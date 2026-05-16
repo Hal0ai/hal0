@@ -18,7 +18,28 @@ export const useSystemStore = defineStore('system', () => {
       const data = await res.json()
       status.value = data
       hardware.value = data.hardware ?? null
-      slots.value = data.slots ?? []
+
+      // /api/status historically only returns synthetic upstream-backed
+      // slots — dynamically created local slots don't appear there until
+      // the backend merge fix (PR #26) lands.  Always fall back to
+      // /api/slots which IS authoritative, and union real slots over
+      // whatever /api/status returned so a just-created slot is visible
+      // immediately on the next poll.
+      const statusSlots = data.slots ?? []
+      try {
+        const slotsRes = await fetch('/api/slots')
+        if (slotsRes.ok) {
+          const realSlots = await slotsRes.json()
+          const byName = new Map()
+          for (const s of statusSlots) byName.set(s.name, s)
+          for (const s of realSlots) byName.set(s.name, s)  // real wins
+          slots.value = [...byName.values()]
+        } else {
+          slots.value = statusSlots
+        }
+      } catch {
+        slots.value = statusSlots
+      }
     } catch (err) {
       error.value = err.message
       // Don't toast on every background poll failure — only surface to store
