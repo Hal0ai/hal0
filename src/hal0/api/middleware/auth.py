@@ -38,7 +38,7 @@ The following stay public under ``HAL0_AUTH_ENABLED=1``:
 
   - ``GET  /api/health/system``        — liveness probe
   - ``GET  /api/status``               — dashboard liveness ping
-  - ``GET  /api/metrics``              — prometheus / dashboard scrape
+  - ``GET  /api/metrics``              — JSON metrics / dashboard scrape
   - ``GET  /api/features``             — feature-flag inspection
   - ``GET  /api/install/state``        — first-run gating
   - ``POST /api/install/complete``     — first-run sentinel write
@@ -127,10 +127,16 @@ PUBLIC_PATHS: frozenset[str] = frozenset(
     {
         # Liveness / observability — must be reachable for monitoring
         # tools that pre-date a per-deployment token.
+        #
+        # NOTE (issue #36): /api/metrics/prometheus used to live here but
+        # no Prometheus exposition route ever shipped. Listing a 404 path
+        # as "public" was confusing for scraper operators following the
+        # documented bypass list. Add it back if/when a real exporter
+        # ships — keep this list in lockstep with packaging/caddy's
+        # @public matcher.
         "/api/health/system",
         "/api/status",
         "/api/metrics",
-        "/api/metrics/prometheus",
         "/api/features",
         # First-run wizard gating — the dashboard hits these before the
         # user has any chance to mint a token.

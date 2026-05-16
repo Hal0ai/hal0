@@ -4,9 +4,12 @@ Routes mounted under /api:
   GET  /api/status            — overall liveness + summary (dashboard polls this)
   GET  /api/health/system     — deep health (slots, disk, ram)
   GET  /api/metrics           — JSON metrics
-  GET  /api/metrics/prometheus — text/plain prometheus exposition
   GET  /api/features          — feature flags
   PUT  /api/features/{name}   — toggle feature flag
+
+Note (issue #36): a /api/metrics/prometheus route was advertised in this
+docstring and in PUBLIC_PATHS but was never implemented. Both stubs are
+removed until a real prometheus_client-backed exporter ships.
 """
 
 from __future__ import annotations
