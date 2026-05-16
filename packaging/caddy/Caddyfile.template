@@ -60,6 +60,35 @@
 		reverse_proxy 127.0.0.1:8080
 	}
 
+	# Public allowlist — paths that MUST be reachable without basic_auth
+	# so the first-run wizard can bootstrap before any credential exists,
+	# and so monitoring tools can scrape liveness without holding creds.
+	#
+	# This list mirrors the PUBLIC_PATHS frozenset in
+	# src/hal0/api/middleware/auth.py — keep them in sync. The `path`
+	# matcher is exact-match (no trailing-slash or prefix expansion), which
+	# matches the `request.url.path in PUBLIC_PATHS` check on the API side.
+	#
+	# This block MUST stay above the default `handle {}` below — Caddy
+	# evaluates `handle` blocks in source order and the first match wins,
+	# so listing `@public` later would let basic_auth swallow the wizard
+	# probes (see issue #28).
+	@public path /api/health/system \
+	             /api/status \
+	             /api/metrics \
+	             /api/metrics/prometheus \
+	             /api/features \
+	             /api/install/state \
+	             /api/install/complete \
+	             /api/config/urls \
+	             /api/auth/status \
+	             /api/auth/login \
+	             /api/auth/logout \
+	             /v1/models
+	handle @public {
+		reverse_proxy 127.0.0.1:8080
+	}
+
 	# Dashboard + management API — Caddy basicauth at the edge. Forwards
 	# the identity as X-Forwarded-Email so the hal0 API trusts the user
 	# as admin (see hal0.api.middleware.auth precedence).

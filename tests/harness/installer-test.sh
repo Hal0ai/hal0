@@ -243,11 +243,20 @@ else
        HAL0_HOSTNAME=hal0-harness.local HAL0_TLS_EMAIL=harness@hal0.test \
        HAL0_NO_PROBE=1 HAL0_PLAIN=1 \
         sudo -E bash "${REPO_ROOT}/installer/install.sh" --auth=basic --no-start >"${LOG4}" 2>&1; then
+        # Regression for #28: the rendered Caddyfile must carry the
+        # @public matcher + `handle @public` block BEFORE the default
+        # basicauth handler, else the first-run wizard's pre-auth
+        # /api/install/state + /api/config/urls probes 401 and the
+        # SPA can't bootstrap. Asserting both halves (matcher + handle)
+        # so a future edit that drops one without the other is caught.
         if [[ -f /etc/hal0/Caddyfile ]] && grep -q basicauth /etc/hal0/Caddyfile \
-            && grep -q HAL0_AUTH_ENABLED=1 /etc/hal0/api.env; then
-            add_row "auth-basic" "pass" "$(since_ms "${start}")" "Caddyfile + api.env auth wiring rendered"
+            && grep -q HAL0_AUTH_ENABLED=1 /etc/hal0/api.env \
+            && grep -q '@public path' /etc/hal0/Caddyfile \
+            && grep -q 'handle @public' /etc/hal0/Caddyfile \
+            && grep -q '/api/install/state' /etc/hal0/Caddyfile; then
+            add_row "auth-basic" "pass" "$(since_ms "${start}")" "Caddyfile + api.env auth wiring rendered (incl. @public allowlist)"
         else
-            add_row "auth-basic" "fail" "$(since_ms "${start}")" "Caddyfile or api.env auth flag missing post-install"
+            add_row "auth-basic" "fail" "$(since_ms "${start}")" "Caddyfile or api.env auth flag missing post-install (check @public allowlist for #28)"
         fi
     else
         rc=$?
