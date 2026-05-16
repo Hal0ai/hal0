@@ -49,18 +49,32 @@ router = APIRouter()
 public_router = APIRouter()
 
 
+def _slot_events(app_state: Any, slot_name: str | None) -> Any:
+    """Return the per-slot tps_events deque for ``slot_name`` (or None).
+
+    ``app_state.tps_events`` is a defaultdict so creating a new deque is
+    a side effect of the lookup — keep that out of the hot path when
+    slot_name is missing or the deque store itself isn't present.
+    """
+    events_store = getattr(app_state, "tps_events", None)
+    if events_store is None or not slot_name:
+        return None
+    return events_store[slot_name]
+
+
 def _instrument_streaming_throughput(
-    response: StreamingResponse, app_state: Any
+    response: StreamingResponse, app_state: Any, slot_name: str | None
 ) -> StreamingResponse:
     """Wrap a streaming response body iterator with a token counter.
 
-    Increments ``app_state.tps_events`` with one (monotonic, tokens)
-    entry per chunk. Token count per chunk is approximated by counting
-    ``"delta":`` occurrences in the raw SSE bytes — close enough for a
-    throughput indicator and far cheaper than a full SSE parse.
+    Appends ``(monotonic, tokens)`` to the per-slot deque so
+    /api/slots/metrics can surface a real current-throughput number per
+    slot. Token count per chunk is approximated by counting ``"delta":``
+    occurrences in the raw SSE bytes — close enough for a throughput
+    indicator and far cheaper than a full SSE parse.
     """
     original = response.body_iterator
-    events = getattr(app_state, "tps_events", None)
+    events = _slot_events(app_state, slot_name)
     if events is None:
         return response
 
@@ -80,10 +94,12 @@ def _instrument_streaming_throughput(
     return response
 
 
-def _record_nonstreaming_throughput(body_bytes: bytes, app_state: Any) -> None:
+def _record_nonstreaming_throughput(
+    body_bytes: bytes, app_state: Any, slot_name: str | None
+) -> None:
     """Pull ``usage.completion_tokens`` + a recent timestamp out of a JSON
-    response body so non-streaming chats also move the throughput tile."""
-    events = getattr(app_state, "tps_events", None)
+    response body so non-streaming chats also move the per-slot tile."""
+    events = _slot_events(app_state, slot_name)
     if events is None or not body_bytes:
         return
     try:
@@ -156,9 +172,13 @@ async def _dispatch_and_forward(
 
     response = await dispatcher.forward(call)
     if isinstance(response, StreamingResponse):
-        return _instrument_streaming_throughput(response, request.app.state)
+        return _instrument_streaming_throughput(
+            response, request.app.state, call.upstream_name
+        )
     if isinstance(response, Response) and getattr(response, "body", None):
-        _record_nonstreaming_throughput(response.body, request.app.state)
+        _record_nonstreaming_throughput(
+            response.body, request.app.state, call.upstream_name
+        )
     return response
 
 

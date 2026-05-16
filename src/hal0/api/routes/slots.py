@@ -199,8 +199,8 @@ async def create_slot(request: Request) -> dict[str, object]:
 # ── metrics / capacity ─────────────────────────────────────────────────────
 
 
-def _local_throughput_tps(request: Request, window_s: float = 5.0) -> float:
-    """Compute current tokens/sec from the rolling tps_events window.
+def _tps_from_events(events: Any, window_s: float = 5.0) -> float:
+    """Compute current tokens/sec from a rolling (ts, tokens) deque.
 
     Rate is ``tokens / (last_event_ts - first_event_ts_in_window)`` rather
     than ``tokens / window_s`` so short bursts read at their real rate
@@ -209,7 +209,6 @@ def _local_throughput_tps(request: Request, window_s: float = 5.0) -> float:
     """
     import time
 
-    events = getattr(request.app.state, "tps_events", None)
     if not events:
         return 0.0
     now = time.monotonic()
@@ -226,28 +225,47 @@ def _local_throughput_tps(request: Request, window_s: float = 5.0) -> float:
     return total_tokens / effective_span
 
 
+def _per_slot_local_tps(request: Request, window_s: float = 5.0) -> dict[str, float]:
+    """Per-slot/upstream tok/s measured on this process's streaming path.
+
+    Reads the per-name deques populated by v1._instrument_streaming_throughput.
+    Empty/missing store returns an empty dict so callers can union without
+    a None check.
+    """
+    store = getattr(request.app.state, "tps_events", None)
+    if not store:
+        return {}
+    return {name: _tps_from_events(events, window_s) for name, events in store.items()}
+
+
 @router.get("/metrics")
 async def slot_metrics(request: Request) -> dict[str, Any]:
     """Per-slot runtime metrics keyed by slot name.
 
-    Drives the dashboard's per-slot GTT bars + throughput sparkline.
-    Proxies remote upstreams via /api/stats/slots; real local SlotManager
-    metrics merge in once the manager is wired.
+    Drives the dashboard's per-slot tok/s row + sparkline. Proxies remote
+    upstreams via /api/stats/slots; layers in per-slot tok/s measured
+    locally on the dispatcher's streaming path so even llama.cpp-backed
+    local slots (which don't expose /api/slots/metrics themselves) light
+    up the SlotCard.
 
-    Adds a synthetic ``__hal0_local__`` entry carrying current TPS
-    measured from the streaming dispatcher path — covers the case where
-    the upstream (e.g. FLM/NPU on haloai) doesn't report tps itself.
+    Local measurement wins when the upstream-reported value is missing
+    or zero — the upstream's number may be stale snapshot-only, while
+    the local rolling window reflects the request that's happening *right
+    now*.
     """
     from hal0.api.routes.hardware import stats_slots
 
     merged = await stats_slots(request)
-    tps = _local_throughput_tps(request)
-    if tps > 0 or "__hal0_local__" not in merged:
-        merged["__hal0_local__"] = {
-            "name": "__hal0_local__",
-            "tokens_per_sec": tps,
-            "_synthetic": True,
-        }
+    for name, tps in _per_slot_local_tps(request).items():
+        if tps <= 0:
+            continue
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        existing = entry.get("tokens_per_sec") or entry.get("tps") or 0
+        if tps > existing:
+            entry["tokens_per_sec"] = tps
     return merged
 
 
