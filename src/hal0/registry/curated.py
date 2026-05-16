@@ -100,6 +100,95 @@ class CuratedModel(BaseModel):
 # call it out in ``notes``.
 
 CURATED_MODELS: list[CuratedModel] = [
+    # ── 2026-05 refresh: featured chat picks the wizard surfaces first ────
+    # Sized for a Strix Halo unified memory pool (~100 GB).  The wizard
+    # renders entries in the order listed below; legacy entries below the
+    # block stay for backward compatibility (tests + already-resolved
+    # registry rows reference their ids).
+    CuratedModel(
+        id="qwen3-coder-next",
+        display_name="Qwen3 Coder Next",
+        description="Frontier coding model. Best in class for software work — needs the full Strix Halo pool.",
+        family="qwen",
+        size_gb=49.0,
+        vram_gb_min=56.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="unsloth/Qwen3-Coder-Next-GGUF",
+        hf_file="Qwen3-Coder-Next-UD-Q4_K_XL.gguf",
+        context_length=262144,
+        recommended_slot="primary",
+        tags=["chat", "code", "frontier", "long-context"],
+        notes="Unsloth's Q4_K_XL quant. Needs ~56 GB unified RAM headroom.",
+    ),
+    CuratedModel(
+        id="qwen3.6-27b",
+        display_name="Qwen3.6 27B",
+        description="General-purpose chat — the sweet spot for Strix Halo. Strong reasoning + multilingual.",
+        family="qwen",
+        size_gb=20.0,
+        vram_gb_min=24.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="unsloth/Qwen3.6-27B-GGUF",
+        hf_file="Qwen3.6-27B-UD-Q5_K_XL.gguf",
+        context_length=131072,
+        recommended_slot="primary",
+        tags=["chat", "reasoning", "multilingual", "default"],
+        notes="Q5_K_XL — quality margin over Q4 with room to spare on a 100 GB pool.",
+    ),
+    CuratedModel(
+        id="gpt-oss-20b",
+        display_name="GPT-OSS 20B",
+        description="OpenAI's open-weights 20B. Reasonable RAM footprint, broad capability.",
+        family="gpt-oss",
+        size_gb=12.0,
+        vram_gb_min=16.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="unsloth/gpt-oss-20b-GGUF",
+        hf_file="gpt-oss-20b-Q4_K_M.gguf",
+        context_length=131072,
+        recommended_slot="primary",
+        tags=["chat", "reasoning"],
+        notes="Repo + filename are the unsloth GGUF mirror; verify before v1 cut.",
+    ),
+    CuratedModel(
+        id="qwen3.5-9b",
+        display_name="Qwen3.5 9B",
+        description="Lean default chat — fits comfortably alongside embed/voice slots.",
+        family="qwen",
+        size_gb=6.0,
+        vram_gb_min=8.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="unsloth/Qwen3.5-9B-GGUF",
+        hf_file="Qwen3.5-9B-UD-Q4_K_XL.gguf",
+        context_length=131072,
+        recommended_slot="primary",
+        tags=["chat", "balanced"],
+        notes="Q4_K_XL — leaves headroom for an embed slot + voice slot on the same host.",
+    ),
+    CuratedModel(
+        id="qwen3.5-0.8b",
+        display_name="Qwen3.5 0.8B",
+        description="Tiny first-boot pick. Useful for smoke-testing the install before pulling a real chat model.",
+        family="qwen",
+        size_gb=0.6,
+        vram_gb_min=1.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="unsloth/Qwen3.5-0.8B-GGUF",
+        hf_file="Qwen3.5-0.8B-UD-Q4_K_XL.gguf",
+        context_length=32768,
+        recommended_slot="primary",
+        tags=["chat", "tiny", "smoke-test"],
+        notes="Sub-second cold start. Good for verifying the slot lifecycle before downloading a 20+ GB pick.",
+    ),
+    # ── Kept-in-featured legacy picks (explicit user ask): qwen3-4b for
+    # mid-tier Vulkan hosts, phi3-mini for the MIT-licensed pick.  Slot
+    # below the 2026-05 refresh — wizard still surfaces them in the main
+    # list, just lower in render order.
     CuratedModel(
         id="qwen3-4b",
         display_name="Qwen3 4B Instruct",
