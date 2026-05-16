@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from hal0.api.middleware.auth import require_writer
 from hal0.config import paths
 from hal0.config.loader import load_hardware_info
+
+# See slots.py for the writer-gate rationale.
+_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -70,7 +74,7 @@ async def get_hardware(request: Request) -> dict[str, Any]:
     return _flatten_for_ui(info)
 
 
-@router.post("/hardware/probe")
+@router.post("/hardware/probe", dependencies=_writer)
 async def reprobe_hardware(request: Request) -> dict[str, Any]:
     """Re-run the hardware probe and persist to /etc/hal0/hardware.json."""
     probe = request.app.state.hardware_probe

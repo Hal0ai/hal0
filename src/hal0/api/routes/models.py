@@ -14,9 +14,10 @@ import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import StreamingResponse
 
+from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.registry.curated import get_curated
 from hal0.registry.pull import (
@@ -26,6 +27,9 @@ from hal0.registry.pull import (
     make_job,
     run_pull,
 )
+
+# See slots.py for the writer-gate rationale.
+_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -98,7 +102,7 @@ async def list_models(request: Request) -> dict[str, Any]:
     return {"models": data, "count": len(data), "filtered_aliases": filtered}
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, dependencies=_writer)
 async def create_model(request: Request) -> dict[str, Any]:
     """Register a new model in the local ModelRegistry.
 
@@ -148,7 +152,7 @@ async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     )
 
 
-@router.put("/{model_id}")
+@router.put("/{model_id}", dependencies=_writer)
 async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     """Apply partial updates to a registered model's metadata."""
     registry = request.app.state.model_registry
@@ -162,7 +166,7 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     return _model_to_dict(model)
 
 
-@router.delete("/{model_id}")
+@router.delete("/{model_id}", dependencies=_writer)
 async def delete_model(model_id: str, request: Request) -> dict[str, object]:
     """Remove a model from the local registry (does not delete files)."""
     registry = request.app.state.model_registry
@@ -201,7 +205,7 @@ def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
     )
 
 
-@router.post("/{model_id}/pull", status_code=202)
+@router.post("/{model_id}/pull", status_code=202, dependencies=_writer)
 async def pull_model(
     model_id: str,
     request: Request,
@@ -312,7 +316,7 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
     )
 
 
-@router.post("/{model_id}/pull/cancel")
+@router.post("/{model_id}/pull/cancel", dependencies=_writer)
 async def pull_cancel(model_id: str, request: Request) -> dict[str, object]:
     """Request cancellation of an in-flight pull.
 

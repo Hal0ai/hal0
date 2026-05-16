@@ -26,12 +26,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
 
+from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
+
+# See slots.py for the writer-gate rationale.
+_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -88,7 +92,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
     return _config_to_dict(cfg)
 
 
-@router.put("")
+@router.put("", dependencies=_writer)
 async def update_settings(request: Request) -> dict[str, Any]:
     """Apply a partial update to hal0.toml.
 
@@ -134,7 +138,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
     return _config_to_dict(merged)
 
 
-@router.post("/reload")
+@router.post("/reload", dependencies=_writer)
 async def reload_settings(request: Request) -> dict[str, Any]:
     """Re-read hal0.toml from disk into ``app.state.hal0_config``.
 

@@ -31,13 +31,17 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
 from hal0 import __version__
+from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
 from hal0.updater import Updater, fetch_release_manifest, releases_url
+
+# See slots.py for the writer-gate rationale.
+_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -187,7 +191,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
 # ── /apply ─────────────────────────────────────────────────────────────────
 
 
-@router.post("/apply")
+@router.post("/apply", dependencies=_writer)
 async def apply_update(request: Request) -> dict[str, Any]:
     """Kick off an update job in the background; return a job id.
 
@@ -251,7 +255,7 @@ async def update_status(job_id: str, request: Request) -> dict[str, Any]:
 # ── /rollback ──────────────────────────────────────────────────────────────
 
 
-@router.post("/rollback")
+@router.post("/rollback", dependencies=_writer)
 async def rollback_update(request: Request) -> dict[str, Any]:
     """Invoke ``Updater.rollback()`` to revert to the retained previous version.
 
@@ -286,7 +290,7 @@ async def get_channel(request: Request) -> dict[str, str]:
     return {"channel": _current_channel(request)}
 
 
-@router.put("/channel")
+@router.put("/channel", dependencies=_writer)
 async def set_channel(request: Request) -> dict[str, str]:
     """Set the update channel.
 

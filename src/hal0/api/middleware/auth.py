@@ -1,12 +1,35 @@
 """Bearer-token + Caddy-edge authentication dependency.
 
-This module exposes two FastAPI dependencies:
+This module exposes four FastAPI dependencies:
 
-  - :func:`require_token` — gates a single route or router.
+  - :func:`require_token` — gates a single route or router. Accepts any
+    valid scope (used as the *reader* gate on admin routers).
   - :func:`require_token_unless_public` — gates a router globally but
     bypasses the auth check for paths in :data:`PUBLIC_PATHS`. This is
     what we attach at ``include_router(...)`` time on routers that mix
     public and protected endpoints (``/v1`` and ``/api/install``).
+  - :func:`require_writer` — gates a single mutating route. Requires an
+    ``admin``- or ``all``-scoped credential; ``read-only`` and
+    ``v1-only`` are rejected with 403 ``auth.forbidden``.
+  - :func:`require_admin` — strictest gate, only ``admin`` scope. Used
+    on the token-CRUD subrouter.
+
+Scope × verb matrix (admin routers: ``/api/slots``, ``/api/models``,
+``/api/settings``, ``/api/hardware``, ``/api/logs``, ``/api/providers``,
+``/api/updates``, ``/api/images``)::
+
+    scope       | GET (reader)       | POST/PUT/PATCH/DELETE (writer)
+    ------------+--------------------+-------------------------------
+    admin       | 200                | 200
+    all         | 200                | 200
+    read-only   | 200                | 403 auth.forbidden
+    v1-only     | 200                | 403 auth.forbidden
+    (no creds)  | 401 auth.required  | 401 auth.required
+    (bad creds) | 401 auth.invalid   | 401 auth.invalid
+
+When ``HAL0_AUTH_ENABLED`` is unset, every dependency is a pass-through
+that returns ``identity="anonymous", scope="all"`` — so the gate
+collapses to "open" on the trusted-LAN install posture.
 
 Public route allowlist
 ----------------------
@@ -87,6 +110,13 @@ _ANONYMOUS_SCOPE = "all"
 # Identity scope returned for an X-Forwarded-Email-only auth path. Caddy
 # basic_auth users are dashboard owners, so they get admin.
 _FORWARDED_SCOPE = "admin"
+
+# Scopes permitted to mutate admin resources. "admin" can do anything
+# (including token CRUD); "all" is the default minted scope for general
+# clients and is treated as a writer for parity with pre-scope behaviour.
+# "read-only" and "v1-only" are explicitly excluded — they get 403 on
+# any mutating route.
+_WRITER_SCOPES: frozenset[str] = frozenset({"admin", "all"})
 
 
 # Routes that bypass auth even when HAL0_AUTH_ENABLED=1. Match exact paths
@@ -306,6 +336,33 @@ async def require_admin(
     return identity
 
 
+async def require_writer(
+    identity: Annotated[AuthIdentity, Depends(require_token)],
+) -> AuthIdentity:
+    """Gate a mutating route — requires ``admin`` or ``all`` scope.
+
+    Attach this to every POST/PUT/PATCH/DELETE handler on the admin
+    routers (slots, models, settings, hardware, providers, updates,
+    images). GETs stay on plain :func:`require_token` so a
+    ``read-only``-scoped token can still observe the system.
+
+    When ``HAL0_AUTH_ENABLED`` is unset, this is a pass-through (same as
+    :func:`require_token` and :func:`require_admin`).
+    """
+    if not auth_enabled():
+        return identity
+    if identity.scope not in _WRITER_SCOPES:
+        raise AuthForbidden(
+            "this endpoint requires a writer-scoped credential (admin or all)",
+            details={
+                "identity": identity.identity,
+                "scope": identity.scope,
+                "required": sorted(_WRITER_SCOPES),
+            },
+        )
+    return identity
+
+
 __all__ = [
     "PUBLIC_PATHS",
     "AuthForbidden",
@@ -315,4 +372,5 @@ __all__ = [
     "require_admin",
     "require_token",
     "require_token_unless_public",
+    "require_writer",
 ]

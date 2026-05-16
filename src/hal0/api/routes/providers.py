@@ -17,11 +17,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.upstreams.integrations import get_catalog
 from hal0.upstreams.registry import UpstreamNotFound
+
+# See slots.py for the writer-gate rationale.
+_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -76,7 +80,7 @@ async def get_upstream(name: str, request: Request) -> dict[str, Any]:
     return _serialize_upstream(u, last_models=model_cache.get(name))
 
 
-@router.post("/upstreams/{name}/test")
+@router.post("/upstreams/{name}/test", dependencies=_writer)
 async def test_upstream(name: str, request: Request) -> dict[str, Any]:
     """Probe ``/v1/models`` on ``name`` and return a reachability report.
 
