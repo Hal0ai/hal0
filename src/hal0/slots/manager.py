@@ -1218,9 +1218,15 @@ class SlotManager:
             # state.json record.  Real callers should always have a TOML.
             rec = self._states.get(slot_name)
             if rec is None:
-                raise SlotConfigError(
-                    f"slot config {path} not found and no in-memory state",
-                    details={"slot": slot_name},
+                # Issue #35: no TOML and no in-memory state means the slot
+                # simply doesn't exist — raise the 404-shaped SlotNotFound so
+                # the API surfaces 'slot.not_found' instead of the misleading
+                # 400 'slot.config_error'. A real config-parse failure on an
+                # existing slot still raises SlotConfigError below.
+                raise SlotNotFound(
+                    f"slot {slot_name!r} is not configured "
+                    f"(no config at {path} and no in-memory state)",
+                    details={"slot": slot_name, "path": str(path)},
                 )
             return {
                 "name": slot_name,

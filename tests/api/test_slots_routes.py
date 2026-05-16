@@ -306,6 +306,45 @@ def test_load_unknown_slot_returns_typed_envelope(
     assert r.json()["error"]["code"] == "slot.not_found"
 
 
+# ── issue #35: get_config on unknown slot → 404 not 400 ─────────────────────
+
+
+def test_get_config_unknown_slot_returns_404(
+    slot_root: Path,
+    isolated_client: TestClient,
+) -> None:
+    """GET /api/slots/doesntexist/config → 404 slot.not_found.
+
+    Pre-issue-#35 the route surfaced 400 'slot.config_error' because the
+    underlying _load_slot_config conflated "missing config file" with a
+    parse error. A UI distinguishing "slot doesn't exist" from "slot
+    exists but config is bad" got ambiguous signals. SlotManager.get_config
+    now raises SlotNotFound (404) when neither the TOML nor an in-memory
+    state record exists for the slot name.
+    """
+    r = isolated_client.get("/api/slots/doesntexist/config")
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "slot.not_found"
+
+
+def test_get_config_invalid_toml_still_returns_400(
+    slot_root: Path,
+    isolated_client: TestClient,
+) -> None:
+    """An EXISTING slot with malformed TOML still surfaces 400 slot.config_error.
+
+    Acceptance for issue #35: the SlotNotFound mapping only applies to the
+    "no config and no state" branch. A real parse failure on a config that
+    is present on disk is still the operator's problem to fix, and the 400
+    code communicates "this slot exists but its config is broken".
+    """
+    # Write a syntactically broken TOML for a real slot name.
+    (slot_root / "broken.toml").write_text("name = \nport = not_an_int [oops", encoding="utf-8")
+    r = isolated_client.get("/api/slots/broken/config")
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "slot.config_error"
+
+
 def test_unload_after_load_transitions_to_offline(
     slot_root: Path,
     systemctl_stub: dict[str, Any],
