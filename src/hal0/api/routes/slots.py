@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.slots.manager import Slot, SlotManager
 
 router = APIRouter()
@@ -162,16 +162,20 @@ async def create_slot(request: Request) -> dict[str, object]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error(
+        raise BadRequest(
             "request body must be valid JSON",
             details={"error": str(exc)},
+            code="request.invalid_json",
         ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
 
     name = body.get("name")
     if not isinstance(name, str) or not name.strip():
-        raise Hal0Error("slot 'name' is required (non-empty string)")
+        raise BadRequest(
+            "slot 'name' is required (non-empty string)",
+            code="slot.name_required",
+        )
 
     snap = await sm.create(name, body)
     return _slot_to_dict(snap, request)

@@ -31,16 +31,23 @@ def test_logs_happy_path_returns_lines_and_count(client: TestClient) -> None:
 
 
 def test_logs_validation_error_envelope_for_missing_unit(client: TestClient) -> None:
-    """Missing unit query param yields a 422 (FastAPI's default validation shape)."""
+    """Missing unit query param yields a 400 in the hal0 envelope shape.
+
+    The ``RequestValidationError`` handler (see
+    ``hal0.api.middleware.error_codes``) reshapes FastAPI's default
+    ``{"detail": [...]}`` 422 into the canonical envelope with
+    ``code="validation.invalid"`` and downgrades the status to 400 —
+    pydantic-driven validation failures are caller-side input errors,
+    not "well-formed but semantically rejected".
+    """
     r = client.get("/api/logs")
-    # FastAPI's RequestValidationError handler stays the framework
-    # default (``{"detail": [...]}``) — the structured envelope kicks in
-    # for typed Hal0Error subclasses, not Pydantic-driven query validation.
-    assert r.status_code == 422
+    assert r.status_code == 400
     body = r.json()
-    # Either shape is acceptable; we assert that *some* error structure
-    # is present so a client can render it.
-    assert ("error" in body) or ("detail" in body)
+    assert "error" in body, f"Expected hal0 envelope, got {body}"
+    assert body["error"]["code"] == "validation.invalid"
+    assert "errors" in body["error"]["details"]
+    assert isinstance(body["error"]["details"]["errors"], list)
+    assert body["error"]["details"]["errors"], "expected at least one error entry"
 
 
 def test_logs_invalid_unit_returns_typed_envelope(client: TestClient) -> None:
@@ -62,11 +69,17 @@ def test_logs_invalid_level_returns_typed_envelope(client: TestClient) -> None:
 
 
 def test_logs_n_out_of_range_returns_envelope(client: TestClient) -> None:
-    """?n=0 is below the validator floor and yields a 422 (validation error)."""
+    """?n=0 is below the validator floor and yields the hal0 envelope.
+
+    Pydantic-driven validation is reshaped by the ``RequestValidationError``
+    handler in ``hal0.api.middleware.error_codes`` into the canonical
+    envelope with ``code="validation.invalid"`` and downgraded to 400.
+    """
     r = client.get("/api/logs", params={"unit": "hal0-api", "n": 0})
-    assert r.status_code == 422
+    assert r.status_code == 400
     body = r.json()
-    assert ("error" in body) or ("detail" in body)
+    assert body["error"]["code"] == "validation.invalid"
+    assert "errors" in body["error"]["details"]
 
 
 def test_logs_stream_returns_sse_content_type(client: TestClient) -> None:

@@ -4,11 +4,18 @@ All non-2xx responses follow:
 
     {"error": {"code": "<namespace>.<reason>", "message": "...", "details": {...}}}
 
-Error code namespaces: slot.*, model.*, dispatch.*, config.*, system.*
+Error code namespaces: slot.*, model.*, dispatch.*, config.*, system.*,
+auth.*, validation.*, resource.*
 
-This middleware catches uncaught exceptions and unhandled HTTPExceptions
-and reshapes their JSON body. Handlers that raise typed `Hal0Error`
-subclasses get their `code` and `details` propagated as-is.
+This middleware catches uncaught exceptions, unhandled HTTPExceptions, and
+FastAPI's pydantic ``RequestValidationError`` and reshapes their JSON body.
+Handlers that raise typed :class:`Hal0Error` subclasses get their ``code``
+and ``details`` propagated as-is.
+
+The typed 4xx subclasses (``BadRequest``, ``Unauthorized``, ``Forbidden``,
+``NotFound``, ``Conflict``, ``UnprocessableEntity``) live in
+:mod:`hal0.errors` and are re-exported here for the import path most
+routes already use.
 """
 
 from __future__ import annotations
@@ -17,16 +24,48 @@ from typing import Any
 
 import structlog
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from hal0.errors import Hal0Error
+from hal0.errors import (
+    BadRequest,
+    Conflict,
+    Forbidden,
+    Hal0Error,
+    NotFound,
+    Unauthorized,
+    UnprocessableEntity,
+)
 
 log = structlog.get_logger(__name__)
 
 
 def _envelope(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, "details": details or {}}}
+
+
+def _shape_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """Reshape pydantic's per-field error dicts into a stable envelope-friendly form.
+
+    Pydantic emits a list of ``{type, loc, msg, input, ctx, url}`` dicts.
+    The envelope contract keeps ``loc`` (so the client knows which field
+    failed), ``msg`` (human-readable), and ``type`` (machine-readable
+    error kind) — and drops the rest to keep the response small and
+    schema-stable. The full pydantic payload remains accessible via
+    structured logs for server-side debugging.
+    """
+    shaped: list[dict[str, Any]] = []
+    for err in exc.errors():
+        loc = err.get("loc", ())
+        shaped.append(
+            {
+                "loc": list(loc),
+                "msg": err.get("msg", ""),
+                "type": err.get("type", ""),
+            }
+        )
+    return shaped
 
 
 def install(app: FastAPI) -> None:
@@ -36,6 +75,31 @@ def install(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status,
             content=_envelope(exc.code, exc.message, exc.details),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's pydantic validator fires for missing/invalid query, path,
+        # and body parameters. Without this handler clients see FastAPI's
+        # default ``{"detail": [...]}`` shape, which doesn't match the hal0
+        # envelope contract. We reshape into the canonical envelope and
+        # downgrade the status from 422 to 400 — these are caller-side input
+        # errors, not "well-formed but semantically rejected" requests
+        # (UnprocessableEntity is reserved for that meaning).
+        errors = _shape_validation_errors(exc)
+        log.info(
+            "hal0.validation_error",
+            path=request.url.path,
+            method=request.method,
+            errors=errors,
+        )
+        return JSONResponse(
+            status_code=400,
+            content=_envelope(
+                "validation.invalid",
+                "request validation failed",
+                {"errors": errors},
+            ),
         )
 
     @app.exception_handler(StarletteHTTPException)
@@ -56,4 +120,13 @@ def install(app: FastAPI) -> None:
         )
 
 
-__all__ = ["Hal0Error", "install"]
+__all__ = [
+    "BadRequest",
+    "Conflict",
+    "Forbidden",
+    "Hal0Error",
+    "NotFound",
+    "Unauthorized",
+    "UnprocessableEntity",
+    "install",
+]

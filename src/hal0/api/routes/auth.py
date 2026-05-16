@@ -37,7 +37,7 @@ from hal0.auth.tokens import (
     auth_enabled,
     get_or_create_store,
 )
-from hal0.errors import Hal0Error
+from hal0.errors import BadRequest
 
 router = APIRouter()
 
@@ -143,12 +143,13 @@ async def create_token(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error(
+        raise BadRequest(
             "request body must be valid JSON",
             details={"error": str(exc)},
+            code="request.invalid_json",
         ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
 
     label = str(body.get("label") or "").strip()
     scope = str(body.get("scope") or "all").strip() or "all"
