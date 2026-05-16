@@ -105,9 +105,13 @@ def test_check_missing_manifest_returns_envelope(
 
 
 def test_apply_creates_a_queued_job_returning_id(isolated_client: TestClient) -> None:
-    """POST /api/updates/apply returns a job with id + state, runs in background."""
+    """POST /api/updates/apply returns a job with id + state, runs in background.
+
+    Status code is 202 Accepted (issue #37) — the route queues background
+    work and returns immediately, matching /api/models/{id}/pull's shape.
+    """
     r = isolated_client.post("/api/updates/apply", json={})
-    assert r.status_code == 200, r.text
+    assert r.status_code == 202, r.text
     body = r.json()
     assert "id" in body and isinstance(body["id"], str)
     assert body["state"] in ("queued", "running", "failed")

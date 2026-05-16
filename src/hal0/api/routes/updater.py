@@ -191,7 +191,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
 # ── /apply ─────────────────────────────────────────────────────────────────
 
 
-@router.post("/apply", dependencies=_writer)
+@router.post("/apply", status_code=202, dependencies=_writer)
 async def apply_update(request: Request) -> dict[str, Any]:
     """Kick off an update job in the background; return a job id.
 
@@ -200,8 +200,13 @@ async def apply_update(request: Request) -> dict[str, Any]:
         {"version": "0.1.0"}   # pin a specific version; omit for latest
 
     The actual update work happens in ``_run_apply_job`` which calls
-    ``Updater.apply()``. The route returns immediately with the job id;
-    poll ``/api/updates/status/{job_id}`` for state transitions.
+    ``Updater.apply()``. The route returns immediately with the queued-job
+    snapshot; poll ``/api/updates/status/{job_id}`` for state transitions.
+
+    Returns **202 Accepted** because the work is queued, not completed —
+    matches ``/api/models/{id}/pull`` and the rest of hal0's async-job
+    endpoints (issue #37). Failure paths still raise typed 4xx envelopes
+    via the middleware.
     """
     try:
         body = await request.json()
