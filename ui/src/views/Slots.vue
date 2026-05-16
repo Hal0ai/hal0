@@ -192,9 +192,24 @@ async function submitCreate() {
       ctx_size:   Number(createForm.value.ctx_size),
     }
     if (createForm.value.model) body.model = createForm.value.model
-    if (createForm.value.port)  body.port  = Number(createForm.value.port)
+    if (createForm.value.port) {
+      body.port = Number(createForm.value.port)
+    } else {
+      // SlotConfig.port is required (Pydantic) and the API doesn't auto-
+      // assign — mirror the CLI behaviour (slot_commands.py:slot_create)
+      // by picking the first free port in 8081-8099 client-side.
+      try {
+        const existing = await api('/api/slots')
+        const used = new Set((existing ?? []).map(s => Number(s.port) || 0))
+        for (let p = 8081; p < 8100; p++) {
+          if (!used.has(p)) { body.port = p; break }
+        }
+      } catch {
+        body.port = 8081
+      }
+    }
     await api('/api/slots', { method: 'POST', body: JSON.stringify(body) })
-    toasts.success(`Slot "${body.name}" created`)
+    toasts.success(`Slot "${body.name}" created on port ${body.port}`)
     showCreate.value = false
     createForm.value = defaultCreateForm()
     createErrors.value = {}

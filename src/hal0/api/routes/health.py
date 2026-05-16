@@ -46,11 +46,33 @@ async def get_status(request: Request) -> dict[str, Any]:
             except Exception:
                 cache[u.name] = []
 
-    # Slot entries come from the (still-stubbed) SlotManager when wired,
-    # else synthesized from upstreams so the dashboard isn't empty.
-    from hal0.api.routes.slots import _synthesize_slots_from_upstreams
+    # Merge real SlotManager-backed entries with synthetic upstream-backed
+    # ones — same shape /api/slots returns.  Without this, dynamically
+    # created slots ("hal0 slot create" or the UI New Slot modal) don't
+    # appear in the dashboard's polled view because the synthesise path
+    # only knows about upstreams; they only show up after a page reload
+    # picks them up via /api/slots directly.
+    from hal0.api.routes.slots import (
+        _get_slot_manager,
+        _slot_to_dict,
+        _synthesize_slots_from_upstreams,
+    )
 
-    slot_list = _synthesize_slots_from_upstreams(request)
+    try:
+        sm = _get_slot_manager(request)
+        real_slots = await sm.list()
+        real_entries = [_slot_to_dict(s, request) for s in real_slots]
+    except Exception:
+        # If SlotManager isn't wired (test paths bypassing lifespan,
+        # bootstrap window), fall back to synthetic-only so /api/status
+        # still serves something useful instead of 500-ing the dashboard.
+        real_entries = []
+    real_names = {entry["name"] for entry in real_entries}
+
+    slot_list: list[dict[str, Any]] = list(real_entries)
+    for entry in _synthesize_slots_from_upstreams(request):
+        if entry["name"] not in real_names:
+            slot_list.append(entry)
 
     upstream_summary = [{"name": u.name, "kind": u.kind, "url": u.url} for u in upstreams.list()]
 

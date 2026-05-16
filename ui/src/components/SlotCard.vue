@@ -270,11 +270,11 @@ const sparkSvg = computed(() => {
   color: var(--color-fg);
   transition: border-color 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
 }
-/* Running slot is the headline metric — amber inset rail mirroring the
-   "Why hal0" featured-card treatment from hal0-web. */
+/* Running slot is the headline metric — amber top rail (symmetric vs the
+   previous left-side inset; reads cleaner in a grid of cards). */
 .slot-card.is-running {
   border-color: color-mix(in srgb, var(--hal0-accent) 40%, var(--color-border));
-  box-shadow: inset 3px 0 0 var(--hal0-accent);
+  box-shadow: inset 0 3px 0 var(--hal0-accent);
 }
 .slot-card.is-busy { opacity: 0.78; }
 .slot-card:hover { border-color: var(--color-border-hi); }
