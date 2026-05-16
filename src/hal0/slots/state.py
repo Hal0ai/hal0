@@ -5,11 +5,25 @@ stream, and the state.json persistence layer.
 
 State machine (PLAN.md §5 Tier 3):
 
-    offline → pulling → starting → warming → ready
-                                             ↓
-                                           serving ↔ idle → unloading → offline
-                                             ↓
-                                           error
+    offline → pulling → starting → warming → ready ←──┐
+                                       │      ↑       │
+                                       │      ↓       │
+                                       └──→ idle ←──serving
+                                              │
+                                              ↓
+                                          unloading → offline
+                                              ↑
+                                            error
+
+``idle`` covers two cases the dashboard renders the same way but the
+state machine reaches via different edges:
+
+  1. **process-up, no model**: ``warming → idle`` when the upstream is
+     reachable but ``/v1/models`` is empty (e.g. ``llama-server --model ""``).
+     This is preferable to ``ready`` because routers must NOT pick a slot
+     that can't fulfil an inference request — see issue #31.
+  2. **warm but quiet**: ``ready → idle`` when no request has landed for
+     longer than the idle timeout. Surfaces a candidate for unload.
 
 Transitions are atomic, persisted to /var/lib/hal0/slots/<name>/state.json,
 and streamable via SSE.  The dashboard surfaces real transitions, not
@@ -61,8 +75,17 @@ class SlotState(StrEnum):
     """An inference request is actively in-flight on this slot."""
 
     IDLE = "idle"
-    """Slot is ready but has received no request for longer than the idle
-    timeout. Candidate for unloading."""
+    """Container is up but cannot fulfil inference requests right now.
+
+    Reached two ways (both surface as ``idle`` on the wire):
+
+      - ``warming → idle``: process started successfully but ``/v1/models``
+        is empty (the slot was launched with ``--model ""`` or the model
+        file is missing). Routers MUST treat this distinctly from ``ready``
+        — see issue #31.
+      - ``ready → idle``: a previously-ready slot has received no request
+        for longer than the idle timeout. Candidate for unloading.
+    """
 
     UNLOADING = "unloading"
     """Graceful shutdown in progress.  systemd stop issued; waiting for the
@@ -78,7 +101,9 @@ LEGAL_TRANSITIONS: dict[SlotState, frozenset[SlotState]] = {
     SlotState.OFFLINE: frozenset({SlotState.PULLING, SlotState.STARTING}),
     SlotState.PULLING: frozenset({SlotState.STARTING, SlotState.ERROR, SlotState.OFFLINE}),
     SlotState.STARTING: frozenset({SlotState.WARMING, SlotState.ERROR, SlotState.OFFLINE}),
-    SlotState.WARMING: frozenset({SlotState.READY, SlotState.ERROR, SlotState.OFFLINE}),
+    SlotState.WARMING: frozenset(
+        {SlotState.READY, SlotState.IDLE, SlotState.ERROR, SlotState.OFFLINE}
+    ),
     SlotState.READY: frozenset(
         {SlotState.SERVING, SlotState.IDLE, SlotState.UNLOADING, SlotState.ERROR}
     ),

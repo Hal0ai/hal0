@@ -94,10 +94,16 @@ def systemctl_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 @pytest.fixture
 def stub_await_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bypass the real HTTP health probe so routes don't sleep on a probe."""
+    """Bypass the real HTTP health probe so routes don't sleep on a probe.
 
-    async def _ok(self: SlotManager, slot_name: str, port: int, provider: str) -> None:
-        return None
+    Issue #31 made ``_await_ready`` return a ``SlotState`` (READY for the
+    happy path, IDLE when the upstream is alive but has no model).
+    Callers of this stub want the READY path.
+    """
+    from hal0.slots.state import SlotState
+
+    async def _ok(self: SlotManager, slot_name: str, port: int, provider: str) -> SlotState:
+        return SlotState.READY
 
     monkeypatch.setattr(SlotManager, "_await_ready", _ok)
 

@@ -95,6 +95,13 @@ _FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
 _IDLE_AFTER_S: float = 300.0
 _IDLE_MONITOR_INTERVAL_S: float = 30.0
 
+# ISSUE #31: How long ``_await_ready`` waits in the "alive but no model"
+# regime before resolving the slot to IDLE instead of continuing to wait
+# for a model to appear.  Kept short so a llama-server launched with
+# ``--model ""`` doesn't sit in WARMING for the full 180s grace window
+# before the dashboard sees an actionable state.
+_IDLE_STABILISE_S: float = 3.0
+
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
 #
@@ -543,10 +550,19 @@ class SlotManager:
                     model_id=resolved_model,
                     port=_cfg_port(cfg),
                 )
-                await self._await_ready(slot_name, _cfg_port(cfg), _cfg_provider(cfg))
+                # _await_ready returns READY when the upstream has a
+                # model loaded and serves inference, or IDLE when the
+                # process is up but ``/v1/models`` is empty (issue #31:
+                # llama-server --model "" lands here). Either is a
+                # successful load — callers downstream pick READY slots
+                # for routing and IDLE slots for "ready to accept a
+                # model" UX.
+                resolved_state = await self._await_ready(
+                    slot_name, _cfg_port(cfg), _cfg_provider(cfg)
+                )
                 await self._transition(
                     slot_name,
-                    SlotState.READY,
+                    resolved_state,
                     model_id=resolved_model,
                     port=_cfg_port(cfg),
                 )
@@ -617,17 +633,35 @@ class SlotManager:
         """Return a snapshot of the current slot state.
 
         Combines the persisted state.json with a live systemd `is-active`
-        check.  If state.json claims READY but the unit is not active, we
-        transition to ERROR so the dashboard reflects reality.
+        check.  Reconciliation runs in BOTH directions:
+
+          - state.json says READY/SERVING/IDLE but the unit is dead →
+            transition to ERROR so the dashboard reflects reality.
+          - state.json says OFFLINE / ERROR (or is missing) but the unit
+            is *active* and a fast health probe succeeds → adopt the
+            running slot into READY/IDLE.  This is the issue #30 fix: a
+            kokoro / moonshine slot started outside ``load()`` (e.g. via
+            ``systemctl enable --now`` on boot, or by an external
+            orchestrator) used to sit at OFFLINE forever because the
+            state writer was only driven by the load() path.
         """
         self._ensure_known(slot_name)
         rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
+        active = await self._is_active(slot_name)
         if rec is None:
             # No state.json yet — but the TOML may exist (configured slot
             # that hasn't been loaded). Synthesize an OFFLINE snapshot
             # carrying the on-disk backend/provider so the dashboard chips
             # render correctly before the first load.
             cfg = await self._maybe_load_config(slot_name)
+            # ISSUE #30: if the TOML exists AND the unit is somehow
+            # already running, run an adoption probe before returning
+            # OFFLINE.  Without this, a slot started by an external
+            # orchestrator never surfaces as ready in /api/slots.
+            if active and cfg:
+                adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
+                if adopted is not None:
+                    return adopted
             return Slot(
                 name=slot_name,
                 state=SlotState.OFFLINE,
@@ -641,7 +675,6 @@ class SlotManager:
                 else {},
             )
         # Reconcile with systemd reality.
-        active = await self._is_active(slot_name)
         observed = rec.state
         if observed in (SlotState.READY, SlotState.SERVING, SlotState.IDLE) and not active:
             # systemd says dead; record reflects ready — drift.
@@ -652,6 +685,17 @@ class SlotManager:
                 force=True,
             )
             observed = SlotState.ERROR
+        elif observed in (SlotState.OFFLINE, SlotState.ERROR) and active:
+            # ISSUE #30: the inverse drift — state.json says we're not
+            # running, but systemd has a live unit.  Adoption probe
+            # picks the appropriate ready/idle state for the running
+            # process.  Failure of the probe leaves the record alone so
+            # the next status() call retries.
+            cfg = await self._maybe_load_config(slot_name)
+            if cfg:
+                adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
+                if adopted is not None:
+                    return adopted
         # Re-hydrate the top-level backend from the slot's TOML when the
         # state.json record predates the extras-carry change (older state
         # files were written without ``extra.backend``). The dashboard's
@@ -1244,8 +1288,21 @@ class SlotManager:
 
     # ── health probe (TIER1 tightened) ───────────────────────────────────────
 
-    async def _await_ready(self, slot_name: str, port: int, provider: str) -> None:
-        """Block until the slot's HTTP health probe reports ready.
+    async def _await_ready(self, slot_name: str, port: int, provider: str) -> SlotState:
+        """Block until the slot's HTTP health probe converges, return final state.
+
+        Returns:
+            SlotState.READY when the upstream is reachable AND can fulfil an
+            inference request (sentinel passes / model_loaded=true / etc.).
+            SlotState.IDLE when the upstream is reachable but cannot serve
+            requests right now — for example llama-server / FLM /
+            kokoro launched with no model. Issue #31: ``ready`` would be
+            an active UX trap here because routers pick ready slots first
+            and immediately 4xx on every inference call.
+
+        Raises:
+            SlotHealthFailed: the upstream never became reachable at all
+            within the grace window (transport errors, timeouts).
 
         TIER1 fix for haloai lib/slots.py:899-920 and lib/upstreams.py:500-520:
           - Adaptive backoff (0.5, 1, 2, 5, 10s).
@@ -1254,11 +1311,38 @@ class SlotManager:
             a /health endpoint) require a *non-empty* /v1/models response
             AND a tiny /v1/chat/completions with max_tokens=1 before we
             declare READY.  Empty /v1/models is no longer "good enough".
+
+        ISSUE #31: After the upstream stabilises (probe stops returning
+        transport errors), an empty ``/v1/models`` or ``model_loaded=false``
+        body resolves the slot to IDLE rather than retrying until the
+        grace window expires.  This lets dashboards distinguish
+        "container running with no model" from "container failing to
+        start".
         """
         deadline = time.monotonic() + _HEALTH_GRACE_TOTAL_S
+        # Once the upstream returns ANY structured response (even one
+        # indicating no model), we know it's alive.  After ``_IDLE_STABILISE_S``
+        # of consecutive "alive but empty" responses we resolve to IDLE
+        # instead of waiting the full grace window for a model to appear.
+        idle_observation_since: float | None = None
         attempt = 0
         last_error: str = "no probe yet"
         url = f"http://127.0.0.1:{port}"
+
+        def _observed_idle() -> SlotState | None:
+            """Promote a steady stream of "alive-but-no-model" observations to IDLE.
+
+            Closure over ``idle_observation_since`` so the caller can clear
+            the timer if the slot recovers (e.g. a model finishes loading
+            mid-warmup).
+            """
+            nonlocal idle_observation_since
+            if idle_observation_since is None:
+                idle_observation_since = time.monotonic()
+                return None
+            if (time.monotonic() - idle_observation_since) >= _IDLE_STABILISE_S:
+                return SlotState.IDLE
+            return None
 
         while time.monotonic() < deadline:
             backoff = _HEALTH_BACKOFF_S[min(attempt, len(_HEALTH_BACKOFF_S) - 1)]
@@ -1279,12 +1363,22 @@ class SlotManager:
                             )
                             models = data.get("data", []) if isinstance(data, dict) else []
                             if models:
+                                idle_observation_since = None
                                 if await _sentinel_inference(client, url, models[0]):
-                                    return
+                                    return SlotState.READY
                                 last_error = "sentinel inference failed"
                             else:
+                                # ISSUE #31: /v1/models is empty but the
+                                # endpoint is alive — this is the canonical
+                                # llama-server --model "" / FLM no-model
+                                # shape.  Stabilise to IDLE rather than
+                                # treat as a transient failure.
                                 last_error = "/v1/models returned empty data array"
+                                idle = _observed_idle()
+                                if idle is not None:
+                                    return idle
                         else:
+                            idle_observation_since = None
                             last_error = f"/v1/models HTTP {resp.status_code}"
                     elif strategy == "health_with_model_loaded":
                         # Moonshine: /health stays 200 while model is
@@ -1296,17 +1390,61 @@ class SlotManager:
                             except Exception:
                                 body = {}
                             if isinstance(body, dict) and body.get("model_loaded"):
-                                return
+                                idle_observation_since = None
+                                return SlotState.READY
+                            # ISSUE #31: /health returns 200 but the
+                            # body advertises no loaded model — the
+                            # container is up, just empty.
                             last_error = f"/health 200 but model_loaded != true (body={body!r})"
+                            idle = _observed_idle()
+                            if idle is not None:
+                                return idle
                         else:
+                            idle_observation_since = None
                             last_error = f"/health HTTP {resp.status_code}"
                     else:
                         # llama-server / kokoro — /health 2xx is authoritative.
+                        # ISSUE #31: pair /health with a /v1/models probe
+                        # so a llama-server launched with --model "" lands
+                        # in IDLE instead of READY.  /health alone reports
+                        # 200 even when no model is loaded.
                         resp = await client.get(f"{url}/health")
                         if resp.status_code == 200:
-                            return
-                        last_error = f"/health HTTP {resp.status_code}"
+                            try:
+                                models_resp = await client.get(f"{url}/v1/models")
+                            except httpx.HTTPError:
+                                # /v1/models may not exist on every
+                                # /health-based provider (comfyui, custom
+                                # backends).  /health 2xx is sufficient.
+                                idle_observation_since = None
+                                return SlotState.READY
+                            if models_resp.status_code != 200:
+                                # Same: provider doesn't expose /v1/models.
+                                idle_observation_since = None
+                                return SlotState.READY
+                            try:
+                                models_data = models_resp.json()
+                            except Exception:
+                                models_data = {}
+                            models = (
+                                models_data.get("data", []) if isinstance(models_data, dict) else []
+                            )
+                            if models:
+                                idle_observation_since = None
+                                return SlotState.READY
+                            # /health=200 but /v1/models is empty:
+                            # container is up with no model loaded.
+                            last_error = "/health 200 but /v1/models empty"
+                            idle = _observed_idle()
+                            if idle is not None:
+                                return idle
+                        else:
+                            idle_observation_since = None
+                            last_error = f"/health HTTP {resp.status_code}"
             except httpx.HTTPError as exc:
+                # Transport error → upstream genuinely unreachable; do
+                # not let prior idle observations carry over.
+                idle_observation_since = None
                 last_error = f"http error: {exc}"
             except Exception as exc:
                 # TIER1: log + retain message; never silent.
@@ -1314,6 +1452,7 @@ class SlotManager:
                     "slot.health_probe_unexpected_error",
                     extra={"slot": slot_name, "error": str(exc)},
                 )
+                idle_observation_since = None
                 last_error = f"unexpected: {exc}"
             attempt += 1
             await asyncio.sleep(wait_s)
@@ -1322,6 +1461,159 @@ class SlotManager:
             f"slot {slot_name!r} did not become healthy within {_HEALTH_GRACE_TOTAL_S}s",
             details={"slot": slot_name, "last_error": last_error},
         )
+
+    # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
+
+    async def _maybe_adopt_running_slot(self, slot_name: str, cfg: dict[str, Any]) -> Slot | None:
+        """Adopt a running-but-OFFLINE slot into READY/IDLE if its probe passes.
+
+        Returns the post-adoption Slot snapshot, or ``None`` when the slot
+        is not (yet) adoptable — caller falls back to the on-disk record.
+
+        Called from ``status()`` when ``state.json`` reports OFFLINE/ERROR
+        but ``systemctl is-active`` reports the unit is up.  Resolves
+        issue #30: kokoro / moonshine slots started outside the hal0
+        ``load()`` lifecycle used to sit at OFFLINE forever.
+        """
+        port = _cfg_port(cfg)
+        provider = _cfg_provider(cfg)
+        if port <= 0:
+            return None
+        ok, resolved, detail = await self._probe_once(port, provider)
+        if not ok or resolved is None:
+            log.debug(
+                "slot.adoption_probe_skipped",
+                extra={"slot": slot_name, "port": port, "detail": detail},
+            )
+            return None
+        model_id = _model_default(cfg) or None
+        extras = {
+            "backend": cfg.get("backend", "vulkan"),
+            "provider": cfg.get("provider", "llama-server"),
+            "adopted": True,
+        }
+        # ``force=True`` is required: the legal-transition map does not
+        # contain offline→ready or offline→idle.  Adoption is the
+        # exception — the state machine is recovering from drift, not
+        # following the normal load() path.
+        await self._transition(
+            slot_name,
+            resolved,
+            model_id=model_id,
+            port=port,
+            message=f"adopted running slot ({detail})",
+            extra=extras,
+            force=True,
+        )
+        log.info(
+            "slot.adopted",
+            extra={
+                "slot": slot_name,
+                "port": port,
+                "resolved": resolved.value,
+                "detail": detail,
+            },
+        )
+        # Build the Slot snapshot directly from the just-written record.
+        # We deliberately do NOT recurse through ``status()`` here — the
+        # caller already checked is-active, and another full pass would
+        # re-probe systemctl + re-run the reconciler.
+        rec = self._states[slot_name]
+        return Slot(
+            name=slot_name,
+            state=resolved,
+            port=rec.port,
+            model_id=rec.model_id,
+            backend=rec.extra.get("backend"),
+            metadata={
+                "updated_at": rec.updated_at,
+                "message": rec.message,
+                **rec.extra,
+            },
+        )
+
+    async def _probe_once(self, port: int, provider: str) -> tuple[bool, SlotState | None, str]:
+        """One-shot health probe — no retries, no backoff.
+
+        Used by ``status()`` to adopt an already-running slot (issue #30):
+        when state.json reports OFFLINE but ``systemctl is-active`` says
+        the unit is up, a single round-trip to the provider's health
+        surface decides whether to promote the slot to READY/IDLE or
+        leave it alone.
+
+        Returns:
+            ``(ok, resolved, detail)``:
+              - ``ok=True``  + ``resolved=READY``: model loaded and
+                serving (kokoro/llama-server /health 2xx + non-empty
+                /v1/models, moonshine /health body model_loaded=true,
+                FLM sentinel passes).
+              - ``ok=True``  + ``resolved=IDLE``: process reachable but
+                no model loaded — analogous to the warming→idle case in
+                ``_await_ready``.
+              - ``ok=False`` + ``resolved=None``: not yet adoptable.
+                ``detail`` carries a human-readable last_error so the
+                caller can log or surface it.
+        """
+        url = f"http://127.0.0.1:{port}"
+        strategy = _provider_health_strategy(provider)
+        try:
+            async with httpx.AsyncClient(timeout=_HEALTH_PROBE_TIMEOUT_S) as client:
+                if strategy == "chat_sentinel":
+                    resp = await client.get(f"{url}/v1/models")
+                    if resp.status_code != 200:
+                        return False, None, f"/v1/models HTTP {resp.status_code}"
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {}
+                    models = data.get("data", []) if isinstance(data, dict) else []
+                    if not models:
+                        # Process alive, no model — IDLE, not OFFLINE.
+                        return True, SlotState.IDLE, "/v1/models empty"
+                    # Don't run a sentinel inference here — adoption must
+                    # be cheap.  A successful /v1/models with at least one
+                    # entry is enough to call the slot READY for status()
+                    # purposes; if the next real request 5xxs, the
+                    # fail-watcher / status reconciler will demote it.
+                    return True, SlotState.READY, "/v1/models non-empty"
+                if strategy == "health_with_model_loaded":
+                    resp = await client.get(f"{url}/health")
+                    if resp.status_code != 200:
+                        return False, None, f"/health HTTP {resp.status_code}"
+                    try:
+                        body = resp.json()
+                    except Exception:
+                        body = {}
+                    if isinstance(body, dict) and body.get("model_loaded"):
+                        return True, SlotState.READY, "model_loaded"
+                    return True, SlotState.IDLE, "model_loaded != true"
+                # /health-based providers: pair /health with /v1/models
+                # so a slot started with no model resolves to IDLE.
+                resp = await client.get(f"{url}/health")
+                if resp.status_code != 200:
+                    return False, None, f"/health HTTP {resp.status_code}"
+                try:
+                    models_resp = await client.get(f"{url}/v1/models")
+                except httpx.HTTPError:
+                    return True, SlotState.READY, "/health 2xx (no /v1/models)"
+                if models_resp.status_code != 200:
+                    return True, SlotState.READY, "/health 2xx (/v1/models not exposed)"
+                try:
+                    models_data = models_resp.json()
+                except Exception:
+                    models_data = {}
+                models = models_data.get("data", []) if isinstance(models_data, dict) else []
+                if models:
+                    return True, SlotState.READY, "/v1/models non-empty"
+                return True, SlotState.IDLE, "/v1/models empty"
+        except httpx.HTTPError as exc:
+            return False, None, f"http error: {exc}"
+        except Exception as exc:
+            log.warning(
+                "slot.adoption_probe_unexpected_error",
+                extra={"port": port, "provider": provider, "error": str(exc)},
+            )
+            return False, None, f"unexpected: {exc}"
 
 
 # ── module-level helpers ─────────────────────────────────────────────────────

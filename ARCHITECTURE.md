@@ -82,6 +82,50 @@ Code is replaceable (every update writes a new versioned dir + flips a
 symlink). Config is preserved across updates. Runtime is preserved
 across updates and survives uninstall when `--keep-data` is passed.
 
+### Slot lifecycle state machine
+
+The authoritative enum lives in
+[`hal0.slots.state.SlotState`](./src/hal0/slots/state.py); transitions are
+enforced by `SlotManager._transition()` and persisted atomically to
+`/var/lib/hal0/slots/<name>/state.json`.
+
+```
+offline → pulling → starting → warming → ready ←──┐
+                                  │      ↑        │
+                                  │      ↓        │
+                                  └──→  idle ←─ serving
+                                         │
+                                         ↓
+                                     unloading → offline
+                                         ↑
+                                       error
+```
+
+| State        | Meaning                                                              |
+|--------------|----------------------------------------------------------------------|
+| `offline`    | No systemd unit active.                                              |
+| `pulling`    | Model files downloading / verifying; unit not yet started.           |
+| `starting`   | `systemctl start` issued; container not yet reachable.               |
+| `warming`    | Container reachable; model loading or `/v1/models` populating.       |
+| `ready`      | Probe converged AND at least one model advertised — safe to route.   |
+| `serving`    | At least one inference request in flight on this slot.               |
+| `idle`       | Container up but cannot fulfil requests right now. Two sub-cases:    |
+|              | (a) `--model ""` / empty `/v1/models` — process-up-no-model;         |
+|              | (b) ready slot quiet for longer than the idle timeout.               |
+| `unloading`  | Graceful `systemctl stop` in progress.                               |
+| `error`      | Failed; details in `state.json.message` and journald.                |
+
+`SlotManager.status()` runs a bidirectional reconciler against
+`systemctl is-active`:
+
+- A `ready`/`serving`/`idle` state with a dead unit → transition to
+  `error`.
+- An `offline`/`error` state with a live unit → run a one-shot health
+  probe and adopt the slot into `ready` or `idle` (issue #30).
+
+Routers MUST treat `idle` distinctly from `ready`: an idle slot has no
+model advertised and will 4xx on inference attempts (issue #31).
+
 ## See also
 
 - [`PLAN.md`](./PLAN.md) — v1 scope, modules ported from haloai, milestones

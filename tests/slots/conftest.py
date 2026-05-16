@@ -91,10 +91,17 @@ def systemctl_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 @pytest.fixture
 def stub_await_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Short-circuit the HTTP health probe so unit tests don't sleep."""
+    """Short-circuit the HTTP health probe so unit tests don't sleep.
 
-    async def _ok(self: SlotManager, slot_name: str, port: int, provider: str) -> None:
-        return None
+    Returns ``SlotState.READY`` so callers exercise the happy-path
+    transition.  Tests that need to drive the new WARMING → IDLE edge
+    (issue #31) stub ``_await_ready`` themselves to return
+    ``SlotState.IDLE``.
+    """
+    from hal0.slots.state import SlotState
+
+    async def _ok(self: SlotManager, slot_name: str, port: int, provider: str) -> SlotState:
+        return SlotState.READY
 
     monkeypatch.setattr(SlotManager, "_await_ready", _ok)
 
