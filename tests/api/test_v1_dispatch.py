@@ -61,3 +61,44 @@ def test_v1_routes_are_no_longer_501_stubs(client: TestClient) -> None:
         assert r.status_code != 501, f"{method} {path}: still a stub"
         if r.status_code >= 400:
             assert r.json()["error"]["code"] != "system.not_implemented"
+
+
+# ── issue #34: missing-model on /v1/audio/* → 400, not 404 ─────────────────
+
+
+def test_v1_audio_speech_missing_model_returns_400(client: TestClient) -> None:
+    """POST /v1/audio/speech without 'model' → 400 validation.invalid.
+
+    Pre-issue-#34 the dispatcher's default-model + no-route fallback
+    surfaced a confusing 404 ('dispatch.no_route'). The route now raises
+    BadRequest up front so OpenAI clients see a useful error message
+    naming the missing field.
+    """
+    r = client.post("/v1/audio/speech", json={"input": "hello", "voice": "alloy"})
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert body["error"]["code"] == "validation.invalid"
+    assert "model" in body["error"]["message"].lower()
+
+
+def test_v1_audio_speech_empty_model_returns_400(client: TestClient) -> None:
+    """An empty / whitespace-only model field is treated as missing."""
+    r = client.post("/v1/audio/speech", json={"model": "   ", "input": "hi"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "validation.invalid"
+
+
+def test_v1_audio_transcriptions_missing_model_returns_400(client: TestClient) -> None:
+    """POST /v1/audio/transcriptions without a model form field → 400.
+
+    Multipart variant of the same contract — the regex-extracted model is
+    empty so the route raises BadRequest before dispatching to a default
+    that wouldn't route anyway.
+    """
+    # Minimal multipart body with a fake audio file but NO model field.
+    files = {"file": ("clip.wav", b"RIFFfake", "audio/wav")}
+    r = client.post("/v1/audio/transcriptions", files=files)
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert body["error"]["code"] == "validation.invalid"
+    assert "model" in body["error"]["message"].lower()

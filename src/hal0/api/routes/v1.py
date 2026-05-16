@@ -131,8 +131,10 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 async def _dispatch_and_forward(
     request: Request,
     dispatcher: DispatcherDep,
+    body: dict[str, Any] | None = None,
 ) -> Response:
-    body = await _read_json_body(request)
+    if body is None:
+        body = await _read_json_body(request)
     call = await dispatcher.dispatch(request, body=body)
     # Remember the most recent model we sent to this upstream so the
     # dashboard's synthetic slot reflects what's actually being used,
@@ -228,14 +230,32 @@ async def audio_transcriptions(request: Request, dispatcher: DispatcherDep) -> R
     # raw multipart bytes unchanged so the upstream's own multipart parser
     # works. JSON re-encoding (the default dispatch path) would corrupt the
     # WAV payload.
-    return await _forward_multipart(request, dispatcher)
+    #
+    # Per OpenAI's contract the ``model`` form field is required. We surface
+    # the missing-model case as 400 (validation.invalid) rather than letting
+    # it fall through to the dispatcher's default-model + no-route 404,
+    # which obscured the real problem (issue #34).
+    return await _forward_multipart(request, dispatcher, require_model=True)
 
 
 @router.post("/audio/speech")
 async def audio_speech(request: Request, dispatcher: DispatcherDep) -> Response:
     # /v1/audio/speech is the TTS input direction — body is JSON
-    # ({"model": "...", "input": "...", "voice": "..."}). Standard path.
-    return await _dispatch_and_forward(request, dispatcher)
+    # ({"model": "...", "input": "...", "voice": "..."}). Standard path,
+    # but the ``model`` field is required by the OpenAI contract; raise
+    # 400 explicitly so the caller doesn't see a misleading 404 from the
+    # dispatcher's default-model fallback path (issue #34).
+    from hal0.errors import BadRequest
+
+    body = await _read_json_body(request)
+    model = body.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise BadRequest(
+            "Request body field 'model' is required",
+            details={"field": "model", "path": "/v1/audio/speech"},
+            code="validation.invalid",
+        )
+    return await _dispatch_and_forward(request, dispatcher, body=body)
 
 
 # ── /v1/images/generations (ComfyUI provider, hal0-managed translation) ────
@@ -403,7 +423,12 @@ def _extract_multipart_model(raw_body: bytes) -> str:
         return ""
 
 
-async def _forward_multipart(request: Request, dispatcher: DispatcherDep) -> Response:
+async def _forward_multipart(
+    request: Request,
+    dispatcher: DispatcherDep,
+    *,
+    require_model: bool = False,
+) -> Response:
     """Route a multipart request without re-serialising its body.
 
     The dispatcher's normal _remap_model path JSON-encodes the body, which
@@ -417,13 +442,26 @@ async def _forward_multipart(request: Request, dispatcher: DispatcherDep) -> Res
        so its route resolution still works.
     4. After dispatch picks an upstream, overwrite call.body with the
        original raw bytes + content-type header so httpx forwards verbatim.
+
+    When ``require_model`` is True, missing ``model`` raises a 400 BadRequest
+    instead of falling through to the dispatcher's default-model path
+    (issue #34 — surfaces a useful error to OpenAI clients that forgot it).
     """
     import httpx
+
+    from hal0.errors import BadRequest
 
     raw_body = await request.body()
     headers = dict(request.headers)
     content_type = headers.get("content-type") or "multipart/form-data"
     model_value = _extract_multipart_model(raw_body)
+
+    if require_model and not model_value:
+        raise BadRequest(
+            "Request body field 'model' is required",
+            details={"field": "model", "path": request.url.path},
+            code="validation.invalid",
+        )
 
     call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})
 
