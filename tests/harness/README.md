@@ -303,6 +303,7 @@ hand or re-run `installer-test.sh` first.
 | `HAL0_HARNESS_AUTH=1` | Enable `--auth=basic` install (Caddy + bcrypt + bearer tokens). Implies PROD=1. | `installer-test.sh:auth-basic` |
 | `HAL0_HARNESS_KEEP=1` | When running `installer-test.sh` standalone, keep the tmp prefix after exit. No effect through the orchestrator (orchestrator always cleans). | `installer-test.sh` |
 | `HAL0_HARNESS_API_PORT=<n>` | Port `hal0 serve` binds during the install test (default 18080). | `installer-test.sh:dev-api-up` |
+| `HAL0_DOCTOR_PORTS="<p1> <p2>..."` | Space-separated TCP ports `hal0 doctor`'s port-collision check probes. Defaults to `"18080 13001"` inside `cli-test.sh` so the row doesn't trip on a co-resident prod install bound to the canonical `8080 3001`. Override to match your dev install if non-default. | `cli-test.sh:cli-doctor` |
 
 The orchestrator passes the environment through unchanged, so set
 these in front of `bash scripts/harness.sh`.

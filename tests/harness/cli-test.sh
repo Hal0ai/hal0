@@ -32,9 +32,13 @@
 #   cli-model-rm            hal0 model rm <id> --force
 #
 # Env knobs:
-#   HAL0_API_URL    base URL (default http://127.0.0.1:18080)
-#   HAL0_HOME       prefix root (default /tmp/hal0-h)
-#   HAL0_BIN        binary path (default ${HAL0_HOME}/.venv/bin/hal0)
+#   HAL0_API_URL        base URL (default http://127.0.0.1:18080)
+#   HAL0_HOME           prefix root (default /tmp/hal0-h)
+#   HAL0_BIN            binary path (default ${HAL0_HOME}/.venv/bin/hal0)
+#   HAL0_DOCTOR_PORTS   space-separated TCP ports for `hal0 doctor`
+#                       port-collision check (default "18080 13001" — the
+#                       dev install's ports, so a co-resident prod install
+#                       on 8080/3001 doesn't poison the cli-doctor row).
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -56,8 +60,13 @@ fi
 : "${HAL0_API_URL:=http://127.0.0.1:18080}"
 : "${HAL0_HOME:=/tmp/hal0-h}"
 : "${HAL0_BIN:=${HAL0_HOME}/.venv/bin/hal0}"
+# When a prod hal0 install is co-resident on this host it owns the
+# default doctor port list (8080 + 3001). Probe the dev install's
+# ports instead so cli-doctor doesn't report a false-positive
+# collision. An externally-set HAL0_DOCTOR_PORTS still wins.
+: "${HAL0_DOCTOR_PORTS:=18080 13001}"
 
-export HAL0_API_URL HAL0_HOME
+export HAL0_API_URL HAL0_HOME HAL0_DOCTOR_PORTS
 
 log_step "CLI harness — bin=${HAL0_BIN}  api=${HAL0_API_URL}  home=${HAL0_HOME}"
 
