@@ -68,6 +68,10 @@ hal0-home/
 # Test harness runtime artifacts
 .harness/
 tests/harness/reports/
+tests/harness/reports.*/
+
+# Local hal0 install state (HAL0_HOME on dev hosts)
+.hal0ai/
 
 # Secrets
 .env

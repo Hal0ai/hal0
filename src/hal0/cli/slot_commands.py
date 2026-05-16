@@ -387,7 +387,13 @@ def slot_edit(
             )
             return
 
-    if model is None and port is None and ctx_size is None and provider is None and hardware is None:
+    if (
+        model is None
+        and port is None
+        and ctx_size is None
+        and provider is None
+        and hardware is None
+    ):
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  "
             "Pass at least one of --model, --port, --ctx-size, --provider, --hardware."

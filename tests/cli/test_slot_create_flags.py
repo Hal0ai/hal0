@@ -122,9 +122,7 @@ def test_legacy_backend_with_invalid_value_errors(
     assert "body" not in captured_post
 
 
-def test_default_hardware_reads_probe_json(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_default_hardware_reads_probe_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """``_detect_default_hardware`` picks rocm for AMD+compute_capable GPUs."""
     probe = tmp_path / "hardware.json"
     probe.write_text(
@@ -147,9 +145,7 @@ def test_default_hardware_reads_probe_json(
     assert slot_commands._detect_default_hardware() == "rocm"
 
 
-def test_default_hardware_vulkan_fallback(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_default_hardware_vulkan_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Missing probe → vulkan (safe default that works on most GPUs)."""
     from hal0.config import paths as _paths
 
@@ -157,9 +153,7 @@ def test_default_hardware_vulkan_fallback(
     assert slot_commands._detect_default_hardware() == "vulkan"
 
 
-def test_default_hardware_cpu_when_no_gpu(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_default_hardware_cpu_when_no_gpu(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Empty gpus[] → cpu."""
     probe = tmp_path / "hardware.json"
     probe.write_text(json.dumps({"gpus": []}))

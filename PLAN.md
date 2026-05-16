@@ -497,16 +497,28 @@ or operator touches on a real host — installer, every CLI subcommand,
 slot lifecycle, uninstall — and emits one structured JSON row per
 scenario. A fail flags one specific surface, not the whole pipeline.
 
-- `make harness` — non-mutating defaults (skips prod install + auth path)
-- `HAL0_HARNESS_PROD=1 make harness` — also exercises sudo `/opt/hal0` install
-- `HAL0_HARNESS_AUTH=1 HAL0_HARNESS_PROD=1 make harness` — adds the Caddy
+- `bash scripts/harness.sh` — non-mutating defaults (skips prod install + auth path)
+- `HAL0_HARNESS_PROD=1 bash scripts/harness.sh` — also exercises sudo `/opt/hal0` install
+- `HAL0_HARNESS_AUTH=1 HAL0_HARNESS_PROD=1 bash scripts/harness.sh` — adds the Caddy
   `--auth=basic` install path
-- `make harness-report` — pretty-prints `tests/harness/reports/harness.json`
+- `python3 scripts/harness-report.py tests/harness/reports/harness.json` — pretty-printer
 
 Status vocabulary, scenario layout, JSON schema, and the "how to add a
 row" template live in `tests/harness/README.md`. Findings get catalogued
 inline at `tests/harness/FINDINGS.md` with file:line cites so a fix can
 land directly.
+
+The δ-tier has been driven on both hosts:
+
+- **hal0-dev** (10.0.1.141, CUDA dev VM) — baseline run 2026-05-15:
+  24 pass / 2 fail / 10 skip / 5 deferred across 41 rows.
+- **hal0-test** LXC (10.0.1.230, Strix Halo iGPU + NPU) — run
+  2026-05-16: 33 / 1 / 5 / 2 across 41 rows. Same run drove three
+  additional probes against the live prod install: **62 distinct
+  API route × method tuples** (9/9 auth-error contract probes pass),
+  **Caddy edge audit** (3 handle blocks, public-paths bypass gap
+  flagged), and **real inference** (phi3-mini on Vulkan: TTFT 59 ms,
+  ~85 tok/s sustained).
 
 Harness is **not** required for PR merge — it's a contributor-side smoke
 loop on real hardware, not a CI gate. The `hal0-test` LXC matrix
