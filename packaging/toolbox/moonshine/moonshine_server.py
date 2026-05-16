@@ -91,8 +91,51 @@ def _load_model(model_arch: str, model_path: str | None) -> None:
 
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
+class UnsupportedAudioFormat(Exception):
+    """ffmpeg refused to decode the upload.
+
+    Raised by ``_decode_audio`` instead of letting ``CalledProcessError``
+    propagate — that exception's ``cmd`` attribute carries the full
+    ffmpeg argv including the user-supplied tempfile path, which then
+    leaks into the API response.  The route handler translates this to
+    a 415 with the hal0 envelope shape and no subprocess argv.
+    """
+
+    def __init__(self, returncode: int) -> None:
+        super().__init__(f"ffmpeg decode failed (rc={returncode})")
+        self.returncode = returncode
+
+
+def _redact_ffmpeg_argv(argv: list[str], input_path: str) -> list[str]:
+    """Return a copy of ``argv`` with the user-supplied input path masked.
+
+    Replaces any element equal to ``input_path`` with the placeholder
+    ``<input>`` so the server-side log line carries no temp-file path or
+    user-controlled filename. Everything else (codec flags, sample rate,
+    output path which is derived from the same temp name) is masked the
+    same way if it starts with ``input_path``.
+    """
+    redacted: list[str] = []
+    for arg in argv:
+        if arg == input_path:
+            redacted.append("<input>")
+        elif arg.startswith(input_path):
+            # out_path is `in_path + ".wav"`; keep the suffix visible for debugging.
+            redacted.append("<input>" + arg[len(input_path) :])
+        else:
+            redacted.append(arg)
+    return redacted
+
+
 def _decode_audio(raw: bytes, filename: str | None) -> np.ndarray:
-    """Decode arbitrary audio bytes to mono float32 @ 16kHz via ffmpeg."""
+    """Decode arbitrary audio bytes to mono float32 @ 16kHz via ffmpeg.
+
+    Raises :class:`UnsupportedAudioFormat` when ffmpeg refuses the input,
+    so the route handler can translate to a 415 with the hal0 envelope
+    instead of letting :class:`subprocess.CalledProcessError` propagate —
+    that exception's ``.cmd`` carries the full argv (and therefore the
+    user-supplied temp path) into the API response.
+    """
     # Fast path: if soundfile can read it natively (wav/flac/ogg), no ffmpeg.
     try:
         data, sr = sf.read(io.BytesIO(raw), dtype="float32")
@@ -121,14 +164,32 @@ def _decode_audio(raw: bytes, filename: str | None) -> np.ndarray:
         in_f.write(raw)
         in_path = in_f.name
     out_path = in_path + ".wav"
+    argv = [
+        "ffmpeg", "-y", "-loglevel", "error", "-i", in_path,
+        "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "wav", out_path,
+    ]
     try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error", "-i", in_path,
-                "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "wav", out_path,
-            ],
-            check=True,
-        )
+        try:
+            subprocess.run(argv, check=True, capture_output=True)
+        except subprocess.CalledProcessError as exc:
+            # Log the full failure server-side with the user-supplied
+            # tempfile path masked. stderr from ffmpeg may include the
+            # input path too, so redact it the same way.
+            redacted_argv = _redact_ffmpeg_argv(argv, in_path)
+            stderr_text = ""
+            if exc.stderr:
+                try:
+                    stderr_text = exc.stderr.decode("utf-8", errors="replace")
+                except Exception:
+                    stderr_text = repr(exc.stderr)
+                stderr_text = stderr_text.replace(in_path, "<input>")
+            log.warning(
+                "ffmpeg decode failed rc=%d argv=%r stderr=%s",
+                exc.returncode,
+                redacted_argv,
+                stderr_text[:500],
+            )
+            raise UnsupportedAudioFormat(exc.returncode) from None
         data, _ = sf.read(out_path, dtype="float32")
         if data.ndim > 1:
             data = data.mean(axis=1)
@@ -209,6 +270,31 @@ async def transcriptions(
         raise HTTPException(status_code=400, detail="empty audio upload")
     try:
         pcm = _decode_audio(raw, file.filename)
+    except UnsupportedAudioFormat as exc:
+        # TODO(#32): swap HTTPException for a typed BadRequest subclass
+        # of Hal0Error once #32 lands so the envelope shape comes from
+        # the shared middleware. For now we hand-build the envelope to
+        # match the hal0 main proxy contract.
+        #
+        # Crucially: do NOT include ``exc.cmd`` / ``exc.stdout`` /
+        # ``exc.stderr`` from the underlying CalledProcessError — those
+        # carry the user-supplied tempfile path and stderr text from
+        # the upload, both of which would leak through the proxy.
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "error": {
+                    "code": "audio.unsupported_format",
+                    "message": "Failed to decode audio input",
+                    # Field name is "decoder_returncode" not "ffmpeg_*" so
+                    # the response body contains no reference to the
+                    # underlying tool — issue #33 explicitly forbids the
+                    # substring "ffmpeg" in the response.
+                    "details": {"decoder_returncode": exc.returncode},
+                }
+            },
+        ) from None
+    try:
         text = _transcribe(pcm)
     except Exception as exc:  # noqa: BLE001 — return as 500
         log.exception("transcription failed")
