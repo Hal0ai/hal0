@@ -428,3 +428,42 @@ async def pick_default(
         "pull_job_id": job.job_id,
         "next": f"poll /api/models/{model_id}/pull/status",
     }
+
+
+@router.put("/slots/{slot}/model")
+async def set_slot_default_model(slot: str, request: Request) -> dict[str, Any]:
+    # Persist-only counterpart to /api/slots/{name}/swap.  Hot-swap changes
+    # the running container; this writes model.default into
+    # /etc/hal0/slots/<slot>.toml so the change survives a restart.  UI
+    # and CLI call both for the common "change and remember" flow.
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise PickDefaultError(
+            f"body must be valid JSON: {exc}",
+            details={"slot": slot, "error": str(exc)},
+        ) from exc
+    if not isinstance(body, dict):
+        raise PickDefaultError("body must be a JSON object", details={"slot": slot})
+    model_id = body.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise PickDefaultError(
+            "model_id is required (non-empty string)",
+            details={"slot": slot},
+        )
+    model_id = model_id.strip()
+
+    registry = getattr(request.app.state, "model_registry", None)
+    if registry is not None and not registry.has(model_id):
+        raise PickDefaultError(
+            f"model_id {model_id!r} is not in the registry",
+            details={"slot": slot, "model_id": model_id},
+        )
+
+    slot_path = _assign_to_slot(slot, model_id)
+    return {
+        "slot": slot,
+        "model_id": model_id,
+        "slot_path": str(slot_path),
+        "persisted": True,
+    }

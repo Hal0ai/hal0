@@ -203,8 +203,23 @@ def slot_restart(
 def slot_swap(
     name: str = typer.Argument(..., help="Slot name to swap"),
     model: str = typer.Option(..., "--model", "-m", help="Model ref to swap in"),
+    no_persist: bool = typer.Option(
+        False,
+        "--no-persist",
+        help="Hot-swap only — don't update /etc/hal0/slots/<slot>.toml.",
+    ),
 ) -> None:
-    """Hot-swap the model in a running slot."""
+    """Swap a slot's model, and (by default) make the change survive a restart.
+
+    Two distinct steps:
+      1. Hot-swap — POST /api/slots/{name}/swap          (runtime)
+      2. Persist  — PUT  /api/install/slots/{name}/model (on-disk default)
+
+    Pass ``--no-persist`` to skip step 2 (try a model briefly without
+    changing the default).  If step 1 succeeds but step 2 fails, the
+    runtime swap is left in place and the failure is surfaced so the
+    operator can retry persist after fixing the cause.
+    """
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -213,8 +228,27 @@ def slot_swap(
     except CliApiError as exc:
         die(str(exc))
         return
+
+    swapped_id = snap.get("model_id", model)
+    state = _fmt_state(snap.get("state"))
+
+    if no_persist:
+        console.print(
+            f"Swapped [bold]{name}[/bold] → {swapped_id} state={state} "
+            "[dim](runtime only; --no-persist set)[/dim]"
+        )
+        return
+
+    try:
+        api_put(f"/api/install/slots/{name}/model", json={"model_id": model})
+    except CliApiError as exc:
+        console.print(f"Swapped [bold]{name}[/bold] → {swapped_id} state={state}")
+        console.print(f"[yellow]Warning:[/yellow] runtime swap succeeded but persist failed: {exc}")
+        console.print(f"[dim]Change will revert on next restart of hal0-slot@{name}.service.[/dim]")
+        raise typer.Exit(1) from None
+
     console.print(
-        f"Swapped [bold]{name}[/bold] → {snap.get('model_id', model)} state={_fmt_state(snap.get('state'))}"
+        f"Swapped [bold]{name}[/bold] → {swapped_id} state={state} [dim](persisted)[/dim]"
     )
 
 

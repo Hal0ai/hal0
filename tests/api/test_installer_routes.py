@@ -118,6 +118,133 @@ def test_install_probe_writes_hardware_json(
     assert info["probed_at"], "probed_at should be a non-empty ISO timestamp"
 
 
+# ── PUT /api/install/slots/{slot}/model ────────────────────────────────────
+
+
+@pytest.fixture
+def isolated_app_client(
+    tmp_hal0_home: str,
+) -> Iterator[tuple[FastAPI, TestClient]]:
+    """Like isolated_client, but also yields the app for state inspection."""
+    app: FastAPI = create_app()
+    with TestClient(app) as c:
+        yield app, c
+
+
+def test_set_slot_default_model_writes_toml_and_returns_path(
+    isolated_app_client: tuple[FastAPI, TestClient], tmp_hal0_home: str
+) -> None:
+    """PUT /api/install/slots/primary/model rewrites the slot TOML."""
+    import tomllib
+
+    from hal0.registry.model import Model
+
+    app, client = isolated_app_client
+    app.state.model_registry.add(
+        Model(
+            id="qwen3.5-4b",
+            name="Qwen 3.5 4B",
+            path="/tmp/qwen3.5-4b.gguf",
+            size_bytes=1,
+            license="Apache-2.0",
+            capabilities=["chat"],
+        )
+    )
+
+    r = client.put(
+        "/api/install/slots/primary/model",
+        json={"model_id": "qwen3.5-4b"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {
+        "slot": "primary",
+        "model_id": "qwen3.5-4b",
+        "slot_path": str(Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "primary.toml"),
+        "persisted": True,
+    }
+
+    cfg = tomllib.loads(Path(body["slot_path"]).read_text())
+    assert cfg["model"]["default"] == "qwen3.5-4b"
+    # Built-in defaults seeded by _assign_to_slot when creating the file.
+    assert cfg["port"] == 8081
+    assert cfg["backend"] == "vulkan"
+
+
+def test_set_slot_default_model_preserves_existing_port_and_backend(
+    isolated_app_client: tuple[FastAPI, TestClient], tmp_hal0_home: str
+) -> None:
+    """Existing port/backend in the TOML survive the model swap."""
+    import tomllib
+
+    import tomli_w
+
+    from hal0.registry.model import Model
+
+    app, client = isolated_app_client
+    app.state.model_registry.add(
+        Model(
+            id="qwen3.5-9b",
+            name="Qwen 3.5 9B",
+            path="/tmp/qwen3.5-9b.gguf",
+            size_bytes=1,
+            license="Apache-2.0",
+            capabilities=["chat"],
+        )
+    )
+    slot_path = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "primary.toml"
+    slot_path.parent.mkdir(parents=True, exist_ok=True)
+    slot_path.write_bytes(
+        tomli_w.dumps(
+            {
+                "name": "primary",
+                "port": 9999,
+                "backend": "rocm",
+                "provider": "llama-server",
+                "model": {"default": "phi3-mini"},
+            }
+        ).encode()
+    )
+
+    r = client.put(
+        "/api/install/slots/primary/model",
+        json={"model_id": "qwen3.5-9b"},
+    )
+    assert r.status_code == 200, r.text
+
+    cfg = tomllib.loads(slot_path.read_text())
+    assert cfg["model"]["default"] == "qwen3.5-9b"
+    assert cfg["port"] == 9999  # preserved
+    assert cfg["backend"] == "rocm"  # preserved
+
+
+def test_set_slot_default_model_rejects_unknown_model_id(
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    """An id not in the registry returns 400 install.pick_default_failed."""
+    _, client = isolated_app_client
+    r = client.put(
+        "/api/install/slots/primary/model",
+        json={"model_id": "does-not-exist"},
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error"]["code"] == "install.pick_default_failed"
+    assert "not in the registry" in body["error"]["message"]
+
+
+def test_set_slot_default_model_requires_non_empty_model_id(
+    isolated_app_client: tuple[FastAPI, TestClient],
+) -> None:
+    _, client = isolated_app_client
+    r = client.put(
+        "/api/install/slots/primary/model",
+        json={"model_id": "   "},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "install.pick_default_failed"
+
+
 def test_install_curated_models_returns_catalogue(isolated_client: TestClient) -> None:
     """Curated-models endpoint surfaces the manifest the wizard renders."""
     r = isolated_client.get("/api/install/curated-models")

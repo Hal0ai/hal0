@@ -146,13 +146,36 @@ async function doLoad(slot) {
 
 async function doSwap() {
   if (!swapSlot.value || !swapModel.value) return
+  const name = swapSlot.value.name
+  const modelId = swapModel.value
   swapping.value = true
   try {
-    await api(`/api/slots/${swapSlot.value.name}/swap`, {
+    // Step 1: hot-swap the running container (runtime only).  Body shape
+    // is {model_id} — must match src/hal0/api/routes/slots.py::swap_slot.
+    await api(`/api/slots/${name}/swap`, {
       method: 'POST',
-      body: JSON.stringify({ model: swapModel.value }),
+      body: JSON.stringify({ model_id: modelId }),
     })
-    toasts.success(`Swapping model in "${swapSlot.value.name}"`)
+
+    // Step 2: persist to /etc/hal0/slots/<name>.toml so the change
+    // survives a restart.  Treated as a soft failure — runtime swap
+    // already succeeded, so we keep the modal closed and warn instead.
+    let persisted = true
+    try {
+      await api(`/api/install/slots/${name}/model`, {
+        method: 'PUT',
+        body: JSON.stringify({ model_id: modelId }),
+      })
+    } catch (persistErr) {
+      persisted = false
+      toasts.warning(
+        `Swapped "${name}" → ${modelId}, but failed to persist: ${persistErr.message}. ` +
+        `Change will revert on next restart.`
+      )
+    }
+    if (persisted) {
+      toasts.success(`Swapped "${name}" → ${modelId} (persisted)`)
+    }
     swapSlot.value = null
     swapModel.value = ''
     await system.fetchStatus()
@@ -773,7 +796,11 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
                   </option>
                 </select>
               </div>
-              <p class="field-hint">The slot will reload with the new model. In-flight requests will complete first.</p>
+              <p class="field-hint">
+                The slot will reload with the new model — in-flight requests complete first.
+                The change is also written to <code class="mono">/etc/hal0/slots/{{ swapSlot?.name }}.toml</code>
+                so it survives a restart.
+              </p>
             </div>
             <div class="modal-footer">
               <button class="btn-ghost" type="button" @click="swapSlot = null" :disabled="swapping">Cancel</button>
