@@ -64,6 +64,7 @@ yarn-error.log*
 /etc-local/
 /usr-local/
 hal0-home/
+.hal0ai/
 
 # Secrets
 .env
