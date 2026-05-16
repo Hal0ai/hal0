@@ -4,6 +4,14 @@ Phase 1: real SlotManager-backed lifecycle wired alongside synthetic
 upstream-backed entries. Real slots win on name collision; synthetic
 entries persist for remote-upstream visibility in the dashboard until
 every upstream has a corresponding local slot.
+
+SSE endpoints (note: there is no ``/api/slots/{name}/events`` — the
+stream is split by concern):
+
+- ``GET /api/slots/{name}/state/stream`` — state-machine transitions
+  for one slot (``starting → warming → ready → serving → idle …``).
+- ``GET /api/slots/{name}/logs/stream`` — line-by-line journal tail
+  for the slot's systemd unit.
 """
 
 from __future__ import annotations
