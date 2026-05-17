@@ -13,7 +13,8 @@
 #
 # Env knobs (passed straight to children):
 #   HAL0_HARNESS_PROD=1     enable prod-mode rows (sudo + real /etc paths)
-#   HAL0_HARNESS_AUTH=1     enable --auth=basic install (needs PROD=1)
+#   HAL0_HARNESS_TLS=1      enable the tls-default install row (needs PROD=1
+#                           and installs Caddy via apt/pacman)
 #   HAL0_HARNESS_SKIP_LXC=1 skip the optional release-test SSH leg
 #
 # Exit 0 if no FAIL rows in any tier (skip/deferred ok), 1 otherwise.

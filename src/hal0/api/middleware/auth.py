@@ -1,13 +1,9 @@
-"""Bearer-token + Caddy-edge authentication dependency.
+"""Bearer-token + cookie-session authentication dependency.
 
-This module exposes four FastAPI dependencies:
+This module exposes three FastAPI dependencies:
 
   - :func:`require_token` — gates a single route or router. Accepts any
     valid scope (used as the *reader* gate on admin routers).
-  - :func:`require_token_unless_public` — gates a router globally but
-    bypasses the auth check for paths in :data:`PUBLIC_PATHS`. This is
-    what we attach at ``include_router(...)`` time on routers that mix
-    public and protected endpoints (``/v1`` and ``/api/install``).
   - :func:`require_writer` — gates a single mutating route. Requires an
     ``admin``- or ``all``-scoped credential; ``read-only`` and
     ``v1-only`` are rejected with 403 ``auth.forbidden``.
@@ -31,28 +27,23 @@ When ``HAL0_AUTH_ENABLED`` is unset, every dependency is a pass-through
 that returns ``identity="anonymous", scope="all"`` — so the gate
 collapses to "open" on the trusted-LAN install posture.
 
-Public route allowlist
-----------------------
+Public routes (no allowlist)
+----------------------------
 
-The following stay public under ``HAL0_AUTH_ENABLED=1``:
-
-  - ``GET  /api/health/system``        — liveness probe
-  - ``GET  /api/status``               — dashboard liveness ping
-  - ``GET  /api/metrics``              — JSON metrics / dashboard scrape
-  - ``GET  /api/features``             — feature-flag inspection
-  - ``GET  /api/install/state``        — first-run gating
-  - ``POST /api/install/complete``     — first-run sentinel write
-  - ``GET  /api/config/urls``          — host-aware URL hints
-  - ``GET  /api/auth/status``          — auth-mode discovery
-  - ``GET  /api/auth/login``           — placeholder (Caddy owns real login)
-  - ``POST /api/auth/logout``          — clears local session hints
-  - ``GET  /v1/models``                — OpenAI clients probe before auth
-
-Everything else under ``/v1/*`` and the admin ``/api/*`` routes is
-gated. Protected single-purpose routers (slots, models, providers,
-hardware, logs, settings, updater) get the dep at router-include time;
-mixed routers (``/v1``, ``/api/install``) get the path-aware variant
-that consults :data:`PUBLIC_PATHS`.
+ADR-0001 (Child B) deleted the ``PUBLIC_PATHS`` frozenset. A route is
+public iff its router / handler does NOT declare an auth dependency —
+that's the entire mechanism. The wizard endpoints
+(``/api/install/state``, ``/api/install/probe``, ``/api/install/complete``,
+``/api/install/curated-models``, ``/api/install/pick-default``), the
+auth surface (``/api/auth/status``, ``/api/auth/login``,
+``/api/auth/logout``, ``/api/auth/password``, ``/api/auth/me`` —
+``me`` IS auth-gated, the rest are public), liveness / metrics
+(``/api/status``, ``/api/health/system``, ``/api/metrics``,
+``/api/features``), config discovery (``/api/config/urls``), and the
+OpenAI pre-auth model probe (``GET /v1/models``) all live on bare /
+auth-free routers. Everything else inherits an auth dep at
+``include_router(...)`` time. See ``hal0.api.create_app`` for the wiring
+table.
 
 Auth precedence
 ---------------
@@ -61,11 +52,16 @@ Auth precedence
    store. Failure ⇒ 401 (``auth.invalid``). Success ⇒ identity = token's
    label, scope = token's scope.
 
-2. ``X-Forwarded-Email`` present (Caddy verified basic_auth at the edge,
-   then forwarded the identity) → trust it. Scope = ``"admin"`` because
-   Caddy's basic_auth users are the dashboard owners.
+2. ``hal0_session`` cookie present (ADR-0001 Child A) → validate signed
+   JWT claims. Failure ⇒ 401 (``auth.invalid``).
 
-3. Else → 401 (``auth.required``).
+3. ``X-Forwarded-Email`` present (a trusted upstream proxy validated the
+   identity and forwarded it) → trust it. Scope = ``"admin"``. This path
+   stays around for users fronting hal0 with their own SSO proxy
+   (Authelia, Authentik, Cloudflare Access, Pangolin etc.) — hal0's own
+   Caddy no longer sets it.
+
+4. Else → 401 (``auth.required``).
 
 When ``HAL0_AUTH_ENABLED`` is unset / falsy, ``require_token`` is a
 no-op pass-through that returns the literal identity ``"anonymous"`` —
@@ -143,43 +139,6 @@ _FORWARDED_SCOPE = "admin"
 # "read-only" and "v1-only" are explicitly excluded — they get 403 on
 # any mutating route.
 _WRITER_SCOPES: frozenset[str] = frozenset({"admin", "all"})
-
-
-# Routes that bypass auth even when HAL0_AUTH_ENABLED=1. Match exact paths
-# (case-sensitive) — all of these are well-known endpoints whose contracts
-# pre-date the auth gate. Adding to this list is a security decision; do
-# it deliberately.
-PUBLIC_PATHS: frozenset[str] = frozenset(
-    {
-        # Liveness / observability — must be reachable for monitoring
-        # tools that pre-date a per-deployment token.
-        #
-        # NOTE (issue #36): /api/metrics/prometheus used to live here but
-        # no Prometheus exposition route ever shipped. Listing a 404 path
-        # as "public" was confusing for scraper operators following the
-        # documented bypass list. Add it back if/when a real exporter
-        # ships — keep this list in lockstep with packaging/caddy's
-        # @public matcher.
-        "/api/health/system",
-        "/api/status",
-        "/api/metrics",
-        "/api/features",
-        # First-run wizard gating — the dashboard hits these before the
-        # user has any chance to mint a token.
-        "/api/install/state",
-        "/api/install/complete",
-        # Host-aware URL hints — used by the FirstRun wizard to render
-        # the OpenWebUI link with the right host.
-        "/api/config/urls",
-        # Auth surface itself — discovery + Caddy-owned login parity.
-        "/api/auth/status",
-        "/api/auth/login",
-        "/api/auth/logout",
-        # OpenAI compat — many clients probe /v1/models before sending
-        # an Authorization header. Models list isn't sensitive.
-        "/v1/models",
-    }
-)
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
@@ -393,38 +352,6 @@ async def require_token(request: Request) -> AuthIdentity:
     )
 
 
-async def require_token_unless_public(request: Request) -> AuthIdentity:
-    """Path-aware dependency: bypass for :data:`PUBLIC_PATHS`, else gate.
-
-    Used at ``include_router(...)`` time on routers that mix public and
-    protected endpoints (``/v1``, ``/api/install``). For single-purpose
-    routers where every endpoint is protected, attach plain
-    :func:`require_token` instead — the path lookup is cheap but
-    unnecessary noise.
-
-    Path matching is exact on ``request.url.path``. Sub-path patterns
-    (e.g. ``/v1/models/{id}``) need to match the resolved path, not the
-    template — which means ``/v1/models/foo`` would NOT match
-    ``"/v1/models"`` in the allowlist. That's intentional: the bare
-    ``/v1/models`` listing is OpenAI's pre-auth probe, but
-    ``/v1/models/{id}`` is a model-detail call that warrants the same
-    gate as everything else under ``/v1``. When that turns out to be
-    wrong in practice, add the model-detail path to PUBLIC_PATHS — don't
-    invert the matcher.
-    """
-    if request.url.path in PUBLIC_PATHS:
-        # Mirror the auth-disabled identity so callers that *do* depend
-        # on the dataclass downstream (none today, but the door is open)
-        # see a consistent shape.
-        return AuthIdentity(
-            identity=_ANONYMOUS_IDENTITY,
-            scope=_ANONYMOUS_SCOPE,
-            source="public",
-            token=None,
-        )
-    return await require_token(request)
-
-
 async def require_admin(
     request: Request,
     identity: Annotated[AuthIdentity, Depends(require_token)],
@@ -531,7 +458,6 @@ async def require_writer(
 
 
 __all__ = [
-    "PUBLIC_PATHS",
     "SESSION_COOKIE_NAME",
     "AuthForbidden",
     "AuthIdentity",
@@ -540,6 +466,5 @@ __all__ = [
     "CSRFRequired",
     "require_admin",
     "require_token",
-    "require_token_unless_public",
     "require_writer",
 ]

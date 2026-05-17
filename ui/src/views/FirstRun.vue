@@ -2,11 +2,15 @@
 /**
  * FirstRun.vue — First-run wizard backed by the model-pull endpoints.
  *
- * 3 steps (plus a "done" coda):
- *   1. Pick a model (curated cards + custom HF form).
- *   2. License confirm (checkbox required).
- *   3. Download + assign (POST /api/install/pick-default; SSE-tail the
+ * 5 steps (plus a "done" coda) post-ADR-0001 Child B:
+ *   1. Set up password (optional, ADR-0001 Child B). Renders only when
+ *      /api/auth/status.password_set === false; auto-skips otherwise.
+ *      Skip button advances without setting a password (open posture).
+ *   2. Pick a model (curated cards + custom HF form).
+ *   3. License confirm (checkbox required).
+ *   4. Download + assign (POST /api/install/pick-default; SSE-tail the
  *      pull stream for live progress; on completion show "Open chat").
+ *   5. Done coda.
  *
  * The router-level guard (router.js) only redirects to /firstrun when
  * /api/install/state.first_run === true; this view does not re-check —
@@ -24,11 +28,23 @@ const router = useRouter()
 const toasts = useToastsStore()
 const system = useSystemStore()
 
-const step = ref(1)              // 1 | 2 | 3 | 4 (done)
+// Step numbers map: 1 = password (optional), 2 = picker, 3 = license,
+// 4 = install, 5 = done. Step 1 self-skips when a password is already
+// set so re-entering the wizard after first install doesn't nag for a
+// password rotation.
+const step = ref(1)              // 1 | 2 | 3 | 4 | 5 (done)
 const curated = ref([])          // /api/install/curated-models result
 const customAllowed = ref(false)
 const loadingCatalogue = ref(true)
 const catalogueError = ref(null)
+
+// Password step state. ``passwordSetServerSide`` reflects the latest
+// /api/auth/status.password_set value; when true on mount we skip step 1.
+const passwordSetServerSide = ref(false)
+const passwordInput = ref('')
+const passwordSubmitting = ref(false)
+const passwordError = ref('')
+const PASSWORD_MIN_LEN = 8  // mirrors hal0.api.routes.auth._MIN_PASSWORD_LEN
 
 // Picker state
 const selectedModel = ref(null)  // curated entry OR { id: 'custom', ... }
@@ -47,8 +63,26 @@ const sse           = ref(null)    // EventSource handle (so onUnmounted closes)
 const downloadStart = ref(0)       // monotonic for ETA
 const chatUrl       = ref(null)
 
-// ── Catalogue fetch on mount ─────────────────────────────────────────────────
+// ── Catalogue + auth-status fetch on mount ───────────────────────────────────
 onMounted(async () => {
+  // Probe auth status first so the password step can auto-skip when a
+  // password is already set (re-running the wizard, or upgrading from
+  // an install where the operator set one through Settings). Failure
+  // here is tolerable — we default to "ask" rather than silently
+  // skipping a security step.
+  try {
+    const s = await api('/api/auth/status')
+    passwordSetServerSide.value = !!s?.password_set
+    if (passwordSetServerSide.value) {
+      step.value = 2
+    }
+  } catch (e) {
+    // Status probe failed — best to leave the password step visible so
+    // the operator can still try to set one. The /password endpoint
+    // will surface a real error if it's broken.
+    console.warn('auth/status probe failed; showing password step anyway', e)
+  }
+
   try {
     const r = await api('/api/install/curated-models')
     curated.value = r?.models ?? []
@@ -102,7 +136,47 @@ function selectCustom() {
   customErr.value = ''
 }
 
-function goStep2() {
+// ── Step 1 — Password (optional, ADR-0001 Child B) ─────────────────────────
+async function submitPassword() {
+  passwordError.value = ''
+  if (passwordInput.value.length < PASSWORD_MIN_LEN) {
+    passwordError.value = `Password must be at least ${PASSWORD_MIN_LEN} characters.`
+    return
+  }
+  passwordSubmitting.value = true
+  try {
+    // First-run claim: /api/auth/password is public when no password is
+    // set, so no Authorization header is needed. The middleware enforces
+    // the writer-scope requirement once a password exists, which is what
+    // makes the second call (rotation) require an authenticated session.
+    await api('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ password: passwordInput.value }),
+    })
+    passwordSetServerSide.value = true
+    toasts.info('Password set — you can change it later in Settings.')
+    // Clear the input rather than keep a copy in the Vue ref.
+    passwordInput.value = ''
+    step.value = 2
+  } catch (e) {
+    passwordError.value = e?.message || 'Could not set password.'
+    toasts.error(passwordError.value)
+  } finally {
+    passwordSubmitting.value = false
+  }
+}
+
+function skipPassword() {
+  // Skipping leaves the install in the "open" posture — explicit choice
+  // by the operator. The wizard reminds them they can set one later
+  // from Settings → Authentication.
+  passwordInput.value = ''
+  passwordError.value = ''
+  step.value = 2
+}
+
+// ── Step 2 / 3 transitions (picker → license) ──────────────────────────────
+function goStep3() {
   if (showCustom.value) {
     if (!customRepo.value.trim()) {
       customErr.value = 'Repo is required (e.g. org/Model-GGUF)'
@@ -130,21 +204,21 @@ function goStep2() {
     toasts.warning('Please select a model first')
     return
   }
-  step.value = 2
+  step.value = 3
 }
 
 function backToPicker() {
-  step.value = 1
+  step.value = 2
   licenseAccepted.value = false
 }
 
-// ── Step 3 — start the pull ─────────────────────────────────────────────────
+// ── Step 4 — start the pull ─────────────────────────────────────────────────
 async function startDownload() {
   if (!licenseAccepted.value) {
     toasts.warning('Please accept the license first')
     return
   }
-  step.value = 3
+  step.value = 4
   downloadStart.value = performance.now()
   pullJob.value = null
 
@@ -182,7 +256,7 @@ async function startDownload() {
     subscribeToProgress(modelId)
   } catch (e) {
     toasts.error(`Download failed: ${e.message}`)
-    step.value = 2
+    step.value = 3
   }
 }
 
@@ -202,7 +276,7 @@ function subscribeToProgress(modelId) {
         es.close()
         sse.value = null
         toasts.error(`Download ${snapshot.state}: ${snapshot.error || 'unknown error'}`)
-        step.value = 2
+        step.value = 3
       }
     } catch (err) {
       console.error('SSE parse failed', err)
@@ -222,7 +296,7 @@ async function pollAsFallback(modelId) {
     if (s.state === 'completed') { onPullComplete(); return }
     if (s.state === 'failed' || s.state === 'cancelled') {
       toasts.error(`Download ${s.state}: ${s.error || 'unknown error'}`)
-      step.value = 2
+      step.value = 3
       return
     }
     setTimeout(() => pollAsFallback(modelId), 500)
@@ -237,7 +311,7 @@ async function onPullComplete() {
     chatUrl.value = urls?.openwebui ?? null
   } catch { /* tolerable; fallback below */ }
   await system.fetchStatus()
-  step.value = 4
+  step.value = 5
 }
 
 async function openChat() {
@@ -282,7 +356,7 @@ const downloadSpeed = computed(() => {
   return `${fmtSize(pullJob.value.bytes_downloaded / elapsedS)}/s`
 })
 
-const stepLabels = ['Pick model', 'License', 'Install', 'Done']
+const stepLabels = ['Password', 'Pick model', 'License', 'Install', 'Done']
 </script>
 
 <template>
@@ -313,8 +387,52 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
         </div>
       </div>
 
-      <!-- ── Step 1 — Pick model ───────────────────────────────── -->
+      <!-- ── Step 1 — Set up password (optional, ADR-0001 Child B) ── -->
       <div v-if="step === 1" class="wizard-body">
+        <p class="step-desc">
+          Set a password to protect the dashboard and the OpenAI-compatible API.
+          You can skip this and run hal0 open on your trusted LAN, then add a
+          password later from <strong>Settings → Authentication</strong>.
+        </p>
+
+        <label class="field-label" for="firstrun-password">Password</label>
+        <input
+          id="firstrun-password"
+          v-model="passwordInput"
+          class="field-input"
+          type="password"
+          autocomplete="new-password"
+          :placeholder="`at least ${PASSWORD_MIN_LEN} characters`"
+          @keydown.enter.prevent="submitPassword"
+        />
+        <p v-if="passwordError" class="field-err">{{ passwordError }}</p>
+        <p class="field-hint">
+          Recommended: at least 12 characters with a mix of letters and digits.
+          We hash the password with bcrypt (cost 12) before storing it.
+        </p>
+
+        <div class="wizard-footer wizard-footer-2">
+          <button
+            class="btn-ghost"
+            type="button"
+            :disabled="passwordSubmitting"
+            @click="skipPassword"
+          >
+            Skip — leave open
+          </button>
+          <button
+            class="btn-primary"
+            type="button"
+            :disabled="passwordSubmitting || passwordInput.length < PASSWORD_MIN_LEN"
+            @click="submitPassword"
+          >
+            {{ passwordSubmitting ? 'Setting…' : 'Set password' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- ── Step 2 — Pick model ───────────────────────────────── -->
+      <div v-if="step === 2" class="wizard-body">
         <p class="step-desc">Pick a starting model. You can add more from the Models page later.</p>
 
         <div v-if="loadingCatalogue" class="loading-state">Loading models…</div>
@@ -380,15 +498,15 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
             class="btn-primary btn-wide"
             type="button"
             :disabled="!selectedModel && !showCustom"
-            @click="goStep2"
+            @click="goStep3"
           >
             Next: Review license →
           </button>
         </div>
       </div>
 
-      <!-- ── Step 2 — License confirm ─────────────────────────── -->
-      <div v-if="step === 2 && selectedModel" class="wizard-body">
+      <!-- ── Step 3 — License confirm ─────────────────────────── -->
+      <div v-if="step === 3 && selectedModel" class="wizard-body">
         <p class="step-desc">
           You're about to download <strong>{{ selectedModel.display_name }}</strong> under the
           <strong>{{ selectedModel.license }}</strong> license. Confirm the terms below.
@@ -425,8 +543,8 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
         </div>
       </div>
 
-      <!-- ── Step 3 — Download + assign ───────────────────────── -->
-      <div v-if="step === 3" class="wizard-body">
+      <!-- ── Step 4 — Download + assign ───────────────────────── -->
+      <div v-if="step === 4" class="wizard-body">
         <p class="step-desc">
           Downloading <strong>{{ selectedModel?.display_name }}</strong> and assigning to the
           <code class="inline-code">primary</code> slot.
@@ -448,8 +566,8 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
         <p class="step-hint">This typically takes a few minutes depending on your connection. The slot starts automatically when the download completes.</p>
       </div>
 
-      <!-- ── Step 4 — Done ────────────────────────────────────── -->
-      <div v-if="step === 4" class="wizard-body wizard-done">
+      <!-- ── Step 5 — Done ────────────────────────────────────── -->
+      <div v-if="step === 5" class="wizard-body wizard-done">
         <div class="done-icon" aria-hidden="true">✓</div>
         <h2 class="done-title">You're all set!</h2>
         <p class="done-desc">

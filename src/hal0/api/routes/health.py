@@ -8,8 +8,10 @@ Routes mounted under /api:
   PUT  /api/features/{name}   — toggle feature flag
 
 Note (issue #36): a /api/metrics/prometheus route was advertised in this
-docstring and in PUBLIC_PATHS but was never implemented. Both stubs are
-removed until a real prometheus_client-backed exporter ships.
+docstring and in the historical PUBLIC_PATHS allowlist but was never
+implemented. Both stubs are removed until a real prometheus_client-
+backed exporter ships. (PUBLIC_PATHS itself was deleted by ADR-0001
+Child B; routes are now public by virtue of not declaring an auth dep.)
 """
 
 from __future__ import annotations

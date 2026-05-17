@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI
 
 from hal0 import __version__
 from hal0.api.middleware import error_codes, request_id
-from hal0.api.middleware.auth import require_token, require_token_unless_public
+from hal0.api.middleware.auth import require_token
 from hal0.api.routes import (
     auth as auth_routes,
 )
@@ -290,29 +290,36 @@ def create_app() -> FastAPI:
     error_codes.install(app)
 
     # ── Auth wiring ──────────────────────────────────────────────────
-    # The /api/auth router is mounted bare — its public endpoints are
-    # listed in PUBLIC_PATHS, and the admin token CRUD subrouter inside
-    # auth_routes.router carries its own require_admin dep.
+    # Per ADR-0001 Child B, the PUBLIC_PATHS frozenset is gone. A route
+    # is public iff its router (or route) does NOT declare an auth
+    # dependency — there is no allowlist to consult, the FastAPI graph
+    # IS the policy.
+    #
+    # The /api/auth router is mounted bare — /status, /login, /logout,
+    # /password (first-run path) are intentionally public; /me declares
+    # require_token at the function level; the /tokens subrouter
+    # declares require_admin at the subrouter level.
     app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
 
-    # /v1 mixes one public endpoint (/v1/models) with protected ones —
-    # use the path-aware variant so /v1/models stays open while
-    # /v1/chat/completions, /v1/embeddings, etc. require a token.
-    _v1_auth = [Depends(require_token_unless_public)]
+    # /v1 is split into a public probe (GET /v1/models + /v1/models/{id})
+    # and a writer surface that requires auth. The split lives in v1.py
+    # via v1.public_router (probes) + v1.router (inference). OpenAI
+    # clients historically GET /v1/models before sending an Authorization
+    # header — keeping that probe auth-free preserves SDK compatibility.
+    app.include_router(v1.public_router, prefix="/v1", tags=["v1"])
+    _v1_auth = [Depends(require_token)]
     app.include_router(v1.router, prefix="/v1", tags=["v1"], dependencies=_v1_auth)
 
-    # /api/install also mixes — first-run state + complete must remain
-    # reachable before any token can exist; the rest is admin-grade.
-    _installer_auth = [Depends(require_token_unless_public)]
-    app.include_router(
-        installer.router,
-        prefix="/api/install",
-        tags=["installer"],
-        dependencies=_installer_auth,
-    )
+    # /api/install drives the first-run wizard, which runs *before* any
+    # credential exists. Mount bare — every wizard endpoint is public.
+    # When the wizard is no longer needed (first_run sentinel written
+    # OR a model is present), the dashboard router-guards stop routing
+    # to it; the endpoints themselves remain reachable for re-entry
+    # (e.g. operator deliberately reopening /firstrun to add a model).
+    app.include_router(installer.router, prefix="/api/install", tags=["installer"])
 
     # Single-purpose protected routers — every endpoint requires a token
-    # when HAL0_AUTH_ENABLED=1, no path-aware bypass needed.
+    # (or session cookie / forwarded email) when HAL0_AUTH_ENABLED=1.
     _admin_auth = [Depends(require_token)]
     app.include_router(slots.router, prefix="/api/slots", tags=["slots"], dependencies=_admin_auth)
     app.include_router(
@@ -337,10 +344,10 @@ def create_app() -> FastAPI:
     )
 
     # Health + config/urls routers carry endpoints that are entirely
-    # public per PUBLIC_PATHS (e.g. /api/status, /api/config/urls). Any
-    # future protected endpoints added to these routers should declare
-    # Depends(require_token) at the function level — keeping the public
-    # bypass to its narrow allowlist.
+    # public (e.g. /api/status, /api/config/urls). Any future protected
+    # endpoints added to these routers should declare
+    # Depends(require_token) at the function level so the publicness of
+    # the rest is declared by absence rather than by allowlist.
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
 

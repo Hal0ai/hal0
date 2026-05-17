@@ -15,13 +15,18 @@
 #   dev-uninstall-purge bash installer/uninstall.sh           (forced, full)
 #   prod-no-start      sudo bash installer/install.sh --no-start
 #                      (only if HAL0_HARNESS_PROD=1 — opt-in, mutates /etc)
-#   auth-basic         --auth=basic + admin/password env, --no-start
-#                      (only if HAL0_HARNESS_AUTH=1 — needs caddy installable)
+#   tls-default        default install (no flag) — Caddy installed, the
+#                      rendered Caddyfile is the ADR-0001-Child-B minimal
+#                      form (TLS-only, no basicauth, no @public matcher).
+#                      Opt-in via HAL0_HARNESS_PROD=1 + HAL0_HARNESS_TLS=1.
+#   no-tls             --no-tls install — no Caddy, no Caddyfile, hal0-api
+#                      unit binds 0.0.0.0:8080, /api/auth/status reports
+#                      auth_mode=open. Opt-in via HAL0_HARNESS_PROD=1.
 #
 # Env knobs:
 #   HAL0_HARNESS_PREFIX    tmp prefix root (default $REPO_ROOT/.harness/install-$$)
 #   HAL0_HARNESS_PROD      1 to run prod-level (sudo) scenarios
-#   HAL0_HARNESS_AUTH      1 to run --auth=basic scenario
+#   HAL0_HARNESS_TLS       1 to run the tls-default scenario (also installs caddy)
 #   HAL0_HARNESS_KEEP      1 to keep the tmp prefix after run (for debugging)
 #
 # Exit:
@@ -230,37 +235,118 @@ else
     fi
 fi
 
-# ── ROW: auth-basic (opt-in) ────────────────────────────────────────────────
-log_step "Row: auth-basic"
+# ── ROW: tls-default (opt-in) ───────────────────────────────────────────────
+# Default install path post-ADR-0001-Child-B: Caddy installed as a dumb
+# TLS terminator, rendered Caddyfile is the minimal 10-line form (no
+# basicauth, no @public matcher, no per-path handle block). The grep
+# assertions below are NEGATIVE — they prove the auth-edge surface is
+# gone, not present.
+log_step "Row: tls-default"
 start=$(start_ms)
-if [[ "${HAL0_HARNESS_AUTH:-0}" != "1" ]]; then
-    add_row "auth-basic" "skip" "$(since_ms "${start}")" "skipped — set HAL0_HARNESS_AUTH=1 (and HAL0_HARNESS_PROD=1) to install caddy + render Caddyfile"
+if [[ "${HAL0_HARNESS_TLS:-0}" != "1" ]]; then
+    add_row "tls-default" "skip" "$(since_ms "${start}")" "skipped — set HAL0_HARNESS_TLS=1 (and HAL0_HARNESS_PROD=1) to install caddy + render Caddyfile"
 elif [[ "${HAL0_HARNESS_PROD:-0}" != "1" ]]; then
-    add_row "auth-basic" "skip" "$(since_ms "${start}")" "auth=basic is a prod-mode path; HAL0_HARNESS_PROD=1 also required"
+    add_row "tls-default" "skip" "$(since_ms "${start}")" "tls-default is a prod-mode path; HAL0_HARNESS_PROD=1 also required"
 else
-    LOG4="${PREFIX}/install-auth.log"
-    if HAL0_ADMIN_USER=admin HAL0_ADMIN_PASSWORD='hal0-harness-test' \
-       HAL0_HOSTNAME=hal0-harness.local HAL0_TLS_EMAIL=harness@hal0.test \
+    LOG_TLS="${PREFIX}/install-tls.log"
+    if HAL0_PUBLIC_HOST=hal0-harness.local HAL0_TLS_EMAIL=harness@hal0.test \
        HAL0_NO_PROBE=1 HAL0_PLAIN=1 \
-        sudo -E bash "${REPO_ROOT}/installer/install.sh" --auth=basic --no-start >"${LOG4}" 2>&1; then
-        # Regression for #28: the rendered Caddyfile must carry the
-        # @public matcher + `handle @public` block BEFORE the default
-        # basicauth handler, else the first-run wizard's pre-auth
-        # /api/install/state + /api/config/urls probes 401 and the
-        # SPA can't bootstrap. Asserting both halves (matcher + handle)
-        # so a future edit that drops one without the other is caught.
-        if [[ -f /etc/hal0/Caddyfile ]] && grep -q basicauth /etc/hal0/Caddyfile \
-            && grep -q HAL0_AUTH_ENABLED=1 /etc/hal0/api.env \
-            && grep -q '@public path' /etc/hal0/Caddyfile \
-            && grep -q 'handle @public' /etc/hal0/Caddyfile \
-            && grep -q '/api/install/state' /etc/hal0/Caddyfile; then
-            add_row "auth-basic" "pass" "$(since_ms "${start}")" "Caddyfile + api.env auth wiring rendered (incl. @public allowlist)"
+        sudo -E bash "${REPO_ROOT}/installer/install.sh" --no-start >"${LOG_TLS}" 2>&1; then
+        # Per ADR-0001 the rendered Caddyfile must collapse to the
+        # ~10-line minimal terminator: TLS + reverse_proxy 127.0.0.1:8080
+        # and NOTHING else (no basicauth, no @public matcher). Grep on
+        # actual directive lines (start-of-line with optional leading
+        # whitespace) so a comment mentioning the historical directives
+        # doesn't false-positive.
+        OK=1
+        FAIL_REASON=""
+        if [[ ! -f /etc/hal0/Caddyfile ]]; then
+            OK=0; FAIL_REASON="/etc/hal0/Caddyfile missing"
+        elif ! grep -q 'reverse_proxy 127.0.0.1:8080' /etc/hal0/Caddyfile; then
+            OK=0; FAIL_REASON="reverse_proxy line missing"
+        elif grep -qE '^[[:space:]]*basicauth' /etc/hal0/Caddyfile; then
+            OK=0; FAIL_REASON="basicauth directive still present in Caddyfile (Child B regression)"
+        elif grep -qE '^[[:space:]]*@public' /etc/hal0/Caddyfile; then
+            OK=0; FAIL_REASON="@public matcher still present in Caddyfile (Child B regression)"
+        elif ! grep -q HAL0_AUTH_ENABLED=1 /etc/hal0/api.env; then
+            OK=0; FAIL_REASON="HAL0_AUTH_ENABLED=1 not set in api.env"
+        fi
+        if [[ "${OK}" -eq 1 ]]; then
+            add_row "tls-default" "pass" "$(since_ms "${start}")" "Caddyfile rendered as minimal TLS-only reverse proxy (no edge auth)"
         else
-            add_row "auth-basic" "fail" "$(since_ms "${start}")" "Caddyfile or api.env auth flag missing post-install (check @public allowlist for #28)"
+            add_row "tls-default" "fail" "$(since_ms "${start}")" "${FAIL_REASON}"
         fi
     else
         rc=$?
-        add_row "auth-basic" "fail" "$(since_ms "${start}")" "auth install exit=${rc}; tail: $(tail -n1 "${LOG4}")"
+        add_row "tls-default" "fail" "$(since_ms "${start}")" "tls-default install exit=${rc}; tail: $(tail -n1 "${LOG_TLS}")"
+    fi
+fi
+
+# ── ROW: no-tls (opt-in) ────────────────────────────────────────────────────
+# --no-tls install: Caddy not touched, no Caddyfile, hal0-api unit binds
+# 0.0.0.0:8080 instead of 127.0.0.1:8080, /api/auth/status reports
+# auth_mode=open (no password set, no edge auth — full open posture for
+# hosts behind an existing reverse proxy).
+log_step "Row: no-tls"
+start=$(start_ms)
+if [[ "${HAL0_HARNESS_PROD:-0}" != "1" ]]; then
+    add_row "no-tls" "skip" "$(since_ms "${start}")" "skipped — set HAL0_HARNESS_PROD=1 to exercise sudo /opt/hal0 --no-tls install"
+else
+    LOG_NOTLS="${PREFIX}/install-no-tls.log"
+    if HAL0_NO_PROBE=1 HAL0_PLAIN=1 HAL0_NO_HELLO=1 HAL0_NO_QR=1 \
+        sudo -E bash "${REPO_ROOT}/installer/install.sh" --no-tls --no-start >"${LOG_NOTLS}" 2>&1; then
+        OK=1
+        FAIL_REASON=""
+        # The Caddy unit must NOT be installed (--no-tls skips that block).
+        if [[ -f /etc/systemd/system/hal0-caddy.service ]]; then
+            OK=0; FAIL_REASON="hal0-caddy.service present despite --no-tls"
+        # hal0-api unit must bind 0.0.0.0:8080 (not 127.0.0.1).
+        elif ! grep -q 'serve --host 0.0.0.0' /etc/systemd/system/hal0-api.service; then
+            OK=0; FAIL_REASON="hal0-api ExecStart does not bind 0.0.0.0 under --no-tls"
+        # api.env must NOT carry HAL0_AUTH_ENABLED=1 — --no-tls means
+        # the operator is fronting hal0 with their own proxy and we
+        # don't presume to flip auth on for them.
+        elif grep -q '^HAL0_AUTH_ENABLED=1' /etc/hal0/api.env; then
+            OK=0; FAIL_REASON="HAL0_AUTH_ENABLED=1 set in api.env despite --no-tls"
+        fi
+        if [[ "${OK}" -eq 1 ]]; then
+            # Spin the API up briefly to hit /api/auth/status and verify
+            # the open-mode envelope. Background, poll, kill — same
+            # pattern as dev-api-up above.
+            NOTLS_PORT="${HAL0_HARNESS_NO_TLS_PORT:-18091}"
+            HAL0_HOME="${PREFIX}" HAL0_PORT="${NOTLS_PORT}" \
+                "${PREFIX}/.venv/bin/hal0" serve --host 127.0.0.1 --port "${NOTLS_PORT}" \
+                >"${PREFIX}/serve-no-tls.log" 2>&1 &
+            NOTLS_PID=$!
+            UP=0
+            for _ in $(seq 1 30); do
+                if curl -fsS -m 1 "http://127.0.0.1:${NOTLS_PORT}/api/auth/status" >/dev/null 2>&1; then
+                    UP=1; break
+                fi
+                sleep 0.5
+            done
+            if [[ "${UP}" -eq 1 ]]; then
+                STATUS_JSON="$(curl -fsS "http://127.0.0.1:${NOTLS_PORT}/api/auth/status" 2>/dev/null || echo '{}')"
+                # Tolerate either jq or python for the parse — harness
+                # hosts may not have jq. We grep on the raw JSON to
+                # avoid the dependency.
+                if echo "${STATUS_JSON}" | grep -q '"auth_mode":"open"' \
+                   && echo "${STATUS_JSON}" | grep -q '"password_set":false'; then
+                    add_row "no-tls" "pass" "$(since_ms "${start}")" "Caddy unit absent, hal0-api binds 0.0.0.0, /api/auth/status=open"
+                else
+                    add_row "no-tls" "fail" "$(since_ms "${start}")" "auth/status not in open posture: ${STATUS_JSON}"
+                fi
+            else
+                add_row "no-tls" "fail" "$(since_ms "${start}")" "API never became healthy on :${NOTLS_PORT}; tail: $(tail -n3 "${PREFIX}/serve-no-tls.log" 2>/dev/null | tr '\n' ' ')"
+            fi
+            kill "${NOTLS_PID}" 2>/dev/null || true
+            wait "${NOTLS_PID}" 2>/dev/null || true
+        else
+            add_row "no-tls" "fail" "$(since_ms "${start}")" "${FAIL_REASON}"
+        fi
+    else
+        rc=$?
+        add_row "no-tls" "fail" "$(since_ms "${start}")" "no-tls install exit=${rc}; tail: $(tail -n1 "${LOG_NOTLS}")"
     fi
 fi
 

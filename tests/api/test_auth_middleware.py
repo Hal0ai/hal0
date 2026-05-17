@@ -1,6 +1,9 @@
-"""Auth middleware (require_token / require_token_unless_public) tests.
+"""Auth middleware (require_token) tests.
 
-Validates the precedence rules and the public-route bypass.
+Validates the precedence rules and that routes mounted without an auth
+dependency stay public under ``HAL0_AUTH_ENABLED=1``. Per ADR-0001
+Child B, publicness is declared by NOT attaching an auth dep at
+``include_router(...)`` time — not by being on a magic allowlist.
 
 Pattern: each test rebuilds the FastAPI app with HAL0_AUTH_ENABLED=1 set
 before create_app() runs, then swaps the auto-created TokenStore on
@@ -87,7 +90,6 @@ def test_public_routes_bypass_auth(auth_app: TestClient, path: str) -> None:
         "/api/logs",
         "/api/settings",
         "/api/providers",
-        "/api/install/curated-models",  # mixed router; this is protected
     ],
 )
 def test_protected_routes_require_auth(auth_app: TestClient, path: str) -> None:

@@ -35,7 +35,18 @@ from fastapi.responses import Response, StreamingResponse
 from hal0.api import image_cache
 from hal0.api.deps import DispatcherDep
 
+# Inference router — auth-required. Mounted by hal0.api.create_app() with
+# Depends(require_token) so /v1/chat/completions, /v1/embeddings, the
+# audio + image endpoints, etc. all gate on a valid credential.
 router = APIRouter()
+
+# Public probe router — auth-free. Mounted on the same /v1 prefix.
+# OpenAI clients (OpenWebUI, third-party SDKs) GET /v1/models before
+# they have anywhere to send an Authorization header; gating it would
+# break the "drop in an OpenAI-shaped base_url" UX. Per ADR-0001 Child
+# B, publicness is declared by NOT attaching an auth dep — not by
+# allowlisting the path in a frozenset.
+public_router = APIRouter()
 
 
 def _instrument_streaming_throughput(
@@ -151,7 +162,7 @@ async def _dispatch_and_forward(
     return response
 
 
-@router.get("/models")
+@public_router.get("/models")
 async def list_models(
     request: Request,
     dispatcher: DispatcherDep,
@@ -161,6 +172,10 @@ async def list_models(
     Returns the OpenAI shape: ``{"object": "list", "data": [...]}``.
     Fetches each upstream's catalog on demand (no caching yet — a TTL
     cache lands when the dispatcher gets one).
+
+    PUBLIC — mounted on ``public_router`` so OpenAI SDKs that probe the
+    catalog before sending Authorization headers continue to work after
+    ADR-0001 Child B.
     """
     upstreams = request.app.state.upstreams
     seen: set[str] = set()
@@ -186,12 +201,19 @@ async def list_models(
     return {"object": "list", "data": data}
 
 
-@router.get("/models/{model_id:path}")
+@public_router.get("/models/{model_id:path}")
 async def get_model(
     model_id: str,
     request: Request,
     dispatcher: DispatcherDep,
 ) -> dict[str, object]:
+    """Look up a single model by id from the aggregated catalog.
+
+    PUBLIC — the catalog is non-sensitive (just model ids the upstreams
+    advertise on their own ``/v1/models``). Pairs with ``list_models``
+    so SDKs that resolve a model handle through ``/v1/models/{id}``
+    before chatting don't need credentials to do so.
+    """
     listing = await list_models(request, dispatcher)
     for entry in listing.get("data", []):  # type: ignore[union-attr]
         if isinstance(entry, dict) and entry.get("id") == model_id:

@@ -1,26 +1,29 @@
 # hal0 Caddyfile template — rendered to /etc/hal0/Caddyfile by
-# installer/install.sh when --auth=basic is passed.
+# installer/install.sh on the default (TLS) install path.
 #
-# This file is REGENERATED on every `install.sh --auth=basic` run; for
-# host-specific tweaks (extra vhosts, ACME settings, custom snippets)
-# create /etc/hal0/Caddyfile.local — hal0-caddy.service loads it AFTER
-# this file via Caddy's --watch-config + global import.
+# This file is REGENERATED on every install.sh run; for host-specific
+# tweaks (extra vhosts, ACME settings, custom snippets) create
+# /etc/hal0/Caddyfile.local — hal0-caddy.service loads it AFTER this
+# file via Caddy's --watch-config + global import (the commented-out
+# import at the bottom is the seam).
 #
-# Required env vars (substituted by `envsubst` at install time):
-#   HAL0_HOSTNAME             — public hostname, e.g. hal0.local
-#   HAL0_TLS_EMAIL            — ACME contact email (used for non-.local domains)
-#   HAL0_ADMIN_USER           — basicauth username (default: admin)
-#   HAL0_ADMIN_PASSWORD_HASH  — bcrypt hash from `caddy hash-password`
+# Per ADR-0001 (Collapse edge auth into FastAPI), Caddy is now a dumb
+# TLS terminator + reverse proxy. All auth lives in FastAPI (password +
+# session cookies + Bearer tokens — see src/hal0/api/middleware/auth.py).
+# There is no edge-auth directive, no path allowlist matcher, no per-
+# path handle block — every request passes straight through to the API.
 #
-# TLS:
-#   For ${HAL0_HOSTNAME} ending in .local Caddy mints a self-signed cert
-#   via its internal CA (see ``tls internal`` directive). The CA root
-#   lands in ``~/.local/share/caddy/pki/authorities/local/root.crt`` —
-#   trust it on browser clients, or install via your platform's keychain.
+# Required env vars (substituted at install time by install.sh's Python
+# template renderer; both `{$VAR}` and `{$VAR:default}` forms are
+# replaced):
 #
-#   For real (DNS-resolvable, public) hostnames remove the ``tls
-#   internal`` line and Caddy will run ACME against Let's Encrypt
-#   automatically using HAL0_TLS_EMAIL.
+#   HAL0_PUBLIC_HOST   — public hostname, e.g. hal0.local
+#   HAL0_TLS_DIRECTIVE — the argument to `tls`; either ``internal`` for
+#                        the .local / private-CA path, or an email for
+#                        ACME against Let's Encrypt. install.sh picks
+#                        ``internal`` automatically for *.local hosts.
+#   HAL0_TLS_EMAIL     — ACME contact email written into the global
+#                        block; harmless on .local installs.
 
 {
 	email {$HAL0_TLS_EMAIL:admin@hal0.local}
@@ -28,78 +31,10 @@
 	#              once we don't need it for `caddy reload --address ...`
 }
 
-{$HAL0_HOSTNAME:hal0.local} {
-	tls internal
+{$HAL0_PUBLIC_HOST:hal0.local} {
+	tls {$HAL0_TLS_DIRECTIVE:internal}
 	encode zstd gzip
-
-	# Header hygiene: strip any inbound X-Forwarded-Email/User so a
-	# client can't spoof the SSO identity by sending it themselves.
-	# Caddy re-writes its own copy below for the protected handlers.
-	request_header -X-Forwarded-Email
-	request_header -X-Forwarded-User
-
-	# OpenWebUI under /chat/ — single-sign-on via X-Forwarded-Email.
-	# handle_path strips the /chat prefix before forwarding so OpenWebUI
-	# sees / as its document root. WEBUI_AUTH_TRUSTED_EMAIL_HEADER on
-	# OpenWebUI's side picks up the forwarded identity and skips its own
-	# login page (see src/hal0/openwebui/env_writer.py).
-	handle_path /chat* {
-		basicauth {
-			{$HAL0_ADMIN_USER:admin} {$HAL0_ADMIN_PASSWORD_HASH}
-		}
-		reverse_proxy 127.0.0.1:3001 {
-			header_up X-Forwarded-Email {http.auth.user.id}
-			header_up X-Forwarded-User {http.auth.user.id}
-		}
-	}
-
-	# OpenAI-compatible API — Bearer token auth happens at the hal0-api
-	# layer (Authorization header passes through verbatim). No basicauth
-	# at the edge so programmatic OpenAI clients work without prompting.
-	handle /v1/* {
-		reverse_proxy 127.0.0.1:8080
-	}
-
-	# Public allowlist — paths that MUST be reachable without basic_auth
-	# so the first-run wizard can bootstrap before any credential exists,
-	# and so monitoring tools can scrape liveness without holding creds.
-	#
-	# This list mirrors the PUBLIC_PATHS frozenset in
-	# src/hal0/api/middleware/auth.py — keep them in sync. The `path`
-	# matcher is exact-match (no trailing-slash or prefix expansion), which
-	# matches the `request.url.path in PUBLIC_PATHS` check on the API side.
-	#
-	# This block MUST stay above the default `handle {}` below — Caddy
-	# evaluates `handle` blocks in source order and the first match wins,
-	# so listing `@public` later would let basic_auth swallow the wizard
-	# probes (see issue #28).
-	@public path /api/health/system \
-	             /api/status \
-	             /api/metrics \
-	             /api/features \
-	             /api/install/state \
-	             /api/install/complete \
-	             /api/config/urls \
-	             /api/auth/status \
-	             /api/auth/login \
-	             /api/auth/logout \
-	             /v1/models
-	handle @public {
-		reverse_proxy 127.0.0.1:8080
-	}
-
-	# Dashboard + management API — Caddy basicauth at the edge. Forwards
-	# the identity as X-Forwarded-Email so the hal0 API trusts the user
-	# as admin (see hal0.api.middleware.auth precedence).
-	handle {
-		basicauth {
-			{$HAL0_ADMIN_USER:admin} {$HAL0_ADMIN_PASSWORD_HASH}
-		}
-		reverse_proxy 127.0.0.1:8080 {
-			header_up X-Forwarded-Email {http.auth.user.id}
-			header_up X-Forwarded-User {http.auth.user.id}
-		}
-	}
+	reverse_proxy 127.0.0.1:8080
 }
 
 # Optional: drop overrides here without touching the above block.
