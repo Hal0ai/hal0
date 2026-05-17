@@ -286,7 +286,17 @@ The round added four parallel teammates beyond the δ-harness:
 δ-tier). Their per-team scratch reports remain under
 `tests/harness/_in-progress/` until cleaned up.
 
-## 10. Caddy basic_auth swallows the PUBLIC_PATHS allowlist — **critical / bug**
+## 10. Caddy basic_auth swallows the PUBLIC_PATHS allowlist — **critical / bug** · ✅ FIXED BY ARCHITECTURE REMOVAL (ADR-0001)
+
+> **FIXED BY ARCHITECTURE REMOVAL (ADR-0001).** The original fix in PR
+> #49 (issue #28) is now historical. Per
+> [ADR-0001](../../docs/adr/0001-collapse-edge-auth-into-fastapi.md), the
+> Caddyfile no longer carries `basicauth` or a `@public path` matcher
+> — Caddy is a dumb TLS terminator + reverse proxy (PR #59), and all
+> auth lives in FastAPI (PR #58). The ordering bug cannot recur because
+> there is no edge-auth layer to mis-order. Original report preserved
+> below.
+
 
 The dashboard `handle {}` block in `/etc/hal0/Caddyfile` applies
 `basicauth` to every path that doesn't match `/chat*` or `/v1/*` —
@@ -469,7 +479,16 @@ because callers will route to it.
   /v1/models non-empty`. Task #10's lifecycle work covered most
   cases but missed model-less containers.
 
-## 16. basic_auth password is unrecoverable post-install — **medium / gap**
+## 16. basic_auth password is unrecoverable post-install — **medium / gap** · ✅ FIXED BY ARCHITECTURE REMOVAL (ADR-0001)
+
+> **FIXED BY ARCHITECTURE REMOVAL (ADR-0001).** This was the source of
+> issue #43 (the HITL credential-capture decision). The installer no
+> longer prompts for or renders a basic_auth password — credential
+> capture moved into the dashboard wizard's password-setup step
+> (`POST /api/auth/password`, PR #58 + #59). Password rotation is a
+> wizard interaction, not a file rewrite + Caddy reload. Original
+> report preserved below for history.
+
 
 The installer renders the Caddyfile with the bcrypt hash inline and
 discards the plaintext. There is no on-host record of the original
@@ -563,7 +582,17 @@ in `error_codes.install()`'s handler set
   ..., "details":{"fields":[...]}}}` shape. Likely affects every
   validated query/path/body parameter across all routes.
 
-## 21. `/api/metrics/prometheus` is in PUBLIC_PATHS but the route is unimplemented — **low / dead config**
+## 21. `/api/metrics/prometheus` is in PUBLIC_PATHS but the route is unimplemented — **low / dead config** · ✅ FIXED BY ARCHITECTURE REMOVAL (ADR-0001)
+
+> **FIXED BY ARCHITECTURE REMOVAL (ADR-0001).** The `PUBLIC_PATHS`
+> frozenset was deleted by PR #59 — every route's auth requirement is
+> now declared in code via `dependencies=[Depends(require_token)]` (or
+> by omitting the dep for public routes). The `/api/metrics/prometheus`
+> orphan is documented in `src/hal0/api/routes/health.py`'s module
+> docstring as a placeholder until a real exporter ships; the
+> allowlist-vs-route drift cannot recur because the allowlist no longer
+> exists. Original report preserved below.
+
 
 `src/hal0/api/middleware/auth.py:103` lists
 `"/api/metrics/prometheus"` in `PUBLIC_PATHS`, but
@@ -625,7 +654,7 @@ different schema for proxied vs. originated errors.
 | Path | Reason | How to enable |
 |---|---|---|
 | `install.sh` prod install (touches `/etc`, `/var/lib`, `/usr/lib`) | mutates the real host | `HAL0_HARNESS_PROD=1 bash scripts/harness.sh` |
-| `--auth=basic` Caddy install | needs prod mode + caddy installable | `HAL0_HARNESS_AUTH=1 HAL0_HARNESS_PROD=1 …` |
+| TLS-default Caddy install | needs prod mode + caddy installable | `HAL0_HARNESS_TLS=1 HAL0_HARNESS_PROD=1 …` (renamed from `HAL0_HARNESS_AUTH` per ADR-0001) |
 | ROCm / FLM-NPU / Moonshine / Kokoro real-model rounds | `hal0-test` LXC owns these | `make release-test` (existing γ tier) |
 | Settings GET/PUT round-trip | route exists but not driven; planned next harness iteration | extend `cli-test.sh` |
 | First-run wizard endpoints | currently mostly stub (PLAN §7) | wait for Team-B model-pull integration |
@@ -636,14 +665,14 @@ different schema for proxied vs. originated errors.
 ## How to re-run
 
 ```
-# full harness (no prod, no auth):
+# full harness (no prod, no TLS):
 bash scripts/harness.sh
 
 # include sudo /opt/hal0 install + uninstall:
 HAL0_HARNESS_PROD=1 bash scripts/harness.sh
 
-# include --auth=basic install path too:
-HAL0_HARNESS_AUTH=1 HAL0_HARNESS_PROD=1 bash scripts/harness.sh
+# include the TLS-default install path too (installs Caddy per ADR-0001):
+HAL0_HARNESS_TLS=1 HAL0_HARNESS_PROD=1 bash scripts/harness.sh
 ```
 
 The aggregate JSON lands at `tests/harness/reports/harness.json` and

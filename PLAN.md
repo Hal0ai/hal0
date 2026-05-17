@@ -34,13 +34,23 @@ home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
       (shipped ahead of schedule via Team K, 2026-05-15 — `1a8a480`, `76b7f8b`)
   - External-LLM upstreams (OpenRouter, Anthropic, OpenAI, custom
     OpenAI-compatible)
-- **Auth + reverse proxy** (shipped ahead of schedule via Team J,
-  2026-05-15 — `ba79427`, `f62902c`)
-  - Default install posture `--auth=off`; opt-in `--auth=basic` brings
-    up a Caddy reverse proxy with basic_auth on the dashboard, bearer
-    tokens on `/v1/*`, OpenWebUI SSO via trusted-header
+- **Auth + reverse proxy** (per [ADR-0001](docs/adr/0001-collapse-edge-auth-into-fastapi.md),
+  collapsed to a single FastAPI layer in PRs #58 + #59; original dual-layer
+  shipped ahead of schedule via Team J, 2026-05-15 — `ba79427`, `f62902c`)
+  - All auth lives in FastAPI: Bearer tokens for programmatic clients,
+    password + session cookie for browser dashboard. Caddy is a dumb TLS
+    terminator + reverse proxy (no edge auth, no path allowlist).
+  - **Trust posture:** a fresh install starts **open on the LAN** — no
+    password set, dashboard + `/v1/*` reachable without credentials.
+    Password auth is **opt-in via the dashboard wizard** (Set up password
+    step → `POST /api/auth/password`); once set, writer routes require
+    login (reads stay open per the wizard's choice). Programmatic clients
+    use Bearer tokens minted under #29 — unchanged.
+  - `--no-tls` install flag skips Caddy entirely; FastAPI binds
+    `0.0.0.0:8080` for hosts behind an existing reverse proxy
+    (Traefik / nginx / Cloudflare Tunnel / etc.).
   - `hal0.local` reachable on the LAN (mDNS via avahi); HTTPS via
-    Caddy's internal CA or Let's Encrypt when a public hostname is set
+    Caddy's internal CA or Let's Encrypt when a public hostname is set.
 - **Dashboard UI** (Vue 3 + Pinia + Tailwind 4)
   - 9 views: Dashboard, Slots, Models, Hardware, Logs, Settings,
     Providers, FirstRun, plus a not-found / error shell
@@ -497,10 +507,10 @@ or operator touches on a real host — installer, every CLI subcommand,
 slot lifecycle, uninstall — and emits one structured JSON row per
 scenario. A fail flags one specific surface, not the whole pipeline.
 
-- `bash scripts/harness.sh` — non-mutating defaults (skips prod install + auth path)
+- `bash scripts/harness.sh` — non-mutating defaults (skips prod install + TLS path)
 - `HAL0_HARNESS_PROD=1 bash scripts/harness.sh` — also exercises sudo `/opt/hal0` install
-- `HAL0_HARNESS_AUTH=1 HAL0_HARNESS_PROD=1 bash scripts/harness.sh` — adds the Caddy
-  `--auth=basic` install path
+- `HAL0_HARNESS_TLS=1 HAL0_HARNESS_PROD=1 bash scripts/harness.sh` — adds the
+  TLS-default install row (installs Caddy + renders the Caddyfile per ADR-0001)
 - `python3 scripts/harness-report.py tests/harness/reports/harness.json` — pretty-printer
 
 Status vocabulary, scenario layout, JSON schema, and the "how to add a

@@ -39,10 +39,8 @@ These are the variables `installer/install.sh` actually reads:
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
 | `HAL0_TOOLBOX_IMAGE_VULKAN` | _(unset)_ | Override the Vulkan toolbox image ref written into `api.env` |
 | `HAL0_TOOLBOX_IMAGE_ROCM` | _(unset)_ | Override the ROCm toolbox image ref written into `api.env` |
-| `HAL0_HOSTNAME` | `hal0.local` | `--auth=basic` only: public hostname used in the Caddyfile |
-| `HAL0_TLS_EMAIL` | `admin@$HAL0_HOSTNAME` | `--auth=basic` only: contact email for Let's Encrypt (when not `tls internal`) |
-| `HAL0_ADMIN_USER` | _(prompted)_ | `--auth=basic` only: admin username for Caddy basic_auth |
-| `HAL0_ADMIN_PASSWORD` | _(prompted)_ | `--auth=basic` only: admin password (hashed by `caddy hash-password`) |
+| `HAL0_PUBLIC_HOST` | `hal0.local` | Public hostname rendered into the Caddyfile (TLS default install path) |
+| `HAL0_TLS_EMAIL` | `admin@$HAL0_PUBLIC_HOST` | Contact email for Let's Encrypt (when not `tls internal`) |
 | `HAL0_OPENWEBUI_PORT` † | `3001` | OpenWebUI host port — **dev mode only** |
 
 † `HAL0_OPENWEBUI_PORT` is honored by `scripts/dev-bootstrap.sh` (the dev-mode launcher). The installed `hal0-openwebui.service` hardcodes `:3001`; to change it post-install, edit `/etc/systemd/system/hal0-openwebui.service` and reload.
@@ -53,42 +51,31 @@ Example:
 HAL0_PORT=9090 sudo bash installer/install.sh
 ```
 
-## Authentication (`--auth=basic`)
+## Authentication
 
-The default install posture is `--auth=off` — the API binds `:8080` and OpenWebUI binds `:3001` directly, with no auth in front. That's safe on a fully-trusted home LAN; it is **not** safe to expose to the internet.
+Per [ADR-0001](../docs/adr/0001-collapse-edge-auth-into-fastapi.md), **all auth
+now lives in FastAPI** — there is no edge-auth layer in Caddy. The Caddyfile is
+a dumb TLS terminator + reverse proxy (`packaging/caddy/Caddyfile.template`,
+~42 lines, no `basicauth`, no path matchers, no allowlist).
 
-`--auth=basic` brings up the v0.2 auth POC: a Caddy reverse proxy in front of both services, with HTTP basic_auth at the edge for the dashboard and bearer-token auth for the OpenAI-compatible API.
+A fresh install starts **open on the LAN** — no password set, no token
+required for the dashboard or `/v1/*`. The dashboard's first-run wizard
+includes a **password-setup step** (Set up password) that calls
+`POST /api/auth/password` (a public endpoint when no password is yet
+set, per ADR-0001 Child A). Once a password is set:
 
-```sh
-# Interactive (prompts for admin user/password):
-sudo bash installer/install.sh --auth=basic
+- Browsers authenticate via `POST /api/auth/login`, which issues a signed
+  `hal0_session` cookie (HttpOnly, SameSite=Lax, Secure-when-TLS).
+  `POST /api/auth/logout` clears it.
+- Programmatic clients keep using Bearer tokens (`Authorization: Bearer hal0_...`)
+  unchanged — the FastAPI middleware accepts both the session cookie and
+  Bearer tokens against the same `require_token` / `require_writer` deps.
 
-# Non-interactive:
-HAL0_ADMIN_USER=alex HAL0_ADMIN_PASSWORD='hunter2' \
-  HAL0_HOSTNAME=hal0.local \
-  sudo bash installer/install.sh --auth=basic
-```
-
-What the flag does:
-
-1. Installs Caddy (`apt install caddy` on Debian/Ubuntu, `pacman -S caddy` on Arch/CachyOS). Other distros require a manual install; the script surfaces a clear error and a docs link.
-2. Prompts for or accepts via env: `HAL0_ADMIN_USER`, `HAL0_ADMIN_PASSWORD`, `HAL0_HOSTNAME` (default `hal0.local`), `HAL0_TLS_EMAIL` (default `admin@<hostname>`).
-3. Hashes the password via `caddy hash-password`, renders `/etc/hal0/Caddyfile` from `packaging/caddy/Caddyfile.template`.
-4. Drops `/etc/systemd/system/hal0-caddy.service` and starts it.
-5. Sets `HAL0_AUTH_ENABLED=1` in `/etc/hal0/api.env` and re-renders `/etc/hal0/openwebui.env` with `WEBUI_AUTH=True` + `WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-Forwarded-Email` so OpenWebUI auto-provisions a user from the Caddy-forwarded identity (no second login).
-6. Restarts `hal0-api` and `hal0-openwebui` so the new env takes effect.
-7. If avahi-daemon is running, drops `/etc/avahi/services/hal0.service` so `hal0.local` resolves on the LAN. Without avahi, add a static `/etc/hosts` entry on each client: `<hal0-ip>  hal0.local`.
-
-After install:
-
-- Dashboard: `https://hal0.local/` — basic_auth prompt → admin user → SPA.
-- Chat: `https://hal0.local/chat/` — single-sign-on via the same Caddy basic_auth identity.
-- OpenAI API: `https://hal0.local/v1/models` (no auth), `https://hal0.local/v1/chat/completions -H 'Authorization: Bearer hal0_...'` (token required).
-
-Mint a token via the Settings UI (Authentication panel → Create token) or via:
+Mint a Bearer token via the Settings UI (Authentication panel → Create token)
+or directly:
 
 ```sh
-curl -k -u 'admin:hunter2' \
+curl -k -H 'Authorization: Bearer hal0_<admin-token>' \
   https://hal0.local/api/auth/tokens \
   -H 'Content-Type: application/json' \
   -d '{"label": "openwebui-bridge", "scope": "all"}'
@@ -97,20 +84,56 @@ curl -k -u 'admin:hunter2' \
 The raw token is in the response **once** — copy it immediately. To revoke:
 
 ```sh
-curl -k -u 'admin:hunter2' -X DELETE \
+curl -k -H 'Authorization: Bearer hal0_<admin-token>' -X DELETE \
   https://hal0.local/api/auth/tokens/<token-id>
 ```
 
-The `tls internal` directive in the rendered Caddyfile mints a self-signed certificate via Caddy's internal CA. For a real (DNS-resolvable) hostname, edit `/etc/hal0/Caddyfile` to remove `tls internal` and Caddy will provision a Let's Encrypt cert on the next reload.
+### TLS
 
-To roll back:
+The default install path runs Caddy in front of FastAPI for TLS termination.
+The `tls internal` directive in the rendered Caddyfile mints a self-signed
+certificate via Caddy's internal CA — picked automatically when
+`HAL0_PUBLIC_HOST` ends in `.local` or is `localhost`. For a real
+DNS-resolvable hostname, set `HAL0_PUBLIC_HOST` and `HAL0_TLS_EMAIL`; Caddy
+provisions a Let's Encrypt cert on the first reload.
+
+If avahi-daemon is running, the installer drops `/etc/avahi/services/hal0.service`
+so `hal0.local` resolves on the LAN. Without avahi, add a static `/etc/hosts`
+entry on each client: `<hal0-ip>  hal0.local`.
+
+### Skip Caddy entirely (`--no-tls`)
 
 ```sh
-sudo systemctl disable --now hal0-caddy
-sudo sed -i 's|^HAL0_AUTH_ENABLED=.*|HAL0_AUTH_ENABLED=0|' /etc/hal0/api.env
-sudo HAL0_AUTH_ENABLED=0 /opt/hal0/.venv/bin/python -m hal0.openwebui.env_writer
-sudo systemctl restart hal0-api hal0-openwebui
+sudo bash installer/install.sh --no-tls
 ```
+
+`--no-tls` skips the Caddy install and Caddyfile render. FastAPI binds
+`0.0.0.0:8080` and is reachable directly at `http://<host>:8080/`. This is
+the right path when hal0 sits behind an existing reverse proxy (for example,
+the staging deployment behind Traefik) — front it with whatever TLS and auth
+layer your edge already provides.
+
+`--dev` implies `--no-tls`; there is no system Caddy install in a dev tree.
+
+### Upgrade notes (pre-v1)
+
+hal0 is pre-v1. Existing installs that used the old `--auth=basic` path lose
+**edge auth** on next install upgrade — the Caddyfile no longer carries
+`basicauth`. The dashboard and `/v1/*` are reachable without credentials
+until you do one of:
+
+- **Set a password in the dashboard wizard.** On first load after upgrade,
+  the wizard's password-setup step calls `POST /api/auth/password` and
+  writes the bcrypt hash into the FastAPI auth store. Writer routes then
+  require login; reads stay open (configurable per the same wizard step).
+- **Install with `--no-tls`** and front hal0 with your own reverse proxy
+  (Traefik, nginx, Caddy you manage outside hal0, Cloudflare Tunnel, etc.).
+  Your edge owns auth.
+
+Bearer tokens minted under the prior install continue to work — token storage
+moved with the rest of auth into the FastAPI store (no migration required).
+The Caddy `basicauth` credentials themselves are not migrated; re-entry via
+the wizard's password-setup step is the supported path.
 
 ## Dev mode (`--dev`)
 

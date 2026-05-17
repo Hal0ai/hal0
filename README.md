@@ -68,13 +68,18 @@ docker / disk / ports).
 
 ### Auth posture
 
-The installer defaults to `--auth=off` — API on `:8080`, OpenWebUI on
-`:3001`, no auth in front. For LAN-only boxes that's fine; for anything
-exposed beyond the LAN, install with `--auth=basic` to bring up the
-Caddy reverse proxy (basic_auth at the edge for the dashboard, bearer
-tokens for the OpenAI-compatible API, OpenWebUI SSO via trusted
-header). See [`installer/README.md`](./installer/README.md) for the
-full flow.
+Per [ADR-0001](./docs/adr/0001-collapse-edge-auth-into-fastapi.md), all
+auth lives in FastAPI. A fresh install is **open on the LAN** — no
+password, no Bearer required for the dashboard or `/v1/*`. The
+dashboard wizard's password-setup step (`POST /api/auth/password`,
+public on first run) opts in to login. Programmatic clients use Bearer
+tokens unchanged.
+
+The default install runs Caddy in front for TLS termination (Caddy's
+internal CA on `.local` hosts, Let's Encrypt for real DNS-resolvable
+hostnames). Use `--no-tls` to skip Caddy and front hal0 with your own
+reverse proxy. See [`installer/README.md`](./installer/README.md) for
+the full flow.
 
 ## License
 

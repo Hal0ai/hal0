@@ -113,6 +113,15 @@ malformed body:
 Same status, hal0 envelope on both surfaces, because the auth
 middleware refuses the request before it can reach an upstream.
 
+Per [ADR-0001](./adr/0001-collapse-edge-auth-into-fastapi.md) (PR #58),
+the auth surface is a single FastAPI layer — `POST /api/auth/login`
+issues a `hal0_session` cookie, `POST /api/auth/logout` clears it, and
+`POST /api/auth/password` sets or rotates the owner password (public
+when no password is yet set; writer-scoped otherwise). The middleware
+accepts either the session cookie or a Bearer token against the same
+`require_token` / `require_writer` deps, so 401 envelopes are identical
+across both auth paths.
+
 ### 404 — not found
 
 `/api/slots/nope` (hal0 envelope):

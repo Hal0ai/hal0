@@ -48,7 +48,7 @@ Opt-in flags:
 
 ```
 HAL0_HARNESS_PROD=1  bash scripts/harness.sh     # also do sudo /opt/hal0 install + uninstall
-HAL0_HARNESS_AUTH=1  HAL0_HARNESS_PROD=1  bash scripts/harness.sh   # +--auth=basic Caddy install
+HAL0_HARNESS_TLS=1   HAL0_HARNESS_PROD=1  bash scripts/harness.sh   # +TLS-default Caddy install (per ADR-0001)
 HAL0_HARNESS_KEEP=1  bash scripts/harness.sh     # keep tmp prefix after run for debugging
 ```
 
@@ -79,7 +79,7 @@ is reserved for **defects in hal0**.
 |------------|----------------|
 | `pass`     | The thing worked. |
 | `fail`     | A real bug in hal0 — the harness exits non-zero if any row is `fail`. |
-| `skip`     | Scenario intentionally not exercised this run (e.g. `--auth=basic` without `HAL0_HARNESS_AUTH=1`). Also for dependent rows after an upstream row already failed. |
+| `skip`     | Scenario intentionally not exercised this run (e.g. TLS-default install without `HAL0_HARNESS_TLS=1`). Also for dependent rows after an upstream row already failed. |
 | `deferred` | The capability exists but can't be tested in this environment, **and that's not hal0's fault** — releases.hal0.dev DNS, disk space, toolbox image not yet public, etc. Distinct from `skip` so `FINDINGS.md` can list them separately. |
 
 Rule of thumb: if a green CI machine with the right env vars would
@@ -300,7 +300,7 @@ hand or re-run `installer-test.sh` first.
 | Flag | Effect | Used by |
 |------|--------|---------|
 | `HAL0_HARNESS_PROD=1` | Enable rows that mutate `/etc`, `/var/lib`, `/usr/lib` via real `sudo bash installer/install.sh` and `installer/uninstall.sh`. | `installer-test.sh:prod-no-start`, `harness-cleanup.sh:prod-uninstall` |
-| `HAL0_HARNESS_AUTH=1` | Enable `--auth=basic` install (Caddy + bcrypt + bearer tokens). Implies PROD=1. | `installer-test.sh:auth-basic` |
+| `HAL0_HARNESS_TLS=1` | Enable the TLS-default install (installs Caddy + renders the Caddyfile per [ADR-0001](../../docs/adr/0001-collapse-edge-auth-into-fastapi.md); renamed from `HAL0_HARNESS_AUTH` when Caddy stopped doing edge auth). Implies PROD=1. | `installer-test.sh:tls-default` |
 | `HAL0_HARNESS_KEEP=1` | When running `installer-test.sh` standalone, keep the tmp prefix after exit. No effect through the orchestrator (orchestrator always cleans). | `installer-test.sh` |
 | `HAL0_HARNESS_API_PORT=<n>` | Port `hal0 serve` binds during the install test (default 18080). | `installer-test.sh:dev-api-up` |
 | `HAL0_DOCTOR_PORTS="<p1> <p2>..."` | Space-separated TCP ports `hal0 doctor`'s port-collision check probes. Defaults to `"18080 13001"` inside `cli-test.sh` so the row doesn't trip on a co-resident prod install bound to the canonical `8080 3001`. Override to match your dev install if non-default. | `cli-test.sh:cli-doctor` |
