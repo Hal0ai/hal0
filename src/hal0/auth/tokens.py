@@ -197,6 +197,11 @@ class TokenStore:
         # fresh install where the file genuinely doesn't exist.
         self._loaded = False
         self._tokens: list[Token] = []
+        # Owner password hash (bcrypt) — single owner for v1 (ADR-0001
+        # Child A, refs #54/#55). None means "no password set yet" which
+        # is the first-run claim-ownership posture. Lives in the same
+        # file as the tokens so one atomic write keeps both consistent.
+        self._password_hash: str | None = None
         # File-identity tuple recorded after each load/save. We compare on
         # every access to detect out-of-band writes (e.g. ``hal0 auth
         # token add`` mutating tokens.toml in a separate process). None
@@ -218,6 +223,7 @@ class TokenStore:
         """
         self._loaded = False
         self._tokens = []
+        self._password_hash = None
         self._fingerprint = None
         self._ensure_loaded()
 
@@ -245,6 +251,7 @@ class TokenStore:
             return
         self._loaded = True
         self._tokens = []
+        self._password_hash = None
         self._fingerprint = current
         if not self._path.exists():
             return
@@ -261,6 +268,12 @@ class TokenStore:
                 f"failed to read tokens.toml at {self._path}: {exc}",
                 details={"path": str(self._path), "reason": str(exc)},
             ) from exc
+
+        # Owner password hash (ADR-0001 Child A). Optional top-level
+        # field; absent on installs that pre-date the password feature.
+        pw = raw.get("password_hash")
+        if isinstance(pw, str) and pw:
+            self._password_hash = pw
 
         rows = raw.get("tokens", [])
         if not isinstance(rows, list):
@@ -302,6 +315,13 @@ class TokenStore:
             "schema_version": SCHEMA_VERSION,
             "tokens": [],
         }
+        # Round-trip the owner password hash if one is set. Kept as a
+        # top-level field rather than smuggled into a token row because
+        # it is logically a single-owner property of the install, not a
+        # credential row that participates in the tokens-list semantics
+        # (list/get/create/revoke don't touch it).
+        if self._password_hash:
+            payload["password_hash"] = self._password_hash
         for tok in self._tokens:
             row: dict[str, Any] = {
                 "id": tok.id,
@@ -390,6 +410,30 @@ class TokenStore:
                 f"no token with id {token_id!r}",
                 details={"id": token_id},
             )
+        self._save()
+
+    # ── Owner password (ADR-0001 Child A) ───────────────────────────────
+    # One owner password per install. ``password_hash`` rides alongside
+    # the token list in the same TOML file so a single atomic write keeps
+    # both consistent (and a single backup of tokens.toml restores both).
+
+    def get_password_hash(self) -> str | None:
+        """Return the persisted owner-password bcrypt hash, or None."""
+        self._ensure_loaded()
+        return self._password_hash
+
+    def set_password_hash(self, hash_str: str) -> None:
+        """Persist *hash_str* as the owner password (atomic write).
+
+        Caller is responsible for hashing the plaintext; this method
+        just stores the resulting string. Raises ``ValueError`` on an
+        empty hash to catch the "I forgot to hash first" footgun loudly
+        rather than silently storing the cleartext.
+        """
+        if not hash_str:
+            raise ValueError("password hash must be non-empty")
+        self._ensure_loaded()
+        self._password_hash = hash_str
         self._save()
 
     # ── Verification ─────────────────────────────────────────────────────
