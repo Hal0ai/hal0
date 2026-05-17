@@ -76,7 +76,6 @@
 	@public path /api/health/system \
 	             /api/status \
 	             /api/metrics \
-	             /api/metrics/prometheus \
 	             /api/features \
 	             /api/install/state \
 	             /api/install/complete \
