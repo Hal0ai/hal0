@@ -40,6 +40,11 @@ test.beforeEach(async ({ page, mockState }) => {
   // bundle. Provide deterministic empty/closed shapes so the composable
   // settles into "first-run, CPU box, nothing gated".
   await page.route('**/api/auth/status', (route) => json(route, { password_set: false }))
+  // Default password-claim mock — accept whatever the wizard posts.
+  // Token-flow specs below override this with a token-aware variant.
+  await page.route('**/api/auth/password', (route) =>
+    json(route, { ok: true, password_set: true, rotated: false }),
+  )
   await page.route('**/api/capabilities', (route) =>
     json(route, {
       backends: [],
@@ -143,4 +148,119 @@ test('redirects to /firstrun, walks the 8-step wizard, opens chat', async ({ pag
   expect(openCalls[0].url).toBe(mockState.configUrls.openwebui)
   expect(openCalls[0].target).toBe('_blank')
   expect(mockState.installCompleteCount).toBe(1)
+})
+
+/**
+ * First-run OTP field — wired in fix/ui-firstrun-otp-2026-05-21 so a
+ * LAN browser (no loopback bypass) can claim ownership using the token
+ * the installer printed. The wizard always posts `first_run_token` in
+ * the password-claim body; an empty value is tolerated server-side on
+ * the loopback path.
+ */
+test.describe('first-run OTP', () => {
+  test('renders the OTP field on step 1 and posts the token verbatim', async ({
+    page,
+    cleanState: _cleanState,
+  }) => {
+    // Capture the POST body so we can assert the OTP rides along.
+    let capturedBody: { password?: string; first_run_token?: string } | null = null
+    await page.route('**/api/auth/password', (route) => {
+      try {
+        capturedBody = JSON.parse(route.request().postData() || '{}')
+      } catch {
+        capturedBody = null
+      }
+      return json(route, { ok: true, password_set: true, rotated: false })
+    })
+
+    await page.goto('/')
+    await expect(page).toHaveURL(/\/firstrun$/)
+
+    // Field renders + accepts text input.
+    const tokenField = page.locator('#firstrun-token')
+    await expect(tokenField).toBeVisible()
+    await expect(tokenField).toHaveAttribute('type', 'text')
+
+    await page.locator('#firstrun-password').fill('correct horse battery staple')
+    await tokenField.fill('deadbeefcafebabe1234567890abcdef')
+
+    await page.getByRole('button', { name: /Set password/ }).click()
+
+    // Wizard advances to step 2 only after the OTP-bearing POST succeeded.
+    await expect(page.getByText('We probed your hardware')).toBeVisible()
+
+    expect(capturedBody).not.toBeNull()
+    expect(capturedBody!.password).toBe('correct horse battery staple')
+    expect(capturedBody!.first_run_token).toBe('deadbeefcafebabe1234567890abcdef')
+  })
+
+  test('surfaces an inline error on auth.first_run_otp_required', async ({
+    page,
+    cleanState: _cleanState,
+  }) => {
+    // First call rejects with the OTP-required code; UI must show inline
+    // error near the token field, NOT a generic toast, AND must stay on
+    // step 1 so the operator can correct the token.
+    await page.route('**/api/auth/password', (route) =>
+      route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'auth.first_run_otp_required',
+            message: 'first-run OTP is required',
+            details: {},
+          },
+        }),
+      }),
+    )
+
+    await page.goto('/')
+    await expect(page).toHaveURL(/\/firstrun$/)
+
+    await page.locator('#firstrun-password').fill('correct horse battery staple')
+    // Submit with an empty token; the mock 401s regardless.
+    await page.getByRole('button', { name: /Set password/ }).click()
+
+    // Inline error visible next to the token field.
+    await expect(page.locator('#firstrun-token + .field-err, .field-err').first()).toContainText(
+      /Token rejected/i,
+    )
+
+    // Step indicator still on step 1 (we didn't advance).
+    await expect(page.getByText('We probed your hardware')).not.toBeVisible()
+
+    // Editing the field clears the error (immediate feedback).
+    await page.locator('#firstrun-token').fill('a')
+    await expect(page.locator('.field-err')).toHaveCount(0)
+  })
+
+  test('surfaces inline error on auth.first_run_otp_invalid too', async ({
+    page,
+    cleanState: _cleanState,
+  }) => {
+    await page.route('**/api/auth/password', (route) =>
+      route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'auth.first_run_otp_invalid',
+            message: 'first-run OTP did not validate',
+            details: {},
+          },
+        }),
+      }),
+    )
+
+    await page.goto('/')
+    await expect(page).toHaveURL(/\/firstrun$/)
+
+    await page.locator('#firstrun-password').fill('correct horse battery staple')
+    await page.locator('#firstrun-token').fill('wrong-token-value')
+    await page.getByRole('button', { name: /Set password/ }).click()
+
+    await expect(page.locator('.field-err').first()).toContainText(/Token rejected/i)
+    await expect(page.getByText('We probed your hardware')).not.toBeVisible()
+  })
 })

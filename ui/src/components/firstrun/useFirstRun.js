@@ -89,6 +89,13 @@ export function useFirstRun() {
   const form = reactive({
     // step 1 — password
     password: '',
+    // step 1 — first-run claim OTP (printed by install.sh at the tail of
+    // the summary box; lives in $VAR_DIR/.first-run.lock). The wizard
+    // sends it on POST /api/auth/password so a LAN browser can claim
+    // ownership; on the loopback bypass path the server tolerates an
+    // empty value, so the UI always sends the field even when blank
+    // rather than trying to auto-detect "am I on localhost".
+    firstRunToken: '',
     // step 2 — model dirs (list-of-strings; legacy `modelDir` first entry)
     modelDirs: ['/var/lib/hal0/models'],
     // step 3 — primary chat
@@ -310,12 +317,22 @@ export function useFirstRun() {
   // ── Step 1 — password ─────────────────────────────────────────────
   async function submitPassword() {
     if (!form.password) return
+    // Always include first_run_token, even when empty. The API tolerates
+    // an empty value when the request originates on the loopback
+    // interface (operator running curl on the box itself); for every
+    // other origin the OTP is required. The UI doesn't know the
+    // request's source — sending blindly keeps the loopback path working
+    // without trying to autodetect localhost.
     await api('/api/auth/password', {
       method: 'POST',
-      body: JSON.stringify({ password: form.password }),
+      body: JSON.stringify({
+        password: form.password,
+        first_run_token: form.firstRunToken || '',
+      }),
     })
     passwordAlreadySet.value = true
     form.password = ''
+    form.firstRunToken = ''
   }
 
   // ── Step 2 — model dirs ───────────────────────────────────────────

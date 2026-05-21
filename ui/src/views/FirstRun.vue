@@ -61,6 +61,12 @@ watch(s.passwordAlreadySet, (set) => { if (set && step.value === 1) step.value =
 // Chat URL for the "Open chat" button on the done coda.
 const chatUrl = ref(null)
 
+// Inline error for the first-run token field. Surfaced when POST
+// /api/auth/password returns 401 with code auth.first_run_otp_required
+// or auth.first_run_otp_invalid (lockfile-OTP gate rejected the value).
+// Cleared on every keystroke so the operator gets immediate feedback.
+const tokenError = ref('')
+
 // Step 4 — rerank is a sub-disclosure inside the embed row, locked off-by-
 // default per the IA-grilling session. The disclosure is closed initially.
 const showRerank = ref(false)
@@ -80,10 +86,21 @@ function removeModelDir(i) {
 async function goNext() {
   if (step.value === 1) {
     if (s.form.password) {
+      tokenError.value = ''
       try {
         await s.submitPassword()
         toasts.info('Password set — you can change it later in Settings.')
       } catch (e) {
+        // 401 with an OTP-flavoured code is a token problem, not a
+        // server fault. Surface it inline next to the OTP field instead
+        // of as a generic toast — the operator's fix is "go grab the
+        // right token", not "open the logs".
+        const code = e?.code || ''
+        if (code === 'auth.first_run_otp_required' || code === 'auth.first_run_otp_invalid') {
+          tokenError.value =
+            'Token rejected — check that you copied it exactly from the installer output.'
+          return
+        }
         toasts.error(e?.message || 'Could not set password.')
         return
       }
@@ -142,6 +159,8 @@ function goBack() {
 
 function skipPassword() {
   s.form.password = ''
+  s.form.firstRunToken = ''
+  tokenError.value = ''
   step.value = 2
 }
 
@@ -267,6 +286,30 @@ const canAdvance = computed(() => {
             Recommended: at least 12 characters with a mix of letters and digits.
             We hash the password with bcrypt (cost 12) before storing it.
           </p>
+
+          <label class="field-label" for="firstrun-token">First-run token</label>
+          <input
+            id="firstrun-token"
+            v-model="s.form.firstRunToken"
+            class="field-input field-input-mono"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="32-char hex from install.sh"
+            :aria-invalid="tokenError ? 'true' : 'false'"
+            aria-describedby="firstrun-token-hint"
+            @input="tokenError = ''"
+            @keydown.enter.prevent="goNext"
+          />
+          <p v-if="tokenError" class="field-err">{{ tokenError }}</p>
+          <p id="firstrun-token-hint" class="field-hint">
+            The installer printed this token at the end of <code>install.sh</code>.
+            Find it in your terminal or with
+            <code>journalctl -u hal0-api -n 100 | grep first-run</code>.
+            If you're running this in a browser on the hal0 server itself
+            (localhost), the field is optional.
+          </p>
+
           <div class="wizard-footer wizard-footer-2">
             <button class="btn-ghost" type="button" @click="skipPassword">Skip — leave open</button>
             <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">
