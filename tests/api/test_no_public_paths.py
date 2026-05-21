@@ -71,12 +71,15 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     app = create_app()
-    from hal0.config import paths as _paths
-
-    lock = _paths.first_run_lock()
-    if lock.exists():
-        lock.unlink()
     with TestClient(app) as c:
+        # Delete lockfile inside the TestClient context so the lifespan
+        # has had a chance to mint it; otherwise our unlink runs before
+        # the mint and is a no-op.
+        from hal0.config import paths as _paths
+
+        lock = _paths.first_run_lock()
+        if lock.exists():
+            lock.unlink()
         yield c
 
 

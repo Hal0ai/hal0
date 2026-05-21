@@ -53,16 +53,16 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     monkeypatch.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
     app: FastAPI = create_app()
-    # Drop the first-run lockfile minted by the lifespan so the
-    # writer-gate fires normally — otherwise /api/install/* is open
-    # during the first-run claim window (intentional, but not what
-    # these tests are pinning).
-    from hal0.config import paths as _paths
-
-    lock = _paths.first_run_lock()
-    if lock.exists():
-        lock.unlink()
     with TestClient(app) as c:
+        # Drop the first-run lockfile minted by the lifespan AFTER it
+        # has run so the writer-gate fires normally. Otherwise
+        # /api/install/* is open during the first-run claim window
+        # (intentional, but not what these tests are pinning).
+        from hal0.config import paths as _paths
+
+        lock = _paths.first_run_lock()
+        if lock.exists():
+            lock.unlink()
         c.app.state.token_store = TokenStore(tmp_path / "tokens.toml")
         yield c
 
