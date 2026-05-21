@@ -1,6 +1,17 @@
-# hal0
+<div align="center">
 
-**Open-source home AI inference platform.**
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./ui/public/brand/logo-halo-dark.svg">
+  <img src="./ui/public/brand/logo-halo-light.svg" alt="hal0" width="220">
+</picture>
+
+### Open-source home AI inference platform
+
+[hal0.dev](https://hal0.dev) · [Install](https://hal0.dev/docs/install/) · [Docs](https://hal0.dev/docs/)
+
+</div>
+
+---
 
 hal0 is a polished, reliable inference platform for running LLMs at home.
 It manages model slots, exposes an OpenAI-compatible API, and ships with
