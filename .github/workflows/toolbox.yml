@@ -203,8 +203,15 @@ jobs:
   manifest:
     name: Aggregate manifest.json
     needs: build
-    if: always()
+    # Only fire on push-to-main (or a dispatch with no image filter); on a
+    # partial dispatch we just upload the artefact and skip the PR step,
+    # otherwise we'd open PRs against main with a manifest that only pins a
+    # subset of images.
+    if: always() && github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -217,6 +224,7 @@ jobs:
           merge-multiple: true
 
       - name: Patch manifest.json
+        id: patch
         run: |
           python3 - <<'PY'
           import json
@@ -226,18 +234,28 @@ jobs:
           manifest = json.loads(manifest_path.read_text())
           toolbox_images = manifest.setdefault("toolbox_images", {})
 
+          changed = []
           digests_dir = Path("_digests")
           if digests_dir.is_dir():
               for f in sorted(digests_dir.glob("*.json")):
                   data = json.loads(f.read_text())
                   name = data["name"]
                   entry = toolbox_images.setdefault(name, {})
+                  prev = entry.get("digest")
                   entry["tag"] = data["image"]
                   entry["digest"] = data["digest"]
+                  if prev != data["digest"]:
+                      changed.append(f"{name}: {prev} -> {data['digest']}")
                   print(f"pinned {name}: {data['digest']}")
 
           manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          Path("_digests/_changed.txt").write_text("\n".join(changed) + "\n")
           PY
+          {
+            echo "changed<<EOF"
+            cat _digests/_changed.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Show manifest
         run: cat manifest.json
@@ -247,3 +265,29 @@ jobs:
         with:
           name: manifest-pinned
           path: manifest.json
+
+      - name: Open PR with refreshed digests
+        if: steps.patch.outputs.changed != ''
+        uses: peter-evans/create-pull-request@v6
+        with:
+          # GITHUB_TOKEN is fine here; PRs opened by this token do NOT
+          # trigger downstream workflows (avoids a build-loop), which is
+          # what we want for a digest-bump PR.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(manifest): refresh toolbox digests after build"
+          title: "chore(manifest): refresh toolbox digests"
+          branch: bot/refresh-toolbox-digests
+          delete-branch: true
+          add-paths: manifest.json
+          body: |
+            Automated refresh of `manifest.json.toolbox_images.*.digest` from
+            the latest `toolbox.yml` build run (commit ${{ github.sha }}).
+
+            Changes:
+            ```
+            ${{ steps.patch.outputs.changed }}
+            ```
+
+            Review and merge to keep installer pins in sync with the
+            published images on ghcr.io. Falls back to `:v1` tag-pull at
+            runtime if a digest is stale or null.
