@@ -20,6 +20,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+# moonshine_server.py imports numpy at module top — it's a runtime dep
+# of the toolbox container, not of hal0 itself, so it isn't in our dev
+# extras. Skip the whole module when numpy is absent rather than erroring
+# at collection time.
+pytest.importorskip("numpy")
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SERVER_PATH = _REPO_ROOT / "packaging" / "toolbox" / "moonshine" / "moonshine_server.py"
 

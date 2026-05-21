@@ -114,15 +114,27 @@ test('add model: local file scan preview + commit', async ({
   await expect(row).toBeVisible()
   await expect(row.locator('.scan-path')).toContainText('tiny-model.Q4_K_M.gguf')
 
-  // Edit the row's id field to confirm chips/inputs are reachable.
-  const idInput = row.locator('input.scan-input.mono')
-  await expect(idInput).toBeVisible()
+  // Edit the row's name field to confirm chips/inputs are reachable.
+  // The scan-table row now exposes a single editable input (Name) per
+  // row; capabilities + backends are pre-detected and locked at scan
+  // time per the post-360b1c8 design. The Name input drives the
+  // derived id (see Models.vue:1103 "id: …" hint), so reaching it is
+  // the right signal that the row's editable surface renders.
+  const nameInput = row.locator('input.scan-input.scan-name')
+  await expect(nameInput).toBeVisible()
 
-  // Click Commit.
+  // Rows only pre-select when the preview returned `confidence: 'high'`
+  // and `kind: 'llama'` (Models.vue:418); our mock returns a numeric
+  // confidence + no kind, so we tick the include-row checkbox to drive
+  // the commit count.
+  await row.locator('input[type="checkbox"]').check()
+
+  // Click Commit. The button now reads "Register N of M" — the
+  // selected-count-of-total framing is the post-refactor copy.
   const commitReq = page.waitForRequest(
     (r) => r.url().endsWith('/api/models/scan') && r.method() === 'POST',
   )
-  await page.getByRole('button', { name: /^Commit 1 row\(s\)$/ }).click()
+  await page.getByRole('button', { name: /^Register 1 of 1$/ }).click()
   await commitReq
 
   expect(lastScanCommit?.rows?.length).toBe(1)
@@ -370,8 +382,11 @@ test('slotcard inline swap: popover + filter by backend + /swap call', async ({
 
   expect(lastSwap?.model_id).toBe('qwen3-4b')
 
-  // Toast on success.
-  await expect(page.locator('.toast').filter({ hasText: /swapped primary/ })).toBeVisible()
+  // Toast on success. SlotCard fires "swapping <slot> → <label>…" the
+  // instant the swap is dispatched (the eventual "<slot> ready on
+  // <label>" toast lands once the backend health-check resolves; in
+  // mock mode we don't wait that long).
+  await expect(page.locator('.toast').filter({ hasText: /swapping primary/ })).toBeVisible()
   // Popover closes.
   await expect(popover).toHaveCount(0)
 })

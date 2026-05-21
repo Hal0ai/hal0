@@ -54,6 +54,13 @@ dev = [
   "ruff>=0.8",
   "mypy>=1.13",
   "httpx>=0.28",
+  # Runtime deps of the in-container moonshine_server, loaded via
+  # importlib by tests/providers/test_moonshine_server.py. Not on the
+  # hal0 production path — only the toolbox image needs them at runtime
+  # — but the test suite exercises the redaction logic from harness
+  # finding #14.
+  "numpy>=2.0",
+  "soundfile>=0.12",
 ]
 
 [project.scripts]
