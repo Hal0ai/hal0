@@ -75,6 +75,28 @@ _RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
 _FLM_TOOLBOX_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
 
 
+# FLM tags hidden from the dashboard catalog because of upstream FLM
+# bugs we've reproduced end-to-end on the bundled toolbox image. The
+# slot would still ``state=ready`` for these tags (the health probe
+# passes), but a real ``/v1/chat/completions`` 500s with the recorded
+# error, so surfacing them in the picker is a trap. Revisit after each
+# toolbox-image bump: re-run ``tests/harness`` flm-chat-utf8 and shrink
+# this set if upstream has fixed.
+#
+# Each entry: {tag: short reason}. The reason becomes the next reader's
+# search term when checking whether to remove the entry.
+_FLM_BROKEN_TAGS: dict[str, str] = {
+    # 2026-05-21 (toolbox FLM v0.9.42, model_list.json pin
+    # v0.9.22-faster-q4-1): any prompt that elicits non-ASCII output
+    # returns ``[json.exception.type_error.316] invalid UTF-8 byte at
+    # index 0: 0x..``. nlohmann/json is rejecting a content string that
+    # starts mid-multibyte-UTF-8, so FLM's qwen3 0.6B decoder is emitting
+    # partial token bytes. qwen3:1.7b and qwen3.5:* on the SAME tag
+    # don't repro — bug is model-weight-specific, not tag-wide.
+    "qwen3:0.6b": "FLM v0.9.42 emits invalid UTF-8 on non-ASCII output (see hal0_flm_chat_utf8_error)",
+}
+
+
 def _flm_image_present() -> bool:
     """True iff the FLM toolbox image is already pulled locally.
 
@@ -597,6 +619,8 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for entry in flm_served_models():
         if capability not in entry["capabilities"]:
+            continue
+        if entry["tag"] in _FLM_BROKEN_TAGS:
             continue
         # Filter capabilities reported to the dashboard down to the
         # in-scope subset; otherwise an "stt" tag would leak through on a
