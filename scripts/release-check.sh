@@ -95,7 +95,6 @@ if command -v shellcheck &>/dev/null; then
     for SCRIPT in \
         "${REPO_ROOT}/installer/install.sh" \
         "${REPO_ROOT}/installer/uninstall.sh" \
-        "${REPO_ROOT}/installer/bin/hal0-slot-launch" \
         "${REPO_ROOT}/scripts/dev-bootstrap.sh" \
         "${REPO_ROOT}/scripts/release-check.sh" \
         "${REPO_ROOT}/scripts/release-test.sh"

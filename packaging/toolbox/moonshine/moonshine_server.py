@@ -336,10 +336,11 @@ async def transcriptions(
     try:
         pcm = _decode_audio(raw, file.filename)
     except UnsupportedAudioFormat as exc:
-        # TODO(#32): swap HTTPException for a typed BadRequest subclass
-        # of Hal0Error once #32 lands so the envelope shape comes from
-        # the shared middleware. For now we hand-build the envelope to
-        # match the hal0 main proxy contract.
+        # tracked-in: #80 — swap HTTPException for a typed BadRequest
+        # subclass of Hal0Error once the toolbox can import the shared
+        # error classes (the main-API migration shipped in #32, but this
+        # container is built without the hal0 package). For now we
+        # hand-build the envelope to match the hal0 main proxy contract.
         #
         # Crucially: do NOT include ``exc.cmd`` / ``exc.stdout`` /
         # ``exc.stderr`` from the underlying CalledProcessError — those

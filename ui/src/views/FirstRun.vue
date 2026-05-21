@@ -522,10 +522,10 @@ const canAdvance = computed(() => {
             spellcheck="false"
           />
           <p class="field-hint">
-            TODO(backend): no persistence endpoint yet — the token is cached
-            in localStorage. The current pull task reads <code>HF_TOKEN</code>
-            out of the API process env, so set that on the host until the
-            secrets endpoint lands.
+            Optional — only needed for gated models. The current pull task
+            reads <code>HF_TOKEN</code> from the API process env; for now,
+            export it on the host before starting hal0. The wizard caches
+            what you type here in your browser so a refresh keeps it.
           </p>
           <div class="wizard-footer wizard-footer-2">
             <button class="btn-ghost" type="button" @click="goBack">← Back</button>

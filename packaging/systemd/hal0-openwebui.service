@@ -23,7 +23,7 @@ EnvironmentFile=/etc/hal0/openwebui.env
 
 # Pre-pull on first start so the unit doesn't sit in 'activating' for
 # minutes the first time. Idempotent — Docker reuses the cached image.
-# TODO: pin :main to a specific digest per hal0 release (PLAN §8).
+# tracked-in: #79 — pin :main to a specific digest per hal0 release (PLAN §8).
 ExecStartPre=-/usr/bin/docker pull ghcr.io/open-webui/open-webui:main
 
 # Best-effort cleanup of any stale container from a previous start that
@@ -36,7 +36,7 @@ ExecStartPre=-/usr/bin/docker rm -f hal0-openwebui
 # Data lives in /var/lib/hal0/openwebui/ which survives container
 # restarts and hal0 updates. The host port :3001 binds 0.0.0.0 by
 # default (PLAN §2 "public" tier).
-# TODO: pin ghcr.io/open-webui/open-webui:main to a digest per release.
+# tracked-in: #79 — pin ghcr.io/open-webui/open-webui:main to a digest per release.
 ExecStart=/usr/bin/docker run \
   --rm \
   --name hal0-openwebui \

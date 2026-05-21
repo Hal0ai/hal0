@@ -101,11 +101,11 @@ export function useFirstRun() {
       tts:    { enabled: false, backend: null, model: null, provider: null },
       img:    { enabled: false, backend: null, model: null, provider: null },
     },
-    // step 5 — HF token. TODO(backend): no persistence endpoint yet — we
-    // stash in localStorage so a tab reload keeps it; real wiring lands
-    // when /api/secrets/hf-token (or similar) exists. The orchestrator's
-    // pull task currently picks HF_TOKEN out of the API process env, so a
-    // browser-set token isn't reachable from the server.
+    // step 5 — HF token. Stashed in localStorage so a tab reload keeps it;
+    // real backend wiring (tracked-in: #78) lands when /api/secrets/hf-token
+    // exists. The orchestrator's pull task currently picks HF_TOKEN out of
+    // the API process env, so a browser-set token isn't reachable from the
+    // server until that endpoint lands.
     hfToken: '',
     // step 6 — license
     licenseAccepted: false,
@@ -341,10 +341,10 @@ export function useFirstRun() {
 
   // ── Step 5 — HF token ─────────────────────────────────────────────
   function persistHfToken() {
-    // TODO(backend): no /api/secrets/hf-token endpoint yet. Cached in
-    // localStorage so a refresh doesn't lose it; the orchestrator can
-    // only see HF_TOKEN from the API process env, so this stash is for
-    // the wizard's own convenience until the backend lands.
+    // Cached in localStorage so a refresh doesn't lose it. The orchestrator
+    // can only see HF_TOKEN from the API process env, so this stash is for
+    // the wizard's own convenience until /api/secrets/hf-token lands
+    // (tracked-in: #78).
     try {
       if (form.hfToken) {
         window.localStorage.setItem('hal0:firstrun:hf_token', form.hfToken)
