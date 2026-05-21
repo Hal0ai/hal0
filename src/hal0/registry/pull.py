@@ -462,8 +462,13 @@ async def run_flm_pull(
     {completed, failed, cancelled}) so the existing SSE / status routes
     work unchanged. Differs in two ways:
 
-      * Bytes come from parsing FLM's stdout lines (no Content-Length
-        header to lean on) — see :func:`hal0.providers.flm.parse_flm_progress`.
+      * Bytes come from polling the on-disk dir size of the target install
+        path. FLM models contain multiple files (config.json, model.q4nx,
+        tokenizer.json, …) and FLM's stdout emits ``Downloading: X% (cur/tot)``
+        for each file independently — leaning on per-file regex parsing made
+        ``bytes_downloaded`` regress to 0 each time a new file began, which
+        the dashboard rendered as a "hanging" progress bar. Dir-size polling
+        is monotonic by construction and survives FLM stdout-format changes.
       * No sha256 is computed here: FLM verifies file hashes internally
         and refuses to use mismatched weights. Re-hashing would just
         double-read multi-GB files for the same guarantee.
@@ -481,7 +486,7 @@ async def run_flm_pull(
     # environments without docker).
     from hal0.providers.flm import (
         flm_pull_command,
-        parse_flm_progress,
+        flm_served_models,
         reset_flm_catalog_cache,
     )
 
@@ -490,6 +495,22 @@ async def run_flm_pull(
     job._signal()
 
     argv, host_models_dir = flm_pull_command(tag)
+
+    # Resolve the install path + advertised total upfront so progress
+    # reporting is monotonic. _flm_install_path reads the same cached
+    # catalog flm_served_models uses; both fall back gracefully when
+    # the probe failed (host without docker / image not present).
+    target_dir = _flm_install_path(host_models_dir, tag)
+    advertised_total = 0
+    for entry in flm_served_models():
+        if entry["tag"] == tag:
+            advertised_total = int(entry.get("size_bytes") or 0)
+            break
+    baseline_size = _dir_size(target_dir) if target_dir else 0
+    if advertised_total > baseline_size:
+        job.bytes_total = advertised_total
+        job._signal()
+
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -500,6 +521,25 @@ async def run_flm_pull(
         )
         assert proc.stdout is not None
         last_emit = time.monotonic()
+
+        def _tick_progress() -> None:
+            """Refresh bytes_downloaded from on-disk dir size if it grew."""
+            nonlocal last_emit
+            if not target_dir:
+                return
+            now = time.monotonic()
+            if (now - last_emit) < _SSE_MIN_INTERVAL_S:
+                return
+            current = _dir_size(target_dir) - baseline_size
+            if current > job.bytes_downloaded:
+                job.bytes_downloaded = current
+                if current > job.bytes_total:
+                    # FLM's advertised size is approximate; let actual
+                    # bytes stretch bytes_total so the UI stays at ≤100%.
+                    job.bytes_total = current
+                last_emit = now
+                job._signal()
+
         while True:
             if job.cancel_requested:
                 proc.terminate()
@@ -515,21 +555,16 @@ async def run_flm_pull(
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
             except TimeoutError:
-                # No new line in 1s — loop back so cancellation observes promptly.
+                # No new line in 1s — loop back so cancellation observes
+                # promptly. Also a good cadence for the dir-size poll.
+                _tick_progress()
                 continue
             if not raw:
                 break
-            line = raw.decode("utf-8", errors="replace")
-            parsed = parse_flm_progress(line)
-            if parsed is not None:
-                downloaded, total = parsed
-                job.bytes_downloaded = downloaded
-                if total > job.bytes_total:
-                    job.bytes_total = total
-                now = time.monotonic()
-                if (now - last_emit) >= _SSE_MIN_INTERVAL_S:
-                    last_emit = now
-                    job._signal()
+            # Reading the line is enough — we don't parse it for byte
+            # accounting any more, but the readline() drains the pipe so
+            # the docker process doesn't block on a full stdout buffer.
+            _tick_progress()
 
         await proc.wait()
         if proc.returncode != 0:
