@@ -649,6 +649,529 @@ different schema for proxied vs. originated errors.
 
 ---
 
+# Security review — v1.0 auth surface (2026-05-21)
+
+First focused review of the post-ADR-0001 auth surface ahead of the
+public v1.0 release. The codebase was treated as unfamiliar; cite
+`file:line` on every entry. Findings §26 onwards.
+
+## 26. `X-Forwarded-Email` auth bypass — Caddy does NOT strip inbound copies — **critical**
+
+`src/hal0/api/middleware/auth.py:254-265` (helper) plus the third
+auth precedence step at `auth.py:335-342` accept any value of
+`X-Forwarded-Email` as a fully-authenticated **admin-scoped**
+identity when no Bearer / cookie is presented. The docstring
+asserts the header is "only trusted because Caddy strips inbound
+copies before forwarding (see Caddyfile template)" — but the
+Caddyfile template (`packaging/caddy/Caddyfile.template:34-38`)
+does NOT strip the header. It is a bare `reverse_proxy
+127.0.0.1:8080` with no `header_up -X-Forwarded-Email`, no
+`request_header -X-Forwarded-Email`, nothing.
+
+Repro (with `HAL0_AUTH_ENABLED=1`, password set, no token cookie):
+
+```
+curl -X POST https://hal0.local/api/auth/tokens \
+  -H "X-Forwarded-Email: attacker@example.com" \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"pwn","scope":"admin"}'
+```
+
+This succeeds — `require_admin` resolves identity via
+`_resolve_forwarded_email`, gets scope=`admin` from the constant
+at `auth.py:134`, the admin gate passes, and a new admin token is
+minted. The same trick passes `require_writer` on every admin
+router. Anyone on the LAN can mint admin Bearer tokens, change
+slot configs, trigger updates, etc.
+
+ADR-0001 Child B explicitly removed Caddy's basic_auth — there is
+no longer ANY legitimate path that sets `X-Forwarded-Email` from
+hal0's own Caddy. The header should default to **rejected**, with
+an opt-in env var (`HAL0_TRUST_FORWARDED_EMAIL=1`) for operators
+fronting hal0 with their own SSO proxy (Authelia, Authentik,
+Cloudflare Access, etc.). Those operators already configure their
+proxy to set + strip the header; the default install must not.
+
+- **Where:**
+  - `src/hal0/api/middleware/auth.py:254-265` — helper that reads the header without checking trust.
+  - `src/hal0/api/middleware/auth.py:335-342` — precedence step 3 promotes to admin scope.
+  - `packaging/caddy/Caddyfile.template:34-38` — no header strip.
+  - `installer/install.sh` — has no `Caddyfile.local` template that would strip either.
+- **Fix:** require an opt-in env var (e.g. `HAL0_TRUST_FORWARDED_EMAIL`) before honouring the header; the default install must reject `X-Forwarded-Email` and fall through to 401. Separately, document the `header_up -X-Forwarded-Email` directive operators must add when they DO front hal0 with their own SSO proxy.
+- **Linked fix PR:** [`fix/sec-review-forwarded-email-2026-05-21`](#)
+
+## 27. CSRF token compared with `==` — timing-leak — **high**
+
+`src/hal0/api/middleware/auth.py:413` compares the
+`X-CSRF-Token` header against the bound 16-char prefix using
+Python's `==` operator. Because the prefix is derived
+deterministically from the session cookie value (first 16 chars
+of the JWT), a network attacker who can observe response timing
+across many requests can in principle reconstruct the prefix
+byte-by-byte. The token space is 16 base64url chars (~96 bits)
+so this is theoretical against a healthy network, but the fix
+is one line of `hmac.compare_digest` and there is no reason to
+ship the timing-sensitive form.
+
+The exact line:
+
+```python
+if csrf and expected and csrf == expected:
+    return
+```
+
+- **Where:** `src/hal0/api/middleware/auth.py:413`.
+- **Fix (5-line):** replace `csrf == expected` with
+  `hmac.compare_digest(csrf, expected)` and `import hmac` at the
+  top of the file. Bonus: also use `compare_digest` in any other
+  secret-equality check.
+- **Linked fix PR:** [`fix/sec-review-csrf-compare-2026-05-21`](#)
+
+## 28. First-run `POST /api/auth/password` race — LAN attacker can claim ownership — **high**
+
+`src/hal0/api/routes/auth.py:256-316` (`set_password`) is
+intentionally callable without auth when no password is yet set
+("first-run claim ownership"). This is necessary on a fresh
+install because the wizard runs before any credential exists.
+The problem is the window: between the moment `hal0-api.service`
+starts and the moment the legitimate operator opens
+`http://hal0.local:8080/` in their browser and types a password,
+ANY peer on the LAN can `POST /api/auth/password` first and
+take ownership of the install.
+
+This is exacerbated by:
+
+- `installer/install.sh:121-125` — `--no-tls` binds the API on
+  `0.0.0.0:8080`. The dev install (which is what
+  `curl install | bash` does) defaults to `--no-tls`.
+- `hal0-openwebui.service:45` binds `0.0.0.0:3001` too — broad
+  LAN exposure is the default.
+- The wizard sentinel `/var/lib/hal0/.first_run_done` is also
+  written by an UNAUTHENTICATED route (`POST /api/install/complete`,
+  see §29), so the attacker can mark first-run done after
+  claiming the password.
+
+Mitigations to consider, in increasing order of disruption:
+
+1. Require a one-time setup token printed to the installer
+   transcript (`install.sh` emits `Setup token: hal0_xxx`; the
+   first POST /api/auth/password must present it as a Bearer
+   header). Closest to current UX; one extra paste during the
+   wizard.
+2. Refuse `set_password` from any peer other than `127.0.0.1`
+   until first-run sentinel is written. Wizard runs on the host
+   anyway; operators reaching the dashboard from another machine
+   would SSH in first, generate a setup token via CLI, and use
+   it. Slight UX hit but kills the LAN race.
+3. Bind the API to `127.0.0.1` only by default and surface a
+   later `hal0 expose` command after a password is set. Most
+   secure; biggest UX change.
+
+- **Where:**
+  - `src/hal0/api/routes/auth.py:256-316` — endpoint.
+  - `installer/install.sh:121-125` — bind host.
+  - `src/hal0/api/__init__.py:378` — router mounted without auth dep.
+
+## 29. `/api/install/*` router is wholly unauthenticated and mutating — **critical**
+
+`src/hal0/api/__init__.py:395` mounts the installer router under
+`/api/install` with NO auth dependency, on the grounds that the
+first-run wizard runs before any credential exists. Reading
+`src/hal0/api/routes/installer.py` shows the router exposes
+mutating endpoints that should NEVER be available after first-run:
+
+- `POST /api/install/probe` (line 148-166) — re-runs the hardware
+  probe and **rewrites `/etc/hal0/hardware.json`**. A LAN
+  attacker can race the file write, replace it with attacker
+  content, or simply DoS by pegging it repeatedly.
+- `POST /api/install/complete` (line 169-210) — **writes the
+  first-run sentinel `/var/lib/hal0/.first_run_done`**. Marking
+  first-run done is the gate that hides the wizard; an attacker
+  can use this to forge "already done" and skip the password
+  prompt entirely.
+- `POST /api/install/pick-default` (line 353-430) — **starts a
+  HuggingFace download** (potentially many GB), assigns a model
+  to a slot, and writes `/etc/hal0/slots/<slot>.toml`.
+  Combined with §30 below this becomes path traversal.
+- `PUT /api/install/slots/{slot}/model` (line 433-469) — sets
+  `model.default` on an arbitrary slot. No auth, no rate-limit.
+
+Even discounting the path-traversal in §30, an attacker on the LAN
+can wedge ANY hal0 install indefinitely by:
+
+```
+while true; do
+  curl -sX POST http://hal0.local:8080/api/install/probe >/dev/null
+  curl -sX POST http://hal0.local:8080/api/install/pick-default \
+    -H "Content-Type: application/json" \
+    -d '{"model_id":"qwen3-72b","slot":"primary"}'
+done
+```
+
+- **Where:**
+  - `src/hal0/api/__init__.py:395` — mount.
+  - `src/hal0/api/routes/installer.py:148, 169, 353, 433` — endpoints.
+- **Fix:** split the router. The read-only state probe
+  (`GET /api/install/state`, `GET /api/install/curated-models`)
+  stays public so the wizard can render. Every mutating endpoint
+  declares `require_writer` AS WELL AS short-circuiting to
+  `127.0.0.1`-only when the first-run sentinel does not yet exist
+  (so the wizard works locally, no remote attack window).
+
+## 30. Path traversal in `_assign_to_slot(slot, ...)` — **critical**
+
+`src/hal0/api/routes/installer.py:298-350` builds the slot config
+path with `slot_path = paths.slots_config_dir() / f"{slot}.toml"`
+from the user-supplied `slot` body field — both in
+`POST /api/install/pick-default` and `PUT /api/install/slots/{slot}/model`.
+`slot` is not validated. `slot = "../../tmp/pwn"` resolves to
+`/tmp/pwn.toml` on a default install. Combined with §29's lack of
+auth, ANY LAN peer can write attacker-controlled TOML content to
+any path the `hal0` service user can reach (typically root, since
+`install.sh` runs `hal0-api.service` as root). Read the existing
+"file" first (line 313-323) opens it via `tomllib.load`, which
+will surface a parse error if the path exists and isn't TOML —
+useful for an attacker probing the FS.
+
+Repro (post-§29 fix this becomes auth'd-only, but the path
+traversal stays a real defect):
+
+```
+curl -X POST http://hal0.local:8080/api/install/pick-default \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"qwen3-4b","slot":"../../tmp/pwn"}'
+# Creates /var/lib/hal0/slots/../../tmp/pwn.toml = /tmp/pwn.toml
+```
+
+- **Where:**
+  - `src/hal0/api/routes/installer.py:298-350` — `_assign_to_slot`.
+  - `src/hal0/api/routes/installer.py:387-396, 444-463` — callers.
+- **Fix:** validate `slot` against `^[A-Za-z0-9_-]{1,32}$` (the
+  same shape used in slot create/update elsewhere) and reject
+  anything else with a 400 envelope `validation.invalid` BEFORE
+  building the path. Same fix for any other route that f-strings
+  a user-supplied `slot` into a path.
+
+## 31. `_admin_auth` router-level dep is `require_token`, not `require_writer` — **medium**
+
+`src/hal0/api/__init__.py:399-462` declares
+`_admin_auth = [Depends(require_token)]` and applies it to the
+admin routers (`/api/slots`, `/api/models`, `/api/settings`,
+`/api/hardware`, `/api/logs`, `/api/providers`, `/api/updates`,
+`/api/capabilities`, `/api/backends`, `/api/images`). That's
+just "any valid token". The scope-enforcement
+(`require_writer`/`require_admin`) is added per-route inside
+each routes module.
+
+Today every mutating route does declare `_writer` (verified by
+grep), so this is correct in practice. But it is a structural
+landmine: a new admin route written in slots.py or models.py
+that forgets to add `dependencies=_writer` is silently mutable
+by any `read-only`-scoped token (or `v1-only`-scoped token).
+There is no "deny by default" backstop.
+
+Two compounding observations:
+
+- `src/hal0/api/__init__.py:386-387` — `_v1_auth =
+  [Depends(require_token)]` on `/v1/router`, which IS mutating
+  (POST /v1/chat/completions etc.) but uses only the token
+  gate. The auth middleware docstring explicitly says "POST /
+  PUT / PATCH / DELETE on admin routers should reject
+  read-only" — that contract does not hold for `/v1/*`.
+  Read-only scoped tokens can fire chat completions, embeddings,
+  TTS, image gen, etc. Likely intentional (read-only means
+  "can't change the box config", not "can't burn GPU time") but
+  the docstring needs to match.
+
+- **Fix:** either (a) change `_admin_auth` to
+  `[Depends(require_writer)]` for the routers that are
+  primarily mutating, and add `dependencies=[Depends(require_token)]`
+  per-route for the read-only endpoints in those routers; or
+  (b) add a CI lint that asserts every non-GET handler in
+  admin routes declares `require_writer`. (b) is cheaper.
+- **Where:** `src/hal0/api/__init__.py:386, 399, 400, 402, 404, 405, 407, 413, 416, 430, 441, 461`.
+
+## 32. No login rate-limit / lockout — **high**
+
+`src/hal0/api/routes/auth.py:180-229` (`POST /api/auth/login`)
+runs the bcrypt verify and returns 401 on failure but has no
+rate-limit, no exponential backoff, no IP lockout. With bcrypt
+cost 12 the legitimate path costs ~250ms per attempt, but a
+distributed attack from the LAN can still mount a meaningful
+dictionary attack against the owner password. The `_MIN_PASSWORD_LEN
+= 8` (line 88) is a low ceiling.
+
+The session-cookie path (`POST /api/auth/login`) and the
+password-set rotation path
+(`POST /api/auth/password` — when password is already set)
+both share this — neither is throttled.
+
+- **Where:** `src/hal0/api/routes/auth.py:180-229`, `:256-316`.
+- **Fix:** in-process token bucket keyed by source IP, e.g. 5
+  failed attempts per minute then 429 for 60s. starlette
+  middleware or a lightweight in-mem dict suffice. Bind to
+  `app.state` so a process restart resets the counter — that's
+  fine, the attacker still pays the bcrypt cost.
+
+## 33. Session JWT cannot be revoked server-side — **medium**
+
+`src/hal0/api/auth/password.py:232-255` (`verify_session_token`)
+trusts the JWT's `exp` claim. There is no server-side session
+store. The module docstring (lines 35-41) acknowledges this and
+calls out keyring rotation as the "sign everyone out" escape
+hatch — but the keyring rotation:
+
+- Is not exposed via API or CLI (no `hal0 auth rotate-keyring`
+  subcommand exists in `src/hal0/cli/`).
+- Is silently destructive in the OSError-on-read path: see §34.
+
+Practical impact: if the owner password is rotated via
+`POST /api/auth/password`, every existing session cookie remains
+valid for up to 7 days (the default TTL at line 76). A stolen
+cookie cannot be invalidated without manually `rm
+/etc/hal0/keyring` and restarting the service, which also
+invalidates ALL other sessions including the rotator's.
+
+- **Where:**
+  - `src/hal0/api/auth/password.py:232-255` — verify.
+  - `src/hal0/api/routes/auth.py:298-316` — `set_password` does not bump the keyring.
+  - `src/hal0/api/routes/auth.py:232-253` — `/logout` is purely client-side cookie deletion.
+- **Fix (post-v1):** add a `jti` claim per minted token and a
+  small revocation list (set of revoked `jti`s persisted to
+  tokens.toml under a new `[[revoked_sessions]]` table).
+  Password rotation revokes all live `jti`s. Pre-v1: at minimum,
+  document the limitation in the deployment guide.
+
+## 34. `_load_or_create_signing_key` silently rotates key on read-failure — **medium**
+
+`src/hal0/api/auth/password.py:172-199` reads the keyring file;
+if `read_text` fails with any `OSError` other than
+`FileNotFoundError` (line 188-195), the function silently mints
+a fresh key and writes it to disk via `_atomic_write_bytes`. The
+in-line comment treats this as a feature ("we'd rather mint a
+fresh key than crash the API on startup") — but the
+consequences are:
+
+- An OS-level fault (transient FS error, permissions glitch, EIO,
+  ENOSPC at read time) will invalidate every live session cookie
+  on the box, silently. No log line at WARNING or above is
+  emitted at the rotation site; the `pass` swallows even the
+  exception class.
+- If the read fails but the subsequent `_atomic_write_bytes`
+  succeeds, the on-disk key file now has new content with mode
+  0600 owned by the service user — overwriting whatever was there
+  before. Worst case the prior contents were correct and we just
+  destroyed the only copy.
+
+- **Where:** `src/hal0/api/auth/password.py:182-198`.
+- **Fix:** distinguish `FileNotFoundError` from other `OSError`
+  subclasses. On the latter, log a WARNING with the exception
+  details and raise — let the service crash and have systemd
+  restart it, rather than silently rotating keys. This is the
+  pattern the tokens.toml loader (`auth/tokens.py:262-270`)
+  already uses for unreadable-but-present files.
+
+## 35. OpenWebUI exposed on `0.0.0.0:3001` by default — **medium**
+
+`packaging/systemd/hal0-openwebui.service:45` binds the
+OpenWebUI container to `0.0.0.0:3001`. OpenWebUI has its own
+auth (`WEBUI_AUTH` env in `/etc/hal0/openwebui.env`) but it is
+a separate trust boundary from hal0's: stealing OpenWebUI
+admin does not directly steal hal0 admin, but it DOES allow
+running arbitrary chat completions against any configured
+upstream (including paid providers like OpenAI/Anthropic if
+the operator wired them up under `/api/upstreams`). That's a
+financial exposure independent of hal0's own auth.
+
+The bind is intentional per PLAN §2 "public tier" — but
+documenting it as "public" is a different decision from
+defaulting it that way on every fresh install.
+
+- **Where:** `packaging/systemd/hal0-openwebui.service:37-48`.
+- **Fix (post-v1):** bind `127.0.0.1:3001` by default and
+  surface a `hal0 expose openwebui` CLI command that re-renders
+  the unit file with `0.0.0.0`. Same pattern as the API
+  bind-host decision in install.sh.
+
+## 36. `HAL0_AUTH_ENABLED` defaults to FALSE — open by default — **high**
+
+`src/hal0/auth/tokens.py:143-151` reads `HAL0_AUTH_ENABLED`. If
+unset (or `0`/`false`), `auth_enabled()` returns `False`, and
+every dependency (`require_token`, `require_writer`, `require_admin`)
+short-circuits to a pass-through that returns
+`identity=anonymous, scope=all` (see `auth.py:295-301, 366-370,
+445-446`). Combined with §28 (default `0.0.0.0` bind) this means
+the **default v1 install is wide-open**: anyone on the LAN gets
+admin-equivalent access to slots, models, upstreams, updater,
+token CRUD, settings, hardware probe, and `/v1/*` inference.
+
+The README claims "anyone running `curl … | bash` gets … a
+FastAPI server on :8080 with a dashboard, OpenWebUI on :3001,
+and a `/v1/*` OpenAI-compatible API". It does NOT claim that
+server requires authentication. The auth surface is fully
+implemented but the env var that activates it is not flipped by
+the installer.
+
+- **Where:**
+  - `src/hal0/auth/tokens.py:143-151` — defaults to off.
+  - `installer/install.sh` — does not set `HAL0_AUTH_ENABLED=1`
+    anywhere in the generated `/etc/hal0/api.env`.
+- **Fix:** make `HAL0_AUTH_ENABLED=1` the default. Invert the
+  semantics: introduce `HAL0_AUTH_DISABLED=1` for the
+  pre-existing test scaffolding that depends on pass-through.
+  Then the installer can omit the env var entirely and ship
+  locked-by-default. Combined with §28's first-run flow, the
+  user is forced through the wizard's "set a password" before
+  any state-changing API call succeeds.
+
+## 37. No security response headers (HSTS, CSP, X-Frame-Options, X-Content-Type-Options) — **low**
+
+`src/hal0/api/__init__.py:353-466` and `packaging/caddy/Caddyfile.template`
+neither emit any of the standard browser security headers. The
+dashboard at `/` is a Vue SPA that consumes `/api/*` from the
+same origin, so the missing CORS allowlist is "secure by absence"
+(no `Access-Control-Allow-Origin: *` to abuse). But the missing
+HSTS / CSP / X-Frame-Options surfaces real risks:
+
+- Without HSTS, a downgrade attack on first connect to a TLS
+  install is possible.
+- Without `X-Frame-Options: DENY` or
+  `frame-ancestors 'none'` in CSP, the dashboard can be iframed
+  by any other origin for clickjacking against logged-in
+  sessions. Combined with the SameSite=Lax cookie (auth.py:219)
+  this is exploitable for state-changing GETs (none today, but
+  the contract is brittle).
+- Without `X-Content-Type-Options: nosniff`, served assets can
+  be MIME-sniffed.
+
+- **Where:** `src/hal0/api/__init__.py:353-466` (no middleware),
+  `packaging/caddy/Caddyfile.template:34-38` (no `header`
+  directive).
+- **Fix:** install a small Starlette middleware that sets
+  `Strict-Transport-Security: max-age=31536000`,
+  `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: strict-origin-when-cross-origin`,
+  `Content-Security-Policy: default-src 'self'; img-src 'self' data:; ...`.
+  For Caddy, add a global `header` block in the template.
+
+## 38. Session cookie has no `Max-Age` — relies on JWT exp — **info**
+
+`src/hal0/api/routes/auth.py:215-225` sets the session cookie
+WITHOUT `max_age` / `expires`, making it a session-scoped
+cookie that dies on browser close. Meanwhile the JWT payload's
+`exp` is 7 days (`src/hal0/api/auth/password.py:76`). The result
+is: the cookie's intended client-side lifetime (browser session)
+and the server-validated lifetime (7 days) disagree.
+
+Practical impact is minor (the shorter one wins on any given
+browser, but if the cookie store survives a browser restart
+it'll be valid for the full 7 days). Worth aligning so the
+operator's mental model matches reality.
+
+- **Where:** `src/hal0/api/routes/auth.py:215-225`,
+  `src/hal0/api/auth/password.py:76`.
+- **Fix:** set `max_age=DEFAULT_SESSION_TTL_SECONDS` on
+  `response.set_cookie`. Make the wire and the claim agree.
+
+## 39. `/api/install/probe` triggers heavy subprocess fanout without auth — **medium**
+
+Subset of §29 worth calling out separately: the hardware probe
+shells out to `rocminfo`, `lspci`, `nvidia-smi`, etc., each
+invocation taking ~hundreds of ms. A LAN attacker can drive 100
+concurrent probes with `xargs -P 100`, exhausting fork
+bandwidth and pinning the API. Even after the §29 auth fix this
+warrants an in-process semaphore (one probe at a time).
+
+- **Where:** `src/hal0/api/routes/installer.py:148-166` →
+  `src/hal0/hardware/probe.py:413+` (subprocess fanout).
+- **Fix:** `asyncio.Semaphore(1)` around the probe; rejected
+  concurrent requests get a 429.
+
+## 40. SSE journal-stream `--since` is forwarded unvalidated — **low**
+
+`src/hal0/api/routes/logs.py:134-135, 200-201` pass the
+client-supplied `since` query string to `journalctl --since`
+without validation. journalctl rejects unparseable timestamps
+with a non-zero exit (the SSE generator surfaces that as a
+disconnect), so this is not RCE — but a malformed value can
+make the journalctl subprocess hang in some configurations
+(observed historically with `--since=invalid` on certain
+systemd versions). The SSE stream stalls until the 8-second
+timeout elapses.
+
+Lower-impact than the unit-name validation already present
+(line 58-83). Cheap to fix by light validation: parse as ISO
+timestamp or one of journalctl's well-known relative formats
+("5min ago", "yesterday", etc.).
+
+- **Where:** `src/hal0/api/routes/logs.py:134, 200`.
+- **Fix:** allow only ISO-8601 timestamps and a small allowlist
+  of relative-time tokens; reject everything else with a 400
+  envelope.
+
+## 41. `slot` parameter in `/api/slots/{name}/logs` not validated before journalctl invocation — **info / defense-in-depth**
+
+`src/hal0/api/routes/slots.py:725-731, 771-780` interpolates the
+`name` path param into the unit name
+(`hal0-slot@{name}.service`) and passes it to
+`journalctl -u <unit>`. There's no shell, so no command
+injection, but the unit-name validator from
+`src/hal0/api/routes/logs.py:58-83` is not reused — meaning a
+`name` like `foo --output=json` would be passed as a single argv
+element (which journalctl would silently reject as an unknown
+unit, fine) but `name = "foo\nNotAfter=..."` would be a
+correctness footgun.
+
+Lower priority because the route auth (require_token via
+_admin_auth) catches the obvious unauthenticated probe, and
+SlotManager.status() raises slot.not_found on unknown names
+before journalctl runs.
+
+- **Where:** `src/hal0/api/routes/slots.py:704-744, 754-799`.
+- **Fix:** call `logs._validate_unit(f"hal0-slot@{name}.service")`
+  (or extract the validator into a shared helper) before
+  building the journalctl argv.
+
+## 42. `HAL0_UPDATE_SKIP_COSIGN=1` env-var bypass is mostly safe but uses string compare — **info**
+
+`src/hal0/updater/updater.py:440-458` (`_cosign_skip`) gates the
+skip on `__version__` not being a stable v1+ tag, then warns and
+no-ops the cosign verify. The version check
+(`_is_pre_release`, line 431-437) is `version.startswith("0.")
+or "-" in version`. This is correct for `0.x.y` and
+`1.0.0-rc1`, but `1.0.0+dev` (PEP 440 local-version) does NOT
+match — the skip would be honored on a stable build that was
+locally tagged. Edge case but worth tightening when the v1 tag
+lands.
+
+- **Where:** `src/hal0/updater/updater.py:431-458`.
+- **Fix (v1+):** use `packaging.version.Version(v).is_prerelease`
+  (already a runtime dep via pydantic). One-liner.
+
+---
+
+## Security review — severity summary
+
+| Severity   | Count | IDs |
+|------------|------:|-----|
+| critical   | 3     | §26 (X-Forwarded-Email bypass), §29 (open /api/install/*), §30 (slot path traversal) |
+| high       | 4     | §27 (CSRF `==`), §28 (first-run password race), §32 (no login rate-limit), §36 (auth off by default) |
+| medium     | 5     | §31 (router-level dep is reader-only), §33 (no session revoke), §34 (silent keyring rotation), §35 (OpenWebUI on 0.0.0.0), §39 (unauthed heavy probe) |
+| low        | 2     | §37 (no security headers), §40 (journalctl --since validation) |
+| info       | 3     | §38 (cookie Max-Age vs JWT exp), §41 (slot-name validation), §42 (cosign-skip version check) |
+
+Fix PRs opened separately for the trivial-fix criticals/highs:
+
+- `fix/sec-review-csrf-compare-2026-05-21` — §27.
+- `fix/sec-review-forwarded-email-2026-05-21` — §26.
+
+The remaining critical/high items (§28, §29, §30, §32, §36) are
+larger design changes and should be triaged before v1.0 cuts.
+
+---
+
 ## What the harness *didn't* try (and why)
 
 | Path | Reason | How to enable |
