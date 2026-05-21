@@ -105,7 +105,7 @@ jobs:
           npm ci
           npm run build
 
-      # ── 2. Stage the release tree (matches updater._extract_tarball expectation) ──
+      # ── 2. Stage the release tree ──
       - name: Stage release tree
         id: stage
         run: |
@@ -123,9 +123,14 @@ jobs:
           cp -a packaging            "${STAGE}/"
           cp -a docs                 "${STAGE}/"
 
-          # UI bundle — the updater extracts this under hal0-<ver>/ui-dist/.
+          # Prebuilt UI bundle — staged at ui/dist/ so install.sh's
+          # "ui/dist already built — left alone" branch fires (the npm
+          # fallback would `cd ui && npm install` which we don't ship)
+          # and so the FastAPI mount_dashboard resolution path
+          # (`<repo>/ui/dist`) finds it without a HAL0_UI_DIST override.
           if [[ -d ui/dist ]]; then
-            cp -a ui/dist            "${STAGE}/ui-dist"
+            mkdir -p                 "${STAGE}/ui"
+            cp -a ui/dist            "${STAGE}/ui/dist"
           else
             echo "::error::ui/dist missing after npm run build"
             exit 1
