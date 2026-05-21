@@ -330,11 +330,14 @@ def test_apply_records_previous_for_rollback(
     tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
     sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
     sig2.write_bytes(b"sig")
+    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
+    cert2.write_bytes(b"cert")
     manifest_path = Path(os.environ["HAL0_RELEASES_URL"])
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball2,
         sig=sig2,
+        cert=cert2,
         version="0.0.2",
     )
 
@@ -358,11 +361,14 @@ def test_apply_sha_mismatch_raises_typed_error(
     tarball = _build_release_tarball(tmp=artifacts, version="0.0.1")
     sig = artifacts / "hal0-0.0.1.tar.gz.sig"
     sig.write_bytes(b"sig")
+    cert = artifacts / "hal0-0.0.1.tar.gz.crt"
+    cert.write_bytes(b"cert")
     manifest_path = artifacts / "latest.json"
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball,
         sig=sig,
+        cert=cert,
         version="0.0.1",
         overrides={"digest_sha256": "0" * 64},
     )
@@ -474,11 +480,14 @@ def test_rollback_swaps_symlink_back(
     tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
     sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
     sig2.write_bytes(b"sig")
+    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
+    cert2.write_bytes(b"cert")
     manifest_path = Path(os.environ["HAL0_RELEASES_URL"])
     _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball2,
         sig=sig2,
+        cert=cert2,
         version="0.0.2",
     )
     asyncio.run(Updater().apply())

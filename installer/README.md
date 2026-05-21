@@ -12,9 +12,11 @@ sudo bash installer/install.sh
 sudo bash installer/install.sh --models-dir=/mnt/ai-models
 ```
 
-> The one-liner `curl -fsSL https://hal0.dev/install.sh | bash` ships
-> with v1.0 once the `hal0.dev/install.sh` endpoint is wired; until then,
-> `git clone` + `sudo bash` is the supported entry point.
+> The one-liner `curl -fsSL https://hal0.dev/install.sh | bash` is the
+> primary install path as of v0.1.0-alpha — it fetches the signed
+> release tarball, cosign-verifies against the workflow OIDC identity,
+> and hands off to this `install.sh`. `git clone` + `sudo bash` still
+> works for development against a checkout.
 
 The toolbox container images (`ghcr.io/hal0ai/hal0-toolbox-*:v1`) are
 public on GHCR — `docker pull` works without a `docker login`. The
@@ -79,7 +81,7 @@ now lives in FastAPI** — there is no edge-auth layer in Caddy. The Caddyfile i
 a dumb TLS terminator + reverse proxy (`packaging/caddy/Caddyfile.template`,
 ~42 lines, no `basicauth`, no path matchers, no allowlist).
 
-As of v1.0 (security review §36, 2026-05-21), a fresh install **starts
+As of v0.1.0-alpha (security review §36, 2026-05-21), a fresh install **starts
 locked**. The API rejects anonymous requests on every admin route and
 on `/v1/*` with `401 auth.required`. Only the first-run wizard claim
 paths (`/api/install/*`, `POST /api/auth/password`) stay reachable —
@@ -93,7 +95,7 @@ lockfile and the claim window closes — from then on every request
 needs a session cookie (browser) or Bearer token (programmatic
 client).
 
-To opt back into the pre-v1 trusted-LAN open posture (single-user dev
+To opt back into the trusted-LAN open posture (single-user dev
 boxes only), uncomment `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env`
 and restart `hal0-api`. The dashboard and `/v1/*` will be reachable
 without credentials. **Do not use this on a multi-tenant network.**
@@ -155,7 +157,7 @@ layer your edge already provides.
 
 Existing installs that used the old `--auth=basic` path lose **edge auth**
 on next install upgrade — the Caddyfile no longer carries `basicauth`.
-And as of v1.0 (security review §36), the FastAPI gate is on by
+And as of v0.1.0-alpha (security review §36), the FastAPI gate is on by
 default: anonymous requests get 401 on admin and `/v1/*` routes. To
 recover:
 

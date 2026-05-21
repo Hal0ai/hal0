@@ -1,4 +1,4 @@
-# hal0 — v1 Plan
+# hal0 — Plan
 
 A polished, reliable, open-source home AI inference platform. Forked from
 the existing haloai project; stripped to a tight core (slot + model
@@ -7,14 +7,16 @@ one-line install) and re-architected around the things that make hal0
 different from "a wrapper around llama-server": hardware-aware slots,
 clean lifecycle, and a real reliability bar.
 
-Target launch: **hal0 v1.0** — Strix Halo + AMD GPU + NVIDIA GPU Linux
-home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
+**Status (2026-05-21):** shipping as **v0.1.0-alpha** — Strix Halo +
+AMD GPU + NVIDIA GPU Linux home installs, OpenAI-compatible inference,
+bundled OpenWebUI chat. Everything in §1 "v0.1.0-alpha ships" is in
+the box; v1.0 is the eventual stability/perf bar (see §1 "Path to v1.0").
 
 ---
 
 ## 1. Scope
 
-### v1 ships
+### v0.1.0-alpha ships
 
 - **Core inference platform**
   - OpenAI-compatible API (`/v1/chat/completions`, `/v1/embeddings`,
@@ -25,7 +27,7 @@ home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
   - Model registry, downloads, assignment to slots
   - Dispatcher: registry-aware routing with cold-cache prefetch and
     upstream fallback
-  - Provider abstraction with **five** providers in v1:
+  - Provider abstraction with **five** providers in v0.1.0-alpha:
     - `llama.cpp` (Vulkan default, ROCm opt-in) — chat / embed / rerank / vision
     - `flm` (AMD NPU, optional) — chat / embed / ASR multiplex
     - `moonshine` (STT) — CPU (upstream `useful-moonshine-onnx` wheel
@@ -91,6 +93,26 @@ home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
   - Unit tests per module (pytest)
   - Slot integration tests on CI (real `hal0-slot@.service` with Qwen3 0.5B on Vulkan-CPU)
   - Playwright γ tests on every critical UI path
+
+### Path to v1.0
+
+v0.1.0-alpha is the shipping cut. v1.0 isn't a feature milestone — it's
+a quality bar:
+
+- **Stability** — alpha → beta when the slot lifecycle state machine
+  has been hammered with concurrent load + restart fuzzing without
+  hangs; beta → rc when the auth + first-run + uninstall paths have
+  no known regressions across two consecutive nightly γ-suite runs.
+- **Performance** — published throughput + latency baselines for the
+  default loadout on each supported hardware tier (Strix Halo iGPU,
+  AMD dGPU, NVIDIA dGPU, CPU). No surprises at v1.0 install.
+- **Docs parity** — every documented feature actually works at the
+  documented URL; the `hal0.dev/docs/` page-count matches the CLI's
+  `--help` coverage.
+
+Tags between now and v1.0: `v0.1.0-alpha.N` → `v0.1.0-beta.N` →
+`v0.1.0-rc.N` → `v0.1.0`, then v0.2 deferred features as separate
+minor bumps.
 
 ### v0.2 (deferred)
 
@@ -332,7 +354,7 @@ the starting point.
 
 ## 6. UI work
 
-### v1 views (Vue 3, Tailwind 4)
+### v0.1.0-alpha views (Vue 3, Tailwind 4)
 
 1. **`Dashboard.vue`** — system health rail, slot summary cards, "your hardware can run these models" tease, link to FirstRun if no models installed
 2. **`Slots.vue`** — list, per-slot card with status (state machine!), inline log tail, load/unload/restart/swap actions, "create slot" → modal with hardware-aware form

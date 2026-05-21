@@ -18,11 +18,13 @@ It manages model slots, exposes an OpenAI-compatible API, and ships with
 a built-in dashboard and a prewired chat UI — all installable in one
 command on any modern Linux box.
 
-> **Status:** v1.0 release candidate. The release pipeline (cosign
-> keyless OIDC, signed tarball + `releases.hal0.dev` manifest) is wired
-> end-to-end; the first real tag-push is still pending. See
-> [`PLAN.md`](./PLAN.md) §15 for the milestone state and §18 for the
-> v1.0 definition of done.
+> **Status:** **v0.1.0-alpha** — shipping. The cosign-keyless-OIDC
+> release pipeline is wired end-to-end (signed tarball + `.crt` + manifest,
+> self-verified before publish); the install command actually installs.
+> Expect rough edges: APIs may shift, slot lifecycle bugs are still being
+> shaken out, and we don't promise upgrade compatibility across `0.1.x`
+> alpha tags. See [`PLAN.md`](./PLAN.md) §1 for what ships now and the
+> path to v1.0.
 
 ## What hal0 does
 
@@ -43,12 +45,12 @@ command on any modern Linux box.
   SD 1.5 / Flux models; OpenAI-compatible `/v1/images/generations`
 - **One-line install** — `curl -fsSL https://hal0.dev/install.sh | bash`
   (`--models-dir=PATH` or `HAL0_MODELS_DIR=PATH` redirects HuggingFace
-  pulls off `/var/lib/hal0/models`). Until the `hal0.dev/install.sh`
-  endpoint is wired, the supported entry point is
-  `git clone` + `sudo bash installer/install.sh` — see
-  [`installer/README.md`](./installer/README.md).
+  pulls off `/var/lib/hal0/models`). The bootstrap fetches the release
+  manifest, sha256-verifies the tarball, cosign-verifies the signature
+  against the workflow OIDC identity, then hands off to
+  [`installer/install.sh`](./installer/install.sh).
 
-## Backends (v1)
+## Backends
 
 | Backend     | Hardware             | Use case                          |
 |-------------|----------------------|-----------------------------------|
@@ -73,7 +75,7 @@ hal0/
 ├── installer/        # install.sh (systemd unit templates live in packaging/systemd/)
 ├── tests/            # pytest suite
 ├── docs/             # api-errors, release-manifest, migration, ADRs
-└── PLAN.md           # v1 roadmap
+└── PLAN.md           # roadmap (current cut: v0.1.0-alpha; path to v1.0)
 ```
 
 ## Quick start (development)
@@ -101,7 +103,7 @@ down a running install (thin wrapper over `installer/uninstall.sh`).
 ### Auth posture
 
 Per [ADR-0001](./docs/adr/0001-collapse-edge-auth-into-fastapi.md), all
-auth lives in FastAPI. As of v1.0, a fresh install **starts locked** —
+auth lives in FastAPI. As of v0.1.0-alpha, a fresh install **starts locked** —
 the dashboard, `/v1/*`, and every admin route reject anonymous requests
 with `401 auth.required`. Only the first-run wizard claim paths
 (`/api/install/*` and `POST /api/auth/password`) stay reachable, and
@@ -113,7 +115,7 @@ credential. Once the password is set the lockfile is deleted and the
 claim window closes — from then on every request needs a session
 cookie (browser) or Bearer token (programmatic client).
 
-To opt back into the pre-v1 trusted-LAN open posture (single-user dev
+To opt back into the trusted-LAN open posture (single-user dev
 boxes only), set `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env` and
 restart `hal0-api`. The legacy `HAL0_AUTH_ENABLED=0` falsy form is
 still honoured for compatibility.
@@ -130,7 +132,7 @@ Apache 2.0. See [`LICENSE`](./LICENSE).
 
 ## Contributing
 
-The contribution model for v1.0 is still being decided
+The contribution model is still being decided
 ([`PLAN.md`](./PLAN.md) §16). File issues for discussion; PRs aren't
 being accepted from outside contributors yet. See
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the test tiers and the
