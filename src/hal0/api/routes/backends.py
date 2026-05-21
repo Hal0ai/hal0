@@ -319,9 +319,7 @@ async def _allocate_npu_port(slot_manager: SlotManagerDep) -> int:
 
 
 @router.post("/npu/load", dependencies=_writer)
-async def load_npu_model(
-    request: Request, slot_manager: SlotManagerDep
-) -> dict[str, Any]:
+async def load_npu_model(request: Request, slot_manager: SlotManagerDep) -> dict[str, Any]:
     """Create + load an FLM slot for one model tag.
 
     Body: ``{"model_id": "lfm2:1.2b"}``. The endpoint is idempotent — a
@@ -343,9 +341,7 @@ async def load_npu_model(
             code="request.invalid_json",
         ) from exc
     if not isinstance(body, dict):
-        raise BadRequest(
-            "request body must be a JSON object", code="request.not_an_object"
-        )
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
 
     model_id = body.get("model_id")
     if not isinstance(model_id, str) or not model_id.strip():
@@ -395,9 +391,7 @@ async def load_npu_model(
 
 
 @router.post("/npu/unload", dependencies=_writer)
-async def unload_npu_model(
-    request: Request, slot_manager: SlotManagerDep
-) -> dict[str, Any]:
+async def unload_npu_model(request: Request, slot_manager: SlotManagerDep) -> dict[str, Any]:
     """Unload + delete a dynamically-created NPU slot.
 
     Body: ``{"slot_name": "npu-lfm2-1-2b"}``. Refuses to touch slots
@@ -413,9 +407,7 @@ async def unload_npu_model(
             code="request.invalid_json",
         ) from exc
     if not isinstance(body, dict):
-        raise BadRequest(
-            "request body must be a JSON object", code="request.not_an_object"
-        )
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
 
     slot_name = body.get("slot_name")
     if not isinstance(slot_name, str) or not slot_name.strip():
