@@ -270,10 +270,11 @@ async def audio_transcriptions(request: Request, dispatcher: DispatcherDep) -> R
     # WAV payload.
     #
     # Per OpenAI's contract the ``model`` form field is required. We surface
-    # the missing-model case as 400 (validation.invalid) rather than letting
-    # it fall through to the dispatcher's default-model + no-route 404,
-    # which obscured the real problem (issue #34).
-    return await _forward_multipart(request, dispatcher, require_model=True)
+    # the missing-model case as 400 (request.missing_model) rather than
+    # letting it fall through to the dispatcher's default-model + no-route
+    # 404, which obscured the real problem (issue #34).
+    response = await _forward_multipart(request, dispatcher, require_model=True)
+    return _scrub_audio_decoder_leakage(response)
 
 
 @router.post("/audio/speech")
@@ -282,16 +283,16 @@ async def audio_speech(request: Request, dispatcher: DispatcherDep) -> Response:
     # ({"model": "...", "input": "...", "voice": "..."}). Standard path,
     # but the ``model`` field is required by the OpenAI contract; raise
     # 400 explicitly so the caller doesn't see a misleading 404 from the
-    # dispatcher's default-model fallback path (issue #34).
+    # dispatcher's default-model fallback path (issue #34 / harness #18).
     from hal0.errors import BadRequest
 
     body = await _read_json_body(request)
     model = body.get("model")
     if not isinstance(model, str) or not model.strip():
         raise BadRequest(
-            "Request body field 'model' is required",
+            "missing required field 'model'",
             details={"field": "model", "path": "/v1/audio/speech"},
-            code="validation.invalid",
+            code="request.missing_model",
         )
     return await _dispatch_and_forward(request, dispatcher, body=body)
 
@@ -437,6 +438,59 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     )
 
 
+# Sentinel substrings whose presence in an upstream error body signals
+# that the audio decoder (ffmpeg) leaked its argv or CalledProcessError
+# repr through. Older / out-of-tree moonshine builds didn't redact this
+# before returning a 5xx, so the proxy must scrub defensively. Issue #14
+# (tests/harness/FINDINGS.md §14) — the hal0 envelope contract forbids
+# echoing subprocess argv or tempfile paths to clients.
+_AUDIO_DECODER_LEAK_MARKERS = (b"CalledProcessError", b"ffmpeg", b"FFmpeg", b"FFMPEG")
+
+
+def _scrub_audio_decoder_leakage(response: Response) -> Response:
+    """Replace a leaky upstream STT error with a clean hal0 415 envelope.
+
+    The moonshine container in this repo already converts ffmpeg decode
+    failures to a 415 with the ``audio.unsupported_format`` envelope and
+    no ``ffmpeg`` substring (see ``packaging/toolbox/moonshine/moonshine_server.py``).
+    But the proxy can't assume every reachable upstream is on that build
+    — older deployed images, third-party STT containers, or operator-side
+    decoders may still surface a ``CalledProcessError`` repr that includes
+    the subprocess argv and the user-supplied tempfile path. When we see
+    those markers, swap the response for a synthetic 415 carrying the hal0
+    envelope shape so callers never see implementation detail.
+
+    Only inspects non-streaming responses with a readable ``body`` attr;
+    StreamingResponse passes through untouched (STT responses aren't
+    streamed today, but if a future upstream does, the scrub is a no-op
+    rather than a body-drain).
+    """
+    if isinstance(response, StreamingResponse):
+        return response
+    body = getattr(response, "body", None)
+    if not isinstance(body, (bytes, bytearray)) or not body:
+        return response
+    # The upstream's bad path is by definition a non-2xx; ignore 2xx bodies
+    # that happen to mention ffmpeg in a metadata field.
+    if 200 <= response.status_code < 300:
+        return response
+    if not any(marker in body for marker in _AUDIO_DECODER_LEAK_MARKERS):
+        return response
+
+    envelope = {
+        "error": {
+            "code": "audio.unsupported_format",
+            "message": "unsupported audio format; expected wav/mp3/flac/ogg/m4a/webm",
+            "details": {"upstream_status": response.status_code},
+        }
+    }
+    return Response(
+        content=json.dumps(envelope).encode("utf-8"),
+        status_code=415,
+        media_type="application/json",
+    )
+
+
 _MODEL_FIELD_RE = re.compile(
     rb'Content-Disposition:\s*form-data;\s*name="model"\s*\r\n\r\n([^\r\n]+)',
     re.IGNORECASE,
@@ -496,9 +550,9 @@ async def _forward_multipart(
 
     if require_model and not model_value:
         raise BadRequest(
-            "Request body field 'model' is required",
+            "missing required field 'model'",
             details={"field": "model", "path": request.url.path},
-            code="validation.invalid",
+            code="request.missing_model",
         )
 
     call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})

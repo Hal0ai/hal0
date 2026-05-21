@@ -33,6 +33,7 @@ from hal0.errors import (
     NotFound,
     Unauthorized,
     UnprocessableEntity,
+    UnsupportedMediaType,
 )
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -66,6 +67,7 @@ def client(app: FastAPI) -> TestClient:
         (Forbidden, 403, "auth.forbidden"),
         (NotFound, 404, "resource.not_found"),
         (Conflict, 409, "resource.conflict"),
+        (UnsupportedMediaType, 415, "audio.unsupported_format"),
         (UnprocessableEntity, 422, "validation.unprocessable"),
     ],
 )
