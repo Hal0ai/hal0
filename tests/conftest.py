@@ -14,8 +14,16 @@ pytest_plugins = ()
 
 
 @pytest.fixture(scope="function")
-def app() -> FastAPI:
-    """Return a fresh FastAPI app instance."""
+def app(tmp_hal0_home: str) -> FastAPI:
+    """Return a fresh FastAPI app instance, filesystem-isolated under tmp_hal0_home.
+
+    Auto-applying tmp_hal0_home means every TestClient-driven test starts
+    against an empty config tree — no host /etc/hal0/slots/*.toml leaks
+    into upstream registration, no host /var/lib/hal0/registry leaks into
+    the model list. Tests that need to populate config should write into
+    ``Path(tmp_hal0_home) / "etc" / "hal0" / ...`` before constructing
+    the client.
+    """
     return create_app()
 
 

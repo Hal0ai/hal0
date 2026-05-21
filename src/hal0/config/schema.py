@@ -27,6 +27,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
+from hal0.config import paths
+
 # ── Shared constants ───────────────────────────────────────────────────────────
 
 # TIER1: surface-area for the backend whitelist. Typos like
@@ -574,10 +576,11 @@ class ModelsConfig(BaseModel):
     model_config = {"populate_by_name": True, "extra": "allow"}
 
     roots: list[str] = Field(
-        default_factory=lambda: ["/var/lib/hal0/models"],
+        default_factory=lambda: [str(paths.models_dir())],
         description=(
             "Filesystem roots scanned for downloaded model files. "
-            "Each must be an absolute path; non-existent paths are skipped at scan time."
+            "Each must be an absolute path; non-existent paths are skipped at scan time. "
+            "Default tracks HAL0_HOME for dev installs."
         ),
     )
     auto_scan_on_start: bool = Field(
@@ -591,13 +594,14 @@ class ModelsConfig(BaseModel):
         ),
     )
     pull_root: str = Field(
-        default="/var/lib/hal0/models",
+        default_factory=lambda: str(paths.models_dir()),
         description=(
             "Destination directory for HuggingFace pulls. Must be an absolute path. "
             "Tempfiles stage under <pull_root>/.tmp/ and finished downloads land at "
             "<pull_root>/<model_id>/<filename>. ComfyUI assets still route to "
-            "/var/lib/hal0/comfyui/models/<subdir>/. This directory is auto-included "
-            "in the discovery scan so pulled files are immediately visible."
+            "<var_lib>/comfyui/models/<subdir>/. This directory is auto-included "
+            "in the discovery scan so pulled files are immediately visible. "
+            "Default tracks HAL0_HOME for dev installs."
         ),
     )
 
