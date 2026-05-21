@@ -61,6 +61,11 @@ dev = [
   # finding #14.
   "numpy>=2.0",
   "soundfile>=0.12",
+  # FastAPI's File()/UploadFile/Form() construction (used by the
+  # moonshine_server multipart route) requires python-multipart at
+  # import time. Same scope as numpy + soundfile above — toolbox-only
+  # at runtime, but the test suite imports the FastAPI app.
+  "python-multipart>=0.0.9",
 ]
 
 [project.scripts]
