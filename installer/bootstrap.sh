@@ -112,16 +112,16 @@ fetch_and_hash_check() {
 }
 
 # ── cosign verify (or documented skip) ────────────────────────────────────
-fetch_sig() {
-    local url="$1" out="$2"
-    info "downloading signature"
+fetch_sidecar() {
+    local label="$1" url="$2" out="$3"
+    info "downloading ${label}"
     info "  ${_C_DIM}${url}${_C_RST}"
     curl -fsSL --retry 3 --retry-delay 2 -o "${out}" "${url}" \
-        || die "could not download signature"
+        || die "could not download ${label}"
 }
 
 cosign_verify() {
-    local tarball="$1" sig="$2" identity="$3" issuer="$4"
+    local tarball="$1" sig="$2" cert="$3" identity="$4" issuer="$5"
 
     if ! command -v cosign >/dev/null 2>&1; then
         if [[ "${HAL0_UPDATE_SKIP_COSIGN:-0}" == "1" ]]; then
@@ -137,8 +137,12 @@ cosign_verify() {
     info "verifying signature with cosign keyless OIDC"
     info "  identity-regex: ${_C_DIM}${identity}${_C_RST}"
     info "  issuer:         ${_C_DIM}${issuer}${_C_RST}"
+    # cosign 3.x requires the Fulcio-issued cert via --certificate
+    # alongside the .sig; --certificate-identity-regexp is checked
+    # against the cert's SAN.
     if ! cosign verify-blob \
             --signature "${sig}" \
+            --certificate "${cert}" \
             --certificate-identity-regexp "${identity}" \
             --certificate-oidc-issuer "${issuer}" \
             "${tarball}" >/dev/null 2>&1; then
@@ -163,10 +167,11 @@ main() {
     local manifest="${work}/manifest.json"
     fetch_manifest "${manifest}"
 
-    local version url sig_url digest identity issuer
+    local version url sig_url cert_url digest identity issuer
     version="$(parse_manifest_field "${manifest}" version)"
     url="$(parse_manifest_field "${manifest}" url)"
     sig_url="$(parse_manifest_field "${manifest}" sig_url)"
+    cert_url="$(parse_manifest_field "${manifest}" cert_url)"
     digest="$(parse_manifest_field "${manifest}" digest_sha256)"
     identity="$(parse_manifest_field "${manifest}" signer_identity)"
     issuer="$(parse_manifest_field "${manifest}" signer_issuer)"
@@ -175,9 +180,11 @@ main() {
 
     local tarball="${work}/hal0-${version}.tar.gz"
     local sig="${tarball}.sig"
+    local cert="${tarball}.crt"
     fetch_and_hash_check "${url}" "${digest}" "${tarball}"
-    fetch_sig "${sig_url}" "${sig}"
-    cosign_verify "${tarball}" "${sig}" "${identity}" "${issuer}"
+    fetch_sidecar "signature" "${sig_url}" "${sig}"
+    fetch_sidecar "certificate" "${cert_url}" "${cert}"
+    cosign_verify "${tarball}" "${sig}" "${cert}" "${identity}" "${issuer}"
 
     info "extracting tarball"
     tar -xzf "${tarball}" -C "${work}"

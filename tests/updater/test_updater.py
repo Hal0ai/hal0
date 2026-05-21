@@ -84,15 +84,18 @@ def _write_release_manifest(
     tarball: Path,
     sig: Path,
     version: str,
+    cert: Path | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write a full hal0.releases.v1 manifest pointing at file:// URLs."""
+    cert_url = f"file://{cert}" if cert is not None else f"file://{sig.with_suffix('.crt')}"
     payload: dict[str, Any] = {
         "_schema": "hal0.releases.v1",
         "version": version,
         "channel": "stable",
         "url": f"file://{tarball}",
         "sig_url": f"file://{sig}",
+        "cert_url": cert_url,
         "digest_sha256": _sha256_of(tarball),
         "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
         "signer_issuer": "https://token.actions.githubusercontent.com",
@@ -122,14 +125,17 @@ def synthetic_release(
     artifacts.mkdir()
     version = "0.0.1"
     tarball = _build_release_tarball(tmp=artifacts, version=version)
-    # Stub signature file — content doesn't matter when cosign is skipped.
+    # Stub signature + cert files — contents don't matter when cosign is skipped.
     sig = artifacts / f"hal0-{version}.tar.gz.sig"
     sig.write_bytes(b"signature-placeholder\n")
+    cert = artifacts / f"hal0-{version}.tar.gz.crt"
+    cert.write_bytes(b"-----BEGIN CERTIFICATE-----\nplaceholder\n-----END CERTIFICATE-----\n")
     manifest_path = artifacts / "latest.json"
     payload = _write_release_manifest(
         manifest_path=manifest_path,
         tarball=tarball,
         sig=sig,
+        cert=cert,
         version=version,
     )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
@@ -137,6 +143,7 @@ def synthetic_release(
         "version": version,
         "tarball": tarball,
         "sig": sig,
+        "cert": cert,
         "manifest_path": manifest_path,
         "payload": payload,
     }
@@ -203,6 +210,7 @@ def test_manifest_schema_rejects_malformed_digest() -> None:
         "version": "0.0.1",
         "url": "file:///x",
         "sig_url": "file:///x.sig",
+        "cert_url": "file:///x.crt",
         "digest_sha256": "not-a-real-digest",
         "signer_identity": "^https://github.com/x/.*",
     }
@@ -390,6 +398,7 @@ def test_apply_download_failure_surfaces_typed_error(
         "version": "9.9.9",
         "url": f"file://{tmp_path / 'nope.tar.gz'}",
         "sig_url": f"file://{tmp_path / 'nope.sig'}",
+        "cert_url": f"file://{tmp_path / 'nope.crt'}",
         "digest_sha256": "a" * 64,
         "signer_identity": "^https://github.com/.*",
     }

@@ -51,6 +51,7 @@ intentional, since there is no real signed artifact behind it yet.
   "channel": "stable",
   "url": "https://github.com/hal0ai/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz",
   "sig_url": "https://github.com/hal0ai/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz.sig",
+  "cert_url": "https://github.com/hal0ai/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz.crt",
   "digest_sha256": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
   "signer_identity": "^(?i)https://github\\.com/hal0ai/hal0/\\.github/workflows/release\\.yml@refs/tags/v0\\.1\\.1$",
   "signer_issuer": "https://token.actions.githubusercontent.com",
@@ -78,6 +79,7 @@ intentional, since there is no real signed artifact behind it yet.
 | `channel` | string | no | `"stable"` (default), `"nightly"`, `"dev"`. |
 | `url` | string | yes | `http(s)` or `file://` URL of the release tarball. |
 | `sig_url` | string | yes | URL of the detached cosign signature (`*.sig`). |
+| `cert_url` | string | yes | URL of the Fulcio-issued certificate (`*.crt`). cosign 3.x requires `--certificate` alongside `--signature` for keyless verify; the cert's SAN is what `--certificate-identity-regexp` checks. |
 | `digest_sha256` | string | yes | Hex sha256 of the tarball bytes (64 chars). `sha256:` prefix tolerated. |
 | `signer_identity` | string | yes | Regex passed to `cosign verify-blob --certificate-identity-regexp`. Must anchor (`^...$`) to the exact GH Actions workflow + ref. Use `(?i)` to absorb GH's case preservation — the `Hal0ai` org slug is canonical capital-H but lowercase `hal0ai` references redirect; `(?i)` matches either. |
 | `signer_issuer` | string | no | OIDC issuer; defaults to GitHub Actions (`token.actions.githubusercontent.com`). |
@@ -99,6 +101,7 @@ The updater shells out to `cosign verify-blob`:
 ```
 cosign verify-blob \
   --signature <sig_url-payload> \
+  --certificate <cert_url-payload> \
   --certificate-identity-regexp <signer_identity> \
   --certificate-oidc-issuer    <signer_issuer> \
   <tarball-path>

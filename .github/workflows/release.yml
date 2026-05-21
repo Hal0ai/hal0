@@ -157,7 +157,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: cosign sign-blob (keyless OIDC, legacy raw .sig)
+      - name: cosign sign-blob (keyless OIDC, legacy raw .sig + .crt)
         id: sign
         env:
           # Belt + braces: the keyless flow reads ACTIONS_ID_TOKEN_REQUEST_*
@@ -166,18 +166,25 @@ jobs:
         run: |
           TARBALL="${{ steps.tarball.outputs.path }}"
           SIG="${TARBALL}.sig"
+          CRT="${TARBALL}.crt"
           # cosign 3.x defaults to --new-bundle-format=true and refuses
           # --output-signature. Today's updater (_verify_cosign in
           # src/hal0/updater/updater.py) calls verify-blob with the legacy
-          # --signature flag, so we must opt out of the bundle format
-          # here. When the updater learns to consume Sigstore Bundles
-          # (RELEASE_PIPELINE_NOTES.md → Findings § cosign 3.x), drop the
-          # --new-bundle-format=false and emit a .bundle alongside.
+          # --signature flag, so we opt out of the bundle format here.
+          # cosign 3.x also requires the Fulcio-issued certificate to be
+          # passed via --certificate at verify time (--certificate-identity-
+          # regexp is checked against the cert's SAN), so we --output-certificate
+          # alongside the .sig and publish both as release assets. When the
+          # updater learns to consume Sigstore Bundles (RELEASE_PIPELINE_NOTES.md
+          # → Findings § cosign 3.x), drop --new-bundle-format=false and emit
+          # a .bundle in place of the separate .sig + .crt.
           cosign sign-blob --yes \
               --new-bundle-format=false \
               --output-signature "${SIG}" \
+              --output-certificate "${CRT}" \
               "${TARBALL}"
           echo "sig=${SIG}" >> "$GITHUB_OUTPUT"
+          echo "cert=${CRT}" >> "$GITHUB_OUTPUT"
 
       # ── 4. Self-verify before publishing — never ship a release we can't
       #       verify with our own production code path. ────────────────────────
@@ -185,6 +192,7 @@ jobs:
         run: |
           TARBALL="${{ steps.tarball.outputs.path }}"
           SIG="${{ steps.sign.outputs.sig }}"
+          CRT="${{ steps.sign.outputs.cert }}"
           # The identity regex must match what we'll write into the
           # manifest below — keep these two strings in lock-step.
           # github.repository preserves case (Hal0ai/hal0); use (?i) to
@@ -193,6 +201,7 @@ jobs:
           ISSUER="https://token.actions.githubusercontent.com"
           cosign verify-blob \
               --signature "${SIG}" \
+              --certificate "${CRT}" \
               --certificate-identity-regexp "${IDENT}" \
               --certificate-oidc-issuer    "${ISSUER}" \
               "${TARBALL}"
@@ -227,6 +236,7 @@ jobs:
               "channel":         channel,
               "url":             f"{base}/hal0-{version}.tar.gz",
               "sig_url":         f"{base}/hal0-{version}.tar.gz.sig",
+              "cert_url":        f"{base}/hal0-{version}.tar.gz.crt",
               "digest_sha256":   digest,
               "signer_identity": ident,
               "signer_issuer":   "https://token.actions.githubusercontent.com",
@@ -268,6 +278,7 @@ jobs:
           TAG="${{ steps.ver.outputs.tag }}"
           TARBALL="${{ steps.tarball.outputs.path }}"
           SIG="${{ steps.sign.outputs.sig }}"
+          CRT="${{ steps.sign.outputs.cert }}"
           MANIFEST="${{ steps.manifest.outputs.path }}"
 
           # Create the release if it doesn't already exist (workflow_dispatch
@@ -281,7 +292,7 @@ jobs:
               --prerelease="$([[ "${TAG}" == *-* ]] && echo true || echo false)"
           fi
 
-          gh release upload "${TAG}" "${TARBALL}" "${SIG}" "${MANIFEST}" --clobber
+          gh release upload "${TAG}" "${TARBALL}" "${SIG}" "${CRT}" "${MANIFEST}" --clobber
 
       - name: Summary
         run: |
