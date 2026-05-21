@@ -13,6 +13,8 @@ import structlog
 from fastapi import Depends, FastAPI
 
 from hal0 import __version__
+from hal0.api.auth import first_run as first_run_lock
+from hal0.api.auth import rate_limit as auth_rate_limit
 from hal0.api.middleware import error_codes, request_id
 from hal0.api.middleware.auth import require_token
 from hal0.api.routes import (
@@ -272,6 +274,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     from hal0.hardware import HardwareStats
 
+    # First-run OTP lockfile (FINDINGS §28). When no owner password is
+    # set yet, mint (or reuse) a one-time token in
+    # ``<state>/.first-run.lock`` so a non-loopback caller has to
+    # present it before claiming ownership. We only mint if the
+    # password store is empty — once a password is set the lockfile
+    # has no purpose. Failures here are non-fatal: log + continue,
+    # because a missing lockfile collapses the route to "loopback-only"
+    # which is still strictly safer than the pre-fix open-LAN window.
+    try:
+        from hal0.auth.tokens import get_or_create_store
+
+        _bootstrap_store = get_or_create_store(app.state)
+        if _bootstrap_store.get_password_hash() is None:
+            lock = first_run_lock.mint_lockfile()
+            log.info(
+                "auth.first_run_lock.ready",
+                path=str(lock.path),
+            )
+        else:
+            # Password already set on this install — clean up any stale
+            # lockfile left over from the install run so a future
+            # rotation doesn't trip over a dangling token.
+            first_run_lock.consume_lockfile()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("auth.first_run_lock.mint_failed", error=str(exc))
+
     app.state.upstreams = upstreams
     app.state.model_registry = model_registry
     app.state.hal0_config = hal0_cfg
@@ -364,6 +392,14 @@ def create_app() -> FastAPI:
 
     request_id.install(app)
     error_codes.install(app)
+
+    # IP-bucket rate limiter for the auth surface (FINDINGS §32).
+    # Routes pull this off ``app.state.auth_rate_limiter`` via
+    # ``hal0.api.auth.rate_limit.check_rate_limit``. Installing here so
+    # the limiter exists before lifespan runs — tests that swap in a
+    # custom limiter (e.g. with a stub clock) can do so after the
+    # TestClient construction by reassigning ``app.state``.
+    auth_rate_limit.install(app)
 
     # ── Auth wiring ──────────────────────────────────────────────────
     # Per ADR-0001 Child B, the PUBLIC_PATHS frozenset is gone. A route
