@@ -26,6 +26,14 @@ const statusColor = computed(() => ({
 }[apiHealth.value]))
 
 const version = computed(() => system.status?.version ?? null)
+// Highlight the version pill while we ship prereleases — alpha/beta/rc
+// in the version string flips it amber so operators see at a glance
+// that this isn't a stable build. Falls back to the muted default once
+// we tag a stable v1.0.0.
+const isPrerelease = computed(() => {
+  const v = version.value ?? ''
+  return /-(alpha|beta|rc)\b/i.test(v) || /(a\d+|b\d+|rc\d+)$/i.test(v)
+})
 
 const { running: runningSlots, total: totalSlots } = useSlotStats()
 </script>
@@ -56,7 +64,12 @@ const { running: runningSlots, total: totalSlots } = useSlotStats()
       </button>
 
       <Wordmark size="text-base" />
-      <span v-if="version" class="version-pill" :title="`Version ${version}`">v{{ version }}</span>
+      <span
+        v-if="version"
+        class="version-pill"
+        :class="{ 'version-pill--prerelease': isPrerelease }"
+        :title="isPrerelease ? `Prerelease — v${version}. APIs may shift across 0.1.x tags.` : `Version ${version}`"
+      >v{{ version }}</span>
     </div>
 
     <!-- Center: command palette trigger -->
@@ -171,6 +184,15 @@ const { running: runningSlots, total: totalSlots } = useSlotStats()
   background: var(--color-surface-2);
   color: var(--color-fg-faint);
   border: 1px solid color-mix(in srgb, var(--hal0-accent) 25%, var(--hal0-border));
+}
+
+.version-pill--prerelease {
+  /* Amber-on-amber so operators see at a glance that this is an
+     unstable build. Reverts to the muted default for stable tags. */
+  background: color-mix(in srgb, var(--hal0-accent) 14%, var(--color-surface-2));
+  color: var(--hal0-accent);
+  border-color: color-mix(in srgb, var(--hal0-accent) 55%, transparent);
+  font-weight: 600;
 }
 
 /* ── Center ────────────────────────────────────────────────────── */
