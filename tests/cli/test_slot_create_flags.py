@@ -22,6 +22,11 @@ from typer.testing import CliRunner
 
 from hal0.cli import slot_commands
 
+# Click ≥8.2 separates stdout/stderr on the result by default — the
+# deprecation warning (emitted via ``typer.echo(..., err=True)``) lands
+# in ``result.stderr``. We assert against ``result.stderr`` rather than
+# ``result.output`` so a future contributor moving the warning back to
+# stdout fails this regression test loudly.
 runner = CliRunner()
 
 
@@ -105,7 +110,7 @@ def test_hardware_flag_overrides_default(captured_post: dict[str, Any]) -> None:
 def test_legacy_backend_flag_translates_to_provider(
     captured_post: dict[str, Any],
 ) -> None:
-    """Deprecated ``--backend flm`` is translated to provider=flm + warns."""
+    """Deprecated ``--backend flm`` is translated to provider=flm + warns on stderr."""
     result = runner.invoke(
         slot_commands.app,
         ["create", "primary", "--backend", "flm", "--model", "demo"],
@@ -114,7 +119,10 @@ def test_legacy_backend_flag_translates_to_provider(
     assert captured_post["body"]["provider"] == "flm"
     # The hardware backend must NOT be conflated with the deprecated flag.
     assert captured_post["body"]["backend"] == "vulkan"
-    assert "deprecated" in result.output.lower()
+    # Deprecation warning goes to stderr so stdout stays parseable for
+    # scripts piping the success line elsewhere.
+    assert "deprecated" in result.stderr.lower()
+    assert "--provider" in result.stderr
 
 
 def test_legacy_backend_with_invalid_value_errors(
@@ -170,3 +178,94 @@ def test_default_hardware_cpu_when_no_gpu(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
     assert slot_commands._detect_default_hardware() == "cpu"
+
+
+def test_invalid_hardware_value_rejected_by_typer(
+    captured_post: dict[str, Any],
+) -> None:
+    """``--hardware foo`` is rejected at the Typer parsing layer.
+
+    Because ``--hardware`` is a ``SlotHardware`` StrEnum, Typer/Click
+    rejects unknown values before the command body runs — the API
+    client should never be called.
+    """
+    result = runner.invoke(
+        slot_commands.app,
+        [
+            "create",
+            "primary",
+            "--provider",
+            "llama-server",
+            "--hardware",
+            "foo",
+            "--model",
+            "demo",
+        ],
+    )
+    assert result.exit_code != 0
+    # Click's bad-parameter envelope mentions the offending flag.
+    assert "hardware" in (result.stderr + result.output).lower()
+    # No API call should have been made — the command body never ran.
+    assert "body" not in captured_post
+
+
+def test_bare_create_on_strix_halo_resolves_to_vulkan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A bare ``slot create primary`` on a Strix Halo fixture auto-resolves
+    ``--hardware vulkan``.
+
+    Strix Halo presents as an AMD iGPU (vendor=amd) that is Vulkan-capable
+    but typically not flagged compute_capable in the probe output — the
+    iGPU runs llama.cpp via Vulkan, not ROCm. The auto-detect path must
+    pick ``vulkan`` so the user doesn't need to know about hardware flags
+    on the platform that hal0 v1 most cares about.
+    """
+    probe = tmp_path / "hardware.json"
+    probe.write_text(
+        json.dumps(
+            {
+                "gpus": [
+                    {
+                        "vendor": "amd",
+                        "name": "Radeon 890M (Strix Halo)",
+                        "vram_mb": 512,
+                        # iGPU — Vulkan via Mesa, no ROCm.
+                        "compute_capable": False,
+                        "vulkan_capable": True,
+                    }
+                ],
+                "unified_memory_mb": 102400,
+            }
+        )
+    )
+    from hal0.config import paths as _paths
+
+    monkeypatch.setattr(_paths, "hardware_json", lambda: probe)
+
+    captured: dict[str, Any] = {}
+
+    def fake_unreachable(_url: str) -> bool:
+        return False
+
+    def fake_get(path: str, **_kw: Any) -> list[dict[str, Any]]:
+        return []
+
+    def fake_post(path: str, *, json: dict[str, Any] | None = None, **_kw: Any) -> dict[str, Any]:
+        captured["body"] = json or {}
+        return {"port": (json or {}).get("port", 8081)}
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", fake_unreachable)
+    monkeypatch.setattr(slot_commands, "api_get", fake_get)
+    monkeypatch.setattr(slot_commands, "api_post", fake_post)
+
+    result = runner.invoke(
+        slot_commands.app,
+        ["create", "primary", "--model", "demo"],
+    )
+    assert result.exit_code == 0, result.output
+    # Bare invocation → provider defaults to llama-server, hardware
+    # auto-resolves to vulkan from the Strix Halo fixture.
+    assert captured["body"]["provider"] == "llama-server"
+    assert captured["body"]["backend"] == "vulkan"

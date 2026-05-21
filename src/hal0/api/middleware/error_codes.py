@@ -51,9 +51,11 @@ def _shape_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]
     Pydantic emits a list of ``{type, loc, msg, input, ctx, url}`` dicts.
     The envelope contract keeps ``loc`` (so the client knows which field
     failed), ``msg`` (human-readable), and ``type`` (machine-readable
-    error kind) — and drops the rest to keep the response small and
-    schema-stable. The full pydantic payload remains accessible via
-    structured logs for server-side debugging.
+    error kind) — and drops the rest. ``input`` in particular is
+    deliberately stripped: it can be verbose, and for body validation
+    failures it often contains the caller-supplied payload, which can
+    leak secrets if echoed back. The full pydantic payload remains
+    accessible via structured logs for server-side debugging.
     """
     shaped: list[dict[str, Any]] = []
     for err in exc.errors():
@@ -83,22 +85,22 @@ def install(app: FastAPI) -> None:
         # and body parameters. Without this handler clients see FastAPI's
         # default ``{"detail": [...]}`` shape, which doesn't match the hal0
         # envelope contract. We reshape into the canonical envelope and
-        # downgrade the status from 422 to 400 — these are caller-side input
-        # errors, not "well-formed but semantically rejected" requests
-        # (UnprocessableEntity is reserved for that meaning).
-        errors = _shape_validation_errors(exc)
+        # keep the FastAPI-default 422 status — OpenAI/FastAPI clients
+        # already expect 422 on request-validation failures, so changing
+        # the status code would break ergonomic detection at the client.
+        fields = _shape_validation_errors(exc)
         log.info(
             "hal0.validation_error",
             path=request.url.path,
             method=request.method,
-            errors=errors,
+            fields=fields,
         )
         return JSONResponse(
-            status_code=400,
+            status_code=422,
             content=_envelope(
                 "validation.invalid",
                 "request validation failed",
-                {"errors": errors},
+                {"fields": fields},
             ),
         )
 

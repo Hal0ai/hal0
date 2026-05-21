@@ -149,6 +149,27 @@ class Conflict(Hal0Error):
     status = 409
 
 
+class UnsupportedMediaType(Hal0Error):
+    """415 — the request body's media type is not one the route can handle.
+
+    Use this when the route received bytes labelled as one type but couldn't
+    decode them (e.g. ``/v1/audio/transcriptions`` got a multipart upload
+    whose file part wasn't actually audio the upstream could decode). The
+    default ``code`` lives in the ``audio.*`` namespace because that's the
+    only current call site; override per-raise for other media surfaces.
+
+    Example::
+
+        raise UnsupportedMediaType(
+            "unsupported audio format; expected wav/mp3/flac/ogg/m4a/webm",
+            code="audio.unsupported_format",
+        )
+    """
+
+    code = "audio.unsupported_format"
+    status = 415
+
+
 class UnprocessableEntity(Hal0Error):
     """422 — the request was well-formed but failed business-rule validation.
 
@@ -182,4 +203,5 @@ __all__ = [
     "NotFound",
     "Unauthorized",
     "UnprocessableEntity",
+    "UnsupportedMediaType",
 ]

@@ -63,21 +63,22 @@ def test_v1_routes_are_no_longer_501_stubs(client: TestClient) -> None:
             assert r.json()["error"]["code"] != "system.not_implemented"
 
 
-# ── issue #34: missing-model on /v1/audio/* → 400, not 404 ─────────────────
+# ── issue #34 / harness #18: missing-model on /v1/audio/* → 400, not 404 ───
 
 
 def test_v1_audio_speech_missing_model_returns_400(client: TestClient) -> None:
-    """POST /v1/audio/speech without 'model' → 400 validation.invalid.
+    """POST /v1/audio/speech without 'model' → 400 request.missing_model.
 
     Pre-issue-#34 the dispatcher's default-model + no-route fallback
     surfaced a confusing 404 ('dispatch.no_route'). The route now raises
     BadRequest up front so OpenAI clients see a useful error message
-    naming the missing field.
+    naming the missing field. Code lives in the ``request.*`` namespace
+    per harness finding #18.
     """
     r = client.post("/v1/audio/speech", json={"input": "hello", "voice": "alloy"})
     assert r.status_code == 400, r.text
     body = r.json()
-    assert body["error"]["code"] == "validation.invalid"
+    assert body["error"]["code"] == "request.missing_model"
     assert "model" in body["error"]["message"].lower()
 
 
@@ -85,7 +86,7 @@ def test_v1_audio_speech_empty_model_returns_400(client: TestClient) -> None:
     """An empty / whitespace-only model field is treated as missing."""
     r = client.post("/v1/audio/speech", json={"model": "   ", "input": "hi"})
     assert r.status_code == 400, r.text
-    assert r.json()["error"]["code"] == "validation.invalid"
+    assert r.json()["error"]["code"] == "request.missing_model"
 
 
 def test_v1_audio_transcriptions_missing_model_returns_400(client: TestClient) -> None:
@@ -100,5 +101,5 @@ def test_v1_audio_transcriptions_missing_model_returns_400(client: TestClient) -
     r = client.post("/v1/audio/transcriptions", files=files)
     assert r.status_code == 400, r.text
     body = r.json()
-    assert body["error"]["code"] == "validation.invalid"
+    assert body["error"]["code"] == "request.missing_model"
     assert "model" in body["error"]["message"].lower()

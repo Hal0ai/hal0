@@ -35,7 +35,7 @@ from fastapi import APIRouter, Depends, Request
 
 from hal0 import __version__
 from hal0.api.middleware.auth import require_writer
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
 from hal0.updater import Updater, fetch_release_manifest, releases_url
@@ -274,6 +274,9 @@ async def rollback_update(request: Request) -> dict[str, Any]:
     try:
         await updater.rollback()
     except NotImplementedError as exc:
+        # 5xx: feature not yet implemented on the server side; not a
+        # client validation failure. Leave at the default 500 envelope
+        # until Team D ports the real symlink-swap path.
         raise Hal0Error(
             f"rollback not yet implemented: {exc}",
             details={"channel": channel, "owner": "team-d"},
@@ -310,14 +313,19 @@ async def set_channel(request: Request) -> dict[str, str]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest(
+            "request body must be valid JSON",
+            details={"error": str(exc)},
+            code="request.invalid_json",
+        ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
     channel = body.get("channel")
     if not isinstance(channel, str) or channel not in _VALID_CHANNELS:
-        raise Hal0Error(
+        raise BadRequest(
             f"channel must be one of {sorted(_VALID_CHANNELS)}",
             details={"got": channel, "allowed": sorted(_VALID_CHANNELS)},
+            code="channel.unknown",
         )
 
     current = getattr(request.app.state, "hal0_config", None)
@@ -328,9 +336,10 @@ async def set_channel(request: Request) -> dict[str, str]:
     try:
         merged = Hal0Config.model_validate(merged_raw)
     except Exception as exc:
-        raise Hal0Error(
+        raise BadRequest(
             f"could not validate channel update: {exc}",
             details={"error": str(exc)},
+            code="channel.invalid",
         ) from exc
     try:
         save_hal0_config(merged)

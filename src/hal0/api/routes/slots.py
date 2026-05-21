@@ -53,6 +53,8 @@ def _get_slot_manager(request: Request) -> SlotManager:
     """
     sm = getattr(request.app.state, "slot_manager", None)
     if sm is None:
+        # 5xx: internal invariant — the lifespan should always wire this.
+        # Not a client validation failure, so it stays at the default 500.
         raise Hal0Error(
             "slot_manager not initialised on app.state",
             details={"hint": "lifespan did not run"},
@@ -564,12 +566,13 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error(
+        raise BadRequest(
             "request body must be valid JSON",
             details={"error": str(exc)},
+            code="request.invalid_json",
         ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
     snap = await sm.update_config(name, body)
     return _slot_to_dict(snap, request)
 
@@ -585,9 +588,13 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest(
+            "request body must be valid JSON",
+            details={"error": str(exc)},
+            code="request.invalid_json",
+        ) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("request body must be a JSON object")
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
     snap = await sm.update_config(name, {"model": body})
     return _slot_to_dict(snap, request)
 
@@ -599,10 +606,17 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest(
+            "request body must be valid JSON",
+            details={"error": str(exc)},
+            code="request.invalid_json",
+        ) from exc
     backend = body.get("backend") if isinstance(body, dict) else None
     if not isinstance(backend, str) or not backend.strip():
-        raise Hal0Error("'backend' is required in request body")
+        raise BadRequest(
+            "'backend' is required in request body",
+            code="backend.missing",
+        )
     snap = await sm.update_config(name, {"backend": backend})
     return _slot_to_dict(snap, request)
 
@@ -677,9 +691,10 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
         body = {}
     model_id = body.get("model_id") if isinstance(body, dict) else None
     if not model_id:
-        raise Hal0Error(
+        raise BadRequest(
             "swap requires a non-empty model_id in the request body",
             details={"slot": name},
+            code="swap.missing_model",
         )
     registry = getattr(request.app.state, "model_registry", None)
     if registry is not None and not registry.has(model_id):
