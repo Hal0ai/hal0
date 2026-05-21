@@ -43,6 +43,24 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
         yield c
 
 
+@pytest.fixture
+def auth_app_trusted_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """auth_app variant that opts in to trusting X-Forwarded-Email.
+
+    The default install REJECTS the header (post-§26 fix); operators behind
+    a trusted edge proxy that validates the email themselves set
+    ``HAL0_TRUST_FORWARDED_EMAIL=1`` to re-enable that path.
+    """
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
+    monkeypatch.setenv("HAL0_TRUST_FORWARDED_EMAIL", "1")
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    app = create_app()
+    with TestClient(app) as c:
+        store = TokenStore(tmp_path / "tokens.toml")
+        c.app.state.token_store = store
+        yield c
+
+
 # ── HAL0_AUTH_ENABLED=0 (default) — pass-through ──────────────────────────────
 
 
@@ -152,21 +170,35 @@ def test_malformed_bearer_falls_through_to_required(auth_app: TestClient) -> Non
     assert response.json()["error"]["code"] == "auth.required"
 
 
-# ── X-Forwarded-Email path (Caddy basic_auth at the edge) ─────────────────────
+# ── X-Forwarded-Email path (post-§26 fix: opt-in only) ────────────────────────
 
 
-def test_forwarded_email_grants_admin_access(auth_app: TestClient) -> None:
-    """When Caddy validates basic_auth and forwards the email, we trust it."""
+def test_forwarded_email_ignored_by_default(auth_app: TestClient) -> None:
+    """Default install (HAL0_TRUST_FORWARDED_EMAIL unset) MUST ignore the header.
+
+    Regression guard for harness finding #26 — the bypass was that any LAN
+    peer could send X-Forwarded-Email and be granted admin scope.
+    """
     response = auth_app.get(
+        "/api/slots",
+        headers={"X-Forwarded-Email": "alex@example.com"},
+    )
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == "auth.required"
+
+
+def test_forwarded_email_grants_admin_access(auth_app_trusted_proxy: TestClient) -> None:
+    """When HAL0_TRUST_FORWARDED_EMAIL=1, the edge-validated email is honoured."""
+    response = auth_app_trusted_proxy.get(
         "/api/slots",
         headers={"X-Forwarded-Email": "alex@example.com"},
     )
     assert response.status_code == 200, response.text
 
 
-def test_forwarded_email_grants_admin_scope(auth_app: TestClient) -> None:
-    """The /api/auth/me endpoint should report scope=admin for the forwarded user."""
-    response = auth_app.get(
+def test_forwarded_email_grants_admin_scope(auth_app_trusted_proxy: TestClient) -> None:
+    """With trust env var set, /api/auth/me reports scope=admin for the forwarded user."""
+    response = auth_app_trusted_proxy.get(
         "/api/auth/me",
         headers={"X-Forwarded-Email": "alex@example.com"},
     )
@@ -177,11 +209,13 @@ def test_forwarded_email_grants_admin_scope(auth_app: TestClient) -> None:
     assert body["source"] == "forwarded"
 
 
-def test_bearer_takes_precedence_over_forwarded(auth_app: TestClient) -> None:
-    """Valid Bearer token wins over X-Forwarded-Email; invalid Bearer 401s."""
-    store: TokenStore = auth_app.app.state.token_store
+def test_bearer_takes_precedence_over_forwarded(
+    auth_app_trusted_proxy: TestClient,
+) -> None:
+    """Even when forwarded-email is trusted, a valid Bearer wins; invalid 401s."""
+    store: TokenStore = auth_app_trusted_proxy.app.state.token_store
     _, raw = store.create(label="bridge", scope="v1-only")
-    response = auth_app.get(
+    response = auth_app_trusted_proxy.get(
         "/api/auth/me",
         headers={
             "Authorization": f"Bearer {raw}",
@@ -196,9 +230,11 @@ def test_bearer_takes_precedence_over_forwarded(auth_app: TestClient) -> None:
     assert body["source"] == "token"
 
 
-def test_invalid_bearer_blocks_even_with_forwarded(auth_app: TestClient) -> None:
-    """A bad Bearer + a good X-Forwarded-Email still 401s — Bearer is authoritative."""
-    response = auth_app.get(
+def test_invalid_bearer_blocks_even_with_forwarded(
+    auth_app_trusted_proxy: TestClient,
+) -> None:
+    """Even when forwarded-email is trusted, a bad Bearer + good forwarded still 401s."""
+    response = auth_app_trusted_proxy.get(
         "/api/slots",
         headers={
             "Authorization": "Bearer hal0_deadbeef.bad",

@@ -55,11 +55,14 @@ Auth precedence
 2. ``hal0_session`` cookie present (ADR-0001 Child A) → validate signed
    JWT claims. Failure ⇒ 401 (``auth.invalid``).
 
-3. ``X-Forwarded-Email`` present (a trusted upstream proxy validated the
-   identity and forwarded it) → trust it. Scope = ``"admin"``. This path
-   stays around for users fronting hal0 with their own SSO proxy
-   (Authelia, Authentik, Cloudflare Access, Pangolin etc.) — hal0's own
-   Caddy no longer sets it.
+3. ``X-Forwarded-Email`` present AND ``HAL0_TRUST_FORWARDED_EMAIL=1``
+   in the environment → trust it. Scope = ``"admin"``. The opt-in
+   env-var is mandatory because hal0's own Caddy (post-ADR-0001
+   Child B) no longer sets or strips this header — trusting it on a
+   default install would let any LAN peer spoof admin. Operators
+   fronting hal0 with their own SSO proxy (Authelia, Authentik,
+   Cloudflare Access, Pangolin) flip the env var ON once they've
+   configured their proxy to set + strip the header.
 
 4. Else → 401 (``auth.required``).
 
@@ -81,6 +84,7 @@ the request when auth fails is the whole point.
 from __future__ import annotations
 
 import hmac
+import os
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -99,6 +103,17 @@ from hal0.errors import Hal0Error
 _BEARER_HEADER = "authorization"
 _BEARER_PREFIX = "Bearer "
 _FORWARDED_EMAIL_HEADER = "x-forwarded-email"
+
+# X-Forwarded-Email opt-in env-var. ADR-0001 Child B removed Caddy's
+# basic_auth, so hal0's own bundled Caddy no longer SETS this header —
+# and the bundled Caddyfile.template does NOT strip inbound copies.
+# Trusting the header by default would let any LAN peer authenticate as
+# admin by sending ``X-Forwarded-Email: anyone@example.com``. Operators
+# fronting hal0 with their own SSO proxy (Authelia, Authentik,
+# Cloudflare Access, Pangolin, etc.) opt back in by setting this env
+# var AND configuring their proxy to set + strip the header — see the
+# deployment docs.
+_FORWARDED_EMAIL_TRUST_ENV = "HAL0_TRUST_FORWARDED_EMAIL"
 
 # Session-cookie surface added by ADR-0001 Child A. The cookie name is
 # part of the API contract — the Set-Cookie issued by /api/auth/login,
@@ -252,14 +267,32 @@ def _resolve_session_cookie(request: Request) -> str | None:
     return raw.strip() or None
 
 
-def _resolve_forwarded_email(request: Request) -> str | None:
-    """Extract the trusted email from the Caddy-forwarded header.
+def _forwarded_email_trusted() -> bool:
+    """Return True iff the operator opted into trusting X-Forwarded-Email.
 
-    The header is only trusted because Caddy strips inbound copies before
-    forwarding (see Caddyfile template). On a misconfigured proxy this
-    would let a client spoof identity — the deployment doc spells this
-    out and the installer hard-fails if Caddy isn't fronting the API.
+    Disabled by default after ADR-0001 Child B because the bundled Caddy
+    no longer strips inbound copies of the header — trusting it on a
+    default install lets any LAN peer authenticate as admin. Operators
+    fronting hal0 with their own SSO proxy (Authelia, Authentik,
+    Cloudflare Access, Pangolin) set ``HAL0_TRUST_FORWARDED_EMAIL=1``
+    once they've verified their proxy sets + strips the header.
     """
+    val = os.environ.get(_FORWARDED_EMAIL_TRUST_ENV, "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def _resolve_forwarded_email(request: Request) -> str | None:
+    """Extract the trusted email from the upstream SSO-proxy-forwarded header.
+
+    Returns None when the operator has not opted into trusting the header
+    via ``HAL0_TRUST_FORWARDED_EMAIL=1``. On a default install (where
+    Caddy is a dumb TLS terminator + reverse_proxy and does NOT strip
+    inbound copies) the header is attacker-controlled and must not gate
+    auth. Operators with their own SSO proxy configured to set + strip
+    the header opt back in via the env var.
+    """
+    if not _forwarded_email_trusted():
+        return None
     raw = request.headers.get(_FORWARDED_EMAIL_HEADER)
     if not raw:
         return None

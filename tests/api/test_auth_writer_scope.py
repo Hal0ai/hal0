@@ -45,6 +45,18 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
         yield c
 
 
+@pytest.fixture
+def auth_app_trusted_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """auth_app variant that opts in to trusting X-Forwarded-Email (§26)."""
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
+    monkeypatch.setenv("HAL0_TRUST_FORWARDED_EMAIL", "1")
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    app = create_app()
+    with TestClient(app) as c:
+        c.app.state.token_store = TokenStore(tmp_path / "tokens.toml")
+        yield c
+
+
 def _bearer(auth_app: TestClient, scope: str, label: str | None = None) -> dict[str, str]:
     """Mint a token at ``scope`` and return its Bearer header dict."""
     store: TokenStore = auth_app.app.state.token_store
@@ -172,12 +184,23 @@ def test_writer_routes_require_auth(
     assert response.json()["error"]["code"] == "auth.required"
 
 
-# ── X-Forwarded-Email (Caddy basic_auth) is admin-scoped, so writes work ──────
+# ── X-Forwarded-Email (post-§26 fix: opt-in only) ─────────────────────────────
 
 
-def test_forwarded_email_can_write(auth_app: TestClient) -> None:
-    """Caddy-forwarded identities map to scope=admin → writer access."""
+def test_forwarded_email_writes_blocked_by_default(auth_app: TestClient) -> None:
+    """Default install MUST 401 on X-Forwarded-Email writes (§26 regression guard)."""
     response = auth_app.put(
+        "/api/settings",
+        json={},
+        headers={"X-Forwarded-Email": "owner@example.com"},
+    )
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == "auth.required"
+
+
+def test_forwarded_email_can_write(auth_app_trusted_proxy: TestClient) -> None:
+    """With HAL0_TRUST_FORWARDED_EMAIL=1, forwarded identity gets writer access."""
+    response = auth_app_trusted_proxy.put(
         "/api/settings",
         json={},
         headers={"X-Forwarded-Email": "owner@example.com"},
