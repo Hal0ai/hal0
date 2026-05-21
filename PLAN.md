@@ -607,6 +607,20 @@ drops the prior host bind-mount entirely. The `FLMProvider` invokes
 namespace (`b90a569`), so the dashboard NPU rollup advertises only
 models FLM can actually serve.
 
+**NPU dashboard pull (2026-05-21):** the dashboard can now pull FLM
+tags end-to-end (PR #89). Two fixes shipped together: the catalog
+probe + the new pull path both bind-mount `HAL0_FLM_MODELS_DIR` to
+`/var/lib/hal0/.config/flm/models` (the toolbox image's non-root
+`hal0` HOME, not `/root`), so `flm list` and `flm pull` see and
+persist into the host-managed model cache. `POST /api/models/{id}/pull`
+detects FLM tags via `is_flm_tag()` and routes them through
+`run_flm_pull()`, which shells out to `flm pull <tag>`, parses the
+`Downloading: …%` progress lines, and writes an HF-shaped registry
+entry on completion. `pullable=True` now propagates to FLM rows in
+the capability catalog. Verified live with `gemma3:1b` (~18 s for
+1.26 GB). FLM-aware pull was the last v0.2 follow-up still listed
+on the public roadmap; closed.
+
 **Moonshine rebuild (2026-05-20):** Republished `hal0-toolbox-moonshine:v1`
 at digest `sha256:a5bbb78b…` after fixing `moonshine_server.py` to pass
 both `models_dir` and `model_name` to `MoonshineOnnxModel` (commit
