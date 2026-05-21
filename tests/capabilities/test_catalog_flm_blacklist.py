@@ -48,9 +48,7 @@ def flm_entries() -> list[dict[str, Any]]:
 def test_broken_tag_hidden_from_chat_rows(
     monkeypatch: pytest.MonkeyPatch, flm_entries: list[dict[str, Any]]
 ) -> None:
-    monkeypatch.setattr(
-        "hal0.providers.flm.flm_served_models", lambda: flm_entries
-    )
+    monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: flm_entries)
     rows = catalog._flm_rows_for_capability("chat")
 
     ids = {row["id"] for row in rows}
