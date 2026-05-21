@@ -31,6 +31,9 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     Yields a TestClient whose underlying app exposes the swapped store at
     ``app.state.token_store`` so tests can mint tokens through it.
     """
+    # The autouse conftest fixture sets HAL0_AUTH_DISABLED=1 — undo here so
+    # the explicit HAL0_AUTH_ENABLED=1 takes effect for this app instance.
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     app = create_app()
@@ -61,11 +64,18 @@ def auth_app_trusted_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
         yield c
 
 
-# ── HAL0_AUTH_ENABLED=0 (default) — pass-through ──────────────────────────────
+# ── HAL0_AUTH_DISABLED=1 (test default) — pass-through ────────────────────────
 
 
 def test_auth_disabled_protected_route_open(client: TestClient) -> None:
-    """When HAL0_AUTH_ENABLED is unset, protected routes work without auth."""
+    """When HAL0_AUTH_DISABLED is set, protected routes work without auth.
+
+    The conftest autouse fixture sets ``HAL0_AUTH_DISABLED=1`` for every
+    test by default (so the pre-v1 test suite keeps passing under the
+    v1.0 auth-on-by-default flip). This test asserts that override
+    still bypasses the gate the same way unsetting HAL0_AUTH_ENABLED did
+    pre-v1.
+    """
     # /api/slots is normally admin-protected when auth is on.
     response = client.get("/api/slots")
     assert response.status_code == 200, response.text
@@ -289,3 +299,197 @@ def test_auth_status_reports_disabled(client: TestClient) -> None:
     response = client.get("/api/auth/status")
     assert response.status_code == 200
     assert response.json()["enabled"] is False
+
+
+# ── §36 — auth on by default + first-run claim window ────────────────────────
+
+
+def test_auth_enabled_default_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Security review §36: ``auth_enabled()`` defaults to True.
+
+    Pre-v1 the default was False — anyone running ``curl install | bash``
+    on a multi-tenant LAN got a wide-open dashboard. v1 flips the
+    default so the wizard owns the credential-capture step before any
+    state-changing API call succeeds.
+    """
+    from hal0.auth.tokens import auth_enabled
+
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
+    monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
+    assert auth_enabled() is True
+
+
+def test_hal0_auth_disabled_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The opt-out env var beats an explicit enable.
+
+    Useful for CI fixtures that pass through host env vars: setting
+    HAL0_AUTH_DISABLED=1 in the test runner short-circuits every gate
+    even if a downstream tool also sets HAL0_AUTH_ENABLED=1.
+    """
+    from hal0.auth.tokens import auth_enabled
+
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
+    monkeypatch.setenv("HAL0_AUTH_DISABLED", "1")
+    assert auth_enabled() is False
+
+
+@pytest.mark.parametrize("val", ["0", "false", "no", "off", ""])
+def test_hal0_auth_enabled_explicit_falsy_disables(
+    monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    """Explicit falsy ``HAL0_AUTH_ENABLED`` still turns auth off.
+
+    Operators who scripted ``HAL0_AUTH_ENABLED=0`` into their unit
+    file before the v1 flip should still see the same behaviour after
+    upgrading — surprising them with a locked dashboard on next restart
+    would be worse than the breakage from the original posture.
+    """
+    from hal0.auth.tokens import auth_enabled
+
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", val)
+    assert auth_enabled() is False
+
+
+def test_first_run_claim_lockfile_unlocks_install_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lockfile + no-password lets anonymous hit the wizard claim paths.
+
+    Models the production first-run window: the installer drops
+    ``$VAR_LIB/.first-run.lock``, no owner password is set yet, and the
+    wizard needs to reach POST /api/install/probe and POST
+    /api/auth/password without yet holding a credential. The middleware
+    short-circuits to an anonymous identity on those paths and leaves
+    every other admin route locked.
+
+    Today the install routes are mounted without an auth dep so this
+    test exercises the helper-side state more than the wiring; once
+    §28/§29 land and attach require_writer to /api/install/*, the
+    helper becomes load-bearing.
+    """
+    from hal0.api.middleware.auth import _first_run_claim_active
+
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+
+    # Plant the lockfile where paths.first_run_lock() looks for it.
+    from hal0.config import paths
+
+    lock = paths.first_run_lock()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("otp=deadbeefcafebabe1234567890abcdef\n", encoding="utf-8")
+    lock.chmod(0o600)
+
+    app = create_app()
+    with TestClient(app):
+        # Sanity: lockfile present + password unset → claim helper True
+        # for the install paths only. Use a request scope to drive
+        # _first_run_claim_active. (We don't actually fire HTTP requests
+        # here — the TestClient is just running lifespan so app.state
+        # is fully initialised when the helper resolves the token store.)
+        from starlette.requests import Request
+
+        async def receive() -> dict:
+            return {"type": "http.request"}
+
+        for path in ("/api/install/probe", "/api/auth/password"):
+            scope = {
+                "type": "http",
+                "method": "POST",
+                "path": path,
+                "headers": [],
+                "query_string": b"",
+                "app": app,
+            }
+            req = Request(scope, receive)
+            assert _first_run_claim_active(req) is True, (
+                f"first-run claim should unlock {path} when lockfile present + no password"
+            )
+
+        # An admin route is NOT in the claim path-list and stays locked.
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/slots",
+            "headers": [],
+            "query_string": b"",
+            "app": app,
+        }
+        req = Request(scope, receive)
+        assert _first_run_claim_active(req) is False, (
+            "admin routes must not be unlocked by the first-run claim window"
+        )
+
+        # Without the lockfile, even the wizard paths stay locked — the
+        # installer's lockfile is the trust anchor for the claim.
+        lock.unlink()
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/auth/password",
+            "headers": [],
+            "query_string": b"",
+            "app": app,
+        }
+        req = Request(scope, receive)
+        assert _first_run_claim_active(req) is False, (
+            "claim window must close when the lockfile is absent"
+        )
+
+
+def test_locked_admin_route_returns_401_with_auth_default_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With HAL0_AUTH_ENABLED unset (new default), /api/slots 401s.
+
+    This is the headline test for §36: a freshly-built app with no env
+    overrides at all enforces auth on every admin route. Pre-v1 this
+    test would have returned 200 (the route was wide open).
+    """
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
+    monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+
+    app = create_app()
+    with TestClient(app) as c:
+        response = c.get("/api/slots")
+        assert response.status_code == 401, (
+            f"v1.0 default install must lock /api/slots without creds; got {response.status_code}"
+        )
+        assert response.json()["error"]["code"] == "auth.required"
+
+
+def test_install_routes_remain_reachable_under_default_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wizard's read-state endpoint stays public under the default lock.
+
+    The first-run wizard renders before any credential exists, so
+    ``GET /api/install/state`` must be reachable without auth even
+    with the v1.0 default-on flip. This is the practical lower bound
+    on "is the wizard still usable" — if this 401s, fresh installs
+    are bricked.
+    """
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
+    monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+
+    app = create_app()
+    with TestClient(app) as c:
+        response = c.get("/api/install/state")
+        assert response.status_code == 200, (
+            f"first-run wizard must reach /api/install/state under default lock; "
+            f"got {response.status_code}: {response.text}"
+        )
+
+        # POST /api/auth/password is also reachable on first run — it's
+        # the wizard's password-claim endpoint and it has its own gate
+        # (no-password-set → no creds required).
+        response = c.post("/api/auth/password", json={"password": "hunter2hunter2"})
+        # The endpoint may 400 on its own validation (e.g. short password),
+        # but it must NOT 401: the wizard's claim path must be reachable.
+        assert response.status_code != 401, (
+            f"first-run set-password must be reachable without creds; got {response.text}"
+        )

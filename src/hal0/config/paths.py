@@ -125,6 +125,28 @@ def hal0_toml() -> Path:
     return etc() / "hal0.toml"
 
 
+def first_run_lock() -> Path:
+    """Return the first-run claim lockfile path.
+
+    The lockfile is dropped by ``installer/install.sh`` on a fresh
+    install and contains a single-use OTP (UUID hex) that the wizard
+    presents back to the API to claim ownership before any password is
+    set. Once the wizard finishes and the operator's password is set,
+    the auth surface uses cookies + Bearer tokens and the lockfile is
+    deleted.
+
+    Location: ``$HAL0_HOME/var-lib/hal0/.first-run.lock`` (or
+    ``/var/lib/hal0/.first-run.lock`` in production). Lives alongside
+    ``.first_run_done`` so a single ``rm -rf /var/lib/hal0`` clears
+    both. Mode 0600 — the OTP is the key to first-run claim, so it
+    must not be world-readable.
+
+    See FINDINGS.md §28 (lockfile consumption) and §36 (the auth-on-
+    by-default flip this lockfile bridges).
+    """
+    return var_lib() / ".first-run.lock"
+
+
 def manifest_json() -> Path:
     """Return the release manifest path.
 

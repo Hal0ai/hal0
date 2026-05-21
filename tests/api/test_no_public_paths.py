@@ -63,6 +63,7 @@ def test_require_token_unless_public_no_longer_exists() -> None:
 @pytest.fixture
 def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """Fresh app with HAL0_AUTH_ENABLED=1; token store rooted at tmp_path."""
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     app = create_app()

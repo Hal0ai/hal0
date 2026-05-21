@@ -203,6 +203,18 @@ else
     done
 fi
 
+# ── First-run claim lockfile ──────────────────────────────────────────────────
+# Always cleaned up — even on --keep-data — because the lockfile only has
+# meaning during the first-run claim window, and a leftover OTP after an
+# uninstall is a credential lying around with no semantics. Belt-and-braces
+# even though the file lives under ${VAR_DIR} (which we just rm -rf'd
+# when --keep-data was NOT passed).
+FIRST_RUN_LOCK="${VAR_DIR}/.first-run.lock"
+if [[ -f "${FIRST_RUN_LOCK}" ]]; then
+    rm -f "${FIRST_RUN_LOCK}"
+    info "Removed ${FIRST_RUN_LOCK}"
+fi
+
 # ── Dev-mode tree cleanup ─────────────────────────────────────────────────────
 # After removing the FHS-mirror subdirs, drop the now-empty PREFIX itself so
 # `install.sh --dev` can be re-run cleanly. Only do this if PREFIX is otherwise

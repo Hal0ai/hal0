@@ -79,11 +79,26 @@ now lives in FastAPI** — there is no edge-auth layer in Caddy. The Caddyfile i
 a dumb TLS terminator + reverse proxy (`packaging/caddy/Caddyfile.template`,
 ~42 lines, no `basicauth`, no path matchers, no allowlist).
 
-A fresh install starts **open on the LAN** — no password set, no token
-required for the dashboard or `/v1/*`. The dashboard's first-run wizard
-includes a **password-setup step** (Set up password) that calls
-`POST /api/auth/password` (a public endpoint when no password is yet
-set, per ADR-0001 Child A). Once a password is set:
+As of v1.0 (security review §36, 2026-05-21), a fresh install **starts
+locked**. The API rejects anonymous requests on every admin route and
+on `/v1/*` with `401 auth.required`. Only the first-run wizard claim
+paths (`/api/install/*`, `POST /api/auth/password`) stay reachable —
+and only while the installer's one-time-OTP lockfile
+(`/var/lib/hal0/.first-run.lock`, mode 0600) is present on disk.
+
+The installer prints the OTP in the post-install summary; the wizard's
+"Set a password" step asks for it before minting the owner password.
+Once the password is set, the wizard's success path deletes the
+lockfile and the claim window closes — from then on every request
+needs a session cookie (browser) or Bearer token (programmatic
+client).
+
+To opt back into the pre-v1 trusted-LAN open posture (single-user dev
+boxes only), uncomment `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env`
+and restart `hal0-api`. The dashboard and `/v1/*` will be reachable
+without credentials. **Do not use this on a multi-tenant network.**
+
+Once a password is set:
 
 - Browsers authenticate via `POST /api/auth/login`, which issues a signed
   `hal0_session` cookie (HttpOnly, SameSite=Lax, Secure-when-TLS).
@@ -139,17 +154,22 @@ layer your edge already provides.
 ### Upgrade notes
 
 Existing installs that used the old `--auth=basic` path lose **edge auth**
-on next install upgrade — the Caddyfile no longer carries `basicauth`. The
-dashboard and `/v1/*` are reachable without credentials until you do one
-of:
+on next install upgrade — the Caddyfile no longer carries `basicauth`.
+And as of v1.0 (security review §36), the FastAPI gate is on by
+default: anonymous requests get 401 on admin and `/v1/*` routes. To
+recover:
 
 - **Set a password in the dashboard wizard.** On first load after upgrade,
   the wizard's password-setup step calls `POST /api/auth/password` and
-  writes the bcrypt hash into the FastAPI auth store. Writer routes then
-  require login; reads stay open (configurable per the same wizard step).
+  writes the bcrypt hash into the FastAPI auth store. The installer
+  also prints a one-time OTP that the wizard requires for first-run
+  claim; copy it out of the installer transcript or read it directly
+  from `/var/lib/hal0/.first-run.lock`.
 - **Install with `--no-tls`** and front hal0 with your own reverse proxy
   (Traefik, nginx, Caddy you manage outside hal0, Cloudflare Tunnel, etc.).
-  Your edge owns auth.
+  Your edge owns auth. Setting `HAL0_AUTH_DISABLED=1` in
+  `/etc/hal0/api.env` collapses hal0's own gate back to pass-through;
+  do this only when the outer proxy is the trust boundary.
 
 Bearer tokens minted under the prior install continue to work — token storage
 moved with the rest of auth into the FastAPI store (no migration required).

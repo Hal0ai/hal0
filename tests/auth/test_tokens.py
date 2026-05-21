@@ -33,8 +33,28 @@ def store(tmp_path: Path) -> TokenStore:
     return TokenStore(tmp_path / "tokens.toml")
 
 
-def test_auth_enabled_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_enabled_default_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v1.0 flip (security review §36): unset → True.
+
+    Pre-v1 this test asserted ``is False`` — open by default. The flip
+    is the headline behaviour change of §36's fix.
+    """
     monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
+    assert auth_enabled() is True
+
+
+def test_auth_disabled_env_opts_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``HAL0_AUTH_DISABLED=1`` is the v1.0 opt-out for trusted-LAN dev."""
+    monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
+    monkeypatch.setenv("HAL0_AUTH_DISABLED", "1")
+    assert auth_enabled() is False
+
+
+def test_disabled_beats_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit opt-out wins over an explicit opt-in."""
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
+    monkeypatch.setenv("HAL0_AUTH_DISABLED", "1")
     assert auth_enabled() is False
 
 
@@ -53,6 +73,9 @@ def test_auth_enabled_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     ],
 )
 def test_auth_enabled_env_parse(monkeypatch: pytest.MonkeyPatch, val: str, expected: bool) -> None:
+    # HAL0_AUTH_DISABLED must be unset so HAL0_AUTH_ENABLED is what's
+    # tested. (The conftest autouse sets DISABLED=1 by default.)
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("HAL0_AUTH_ENABLED", val)
     assert auth_enabled() is expected
 

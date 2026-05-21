@@ -382,11 +382,61 @@ if [[ ! -f "${API_ENV}" ]]; then
     cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
+# Auth is **on by default** as of v1.0 (security review §36). The wizard
+# captures the owner password on first visit; until then, only the wizard
+# claim paths (/api/install/*, /api/auth/password) are reachable without
+# credentials. Set HAL0_AUTH_DISABLED=1 to opt back into the pre-v1
+# trusted-LAN open posture — only safe on single-user dev boxes.
+# HAL0_AUTH_DISABLED=1
 # Uncomment to pin specific toolbox images:
 # HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0ai/hal0-toolbox-vulkan:v1
 # HAL0_TOOLBOX_IMAGE_ROCM=ghcr.io/hal0ai/hal0-toolbox-rocm:v1
 EOF
     info "wrote ${API_ENV}"
+fi
+
+# ── First-run claim lockfile ─────────────────────────────────────────
+# Per security review §36 (auth-on-by-default) + §28 (first-run claim
+# race), drop a one-time-password lockfile that scopes the
+# unauthenticated wizard window to operators who can read this file on
+# disk. The middleware honours the lockfile only while the owner
+# password is unset; once the wizard finishes, the file is deleted.
+#
+# The OTP is a UUID hex (128 bits, plenty for a one-shot bootstrap).
+# Owner = the API service user (root in the v1 install layout — see
+# HAL0_USER above). Mode 0600 so neighbours on the host cannot read
+# the value out of band. The summary box surfaces it once at the end
+# of the install for the operator to type into the wizard's first
+# prompt.
+FIRST_RUN_LOCK="${VAR_DIR}/.first-run.lock"
+FIRST_RUN_OTP=""
+if [[ ! -f "${FIRST_RUN_LOCK}" ]]; then
+    # Mint a UUID OTP. ``uuidgen`` lives in util-linux on every host
+    # we ship to; falling back to ``/proc/sys/kernel/random/uuid``
+    # keeps minimal containers (no util-linux) working.
+    if command -v uuidgen >/dev/null 2>&1; then
+        FIRST_RUN_OTP="$(uuidgen | tr -d '-' | tr 'A-Z' 'a-z')"
+    elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+        FIRST_RUN_OTP="$(tr -d '-' </proc/sys/kernel/random/uuid)"
+    else
+        FIRST_RUN_OTP="$(${PY} -c 'import uuid; print(uuid.uuid4().hex)')"
+    fi
+    # Write atomically: temp file in the same directory + rename, so a
+    # crash mid-write doesn't leave a half-empty lockfile with the wrong
+    # mode. ``install -m 0600`` would also set ownership, but we just
+    # need mode here — the service user owns ${VAR_DIR} already.
+    LOCK_TMP="$(mktemp "${FIRST_RUN_LOCK}.XXXXXX")"
+    printf 'otp=%s\n' "${FIRST_RUN_OTP}" > "${LOCK_TMP}"
+    chmod 0600 "${LOCK_TMP}"
+    mv "${LOCK_TMP}" "${FIRST_RUN_LOCK}"
+    info "wrote ${FIRST_RUN_LOCK} (first-run claim OTP, mode 0600)"
+else
+    # Idempotent rerun: keep the existing OTP in place so a re-run
+    # doesn't invalidate a token the operator already noted from a
+    # prior install attempt. Parse out the value to redisplay in the
+    # summary box.
+    FIRST_RUN_OTP="$(awk -F= '$1=="otp"{print $2; exit}' "${FIRST_RUN_LOCK}" 2>/dev/null || true)"
+    info "${FIRST_RUN_LOCK} already exists — reusing existing OTP"
 fi
 
 UPSTREAMS_TOML="${ETC_DIR}/upstreams.toml"
@@ -528,17 +578,11 @@ PY
         warn "avahi-daemon not present; add an /etc/hosts entry on clients: '<this-host-ip> ${HAL0_PUBLIC_HOST}'"
     fi
 
-    # Flip the runtime auth flag for hal0-api. Auth still defaults to
-    # "open" until the wizard sets a password — see
-    # src/hal0/api/routes/auth.py for the first-run claim path.
-    if [[ -f "${API_ENV}" ]]; then
-        if grep -q '^HAL0_AUTH_ENABLED=' "${API_ENV}"; then
-            sed -i 's|^HAL0_AUTH_ENABLED=.*|HAL0_AUTH_ENABLED=1|' "${API_ENV}"
-        else
-            echo "HAL0_AUTH_ENABLED=1" >> "${API_ENV}"
-        fi
-        info "set HAL0_AUTH_ENABLED=1 in ${API_ENV}"
-    fi
+    # Auth is on by default at the API level (v1.0 security review §36)
+    # — we still flip OpenWebUI's prewire to use the Caddy SSO header
+    # because that's a Caddy-fronted concern. For the API itself the
+    # env var is the legacy switch; the new HAL0_AUTH_DISABLED escape
+    # hatch is documented in the api.env template instead.
     HAL0_AUTH_ENABLED_FOR_RENDER="1"
 fi
 
@@ -888,27 +932,41 @@ SUMMARY_LINES=(
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
     if [[ "${NO_TLS}" -eq 0 ]]; then
         # TLS-default install: Caddy fronts both services, dashboard
-        # lives on https://<public-host>/. The wizard captures a
-        # password on first visit; until set, the API is reachable
-        # without credentials on the LAN (intentional — see ADR-0001
-        # "First-run posture").
+        # lives on https://<public-host>/. Auth is **on by default**
+        # (v1.0 security review §36); the wizard captures the owner
+        # password using the one-time OTP printed below.
         HOSTNAME_FOR_DISPLAY="${HAL0_PUBLIC_HOST:-hal0.local}"
         SUMMARY_LINES+=(
             "$(printf 'Dashboard   %shttps://%s/%s' "${BLU}" "${HOSTNAME_FOR_DISPLAY}" "${RST}")"
             "$(printf 'Chat        %shttp://%s:3001%s' "${BLU}" "${HOST}" "${RST}")"
-            "$(printf 'Auth        %sopen — set a password in the wizard or Settings → Authentication%s' "${DIM}" "${RST}")"
+            "$(printf 'Auth        %slocked — finish first-run wizard to set a password%s' "${DIM}" "${RST}")"
             "$(printf 'Logs        %sjournalctl -fu hal0-caddy hal0-api hal0-openwebui%s' "${DIM}" "${RST}")"
         )
     else
         # --no-tls: API binds 0.0.0.0:8080 directly. No TLS, no edge
-        # proxy. Auth (password + tokens) still works — same as the
-        # TLS path, just over HTTP.
+        # proxy. Auth is still on by default; only the wizard claim
+        # paths are reachable until the operator sets a password.
         SUMMARY_LINES+=(
             "$(printf 'Dashboard   %shttp://%s:%s%s' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}")"
             "$(printf 'Chat        %shttp://%s:3001%s' "${BLU}" "${HOST}" "${RST}")"
             "$(printf 'TLS         %soff (--no-tls) — no TLS, no edge proxy%s' "${DIM}" "${RST}")"
-            "$(printf 'Auth        %sopen — set a password in the wizard or Settings → Authentication%s' "${DIM}" "${RST}")"
+            "$(printf 'Auth        %slocked — finish first-run wizard to set a password%s' "${DIM}" "${RST}")"
             "$(printf 'Logs        %sjournalctl -fu hal0-api%s' "${DIM}" "${RST}")"
+        )
+    fi
+
+    # First-run claim OTP. The wizard's "Set a password" step asks for
+    # this verbatim; it proves the operator can read root-owned files
+    # on the host and prevents a LAN attacker from racing in to claim
+    # ownership before the legitimate operator opens the dashboard.
+    # The lockfile is auto-deleted once the password is set.
+    if [[ -n "${FIRST_RUN_OTP:-}" ]]; then
+        SUMMARY_LINES+=(
+            ""
+            "$(printf '%sFirst-run OTP:%s' "${BOLD}" "${RST}")"
+            "$(printf '  %s%s%s' "${AMBER}" "${FIRST_RUN_OTP}" "${RST}")"
+            "$(printf '  %spaste this into the wizard to claim ownership.%s' "${DIM}" "${RST}")"
+            "$(printf '  %slockfile: %s%s' "${DIM}" "${FIRST_RUN_LOCK}" "${RST}")"
         )
     fi
 fi

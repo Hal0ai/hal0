@@ -141,13 +141,50 @@ def default_token_store_path() -> Path:
 
 
 def auth_enabled() -> bool:
-    """True iff ``HAL0_AUTH_ENABLED`` is set to a truthy value.
+    """True unless the operator has explicitly opted out.
 
-    Default is False so existing installs keep working without changes.
-    Flipping the env var (via the installer or Settings UI) gates every
-    ``Depends(require_token)`` route.
+    v1.0 security posture (security review §36, 2026-05-21): auth is
+    **on by default**. A fresh install of hal0 is locked from boot — every
+    ``Depends(require_token)`` route requires a Bearer token, session
+    cookie, or trusted forwarded email. The first-run wizard reaches the
+    server through the public ``/api/install/*`` + ``/api/auth/password``
+    routes (mounted without an auth dependency), which is how the operator
+    bootstraps a credential without one already existing.
+
+    Two env-var overrides, in precedence order:
+
+      1. ``HAL0_AUTH_DISABLED=1`` (or ``true``/``yes``/``on``) — hard
+         opt-out. Use only in CI fixtures, throwaway test boxes, or
+         deliberately-trusted-LAN dev installs. Returns ``False`` and
+         short-circuits all dependency gates to a pass-through. This is
+         the inverse of the pre-v1 default.
+
+      2. ``HAL0_AUTH_ENABLED`` — retained for compatibility with the
+         pre-v1 surface. Explicitly setting it to a falsy value
+         (``0``/``false``/``no``/``off``/``""``) disables auth; any
+         truthy value enables it. Absent (the new default), auth is on.
+
+    Why flip the default: pre-v1 the env var defaulted to off — every
+    fresh ``curl install | bash`` shipped an unauthenticated dashboard
+    + ``/v1/*`` reachable on ``0.0.0.0:8080``. Open-source defaults
+    must be safe-by-default, not safe-by-banner-reading. The wizard
+    captures the owner password before any state-changing API call
+    succeeds.
     """
-    val = os.environ.get("HAL0_AUTH_ENABLED", "").strip().lower()
+    disabled = os.environ.get("HAL0_AUTH_DISABLED", "").strip().lower()
+    if disabled in ("1", "true", "yes", "on"):
+        return False
+    val = os.environ.get("HAL0_AUTH_ENABLED")
+    if val is None:
+        # Unset → on by default (v1.0 posture).
+        return True
+    val = val.strip().lower()
+    if val == "":
+        # Empty string is treated as "explicitly off" so the installer's
+        # ``unset HAL0_AUTH_ENABLED`` ... ``HAL0_AUTH_ENABLED=``
+        # idiom (export with empty value) keeps the pre-v1 escape hatch
+        # working for users who were relying on the prior default.
+        return False
     return val in ("1", "true", "yes", "on")
 
 

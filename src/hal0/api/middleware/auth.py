@@ -23,9 +23,12 @@ Scope x verb matrix (admin routers: ``/api/slots``, ``/api/models``,
     (no creds)  | 401 auth.required  | 401 auth.required
     (bad creds) | 401 auth.invalid   | 401 auth.invalid
 
-When ``HAL0_AUTH_ENABLED`` is unset, every dependency is a pass-through
-that returns ``identity="anonymous", scope="all"`` — so the gate
-collapses to "open" on the trusted-LAN install posture.
+Auth is **on by default** as of v1.0 (security review §36, 2026-05-21).
+Set ``HAL0_AUTH_DISABLED=1`` to opt back into the pre-v1 trusted-LAN
+pass-through (every dependency returns
+``identity="anonymous", scope="all"`` and routes are open). The legacy
+``HAL0_AUTH_ENABLED`` env var is honoured for compatibility — see
+``hal0.auth.tokens.auth_enabled()`` for the full precedence table.
 
 Public routes (no allowlist)
 ----------------------------
@@ -66,10 +69,10 @@ Auth precedence
 
 4. Else → 401 (``auth.required``).
 
-When ``HAL0_AUTH_ENABLED`` is unset / falsy, ``require_token`` is a
-no-op pass-through that returns the literal identity ``"anonymous"`` —
-preserving full backward compatibility with the pre-auth installs that
-449 of the existing tests exercise.
+When ``HAL0_AUTH_DISABLED=1`` (or the legacy ``HAL0_AUTH_ENABLED=0``),
+``require_token`` is a no-op pass-through that returns the literal
+identity ``"anonymous"`` — preserving the pre-v1 trusted-LAN posture
+for operators who deliberately opted back into it.
 
 Notes on the identity contract
 ------------------------------
@@ -97,6 +100,7 @@ from hal0.auth.tokens import (
     auth_enabled,
     get_or_create_store,
 )
+from hal0.config import paths
 from hal0.errors import Hal0Error
 
 # Header names — lower-cased because Starlette normalises them on read.
@@ -155,6 +159,78 @@ _FORWARDED_SCOPE = "admin"
 # "read-only" and "v1-only" are explicitly excluded — they get 403 on
 # any mutating route.
 _WRITER_SCOPES: frozenset[str] = frozenset({"admin", "all"})
+
+
+# ── First-run claim ──────────────────────────────────────────────────
+# When auth is on AND no owner password is yet set AND the installer's
+# ``.first-run.lock`` file is present on disk, a small set of paths
+# stay reachable to anonymous callers so the wizard can claim
+# ownership. The lockfile is mode 0600 and carries a one-time OTP that
+# §28's follow-up consumes via Bearer-header presentation; this fix
+# (§36) plants the file so the API can rely on it being there.
+#
+# Today every route in this list is mounted WITHOUT an auth dependency
+# (the wizard endpoints live on a bare router; ``/api/auth/password``
+# has its own gate-by-presence logic). The pass-through here is the
+# coordination point for §28 / §29's follow-up PRs, which attach
+# ``Depends(require_writer)`` to those routes: when they do, this
+# helper keeps the first-run claim reachable without rewriting the
+# router wiring.
+_FIRST_RUN_CLAIM_PATHS: frozenset[str] = frozenset(
+    {
+        "/api/install/state",
+        "/api/install/probe",
+        "/api/install/complete",
+        "/api/install/curated-models",
+        "/api/install/pick-default",
+        "/api/auth/password",
+    }
+)
+
+
+def _password_is_set(request: Request) -> bool:
+    """True iff the owner password is set on the active token store.
+
+    Resolves the store via the same ``get_or_create_store`` path the
+    main auth dependency uses, so a test that swaps the store on
+    ``app.state`` exercises the same code path as production.
+    Failures (missing app state, store I/O error) collapse to False —
+    we'd rather treat "I don't know" as "first-run still possible" so
+    the wizard remains reachable than 500 the auth middleware.
+    """
+    try:
+        store: TokenStore = get_or_create_store(request.app.state)
+        return store.get_password_hash() is not None
+    except Exception:
+        return False
+
+
+def _first_run_claim_active(request: Request) -> bool:
+    """True iff the first-run claim window is currently open.
+
+    Three conditions must hold:
+      1. The route being requested is in :data:`_FIRST_RUN_CLAIM_PATHS`.
+      2. The owner password is not yet set.
+      3. The installer's ``.first-run.lock`` file exists on disk
+         (proof a fresh install just happened on this host).
+
+    When all three hold, ``require_token`` short-circuits to an
+    anonymous identity so the wizard's set-password call can land.
+    The lockfile is deleted by the wizard's success path (or by the
+    uninstaller); once it's gone, the only public surface is whatever
+    the routers declare via absent-auth-dep.
+    """
+    if request.url.path not in _FIRST_RUN_CLAIM_PATHS:
+        return False
+    if _password_is_set(request):
+        return False
+    try:
+        return paths.first_run_lock().exists()
+    except OSError:
+        # ``first_run_lock()`` builds a path purely from env / FHS — an
+        # OSError here would be a filesystem-level fault on the stat,
+        # treat as "no claim window" to fail closed.
+        return False
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
@@ -334,6 +410,18 @@ async def require_token(request: Request) -> AuthIdentity:
             token=None,
         )
 
+    # First-run claim window: an installer just dropped ``.first-run.lock``
+    # and no password is set yet. Allow anonymous on the wizard claim
+    # paths so the operator can POST /api/auth/password without already
+    # holding a credential. Every other route still demands creds.
+    if _first_run_claim_active(request):
+        return AuthIdentity(
+            identity=_ANONYMOUS_IDENTITY,
+            scope=_ANONYMOUS_SCOPE,
+            source="first-run-claim",
+            token=None,
+        )
+
     bearer = _resolve_bearer(request)
     if bearer is not None:
         store: TokenStore = get_or_create_store(request.app.state)
@@ -507,3 +595,9 @@ __all__ = [
     "require_token",
     "require_writer",
 ]
+
+
+# Re-export for §28/§29's follow-up PRs — they need to know whether the
+# first-run claim window is currently active when deciding whether to
+# short-circuit to ``127.0.0.1``-only mode on the install routes.
+__all__.append("_first_run_claim_active")

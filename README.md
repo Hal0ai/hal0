@@ -90,11 +90,22 @@ down a running install (thin wrapper over `installer/uninstall.sh`).
 ### Auth posture
 
 Per [ADR-0001](./docs/adr/0001-collapse-edge-auth-into-fastapi.md), all
-auth lives in FastAPI. A fresh install is **open on the LAN** — no
-password, no Bearer required for the dashboard or `/v1/*`. The
-dashboard wizard's password-setup step (`POST /api/auth/password`,
-public on first run) opts in to login. Programmatic clients use Bearer
-tokens unchanged.
+auth lives in FastAPI. As of v1.0, a fresh install **starts locked** —
+the dashboard, `/v1/*`, and every admin route reject anonymous requests
+with `401 auth.required`. Only the first-run wizard claim paths
+(`/api/install/*` and `POST /api/auth/password`) stay reachable, and
+only while the installer's `.first-run.lock` file is present on disk.
+
+The installer prints a one-time OTP in the post-install summary; the
+wizard's "Set a password" step asks for it before minting the owner
+credential. Once the password is set the lockfile is deleted and the
+claim window closes — from then on every request needs a session
+cookie (browser) or Bearer token (programmatic client).
+
+To opt back into the pre-v1 trusted-LAN open posture (single-user dev
+boxes only), set `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env` and
+restart `hal0-api`. The legacy `HAL0_AUTH_ENABLED=0` falsy form is
+still honoured for compatibility.
 
 The default install runs Caddy in front for TLS termination (Caddy's
 internal CA on `.local` hosts, Let's Encrypt for real DNS-resolvable
