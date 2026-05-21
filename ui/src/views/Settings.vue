@@ -474,10 +474,155 @@ async function saveAndScanModelRoots() {
   }
 }
 
+// ── Proxmox integration ──────────────────────────────────────────────
+// Powers the "Proxmox host" segment on the Dashboard memory bar.
+// Config lives at /etc/hal0/proxmox.json (separate from hal0.toml).
+// Endpoints: GET / PUT / DELETE /api/settings/proxmox, POST .../test.
+const pveLoading = ref(false)
+const pveSaving  = ref(false)
+const pveTesting = ref(false)
+const pveError   = ref(null)
+const pveTestResult = ref(null)
+const pveStatus  = ref(null)
+const pveConfigured = ref(false)
+const pveTokenSet = ref(false)
+const pveForm = reactive({
+  host: '',
+  port: 8006,
+  user: '',
+  token_name: '',
+  token_value: '',
+  verify_ssl: false,
+})
+
+async function loadProxmox() {
+  pveLoading.value = true
+  pveError.value = null
+  try {
+    const data = await api('/api/settings/proxmox')
+    pveConfigured.value = !!data.configured
+    pveTokenSet.value = !!data.token_value_set
+    pveForm.host = data.host || ''
+    pveForm.port = data.port || 8006
+    pveForm.user = data.user || ''
+    pveForm.token_name = data.token_name || ''
+    pveForm.verify_ssl = !!data.verify_ssl
+    // Never echo the secret — keep the field empty on load. Operators
+    // re-enter it only when rotating credentials.
+    pveForm.token_value = ''
+    pveStatus.value = data.status || null
+  } catch (e) {
+    pveError.value = e.message
+  } finally {
+    pveLoading.value = false
+  }
+}
+
+async function testProxmox() {
+  pveTesting.value = true
+  pveError.value = null
+  pveTestResult.value = null
+  try {
+    if (!pveForm.token_value) {
+      pveTestResult.value = { ok: false, error: 'enter the token value to test' }
+      return
+    }
+    const body = JSON.stringify({
+      host: pveForm.host.trim(),
+      port: Number(pveForm.port) || 8006,
+      user: pveForm.user.trim(),
+      token_name: pveForm.token_name.trim(),
+      token_value: pveForm.token_value,
+      verify_ssl: !!pveForm.verify_ssl,
+    })
+    const result = await api('/api/settings/proxmox/test', { method: 'POST', body })
+    pveTestResult.value = result
+    if (result.ok) toasts.success(`Reached ${result.node} — ${result.tenants_total} tenants visible`)
+    else toasts.error(`Test failed: ${result.error}`)
+  } catch (e) {
+    pveTestResult.value = { ok: false, error: e.message }
+    toasts.error(e.message)
+  } finally {
+    pveTesting.value = false
+  }
+}
+
+async function saveProxmox() {
+  pveSaving.value = true
+  pveError.value = null
+  try {
+    const body = {
+      host: pveForm.host.trim(),
+      port: Number(pveForm.port) || 8006,
+      user: pveForm.user.trim(),
+      token_name: pveForm.token_name.trim(),
+      verify_ssl: !!pveForm.verify_ssl,
+    }
+    // Only send token_value when the operator actually entered one —
+    // omission means "keep the existing token on disk."
+    if (pveForm.token_value) body.token_value = pveForm.token_value
+    const data = await api('/api/settings/proxmox', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    })
+    pveConfigured.value = !!data.configured
+    pveTokenSet.value = !!data.token_value_set
+    pveStatus.value = data.status || null
+    pveForm.token_value = ''
+    pveTestResult.value = null
+    toasts.success('Proxmox integration saved')
+  } catch (e) {
+    if (e.code === 'proxmox.config_invalid' && e.details && typeof e.details === 'object') {
+      const first = Object.entries(e.details)[0]
+      const msg = first ? `${first[0]}: ${first[1]}` : e.message
+      toasts.error(`Invalid: ${msg}`)
+    } else {
+      toasts.error(e.message)
+    }
+  } finally {
+    pveSaving.value = false
+  }
+}
+
+async function removeProxmox() {
+  if (!confirm('Remove Proxmox integration? The dashboard will stop showing host-pressure data.')) return
+  pveSaving.value = true
+  pveError.value = null
+  try {
+    await api('/api/settings/proxmox', { method: 'DELETE' })
+    pveConfigured.value = false
+    pveTokenSet.value = false
+    pveStatus.value = { configured: false }
+    pveForm.host = ''
+    pveForm.port = 8006
+    pveForm.user = ''
+    pveForm.token_name = ''
+    pveForm.token_value = ''
+    pveForm.verify_ssl = false
+    pveTestResult.value = null
+    toasts.success('Proxmox integration removed')
+  } catch (e) {
+    toasts.error(e.message)
+  } finally {
+    pveSaving.value = false
+  }
+}
+
+const pveStatusLine = computed(() => {
+  const s = pveStatus.value
+  if (!s) return null
+  if (s.configured === false) return 'Not configured.'
+  if (s.ok === false) return `Cannot reach Proxmox: ${s.error || 'unknown error'}`
+  const totalGb = (s.host_mem_total_mb / 1024).toFixed(0)
+  const usedGb  = (s.host_mem_used_mb  / 1024).toFixed(1)
+  return `${s.node} · ${usedGb} / ${totalGb} GB used · ${s.tenants_running} of ${s.tenants_total} tenants running`
+})
+
 onMounted(async () => {
   await load()
   await loadAuthState()
   await loadModelsCfg()
+  await loadProxmox()
 })
 </script>
 
@@ -669,6 +814,90 @@ onMounted(async () => {
             >
               <span v-if="modelsCfgSaving" class="spinner" aria-hidden="true" />
               {{ modelsCfgSaving ? 'Scanning…' : 'Save & re-scan' }}
+            </button>
+          </div>
+        </div>
+      </Card>
+
+      <!-- ── Proxmox integration panel ───────────────────────────── -->
+      <Card>
+        <div class="proxmox-header">
+          <h3 class="section-title">Proxmox integration</h3>
+          <span class="auth-badge" :class="pveConfigured ? 'auth-on' : 'auth-off'">
+            {{ pveConfigured ? 'Configured' : 'Off' }}
+          </span>
+        </div>
+        <p class="field-hint">
+          Optional. When hal0 runs as a Proxmox LXC or VM, configure a
+          read-only <code class="mono">PVEAuditor</code> (or root) API token
+          so the dashboard's memory bar can show RAM consumed by other
+          tenants and the host kernel — not just this LXC's slice. Leave
+          off on bare-metal installs.
+          <br />
+          Create the token at
+          <code class="mono">Datacenter → Permissions → API Tokens</code>
+          (uncheck "Privilege Separation" or grant the token
+          <code class="mono">PVEAuditor</code> on <code class="mono">/</code>).
+        </p>
+
+        <div v-if="pveError" class="error-banner" role="alert">{{ pveError }}</div>
+        <div v-else-if="pveLoading" class="loading-row">Loading…</div>
+        <div v-else>
+          <p v-if="pveStatusLine" class="proxmox-status mono" :class="{ 'text-success': pveStatus?.ok, 'text-danger': pveStatus?.configured && !pveStatus?.ok }">
+            {{ pveStatusLine }}
+          </p>
+
+          <div class="proxmox-grid">
+            <div class="field-row proxmox-field">
+              <label for="pve-host" class="field-label">Host</label>
+              <input id="pve-host" v-model="pveForm.host" type="text" class="field-input" placeholder="10.0.1.110" :disabled="pveSaving" />
+            </div>
+            <div class="field-row proxmox-field proxmox-field-narrow">
+              <label for="pve-port" class="field-label">Port</label>
+              <input id="pve-port" v-model.number="pveForm.port" type="number" class="field-input" min="1" max="65535" :disabled="pveSaving" />
+            </div>
+            <div class="field-row proxmox-field">
+              <label for="pve-user" class="field-label">User</label>
+              <input id="pve-user" v-model="pveForm.user" type="text" class="field-input" placeholder="root@pam" :disabled="pveSaving" />
+            </div>
+            <div class="field-row proxmox-field">
+              <label for="pve-token-name" class="field-label">Token name</label>
+              <input id="pve-token-name" v-model="pveForm.token_name" type="text" class="field-input" placeholder="hal0-readonly" :disabled="pveSaving" />
+            </div>
+            <div class="field-row proxmox-field proxmox-field-wide">
+              <label for="pve-token-value" class="field-label">
+                Token value
+                <span v-if="pveTokenSet && !pveForm.token_value" class="restart-badge" title="A token is on disk; leave blank to keep it">on disk</span>
+              </label>
+              <input id="pve-token-value" v-model="pveForm.token_value" type="password" class="field-input mono"
+                     :placeholder="pveTokenSet ? '••••••••  (leave blank to keep existing)' : 'paste the token UUID'"
+                     :disabled="pveSaving" autocomplete="off" />
+            </div>
+            <div class="field-row proxmox-field proxmox-field-toggle">
+              <label class="toggle-label">
+                <input type="checkbox" class="toggle-checkbox" v-model="pveForm.verify_ssl" :disabled="pveSaving" />
+                <span>Verify TLS certificate</span>
+              </label>
+              <p class="field-hint dim">Off by default — most home Proxmox installs use the self-signed cert.</p>
+            </div>
+          </div>
+
+          <p v-if="pveTestResult && !pveTestResult.ok" class="field-err" role="alert">
+            Test failed: {{ pveTestResult.error }}
+          </p>
+
+          <div class="proxmox-actions">
+            <button class="btn-ghost" type="button" @click="testProxmox" :disabled="pveTesting || pveSaving || !pveForm.host || !pveForm.user || !pveForm.token_name">
+              <span v-if="pveTesting" class="spinner" aria-hidden="true" />
+              {{ pveTesting ? 'Testing…' : 'Test connection' }}
+            </button>
+            <button class="btn-primary btn-small" type="button" @click="saveProxmox"
+                    :disabled="pveSaving || !pveForm.host || !pveForm.user || !pveForm.token_name || (!pveTokenSet && !pveForm.token_value)">
+              <span v-if="pveSaving" class="spinner" aria-hidden="true" />
+              {{ pveSaving ? 'Saving…' : 'Save' }}
+            </button>
+            <button v-if="pveConfigured" class="btn-danger btn-small" type="button" @click="removeProxmox" :disabled="pveSaving">
+              Remove
             </button>
           </div>
         </div>
@@ -1112,4 +1341,29 @@ onMounted(async () => {
 .roots-actions { display: flex; align-items: center; gap: 12px; margin-top: 6px; flex-wrap: wrap; }
 .auto-scan-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-fg-muted); cursor: pointer; }
 .auto-scan-label input[type="checkbox"] { accent-color: var(--hal0-accent); }
+
+/* ── Proxmox integration panel ──────────────────────────────────── */
+.proxmox-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.proxmox-status {
+  margin: 8px 0 14px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  font-size: 12px;
+}
+.proxmox-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(200px, 1fr));
+  gap: 10px 16px;
+  margin-top: 8px;
+}
+.proxmox-field { display: flex; flex-direction: column; gap: 4px; padding: 0; border-bottom: none; }
+.proxmox-field .field-label { font-size: 11.5px; font-weight: 500; }
+.proxmox-field .field-input { font-family: var(--font-mono); font-size: 12.5px; padding: 6px 10px; }
+.proxmox-field-narrow { max-width: 130px; }
+.proxmox-field-wide { grid-column: 1 / -1; }
+.proxmox-field-toggle { grid-column: 1 / -1; flex-direction: column; align-items: flex-start; gap: 4px; }
+.proxmox-actions { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+.dim { color: var(--color-fg-faint); }
 </style>

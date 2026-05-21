@@ -74,6 +74,17 @@ function fmt(used, total) {
 const tally = computed(() => footer.slotTally)
 const slotDot = computed(() => footer.worstSlotDot)
 
+// ── Proxmox integration status ─────────────────────────────────────
+// Persistent indicator: pill renders only when the integration is
+// configured but unreachable. Hidden when ok (transparent) and when
+// unconfigured (bare-metal deployments stay quiet). Clicking opens
+// Settings so the operator can re-test or rotate the token.
+const pveBroken = computed(() => {
+  const h = hw.value.host
+  return !!(h && h.configured && !h.ok)
+})
+const pveError = computed(() => hw.value.host?.error || 'Cluster poll failed')
+
 // ── Active job chips (deduped, max 3 visible, ttl on terminal) ─────
 const visibleChips = ref([])
 
@@ -182,6 +193,19 @@ function onTickerClick(e) {
       <span class="tally-text mono">{{ tally.running }}/{{ tally.total }}</span>
     </button>
 
+    <!-- 4b. Proxmox pill (only when configured && !ok) -->
+    <router-link
+      v-if="pveBroken"
+      to="/settings"
+      class="bar-pve"
+      :title="pveError"
+      :aria-label="`Proxmox integration unreachable: ${pveError}`"
+      @click.stop
+    >
+      <span class="pve-dot" aria-hidden="true"></span>
+      <span class="pve-text mono">PVE</span>
+    </router-link>
+
     <!-- 5. Progress chips -->
     <span class="bar-chips" v-if="visibleChips.length">
       <ProgressChip
@@ -278,6 +302,31 @@ function onTickerClick(e) {
 .tally-text { font-feature-settings: 'zero' 1, 'tnum' 1; }
 
 .bar-chips { display: inline-flex; gap: 4px; flex-shrink: 0; }
+
+.bar-pve {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  height: 18px;
+  background: color-mix(in oklch, var(--color-danger) 14%, transparent);
+  border: 1px solid color-mix(in oklch, var(--color-danger) 35%, var(--color-border));
+  border-radius: 999px;
+  color: var(--color-danger);
+  font-size: 10.5px;
+  text-decoration: none;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.bar-pve:hover { background: color-mix(in oklch, var(--color-danger) 22%, transparent); }
+.pve-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-danger);
+  box-shadow: 0 0 6px color-mix(in oklch, var(--color-danger) 40%, transparent);
+}
+.pve-text { letter-spacing: 0.05em; font-weight: 600; }
 
 .bar-hint {
   font-size: 10px;

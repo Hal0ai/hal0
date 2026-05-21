@@ -33,6 +33,9 @@ from hal0.api.routes import (
     events as events_routes,
 )
 from hal0.api.routes import (
+    proxmox as proxmox_routes,
+)
+from hal0.api.routes import (
     hardware,
     health,
     images,
@@ -449,6 +452,15 @@ def create_app() -> FastAPI:
         settings.router,
         prefix="/api/settings",
         tags=["settings"],
+        dependencies=_admin_auth,
+    )
+    # Proxmox integration sub-router (config file at /etc/hal0/proxmox.json).
+    # Mounted as a sibling under /api/settings/proxmox so the dashboard's
+    # Settings panel can read/write it without touching hal0.toml.
+    app.include_router(
+        proxmox_routes.router,
+        prefix="/api/settings/proxmox",
+        tags=["settings", "proxmox"],
         dependencies=_admin_auth,
     )
     app.include_router(

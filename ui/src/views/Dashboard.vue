@@ -55,10 +55,17 @@ const memLabel = computed(() => (hw.value.gtt_total_mb ? 'GTT' : 'VRAM'))
 // ram_total + gtt_total would double-count, which is what produced the
 // "169 GB pool on a 128 GB machine" bug. The probe exposes the true
 // unified_memory_mb (via dmidecode when /proc/meminfo reports an LXC
-// cgroup quota); we trust that. host.host_mem_total_mb is the haloai
-// upstream's equivalent.
+// cgroup quota); we trust that. When a Proxmox API token is configured
+// (see /etc/hal0/proxmox.json) the host's view is more authoritative
+// because it sees the actual physical DIMM total *and* the other
+// tenants competing for it — prefer it when present.
+const hostOk = computed(() => {
+  const h = hw.value.host
+  return !!(h && h.configured && h.ok && h.host_mem_total_mb)
+})
 const unifiedTotalGb = computed(() => {
-  const probed = hw.value.unified_memory_mb || hw.value.host?.host_mem_total_mb
+  if (hostOk.value) return hw.value.host.host_mem_total_mb / 1024
+  const probed = hw.value.unified_memory_mb
   if (probed) return probed / 1024
   // Non-UMA / unknown: RAM + dedicated VRAM is a fair total (no overlap).
   const ramG = (hw.value.ram_total_mb || 0) / 1024
@@ -71,20 +78,39 @@ const unifiedSegments = computed(() => {
   if (totalG === 0) return []
   // Used breakdown:
   //   gtt   = GPU's GTT allocations (live model weights / KV cache on UMA)
-  //   npu   = NPU model resident bytes (also drawn from the unified pool)
-  //   vram  = dedicated VRAM in use (discrete GPUs only — 0 on UMA)
-  //   sys   = system RAM used by everything else (MemTotal - MemAvailable
-  //           minus what's already attributed to the GPU through GTT)
+  //   npu   = NPU model resident bytes (drawn from the same pool as GTT,
+  //           so shown only when an FLM slot is loaded — segment hidden
+  //           at 0 to avoid visually double-counting with GTT).
+  //   vram  = dedicated VRAM in use (discrete GPUs only). On Strix Halo /
+  //           any UMA box the "VRAM" sysfs counter just reports the small
+  //           BIOS-reserved framebuffer slice carved out of the same DIMMs
+  //           the unified pool already covers — we drop it entirely so the
+  //           bar only shows knobs the user can actually manage.
+  //   sys   = system RAM used by everything else (MemTotal - MemAvailable).
+  //           Inside an LXC, /proc/meminfo does NOT account for GPU-pinned
+  //           pages (those live in the host kernel's GTT bookkeeping), so
+  //           ram_used_gb and gtt_used_mb are independent — no subtraction.
+  //   host  = everything else on the Proxmox host competing for the same
+  //           DIMMs — other LXCs/VMs + ZFS ARC + the host kernel. Only
+  //           rendered when /etc/hal0/proxmox.json is configured and the
+  //           cluster/resources poll succeeded; otherwise the bar honestly
+  //           shows "we can't see beyond this LXC" by leaving that mass
+  //           unattributed inside Free.
+  const isUma = !!hw.value.is_uma
   const gtt = (hw.value.gtt_used_mb || 0) / 1024
-  const vram = (hw.value.vram_used_mb || 0) / 1024
-  const npuMb = hw.value.npu_status?.model_mb || 0
-  const npu = npuMb / 1024
-  // ram_used_gb is from /api/stats/hardware (haloai shape) — it's the OS-
-  // visible used total, which already includes pinned GTT bytes on UMA.
-  // Subtract gtt so we don't double-count GTT into both buckets.
-  const ramUsedG = hw.value.ram_used_gb ?? ((hw.value.ram_total_mb || 0) - (hw.value.ram_available_mb || 0)) / 1024
-  const sys = Math.max(0, ramUsedG - gtt)
-  const used = gtt + sys + npu + vram
+  const vram = isUma ? 0 : (hw.value.vram_used_mb || 0) / 1024
+  const npu = (hw.value.npu_status?.model_mb || 0) / 1024
+  const sys = hw.value.ram_used_gb
+    ?? (((hw.value.ram_total_mb || 0) - (hw.value.ram_available_mb || 0)) / 1024)
+  let host = 0
+  if (hostOk.value) {
+    // host_mem_used already includes our LXC's sys RAM + this kernel's
+    // share of GTT (GTT is host-kernel-owned on UMA). Subtract our share
+    // so we don't visually double-count.
+    const hostUsedG = hw.value.host.host_mem_used_mb / 1024
+    host = Math.max(0, hostUsedG - sys - gtt)
+  }
+  const used = gtt + sys + npu + vram + host
   const free = Math.max(0, totalG - used)
   const seg = (label, gb, cls) => ({
     label,
@@ -95,9 +121,14 @@ const unifiedSegments = computed(() => {
   const out = [
     seg('GTT · inference', gtt, 'seg-gtt'),
     seg('System RAM', sys, 'seg-sys'),
-    seg('NPU / FLM', npu, 'seg-npu'),
   ]
-  // Hide the VRAM segment on UMA — it's always 0 and just clutters the legend.
+  // Hide the NPU segment until an FLM slot is loaded — NPU memory comes
+  // out of GTT, so an always-on NPU bucket would visually double-count.
+  if (npu > 0.01) out.push(seg('NPU · FLM', npu, 'seg-npu'))
+  // Proxmox host segment (other tenants + host kernel / ZFS ARC) only when
+  // we have an authoritative cluster snapshot.
+  if (host > 0.01) out.push(seg('Proxmox host', host, 'seg-host'))
+  // VRAM segment only on discrete-GPU (non-UMA) machines.
   if (vram > 0.01) out.push(seg('VRAM', vram, 'seg-vram'))
   out.push(seg('Free', free, 'seg-free'))
   return out
@@ -316,10 +347,29 @@ loadChatModels()
       <!-- ── Unified memory bar (Strix Halo) ─────────────────────── -->
       <Card v-if="unifiedSegments.length" class="um-card">
         <div class="um-head">
-          <div class="um-title">Unified memory · {{ unifiedTotalGb.toFixed(0) }} GB pool</div>
+          <div class="um-title">
+            {{ hostOk ? 'Physical host memory' : 'Unified memory' }} ·
+            {{ unifiedTotalGb.toFixed(0) }} GB pool
+          </div>
           <div class="um-sub">
             {{ unifiedSegments.filter(s => s.cls !== 'seg-free').reduce((a, s) => a + s.gb, 0).toFixed(1) }} GB used
             <span class="dim"> · NPU {{ npuOk ? 'ready' : 'offline' }}</span>
+            <span v-if="hostOk" class="dim">
+              · {{ hw.host.tenants_running }} tenant{{ hw.host.tenants_running === 1 ? '' : 's' }}
+            </span>
+            <!-- Token-rot / network-failure indicator. Memory bar quietly
+                 falls back to the LXC-only view in this state; the pill
+                 is the user-visible signal that the host total is stale.
+                 Click target is the Settings panel where the operator
+                 can re-test or rotate the API token. -->
+            <router-link
+              v-if="hw.host?.configured && !hw.host?.ok"
+              to="/settings"
+              class="pve-warn"
+              :title="hw.host?.error || 'Cluster poll failed — check token / network'"
+            >
+              · Proxmox: unreachable
+            </router-link>
           </div>
         </div>
         <div class="um-bar" role="img" aria-label="Unified memory breakdown">
@@ -474,12 +524,17 @@ loadChatModels()
 .um-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
 .um-title { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; color: var(--hal0-accent); }
 .um-sub { font-size: 11.5px; color: var(--color-fg-muted); font-family: var(--font-mono); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
+.um-sub .pve-warn { color: var(--color-danger); text-decoration: none; margin-left: 2px; }
+.um-sub .pve-warn:hover { text-decoration: underline; }
 .um-bar { display: flex; height: 24px; border-radius: 4px; overflow: hidden; background: var(--color-surface-2); border: 1px solid var(--color-border); }
 .useg { height: 100%; transition: width 0.4s ease; }
 .seg-gtt   { background: var(--hal0-accent); }
 .seg-sys   { background: var(--color-success); opacity: 0.85; }
 .seg-npu   { background: var(--color-warning); opacity: 0.9; }
 .seg-vram  { background: color-mix(in oklch, var(--hal0-accent) 50%, var(--color-warning)); }
+/* Muted slate so other-tenant pressure reads as "outside our control"
+   without competing with the amber GTT and green Sys colours. */
+.seg-host  { background: color-mix(in oklch, var(--color-fg-muted) 55%, var(--color-surface-2)); }
 .seg-free  { background: var(--color-surface-2); }
 .um-legend { display: flex; flex-wrap: wrap; gap: 14px 18px; margin-top: 10px; font-size: 11.5px; color: var(--color-fg-muted); font-family: var(--font-mono); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 .lg { display: inline-flex; align-items: center; gap: 6px; }

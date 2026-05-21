@@ -79,6 +79,15 @@ const hw = computed(() => ({ ...(hardware.value || {}), ...(stats.value || {}) }
 
 const isUma = computed(() => !!hw.value.is_uma)
 
+// Proxmox host memory authority — when /etc/hal0/proxmox.json is configured
+// and the cluster/resources poll succeeded, the host's view trumps the
+// LXC's cgroup view (which is just our slice). Mirrors Dashboard.vue so
+// the two pages can never disagree about totals.
+const hostOk = computed(() => {
+  const h = hw.value.host
+  return !!(h && h.configured && h.ok && h.host_mem_total_mb)
+})
+
 const gpuName    = computed(() => hw.value.gpu_name || '')
 const gpuVendor  = computed(() => hw.value.gpu_vendor || '')
 const gpuUtilPct = computed(() => {
@@ -100,6 +109,7 @@ const vramUsedGb  = computed(() => (hw.value.vram_used_mb || 0) / 1024)
 // the two views can never disagree about totals. Falls back to ram+vram
 // only on non-UMA where the two are independent.
 const unifiedTotalGb = computed(() => {
+  if (hostOk.value) return hw.value.host.host_mem_total_mb / 1024
   const probed = hw.value.unified_memory_mb
   if (probed) return probed / 1024
   const ramG = (hw.value.ram_total_mb || 0) / 1024
@@ -111,14 +121,28 @@ const unifiedSegments = computed(() => {
   const totalG = unifiedTotalGb.value || 0
   if (totalG === 0) return []
   const gtt = gttUsedGb.value
-  const vram = vramUsedGb.value
-  // ram_used_gb is the OS-visible used total. On UMA it *includes* the
-  // pinned GTT bytes, so subtracting GTT keeps the segments additive.
-  const ramUsedG = hw.value.ram_used_gb
+  // On UMA the "VRAM" sysfs counter is the BIOS-reserved framebuffer
+  // slice carved out of the same DIMMs the unified pool covers — drop
+  // it so the bar only shows knobs the user can actually manage.
+  const vram = isUma.value ? 0 : vramUsedGb.value
+  const npu = (hw.value.npu_status?.model_mb || 0) / 1024
+  // ram_used_gb is the OS-visible used total. Inside an LXC, /proc/meminfo
+  // does NOT include GPU-pinned pages (those live in the host kernel's GTT
+  // bookkeeping), so ram_used and gtt_used are independent buckets — no
+  // subtraction needed.
+  const sys = hw.value.ram_used_gb
     ?? ((hw.value.ram_used_mb || 0) / 1024)
     ?? Math.max(0, ((hw.value.ram_total_mb || 0) - (hw.value.ram_available_mb || 0)) / 1024)
-  const sys = Math.max(0, ramUsedG - gtt)
-  const used = gtt + sys + vram
+  // Proxmox-host pressure: everything else on the physical host —
+  // other LXCs/VMs + ZFS ARC + host kernel. Canary confirmed 2026-05-21
+  // that GTT lives in host kernel memory (not the LXC cgroup), so it
+  // shows up inside host_mem_used and must be subtracted out.
+  let host = 0
+  if (hostOk.value) {
+    const hostUsedG = hw.value.host.host_mem_used_mb / 1024
+    host = Math.max(0, hostUsedG - sys - gtt)
+  }
+  const used = gtt + sys + npu + vram + host
   const free = Math.max(0, totalG - used)
   const seg = (label, gb, cls) => ({
     label, gb, pct: Math.max(0, (gb / totalG) * 100), cls,
@@ -127,6 +151,13 @@ const unifiedSegments = computed(() => {
     seg('GTT · inference', gtt, 'seg-gtt'),
     seg('System RAM', sys, 'seg-sys'),
   ]
+  // NPU memory comes out of GTT — only show the segment when an FLM slot
+  // is loaded, otherwise it would visually double-count.
+  if (npu > 0.01) out.push(seg('NPU · FLM', npu, 'seg-npu'))
+  // Proxmox host segment (other tenants + host kernel / ZFS ARC) only
+  // when /etc/hal0/proxmox.json is configured and reachable.
+  if (host > 0.01) out.push(seg('Proxmox host', host, 'seg-host'))
+  // VRAM segment only on discrete-GPU (non-UMA) machines.
   if (vram > 0.01) out.push(seg('Dedicated VRAM', vram, 'seg-vram'))
   out.push(seg('Free', free, 'seg-free'))
   return out
@@ -136,7 +167,15 @@ const unifiedSegments = computed(() => {
 const unifiedUsedPct = computed(() => {
   const total = unifiedTotalGb.value
   if (!total) return 0
-  return Math.min(100, ((gttUsedGb.value + Math.max(0, ((hw.value.ram_used_gb ?? 0) - gttUsedGb.value)) + vramUsedGb.value) / total) * 100)
+  // When we have an authoritative host view, just use it — host_mem_used
+  // already accounts for our LXC + GTT + every other tenant + kernel.
+  if (hostOk.value) {
+    return Math.min(100, (hw.value.host.host_mem_used_mb / 1024 / total) * 100)
+  }
+  const ramUsedG = hw.value.ram_used_gb ?? 0
+  const npu = (hw.value.npu_status?.model_mb || 0) / 1024
+  const vram = isUma.value ? 0 : vramUsedGb.value
+  return Math.min(100, ((gttUsedGb.value + ramUsedG + npu + vram) / total) * 100)
 })
 
 // Non-UMA bars (only render when !is_uma)
@@ -182,11 +221,17 @@ onMounted(loadHardware)
         <h2 id="tiles-heading" class="sr-only">Hardware overview</h2>
         <div class="tiles">
           <div class="tile">
-            <div class="tile-label">{{ isUma ? 'Unified memory' : 'System RAM' }}</div>
+            <div class="tile-label">
+              {{ hostOk ? 'Physical host memory' : (isUma ? 'Unified memory' : 'System RAM') }}
+            </div>
             <div class="tile-value mono">
               {{ unifiedTotalGb.toFixed(0) }}<span class="tile-unit">GB</span>
             </div>
-            <div v-if="isUma" class="tile-sub">{{ unifiedUsedPct.toFixed(0) }}% in use · UMA pool</div>
+            <div v-if="hostOk" class="tile-sub">
+              {{ unifiedUsedPct.toFixed(0) }}% in use ·
+              {{ hw.host.tenants_running }} tenant{{ hw.host.tenants_running === 1 ? '' : 's' }}
+            </div>
+            <div v-else-if="isUma" class="tile-sub">{{ unifiedUsedPct.toFixed(0) }}% in use · UMA pool</div>
             <div v-else class="tile-sub">{{ ramPct.toFixed(0) }}% in use</div>
           </div>
 
@@ -393,6 +438,7 @@ onMounted(loadHardware)
 .bar-seg.seg-gtt  { background: var(--hal0-accent); }
 .bar-seg.seg-sys  { background: color-mix(in oklch, var(--color-fg-muted) 40%, var(--color-surface)); }
 .bar-seg.seg-npu  { background: var(--color-warning); }
+.bar-seg.seg-host { background: color-mix(in oklch, var(--color-fg-muted) 55%, var(--color-surface-2)); }
 .bar-seg.seg-vram { background: var(--color-danger); }
 .bar-seg.seg-free { background: transparent; }
 .bar-total { font-size: 11.5px; color: var(--color-fg-faint); flex-shrink: 0; }
@@ -415,6 +461,7 @@ onMounted(loadHardware)
 .legend-swatch.seg-gtt  { background: var(--hal0-accent); }
 .legend-swatch.seg-sys  { background: color-mix(in oklch, var(--color-fg-muted) 40%, var(--color-surface)); }
 .legend-swatch.seg-npu  { background: var(--color-warning); }
+.legend-swatch.seg-host { background: color-mix(in oklch, var(--color-fg-muted) 55%, var(--color-surface-2)); }
 .legend-swatch.seg-vram { background: var(--color-danger); }
 .legend-swatch.seg-free { background: var(--color-surface-3); border: 1px solid var(--color-border); }
 .legend-label { color: var(--color-fg-muted); }

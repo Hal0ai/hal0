@@ -114,13 +114,96 @@ async def _proxy_upstream_endpoint(
     return out
 
 
-def _local_live_stats(request: Request) -> dict[str, Any]:
+async def _npu_status(request: Request) -> dict[str, Any] | None:
+    """Build the ``npu_status`` block the dashboard's memory bar reads.
+
+    Shape matches haloai's ``lib.hardware._npu_status``: ``{ok, model_mb}``.
+
+      - ``ok``        — XDNA driver is loaded (taken from the cached probe;
+                        no subprocess work happens here).
+      - ``model_mb``  — sum of the model file sizes for any slot whose
+                        provider is FLM. Read from the model registry so
+                        we don't shell out per stats poll. Zero when no
+                        FLM slot is loaded — the UI hides the segment.
+
+    Returns ``None`` if no NPU is present so the field stays absent and
+    the UI's NPU pill / segment collapse cleanly.
+    """
+    try:
+        info = load_hardware_info().model_dump(mode="python")
+    except Exception:
+        return None
+    npu = info.get("npu") or {}
+    if not npu.get("present"):
+        return None
+
+    model_mb = 0.0
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    registry = getattr(request.app.state, "model_registry", None)
+    if slot_manager is not None:
+        # Only states where the model is actually resident on the NPU.
+        # PULLING/STARTING haven't loaded yet; OFFLINE/UNLOADING/ERROR
+        # don't hold weights in GTT.
+        live_states = {"warming", "ready", "serving", "idle"}
+        try:
+            slots = await slot_manager.list()
+        except Exception:
+            slots = []
+        # Build the FLM catalog lookup lazily — only when we actually have
+        # an FLM slot live. flm_served_models() is cached, so repeated
+        # calls are O(1) after the first probe.
+        flm_catalog: dict[str, dict[str, Any]] | None = None
+        for s in slots:
+            state = str(getattr(s, "state", "") or "").lower()
+            if state not in live_states:
+                continue
+            meta = getattr(s, "metadata", None) or {}
+            provider = (meta.get("provider") or "").lower()
+            backend = str(getattr(s, "backend", None) or meta.get("backend") or "").lower()
+            if provider != "flm" and backend not in ("flm", "npu"):
+                continue
+            mid = getattr(s, "model_id", None)
+            if not mid:
+                continue
+            # FLM tags ("name:tag") live in their own namespace — they are
+            # not in the hal0 model registry. Prefer FLM's own footprint
+            # estimate (runtime memory, includes KV cache) over file size.
+            sz_mb = 0.0
+            if flm_catalog is None:
+                try:
+                    from hal0.providers.flm import flm_served_models
+
+                    flm_catalog = {e["tag"]: e for e in flm_served_models()}
+                except Exception:
+                    flm_catalog = {}
+            flm_entry = flm_catalog.get(mid)
+            if flm_entry:
+                footprint_gb = flm_entry.get("footprint_gb") or 0.0
+                if footprint_gb > 0:
+                    sz_mb = footprint_gb * 1024
+                else:
+                    sz_mb = (flm_entry.get("size_bytes") or 0) / (1024 * 1024)
+            elif registry is not None:
+                # Non-FLM-tag model id (rare for npu slots, but possible
+                # if someone wires a llamacpp-shaped GGUF through FLM).
+                try:
+                    m = registry.get(mid)
+                    sz_mb = (getattr(m, "size_bytes", 0) or 0) / (1024 * 1024)
+                except Exception:
+                    sz_mb = 0.0
+            model_mb += sz_mb
+
+    return {"ok": True, "model_mb": round(model_mb, 1)}
+
+
+async def _local_live_stats(request: Request) -> dict[str, Any]:
     """Read live counters from this process's HardwareStats.
 
     Maps the snapshot() fields onto the names the dashboard expects:
     ``ram_used_mb``, ``ram_used_gb``, ``gtt_used_mb``, ``vram_used_mb``,
-    plus a ``gpu_util`` fraction. Returned values may be ``None`` when a
-    counter isn't available on this host (e.g. no AMD/NVIDIA GPU).
+    plus a ``gpu_util`` fraction and an ``npu_status`` block. Returned
+    values may be ``None`` when a counter isn't available on this host
+    (e.g. no AMD/NVIDIA GPU).
     """
 
     stats = getattr(request.app.state, "hardware_stats", None)
@@ -148,7 +231,7 @@ def _local_live_stats(request: Request) -> dict[str, Any]:
         vram_used = _read_sysfs_mb(drm / "mem_info_vram_used")
 
     ram_used_gb = snap.get("ram_used_gb") or 0.0
-    return {
+    out: dict[str, Any] = {
         "ram_used_gb": ram_used_gb,
         "ram_used_mb": int(ram_used_gb * 1024),
         "ram_available_gb": snap.get("ram_available_gb"),
@@ -158,6 +241,10 @@ def _local_live_stats(request: Request) -> dict[str, Any]:
         "gpu_vram_used_mb": snap.get("gpu_vram_used_mb"),
         "gpu_vram_total_mb": snap.get("gpu_vram_total_mb"),
     }
+    npu_status = await _npu_status(request)
+    if npu_status is not None:
+        out["npu_status"] = npu_status
+    return out
 
 
 @router.get("/stats/hardware")
@@ -188,12 +275,47 @@ async def stats_hardware(request: Request) -> dict[str, Any]:
 
     # Live counters from this process — overwrite any zero/missing values
     # in the upstream payload (which often has only the static probe shape).
-    local = _local_live_stats(request)
+    local = await _local_live_stats(request)
     for key, val in local.items():
         if val is None:
             continue
         if primary.get(key) in (None, 0, 0.0):
             primary[key] = val
+
+    # Proxmox host status (when /etc/hal0/proxmox.json is configured).
+    # The merge above already lets an upstream's ``host`` field win if
+    # one was reported; for the common single-LXC deployment we attach
+    # this process's own pve probe. ``configured: false`` keeps the
+    # dashboard quiet on non-Proxmox installs.
+    #
+    # The payload here is the *slim* projection (no tenants[]) because
+    # the dashboard polls /api/stats/hardware every 2.5 s. The Settings
+    # card consumes the full shape via /api/settings/proxmox instead.
+    from hal0.hardware import pve
+
+    if "host" not in primary or not isinstance(primary.get("host"), dict):
+        full = await pve.pve_status()
+        transition = pve.pop_transition(full)
+        if transition is not None:
+            event_bus = getattr(request.app.state, "events", None)
+            if event_bus is not None:
+                if transition == "became_broken":
+                    await event_bus.emit(
+                        "system.proxmox_unreachable",
+                        "warn",
+                        "system",
+                        f"Proxmox host integration unreachable: {full.get('error', 'unknown error')}",
+                        data={"error": full.get("error")},
+                    )
+                else:  # recovered
+                    await event_bus.emit(
+                        "system.proxmox_recovered",
+                        "info",
+                        "system",
+                        f"Proxmox host integration recovered ({full.get('node', '?')})",
+                        data={"node": full.get("node")},
+                    )
+        primary["host"] = pve.project_slim(full)
 
     primary["per_upstream"] = per_upstream
     primary["upstream_names"] = list(per_upstream.keys())
