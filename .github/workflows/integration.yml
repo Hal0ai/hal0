@@ -1,10 +1,20 @@
 name: Integration (tier β)
 
 # Slot integration tests on a fresh ubuntu-latest runner.  Builds the
-# Vulkan toolbox image (CPU baseline — no GPU on the runner), pulls a
-# tiny GGUF, installs the hal0-slot@.service template via
-# installer/install.sh, and runs the gated cases in
-# tests/slots/test_integration.py.
+# CPU-only toolbox image (PLAN §10.2 "Vulkan-CPU baseline" — same
+# llama.cpp, compiled without GGML_VULKAN so a model actually loads on
+# a runner with no GPU and no working Vulkan ICD), pulls a tiny GGUF,
+# installs the hal0-slot@.service template via installer/install.sh,
+# and runs the gated cases in tests/slots/test_integration.py.
+#
+# History: between 2026-05-18 and 2026-05-21 this job built the Vulkan
+# toolbox and ran it on the runner.  llama-server's Vulkan backend
+# couldn't usefully load model weights against Mesa's llvmpipe, so the
+# container came up with /v1/models empty and the slot resolved to IDLE
+# rather than READY (manager.py:1422-1515).  After dc71fcf landed the
+# modelless-READY adoption guard, IDLE became the durable state and
+# all three integration cases asserted READY.  cpu.Dockerfile gives
+# the integration tier a build that actually serves on CPU.
 #
 # Wall-clock budget: ≤12 min/run (PLAN §10.2).  The toolbox build is
 # layer-cached against GHA so successive runs hit ~3-4 min when
@@ -70,26 +80,25 @@ jobs:
       - name: Set up Docker Buildx (for layer caching)
         uses: docker/setup-buildx-action@v3
 
-      - name: Build hal0-toolbox-vulkan (CPU baseline)
+      - name: Build hal0-toolbox-cpu (Vulkan-CPU baseline)
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: packaging/toolbox/vulkan.Dockerfile
-          tags: hal0-toolbox-vulkan:ci
+          file: packaging/toolbox/cpu.Dockerfile
+          tags: hal0-toolbox-cpu:ci
           push: false
           load: true
-          cache-from: type=gha,scope=toolbox-vulkan-ci
-          cache-to: type=gha,scope=toolbox-vulkan-ci,mode=max
+          cache-from: type=gha,scope=toolbox-cpu-ci
+          cache-to: type=gha,scope=toolbox-cpu-ci,mode=max
 
       - name: Smoke-test toolbox image (CPU llama.cpp)
         run: |
-          # The runner has no GPU; the Vulkan binary should still launch
-          # against the llvmpipe software rasteriser or fall back to CPU.
+          # CPU-only build: llama-server runs without any GPU loader.
           # We accept any non-error exit from --help as proof-of-life.
-          # --entrypoint override: the image's ENTRYPOINT is llama-server
-          # itself (packaging/toolbox/vulkan.Dockerfile:154), so we have
-          # to swap it for /bin/bash to chain `which` + `--help`.
-          docker run --rm --entrypoint /bin/bash hal0-toolbox-vulkan:ci -c \
+          # ENTRYPOINT is llama-server itself (provider contract — see
+          # packaging/toolbox/cpu.Dockerfile), so we override it for the
+          # shell wrapper.
+          docker run --rm --entrypoint /bin/bash hal0-toolbox-cpu:ci -c \
             'which llama-server && llama-server --help >/dev/null'
 
       - name: Cache model GGUF
@@ -126,10 +135,16 @@ jobs:
 
       - name: Pin local toolbox image
         run: |
-          # The slot manager reads HAL0_TOOLBOX_IMAGE_VULKAN to override
-          # the manifest digest. Point it at the locally-built CI image.
+          # The slot manager's LlamaServerProvider.image_ref() reads
+          # HAL0_TOOLBOX_IMAGE_VULKAN from the *process* environment
+          # (llama_server.py:348).  Both consumers need it:
+          #   - The pytest process below (it resolves the image at
+          #     render-override time, before systemctl start hits docker).
+          #   - The hal0-api systemd unit (production path; not used by
+          #     these tests, but the api.env line matches how a real
+          #     install would pin the image so we keep both in sync).
           sudo mkdir -p /etc/hal0
-          echo "HAL0_TOOLBOX_IMAGE_VULKAN=hal0-toolbox-vulkan:ci" \
+          echo "HAL0_TOOLBOX_IMAGE_VULKAN=hal0-toolbox-cpu:ci" \
               | sudo tee -a /etc/hal0/api.env
 
       - name: Confirm hal0-slot@.service template is visible to systemd
@@ -141,9 +156,17 @@ jobs:
         # The tests' module-level skipif now checks
         # `systemctl list-unit-files hal0-slot@.service` and will collect
         # all three cases on this runner.
+        #
+        # HAL0_TOOLBOX_IMAGE_VULKAN must reach the pytest process because
+        # LlamaServerProvider.image_ref() bakes the resolved image into
+        # the rendered override.conf at SlotManager.load() time —
+        # /etc/hal0/api.env only flows into the hal0-api systemd unit,
+        # which these tests bypass.
+        env:
+          HAL0_TOOLBOX_IMAGE_VULKAN: hal0-toolbox-cpu:ci
         run: |
           . .venv/bin/activate
-          sudo --preserve-env=PATH,VIRTUAL_ENV,HAL0_CI_SLOT,HAL0_CI_MODEL \
+          sudo --preserve-env=PATH,VIRTUAL_ENV,HAL0_CI_SLOT,HAL0_CI_MODEL,HAL0_TOOLBOX_IMAGE_VULKAN \
               .venv/bin/pytest tests/slots/test_integration.py -v -m integration
 
       - name: Capture journald on failure
