@@ -202,9 +202,7 @@ def check_rate_limit(request: Request, *, scope: str) -> None:
     keep this one-liner shape so the rate-limit concern doesn't grow a
     tail of imports per call site.
     """
-    limiter: IpRateLimiter | None = getattr(
-        request.app.state, "auth_rate_limiter", None
-    )
+    limiter: IpRateLimiter | None = getattr(request.app.state, "auth_rate_limiter", None)
     if limiter is None:
         # Defensive: if the install step was skipped (e.g. a test
         # constructs a TestClient without our wiring), the limiter is

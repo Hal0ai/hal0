@@ -409,11 +409,7 @@ def _verify_first_run_otp(request: Request, body: dict[str, Any]) -> None:
         )
         return
 
-    presented = str(
-        body.get("otp")
-        or request.headers.get("x-hal0-first-run-otp")
-        or ""
-    ).strip()
+    presented = str(body.get("otp") or request.headers.get("x-hal0-first-run-otp") or "").strip()
 
     lock = first_run_lock.read_lockfile()
     if lock is None:
@@ -429,8 +425,7 @@ def _verify_first_run_otp(request: Request, body: dict[str, Any]) -> None:
             "first-run setup requires the OTP printed by the installer",
             details={
                 "hint": (
-                    "the .first-run.lock file is missing; "
-                    "run hal0-api restart to mint a fresh one"
+                    "the .first-run.lock file is missing; run hal0-api restart to mint a fresh one"
                 ),
             },
         )
