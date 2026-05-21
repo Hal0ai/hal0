@@ -86,7 +86,10 @@ jobs:
           # The runner has no GPU; the Vulkan binary should still launch
           # against the llvmpipe software rasteriser or fall back to CPU.
           # We accept any non-error exit from --help as proof-of-life.
-          docker run --rm hal0-toolbox-vulkan:ci /bin/bash -c \
+          # --entrypoint override: the image's ENTRYPOINT is llama-server
+          # itself (packaging/toolbox/vulkan.Dockerfile:154), so we have
+          # to swap it for /bin/bash to chain `which` + `--help`.
+          docker run --rm --entrypoint /bin/bash hal0-toolbox-vulkan:ci -c \
             'which llama-server && llama-server --help >/dev/null'
 
       - name: Cache model GGUF

@@ -21,12 +21,17 @@ def isolated_client(tmp_hal0_home: str) -> Iterator[TestClient]:
         yield c
 
 
-def test_get_models_config_returns_defaults(isolated_client: TestClient) -> None:
+def test_get_models_config_returns_defaults(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
     r = isolated_client.get("/api/config/models")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["roots"] == ["/var/lib/hal0/models"]
-    assert body["pull_root"] == "/var/lib/hal0/models"
+    # Defaults track HAL0_HOME (set by isolated_client → tmp_hal0_home).
+    # In production (HAL0_HOME unset) these resolve to /var/lib/hal0/models.
+    expected_models_dir = f"{tmp_hal0_home}/var-lib/hal0/models"
+    assert body["roots"] == [expected_models_dir]
+    assert body["pull_root"] == expected_models_dir
     assert body["auto_scan_on_start"] is True
     assert ".gguf" in body["file_extensions"]
     assert ".safetensors" in body["file_extensions"]
