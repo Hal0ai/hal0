@@ -29,7 +29,7 @@ import NPUBackendCard from '../components/capabilities/NPUBackendCard.vue'
 const router = useRouter()
 const system = useSystemStore()
 const { stats } = useStats(2500)
-const { metrics, aggHistory } = useSlotMetrics(2500)
+const { metrics, history, aggHistory } = useSlotMetrics(2500)
 
 const hw = computed(() => stats.value || {})
 
@@ -367,6 +367,7 @@ loadChatModels()
               :key="slot.name"
               :slot="slot"
               :metrics="metrics[slot.name]"
+              :spark-data="history[slot.name] || { tps: [], pps: [] }"
               @action="() => router.push('/slots')"
               @logs="() => router.push('/slots')"
               @edit="() => router.push('/slots')"
