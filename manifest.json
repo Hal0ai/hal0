@@ -1,38 +1,38 @@
 {
   "_schema": "hal0.manifest.v1",
-  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, flm, moonshine, kokoro) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release \u2014 the runtime then pulls by tag and emits a warning. The `.github/workflows/toolbox.yml` build job patches this file post-publish with the actual content digests via cosign + buildx. Schema versioned via `_schema`; bump it when the shape changes. See PLAN.md \u00a712 (toolbox images) and \u00a717 (Risks: ghcr.io/hal0ai/ org provisioning may be deferred, so refs use ghcr.io/<owner>/ in the workflow).",
+  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, flm, moonshine, kokoro, comfyui) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release \u2014 the runtime then pulls by tag and emits a warning. The `.github/workflows/toolbox.yml` build job patches this file post-publish with the actual content digests via cosign + buildx and opens a PR (or pushes to main, depending on the `manifest` job config) so the pinned digests track the published images. Schema versioned via `_schema`; bump it when the shape changes. Toolbox images are public on `ghcr.io/hal0ai/`; the installer pulls them anonymously and `hal0 doctor toolbox-pull` asserts that contract holds. See PLAN.md \u00a712 (toolbox images) and \u00a717 (Risks).",
   "version": "0.0.0",
   "channel": "dev",
   "toolbox_images": {
     "vulkan": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-      "digest": "sha256:8257537d32c900014c4fb81249ab8732c72701a9a28fa3053a9d294b5d5ef8e2",
+      "digest": "sha256:eac37fe1b594cf496066fabb050d053692194f3ea8656fc4782b3131cbec7a9c",
       "_notes": "llama.cpp Vulkan backend; default for Strix Halo iGPU"
     },
     "rocm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
-      "digest": "sha256:ea82221a210fd3b7ca6deb1e53b7206c8e53e6dd91fc53595efc0c5c73daea84",
+      "digest": "sha256:3cfa65321cc66d3f7ad389d83e6f134912330ffc4f45ba50360307f97ca42830",
       "_notes": "llama.cpp ROCm backend; multi-arch (gfx1030..gfx1151)"
     },
     "flm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
-      "digest": "sha256:6ef99c2f202a0166b3034d474726ba49a36093b16f26e6e472607876a715e690",
+      "digest": "sha256:eadbc8128599fe177a47e536f3a1a638ce9bbe83930910f9594e1f2e8df29ac9",
       "_notes": "FastFlowLM on AMD XDNA2 NPU; requires kernel >= 6.11 + amdxdna driver on the host"
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
-      "digest": "sha256:b1fbd13db78975c3f29d77d1a4523ba613710fbfd331395e4f2c41913b4faba5",
+      "digest": "sha256:a5bbb78b54ac07620fc28a168d31ef5d8e6523cbf93f76faf189f3bbd8e8ddaa",
       "_notes": "Moonshine STT (CPU/Vulkan); OpenAI-compat /v1/audio/transcriptions + WS"
     },
     "kokoro": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
-      "digest": "sha256:2247ed408a2ea556ba257cf3f054cc3d59f8d07b1274a7e44ea9f11b693eb716",
+      "digest": "sha256:0e9e7b06bbda3ba4c81deda71c9d2c3b43697325eb2d514e2fd69afa3cdcb9d1",
       "_notes": "Kokoro-82M TTS (CPU ONNX); OpenAI-compat /v1/audio/speech",
       "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
     },
     "comfyui": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-comfyui:v1",
-      "digest": "sha256:55d711557f4e6b761c5b09f21601d23736567a3d9a58283da5fe064bd65cd593",
+      "digest": "sha256:f887050f5ae4e648ce2fa7225fbbfed61d45b00941857ec4ec115d3353c99f76",
       "_notes": "ComfyUI image-gen on ROCm; SDXL + SD 1.5 + Flux. Translated from OpenAI /v1/images/generations.",
       "_upstream_reference": "https://github.com/comfyanonymous/ComfyUI"
     }

@@ -26,6 +26,19 @@ sudo bash installer/install.sh
 
 The installer is **idempotent** — safe to re-run after a partial failure or to update configuration defaults.
 
+### Pulling toolbox images
+
+Toolbox images live under `ghcr.io/hal0ai/hal0-toolbox-*` and are **public**;
+the installer (and `hal0 slot load` at runtime) pull them anonymously. No
+`docker login` is required — even on a hardened LAN box that has never seen
+a GHCR credential.
+
+The pinned image digests are tracked in [`manifest.json`](../manifest.json)
+and refreshed by `.github/workflows/toolbox.yml` after every build. Run
+`hal0 doctor toolbox-pull` to verify each pinned image is reachable from
+this host (anonymous OCI v2 token-exchange + HEAD on the manifest URL —
+no `docker pull` needed).
+
 ## Environment variables
 
 These are the variables `installer/install.sh` actually reads:
