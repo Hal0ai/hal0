@@ -17,16 +17,15 @@ const props = defineProps({
   slot: { type: Object, required: true },
   metrics: { type: Object, default: null },
   sparkData: { type: Object, default: () => ({ tps: [], pps: [] }) },
-  models: { type: Array, default: () => [] },
-  selectedModel: { type: String, default: '' },
   actionLoading: { type: String, default: null },
 })
 
 // `swap` was the interim B2 fallback (parent routed to openEdit). C1 wires
 // the inline popover directly to /api/slots/{name}/swap — emit `swapped` on
 // success so parents that want to refetch can do so without listening to the
-// events ring.
-const emit = defineEmits(['action', 'select-model', 'logs', 'edit', 'delete', 'swapped'])
+// events ring. The bottom-of-card model `<select>` was removed in favour of
+// the inline-trigger popover, so we no longer emit `select-model` either.
+const emit = defineEmits(['action', 'logs', 'edit', 'delete', 'swapped'])
 
 const toasts = useToastsStore()
 
@@ -114,6 +113,23 @@ const hardwareTarget = computed(() => {
   // mix in haloai but show as 'iGPU' for now.
   if (provider === 'kokoro' || provider === 'moonshine') return { id: 'igpu', label: 'iGPU' }
   return { id: 'unknown', label: backend || provider || 'slot' }
+})
+
+// Backend / runtime identifier — the concrete tech driving the slot
+// (vulkan / rocm / cuda / flm / cpu / kokoro / moonshine / …). Surfaced
+// next to the hardware-target chip so the user can tell two iGPU slots
+// apart at a glance ("iGPU via vulkan" vs "iGPU via kokoro").
+const backendTech = computed(() => {
+  const backend = (props.slot.backend || '').toLowerCase()
+  const provider = (props.slot.provider || '').toLowerCase()
+  // Self-managed providers carry their own runtime name in `provider` and
+  // a generic backend (often `cpu` or empty), so prefer provider there.
+  if (provider && provider !== 'llama-server' && provider !== 'llama.cpp') {
+    return { id: provider, label: provider }
+  }
+  if (backend) return { id: backend, label: backend }
+  if (provider) return { id: provider, label: provider }
+  return null
 })
 
 // -----------------------------------------------------------------------------
@@ -374,6 +390,19 @@ onBeforeUnmount(() => {
   if (flashTimer) clearTimeout(flashTimer)
 })
 
+// Start button delegate. When the slot already has a model assigned, just
+// emit `action: 'load'` and let the parent (Slots.vue / doLoad) drive the
+// /api/slots/{name}/load call. When no model is set yet, the bottom <select>
+// used to be the affordance; with that removed we route Start straight into
+// the swap popover so the operator always has a path to pick a model.
+function startSlot() {
+  if (!currentModelId.value && swapAvailable.value) {
+    openSwap()
+    return
+  }
+  emit('action', 'load')
+}
+
 function fmtUptime(s) {
   if (!s || s < 60) return '—'
   const mins = Math.floor(s / 60), hrs = Math.floor(mins / 60), days = Math.floor(hrs / 24)
@@ -446,21 +475,28 @@ const sparkSvg = computed(() => {
       </template>
       <template v-else>
         <!-- Non-FLM slots get an inline swap trigger on the model label.
-             FLM slots multiplex multi-model sets — out of scope for C1, the
-             label stays read-only and the affordance is hidden. -->
+             Styled as a select-like control so the affordance is obvious
+             without hover. FLM slots multiplex multi-model sets — out of
+             scope for C1, the label stays read-only and the chevron hides. -->
         <button
           v-if="swapAvailable"
           ref="swapTriggerRef"
           type="button"
-          class="sc-model sc-model-trigger mono"
-          :title="`Swap model (${modelLabel})`"
+          class="sc-model-trigger mono"
+          :class="{ 'is-empty': !currentModelId, 'is-open': swapOpen }"
+          :title="currentModelId ? `Swap model (${modelLabel})` : 'Pick a model'"
           :aria-haspopup="'listbox'"
           :aria-expanded="swapOpen"
-          :aria-label="`Swap model for ${slot.name}, current ${modelLabel}`"
+          :aria-label="currentModelId
+            ? `Swap model for ${slot.name}, current ${modelLabel}`
+            : `Pick a model for ${slot.name}`"
           @click.stop="openSwap"
         >
-          <span class="sc-model-text">{{ modelLabel }}</span>
-          <svg class="sc-swap-caret" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
+          <svg class="sc-swap-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4"/>
+          </svg>
+          <span class="sc-model-text">{{ currentModelId ? modelLabel : 'select model…' }}</span>
+          <svg class="sc-swap-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/>
           </svg>
         </button>
@@ -573,11 +609,6 @@ const sparkSvg = computed(() => {
       </div>
     </Teleport>
 
-    <div class="sc-meta">
-      <span class="sc-chip" :class="`hw-${hardwareTarget.id}`">{{ hardwareTarget.label }}</span>
-      <span v-if="slot.context_size" class="sc-chip dim">ctx {{ (slot.context_size / 1024).toFixed(0) }}K</span>
-    </div>
-
     <!-- Stats row -->
     <div class="sc-stats">
       <div class="sc-stat">
@@ -606,19 +637,22 @@ const sparkSvg = computed(() => {
       <span class="sc-spark-label">tps</span>
     </div>
 
-    <!-- Footer: model picker + actions -->
+    <!-- Footer: hardware + backend chips on the left, lifecycle actions on
+         the right. The model picker used to live here as a redundant
+         <select>; it's been folded into the inline trigger on the model
+         label (which already supports hot-swap + pull-if-missing). In its
+         place we surface the slot's hardware target + concrete backend so
+         two iGPU slots running different runtimes are distinguishable. -->
     <div class="sc-foot">
-      <select
-        class="sc-select mono"
-        :value="selectedModel"
-        :disabled="!models || models.length === 0"
-        @change="$emit('select-model', $event.target.value)"
-      >
-        <option value="">{{ (!models || models.length === 0) ? 'no models' : 'pick model…' }}</option>
-        <option v-for="mdl in models" :key="mdl.id || mdl" :value="mdl.id || mdl">
-          {{ mdl.name || mdl.id || mdl }}
-        </option>
-      </select>
+      <div class="sc-foot-chips" :title="`Hardware: ${hardwareTarget.label}${backendTech ? ' · backend: ' + backendTech.label : ''}`">
+        <span class="sc-chip hw" :class="`hw-${hardwareTarget.id}`">{{ hardwareTarget.label }}</span>
+        <span
+          v-if="backendTech && backendTech.id !== hardwareTarget.id.toLowerCase()"
+          class="sc-chip backend"
+          :class="`be-${backendTech.id}`"
+        >{{ backendTech.label }}</span>
+        <span v-if="slot.context_size" class="sc-chip dim">ctx {{ (slot.context_size / 1024).toFixed(0) }}K</span>
+      </div>
 
       <button class="sc-btn" type="button" @click="$emit('edit')" title="Edit">
         <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
@@ -632,7 +666,14 @@ const sparkSvg = computed(() => {
       <button v-if="running" class="sc-btn danger" type="button" :disabled="busy" @click="$emit('action', 'unload')" title="Stop">
         <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
       </button>
-      <button v-else class="sc-btn good" type="button" :disabled="busy" @click="$emit('action', selectedModel ? 'load' : 'load')" title="Start">
+      <button
+        v-else
+        class="sc-btn good"
+        type="button"
+        :disabled="busy"
+        @click="startSlot"
+        :title="currentModelId ? 'Start' : 'Pick a model to start'"
+      >
         <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5.14v14l11-7-11-7z"/></svg>
       </button>
       <!-- Delete is hidden for built-in slots (primary/embed/stt/tts); the
@@ -726,12 +767,12 @@ const sparkSvg = computed(() => {
 }
 
 .sc-models {
-  padding: 4px 16px;
+  padding: 6px 16px 2px;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 4px;
-  min-height: 19px;
+  min-height: 28px;
 }
 .sc-model {
   font-size: 11px;
@@ -756,13 +797,6 @@ const sparkSvg = computed(() => {
   background: color-mix(in srgb, var(--hal0-accent) 12%, transparent);
 }
 
-.sc-meta {
-  padding: 6px 16px 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
 .sc-chip {
   font-family: var(--font-mono);
   font-size: 9px;
@@ -845,18 +879,51 @@ const sparkSvg = computed(() => {
   align-items: center;
   gap: 6px;
 }
-.sc-select {
+/* Left-side chip cluster replaces the legacy model `<select>`. Flex-grows
+   so the action buttons hug the right edge regardless of how many chips
+   render (cpu-only slots have just the hw chip; iGPU/vulkan slots have
+   two; FLM slots inherit hw=NPU + backend=flm). */
+.sc-foot-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
   flex: 1;
   min-width: 0;
-  background: var(--color-surface-2);
-  color: var(--color-fg);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  padding: 5px 8px;
-  font-size: 12px;
 }
-.sc-select:focus { outline: none; border-color: var(--color-accent); }
-.sc-select:disabled { opacity: 0.5; }
+
+/* Backend tech chip — neutral by default so it doesn't compete with the
+   hw-target chip's category colour. Specific runtimes get a recognisable
+   accent (vulkan teal, rocm orange, flm warning-amber). */
+.sc-chip.backend {
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+}
+.sc-chip.be-vulkan {
+  color: #4fc3f7;
+  border-color: color-mix(in oklch, #4fc3f7, transparent 60%);
+  background: color-mix(in oklch, #4fc3f7, transparent 88%);
+}
+.sc-chip.be-rocm {
+  color: #ff8a65;
+  border-color: color-mix(in oklch, #ff8a65, transparent 60%);
+  background: color-mix(in oklch, #ff8a65, transparent 88%);
+}
+.sc-chip.be-cuda {
+  color: #aed581;
+  border-color: color-mix(in oklch, #aed581, transparent 60%);
+  background: color-mix(in oklch, #aed581, transparent 88%);
+}
+.sc-chip.be-metal {
+  color: #ce93d8;
+  border-color: color-mix(in oklch, #ce93d8, transparent 60%);
+  background: color-mix(in oklch, #ce93d8, transparent 88%);
+}
+.sc-chip.be-flm {
+  color: var(--color-warning);
+  border-color: color-mix(in oklch, var(--color-warning), transparent 60%);
+  background: color-mix(in oklch, var(--color-warning), transparent 90%);
+}
 
 /* Default action button — transparent ghost. Edit / Logs / Delete sit
    here so they don't compete visually with the load-cycle buttons. */
@@ -905,47 +972,77 @@ const sparkSvg = computed(() => {
   border-color: var(--color-danger);
 }
 
-/* Inline swap trigger — looks like the static model label but reveals a
-   caret on hover so the affordance is discoverable. Keeps the same font
-   metrics so layout doesn't shift between FLM (read-only) and non-FLM
-   (clickable) slots. */
+/* Inline swap trigger — styled as a select-like control so the affordance
+   reads as "click me" without depending on hover. A subtle accent-tinted
+   frame distinguishes it from a static label; the left swap-arrows icon
+   reinforces that this is a swap action, and the right caret indicates
+   a dropdown. Empty-state ("select model…") gets a stronger amber accent
+   to draw the eye for newly-created slots. */
 .sc-model-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   max-width: 100%;
-  background: transparent;
-  border: 0;
-  padding: 0;
+  padding: 3px 8px;
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--color-fg-muted);
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--color-fg);
   cursor: pointer;
+  background: color-mix(in oklch, var(--hal0-accent) 5%, var(--color-surface-2));
+  border: 1px solid color-mix(in oklch, var(--hal0-accent) 24%, var(--color-border));
   border-radius: var(--radius-sm);
   text-align: left;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .sc-model-trigger .sc-model-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.sc-model-trigger .sc-swap-icon {
+  flex-shrink: 0;
+  color: var(--hal0-accent);
+  opacity: 0.75;
 }
 .sc-model-trigger .sc-swap-caret {
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.15s ease;
+  opacity: 0.7;
+  color: var(--hal0-accent);
+  transition: transform 0.15s ease, opacity 0.15s ease;
 }
 .sc-model-trigger:hover,
 .sc-model-trigger:focus-visible,
-.sc-model-trigger[aria-expanded="true"] {
-  color: var(--color-fg);
+.sc-model-trigger.is-open {
+  background: color-mix(in oklch, var(--hal0-accent) 12%, var(--color-surface-2));
+  border-color: color-mix(in oklch, var(--hal0-accent) 50%, var(--color-border));
 }
+.sc-model-trigger:hover .sc-swap-icon,
+.sc-model-trigger:focus-visible .sc-swap-icon,
+.sc-model-trigger.is-open .sc-swap-icon { opacity: 1; }
 .sc-model-trigger:hover .sc-swap-caret,
-.sc-model-trigger:focus-visible .sc-swap-caret,
-.sc-model-trigger[aria-expanded="true"] .sc-swap-caret {
-  opacity: 0.8;
-}
+.sc-model-trigger:focus-visible .sc-swap-caret { opacity: 1; }
+.sc-model-trigger.is-open .sc-swap-caret { transform: rotate(180deg); opacity: 1; }
 .sc-model-trigger:focus-visible { outline: 1px solid var(--color-accent); outline-offset: 2px; }
+
+/* Empty-state — slot has no model assigned yet. Stronger accent so the
+   operator knows this is the primary CTA to get the slot running. */
+.sc-model-trigger.is-empty {
+  color: var(--hal0-accent);
+  background: color-mix(in oklch, var(--hal0-accent) 10%, var(--color-surface-2));
+  border-color: color-mix(in oklch, var(--hal0-accent) 50%, var(--color-border));
+  border-style: dashed;
+}
+.sc-model-trigger.is-empty:hover,
+.sc-model-trigger.is-empty:focus-visible,
+.sc-model-trigger.is-empty.is-open {
+  background: color-mix(in oklch, var(--hal0-accent) 18%, var(--color-surface-2));
+  border-color: var(--hal0-accent);
+  border-style: solid;
+}
 </style>
 
 <!-- Popover is teleported to <body>. Scoped styles travel with the root

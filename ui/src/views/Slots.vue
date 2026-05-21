@@ -161,8 +161,20 @@ async function slotAction(slotName, action, body = null) {
 }
 
 async function doLoad(slot) {
-  const model = slotSelections.value[slot.name] || slot._selectedModel
-  if (!model) { toasts.warning('Select a model first'); return }
+  // The card's footer <select> was removed in favour of the inline swap
+  // trigger on the model label, so slotSelections is only populated by
+  // the legacy row layout (kept behind v-if="false"). Fall back to the
+  // slot's persisted model_id so Start on a previously-loaded slot just
+  // reloads its model; if even that is empty the POST body is omitted
+  // and the API uses the slot's TOML default.
+  const model = slotSelections.value[slot.name]
+    || slot._selectedModel
+    || slot.model_id
+    || slot.model
+  if (!model) {
+    await slotAction(slot.name, 'load')
+    return
+  }
   await slotAction(slot.name, 'load', { model })
 }
 
@@ -615,14 +627,10 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
             :slot="slot"
             :metrics="slotMetrics[slot.name]"
             :spark-data="slotHistory[slot.name] || { tps: [], pps: [] }"
-            :models="models"
-            :selected-model="slot._selectedModel"
             :action-loading="actionBusy[slot.name]"
-            @select-model="(v) => { slotSelections[slot.name] = v }"
             @action="(a) => a === 'load' ? doLoad(slot) : slotAction(slot.name, a)"
             @logs="openLogs(slot)"
             @edit="openEdit(slot)"
-            @swap="openEdit(slot)"
             @delete="deletingSlot = slot"
           />
           <!-- NPU backend rides in the same grid as the other slot
