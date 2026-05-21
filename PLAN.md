@@ -69,6 +69,14 @@ the box; v1.0 is the eventual stability/perf bar (see §1 "Path to v1.0").
   - Dark mode only; mobile-responsive on read-only paths
   - SSE for slot status + log tail
   - Hardware-aware slot config form (VRAM fit warnings inline)
+  - **Proxmox host-pressure segment** (shipped 2026-05-21 — #103) —
+    optional `/etc/hal0/proxmox.json` PVE API token surfaces the
+    physical host's DIMM total + other-tenant pressure on the unified
+    memory bar when hal0 runs inside an LXC. Token-rot signalled via
+    persistent pills on Dashboard + FooterBar plus a one-shot
+    `system.proxmox_unreachable` event on the ok→broken transition.
+    `/api/stats/hardware` ships a slim projection (no tenants[]) so
+    the 2.5 s poll cadence stays cheap regardless of cluster size.
 - **Bundled prewired OpenWebUI** at `:3001`
   - Installer pre-configures `OPENAI_API_BASE_URLS=http://127.0.0.1:8080/v1`
   - `WEBUI_AUTH=False` (LAN-only home install)

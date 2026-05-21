@@ -126,6 +126,19 @@ hostnames). Use `--no-tls` to skip Caddy and front hal0 with your own
 reverse proxy. See [`installer/README.md`](./installer/README.md) for
 the full flow.
 
+### Proxmox integration (optional)
+
+If hal0 runs inside a Proxmox LXC, the container only sees its own
+cgroup slice of memory — other tenants, ZFS ARC, and the host kernel
+draw from the same physical DIMMs as GPU GTT but are invisible from
+inside. To surface that, drop a read-only `PVEAuditor` API token into
+the dashboard's Settings → "Proxmox integration" panel. Once saved,
+the unified-memory bar swaps to the physical host's DIMM total and
+adds a muted "Proxmox host" segment for other-tenant + kernel
+pressure. Token is sensitive and stored 0600 at
+`/etc/hal0/proxmox.json`; the API never echoes it back. Bare-metal and
+VM installs leave the panel off and the dashboard stays quiet.
+
 ## License
 
 Apache 2.0. See [`LICENSE`](./LICENSE).
