@@ -1,9 +1,11 @@
 # ADR 0001 — Collapse edge auth into FastAPI
 
-- **Status:** Proposed
-- **Date:** 2026-05-17
+- **Status:** Accepted
+- **Date proposed:** 2026-05-17
+- **Date accepted:** 2026-05-21
+- **Implementing PRs:** Child A (#58 — FastAPI password auth), Child B (#59 — Caddyfile reduction + --no-tls), Child C (#60 — docs pass)
 - **Supersedes:** the dual-layer auth posture established by #28, #29, #36, #43, #49
-- **Closes (on land):** #43, #51
+- **Closed on land:** #28, #43, #51
 
 ## Context
 
@@ -121,3 +123,14 @@ Three coordinated PRs, in two waves:
 **Wave 2 (after A merges):**
 - PR B — Caddyfile reduction, `--no-tls` install flag, drop `--auth=basic`, delete `PUBLIC_PATHS` frozenset. Wires the wizard's "set up password" step (UI lives in #46's wizard work already in tree).
 - PR C — Docs (installer README, upgrade notes, PLAN.md), close #43 / #51, reframe #28's finding in `tests/harness/FINDINGS.md` as "fixed by architecture removal."
+
+## Outcome
+
+Landed across PRs #58 (Child A), #59 (Child B), and #60 (Child C):
+
+- **Caddyfile collapsed to a TLS terminator + reverse proxy** (~42 lines: `tls`, `encode`, `reverse_proxy`, log block — no matchers, no `basicauth`, no allowlist). `packaging/caddy/Caddyfile.template`.
+- **`--no-tls` install flag** added — skips the Caddy install/render entirely, FastAPI binds `0.0.0.0:8080`. Right path for hosts behind Traefik / nginx / Cloudflare Tunnel / an existing reverse proxy. `--dev` implies `--no-tls`. `--auth=basic` removed.
+- **Password auth in FastAPI** — `POST /api/auth/password` (public when no password is set, writer-scoped otherwise), `POST /api/auth/login` issues a signed `hal0_session` cookie, `POST /api/auth/logout` clears it. The dashboard wizard's password-setup step drives the first-run flow.
+- **`PUBLIC_PATHS` frozenset deleted** — every route's auth posture is decided in code via `dependencies=[Depends(require_token)]` (or `require_writer`), or by omission. The middleware composes Bearer + session cookie + (legacy) `X-Forwarded-Email` against the same deps. Regression test in `tests/api/test_no_public_paths.py` keeps the frozenset from coming back.
+- **Findings #16 and #21 resolved by architecture removal** — credential capture lives in the wizard (not the installer), and the allowlist-vs-route drift class cannot recur because there is no allowlist. Finding #10 (the #28 critical bug) is similarly historical. See `tests/harness/FINDINGS.md` §10 / §16 / §21.
+- **Issue housekeeping** — #28, #43, and #51 closed on land. Parent #54 closed with a summary.
