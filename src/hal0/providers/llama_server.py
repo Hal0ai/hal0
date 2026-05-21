@@ -138,8 +138,10 @@ class LlamaServerProvider(Provider):
 
         port = _g(slot_cfg, "port", "slot", "port", 8081)
         model_path = model_info.get("path", "")
-        is_embedding = model_info.get("embedding", False) or _g(
-            slot_cfg, "embedding", "defaults", "embedding", False
+        is_embedding = (
+            model_info.get("embedding", False)
+            or _g(slot_cfg, "embedding", "defaults", "embedding", False)
+            or "embed" in (model_info.get("capabilities") or [])
         )
 
         # Slot backend wins; model preferred_backend is legacy fallback.
