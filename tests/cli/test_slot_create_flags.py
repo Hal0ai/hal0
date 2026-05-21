@@ -52,11 +52,20 @@ def captured_post(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def test_help_lists_new_flags() -> None:
-    """``slot create --help`` mentions --provider and --hardware."""
+    """``slot create --help`` mentions --provider and --hardware.
+
+    Click colors the flag name's leading ``-`` and ``-provider`` with
+    separate ANSI sequences, so the raw ``result.output`` won't contain
+    a contiguous ``--provider`` substring under a coloring terminal.
+    Strip ANSI before checking.
+    """
+    import re
+
     result = runner.invoke(slot_commands.app, ["create", "--help"])
     assert result.exit_code == 0, result.output
-    assert "--provider" in result.output
-    assert "--hardware" in result.output
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--provider" in plain
+    assert "--hardware" in plain
 
 
 def test_provider_flag_sets_provider_and_default_hardware(

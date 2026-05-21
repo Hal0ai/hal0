@@ -95,7 +95,10 @@ test('pulls a custom HF model, assigns it to primary, deletes it', async ({
   await page.goto('/models')
 
   // ── Open pull modal, switch to HF tab, submit a repo ─────────
-  await page.getByRole('button', { name: /^Pull model$/ }).click()
+  // Page-level trigger is now "Add model" (B3 rename in 360b1c8 — the
+  // page Add button surfaces Curated/HuggingFace/Local tabs; the HF
+  // tab's submit button is still "Pull model").
+  await page.getByRole('button', { name: /^Add model$/ }).click()
   await expect(page.locator('#pull-title')).toBeVisible()
   await page.getByRole('tab', { name: /HuggingFace/ }).click()
   await page.locator('#hf-url').fill(HF_ID)
