@@ -62,12 +62,24 @@ def test_require_token_unless_public_no_longer_exists() -> None:
 
 @pytest.fixture
 def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """Fresh app with HAL0_AUTH_ENABLED=1; token store rooted at tmp_path."""
+    """Fresh app with HAL0_AUTH_ENABLED=1; token store rooted at tmp_path.
+
+    Consumes the first-run lockfile after app creation so these tests
+    exercise the POST-claim writer-gate (not the open-during-claim window).
+    """
     monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     app = create_app()
     with TestClient(app) as c:
+        # Delete lockfile inside the TestClient context so the lifespan
+        # has had a chance to mint it; otherwise our unlink runs before
+        # the mint and is a no-op.
+        from hal0.config import paths as _paths
+
+        lock = _paths.first_run_lock()
+        if lock.exists():
+            lock.unlink()
         yield c
 
 

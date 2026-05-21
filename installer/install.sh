@@ -994,6 +994,49 @@ SUMMARY_LINES+=(
     "$(printf '  %shal0 config show%s    inspect %s/hal0.toml' "${BOLD}" "${RST}" "${ETC_DIR}")"
 )
 
+# First-run OTP banner (FINDINGS §28). The API mints a one-time token
+# at ``${VAR_DIR}/.first-run.lock`` whenever the owner password is
+# unset. Operators reaching the dashboard from a non-loopback host
+# (browser on a laptop hitting hal0.local) need to paste this token
+# into the wizard's password step. Loopback callers (a curl on the
+# host itself) bypass the gate, so a local install with `curl
+# http://127.0.0.1:8080/api/auth/password ...` still works without
+# the token.
+#
+# The lockfile may not exist yet (the API is still starting; the file
+# is created in the lifespan hook). We poll briefly and surface the
+# token when it lands, otherwise fall back to a "find it at <path>"
+# hint so the operator knows where to look.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
+    FIRST_RUN_LOCK="${VAR_DIR}/.first-run.lock"
+    FIRST_RUN_OTP=""
+    for _attempt in 1 2 3 4 5; do
+        if [[ -r "${FIRST_RUN_LOCK}" ]]; then
+            # Lockfile is JSON {"otp": "...", "created_at": N}. Use
+            # grep + sed rather than depending on jq being installed —
+            # the installer cannot assume jq is on the host.
+            FIRST_RUN_OTP="$(sed -nE 's/.*"otp"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "${FIRST_RUN_LOCK}" 2>/dev/null || true)"
+            [[ -n "${FIRST_RUN_OTP}" ]] && break
+        fi
+        sleep 1
+    done
+
+    SUMMARY_LINES+=(
+        ""
+        "$(printf '%sFirst-run setup token:%s' "${BOLD}" "${RST}")"
+    )
+    if [[ -n "${FIRST_RUN_OTP}" ]]; then
+        SUMMARY_LINES+=(
+            "$(printf '  %s%s%s' "${BLU}" "${FIRST_RUN_OTP}" "${RST}")"
+            "$(printf '  %sPaste into the wizard password step. Loopback callers (curl on this host) bypass it.%s' "${DIM}" "${RST}")"
+        )
+    else
+        SUMMARY_LINES+=(
+            "$(printf '  %s(API still starting — read it from %s once available)%s' "${DIM}" "${FIRST_RUN_LOCK}" "${RST}")"
+        )
+    fi
+fi
+
 # --dev mode caveat — systemd units were written into the dev tree, not
 # /etc/systemd/system, so the host's systemctl does not see them. The
 # `hal0 slot create && hal0 slot load` flow will fail with "Unit

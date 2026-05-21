@@ -492,12 +492,24 @@ def test_install_routes_remain_reachable_under_default_lock(
             f"got {response.status_code}: {response.text}"
         )
 
-        # POST /api/auth/password is also reachable on first run — it's
-        # the wizard's password-claim endpoint and it has its own gate
-        # (no-password-set → no creds required).
-        response = c.post("/api/auth/password", json={"password": "hunter2hunter2"})
-        # The endpoint may 400 on its own validation (e.g. short password),
-        # but it must NOT 401: the wizard's claim path must be reachable.
-        assert response.status_code != 401, (
-            f"first-run set-password must be reachable without creds; got {response.text}"
+        # POST /api/auth/password is reachable on first run too — but
+        # per §28 it requires either an OTP from the .first-run.lock OR
+        # a 127.0.0.1 loopback call. TestClient appears as a non-loopback
+        # host, so a call without the OTP 401s auth.first_run_otp_required.
+        # That's the documented contract, not a regression — the wizard
+        # reads the OTP from the lockfile (printed by install.sh) and
+        # includes it in the body.
+        response = c.post(
+            "/api/auth/password",
+            json={"password": "hunter2hunter2"},
         )
+        # 401 (no OTP), 400 (validation), or 200 (loopback bypass) are all
+        # acceptable — what matters is the route exists and is reachable.
+        assert response.status_code in (200, 400, 401), (
+            f"set-password must be reachable on first-run; got {response.text}"
+        )
+        if response.status_code == 401:
+            assert response.json()["error"]["code"] in (
+                "auth.first_run_otp_required",
+                "auth.first_run_otp_invalid",
+            ), response.text

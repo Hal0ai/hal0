@@ -9,16 +9,22 @@
   POST   /api/auth/login        — public; validates {username, password}
                                   against the stored owner password and
                                   sets a ``hal0_session`` cookie on
-                                  success. 401 on bad creds.
+                                  success. 401 on bad creds. Throttled
+                                  via the IP-bucket rate limiter
+                                  (FINDINGS §32) — 5 attempts / 60s.
   GET    /api/auth/login        — legacy no-op kept so existing wizard
                                   probes don't 404 during the Wave 1
                                   rollout. Returns a hint pointing at
                                   the POST endpoint.
   POST   /api/auth/logout       — clears the session cookie; 204.
   POST   /api/auth/password     — set or rotate the owner password.
-                                  Allowed *without* auth iff no password
-                                  is currently set (first-run claim).
-                                  Otherwise requires writer scope.
+                                  First-run claim requires EITHER the
+                                  OTP token from
+                                  ``<state>/.first-run.lock`` OR a
+                                  127.0.0.1 loopback call (FINDINGS
+                                  §28). Once a password is set, the
+                                  endpoint requires writer scope.
+                                  Rate-limited the same as /login.
   GET    /api/auth/tokens       — admin-only; list token metadata.
   POST   /api/auth/tokens       — admin-only; mint a new token. The raw
                                   token value is in the response body
@@ -39,12 +45,20 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import JSONResponse
 
+from hal0.api.auth import first_run as first_run_lock
 from hal0.api.auth.password import (
     create_session_token,
     hash_password,
     verify_password,
+)
+from hal0.api.auth.rate_limit import (
+    RateLimitExceeded,
+    check_rate_limit,
+    client_ip,
 )
 from hal0.api.middleware.auth import (
     SESSION_COOKIE_NAME,
@@ -64,7 +78,21 @@ from hal0.auth.tokens import (
 )
 from hal0.errors import BadRequest, Hal0Error
 
+log = structlog.get_logger(__name__)
+
 router = APIRouter()
+
+# Loopback hosts that bypass the first-run OTP gate. IPv4 plus IPv6
+# loopback both qualify — a curl call from the same machine could come
+# in on either depending on the bind address. Anything outside this set
+# (including a LAN IP that points at the same physical host) must
+# present the OTP.
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
+
+# Rate-limit scope names. Kept as constants so the limiter buckets stay
+# stable across releases and tests can reset() per-scope.
+_RATE_SCOPE_LOGIN: str = "auth.login"
+_RATE_SCOPE_PASSWORD: str = "auth.password"
 
 
 # ── Constants / helpers ──────────────────────────────────────────────────────
@@ -93,6 +121,43 @@ class PasswordTooShort(Hal0Error):
 
     code = "auth.password_too_short"
     status = 400
+
+
+class FirstRunOtpRequired(Hal0Error):
+    """First-run set-password called from a LAN peer without the OTP.
+
+    The lockfile sits at ``<state>/.first-run.lock`` and is printed by
+    ``install.sh`` at the end of the install. The operator pastes it
+    into the wizard's password step; the wizard then echoes it back as
+    ``otp`` in the JSON body. Loopback callers bypass this requirement
+    so a host-local ``curl`` to ``http://127.0.0.1:8080`` keeps the old
+    UX.
+    """
+
+    code = "auth.first_run_otp_required"
+    status = 401
+
+
+class FirstRunOtpInvalid(Hal0Error):
+    """First-run set-password called with a bad/expired OTP.
+
+    Distinct code from "required" so the wizard can render a more
+    targeted error ("That setup token didn't match — copy a fresh one
+    from the installer transcript or run ``hal0 auth print-otp``").
+    """
+
+    code = "auth.first_run_otp_invalid"
+    status = 401
+
+
+# Note: the brief mentioned a possible "409 auth.password_already_set"
+# response for the post-first-run path, but the existing behaviour
+# (kept intentionally) is the more conservative 401 ``auth.required``
+# from ``require_token`` — see
+# tests/api/test_password_auth.py::test_second_set_password_without_auth_returns_401.
+# Surfacing 409 would let a probing attacker enumerate the install
+# state without credentials; 401 is the indistinguishable response
+# that matches the rest of the auth surface.
 
 
 def _store(request: Request) -> TokenStore:
@@ -177,8 +242,31 @@ async def login_hint() -> dict[str, Any]:
     }
 
 
+def _rate_limited_response(exc: RateLimitExceeded) -> JSONResponse:
+    """Render a 429 JSONResponse with the Retry-After header.
+
+    The global ``Hal0Error`` handler can't set per-response headers
+    (it's a single-arg JSONResponse construction), so the rate-limit
+    paths catch :class:`RateLimitExceeded` locally and synthesise the
+    response here. Shape matches the hal0 error envelope contract:
+    ``{"error": {"code", "message", "details"}}`` plus ``Retry-After``
+    in seconds.
+    """
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            }
+        },
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+    )
+
+
 @router.post("/login")
-async def login(request: Request, response: Response) -> dict[str, Any]:
+async def login(request: Request, response: Response) -> Any:
     """Validate owner credentials and set the ``hal0_session`` cookie.
 
     Body::
@@ -194,7 +282,19 @@ async def login(request: Request, response: Response) -> dict[str, Any]:
     same error for "no password configured", "wrong username", and
     "wrong password" so a probing client cannot enumerate which leg
     failed.
+
+    Rate-limited (FINDINGS §32) via the IP-bucket on
+    ``app.state.auth_rate_limiter``. The check runs BEFORE the bcrypt
+    verify so a flooding client doesn't get the CPU-amortised cover of
+    250ms per attempt — they pay zero compute on the throttled tail.
+    Failed attempts log at WARN level with ``{client_ip, identity,
+    reason}`` for grep-ability; the password itself is never logged.
     """
+    try:
+        check_rate_limit(request, scope=_RATE_SCOPE_LOGIN)
+    except RateLimitExceeded as exc:
+        return _rate_limited_response(exc)
+
     body = await _read_json_object(request)
     username = str(body.get("username") or "").strip()
     password = str(body.get("password") or "")
@@ -205,7 +305,29 @@ async def login(request: Request, response: Response) -> dict[str, Any]:
     # Constant-ish failure path: every failure mode below collapses to
     # the same 401 envelope, so a probing client can't distinguish
     # "no password set" from "wrong password" from "wrong username".
-    if not hash_str or username != _OWNER_USERNAME or not verify_password(password, hash_str):
+    if not hash_str:
+        reason = "no_password_configured"
+        ok = False
+    elif username != _OWNER_USERNAME:
+        reason = "unknown_username"
+        ok = False
+    elif not verify_password(password, hash_str):
+        reason = "bad_password"
+        ok = False
+    else:
+        reason = "ok"
+        ok = True
+
+    if not ok:
+        # Structured WARN log — identity is what the client claimed (so
+        # an attacker probing common usernames is grep-able) and reason
+        # is the precise leg that failed. The password is NEVER logged.
+        log.warning(
+            "auth.login_failed",
+            client_ip=client_ip(request),
+            identity=username or "<empty>",
+            reason=reason,
+        )
         raise AuthInvalid(
             "username or password is incorrect",
             details={"reason": "bad_credentials"},
@@ -253,25 +375,122 @@ async def logout() -> Response:
     return response
 
 
+def _is_loopback(request: Request) -> bool:
+    """True if ``request.client.host`` is a loopback address.
+
+    Used to bypass the first-run OTP gate: an operator running
+    ``curl http://127.0.0.1:8080`` on the host machine has already
+    proven they have shell access, so requiring them to fish the OTP
+    out of journalctl is friction without a corresponding security
+    win. The bypass is intentionally strict — only the literal
+    loopback hosts qualify, not e.g. ``10.0.1.50`` even when that's
+    the install's own LAN IP.
+    """
+    return client_ip(request) in _LOOPBACK_HOSTS
+
+
+def _verify_first_run_otp(request: Request, body: dict[str, Any]) -> None:
+    """Validate the first-run OTP against the lockfile.
+
+    Raises ``FirstRunOtpRequired`` when no OTP is presented and the
+    request isn't loopback, or ``FirstRunOtpInvalid`` when an OTP is
+    presented but doesn't match. On match (or loopback), returns
+    cleanly so the caller can proceed.
+
+    The OTP is read from the JSON body's ``otp`` field OR from the
+    ``X-Hal0-First-Run-OTP`` header — both are accepted so the wizard
+    can carry it in JSON while a CLI flow can stick it on a header.
+    """
+    # Loopback bypass — see _is_loopback's docstring for the rationale.
+    if _is_loopback(request):
+        log.info(
+            "auth.first_run.loopback_bypass",
+            client_ip=client_ip(request),
+        )
+        return
+
+    presented = str(body.get("otp") or request.headers.get("x-hal0-first-run-otp") or "").strip()
+
+    lock = first_run_lock.read_lockfile()
+    if lock is None:
+        # No lockfile on disk — either it was never minted (very old
+        # install upgraded in-place) or it was consumed earlier. Refuse
+        # the first-run claim from a non-loopback peer rather than
+        # silently allowing it: this is a security-critical path.
+        log.warning(
+            "auth.first_run.no_lockfile",
+            client_ip=client_ip(request),
+        )
+        raise FirstRunOtpRequired(
+            "first-run setup requires the OTP printed by the installer",
+            details={
+                "hint": (
+                    "the .first-run.lock file is missing; run hal0-api restart to mint a fresh one"
+                ),
+            },
+        )
+
+    if not presented:
+        raise FirstRunOtpRequired(
+            "first-run setup requires the OTP printed by the installer",
+            details={
+                "hint": (
+                    "paste the value from `cat /var/lib/hal0/.first-run.lock` "
+                    "into the wizard, OR call from 127.0.0.1"
+                ),
+            },
+        )
+
+    # Constant-time compare so the per-byte timing on a sustained probe
+    # doesn't leak the prefix of the OTP. ``hmac.compare_digest`` is
+    # also resistant to length-leak (returns False for differing
+    # lengths without scanning).
+    import hmac as _hmac
+
+    if not _hmac.compare_digest(presented, lock.otp):
+        log.warning(
+            "auth.first_run.otp_mismatch",
+            client_ip=client_ip(request),
+        )
+        raise FirstRunOtpInvalid(
+            "first-run OTP did not match",
+            details={"reason": "otp_mismatch"},
+        )
+
+
 @router.post("/password")
-async def set_password(request: Request) -> dict[str, Any]:
+async def set_password(request: Request) -> Any:
     """Set or rotate the owner password.
 
     Body::
 
-        {"password": "..."}
+        {"password": "...", "otp": "<optional first-run token>"}
 
     Auth contract:
-      - When no password is yet set, the endpoint is callable
-        **without any credentials** — that's the first-run "claim
-        ownership" path the wizard drives.
-      - Once a password is set, the endpoint requires writer scope
-        (Bearer or cookie). The cookie path additionally goes through
-        the CSRF tripwire because it's a writer-scoped mutation.
+
+      - First-run claim (no password yet):
+          * Loopback callers (``127.0.0.1`` / ``::1``) pass through
+            without any credential.
+          * Non-loopback callers MUST present the OTP minted on
+            startup at ``<state>/.first-run.lock`` (printed by the
+            installer banner). FINDINGS §28.
+      - Rotation (password already set):
+          * Requires writer scope (Bearer or cookie). Cookie path
+            additionally enforces the CSRF tripwire — same as every
+            other writer-scoped mutation.
 
     Always 400s a password shorter than 8 chars (server-side floor;
     the wizard surfaces a stronger UX hint).
+
+    Rate-limited (FINDINGS §32): the IP-bucket scope is shared with
+    the rest of the auth surface so an attacker can't grind both
+    endpoints simultaneously.
     """
+    try:
+        check_rate_limit(request, scope=_RATE_SCOPE_PASSWORD)
+    except RateLimitExceeded as exc:
+        return _rate_limited_response(exc)
+
     body = await _read_json_object(request)
     new_password = str(body.get("password") or "")
     if len(new_password) < _MIN_PASSWORD_LEN:
@@ -295,9 +514,25 @@ async def set_password(request: Request) -> dict[str, Any]:
         # require_writer also enforces CSRF on cookie auth — reuse it
         # rather than re-implementing the scope+CSRF logic.
         await require_writer(request, identity)
+    else:
+        # First-run claim: enforce the OTP / loopback gate. This is the
+        # FINDINGS §28 mitigation — without it, any LAN peer can race
+        # the legitimate operator to claim ownership in the window
+        # between hal0-api starting and the operator finishing the
+        # wizard.
+        _verify_first_run_otp(request, body)
 
     new_hash = hash_password(new_password)
     store.set_password_hash(new_hash)
+
+    # Consume the lockfile only on the first-run path. On a rotation
+    # the file is already gone (was consumed on the original claim);
+    # consume_lockfile is idempotent so the rotation branch could also
+    # call it, but keeping the call colocated with first-run makes the
+    # life-cycle obvious in code review.
+    if not has_existing:
+        first_run_lock.consume_lockfile()
+
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
         await event_bus.emit(

@@ -37,19 +37,56 @@ from hal0.api.middleware.auth import SESSION_COOKIE_NAME
 from hal0.auth.tokens import TokenStore
 
 
+def _install_loopback_client_middleware(app: object) -> None:
+    """Pin ``request.client.host`` to ``127.0.0.1`` for the test app.
+
+    Starlette's TestClient hard-codes ``scope['client']`` to
+    ``('testclient', 50000)``. Routes that distinguish loopback callers
+    from LAN peers (the first-run OTP gate, FINDINGS §28) need a real
+    127.0.0.1 here so the loopback bypass exercises in tests. The
+    middleware reads ``X-Test-Client-Ip`` when present so individual
+    tests can simulate a LAN attacker by setting the header.
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request as StarletteRequest
+
+    class _PinClientMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[override]
+            override = request.headers.get("x-test-client-ip")
+            host = override or "127.0.0.1"
+            # ASGI scope is the mutable source of truth for
+            # ``request.client``.
+            request.scope["client"] = (host, 12345)
+            return await call_next(request)
+
+    app.add_middleware(_PinClientMiddleware)  # type: ignore[attr-defined]
+
+
 @pytest.fixture
 def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """A fresh app with auth enabled and an isolated store + keyring."""
+    """A fresh app with auth enabled and an isolated store + keyring.
+
+    The TestClient appears as a loopback caller by default (FINDINGS
+    §28 OTP bypass). Tests that need to simulate a LAN attacker can
+    pass ``headers={"X-Test-Client-Ip": "10.0.1.50"}``.
+    """
     monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     app = create_app()
+    _install_loopback_client_middleware(app)
     with TestClient(app) as c:
         # Swap in a tmp-rooted store so the password hash + tokens land
         # under tmp_path/etc/hal0/tokens.toml. The keyring file lands at
         # tmp_path/etc/hal0/keyring on first session-token mint.
         store = TokenStore(tmp_path / "etc" / "hal0" / "tokens.toml")
         c.app.state.token_store = store
+        # Reset the rate-limit bucket so the per-test login matrices
+        # don't tip into 429 just because the fixture itself fired a
+        # few attempts.
+        limiter = getattr(c.app.state, "auth_rate_limiter", None)
+        if limiter is not None:
+            limiter.reset()
         yield c
 
 

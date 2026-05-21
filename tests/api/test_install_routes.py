@@ -38,23 +38,43 @@ from hal0.auth.tokens import TokenStore
 
 @pytest.fixture
 def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """TestClient with HAL0_AUTH_ENABLED=1 and an isolated token store."""
+    """TestClient with HAL0_AUTH_ENABLED=1 and an isolated token store.
+
+    Per §36 + §87 the lifespan mints a first-run lockfile when no
+    password is set, which intentionally opens /api/install/* during
+    the wizard claim window. The §29 writer-gate tests here pin the
+    POST-CLAIM contract (lockfile already consumed by the wizard), so
+    we delete the lockfile after app creation.
+    """
+    # autouse conftest fixture sets HAL0_AUTH_DISABLED=1 — undo so the
+    # explicit HAL0_AUTH_ENABLED=1 takes effect.
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     monkeypatch.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
     app: FastAPI = create_app()
     with TestClient(app) as c:
+        # Drop the first-run lockfile minted by the lifespan AFTER it
+        # has run so the writer-gate fires normally. Otherwise
+        # /api/install/* is open during the first-run claim window
+        # (intentional, but not what these tests are pinning).
+        from hal0.config import paths as _paths
+
+        lock = _paths.first_run_lock()
+        if lock.exists():
+            lock.unlink()
         c.app.state.token_store = TokenStore(tmp_path / "tokens.toml")
         yield c
 
 
 @pytest.fixture
 def open_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """TestClient with HAL0_AUTH_ENABLED unset — the fresh-install posture.
+    """TestClient with HAL0_AUTH_DISABLED=1 — the fresh-install posture.
 
     The FirstRun wizard MUST work in this mode: no password has been set
     yet, so the require_writer gate has to short-circuit to anonymous.
     """
+    # autouse conftest already sets HAL0_AUTH_DISABLED=1; keep it.
     monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     monkeypatch.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
