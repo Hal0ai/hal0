@@ -233,7 +233,7 @@ function openEdit(slot) {
   editingSlot.value = slot
   const initial = {
     backend:        slot.backend ?? 'vulkan',
-    model:          slot.model ?? '',
+    model:          slot.model_id ?? slot.model ?? '',
     ctx_size:       slot.ctx_size ?? 4096,
     auto_start:     slot.auto_start ?? false,
     // Advanced — Model
@@ -653,7 +653,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
               <span class="state-dot" :class="stateClass(slot.status)" :title="slot.status" aria-hidden="true" />
               <div class="slot-names">
                 <span class="slot-name">{{ slot.name }}</span>
-                <span class="slot-model" v-if="slot.model">{{ slot.model }}</span>
+                <span class="slot-model" v-if="slot.model_id || slot.model">{{ slot.model_id || slot.model }}</span>
                 <span class="slot-model text-faint" v-else>no model loaded</span>
               </div>
             </div>
@@ -674,7 +674,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
             <!-- Right: actions -->
             <div class="slot-actions">
               <!-- Load (when no model loaded) -->
-              <template v-if="!slot.model || slot.status === 'offline'">
+              <template v-if="!(slot.model_id || slot.model) || slot.status === 'offline'">
                 <select
                   class="model-select"
                   :value="slot._selectedModel"
@@ -682,7 +682,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
                   :aria-label="`Select model for slot ${slot.name}`"
                 >
                   <option value="">Select model…</option>
-                  <option v-for="m in models" :key="m.id" :value="m.id">
+                  <option v-for="m in filterCompatibleModels(slot.backend)" :key="m.id" :value="m.id">
                     {{ m.name ?? m.id }}{{ m.size_gb ? ` — ${m.size_gb}GB` : '' }} {{ modelFitLabel(m) }}
                   </option>
                 </select>
