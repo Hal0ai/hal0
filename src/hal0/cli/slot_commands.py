@@ -333,12 +333,13 @@ def slot_create(
 
     # Back-compat: --backend was historically the provider name. Translate
     # with a deprecation warning so existing scripts keep working but the
-    # user is nudged toward the corrected flags.
+    # user is nudged toward the corrected flags. We emit to stderr via
+    # ``typer.echo(..., err=True)`` so stdout stays parseable for callers
+    # piping the success line into other tools.
     if backend is not None:
-        console.print(
-            "[yellow]warning:[/yellow] --backend is deprecated and was always the "
-            "provider name, not the hardware backend; use --provider instead.",
-            highlight=False,
+        typer.echo(
+            "[deprecated] --backend will be renamed to --provider in v0.2; use --provider",
+            err=True,
         )
         try:
             provider = SlotProvider(backend)
@@ -407,10 +408,9 @@ def slot_edit(
 
     # Back-compat: --backend mapped to provider historically.
     if backend is not None:
-        console.print(
-            "[yellow]warning:[/yellow] --backend is deprecated and was always the "
-            "provider name, not the hardware backend; use --provider instead.",
-            highlight=False,
+        typer.echo(
+            "[deprecated] --backend will be renamed to --provider in v0.2; use --provider",
+            err=True,
         )
         try:
             provider = SlotProvider(backend) if provider is None else provider
