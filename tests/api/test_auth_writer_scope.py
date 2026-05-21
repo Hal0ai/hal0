@@ -46,9 +46,7 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
 
 
 @pytest.fixture
-def auth_app_trusted_proxy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[TestClient]:
+def auth_app_trusted_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """auth_app variant that opts in to trusting X-Forwarded-Email (§26)."""
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_TRUST_FORWARDED_EMAIL", "1")

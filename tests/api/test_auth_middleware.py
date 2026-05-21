@@ -44,9 +44,7 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
 
 
 @pytest.fixture
-def auth_app_trusted_proxy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[TestClient]:
+def auth_app_trusted_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """auth_app variant that opts in to trusting X-Forwarded-Email.
 
     The default install REJECTS the header (post-§26 fix); operators behind
