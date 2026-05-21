@@ -92,8 +92,9 @@ _PRECONDITIONS_MET = _systemd_available() and _template_unit_installed()
 # Unconditional xfail with strict=False:
 #  - on GHA without GPU, the failure is expected (XFAIL → green)
 #  - on real hardware that DOES reach READY, the test silently XPASSes
-#    (strict=False keeps that non-fatal). The release-gate γ matrix on
-#    hal0-test (PLAN §10) is the authoritative "real hardware" run.
+#    (strict=False keeps that non-fatal). The release-gate gamma
+#    matrix on hal0-test (PLAN section 10) is the authoritative "real
+#    hardware" run.
 
 
 pytestmark = [
