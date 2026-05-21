@@ -72,7 +72,7 @@ home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
   - `WEBUI_AUTH=False` (LAN-only home install)
   - State at `/var/lib/hal0/openwebui/`
 - **One-line installer**
-  - Sensible defaults, non-interactive (`curl -fsSL hal0.dev/install | bash`)
+  - Sensible defaults, non-interactive (`curl -fsSL hal0.dev/install.sh | bash`)
   - Pre-flight checks, hardware probe, lay down `/etc/hal0/slots/{primary,embed,stt,tts}.toml`
   - Pulls toolbox images in background
   - First-run wizard in dashboard for default-model pick
@@ -777,7 +777,7 @@ own decisions before relevant milestones:
 
 ## 18. Definition of done — v1.0
 
-- [ ] Fresh LXC: `curl -fsSL hal0.dev/install | bash` → install completes in <5 min — *unmeasured against a real wipe*
+- [ ] Fresh LXC: `curl -fsSL hal0.dev/install.sh | bash` → install completes in <5 min — *unmeasured against a real wipe*
 - [x] Dashboard at `:8080`, OpenWebUI at `:3001`, both reachable
 - [x] FirstRun wizard downloads a model, assigns to slot, slot reports ready — *UI flow unblocked (PR #7 + #12); pending live model-pull measurement*
 - [ ] Chat works end-to-end (OpenWebUI → hal0 → llama.cpp slot → response) — *stub-proxy CI green (PR #4); real run gated on toolbox image pull (task #25)*

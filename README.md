@@ -41,9 +41,9 @@ command on any modern Linux box.
 - **OpenWebUI bundled** — prewired chat interface at `:3001`, no setup
 - **Image generation** — bundled ComfyUI provider with curated SDXL /
   SD 1.5 / Flux models; OpenAI-compatible `/v1/images/generations`
-- **One-line install** — `curl -fsSL https://hal0.dev/install | bash`
+- **One-line install** — `curl -fsSL https://hal0.dev/install.sh | bash`
   (`--models-dir=PATH` or `HAL0_MODELS_DIR=PATH` redirects HuggingFace
-  pulls off `/var/lib/hal0/models`). Until the `hal0.dev/install`
+  pulls off `/var/lib/hal0/models`). Until the `hal0.dev/install.sh`
   endpoint is wired, the supported entry point is
   `git clone` + `sudo bash installer/install.sh` — see
   [`installer/README.md`](./installer/README.md).

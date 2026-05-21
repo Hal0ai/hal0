@@ -12,8 +12,8 @@ sudo bash installer/install.sh
 sudo bash installer/install.sh --models-dir=/mnt/ai-models
 ```
 
-> The one-liner `curl -fsSL https://hal0.dev/install | bash` ships
-> with v1.0 once the `hal0.dev/install` endpoint is wired; until then,
+> The one-liner `curl -fsSL https://hal0.dev/install.sh | bash` ships
+> with v1.0 once the `hal0.dev/install.sh` endpoint is wired; until then,
 > `git clone` + `sudo bash` is the supported entry point.
 
 The toolbox container images (`ghcr.io/hal0ai/hal0-toolbox-*:v1`) are
