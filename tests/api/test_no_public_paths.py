@@ -73,14 +73,19 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
 # Every path that used to live in the deleted PUBLIC_PATHS frozenset.
 # The wizard, monitoring tools, and OpenAI clients all depend on these
 # being reachable without credentials when no password is yet set.
+#
+# Note: ``/api/install/*`` is intentionally absent from this list as of
+# FINDINGS §29 — the entire installer surface is now gated (require_token
+# at the router level, require_writer per mutating endpoint). On a fresh
+# install with no password set, HAL0_AUTH_ENABLED is unset and both gates
+# pass through, so the wizard still works; once auth is on, the wizard
+# rides the session cookie like any other admin surface.
 _FORMERLY_PUBLIC_PATHS = [
     # Liveness / monitoring.
     "/api/health/system",
     "/api/status",
     "/api/metrics",
     "/api/features",
-    # First-run wizard gating.
-    "/api/install/state",
     # Host-aware URL hints (wizard uses to render the OpenWebUI link).
     "/api/config/urls",
     # Auth surface itself.
@@ -108,10 +113,17 @@ def test_formerly_public_paths_stay_open(auth_app: TestClient, path: str) -> Non
     )
 
 
-def test_install_complete_post_stays_open(auth_app: TestClient) -> None:
-    """The wizard's sentinel-write call is a POST — auth-free."""
+def test_install_complete_post_requires_writer(auth_app: TestClient) -> None:
+    """POST /api/install/complete is a writer endpoint (FINDINGS §29).
+
+    Previously this was anonymously reachable to support the wizard; an
+    unauthenticated LAN peer could write the first-run sentinel and lock
+    the operator out of the password flow. With auth enabled it now
+    requires a writer-scoped credential — anonymous callers 401.
+    """
     response = auth_app.post("/api/install/complete")
-    assert response.status_code != 401, response.text
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == "auth.required"
 
 
 def test_auth_logout_post_stays_open(auth_app: TestClient) -> None:

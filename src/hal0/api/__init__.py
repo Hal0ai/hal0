@@ -386,17 +386,23 @@ def create_app() -> FastAPI:
     _v1_auth = [Depends(require_token)]
     app.include_router(v1.router, prefix="/v1", tags=["v1"], dependencies=_v1_auth)
 
-    # /api/install drives the first-run wizard, which runs *before* any
-    # credential exists. Mount bare — every wizard endpoint is public.
-    # When the wizard is no longer needed (first_run sentinel written
-    # OR a model is present), the dashboard router-guards stop routing
-    # to it; the endpoints themselves remain reachable for re-entry
-    # (e.g. operator deliberately reopening /firstrun to add a model).
-    app.include_router(installer.router, prefix="/api/install", tags=["installer"])
-
     # Single-purpose protected routers — every endpoint requires a token
     # (or session cookie / forwarded email) when HAL0_AUTH_ENABLED=1.
     _admin_auth = [Depends(require_token)]
+
+    # /api/install drives the first-run wizard. When HAL0_AUTH_ENABLED is
+    # unset, the gate is a pure pass-through (require_token short-circuits
+    # to an anonymous identity), so the wizard still works on a fresh
+    # install with no password set — see FINDINGS §29. Once auth is
+    # enabled, every install endpoint requires a valid identity; mutating
+    # endpoints additionally declare Depends(require_writer) at the route
+    # level (matches the #11 admin-router pattern).
+    app.include_router(
+        installer.router,
+        prefix="/api/install",
+        tags=["installer"],
+        dependencies=_admin_auth,
+    )
     app.include_router(slots.router, prefix="/api/slots", tags=["slots"], dependencies=_admin_auth)
     app.include_router(
         models.router, prefix="/api/models", tags=["models"], dependencies=_admin_auth

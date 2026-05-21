@@ -63,7 +63,12 @@ def test_auth_disabled_protected_route_open(client: TestClient) -> None:
         "/api/health/system",
         "/api/metrics",
         "/api/features",
-        "/api/install/state",
+        # Note: ``/api/install/*`` is no longer public — the entire
+        # installer router is gated by ``require_token`` per FINDINGS §29.
+        # On a fresh install with ``HAL0_AUTH_ENABLED`` unset the gate is
+        # a pass-through (covered by tests/api/test_install_routes.py);
+        # once auth is on, the wizard rides the operator's session
+        # cookie like any other admin surface.
         "/api/config/urls",
         "/api/auth/status",
         "/api/auth/login",

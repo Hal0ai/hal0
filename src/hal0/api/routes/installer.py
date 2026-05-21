@@ -25,20 +25,60 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.auth import require_writer
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
 from hal0.registry.curated import CURATED_MODELS, get_curated
 from hal0.registry.model import Model
 from hal0.registry.pull import make_job, run_pull
 from hal0.registry.store import ModelAlreadyExists
+
+# Reusable writer-scope gate, applied per-route on every mutating endpoint
+# (POST /probe, POST /complete, POST /pick-default, PUT /slots/{slot}/model).
+# The router itself is mounted with require_token at include_router() time
+# (see hal0.api.create_app), which keeps GETs open to any valid identity
+# while these per-route deps enforce the writer scope on mutations. Both
+# gates short-circuit to a pass-through when HAL0_AUTH_ENABLED is unset,
+# preserving the fresh-install / first-run wizard UX.
+_writer = [Depends(require_writer)]
+
+# Slot-name policy — mirrors ``SlotConfig.name`` in hal0.config.schema so a
+# slot name accepted by the API installer endpoints is also accepted by the
+# CLI / TOML loader. Reject anything else BEFORE the path is built so a
+# value like ``"../../tmp/pwn"`` can't resolve to an arbitrary on-disk file.
+# See FINDINGS §30.
+_SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def _validate_slot_name(slot: object) -> str:
+    """Return ``slot`` as a string if it matches the slot-name policy.
+
+    Raises :class:`BadRequest` (code ``slot.invalid_name``) on any value
+    that doesn't match the regex — including non-string types, the empty
+    string, path-traversal payloads (``"../foo"``), and absolute paths
+    (``"/etc/passwd"``). The error envelope echoes back the policy so a
+    well-behaved client can correct itself.
+    """
+    if not isinstance(slot, str) or not _SLOT_NAME_RE.match(slot):
+        raise BadRequest(
+            "invalid slot name",
+            details={
+                "slot": slot if isinstance(slot, str) else repr(slot),
+                "policy": _SLOT_NAME_RE.pattern,
+            },
+            code="slot.invalid_name",
+        )
+    return slot
+
 
 router = APIRouter()
 
@@ -145,7 +185,7 @@ async def install_state(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/probe")
+@router.post("/probe", dependencies=_writer)
 async def install_probe(request: Request) -> dict[str, Any]:
     """Re-run the hardware probe and rewrite ``/etc/hal0/hardware.json``.
 
@@ -166,7 +206,7 @@ async def install_probe(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/complete")
+@router.post("/complete", dependencies=_writer)
 async def install_complete(request: Request) -> dict[str, Any]:
     """Mark the FirstRun wizard as complete by writing the sentinel.
 
@@ -350,7 +390,7 @@ def _assign_to_slot(slot: str, model_id: str) -> Path:
     return slot_path
 
 
-@router.post("/pick-default")
+@router.post("/pick-default", dependencies=_writer)
 async def pick_default(
     request: Request,
     background: BackgroundTasks,
@@ -385,11 +425,10 @@ async def pick_default(
             details={"got": body},
         )
     slot = body.get("slot") or _DEFAULT_SLOT
-    if not isinstance(slot, str) or not slot.strip():
-        raise PickDefaultError(
-            "body.slot must be a non-empty string when provided",
-            details={"got": body},
-        )
+    # Validate the slot name BEFORE any filesystem op — see FINDINGS §30.
+    # A traversal payload (e.g. ``"../../tmp/pwn"``) is rejected here with
+    # a typed 400 rather than escaping the slots config dir on disk.
+    slot = _validate_slot_name(slot)
 
     registry = request.app.state.model_registry
     _ensure_registry_entry(registry, model_id)
@@ -430,12 +469,17 @@ async def pick_default(
     }
 
 
-@router.put("/slots/{slot}/model")
+@router.put("/slots/{slot}/model", dependencies=_writer)
 async def set_slot_default_model(slot: str, request: Request) -> dict[str, Any]:
     # Persist-only counterpart to /api/slots/{name}/swap.  Hot-swap changes
     # the running container; this writes model.default into
     # /etc/hal0/slots/<slot>.toml so the change survives a restart.  UI
     # and CLI call both for the common "change and remember" flow.
+    #
+    # Validate the slot name BEFORE reading the body or touching disk —
+    # see FINDINGS §30. ``slot="../../tmp/pwn"`` would otherwise resolve
+    # under /tmp via the f-string in ``_assign_to_slot``.
+    slot = _validate_slot_name(slot)
     try:
         body = await request.json()
     except Exception as exc:
