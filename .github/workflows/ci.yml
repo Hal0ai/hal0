@@ -17,6 +17,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Install system deps
+        # ffmpeg backs the in-container moonshine audio decoder
+        # (packaging/toolbox/moonshine/moonshine_server.py). The redaction
+        # tests in tests/providers/test_moonshine_server.py exercise the
+        # real subprocess path; without ffmpeg they hit FileNotFoundError
+        # instead of the CalledProcessError the code catches.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install
         run: pip install -e ".[dev]"
       - name: Lint
