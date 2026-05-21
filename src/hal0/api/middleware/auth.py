@@ -80,6 +80,7 @@ the request when auth fails is the whole point.
 
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -410,7 +411,12 @@ def _check_session_csrf(request: Request, identity: AuthIdentity) -> None:
     csrf = headers.get(_CSRF_TOKEN_HEADER, "")
     session_token = identity.session_token or ""
     expected = session_token[:_CSRF_TOKEN_BINDING_LEN]
-    if csrf and expected and csrf == expected:
+    # Constant-time compare so the per-request timing on the X-CSRF-Token
+    # path doesn't leak a byte-by-byte oracle for the bound prefix. The
+    # length-prefilter guards against compare_digest's "compares OK on
+    # empty string" edge case and keeps the short-circuit on the missing-
+    # header branch.
+    if csrf and expected and hmac.compare_digest(csrf, expected):
         return
     raise CSRFRequired(
         "writer routes require a CSRF tripwire when authenticated via cookie",
