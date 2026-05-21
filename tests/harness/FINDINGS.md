@@ -564,7 +564,17 @@ config is bad" gets ambiguous signals.
 - **Fix:** map "no config file AND no in-memory state" →
   `SlotNotFound` upstream in `SlotManager.get_config()`.
 
-## 20. `/api/logs?unit=` missing param returns FastAPI default envelope — **low / envelope inconsistency**
+## 20. `/api/logs?unit=` missing param returns FastAPI default envelope — **low / envelope inconsistency** · ✅ RESOLVED 2026-05-21
+
+> Closed by `fix/validation-envelope-2026-05-21`. A
+> `RequestValidationError` handler now lives in
+> `src/hal0/api/middleware/error_codes.py` and reshapes pydantic-driven
+> failures into `{"error":{"code":"validation.invalid", "details":
+> {"fields":[{"loc","msg","type"}]}}}` at the FastAPI-default 422 status.
+> The `input` field is intentionally stripped from each entry to avoid
+> echoing caller-supplied payloads (potential secret leak on body
+> validation). Original report preserved below.
+
 
 `unit = Query(...)` raises `RequestValidationError`, which is NOT
 in `error_codes.install()`'s handler set

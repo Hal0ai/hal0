@@ -31,23 +31,23 @@ def test_logs_happy_path_returns_lines_and_count(client: TestClient) -> None:
 
 
 def test_logs_validation_error_envelope_for_missing_unit(client: TestClient) -> None:
-    """Missing unit query param yields a 400 in the hal0 envelope shape.
+    """Missing unit query param yields a 422 in the hal0 envelope shape.
 
     The ``RequestValidationError`` handler (see
     ``hal0.api.middleware.error_codes``) reshapes FastAPI's default
     ``{"detail": [...]}`` 422 into the canonical envelope with
-    ``code="validation.invalid"`` and downgrades the status to 400 —
-    pydantic-driven validation failures are caller-side input errors,
-    not "well-formed but semantically rejected".
+    ``code="validation.invalid"`` while preserving the FastAPI-default
+    422 status — clients already expect 422 on request-validation
+    failures.
     """
     r = client.get("/api/logs")
-    assert r.status_code == 400
+    assert r.status_code == 422
     body = r.json()
     assert "error" in body, f"Expected hal0 envelope, got {body}"
     assert body["error"]["code"] == "validation.invalid"
-    assert "errors" in body["error"]["details"]
-    assert isinstance(body["error"]["details"]["errors"], list)
-    assert body["error"]["details"]["errors"], "expected at least one error entry"
+    assert "fields" in body["error"]["details"]
+    assert isinstance(body["error"]["details"]["fields"], list)
+    assert body["error"]["details"]["fields"], "expected at least one field entry"
 
 
 def test_logs_invalid_unit_returns_typed_envelope(client: TestClient) -> None:
@@ -73,13 +73,14 @@ def test_logs_n_out_of_range_returns_envelope(client: TestClient) -> None:
 
     Pydantic-driven validation is reshaped by the ``RequestValidationError``
     handler in ``hal0.api.middleware.error_codes`` into the canonical
-    envelope with ``code="validation.invalid"`` and downgraded to 400.
+    envelope with ``code="validation.invalid"`` at the FastAPI-default
+    422 status.
     """
     r = client.get("/api/logs", params={"unit": "hal0-api", "n": 0})
-    assert r.status_code == 400
+    assert r.status_code == 422
     body = r.json()
     assert body["error"]["code"] == "validation.invalid"
-    assert "errors" in body["error"]["details"]
+    assert "fields" in body["error"]["details"]
 
 
 def test_logs_stream_returns_sse_content_type(client: TestClient) -> None:
