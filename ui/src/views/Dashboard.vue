@@ -29,7 +29,7 @@ import NPUBackendCard from '../components/capabilities/NPUBackendCard.vue'
 const router = useRouter()
 const system = useSystemStore()
 const { stats } = useStats(2500)
-const { metrics, aggHistory } = useSlotMetrics(2500)
+const { metrics, history, aggHistory } = useSlotMetrics(2500)
 
 const hw = computed(() => stats.value || {})
 
@@ -146,8 +146,28 @@ const chatOutputEl = ref(null)
 
 async function loadChatModels() {
   try {
-    const r = await api('/v1/models')
-    chatModels.value = (r?.data || []).map((m) => m.id)
+    // The Test chat panel POSTs to /v1/chat/completions, so we must show
+    // only chat-capable upstreams in the dropdown. /v1/models is a flat
+    // aggregation across every slot (embed, rerank, stt, tts included)
+    // with no capability tag — relying on its order put the embed model
+    // at the top of the list as default. We instead derive the set of
+    // chat-capable slots by joining /api/slots (slot → loaded model id)
+    // with /api/capabilities (model id → capabilities) and filter
+    // /v1/models' rows by owned_by ∈ chat-capable slots.
+    const [models, slots, cap] = await Promise.all([
+      api('/v1/models'),
+      api('/api/slots').catch(() => []),
+      api('/api/capabilities').catch(() => ({ catalogs: {} })),
+    ])
+    const chatModelIds = new Set(
+      (cap?.catalogs?.chat?.chat ?? []).map((m) => m.id),
+    )
+    const chatSlots = new Set(
+      (slots || []).filter((s) => chatModelIds.has(s.model_id)).map((s) => s.name),
+    )
+    chatModels.value = (models?.data || [])
+      .filter((m) => chatSlots.has(m.owned_by))
+      .map((m) => m.id)
     if (!chatModel.value && chatModels.value.length) {
       // Prefer a small fast model for the first interaction.
       const preferred = chatModels.value.find((m) =>
@@ -347,6 +367,7 @@ loadChatModels()
               :key="slot.name"
               :slot="slot"
               :metrics="metrics[slot.name]"
+              :spark-data="history[slot.name] || { tps: [], pps: [] }"
               @action="() => router.push('/slots')"
               @logs="() => router.push('/slots')"
               @edit="() => router.push('/slots')"

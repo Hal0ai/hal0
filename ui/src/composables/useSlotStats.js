@@ -2,7 +2,12 @@ import { computed } from 'vue'
 import { useSystemStore } from '../stores/system.js'
 
 // Shared running/total/active counts for navbar, sidebar, and dashboard.
-export const ACTIVE_STATES = new Set(['running', 'ready', 'serving'])
+// ``idle`` is included intentionally — a slot whose idle_timeout_s window
+// elapsed without traffic still has its container up, model loaded, and
+// can serve the next request instantly. Excluding it (as the previous
+// revision did) made primary/nano render as "offline" 5 minutes after
+// the last completion, which kept being mis-read as a slot crash.
+export const ACTIVE_STATES = new Set(['running', 'ready', 'serving', 'idle'])
 
 // Providers that serve a single baked-in model without an explicit load —
 // a missing model_id on these is not a misconfiguration.

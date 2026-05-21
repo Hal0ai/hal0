@@ -161,8 +161,20 @@ async function slotAction(slotName, action, body = null) {
 }
 
 async function doLoad(slot) {
-  const model = slotSelections.value[slot.name] || slot._selectedModel
-  if (!model) { toasts.warning('Select a model first'); return }
+  // The card's footer <select> was removed in favour of the inline swap
+  // trigger on the model label, so slotSelections is only populated by
+  // the legacy row layout (kept behind v-if="false"). Fall back to the
+  // slot's persisted model_id so Start on a previously-loaded slot just
+  // reloads its model; if even that is empty the POST body is omitted
+  // and the API uses the slot's TOML default.
+  const model = slotSelections.value[slot.name]
+    || slot._selectedModel
+    || slot.model_id
+    || slot.model
+  if (!model) {
+    await slotAction(slot.name, 'load')
+    return
+  }
   await slotAction(slot.name, 'load', { model })
 }
 
@@ -233,7 +245,7 @@ function openEdit(slot) {
   editingSlot.value = slot
   const initial = {
     backend:        slot.backend ?? 'vulkan',
-    model:          slot.model ?? '',
+    model:          slot.model_id ?? slot.model ?? '',
     ctx_size:       slot.ctx_size ?? 4096,
     auto_start:     slot.auto_start ?? false,
     // Advanced — Model
@@ -615,14 +627,10 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
             :slot="slot"
             :metrics="slotMetrics[slot.name]"
             :spark-data="slotHistory[slot.name] || { tps: [], pps: [] }"
-            :models="models"
-            :selected-model="slot._selectedModel"
             :action-loading="actionBusy[slot.name]"
-            @select-model="(v) => { slotSelections[slot.name] = v }"
             @action="(a) => a === 'load' ? doLoad(slot) : slotAction(slot.name, a)"
             @logs="openLogs(slot)"
             @edit="openEdit(slot)"
-            @swap="openEdit(slot)"
             @delete="deletingSlot = slot"
           />
           <!-- NPU backend rides in the same grid as the other slot
@@ -653,7 +661,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
               <span class="state-dot" :class="stateClass(slot.status)" :title="slot.status" aria-hidden="true" />
               <div class="slot-names">
                 <span class="slot-name">{{ slot.name }}</span>
-                <span class="slot-model" v-if="slot.model">{{ slot.model }}</span>
+                <span class="slot-model" v-if="slot.model_id || slot.model">{{ slot.model_id || slot.model }}</span>
                 <span class="slot-model text-faint" v-else>no model loaded</span>
               </div>
             </div>
@@ -674,7 +682,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
             <!-- Right: actions -->
             <div class="slot-actions">
               <!-- Load (when no model loaded) -->
-              <template v-if="!slot.model || slot.status === 'offline'">
+              <template v-if="!(slot.model_id || slot.model) || slot.status === 'offline'">
                 <select
                   class="model-select"
                   :value="slot._selectedModel"
@@ -682,7 +690,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
                   :aria-label="`Select model for slot ${slot.name}`"
                 >
                   <option value="">Select model…</option>
-                  <option v-for="m in models" :key="m.id" :value="m.id">
+                  <option v-for="m in filterCompatibleModels(slot.backend)" :key="m.id" :value="m.id">
                     {{ m.name ?? m.id }}{{ m.size_gb ? ` — ${m.size_gb}GB` : '' }} {{ modelFitLabel(m) }}
                   </option>
                 </select>

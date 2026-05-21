@@ -8,10 +8,10 @@
  *      The "Loaded on NPU" list and memory bar both read from the live
  *      `{ loaded, memUsedMb, memTotalMb, totalReqPerSec }` snapshot.
  *
- *   2. Operator affordance: "+ load NPU model" (preview only). Lets the
- *      operator queue an extra model client-side; v1.1 will wire this to
- *      a backend endpoint. Local `extras` ref stays in this component on
- *      purpose — it's UI scratch state, not capability-store state.
+ *   2. Operator affordance: "+ load NPU model". The button creates a real
+ *      FLM slot via `POST /api/backends/npu/load`; the slot then shows up
+ *      in `/api/backends/npu`'s `loaded` array on the next poll. Removing
+ *      a row tears the slot back down via `POST /api/backends/npu/unload`.
  *
  * Long-term home for this card is the Hardware view (as one of a row of
  * backend cards). Surfaced here next to the capability cards because it
@@ -21,14 +21,15 @@ import { computed, ref } from 'vue'
 import { useCapabilities, useBackend } from '../../composables/useCapabilities.js'
 import { usePullJob, fmtBytes } from '../../composables/usePullJob.js'
 import { useToastsStore } from '../../stores/toasts.js'
+import { api } from '../../composables/useApi.js'
 
 const cap = useCapabilities()
-const { data: npu, error: npuError } = useBackend('npu')
+const { data: npu, error: npuError, refresh: refreshNpu } = useBackend('npu')
 
 const showAdvanced = ref(false)
 const showAdd = ref(false)
 const addPick = ref('')
-const extras = ref([])  // [{ capability, modelId, size_gb }] — preview-only, see header
+const busyUnload = ref('')  // slot name currently being unloaded (for spinner)
 
 // Static fallback while /api/backends/npu hasn't responded yet — keeps
 // the card from flickering empty on first paint.
@@ -74,11 +75,11 @@ const npuModels = computed(() => {
   return out
 })
 
-// IDs already on the live "loaded" list or claimed by a local extra.
+// IDs already on the live "loaded" list — used to filter the add picker
+// so we don't offer to load a model that's already serving.
 const claimedIds = computed(() => {
   const set = new Set()
   for (const item of snap.value.loaded ?? []) set.add(item.modelId)
-  for (const e of extras.value) set.add(e.modelId)
   return set
 })
 
@@ -86,29 +87,21 @@ const addOptions = computed(() =>
   npuModels.value.filter((m) => !claimedIds.value.has(m.id)),
 )
 
-// Combined "serving" list — live backend `loaded` + locally-added extras.
-// `path` is the canonical "{slot}.{child}" tag used to render the
-// capability prefix in the row.
-const serving = computed(() => {
-  const live = (snap.value.loaded ?? []).map((c) => ({
+// Live "serving" list — pulled straight from /api/backends/npu's loaded
+// array. `path` is the canonical "{slot}.{child}" tag used to render the
+// capability prefix in the row, and `slotName` is what the unload route
+// needs.
+const serving = computed(() =>
+  (snap.value.loaded ?? []).map((c) => ({
     path: `${c.slot}.${c.child}`,
+    slotName: c.slotName,
     modelId: c.modelId,
-    source: 'slot',
+    source: c.source ?? 'slot',
     sizeMb: c.sizeMb,
-  }))
-  const extra = extras.value.map((e) => ({
-    path: `npu.${e.capability}`,
-    modelId: e.modelId,
-    source: 'extra',
-    sizeMb: Math.round((e.size_gb || 0) * 1024),
-  }))
-  return [...live, ...extra]
-})
-
-const extraMemMb = computed(() =>
-  extras.value.reduce((n, e) => n + Math.round((e.size_gb || 0) * 1024), 0),
+  })),
 )
-const totalUsedMb = computed(() => (snap.value.memUsedMb || 0) + extraMemMb.value)
+
+const totalUsedMb = computed(() => snap.value.memUsedMb || 0)
 const memPct = computed(() => {
   const tot = snap.value.memTotalMb || 0
   if (!tot) return 0
@@ -126,8 +119,7 @@ async function addExtra() {
   const m = npuModels.value.find((x) => x.id === addPick.value)
   if (!m) return
   // Same pattern as the capability cards: pull first when the file
-  // isn't on disk, then commit the selection (currently UI-only state
-  // for NPU extras — see the header note about v1.1 wiring).
+  // isn't on disk, then promote to a real FLM slot via the backend.
   if (m.downloaded === false) {
     if (m.pullable === false) {
       npuToasts.error(
@@ -144,16 +136,38 @@ async function addExtra() {
       return
     }
   }
-  extras.value.push({
-    capability: m.capability,
-    modelId: m.id,
-    size_gb: m.size_gb,
-  })
+  // Promote into a real slot — the next /api/backends/npu poll will
+  // surface it in `loaded` so the row appears in the serving list.
+  try {
+    await api('/api/backends/npu/load', {
+      method: 'POST',
+      body: JSON.stringify({ model_id: m.id }),
+    })
+  } catch (err) {
+    npuToasts.error(`load "${m.id}" failed: ${err?.message ?? err}`)
+    return
+  }
   addPick.value = ''
   showAdd.value = false
+  // Refresh immediately so the user sees the new row without waiting
+  // for the 5s backend poll tick.
+  refreshNpu()
 }
-function removeExtra(idx) {
-  extras.value.splice(idx, 1)
+
+async function unloadSlot(slotName) {
+  if (!slotName || busyUnload.value) return
+  busyUnload.value = slotName
+  try {
+    await api('/api/backends/npu/unload', {
+      method: 'POST',
+      body: JSON.stringify({ slot_name: slotName }),
+    })
+    refreshNpu()
+  } catch (err) {
+    npuToasts.error(`unload "${slotName}" failed: ${err?.message ?? err}`)
+  } finally {
+    busyUnload.value = ''
+  }
 }
 
 // Group add-options by the upstream capability bucket. The
@@ -205,22 +219,23 @@ const addOptionsGrouped = computed(() => {
         </span>
       </div>
       <ul class="bc-serving-list">
-        <li v-for="(item, i) in serving" :key="item.path + ':' + item.modelId">
+        <li v-for="item in serving" :key="item.slotName + ':' + item.modelId">
           <span class="bc-ch-left">
             <span class="bc-ch-cap">{{ item.path.split('.')[1] }}</span>
             <span class="bc-ch-model mono">{{ item.modelId }}</span>
           </span>
           <span class="bc-ch-right">
             <span class="bc-ch-source" :data-source="item.source">
-              {{ item.source === 'slot' ? item.path.split('.')[0] : 'preview' }}
+              {{ item.path.split('.')[0] }}
             </span>
             <button
-              v-if="item.source === 'extra'"
+              v-if="item.source === 'slot'"
               type="button"
               class="bc-ch-x"
+              :disabled="busyUnload === item.slotName"
               :aria-label="`Unload ${item.modelId}`"
-              @click="removeExtra(i - serving.filter(s => s.source === 'slot').length)"
-            >×</button>
+              @click="unloadSlot(item.slotName)"
+            >{{ busyUnload === item.slotName ? '…' : '×' }}</button>
           </span>
         </li>
         <li v-if="serving.length === 0" class="bc-empty">
@@ -237,9 +252,6 @@ const addOptionsGrouped = computed(() => {
             :disabled="addOptions.length === 0"
             @click="showAdd = true"
           >+ load NPU model</button>
-          <span class="bc-add-hint mono" title="local UI scratch — not yet wired to the backend">
-            preview only
-          </span>
           <span v-if="addOptions.length === 0" class="bc-add-empty mono">no models left</span>
         </template>
         <template v-else>

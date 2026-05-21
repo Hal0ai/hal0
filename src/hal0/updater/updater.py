@@ -151,6 +151,14 @@ class ReleaseManifest(BaseModel):
     channel: str = Field(default="stable", description="stable | nightly | dev")
     url: str = Field(..., description="Tarball download URL (https or file).")
     sig_url: str = Field(..., description="Detached cosign signature URL.")
+    cert_url: str = Field(
+        ...,
+        description=(
+            "Fulcio-issued certificate URL (cosign keyless OIDC). "
+            "Required by ``cosign verify-blob --certificate`` in cosign 3.x; "
+            "produced alongside the .sig by ``cosign sign-blob --output-certificate``."
+        ),
+    )
     digest_sha256: str = Field(..., description="Hex sha256 of the tarball bytes.")
     signer_identity: str = Field(
         ...,
@@ -461,6 +469,7 @@ def _cosign_skip() -> bool:
 def _verify_cosign(
     tarball: Path,
     signature: Path,
+    certificate: Path,
     *,
     identity_regexp: str,
     issuer: str,
@@ -471,6 +480,11 @@ def _verify_cosign(
     Raises:
         UpdateCosignMissing: ``cosign`` not on PATH.
         UpdateCosignFailed: signature invalid or identity mismatch.
+
+    cosign 3.x requires the Fulcio-issued certificate (``--certificate``)
+    alongside the signature for keyless verification; ``--certificate-
+    identity-regexp`` is checked against the cert's SAN. The cert is
+    fetched from ``manifest.cert_url`` and stored next to the .sig.
 
     The skip env-var (``HAL0_UPDATE_SKIP_COSIGN=1``) bypasses the entire
     check with a WARN log line — documented gap, must close before v1.
@@ -507,6 +521,8 @@ def _verify_cosign(
         "verify-blob",
         "--signature",
         str(signature),
+        "--certificate",
+        str(certificate),
         "--certificate-identity-regexp",
         identity_regexp,
         "--certificate-oidc-issuer",
@@ -839,11 +855,12 @@ class Updater:
                 manifest=manifest.version,
             )
 
-        # Step 3: download tarball + signature.
+        # Step 3: download tarball + signature + cert.
         cache = _cache_dir(target_version)
         cache.mkdir(parents=True, exist_ok=True)
         tarball_path = cache / f"hal0-{target_version}.tar.gz"
         sig_path = cache / f"hal0-{target_version}.tar.gz.sig"
+        cert_path = cache / f"hal0-{target_version}.tar.gz.crt"
         log.info(
             "updater.download_start",
             job_id=self.job_id,
@@ -852,11 +869,13 @@ class Updater:
         )
         await _download(manifest.url, tarball_path)
         await _download(manifest.sig_url, sig_path)
+        await _download(manifest.cert_url, cert_path)
         log.info(
             "updater.download_ok",
             job_id=self.job_id,
             tarball=str(tarball_path),
             sig=str(sig_path),
+            cert=str(cert_path),
         )
 
         # Step 4: sha256 verify.
@@ -877,6 +896,7 @@ class Updater:
             _verify_cosign,
             tarball_path,
             sig_path,
+            cert_path,
             identity_regexp=manifest.signer_identity,
             issuer=manifest.signer_issuer,
             job_id=self.job_id,

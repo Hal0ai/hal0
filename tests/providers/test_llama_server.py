@@ -117,6 +117,15 @@ def test_build_env_emits_embedding_flag_when_model_is_embedding(
     assert "--embedding" in env["HAL0_EXTRA_ARGS"]
 
 
+def test_build_env_emits_embedding_flag_when_model_has_embed_capability(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    model_info.pop("embedding", None)
+    model_info["capabilities"] = ["embed"]
+    env = provider.build_env(slot_cfg, model_info)
+    assert "--embedding" in env["HAL0_EXTRA_ARGS"]
+
+
 # ─── A3 flag-merge wiring (model.defaults.extra_args ⊕ slot.server.extra_args)
 #
 # These exercise the launcher's arg-build site that consumes the new

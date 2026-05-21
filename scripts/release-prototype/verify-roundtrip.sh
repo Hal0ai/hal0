@@ -135,6 +135,11 @@ payload = {
     "channel": "dev",
     "url": f"file://{tar}",
     "sig_url": f"file://{sig}",
+    # The prototype signs with --key, so no Fulcio cert exists. Point
+    # cert_url at the sig file itself so the schema is satisfied; the
+    # --key verify path in updater._verify_cosign ignores --certificate
+    # contents (production keyless flow is what actually uses the cert).
+    "cert_url": f"file://{sig}",
     "digest_sha256": digest,
     # In production this is the GH Actions workflow subject (see
     # docs/release-manifest.md). For the local key prototype it is a
