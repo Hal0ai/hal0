@@ -450,6 +450,244 @@ def _register_pulled(
     registry.update(model_id, updates)
 
 
+async def run_flm_pull(
+    job: PullJob,
+    *,
+    tag: str,
+    registry: ModelRegistry,
+) -> None:
+    """Background-task body: shell ``flm pull <tag>`` in the toolbox image.
+
+    Mirrors :func:`run_pull`'s state machine (queued → running →
+    {completed, failed, cancelled}) so the existing SSE / status routes
+    work unchanged. Differs in two ways:
+
+      * Bytes come from parsing FLM's stdout lines (no Content-Length
+        header to lean on) — see :func:`hal0.providers.flm.parse_flm_progress`.
+      * No sha256 is computed here: FLM verifies file hashes internally
+        and refuses to use mismatched weights. Re-hashing would just
+        double-read multi-GB files for the same guarantee.
+
+    Cancellation works via SIGTERM on the docker CLI subprocess — docker
+    propagates that to the container and ``flm pull`` aborts. The partial
+    files are left on disk; FLM's next pull deletes & redownloads them
+    (it checks file sizes against the manifest before reusing).
+
+    On success the FLM probe cache is reset so the next ``/api/capabilities``
+    GET flips this tag's ``downloaded`` flag to True without an api restart.
+    """
+    # Local import to keep providers.flm's docker subprocess out of the
+    # base pull module's import graph (tests pull this module in
+    # environments without docker).
+    from hal0.providers.flm import (
+        flm_pull_command,
+        parse_flm_progress,
+        reset_flm_catalog_cache,
+    )
+
+    job.state = "running"
+    job.started_at = time.time()
+    job._signal()
+
+    argv, host_models_dir = flm_pull_command(tag)
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        assert proc.stdout is not None
+        last_emit = time.monotonic()
+        while True:
+            if job.cancel_requested:
+                proc.terminate()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=10.0)
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
+                job.state = "cancelled"
+                job.finished_at = time.time()
+                job._signal()
+                return
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
+            except TimeoutError:
+                # No new line in 1s — loop back so cancellation observes promptly.
+                continue
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace")
+            parsed = parse_flm_progress(line)
+            if parsed is not None:
+                downloaded, total = parsed
+                job.bytes_downloaded = downloaded
+                if total > job.bytes_total:
+                    job.bytes_total = total
+                now = time.monotonic()
+                if (now - last_emit) >= _SSE_MIN_INTERVAL_S:
+                    last_emit = now
+                    job._signal()
+
+        await proc.wait()
+        if proc.returncode != 0:
+            raise PullError(
+                f"flm pull {tag!r} exited with status {proc.returncode}",
+                details={"tag": tag, "exit_code": proc.returncode},
+            )
+
+        # Refresh the catalog so subsequent /api/capabilities picks up
+        # the new installed=true flag without a process restart.
+        reset_flm_catalog_cache()
+
+        # Best-effort path bookkeeping. FLM stores each tag's weights at
+        # ``<host_models_dir>/<HF-repo-name>/`` — we resolve the dir from
+        # the FLM model_list lookup when available, falling back to the
+        # bare host dir so a missing entry doesn't fail the job.
+        final_path = _flm_install_path(host_models_dir, tag) or host_models_dir
+        size_bytes = _dir_size(final_path)
+        if job.bytes_total <= 0 and size_bytes > 0:
+            job.bytes_total = size_bytes
+        if job.bytes_downloaded < size_bytes:
+            job.bytes_downloaded = size_bytes
+        job.path = str(final_path)
+
+        # Register an FLM tag so the registry surfaces it for downstream
+        # consumers (catalog, slot model resolution). hf_repo/filename
+        # stay empty — FLM tags route through the toolbox, not HF directly.
+        _register_flm_pulled(
+            registry,
+            tag=tag,
+            path=str(final_path),
+            size_bytes=size_bytes,
+        )
+
+        job.state = "completed"
+        job.finished_at = time.time()
+        job._signal()
+        log.info(
+            "model.pull_flm_completed",
+            extra={"tag": tag, "path": str(final_path), "bytes": size_bytes},
+        )
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+        job.state = "cancelled"
+        job.finished_at = time.time()
+        job._signal()
+        raise
+    except Hal0Error as exc:
+        job.state = "failed"
+        job.error = exc.message
+        job.error_code = exc.code
+        job.finished_at = time.time()
+        job._signal()
+        log.warning("model.pull_flm_failed", extra={"tag": tag, "error": exc.message})
+    except Exception as exc:
+        job.state = "failed"
+        job.error = f"{type(exc).__name__}: {exc}"
+        job.error_code = "model.pull_failed"
+        job.finished_at = time.time()
+        job._signal()
+        log.exception("model.pull_flm_unexpected_error", extra={"tag": tag})
+
+
+def _flm_install_path(host_models_dir: str, tag: str) -> str | None:
+    """Look up the on-disk subdir FLM uses for ``tag``, or None if unknown.
+
+    Walks the toolbox image's bundled ``model_list.json`` schema (family
+    → variants → name=HF-repo). We probe it via ``flm_served_models``
+    indirectly: the cached entry exposes a ``family`` field but not the
+    HF name, so we read FLM's own JSON by shelling ``flm list -j`` and
+    matching tag → ``name``. The probe is cached, so this lookup is
+    O(1) after the first call.
+    """
+    from hal0.providers.flm import _probe_flm_catalog
+
+    models = _probe_flm_catalog()
+    if not models:
+        return None
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("model") == tag or entry.get("name") == tag:
+            # The "name" field on the flat list is the same as model.
+            # The HF repo name lives only in the nested model_list.json
+            # tree; the flat list flattens it into ``files`` + ``url``.
+            # Extract from the ``url`` field, which looks like
+            # ``https://huggingface.co/FastFlowLM/Qwen3-0.6B-NPU2/resolve/...``.
+            url = entry.get("url") or ""
+            parts = url.split("/")
+            try:
+                idx = parts.index("huggingface.co")
+                repo_name = parts[idx + 2]  # owner/<repo>
+                return str(Path(host_models_dir) / repo_name)
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def _dir_size(path: str | Path) -> int:
+    """Sum file sizes under ``path``; 0 if path is missing/unreadable."""
+    p = Path(path)
+    if not p.exists():
+        return 0
+    total = 0
+    try:
+        for child in p.rglob("*"):
+            if child.is_file():
+                with contextlib.suppress(OSError):
+                    total += child.stat().st_size
+    except OSError:
+        return total
+    return total
+
+
+def _register_flm_pulled(
+    registry: ModelRegistry,
+    *,
+    tag: str,
+    path: str,
+    size_bytes: int,
+) -> None:
+    """Upsert a registry entry for an FLM-pulled model.
+
+    FLM tags don't carry HF coords from a hal0 perspective (the toolbox
+    image's ``flm pull`` resolves them itself), so ``hf_repo`` and
+    ``hf_filename`` stay empty. ``metadata.runtime = "flm"`` flags the
+    entry so other code (slot pick, model resolution) can route it to
+    the FLM provider without re-deriving from the id.
+    """
+    updates: dict[str, Any] = {
+        "path": path,
+        "size_bytes": size_bytes,
+        "metadata": {"runtime": "flm"},
+    }
+    try:
+        existing = registry.get(tag)
+    except ModelNotFound:
+        registry.add(
+            Model(
+                id=tag,
+                name=tag,
+                path=path,
+                size_bytes=size_bytes,
+                capabilities=["chat"],
+                backends=["npu"],
+                metadata={"runtime": "flm"},
+            )
+        )
+        return
+    merged_meta = dict(existing.metadata)
+    merged_meta["runtime"] = "flm"
+    updates["metadata"] = merged_meta
+    registry.update(tag, updates)
+
+
 __all__ = [
     "PullError",
     "PullInvalidSource",
@@ -459,5 +697,6 @@ __all__ = [
     "get_job",
     "hf_download_url",
     "make_job",
+    "run_flm_pull",
     "run_pull",
 ]

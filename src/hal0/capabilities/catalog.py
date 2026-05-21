@@ -580,13 +580,13 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
     FLM also serves ``stt`` (whisper-v3, gemma4-it asr=true) but the NPU
     voice path through the slot manager is a later slice.
 
-    ``pullable`` is reported as False even though ``flm pull <tag>``
-    works inside the toolbox: the existing ``POST /api/models/{id}/pull``
-    handler resolves a HuggingFace repo + filename, which FLM tags don't
-    carry. Wiring an FLM-aware pull path is a follow-up; until then,
-    operators run ``flm pull`` manually via the toolbox container and
-    the catalog will flip ``downloaded`` to True on the next probe-cache
-    refresh (process restart).
+    ``pullable`` is True for FLM tags — the pull route (routes/models.py)
+    detects FLM ids via :func:`hal0.providers.flm.is_flm_tag` and dispatches
+    to :func:`hal0.registry.pull.run_flm_pull`, which shells ``flm pull
+    <tag>`` inside the toolbox image with the same bind mount the slot
+    uses. After a successful pull we reset the FLM probe cache so the
+    next ``/api/capabilities`` GET flips ``downloaded`` to True without a
+    process restart.
     """
     if capability not in {"chat", "embed"}:
         return []
@@ -617,7 +617,7 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
                 "size_gb": size_gb,
                 "capabilities": reported_caps,
                 "downloaded": entry["installed"],
-                "pullable": False,
+                "pullable": True,
             }
         )
     return out

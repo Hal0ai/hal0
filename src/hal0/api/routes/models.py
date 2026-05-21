@@ -30,6 +30,7 @@ from hal0.registry.pull import (
     PullJob,
     PullJobNotFound,
     make_job,
+    run_flm_pull,
     run_pull,
 )
 
@@ -808,6 +809,17 @@ async def _run_pull_with_events(
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await progress_task
 
+    await _emit_terminal_pull_event(event_bus, job)
+
+
+async def _emit_terminal_pull_event(event_bus: Any, job: PullJob) -> None:
+    """Emit the success/failure/cancellation footer event for a pull.
+
+    Shared between the HF pull wrapper and the FLM pull background task
+    so both surfaces produce the same dashboard footer events.
+    """
+    if event_bus is None:
+        return
     if job.state == "completed":
         await event_bus.emit(
             "pull.completed",
@@ -890,6 +902,15 @@ async def pull_model(
             "resumed": True,
         }
 
+    # FLM/NPU tags route through the toolbox container instead of HF.
+    # The ``model:tag`` shape is the dispatch signal (HF ids never use
+    # colons), validated against the FLM probe so a stray ``foo:bar``
+    # falls through to the HF resolver and gets a clean 422.
+    from hal0.providers.flm import is_flm_tag
+
+    if is_flm_tag(model_id):
+        return await _start_flm_pull(model_id, request, background, jobs)
+
     hf_repo, hf_file = _resolve_pull_source(request, model_id)
     job = make_job(model_id)
     jobs[model_id] = job
@@ -921,6 +942,52 @@ async def pull_model(
         "state": job.state,
         "hf_repo": hf_repo,
         "hf_file": hf_file,
+    }
+
+
+async def _start_flm_pull(
+    model_id: str,
+    request: Request,
+    background: BackgroundTasks,
+    jobs: dict[str, PullJob],
+) -> dict[str, object]:
+    """Spawn a background ``flm pull`` job and return the job handle.
+
+    Shares the PullJob/SSE plumbing with the HF pull path so the
+    dashboard's pull progress UI works unchanged. The HF-specific
+    progress decile + speed/ETA wrapper (:func:`_run_pull_with_events`)
+    isn't reused here because its progress event payload assumes byte
+    deltas from a single HTTP stream — FLM's container emits multiple
+    files with its own progress lines and we don't want to misreport
+    rate. Footer events are emitted directly around the run.
+    """
+    job = make_job(model_id)
+    jobs[model_id] = job
+    registry = request.app.state.model_registry
+    event_bus = getattr(request.app.state, "events", None)
+
+    if event_bus is not None:
+        await event_bus.emit(
+            "pull.queued",
+            "info",
+            f"pull:{model_id}",
+            f"{model_id}: queued (FLM/NPU)",
+            data={"model_id": model_id, "source": "flm"},
+        )
+
+    async def _run_flm_with_events() -> None:
+        try:
+            await run_flm_pull(job, tag=model_id, registry=registry)
+        finally:
+            if event_bus is not None:
+                await _emit_terminal_pull_event(event_bus, job)
+
+    background.add_task(_run_flm_with_events)
+    return {
+        "id": job.job_id,
+        "model_id": model_id,
+        "state": job.state,
+        "source": "flm",
     }
 
 

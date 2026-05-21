@@ -32,6 +32,7 @@ haloai's lib/providers/flm.py.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import httpx
@@ -208,9 +209,13 @@ class FLMProvider(Provider):
 
         # Only the model cache is bind-mounted. FLM hardcodes
         # ~/.config/flm/models internally; map our hal0-managed cache
-        # to that path.
+        # to that path. The toolbox image runs as the non-root ``hal0``
+        # user (uid 1000, HOME=/var/lib/hal0), so ~/.config resolves to
+        # /var/lib/hal0/.config — NOT /root/.config. Mounting at the
+        # wrong HOME would silently drop every pulled model into the
+        # container's writable overlay and lose it on exit.
         mounts: list[tuple[str, str]] = [
-            (flm_models, "/root/.config/flm/models"),
+            (flm_models, "/var/lib/hal0/.config/flm/models"),
         ]
 
         # Build the argv passed to the image's ENTRYPOINT. The image runs
@@ -424,17 +429,27 @@ def _probe_flm_catalog() -> list[dict[str, Any]] | None:
     ``flm list`` reads the bundled ``model_list.json`` and never touches
     NPU hardware — keeping the device flag out makes the probe usable on
     dev hosts without XDNA passthrough.
+
+    The hal0-managed FLM models cache is bind-mounted at the same path
+    the slot's container_spec uses (``~/.config/flm/models`` resolved
+    against the toolbox image's non-root ``hal0`` user, HOME=/var/lib/hal0).
+    Without it ``flm list`` runs against an empty overlay and reports
+    every model as not-installed — masking weights the host already has
+    on disk.
     """
     import json
     import subprocess
 
     image = os.environ.get("HAL0_TOOLBOX_IMAGE_FLM", _DEFAULT_FLM_IMAGE)
+    flm_models = os.environ.get("HAL0_FLM_MODELS_DIR") or _DEFAULT_FLM_MODELS_DIR
     cmd = [
         "docker",
         "run",
         "--rm",
         "--security-opt",
         "apparmor=unconfined",
+        "-v",
+        f"{flm_models}:/var/lib/hal0/.config/flm/models",
         image,
         "list",
         "-j",
@@ -522,3 +537,76 @@ def reset_flm_catalog_cache() -> None:
     global _FLM_CATALOG_CACHE, _FLM_PROBE_OK
     _FLM_CATALOG_CACHE = None
     _FLM_PROBE_OK = False
+
+
+def is_flm_tag(model_id: str) -> bool:
+    """True iff ``model_id`` matches an FLM-served tag.
+
+    Routing helper for the pull endpoint: FLM tags are Ollama-style
+    ``family:size`` ids (``qwen3:0.6b``, ``deepseek-r1:8b``, …) and
+    don't carry HF coords, so the generic HF pull path can't pull them.
+    Looks them up against the cached :func:`flm_served_models` so we
+    only treat ids the toolbox actually knows about — a stray ``foo:bar``
+    falls through to the HF resolver and gets a proper 422.
+    """
+    if ":" not in model_id:
+        return False
+    return any(m["tag"] == model_id for m in flm_served_models())
+
+
+def flm_pull_command(tag: str) -> tuple[list[str], str]:
+    """Return ``(argv, host_models_dir)`` for an ``flm pull <tag>`` run.
+
+    Mirrors :func:`_probe_flm_catalog` argv shape (apparmor unconfined,
+    same bind mount target) but invokes ``pull`` instead of ``list``.
+    The host_models_dir is returned so callers can locate the on-disk
+    weights for registry/path bookkeeping after the pull finishes.
+
+    Like the slot's container_spec we do NOT pass ``--device``: ``flm
+    pull`` downloads files; it doesn't touch the NPU. Keeping the
+    device flag out lets the pull run on dev hosts without XDNA
+    passthrough (useful for tests).
+    """
+    image = os.environ.get("HAL0_TOOLBOX_IMAGE_FLM", _DEFAULT_FLM_IMAGE)
+    flm_models = os.environ.get("HAL0_FLM_MODELS_DIR") or _DEFAULT_FLM_MODELS_DIR
+    argv = [
+        "docker",
+        "run",
+        "--rm",
+        "--security-opt",
+        "apparmor=unconfined",
+        "-v",
+        f"{flm_models}:/var/lib/hal0/.config/flm/models",
+        image,
+        "pull",
+        tag,
+    ]
+    return argv, flm_models
+
+
+_FLM_PROGRESS_RE = re.compile(
+    r"Downloading:\s*([0-9.]+)%\s*\(([0-9.]+)\s*([KMG]?)B\s*/\s*([0-9.]+)\s*([KMG]?)B\)"
+)
+
+
+def parse_flm_progress(line: str) -> tuple[int, int] | None:
+    """Extract ``(bytes_downloaded, bytes_total)`` from a ``flm pull`` line.
+
+    FLM emits progress like::
+
+        [FLM]  Downloading: 38.8% (253.0MB / 652.1MB)
+
+    Returns ``None`` on lines that don't match (status, hash check,
+    blank, etc.) so the caller can skip them without branching.
+    """
+    m = _FLM_PROGRESS_RE.search(line)
+    if not m:
+        return None
+    _pct, cur, cur_unit, tot, tot_unit = m.groups()
+    units = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3}
+    try:
+        bytes_downloaded = int(float(cur) * units[cur_unit])
+        bytes_total = int(float(tot) * units[tot_unit])
+    except (KeyError, ValueError):
+        return None
+    return bytes_downloaded, bytes_total
