@@ -7,11 +7,18 @@ Non-interactive installer for hal0 — the open-source home AI inference platfor
 ```sh
 # From a clone of this repo:
 sudo bash installer/install.sh
+
+# Or point HuggingFace pulls at a larger disk:
+sudo bash installer/install.sh --models-dir=/mnt/ai-models
 ```
 
-> **Phase 1 only.** The one-liner `curl -fsSL https://hal0.dev/install | bash`
-> will ship once the `hal0.dev/install` endpoint is wired; until then,
+> The one-liner `curl -fsSL https://hal0.dev/install | bash` ships
+> with v1.0 once the `hal0.dev/install` endpoint is wired; until then,
 > `git clone` + `sudo bash` is the supported entry point.
+
+The toolbox container images (`ghcr.io/hal0ai/hal0-toolbox-*:v1`) are
+public on GHCR — `docker pull` works without a `docker login`. The
+installer pulls them in the background after the API comes up.
 
 ## What the installer does
 
@@ -36,6 +43,7 @@ These are the variables `installer/install.sh` actually reads:
 | `HAL0_PORT` | `8080` | hal0 API port |
 | `HAL0_USER` | `root` | systemd unit user (see §What the installer does) |
 | `HAL0_PYTHON` | `python3` | Python interpreter used to build the venv |
+| `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where HuggingFace pulls land; same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
 | `HAL0_TOOLBOX_IMAGE_VULKAN` | _(unset)_ | Override the Vulkan toolbox image ref written into `api.env` |
 | `HAL0_TOOLBOX_IMAGE_ROCM` | _(unset)_ | Override the ROCm toolbox image ref written into `api.env` |
@@ -115,12 +123,12 @@ layer your edge already provides.
 
 `--dev` implies `--no-tls`; there is no system Caddy install in a dev tree.
 
-### Upgrade notes (pre-v1)
+### Upgrade notes
 
-hal0 is pre-v1. Existing installs that used the old `--auth=basic` path lose
-**edge auth** on next install upgrade — the Caddyfile no longer carries
-`basicauth`. The dashboard and `/v1/*` are reachable without credentials
-until you do one of:
+Existing installs that used the old `--auth=basic` path lose **edge auth**
+on next install upgrade — the Caddyfile no longer carries `basicauth`. The
+dashboard and `/v1/*` are reachable without credentials until you do one
+of:
 
 - **Set a password in the dashboard wizard.** On first load after upgrade,
   the wizard's password-setup step calls `POST /api/auth/password` and
@@ -241,12 +249,14 @@ Or add your user to the docker group and re-login.
 ✗ pre-flight failed: less than 20GB free in /var/lib
 ```
 
-Free up space, or symlink the models dir to a larger disk before installing:
+Free up space, or redirect HuggingFace pulls to a larger disk:
 
 ```sh
-mkdir -p /mnt/large-disk/hal0-models
-ln -s /mnt/large-disk/hal0-models /var/lib/hal0/models
+sudo bash installer/install.sh --models-dir=/mnt/large-disk/hal0-models
 ```
+
+The installer records this in `/etc/hal0/hal0.toml` under
+`[models].pull_root` so subsequent `hal0 model pull` calls honor it too.
 
 ### Services won't start
 

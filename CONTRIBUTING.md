@@ -1,9 +1,10 @@
 # Contributing to hal0
 
-**Pre-alpha.** External contributions aren't being accepted yet. This
-file is a placeholder for the v0.2+ contribution flow.
+hal0 is licensed [Apache 2.0](./LICENSE). The contribution model for
+v1.0 is still being decided (see [`PLAN.md`](./PLAN.md) §16). External
+PRs aren't being merged yet; please open issues for discussion.
 
-When it opens up:
+When the model opens up, the shape will be:
 
 - One PR per feature; small, reviewable diffs
 - Run `make lint test` before pushing
@@ -11,8 +12,6 @@ When it opens up:
 - Slot/dispatcher/provider changes require both unit and integration
   tests (Tier-1 reliability is non-negotiable)
 - UI changes need Playwright coverage for any new critical path
-
-For now, please open issues for discussion only.
 
 ## Test tiers
 
@@ -59,8 +58,9 @@ in `tests/slots/test_integration.py`:
 2. `test_state_transitions_visible_via_stream` — SSE state stream sees `starting → warming → ready`
 3. `test_full_state_machine_round_trip_via_stream` — full round-trip incl. `unloading → offline`
 
-Wall-clock budget: ≤12 minutes per PLAN §10.2. Toolbox image build
-is layer-cached via GHA so cold-cache runs are ~10 min, hot-cache ~4.
+Wall-clock budget: ≤12 minutes (PLAN §10, Integration β). Toolbox
+image build is layer-cached via GHA so cold-cache runs are ~10 min,
+hot-cache ~4.
 
 ### γ — release-gate (`make release-test`)
 
@@ -111,10 +111,11 @@ If any of these fail, fix and re-run before `git tag`.
 ## E2E tests
 
 The `ui/tests/e2e/` Playwright suite covers the seven critical paths
-from PLAN §10.3 (FirstRun wizard, slot lifecycle, model management,
-settings + restart banner, logs SSE tail, hardware probe, update
-banner). All seven run on every PR via `.github/workflows/playwright.yml`
-in <8 minutes against mocked backends.
+from PLAN §10 (E2E γ) — FirstRun wizard, slot lifecycle, model
+management, settings + restart banner, logs SSE tail, hardware probe,
+update banner. All seven run on every PR via
+`.github/workflows/playwright.yml` in <8 minutes against mocked
+backends.
 
 ```bash
 cd ui

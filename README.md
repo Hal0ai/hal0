@@ -7,8 +7,11 @@ It manages model slots, exposes an OpenAI-compatible API, and ships with
 a built-in dashboard and a prewired chat UI — all installable in one
 command on any modern Linux box.
 
-> **Status:** pre-alpha. Active development. Not yet a thing you should
-> install. See [`PLAN.md`](./PLAN.md) for the v1 roadmap.
+> **Status:** v1.0 release candidate. The release pipeline (cosign
+> keyless OIDC, signed tarball + `releases.hal0.dev` manifest) is wired
+> end-to-end; the first real tag-push is still pending. See
+> [`PLAN.md`](./PLAN.md) §15 for the milestone state and §18 for the
+> v1.0 definition of done.
 
 ## What hal0 does
 
@@ -27,15 +30,19 @@ command on any modern Linux box.
 - **OpenWebUI bundled** — prewired chat interface at `:3001`, no setup
 - **Image generation** — bundled ComfyUI provider with curated SDXL /
   SD 1.5 / Flux models; OpenAI-compatible `/v1/images/generations`
-- **One-line install** — `curl -fsSL hal0.dev/install | bash`
-  (`--models-dir=PATH` redirects HuggingFace pulls off `/var/lib/hal0`)
+- **One-line install** — `curl -fsSL https://hal0.dev/install | bash`
+  (`--models-dir=PATH` or `HAL0_MODELS_DIR=PATH` redirects HuggingFace
+  pulls off `/var/lib/hal0/models`). Until the `hal0.dev/install`
+  endpoint is wired, the supported entry point is
+  `git clone` + `sudo bash installer/install.sh` — see
+  [`installer/README.md`](./installer/README.md).
 
 ## Backends (v1)
 
 | Backend     | Hardware             | Use case                          |
 |-------------|----------------------|-----------------------------------|
 | llama.cpp   | Vulkan (default) / ROCm | chat, embed, rerank, vision    |
-| FLM         | AMD XDNA NPU (opt-in)| chat + embed (ASR routes through Moonshine for now) |
+| FLM         | AMD XDNA NPU (opt-in)| chat + embed (ASR multiplex available via `defaults.load_asr`; Moonshine is the default STT) |
 | Moonshine   | CPU                  | STT (`/v1/audio/transcriptions`) |
 | Kokoro      | CPU / Vulkan         | TTS                              |
 | ComfyUI     | ROCm                 | image gen (`/v1/images/generations`) |
@@ -54,7 +61,7 @@ hal0/
 ├── ui/               # Vue 3 + Tailwind 4 dashboard
 ├── installer/        # install.sh (systemd unit templates live in packaging/systemd/)
 ├── tests/            # pytest suite
-├── docs/             # architecture, install, slot docs
+├── docs/             # api-errors, release-manifest, migration, ADRs
 └── PLAN.md           # v1 roadmap
 ```
 
@@ -101,6 +108,8 @@ Apache 2.0. See [`LICENSE`](./LICENSE).
 
 ## Contributing
 
-This is pre-alpha. External contributions aren't being accepted yet;
-that opens up around v0.2. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for
-the eventual flow.
+The contribution model for v1.0 is still being decided
+([`PLAN.md`](./PLAN.md) §16). File issues for discussion; PRs aren't
+being accepted from outside contributors yet. See
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) for the test tiers and the
+eventual flow.
