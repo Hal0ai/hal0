@@ -20,7 +20,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.auth import require_writer
-from hal0.api.middleware.error_codes import BadRequest, Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
 from hal0.registry.detect import DetectionResult, detect
@@ -502,9 +502,10 @@ async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     for m in listing["models"]:
         if m["id"] == model_id:
             return m
-    raise Hal0Error(
+    raise NotFound(
         f"model {model_id!r} not found in registry or any upstream catalog",
         details={"model_id": model_id},
+        code="model.not_found",
     )
 
 
