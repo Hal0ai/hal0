@@ -44,6 +44,23 @@ dependencies = [
   # so a process restart doesn't sign every browser session out. The
   # signing key lives under HAL0_HOME and is generated on first use.
   "PyJWT>=2.8",
+  # ADR-0005 (Phase 8): Cognee is hal0's embedded memory engine.
+  # Apache 2.0; pulls aiosqlite + lancedb + kuzu underneath. Verified
+  # 2026-05-22 to NOT pull torch / nvidia / cuda wheels on a CPU-only
+  # install (lancedb + pylance are Rust-built and ship CPU wheels).
+  # Pinned to 1.0.7 (released 2026-05-05, >2 weeks of soak before
+  # adoption); pin window kept tight per ADR-0005 §"Consequences" —
+  # Cognee's Python API is now the upstream contract for /mcp/memory.
+  "cognee==1.0.7",
+  # ADR-0005 §1: fastembed gives Cognee a CPU-only ONNX embedding
+  # backend so we don't require an OpenAI key on a fresh hal0 install.
+  # Pulls onnxruntime, NOT torch/CUDA. Bundled with cognee but only
+  # via the [fastembed] extra, so we list it explicitly.
+  "fastembed>=0.8,<1.0",
+  # ADR-0004 (Phase 8): hal0 ships /mcp/admin + /mcp/memory MCP servers.
+  # MIT-licensed Python SDK; consumed by hal0.mcp.* — required at
+  # import time, hence core (not optional).
+  "mcp==1.27.0",
 ]
 
 [project.optional-dependencies]
@@ -97,6 +114,9 @@ quote-style = "double"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers"
+markers = [
+  "slow: tests that take >1s wall-clock (Cognee fixtures, etc.)",
+]
 
 [tool.mypy]
 python_version = "3.11"
