@@ -9,6 +9,9 @@ ADR-0004 §5 "Pending items").
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from typing import Any
+
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -23,6 +26,7 @@ from hal0.cli._shared import (
     api_post,
     die,
 )
+from hal0.mcp.approval_queue import _PRIMARY_TARGET_ARG
 
 app = typer.Typer(help="Manage bundled agents (Phase 8 — pi-coder / Hermes-Agent).")
 console = Console()
@@ -120,6 +124,63 @@ def agent_list() -> None:
 # ── Approvals (MCP-backend owns the route shape; CLI assumes ADR-0004 §5) ────
 
 
+def _fmt_enqueued_at(value: Any) -> str:
+    """Project ``enqueued_at`` (epoch seconds float) to a short ISO string.
+
+    Mirrors the dashboard's ``AgentApprovalRow.vue`` tooltip projection
+    (``new Date(epoch * 1000).toISOString()``) — keep CLI + UI agreeing
+    on a single representation so screenshots and CLI output read the
+    same to operators.
+    """
+    if value in (None, "", "—"):
+        return "—"
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError):
+        # Already a string-ish timestamp — pass through untouched.
+        return str(value)
+    return (
+        datetime.fromtimestamp(epoch, tz=UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _approval_summary(entry: dict[str, Any]) -> str:
+    """Build a one-line Summary from ``tool`` + primary target arg.
+
+    Mirrors ``AgentApprovalRow.vue``'s ``primaryArg`` projection: the
+    arg name comes from :data:`hal0.mcp.approval_queue._PRIMARY_TARGET_ARG`
+    so the CLI and the dashboard agree on which field is the
+    "distinguishing" one. When the tool has no registered primary arg
+    we fall back to the first scalar in ``args`` so the operator still
+    sees something more useful than the bare tool name. Truncated to
+    60 chars to fit a reasonable terminal width without wrapping.
+    """
+    tool = str(entry.get("tool") or "—")
+    args = entry.get("args")
+    if not isinstance(args, dict) or not args:
+        return tool[:60]
+
+    primary_key = _PRIMARY_TARGET_ARG.get(tool)
+    primary_val: Any = None
+    if primary_key is not None:
+        primary_val = args.get(primary_key)
+    if primary_val is None:
+        # No registered primary arg (or it's missing) — fall back to
+        # the first scalar value, matching the Vue row's behaviour.
+        for v in args.values():
+            if isinstance(v, str | int | float | bool) and v != "":
+                primary_val = v
+                break
+
+    if isinstance(primary_val, list | tuple):
+        primary_val = ",".join(str(v) for v in primary_val)
+    summary = tool if primary_val is None or primary_val == "" else f"{tool} {primary_val}"
+    return summary[:60]
+
+
 @approvals_app.command("list")
 def approvals_list() -> None:
     """List pending agent approval requests."""
@@ -142,12 +203,16 @@ def approvals_list() -> None:
     table.add_column("Requested at")
     table.add_column("Summary")
     for it in items:
+        # ApprovalEntry.as_dict() emits ``client_id`` + ``enqueued_at``
+        # + ``args`` — NOT ``agent`` / ``requested_at`` / ``summary``.
+        # Mirror ui/src/components/agent/AgentApprovalRow.vue's
+        # projection so CLI + dashboard show the same row content.
         table.add_row(
             str(it.get("id", "—")),
             str(it.get("tool", "—")),
-            str(it.get("agent", "—")),
-            str(it.get("requested_at", "—")),
-            str(it.get("summary", "—"))[:60],
+            str(it.get("client_id") or "—"),
+            _fmt_enqueued_at(it.get("enqueued_at")),
+            _approval_summary(it),
         )
     console.print(table)
 
