@@ -102,6 +102,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 #                         explicitly so the runtime contract is obvious)
 # - libgomp1            : OpenMP runtime — llama.cpp threads
 # - libcurl4            : runtime side of LLAMA_CURL=ON
+# - curl                : the CLI binary — needed by HEALTHCHECK below.
+#                         libcurl4 alone gives us the library; without
+#                         this the container reports `unhealthy` forever
+#                         ("/bin/sh: 1: curl: not found") even when the
+#                         server is serving fine.
 # - libc++ / libstdc++  : C++ runtime (already in ubuntu:24.04 base, but
 #                         libstdc++6 listed defensively)
 # - ca-certificates     : HTTPS for curl-backed model fetch
@@ -111,6 +116,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libvulkan1 \
         libgomp1 \
         libcurl4 \
+        curl \
         libstdc++6 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
