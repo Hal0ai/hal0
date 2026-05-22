@@ -133,10 +133,22 @@ def test_first_run_set_password_no_auth_required(auth_app: TestClient) -> None:
 
 
 def test_second_set_password_without_auth_returns_401(auth_app: TestClient) -> None:
-    """Once a password is set, the endpoint requires writer scope."""
+    """Once a password is set, the endpoint requires writer scope.
+
+    The first-run leg auto-mints a hal0_session cookie (#fix-firstrun-auth)
+    so the wizard's subsequent writer calls ride a session. To exercise
+    the "second call with no creds" contract we clear that cookie first
+    — otherwise the second call rides the session and bounces on the
+    CSRF tripwire (403 ``auth.csrf_required``) instead of the no-creds
+    gate (401 ``auth.required``).
+    """
     # First run claims ownership.
     first = auth_app.post("/api/auth/password", json={"password": "correcthorse"})
     assert first.status_code == 200
+
+    # Drop the session cookie minted by the first-run leg so the
+    # follow-up call is genuinely "no credentials presented".
+    auth_app.cookies.clear()
 
     # Second call with no auth → 401 auth.required.
     second = auth_app.post("/api/auth/password", json={"password": "newbatterystaple"})
@@ -186,6 +198,11 @@ def test_login_happy_path_sets_session_cookie(auth_app: TestClient) -> None:
 
 def test_login_wrong_password_returns_401(auth_app: TestClient) -> None:
     auth_app.post("/api/auth/password", json={"password": "correcthorse"})
+    # First-run set-password mints a cookie (#fix-firstrun-auth). Clear
+    # it so the "no cookie after failed login" assertion below means
+    # "/login didn't issue one" rather than "the jar happens to still
+    # hold the set-password cookie".
+    auth_app.cookies.clear()
     response = auth_app.post(
         "/api/auth/login",
         json={"username": "owner", "password": "wrong"},

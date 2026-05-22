@@ -320,9 +320,19 @@ def test_set_password_after_first_returns_existing_behaviour(auth_app: TestClien
     The pre-FINDINGS contract was: first-run claim is auth-free, every
     subsequent call requires writer scope. The new §28 lockfile only
     gates the first-run path; the rotation path is unchanged.
+
+    The first-run leg also mints a hal0_session cookie
+    (#fix-firstrun-auth) so the wizard's subsequent writer calls don't
+    401. We explicitly clear that cookie here so the assertion below
+    exercises the genuine "no credentials" branch instead of bouncing
+    off the CSRF tripwire.
     """
     # First-run claim via loopback bypass.
     auth_app.post("/api/auth/password", json={"password": "correcthorse"})
+
+    # Drop the session cookie minted by the first-run leg so the second
+    # call below is truly anonymous.
+    auth_app.cookies.clear()
 
     # Second call without any credential — even from loopback — must
     # still require the writer-scope token. This is the §28 mitigation

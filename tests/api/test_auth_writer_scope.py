@@ -42,8 +42,20 @@ def auth_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    monkeypatch.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
     app = create_app()
     with TestClient(app) as c:
+        # Lifespan mints ``.first-run.lock`` when no password is set,
+        # which intentionally opens a small claim path-set (the wizard
+        # writer calls — #fix-firstrun-auth). The scope x verb matrix
+        # here pins the POST-CLAIM contract (lockfile already consumed
+        # by the wizard), so we delete the lockfile after lifespan to
+        # exercise the closed-claim writer gate.
+        from hal0.config import paths as _paths
+
+        lock = _paths.first_run_lock()
+        if lock.exists():
+            lock.unlink()
         c.app.state.token_store = TokenStore(tmp_path / "tokens.toml")
         yield c
 
@@ -57,8 +69,17 @@ def auth_app_trusted_proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> I
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     monkeypatch.setenv("HAL0_TRUST_FORWARDED_EMAIL", "1")
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    monkeypatch.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
     app = create_app()
     with TestClient(app) as c:
+        # See auth_app: drop the lifespan-minted first-run lockfile so
+        # the writer gate fires normally (the matrix tests are not
+        # interested in the claim window).
+        from hal0.config import paths as _paths
+
+        lock = _paths.first_run_lock()
+        if lock.exists():
+            lock.unlink()
         c.app.state.token_store = TokenStore(tmp_path / "tokens.toml")
         yield c
 
