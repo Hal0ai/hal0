@@ -793,7 +793,29 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 - Migrate haloai LXC → hal0 (cutover) — script ready (PR #22, `scripts/migrate-haloai.py` + 14-model curated allow-list); cutover script tested with synthetic fixtures, not yet against live haloai data
 - Public launch — pending §16 decisions (launch story, contribution model)
 
-**Total: ~10 weeks of focused work.** Phases 1–6 closed in ~3 weeks of compressed sprint work + a multi-agent sweep on 2026-05-15.
+**Phase 8 — Agents v0.2 (post-v1.0)** — combined Agents + MCP + basic memory release; design settled via grilling 2026-05-22, deliverables in `docs/adr/0004-agents.md` + `docs/adr/0005-memory-engine-cognee.md`.
+
+- **Bundled agent app, single-pick at install.** Supported choices: `pi-coder` (CLI, `badlogic/pi-mono`) and `Hermes-Agent` (service, the haloai-internal one). User picks one via the first-run wizard or `hal0 agent {install,uninstall,list} <name>`; single-pick enforced; `--switch` flag for atomic swap. install.sh stays non-interactive (no `--agent` flag).
+- **hal0 admin MCP server at `/mcp/admin`.** Tools wrap existing `/api/*` routes only (rule: a tool ships iff it maps to an existing `/api/*` route — no new privileged surface). Bearer-token auth reused from ADR-0001. Two-tier scope: routine ops (slot status / list / `model_swap` / hardware probe / logs) autonomous; capital-D destructives (`model_pull`, `slot_restart/create/delete`, `capability_set`, `config_write`) gated.
+- **hal0 memory MCP server at `/mcp/memory`.** Wraps **Cognee** (Apache 2.0, embedded SQLite + LanceDB + Kuzu defaults — same stack we'd otherwise build). v0.2 surfaces only `memory_add` / `memory_search` / `memory_list` / `memory_delete`; Cognee's graph pipeline and Memify stay disabled until Phase 9.
+- **Approvals UX.** Bell+inbox in dashboard header (badge count, modal); inline pending indicators on Models / Slots / Capabilities pages where relevant; pending-forever (no auto-expire); no per-agent "trust mode" toggle (destructives must always be approved); full CLI parity via `hal0 agent approvals {list,approve,deny}` for headless workflows.
+- **Per-agent surface, asymmetric by upstream shape.** Service-shape (Hermes-Agent) gets a sidebar link-out OWUI-style; CLI-shape (pi-coder) gets no dashboard surface in v0.2. Both agents `track latest` upstream — no version pin — backed by a nightly CI smoke test that re-runs `installer/agents/pi-coder.sh` end-to-end against current upstream + asserts an MCP round-trip.
+- **Asymmetric ownership of integration shims.** hal0 maintains `installer/agents/pi-coder.sh` (installs pi-mono + `pi-mcp-adapter` for MCP routing + leaves `pi-memory-md` in place for project-scoped markdown memory). Hermes grows native hal0-awareness upstream (you own it); hal0's Hermes shim is a one-liner calling Hermes's own install command.
+- **Memory scope split, by design.** pi-coder keeps `pi-memory-md` (project-scoped markdown) — that's what it's good at and benchmarks well at. hal0's memory MCP is cross-session / cross-agent / cross-app — different job. They coexist; we don't displace pi-memory-md.
+- **Cross-app reach is automatic.** Both MCP servers are reachable by any MCP-speaking client. Pattern references:
+  - `topoteretes/cognee-integrations/integrations/claude-code` — Claude Code plugin using six lifecycle hooks + `node_set` tagging (user-context / project-docs / agent-actions). Gives Claude Code users a second path into the same Cognee store, complementary to MCP.
+  - `topoteretes/cognee-integrations/integrations/openclaw-skills` — `SKILL.md` + YAML-frontmatter format + Ingest → Execute → Observe → Amendify loop. Reference shape if hal0 ever grows agent-side skills (distinct from the platform "skills" = MCP tools settled here).
+
+**Phase 9 — Advanced memory + MCP client side (post-v0.2)** — unscheduled; deliverables in `docs/adr/0006-advanced-memory.md`.
+
+- **Enable Cognee's advanced features** — graph extraction (Kuzu) gated behind a configurable model (small local models are unreliable at structured output; default to OpenRouter or a 70B-class local model for graph builds), Memify pipeline for memory hygiene, additional source connectors.
+- **MCP client side of hal0** — bundled agents can reach external MCP servers (filesystem scoped to `/var/lib/hal0/agents/<name>/workspace`, web search, third-party memory services like Supermemory or Hindsight). Per-agent allow-list in agent config.
+- **Memory federation** — pluggable Provider pattern; multiple memory sources (local Cognee + remote MCPs) federated under one query path; dashboard surfaces what each agent can see.
+- **RBAC + audit log surface** — Cognee's built-in RBAC + dataset-scoped permissions; rotating audit log mirrored to journald; visible in dashboard.
+- **Migration importers** — one-shot scripts to pull upstream agent history into the Cognee store: `migrate-pi-memory-md.py`, `migrate-hermes-mem.py`, `migrate-mem0.py` (for users transitioning from existing mem0 installs).
+- **Optional self-improving skills loop** — adopt the openclaw-skills SKILL.md pattern if the bundled agent supports it; stretch goal, not a v0.3 commitment.
+
+**Total: ~10 weeks of focused work through v1.0.** Phase 8 (v0.2) is post-v1.0 and unestimated. Phases 1–6 closed in ~3 weeks of compressed sprint work + a multi-agent sweep on 2026-05-15.
 
 ---
 
@@ -826,6 +848,8 @@ own decisions before relevant milestones:
 | Strix Halo NPU driver flakiness on `hal0-test` LXC delays integration | Medium | Build CI path on Vulkan-CPU first; NPU is release-gate only, not per-commit |
 | Self-update mechanism corrupts an install | Low–Medium | Atomic symlink swap + retained previous version + `hal0 update --rollback` command. Test rollback as part of release-gate. `HAL0_UPDATE_SKIP_COSIGN` gated to pre-release builds (PR #6) so v1.0.0 mandates signature verification |
 | Scope creep ("just add memory while we're in there") | High | This document is the scope. Anything else is v0.2. Push back hard |
+| Cognee structured-output reliability on small local models (Phase 9 graph builds) | Medium | Gate graph extraction behind a configurable model; default to OpenRouter or 70B-class local model for graph builds. Basic memory (add/search/list/delete) works on any model |
+| Bundled agents `track latest` upstream — pi-coder or Hermes can break the prewired config between two `hal0 update` runs | Medium | Nightly CI smoke test runs `installer/agents/pi-coder.sh` end-to-end against current upstream + asserts an MCP round-trip. Diverges from OWUI's pin-per-release pattern by intent (Phase 8 is best-effort, not release-gated) |
 
 ---
 
