@@ -195,6 +195,12 @@ _FIRST_RUN_CLAIM_PATHS: frozenset[str] = frozenset(
         "/api/install/curated-models",
         "/api/install/pick-default",
         "/api/auth/password",
+        # Wizard "Skip — leave open" — writes HAL0_AUTH_DISABLED=1 to
+        # api.env and schedules a service restart so the trusted-LAN
+        # posture is in effect from the next request onward. Gated
+        # internally on no-password + lockfile-present, so the open
+        # claim window can't widen this beyond the wizard.
+        "/api/auth/disable",
         # Wizard step 2 — operator picks the model storage directories.
         # Gated by require_writer on the live router; admitted here so
         # the wizard can persist before a credential exists.

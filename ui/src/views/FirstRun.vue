@@ -159,10 +159,17 @@ function goBack() {
   step.value = Math.max(1, step.value - 1)
 }
 
-function skipPassword() {
+async function skipPassword() {
   s.form.password = ''
   s.form.firstRunToken = ''
   tokenError.value = ''
+  // Flip the box to trusted-LAN posture (HAL0_AUTH_DISABLED=1 +
+  // deferred restart). Without this the dashboard's Settings panels
+  // 401 on every writer route after the wizard finishes, because the
+  // skip path never establishes a credential. Fire-and-forget — the
+  // composable swallows errors and the wizard advances either way.
+  s.disableAuthForSkip()
+  toasts.info('Dashboard runs open on the trusted LAN. You can set a password later in Settings.')
   step.value = 2
 }
 

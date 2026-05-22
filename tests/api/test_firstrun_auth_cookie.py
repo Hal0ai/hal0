@@ -413,3 +413,133 @@ def test_path_is_claim_eligible(path: str, expected: bool) -> None:
     assert _path_is_claim_eligible(path) is expected, (
         f"claim-eligibility mismatch for path={path!r}: got {not expected}, expected {expected}"
     )
+
+
+# ── (8) /api/auth/disable — first-run skip → trusted-LAN posture ────────────
+#
+# The wizard's "Skip — leave open" button writes HAL0_AUTH_DISABLED=1
+# into /etc/hal0/api.env and schedules a service restart so the
+# dashboard's writer routes stop 401'ing on a no-credential install.
+# These tests pin the gates (password-not-set + lockfile-present) and
+# the env-writer's idempotency.
+
+
+@pytest.fixture
+def stub_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the ``_schedule_service_restart`` helper with a no-op.
+
+    Without this the test would try to ``systemctl restart hal0-api``,
+    which is either missing (CI runners) or actually restarts the test
+    process (real systemd). The endpoint's contract is "best-effort
+    deferred restart, never blocks on failure"; the no-op stub keeps
+    the rest of the assertions clean.
+    """
+    from hal0.api.routes import auth as auth_routes
+
+    monkeypatch.setattr(auth_routes, "_schedule_service_restart", lambda: None)
+
+
+def test_disable_auth_writes_env_and_consumes_lockfile(
+    auth_app: TestClient, tmp_path: Path, stub_restart: None
+) -> None:
+    """First-run anonymous POST sticks HAL0_AUTH_DISABLED=1 + closes claim."""
+    lock = first_run_lock.lockfile_path()
+    assert lock.exists()
+
+    api_env = tmp_path / "etc" / "hal0" / "api.env"
+    # Pre-seed an existing api.env with the commented form, the way
+    # installer/install.sh writes it. The handler should uncomment.
+    api_env.parent.mkdir(parents=True, exist_ok=True)
+    api_env.write_text(
+        "HAL0_PORT=8080\nHAL0_LOG_LEVEL=info\n# HAL0_AUTH_DISABLED=1\n",
+        encoding="utf-8",
+    )
+
+    response = auth_app.post("/api/auth/disable")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["auth_disabled"] is True
+    assert body["restart_scheduled"] is True
+
+    written = api_env.read_text(encoding="utf-8")
+    assert "HAL0_AUTH_DISABLED=1" in written
+    # Commented form must be gone — the handler uncomments in place
+    # rather than appending a duplicate.
+    assert "# HAL0_AUTH_DISABLED=1" not in written
+
+    # Lockfile consumed → the claim window closes.
+    assert not lock.exists()
+
+
+def test_disable_auth_rejects_after_password_set(auth_app: TestClient, stub_restart: None) -> None:
+    """403 once an owner password exists — can't toggle auth anonymously."""
+    # Set a password via the normal first-run flow.
+    set_response = auth_app.post(
+        "/api/auth/password",
+        json={"password": "supersecret123"},
+    )
+    assert set_response.status_code == 200, set_response.text
+
+    # Clear the session cookie the set-password response minted —
+    # we want to exercise the anonymous-call gate, not the
+    # authenticated-rotation path.
+    auth_app.cookies.clear()
+
+    response = auth_app.post("/api/auth/disable")
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "auth.forbidden"
+
+
+def test_disable_auth_rejects_after_lockfile_consumed(
+    auth_app: TestClient, stub_restart: None
+) -> None:
+    """403 once the claim window has closed (lockfile gone)."""
+    first_run_lock.consume_lockfile()
+    assert not first_run_lock.lockfile_path().exists()
+
+    response = auth_app.post("/api/auth/disable")
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "auth.forbidden"
+
+
+def test_set_auth_disabled_in_env_idempotency(tmp_path: Path) -> None:
+    """``_set_auth_disabled_in_env`` handles the three input shapes.
+
+    Cases:
+      - File missing → appended.
+      - Commented (``# HAL0_AUTH_DISABLED=1``) → uncommented in place.
+      - Already set with a different value → replaced.
+      - Already set with the canonical value → no-op (still exactly one line).
+    """
+    from hal0.api.routes.auth import _set_auth_disabled_in_env
+
+    target = tmp_path / "api.env"
+
+    # 1. Missing file → handler creates parent + writes the line.
+    _set_auth_disabled_in_env(target)
+    assert target.read_text(encoding="utf-8") == "HAL0_AUTH_DISABLED=1\n"
+
+    # 2. Commented form → uncomment.
+    target.write_text(
+        "HAL0_PORT=8080\n# HAL0_AUTH_DISABLED=1\n",
+        encoding="utf-8",
+    )
+    _set_auth_disabled_in_env(target)
+    contents = target.read_text(encoding="utf-8")
+    assert "HAL0_AUTH_DISABLED=1\n" in contents
+    assert "# HAL0_AUTH_DISABLED=1" not in contents
+    # Exactly one occurrence.
+    assert contents.count("HAL0_AUTH_DISABLED=1") == 1
+
+    # 3. Different value → overwritten.
+    target.write_text(
+        "HAL0_PORT=8080\nHAL0_AUTH_DISABLED=0\n",
+        encoding="utf-8",
+    )
+    _set_auth_disabled_in_env(target)
+    assert target.read_text(encoding="utf-8").count("HAL0_AUTH_DISABLED=1") == 1
+    assert "HAL0_AUTH_DISABLED=0" not in target.read_text(encoding="utf-8")
+
+    # 4. Already canonical → no-op (still exactly one line).
+    _set_auth_disabled_in_env(target)
+    assert target.read_text(encoding="utf-8").count("HAL0_AUTH_DISABLED=1") == 1

@@ -49,7 +49,14 @@ const SMART_DEFAULTS = {
 }
 
 function pickBackendTier(hw) {
-  if (hw?.npu_present) return 'npu'
+  // NPU tier is reserved for Strix Halo specifically. The FLM toolbox
+  // image ships AMD-XDNA-on-Strix-Halo binaries and the curated NPU
+  // tags are validated on that hardware; advertising NPU on any future
+  // XDNA-bearing chip just because npu_present=true would push
+  // operators onto an unsupported runtime. Once we validate a second
+  // XDNA platform, widen this list rather than dropping back to the
+  // bare npu_present check.
+  if (hw?.npu_present && hw?.platform === 'strix-halo') return 'npu'
   const v = hw?.gpu_vendor || ''
   if (v === 'amd' && !hw?.is_uma) return 'rocm'
   if (v === 'nvidia') return 'rocm'  // closest analogue in our catalog; CUDA not in capability matrix
@@ -229,7 +236,42 @@ export function useFirstRun() {
   }
 
   // ── Catalog helpers (for the capability dropdowns) ────────────────
-  const optionsFor = (slot, child) => capsData.catalogs?.[slot]?.[child] || []
+  // `/api/capabilities` returns the GROUPED shape — one row per model
+  // id, with `backends: [{id, provider, downloaded, pullable}, ...]`.
+  // The wizard's dropdown template iterates options expecting the OLD
+  // FLAT shape (`o.backend` as a top-level string + `o.provider`), so
+  // we flatten back to per-(model × backend) rows here. That keeps the
+  // existing setCapModel / sizeFor / pickFirstAvailableModels /
+  // enabledList code paths working without rewriting the template.
+  // When a row lacks a `backends` array (legacy or registry-only
+  // entries), we fall back to the row itself — that preserves any
+  // already-flat shape some path might still produce.
+  function _flattenCatalog(rows) {
+    if (!Array.isArray(rows)) return []
+    const out = []
+    for (const r of rows) {
+      const backends = Array.isArray(r.backends) ? r.backends : null
+      if (backends && backends.length > 0) {
+        for (const b of backends) {
+          out.push({
+            id: r.id,
+            backend: b.id,
+            provider: b.provider,
+            size_gb: r.size_gb,
+            capabilities: r.capabilities,
+            downloaded: b.downloaded,
+            pullable: b.pullable,
+            license: r.license,
+            license_url: r.license_url,
+          })
+        }
+      } else if (r.backend) {
+        out.push(r)
+      }
+    }
+    return out
+  }
+  const optionsFor = (slot, child) => _flattenCatalog(capsData.catalogs?.[slot]?.[child])
 
   function setCapModel(key, slot, child, comboKey) {
     const opts = optionsFor(slot, child)
@@ -333,6 +375,27 @@ export function useFirstRun() {
     passwordAlreadySet.value = true
     form.password = ''
     form.firstRunToken = ''
+  }
+
+  // "Skip — leave open" path. Flips the box to trusted-LAN posture
+  // (HAL0_AUTH_DISABLED=1 in /etc/hal0/api.env + deferred restart) so
+  // Settings → Authentication and every other writer-scoped admin
+  // route stops 401'ing. The endpoint is gated server-side on
+  // no-password + lockfile-present, so this only fires during the
+  // first-run claim window. We swallow individual error codes —
+  // the wizard advances either way, since the user explicitly chose
+  // "skip" and there's nothing else to do on this step.
+  async function disableAuthForSkip() {
+    try {
+      await api('/api/auth/disable', { method: 'POST' })
+    } catch (e) {
+      // Surface for telemetry but don't block the wizard. The most
+      // common failure is "claim window closed" (lockfile already
+      // consumed by an earlier run) — harmless, the box stays in
+      // whatever posture it was already in.
+      // eslint-disable-next-line no-console
+      console.warn('disableAuthForSkip failed:', e?.message || e)
+    }
   }
 
   // ── Step 2 — model dirs ───────────────────────────────────────────
@@ -571,7 +634,7 @@ export function useFirstRun() {
     // helpers
     optionsFor, setCapModel, sizeFor,
     // actions
-    load, submitPassword, persistModelDirs, persistHfToken,
+    load, submitPassword, disableAuthForSkip, persistModelDirs, persistHfToken,
     startAllPulls, retryItem, markComplete, dispose,
   }
   load()

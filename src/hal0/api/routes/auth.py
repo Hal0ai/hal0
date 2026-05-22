@@ -43,6 +43,12 @@ must NOT be touched by edits to this file.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Annotated, Any
 
 import structlog
@@ -62,6 +68,7 @@ from hal0.api.auth.rate_limit import (
 )
 from hal0.api.middleware.auth import (
     SESSION_COOKIE_NAME,
+    AuthForbidden,
     AuthIdentity,
     AuthInvalid,
     AuthRequired,
@@ -76,6 +83,7 @@ from hal0.auth.tokens import (
     auth_enabled,
     get_or_create_store,
 )
+from hal0.config import paths
 from hal0.errors import BadRequest, Hal0Error
 
 log = structlog.get_logger(__name__)
@@ -574,6 +582,81 @@ async def set_password(request: Request, response: Response) -> Any:
     }
 
 
+@router.post("/disable")
+async def disable_auth(request: Request) -> dict[str, Any]:
+    """First-run-only: switch the box to trusted-LAN posture.
+
+    Called from the wizard's "Skip — leave open" path. Writes
+    ``HAL0_AUTH_DISABLED=1`` into ``/etc/hal0/api.env`` (atomic
+    tmp-file + replace; the line is added or uncommented as needed),
+    consumes the first-run lockfile so the open-claim window closes,
+    and schedules a deferred ``systemctl restart hal0-api`` so the
+    response can flush before the process turns over. The next
+    request lands on an auth-disabled process where every dependency
+    returns ``identity=anonymous, scope=all`` — the dashboard's
+    Settings panels stop 401'ing and the operator gets the
+    pre-v1 trusted-LAN posture they asked for by clicking Skip.
+
+    Gates:
+      - Only callable while no owner password is set AND the
+        first-run lockfile exists. Once either condition flips, this
+        endpoint returns 403 ``auth.disable_not_available`` — we
+        deliberately do NOT allow flipping auth off from an existing
+        password-secured install via a single anonymous POST.
+      - The endpoint is in :data:`_FIRST_RUN_CLAIM_PATHS` so anonymous
+        callers can reach it during the claim window.
+
+    On hosts without systemd (dev installs, CI), the restart step is
+    a no-op and the env-var write is the only side effect — the next
+    process start (manual or harness-driven) picks it up.
+    """
+    try:
+        check_rate_limit(request, scope=_RATE_SCOPE_PASSWORD)
+    except RateLimitExceeded as exc:
+        return _rate_limited_response(exc)
+
+    store = _store(request)
+    if store.get_password_hash() is not None:
+        raise AuthForbidden(
+            "cannot disable auth after the owner password has been set — "
+            "edit /etc/hal0/api.env and restart hal0-api instead",
+            details={"reason": "password_already_set"},
+        )
+    if first_run_lock.read_lockfile() is None:
+        raise AuthForbidden(
+            "first-run claim window has closed — cannot toggle auth from "
+            "an anonymous request, edit /etc/hal0/api.env directly",
+            details={"reason": "claim_window_closed"},
+        )
+
+    api_env = paths.etc() / "api.env"
+    _set_auth_disabled_in_env(api_env)
+    first_run_lock.consume_lockfile()
+
+    # Best-effort deferred restart so the response flushes before the
+    # process turns over. On dev / CI / containerised installs without
+    # systemd, swallow the FileNotFoundError — the env-var write stuck
+    # to disk and the next process start picks it up.
+    _schedule_service_restart()
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "system.auth_changed",
+            "info",
+            "system",
+            "auth disabled — trusted-LAN posture (first-run skip)",
+            data={"auth_disabled": True},
+        )
+
+    return {
+        "ok": True,
+        "auth_disabled": True,
+        "api_env_path": str(api_env),
+        "restart_scheduled": True,
+    }
+
+
 @router.get("/me")
 async def me(
     identity: Annotated[AuthIdentity, Depends(require_token)],
@@ -588,6 +671,106 @@ async def me(
         "scope": identity.scope,
         "source": identity.source,
     }
+
+
+# ── Auth-disable helpers (POST /api/auth/disable) ────────────────────────────
+
+
+_AUTH_DISABLED_LINE = "HAL0_AUTH_DISABLED=1\n"
+
+
+def _set_auth_disabled_in_env(api_env: Path) -> None:
+    """Add or uncomment ``HAL0_AUTH_DISABLED=1`` in ``api.env``.
+
+    Atomic: writes a tmp file in the same directory then ``os.replace``
+    over the target so a crash mid-write leaves the prior file intact.
+    Idempotent: if the line is already present and uncommented, we
+    rewrite the file with the same content (no-op semantically).
+
+    The installer's default ``api.env`` ships the line commented out
+    (``# HAL0_AUTH_DISABLED=1``); we look for the commented form and
+    uncomment it in place to preserve surrounding comments. If neither
+    form is present we append. The file is created with mode 0644 to
+    match what the installer drops — adjust the umask if the deploy
+    posture changes.
+    """
+    api_env.parent.mkdir(parents=True, exist_ok=True)
+    existing = ""
+    try:
+        existing = api_env.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise Hal0Error(
+            f"could not read {api_env}: {exc}",
+            details={"path": str(api_env), "error": str(exc)},
+        ) from exc
+
+    lines = existing.splitlines(keepends=True) if existing else []
+    rewritten: list[str] = []
+    replaced = False
+    for line in lines:
+        stripped = line.lstrip()
+        if (
+            stripped.startswith("HAL0_AUTH_DISABLED=")
+            or stripped.startswith("# HAL0_AUTH_DISABLED=")
+            or stripped.startswith("#HAL0_AUTH_DISABLED=")
+        ):
+            if not replaced:
+                rewritten.append(_AUTH_DISABLED_LINE)
+                replaced = True
+            # Drop the original line (whether commented or set to a
+            # different value) — the new line above is authoritative.
+            continue
+        rewritten.append(line)
+    if not replaced:
+        if rewritten and not rewritten[-1].endswith("\n"):
+            rewritten.append("\n")
+        rewritten.append(_AUTH_DISABLED_LINE)
+
+    fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{api_env.name}.",
+        suffix=".tmp",
+        dir=str(api_env.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("".join(rewritten))
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_str, 0o644)
+        os.replace(tmp_str, api_env)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_str)
+        raise
+
+
+def _schedule_service_restart() -> None:
+    """Best-effort deferred ``systemctl restart hal0-api``.
+
+    Spawns a detached background shell that sleeps 2s and then asks
+    systemd to restart this process. The sleep lets the HTTP response
+    flush before the kill arrives, and the detach (``setsid`` +
+    closed FDs) makes the child outlive its parent.
+
+    Silently no-ops when ``systemctl`` is absent (dev / CI /
+    containerised installs without systemd). The env-var write
+    already landed; the next process start picks it up.
+    """
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return
+    # If we can't even spawn sh, the env-var write still stuck; the
+    # operator's next manual restart picks it up.
+    with contextlib.suppress(OSError, FileNotFoundError):
+        subprocess.Popen(
+            ["sh", "-c", f"sleep 2 && {systemctl} restart hal0-api"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
 
 # ── Admin: token CRUD ─────────────────────────────────────────────────────────
