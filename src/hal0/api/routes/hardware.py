@@ -35,6 +35,12 @@ def _flatten_for_ui(info: dict[str, Any]) -> dict[str, Any]:
     # only for non-UMA. This stops the dashboard from treating GTT and VRAM
     # as independent buckets.
     is_uma = vendor == "amd" and vram_mb > ram_mb * 0.5
+    platform = info.get("platform", "unknown") or "unknown"
+    # memory_kind tells the UI whether to label the pool "unified" or
+    # "system". Only strix-halo is genuinely unified for our purposes;
+    # everything else (including non-Halo AMD APUs the probe doesn't yet
+    # classify) gets the safer "system" label.
+    memory_kind = "unified" if (platform == "strix-halo" or is_uma) else "system"
     return {
         **info,
         "gpu_name": primary_gpu.get("name", ""),
@@ -51,7 +57,40 @@ def _flatten_for_ui(info: dict[str, Any]) -> dict[str, Any]:
         "cpu_threads": info.get("cpu_threads", 0),
         "npu_present": (info.get("npu") or {}).get("present", False),
         "npu_name": (info.get("npu") or {}).get("name", ""),
+        "platform": platform,
+        "platform_label": _platform_label(platform, primary_gpu),
+        "memory_kind": memory_kind,
     }
+
+
+_PLATFORM_LABELS = {
+    "strix-halo": "Strix Halo (unified memory)",
+    "wsl2": "WSL 2",
+    "proxmox-kvm": "Proxmox VM (KVM)",
+    "kvm": "KVM virtual machine",
+    "lxc": "Linux container (LXC)",
+    "bare-metal-amd-gpu": "Bare metal — AMD GPU",
+    "bare-metal-nvidia-gpu": "Bare metal — NVIDIA GPU",
+    "bare-metal-intel-igpu": "Bare metal — Intel iGPU",
+    "bare-metal-cpu-only": "Bare metal — CPU only",
+    "unknown": "Unknown platform",
+}
+
+
+def _platform_label(platform: str, primary_gpu: dict[str, Any]) -> str:
+    """Pretty label for the probed platform string.
+
+    Promotes the GPU model into the label for bare-metal hosts so the UI
+    can show "Bare metal — NVIDIA GeForce RTX 4080" without re-deriving
+    the brand on the client.
+    """
+    base = _PLATFORM_LABELS.get(platform, _PLATFORM_LABELS["unknown"])
+    name = (primary_gpu or {}).get("name") or ""
+    if platform.startswith("bare-metal-") and name and "GPU" in base:
+        # Drop the generic "GPU" suffix and substitute the actual name.
+        prefix = base.split(" — ")[0]
+        return f"{prefix} — {name}"
+    return base
 
 
 @router.get("/hardware")

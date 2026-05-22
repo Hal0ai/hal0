@@ -78,6 +78,12 @@ async function reProbe() {
 const hw = computed(() => ({ ...(hardware.value || {}), ...(stats.value || {}) }))
 
 const isUma = computed(() => !!hw.value.is_uma)
+const platform = computed(() => hw.value.platform || 'unknown')
+const platformLabel = computed(() => hw.value.platform_label || '')
+// "unified" is only meaningful on Strix Halo (and any future UMA host the
+// probe explicitly classifies). On generic KVM, WSL, or discrete-GPU bare
+// metal, "system" memory is the accurate label.
+const isUnifiedMemory = computed(() => hw.value.memory_kind === 'unified' || isUma.value)
 
 // Proxmox host memory authority — when /etc/hal0/proxmox.json is configured
 // and the cluster/resources poll succeeded, the host's view trumps the
@@ -222,7 +228,7 @@ onMounted(loadHardware)
         <div class="tiles">
           <div class="tile">
             <div class="tile-label">
-              {{ hostOk ? 'Physical host memory' : (isUma ? 'Unified memory' : 'System RAM') }}
+              {{ hostOk ? 'Physical host memory' : (isUnifiedMemory ? 'Unified memory' : 'System RAM') }}
             </div>
             <div class="tile-value mono">
               {{ unifiedTotalGb.toFixed(0) }}<span class="tile-unit">GB</span>
@@ -231,8 +237,14 @@ onMounted(loadHardware)
               {{ unifiedUsedPct.toFixed(0) }}% in use ·
               {{ hw.host.tenants_running }} tenant{{ hw.host.tenants_running === 1 ? '' : 's' }}
             </div>
-            <div v-else-if="isUma" class="tile-sub">{{ unifiedUsedPct.toFixed(0) }}% in use · UMA pool</div>
+            <div v-else-if="isUnifiedMemory" class="tile-sub">{{ unifiedUsedPct.toFixed(0) }}% in use · UMA pool</div>
             <div v-else class="tile-sub">{{ ramPct.toFixed(0) }}% in use</div>
+          </div>
+
+          <div class="tile" v-if="platformLabel">
+            <div class="tile-label">Platform</div>
+            <div class="tile-value tile-small">{{ platformLabel }}</div>
+            <div class="tile-sub mono">{{ platform }}</div>
           </div>
 
           <div class="tile" v-if="gpuName">

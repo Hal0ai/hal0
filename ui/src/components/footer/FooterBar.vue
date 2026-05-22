@@ -35,8 +35,11 @@ const hostname = computed(() => system.status?.hostname || '')
 const hw = computed(() => stats.value || {})
 
 const isUnified = computed(() => {
-  // memory_kind from probe; fall back to is_uma
-  const kind = system.hardware?.memory_kind || (system.hardware?.is_uma ? 'unified' : 'discrete')
+  // memory_kind from the API flatten (preferred; strix-halo and any
+  // explicit UMA host). Fall back to the older is_uma signal so a stale
+  // /etc/hal0/hardware.json doesn't regress to the wrong stat row.
+  const kind = system.hardware?.memory_kind
+    || (system.hardware?.is_uma ? 'unified' : 'system')
   return kind === 'unified'
 })
 

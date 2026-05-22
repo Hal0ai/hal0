@@ -109,10 +109,16 @@ def _amd_drm_device() -> Path | None:
 def _parse_cpuinfo() -> tuple[str, int, int]:
     """Return (model_name, physical_cores, logical_threads).
 
-    Reads /proc/cpuinfo. Falls back to os.cpu_count() for threads if parsing fails.
+    Reads /proc/cpuinfo. Falls back to os.cpu_count() for threads if parsing
+    fails. On ARM hosts /proc/cpuinfo has no ``model name`` line — we look
+    at ``Hardware``, ``Model`` and ``CPU implementer`` fields instead so the
+    UI gets a non-empty string instead of a bare "—".
     """
     txt = _read_text(Path("/proc/cpuinfo"))
     model = ""
+    arm_hardware = ""
+    arm_model = ""
+    arm_part = ""
     threads = 0
     physical_ids: set[str] = set()
     cores_per_socket = 0
@@ -125,6 +131,12 @@ def _parse_cpuinfo() -> tuple[str, int, int]:
             v = v.strip()
             if k == "model name" and not model:
                 model = v
+            elif k == "Model" and not arm_model:
+                arm_model = v
+            elif k == "Hardware" and not arm_hardware:
+                arm_hardware = v
+            elif k == "CPU part" and not arm_part:
+                arm_part = v
             elif k == "processor":
                 threads += 1
             elif k == "physical id":
@@ -132,6 +144,20 @@ def _parse_cpuinfo() -> tuple[str, int, int]:
             elif k == "cpu cores":
                 with contextlib.suppress(ValueError):
                     cores_per_socket = max(cores_per_socket, int(v))
+    # ARM fallback: stitch whichever ID-shaped field we found into a name.
+    if not model:
+        model = arm_model or arm_hardware
+        if not model and arm_part:
+            model = f"ARM CPU ({arm_part})"
+    # Last resort: name the architecture so the wizard never shows an empty
+    # CPU row when /proc/cpuinfo exists but lacks any of the above.
+    if not model:
+        with contextlib.suppress(OSError):
+            import platform as _platform
+
+            mach = _platform.machine()
+            if mach:
+                model = f"{mach} CPU"
     if threads == 0:
         threads = os.cpu_count() or 0
     sockets = max(1, len(physical_ids))
@@ -327,12 +353,25 @@ def _detect_vulkan_fallback() -> GPUInfo | None:
 
 
 def _detect_lspci_fallback() -> GPUInfo | None:
-    """Last-resort: parse `lspci -nnk` for a VGA controller."""
-    rc, out, _ = _run(["lspci", "-nnk"])
-    if rc != 0 or not out:
+    """Last-resort: parse ``lspci -nnk`` (or plain ``lspci``) for any
+    VGA / 3D / Display controller. Try the verbose variant first, then
+    degrade to bare ``lspci`` so we still produce a name in containers
+    where pciutils' device-id database is missing.
+    """
+    out = ""
+    for cmd in (["lspci", "-nnk"], ["lspci"]):
+        rc, _out, _ = _run(cmd)
+        if rc == 0 and _out:
+            out = _out
+            break
+    if not out:
         return None
     for line in out.splitlines():
-        if "VGA compatible controller" in line or "3D controller" in line:
+        if (
+            "VGA compatible controller" in line
+            or "3D controller" in line
+            or "Display controller" in line
+        ):
             after = line.split(":", 2)[-1].strip()
             lower = after.lower()
             vendor = "unknown"
@@ -357,6 +396,138 @@ def _detect_gpu() -> GPUInfo:
         if info is not None:
             return info
     return GPUInfo(vendor="unknown")
+
+
+# ── Platform detection ────────────────────────────────────────────────────────
+#
+# Layered probe — first match wins. The string returned drives UI labels
+# (memory "unified" vs "system", docs links, slot recommendation tier) so
+# stability of the values matters more than precision: we'd rather
+# under-classify (return ``"kvm"`` for a Proxmox VM whose DMI strings the
+# kernel hid) than mis-attribute Strix Halo when no NPU is present.
+
+
+_DMI_PATHS = {
+    "product_name": Path("/sys/class/dmi/id/product_name"),
+    "sys_vendor": Path("/sys/class/dmi/id/sys_vendor"),
+    "board_vendor": Path("/sys/class/dmi/id/board_vendor"),
+    "bios_vendor": Path("/sys/class/dmi/id/bios_vendor"),
+}
+
+
+def _read_dmi() -> dict[str, str]:
+    """Read DMI strings used by platform detection. Returns lowercased values."""
+    out: dict[str, str] = {}
+    for key, path in _DMI_PATHS.items():
+        txt = _read_text(path)
+        if txt:
+            out[key] = txt.strip().lower()
+    return out
+
+
+def _is_container() -> bool:
+    """True when /proc/1/cgroup or /proc/self/cgroup hints at lxc/docker."""
+    for p in (Path("/proc/1/cgroup"), Path("/proc/self/cgroup")):
+        txt = _read_text(p)
+        if not txt:
+            continue
+        low = txt.lower()
+        if "lxc" in low or "docker" in low or "kubepods" in low:
+            return True
+    # systemd-nspawn / podman expose /run/.containerenv or /.dockerenv
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
+def _is_lxc() -> bool:
+    """Narrower than _is_container — only matches Proxmox/native LXC."""
+    txt = _read_text(Path("/proc/1/cgroup")) or _read_text(Path("/proc/self/cgroup"))
+    if txt and "lxc" in txt.lower():
+        return True
+    # systemd reports lxc via /proc/1/environ on some kernels
+    env = _read_text(Path("/proc/1/environ"))
+    return bool(env and "container=lxc" in env.lower().replace("\x00", " "))
+
+
+def _is_wsl() -> bool:
+    """True on WSL 1 / WSL 2 (any Microsoft kernel)."""
+    for p in (Path("/proc/version"), Path("/proc/sys/kernel/osrelease")):
+        txt = _read_text(p)
+        if not txt:
+            continue
+        low = txt.lower()
+        if "microsoft" in low or "wsl" in low:
+            return True
+    return False
+
+
+def _detect_platform(gpu: GPUInfo, npu: NPUInfo) -> str:
+    """Return a short platform string. See HardwareInfo.platform for the
+    canonical vocabulary. Detection order is intentional:
+
+      1. Containers first — wsl2 then lxc — because they overlap with KVM
+         when the host is itself a VM.
+      2. KVM detection via DMI ('QEMU' / 'KVM' sys_vendor + product_name).
+      3. Bare metal: classify by GPU vendor + NPU presence.
+    """
+    # 1. WSL — checked before LXC because WSL's /proc/1/cgroup can mention
+    #    other shims; the kernel string is the authoritative signal.
+    if _is_wsl():
+        return "wsl2"
+    if _is_lxc():
+        return "lxc"
+
+    dmi = _read_dmi()
+    product = dmi.get("product_name", "")
+    sysv = dmi.get("sys_vendor", "")
+    bios = dmi.get("bios_vendor", "")
+
+    is_qemu_kvm = (
+        "qemu" in sysv
+        or "qemu" in product
+        or "kvm" in product
+        or "kvm" in sysv
+        or "red hat" in sysv  # virtio devices report Red Hat as vendor
+        or "seabios" in bios
+        or "edk ii" in bios
+        or "ovmf" in bios
+    )
+    if is_qemu_kvm:
+        # Proxmox VMs typically expose "Standard PC (i440FX + PIIX, …)" or
+        # "Standard PC (Q35 + ICH9, …)" as product_name plus a generic QEMU
+        # sys_vendor. There's no DMI field that says "Proxmox" outright, so
+        # we look at the BIOS vendor / SMBIOS oem tags (Proxmox sets
+        # ``Type: 1 Manufacturer: ...`` to QEMU regardless). For the user-
+        # facing label we'd rather say "Proxmox VM (KVM)" when the host is
+        # almost certainly Proxmox; check for the SMBIOS oem string the
+        # PVE installer stamps in newer releases.
+        oem = _read_text(Path("/sys/class/dmi/id/chassis_vendor"))
+        if oem and "proxmox" in oem.lower():
+            return "proxmox-kvm"
+        # Heuristic: a /etc/pve directory is the strongest live signal but
+        # only present on a PVE host, not inside its VMs. For VMs, fall back
+        # to the kernel command line which carries a virtio root marker.
+        cmdline = _read_text(Path("/proc/cmdline")) or ""
+        if "virtio" in cmdline.lower() and "Q35" in (product.upper()):
+            # Q35 + virtio is the Proxmox default; users can override but
+            # 95%+ of homelab deployments hit this code path.
+            return "proxmox-kvm"
+        return "kvm"
+
+    # 3. Bare metal.
+    vendor = (gpu.vendor or "").lower()
+    if npu.present and vendor == "amd":
+        # Strix Halo / Hawk Point: AMD iGPU + XDNA NPU + unified memory.
+        # The drm_path having a GTT counter is what makes "unified" valid,
+        # but at this point we already trusted the GPU detector to report
+        # vram_mb=max(vram,gtt) so this is just the platform label.
+        return "strix-halo"
+    if vendor == "nvidia":
+        return "bare-metal-nvidia-gpu"
+    if vendor == "amd":
+        return "bare-metal-amd-gpu"
+    if vendor == "intel":
+        return "bare-metal-intel-igpu"
+    return "bare-metal-cpu-only"
 
 
 # ── NPU detection ──────────────────────────────────────────────────────────────
@@ -441,6 +612,18 @@ class HardwareProbe:
                 pass
 
             unified_mb = _derive_unified_memory_mb(ram_total_mb, gpu if gpu.vendor else None)
+            platform = "unknown"
+            try:
+                platform = _detect_platform(gpu, npu)
+            except Exception as exc:  # never let platform classification break the probe
+                log.warning("hardware.probe.platform_detect_fail", error=str(exc))
+
+            # We surface a GPU row when EITHER vendor or name is populated;
+            # the old logic dropped vendor="unknown" rows even when lspci
+            # gave us a perfectly good model string (e.g. a virtio GPU in a
+            # Proxmox VM). UI consumers can still gate on gpu.vendor when
+            # they need real compute capability.
+            include_gpu = bool(gpu.vendor and gpu.vendor != "unknown") or bool(gpu.name)
 
             return HardwareInfo(
                 cpu_model=cpu_model,
@@ -449,9 +632,10 @@ class HardwareProbe:
                 ram_mb=ram_total_mb,
                 ram_available_mb=ram_avail_mb,
                 unified_memory_mb=unified_mb,
-                gpus=[gpu] if gpu.vendor else [],
+                gpus=[gpu] if include_gpu else [],
                 npu=npu,
                 disk_free_mb=disk_mb,
+                platform=platform,
                 probed_at=_dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
                 extra={"kernel": uname} if uname else {},
             )

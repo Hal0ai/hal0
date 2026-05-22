@@ -443,3 +443,192 @@ def test_run_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     rc, _, err = probe_mod._run(["sleep", "60"], timeout=1.0)
     assert rc == -1
     assert "timeout" in err
+
+
+# ── Platform detection ────────────────────────────────────────────────────────
+
+
+def _stub_files(monkeypatch: pytest.MonkeyPatch, table: dict[str, str | None]) -> None:
+    """Make ``probe._read_text(path)`` return canned content for ``table`` keys."""
+
+    def fake(p: Path) -> str | None:
+        return table.get(str(p))
+
+    monkeypatch.setattr(probe_mod, "_read_text", fake)
+
+
+def test_detect_platform_wsl_via_proc_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_files(
+        monkeypatch,
+        {
+            "/proc/version": "Linux version 5.15.146.1-microsoft-standard-WSL2",
+            "/proc/sys/kernel/osrelease": "5.15.146.1-microsoft-standard-WSL2",
+            "/proc/1/cgroup": "0::/init.scope",
+        },
+    )
+    gpu = GPUInfo(vendor="unknown")
+    npu = probe_mod.NPUInfo(present=False)
+    assert probe_mod._detect_platform(gpu, npu) == "wsl2"
+
+
+def test_detect_platform_lxc(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_files(
+        monkeypatch,
+        {
+            "/proc/version": "Linux version 6.6.0",
+            "/proc/1/cgroup": "0::/lxc.payload.105",
+            "/proc/self/cgroup": "0::/lxc.payload.105",
+            "/proc/1/environ": "",
+        },
+    )
+    gpu = GPUInfo(vendor="amd", name="Radeon")
+    npu = probe_mod.NPUInfo(present=True, vendor="amd")
+    # LXC short-circuits before strix-halo classification — but downstream
+    # consumers can still see the NPU + AMD GPU on the HardwareInfo body.
+    assert probe_mod._detect_platform(gpu, npu) == "lxc"
+
+
+def test_detect_platform_kvm_via_dmi(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Stub DMI sysfs by routing _read_text on the DMI paths through a dict.
+    files = {
+        "/proc/version": "Linux version 6.6.0",
+        "/proc/1/cgroup": "0::/init.scope",
+        str(probe_mod._DMI_PATHS["product_name"]): "Standard PC (Q35 + ICH9, 2009)",
+        str(probe_mod._DMI_PATHS["sys_vendor"]): "QEMU",
+        str(probe_mod._DMI_PATHS["bios_vendor"]): "SeaBIOS",
+        str(probe_mod._DMI_PATHS["board_vendor"]): "",
+        "/proc/cmdline": "root=UUID=... ro quiet",  # no virtio hint
+    }
+    _stub_files(monkeypatch, files)
+    monkeypatch.setattr(probe_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(probe_mod, "_is_lxc", lambda: False)
+    gpu = GPUInfo(vendor="unknown")
+    npu = probe_mod.NPUInfo(present=False)
+    assert probe_mod._detect_platform(gpu, npu) == "kvm"
+
+
+def test_detect_platform_proxmox_kvm_heuristic(monkeypatch: pytest.MonkeyPatch) -> None:
+    files = {
+        "/proc/version": "Linux version 6.6.0",
+        "/proc/1/cgroup": "0::/init.scope",
+        str(probe_mod._DMI_PATHS["product_name"]): "Standard PC (Q35 + ICH9, 2009)",
+        str(probe_mod._DMI_PATHS["sys_vendor"]): "QEMU",
+        str(probe_mod._DMI_PATHS["bios_vendor"]): "SeaBIOS",
+        str(probe_mod._DMI_PATHS["board_vendor"]): "",
+        "/proc/cmdline": "root=UUID=... ro quiet virtio_blk",
+    }
+    _stub_files(monkeypatch, files)
+    monkeypatch.setattr(probe_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(probe_mod, "_is_lxc", lambda: False)
+    gpu = GPUInfo(vendor="unknown")
+    npu = probe_mod.NPUInfo(present=False)
+    assert probe_mod._detect_platform(gpu, npu) == "proxmox-kvm"
+
+
+def test_detect_platform_bare_metal_nvidia(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(probe_mod, "_is_lxc", lambda: False)
+    monkeypatch.setattr(probe_mod, "_read_dmi", lambda: {})  # bare metal: real OEM
+    gpu = GPUInfo(vendor="nvidia", name="GeForce RTX 4080")
+    npu = probe_mod.NPUInfo(present=False)
+    assert probe_mod._detect_platform(gpu, npu) == "bare-metal-nvidia-gpu"
+
+
+def test_detect_platform_strix_halo(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(probe_mod, "_is_lxc", lambda: False)
+    monkeypatch.setattr(probe_mod, "_read_dmi", lambda: {})
+    gpu = GPUInfo(vendor="amd", name="Radeon 8060S")
+    npu = probe_mod.NPUInfo(present=True, vendor="amd", name="AMD NPU (XDNA)")
+    assert probe_mod._detect_platform(gpu, npu) == "strix-halo"
+
+
+def test_detect_platform_cpu_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_is_wsl", lambda: False)
+    monkeypatch.setattr(probe_mod, "_is_lxc", lambda: False)
+    monkeypatch.setattr(probe_mod, "_read_dmi", lambda: {})
+    gpu = GPUInfo(vendor="unknown")
+    npu = probe_mod.NPUInfo(present=False)
+    assert probe_mod._detect_platform(gpu, npu) == "bare-metal-cpu-only"
+
+
+# ── End-to-end: probe() populates platform + survives a WSL-shaped host ───────
+
+
+def test_probe_populates_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("Intel WSL CPU", 4, 8))
+    monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (16384, 12000))
+    monkeypatch.setattr(probe_mod, "_detect_gpu", lambda: GPUInfo(vendor="unknown"))
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
+    monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 512000)
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    monkeypatch.setattr(probe_mod, "_detect_platform", lambda *_: "wsl2")
+
+    info = HardwareProbe().probe()
+    # The whole point: CPU + RAM populate even when no GPU vendor matched.
+    assert info.cpu_model == "Intel WSL CPU"
+    assert info.ram_mb == 16384
+    assert info.platform == "wsl2"
+
+
+def test_probe_includes_named_gpu_even_when_vendor_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lspci returns a model string but vendor matched none of nvidia/amd/intel
+    (e.g. a virtio GPU in a Proxmox VM). The probe should still surface the
+    name so the dashboard shows "Red Hat, Inc. Virtio GPU" instead of "—".
+    """
+    monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("x86 CPU", 4, 8))
+    monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (4096, 2048))
+    monkeypatch.setattr(
+        probe_mod,
+        "_detect_gpu",
+        lambda: GPUInfo(vendor="unknown", name="Red Hat, Inc. Virtio 1.0 GPU"),
+    )
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
+    monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 1024)
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    monkeypatch.setattr(probe_mod, "_detect_platform", lambda *_: "kvm")
+
+    info = HardwareProbe().probe()
+    assert len(info.gpus) == 1
+    assert info.gpus[0].name.startswith("Red Hat")
+
+
+def test_parse_cpuinfo_arm_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ARM /proc/cpuinfo has Hardware/Model fields instead of 'model name'."""
+    arm_sample = (
+        "processor\t: 0\n"
+        "BogoMIPS\t: 108.00\n"
+        "Hardware\t: BCM2835\n"
+        "Model\t: Raspberry Pi 4 Model B Rev 1.5\n"
+    )
+    monkeypatch.setattr(
+        probe_mod, "_read_text", lambda p: arm_sample if str(p) == "/proc/cpuinfo" else None
+    )
+    model, _cores, _threads = probe_mod._parse_cpuinfo()
+    assert "Raspberry Pi" in model or "BCM2835" in model
+
+
+def test_detect_lspci_fallback_handles_display_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``lspci -nnk`` failed (rc!=0) but bare ``lspci`` returned a Display
+    controller line — e.g. a WSL2 vGPU. We should still surface a name.
+    """
+    calls = {"n": 0}
+
+    def fake_run(cmd: list[str], timeout: float = 4.0) -> tuple[int, str, str]:
+        calls["n"] += 1
+        if cmd == ["lspci", "-nnk"]:
+            return -1, "", "binary not found: lspci"
+        if cmd == ["lspci"]:
+            return 0, "0000:00:00.0 Display controller: Microsoft Corporation Virtual GPU", ""
+        return -1, "", "not mocked"
+
+    monkeypatch.setattr(probe_mod, "_run", fake_run)
+    info = probe_mod._detect_lspci_fallback()
+    assert info is not None
+    assert "Microsoft" in info.name

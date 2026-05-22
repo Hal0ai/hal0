@@ -334,8 +334,17 @@ const canAdvance = computed(() => {
           <p class="step-desc">We probed your hardware. Confirm where downloaded models live.</p>
 
           <div class="hw-card">
+            <div class="hw-row" v-if="s.hardware.value?.platform_label">
+              <span class="hw-l">Platform</span>
+              <span class="hw-v">{{ s.hardware.value?.platform_label }}</span>
+            </div>
             <div class="hw-row"><span class="hw-l">CPU</span><span class="hw-v">{{ s.hardware.value?.cpu_name || s.hardware.value?.cpu_model || '—' }}</span></div>
-            <div class="hw-row"><span class="hw-l">Memory</span><span class="hw-v">{{ Math.round((s.hardware.value?.unified_memory_mb || s.hardware.value?.ram_total_mb || 0) / 1024) }} GB unified</span></div>
+            <div class="hw-row">
+              <span class="hw-l">Memory</span>
+              <span class="hw-v">
+                {{ Math.round((s.hardware.value?.unified_memory_mb || s.hardware.value?.ram_total_mb || 0) / 1024) }} GB<template v-if="s.hardware.value?.memory_kind === 'unified'"> unified</template>
+              </span>
+            </div>
             <div class="hw-row"><span class="hw-l">GPU</span><span class="hw-v">{{ s.hardware.value?.gpu_name || '—' }}</span></div>
             <div class="hw-row"><span class="hw-l">NPU</span><span class="hw-v">{{ s.hardware.value?.npu_present ? (s.hardware.value?.npu_name || 'detected') : 'none detected' }}</span></div>
           </div>

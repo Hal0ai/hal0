@@ -472,6 +472,16 @@ class HardwareInfo(BaseModel):
         default="",
         description="ISO-8601 UTC timestamp of the last probe run.",
     )
+    platform: str = Field(
+        default="unknown",
+        description=(
+            "Detected platform string. One of: 'strix-halo', 'wsl2', "
+            "'proxmox-kvm', 'kvm', 'lxc', 'bare-metal-amd-gpu', "
+            "'bare-metal-nvidia-gpu', 'bare-metal-intel-igpu', "
+            "'bare-metal-cpu-only', or 'unknown'. Used by the UI to label "
+            "memory ('unified' only on strix-halo) and tailor docs links."
+        ),
+    )
     extra: dict[str, Any] = Field(
         default_factory=dict,
         description="Probe-time extras (kernel version, OS release, etc.).",
