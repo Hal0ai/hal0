@@ -22,18 +22,63 @@ See PLAN.md §3, §5 Tier 1 ("pydantic-validated TOML schema at load time").
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 from hal0.config import paths
 
+log = logging.getLogger(__name__)
+
 # ── Shared constants ───────────────────────────────────────────────────────────
 
 # TIER1: surface-area for the backend whitelist. Typos like
 # `backend = "vukan"` must raise at load time with the field path.
+#
+# DEPRECATED v0.2: ``SlotConfig.backend`` is being retired in favour of the
+# hardware-preference field ``SlotConfig.device``. The whitelist is kept for
+# one release so legacy slot TOMLs round-trip cleanly; a warning is logged
+# whenever ``backend`` is read without an accompanying ``device``. See
+# ADR-0006 §7 and ``docs/internal/lemonade-migration-plan.md`` decision 15.
 _VALID_BACKENDS = frozenset({"vulkan", "rocm", "flm", "moonshine", "kokoro", "cpu"})
+
+# v0.2 hardware-preference enum. ``device`` replaces the overloaded
+# ``backend`` field — it carries hardware intent only, not provider choice.
+# ``LemonadeProvider`` (issue #140) maps these to Lemonade's recipe:backend
+# pair at the runtime layer.
+DeviceLiteral = Literal["gpu-rocm", "gpu-vulkan", "cpu", "npu"]
+_VALID_DEVICES = frozenset({"gpu-rocm", "gpu-vulkan", "cpu", "npu"})
+
+# Default ``device`` for fresh installs. Strix Halo (hal0's reference
+# target) gets best throughput on ROCm; the recommender may downgrade
+# this in hardware-aware seeds.
+DEFAULT_DEVICE: str = "gpu-rocm"
+
+# Mapping from the legacy ``backend`` enum to the v0.2 ``device`` enum.
+# Used by:
+#   - ``SlotConfig`` model-validator (auto-promote on load).
+#   - ``hal0/config/migrations/capabilities_v2.py`` (file migration).
+#   - ``hal0 capabilities migrate-to-lemonade`` CLI.
+# Keep these aligned with ADR-0006 §7. The values for moonshine/kokoro map
+# to ``cpu`` because those toolboxes were always CPU runtimes — the legacy
+# enum overloaded the term ``backend`` with provider identity.
+BACKEND_TO_DEVICE: dict[str, str] = {
+    "vulkan": "gpu-vulkan",
+    "rocm": "gpu-rocm",
+    "flm": "npu",
+    "moonshine": "cpu",
+    "kokoro": "cpu",
+    "cpu": "cpu",
+    # The capabilities catalog has historically stored values in the new
+    # namespace already (e.g. ``gpu-rocm``); accept them idempotently so
+    # both SlotConfig.backend and CapabilitySelection.backend can flow
+    # through the same map without surprise.
+    "gpu-rocm": "gpu-rocm",
+    "gpu-vulkan": "gpu-vulkan",
+    "npu": "npu",
+}
 
 # TIER1: valid provider names.  Maps to the Provider ABC implementations
 # under hal0.providers.
@@ -46,6 +91,41 @@ _SLOT_PORT_MAX = 8099
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
 CURRENT_SCHEMA_VERSION = 1
+
+# Capabilities-file schema version. Independent of ``hal0.toml``'s
+# ``meta.schema_version`` — capabilities.toml carries its own counter so
+# the v0.2 backend→device migration (ADR-0006 §7) can be detected and
+# applied without coupling the two config files.
+#
+# - schema_version = 1 (or absent): legacy. CapabilitySelection uses
+#   ``backend`` field.
+# - schema_version = 2: post-Lemonade migration. CapabilitySelection
+#   uses ``device``; ``backend`` round-trips as a deprecated alias.
+CAPABILITIES_SCHEMA_VERSION_LEGACY = 1
+CAPABILITIES_SCHEMA_VERSION_CURRENT = 2
+
+
+def map_backend_to_device(backend: str | None) -> str:
+    """Map a legacy ``backend`` value to the v0.2 ``device`` enum.
+
+    Unknown values (e.g. an operator hand-edited a slot TOML with a
+    bespoke backend tag) fall back to ``cpu`` so the runtime has a safe
+    default rather than crashing at load. A warning is logged so the
+    operator notices on the next ``hal0-api`` boot.
+
+    Empty / None input is treated as "no opinion" and returns the
+    package-level default ``DEFAULT_DEVICE``.
+    """
+    if not backend:
+        return DEFAULT_DEVICE
+    mapped = BACKEND_TO_DEVICE.get(backend)
+    if mapped is not None:
+        return mapped
+    log.warning(
+        "config.device_mapping_unknown_backend",
+        extra={"backend": backend, "fallback": "cpu"},
+    )
+    return "cpu"
 
 
 # ── ModelConfig + SlotConfig ───────────────────────────────────────────────────
@@ -129,7 +209,21 @@ class SlotConfig(BaseModel):
     )
     backend: str = Field(
         default="vulkan",
-        description="Backend type: 'vulkan' | 'rocm' | 'flm' | 'moonshine' | 'kokoro' | 'cpu'.",
+        description=(
+            "DEPRECATED (v0.2; removed v0.3): legacy overloaded backend enum. "
+            "Use ``device`` instead. Reading a SlotConfig that has ``backend`` "
+            "set without ``device`` logs a deprecation warning and auto-fills "
+            "``device`` via ``map_backend_to_device``. See ADR-0006 §7."
+        ),
+    )
+    device: str = Field(
+        default=DEFAULT_DEVICE,
+        description=(
+            "v0.2 hardware-preference enum: 'gpu-rocm' | 'gpu-vulkan' | 'cpu' "
+            "| 'npu'. Replaces the legacy ``backend`` field which mixed "
+            "providers and backends. ``LemonadeProvider`` maps this to "
+            "Lemonade's recipe:backend pair internally. See ADR-0006 §7."
+        ),
     )
     provider: str = Field(
         default="llama-server",
@@ -201,6 +295,47 @@ class SlotConfig(BaseModel):
             return new_data
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def _promote_backend_to_device(cls, data: Any) -> Any:
+        """Soft-deprecation hook: derive ``device`` from a legacy ``backend``.
+
+        v0.2 (ADR-0006 §7) renames the hardware-preference field
+        ``backend`` → ``device``. For one release we read both: if a TOML
+        file or in-memory dict carries ``backend`` but no ``device`` we
+        synthesise ``device`` via :func:`map_backend_to_device` so the
+        rest of the system can pivot to the new field without losing
+        operator data. A log warning fires per load so the deprecation
+        is visible.
+
+        We deliberately do NOT *delete* ``backend`` from the dict — the
+        slot loader/dumper still round-trips it onto disk so a downgrade
+        to v0.1.x stays clean. Removal lands in v0.3.
+        """
+        if not isinstance(data, dict):
+            return data
+        # Skip when the caller already supplied ``device`` explicitly.
+        if data.get("device"):
+            return data
+        backend_value = data.get("backend")
+        if not backend_value:
+            return data
+        # Tolerate already-new-namespace values (gpu-rocm etc) — those
+        # round-trip through ``map_backend_to_device`` as identities.
+        mapped = map_backend_to_device(str(backend_value))
+        if backend_value not in _VALID_DEVICES:
+            log.warning(
+                "config.slot.backend_deprecated",
+                extra={
+                    "backend": backend_value,
+                    "promoted_device": mapped,
+                    "note": "SlotConfig.backend is deprecated; set 'device' instead. See ADR-0006 §7.",
+                },
+            )
+        new_data = dict(data)
+        new_data["device"] = mapped
+        return new_data
+
     @model_serializer(mode="wrap")
     def _tuck_server_into_extra(self, handler: Any) -> dict[str, Any]:
         """Inverse of `_hoist_server_from_extra` for round-trip dumps.
@@ -248,6 +383,15 @@ class SlotConfig(BaseModel):
     def backend_valid(cls, v: str) -> str:
         if v not in _VALID_BACKENDS:
             raise ValueError(f"backend {v!r} is not valid; choose from {sorted(_VALID_BACKENDS)}")
+        return v
+
+    @field_validator("device")
+    @classmethod
+    def device_valid(cls, v: str) -> str:
+        # Same shape as ``backend_valid`` — catch typos at load time
+        # ("gpu-rcom" → ValidationError with field path) per PLAN.md §5 Tier 1.
+        if v not in _VALID_DEVICES:
+            raise ValueError(f"device {v!r} is not valid; choose from {sorted(_VALID_DEVICES)}")
         return v
 
     @field_validator("provider")
@@ -661,7 +805,12 @@ class Hal0Config(BaseModel):
 
 
 __all__ = [
+    "BACKEND_TO_DEVICE",
+    "CAPABILITIES_SCHEMA_VERSION_CURRENT",
+    "CAPABILITIES_SCHEMA_VERSION_LEGACY",
     "CURRENT_SCHEMA_VERSION",
+    "DEFAULT_DEVICE",
+    "DeviceLiteral",
     "DispatcherConfig",
     "GPUInfo",
     "Hal0Config",
@@ -678,4 +827,5 @@ __all__ = [
     "TelemetryConfig",
     "UpstreamEntry",
     "UpstreamsConfig",
+    "map_backend_to_device",
 ]

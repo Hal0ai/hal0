@@ -17,6 +17,10 @@
 name = "img"
 provider = "comfyui"
 port = 8186
+# v0.2 (ADR-0006 §7): hardware preference moved from ``backend`` →
+# ``device``. ``backend`` is retained for one release so a downgrade to
+# v0.1.x still reads this file. Drop it in v0.3.
+device = "gpu-rocm"
 backend = "rocm"
 
 [model]

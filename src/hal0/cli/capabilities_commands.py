@@ -6,7 +6,14 @@ a manual edit goes wrong.
 
 Currently exposes::
 
-    hal0 capabilities migrate    Rewrite illegal (backend, model) pairs
+    hal0 capabilities migrate
+        Rewrite illegal (backend, model) pairs against the live catalog.
+
+    hal0 capabilities migrate-to-lemonade
+        v0.2 (ADR-0006 §7): schema_version=1 → 2 migration that renames
+        ``backend`` → ``device`` per selection and stamps the new
+        version. Idempotent on v2 files. Pairs with ``--apply`` and
+        ``--revert`` for the round-trip.
 
 Migration is the first reason this module exists: when the catalog
 reshape landed (model-first grouped rows + per-(backend, model)
@@ -20,18 +27,31 @@ when the model is gone entirely), and writes back atomically.
 
 from __future__ import annotations
 
+import difflib
+import os
+import tomllib
+from pathlib import Path
+
+import tomli_w
 import typer
 from rich.console import Console
+from rich.syntax import Syntax
 from rich.table import Table
 
 from hal0.capabilities.catalog import models_for_capability
 from hal0.capabilities.config import (
+    CAPABILITIES_SCHEMA_VERSION_CURRENT,
+    CapabilityConfig,
     CapabilitySelection,
     capabilities_toml_path,
+    capabilities_v1_backup_path,
     load_capabilities_config,
+    migrate_capabilities_v1_to_v2,
+    read_schema_version,
     save_capabilities_config,
 )
 from hal0.capabilities.orchestrator import _CHILD_TO_CAPABILITY
+from hal0.config.loader import write_toml_atomic
 from hal0.registry.store import ModelRegistry
 
 app = typer.Typer(
@@ -188,4 +208,165 @@ def migrate(
     save_capabilities_config(cfg)
     console.print(
         f"\n[green]migrated[/green] {len(changes)} selection(s) in {capabilities_toml_path()}."
+    )
+
+
+# ── migrate-to-lemonade (v0.2 schema_version=1 → 2) ───────────────────────────
+
+
+def _dump_toml(data: dict[str, object]) -> str:
+    """Stringify a TOML payload exactly the way ``write_toml_atomic`` would.
+
+    ``tomli_w.dumps`` is the round-trip-correct stringifier — we use it
+    so the diff the user sees matches the bytes the migration would
+    write. Sort behaviour matches tomli_w defaults so two equivalent
+    dicts produce identical output.
+    """
+    return tomli_w.dumps(data)
+
+
+def _read_raw_toml(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+@app.command("migrate-to-lemonade")
+def migrate_to_lemonade(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Perform the migration. Without this flag, only the diff is printed.",
+    ),
+    revert: bool = typer.Option(
+        False,
+        "--revert",
+        help=(
+            "Restore the pre-migration backup (``capabilities.toml.v1.bak``) "
+            "back to ``capabilities.toml``. Mutually exclusive with --apply."
+        ),
+    ),
+    path: Path | None = typer.Option(
+        None,
+        "--path",
+        help=(
+            "Override the capabilities.toml path. Defaults to "
+            "/etc/hal0/capabilities.toml (HAL0_HOME-aware). Useful for "
+            "off-host migration of a backup file."
+        ),
+    ),
+) -> None:
+    """Migrate capabilities.toml from schema_version=1 (v0.1.x) to 2 (v0.2).
+
+    The on-boot auto-migration in ``hal0-api`` already runs this when a
+    legacy file is detected, but this command exposes the same logic for
+    manual reruns: previewing the diff, replaying after a revert, or
+    migrating a backup file in another location.
+
+    Output:
+      - With no flags: prints the unified diff and exits 0.
+      - With ``--apply``: performs the migration (atomic-rename backup +
+        rewrite). Idempotent on already-v2 files (exits 0, no changes).
+      - With ``--revert``: restores ``<path>.v1.bak`` over ``<path>``.
+
+    See ADR-0006 §7 for the field rename + value mapping (vulkan →
+    gpu-vulkan, rocm → gpu-rocm, flm → npu, moonshine/kokoro → cpu,
+    cpu → cpu).
+    """
+    if apply and revert:
+        console.print("[red]error[/red]: --apply and --revert are mutually exclusive.")
+        raise typer.Exit(2)
+
+    target = Path(path) if path is not None else capabilities_toml_path()
+    backup = capabilities_v1_backup_path(target)
+
+    # ── --revert ──────────────────────────────────────────────────────────
+    if revert:
+        if not backup.exists():
+            console.print(f"[red]error[/red]: no v1 backup found at {backup}.\nNothing to revert.")
+            raise typer.Exit(1)
+        os.replace(backup, target)
+        console.print(f"[green]reverted[/green]: restored {target} from {backup.name}.")
+        raise typer.Exit(0)
+
+    # ── read live + compute migration target ──────────────────────────────
+    if not target.exists():
+        console.print(f"[yellow]nothing to do[/yellow]: {target} does not exist.")
+        raise typer.Exit(0)
+
+    before = _read_raw_toml(target)
+    before_version = read_schema_version(before)
+    after = migrate_capabilities_v1_to_v2(before)
+
+    if before_version >= CAPABILITIES_SCHEMA_VERSION_CURRENT:
+        console.print(
+            f"[green]already v{CAPABILITIES_SCHEMA_VERSION_CURRENT}[/green]: "
+            f"{target} is at schema_version={before_version}, nothing to migrate."
+        )
+        raise typer.Exit(0)
+
+    # Validate the migration output BEFORE printing the diff so we never
+    # advertise an invalid result.
+    CapabilityConfig.model_validate(after)
+
+    before_text = _dump_toml(before)
+    after_text = _dump_toml(after)
+    diff = list(
+        difflib.unified_diff(
+            before_text.splitlines(keepends=True),
+            after_text.splitlines(keepends=True),
+            fromfile=str(target),
+            tofile=f"{target} (post-migration)",
+        )
+    )
+
+    if not diff:
+        # Schema_version mismatch but no other diffs — still write the
+        # version stamp so subsequent boots don't re-trigger migration.
+        if apply:
+            write_toml_atomic(target, after)
+            console.print(
+                f"[green]stamped[/green]: bumped {target} to schema_version="
+                f"{CAPABILITIES_SCHEMA_VERSION_CURRENT}."
+            )
+        else:
+            console.print(
+                f"[yellow]version-only stamp pending[/yellow]: "
+                f"{target} is at schema_version={before_version}; run with "
+                f"--apply to bump to {CAPABILITIES_SCHEMA_VERSION_CURRENT}."
+            )
+        raise typer.Exit(0)
+
+    console.print(
+        Syntax(
+            "".join(diff),
+            "diff",
+            theme="ansi_dark",
+            background_color="default",
+        )
+    )
+
+    if not apply:
+        console.print(
+            f"\n[yellow]dry-run[/yellow] — re-run with --apply to write "
+            f"{target} (v{before_version} → v{CAPABILITIES_SCHEMA_VERSION_CURRENT})."
+        )
+        raise typer.Exit(0)
+
+    # ── --apply ──────────────────────────────────────────────────────────
+    if backup.exists():
+        console.print(
+            f"[yellow]warning[/yellow]: {backup} already exists. "
+            f"Leaving it in place; the live file will be rewritten without "
+            f"a fresh backup. Move or delete the old backup if you want a "
+            f"new one captured."
+        )
+    else:
+        os.replace(target, backup)
+    write_toml_atomic(target, after)
+    console.print(
+        f"[green]migrated[/green]: {target} "
+        f"v{before_version} → v{CAPABILITIES_SCHEMA_VERSION_CURRENT} "
+        f"(backup at {backup.name})."
     )

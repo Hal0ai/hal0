@@ -10,17 +10,17 @@ Picks intentionally use models from :mod:`hal0.registry.curated` so the
 slot validates against the registry as soon as the model is downloaded.
 We do NOT invent model names.
 
-Backend choice respects ``hal0.config.schema._VALID_BACKENDS`` —
-``vulkan``, ``rocm``, ``flm``, ``moonshine``, ``kokoro``, ``cpu``. (CUDA
-is not a separate backend in v1; NVIDIA cards run via the Vulkan
-backend, which llama.cpp's vulkan build supports on NVIDIA drivers too.)
+Device choice respects ``hal0.config.schema._VALID_DEVICES`` —
+``gpu-rocm``, ``gpu-vulkan``, ``cpu``, ``npu`` (ADR-0006 §7). The
+output also emits the legacy ``backend`` field for one release so a
+downgrade to v0.1.x reads the recommendation file cleanly.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from hal0.config.schema import HardwareInfo
+from hal0.config.schema import HardwareInfo, map_backend_to_device
 
 # Curated chat models suitable for the primary slot, ordered from
 # largest-context / most capable down to the smallest. We pick the
@@ -137,10 +137,16 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     # can bump it in the rendered TOML.
     context_size = 8192
 
+    # v0.2: emit ``device`` as the canonical hardware-preference field
+    # (ADR-0006 §7). ``backend`` is also emitted so a downgrade to
+    # v0.1.x can still read the file before re-running the recommender.
+    device = map_backend_to_device(backend)
+
     return {
         "name": "primary",
         "port": 8081,
         "backend": backend,
+        "device": device,
         "provider": "llama-server",
         "enabled": False,  # operator runs `hal0 model pull <id>` first
         "model": {
@@ -149,6 +155,7 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
         },
         "_meta": {
             "rationale_backend": backend_why,
+            "rationale_device": f"{device} (mapped from backend={backend!r})",
             "rationale_model": (
                 f"{model_id}: largest curated chat model fitting ~{budget_gb:.1f} GB budget"
             ),

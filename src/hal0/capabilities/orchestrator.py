@@ -141,13 +141,29 @@ class CapabilityOrchestrator:
     async def initialize_if_missing(self) -> None:
         """Seed ``capabilities.toml`` from existing slot configs on first boot.
 
-        Idempotent: when the file already exists, this is a no-op. Otherwise
-        we walk ``/etc/hal0/slots/{embed,stt,tts,img}.toml`` and lift each
-        slot's current backend/provider/model + ``enabled`` flag into the
-        matching child. Slots that don't exist on disk get an empty
-        selection so the dashboard can still render an "unset" picker.
+        Idempotent: when the file already exists, this method first runs
+        :func:`auto_migrate_capabilities_file` so a stale v1 file is
+        promoted to v2 (ADR-0006 §7) before any read. When the file is
+        missing we walk ``/etc/hal0/slots/{embed,stt,tts,img}.toml`` and
+        lift each slot's current device/provider/model + ``enabled`` flag
+        into the matching child. Slots that don't exist on disk get an
+        empty selection so the dashboard can still render an "unset"
+        picker.
         """
+        from hal0.capabilities.config import auto_migrate_capabilities_file
+
         if self._config_path.exists():
+            # Migrate v1 → v2 in place if needed. Idempotent on v2 files.
+            try:
+                auto_migrate_capabilities_file(self._config_path)
+            except Exception as exc:
+                # Don't let a migration crash block API startup — the
+                # orchestrator already swallows initialise failures one
+                # level up.
+                log.warning(
+                    "capabilities.migrate.skipped",
+                    extra={"path": str(self._config_path), "error": str(exc)},
+                )
             return
 
         cfg = CapabilityConfig()
@@ -160,8 +176,11 @@ class CapabilityOrchestrator:
                 # Slot TOML missing or invalid — leave the selection blank.
                 cfg.selections[slot][child] = selection
                 continue
-            # Lift the fields we care about.
-            selection.backend = self._canonical_backend_id(slot_cfg.backend)
+            # Lift the fields we care about. v0.2: write ``device``
+            # (not the deprecated ``backend``). SlotConfig auto-promotes
+            # legacy ``backend`` on load, so ``slot_cfg.device`` is the
+            # right v0.2 surface here.
+            selection.device = self._canonical_device_id(slot_cfg.device)
             selection.provider = slot_cfg.provider
             selection.model = slot_cfg.model.default or ""
             selection.enabled = bool(slot_cfg.enabled) and bool(selection.model)
@@ -172,29 +191,53 @@ class CapabilityOrchestrator:
     # ── shape helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _canonical_backend_id(slot_backend: str) -> str:
-        """Translate slot TOML's ``backend`` value to the catalog's id.
+    def _canonical_device_id(slot_device: str) -> str:
+        """Normalise a slot's ``device`` to the capabilities catalog id.
 
-        Slot configs use ``vulkan`` / ``rocm`` / ``flm`` / ``cpu`` /
-        provider-specific tags. The capabilities surface uses ``gpu-vulkan``
-        / ``gpu-rocm`` / ``npu`` / ``cpu`` / provider tags. Map between
-        them — unknown values pass through verbatim so a hand-edited
-        slot still surfaces something.
+        After ADR-0006 §7 both surfaces speak the same enum
+        (``gpu-rocm | gpu-vulkan | cpu | npu``), so this is a near-identity.
+        It still tolerates a legacy ``backend``-style input
+        (``vulkan|rocm|flm|moonshine|kokoro``) for forward compatibility
+        with hand-edited slot TOMLs by routing through
+        :func:`hal0.config.schema.map_backend_to_device`.
         """
-        mapping = {
-            "vulkan": "gpu-vulkan",
-            "rocm": "gpu-rocm",
-            "flm": "npu",
-            # kokoro/moonshine slots live on the GPU; surface as such.
-            "kokoro": "gpu-vulkan",
-            "moonshine": "gpu-vulkan",
-            "cpu": "cpu",
-        }
-        return mapping.get(slot_backend, slot_backend or "")
+        from hal0.config.schema import _VALID_DEVICES, map_backend_to_device
+
+        if not slot_device:
+            return ""
+        if slot_device in _VALID_DEVICES:
+            return slot_device
+        return map_backend_to_device(slot_device)
+
+    @staticmethod
+    def _canonical_backend_id(slot_backend: str) -> str:
+        """DEPRECATED — kept for tests / external callers.
+
+        Forward to :meth:`_canonical_device_id`. Removed when the
+        ``backend`` field is excised in v0.3.
+        """
+        return CapabilityOrchestrator._canonical_device_id(slot_backend)
+
+    @staticmethod
+    def _slot_device_for_catalog_id(device_id: str) -> str:
+        """Catalog ``device`` id → SlotConfig.device string (identity)."""
+        from hal0.config.schema import _VALID_DEVICES
+
+        if device_id in _VALID_DEVICES:
+            return device_id
+        # Legacy round-trip — accept ``vulkan|rocm|flm|cpu`` and forward.
+        from hal0.config.schema import map_backend_to_device
+
+        return map_backend_to_device(device_id) if device_id else ""
 
     @staticmethod
     def _slot_backend_for_catalog_id(backend_id: str) -> str:
-        """Inverse: catalog backend id → SlotConfig.backend string."""
+        """DEPRECATED — translate catalog id to the legacy ``backend`` string.
+
+        Still used by code paths that write the deprecated SlotConfig.backend
+        field (kept until v0.3 for downgrade legibility). New write paths
+        should call :meth:`_slot_device_for_catalog_id` instead.
+        """
         mapping = {
             "gpu-vulkan": "vulkan",
             "gpu-rocm": "rocm",
@@ -235,7 +278,12 @@ class CapabilityOrchestrator:
                 slot_name = _CHILD_TO_SLOT[(slot, child)]
                 status_str = await self._slot_status_string(slot_name)
                 selections_out[slot][child] = {
-                    "backend": selection.backend,
+                    # ``device`` is the v0.2 canonical key (ADR-0006 §7).
+                    "device": selection.device,
+                    # ``backend`` is emitted as a one-release alias so the
+                    # v0.1.x dashboard frontend keeps rendering until the
+                    # UI rework lands in v0.2.1.
+                    "backend": selection.device,
                     "provider": selection.provider,
                     "model": selection.model,
                     "enabled": selection.enabled,
@@ -296,13 +344,25 @@ class CapabilityOrchestrator:
         existing = self._selection_with_defaults(cfg, slot, child)
         before_enabled = existing.enabled
         before_model = existing.model
-        before_backend = existing.backend
+        before_device = existing.device
 
         # Shallow-merge the partial into the existing selection.
+        # ``backend`` is accepted for one release as an alias for
+        # ``device`` so legacy clients (dashboard built against v0.1.x)
+        # still POST a backend key and survive.
         merged_data: dict[str, Any] = existing.model_dump()
-        for key in ("backend", "provider", "model", "enabled"):
+        # Drop the deprecated alias before re-validating; the model's
+        # ``_promote_backend_to_device`` hook would otherwise overwrite
+        # a legitimate device update if both fields are present in the
+        # dump (e.g. partial only sent ``device``).
+        merged_data.pop("backend", None)
+        for key in ("device", "backend", "provider", "model", "enabled"):
             if key in partial:
-                merged_data[key] = partial[key]
+                if key == "backend":
+                    # Translate legacy alias forward.
+                    merged_data["device"] = self._canonical_device_id(str(partial[key]))
+                else:
+                    merged_data[key] = partial[key]
         try:
             merged = CapabilitySelection.model_validate(merged_data)
         except Exception as exc:
@@ -316,14 +376,14 @@ class CapabilityOrchestrator:
         # caller didn't explicitly clear it. We don't fail when the model
         # is empty — that's the "unset" state.
         if merged.model:
-            self._validate_model_in_catalog(slot, child, merged.model, merged.backend)
+            self._validate_model_in_catalog(slot, child, merged.model, merged.device)
 
         cfg.selections[slot][child] = merged
 
         # ── lifecycle dispatch ────────────────────────────────────────────
         enabled_changed = merged.enabled != before_enabled
         model_changed = merged.model != before_model
-        backend_changed = merged.backend != before_backend
+        backend_changed = merged.device != before_device
         # provider change does not gate any branch today — the slot TOML
         # rewrite below covers it. Reintroduce if the swap path grows a
         # provider-aware case.
@@ -390,6 +450,10 @@ class CapabilityOrchestrator:
         model_id: str,
         backend_id: str,
     ) -> None:
+        # NOTE: ``backend_id`` is named for back-compat with v0.1.x call
+        # sites; in v0.2 it carries a ``device`` value (gpu-rocm etc).
+        # The catalog still keys on the same enum so the rename is
+        # source-only.
         """Reject the merged selection if it's illegal against the catalog.
 
         Two distinct failure modes:
@@ -454,12 +518,17 @@ class CapabilityOrchestrator:
             return
 
         port = self._next_free_slot_port()
-        slot_backend = self._slot_backend_for_catalog_id(selection.backend)
+        # Emit both ``device`` (v0.2 canonical) and ``backend`` (v0.1.x
+        # alias) so downgrades remain legible. SlotConfig's
+        # ``_promote_backend_to_device`` validator keeps them in sync.
+        slot_backend = self._slot_backend_for_catalog_id(selection.device)
+        slot_device = self._slot_device_for_catalog_id(selection.device)
         provider = selection.provider or "llama-server"
         cfg_dict = {
             "name": slot_name,
             "port": port,
             "backend": slot_backend or "vulkan",
+            "device": slot_device or "gpu-rocm",
             "provider": provider,
             "enabled": True,
             "model": {"default": selection.model or ""},
@@ -485,10 +554,14 @@ class CapabilityOrchestrator:
         cfg_path = paths.slots_config_dir() / f"{slot_name}.toml"
         if not cfg_path.exists():
             return
-        slot_backend = self._slot_backend_for_catalog_id(selection.backend)
+        slot_backend = self._slot_backend_for_catalog_id(selection.device)
+        slot_device = self._slot_device_for_catalog_id(selection.device)
         updates: dict[str, Any] = {}
         if slot_backend:
+            # Deprecated field, kept for one release — see ADR-0006 §7.
             updates["backend"] = slot_backend
+        if slot_device:
+            updates["device"] = slot_device
         if selection.provider:
             updates["provider"] = selection.provider
         if selection.model:

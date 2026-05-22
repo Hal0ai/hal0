@@ -48,6 +48,7 @@ Every slot entry has at minimum:
 ```toml
 [slots.primary]
 provider = "llama.cpp"                       # one of: llama.cpp, flm, moonshine, kokoro, comfyui
+device = "gpu-rocm"                          # v0.2: hardware preference — see "Device field" below
 model = "qwen2.5-0.5b-instruct-q4_k_m"       # registry ref (install-time seed; runtime swap writes env override)
 port = 8081                                  # 8081-8099, must be unique
 idle_timeout_seconds = 600                   # ready -> idle transition threshold
@@ -57,6 +58,63 @@ Provider-specific knobs go under `[slots.<name>.options]`. The five
 built-in slots (`primary`, `embed`, `stt`, `tts`, `img`) cannot be
 removed; their `provider`, `model`, and `port` fields are still freely
 editable.
+
+### Device field (v0.2)
+
+The `device` field replaces the v0.1.x `backend` field (ADR-0006 §7).
+It carries hardware preference only; the provider — i.e. which engine
+runs on that device — is configured separately via the `provider`
+field. The Lemonade-backed runtime in v0.2 maps `device` onto its
+internal `recipe:backend` pair.
+
+| `device`     | Meaning                                  | Default for             |
+|--------------|------------------------------------------|-------------------------|
+| `gpu-rocm`   | AMD GPU via ROCm (preferred on Strix Halo) | new installs            |
+| `gpu-vulkan` | Any GPU via Vulkan (fallback)            | Vulkan-only hosts        |
+| `cpu`        | CPU inference                            | hosts without a GPU     |
+| `npu`        | AMD XDNA NPU (via Lemonade `flm:npu`)    | NPU-capable hosts        |
+
+For one release (v0.2) the deprecated `backend` field is still
+accepted on read and round-tripped on write so a downgrade to v0.1.x
+remains legible. New TOML written by hal0 always carries both fields.
+The compatibility mapping is:
+
+| Legacy `backend` | New `device`  |
+|------------------|---------------|
+| `vulkan`         | `gpu-vulkan`  |
+| `rocm`           | `gpu-rocm`    |
+| `flm`            | `npu`         |
+| `moonshine`      | `cpu`         |
+| `kokoro`         | `cpu`         |
+| `cpu`            | `cpu`         |
+
+Unknown legacy values fall back to `cpu` and log a deprecation
+warning so the demotion is visible in `journalctl -u hal0-api`.
+
+### Capabilities file migration
+
+The user-facing `capabilities.toml` carries an independent
+`schema_version`. v0.2 stamps `schema_version = 2`; v0.1.x files
+(implicit v1) are auto-migrated on the first `hal0-api` boot. The
+auto-migration:
+
+1. Atomic-renames the live file to `capabilities.toml.v1.bak`.
+2. Renames each selection's `backend` key to `device`, mapping values
+   through the table above.
+3. Writes back atomically with `schema_version = 2`.
+4. Logs `migrated capabilities.toml from schema_version=1 to 2`.
+
+To run the migration manually (preview or replay):
+
+```bash
+hal0 capabilities migrate-to-lemonade           # prints unified diff
+hal0 capabilities migrate-to-lemonade --apply   # performs the migration
+hal0 capabilities migrate-to-lemonade --revert  # restores .v1.bak
+```
+
+The `--apply` path is idempotent — running it on an already-v2 file
+exits 0 with no changes. Operators who need to roll back to v0.1.x
+can use `--revert` to restore the live file from its backup.
 
 `[model] default` in a per-slot TOML is the install-time seed only.
 Once the slot is provisioned, model swaps go through the env layer
