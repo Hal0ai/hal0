@@ -294,8 +294,7 @@ def test_install_complete_consumes_lockfile_and_closes_claim(
     # Lockfile must be gone — the install-complete handler calls
     # ``first_run_lock.consume_lockfile()`` after writing the sentinel.
     assert not lock.exists(), (
-        f"install/complete must consume the first-run lockfile; "
-        f"still present at {lock}"
+        f"install/complete must consume the first-run lockfile; still present at {lock}"
     )
 
     # Follow-up anonymous PUT now bounces with 401 auth.required —
@@ -333,8 +332,7 @@ def test_curated_models_filters_out_image_slot(auth_app: TestClient) -> None:
     # the filter doesn't actually filter anything and the test is
     # vacuous.
     assert any(m.recommended_slot == "img" for m in CURATED_MODELS), (
-        "catalogue invariant: at least one image-gen entry must exist "
-        "to make the filter meaningful"
+        "catalogue invariant: at least one image-gen entry must exist to make the filter meaningful"
     )
 
     response = auth_app.get("/api/install/curated-models")
@@ -342,8 +340,7 @@ def test_curated_models_filters_out_image_slot(auth_app: TestClient) -> None:
     body = response.json()
     img_picks = [m for m in body["models"] if m.get("recommended_slot") == "img"]
     assert img_picks == [], (
-        f"chat-picker must filter out img-slot models; got: "
-        f"{[m['id'] for m in img_picks]}"
+        f"chat-picker must filter out img-slot models; got: {[m['id'] for m in img_picks]}"
     )
     # And every surfaced row must positively be a chat pick.
     for m in body["models"]:
@@ -414,6 +411,5 @@ def test_path_is_claim_eligible(path: str, expected: bool) -> None:
     from hal0.api.middleware.auth import _path_is_claim_eligible
 
     assert _path_is_claim_eligible(path) is expected, (
-        f"claim-eligibility mismatch for path={path!r}: "
-        f"got {not expected}, expected {expected}"
+        f"claim-eligibility mismatch for path={path!r}: got {not expected}, expected {expected}"
     )

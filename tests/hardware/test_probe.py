@@ -488,9 +488,7 @@ def test_detect_platform_lxc(monkeypatch: pytest.MonkeyPatch) -> None:
     assert probe_mod._detect_platform(gpu, npu) == "lxc"
 
 
-def test_detect_platform_kvm_via_dmi(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_detect_platform_kvm_via_dmi(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Stub DMI sysfs by routing _read_text on the DMI paths through a dict.
     files = {
         "/proc/version": "Linux version 6.6.0",
