@@ -19,6 +19,7 @@ import { useSystemStore } from '../stores/system.js'
 import { useStats, useSlotMetrics } from '../composables/useStats.js'
 import { useSlotStats } from '../composables/useSlotStats.js'
 import { api } from '../composables/useApi.js'
+import { useEvents } from '../composables/useEvents.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
@@ -230,7 +231,30 @@ const tputAreaPath = computed(() => {
 
 // ── API health ───────────────────────────────────────────────────────
 const apiOk = computed(() => !system.error && system.status !== null)
-const recentLogs = computed(() => system.status?.recent_logs ?? [])
+
+// ── Recent events ────────────────────────────────────────────────────
+// Reads the shared /api/events ring owned by the footer's SSE
+// connection — no second subscription. The dashboard panel formerly
+// rendered `system.status.recent_logs`, which the API never populated;
+// structured events from the bus (slot.state, pull.progress, system.*)
+// are what we have live and what actually convey "something happened
+// just now" on this box.
+const eventsApi = useEvents()
+const recentEvents = computed(() => {
+  const all = eventsApi.events.value
+  return all.length > 10 ? all.slice(-10) : all
+})
+function eventTs(ts) {
+  if (!ts) return ''
+  const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleTimeString(undefined, { hour12: false })
+}
+function eventSevClass(s) {
+  if (s === 'error') return 'sev-error'
+  if (s === 'warn' || s === 'warning') return 'sev-warn'
+  return 'sev-info'
+}
 
 // ── Chat panel ───────────────────────────────────────────────────────
 const chatModels = ref([])
@@ -553,19 +577,28 @@ loadChatModels()
         </Card>
       </section>
 
-      <!-- ── Recent logs ──────────────────────────────────────────── -->
+      <!-- ── Recent events ────────────────────────────────────────── -->
       <section aria-labelledby="logs-heading">
         <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> Journal</p>
         <h2 id="logs-heading" class="section-title">
-          Recent log events
+          Recent events
           <button class="stat-link section-link" type="button" @click="router.push('/logs')">View all →</button>
         </h2>
         <Card :padded="false">
-          <div v-if="recentLogs.length === 0" class="logs-empty">
-            <span class="text-muted mono-text">No recent log events.</span>
+          <div v-if="recentEvents.length === 0" class="logs-empty">
+            <span class="text-muted mono-text">Waiting for events…</span>
           </div>
-          <div v-else class="logs-list">
-            <div v-for="(line, i) in recentLogs.slice(-10)" :key="i" class="log-line">{{ line }}</div>
+          <div v-else class="logs-list" role="log" aria-live="polite" aria-relevant="additions">
+            <div
+              v-for="e in recentEvents"
+              :key="e.id"
+              class="log-event"
+              :class="eventSevClass(e.severity)"
+            >
+              <span class="log-ts mono-text">{{ eventTs(e.ts) }}</span>
+              <span class="log-type mono-text" :title="e.type">{{ e.type }}</span>
+              <span class="log-msg">{{ e.message }}</span>
+            </div>
           </div>
         </Card>
       </section>
@@ -695,8 +728,21 @@ loadChatModels()
 /* ── Logs ───────────────────────────────────────────────────────── */
 .logs-empty { padding: 20px 16px; display: flex; align-items: center; }
 .logs-list { padding: 8px 0; max-height: 200px; overflow-y: auto; background: var(--hal0-bg-sunken); }
-.log-line { padding: 3px 16px; font-family: var(--font-mono); font-size: 11.5px; color: var(--hal0-fg-dim); white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid var(--color-border); }
-.log-line:last-child { border-bottom: none; }
+.log-event {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 16px;
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--color-border);
+}
+.log-event:last-child { border-bottom: none; }
+.log-ts { color: var(--color-fg-faint); font-size: 11px; }
+.log-type { color: var(--hal0-accent); font-size: 11px; opacity: 0.85; }
+.log-msg { color: var(--color-fg); white-space: pre-wrap; word-break: break-word; }
+.log-event.sev-warn .log-msg { color: var(--color-warning); }
+.log-event.sev-error .log-msg { color: var(--color-danger); }
 
 /* ── Utility ────────────────────────────────────────────────────── */
 .dim { color: var(--color-fg-faint); }
