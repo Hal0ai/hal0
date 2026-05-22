@@ -69,7 +69,7 @@ const dotState = computed(() => {
   const s = props.slot.status
   if (s === 'error' || s === 'failed') return 'error'
   if (!running.value) return 'offline'
-  if ((m.value.requests_processing || 0) > 0) return 'live'
+  if ((m.value.requests_processing || 0) > 0) return 'active'
   return 'idle'
 })
 
@@ -455,7 +455,7 @@ const sparkSvg = computed(() => {
 </script>
 
 <template>
-  <div class="slot-card" :class="{ 'is-running': running, 'is-busy': busy, 'sc-flash': transitionFlash, [`sc-state-${dotState}`]: true }">
+  <div class="slot-card" :class="{ 'is-running': running, 'is-serving': dotState === 'active', 'is-busy': busy, 'sc-flash': transitionFlash, [`sc-state-${dotState}`]: true }">
     <!-- Header -->
     <div class="sc-head">
       <span class="sc-dot" />
@@ -717,6 +717,10 @@ const sparkSvg = computed(() => {
    previous left-side inset; reads cleaner in a grid of cards). */
 .slot-card.is-running {
   border-color: color-mix(in srgb, var(--hal0-accent) 40%, var(--color-border));
+}
+/* Top rail is now a *live-traffic* signal — appears only while
+   requests_processing > 0. Steady readiness lives in the dot color. */
+.slot-card.is-serving {
   box-shadow: inset 0 3px 0 var(--hal0-accent);
 }
 .slot-card.is-busy { opacity: 0.78; }
@@ -739,31 +743,45 @@ const sparkSvg = computed(() => {
   box-shadow: 0 0 6px -1px var(--hal0-accent);
   flex-shrink: 0;
 }
-.sc-state-live .sc-dot   { background: var(--hal0-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--hal0-accent) 22%, transparent), 0 0 8px var(--hal0-accent); animation: dot-pulse 1.4s ease-in-out infinite; }
+.sc-state-active .sc-dot { background: var(--color-success); animation: dot-breathe 2.4s ease-in-out infinite; }
 
 /* SSE-driven state-transition flash. Brief border highlight + dot pop so
    the user sees instant feedback on a transition without the noise of a
    full re-render. Reduced-motion users get nothing (gated in script). */
-.slot-card.sc-flash { animation: sc-flash 0.7s ease-out; }
-.slot-card.sc-flash .sc-dot { animation: sc-flash-dot 0.7s ease-out; }
+.slot-card.sc-flash { animation: sc-flash 1.6s ease-in-out; }
+.slot-card.sc-flash .sc-dot { animation: sc-flash-dot 1.6s ease-in-out; }
 @keyframes sc-flash {
-  0%   { box-shadow: 0 0 0 2px color-mix(in oklch, var(--color-accent), transparent 60%); }
-  100% { box-shadow: 0 0 0 0 transparent; }
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-accent), transparent 100%); }
+  35%  { box-shadow: 0 0 0 5px color-mix(in oklch, var(--color-accent), transparent 70%); }
+  100% { box-shadow: 0 0 0 9px color-mix(in oklch, var(--color-accent), transparent 100%); }
 }
 @keyframes sc-flash-dot {
-  0%   { transform: scale(1.6); }
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.35); }
   100% { transform: scale(1); }
 }
 @media (prefers-reduced-motion: reduce) {
   .slot-card.sc-flash, .slot-card.sc-flash .sc-dot { animation: none; }
 }
-.sc-state-idle .sc-dot   { background: var(--hal0-accent); opacity: 0.65; }
+.sc-state-idle .sc-dot   { background: var(--color-warning); }
 .sc-state-loading .sc-dot { background: var(--color-warning); box-shadow: 0 0 6px -1px var(--color-warning); animation: dot-pulse 1.4s ease-in-out infinite; }
 .sc-state-error .sc-dot  { background: var(--color-danger); box-shadow: 0 0 6px -1px var(--color-danger); }
 .sc-state-offline .sc-dot { background: var(--color-fg-faint); box-shadow: none; }
 @keyframes dot-pulse {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, currentColor, transparent 70%); }
   50%      { box-shadow: 0 0 0 4px color-mix(in oklch, currentColor, transparent 90%); }
+}
+/* Soft active-traffic breathe: halo expands and fades smoothly without
+   the punchy ring of dot-pulse. Carried by the success-green dot. */
+@keyframes dot-breathe {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-success), transparent 70%),
+                0 0 5px 0 color-mix(in oklch, var(--color-success), transparent 80%);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in oklch, var(--color-success), transparent 100%),
+                0 0 12px 2px color-mix(in oklch, var(--color-success), transparent 55%);
+  }
 }
 
 .sc-models {

@@ -82,7 +82,7 @@ const deleting     = ref(false)
 // Fields that require a slot restart to apply
 const RESTART_FIELDS = new Set(['ctx_size', 'n_gpu_layers'])
 // Slot states considered "live" for swap-vs-config dispatch
-const RUNNING_STATES = new Set(['running', 'serving', 'ready'])
+const RUNNING_STATES = new Set(['running', 'ready', 'serving', 'idle'])
 
 // Logs drawer
 const logsSlot    = ref(null)
@@ -577,9 +577,16 @@ onUnmounted(() => {
 })
 
 // ── Display helpers ────────────────────────────────────────────────────
+// state-dot vocab:
+//   state-running (green)  → only `serving` (a request is in-flight)
+//   state-idle    (yellow) → any warm/loaded state (running/ready/idle/warming/starting/pulling)
+//   state-error   (red)    → terminal failure
+//   state-offline (grey)   → process down / unloading
+// Mirrors SlotCard.vue dot semantics: dot color = readiness, top rail = in-flight.
 const stateClass = (s) => ({
-  running: 'state-running', ready: 'state-running', serving: 'state-running',
-  idle: 'state-idle', warming: 'state-idle', starting: 'state-idle', pulling: 'state-idle',
+  serving: 'state-running',
+  running: 'state-idle', ready: 'state-idle', idle: 'state-idle',
+  warming: 'state-idle', starting: 'state-idle', pulling: 'state-idle',
   error: 'state-error',
   offline: 'state-offline', unloading: 'state-offline',
 }[s] ?? 'state-offline')
