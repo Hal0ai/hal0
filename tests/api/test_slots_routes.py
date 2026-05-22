@@ -565,3 +565,164 @@ async def test_state_stream_emits_sse_event_shape(
         assert payload["port"] == 8081
         # Close the generator so the SlotManager removes its subscriber.
         await agen.aclose()
+
+
+# ── _scrape_llama_metrics — Prometheus + /slots synthesis ────────────────────
+
+
+class _StubResponse:
+    """Minimal httpx.Response stand-in for the scrape tests.
+
+    Implements just the surface ``_scrape_llama_metrics`` reaches into:
+    ``status_code``, ``text``, ``json()``. Using a hand-rolled stub keeps
+    these tests free of network shims and lets us swap the httpx client
+    out with a one-line monkeypatch.
+    """
+
+    def __init__(
+        self,
+        *,
+        status_code: int = 200,
+        text: str = "",
+        json_data: Any = None,
+    ) -> None:
+        self.status_code = status_code
+        self.text = text
+        self._json = json_data
+
+    def json(self) -> Any:
+        if isinstance(self._json, Exception):
+            raise self._json
+        return self._json
+
+
+def _patch_httpx(monkeypatch: pytest.MonkeyPatch, metrics: _StubResponse, slots: _StubResponse):
+    """Patch httpx.AsyncClient used inside slots._scrape_llama_metrics.
+
+    Routes the two URLs the scrape hits to the supplied stubs and leaves
+    every other call short-circuited so an accidentally widened scrape
+    fails loudly in the test.
+    """
+
+    class _Client:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+        async def get(self, url: str) -> _StubResponse:
+            if url.endswith("/metrics"):
+                return metrics
+            if url.endswith("/slots"):
+                return slots
+            raise AssertionError(f"unexpected scrape URL: {url}")
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+
+@pytest.mark.asyncio
+async def test_scrape_llama_metrics_synthesises_kv_from_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Newer llama-server (b9279+) drops kv_cache_usage_ratio from
+    /metrics but still exposes per-slot n_prompt_tokens + n_ctx in
+    /slots; the scrape should synthesise ``kv_cache_usage`` as
+    max(n_prompt_tokens) / n_ctx."""
+    from hal0.api.routes.slots import _scrape_llama_metrics
+
+    metrics_text = (
+        "# HELP llamacpp:requests_processing gauge\n"
+        "# TYPE llamacpp:requests_processing gauge\n"
+        "llamacpp:requests_processing 1\n"
+        "llamacpp:requests_deferred 0\n"
+    )
+    slots_json = [
+        {"id": 0, "n_ctx": 4096, "is_processing": False},
+        {"id": 1, "n_ctx": 4096, "is_processing": True, "n_prompt_tokens": 2048},
+    ]
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(text=metrics_text),
+        _StubResponse(json_data=slots_json),
+    )
+
+    out = await _scrape_llama_metrics(8081)
+    assert out["requests_processing"] == 1
+    assert out["requests_deferred"] == 0
+    # 2048 / 4096 = 0.5
+    assert out["kv_cache_usage"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_scrape_llama_metrics_prefers_native_ratio_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a future llama.cpp reintroduces ``llamacpp:kv_cache_usage_ratio``
+    we use the native gauge as-is and skip the /slots synthesis."""
+    from hal0.api.routes.slots import _scrape_llama_metrics
+
+    metrics_text = (
+        "llamacpp:requests_processing 0\n"
+        "llamacpp:requests_deferred 0\n"
+        "llamacpp:kv_cache_usage_ratio 0.73\n"
+    )
+    # /slots would otherwise synthesise 0.25; the native gauge should win.
+    slots_json = [{"id": 0, "n_ctx": 4096, "n_prompt_tokens": 1024}]
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(text=metrics_text),
+        _StubResponse(json_data=slots_json),
+    )
+
+    out = await _scrape_llama_metrics(8081)
+    assert out["kv_cache_usage"] == pytest.approx(0.73)
+
+
+@pytest.mark.asyncio
+async def test_scrape_llama_metrics_omits_kv_when_slots_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Idle /slots payload (no n_prompt_tokens on any sub-slot) leaves
+    ``kv_cache_usage`` absent so the UI renders '—' rather than 0%."""
+    from hal0.api.routes.slots import _scrape_llama_metrics
+
+    metrics_text = "llamacpp:requests_processing 0\nllamacpp:requests_deferred 0\n"
+    slots_json = [
+        {"id": 0, "n_ctx": 4096, "is_processing": False},
+        {"id": 1, "n_ctx": 4096, "is_processing": False},
+    ]
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(text=metrics_text),
+        _StubResponse(json_data=slots_json),
+    )
+
+    out = await _scrape_llama_metrics(8081)
+    assert out.get("requests_processing") == 0
+    assert "kv_cache_usage" not in out
+
+
+@pytest.mark.asyncio
+async def test_scrape_llama_metrics_clamps_overrun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """n_prompt_tokens can briefly exceed n_ctx during shift; clamp the
+    synthesised ratio at 1.0 instead of surfacing >100%."""
+    from hal0.api.routes.slots import _scrape_llama_metrics
+
+    metrics_text = "llamacpp:requests_processing 1\n"
+    slots_json = [{"id": 0, "n_ctx": 4096, "n_prompt_tokens": 5000}]
+    _patch_httpx(
+        monkeypatch,
+        _StubResponse(text=metrics_text),
+        _StubResponse(json_data=slots_json),
+    )
+
+    out = await _scrape_llama_metrics(8081)
+    assert out["kv_cache_usage"] == pytest.approx(1.0)
