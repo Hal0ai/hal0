@@ -272,6 +272,7 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
 }
 .cap-metric {
   display: flex; flex-direction: column; gap: 1px; min-width: 0;
+  align-items: center; text-align: center;
 }
 .cap-metric-v {
   font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;

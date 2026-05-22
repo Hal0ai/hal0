@@ -8,7 +8,7 @@
  * /api/capabilities/img/img endpoint as the other capability cards via
  * useCapabilities().setSelection().
  *
- * Metrics show `imgs/h` (req/s × 3600) when available — operator-visible
+ * Metrics show active reqs / tok/s / memory / uptime — operator-visible
  * throughput is rare-event-y for image gen, so a per-hour rollup reads
  * more usefully than the underlying per-sec rate.
  *
@@ -42,7 +42,17 @@ const slotPort = computed(
 
 function fmtMem(mb) {
   if (mb == null) return '—'
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(2)} MB`
+}
+
+function fmtUptime(sec) {
+  if (sec == null) return '—'
+  const s = Math.floor(sec)
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return m ? `${h}h ${m}m` : `${h}h`
 }
 
 function modelsFor() {
@@ -150,30 +160,24 @@ const isActive = computed(() => {
   return s?.enabled && s?.status !== 'offline'
 })
 
-// Live metrics — image gen reads per-hour from the per-sec rate.
+// Live metrics for the img slot.
 const imgMetrics = computed(() => metrics.value?.[SLOT_NAME] ?? null)
-function reqRate(m) {
+function activeReqs(m) {
   if (!m) return null
-  if (m.requests_per_sec != null) return m.requests_per_sec
-  if (m.tokens_per_sec   != null) return m.tokens_per_sec
-  return null
+  return m.requests_processing ?? null
 }
-function latency(m) {
+function tokRate(m) {
   if (!m) return null
-  return m.latency_ms_p50 ?? m.p50_latency_ms ?? m.latency_p50 ?? null
+  return m.tokens_per_sec ?? m.tps ?? null
 }
 function mem(m) {
   if (!m) return null
   return m.mem_rss_mb ?? m.vram_mb ?? m.gtt_mb ?? null
 }
-const imgsPerHour = computed(() => {
-  const r = reqRate(imgMetrics.value)
-  return r != null ? Math.round(r * 3600) : null
-})
-const secPerImg = computed(() => {
-  const l = latency(imgMetrics.value)
-  return l != null ? (l / 1000).toFixed(1) : null
-})
+function uptime(m) {
+  if (!m) return null
+  return m.uptime_seconds ?? null
+}
 
 const headerPill = computed(() => {
   const s = props.selection?.img?.status
@@ -251,17 +255,21 @@ const headerPill = computed(() => {
         <span class="cap-meta-item">comfyui handles VAE + text encoder</span>
       </div>
       <div v-if="isActive" class="cap-metrics">
-        <div class="cap-metric cap-metric-headline" :class="{ 'cap-metric-na': imgsPerHour == null }">
-          <span class="cap-metric-v">{{ imgsPerHour ?? '—' }}</span>
-          <span class="cap-metric-u">imgs/h</span>
+        <div class="cap-metric cap-metric-headline" :class="{ 'cap-metric-na': activeReqs(imgMetrics) == null }">
+          <span class="cap-metric-v">{{ activeReqs(imgMetrics) ?? '—' }}</span>
+          <span class="cap-metric-u">active reqs</span>
         </div>
-        <div class="cap-metric" :class="{ 'cap-metric-na': secPerImg == null }">
-          <span class="cap-metric-v">{{ secPerImg ?? '—' }}</span>
-          <span class="cap-metric-u">s/img</span>
+        <div class="cap-metric" :class="{ 'cap-metric-na': tokRate(imgMetrics) == null }">
+          <span class="cap-metric-v">{{ tokRate(imgMetrics) != null ? Number(tokRate(imgMetrics)).toFixed(1) : '—' }}</span>
+          <span class="cap-metric-u">tok/s</span>
         </div>
         <div class="cap-metric cap-metric-mem">
           <span class="cap-metric-v">{{ fmtMem(mem(imgMetrics)) }}</span>
-          <span class="cap-metric-u">resident</span>
+          <span class="cap-metric-u">memory</span>
+        </div>
+        <div class="cap-metric" :class="{ 'cap-metric-na': uptime(imgMetrics) == null }">
+          <span class="cap-metric-v">{{ fmtUptime(uptime(imgMetrics)) }}</span>
+          <span class="cap-metric-u">uptime</span>
         </div>
       </div>
     </section>

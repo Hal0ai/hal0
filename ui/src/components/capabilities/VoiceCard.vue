@@ -41,7 +41,17 @@ const togglePending = ref({ stt: false, tts: false })
 
 function fmtMem(mb) {
   if (mb == null) return '—'
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(2)} MB`
+}
+
+function fmtUptime(sec) {
+  if (sec == null) return '—'
+  const s = Math.floor(sec)
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return m ? `${h}h ${m}m` : `${h}h`
 }
 
 function modelsFor(capability) {
@@ -155,19 +165,21 @@ function metricsFor(capability) {
   return slotName ? (metrics.value?.[slotName] ?? null) : null
 }
 
-function reqRate(m) {
+function activeReqs(m) {
   if (!m) return null
-  if (m.requests_per_sec != null) return m.requests_per_sec
-  if (m.tokens_per_sec   != null) return m.tokens_per_sec
-  return null
+  return m.requests_processing ?? null
 }
-function latency(m) {
+function tokRate(m) {
   if (!m) return null
-  return m.latency_ms_p50 ?? m.p50_latency_ms ?? m.latency_p50 ?? null
+  return m.tokens_per_sec ?? m.tps ?? null
 }
 function mem(m) {
   if (!m) return null
   return m.mem_rss_mb ?? m.vram_mb ?? m.gtt_mb ?? null
+}
+function uptime(m) {
+  if (!m) return null
+  return m.uptime_seconds ?? null
 }
 
 function isActive(c) {
@@ -253,17 +265,21 @@ const headerPill = computed(() => {
         <span class="cap-meta-item" v-if="backendFor(c)?.multiplex">⚡ shared {{ backendFor(c).label }} process</span>
       </div>
       <div v-if="isActive(c)" class="cap-metrics">
-        <div class="cap-metric cap-metric-headline" :class="{ 'cap-metric-na': reqRate(metricsFor(c)) == null }">
-          <span class="cap-metric-v">{{ reqRate(metricsFor(c)) != null ? Number(reqRate(metricsFor(c))).toFixed(1) : '—' }}</span>
-          <span class="cap-metric-u">req/s</span>
+        <div class="cap-metric cap-metric-headline" :class="{ 'cap-metric-na': activeReqs(metricsFor(c)) == null }">
+          <span class="cap-metric-v">{{ activeReqs(metricsFor(c)) ?? '—' }}</span>
+          <span class="cap-metric-u">active reqs</span>
         </div>
-        <div class="cap-metric" :class="{ 'cap-metric-na': latency(metricsFor(c)) == null }">
-          <span class="cap-metric-v">{{ latency(metricsFor(c)) ?? '—' }}</span>
-          <span class="cap-metric-u">ms p50</span>
+        <div class="cap-metric" :class="{ 'cap-metric-na': tokRate(metricsFor(c)) == null }">
+          <span class="cap-metric-v">{{ tokRate(metricsFor(c)) != null ? Number(tokRate(metricsFor(c))).toFixed(1) : '—' }}</span>
+          <span class="cap-metric-u">tok/s</span>
         </div>
         <div class="cap-metric cap-metric-mem">
           <span class="cap-metric-v">{{ fmtMem(mem(metricsFor(c))) }}</span>
-          <span class="cap-metric-u">resident</span>
+          <span class="cap-metric-u">memory</span>
+        </div>
+        <div class="cap-metric" :class="{ 'cap-metric-na': uptime(metricsFor(c)) == null }">
+          <span class="cap-metric-v">{{ fmtUptime(uptime(metricsFor(c))) }}</span>
+          <span class="cap-metric-u">uptime</span>
         </div>
       </div>
     </section>
