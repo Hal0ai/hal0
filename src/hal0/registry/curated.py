@@ -14,6 +14,51 @@ without touching the curated list.
 # it ships *with* a hal0 release so users can't end up on an outdated
 # pick list. v0.2 may introduce a remote-fetched manifest with signed
 # releases; for v1 a frozen-at-build-time list is plenty.
+
+# TODO(stt/tts curated picks): the FirstRun wizard's STT and TTS
+# dropdowns currently fall back on HaloaiModel seed rows (moonshine,
+# kokoro, vibevoice), which the capability catalog intentionally
+# filters out — they're upstream-routed, not pullable. The blocker for
+# adding real CuratedModel picks is the upstream file shape:
+#
+#   * Moonshine ships its weights as a multi-file ONNX bundle
+#     (``encode_model.ort`` + ``decode_model.ort`` + tokenizer JSON
+#     under ``quantized/<variant>/``). The pull engine (registry/pull.py)
+#     streams a single ``hf_repo/resolve/main/<file>`` URL, and the
+#     curated-model schema validation (tests/registry/test_curated.py)
+#     restricts ``hf_file`` to ``.gguf``/``.safetensors``/``.ckpt``.
+#     ``.ort`` files don't fit either constraint.
+#   * Whisper.cpp GGUF mirrors exist (``oxide-lab/whisper-tiny-GGUF``,
+#     ``xkeyC/whisper-large-v3-turbo-gguf``) but hal0's STT runtime is
+#     the Moonshine toolbox (``_RUNTIME_TO_HOST_BACKENDS["moonshine"]``
+#     in capabilities/catalog.py), which can't load whisper GGUFs.
+#     Surfacing a whisper.cpp pick needs either a whisper-cpp toolbox
+#     image or routing whisper-ggufs through llama-server (which 0.1.x
+#     llama-server doesn't support for transcription).
+#   * Kokoro's only public weight is ``hexgrad/Kokoro-82M/kokoro-v1_0.pth``
+#     — a PyTorch pickle. The ONNX mirror
+#     (``onnx-community/Kokoro-82M-v1.0-ONNX``) ships only ``.onnx`` +
+#     ``voices/*.bin``. Neither fits the allowed suffix list.
+#   * VibeVoice is similarly multi-file safetensors but lives in a
+#     diffusers-style repo (config + multiple shards), not a single
+#     pullable file.
+#
+# Resolutions to unblock (any one is enough):
+#   1. Add a multi-file pull mode to ``registry/pull.py`` that snapshots
+#      a HF repo dir into the model store, and relax the curated
+#      ``hf_file`` validator to allow a directory glob.
+#   2. Ship a whisper-cpp toolbox image and add a ``whisper`` entry to
+#      ``_RUNTIME_TO_HOST_BACKENDS``, then surface whisper.cpp GGUFs
+#      under stt.
+#   3. Keep the HaloaiModel seed rows visible in the wizard but mark
+#      them clearly as "needs upstream routing" — would require
+#      narrowing the ``HaloaiModel`` filter in
+#      ``capabilities/catalog._flat_rows_for_capability`` (NOT the call
+#      this PR makes — that filter is load-bearing).
+#
+# Until one of those lands, the wizard's STT and TTS dropdowns will
+# stay empty on a standalone install and the operator falls back on the
+# "skip this capability" path or the post-install Models view.
 """
 
 from __future__ import annotations
@@ -77,6 +122,17 @@ class CuratedModel(BaseModel):
         description=(
             "Primary capability — 'chat' (default), 'embed', 'asr', 'tts', 'image'. "
             "The pull layer routes 'image' into the ComfyUI models tree."
+        ),
+    )
+    backend: str = Field(
+        default="",
+        description=(
+            "Runtime backend tag the capability catalog fans out from. "
+            "'llamacpp' for GGUF chat/embed/rerank picks (catalog fans "
+            "out to gpu-vulkan/gpu-rocm/cpu); empty for image picks (the "
+            "catalog routes them to ComfyUI via ``comfyui_subdir``). The "
+            "field has no effect on the pull layer — pulls always go "
+            "through hf_repo + hf_file."
         ),
     )
     model_class: str = Field(
@@ -244,6 +300,125 @@ CURATED_MODELS: list[CuratedModel] = [
             "we use that. Smallest validated catalogue entry — good 'just download something' pick."
         ),
     ),
+    # ── Embed picks (llama-server with --embedding) ────────────────────────
+    # The wizard's "Embed" capability dropdown surfaces these. Both are
+    # llama.cpp-compatible GGUFs so they fan out to gpu-vulkan/gpu-rocm/cpu
+    # via _backend_variants. nomic-embed is the canonical light pick
+    # (single-file ~150 MB Q8_0); bge-base-en-v1.5 is the medium pick
+    # (~70 MB Q4_K_M, better English retrieval quality than nomic on MTEB).
+    CuratedModel(
+        id="nomic-embed-text-v1.5-q8_0",
+        display_name="Nomic Embed Text v1.5 (Q8_0)",
+        description=(
+            "Fast, accurate English/multilingual embeddings. Tiny enough "
+            "to ride alongside any chat slot. The default embed pick."
+        ),
+        family="nomic",
+        size_gb=0.15,
+        vram_gb_min=0.5,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="nomic-ai/nomic-embed-text-v1.5-GGUF",
+        hf_file="nomic-embed-text-v1.5.Q8_0.gguf",
+        context_length=8192,
+        recommended_slot="embed",
+        tags=["embed", "light"],
+        notes=(
+            "Q8_0 over Q4_K_M because embedding quality is brittle under "
+            "aggressive quantization and the size delta (146 MB vs 84 MB) "
+            "is irrelevant on Strix Halo's 100 GB pool."
+        ),
+        capability="embed",
+        backend="llamacpp",
+    ),
+    CuratedModel(
+        id="bge-base-en-v1.5-q4_k_m",
+        display_name="BGE Base EN v1.5 (Q4_K_M)",
+        description=(
+            "Higher English retrieval quality than nomic. Good when "
+            "RAG accuracy matters more than multilingual coverage."
+        ),
+        family="bge",
+        size_gb=0.07,
+        vram_gb_min=0.5,
+        license="MIT",
+        license_url="https://opensource.org/license/mit",
+        hf_repo="CompendiumLabs/bge-base-en-v1.5-gguf",
+        hf_file="bge-base-en-v1.5-q4_k_m.gguf",
+        context_length=512,
+        recommended_slot="embed",
+        tags=["embed", "medium"],
+        notes=(
+            "BAAI's BGE family leads MTEB English retrieval; Q4_K_M is "
+            "the standard quality/size sweet spot and the CompendiumLabs "
+            "repo is the canonical GGUF mirror."
+        ),
+        capability="embed",
+        backend="llamacpp",
+    ),
+    # ── Rerank picks (llama-server with --reranking) ───────────────────────
+    # Per memory hal0_rerank_slot_wiring, the working recipe is
+    # llama-server on a non-8081 port with --reranking; bge-reranker-v2-m3
+    # Q4_K_M is already running in production on hal0 LXC.
+    CuratedModel(
+        id="bge-reranker-base-q4_k_m",
+        display_name="BGE Reranker Base (Q4_K_M)",
+        description=(
+            "Light cross-encoder reranker for English RAG. ~260 MB on "
+            "disk, runs on CPU comfortably."
+        ),
+        family="bge",
+        size_gb=0.26,
+        vram_gb_min=0.5,
+        license="MIT",
+        license_url="https://opensource.org/license/mit",
+        hf_repo="cstr/bge-reranker-base-GGUF",
+        hf_file="bge-reranker-base-q4_k.gguf",
+        context_length=512,
+        recommended_slot="embed",
+        tags=["rerank", "light"],
+        notes=(
+            "cstr's GGUF mirror includes the classifier-head fix needed "
+            "for llama-server --reranking; the upstream BAAI repo ships "
+            "PyTorch only. Q4_K is the smallest quant that preserves "
+            "rerank ordering on BEIR."
+        ),
+        capability="rerank",
+        backend="llamacpp",
+    ),
+    CuratedModel(
+        id="bge-reranker-v2-m3-q4_k_m",
+        display_name="BGE Reranker v2 M3 (Q4_K_M)",
+        description=(
+            "Multilingual cross-encoder reranker. The production pick on "
+            "the hal0 LXC; ~440 MB, runs on CPU or GPU."
+        ),
+        family="bge",
+        size_gb=0.44,
+        vram_gb_min=1.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="gpustack/bge-reranker-v2-m3-GGUF",
+        hf_file="bge-reranker-v2-m3-Q4_K_M.gguf",
+        context_length=8192,
+        recommended_slot="embed",
+        tags=["rerank", "medium"],
+        notes=(
+            "v2-m3 covers 100+ languages and beats v1 base on most "
+            "benchmarks. Q4_K_M matches the running config on hal0; "
+            "remember to wire the slot to a non-8081 port and pass "
+            "--reranking (see memory hal0_rerank_slot_wiring)."
+        ),
+        capability="rerank",
+        backend="llamacpp",
+    ),
+    # ── STT / TTS picks ────────────────────────────────────────────────────
+    # Intentionally empty — see the module docstring TODO. The blocker is
+    # the pull layer's single-file shape vs. moonshine/kokoro's multi-file
+    # ONNX/PyTorch bundles. The HaloaiModel seed rows
+    # (moonshine-small-streaming-en, tts-1, kokoro, vibevoice-realtime-0.5b)
+    # remain visible through the /api/models/catalogue surface but are
+    # filtered out of the capability dropdowns by design.
     # ── Image-gen models (recommended_slot="img", routed through ComfyUI) ────
     #
     # Curated picks intentionally span the licensing spectrum:
