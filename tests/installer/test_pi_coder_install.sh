@@ -45,5 +45,14 @@ if grep -q 'github\.com/badlogic/pi-mono' "$INSTALLER"; then
     fail "pi-coder.sh still references github.com/badlogic/pi-mono"
 fi
 
+log "assert npm install line uses upstream-renamed package name"
+grep -q '@earendil-works/pi-coding-agent' "$INSTALLER" \
+    || fail "pi-coder.sh missing @earendil-works/pi-coding-agent npm package reference"
+
+log "assert no lingering 'npm install -g pi-mono' invocation"
+if grep -q 'npm install -g pi-mono\b' "$INSTALLER"; then
+    fail "pi-coder.sh still tries to npm install -g pi-mono (renamed upstream)"
+fi
+
 log "PASS"
 exit 0

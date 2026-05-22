@@ -7,10 +7,12 @@
 #
 # Fork policy: pi-mono source-of-truth for hal0 is the hard fork at
 # https://github.com/Hal0ai/pi-mono (mirrored from upstream
-# earendil-works/pi, formerly badlogic/pi-mono). The `pi-mono` npm /
-# cargo package name is unchanged — the fork lives on the GitHub side
-# so we can pin / patch / mirror without external coordination. Re-sync
-# the fork with `bash scripts/fork-pi-mono.sh`.
+# earendil-works/pi, formerly badlogic/pi-mono). NPM SOURCE: upstream
+# renamed pi-mono into a monorepo at earendil-works/pi; the CLI now
+# ships as @earendil-works/pi-coding-agent (bin `pi`). We pull from
+# the upstream NPM name directly until we publish @hal0ai/pi-coding-agent
+# (Phase 9). The GitHub fork remains the patch surface; re-sync with
+# `bash scripts/fork-pi-mono.sh`.
 #
 # Inputs (set by the Python driver in hal0.agents.pi_coder; safe to
 # override for manual invocation):
@@ -53,43 +55,27 @@ fi
 
 mkdir -p "$HAL0_AGENT_DATA_DIR"
 
-# ── Install pi-mono upstream (track-latest) ──────────────────────────────────
+# ── Install pi CLI upstream (track-latest) ───────────────────────────────────
 #
-# pi-mono distribution shape upstream:
-#   - npm package "pi-mono" (CLI ships there)
-#   - cargo install fallback for users without node
-#
-# Pick whichever package manager is present. NO version pin (ADR-0004
-# §3). If both are missing, fail with an actionable message rather than
-# silently degrading.
+# Upstream distribution: @earendil-works/pi-coding-agent on npm.
+# Binary: `pi`. NO version pin (ADR-0004 §3). No cargo path — upstream
+# is JS-only.
 
 install_pi_mono() {
-    if command -v npm >/dev/null 2>&1; then
-        info "Installing pi-mono via npm (track-latest, source: Hal0ai/pi-mono fork)"
-        npm install -g pi-mono || die "npm install -g pi-mono failed — upstream may have renamed; check https://github.com/Hal0ai/pi-mono"
-        return 0
+    if ! command -v npm >/dev/null 2>&1; then
+        die "npm not found on PATH. Install Node.js (https://nodejs.org/) first."
     fi
-    if command -v cargo >/dev/null 2>&1; then
-        info "Installing pi-mono via cargo (track-latest, source: Hal0ai/pi-mono fork)"
-        cargo install pi-mono || die "cargo install pi-mono failed — upstream may have renamed; check https://github.com/Hal0ai/pi-mono"
-        return 0
-    fi
-    die "Neither npm nor cargo found on PATH. Install Node.js (https://nodejs.org/) or Rust (https://rustup.rs/) first."
+    info "Installing @earendil-works/pi-coding-agent via npm (track-latest)"
+    npm install -g @earendil-works/pi-coding-agent || die "npm install -g @earendil-works/pi-coding-agent failed — upstream may have renamed again; check https://github.com/earendil-works/pi"
 }
 
 # ── Install pi-mcp-adapter (track-latest) ────────────────────────────────────
 install_pi_mcp_adapter() {
-    if command -v npm >/dev/null 2>&1; then
-        info "Installing pi-mcp-adapter via npm (track-latest)"
-        npm install -g pi-mcp-adapter || die "npm install -g pi-mcp-adapter failed — upstream may have renamed"
-        return 0
+    if ! command -v npm >/dev/null 2>&1; then
+        die "npm not found — needed to install pi-mcp-adapter."
     fi
-    if command -v cargo >/dev/null 2>&1; then
-        info "Installing pi-mcp-adapter via cargo (track-latest)"
-        cargo install pi-mcp-adapter || die "cargo install pi-mcp-adapter failed"
-        return 0
-    fi
-    die "Neither npm nor cargo found — needed to install pi-mcp-adapter."
+    info "Installing pi-mcp-adapter via npm (track-latest)"
+    npm install -g pi-mcp-adapter || die "npm install -g pi-mcp-adapter failed — upstream may have renamed"
 }
 
 install_pi_mono
@@ -133,11 +119,7 @@ info "Install complete. Adapter config will be written at $HAL0_AGENT_DATA_DIR/p
     printf 'set -eu\n'
     printf 'if command -v npm >/dev/null 2>&1; then\n'
     printf '    npm uninstall -g pi-mcp-adapter 2>/dev/null || true\n'
-    printf '    npm uninstall -g pi-mono 2>/dev/null || true\n'
-    printf 'fi\n'
-    printf 'if command -v cargo >/dev/null 2>&1; then\n'
-    printf '    cargo uninstall pi-mcp-adapter 2>/dev/null || true\n'
-    printf '    cargo uninstall pi-mono 2>/dev/null || true\n'
+    printf '    npm uninstall -g @earendil-works/pi-coding-agent 2>/dev/null || true\n'
     printf 'fi\n'
     printf 'rm -f "%s/config.toml" 2>/dev/null || true\n' "$PI_CONFIG_DIR"
 } > "$HAL0_AGENT_DATA_DIR/uninstall.sh"
