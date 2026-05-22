@@ -8,12 +8,15 @@ name: Release
 #
 # Triggered by: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 #
+# The manifest is automatically served at https://releases.hal0.dev/<channel>.json
+# (e.g. /stable.json) by the Cloudflare Pages middleware in hal0-web
+# (functions/_middleware.ts). On a successful upload here, the next request
+# to releases.hal0.dev picks it up within ~60s (CF cache TTL) — no hal0-web
+# deploy needed. Updater clients should point at
+# HAL0_RELEASES_URL=https://releases.hal0.dev/stable.json.
+#
 # What this workflow does NOT do (deliberate, see "Blockers" in
 # scripts/release-prototype/RELEASE_PIPELINE_NOTES.md):
-#   - publish the manifest to https://releases.hal0.dev/ — that host
-#     does not exist yet. Until it does, the GH Release page acts as the
-#     canonical source and the updater can be pointed at
-#     HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/latest/download/latest.json
 #   - rebuild + republish toolbox images. That stays in toolbox.yml. The
 #     release manifest mirrors the toolbox digests pinned in
 #     manifest.json at the moment of the tag — the assumption is the
