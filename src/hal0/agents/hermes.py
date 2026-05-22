@@ -1,23 +1,26 @@
 """Hermes-Agent driver (ADR-0004 §6).
 
-Hermes is user-owned upstream. Native hal0-awareness grows on the
-Hermes side rather than via a hal0-owned shim. This driver is a
-one-liner: detect that upstream Hermes ships hal0-awareness, then
-invoke Hermes's own install command and write
-``/etc/hal0/agents/hermes.env``.
+Hermes is user-owned upstream — and crucially, the user cannot PR
+upstream NousResearch/hermes-agent. So hal0-awareness lives on the
+hal0 side, in a hal0-owned wrapper script (``hal0-hermes``) that
+sources ``/etc/hal0/agents/hermes.env`` and ``exec``s the upstream
+``hermes`` binary.
 
-The "hal0-awareness" probe is intentionally narrow: we look for a
-``--hal0-config`` flag on the Hermes binary (or an
-``HERMES_HAL0_READY=1`` env hint from a marker the upstream installer
-drops). Picking a probe with a concrete shape gives the user an
-actionable error when it fails — vs a vague "Hermes is incompatible"
-that lands them in a Slack thread.
+This driver's responsibilities:
 
-Until Hermes ships that surface, the install path raises
-:class:`HermesNotHal0AwareError` with the upstream issue link to
-follow. The shell script ``installer/agents/hermes-agent.sh`` mirrors
-the same gate at the shell level so a curl|bash invocation also
-short-circuits cleanly.
+1. Probe whether the ``hal0-hermes`` wrapper is installed and
+   functional (``--hal0-ready`` sentinel returns 0).
+2. Shell out to ``installer/agents/hermes-agent.sh`` to install the
+   wrapper if the user invokes this path manually.
+3. Write the canonical env file at ``/etc/hal0/agents/hermes.env``
+   that the wrapper sources on every hermes invocation.
+
+The "hal0-awareness" probe shifted: previously it checked the upstream
+binary for a ``--hal0-config`` flag that was never going to ship.
+Now it checks that the hal0-owned wrapper is on PATH and answers the
+``--hal0-ready`` probe. The shell script
+``installer/agents/hermes-agent.sh`` mirrors this gate at the shell
+level so a curl|bash invocation also short-circuits cleanly.
 """
 
 from __future__ import annotations
@@ -30,40 +33,52 @@ from pathlib import Path
 from hal0.agents.manager import (
     AgentDriver,
     AgentError,
-    HermesNotHal0AwareError,
-    installer_script_path,
+    HermesUpstreamMissingError,
 )
 from hal0.config import paths as _paths
 
-# Concrete probe surface — see module docstring. Both fire OR-ed; the
-# upstream maintainer needs to satisfy only one to flip the gate green.
-_HERMES_BIN_NAME = "hermes-agent"
-_HAL0_AWARE_FLAG = "--hal0-config"
-_HAL0_READY_ENV = "HERMES_HAL0_READY"
+# Hermes's installer script lives at ``installer/agents/hermes-agent.sh``
+# (not ``hermes.sh``) — kept as-is to avoid breaking the curl|bash
+# invocation contract the dashboard uses. We resolve it ourselves
+# rather than via :func:`installer_script_path`, which assumes
+# ``{name}.sh``.
+_INSTALLER_SCRIPT_REL = "installer/agents/hermes-agent.sh"
 
 
-def _probe_hal0_awareness() -> bool:
-    """Return True iff the local Hermes install advertises hal0-awareness.
+def _installer_script_path() -> Path:
+    # parents[0]=agents, [1]=hal0, [2]=src, [3]=repo root — same
+    # resolution shape as :func:`installer_script_path` in the manager.
+    repo_root = Path(__file__).resolve().parents[3]
+    return repo_root / _INSTALLER_SCRIPT_REL
 
-    OR of two cheap checks:
 
-    1. ``HERMES_HAL0_READY=1`` env var present (upstream-installer hint).
-    2. ``hermes-agent --help`` mentions :data:`_HAL0_AWARE_FLAG`.
+# The wrapper binary name. Installed by installer/agents/hermes-agent.sh
+# to /usr/local/bin (root) or ~/.local/bin (user). Sourcing the env
+# file + exec'ing upstream `hermes` is the whole job.
+_WRAPPER_BIN_NAME = "hal0-hermes"
+_WRAPPER_READY_FLAG = "--hal0-ready"
 
-    Both are runtime-only — no network calls. Failing on the host
-    (binary missing, --help non-zero) returns False so the caller raises
-    a clean error rather than the probe itself blowing up.
+
+def _probe_wrapper_installed() -> bool:
+    """Return True iff the hal0-hermes wrapper is installed and functional.
+
+    Two cheap checks, AND-ed:
+
+    1. ``shutil.which("hal0-hermes")`` resolves (wrapper is on PATH).
+    2. ``hal0-hermes --hal0-ready`` returns rc 0 (wrapper is readable,
+       executable, and not corrupted).
+
+    Both are runtime-only — no network calls. Wrapper missing or
+    smoke-test failing returns False so the caller raises a clean
+    error rather than the probe itself blowing up.
     """
-    if os.environ.get(_HAL0_READY_ENV) == "1":
-        return True
-
-    bin_path = shutil.which(_HERMES_BIN_NAME)
+    bin_path = shutil.which(_WRAPPER_BIN_NAME)
     if bin_path is None:
         return False
 
     try:
         result = subprocess.run(  # nosec B603 — known-safe argv
-            [bin_path, "--help"],
+            [bin_path, _WRAPPER_READY_FLAG],
             check=False,
             capture_output=True,
             timeout=5,
@@ -72,8 +87,7 @@ def _probe_hal0_awareness() -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
 
-    haystack = (result.stdout or "") + (result.stderr or "")
-    return _HAL0_AWARE_FLAG in haystack
+    return result.returncode == 0
 
 
 class HermesDriver(AgentDriver):
@@ -84,24 +98,28 @@ class HermesDriver(AgentDriver):
     def __init__(self, *, runner: object | None = None, prober: object | None = None) -> None:
         # ``runner`` parallels :class:`PiCoderDriver` — tests inject a
         # fake subprocess. ``prober`` lets tests force the
-        # hal0-awareness gate without needing a real Hermes on PATH.
+        # wrapper-installed gate without needing a real hal0-hermes on PATH.
         self._runner = runner if runner is not None else subprocess
-        self._prober = prober if prober is not None else _probe_hal0_awareness
+        self._prober = prober if prober is not None else _probe_wrapper_installed
 
     # ── AgentDriver protocol ────────────────────────────────────────────
 
     def install(self, *, bearer_token: str | None = None) -> None:
+        # Probe FIRST: the wrapper must be installed and functional
+        # before we shell out. The shell installer
+        # (installer/agents/hermes-agent.sh) is the bootstrap path for
+        # the wrapper itself — driver.install() is the "rewire the
+        # env file with a fresh Bearer token" path, and it refuses
+        # to wire an env file the wrapper can't source.
         if not self._prober():
-            raise HermesNotHal0AwareError(
-                "Hermes-Agent on this host does not yet ship hal0-awareness. "
-                "Either upgrade Hermes to a build that supports the "
-                f"{_HAL0_AWARE_FLAG!r} flag, or export "
-                f"{_HAL0_READY_ENV}=1 if you're testing an unreleased build. "
-                "Track upstream progress at "
-                "https://github.com/Hal0ai/hal0/issues (Phase 8 milestone)."
+            raise HermesUpstreamMissingError(
+                "hal0-hermes wrapper not found or not functional. Run "
+                "`installer/agents/hermes-agent.sh` as root or via "
+                "`hal0 agent install hermes`. Requires upstream `hermes` "
+                "on PATH (pip install --user hermes-agent)."
             )
 
-        script = installer_script_path(self.name)
+        script = _installer_script_path()
         if not script.is_file():
             raise AgentError(
                 f"installer script missing at {script}. This hal0 install looks "
@@ -127,9 +145,9 @@ class HermesDriver(AgentDriver):
         except Exception as exc:
             raise AgentError(f"hermes-agent install failed ({type(exc).__name__}: {exc}).") from exc
 
-        # Write the env file Hermes will source on startup. Single
-        # source of truth for the API URL + Bearer the agent uses to
-        # reach hal0.
+        # Write the env file the wrapper sources on every hermes
+        # invocation. Single source of truth for the API URL + Bearer
+        # the agent uses to reach hal0.
         self._write_env_file(bearer_token=bearer_token)
 
     def uninstall(self) -> None:
@@ -148,7 +166,8 @@ class HermesDriver(AgentDriver):
     def _env_file_path(self) -> Path:
         # ADR-0004 §6: "writes /etc/hal0/agents/hermes.env". Lives in
         # /etc so the user/admin can tweak it without disturbing
-        # /var/lib state, same posture as openwebui.env.
+        # /var/lib state, same posture as openwebui.env. The wrapper
+        # sources this file on every hermes invocation.
         return _paths.etc() / "agents" / "hermes.env"
 
     def _write_env_file(self, *, bearer_token: str | None) -> None:

@@ -1,9 +1,16 @@
 #!/bin/sh
 # hal0 — pi-coder bundled-agent installer (Phase 8, ADR-0004 §6).
 #
-# POSIX shell, dash-safe. Track-latest of badlogic/pi-mono and
-# pi-mcp-adapter (NO version pins per ADR-0004 §3; nightly CI smoke
-# test catches upstream breakage).
+# POSIX shell, dash-safe. Track-latest of pi-mono and pi-mcp-adapter
+# (NO version pins per ADR-0004 §3; nightly CI smoke test catches
+# upstream breakage).
+#
+# Fork policy: pi-mono source-of-truth for hal0 is the hard fork at
+# https://github.com/Hal0ai/pi-mono (mirrored from upstream
+# earendil-works/pi, formerly badlogic/pi-mono). The `pi-mono` npm /
+# cargo package name is unchanged — the fork lives on the GitHub side
+# so we can pin / patch / mirror without external coordination. Re-sync
+# the fork with `bash scripts/fork-pi-mono.sh`.
 #
 # Inputs (set by the Python driver in hal0.agents.pi_coder; safe to
 # override for manual invocation):
@@ -58,13 +65,13 @@ mkdir -p "$HAL0_AGENT_DATA_DIR"
 
 install_pi_mono() {
     if command -v npm >/dev/null 2>&1; then
-        info "Installing pi-mono via npm (track-latest)"
-        npm install -g pi-mono || die "npm install -g pi-mono failed — upstream may have renamed; check https://github.com/badlogic/pi-mono"
+        info "Installing pi-mono via npm (track-latest, source: Hal0ai/pi-mono fork)"
+        npm install -g pi-mono || die "npm install -g pi-mono failed — upstream may have renamed; check https://github.com/Hal0ai/pi-mono"
         return 0
     fi
     if command -v cargo >/dev/null 2>&1; then
-        info "Installing pi-mono via cargo (track-latest)"
-        cargo install pi-mono || die "cargo install pi-mono failed — upstream may have renamed; check https://github.com/badlogic/pi-mono"
+        info "Installing pi-mono via cargo (track-latest, source: Hal0ai/pi-mono fork)"
+        cargo install pi-mono || die "cargo install pi-mono failed — upstream may have renamed; check https://github.com/Hal0ai/pi-mono"
         return 0
     fi
     die "Neither npm nor cargo found on PATH. Install Node.js (https://nodejs.org/) or Rust (https://rustup.rs/) first."
