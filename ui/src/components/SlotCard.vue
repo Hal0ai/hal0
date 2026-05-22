@@ -638,14 +638,6 @@ const sparkSvg = computed(() => {
 
     <!-- Stats row -->
     <div class="sc-stats">
-      <div class="sc-stat">
-        <div class="sc-stat-l">T/S</div>
-        <div class="sc-stat-v" :class="{ active: running }">{{ (m.tokens_per_sec || 0).toFixed(1) }}</div>
-      </div>
-      <div class="sc-stat" :title="ttftTitle">
-        <div class="sc-stat-l">TTFT</div>
-        <div class="sc-stat-v" :class="{ active: m.ttft_seconds != null }">{{ fmtTtft(m.ttft_seconds) }}</div>
-      </div>
       <div class="sc-stat" :title="m.kv_cache_usage != null ? 'KV-cache fill — % of model context occupied' : 'KV-cache % unavailable on this build of llama-server'">
         <div class="sc-stat-l">KV</div>
         <div class="sc-stat-v" :class="{ active: m.kv_cache_usage != null }">{{ fmtKv(m.kv_cache_usage) }}</div>
@@ -669,7 +661,17 @@ const sparkSvg = computed(() => {
     <!-- Sparkline -->
     <div v-if="running || hasHistory" class="sc-spark" :title="`gen ${(m.tokens_per_sec||0).toFixed(1)} t/s · prompt ${(m.prompt_tokens_per_sec||0).toFixed(1)} t/s`">
       <div class="sc-spark-inner" v-html="sparkSvg"></div>
-      <span class="sc-spark-label">tps</span>
+      <div class="sc-spark-readouts">
+        <span class="sc-spark-readout">
+          <span class="sc-spark-l">T/S</span>
+          <span class="sc-spark-v" :class="{ active: running }">{{ (m.tokens_per_sec || 0).toFixed(1) }}</span>
+        </span>
+        <span class="sc-spark-sep" aria-hidden="true">·</span>
+        <span class="sc-spark-readout" :title="ttftTitle">
+          <span class="sc-spark-l">TTFT</span>
+          <span class="sc-spark-v" :class="{ active: m.ttft_seconds != null }">{{ fmtTtft(m.ttft_seconds) }}</span>
+        </span>
+      </div>
     </div>
 
     <!-- Footer: hardware + backend chips on the left, lifecycle actions on
@@ -912,16 +914,46 @@ const sparkSvg = computed(() => {
   overflow: hidden;
 }
 .sc-spark-inner :deep(svg) { width: 100%; height: 100%; display: block; }
-.sc-spark-label {
+/* HUD-style readouts pinned to the top-left of the sparkline. The chart
+   beneath continues to render unchanged; if a peak rises behind the
+   numbers it just reads as a backdrop. `pointer-events: none` on the
+   wrapper lets the chart's parent :title still fire on hover; the TTFT
+   readout re-enables pointer events on itself so its own :title can
+   show on hover without stealing the gen/prompt tooltip elsewhere. */
+.sc-spark-readouts {
   position: absolute;
   top: 4px;
   left: 6px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   font-family: var(--font-mono);
+  font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1;
+  pointer-events: none;
+}
+.sc-spark-readout {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.sc-spark-readout + .sc-spark-readout,
+.sc-spark-readout[title] { pointer-events: auto; }
+.sc-spark-l {
   font-size: 9px;
   color: var(--color-fg-faint);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  pointer-events: none;
+}
+.sc-spark-v {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-fg);
+}
+.sc-spark-v.active { color: var(--hal0-accent); }
+.sc-spark-sep {
+  font-size: 10px;
+  color: var(--color-fg-faint);
+  opacity: 0.6;
 }
 
 .sc-foot {
