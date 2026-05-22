@@ -57,20 +57,35 @@ def _installer_script_path() -> Path:
 # file + exec'ing upstream `hermes` is the whole job.
 _WRAPPER_BIN_NAME = "hal0-hermes"
 _WRAPPER_READY_FLAG = "--hal0-ready"
+_UPSTREAM_BIN_NAME = "hermes"
+
+
+def _probe_hermes_upstream() -> bool:
+    """Return True iff upstream ``hermes`` is on PATH.
+
+    This is the **pre-install** gate — the wrapper's whole job is to
+    source the env file and exec upstream ``hermes``, so installing
+    the wrapper without upstream Hermes is pointless. Mirrors the
+    `command -v hermes` check at the top of
+    ``installer/agents/hermes-agent.sh``.
+    """
+    return shutil.which(_UPSTREAM_BIN_NAME) is not None
 
 
 def _probe_wrapper_installed() -> bool:
     """Return True iff the hal0-hermes wrapper is installed and functional.
+
+    This is the **post-install** health check — used by
+    :meth:`HermesDriver.status` and the dashboard's installed-agent row
+    to surface whether the wrapper is wired correctly. NOT used to gate
+    ``install()``; that gates on :func:`_probe_hermes_upstream` because
+    the installer's job *is* to put the wrapper on PATH.
 
     Two cheap checks, AND-ed:
 
     1. ``shutil.which("hal0-hermes")`` resolves (wrapper is on PATH).
     2. ``hal0-hermes --hal0-ready`` returns rc 0 (wrapper is readable,
        executable, and not corrupted).
-
-    Both are runtime-only — no network calls. Wrapper missing or
-    smoke-test failing returns False so the caller raises a clean
-    error rather than the probe itself blowing up.
     """
     bin_path = shutil.which(_WRAPPER_BIN_NAME)
     if bin_path is None:
@@ -97,26 +112,25 @@ class HermesDriver(AgentDriver):
 
     def __init__(self, *, runner: object | None = None, prober: object | None = None) -> None:
         # ``runner`` parallels :class:`PiCoderDriver` — tests inject a
-        # fake subprocess. ``prober`` lets tests force the
-        # wrapper-installed gate without needing a real hal0-hermes on PATH.
+        # fake subprocess. ``prober`` lets tests force the upstream
+        # pre-install gate without needing a real ``hermes`` on PATH.
         self._runner = runner if runner is not None else subprocess
-        self._prober = prober if prober is not None else _probe_wrapper_installed
+        self._prober = prober if prober is not None else _probe_hermes_upstream
 
     # ── AgentDriver protocol ────────────────────────────────────────────
 
     def install(self, *, bearer_token: str | None = None) -> None:
-        # Probe FIRST: the wrapper must be installed and functional
-        # before we shell out. The shell installer
-        # (installer/agents/hermes-agent.sh) is the bootstrap path for
-        # the wrapper itself — driver.install() is the "rewire the
-        # env file with a fresh Bearer token" path, and it refuses
-        # to wire an env file the wrapper can't source.
+        # Pre-flight: upstream ``hermes`` must be on PATH. The wrapper
+        # we're about to install just sources the env file and execs
+        # upstream hermes — installing it without the binary is
+        # pointless. Mirror of `command -v hermes` in
+        # installer/agents/hermes-agent.sh.
         if not self._prober():
             raise HermesUpstreamMissingError(
-                "hal0-hermes wrapper not found or not functional. Run "
-                "`installer/agents/hermes-agent.sh` as root or via "
-                "`hal0 agent install hermes`. Requires upstream `hermes` "
-                "on PATH (pip install --user hermes-agent)."
+                "Upstream `hermes` binary not found on PATH. Install it "
+                "first: `pipx install hermes-agent` (recommended) or "
+                "`pip install --user hermes-agent`. Then retry "
+                "`hal0 agent install hermes`."
             )
 
         script = _installer_script_path()

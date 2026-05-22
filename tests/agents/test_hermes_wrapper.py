@@ -2,9 +2,16 @@
 
 The driver no longer probes upstream `hermes-agent --help` for a
 `--hal0-config` flag (which was never going to ship — the user cannot
-PR upstream NousResearch/hermes-agent). Instead it probes for the
-hal0-owned `hal0-hermes` wrapper that env-file-injects HAL0_* into
-upstream `hermes` on every invocation.
+PR upstream NousResearch/hermes-agent). Instead it ships a hal0-owned
+`hal0-hermes` wrapper that env-file-injects HAL0_* into upstream
+`hermes` on every invocation.
+
+Pre-install gate (driver.install): probe upstream `hermes` is on PATH.
+Installing the wrapper without upstream Hermes is pointless — the
+wrapper just sources the env file and execs upstream hermes.
+
+Post-install health (driver.status): env-file presence + (optionally
+via _probe_wrapper_installed) wrapper functional.
 
 These tests mirror the shape of ``tests/agents/test_pi_coder_shim.py``:
 fake subprocess + fake prober, so the suite stays hermetic — no real
@@ -54,12 +61,12 @@ class _FakeRunner:
 
 
 def _prober_ok() -> bool:
-    """Prober that reports wrapper installed + functional."""
+    """Prober that reports upstream ``hermes`` on PATH."""
     return True
 
 
 def _prober_missing() -> bool:
-    """Prober that reports wrapper missing or non-functional."""
+    """Prober that reports upstream ``hermes`` NOT on PATH."""
     return False
 
 
@@ -68,50 +75,49 @@ def _prober_missing() -> bool:
 
 @pytest.fixture
 def driver(tmp_hal0_home: str) -> HermesDriver:
-    """Driver with default subprocess + a wrapper-installed prober.
+    """Driver with default subprocess + an upstream-present prober.
 
     ``tmp_hal0_home`` (autouse'd via the project conftest) routes
     ``/var/lib/hal0`` and ``/etc/hal0`` under tmp_path so the env file
     writes don't escape the sandbox.
 
-    Tests that need the wrapper-missing branch override
+    Tests that need the upstream-missing branch override
     ``driver._prober`` per-test.
     """
     return HermesDriver(prober=_prober_ok)
 
 
-# ── install: wrapper-missing short-circuit ───────────────────────────────────
+# ── install: upstream-missing short-circuit ──────────────────────────────────
 
 
-def test_install_raises_when_wrapper_missing_before_shelling_out(
+def test_install_raises_when_upstream_hermes_missing(
     tmp_hal0_home: str,
 ) -> None:
-    """If the hal0-hermes wrapper isn't on PATH (or its --hal0-ready
-    probe fails), driver.install() raises HermesUpstreamMissingError
-    BEFORE invoking the installer script. We assert this by injecting
-    a runner that records calls — it should record zero."""
+    """If upstream ``hermes`` isn't on PATH, driver.install() raises
+    HermesUpstreamMissingError BEFORE invoking the installer script
+    (no point shipping a wrapper around a missing binary). Injected
+    runner records calls — it should record zero."""
     runner = _FakeRunner()
     drv = HermesDriver(runner=runner, prober=_prober_missing)
 
-    with pytest.raises(HermesUpstreamMissingError, match="hal0-hermes wrapper"):
+    with pytest.raises(HermesUpstreamMissingError, match="Upstream `hermes`"):
         drv.install(bearer_token="hal0_tok_xyz")
 
-    assert runner.calls == [], "installer script must NOT be shelled out when wrapper probe fails"
+    assert runner.calls == [], "installer script must NOT shell out when upstream hermes is missing"
 
 
-def test_install_error_message_points_to_installer_and_upstream_hermes(
+def test_install_error_message_points_to_pipx_install(
     tmp_hal0_home: str,
 ) -> None:
-    """Error message must tell the operator both how to install the
-    wrapper AND that upstream `hermes` is a prerequisite. Avoids the
-    'Hermes is incompatible' vague-error Slack thread."""
+    """Error message must give the operator an actionable install
+    command (pipx / pip). Avoids the 'Hermes is incompatible' vague
+    Slack thread."""
     drv = HermesDriver(runner=_FakeRunner(), prober=_prober_missing)
     with pytest.raises(HermesUpstreamMissingError) as exc:
         drv.install(bearer_token=None)
     msg = str(exc.value)
-    assert "installer/agents/hermes-agent.sh" in msg
+    assert "pipx install hermes-agent" in msg or "pip install" in msg
     assert "hal0 agent install hermes" in msg
-    assert "hermes" in msg  # upstream binary mention
 
 
 # ── install: happy path ──────────────────────────────────────────────────────
