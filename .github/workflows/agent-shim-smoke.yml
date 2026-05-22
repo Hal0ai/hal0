@@ -1,0 +1,164 @@
+name: Agent shim smoke (pi-coder nightly)
+
+# Nightly end-to-end re-run of installer/agents/pi-coder.sh + an MCP
+# round-trip against the resulting hal0 MCP memory server.
+#
+# Why this exists:
+#   ADR-0004 §3 ("Mitigation for track-latest churn") + PLAN.md §17 risk
+#   row commit hal0 to a nightly smoke that catches upstream pi-coder
+#   contract drift overnight, instead of breaking real installs the next
+#   morning. Pinning pi-coder per hal0 release would freeze users on
+#   stale revisions; track-latest is the chosen tradeoff and this
+#   workflow is the safety net.
+#
+# Runner choice (v0.2):
+#   ubuntu-latest. Graduation to a self-hosted hal0-LXC runner with
+#   Strix Halo passthrough is a post-v0.2 follow-up — for v0.2 the
+#   round-trip only needs the FastAPI/MCP layer to be healthy, not the
+#   NPU/iGPU inference path.
+#
+# Failure handling:
+#   On red, open (or update) a single tracking issue tagged
+#   `agent-shim-broken`. One issue per upstream-broken-us state — we
+#   refuse to spam a fresh ticket every night while the same root cause
+#   is unfixed.
+
+on:
+  schedule:
+    # 04:00 UTC nightly — well after the Asia/Europe push window so any
+    # upstream pi-coder release from the prior day is already cut.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: agent-shim-smoke
+  # Latest nightly wins. We do not queue back-to-back runs.
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write   # required for the failure-issue handling step below
+
+jobs:
+  smoke:
+    name: pi-coder install + MCP round-trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install hal0 (editable + dev extras)
+        # Mirrors integration.yml — gets pip/pydantic/etc primed before
+        # installer/install.sh runs so the FastAPI process can boot.
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Verify Docker on runner
+        # pi-coder.sh and the agent toolboxes rely on docker; surface a
+        # clear error early instead of letting smoke-pi-coder.sh fail
+        # deep inside install.
+        run: |
+          docker version
+          docker info --format '{{.ServerVersion}}'
+
+      - name: Run pi-coder smoke
+        id: smoke
+        # The script is the contract — see scripts/smoke-pi-coder.sh
+        # header for exit-code semantics.
+        run: bash scripts/smoke-pi-coder.sh
+
+      - name: Capture journald on failure
+        if: failure()
+        run: |
+          sudo journalctl -u 'hal0-api*' --no-pager -n 500 > journal-api.log || true
+          sudo journalctl -u 'hal0-mcp*' --no-pager -n 500 > journal-mcp.log || true
+          systemctl status hal0-api.service --no-pager > status-api.txt 2>&1 || true
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-shim-smoke-logs
+          path: |
+            journal-api.log
+            journal-mcp.log
+            status-api.txt
+          if-no-files-found: ignore
+
+  # ── failure-issue handling ────────────────────────────────────────────
+  # Runs only when the smoke job failed. Opens a fresh issue tagged
+  # `agent-shim-broken` if none is open, or comments on the existing one
+  # with the failing run's URL. This guarantees exactly one open ticket
+  # per upstream-broken-us state — no spam, no duplicates.
+  notify:
+    name: Open/update agent-shim-broken issue
+    needs: smoke
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Find or create tracking issue
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const label = 'agent-shim-broken';
+            const runUrl = process.env.RUN_URL;
+            const today = new Date().toISOString().slice(0, 10);
+
+            // Look for any open issue with the label. We want one
+            // tracker per upstream-broken-us state, so we attach to the
+            // first match and never open duplicates.
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: label,
+              per_page: 100,
+            });
+
+            const body = [
+              `Nightly agent-shim smoke failed on ${today}.`,
+              ``,
+              `Run: ${runUrl}`,
+              ``,
+              `This is the track-latest mitigation defined in ADR-0004 §3.`,
+              `Likely cause: upstream pi-coder changed a CLI flag, shim`,
+              `contract, or MCP handshake. Diagnose with the run log +`,
+              `\`agent-shim-smoke-logs\` artifact attached to the run.`,
+            ].join('\n');
+
+            if (open.length === 0) {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                title: `agent-shim-broken: pi-coder nightly failing (${today})`,
+                body,
+                labels: [label],
+              });
+              core.info(`opened issue #${created.data.number}`);
+            } else {
+              const issue = open[0];
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: issue.number,
+                body: `Still failing on ${today}.\n\nRun: ${runUrl}`,
+              });
+              core.info(`updated issue #${issue.number}`);
+            }
