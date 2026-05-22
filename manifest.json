@@ -6,33 +6,33 @@
   "toolbox_images": {
     "vulkan": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-      "digest": "sha256:dd6dbd4c07792d1a7ef98f1a0b8099f3ec7519282bf0b168283fe7148ae76cfd",
+      "digest": "sha256:a970d47c864b4bc83e34a1ebf11216353efc1b3a2340f4dd436086ce454ac856",
       "_notes": "llama.cpp Vulkan backend; default for Strix Halo iGPU"
     },
     "rocm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
-      "digest": "sha256:6141a3d349d04f0dab7aa6c7db9d5a84bfb156e16dc3622f8dcc8b41dd8fa393",
+      "digest": "sha256:a47ca05ea08bc895e355d28153aa60873f1a13919eb40b16876bf9f2827499fd",
       "_notes": "llama.cpp ROCm backend; multi-arch (gfx1030..gfx1151)"
     },
     "flm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
-      "digest": "sha256:561a101f078e93a0d3b9c35ca121c6d23e08ea15d630b61db68712f897666a83",
+      "digest": "sha256:e73c2b29e89356953126916805096fc70e2bcf41e050b5e5f17f8ded34b842aa",
       "_notes": "FastFlowLM on AMD XDNA2 NPU; requires kernel >= 6.11 + amdxdna driver on the host"
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
-      "digest": "sha256:f1f43976bd1677c43876dc29efdb99a238f379114b62668e97a92c81d90d2e0f",
+      "digest": "sha256:bf07e3d5640fc1d009298be0600b62ec24185f80d7c8bed47321742fce17aa31",
       "_notes": "Moonshine STT (CPU/Vulkan); OpenAI-compat /v1/audio/transcriptions + WS"
     },
     "kokoro": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
-      "digest": "sha256:cb6d706dcc58f5b20284fe56636a7c7998f36b78fcaced86c6d80b84573ed2d2",
+      "digest": "sha256:1ac80acc00a2e9d578b077fa0a3f2c3e3f32f4f3da5080f346838e1c5a540456",
       "_notes": "Kokoro-82M TTS (CPU ONNX); OpenAI-compat /v1/audio/speech",
       "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
     },
     "comfyui": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-comfyui:v1",
-      "digest": "sha256:f43fc66cc064109eecf6a2ef20d8bc68b933c122bc46d06ebf1d73a65c22c4c0",
+      "digest": "sha256:f51c97a551b8807bda24193d5c48afae9b14fc84c03fbb9eeb1f12be62dba1dc",
       "_notes": "ComfyUI image-gen on ROCm; SDXL + SD 1.5 + Flux. Translated from OpenAI /v1/images/generations.",
       "_upstream_reference": "https://github.com/comfyanonymous/ComfyUI"
     }
