@@ -373,6 +373,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.tps_events = collections.defaultdict(_new_tps_deque)
 
+    def _new_ttft_deque() -> collections.deque[tuple[float, float]]:
+        return collections.deque(maxlen=128)
+
+    app.state.ttft_events = collections.defaultdict(_new_ttft_deque)
+
     log.info(
         "hal0.api.upstreams_loaded",
         count=len(upstreams.list()),

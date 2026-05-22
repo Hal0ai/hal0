@@ -62,32 +62,60 @@ def _slot_events(app_state: Any, slot_name: str | None) -> Any:
     return events_store[slot_name]
 
 
-def _instrument_streaming_throughput(
-    response: StreamingResponse, app_state: Any, slot_name: str | None
-) -> StreamingResponse:
-    """Wrap a streaming response body iterator with a token counter.
+def _slot_ttft_events(app_state: Any, slot_name: str | None) -> Any:
+    """Per-slot ttft_events deque (mirrors `_slot_events`)."""
+    events_store = getattr(app_state, "ttft_events", None)
+    if events_store is None or not slot_name:
+        return None
+    return events_store[slot_name]
 
-    Appends ``(monotonic, tokens)`` to the per-slot deque so
-    /api/slots/metrics can surface a real current-throughput number per
-    slot. Token count per chunk is approximated by counting ``"delta":``
-    occurrences in the raw SSE bytes — close enough for a throughput
-    indicator and far cheaper than a full SSE parse.
+
+def _instrument_streaming_throughput(
+    response: StreamingResponse,
+    app_state: Any,
+    slot_name: str | None,
+    dispatch_started: float | None = None,
+) -> StreamingResponse:
+    """Wrap a streaming response body iterator with a token counter
+    plus a one-shot TTFT recorder.
+
+    Token throughput: appends ``(monotonic, tokens)`` to the per-slot
+    deque so /api/slots/metrics can surface a real current-throughput
+    number per slot. Token count per chunk is approximated by counting
+    ``"delta":`` occurrences in the raw SSE bytes — close enough for a
+    throughput indicator and far cheaper than a full SSE parse.
+
+    TTFT: when `dispatch_started` is provided, the first chunk that
+    carries at least one ``"delta":`` marker records
+    ``(monotonic, monotonic - dispatch_started)`` into the per-slot
+    ttft deque. We key off the first content delta (not the first
+    arbitrary chunk) because llama-server emits an initial role-only
+    chunk before any generated tokens — that role chunk arrives in
+    microseconds after prefill and would mask the real prefill cost.
     """
     original = response.body_iterator
     events = _slot_events(app_state, slot_name)
-    if events is None:
+    ttft_events = _slot_ttft_events(app_state, slot_name) if dispatch_started is not None else None
+    if events is None and ttft_events is None:
         return response
+    ttft_pending = ttft_events is not None  # one-shot per response
 
     async def _counting() -> Any:
+        nonlocal ttft_pending
         async for chunk in original:
             if isinstance(chunk, (bytes, bytearray)):
                 tokens = chunk.count(b'"delta":')
-                if tokens > 0:
-                    events.append((time.monotonic(), tokens))
             elif isinstance(chunk, str):
                 tokens = chunk.count('"delta":')
-                if tokens > 0:
-                    events.append((time.monotonic(), tokens))
+            else:
+                tokens = 0
+            if tokens > 0:
+                now = time.monotonic()
+                if events is not None:
+                    events.append((now, tokens))
+                if ttft_pending and ttft_events is not None and dispatch_started is not None:
+                    ttft_events.append((now, max(0.0, now - dispatch_started)))
+                    ttft_pending = False
             yield chunk
 
     response.body_iterator = _counting()
@@ -170,9 +198,18 @@ async def _dispatch_and_forward(
     if last_used is not None and call.upstream_name and call.resolved_model:
         last_used[call.upstream_name] = call.resolved_model
 
+    # Capture TTFT against the moment we actually hand off to forward()
+    # — anything before this point (auth, body parse, dispatcher
+    # routing) is local overhead, not prefill cost.
+    dispatch_started = time.monotonic()
     response = await dispatcher.forward(call)
     if isinstance(response, StreamingResponse):
-        return _instrument_streaming_throughput(response, request.app.state, call.upstream_name)
+        return _instrument_streaming_throughput(
+            response,
+            request.app.state,
+            call.upstream_name,
+            dispatch_started=dispatch_started,
+        )
     if isinstance(response, Response) and getattr(response, "body", None):
         _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
     return response

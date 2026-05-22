@@ -1,6 +1,7 @@
 .PHONY: help install dev test test-unit test-integration release-test release-test-report \
         harness harness-report harness-clean \
-        lint fmt typecheck ui-install ui-dev ui-build clean
+        lint fmt typecheck ui-install ui-dev ui-build clean \
+        proto-ttft proto-ttft-live
 
 # ── hal0-test LXC connection knobs (release-gate) ───────────────────────────
 # Override on the command line, e.g.:
@@ -109,6 +110,15 @@ ui-dev:
 
 ui-build:
 	cd ui && npm run build
+
+# ── throwaway prototypes ──────────────────────────────────────────────────
+# scripts/prototype_ttft/ — TTFT + KV-cache % measurement and aggregation.
+# Delete once the model is validated and lifted into src/hal0/slots/.
+proto-ttft:
+	cd scripts/prototype_ttft && python3 tui.py
+
+proto-ttft-live:
+	cd scripts/prototype_ttft && python3 live_probe.py
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

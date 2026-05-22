@@ -240,6 +240,36 @@ def _per_slot_local_tps(request: Request, window_s: float = 5.0) -> dict[str, fl
     return {name: _tps_from_events(events, window_s) for name, events in store.items()}
 
 
+def _per_slot_ttft(request: Request) -> dict[str, dict[str, float]]:
+    """Per-slot TTFT view — latest sample + windowed mean.
+
+    Reads the per-name ttft_events deque populated by
+    `v1._instrument_streaming_throughput` and returns a dict of
+    ``{slot_name: {"ttft_seconds": latest, "ttft_avg_seconds": mean}}``.
+    Slots without any in-window sample are simply absent from the
+    result so the UI can render '—' rather than a misleading zero.
+    """
+    store = getattr(request.app.state, "ttft_events", None)
+    if not store:
+        return {}
+    from hal0.slots.ttft_samples import samples_from_events
+
+    out: dict[str, dict[str, float]] = {}
+    for name, events in store.items():
+        view = samples_from_events(events)
+        cur = view.current_ttft()
+        avg = view.avg_ttft()
+        if cur is None and avg is None:
+            continue
+        row: dict[str, float] = {}
+        if cur is not None:
+            row["ttft_seconds"] = cur
+        if avg is not None:
+            row["ttft_avg_seconds"] = avg
+        out[name] = row
+    return out
+
+
 async def _systemd_show(unit: str, *props: str) -> dict[str, str]:
     """Return ``systemctl show -p <prop>...`` parsed into a dict.
 
@@ -505,6 +535,19 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
         for key in ("mem_rss_mb", "uptime_seconds", "requests_processing"):
             if not entry.get(key):
                 entry[key] = local.get(key, 0)
+        # KV-cache is a gauge — present only on llama-backed slots,
+        # which the remote upstream may not know about. Always prefer
+        # the local scrape when we have one.
+        if "kv_cache_usage" in local:
+            entry["kv_cache_usage"] = local["kv_cache_usage"]
+    # TTFT samples are captured on the dispatcher's streaming wrapper
+    # and only exist locally — fold them in last so they win.
+    for name, ttft in _per_slot_ttft(request).items():
+        entry = merged.get(name)
+        if not isinstance(entry, dict):
+            entry = {"name": name}
+            merged[name] = entry
+        entry.update(ttft)
     return merged
 
 

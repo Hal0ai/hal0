@@ -411,6 +411,33 @@ function fmtUptime(s) {
   return `${mins}m`
 }
 
+// TTFT — time-to-first-token, measured at the dispatcher: the gap
+// between forwarding the request and the first emitted SSE chunk.
+// '—' when no in-window sample (slot idle or just started).
+function fmtTtft(s) {
+  if (s == null || !Number.isFinite(s)) return '—'
+  if (s < 1) return `${Math.round(s * 1000)}ms`
+  return `${s.toFixed(2)}s`
+}
+
+// KV-cache % is a gauge scraped from the slot's llama-server /metrics.
+// Older Vulkan/CPU builds don't emit the gauge — shows '—' there
+// rather than a misleading zero.
+function fmtKv(v) {
+  if (v == null || !Number.isFinite(v)) return '—'
+  return `${(v * 100).toFixed(0)}%`
+}
+
+const ttftTitle = computed(() => {
+  const cur = props.metrics?.ttft_seconds
+  const avg = props.metrics?.ttft_avg_seconds
+  if (cur == null) return 'TTFT — no recent samples'
+  const ms = (x) => `${Math.round(x * 1000)} ms`
+  return avg != null && avg !== cur
+    ? `TTFT — latest ${ms(cur)} · 60s avg ${ms(avg)}`
+    : `TTFT — latest ${ms(cur)}`
+})
+
 const hasHistory = computed(() => {
   const d = props.sparkData
   return !!(d && ((d.tps && d.tps.length > 1) || (d.pps && d.pps.length > 1)))
@@ -614,6 +641,14 @@ const sparkSvg = computed(() => {
       <div class="sc-stat">
         <div class="sc-stat-l">T/S</div>
         <div class="sc-stat-v" :class="{ active: running }">{{ (m.tokens_per_sec || 0).toFixed(1) }}</div>
+      </div>
+      <div class="sc-stat" :title="ttftTitle">
+        <div class="sc-stat-l">TTFT</div>
+        <div class="sc-stat-v" :class="{ active: m.ttft_seconds != null }">{{ fmtTtft(m.ttft_seconds) }}</div>
+      </div>
+      <div class="sc-stat" :title="m.kv_cache_usage != null ? 'KV-cache fill — % of model context occupied' : 'KV-cache % unavailable on this build of llama-server'">
+        <div class="sc-stat-l">KV</div>
+        <div class="sc-stat-v" :class="{ active: m.kv_cache_usage != null }">{{ fmtKv(m.kv_cache_usage) }}</div>
       </div>
       <div class="sc-stat">
         <div class="sc-stat-l">ACT</div>

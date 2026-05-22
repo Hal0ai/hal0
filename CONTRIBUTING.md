@@ -155,3 +155,22 @@ needs the env var. Live-mode adjusts test timeouts (180s per spec,
 3. Keep each spec <90s. If you need a `data-testid`, document the
    addition in the PR description so the lid on UI churn stays low.
 
+## Reasoning tools
+
+Some chunks of hal0 have a *teaching prototype* checked in alongside
+the production code — a tiny TUI you can drive by keystroke to feel
+out the data model before changing it. These aren't tests; they're
+debugger-replacements for design questions.
+
+- `scripts/prototype_ttft/` — TTFT + KV-cache aggregation model that
+  feeds the dashboard's per-slot tiles and fleet-avg throughput card.
+  See `docs/internal/metrics-prototype.md`.
+
+  ```sh
+  ssh -t hal0 'cd /opt/hal0 && make proto-ttft'        # logic TUI
+  ssh    hal0 'cd /opt/hal0 && make proto-ttft-live'   # client-side validator
+  ```
+
+If you're tweaking the rule that decides "should this slot count
+toward the fleet average?", start in the TUI.
+

@@ -179,6 +179,37 @@ const showNpuCard = computed(
 const totalTps = computed(() =>
   Object.values(metrics.value).reduce((a, m) => a + (m?.tokens_per_sec ?? m?.tps ?? 0), 0),
 )
+
+// Fleet avg TTFT — mean of per-slot avg TTFT across slots that have a
+// recent sample. Slots without data are excluded (so the avg doesn't
+// drop to zero just because STT/TTS are idle). Matches the rule
+// validated in `scripts/prototype_ttft/`.
+const avgTtftMs = computed(() => {
+  const samples = Object.values(metrics.value)
+    .map((m) => m?.ttft_avg_seconds ?? m?.ttft_seconds)
+    .filter((v) => v != null && Number.isFinite(v))
+  if (!samples.length) return null
+  return (samples.reduce((a, v) => a + v, 0) / samples.length) * 1000
+})
+
+// Fleet avg KV-cache % — mean over slots that report the gauge.
+// Non-llama slots (and llama builds without the metric) are absent
+// from the dict and naturally excluded.
+const avgKvPct = computed(() => {
+  const samples = Object.values(metrics.value)
+    .map((m) => m?.kv_cache_usage)
+    .filter((v) => v != null && Number.isFinite(v))
+  if (!samples.length) return null
+  return (samples.reduce((a, v) => a + v, 0) / samples.length) * 100
+})
+
+function fmtAvgTtft(v) {
+  if (v == null) return '—'
+  return v < 1000 ? `${Math.round(v)}` : `${(v / 1000).toFixed(1)}`
+}
+function fmtAvgTtftUnit(v) {
+  return v == null ? '' : v < 1000 ? 'ms' : 's'
+}
 const tputSparkPath = computed(() => {
   const series = aggHistory.value.tps
   if (!series.length) return ''
@@ -380,6 +411,18 @@ loadChatModels()
           <div class="stat-value">
             {{ totalTps.toFixed(0) }}<span class="stat-denom">tok/s</span>
           </div>
+          <div class="stat-sub stat-tput-row">
+            <div class="stat-tput-cell" title="Fleet avg TTFT — mean across slots with recent samples">
+              <span class="stat-tput-l">TTFT</span>
+              <span class="stat-tput-v">{{ fmtAvgTtft(avgTtftMs) }}</span>
+              <span class="stat-tput-u">{{ fmtAvgTtftUnit(avgTtftMs) || '—' }}</span>
+            </div>
+            <div class="stat-tput-cell" title="Fleet avg KV-cache fill — mean across slots that report the gauge">
+              <span class="stat-tput-l">KV</span>
+              <span class="stat-tput-v">{{ avgKvPct == null ? '—' : avgKvPct.toFixed(0) }}</span>
+              <span class="stat-tput-u">{{ avgKvPct == null ? '' : '%' }}</span>
+            </div>
+          </div>
           <svg class="stat-spark" viewBox="0 0 320 36" preserveAspectRatio="none" aria-hidden="true">
             <path :d="tputAreaPath" fill="currentColor" opacity="0.12" />
             <path :d="tputSparkPath" fill="none" stroke="currentColor" stroke-width="1.4" />
@@ -561,6 +604,11 @@ loadChatModels()
 .stat-tput { display: flex; flex-direction: column; }
 .stat-tput .stat-value { margin-bottom: 4px; }
 .stat-tput .stat-denom { margin-left: 4px; font-size: 13px; }
+.stat-tput-row { display: flex; gap: 14px; margin: 2px 0 6px; }
+.stat-tput-cell { display: inline-flex; align-items: baseline; gap: 4px; }
+.stat-tput-l { font-size: 10px; color: var(--color-fg-faint); letter-spacing: 0.5px; text-transform: uppercase; }
+.stat-tput-v { font-size: 13px; color: var(--color-fg); font-variant-numeric: tabular-nums; }
+.stat-tput-u { font-size: 10.5px; color: var(--color-fg-faint); }
 .stat-spark { width: 100%; height: 30px; color: var(--hal0-accent); margin-top: auto; }
 
 /* ── Unified memory bar ─────────────────────────────────────────── */
