@@ -17,7 +17,6 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque
 
 
 @dataclass
@@ -31,7 +30,7 @@ class SlotSamples:
     """
 
     window_s: float = 60.0
-    ttft_samples: Deque[tuple[float, float]] = field(
+    ttft_samples: deque[tuple[float, float]] = field(
         default_factory=lambda: deque(maxlen=128)
     )
     inflight: dict[str, float] = field(default_factory=dict)
