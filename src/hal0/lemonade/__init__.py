@@ -31,6 +31,10 @@ from hal0.lemonade.errors import (
 )
 from hal0.lemonade.idle import IdleDriver
 from hal0.lemonade.preload import PreloadError, preload_validate
+from hal0.lemonade.server_models_gen import (
+    generate_server_models,
+    write_server_models,
+)
 
 __all__ = [
     "IdleDriver",
@@ -41,5 +45,7 @@ __all__ = [
     "LemonadeTimeoutError",
     "LemonadeUnavailableError",
     "PreloadError",
+    "generate_server_models",
     "preload_validate",
+    "write_server_models",
 ]

@@ -52,6 +52,10 @@ from hal0.capabilities.config import (
 )
 from hal0.capabilities.orchestrator import _CHILD_TO_CAPABILITY
 from hal0.config.loader import write_toml_atomic
+from hal0.lemonade.server_models_gen import (
+    generate_server_models,
+    write_server_models,
+)
 from hal0.registry.store import ModelRegistry
 
 app = typer.Typer(
@@ -370,3 +374,70 @@ def migrate_to_lemonade(
         f"v{before_version} → v{CAPABILITIES_SCHEMA_VERSION_CURRENT} "
         f"(backup at {backup.name})."
     )
+
+
+# ── sync (regenerate server_models.json from registry — issue #141) ──────────
+
+# Default paths for the sync command. Override-able for tests + dev installs.
+_DEFAULT_REGISTRY_PATH = Path("/var/lib/hal0/registry/registry.toml")
+_DEFAULT_SERVER_MODELS_PATH = Path("/opt/lemonade/resources/server_models.json")
+
+
+@app.command()
+def sync(
+    registry: Path = typer.Option(
+        _DEFAULT_REGISTRY_PATH,
+        "--registry",
+        help="Path to hal0 registry.toml.",
+    ),
+    output: Path = typer.Option(
+        _DEFAULT_SERVER_MODELS_PATH,
+        "--output",
+        help="Path to Lemonade's server_models.json.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show entry count and recipe summary without writing the file.",
+    ),
+) -> None:
+    """Regenerate Lemonade's ``server_models.json`` from hal0's registry.
+
+    This is the runtime entry point for issue #141 (the install-time hook
+    runs the same code path via ``python -m hal0.lemonade.server_models_gen``).
+    Lemonade re-scans ``resources/server_models.json`` on its next probe,
+    so a sync does NOT require restarting ``lemond.service`` — the next
+    ``/v1/load`` or ``/v1/models`` call sees the new entries.
+
+    Idempotent: re-running with an unchanged registry produces an identical
+    byte stream. Safe to invoke from cron, post-pull hooks, or operators.
+    """
+    catalog = generate_server_models(registry)
+
+    if not catalog:
+        console.print(
+            f"[yellow]warning[/yellow] — no models in {registry}; would write an empty catalog."
+        )
+
+    # Summary table: model id + recipe + first label (the Lemonade type driver).
+    table = Table(title=f"server_models.json ({len(catalog)} entries)")
+    table.add_column("model_id", style="bold")
+    table.add_column("recipe")
+    table.add_column("labels", overflow="fold")
+    table.add_column("checkpoint", overflow="fold")
+    for mid, entry in catalog.items():
+        labels = entry.get("labels") or []
+        table.add_row(
+            mid,
+            entry.get("recipe", "—"),
+            ", ".join(labels) or "(llm)",
+            entry.get("checkpoint", "—"),
+        )
+    console.print(table)
+
+    if dry_run:
+        console.print(f"\n[yellow]--dry-run[/yellow] — not writing {output}.")
+        raise typer.Exit(0)
+
+    write_server_models(registry, output)
+    console.print(f"\n[green]wrote[/green] {len(catalog)} entries to {output}.")

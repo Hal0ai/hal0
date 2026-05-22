@@ -764,6 +764,41 @@ else
     warn "skipping probe (HAL0_NO_PROBE=1)"
 fi
 
+# ── Lemonade server_models.json generation (issue #141) ───────────────────
+# Convert hal0's registry.toml into the curated catalog Lemonade Server
+# loads from ``resources/server_models.json``. Must run BEFORE
+# ``systemctl enable --now lemond`` so the daemon picks up our entries on
+# first start (Lemonade re-reads the file on probe, so a later sync
+# does not strictly require a restart).
+#
+# Guarded by the presence of the Lemonade resources directory: installs
+# that have not yet bundled Lemonade (issue #140 lands the tarball) are
+# skipped silently. Once #140 lands, this block becomes the canonical
+# install-time wiring without further changes here.
+#
+# Idempotent: re-running install.sh overwrites server_models.json via
+# atomic tempfile + rename. See ADR-0006 §4 + ``src/hal0/lemonade/server_models_gen.py``.
+ui_step "Lemonade server_models.json"
+
+LEMONADE_RESOURCES="/opt/lemonade/resources"
+LEMONADE_SERVER_MODELS="${LEMONADE_RESOURCES}/server_models.json"
+REGISTRY_TOML="${VAR_DIR}/registry/registry.toml"
+
+if [[ "${DEV_MODE}" -eq 0 && -d "${LEMONADE_RESOURCES}" ]]; then
+    if [[ ! -f "${REGISTRY_TOML}" ]]; then
+        warn "registry.toml not found at ${REGISTRY_TOML}; writing empty server_models.json"
+    fi
+    if "${VENV_DIR}/bin/python" -m hal0.lemonade.server_models_gen \
+        --registry "${REGISTRY_TOML}" \
+        --output "${LEMONADE_SERVER_MODELS}"; then
+        info "wrote ${LEMONADE_SERVER_MODELS}"
+    else
+        warn "server_models_gen failed; Lemonade will fall back to its bundled catalog"
+    fi
+else
+    info "skipping (Lemonade resources dir ${LEMONADE_RESOURCES} not present yet)"
+fi
+
 ui_step "Service start"
 
 if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
