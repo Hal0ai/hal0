@@ -208,4 +208,196 @@ test.describe('Phase 8 — agent surface', () => {
     // Row is gone; badge gone.
     await expect(page.locator('.bell .badge')).toHaveCount(0)
   })
+
+  /* ── New γ coverage for ADR-0004 §5 gaps ─────────────────────────── */
+
+  test('@agent-approval deny clears the row + badge', async ({
+    page,
+    cleanState: _cleanState,
+  }) => {
+    await page.goto('/')
+    await waitForSse(page, '/api/agent/approvals/events')
+
+    // Enqueue + verify the badge appears.
+    await emitSse(page, '/api/agent/approvals/events', {
+      kind: 'enqueued',
+      entry: {
+        id: 'a-deny-1',
+        tool: 'model_delete',
+        args: { model_id: 'qwen3:0.6b' },
+        client_id: 'pi-coder',
+        enqueued_at: Date.now() / 1000,
+        state: 'pending',
+        hit_count: 1,
+        decided_at: null,
+        result: null,
+        error: null,
+      },
+    })
+    await expect(page.locator('.bell .badge')).toHaveText('1')
+
+    // Open modal, click Deny, intercept the POST.
+    await page.locator('.bell').click()
+    const modal = page.locator('.modal-card')
+    await expect(modal).toBeVisible()
+    await expect(modal.getByText('model_delete')).toBeVisible()
+
+    const denyReq = page.waitForRequest(
+      (req) =>
+        /\/api\/agent\/approvals\/a-deny-1\/deny$/.test(req.url()) &&
+        req.method() === 'POST',
+    )
+    await modal.getByRole('button', { name: /^Deny$/ }).click()
+    await denyReq
+
+    // Store optimistically clears on deny resolve; badge gone, row gone.
+    await expect(page.locator('.bell .badge')).toHaveCount(0)
+    await expect(modal.getByText('model_delete')).toHaveCount(0)
+  })
+
+  test('@agent-approval badge decrements as multi-pending get approved', async ({
+    page,
+    cleanState: _cleanState,
+  }) => {
+    await page.goto('/')
+    await waitForSse(page, '/api/agent/approvals/events')
+
+    // Drive two enqueueds — badge ticks to 2.
+    const baseEntry = {
+      tool: 'model_pull',
+      args: {},
+      client_id: 'pi-coder',
+      enqueued_at: Date.now() / 1000,
+      state: 'pending',
+      hit_count: 1,
+      decided_at: null,
+      result: null,
+      error: null,
+    }
+    await emitSse(page, '/api/agent/approvals/events', {
+      kind: 'enqueued',
+      entry: { ...baseEntry, id: 'a-multi-1', args: { model_id: 'qwen3:0.6b' } },
+    })
+    await emitSse(page, '/api/agent/approvals/events', {
+      kind: 'enqueued',
+      entry: { ...baseEntry, id: 'a-multi-2', args: { model_id: 'phi3-mini' } },
+    })
+    await expect(page.locator('.bell .badge')).toHaveText('2')
+
+    // Approve #1 — badge ticks down to 1. The store optimistically
+    // drops the row on the approve resolve (per stores/agent.js:182).
+    await page.locator('.bell').click()
+    const modal = page.locator('.modal-card')
+    await expect(modal).toBeVisible()
+    const row1 = modal.locator('.approval-row', { hasText: 'qwen3:0.6b' })
+    await expect(row1).toBeVisible()
+    const approve1 = page.waitForRequest(
+      (req) =>
+        /\/api\/agent\/approvals\/a-multi-1\/approve$/.test(req.url()) &&
+        req.method() === 'POST',
+    )
+    await row1.getByRole('button', { name: /^Approve$/ }).click()
+    await approve1
+    await expect(page.locator('.bell .badge')).toHaveText('1')
+
+    // Approve #2 — badge gone.
+    const row2 = modal.locator('.approval-row', { hasText: 'phi3-mini' })
+    await expect(row2).toBeVisible()
+    const approve2 = page.waitForRequest(
+      (req) =>
+        /\/api\/agent\/approvals\/a-multi-2\/approve$/.test(req.url()) &&
+        req.method() === 'POST',
+    )
+    await row2.getByRole('button', { name: /^Approve$/ }).click()
+    await approve2
+    await expect(page.locator('.bell .badge')).toHaveCount(0)
+  })
+
+  test('@agent-approval badge persists across reload via GET backfill', async ({
+    page,
+    mockState,
+    cleanState: _cleanState,
+  }) => {
+    await page.goto('/')
+    await waitForSse(page, '/api/agent/approvals/events')
+
+    // Step 1: emit the pending via SSE → badge '1'.
+    const entry = {
+      id: 'a-persist-1',
+      tool: 'slot_restart',
+      args: { slot: 'primary' },
+      client_id: 'pi-coder',
+      enqueued_at: Date.now() / 1000,
+      state: 'pending',
+      hit_count: 1,
+      decided_at: null,
+      result: null,
+      error: null,
+    }
+    await emitSse(page, '/api/agent/approvals/events', { kind: 'enqueued', entry })
+    await expect(page.locator('.bell .badge')).toHaveText('1')
+
+    // Step 2: stage the GET-backfill response and reload. After reload
+    // the store calls fetchPending() during ensureBootstrapped, so the
+    // backfill is what populates the badge on the fresh page.
+    mockState.agentApprovals = [entry]
+    await page.reload()
+
+    // SSE re-opens after reload; backfill from GET re-seeds pending.
+    await waitForSse(page, '/api/agent/approvals/events')
+    await expect(page.locator('.bell .badge')).toHaveText('1')
+  })
+
+  test('@agent-approval clear-all denies every pending', async ({
+    page,
+    cleanState: _cleanState,
+  }) => {
+    await page.goto('/')
+    await waitForSse(page, '/api/agent/approvals/events')
+
+    // Emit three enqueueds; badge climbs to '3'.
+    const baseEntry = {
+      tool: 'model_pull',
+      args: {},
+      client_id: 'pi-coder',
+      enqueued_at: Date.now() / 1000,
+      state: 'pending',
+      hit_count: 1,
+      decided_at: null,
+      result: null,
+      error: null,
+    }
+    for (const i of [1, 2, 3]) {
+      await emitSse(page, '/api/agent/approvals/events', {
+        kind: 'enqueued',
+        entry: { ...baseEntry, id: `a-clear-${i}`, args: { model_id: `m-${i}` } },
+      })
+    }
+    await expect(page.locator('.bell .badge')).toHaveText('3')
+
+    // Open modal.
+    await page.locator('.bell').click()
+    const modal = page.locator('.modal-card')
+    await expect(modal).toBeVisible()
+
+    // Track all three deny POSTs. stores/agent.js:clearAll loops the
+    // pending list and calls deny() on each entry; the existing default
+    // route mock for /deny is already in beforeEach.
+    const denyIds = new Set<string>()
+    page.on('request', (req) => {
+      const m = req.url().match(/\/api\/agent\/approvals\/([^/]+)\/deny$/)
+      if (m && req.method() === 'POST') denyIds.add(m[1])
+    })
+
+    // window.confirm is the user-facing gate for Clear-all — auto-accept.
+    page.once('dialog', (d) => d.accept())
+    await modal.getByRole('button', { name: /^Clear all$/ }).click()
+
+    // All three deny POSTs fired; badge cleared.
+    await expect.poll(() => denyIds.size, { timeout: 5000 }).toBe(3)
+    expect(denyIds.has('a-clear-1')).toBe(true)
+    expect(denyIds.has('a-clear-2')).toBe(true)
+    expect(denyIds.has('a-clear-3')).toBe(true)
+    await expect(page.locator('.bell .badge')).toHaveCount(0)
+  })
 })

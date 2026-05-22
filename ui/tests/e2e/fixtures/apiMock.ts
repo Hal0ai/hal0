@@ -111,6 +111,10 @@ export type MockState = {
   installProbeCount: number
   /** Map of slot snapshots keyed by name — used for slot lifecycle. */
   slotSnapshots: Record<string, any>
+  /** Approval entries returned by GET /api/agent/approvals (Phase 8). */
+  agentApprovals: any[]
+  /** Installed bundled agents returned by GET /api/agents (Phase 8). */
+  agentInstalled: any[]
 }
 
 export function makeMockState(): MockState {
@@ -127,6 +131,8 @@ export function makeMockState(): MockState {
     installCompleteCount: 0,
     installProbeCount: 0,
     slotSnapshots: {},
+    agentApprovals: [],
+    agentInstalled: [],
   }
 }
 
@@ -199,6 +205,25 @@ export async function installDefaultMocks(page: Page, state: MockState) {
     }
     return json(route, { models: state.models })
   })
+
+  /* Agent surface (Phase 8). The header bell mounts on every page and
+     hits these two endpoints via ensureBootstrapped(); without explicit
+     routes the calls would fall through to the catch-all and yield
+     [], which is fine but routing here lets specs seed
+     `mockState.agentApprovals` / `agentInstalled` without per-spec
+     boilerplate.
+
+     Note: the EventSource for /api/agent/approvals/events is NOT routed
+     here — specs that drive SSE install the sseHarness which replaces
+     window.EventSource wholesale before navigation. Specs that don't
+     install the harness should add an empty-200 stub for the events URL
+     to keep the real EventSource from hitting the vite proxy. */
+  await page.route('**/api/agents', (route) =>
+    json(route, { agents: state.agentInstalled, count: state.agentInstalled.length }),
+  )
+  await page.route('**/api/agent/approvals', (route) =>
+    json(route, { approvals: state.agentApprovals }),
+  )
 }
 
 /* ── Test fixture wiring ─────────────────────────────────────────── */

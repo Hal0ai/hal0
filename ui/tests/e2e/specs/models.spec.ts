@@ -157,3 +157,57 @@ test('pulls a custom HF model, assigns it to primary, deletes it', async ({
     mockState.status.slots.find((s) => s.name === 'primary')?.model,
   ).toBeNull()
 })
+
+/**
+ * γ — inline pending-approval chip on Models rows (ADR-0004 §5).
+ *
+ * GET /api/agent/approvals returns one model_delete entry keyed on a
+ * known model id. The row's AgentPendingChip should render and link to
+ * /agent?tab=inbox.
+ */
+test('@agent-approval renders inline pending chip on a model row', async ({
+  page,
+  mockState,
+  cleanState: _cleanState,
+}) => {
+  // Seed the registry so a row exists for the chip to attach to. The
+  // store's pendingForResource('model', target) matches on
+  // args.model_id / args.id / args.name.
+  const MODEL_ID = 'phi3-mini'
+  mockState.models.push({ id: MODEL_ID, name: 'Phi-3 Mini', size_gb: 2.4 })
+
+  // Seed the approvals backfill. apiMock.ts's default route reads from
+  // mockState.agentApprovals so the bell + the row chip share state.
+  mockState.agentApprovals = [
+    {
+      id: 'a-model-1',
+      tool: 'model_delete',
+      args: { model_id: MODEL_ID },
+      client_id: 'pi-coder',
+      enqueued_at: Date.now() / 1000,
+      state: 'pending',
+      hit_count: 1,
+      decided_at: null,
+      result: null,
+      error: null,
+    },
+  ]
+
+  await page.goto('/models')
+
+  // Header bell knows about the one pending — sanity check that the
+  // store's bootstrap fetch ran before we assert on the inline chip.
+  await expect(page.locator('.bell .badge')).toHaveText('1')
+
+  // Row chip is present and labels the gated tool.
+  const row = page.locator('tr', { hasText: 'Phi-3 Mini' })
+  await expect(row).toBeVisible()
+  const chip = row.locator('.pending-chip')
+  await expect(chip).toHaveCount(1)
+  await expect(chip).toContainText('model_delete')
+
+  // Click chip → URL hops to the agent inbox tab. Don't bother fully
+  // rendering /agent — the route navigation itself is the contract.
+  await chip.click()
+  await expect(page).toHaveURL(/\/agent\?tab=inbox$/)
+})

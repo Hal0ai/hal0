@@ -152,3 +152,57 @@ test('creates a slot, walks state transitions, restarts, unloads, deletes', asyn
   })
   await expect(page.locator('.slot-card', { hasText: 'test-vulkan' })).toHaveCount(0)
 })
+
+/**
+ * γ — inline pending-approval chip on Slots cards (ADR-0004 §5).
+ *
+ * Mirrors the Models inline-chip test: GET /api/agent/approvals returns
+ * one slot_delete entry for a known slot, and the slot card should
+ * render an AgentPendingChip pointing at /agent?tab=inbox.
+ */
+test('@agent-approval renders inline pending chip on a slot card', async ({
+  page,
+  mockState,
+  cleanState: _cleanState,
+}) => {
+  // Seed a custom slot so it actually shows in the grid. Built-in
+  // slots are filtered into capability cards, not the slot grid.
+  mockState.status.slots.push({
+    name: 'test-vulkan',
+    backend: 'vulkan',
+    model: null,
+    port: 8081,
+    status: 'offline',
+  })
+
+  // pendingForResource('slot', target) matches on args.slot or args.name.
+  mockState.agentApprovals = [
+    {
+      id: 'a-slot-1',
+      tool: 'slot_delete',
+      args: { slot: 'test-vulkan' },
+      client_id: 'pi-coder',
+      enqueued_at: Date.now() / 1000,
+      state: 'pending',
+      hit_count: 1,
+      decided_at: null,
+      result: null,
+      error: null,
+    },
+  ]
+
+  await page.goto('/slots')
+
+  // Bell badge confirms the bootstrap fetch landed.
+  await expect(page.locator('.bell .badge')).toHaveText('1')
+
+  // Slot card chip — scoped to the .slot-pending sibling next to the
+  // matching SlotCard.
+  const cardCell = page.locator('.slot-card', { hasText: 'test-vulkan' }).locator('..')
+  const chip = cardCell.locator('.pending-chip')
+  await expect(chip).toHaveCount(1)
+  await expect(chip).toContainText('slot_delete')
+
+  await chip.click()
+  await expect(page).toHaveURL(/\/agent\?tab=inbox$/)
+})
