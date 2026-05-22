@@ -9,10 +9,10 @@ hal0 v0.2 ships **bundled agent apps** — third-party agents installed
 alongside hal0, prewired to use hal0 as their local AI provider and to
 consume hal0's [MCP servers](./mcp.md). Two options ship at launch:
 
-| Agent          | Shape   | Upstream                | Memory                      |
-|----------------|---------|-------------------------|-----------------------------|
-| `pi-coder`     | CLI     | `badlogic/pi-mono`      | `pi-memory-md` + hal0 MCP   |
-| `Hermes-Agent` | Service | Hermes upstream (user-owned) | hal0 MCP                |
+| Agent          | Shape   | Upstream                                     | Memory                      |
+|----------------|---------|----------------------------------------------|-----------------------------|
+| `pi-coder`     | CLI     | `Hal0ai/pi-mono` (fork of `badlogic/pi-mono`) | `pi-memory-md` + hal0 MCP   |
+| `Hermes-Agent` | Service | Hermes upstream (user-owned)                 | hal0 MCP                    |
 
 See [ADR-0004](../internal/adr/0004-agents.md) for the full design.
 
@@ -110,6 +110,17 @@ hal0 owns `installer/agents/pi-coder.sh`. The shim:
 Both memory layers coexist: `pi-memory-md` is project-scoped (and what
 pi-coder benchmarks well at), hal0's memory MCP is cross-session,
 cross-agent, cross-app.
+
+#### Fork policy
+
+`pi-coder` installs from the hal0-owned hard fork
+[`Hal0ai/pi-mono`](https://github.com/Hal0ai/pi-mono) — a mirror of the
+upstream (`badlogic/pi-mono`, since renamed to `earendil-works/pi`).
+We do not hold write access on the upstream, and owning the integration
+surface keeps the rebase tax predictable and symmetric with the
+upstream-owned Hermes-Agent path. The fork tracks latest with no patches
+applied yet; re-sync with `bash scripts/fork-pi-mono.sh`. Nightly smoke
+test (see below) catches upstream breakage.
 
 ### Hermes-Agent — upstream-owned integration
 
