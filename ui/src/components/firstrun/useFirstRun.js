@@ -123,6 +123,15 @@ export function useFirstRun() {
     hfToken: '',
     // step 6 — license
     licenseAccepted: false,
+    // step 7 — bundled agent (Phase 8 / ADR-0004). Default 'none' so the
+    // wizard never silently installs a third-party app; user must
+    // deliberately pick one. 'pi-coder' is CLI shape, 'hermes' is
+    // service shape (and requires Hermes-side hal0-awareness probe).
+    agentChoice: 'none',
+    // Whether Hermes is hal0-aware on the upstream side. Server-side
+    // probe (TBD endpoint) sets this; until it lands the option stays
+    // selectable but the install path will 409 with a clean message.
+    hermesHal0Aware: true,
   })
 
   // ── Per-model pull tracking (step 7) ──────────────────────────────
@@ -607,6 +616,25 @@ export function useFirstRun() {
     await _startOne(it)
   }
 
+  // ── Step 7 — bundled agent (Phase 8) ──────────────────────────────
+  // POST /api/agents/install in fire-and-forget mode; we don't block the
+  // wizard on the agent driver's shell-out because the dashboard's
+  // /agent page is the right place to recover from a failed install.
+  // Errors are surfaced as a return value so the view layer can toast.
+  async function installAgent() {
+    const choice = form.agentChoice
+    if (!choice || choice === 'none') return null
+    try {
+      const rec = await api('/api/agents/install', {
+        method: 'POST',
+        body: JSON.stringify({ name: choice }),
+      })
+      return { ok: true, record: rec }
+    } catch (e) {
+      return { ok: false, error: e }
+    }
+  }
+
   // ── Step 8 — complete ─────────────────────────────────────────────
   async function markComplete() {
     try { await api('/api/install/complete', { method: 'POST' }) }
@@ -636,6 +664,7 @@ export function useFirstRun() {
     // actions
     load, submitPassword, disableAuthForSkip, persistModelDirs, persistHfToken,
     startAllPulls, retryItem, markComplete, dispose,
+    installAgent,
   }
   load()
   return _state

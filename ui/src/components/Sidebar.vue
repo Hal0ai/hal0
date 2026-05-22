@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSlotStats } from '../composables/useSlotStats.js'
+import { useAgentStore } from '../stores/agent.js'
 import { api } from '../composables/useApi.js'
 
 const props = defineProps({
@@ -11,8 +12,43 @@ const props = defineProps({
 const emit = defineEmits(['toggle', 'navigate'])
 
 const route  = useRoute()
+const agent  = useAgentStore()
 
 const { running, total } = useSlotStats()
+
+// ── Agent link (Phase 8) ───────────────────────────────────────────
+// When a service-shape agent is installed (Hermes) the sidebar link
+// goes OWUI-style — opens the agent's own web surface in a new tab.
+// CLI shape (pi-coder) and "no agent installed" both route to the
+// in-dashboard /agent page where the picker or transcript live.
+//
+// The hostname follows the same pattern as the OpenWebUI link below:
+// resolved at runtime from /api/config/urls so a remote LAN browser
+// gets the right hostname, not a hardcoded localhost.
+const hermesUrl = ref('')
+async function loadHermesUrl() {
+  try {
+    const r = await api('/api/config/urls')
+    hermesUrl.value = r?.hermes ?? ''
+  } catch { /* leave hermesUrl empty */ }
+}
+
+const agentItem = computed(() => {
+  if (agent.shape === 'service' && hermesUrl.value) {
+    return {
+      label: 'Agent',
+      external: true,
+      href: hermesUrl.value,
+      icon: 'M9 17H7A5 5 0 017 7h2m6 0h2a5 5 0 010 10h-2M8 12h8',
+    }
+  }
+  return {
+    to: '/agent',
+    label: 'Agent',
+    external: false,
+    icon: 'M9 17H7A5 5 0 017 7h2m6 0h2a5 5 0 010 10h-2M8 12h8',
+  }
+})
 
 // ── OpenWebUI chat link ────────────────────────────────────────────
 // /api/config/urls returns the live hostnames + a runtime flag for
@@ -34,7 +70,13 @@ async function loadChatUrl() {
   }
 }
 
-onMounted(loadChatUrl)
+onMounted(() => {
+  loadChatUrl()
+  loadHermesUrl()
+  // Pull initial agent state so the sidebar's link branches correctly
+  // on first render even if the bell hasn't mounted yet.
+  agent.fetchInstalled()
+})
 
 // ── Nav definition ─────────────────────────────────────────────────
 const NAV_ITEMS = [
@@ -75,7 +117,20 @@ const NAV_ITEMS = [
   },
 ]
 
+// "Agent" lives between Providers and Settings — group with the other
+// dashboard surfaces that touch installed surfaces, not with the inline
+// model/slot management above. Insert at runtime so the link can
+// switch between internal (router-link → /agent) and external
+// (href → hermes web UI) without splitting the markup into two loops.
+const NAV_AGENT_INDEX = NAV_ITEMS.findIndex((i) => i.to === '/settings')
+const navItems = computed(() => {
+  const items = [...NAV_ITEMS]
+  items.splice(NAV_AGENT_INDEX, 0, agentItem.value)
+  return items
+})
+
 function isActive(item) {
+  if (item.external) return false
   if (item.to === '/') return route.path === '/'
   return route.path.startsWith(item.to)
 }
@@ -93,27 +148,62 @@ function onNavClick() {
     aria-label="Main navigation"
   >
     <nav class="nav" aria-label="Primary">
-      <router-link
-        v-for="item in NAV_ITEMS"
-        :key="item.to"
-        :to="item.to"
-        class="nav-item"
-        :class="{ active: isActive(item) }"
-        :aria-current="isActive(item) ? 'page' : undefined"
-        @click="onNavClick"
-      >
-        <svg
-          class="nav-icon"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-          stroke-width="1.6"
-          aria-hidden="true"
+      <template v-for="item in navItems" :key="item.to || item.href">
+        <!-- External (Hermes service-shape link-out, OWUI-style) -->
+        <a
+          v-if="item.external"
+          :href="item.href"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="nav-item"
+          :title="item.label"
+          @click="onNavClick"
         >
-          <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
-        </svg>
-        <span v-if="open" class="nav-label">{{ item.label }}</span>
-      </router-link>
+          <svg
+            class="nav-icon"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
+          </svg>
+          <span v-if="open" class="nav-label">{{ item.label }}</span>
+          <svg v-if="open" class="ext-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+          </svg>
+        </a>
+        <!-- Internal router target -->
+        <router-link
+          v-else
+          :to="item.to"
+          class="nav-item"
+          :class="{ active: isActive(item) }"
+          :aria-current="isActive(item) ? 'page' : undefined"
+          @click="onNavClick"
+        >
+          <svg
+            class="nav-icon"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            stroke-width="1.6"
+            aria-hidden="true"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
+          </svg>
+          <span v-if="open" class="nav-label">{{ item.label }}</span>
+          <!-- Pending-approval pill, only on the Agent item when there are
+               pending approvals queued. Mirrors the bell badge so an
+               operator scanning the sidebar sees the same count. -->
+          <span
+            v-if="open && item.to === '/agent' && agent.pendingCount > 0"
+            class="nav-badge"
+            :aria-label="`${agent.pendingCount} pending approval${agent.pendingCount === 1 ? '' : 's'}`"
+          >{{ agent.pendingCount }}</span>
+        </router-link>
+      </template>
     </nav>
 
     <!-- External link: OpenWebUI. Href is resolved from /api/config/urls -->
@@ -255,6 +345,25 @@ function onNavClick() {
   width: 11px;
   height: 11px;
   opacity: 0.4;
+  flex-shrink: 0;
+}
+
+/* Pending-approval badge on the Agent nav item. Mirrors the topbar bell. */
+.nav-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--hal0-accent);
+  color: #000;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  font-feature-settings: 'zero' 1, 'tnum' 1;
+  display: grid;
+  place-items: center;
+  line-height: 1;
+  margin-left: auto;
   flex-shrink: 0;
 }
 

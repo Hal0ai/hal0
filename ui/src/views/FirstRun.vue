@@ -40,7 +40,9 @@ const system = useSystemStore()
 
 const s = useFirstRun()
 
-// Step labels for the indicator row.
+// Step labels for the indicator row. Phase 8 inserts an Agent picker
+// between the License acceptance and the Install kickoff so the agent
+// install is included in the parallel-pull pass; 9 steps total.
 const STEPS = [
   { n: 1, label: 'Password' },
   { n: 2, label: 'Hardware' },
@@ -48,8 +50,9 @@ const STEPS = [
   { n: 4, label: 'Capabilities' },
   { n: 5, label: 'HF token' },
   { n: 6, label: 'License' },
-  { n: 7, label: 'Install' },
-  { n: 8, label: 'Done' },
+  { n: 7, label: 'Agent' },
+  { n: 8, label: 'Install' },
+  { n: 9, label: 'Done' },
 ]
 
 // Start on step 2 when a password is already set (re-entering the wizard
@@ -147,7 +150,24 @@ async function goNext() {
       toasts.warning('Please accept the licenses first')
       return
     }
+    // Advance to the Agent picker (step 7). Install runs in step 8.
     step.value = 7
+    return
+  }
+  if (step.value === 7) {
+    // Fire-and-forget the bundled-agent install. /api/agents/install
+    // shell-outs to the installer script; we don't block the wizard on
+    // that work — failures bubble to a toast so the user knows to
+    // recover from the /agent page.
+    if (s.form.agentChoice !== 'none') {
+      const r = await s.installAgent()
+      if (r && !r.ok) {
+        toasts.warning(
+          `Agent install failed: ${r.error?.message || 'unknown'}. Continue and retry from the Agent page.`,
+        )
+      }
+    }
+    step.value = 8
     s.startAllPulls()
     return
   }
@@ -178,14 +198,14 @@ function skipPrimary() {
   step.value = 4
 }
 
-// Step 7 → 8 happens implicitly when every pull is terminal. The
+// Step 8 → 9 happens implicitly when every pull is terminal. The
 // useFirstRun composable flips `pull.done` once all items settled; we
 // advance the step on that signal (and refresh system store + chat URL).
 watch(
   () => s.pull.done,
   async (done) => {
     if (!done) return
-    if (step.value !== 7) return
+    if (step.value !== 8) return
     // Refresh dashboard state so the user lands on a hydrated screen if
     // they pick "Go to dashboard" rather than chat.
     try {
@@ -193,7 +213,7 @@ watch(
       chatUrl.value = urls?.openwebui ?? null
     } catch { /* tolerable */ }
     try { await system.fetchStatus() } catch { /* ignore */ }
-    step.value = 8
+    step.value = 9
   },
 )
 
@@ -245,6 +265,13 @@ const canAdvance = computed(() => {
     if (s.enabledList.value.length === 0) return s.fits.value
     return s.form.licenseAccepted && s.fits.value
   }
+  if (step.value === 7) {
+    // Hermes requires hal0-awareness on the upstream side. The picker
+    // disables the option when the server-side probe failed; this guard
+    // is a belt-and-braces in case the form state is hand-edited.
+    if (s.form.agentChoice === 'hermes' && !s.form.hermesHal0Aware) return false
+    return true
+  }
   return false
 })
 </script>
@@ -278,7 +305,7 @@ const canAdvance = computed(() => {
       </ol>
 
       <!-- ── Loading shell ──────────────────────────────────────── -->
-      <div v-if="s.loading.value && step !== 7 && step !== 8" class="wizard-body">
+      <div v-if="s.loading.value && step !== 8 && step !== 9" class="wizard-body">
         <div class="loading-state">Loading…</div>
       </div>
 
@@ -667,8 +694,101 @@ const canAdvance = computed(() => {
           </div>
         </div>
 
-        <!-- ── 7. Install (parallel pulls + retry-per-row) ───────── -->
-        <div v-else-if="step === 7" key="s7" class="wizard-body">
+        <!-- ── 7. Bundled agent picker (Phase 8 / ADR-0004) ──────── -->
+        <div v-else-if="!s.loading.value && step === 7" key="s7-agent" class="wizard-body">
+          <p class="step-desc">
+            Bundle a third-party agent on top of hal0. The agent uses
+            hal0 as its local AI provider and consumes hal0's MCP
+            servers. You can pick "no agent" now and install one later
+            from the <strong>Agent</strong> page.
+          </p>
+
+          <div class="agent-list" role="radiogroup" aria-label="Bundled agent selection">
+            <label
+              class="agent-option"
+              :class="{ selected: s.form.agentChoice === 'none' }"
+            >
+              <input
+                type="radio"
+                class="sr-only"
+                name="firstrun-agent"
+                value="none"
+                v-model="s.form.agentChoice"
+              />
+              <div class="agent-option-inner">
+                <div class="agent-option-head">
+                  <span class="agent-option-name">No agent</span>
+                  <span class="meta-chip">default</span>
+                </div>
+                <p class="agent-option-desc">
+                  Install hal0 without a bundled agent. The Agent page is still
+                  available; you can install pi-coder or Hermes-Agent later.
+                </p>
+              </div>
+            </label>
+
+            <label
+              class="agent-option"
+              :class="{ selected: s.form.agentChoice === 'pi-coder' }"
+            >
+              <input
+                type="radio"
+                class="sr-only"
+                name="firstrun-agent"
+                value="pi-coder"
+                v-model="s.form.agentChoice"
+              />
+              <div class="agent-option-inner">
+                <div class="agent-option-head">
+                  <span class="agent-option-name">pi-coder</span>
+                  <span class="meta-chip meta-chip-ok">CLI</span>
+                </div>
+                <p class="agent-option-desc">
+                  Terminal coding agent (badlogic/pi-mono). Installs the
+                  hal0 MCP adapter + leaves pi-memory-md in place. Minimal
+                  by design — read, write, edit, bash.
+                </p>
+              </div>
+            </label>
+
+            <label
+              class="agent-option"
+              :class="{ selected: s.form.agentChoice === 'hermes', dim: !s.form.hermesHal0Aware }"
+              :title="s.form.hermesHal0Aware ? '' : 'Hermes-Agent not yet hal0-aware — install via CLI later.'"
+            >
+              <input
+                type="radio"
+                class="sr-only"
+                name="firstrun-agent"
+                value="hermes"
+                v-model="s.form.agentChoice"
+                :disabled="!s.form.hermesHal0Aware"
+              />
+              <div class="agent-option-inner">
+                <div class="agent-option-head">
+                  <span class="agent-option-name">Hermes-Agent</span>
+                  <span class="meta-chip">service</span>
+                  <span v-if="!s.form.hermesHal0Aware" class="meta-chip meta-chip-tight">probe failed</span>
+                </div>
+                <p class="agent-option-desc">
+                  Long-running service agent with its own web surface.
+                  Wired into the sidebar OWUI-style. Integration lives in
+                  Hermes upstream — requires a hal0-aware Hermes build.
+                </p>
+              </div>
+            </label>
+          </div>
+
+          <div class="wizard-footer wizard-footer-2">
+            <button class="btn-ghost" type="button" @click="goBack">← Back</button>
+            <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">
+              {{ s.form.agentChoice === 'none' ? 'Skip — no agent →' : 'Install agent + models →' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- ── 8. Install (parallel pulls + retry-per-row) ───────── -->
+        <div v-else-if="step === 8" key="s8-install" class="wizard-body">
           <p class="step-desc">
             Downloading {{ s.pull.items.length }} model{{ s.pull.items.length === 1 ? '' : 's' }} in parallel.
             You can leave this tab open and come back — pulls keep running on the server.
@@ -700,8 +820,8 @@ const canAdvance = computed(() => {
           <p v-else-if="!s.pull.done" class="step-hint">Slots warm up automatically once each download completes.</p>
         </div>
 
-        <!-- ── 8. Done ───────────────────────────────────────────── -->
-        <div v-else-if="step === 8" key="s8" class="wizard-body wizard-done">
+        <!-- ── 9. Done ───────────────────────────────────────────── -->
+        <div v-else-if="step === 9" key="s9-done" class="wizard-body wizard-done">
           <div class="done-icon" aria-hidden="true">✓</div>
           <h2 class="done-title">You're all set!</h2>
           <p class="done-desc">
@@ -798,7 +918,7 @@ const canAdvance = computed(() => {
 /* ── Steps indicator ───────────────────────────────────────────────────── */
 .steps {
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
+  grid-template-columns: repeat(9, 1fr);
   gap: 0;
   padding: 16px 24px;
   border-bottom: 1px solid var(--color-border);
@@ -929,6 +1049,36 @@ const canAdvance = computed(() => {
 .disclosure { background: transparent; border: 0; color: var(--color-fg-muted); cursor: pointer; font-size: 11.5px; text-align: left; padding: 2px 0; font-family: var(--font-mono); display: flex; gap: 6px; align-items: center; }
 .disclosure:hover { color: var(--color-fg); }
 .custom-chevron { font-family: var(--font-mono); width: 12px; }
+
+/* ── Agent picker (step 7) ─────────────────────────────────────────────── */
+.agent-list { display: flex; flex-direction: column; gap: 8px; }
+.agent-option {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  background: var(--color-surface);
+}
+.agent-option:hover { border-color: var(--color-border-hi); }
+.agent-option.selected {
+  border-color: color-mix(in srgb, var(--hal0-accent) 45%, var(--color-border));
+  box-shadow: inset 3px 0 0 var(--hal0-accent);
+}
+.agent-option.dim { opacity: 0.6; cursor: not-allowed; }
+.agent-option-inner { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.agent-option-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.agent-option-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--color-fg);
+  font-size: 13.5px;
+}
+.agent-option-desc {
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  margin: 0;
+  line-height: 1.55;
+}
 
 /* ── HF gated list (step 5) ────────────────────────────────────────────── */
 .gated-list {

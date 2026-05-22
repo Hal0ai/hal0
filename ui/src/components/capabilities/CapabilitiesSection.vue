@@ -16,6 +16,7 @@
  */
 import { computed } from 'vue'
 import { useCapabilities } from '../../composables/useCapabilities.js'
+import { useAgentStore } from '../../stores/agent.js'
 import EmbedCard from './EmbedCard.vue'
 import VoiceCard from './VoiceCard.vue'
 import ImgCard from './ImgCard.vue'
@@ -25,8 +26,20 @@ import ImgCard from './ImgCard.vue'
 // honestly than treating it as a capability-only widget.
 import LoadingSkeleton from '../LoadingSkeleton.vue'
 import EmptyState from '../EmptyState.vue'
+import AgentPendingChip from '../agent/AgentPendingChip.vue'
 
 const cap = useCapabilities()
+const agent = useAgentStore()
+
+// Pending lookups — capability_set is the gated tool that targets these
+// rows (ADR-0004 §4). Encoded as `<slot>/<child>` so the store's
+// pendingForResource('capability', key) matches.
+const embedPending = computed(() => agent.pendingForResource('capability', 'embed/embed'))
+const voicePending = computed(() => [
+  ...agent.pendingForResource('capability', 'voice/stt'),
+  ...agent.pendingForResource('capability', 'voice/tts'),
+])
+const imgPending = computed(() => agent.pendingForResource('capability', 'img/img'))
 
 const embedSel = computed(() => cap.selections.value?.embed ?? null)
 const voiceSel = computed(() => cap.selections.value?.voice ?? null)
@@ -65,9 +78,24 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
     />
 
     <div v-else class="cap-grid">
-      <EmbedCard v-if="embedSel" :selection="embedSel" />
-      <VoiceCard v-if="voiceSel" :selection="voiceSel" />
-      <ImgCard   v-if="imgSel"   :selection="imgSel" />
+      <div v-if="embedSel" class="cap-cell">
+        <EmbedCard :selection="embedSel" />
+        <div v-if="embedPending.length" class="cap-pending">
+          <AgentPendingChip v-for="p in embedPending" :key="p.id" :entry="p" />
+        </div>
+      </div>
+      <div v-if="voiceSel" class="cap-cell">
+        <VoiceCard :selection="voiceSel" />
+        <div v-if="voicePending.length" class="cap-pending">
+          <AgentPendingChip v-for="p in voicePending" :key="p.id" :entry="p" />
+        </div>
+      </div>
+      <div v-if="imgSel" class="cap-cell">
+        <ImgCard :selection="imgSel" />
+        <div v-if="imgPending.length" class="cap-pending">
+          <AgentPendingChip v-for="p in imgPending" :key="p.id" :entry="p" />
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -108,6 +136,10 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
   gap: 14px;
   align-items: start;
 }
+
+/* Pending-approval chips render below each capability card. */
+.cap-cell { display: flex; flex-direction: column; gap: 6px; }
+.cap-pending { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px; }
 
 .cap-card-skeleton {
   background: var(--color-surface);

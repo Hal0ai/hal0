@@ -17,6 +17,7 @@
 import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
 import { useSystemStore } from '../stores/system.js'
 import { useToastsStore } from '../stores/toasts.js'
+import { useAgentStore } from '../stores/agent.js'
 import { api } from '../composables/useApi.js'
 import { usePullJob, fmtBytes, fmtSpeed, fmtEta } from '../composables/usePullJob.js'
 import PageHeader from '../components/PageHeader.vue'
@@ -24,9 +25,11 @@ import Card from '../components/Card.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import AgentPendingChip from '../components/agent/AgentPendingChip.vue'
 
 const system = useSystemStore()
 const toasts = useToastsStore()
+const agent  = useAgentStore()
 
 // ── State ──────────────────────────────────────────────────────────────
 const models   = ref([])
@@ -749,6 +752,19 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                       <div v-if="(model.capabilities && model.capabilities.length) || (model.backends && model.backends.length)" class="model-badges">
                         <span v-for="c in (model.capabilities ?? [])" :key="`cap-${c}`" class="badge badge-cap">{{ c }}</span>
                         <span v-for="b in (model.backends ?? [])" :key="`bk-${b}`" class="badge badge-bk">{{ b }}</span>
+                      </div>
+                      <!-- Pending-approval chip(s). Rendered when a gated MCP
+                           tool (model_pull / model_delete) is queued for
+                           this model. Links to /agent?tab=inbox. -->
+                      <div
+                        v-if="agent.pendingForResource('model', model.id).length"
+                        class="model-pending"
+                      >
+                        <AgentPendingChip
+                          v-for="p in agent.pendingForResource('model', model.id)"
+                          :key="p.id"
+                          :entry="p"
+                        />
                       </div>
                       <!-- Inline pull progress: rendered when a row has an
                            active or recently-terminated pull job. SSE-driven;
@@ -1649,6 +1665,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 
 /* ── Model badges (row-level capability + backend chips) ────────── */
 .model-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.model-pending { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .badge {
   font-family: var(--font-mono);
   font-size: 10px;

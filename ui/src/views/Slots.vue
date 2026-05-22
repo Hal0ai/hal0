@@ -18,6 +18,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
 import { useToastsStore } from '../stores/toasts.js'
+import { useAgentStore } from '../stores/agent.js'
 import { useSlotMetrics } from '../composables/useStats.js'
 import { api } from '../composables/useApi.js'
 import { useEvents } from '../composables/useEvents.js'
@@ -29,6 +30,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import SlotCard from '../components/SlotCard.vue'
 import NPUBackendCard from '../components/capabilities/NPUBackendCard.vue'
 import CapabilitiesSection from '../components/capabilities/CapabilitiesSection.vue'
+import AgentPendingChip from '../components/agent/AgentPendingChip.vue'
 
 // Mirror src/hal0/slots/__init__.py BUILTIN_SLOTS — these cannot be deleted.
 const BUILTIN_SLOTS = new Set(['primary', 'embed', 'stt', 'tts'])
@@ -56,6 +58,7 @@ const route  = useRoute()
 const router = useRouter()
 const system = useSystemStore()
 const toasts = useToastsStore()
+const agent  = useAgentStore()
 
 // ── State ──────────────────────────────────────────────────────────────
 const loading    = ref(false)
@@ -652,18 +655,35 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
 
       <template v-else>
         <div class="slots-grid" role="list" aria-label="Inference slots">
-          <SlotCard
+          <div
             v-for="slot in slots"
             :key="slot.name"
-            :slot="slot"
-            :metrics="slotMetrics[slot.name]"
-            :spark-data="slotHistory[slot.name] || { tps: [], pps: [] }"
-            :action-loading="actionBusy[slot.name]"
-            @action="(a) => a === 'load' ? doLoad(slot) : slotAction(slot.name, a)"
-            @logs="openLogs(slot)"
-            @edit="openEdit(slot)"
-            @delete="deletingSlot = slot"
-          />
+            class="slot-cell"
+          >
+            <SlotCard
+              :slot="slot"
+              :metrics="slotMetrics[slot.name]"
+              :spark-data="slotHistory[slot.name] || { tps: [], pps: [] }"
+              :action-loading="actionBusy[slot.name]"
+              @action="(a) => a === 'load' ? doLoad(slot) : slotAction(slot.name, a)"
+              @logs="openLogs(slot)"
+              @edit="openEdit(slot)"
+              @delete="deletingSlot = slot"
+            />
+            <!-- Pending-approval chip(s) for any gated MCP tool queued
+                 against this slot (slot_delete / slot_restart / etc.).
+                 Per ADR-0004 §5: inline indicator, bell is canonical. -->
+            <div
+              v-if="agent.pendingForResource('slot', slot.name).length"
+              class="slot-pending"
+            >
+              <AgentPendingChip
+                v-for="p in agent.pendingForResource('slot', slot.name)"
+                :key="p.id"
+                :entry="p"
+              />
+            </div>
+          </div>
           <!-- NPU backend rides in the same grid as the other slot
                cards now — it serves chat-shaped models the same way a
                local llama.cpp slot does. -->
@@ -1108,6 +1128,8 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 14px;
 }
+.slot-cell { display: flex; flex-direction: column; gap: 6px; }
+.slot-pending { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 2px; }
 .slots-list { display: flex; flex-direction: column; gap: 4px; }
 
 .slot-row {

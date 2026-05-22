@@ -3,6 +3,7 @@ import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useSystemStore } from '../stores/system.js'
 import { useSlotStats } from '../composables/useSlotStats.js'
 import Wordmark from './Wordmark.vue'
+import AgentApprovalBell from './AgentApprovalBell.vue'
 
 const props = defineProps({
   isMobile: Boolean,
@@ -88,8 +89,13 @@ const { running: runningSlots, total: totalSlots } = useSlotStats()
       </button>
     </div>
 
-    <!-- Right: slot count + status dot -->
+    <!-- Right: agent approvals bell + slot count + status dot -->
     <div class="topbar-right">
+      <!-- Phase 8 agent-approvals bell. Canonical surface per ADR-0004
+           §5 — visible regardless of which page the operator is on, so
+           a gated tool call never goes unnoticed. -->
+      <AgentApprovalBell />
+
       <span v-if="totalSlots > 0" class="slot-stat" aria-label="`${runningSlots} of ${totalSlots} slots running`">
         <span class="slot-dot" :class="runningSlots > 0 ? 'live' : ''" aria-hidden="true" />
         <span class="mono-text">{{ runningSlots }}/{{ totalSlots }}</span>

@@ -20,7 +20,12 @@ Coupling captured in ``WAVE1_INSTALLER_PENDING.md``.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import asyncio
+import contextlib
+import json
+import shutil
+
+from fastapi import APIRouter, Depends, Query
 
 from hal0.agents import (
     AgentAlreadyInstalledError,
@@ -28,6 +33,7 @@ from hal0.agents import (
     AgentNotFoundError,
     HermesNotHal0AwareError,
 )
+from hal0.agents.manager import BUNDLED_AGENTS
 from hal0.api.middleware.auth import require_writer
 from hal0.errors import BadRequest, Conflict, Hal0Error, NotFound
 
@@ -101,6 +107,158 @@ async def install_agent(body: dict[str, object]) -> dict[str, object]:
         ) from exc
 
     return rec.as_dict()
+
+
+# ── GET /api/agents/{name}/activity ──────────────────────────────────────────
+
+
+@router.get("/{name}/activity")
+async def agent_activity(
+    name: str,
+    limit: int = Query(50, ge=1, le=500),
+) -> dict[str, object]:
+    """Return the last ``limit`` MCP audit rows attributed to ``name``.
+
+    Reads from journald (``hal0.mcp.audit`` logger; see ``hal0/mcp/__init__``
+    module docstring). Each row carries ``client_id, tool, args, gated,
+    outcome, timestamp`` — the dashboard's Activity tab renders them
+    verbatim, filtering client-side by tool / status.
+
+    Best-effort: returns ``{events: [], hint}`` on hosts without
+    journalctl. ``client_id`` filter is substring-matched against the
+    agent name so e.g. ``pi-coder`` matches client_ids like
+    ``pi-coder@host``. The MCP server attributes ``client_id`` from the
+    Bearer token (ADR-0004 §7) so the agent identity is forensically
+    grounded.
+    """
+    mgr = _manager()
+    if name not in mgr.installed_names() and name not in BUNDLED_AGENTS:
+        # 404 when the name isn't a recognised bundled agent at all. An
+        # installed-but-uninstalled-since case still serves history so
+        # operators can audit a removed agent's last actions.
+        raise NotFound(f"unknown agent {name!r}", code="agent.unknown")
+
+    if shutil.which("journalctl") is None:
+        return {
+            "agent": name,
+            "events": [],
+            "count": 0,
+            "hint": "journalctl not available on this host",
+        }
+
+    # ``-o json`` gives one structlog-formatted line per row. We pull
+    # the API unit's log (the MCP servers run in the API process — see
+    # /grill-with-docs session 2026-05-22) and filter for the audit
+    # logger name on the way back.
+    cmd = [
+        "journalctl",
+        "-u",
+        "hal0-api",
+        "--no-pager",
+        "-o",
+        "json",
+        "-n",
+        # Pull more than the requested limit because filtering by audit
+        # logger discards a lot of noise from the same unit.
+        str(min(5000, max(limit * 20, 200))),
+    ]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (OSError, FileNotFoundError):
+        return {
+            "agent": name,
+            "events": [],
+            "count": 0,
+            "hint": "journalctl invocation failed",
+        }
+
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        return {
+            "agent": name,
+            "events": [],
+            "count": 0,
+            "hint": "journalctl timed out",
+        }
+
+    events: list[dict[str, object]] = []
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        # journalctl wraps the structlog payload in MESSAGE; structlog
+        # serialises as JSON when configured for journald.
+        message_raw = row.get("MESSAGE") or row.get("message")
+        if not message_raw:
+            continue
+        payload: dict[str, object] | None = None
+        if isinstance(message_raw, str):
+            try:
+                payload = json.loads(message_raw)
+            except json.JSONDecodeError:
+                continue
+        elif isinstance(message_raw, dict):
+            payload = message_raw
+        if not payload or not isinstance(payload, dict):
+            continue
+        if payload.get("logger") not in (None, "hal0.mcp.audit"):
+            # Some structlog configs put logger name under different keys —
+            # accept either by leaving the None branch through.
+            pass
+        # The audit event itself uses the structlog "event" key; we match
+        # on the canonical mcp.tool.invoked + the family of approval-
+        # related events emitted alongside it.
+        evt = payload.get("event")
+        if evt not in {
+            "mcp.tool.invoked",
+            "mcp.tool.enqueued",
+            "mcp.tool.approved",
+            "mcp.tool.denied",
+            "mcp.tool.executed",
+            "mcp.tool.failed",
+        }:
+            continue
+        client_id = str(payload.get("client_id") or "")
+        if name not in client_id and client_id != name:
+            # client_id might be e.g. "pi-coder" or "pi-coder@host". Match
+            # both with a contains check; agents installed via the MCP
+            # adapter all carry their own canonical name.
+            continue
+        events.append(
+            {
+                "id": row.get("__CURSOR") or payload.get("id"),
+                "timestamp": payload.get("timestamp")
+                or (
+                    int(row.get("__REALTIME_TIMESTAMP", "0")) / 1_000_000
+                    if row.get("__REALTIME_TIMESTAMP")
+                    else None
+                ),
+                "tool": payload.get("tool"),
+                "args": payload.get("args") or {},
+                "gated": payload.get("gated"),
+                "outcome": payload.get("outcome") or evt.split(".")[-1],
+                "client_id": client_id,
+            }
+        )
+        if len(events) >= limit:
+            break
+
+    return {
+        "agent": name,
+        "events": events,
+        "count": len(events),
+    }
 
 
 # ── DELETE /api/agents/{name} ─────────────────────────────────────────────────

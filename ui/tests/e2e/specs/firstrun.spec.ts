@@ -1,15 +1,16 @@
 /**
  * firstrun.spec.ts — γ-1 First-run wizard (PLAN §10.3 path 1).
  *
- * Covers the post-prototype 8-step linear wizard (Variant A):
+ * Covers the post-prototype 9-step linear wizard (Variant A + Phase 8):
  *   1. Password         — skip
  *   2. Hardware + dirs  — accept defaults
  *   3. Primary chat     — pick smallest curated card (Phi-3 Mini)
  *   4. Capabilities     — leave smart defaults (CPU box → embed off etc.)
  *   5. HF token         — skipped (Phi-3 Mini is not gated by id heuristic)
  *   6. License          — check accept box, click install
- *   7. Install          — drive SSE events to completion
- *   8. Done             — click "Open chat" → window.open + install/complete
+ *   7. Agent            — leave "no agent" default (Phase 8 / ADR-0004)
+ *   8. Install          — drive SSE events to completion
+ *   9. Done             — click "Open chat" → window.open + install/complete
  *
  * The spec mocks the curated catalogue, capability catalogs, config/models,
  * auth/status, and the pull-stream SSE so we can assert UI updates in
@@ -103,13 +104,18 @@ test('redirects to /firstrun, walks the 8-step wizard, opens chat', async ({ pag
   await expect(page.locator('.license-row', { hasText: 'Phi-3 Mini' })).toBeVisible()
 
   const acceptCheckbox = page.locator('.accept-label input[type="checkbox"]')
-  const installBtn = page.getByRole('button', { name: /Accept .* install/i })
-  await expect(installBtn).toBeDisabled()
+  const acceptBtn = page.getByRole('button', { name: /Accept .* install/i })
+  await expect(acceptBtn).toBeDisabled()
   await acceptCheckbox.check()
-  await expect(installBtn).toBeEnabled()
-  await installBtn.click()
+  await expect(acceptBtn).toBeEnabled()
+  await acceptBtn.click()
 
-  // ── Step 7 — Install: SSE progress events ─────────────────────────
+  // ── Step 7 — Agent picker (Phase 8): leave "no agent" default ─────
+  await expect(page.getByText('Bundle a third-party agent')).toBeVisible()
+  // Default radio is "none" — just advance with the skip button copy.
+  await page.getByRole('button', { name: /Skip — no agent/ }).click()
+
+  // ── Step 8 — Install: SSE progress events ─────────────────────────
   await waitForSse(page, '/api/models/phi3-mini/pull/stream')
 
   const streamUrl = '/api/models/phi3-mini/pull/stream'

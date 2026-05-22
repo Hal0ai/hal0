@@ -58,6 +58,15 @@ const routes = [
     meta: { title: 'Settings' },
   },
   {
+    // Phase 8 bundled-agent surface. The page is one host component
+    // with horizontal tabs driven by ?tab=overview|inbox|activity|chat
+    // so the URL is shareable + reload-stable.
+    path: '/agent',
+    name: 'agent',
+    component: () => import('./views/Agent.vue'),
+    meta: { title: 'Agent' },
+  },
+  {
     path: '/welcome',
     name: 'welcome',
     component: () => import('./views/FirstRun.vue'),
