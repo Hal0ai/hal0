@@ -147,6 +147,7 @@ def _redact_logs_payload(payload: Any) -> Any:
     payload["lines"] = [_redact_log_line(line) if isinstance(line, str) else line for line in lines]
     return payload
 
+
 # ── Fail-fast SDK import ─────────────────────────────────────────────────────
 #
 # The mcp SDK is an optional dependency at the package level — only
