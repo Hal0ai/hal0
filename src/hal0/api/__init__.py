@@ -6,7 +6,9 @@ For tests and alternate entrypoints, call `create_app()`.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import structlog
@@ -120,6 +122,44 @@ async def _autoregister_slot_upstreams(
 # routes ``model: "embed-gemma"`` to nowhere. Seed the cache explicitly.
 _FLM_EMBED_TAG = "embed-gemma"
 _FLM_ASR_TAG = "whisper-v3:turbo"
+
+
+async def _refresh_model_cache_on_ready(
+    event_bus: EventBus,
+    upstreams: UpstreamRegistry,
+    fetch_and_cache: Callable[[Upstream], Awaitable[list[str]]],
+) -> None:
+    """Re-fetch ``model_cache[slot]`` whenever a slot transitions to ready.
+
+    The cache backs ``Dispatcher.dispatch`` Step 2 passthrough. When a slot's
+    loaded GGUF changes (model swap, restart with a new config), the cache
+    must follow — otherwise the dispatcher matches by stale ids and routes
+    ``/v1/chat/completions`` to whichever slot last advertised that filename.
+    SlotManager already emits ``slot.state`` events; subscribing here keeps
+    the cache aligned without coupling the manager to app state.
+    """
+    async with event_bus.subscribe() as q:
+        while True:
+            event = await q.get()
+            if event.get("type") != "slot.state":
+                continue
+            data = event.get("data") or {}
+            if data.get("to") != "ready":
+                continue
+            slot_name = data.get("slot")
+            if not isinstance(slot_name, str) or not slot_name:
+                continue
+            upstream = upstreams.get(slot_name)
+            if upstream is None:
+                continue
+            try:
+                await fetch_and_cache(upstream)
+            except Exception as exc:  # pragma: no cover — defensive
+                log.warning(
+                    "model_cache.refresh_failed",
+                    slot=slot_name,
+                    error=str(exc),
+                )
 
 
 async def _seed_multiplex_models(
@@ -395,10 +435,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     managers = getattr(app.state, "mcp_session_managers", []) or []
 
+    refresh_task = asyncio.create_task(
+        _refresh_model_cache_on_ready(event_bus, upstreams, _fetch_and_cache)
+    )
+
+    async def _stop_refresh_task() -> None:
+        refresh_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await refresh_task
+
     try:
         async with AsyncExitStack() as stack:
             for mgr in managers:
                 await stack.enter_async_context(mgr.run())
+            stack.push_async_callback(_stop_refresh_task)
             yield
     finally:
         await slot_manager.stop_idle_monitor()
