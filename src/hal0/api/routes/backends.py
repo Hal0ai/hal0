@@ -127,9 +127,17 @@ def _mem_totals_for_backend(backend_id: str) -> tuple[int, int]:
     except Exception:
         return 0, 0
     if backend_id == "npu":
-        # NPU memory isn't exposed by the AMDXDNA driver yet; advertise
-        # 16 GB as the Strix Halo defaults.
-        return 0, 16000
+        # The AMDXDNA driver doesn't expose per-NPU residency yet, so
+        # there's no real per-device cap to report. NPU model weights
+        # live in the same GTT region of the unified-memory pool that
+        # the iGPU pulls from, so advertise the GTT total (or fall back
+        # to the unified-memory total). Once the driver surfaces real
+        # NPU residency, swap this for the live number.
+        if hw.gpus and hw.gpus[0].vram_mb:
+            return 0, hw.gpus[0].vram_mb
+        if hw.unified_memory_mb:
+            return 0, hw.unified_memory_mb
+        return 0, 0
     if backend_id in {"gpu-vulkan", "gpu-rocm"}:
         if hw.gpus and hw.gpus[0].vram_mb:
             return 0, hw.gpus[0].vram_mb
