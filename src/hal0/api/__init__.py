@@ -383,13 +383,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Cognee-backed long-term memory wrapper (ADR-0005). Lazy-imported so
     # an install with the ``hal0`` core deps but no ``memory`` extra still
-    # boots — the memory MCP just stays unmounted in that case.
+    # boots — the memory MCP just stays unmounted in that case. The
+    # wrapper's constructor does all setup synchronously; Cognee itself
+    # lazy-initialises its schema on the first ``add()`` call.
     memory_wrapper = None
     try:
         from hal0.memory import CogneeWrapper
 
         memory_wrapper = CogneeWrapper()
-        await memory_wrapper.initialize()
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("hal0.memory.init_failed", error=str(exc))
     app.state.memory_wrapper = memory_wrapper
