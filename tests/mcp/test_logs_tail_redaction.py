@@ -22,7 +22,6 @@ import pytest
 from hal0.mcp import admin
 from hal0.mcp.approval_queue import ApprovalQueue
 
-
 # ── Direct line-level coverage ───────────────────────────────────────────────
 
 

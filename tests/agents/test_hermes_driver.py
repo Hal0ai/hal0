@@ -33,7 +33,6 @@ from hal0.agents import hermes as hermes_mod
 from hal0.agents.hermes import HermesDriver
 from hal0.agents.manager import AgentError, HermesNotHal0AwareError
 
-
 # ── Fake subprocess (parallels test_pi_coder_shim._FakeRunner) ───────────────
 
 

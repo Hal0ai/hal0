@@ -92,6 +92,7 @@ from typing import Any
 import httpx
 import structlog
 
+from hal0.mcp.approval_queue import ApprovalQueue
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
@@ -162,8 +163,6 @@ except ImportError as _import_exc:  # pragma: no cover — exercised at install 
         "hal0.mcp.admin requires the 'mcp' Python SDK. "
         "Install via 'pip install mcp' or the Memory-engine wave's pyproject extras."
     ) from _import_exc
-
-from hal0.mcp.approval_queue import ApprovalQueue
 
 audit_log = structlog.get_logger("hal0.mcp.audit")
 log = structlog.get_logger(__name__)
