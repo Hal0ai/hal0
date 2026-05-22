@@ -27,7 +27,7 @@ The embedded memory engine adopted from v0.2 (Apache 2.0). Defaults: SQLite + La
 
 ## dataset (Cognee)
 
-Cognee's namespace primitive. hal0's namespace rule (v0.2): default `shared` for all clients; per-client `--private` toggle promotes that client's writes to `private:<client_id>`. Multi-user revisits the rule in Phase 9 (ADR-0006 pending). See ADR-0005 §3.
+Cognee's namespace primitive. hal0's namespace rule (v0.2): default `shared` for all clients; per-client `--private` toggle promotes that client's writes to `private:<client_id>`. Multi-user revisits the rule in Phase 9 (future ADR pending — ADR-0006 was reassigned to Lemonade migration). See ADR-0005 §3.
 
 ## MCP server (hal0-exposed)
 
@@ -62,9 +62,22 @@ Overloaded THREE ways. Default to sense (3) in hal0 product context.
 
 (Possible Phase 9+ stretch: agent-side skills in the `cognee-integrations/openclaw-skills` style — `SKILL.md` + YAML frontmatter + self-improving loop. If we ever ship that, it's a separate noun and gets its own gloss entry.)
 
+## device
+
+Per-slot hardware preference in v0.2. Field on `SlotConfig` replacing v0.1.x's overloaded `backend` field (which mixed providers and backends). Enum: `gpu-rocm` | `gpu-vulkan` | `cpu` | `npu`. Default for new installs: `gpu-rocm`. `LemonadeProvider` maps this to Lemonade's recipe:backend pair internally (e.g. `gpu-rocm` → `llamacpp:rocm`, `npu` → `flm:npu`).
+
+Note: spike data showed `gpu-vulkan` is much slower than `gpu-rocm` for Strix Halo through Lemonade — likely user-facing UI should advise `gpu-rocm` as the recommended default and label `gpu-vulkan` as fallback.
+
 ## slot
 
-Existing concept (PLAN.md §2). `hal0-slot@.service` template unit, parameterized by slot name. Runs a model under a provider. NOT a memory or RAG primitive — slots serve inference, memory lives in `/mcp/memory`.
+A named, configured serving target — e.g. `primary`, `embed`, `embed-rerank`, `stt`, `tts`. NOT a memory or RAG primitive — slots serve inference, memory lives in `/mcp/memory`.
+
+Two sub-senses depending on release:
+
+1. **v0.1.x slot (current)** — `hal0-slot@.service` systemd template unit, parameterized by slot name. Owns a process + port + container under a Provider class (PLAN.md §2).
+2. **v0.2 slot (with Lemonade)** — a logical mapping from slot name to ONE Lemonade-loaded model. The per-slot systemd template retires; `lemond` is the single shared process. Slot state (`ready`/`idle`/`serving`) is derived from `/v1/health.loaded[]` by model_name lookup. User-facing UX unchanged. See ADR-0006 (pending).
+
+`SlotManager.start(slot)` in v0.2 calls Lemonade load semantics rather than starting a systemd unit. Slot identity persists in `capabilities.toml` and the user-facing surface; the runtime layer is the Lemonade pool.
 
 ## two-tier scope
 
