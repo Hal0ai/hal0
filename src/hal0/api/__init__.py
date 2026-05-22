@@ -629,6 +629,28 @@ def create_app() -> FastAPI:
         log.warning("hal0.memory.init_failed", error=str(exc))
     app.state.memory_wrapper = memory_wrapper
 
+    # In-process memory dispatcher (Phase 8 closeout, ADR-0004 §7).
+    # When Cognee is up, instantiate one MemoryDispatcher and hand it to
+    # mount_mcp_servers so the admin MCP server's ``memory_*`` tools hit
+    # Cognee directly instead of looping back through HTTP to
+    # ``/mcp/memory``. The same client-id + private-mode resolvers the
+    # memory MCP uses thread through the dispatcher so audit grounding
+    # and namespace promotion stay identical across transports.
+    memory_dispatcher = None
+    if memory_wrapper is not None:
+        try:
+            from hal0.api.mcp_mount import client_id_resolver, private_resolver
+            from hal0.dispatcher.memory_dispatcher import MemoryDispatcher
+
+            memory_dispatcher = MemoryDispatcher(
+                memory_wrapper,
+                client_id_resolver=client_id_resolver,
+                private_resolver=private_resolver,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("hal0.memory.dispatcher_init_failed", error=str(exc))
+    app.state.memory_dispatcher = memory_dispatcher
+
     try:
         from hal0.api.mcp_mount import mount_mcp_servers
 
@@ -636,6 +658,7 @@ def create_app() -> FastAPI:
             app,
             approval_queue=app.state.approval_queue,
             memory_wrapper=memory_wrapper,
+            memory_dispatcher=memory_dispatcher,
         )
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("hal0.mcp.mount_failed", error=str(exc))

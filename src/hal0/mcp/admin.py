@@ -1,5 +1,23 @@
 """hal0 admin MCP server — slots / models / capabilities / config / hardware.
 
+Secret redaction
+----------------
+
+``logs_tail`` proxies journald output back to the agent. Journald lines
+routinely carry Bearer tokens (HAL0_BEARER_TOKEN= rows on slot startup,
+``Authorization: Bearer ...`` debug-level traces, third-party-provider
+keys in error breadcrumbs). The MCP-backend security review (MED-1)
+flagged this as a potential exfiltration vector — an agent that can
+gate a single ``logs_tail`` approval inherits every secret the log
+redactor doesn't yet cover.
+
+We compile a single regex covering the three highest-frequency leak
+shapes and apply it to every line the tool returns to the client.
+Redaction happens in :func:`_redact_logs_payload` after the REST call
+returns and before the dispatch envelope ships to the agent — keep the
+logic localised to this module so future patterns slot in next to the
+existing ones without touching :mod:`hal0.api.routes.logs`.
+
 Transport
 ---------
 
@@ -66,12 +84,68 @@ install missing the SDK still boots — the dashboard surfaces the
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 import structlog
+
+
+# ── logs_tail secret redactor (security review MED-1) ────────────────────────
+#
+# Compiled once at import time. Each alternative ends with a
+# ``(?P<...>...)`` capture of just the secret token; the substitution
+# function rewrites that token to ``***REDACTED***`` while leaving the
+# surrounding ``Authorization:``, ``Bearer``, or ``HAL0_BEARER_TOKEN=``
+# prefix in place. The case-insensitive flag covers the lowercase
+# ``authorization:`` header style some clients emit, and the explicit
+# alternatives are ordered most-to-least specific so the precise header
+# form wins over the bare-``Bearer`` fallback. (Python's re alternation
+# is leftmost-wins inside a single match.)
+_LOG_SECRET_RE = re.compile(
+    r"(?P<prefix_auth>Authorization:\s*Bearer\s+)(?P<auth_token>\S+)"
+    r"|(?P<prefix_env>HAL0_BEARER_TOKEN=)(?P<env_token>\S+)"
+    r"|(?P<prefix_bearer>Bearer\s+)(?P<bearer_token>[A-Za-z0-9_\-\.]+)",
+    re.IGNORECASE,
+)
+
+
+def _redact_log_line(line: str) -> str:
+    """Replace Bearer / HAL0_BEARER_TOKEN secrets in ``line`` with
+    ``***REDACTED***``.
+
+    The prefix is preserved so an operator reading a redacted log still
+    sees that an Authorization header was present — only the token
+    body is destroyed.
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        groups = match.groupdict()
+        if groups["prefix_auth"] is not None:
+            return f"{groups['prefix_auth']}***REDACTED***"
+        if groups["prefix_env"] is not None:
+            return f"{groups['prefix_env']}***REDACTED***"
+        return f"{groups['prefix_bearer']}***REDACTED***"
+
+    return _LOG_SECRET_RE.sub(_sub, line)
+
+
+def _redact_logs_payload(payload: Any) -> Any:
+    """Walk the GET /api/logs response and redact every line in ``lines``.
+
+    Non-dict payloads (or shapes missing ``lines``) round-trip unchanged
+    so a transport error or alternative-shape envelope still reaches the
+    agent — we never swallow content, only mask known secret tokens.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    lines = payload.get("lines")
+    if not isinstance(lines, list):
+        return payload
+    payload["lines"] = [_redact_log_line(line) if isinstance(line, str) else line for line in lines]
+    return payload
 
 # ── Fail-fast SDK import ─────────────────────────────────────────────────────
 #
@@ -428,13 +502,22 @@ async def _execute_tool(
         }
     url = _format_url(base_url, template, path_args)
     payload: dict[str, Any] | None = remainder if remainder else None
-    return await _call_rest(
+    result = await _call_rest(
         base_url=base_url,
         bearer=bearer,
         method=method,
         url=url,
         payload=payload,
     )
+    # Redact every Bearer / HAL0_BEARER_TOKEN occurrence before the
+    # logs_tail response leaves this process. The /api/logs route
+    # itself stays unredacted — REST consumers on the same host already
+    # have credential access; the MCP transport is the spot where a
+    # narrowly-scoped agent can otherwise siphon tokens out (security
+    # review MED-1).
+    if tool == "logs_tail":
+        result = _redact_logs_payload(result)
+    return result
 
 
 # ── Tool annotations (mcp-builder Phase 2.3) ─────────────────────────────────

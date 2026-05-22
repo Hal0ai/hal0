@@ -15,14 +15,31 @@ TOML files as the source of truth; a fully reactive editor lands later.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import re
+import tempfile
+from pathlib import Path
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel, Field
 
 from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
+from hal0.config import paths
 from hal0.upstreams.integrations import get_catalog
 from hal0.upstreams.registry import UpstreamNotFound
+
+_audit_log = structlog.get_logger("hal0.audit")
+_log = structlog.get_logger(__name__)
+
+# Allowed env-var names — uppercase ASCII letters, digits, underscores; must
+# start with a letter or underscore. Matches POSIX shell + systemd
+# EnvironmentFile= rules and prevents callers from injecting newlines /
+# shell metacharacters via the ``key`` body field.
+_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 # See slots.py for the writer-gate rationale.
 _writer = [Depends(require_writer)]
@@ -33,6 +50,24 @@ router = APIRouter()
 class UpstreamNotFoundHTTP(Hal0Error):
     code = "upstream.not_found"
     status = 404
+
+
+class ProviderCredentialError(Hal0Error):
+    code = "provider.credential_write_failed"
+    status = 400
+
+
+class ProviderCredentialBody(BaseModel):
+    """POST /api/providers/{name}/credentials body schema.
+
+    Single secret pair: ``key`` is the env-var name the upstream's
+    ``auth_value_env`` points at; ``value`` is the secret itself.
+    Validated against :data:`_ENV_KEY_RE` so a caller can't sneak a
+    newline or shell metacharacter into the api.env line.
+    """
+
+    key: str = Field(..., min_length=1, max_length=128)
+    value: str = Field(..., min_length=1)
 
 
 def _serialize_upstream(u: Any, *, last_models: list[str] | None = None) -> dict[str, Any]:
@@ -138,3 +173,163 @@ async def list_providers(request: Request) -> list[dict[str, Any]]:
         for u in upstreams.list()
         if u.kind != "slot"
     ]
+
+
+def _write_credential_to_api_env(api_env: Path, key: str, value: str) -> None:
+    """Upsert ``key=<quoted-value>`` in ``api_env`` atomically.
+
+    Mirrors the tmp-file + ``os.replace`` posture used by
+    ``hal0.api.routes.auth._set_auth_disabled_in_env``: if a line for
+    ``key`` exists (commented or not) it is replaced in place;
+    otherwise the line is appended. Values are double-quoted with
+    embedded quotes/backslashes escaped so systemd's EnvironmentFile
+    parser sees the literal secret.
+    """
+    api_env.parent.mkdir(parents=True, exist_ok=True)
+    existing = ""
+    try:
+        existing = api_env.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ProviderCredentialError(
+            f"could not read {api_env}: {exc}",
+            details={"path": str(api_env), "error": str(exc)},
+        ) from exc
+
+    # systemd EnvironmentFile= treats double-quoted values as a single
+    # token with the outer quotes stripped. Escape backslash + double
+    # quote so the secret round-trips verbatim.
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    new_line = f'{key}="{escaped}"\n'
+
+    lines = existing.splitlines(keepends=True) if existing else []
+    rewritten: list[str] = []
+    replaced = False
+    prefix_plain = f"{key}="
+    prefix_commented = f"# {key}="
+    prefix_commented_tight = f"#{key}="
+    for line in lines:
+        stripped = line.lstrip()
+        if (
+            stripped.startswith(prefix_plain)
+            or stripped.startswith(prefix_commented)
+            or stripped.startswith(prefix_commented_tight)
+        ):
+            if not replaced:
+                rewritten.append(new_line)
+                replaced = True
+            continue
+        rewritten.append(line)
+    if not replaced:
+        if rewritten and not rewritten[-1].endswith("\n"):
+            rewritten.append("\n")
+        rewritten.append(new_line)
+
+    fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{api_env.name}.",
+        suffix=".tmp",
+        dir=str(api_env.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("".join(rewritten))
+            f.flush()
+            os.fsync(f.fileno())
+        # Mode 0600 — this file now holds a secret. Tighter than the
+        # auth.env defaults because provider keys are higher-value than
+        # the toggle line that lives next to them.
+        os.chmod(tmp_str, 0o600)
+        os.replace(tmp_str, api_env)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_str)
+        raise
+
+
+@router.post("/providers/{name}/credentials", dependencies=_writer)
+async def write_provider_credential(
+    name: str,
+    body: ProviderCredentialBody,
+    request: Request,
+) -> dict[str, Any]:
+    """Persist one provider credential to ``/etc/hal0/api.env`` (gated).
+
+    Body: ``{key: <ENV_VAR_NAME>, value: <secret>}``. The upstream named
+    ``{name}`` must already exist in the registry; we use it to validate
+    that ``key`` matches its declared ``auth_value_env`` so a caller
+    can't write arbitrary env-vars through this route. Returns
+    ``{ok: true, key, name}`` — the secret value is NEVER echoed back.
+
+    The Phase 8 MCP admin server's ``provider_credential_write`` tool
+    routes here; that path is gated on owner approval (see
+    ``hal0.mcp.admin.GATED_TOOLS``). Direct REST writes are gated by the
+    same ``require_writer`` dep all admin mutations share.
+
+    Process restart is the caller's responsibility — the registry
+    re-reads env on next load (see ``UpstreamRegistry`` __init__).
+    Surfacing that as a hint in the response so the dashboard can render
+    "restart hal0-api to pick up the change" without an extra round trip.
+    """
+    upstreams = request.app.state.upstreams
+    upstream = upstreams.get(name)
+    if upstream is None:
+        raise UpstreamNotFoundHTTP(f"upstream {name!r} not found", {"name": name})
+
+    key = body.key.strip()
+    if not _ENV_KEY_RE.match(key):
+        raise ProviderCredentialError(
+            "key must be an ALL_CAPS env-var name "
+            "(letters, digits, underscores; no leading digit, no shell metacharacters)",
+            details={"key": key},
+        )
+
+    # Bind the credential to the upstream's declared env-var. Catches
+    # the "typo'd PROVIDER_KEY but the upstream actually reads
+    # PROVIDER_API_KEY" footgun without forcing the caller to look up
+    # auth_value_env separately.
+    expected_env = upstream.auth_value_env or ""
+    if expected_env and key != expected_env:
+        raise ProviderCredentialError(
+            f"key {key!r} does not match upstream {name!r}'s declared "
+            f"auth_value_env={expected_env!r}; refusing to write a "
+            "credential the upstream won't read",
+            details={"name": name, "key": key, "expected": expected_env},
+        )
+
+    api_env = paths.etc() / "api.env"
+    try:
+        _write_credential_to_api_env(api_env, key, body.value)
+    except ProviderCredentialError:
+        raise
+    except OSError as exc:
+        raise ProviderCredentialError(
+            f"failed to write {api_env}: {exc}",
+            details={"path": str(api_env), "error": str(exc)},
+        ) from exc
+
+    # Update the in-process environment so the running registry can
+    # observe the new value without a restart — the registry reads
+    # ``os.environ[upstream.auth_value_env]`` per call (registry.py:293).
+    # The persisted api.env line is the source of truth across restarts.
+    os.environ[key] = body.value
+
+    identity = getattr(request.state, "identity", None)
+    audit_identity = getattr(identity, "identity", None) if identity is not None else None
+    # Structured audit row — never log the value, only the env-var name +
+    # the upstream it landed against + who wrote it.
+    _audit_log.info(
+        "provider.credential_written",
+        upstream=name,
+        key=key,
+        api_env_path=str(api_env),
+        identity=audit_identity,
+    )
+
+    return {
+        "ok": True,
+        "name": name,
+        "key": key,
+        "value": "***REDACTED***",
+        "hint": "restart hal0-api or reload upstreams to pick up the change",
+    }

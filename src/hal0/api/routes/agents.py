@@ -7,15 +7,13 @@ logic lives in the manager so the CLI and the API share one
 implementation.
 
 Approval-queue endpoints (the ``/api/agent/approvals`` surface the CLI
-``hal0 agent approvals`` subcommand consumes) are NOT defined here —
-those are owned by the MCP-backend team per the wave-1 brief. We assume
-the shape settled in ADR-0004 §5:
+``hal0 agent approvals`` subcommand consumes) live in
+:mod:`hal0.api.routes.approvals` and are mounted in-process from
+:mod:`hal0.api` next to this router. Shape per ADR-0004 §5:
 
     GET    /api/agent/approvals
     POST   /api/agent/approvals/{id}/approve
     POST   /api/agent/approvals/{id}/deny
-
-Coupling captured in ``WAVE1_INSTALLER_PENDING.md``.
 """
 
 from __future__ import annotations
