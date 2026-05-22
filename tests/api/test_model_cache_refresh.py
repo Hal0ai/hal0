@@ -24,6 +24,7 @@ transitions to ``ready``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
@@ -76,7 +77,10 @@ async def test_ready_event_refreshes_stale_cache_for_that_slot() -> None:
         # Wait for the subscriber to register before emitting.
         await asyncio.sleep(0)
         await bus.emit(
-            "slot.state", "info", "slot:primary", "primary: starting → ready",
+            "slot.state",
+            "info",
+            "slot:primary",
+            "primary: starting → ready",
             data={"slot": "primary", "from": "starting", "to": "ready"},
         )
         # Yield the loop until the refresher has processed the event.
@@ -89,10 +93,8 @@ async def test_ready_event_refreshes_stale_cache_for_that_slot() -> None:
         assert cache["nano"] == ["wrong-but-matches-primary.gguf"]
     finally:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 @pytest.mark.asyncio
@@ -114,7 +116,10 @@ async def test_non_ready_transitions_do_not_refresh() -> None:
         await asyncio.sleep(0)
         for to_state in ("starting", "idle", "error", "offline"):
             await bus.emit(
-                "slot.state", "info", "slot:primary", f"primary: ready → {to_state}",
+                "slot.state",
+                "info",
+                "slot:primary",
+                f"primary: ready → {to_state}",
                 data={"slot": "primary", "from": "ready", "to": to_state},
             )
         for _ in range(5):
@@ -122,10 +127,8 @@ async def test_non_ready_transitions_do_not_refresh() -> None:
         assert fetch_calls == []
     finally:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 @pytest.mark.asyncio
@@ -144,7 +147,10 @@ async def test_event_for_unregistered_slot_is_ignored() -> None:
     try:
         await asyncio.sleep(0)
         await bus.emit(
-            "slot.state", "info", "slot:ghost", "ghost: starting → ready",
+            "slot.state",
+            "info",
+            "slot:ghost",
+            "ghost: starting → ready",
             data={"slot": "ghost", "from": "starting", "to": "ready"},
         )
         for _ in range(5):
@@ -153,10 +159,8 @@ async def test_event_for_unregistered_slot_is_ignored() -> None:
         assert not task.done()
     finally:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 @pytest.mark.asyncio
@@ -191,7 +195,5 @@ async def test_fetch_exception_does_not_kill_refresher() -> None:
         assert not task.done()
     finally:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
