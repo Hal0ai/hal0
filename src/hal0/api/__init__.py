@@ -48,6 +48,12 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     proxmox as proxmox_routes,
 )
+from hal0.api.routes import (
+    agents as agents_routes,
+)
+from hal0.api.routes import (
+    approvals as approvals_routes,
+)
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
 from hal0.dispatcher.router import Dispatcher
@@ -367,6 +373,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.tps_events = collections.defaultdict(_new_tps_deque)
 
+    # Approval queue for gated MCP tool calls (ADR-0004 §5). One per
+    # FastAPI app instance — the dashboard's bell, the MCP admin server,
+    # and the CLI's ``hal0 agent approvals`` all read from the same
+    # in-process queue.
+    from hal0.mcp import ApprovalQueue
+
+    app.state.approval_queue = ApprovalQueue()
+
+    # Cognee-backed long-term memory wrapper (ADR-0005). Lazy-imported so
+    # an install with the ``hal0`` core deps but no ``memory`` extra still
+    # boots — the memory MCP just stays unmounted in that case.
+    memory_wrapper = None
+    try:
+        from hal0.memory import CogneeWrapper
+
+        memory_wrapper = CogneeWrapper()
+        await memory_wrapper.initialize()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("hal0.memory.init_failed", error=str(exc))
+    app.state.memory_wrapper = memory_wrapper
+
+    # Mount the MCP admin + memory servers. Sub-ASGI apps under
+    # /mcp/admin and /mcp/memory with their own Bearer-gating middleware.
+    try:
+        from hal0.api.mcp_mount import mount_mcp_servers
+
+        mount_mcp_servers(
+            app,
+            approval_queue=app.state.approval_queue,
+            memory_wrapper=memory_wrapper,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("hal0.mcp.mount_failed", error=str(exc))
+
     log.info(
         "hal0.api.upstreams_loaded",
         count=len(upstreams.list()),
@@ -513,6 +553,27 @@ def create_app() -> FastAPI:
     # URLs and could leak prompts via filename if exposed publicly.
     app.include_router(
         images.router, prefix="/api/images", tags=["images"], dependencies=_admin_auth
+    )
+
+    # Bundled-agent lifecycle (ADR-0004 §2). Install / uninstall / list /
+    # status. Single-pick + atomic switch enforced inside AgentManager.
+    app.include_router(
+        agents_routes.router,
+        prefix="/api/agents",
+        tags=["agents"],
+        dependencies=_admin_auth,
+    )
+
+    # Approval inbox (ADR-0004 §5). The dashboard bell, the MCP admin
+    # server's gated-tool enqueue, and the ``hal0 agent approvals``
+    # CLI all read from the same lifespan-scoped ApprovalQueue. GETs
+    # require any token; POST approve/deny require admin (writer)
+    # scope — declared inside the route module.
+    app.include_router(
+        approvals_routes.router,
+        prefix="/api/agent/approvals",
+        tags=["approvals"],
+        dependencies=_admin_auth,
     )
 
     _mount_dashboard(app)
