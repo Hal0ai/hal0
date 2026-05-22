@@ -31,6 +31,32 @@ const system = useSystemStore()
 const { stats } = useStats(2500)
 const { metrics, history, aggHistory } = useSlotMetrics(2500)
 
+// Slots managed entirely by the capability cards (Embed/Voice/Img on
+// the Slots page). Hidden from the dashboard slot grid so operators
+// don't see them twice.
+const CAPABILITY_OWNED_SLOTS = new Set([
+  'embed', 'embed-rerank', 'stt', 'tts', 'img',
+])
+
+// Hard ordering: primary first, nano second, then user-defined slots
+// alphabetically. NPU rides at the end as its own card.
+const SLOT_ORDER = ['primary', 'nano']
+function slotSortKey(name) {
+  const i = SLOT_ORDER.indexOf(name)
+  return i >= 0 ? [0, i, name] : [1, 0, name]
+}
+const visibleSlots = computed(() => {
+  const rows = system.slots.filter((s) => !CAPABILITY_OWNED_SLOTS.has(s.name))
+  rows.sort((a, b) => {
+    const ka = slotSortKey(a.name)
+    const kb = slotSortKey(b.name)
+    if (ka[0] !== kb[0]) return ka[0] - kb[0]
+    if (ka[1] !== kb[1]) return ka[1] - kb[1]
+    return ka[2].localeCompare(kb[2])
+  })
+  return rows
+})
+
 const hw = computed(() => stats.value || {})
 
 // ── Slot summary ─────────────────────────────────────────────────────
@@ -171,6 +197,7 @@ const chatModels = ref([])
 const chatModel = ref('')
 const chatPrompt = ref('')
 const chatOutput = ref('')
+const chatReasoning = ref('')
 const chatBusy = ref(false)
 const chatError = ref(null)
 const chatOutputEl = ref(null)
@@ -216,6 +243,7 @@ async function runChat() {
   chatBusy.value = true
   chatError.value = null
   chatOutput.value = ''
+  chatReasoning.value = ''
   try {
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
@@ -252,9 +280,15 @@ async function runChat() {
         if (data === '[DONE]') continue
         try {
           const j = JSON.parse(data)
-          const delta = j?.choices?.[0]?.delta?.content
-          if (delta) {
-            chatOutput.value += delta
+          const d = j?.choices?.[0]?.delta
+          // Reasoning models (Qwen3-Reason, gpt-oss, deepseek-r1, …) emit
+          // `reasoning_content` for their <think> tokens and `content` for
+          // the user-visible answer. Dropping reasoning made the panel look
+          // frozen — small reasoning models can burn the whole token budget
+          // on thinking before any `content` arrives.
+          if (d?.reasoning_content) chatReasoning.value += d.reasoning_content
+          if (d?.content) chatOutput.value += d.content
+          if (d?.reasoning_content || d?.content) {
             await nextTick()
             if (chatOutputEl.value) {
               chatOutputEl.value.scrollTop = chatOutputEl.value.scrollHeight
@@ -395,25 +429,20 @@ loadChatModels()
       <section aria-labelledby="slots-heading">
         <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> Slots</p>
         <h2 id="slots-heading" class="section-title">Slots</h2>
-        <template v-if="system.loading && system.slots.length === 0">
+        <template v-if="system.loading && visibleSlots.length === 0">
           <div class="slots-grid">
             <Card v-for="i in 3" :key="i"><LoadingSkeleton :lines="3" /></Card>
           </div>
         </template>
-        <template v-else-if="system.slots.length === 0">
-          <Card :padded="false">
-            <EmptyState
-              title="No slots configured"
-              description="Create a slot to start serving inference requests."
-              cta-label="Go to Slots"
-              @cta="router.push('/slots')"
-            />
-          </Card>
+        <template v-else-if="visibleSlots.length === 0">
+          <div class="slots-grid" role="list" aria-label="Inference slots">
+            <NPUBackendCard />
+          </div>
         </template>
         <template v-else>
           <div class="slots-grid" role="list" aria-label="Inference slots">
             <SlotCard
-              v-for="slot in system.slots"
+              v-for="slot in visibleSlots"
               :key="slot.name"
               :slot="slot"
               :metrics="metrics[slot.name]"
@@ -458,9 +487,13 @@ loadChatModels()
               {{ chatBusy ? 'Streaming…' : 'Send' }}
             </button>
           </div>
-          <div ref="chatOutputEl" class="chat-output" :class="{ empty: !chatOutput && !chatError }">
+          <div ref="chatOutputEl" class="chat-output" :class="{ empty: !chatOutput && !chatReasoning && !chatError }">
             <span v-if="chatError" class="text-danger">{{ chatError }}</span>
-            <span v-else-if="chatOutput">{{ chatOutput }}</span>
+            <template v-else-if="chatOutput || chatReasoning">
+              <span v-if="chatReasoning" class="chat-reasoning">{{ chatReasoning }}</span>
+              <span v-if="chatReasoning && chatOutput" class="chat-reasoning-sep">───</span>
+              <span v-if="chatOutput">{{ chatOutput }}</span>
+            </template>
             <span v-else class="text-muted mono-text">Response appears here · streaming SSE from /v1/chat/completions</span>
           </div>
         </Card>
@@ -585,6 +618,8 @@ loadChatModels()
 .chat-send { padding: 6px 16px; flex-shrink: 0; }
 .chat-output { min-height: 80px; max-height: 260px; overflow-y: auto; padding: 10px 12px; background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .chat-output.empty { display: flex; align-items: center; min-height: 60px; }
+.chat-reasoning { color: var(--color-fg-faint); font-style: italic; font-size: 12px; }
+.chat-reasoning-sep { display: block; margin: 8px 0; color: var(--color-fg-faint); font-family: var(--font-mono); font-size: 11px; }
 
 /* ── Logs ───────────────────────────────────────────────────────── */
 .logs-empty { padding: 20px 16px; display: flex; align-items: center; }

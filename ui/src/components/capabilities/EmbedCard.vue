@@ -29,6 +29,7 @@ import { useCapabilities } from '../../composables/useCapabilities.js'
 import { useSlotMetrics } from '../../composables/useStats.js'
 import { useToastsStore } from '../../stores/toasts.js'
 import { usePullJob, fmtBytes } from '../../composables/usePullJob.js'
+import { useSystemStore } from '../../stores/system.js'
 import CapabilityToggle from './CapabilityToggle.vue'
 
 const props = defineProps({
@@ -38,6 +39,7 @@ const props = defineProps({
 
 const cap = useCapabilities()
 const toasts = useToastsStore()
+const system = useSystemStore()
 const { metrics } = useSlotMetrics()
 
 // Map { capability → upstream slot name }. Mirrors the backend's slot
@@ -45,6 +47,14 @@ const { metrics } = useSlotMetrics()
 // with the cards. Keep in sync with the backend agent.
 const SLOT_NAME = { embed: 'embed', rerank: 'embed-rerank' }
 const ENDPOINTS  = { embed: '/v1/embeddings', rerank: '/v1/rerankings' }
+
+// Port of the upstream slot, surfaced alongside the endpoint so
+// operators can curl the slot directly without cross-referencing
+// /api/slots.
+function portFor(capability) {
+  const name = SLOT_NAME[capability]
+  return system.slots.find((s) => s.name === name)?.port ?? null
+}
 
 // Per-child loading flag for the toggle spinner. Keyed by capability so
 // flipping one pill doesn't lock the other.
@@ -257,7 +267,10 @@ const headerPill = computed(() => {
             {{ selection?.embed?.status || 'offline' }}
           </span>
           <span class="cap-section-label">Embed</span>
-          <span class="cap-section-sub">{{ ENDPOINTS.embed }}</span>
+          <span class="cap-section-sub">
+            {{ ENDPOINTS.embed }}
+            <span v-if="portFor('embed')" class="cap-section-port">· :{{ portFor('embed') }}</span>
+          </span>
         </span>
         <CapabilityToggle
           :model-value="!!selection?.embed?.enabled"
@@ -331,7 +344,10 @@ const headerPill = computed(() => {
             {{ selection?.rerank?.status || 'offline' }}
           </span>
           <span class="cap-section-label">Rerank</span>
-          <span class="cap-section-sub">{{ ENDPOINTS.rerank }}</span>
+          <span class="cap-section-sub">
+            {{ ENDPOINTS.rerank }}
+            <span v-if="portFor('rerank')" class="cap-section-port">· :{{ portFor('rerank') }}</span>
+          </span>
         </span>
         <CapabilityToggle
           :model-value="!!selection?.rerank?.enabled"

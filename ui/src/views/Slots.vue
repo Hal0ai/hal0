@@ -33,6 +33,23 @@ import CapabilitiesSection from '../components/capabilities/CapabilitiesSection.
 // Mirror src/hal0/slots/__init__.py BUILTIN_SLOTS — these cannot be deleted.
 const BUILTIN_SLOTS = new Set(['primary', 'embed', 'stt', 'tts'])
 
+// Slots whose UX lives entirely in the capability cards (EmbedCard,
+// VoiceCard, ImgCard). They're still real slots in the backend, but we
+// hide them from the regular slot grid so operators don't have two
+// places that look like they configure the same thing.
+const CAPABILITY_OWNED_SLOTS = new Set([
+  'embed', 'embed-rerank', 'stt', 'tts', 'img',
+])
+
+// Hard ordering for the slot grid. Slots listed here take the first
+// positions in the given order; anything else sorts alphabetically
+// after them. NPU rides at the very end as a separate card.
+const SLOT_ORDER = ['primary', 'nano']
+function slotSortKey(name) {
+  const i = SLOT_ORDER.indexOf(name)
+  return i >= 0 ? [0, i, name] : [1, 0, name]
+}
+
 const { metrics: slotMetrics, history: slotHistory } = useSlotMetrics(2500)
 
 const route  = useRoute()
@@ -545,13 +562,23 @@ const liveStates = computed(() => {
 // `_selectedModel` is read from slotSelections (not stored on the
 // wrapper object), so the dropdown's pending selection survives across
 // store polls — see the slotSelections declaration above.
-const slots = computed(() =>
-  system.slots.map((s) => {
-    const live = liveStates.value[s.name]
-    const status = live?.state ?? s.status
-    return { ...s, status, _selectedModel: slotSelections.value[s.name] ?? '' }
+const slots = computed(() => {
+  const rows = system.slots
+    .filter((s) => !CAPABILITY_OWNED_SLOTS.has(s.name))
+    .map((s) => {
+      const live = liveStates.value[s.name]
+      const status = live?.state ?? s.status
+      return { ...s, status, _selectedModel: slotSelections.value[s.name] ?? '' }
+    })
+  rows.sort((a, b) => {
+    const ka = slotSortKey(a.name)
+    const kb = slotSortKey(b.name)
+    if (ka[0] !== kb[0]) return ka[0] - kb[0]
+    if (ka[1] !== kb[1]) return ka[1] - kb[1]
+    return ka[2].localeCompare(kb[2])
   })
-)
+  return rows
+})
 
 // Open detail panel if navigated to /slots/:name
 watch(() => route.params.name, (name) => {
@@ -611,19 +638,16 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
 
     <div class="page-body">
       <!-- ── Slots table ──────────────────────────────────────── -->
-      <template v-if="system.loading && system.slots.length === 0">
+      <template v-if="system.loading && slots.length === 0">
         <Card v-for="i in 3" :key="i" class="slot-row-skel"><LoadingSkeleton :lines="2" /></Card>
       </template>
 
-      <template v-else-if="system.slots.length === 0">
-        <Card :padded="false">
-          <EmptyState
-            title="No slots yet"
-            description="Create your first slot to start serving inference requests. Slots map a backend process to a model."
-            cta-label="Create slot"
-            @cta="showCreate = true"
-          />
-        </Card>
+      <template v-else-if="slots.length === 0">
+        <!-- All system slots are capability-owned; show NPU card alone
+             rather than an empty "create a slot" prompt. -->
+        <div class="slots-grid" role="list" aria-label="Inference slots">
+          <NPUBackendCard />
+        </div>
       </template>
 
       <template v-else>

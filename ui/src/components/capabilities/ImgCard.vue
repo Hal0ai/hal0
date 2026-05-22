@@ -20,6 +20,7 @@ import { useCapabilities } from '../../composables/useCapabilities.js'
 import { useSlotMetrics } from '../../composables/useStats.js'
 import { useToastsStore } from '../../stores/toasts.js'
 import { usePullJob, fmtBytes } from '../../composables/usePullJob.js'
+import { useSystemStore } from '../../stores/system.js'
 import CapabilityToggle from './CapabilityToggle.vue'
 
 const props = defineProps({
@@ -29,10 +30,15 @@ const props = defineProps({
 
 const cap = useCapabilities()
 const toasts = useToastsStore()
+const system = useSystemStore()
 const { metrics } = useSlotMetrics()
 
 const SLOT_NAME = 'img'
 const togglePending = ref(false)
+
+const slotPort = computed(
+  () => system.slots.find((s) => s.name === SLOT_NAME)?.port ?? null,
+)
 
 function fmtMem(mb) {
   if (mb == null) return '—'
@@ -196,7 +202,10 @@ const headerPill = computed(() => {
             {{ selection?.img?.status || 'offline' }}
           </span>
           <span class="cap-section-label">Image</span>
-          <span class="cap-section-sub">/v1/images/generations</span>
+          <span class="cap-section-sub">
+            /v1/images/generations
+            <span v-if="slotPort" class="cap-section-port">· :{{ slotPort }}</span>
+          </span>
         </span>
         <CapabilityToggle
           :model-value="!!selection?.img?.enabled"

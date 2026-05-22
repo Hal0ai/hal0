@@ -145,6 +145,11 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
   font-family: var(--font-mono); font-size: 10.5px;
   color: var(--color-fg-faint);
 }
+.cap-section-port {
+  margin-left: 2px;
+  color: var(--color-fg-faint);
+  opacity: 0.7;
+}
 
 /* Status pill — sits on the LEFT of the section header to anchor the eye.
  * Drives off the selection.status returned by /api/capabilities. */
@@ -163,7 +168,8 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
   border-color: color-mix(in oklch, var(--color-success) 40%, transparent);
   background: color-mix(in oklch, var(--color-success) 12%, transparent);
 }
-.cap-status[data-state="idle"] {
+.cap-status[data-state="idle"],
+.cap-status[data-state="ready"] {
   color: var(--color-warning);
   border-color: color-mix(in oklch, var(--color-warning) 40%, transparent);
   background: color-mix(in oklch, var(--color-warning) 12%, transparent);

@@ -13,6 +13,7 @@ import { useCapabilities } from '../../composables/useCapabilities.js'
 import { useSlotMetrics } from '../../composables/useStats.js'
 import { useToastsStore } from '../../stores/toasts.js'
 import { usePullJob, fmtBytes } from '../../composables/usePullJob.js'
+import { useSystemStore } from '../../stores/system.js'
 import CapabilityToggle from './CapabilityToggle.vue'
 
 const props = defineProps({
@@ -21,6 +22,7 @@ const props = defineProps({
 
 const cap = useCapabilities()
 const toasts = useToastsStore()
+const system = useSystemStore()
 const { metrics } = useSlotMetrics()
 
 const CAPS = ['stt', 'tts']
@@ -28,6 +30,11 @@ const SLOT_NAME = { stt: 'stt', tts: 'tts' }
 const ENDPOINTS = {
   stt: '/v1/audio/transcriptions',
   tts: '/v1/audio/speech',
+}
+
+function portFor(capability) {
+  const name = SLOT_NAME[capability]
+  return system.slots.find((s) => s.name === name)?.port ?? null
 }
 
 const togglePending = ref({ stt: false, tts: false })
@@ -197,7 +204,10 @@ const headerPill = computed(() => {
             {{ selection?.[c]?.status || 'offline' }}
           </span>
           <span class="cap-section-label">{{ c.toUpperCase() }}</span>
-          <span class="cap-section-sub">{{ ENDPOINTS[c] }}</span>
+          <span class="cap-section-sub">
+            {{ ENDPOINTS[c] }}
+            <span v-if="portFor(c)" class="cap-section-port">· :{{ portFor(c) }}</span>
+          </span>
         </span>
         <CapabilityToggle
           :model-value="!!selection?.[c]?.enabled"
