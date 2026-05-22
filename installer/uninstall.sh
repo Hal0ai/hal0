@@ -128,6 +128,49 @@ else
     step "Skipping systemd / docker stop (dev mode)"
 fi
 
+# ── Bundled agents (Phase 8, ADR-0004 §6) ─────────────────────────────────────
+# Iterates /etc/hal0/agents/*.toml, calls each agent's uninstall
+# companion script (dropped by installer/agents/<name>.sh during
+# install), then removes the per-agent data dirs. Runs BEFORE the
+# code/data sweep below because the companion scripts live under
+# ${VAR_DIR}/agents/<name>/ — wiping that first would orphan the
+# upstream packages (npm/cargo/hermes-agent).
+uninstall_agents() {
+    local AGENTS_ETC="${ETC_DIR}/agents"
+    local AGENTS_VAR="${VAR_DIR}/agents"
+    if [[ ! -d "${AGENTS_ETC}" ]] && [[ ! -d "${AGENTS_VAR}" ]]; then
+        return 0
+    fi
+    step "Bundled agents"
+    if [[ -d "${AGENTS_ETC}" ]]; then
+        for AGENT_TOML in "${AGENTS_ETC}"/*.toml; do
+            [[ -e "${AGENT_TOML}" ]] || continue
+            local AGENT_NAME
+            AGENT_NAME="$(basename "${AGENT_TOML}" .toml)"
+            local COMPANION="${AGENTS_VAR}/${AGENT_NAME}/uninstall.sh"
+            if [[ -x "${COMPANION}" ]]; then
+                if bash "${COMPANION}"; then
+                    info "Ran uninstall companion for ${AGENT_NAME}"
+                else
+                    warn "Companion uninstall for ${AGENT_NAME} returned non-zero (continuing)"
+                fi
+            else
+                info "No uninstall companion for ${AGENT_NAME} (already removed?)"
+            fi
+        done
+    fi
+    if [[ -d "${AGENTS_VAR}" ]]; then
+        rm -rf "${AGENTS_VAR}"
+        info "Removed ${AGENTS_VAR}"
+    fi
+    if [[ -d "${AGENTS_ETC}" ]]; then
+        rm -rf "${AGENTS_ETC}"
+        info "Removed ${AGENTS_ETC}"
+    fi
+}
+
+uninstall_agents
+
 # ── Remove unit files ─────────────────────────────────────────────────────────
 step "Removing systemd units"
 
