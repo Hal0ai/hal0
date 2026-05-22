@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Deque, Iterable
 
 
 # 60s window matches what the prototype TUI defaults to — long enough
@@ -44,7 +44,7 @@ class SlotSamples:
     """
 
     window_s: float = DEFAULT_WINDOW_S
-    ttft_samples: Deque[tuple[float, float]] = field(
+    ttft_samples: deque[tuple[float, float]] = field(
         default_factory=lambda: deque(maxlen=128)
     )
     inflight: dict[str, float] = field(default_factory=dict)
@@ -110,7 +110,7 @@ def avg_kv_cache_across(kv_cache: dict[str, float]) -> float | None:
 
 
 def samples_from_events(
-    events: Deque[tuple[float, float]],
+    events: deque[tuple[float, float]],
     window_s: float = DEFAULT_WINDOW_S,
 ) -> SlotSamples:
     """Adapt a raw ``app.state.ttft_events[slot]`` deque to a
