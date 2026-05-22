@@ -34,7 +34,7 @@ Migration still net-positive on the surviving drivers, but the perf narrative ne
 | 4 | vLLM-ROCm | Out of scope this cycle — re-evaluate post-v0.2 |
 | 5 | Release vehicle | v0.2 (combined with Agents per parallel session work) |
 | 6 | UI rework | Punt to v0.2.1 pending web-ui.md research |
-| 7 | Bundling + pin | manifest.json schema v2 adds `lemonade: { image, digest, version }` |
+| 7 | Bundling + pin | manifest.json schema v2 adds `lemonade: { tarball_url, sha256, version }` |
 | 8 | Rollback | Downgrade-only via existing update mechanism; v0.2 deletes old Provider code cleanly |
 | 9 | ComfyUI loss | Accepted — sdpp covers 90%; release-notes documented |
 
@@ -43,10 +43,10 @@ Migration still net-positive on the surviving drivers, but the perf narrative ne
 | # | Decision | Choice |
 |---|---|---|
 | 10 | Slot abstraction | Preserve. Each hal0 slot = 1 Lemonade-loaded model. SlotManager retargets to Lemonade load/unload. Per-slot `hal0-slot@.service` retires. |
-| 11 | Drive method | HTTP-first /v1/load with reverse-engineered schema (research lands it). `lemonade` CLI subprocess as bootstrap fallback. |
+| 11 | Drive method | HTTP-only. `/v1/load` schema: `{model_name}` (only required field, research-resolved). `LemonadeClient` wraps endpoints. Healthcheck = `/live`. |
 | 12 | Model registration | Generate hal0-customized `server_models.json` from `registry.toml` at install. Runtime user adds via /v1/pull `user.*` namespace. |
-| 13 | Process supervision | Containerized lemond in systemd. `/etc/systemd/system/lemond.service` wraps `podman/docker run` with `--device` passthrough. Boot-enabled. |
-| 14 | Container source | `ghcr.io/hal0ai/hal0-lemond:vX.Y.Z` — hal0-published wrapper. Base + lemond tarball + `unzip` + `libxrt-npu2` + pre-pulled backends. CI builds + cosign-signs. |
+| 13 | Process supervision | AMD embeddable tarball + bare systemd unit. `lemond.service` runs `lemond /opt/lemonade --port 9100` directly. Hardened: NoNewPrivileges, ProtectSystem=strict, ProtectHome, PrivateTmp, RestrictAddressFamilies. Boot-enabled. |
+| 14 | Bundling | AMD's `lemonade-embeddable-<VERSION>-ubuntu-x64.tar.gz`. install.sh sha256-verifies, extracts to /opt/lemonade, apt-installs unzip+libxrt-npu2, runs `lemonade backends install` at first boot. **No custom hal0 image.** |
 | 15 | `SlotConfig.backend` | Refactor → `SlotConfig.device` (enum `gpu-rocm \| gpu-vulkan \| cpu \| npu`). Default `gpu-rocm`. Schema_version bump + migration. |
 | 16 | Metrics shim | `/v1/stats` polling (backend_url /metrics returned 501 in spike). hal0-side metrics aggregator polls `/v1/stats` + `/v1/health` per slot. |
 | 17 | Idle-eviction driver | hal0-owned external. SlotManager polls `/v1/health.loaded[].last_use`, calls `POST /v1/unload` when stale per existing 300s policy. |
@@ -99,15 +99,16 @@ ADRs 0007+ for multi-user Cognee, prior plan, are renumbered to 0008+ as needed.
 
 **install.sh changes:**
 - `apt install -y unzip libxrt-npu2` (system deps Lemonade requires)
-- Pull `ghcr.io/hal0ai/hal0-lemond:vX.Y.Z` image
+- Download embeddable tarball, sha256-verify, extract to /opt/lemonade
 - Write `/etc/systemd/system/lemond.service`
 - `systemctl enable --now lemond`
 - Generate + install `server_models.json` from registry
 - Stop installing per-modality docker images
 
-**New CI:**
-- `hal0-lemond` image build workflow (replaces six toolbox workflows)
-- Cosign signing per release
+**CI changes:**
+- Retire six toolbox build workflows
+- NO new hal0 image to build (AMD ships the embeddable tarball)
+- Release workflow adds tarball sha256 + version pin to manifest.json
 
 ---
 
@@ -116,8 +117,8 @@ ADRs 0007+ for multi-user Cognee, prior plan, are renumbered to 0008+ as needed.
 1. **ADR-0006 + ADR-0007 drafts** — written from this session's decisions; tightened post-research
 2. **`LemonadeClient` skeleton** — HTTP client with CLI fallback, type stubs only
 3. **manifest.json schema v2** — `lemonade: {...}` field, validation, `HAL0_BACKEND=lemonade` flag plumbing
-4. **`hal0-lemond` image** — Dockerfile + GH workflow + cosign + publish to ghcr.io
-5. **`lemond.service`** — install.sh writes systemd unit + container-run command + device passthrough
+4. **install.sh tarball fetch** — download embeddable tarball, sha256-verify, extract to /opt/lemonade, apt-install unzip+libxrt-npu2
+5. **`lemond.service`** — install.sh writes hardened systemd unit running `lemond` directly (no container wrapper)
 6. **`server_models_gen.py`** — registry.toml → server_models.json converter + install hook
 7. **`SlotConfig.device`** — schema refactor + capabilities.toml schema_version=2 migration
 8. **`LemonadeProvider`** — concrete provider implementing Provider ABC, drives `LemonadeClient`
