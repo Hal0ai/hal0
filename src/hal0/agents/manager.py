@@ -52,11 +52,19 @@ class AgentAlreadyInstalledError(AgentError):
     to atomically swap."""
 
 
-class HermesNotHal0AwareError(AgentError):
-    """Raised by the Hermes driver when the upstream Hermes build does not
-    yet ship hal0-awareness (ADR-0004 §6). Install path refuses with a
-    clean actionable message rather than half-wiring something that will
-    not work."""
+class HermesUpstreamMissingError(AgentError):
+    """Raised by the Hermes driver when the hal0-owned ``hal0-hermes``
+    wrapper is not installed or not functional (ADR-0004 §6). The
+    wrapper is hal0's integration seam against upstream
+    NousResearch/hermes-agent; install path refuses to wire an env file
+    the wrapper can't source rather than half-wiring something that
+    will not work."""
+
+
+# Back-compat alias for the pre-wrapper-pivot error class. Existing
+# callers in ``hal0.api.routes.agents`` (Team CloseOut surface) catch
+# the old name; keep the symbol live until that surface migrates.
+HermesNotHal0AwareError = HermesUpstreamMissingError
 
 
 # ── Bundled catalog ──────────────────────────────────────────────────────────

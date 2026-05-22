@@ -1,0 +1,31 @@
+#!/bin/sh
+# hal0-hermes — env-file injector wrapper around upstream `hermes`.
+#
+# Sourced env-file injection lets hal0 own the hermes integration
+# WITHOUT touching upstream NousResearch/hermes-agent. The wrapper
+# loads HAL0_* + provider config from $HAL0_ENV_FILE (default
+# /etc/hal0/agents/hermes.env), then execs the upstream `hermes`
+# binary with the same argv.
+#
+# The `--hal0-ready` sentinel is consumed by the hal0 installer's
+# post-install smoke test (installer/agents/hermes-agent.sh) so the
+# install script can verify the wrapper is on PATH and functional
+# WITHOUT spawning the heavyweight upstream binary.
+
+set -eu
+
+HAL0_ENV_FILE="${HAL0_ENV_FILE:-/etc/hal0/agents/hermes.env}"
+
+if [ -r "$HAL0_ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    # (path is operator-controlled by design)
+    . "$HAL0_ENV_FILE"
+    set +a
+fi
+
+case "${1:-}" in
+    --hal0-ready) exit 0 ;;
+esac
+
+exec hermes "$@"

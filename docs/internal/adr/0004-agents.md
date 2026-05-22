@@ -103,8 +103,11 @@ Server-side store the pending queue. Agent's MCP loop decide whether to wait syn
 ### 6. Ownership (asymmetric)
 
 - **pi-coder shim**: hal0 owns `installer/agents/pi-coder.sh`. Script install `pi-mono` upstream, install `pi-mcp-adapter` (a proxy-tool MCP routing layer — ~200 tokens per dispatch instead of dumping the full tool catalog into context), and leave `pi-memory-md` extension in place (project-scoped markdown memory, distinct from hal0's cross-app memory MCP per ADR-0005). Both memory layers coexist; they target different scopes.
-- **Hermes-Agent**: native hal0-awareness grow upstream. User own Hermes — the integration get done in Hermes itself, not in a shim. hal0's Hermes shim is a one-liner calling Hermes's own install command and pointing it at the local hal0 admin MCP endpoint.
-- **Default for future bundled agents**: shim-first. Promote to upstream integration when the upstream maintainer cooperate. Shim is the always-available fallback; native integration is the goal where reachable.
+- **Hermes-Agent**: hal0 owns a thin wrapper (`hal0-hermes`) that env-file-injects HAL0_* into upstream `hermes` on every invocation. The user CAN'T PR upstream NousResearch/hermes-agent, so the previous "native hal0-awareness grows upstream" plan is unreachable; the wrapper is hal0's integration seam instead. Wrapper files:
+    - `installer/wrappers/hal0-hermes` — POSIX shell, sources `$HAL0_ENV_FILE` (default `/etc/hal0/agents/hermes.env`) then `exec hermes "$@"`. Carries a `--hal0-ready` sentinel for installer smoke-test and driver probe.
+    - `installer/agents/hermes-agent.sh` — copies the wrapper to `/usr/local/bin` (root) or `~/.local/bin` (user), chmod 0755, smoke-tests `--hal0-ready`, drops an uninstall companion.
+    - `src/hal0/agents/hermes.py` — driver probes `shutil.which("hal0-hermes")` + `--hal0-ready` rc==0 before shelling out, then writes the canonical env file. No `--hal0-config` probe anymore.
+- **Default for future bundled agents**: shim-first. Promote to upstream integration when the upstream maintainer cooperate. Shim is the always-available fallback; native integration is the goal where reachable. Hermes is the worked example of "upstream maintainer won't cooperate" — wrapper is the answer.
 
 ### 7. Server-side hardening
 

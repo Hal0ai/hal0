@@ -1,62 +1,115 @@
 #!/bin/sh
 # hal0 — Hermes-Agent bundled-agent installer (Phase 8, ADR-0004 §6).
 #
-# POSIX shell, dash-safe. One-liner that calls Hermes's own install
-# command — Hermes is user-owned upstream, hal0-awareness grows there
-# (ADR-0004 §6). This script is the shell mirror of the Python
-# driver's hal0-awareness gate.
+# POSIX shell, dash-safe. Installs the hal0-owned `hal0-hermes` wrapper
+# around upstream `hermes`. The wrapper is the env-file injector that
+# lets hal0 prewire HAL0_* into Hermes's process env WITHOUT requiring
+# any upstream changes — user can't PR upstream NousResearch/hermes-agent,
+# so the wrapper is hal0's integration seam.
 #
-# Inputs:
+# Flow:
+#   1. Verify upstream `hermes` is on PATH (else die with install hint).
+#   2. Pick install dir: /usr/local/bin if root, else ~/.local/bin.
+#   3. Copy installer/wrappers/hal0-hermes → <install_dir>/hal0-hermes (0755).
+#   4. Smoke-test: `hal0-hermes --hal0-ready` returns 0.
+#   5. Drop an uninstall companion under $HAL0_AGENT_DATA_DIR.
+#
+# The env file itself (/etc/hal0/agents/hermes.env) is written by the
+# Python driver (hal0.agents.hermes._write_env_file) AFTER this script
+# exits, so the call shape stays declarative here.
+#
+# Inputs (set by the Python driver; safe to override for manual runs):
 #   HAL0_AGENT_DATA_DIR  per-agent data dir (default:
 #                         /var/lib/hal0/agents/hermes)
 #   HAL0_API_URL         hal0 API base URL (default: http://127.0.0.1:8080)
 #   HAL0_BEARER_TOKEN    Bearer token (default: pulled from
 #                         /etc/hal0/tokens.toml, like pi-coder.sh)
-#
-# Side effects:
-#   - Verifies the local Hermes binary advertises hal0-awareness
-#     (--hal0-config flag OR HERMES_HAL0_READY=1) before doing anything.
-#   - Runs `hermes-agent install --hal0-config /etc/hal0/agents/hermes.env`.
-#     The env file itself is written by the Python driver after this
-#     script exits, so the call shape stays declarative here.
 
 set -eu
 
+# ── Logging ──────────────────────────────────────────────────────────────────
 info()  { printf '[hermes] %s\n' "$*"; }
 warn()  { printf '[hermes] WARN: %s\n' "$*" >&2; }
 die()   { printf '[hermes] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# ── Defaults ─────────────────────────────────────────────────────────────────
 HAL0_AGENT_DATA_DIR="${HAL0_AGENT_DATA_DIR:-/var/lib/hal0/agents/hermes}"
 HAL0_API_URL="${HAL0_API_URL:-http://127.0.0.1:8080}"
 HAL0_BEARER_TOKEN="${HAL0_BEARER_TOKEN:-}"
 
 mkdir -p "$HAL0_AGENT_DATA_DIR"
 
-# ── hal0-awareness gate (mirrors hal0.agents.hermes._probe_hal0_awareness) ───
+# ── Upstream gate ────────────────────────────────────────────────────────────
 #
-# Both branches OR-ed: if either is satisfied, proceed. Failing here
-# is the *expected* path until Hermes upstream ships hal0-awareness.
+# We do NOT probe for hal0-awareness on the upstream binary anymore —
+# upstream Hermes never ships a `--hal0-config` flag and never will
+# (user can't PR upstream). Instead we just verify `hermes` is on PATH;
+# the wrapper carries the integration.
 
-probe_hermes_hal0_aware() {
-    if [ "${HERMES_HAL0_READY:-}" = "1" ]; then
-        return 0
-    fi
-    if ! command -v hermes-agent >/dev/null 2>&1; then
-        return 1
-    fi
-    # --help exit code may be non-zero on some builds; we only care
-    # about the text. Capture both streams.
-    if hermes-agent --help 2>&1 | grep -q -- '--hal0-config'; then
-        return 0
-    fi
-    return 1
-}
-
-if ! probe_hermes_hal0_aware; then
-    die "Hermes-Agent on this host does not ship hal0-awareness yet. Upgrade Hermes to a build that supports --hal0-config, or export HERMES_HAL0_READY=1 if you're testing an unreleased build. Tracking issue: Phase 8 milestone on https://github.com/Hal0ai/hal0."
+if ! command -v hermes >/dev/null 2>&1; then
+    die "upstream \`hermes\` not found on PATH. Install Hermes first: \
+\`pip install --user hermes-agent\` (or \`pipx install hermes-agent\`), \
+then re-run \`hal0 agent install hermes\`."
 fi
 
-# ── Token discovery (same shape as pi-coder.sh) ──────────────────────────────
+# ── Pick install dir ─────────────────────────────────────────────────────────
+#
+# Root → /usr/local/bin (LSB system binary location). Non-root →
+# ~/.local/bin (XDG user-local). The latter must be on PATH; we warn
+# but don't fail — the user may PATH-prepend it after the fact.
+
+if [ "$(id -u)" = "0" ]; then
+    INSTALL_DIR="/usr/local/bin"
+else
+    INSTALL_DIR="${HOME:-/root}/.local/bin"
+    mkdir -p "$INSTALL_DIR"
+    case ":${PATH:-}:" in
+        *":$INSTALL_DIR:"*) ;;
+        *) warn "$INSTALL_DIR is not on PATH — add it to your shell rc (\
+e.g. export PATH=\"\$HOME/.local/bin:\$PATH\")." ;;
+    esac
+fi
+
+# ── Resolve wrapper source ───────────────────────────────────────────────────
+#
+# This script lives at <repo>/installer/agents/hermes-agent.sh; the
+# wrapper source is its sibling at <repo>/installer/wrappers/hal0-hermes.
+# Resolve relative to $0 so the script works whether called via bash
+# or sourced from a different cwd.
+
+SCRIPT_DIR="$(cd "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)"
+WRAPPER_SRC="$SCRIPT_DIR/../wrappers/hal0-hermes"
+
+if [ ! -r "$WRAPPER_SRC" ]; then
+    die "wrapper source missing at $WRAPPER_SRC. This hal0 install \
+looks packaged without installer/wrappers/ — reinstall hal0 from a \
+release tarball or git clone."
+fi
+
+# ── Install wrapper ──────────────────────────────────────────────────────────
+WRAPPER_DST="$INSTALL_DIR/hal0-hermes"
+info "Installing hal0-hermes wrapper → $WRAPPER_DST"
+cp "$WRAPPER_SRC" "$WRAPPER_DST"
+chmod 0755 "$WRAPPER_DST"
+
+# ── Smoke-test ───────────────────────────────────────────────────────────────
+#
+# `--hal0-ready` short-circuits in the wrapper BEFORE exec'ing upstream
+# `hermes`. A zero rc confirms the wrapper is on PATH (or at least
+# resolvable via INSTALL_DIR), readable, and not corrupted in transit.
+
+info "Smoke-testing $WRAPPER_DST --hal0-ready"
+if ! "$WRAPPER_DST" --hal0-ready >/dev/null 2>&1; then
+    die "hal0-hermes wrapper failed --hal0-ready smoke test. Check \
+permissions on $WRAPPER_DST."
+fi
+
+# ── Token discovery (best-effort, same shape as pi-coder.sh) ─────────────────
+#
+# Surfaced via env file by the Python driver; we keep the discovery
+# here as a no-op for now so future shell-only invocations don't miss
+# the file. No-op in the sense that the driver re-discovers and writes
+# the canonical env file itself.
 if [ -z "$HAL0_BEARER_TOKEN" ] && [ -r /etc/hal0/tokens.toml ]; then
     HAL0_BEARER_TOKEN="$(
         awk '/^wire_token *= */ {gsub(/"/,"",$0); print $3; exit}' \
@@ -64,30 +117,20 @@ if [ -z "$HAL0_BEARER_TOKEN" ] && [ -r /etc/hal0/tokens.toml ]; then
     )"
 fi
 
-# ── Invoke Hermes's own install command ──────────────────────────────────────
+# ── Uninstall companion ──────────────────────────────────────────────────────
 #
-# The env file referenced here is *written by the Python driver*
-# (hal0.agents.hermes._write_env_file) after this script exits cleanly.
-# We pass the path so Hermes can wire its config to consume it on
-# first start.
+# installer/uninstall.sh's uninstall_agents() hook calls this.
+# Removes the wrapper from INSTALL_DIR + the env file from /etc/hal0.
 
-ENV_FILE="/etc/hal0/agents/hermes.env"
-info "Calling hermes-agent install --hal0-config $ENV_FILE"
-hermes-agent install --hal0-config "$ENV_FILE" \
-    || die "hermes-agent install failed — see Hermes-side logs"
-
-# Drop the uninstall companion so installer/uninstall.sh's
-# uninstall_agents() hook can find it.
 {
     printf '#!/bin/sh\n'
     printf '# hal0 — hermes uninstall companion (called from installer/uninstall.sh)\n'
     printf 'set -eu\n'
-    printf 'if command -v hermes-agent >/dev/null 2>&1; then\n'
-    printf '    hermes-agent uninstall 2>/dev/null || true\n'
-    printf 'fi\n'
+    printf 'rm -f %s 2>/dev/null || true\n' "$WRAPPER_DST"
     printf 'rm -f /etc/hal0/agents/hermes.env 2>/dev/null || true\n'
 } > "$HAL0_AGENT_DATA_DIR/uninstall.sh"
 chmod +x "$HAL0_AGENT_DATA_DIR/uninstall.sh"
 
-info "Install complete."
+info "Install complete. Wrapper at $WRAPPER_DST; env file will be \
+written by the hal0 driver at /etc/hal0/agents/hermes.env."
 exit 0

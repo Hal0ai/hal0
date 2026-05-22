@@ -35,8 +35,10 @@ The picker lives in **two places**:
 
 Step 7 of the first-run wizard offers `pi-coder`, `Hermes-Agent`, or
 "no agent". The pick fires `POST /api/agents/install` with the chosen
-name. The Hermes option is disabled (with a tooltip) when the host's
-Hermes upstream does not yet ship hal0-awareness.
+name. The Hermes option is disabled (with a tooltip) when upstream
+`hermes` is not on PATH — the hal0-owned wrapper requires the upstream
+binary to be installed first (`pip install --user hermes-agent` or
+`pipx install hermes-agent`).
 
 `install.sh` itself stays **non-interactive**. There is no `--agent`
 flag on the installer — the wizard is the only first-run entry point
@@ -118,20 +120,37 @@ cross-agent, cross-app.
 upstream (`badlogic/pi-mono`, since renamed to `earendil-works/pi`).
 We do not hold write access on the upstream, and owning the integration
 surface keeps the rebase tax predictable and symmetric with the
-upstream-owned Hermes-Agent path. The fork tracks latest with no patches
+hal0-owned Hermes wrapper path. The fork tracks latest with no patches
 applied yet; re-sync with `bash scripts/fork-pi-mono.sh`. Nightly smoke
 test (see below) catches upstream breakage.
 
-### Hermes-Agent — upstream-owned integration
+### Hermes-Agent — hal0-owned wrapper (`hal0-hermes`)
 
-The Hermes integration grows **upstream**. Hermes is user-owned;
-hal0-awareness lands in Hermes itself, not in a hal0-owned shim.
-hal0's `installer/agents/hermes-agent.sh` is a one-liner calling
-Hermes's own install command and pointing it at the local hal0 admin
-MCP endpoint. Hermes runs as `hal0-agent-hermes.service`.
+The Hermes integration is **a hal0-owned wrapper**, not an upstream
+change. The user cannot PR upstream NousResearch/hermes-agent, so
+hal0 ships `hal0-hermes` — a thin POSIX-shell wrapper installed by
+`hal0 agent install hermes` that sources `/etc/hal0/agents/hermes.env`
+(populating `HAL0_API_URL`, `HAL0_MCP_*_URL`, `HAL0_BEARER_TOKEN`)
+and then `exec`s the upstream `hermes` binary with the same argv.
+No upstream changes are required.
+
+- `installer/wrappers/hal0-hermes` — the wrapper itself (also responds
+  to `--hal0-ready` so the installer + driver can verify it's
+  functional without spawning upstream Hermes).
+- `installer/agents/hermes-agent.sh` — installs the wrapper to
+  `/usr/local/bin` (root) or `~/.local/bin` (user), then writes the
+  uninstall companion. Requires upstream `hermes` to already be on
+  PATH (`pip install --user hermes-agent` or `pipx install hermes-agent`).
+- `hal0.agents.hermes.HermesDriver` — Python driver. Probes the
+  wrapper before shelling out; raises `HermesUpstreamMissingError`
+  with an actionable hint if the wrapper isn't installed.
+
+Hermes runs as `hal0-agent-hermes.service`.
 
 Shape rule for future bundled agents: shim-first, promote to upstream
-integration when the upstream maintainer cooperates.
+integration when the upstream maintainer cooperates. Hermes is the
+worked example of "upstream won't cooperate" — wrapper is the
+fallback.
 
 ## Track-latest policy
 
