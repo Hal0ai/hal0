@@ -491,7 +491,13 @@ const sparkSvg = computed(() => {
     </div>
 
     <div class="sc-models">
-      <template v-if="hasMultipleModels">
+      <template v-if="isFlmSlot && hasMultipleModels">
+        <!-- FLM multiplexes chat + embed + asr on one NPU runtime; the
+             chips here are the auxiliary tags. Non-FLM slots may also
+             advertise multiple entries in `slot.models` (draft model
+             for speculative decoding, embedded vocab models, etc.) —
+             those still want the swap trigger, so gate on isFlmSlot
+             rather than on count alone. -->
         <span
           v-for="(m, i) in allModels"
           :key="m"
@@ -643,35 +649,32 @@ const sparkSvg = computed(() => {
         <div class="sc-stat-v" :class="{ active: m.kv_cache_usage != null }">{{ fmtKv(m.kv_cache_usage) }}</div>
       </div>
       <div class="sc-stat">
-        <div class="sc-stat-l">ACT</div>
-        <div class="sc-stat-v" :class="{ active: (m.requests_processing || 0) > 0 }">
-          {{ m.requests_processing || 0 }}
-        </div>
+        <div class="sc-stat-l">T/S</div>
+        <div class="sc-stat-v" :class="{ active: running }">{{ (m.tokens_per_sec || 0).toFixed(1) }}</div>
+      </div>
+      <div class="sc-stat" :title="ttftTitle">
+        <div class="sc-stat-l">TTFT</div>
+        <div class="sc-stat-v" :class="{ active: m.ttft_seconds != null }">{{ fmtTtft(m.ttft_seconds) }}</div>
       </div>
       <div class="sc-stat">
         <div class="sc-stat-l">MEM</div>
         <div class="sc-stat-v">{{ (m.mem_rss_mb || 0) > 0 ? ((m.mem_rss_mb / 1024).toFixed(1) + 'G') : '—' }}</div>
       </div>
-      <div class="sc-stat">
-        <div class="sc-stat-l">UP</div>
-        <div class="sc-stat-v">{{ fmtUptime(m.uptime_seconds) }}</div>
-      </div>
     </div>
 
-    <!-- Sparkline -->
+    <!-- Sparkline. Corner badges: ACT (in-flight requests) top-left,
+         UP (uptime) bottom-right. T/S + TTFT live in the stats row
+         above so the chart stays the chart. -->
     <div v-if="running || hasHistory" class="sc-spark" :title="`gen ${(m.tokens_per_sec||0).toFixed(1)} t/s · prompt ${(m.prompt_tokens_per_sec||0).toFixed(1)} t/s`">
       <div class="sc-spark-inner" v-html="sparkSvg"></div>
-      <div class="sc-spark-readouts">
-        <span class="sc-spark-readout">
-          <span class="sc-spark-l">T/S</span>
-          <span class="sc-spark-v" :class="{ active: running }">{{ (m.tokens_per_sec || 0).toFixed(1) }}</span>
-        </span>
-        <span class="sc-spark-sep" aria-hidden="true">·</span>
-        <span class="sc-spark-readout" :title="ttftTitle">
-          <span class="sc-spark-l">TTFT</span>
-          <span class="sc-spark-v" :class="{ active: m.ttft_seconds != null }">{{ fmtTtft(m.ttft_seconds) }}</span>
-        </span>
-      </div>
+      <span class="sc-spark-badge sc-spark-act" title="Active requests in flight">
+        <span class="sc-spark-l">ACT</span>
+        <span class="sc-spark-v" :class="{ active: (m.requests_processing || 0) > 0 }">{{ m.requests_processing || 0 }}</span>
+      </span>
+      <span class="sc-spark-badge sc-spark-up" title="Slot uptime">
+        <span class="sc-spark-l">UP</span>
+        <span class="sc-spark-v">{{ fmtUptime(m.uptime_seconds) }}</span>
+      </span>
     </div>
 
     <!-- Footer: hardware + backend chips on the left, lifecycle actions on
@@ -914,30 +917,19 @@ const sparkSvg = computed(() => {
   overflow: hidden;
 }
 .sc-spark-inner :deep(svg) { width: 100%; height: 100%; display: block; }
-/* HUD-style readouts pinned to the top-left of the sparkline. The chart
-   beneath continues to render unchanged; if a peak rises behind the
-   numbers it just reads as a backdrop. `pointer-events: none` on the
-   wrapper lets the chart's parent :title still fire on hover; the TTFT
-   readout re-enables pointer events on itself so its own :title can
-   show on hover without stealing the gen/prompt tooltip elsewhere. */
-.sc-spark-readouts {
+/* Corner badges over the sparkline. ACT pins top-left, UP pins bottom-right.
+   pointer-events stay enabled on each badge so their own :title fires; the
+   sparkline's outer wrapper :title still works in the gaps between badges. */
+.sc-spark-badge {
   position: absolute;
-  top: 4px;
-  left: 6px;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  font-family: var(--font-mono);
-  font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1;
-  pointer-events: none;
-}
-.sc-spark-readout {
   display: inline-flex;
   align-items: baseline;
   gap: 4px;
+  font-family: var(--font-mono);
+  font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1;
 }
-.sc-spark-readout + .sc-spark-readout,
-.sc-spark-readout[title] { pointer-events: auto; }
+.sc-spark-act { top: 4px; left: 6px; }
+.sc-spark-up  { bottom: 4px; right: 6px; }
 .sc-spark-l {
   font-size: 9px;
   color: var(--color-fg-faint);
@@ -950,11 +942,6 @@ const sparkSvg = computed(() => {
   color: var(--color-fg);
 }
 .sc-spark-v.active { color: var(--hal0-accent); }
-.sc-spark-sep {
-  font-size: 10px;
-  color: var(--color-fg-faint);
-  opacity: 0.6;
-}
 
 .sc-foot {
   margin-top: auto;
