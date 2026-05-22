@@ -25,6 +25,8 @@ Bundle third-party agent apps. Each install from official upstream, byte for byt
 
 No first-party agent runtime. No hal0-authored prompts. No hal0-authored tool dispatch. The shim only do install + wire.
 
+**SDK divergence (D1).** hal0's MCP servers are built on the upstream Python SDK (`mcp.server.fastmcp.FastMCP`), not the TypeScript SDK the `mcp-builder` skill recommends for new servers. Justification: the orchestrator + every other hal0 surface is Python, FastMCP is the upstream Python SDK, and we have no MCPB distribution target. Divergence accepted; see [audit 2026-05-22 §D1](../audit-2026-05-22-phase8-skill-review.md#d1--python-fastmcp-over-typescript-mcp-sdk).
+
 ### 2. Picker + lifecycle
 
 - Picker live in two places: first-run wizard step, plus `hal0 agent install <name>` CLI subcommand for after the fact.

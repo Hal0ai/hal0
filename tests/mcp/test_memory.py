@@ -210,3 +210,24 @@ async def test_private_without_client_id_errors(wrapper: _FakeWrapper) -> None:
     out = await disp("memory_add", {"text": "x"})
     assert out["status"] == "error"
     assert out["error"]["code"] == "mcp.memory_schema"
+
+
+@pytest.mark.asyncio
+async def test_standalone_server_tools_carry_annotations(wrapper: _FakeWrapper) -> None:
+    """The standalone /mcp/memory server must surface MCP hints —
+    matching what the admin server reports for the same tool names."""
+    server = memory.build_server(wrapper=wrapper)
+    tools = await server.list_tools()
+    by_name = {t.name: t for t in tools}
+    for tool_name in ("memory_add", "memory_search", "memory_list", "memory_delete"):
+        ann = by_name[tool_name].annotations
+        assert ann is not None, f"{tool_name}: annotations missing"
+        assert ann.readOnlyHint is not None
+        assert ann.destructiveHint is not None
+        assert ann.idempotentHint is not None
+        assert ann.openWorldHint is not None
+    # memory_delete is the destructive one.
+    assert by_name["memory_delete"].annotations.destructiveHint is True
+    # memory_search + memory_list are reads.
+    assert by_name["memory_search"].annotations.readOnlyHint is True
+    assert by_name["memory_list"].annotations.readOnlyHint is True

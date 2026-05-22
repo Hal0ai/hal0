@@ -81,6 +81,7 @@ import structlog
 # server module itself (the orchestrator decides whether to mount).
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
+    from mcp.types import ToolAnnotations  # type: ignore[import-not-found]
 except ImportError as _import_exc:  # pragma: no cover — exercised at install time
     raise ImportError(
         "hal0.mcp.admin requires the 'mcp' Python SDK. "
@@ -436,6 +437,96 @@ async def _execute_tool(
     )
 
 
+# ── Tool annotations (mcp-builder Phase 2.3) ─────────────────────────────────
+#
+# Per the MCP spec, every tool advertises four behavioural hints so the
+# client can pick the right warning UX before invocation:
+#
+#   readOnlyHint     — call doesn't mutate hal0 state.
+#   destructiveHint  — meaningful only when readOnly=False; true if the
+#                      call removes data or deletes a resource.
+#   idempotentHint   — repeated calls with the same args leave the same
+#                      end state (true for "set X to Y" semantics).
+#   openWorldHint    — call reaches outside hal0's own surface (e.g.
+#                      pulling weights from HuggingFace).
+#
+# These are advisory — server-side gating in :func:`is_gated` is still
+# the authoritative policy. The annotations exist so MCP clients render
+# the right approval-prompt language without having to read ADR-0004.
+
+_ANNOTATIONS: dict[str, ToolAnnotations] = {
+    # Autonomous read — pure reads against the local REST surface.
+    "slot_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "hardware_probe": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "logs_tail": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "capability_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "provider_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "version_info": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Read-shaped memory tools — surface a Cognee query, no writes.
+    "memory_search": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Mutating, reversible, idempotent end-state writes.
+    "model_swap": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "capability_set": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "config_write": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "provider_credential_write": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Mutating, reversible, non-idempotent (each call has additional effect).
+    "memory_add": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "slot_create": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "slot_restart": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    # Reaches outside hal0 (HuggingFace / upstream registries).
+    "model_pull": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
+    # Destructive — re-delete is a no-op so idempotentHint stays true.
+    "model_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "slot_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+}
+
+
 # ── FastMCP server builder ───────────────────────────────────────────────────
 
 
@@ -487,7 +578,8 @@ def build_server(
 
         _tool.__name__ = tool_name
         _tool.__doc__ = description
-        server.tool(name=tool_name, description=description)(_tool)
+        annotations = _ANNOTATIONS.get(tool_name)
+        server.tool(name=tool_name, description=description, annotations=annotations)(_tool)
 
     # Autonomous read
     _register("slot_list", "List every slot known to hal0 (local + remote).")
@@ -527,6 +619,7 @@ __all__ = [
     "AUTONOMOUS_READ_TOOLS",
     "AUTONOMOUS_WRITE_TOOLS",
     "GATED_TOOLS",
+    "_ANNOTATIONS",
     "build_server",
     "dispatch",
     "is_gated",

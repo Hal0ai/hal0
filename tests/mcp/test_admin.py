@@ -129,6 +129,52 @@ async def test_build_server_registers_full_catalog(queue: ApprovalQueue) -> None
     assert expected.issubset(registered)
 
 
+def test_every_tool_has_annotations() -> None:
+    """Every tool registered with FastMCP must carry the four MCP hints
+    (readOnly / destructive / idempotent / openWorld). New tools added
+    to the catalog without an annotation row trip this guard."""
+    catalog = admin.AUTONOMOUS_READ_TOOLS | admin.AUTONOMOUS_WRITE_TOOLS | admin.GATED_TOOLS
+    missing = catalog - admin._ANNOTATIONS.keys()
+    assert not missing, f"tools missing MCP annotations: {sorted(missing)}"
+    for name, ann in admin._ANNOTATIONS.items():
+        assert ann.readOnlyHint is not None, f"{name}: readOnlyHint unset"
+        assert ann.destructiveHint is not None, f"{name}: destructiveHint unset"
+        assert ann.idempotentHint is not None, f"{name}: idempotentHint unset"
+        assert ann.openWorldHint is not None, f"{name}: openWorldHint unset"
+
+
+def test_destructive_tools_match_gated_destructive_set() -> None:
+    """ADR-0004 §4's "destructive" classification must match the
+    destructiveHint annotations exactly. The annotation is the
+    client-facing surface; ADR-0004 is the policy. They cannot drift."""
+    destructive_per_adr = {"model_delete", "slot_delete", "memory_delete"}
+    destructive_per_annotation = {
+        name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint
+    }
+    assert destructive_per_annotation == destructive_per_adr
+
+
+def test_open_world_tool_is_model_pull_only() -> None:
+    """model_pull is the only tool that reaches outside hal0's own
+    surface (HuggingFace + upstream registries). Anything else with
+    openWorldHint=True needs a deliberate ADR update."""
+    open_world = {name for name, ann in admin._ANNOTATIONS.items() if ann.openWorldHint}
+    assert open_world == {"model_pull"}
+
+
+@pytest.mark.asyncio
+async def test_registered_tools_carry_their_annotations(queue: ApprovalQueue) -> None:
+    """The annotation table must actually reach FastMCP's tool list —
+    not just sit in a dict no one looks at."""
+    server = admin.build_server(approval_queue=queue, base_url="http://t")
+    tools = await server.list_tools()
+    by_name = {t.name: t for t in tools}
+    sample = "model_delete"  # destructive — easiest to spot a regression on
+    assert by_name[sample].annotations is not None
+    assert by_name[sample].annotations.destructiveHint is True
+    assert by_name[sample].annotations.readOnlyHint is False
+
+
 @pytest.mark.asyncio
 async def test_autonomous_read_dispatches_get_with_bearer(
     queue: ApprovalQueue, mock_transport: dict[str, Any]

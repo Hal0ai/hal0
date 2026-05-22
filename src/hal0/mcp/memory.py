@@ -68,6 +68,7 @@ import structlog
 
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
+    from mcp.types import ToolAnnotations  # type: ignore[import-not-found]
 except ImportError as _import_exc:  # pragma: no cover — exercised at install time
     raise ImportError(
         "hal0.mcp.memory requires the 'mcp' Python SDK. "
@@ -381,6 +382,30 @@ def make_dispatcher(
     return _dispatch
 
 
+# ── Tool annotations (mcp-builder Phase 2.3) ─────────────────────────────────
+#
+# Matches the standalone-server view of memory tools. Hints stay
+# consistent with :mod:`hal0.mcp.admin`'s table — the destructive bit
+# on memory_delete is intrinsic to the operation; admin-layer approval
+# gating for bulk deletes is a separate enforcement layer that doesn't
+# change the annotation.
+
+_ANNOTATIONS: dict[str, ToolAnnotations] = {
+    "memory_add": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
+    "memory_search": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+}
+
+
 # ── Standalone server (used when the memory MCP is mounted on its own) ───────
 
 
@@ -416,7 +441,8 @@ def build_server(
 
         _tool.__name__ = tool
         _tool.__doc__ = description
-        server.tool(name=tool, description=description)(_tool)
+        annotations = _ANNOTATIONS.get(tool)
+        server.tool(name=tool, description=description, annotations=annotations)(_tool)
 
     _register("memory_add", "Add an item to long-term memory.")
     _register("memory_search", "Search long-term memory.")
@@ -430,6 +456,7 @@ def build_server(
 
 
 __all__ = [
+    "_ANNOTATIONS",
     "MemorySchemaError",
     "build_server",
     "make_dispatcher",
