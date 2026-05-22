@@ -45,7 +45,13 @@ log = logging.getLogger(__name__)
 # org provisioning"). Names are fixed now so the rest of the system can
 # wire against them; Phase 5 publishes digests into manifest.json.
 _HAL0_TOOLBOX_IMAGES = {
-    "vulkan": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
+    # v2 (b9279) reinstates per-slot ``n_prompt_tokens`` in /slots so the
+    # dashboard can surface a KV-cache % gauge (the legacy
+    # ``llamacpp:kv_cache_usage_ratio`` Prometheus metric never came back
+    # after the server.cpp refactor; we synthesise it from /slots in
+    # api/routes/slots.py:_scrape_llama_metrics). ROCm stays on :v1 until
+    # the matching rebuild lands.
+    "vulkan": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v2",
     "rocm": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
 }
 
@@ -105,7 +111,7 @@ class LlamaServerProvider(Provider):
     """Provider for llama.cpp (llama-server) backends.
 
     Toolbox images (PLAN.md §12):
-      Vulkan: ghcr.io/hal0ai/hal0-toolbox-vulkan:v1
+      Vulkan: ghcr.io/hal0ai/hal0-toolbox-vulkan:v2
       ROCm:   ghcr.io/hal0ai/hal0-toolbox-rocm:v1
 
     Backend is selected by slot_cfg["backend"]: "vulkan" | "rocm" | "cpu".
@@ -326,7 +332,8 @@ class LlamaServerProvider(Provider):
              ``HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0ai/...@sha256:abc``
              materialised by the installer at first-run.
           3. ``_HAL0_TOOLBOX_IMAGES[backend]`` — the schema default
-             (``ghcr.io/hal0ai/hal0-toolbox-<backend>:v1``).
+             (``ghcr.io/hal0ai/hal0-toolbox-<backend>:v{1,2}`` — see
+             ``_HAL0_TOOLBOX_IMAGES`` for the current per-backend tags).
 
         Backends: "vulkan" | "rocm" | "cpu" (cpu falls through to vulkan
         since the vulkan image runs on cpu when no GPU is exposed).

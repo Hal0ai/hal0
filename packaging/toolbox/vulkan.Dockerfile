@@ -1,6 +1,10 @@
 # hal0-toolbox-vulkan — llama.cpp Vulkan backend for AMD iGPU (Strix Halo)
 #
-# Target image:    ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1  (Phase 5 publish)
+# Target image:    ghcr.io/hal0ai/hal0-toolbox-vulkan:v2
+#                  (v2 pins LLAMA_CPP_REF=b9279 so /slots emits
+#                  ``n_prompt_tokens`` and the dashboard can synthesise
+#                  a KV-cache % gauge — see
+#                  src/hal0/api/routes/slots.py:_scrape_llama_metrics.)
 # Local dev tag:   hal0-toolbox-vulkan:dev
 #
 # Provider contract (src/hal0/providers/llama_server.py):
@@ -29,8 +33,11 @@ FROM ubuntu:24.04 AS builder
 
 # llama.cpp git ref. Override at build time, e.g.:
 #   docker build --build-arg LLAMA_CPP_REF=b4404 ...
-# For :dev we track master; :v1 will pin to a signed release tag.
-ARG LLAMA_CPP_REF=master
+# For :dev we track master; :v2 pins to b9279 (2026-05-22) — the
+# first ref that reinstates per-slot ``n_prompt_tokens`` in /slots
+# after the server.cpp restructure, which the dashboard's KV-cache %
+# gauge depends on. Bump the default when bumping the published tag.
+ARG LLAMA_CPP_REF=b9279
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Build deps: compiler toolchain, cmake, Vulkan SDK headers, glslang

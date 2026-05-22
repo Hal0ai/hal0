@@ -373,7 +373,7 @@ def test_render_systemd_override_emits_full_docker_line(
     # bind-mount for the model file
     assert "/var/lib/hal0/models:/var/lib/hal0/models" in out
     # image + ENTRYPOINT args (llama-server flags)
-    assert "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1" in out
+    assert "ghcr.io/hal0ai/hal0-toolbox-vulkan:v2" in out
     assert "--model" in out
     assert "--port 8081" in out or "--port" in out
     assert "-ngl" in out

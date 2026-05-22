@@ -305,8 +305,16 @@ async def _systemd_show(unit: str, *props: str) -> dict[str, str]:
 
 
 async def _scrape_llama_metrics(port: int) -> dict[str, Any]:
-    """Scrape llama.cpp's /metrics endpoint on loopback and parse the
-    Prometheus text into a small whitelist of slot-card-relevant fields.
+    """Scrape llama.cpp's /metrics + /slots endpoints on loopback.
+
+    /metrics is parsed for ``requests_processing`` / ``requests_deferred``
+    (still emitted by current llama-server master). The KV-cache ratio
+    gauge upstream used to emit (``llamacpp:kv_cache_usage_ratio``) was
+    removed in the post-refactor server, so we synthesise it from
+    /slots: ``max(n_prompt_tokens) / n_ctx`` across the slot's parallel
+    sub-slots. This matches what the gauge used to represent — the
+    fullest cache slot — and is provider-agnostic (any llama-server
+    with a busy parallel slot reports n_prompt_tokens).
 
     Returns an empty dict on any failure (slot not running, port
     unbound, llama-server built without ``--metrics``, parse error) so
@@ -316,17 +324,24 @@ async def _scrape_llama_metrics(port: int) -> dict[str, Any]:
         return {}
     import httpx
 
-    url = f"http://127.0.0.1:{port}/metrics"
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(0.5)) as client:
-            resp = await client.get(url)
-    except (httpx.HTTPError, OSError):
-        return {}
-    if resp.status_code != 200:
-        return {}
+    metrics_url = f"http://127.0.0.1:{port}/metrics"
+    slots_url = f"http://127.0.0.1:{port}/slots"
+    timeout = httpx.Timeout(0.5)
+    out: dict[str, Any] = {}
 
-    # Same whitelist haloai used in lib/providers/llama_server.py — keep
-    # output keys in sync with the SlotCard's expected field names.
+    # Fan the two scrapes out in parallel; either may 404 (older builds,
+    # --no-slots, --no-metrics) and we degrade silently per-endpoint.
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            metrics_resp, slots_resp = await asyncio.gather(
+                client.get(metrics_url),
+                client.get(slots_url),
+                return_exceptions=True,
+            )
+        except (httpx.HTTPError, OSError):
+            return out
+
+    # --- /metrics: still the source of truth for queue depth gauges. ---
     #
     # We intentionally DO NOT scrape `llamacpp:predicted_tokens_seconds`
     # here. That gauge is the lifetime average since llama-server start,
@@ -337,24 +352,82 @@ async def _scrape_llama_metrics(port: int) -> dict[str, Any]:
     wanted: dict[str, tuple[str, type]] = {
         "llamacpp:requests_processing": ("requests_processing", int),
         "llamacpp:requests_deferred": ("requests_deferred", int),
+        # Kept for completeness in case a future llama.cpp reintroduces it;
+        # current master (b9279) does not emit this gauge.
         "llamacpp:kv_cache_usage_ratio": ("kv_cache_usage", float),
     }
-    out: dict[str, Any] = {}
-    for line in resp.text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        entry = wanted.get(parts[0])
-        if entry is None:
-            continue
-        key, caster = entry
+    # Duck-typed: any object with a status_code + text attr (real httpx
+    # Response or a test stub) passes; exceptions returned by gather()
+    # fall through to the synthesis branch below.
+    if (
+        not isinstance(metrics_resp, BaseException)
+        and getattr(metrics_resp, "status_code", 0) == 200
+    ):
+        for line in metrics_resp.text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            entry = wanted.get(parts[0])
+            if entry is None:
+                continue
+            key, caster = entry
+            try:
+                out[key] = int(float(parts[1])) if caster is int else float(parts[1])
+            except (ValueError, TypeError):
+                continue
+
+    # --- /slots: KV-cache % via max(n_prompt_tokens)/n_ctx. -------------
+    #
+    # Newer llama-server (post-server.cpp refactor, b9000-ish onward)
+    # exposes ``n_prompt_tokens`` per parallel sub-slot when busy, plus
+    # ``n_ctx`` always. Older builds only return id/n_ctx/is_processing,
+    # in which case the max is 0 and we skip the synthesised gauge so
+    # the UI renders '—' rather than a misleading 0%.
+    if (
+        "kv_cache_usage" not in out
+        and not isinstance(slots_resp, BaseException)
+        and getattr(slots_resp, "status_code", 0) == 200
+    ):
         try:
-            out[key] = int(float(parts[1])) if caster is int else float(parts[1])
+            payload = slots_resp.json()
         except (ValueError, TypeError):
-            continue
+            payload = None
+        if isinstance(payload, list) and payload:
+            max_used = 0
+            n_ctx = 0
+            for slot in payload:
+                if not isinstance(slot, dict):
+                    continue
+                try:
+                    ctx = int(slot.get("n_ctx", 0) or 0)
+                except (ValueError, TypeError):
+                    ctx = 0
+                if ctx > n_ctx:
+                    n_ctx = ctx
+                # Prefer n_prompt_tokens (current prompt+cache occupancy)
+                # if it's there; cache_tokens / n_past are legacy fallbacks
+                # used by even-older builds.
+                used = 0
+                for key in ("n_prompt_tokens", "cache_tokens", "n_past"):
+                    v = slot.get(key)
+                    if v is None:
+                        continue
+                    try:
+                        iv = int(v)
+                    except (ValueError, TypeError):
+                        continue
+                    if iv > used:
+                        used = iv
+                if used > max_used:
+                    max_used = used
+            if n_ctx > 0 and max_used > 0:
+                ratio = max_used / float(n_ctx)
+                # Clamp — n_prompt_tokens can briefly exceed n_ctx during
+                # shift; surfacing >1.0 would look broken in the UI.
+                out["kv_cache_usage"] = min(max(ratio, 0.0), 1.0)
     return out
 
 
