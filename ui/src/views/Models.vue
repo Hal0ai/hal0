@@ -711,8 +711,8 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
         <Card :padded="false">
           <EmptyState
             icon="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"
-            title="No models in registry"
-            description="Pull from Hugging Face, scan a local directory, or pick from the curated catalogue."
+            title="No models in the registry yet."
+            description="Pull from Hugging Face, scan a directory you already have on disk (NFS mounts are fine), or pick from the curated catalog."
             cta-label="Add a model"
             @cta="showPull = true"
           />

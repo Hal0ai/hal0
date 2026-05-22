@@ -234,8 +234,8 @@ onMounted(load)
         <Card :padded="false">
           <EmptyState
             icon="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"
-            title="No upstreams configured"
-            description="Add OpenRouter, Anthropic, OpenAI, or a custom OpenAI-compatible upstream to enable external model routing."
+            title="No upstreams configured."
+            description="Wire up OpenRouter, Anthropic, OpenAI, or any OpenAI-compatible endpoint to route requests beyond the slots running locally."
             cta-label="Add upstream"
             @cta="openAddForm"
           />

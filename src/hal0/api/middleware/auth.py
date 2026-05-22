@@ -428,7 +428,7 @@ async def require_token(request: Request) -> AuthIdentity:
         match = store.verify(bearer)
         if match is None:
             raise AuthInvalid(
-                "bearer token did not validate",
+                "bearer token didn't match any active token in the store",
                 details={"reason": "unknown_or_malformed_token"},
             )
         return AuthIdentity(
@@ -443,7 +443,7 @@ async def require_token(request: Request) -> AuthIdentity:
         claims = verify_session_token(cookie)
         if claims is None:
             raise AuthInvalid(
-                "session cookie did not validate",
+                "session cookie is expired or malformed",
                 details={"reason": "expired_or_malformed_session"},
             )
         return AuthIdentity(
@@ -464,11 +464,11 @@ async def require_token(request: Request) -> AuthIdentity:
         )
 
     raise AuthRequired(
-        "this endpoint requires authentication",
+        "this route needs a token or a logged-in session",
         details={
             "hint": (
                 "send Authorization: Bearer <token> for programmatic clients, "
-                "or POST /api/auth/login to obtain a hal0_session cookie"
+                "or POST /api/auth/login to get a hal0_session cookie"
             )
         },
     )
@@ -492,7 +492,7 @@ async def require_admin(
         return identity
     if not identity.is_admin:
         raise AuthForbidden(
-            "this endpoint requires an admin-scoped credential",
+            "this route is admin-only and your credential isn't admin-scoped",
             details={"identity": identity.identity, "scope": identity.scope},
         )
     _check_session_csrf(request, identity)
@@ -573,7 +573,8 @@ async def require_writer(
         return identity
     if identity.scope not in _WRITER_SCOPES:
         raise AuthForbidden(
-            "this endpoint requires a writer-scoped credential (admin or all)",
+            "this route needs a writer-scoped credential (admin or all). "
+            "read-only and v1-only tokens get a 403 here.",
             details={
                 "identity": identity.identity,
                 "scope": identity.scope,

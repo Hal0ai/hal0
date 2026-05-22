@@ -58,7 +58,7 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
          fall through and render the cards normally. -->
     <EmptyState
       v-else-if="cap.error.value && !hasData"
-      title="Couldn't load capabilities"
+      title="Dashboard couldn't reach /api/capabilities"
       :description="cap.error.value"
       cta-label="Retry"
       @cta="cap.refresh()"
