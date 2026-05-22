@@ -2,7 +2,7 @@
  * models-slots-refactor.spec.ts — C3 (Phase 3) smoke + a11y pass for the
  * Models + Slots UI work landed in Phase 2 (B2 / B3) and Phase 3 (C1).
  *
- * Coverage (per docs/models-slots-impl-plan.md §C3):
+ * Coverage (per docs/internal/models-slots-impl-plan.md §C3):
  *   1. Add model — Local file Scan-directory: open Add modal, switch to
  *      Local file tab, Scan sub-action, preview rows, commit.
  *   2. Add model — Local file Register-single: detect → register.

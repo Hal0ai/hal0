@@ -1,0 +1,122 @@
+---
+title: CLI reference
+description: The hal0 command-line interface — every subcommand grouped by area.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 ships a single `hal0` binary built with Typer
+(`src/hal0/cli/main.py`). Every non-`serve` subcommand talks to the
+local daemon on `127.0.0.1:8080`, so the CLI and the dashboard end up
+calling the same code paths.
+
+Every command listed below hits a live endpoint. The `# real` /
+`# stub` markers used in earlier builds have been retired now that
+the surface is fully wired.
+
+## System
+
+```sh
+hal0 status                                  # system + slot summary
+hal0 probe                                   # re-run hardware detection
+hal0 serve [--host] [--port] [--reload]      # daemon mode
+```
+
+`hal0 status` is what you run first when something looks off.
+`hal0 probe` rewrites `/etc/hal0/hardware.json` — re-run after BIOS
+UMA changes, GPU swaps, or RAM upgrades.
+
+## Slots
+
+```sh
+hal0 slot list
+hal0 slot load <name> [--model M]
+hal0 slot unload <name>
+hal0 slot restart <name>
+hal0 slot swap <name> --model M
+hal0 slot logs <name> [--follow]             # SSE tail of journald
+```
+
+`hal0 slot swap` is the most-used command in normal operation. It
+changes a slot's model in one call and you watch it transition
+through `unloading → starting → warming → ready`.
+
+`hal0 slot logs <name> --follow` is the journald tail wrapped over
+SSE; it shows the same stream the dashboard's Logs view tails.
+
+## Models
+
+```sh
+hal0 model list
+hal0 model pull <ref>                        # HF streaming pull
+hal0 model rm <ref>
+hal0 model assign <ref> --slot S
+```
+
+`hal0 model list` is the CLI view of what the dashboard's `/models`
+page shows: every registered model with its size, backend, and
+capability tags. Use it when you've SSH'd in and don't want to bounce
+to the browser.
+
+<img
+  src="/screenshots/models-registry.png"
+  srcset="/screenshots/models-registry.png 1x, /screenshots/models-registry@2x.png 2x"
+  alt="Dashboard /models page showing the same registry rows hal0 model list prints, with chat/stt/tts/rerank tags, sizes, and per-row backend."
+  width="1440"
+  height="900"
+  loading="lazy"
+/>
+
+## Configuration
+
+```sh
+hal0 config show
+hal0 config edit                             # opens $EDITOR
+hal0 config validate                         # schema check
+hal0 config migrate                          # apply schema migrations
+```
+
+`hal0 config validate` is safe to run at any time and doesn't write
+anything. Use it before `hal0 config edit` to confirm your starting
+point is clean.
+
+## Updates
+
+```sh
+hal0 update                                  # apply latest stable
+hal0 update --channel stable
+hal0 update --channel nightly
+hal0 update --check                          # print version, don't apply
+hal0 update --rollback                       # revert to previous version
+```
+
+See [Updates & rollback](/docs/operate/updates/) for the atomic
+symlink-swap mechanics.
+
+## Uninstall
+
+```sh
+hal0 uninstall [--keep-data] [--force] [--dev]
+```
+
+Thin wrapper over `installer/uninstall.sh`. The CLI exec's the script
+so the DELETE confirmation prompt inherits the live TTY; in
+non-interactive contexts pass `--force` or `--keep-data` to skip the
+prompt. `--dev` mirrors `install.sh --dev` for a `$PWD/.hal0ai`
+tree.
+
+
+## Talking to the daemon
+
+Almost every subcommand is a thin client on the API. You can hit the
+same endpoints directly:
+
+```sh
+curl http://localhost:8080/api/slots
+curl http://localhost:8080/api/models
+curl -X POST http://localhost:8080/api/slots/primary/restart
+```
+
+The CLI is for ergonomics; the API is the source of truth.

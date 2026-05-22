@@ -19,7 +19,7 @@ into a single argv-ready string with collision rules:
     falls back to a dumb concat with a structured warning log — the
     launcher still gets *something* runnable instead of a hard crash.
 
-See docs/models-slots-impl-plan.md §A3.
+See docs/internal/models-slots-impl-plan.md §A3.
 """
 
 from __future__ import annotations

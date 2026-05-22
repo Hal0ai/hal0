@@ -290,7 +290,7 @@ The round added four parallel teammates beyond the δ-harness:
 
 > **FIXED BY ARCHITECTURE REMOVAL (ADR-0001).** The original fix in PR
 > #49 (issue #28) is now historical. Per
-> [ADR-0001](../../docs/adr/0001-collapse-edge-auth-into-fastapi.md), the
+> [ADR-0001](../../docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md), the
 > Caddyfile no longer carries `basicauth` or a `@public path` matcher
 > — Caddy is a dumb TLS terminator + reverse proxy (PR #59), and all
 > auth lives in FastAPI (PR #58). The ordering bug cannot recur because

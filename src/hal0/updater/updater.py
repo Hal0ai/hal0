@@ -95,7 +95,7 @@ class UpdateCosignMissing(UpdateError):
     fall back to unsigned acceptance. On dev (0.x) and pre-release
     builds, ``HAL0_UPDATE_SKIP_COSIGN=1`` bypasses verification for
     end-to-end smoke against unsigned tarballs; on stable v1+ tags the
-    env var is silently ignored (see ``docs/release-manifest.md``).
+    env var is silently ignored (see ``docs/internal/release-manifest.md``).
     """
 
     code = "system.update_cosign_missing"
@@ -136,7 +136,7 @@ class UpdateRollbackUnavailable(UpdateError):
 class ReleaseManifest(BaseModel):
     """Schema-validated release-manifest payload.
 
-    Mirrors the on-disk JSON shape documented in ``docs/release-manifest.md``
+    Mirrors the on-disk JSON shape documented in ``docs/internal/release-manifest.md``
     (``_schema = "hal0.releases.v1"``). Malformed manifests are rejected at
     fetch time so apply() never operates on a half-shaped payload.
 

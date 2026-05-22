@@ -76,7 +76,7 @@ HAL0_PORT=9090 sudo bash installer/install.sh
 
 ## Authentication
 
-Per [ADR-0001](../docs/adr/0001-collapse-edge-auth-into-fastapi.md), **all auth
+Per [ADR-0001](../docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md), **all auth
 now lives in FastAPI** — there is no edge-auth layer in Caddy. The Caddyfile is
 a dumb TLS terminator + reverse proxy (`packaging/caddy/Caddyfile.template`,
 ~42 lines, no `basicauth`, no path matchers, no allowlist).

@@ -31,7 +31,7 @@
 # the documented skip) has verified the signature against the workflow
 # OIDC identity in the manifest.
 #
-# Schema reference: docs/release-manifest.md (hal0.releases.v1).
+# Schema reference: docs/internal/release-manifest.md (hal0.releases.v1).
 
 set -euo pipefail
 IFS=$'\n\t'

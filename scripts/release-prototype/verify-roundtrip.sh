@@ -142,7 +142,7 @@ payload = {
     "cert_url": f"file://{sig}",
     "digest_sha256": digest,
     # In production this is the GH Actions workflow subject (see
-    # docs/release-manifest.md). For the local key prototype it is a
+    # docs/internal/release-manifest.md). For the local key prototype it is a
     # wildcard we never actually evaluate — verify-blob with --key
     # short-circuits the cert-identity check.
     "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",

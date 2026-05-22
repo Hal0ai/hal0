@@ -1,0 +1,120 @@
+---
+title: Updates & rollback
+description: Atomic self-updates via cosign-verified tarballs, with one-command rollback.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 updates itself in one atomic symlink swap, backed by
+cosign-verified release tarballs. If an update goes wrong, one
+command rolls back to the previous version.
+
+## The layout
+
+The filesystem layout (PLAN §2) is FHS-aligned and deliberately
+separates the code from the data:
+
+```
+/usr/lib/hal0/current/        # symlink → /usr/lib/hal0-<version>/
+/usr/lib/hal0-0.9.7/          # versioned install
+/usr/lib/hal0-0.9.8/          # versioned install (next)
+/etc/hal0/                    # config, preserved across updates
+/var/lib/hal0/                # models, registry, OpenWebUI state
+```
+
+`hal0 update` unpacks the new version next to the current one, then
+swaps the `current` symlink in a single `rename(2)` call. The systemd
+units point at `/usr/lib/hal0/current/`, so a `systemctl restart`
+picks up the new version atomically. No partial state on disk, ever.
+
+## Check for an update
+
+```sh
+hal0 update --check
+```
+
+Returns the latest version on the configured channel without
+applying it.
+
+## Apply an update
+
+```sh
+hal0 update                       # stable channel
+hal0 update --channel stable      # explicit
+hal0 update --channel nightly     # bleeding edge
+```
+
+The flow:
+
+1. Fetch the release manifest from `hal0.dev`.
+2. Verify the manifest signature.
+3. Download the version tarball.
+4. Verify the tarball against `signer_identity` + `signer_issuer`
+   (GitHub OIDC, cosign).
+5. Unpack to `/usr/lib/hal0-<new-version>/`.
+6. Swap `/usr/lib/hal0/current/` to the new version (atomic).
+7. Restart `hal0-api.service`.
+8. Slot units survive the restart — they keep serving traffic
+   throughout.
+
+## Rollback
+
+```sh
+hal0 update --rollback
+```
+
+Points `current` back at the previous versioned directory and
+restarts. The data dirs (`/etc/hal0`, `/var/lib/hal0`) are untouched,
+so your config, models, and registry are preserved.
+
+## Channels
+
+| Channel  | What you get                                    |
+|----------|--------------------------------------------------|
+| `stable` | Cut releases. The default; recommended.          |
+| `nightly`| Every green main build. For testing only.        |
+
+Channels are configured in `hal0.toml`. Switch with
+`hal0 config edit` or via the dashboard's Settings view.
+
+<Aside type="note">
+  The release manifest schema is `hal0.releases.v1` (see
+  `docs/release-manifest.md` in the hal0 repo). Cosign verification
+  is non-negotiable; an unverified tarball fails the update before
+  any unpack happens.
+</Aside>
+
+## systemd does the lifecycle work
+
+Because every hal0 process is a systemd unit, the rest of the update
+mechanics are boring on purpose:
+
+- `hal0-api.service` restarts on the symlink swap. `systemctl status
+  hal0-api` shows what version is now active.
+- `hal0-slot@*.service` instances survive the API restart; they keep
+  serving traffic throughout.
+- `hal0-openwebui.service` restarts alongside the API.
+- All four log into journald under their unit names, so a failed
+  update shows up in `journalctl -u hal0-api -n 100` without
+  ceremony.
+
+`systemctl is-active hal0-api` is the single binary check a homelab
+monitor (uptime-kuma, Prometheus blackbox, whatever) should hit after
+an update.
+
+## Why atomic
+
+The naive approach (`tar xf … && systemctl restart`) has two failure
+modes that bite at 2am:
+
+- **Partial unpack.** Disk fills mid-tar; you have half a new
+  version overlaid on the old one. Nothing works.
+- **Restart loop.** New binary crashes on start; systemd retries; no
+  obvious way back without a second SSH session and a working
+  `mv`.
+
+Atomic symlink swap solves both: the new version is fully unpacked
+*before* the swap, and the previous version is still on disk for
+`--rollback` to point back at.

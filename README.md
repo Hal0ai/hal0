@@ -74,7 +74,7 @@ hal0/
 ├── ui/               # Vue 3 + Tailwind 4 dashboard
 ├── installer/        # install.sh (systemd unit templates live in packaging/systemd/)
 ├── tests/            # pytest suite
-├── docs/             # api-errors, release-manifest, migration, ADRs
+├── docs/             # user docs (mirror of hal0.dev/docs); dev docs under docs/internal/
 └── PLAN.md           # roadmap (current cut: v0.1.0-alpha; path to v1.0)
 ```
 
@@ -102,7 +102,7 @@ down a running install (thin wrapper over `installer/uninstall.sh`).
 
 ### Auth posture
 
-Per [ADR-0001](./docs/adr/0001-collapse-edge-auth-into-fastapi.md), all
+Per [ADR-0001](./docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md), all
 auth lives in FastAPI. As of v0.1.0-alpha, a fresh install **starts locked** —
 the dashboard, `/v1/*`, and every admin route reject anonymous requests
 with `401 auth.required`. Only the first-run wizard claim paths

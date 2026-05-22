@@ -1,0 +1,32 @@
+---
+title: hal0 docs
+description: Homelab AI inference platform. systemd slots, OpenAI-compatible API, runs in a privileged Proxmox LXC with GPU/NPU passthrough.
+template: doc
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+hal0 is a homelab AI inference platform. It manages model slots as
+systemd units, exposes an OpenAI-compatible `/v1/*` API on port 8080,
+and ships with a Vue dashboard plus a prewired OpenWebUI chat tab on
+port 3001. It's happy bare-metal, in a VM, or as a tenant in a
+privileged LXC on your Proxmox node (AppArmor unconfined + GPU/NPU
+passthrough).
+
+> **Status:** v0.1.0-alpha. Cosign-signed releases are wired end-to-end
+> and the install command actually installs. APIs may shift. Full FLM
+> NPU coverage and ROCm/CUDA toolbox parity are still landing. Pages
+> marked "Coming soon" are stubs.
+
+## Start here
+
+<CardGrid>
+  <LinkCard title="Install" href="/docs/getting-started/install/"
+    description="The one-line installer, the pre-flight checks, and what `hal0 status` should say after." />
+  <LinkCard title="Strix Halo" href="/docs/hardware/strix-halo/"
+    description="The reference platform. Unified memory, iGPU + XDNA NPU, the tuning details." />
+  <LinkCard title="Slot architecture" href="/docs/slots/what-is-a-slot/"
+    description="The lifecycle state machine and how single-flight dispatch works." />
+  <LinkCard title="API reference" href="/docs/api/openai-compat/"
+    description="OpenAI-compatible endpoints, model registry, dispatcher." />
+</CardGrid>

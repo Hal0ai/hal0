@@ -1,0 +1,273 @@
+---
+title: Install
+description: Install hal0 in one line on any modern Linux box with systemd. Bare-metal, VM, or privileged LXC on Proxmox with GPU/NPU passthrough.
+sidebar:
+  order: 1
+head:
+  - tag: script
+    attrs:
+      type: application/ld+json
+    content: |
+      {
+        "@context": "https://schema.org",
+        "@type": "TechArticle",
+        "headline": "Install hal0",
+        "description": "Linux + systemd one-line installer for the hal0 homelab AI inference platform.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Linux",
+        "url": "https://hal0.dev/docs/getting-started/install/"
+      }
+---
+
+import { Aside, Steps, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The installer detects your hardware, picks a backend (Vulkan, ROCm,
+CUDA, or CPU), writes the systemd units, drops the `hal0` CLI on
+`PATH`, and brings up the API plus a prewired OpenWebUI tab. It's
+idempotent. Re-runs touch nothing in `/etc/hal0/`.
+
+## The one-liner
+
+```sh frame="terminal"
+curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+## Deployment shapes
+
+hal0 doesn't care which slice of your homelab it runs on, as long as
+the kernel speaks systemd and Docker. Three shapes worth naming:
+
+- **Bare-metal Linux.** The simplest case. `hal0-api`, `hal0-openwebui`,
+  and the per-slot toolbox containers all live on the host.
+- **VM.** Works if you give it enough RAM and pass the GPU through.
+  Eats more host memory than an LXC for the same workload.
+- **Privileged LXC on Proxmox (recommended for homelabs).** GPU and
+  NPU passthrough via `dev0`–`dev3` + cgroup allows. The Strix Halo
+  iGPU + XDNA recipe is privileged + AppArmor unconfined; AMD discrete
+  + ROCm needs `/dev/kfd` and `/dev/dri/*` passed through. CPU-only is
+  the one shape that's happy unprivileged. The unified-memory bar in
+  the dashboard surfaces the LXC's cgroup slice and, when you wire in
+  a `PVEAuditor` token, the physical host total plus other tenants.
+  That's the homelab payoff: hal0 knows it isn't the only thing on
+  the box.
+
+## What you'll see after install
+
+<img
+  src="/screenshots/dashboard-overview.png"
+  srcset="/screenshots/dashboard-overview.png 1x, /screenshots/dashboard-overview@2x.png 2x"
+  alt="hal0 dashboard at / showing KPI row (API, Slots, Memory, Throughput), the unified-memory bar with GTT inference and Proxmox host segments, and the slot grid below."
+  width="1440"
+  height="900"
+/>
+
+Dashboard at `/`. Four KPIs across the top (API, Slots, Memory,
+Throughput), the unified-memory bar, then the slot grid. On a fresh
+install the slots sit `offline` until the first-run wizard or the CLI
+loads one.
+
+## Prerequisites
+
+<Steps>
+1. **Linux with systemd.** Tested on Arch, CachyOS, Fedora, and Ubuntu
+   22.04+. macOS and Windows are not in scope for v1.
+
+2. **x86_64.** ARM is not currently supported.
+
+3. **Docker reachable.** The slot toolboxes run as containers. The
+   installer checks `docker ps` before doing anything destructive.
+
+4. **At least 20 GB free under `/var/lib`.** Models, registry, and
+   OpenWebUI state land there. Override via `--models-dir=/path` if
+   you'd rather point at a NAS mount or an existing model store.
+
+5. **Ports `8080` and `3001` free.** Override with `HAL0_PORT` and
+   `HAL0_OPENWEBUI_PORT` if you need different ones.
+</Steps>
+
+## What the installer does
+
+<Steps>
+1. **Pre-flight checks.** Verifies systemd, x86\_64, Docker, free
+   space, and free ports. Bails before touching anything if a check
+   fails. Re-runnable on its own as `hal0 doctor`.
+
+2. **Hardware probe.** Detects GPU, NPU, and unified-memory pools.
+   Writes `/etc/hal0/hardware.json`. Drives the default backends and
+   the slot-fit warnings in the dashboard.
+
+3. **FHS-aligned layout.** Creates the tree the rest of hal0 expects:
+   - `/usr/lib/hal0/current/` — versioned code, atomic symlink swapped
+     by `hal0 update`
+   - `/etc/hal0/` — config (`hal0.toml`, `api.env`, `openwebui.env`,
+     slot skeletons), preserved across updates
+   - `/var/lib/hal0/` — models, registry, slot state, OpenWebUI state
+
+4. **Config defaults.** Writes `hal0.toml` and the five built-in slot
+   skeletons (`primary`, `embed`, `stt`, `tts`, `img`). The hardware
+   recommender renders a `primary.toml` with `enabled = false` so you
+   pull a model and flip it on yourself. Existing files are never
+   overwritten on re-run.
+
+5. **systemd units.** Drops `hal0-api.service`,
+   `hal0-openwebui.service`, and the `hal0-slot@.service` template into
+   `/etc/systemd/system/`. Reloads the daemon, enables and starts the
+   API plus OpenWebUI.
+
+6. **`hal0` on PATH.** Symlinks `/usr/local/bin/hal0` →
+   `${VENV_DIR}/bin/hal0` so the CLI works without sourcing anything.
+   `uninstall.sh` removes the symlink.
+
+7. **Finish.** Prints reachability URLs, streams a live "hello" through
+   the freshly-spawned slot, and (if `qrencode` is on PATH) drops an
+   ANSI QR pointing at the dashboard.
+</Steps>
+
+<Aside type="note" title="What runs as root, what doesn't">
+The installer needs `sudo` to drop systemd unit files in
+`/etc/systemd/system/`, create the `/usr/lib/hal0/` tree, and
+optionally write the `/usr/local/bin/hal0` symlink. The `hal0-api`
+service itself runs as the unprivileged `hal0` user, as do the
+per-slot toolbox containers (each declares `User=hal0` in the
+template unit).
+</Aside>
+
+## Memory accounting on Proxmox
+
+<img
+  src="/screenshots/memory-bar.png"
+  srcset="/screenshots/memory-bar.png 1x, /screenshots/memory-bar@2x.png 2x"
+  alt="Unified-memory bar with segments labelled GTT · inference, System RAM, Proxmox host, and Free."
+  width="1172"
+  height="114"
+/>
+
+The memory bar reads physical-host totals when it can, instead of
+the LXC's cgroup slice in isolation. On a Proxmox LXC, hand the
+dashboard a read-only `PVEAuditor`
+API token in Settings → Proxmox integration and the bar adds a muted
+"Proxmox host" segment for other tenants, ZFS ARC, and kernel
+pressure. Token lives 0600 at `/etc/hal0/proxmox.json` and the API
+redacts the value on read. Bare-metal installs leave the panel off and
+the bar stays scoped to the local box.
+
+## Overrides
+
+Every knob is an environment variable. Pass them on the same line as
+the installer:
+
+```sh frame="terminal"
+HAL0_PORT=9090 HAL0_OPENWEBUI_PORT=9091 \
+  curl -fsSL https://hal0.dev/install.sh | bash
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HAL0_PREFIX` | `/usr/lib/hal0` | Install prefix |
+| `HAL0_PORT` | `8080` | API + dashboard port |
+| `HAL0_OPENWEBUI_PORT` | `3001` | OpenWebUI port |
+| `HAL0_USER` | `hal0` | Service user |
+| `HAL0_PYTHON` | `python3` | Python interpreter |
+| `HAL0_NO_PROBE` | unset | Skip the hardware probe |
+| `HAL0_AUTO_PULL` | `0` | Pre-pull toolbox images on install |
+| `HAL0_TOOLBOX_IMAGE_VULKAN` | repo default | Override Vulkan toolbox tag |
+| `HAL0_TOOLBOX_IMAGE_ROCM` | repo default | Override ROCm toolbox tag |
+
+`HAL0_HOME=$PWD/.hal0` relocates the whole tree under your working
+directory and skips the systemd path entirely. Useful for dev installs.
+
+`install.sh --models-dir=/srv/models` points the install at an
+existing model store at provision time. Resolution order: explicit
+flag, then `HAL0_MODELS_DIR`, then an interactive prompt on a tty,
+then `/var/lib/hal0/models`. The path is persisted as
+`[models].pull_root` and auto-included in `[models].roots` so a fresh
+install scans the existing tree on first boot.
+
+## Authentication & HTTPS (optional)
+
+The default install has no auth in front. Fine on a trusted home LAN
+behind your Traefik or Caddy. For exposed deployments add
+`--auth=basic`:
+
+```sh frame="terminal"
+sudo bash installer/install.sh --auth=basic
+```
+
+The installer prompts for an admin user and password, installs Caddy,
+generates a TLS cert (self-signed for `.local` hostnames, Let's
+Encrypt for real domains), mints a Bearer token, and round-trips
+`https://${HAL0_HOSTNAME}/api/health` as a self-test before exiting.
+See [Authentication & HTTPS](/docs/operate/auth/) for the full flow
+including client-side cert trust and ACME setup.
+
+## From a clone
+
+```sh frame="terminal"
+git clone https://github.com/hal0ai/hal0
+cd hal0
+sudo bash installer/install.sh
+```
+
+The script in the repo is the same one the URL serves.
+
+## Verifying the install
+
+```sh frame="terminal"
+hal0 status
+```
+
+System summary plus the state of every slot. A healthy install shows
+the five built-in slots `offline`; the
+[first-run wizard](/docs/getting-started/first-model/) lights up
+`primary` for you.
+
+```sh frame="terminal"
+curl http://localhost:8080/v1/models
+```
+
+Returns `data: []` until you've assigned a model to a slot.
+
+```sh frame="terminal"
+hal0 doctor
+```
+
+Re-runs the pre-flight pack against the live host. Handy after a
+kernel upgrade, a Docker daemon swap, or whenever something feels off.
+
+## Next steps
+
+<CardGrid>
+  <LinkCard
+    title="Load your first model"
+    href="/docs/getting-started/first-model/"
+    description="The eight-step FirstRun wizard: hardware, model, capabilities, pull." />
+  <LinkCard
+    title="Send your first chat"
+    href="/docs/getting-started/first-chat/"
+    description="OpenWebUI is prewired. Open the tab and start talking." />
+  <LinkCard
+    title="Strix Halo notes"
+    href="/docs/hardware/strix-halo/"
+    description="The reference platform. Unified memory iGPU, XDNA NPU, the tuning details." />
+  <LinkCard
+    title="Hardware overview"
+    href="/docs/hardware/overview/"
+    description="Where hal0 runs best and the supported tiers." />
+</CardGrid>
+
+## Uninstalling
+
+```sh frame="terminal"
+sudo bash /usr/lib/hal0/current/installer/uninstall.sh
+```
+
+Stops the services, removes the unit files, and (with `--keep-data`)
+leaves config and models in place. Without `--keep-data` it also
+clears `/etc/hal0` and `/var/lib/hal0`.
+
+<Aside type="tip" title="hal0 uninstall — wired to installer/uninstall.sh">
+`hal0 uninstall [--keep-data] [--force] [--dev]` is a thin wrapper
+that exec's `installer/uninstall.sh`. The shell script is the source
+of truth; the CLI forwards flags and inherits the live TTY so the
+DELETE confirmation prompt works.
+</Aside>

@@ -92,7 +92,7 @@ class ServerConfig(BaseModel):
     server-side knobs (idle-eviction policy, request quotas, …) land
     here too rather than at top-level so the surface stays grouped.
 
-    See docs/models-slots-impl-plan.md §A3 and the ``flag_merge`` util.
+    See docs/internal/models-slots-impl-plan.md §A3 and the ``flag_merge`` util.
     """
 
     model_config = {"populate_by_name": True, "extra": "allow"}

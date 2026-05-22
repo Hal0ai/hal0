@@ -78,7 +78,7 @@ ship without flm or stub a placeholder digest.
      `toolbox.yml`.
 
 3. **`HAL0_UPDATE_SKIP_COSIGN=1` escape hatch exists.** Documented gap
-   in `docs/release-manifest.md` — must close before v1 ships. Decision:
+   in `docs/internal/release-manifest.md` — must close before v1 ships. Decision:
    keep for `v1.0.0-rc*` (so smoke testing works on the LXC without a
    real release) and remove in `v1.0.0` proper, or remove now and
    require a real release for any LXC smoke.

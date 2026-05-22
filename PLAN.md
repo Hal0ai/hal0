@@ -46,7 +46,7 @@ the box; v1.0 is the eventual stability/perf bar (see §1 "Path to v1.0").
     catalog (`b90a569`) groups models first, narrows the backend
     dropdown to backends a model can actually serve, and ships
     `hal0 capabilities migrate` for stale persisted selections.
-- **Auth + reverse proxy** (per [ADR-0001](docs/adr/0001-collapse-edge-auth-into-fastapi.md),
+- **Auth + reverse proxy** (per [ADR-0001](docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md),
   collapsed to a single FastAPI layer in PRs #58 + #59; original dual-layer
   shipped ahead of schedule via Team J, 2026-05-15 — `ba79427`, `f62902c`)
   - All auth lives in FastAPI: Bearer tokens for programmatic clients,

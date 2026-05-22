@@ -1,0 +1,85 @@
+---
+title: Hugging Face pulls
+description: How hal0 downloads model weights from Hugging Face and streams progress to clients.
+sidebar:
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+When you assign a model to a slot that isn't already in the registry,
+hal0 pulls it from Hugging Face. The pull surfaces as a slot-level
+state transition (`offline → pulling`) and a byte-level SSE stream so
+the dashboard and CLI can render a live progress bar.
+
+## Pulling a model
+
+Three ways:
+
+- **Dashboard.** The Models view has a **Pull** button. Paste a
+  Hugging Face repo ref (e.g.
+  `bartowski/Qwen2.5-Coder-7B-Instruct-GGUF`) and pick the quant
+  file.
+- **CLI.**
+  ```sh
+  hal0 model pull bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
+    --file Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+  ```
+- **Slot swap.**
+  ```sh
+  hal0 slot swap primary --model qwen2.5-coder-7b-instruct-q4_k_m
+  ```
+  If the registry doesn't have it, the slot transitions through
+  `pulling` before `warming`.
+
+## Where the bytes land
+
+Models are written to `/var/lib/hal0/models/<safe-ref>/<file>` with a
+checksum sidecar. On a successful pull the registry entry is created
+atomically; a failed pull leaves no partial entry.
+
+`/var/lib/hal0/` survives `hal0 update` (only `/usr/lib/hal0/current/`
+gets swapped), so pulled models persist across version upgrades. If
+you're mounting the model store from an NFS export on your NAS, the
+path stays stable through upgrades too.
+
+## Progress streaming
+
+The dashboard and CLI subscribe to an SSE stream that emits one event
+per progress tick:
+
+- Total bytes
+- Bytes received
+- Throughput (bytes / second)
+- Elapsed time
+- ETA
+
+The slot itself stays in `pulling` until the file is fully verified;
+only then does it transition to `warming`.
+
+<Aside type="note">
+  Verified Phi-3 Mini Q4 download on Strix Halo: **2.39 GB in ~10s**.
+  Real numbers vary by network; the size is fixed.
+</Aside>
+
+## Status today
+
+`POST /api/models/{id}/pull` is live. It queues a background pull
+job, streams the file from Hugging Face, verifies sha256, and stages
+atomically into the registry. Poll `GET /api/models/{id}/pull/status`
+for progress, or `POST .../pull/cancel` to abort. The CLI
+(`hal0 model pull`) and the FirstRun wizard both drive this same code
+path.
+
+FLM tags (the Ollama-style `family:size` ids served by the FLM
+toolbox) also go through `POST /api/models/{id}/pull`. The route
+detects them via `is_flm_tag()` and shells `flm pull <tag>` inside
+the toolbox image instead of hitting Hugging Face.
+
+## Coming soon — outline
+
+- Repo authentication for gated models (`HF_TOKEN` plumbing).
+- Multi-file pulls (sharded GGUFs).
+- Resume on interrupt.
+- Disk-space pre-flight warning.
+- Mirror configuration for self-hosted HF caches.

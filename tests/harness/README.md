@@ -300,7 +300,7 @@ hand or re-run `installer-test.sh` first.
 | Flag | Effect | Used by |
 |------|--------|---------|
 | `HAL0_HARNESS_PROD=1` | Enable rows that mutate `/etc`, `/var/lib`, `/usr/lib` via real `sudo bash installer/install.sh` and `installer/uninstall.sh`. | `installer-test.sh:prod-no-start`, `harness-cleanup.sh:prod-uninstall` |
-| `HAL0_HARNESS_TLS=1` | Enable the TLS-default install (installs Caddy + renders the Caddyfile per [ADR-0001](../../docs/adr/0001-collapse-edge-auth-into-fastapi.md); renamed from `HAL0_HARNESS_AUTH` when Caddy stopped doing edge auth). Implies PROD=1. | `installer-test.sh:tls-default` |
+| `HAL0_HARNESS_TLS=1` | Enable the TLS-default install (installs Caddy + renders the Caddyfile per [ADR-0001](../../docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md); renamed from `HAL0_HARNESS_AUTH` when Caddy stopped doing edge auth). Implies PROD=1. | `installer-test.sh:tls-default` |
 | `HAL0_HARNESS_KEEP=1` | When running `installer-test.sh` standalone, keep the tmp prefix after exit. No effect through the orchestrator (orchestrator always cleans). | `installer-test.sh` |
 | `HAL0_HARNESS_API_PORT=<n>` | Port `hal0 serve` binds during the install test (default 18080). | `installer-test.sh:dev-api-up` |
 | `HAL0_DOCTOR_PORTS="<p1> <p2>..."` | Space-separated TCP ports `hal0 doctor`'s port-collision check probes. Defaults to `"18080 13001"` inside `cli-test.sh` so the row doesn't trip on a co-resident prod install bound to the canonical `8080 3001`. Override to match your dev install if non-default. | `cli-test.sh:cli-doctor` |

@@ -22,7 +22,7 @@ name: Release
 #     manifest.json at the moment of the tag — the assumption is the
 #     toolbox workflow ran on main first.
 #
-# See: docs/release-manifest.md, src/hal0/updater/updater.py,
+# See: docs/internal/release-manifest.md, src/hal0/updater/updater.py,
 #      scripts/release-prototype/verify-roundtrip.sh, PLAN §9 + §17.
 
 on:
@@ -235,7 +235,7 @@ jobs:
           out, version, tag, channel, digest, base, self_url, ident = sys.argv[1:]
           # Mirror the toolbox_images block from manifest.json into the
           # release manifest so an updater can pull the matching image
-          # set (see docs/release-manifest.md §"What the release pipeline
+          # set (see docs/internal/release-manifest.md §"What the release pipeline
           # must guarantee", item 6).
           repo_manifest = json.loads(open("manifest.json").read())
           payload = {
@@ -295,7 +295,7 @@ jobs:
           if ! gh release view "${TAG}" >/dev/null 2>&1; then
             gh release create "${TAG}" \
               --title "hal0 ${TAG}" \
-              --notes "Automated release. See docs/release-manifest.md for the verify path." \
+              --notes "Automated release. See docs/internal/release-manifest.md for the verify path." \
               --draft=false \
               --prerelease="$([[ "${TAG}" == *-* ]] && echo true || echo false)"
           fi

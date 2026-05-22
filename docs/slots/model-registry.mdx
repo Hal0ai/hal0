@@ -1,0 +1,106 @@
+---
+title: Model registry
+description: The on-disk index of pulled models and how slots reference them.
+sidebar:
+  order: 5
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The **model registry** is hal0's on-disk index of every model it knows
+about: pulled, verified, and ready to be assigned to a slot. It lives
+under `/var/lib/hal0/models/` and survives `hal0 update`. Mount that
+directory from an NFS export on your NAS and one registry is shared
+across reinstalls.
+
+<img
+  src="/screenshots/models-registry.png"
+  srcset="/screenshots/models-registry.png 1x, /screenshots/models-registry@2x.png 2x"
+  alt="Dashboard /models view showing the registry table with chat, stt, tts, and rerank tagged rows plus size and backend per entry."
+  width="1440"
+  height="900"
+/>
+
+## Why a registry
+
+Slots reference models by short **registry refs**, not by file paths.
+That lets you:
+
+- **Swap a slot's model** without rewriting paths.
+- **Share a model** across two slots (a small chat model serving two
+  endpoints).
+- **Update a model file** in place (e.g. a newer quant of the same
+  weights) without touching slot config.
+
+The registry is also what the dashboard's Models view enumerates and
+what `/v1/models` reflects to OpenAI-shaped clients.
+
+## Shape of a registry entry
+
+Each entry is one directory under `/var/lib/hal0/models/` with:
+
+- The model file(s), usually one `.gguf`.
+- A sidecar JSON describing the source repo, file name, size, and
+  checksum.
+- The registry ref (a slug, e.g. `qwen2.5-0.5b-instruct-q4_k_m`).
+
+Entries are written atomically; a failed pull leaves no partial
+entry, so the registry never lies about what's on disk.
+
+## Listing the registry
+
+```sh
+hal0 model list
+```
+
+Or via the API:
+
+```sh
+curl http://localhost:8080/v1/models
+```
+
+The `/v1/models` response is OpenAI-shaped, with one entry per
+registry model plus one entry per loaded slot name (so
+`model: "primary"` works as a model identifier; see
+[Slot as model](/docs/api/slot-as-model/)).
+
+## Assigning a model to a slot
+
+```sh
+hal0 model assign qwen2.5-0.5b-instruct-q4_k_m --slot primary
+```
+
+This updates the slot's TOML config (atomically) and restarts the
+slot through the lifecycle (`unloading → warming → ready`).
+
+## Removing a model
+
+```sh
+hal0 model rm qwen2.5-0.5b-instruct-q4_k_m
+```
+
+The registry refuses to remove a model that's currently assigned to
+a slot. Unload the slot or swap its model first.
+
+## Curated defaults
+
+A small **curated catalogue** ships with the installer
+(`src/hal0/registry/curated.py`). It's how the hardware probe picks
+a starting model for each slot on a fresh install. The catalogue is
+not the registry; it's a list of *suggestions* the FirstRun wizard
+draws from. Pulled models land in the registry; the curated list is
+just a starting menu.
+
+<Aside type="tip">
+  The dashboard's Models view distinguishes **registry models** (on
+  disk, ready to assign) from **curated suggestions** (one click to
+  pull). See [Recommended loadouts](/docs/slots/loadouts/) for picks
+  per workload + hardware tier.
+</Aside>
+
+## Coming soon — outline
+
+- Registry import / export for moving a model collection between
+  machines.
+- Pinning a model to a specific version of its source file.
+- Custom metadata fields per entry.

@@ -1,0 +1,132 @@
+---
+title: Load your first model
+description: Walk through the FirstRun wizard — hardware, model, capabilities, license, pull. Watch the primary slot come up.
+sidebar:
+  order: 2
+---
+
+import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+A fresh hal0 install boots into the **FirstRun wizard**. Open the
+dashboard at `http://localhost:8080` and the wizard owns the screen
+until the `primary` slot has a model and reaches `ready`.
+
+## What the wizard does
+
+The wizard is a guarded route at `/firstrun`. Until the API reports
+`first_run: false` every other dashboard navigation redirects back to
+it. There's no point operating an empty box.
+
+It owns a linear sequence: confirm the password, confirm the detected
+hardware and model storage, pick a primary chat model, pick which
+capabilities to bring up (embed, voice, image), accept any
+click-through licenses, then stream the pulls into their slots. When
+`primary` reaches `ready` the wizard hands you the rest of the
+dashboard.
+
+## The steps
+
+<Steps>
+1. **Password.** Optional. Auto-skips when
+   `/api/auth/status.password_set` is already true.
+
+2. **Hardware + storage.** Confirms what the probe wrote to
+   `/etc/hal0/hardware.json` and which directories the registry will
+   scan and pull into.
+
+3. **Primary chat model.** A curated list, hardware-aware. Fit
+   warnings appear inline next to anything that would offload
+   heavily. The default highlight is `Phi-3-mini-4k-instruct-q4` — a
+   2.4 GB Q4 GGUF that pulls in roughly 10 seconds on a decent
+   connection and fits anywhere hal0 runs. Strix Halo operators
+   should jump straight to a Q4 7B-class chat model or a Q4 MoE 30B;
+   see [recommended loadouts](/docs/hardware/strix-halo/#recommended-loadouts).
+
+4. **Capabilities.** Embed, voice (STT + TTS), and image generation,
+   each with smart defaults. Rerank is a sub-disclosure inside the
+   embed row, locked off by default.
+
+5. **Hugging Face token.** Conditional. Only renders when at least
+   one selected model is gated.
+
+6. **License acceptance.** Aggregated across every selected model.
+   Skipped if nothing requires it.
+
+7. **Install.** Parallel pulls plus capability registration, with
+   per-row retry. Progress streams over SSE: bytes, percent, and the
+   slot state walking through
+   `pulling → starting → warming → ready`.
+
+8. **Done.** Links to the dashboard, OpenWebUI, and settings.
+</Steps>
+
+<Aside type="note" title="Skipping the wizard from the CLI">
+The CLI gets you to the same place without a browser:
+
+```sh
+hal0 slot load primary --model phi-3-mini-4k-instruct-q4
+```
+
+The slot manager handles the pull, the systemd unit, and the health
+probe. `hal0 status` shows the same state machine the wizard streams.
+</Aside>
+
+## When the pull fails
+
+The wizard surfaces errors inline. Common ones:
+
+- **No disk space.** `/var/lib/hal0/models/` ran out mid-pull. Free
+  the space and retry — partial downloads resume.
+- **Hugging Face rate-limit.** Anonymous pulls hit a rate cap on
+  popular weights. Export `HF_TOKEN` (or set it in
+  `/etc/hal0/api.env`) and retry.
+- **License not accepted on Hugging Face.** Some gated models require
+  acceptance on the HF side before the API will serve the files. The
+  error message links out to the model page.
+
+The slot stays in `error` with details in
+`/var/lib/hal0/slots/primary/state.json` until you retry. Nothing
+hidden.
+
+## Picking something other than the default
+
+The wizard's curated list is a starting point. After it's done the
+**Models** page in the dashboard is where you live:
+
+<img
+  src="/screenshots/models-registry.png"
+  srcset="/screenshots/models-registry.png 1x, /screenshots/models-registry@2x.png 2x"
+  alt="Models registry table at /models showing rows with chat / STT / TTS / rerank capability tags, on-disk size, and the backend that owns each model."
+  width="1440"
+  height="900"
+/>
+
+Each row carries the model's capability tags, on-disk size, and the
+backend that owns it. From here you can pull more weights, assign a
+model to a slot, or hand the same job to the CLI:
+
+```sh frame="terminal"
+hal0 model list
+hal0 slot swap primary --model qwen2.5-coder-7b-instruct-q4_k_m
+```
+
+See [recommended loadouts](/docs/hardware/strix-halo/#recommended-loadouts)
+for a hardware-by-hardware breakdown of what fits where.
+
+
+## Next steps
+
+<CardGrid>
+  <LinkCard
+    title="Send your first chat"
+    href="/docs/getting-started/first-chat/"
+    description="OpenWebUI is already pointed at your primary slot." />
+  <LinkCard
+    title="Slot lifecycle"
+    href="/docs/slots/what-is-a-slot/"
+    description="The state machine you just watched the wizard drive." />
+  <LinkCard
+    title="API reference"
+    href="/docs/api/openai-compat/"
+    description="Hit `/v1/chat/completions` directly from any OpenAI SDK." />
+</CardGrid>

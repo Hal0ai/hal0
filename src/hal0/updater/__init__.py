@@ -11,7 +11,7 @@ Rollback swaps the symlink back to the retained previous version and
 restarts hal0-api.
 
 See PLAN.md §9 (update mechanism) and §17 risk #2 (cosign edge cases).
-The schema for release manifests lives at ``docs/release-manifest.md``.
+The schema for release manifests lives at ``docs/internal/release-manifest.md``.
 
 Key exports:
     Updater — check / apply / pull / rollback methods.
