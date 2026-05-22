@@ -363,7 +363,13 @@ def test_curated_models_filters_out_image_slot(auth_app: TestClient) -> None:
         ("/api/install/curated-models", True),
         ("/api/install/pick-default", True),
         ("/api/auth/password", True),
+        ("/api/auth/disable", True),
         ("/api/config/models", True),
+        # The wizard's load() reads these on mount, before the operator
+        # has had a chance to set a password — admit them so the disk
+        # row and capability dropdowns render on a fresh install.
+        ("/api/hardware", True),
+        ("/api/capabilities", True),
         # Regex matches — /api/models/{id}/pull
         ("/api/models/qwen3-4b/pull", True),
         ("/api/models/some-weird_id.v2/pull", True),
@@ -388,7 +394,6 @@ def test_curated_models_filters_out_image_slot(auth_app: TestClient) -> None:
         ("/api/slots/primary", False),
         ("/api/auth/login", False),
         ("/api/auth/logout", False),
-        ("/api/hardware", False),
         ("/api/models", False),
         ("/api/models/foo", False),
         ("/", False),

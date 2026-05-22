@@ -33,7 +33,22 @@ def config_show() -> None:
     if not path.exists():
         console.print(f"[dim]No config at {path}[/dim]")
         raise typer.Exit(0)
-    body = path.read_text()
+    # Translate PermissionError into a clear hint — pre-v0.1.3 installs
+    # left /etc/hal0 mode 0700 in some umask-tightened environments,
+    # which makes `hal0 config show` from a non-root shell explode with
+    # a raw Python traceback. Re-run under sudo or chmod the config tree
+    # 0755/0644 (the installer does this for fresh installs as of
+    # v0.1.3).
+    try:
+        body = path.read_text()
+    except PermissionError as exc:
+        console.print(f"[red]Permission denied:[/red] {path}")
+        console.print(
+            "[dim]The config is owned by root. Re-run with [bold]sudo[/bold], "
+            "or run [bold]sudo chmod 0755 /etc/hal0 && sudo chmod 0644 "
+            f"{path}[/bold] once and the command will work without sudo.[/dim]"
+        )
+        raise typer.Exit(1) from exc
     console.print(
         Panel(
             Syntax(body, "toml", theme="ansi_dark", background_color="default"),

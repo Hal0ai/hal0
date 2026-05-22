@@ -166,6 +166,15 @@ const unifiedSegments = computed(() => {
 // proxy from — still lights up when amdxdna + /dev/accel are present.
 const npuOk = computed(() => hw.value.npu_status?.ok ?? !!hw.value.npu_present)
 
+// Only render the NPU backend card on Strix Halo. Even when npu_present
+// is true on a future XDNA-bearing chip, the FLM toolbox image is
+// validated on Strix Halo only — surfacing the card on every NPU host
+// would put operators in front of a broken backend they can't use yet.
+// Widen this list when a second NPU platform is validated.
+const showNpuCard = computed(
+  () => !!hw.value.npu_present && hw.value.platform === 'strix-halo',
+)
+
 // ── Throughput ────────────────────────────────────────────────────────
 const totalTps = computed(() =>
   Object.values(metrics.value).reduce((a, m) => a + (m?.tokens_per_sec ?? m?.tps ?? 0), 0),
@@ -436,7 +445,8 @@ loadChatModels()
         </template>
         <template v-else-if="visibleSlots.length === 0">
           <div class="slots-grid" role="list" aria-label="Inference slots">
-            <NPUBackendCard />
+            <NPUBackendCard v-if="showNpuCard" />
+            <p v-else class="empty-slots">No slots configured yet — head to <a href="/slots">Slots</a> to create one.</p>
           </div>
         </template>
         <template v-else>
@@ -455,8 +465,9 @@ loadChatModels()
             />
             <!-- NPU backend lives in the slots grid: it can serve a
                  chat-shaped model the same way a llama.cpp slot does,
-                 so colocating it here is honest. -->
-            <NPUBackendCard />
+                 so colocating it here is honest. Strix-Halo-only —
+                 see showNpuCard above. -->
+            <NPUBackendCard v-if="showNpuCard" />
           </div>
         </template>
       </section>
@@ -608,6 +619,18 @@ loadChatModels()
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 14px;
 }
+.empty-slots {
+  grid-column: 1 / -1;
+  padding: 24px;
+  text-align: center;
+  color: var(--color-fg-muted);
+  font-size: 13px;
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+}
+.empty-slots a { color: var(--hal0-accent); text-decoration: none; }
+.empty-slots a:hover { text-decoration: underline; }
 
 /* ── Chat panel ─────────────────────────────────────────────────── */
 .chat-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }

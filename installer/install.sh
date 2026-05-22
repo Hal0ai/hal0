@@ -376,6 +376,14 @@ TOML
 else
     info "${HAL0_TOML} exists — left alone"
 fi
+# Make the config world-readable. It's not a secret (no tokens, no
+# passwords — those live in tokens.toml + auth.toml which stay 0600),
+# and `hal0 config show` from a non-root shell needs to read it.
+# Same goes for /etc/hal0 itself — without this an install run with
+# a tightened root umask leaves /etc/hal0 at 0700 and every non-root
+# CLI command 500s with PermissionError. Idempotent on re-runs.
+chmod 0755 "${ETC_DIR}" 2>/dev/null || true
+chmod 0644 "${HAL0_TOML}" 2>/dev/null || true
 
 API_ENV="${ETC_DIR}/api.env"
 if [[ ! -f "${API_ENV}" ]]; then

@@ -205,6 +205,15 @@ _FIRST_RUN_CLAIM_PATHS: frozenset[str] = frozenset(
         # Gated by require_writer on the live router; admitted here so
         # the wizard can persist before a credential exists.
         "/api/config/models",
+        # Wizard load — read-only hardware + capability info. Both are
+        # fetched on mount BEFORE the operator has had a chance to set
+        # a password (or click "Skip — leave open"), so without this
+        # admission the disk-free row and the capability dropdowns
+        # render empty on every fresh install. Neither leaks anything
+        # secret — the probe payload is already available through
+        # /api/install/probe (also in this set).
+        "/api/hardware",
+        "/api/capabilities",
     }
 )
 

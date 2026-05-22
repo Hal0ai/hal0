@@ -148,6 +148,14 @@ const availMemMb = computed(() => {
   return hardware.value.gtt_total_mb ?? hardware.value.vram_total_mb ?? null
 })
 
+// Strix-Halo-only NPU card visibility. The FLM toolbox image only
+// runs on Strix Halo today; surfacing the card on any other XDNA host
+// (or, worse, on a virtio "NPU" in a misconfigured probe) leads
+// operators to a backend they can't use.
+const showNpuCard = computed(
+  () => !!hardware.value?.npu_present && hardware.value?.platform === 'strix-halo',
+)
+
 function modelFit(model) {
   if (availMemMb.value === null) return null
   const reqMb = (model.size_gb ?? 0) * 1024 * 1.1  // 10% overhead
@@ -647,9 +655,15 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
 
       <template v-else-if="slots.length === 0">
         <!-- All system slots are capability-owned; show NPU card alone
-             rather than an empty "create a slot" prompt. -->
+             rather than an empty "create a slot" prompt. Strix-Halo-only;
+             elsewhere we render an explicit empty state. -->
         <div class="slots-grid" role="list" aria-label="Inference slots">
-          <NPUBackendCard />
+          <NPUBackendCard v-if="showNpuCard" />
+          <p v-else class="empty-slots-msg">
+            No slots configured. The Capabilities section above creates
+            them automatically; create a custom slot with the form below
+            once you've pulled a model.
+          </p>
         </div>
       </template>
 
@@ -686,8 +700,9 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
           </div>
           <!-- NPU backend rides in the same grid as the other slot
                cards now — it serves chat-shaped models the same way a
-               local llama.cpp slot does. -->
-          <NPUBackendCard />
+               local llama.cpp slot does. Strix-Halo-only; see
+               showNpuCard above. -->
+          <NPUBackendCard v-if="showNpuCard" />
         </div>
       </template>
 

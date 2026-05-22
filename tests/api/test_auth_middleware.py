@@ -126,9 +126,22 @@ def test_public_routes_bypass_auth(auth_app: TestClient, path: str) -> None:
         "/api/logs",
         "/api/settings",
         "/api/providers",
+        "/api/capabilities",
     ],
 )
 def test_protected_routes_require_auth(auth_app: TestClient, path: str) -> None:
+    # Drop the first-run lockfile so the claim window is closed for this
+    # assertion. /api/hardware and /api/capabilities are deliberately
+    # admitted while .first-run.lock + no-password — see
+    # _FIRST_RUN_CLAIM_PATHS in src/hal0/api/middleware/auth.py — so
+    # without this the wizard-claim layer would mask the writer gate
+    # and the test would 200 instead of 401. The protected-route
+    # contract this test pins is "auth required once the wizard has
+    # finished", which matches the install-complete posture.
+    from hal0.api.auth import first_run as first_run_lock
+
+    first_run_lock.consume_lockfile()
+
     response = auth_app.get(path)
     assert response.status_code == 401, (
         f"protected route {path} did not 401: status={response.status_code} body={response.text}"
