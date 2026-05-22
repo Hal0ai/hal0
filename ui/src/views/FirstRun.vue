@@ -119,10 +119,12 @@ async function goNext() {
     return
   }
   if (step.value === 3) {
-    if (!s.primaryModel.value) {
-      toasts.warning('Please select a chat model first')
-      return
-    }
+    // No-primary is a valid install — a capabilities-only box (embed +
+    // voice + img) is a legitimate shape, and operators who plan to
+    // route chat to a remote provider via Settings → Providers don't
+    // need a local chat model at all. The wizard's enabledList already
+    // omits the primary row when null, so step 7 just kicks the
+    // capability pulls.
     step.value = 4
     return
   }
@@ -137,12 +139,12 @@ async function goNext() {
     return
   }
   if (step.value === 6) {
-    if (!s.form.licenseAccepted) {
-      toasts.warning('Please accept the licenses first')
-      return
-    }
     if (!s.fits.value) {
       toasts.warning('Not enough disk space — free up storage or remove capabilities')
+      return
+    }
+    if (s.enabledList.value.length > 0 && !s.form.licenseAccepted) {
+      toasts.warning('Please accept the licenses first')
       return
     }
     step.value = 7
@@ -162,6 +164,11 @@ function skipPassword() {
   s.form.firstRunToken = ''
   tokenError.value = ''
   step.value = 2
+}
+
+function skipPrimary() {
+  s.form.primaryId = null
+  step.value = 4
 }
 
 // Step 7 → 8 happens implicitly when every pull is terminal. The
@@ -223,10 +230,14 @@ const licenseList = computed(() => s.enabledList.value)
 const canAdvance = computed(() => {
   if (step.value === 1) return s.form.password.length === 0 || s.form.password.length >= 8
   if (step.value === 2) return s.form.modelDirs.some((d) => String(d).trim().length > 0)
-  if (step.value === 3) return !!s.primaryModel.value
+  if (step.value === 3) return true  // primary is optional — operators can run capabilities-only
   if (step.value === 4) return true
   if (step.value === 5) return true  // skip is allowed; empty token is permitted
-  if (step.value === 6) return s.form.licenseAccepted && s.fits.value
+  if (step.value === 6) {
+    // Nothing selected ⇒ nothing to accept; let the operator pass straight through.
+    if (s.enabledList.value.length === 0) return s.fits.value
+    return s.form.licenseAccepted && s.fits.value
+  }
   return false
 })
 </script>
@@ -370,7 +381,10 @@ const canAdvance = computed(() => {
 
         <!-- ── 3. Primary chat ───────────────────────────────────── -->
         <div v-else-if="!s.loading.value && step === 3" key="s3" class="wizard-body">
-          <p class="step-desc">Pick the model that powers chat. You can add more from the Models page later.</p>
+          <p class="step-desc">
+            Pick the model that powers chat. You can add more from the Models page later, or
+            <strong>skip</strong> if you plan to route chat to a remote provider (Settings → Providers).
+          </p>
 
           <div v-if="!s.curated.value.length" class="error-state">
             Curated catalogue is empty — the API may be unavailable.
@@ -411,8 +425,9 @@ const canAdvance = computed(() => {
             </label>
           </div>
 
-          <div class="wizard-footer wizard-footer-2">
+          <div class="wizard-footer wizard-footer-3">
             <button class="btn-ghost" type="button" @click="goBack">← Back</button>
+            <button class="btn-ghost" type="button" @click="skipPrimary">Skip — no chat model</button>
             <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">Next: capabilities →</button>
           </div>
         </div>
@@ -578,50 +593,61 @@ const canAdvance = computed(() => {
 
         <!-- ── 6. License acceptance (aggregated) ────────────────── -->
         <div v-else-if="!s.loading.value && step === 6" key="s6" class="wizard-body">
-          <p class="step-desc">
-            You're about to download these models. Confirm the licenses below.
-            hal0 does not modify or redistribute weights — files come straight
-            from Hugging Face. You're responsible for compliance in your jurisdiction.
-          </p>
+          <template v-if="licenseList.length > 0">
+            <p class="step-desc">
+              You're about to download these models. Confirm the licenses below.
+              hal0 does not modify or redistribute weights — files come straight
+              from Hugging Face. You're responsible for compliance in your jurisdiction.
+            </p>
 
-          <ul class="license-list">
-            <li v-for="row in licenseList" :key="row.kind + ':' + row.modelId" class="license-row">
-              <div class="license-row-l">
-                <span class="license-row-name">{{ row.label }}</span>
-                <span class="license-row-size">{{ fmtGb(row.sizeGb) }}</span>
-              </div>
-              <div class="license-row-r">
-                <span class="meta-chip">{{ row.license || 'see repo' }}</span>
-                <a
-                  v-if="row.license_url"
-                  class="license-link"
-                  :href="row.license_url"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >view ↗</a>
-              </div>
-            </li>
-          </ul>
+            <ul class="license-list">
+              <li v-for="row in licenseList" :key="row.kind + ':' + row.modelId" class="license-row">
+                <div class="license-row-l">
+                  <span class="license-row-name">{{ row.label }}</span>
+                  <span class="license-row-size">{{ fmtGb(row.sizeGb) }}</span>
+                </div>
+                <div class="license-row-r">
+                  <span class="meta-chip">{{ row.license || 'see repo' }}</span>
+                  <a
+                    v-if="row.license_url"
+                    class="license-link"
+                    :href="row.license_url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >view ↗</a>
+                </div>
+              </li>
+            </ul>
 
-          <div class="totals">
-            <div><span class="totals-l">Total download</span><span class="totals-v">{{ fmtGb(s.totalDownloadGb.value) }}</span></div>
-            <div>
-              <span class="totals-l">Free on storage dir</span>
-              <span class="totals-v" :class="{ 'totals-bad': !s.fits.value }">{{ fmtGb(s.diskFreeGb.value) }}</span>
+            <div class="totals">
+              <div><span class="totals-l">Total download</span><span class="totals-v">{{ fmtGb(s.totalDownloadGb.value) }}</span></div>
+              <div>
+                <span class="totals-l">Free on storage dir</span>
+                <span class="totals-v" :class="{ 'totals-bad': !s.fits.value }">{{ fmtGb(s.diskFreeGb.value) }}</span>
+              </div>
             </div>
-          </div>
-          <p v-if="!s.fits.value" class="field-err">
-            Not enough disk space. Free up some, add a larger storage directory in step 2, or remove capabilities.
-          </p>
+            <p v-if="!s.fits.value" class="field-err">
+              Not enough disk space. Free up some, add a larger storage directory in step 2, or remove capabilities.
+            </p>
 
-          <label class="accept-label">
-            <input type="checkbox" v-model="s.form.licenseAccepted" />
-            I accept the licenses for each model shown above.
-          </label>
+            <label class="accept-label">
+              <input type="checkbox" v-model="s.form.licenseAccepted" />
+              I accept the licenses for each model shown above.
+            </label>
+          </template>
+          <template v-else>
+            <p class="step-desc">
+              Nothing to download — you skipped the chat model and didn't enable any capabilities.
+              You can install hal0 as-is and add models later from <strong>Models</strong> or
+              <strong>Capabilities</strong>, or go back and pick something now.
+            </p>
+          </template>
 
           <div class="wizard-footer wizard-footer-2">
             <button class="btn-ghost" type="button" @click="goBack">← Back</button>
-            <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">Accept &amp; install →</button>
+            <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">
+              {{ licenseList.length > 0 ? 'Accept &amp; install →' : 'Finish setup →' }}
+            </button>
           </div>
         </div>
 
@@ -959,6 +985,8 @@ const canAdvance = computed(() => {
 /* ── Footers + buttons ─────────────────────────────────────────────────── */
 .wizard-footer { padding-top: 4px; }
 .wizard-footer-2 { display: flex; justify-content: space-between; align-items: center; }
+.wizard-footer-3 { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 4px; }
+.wizard-footer-3 .btn-ghost { flex-shrink: 0; }
 
 .btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 11px 22px; border-radius: var(--radius); background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-size: 13px; font-weight: 500; border: none; cursor: pointer; transition: background 0.15s, transform 0.05s; }
 .btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }

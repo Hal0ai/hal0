@@ -523,6 +523,14 @@ export function useFirstRun() {
     pull.done = false
     pull.error = null
     _initPullItems()
+    if (pull.items.length === 0) {
+      // Nothing-to-do install (operator skipped chat + every capability).
+      // _checkAllDone short-circuits to terminal=true on an empty array,
+      // so the wizard flips to step 8 immediately rather than dangling
+      // on a blank progress screen.
+      _checkAllDone()
+      return
+    }
     await Promise.all(pull.items.map((it) => _startOne(it)))
   }
 

@@ -33,6 +33,7 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 
+from hal0.api.auth import first_run as first_run_lock
 from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config import paths
@@ -213,6 +214,14 @@ async def install_complete(request: Request) -> dict[str, Any]:
     Atomic: tempfile + os.replace in the parent directory so a partial
     write can't leave a half-written marker. Idempotent — re-calling
     after the sentinel already exists is a no-op.
+
+    Also consumes the ``.first-run.lock`` file. The lockfile already
+    disappears on a successful POST /api/auth/password, but operators
+    who chose "Skip — leave open" never hit that path. Without this
+    cleanup the claim window would stay open indefinitely — the
+    sentinel hides the wizard route in the UI, but the anonymous
+    pass-through on wizard writer routes would survive. Consuming
+    here closes that window the moment the wizard signals completion.
     """
     sentinel = _first_run_sentinel()
     sentinel.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +256,9 @@ async def install_complete(request: Request) -> dict[str, Any]:
             with contextlib.suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
 
+    # Idempotent — consume_lockfile() is a no-op if the file is already gone.
+    first_run_lock.consume_lockfile()
+
     return {"first_run": False, "sentinel_path": str(sentinel)}
 
 
@@ -255,7 +267,7 @@ async def install_complete(request: Request) -> dict[str, Any]:
 
 @router.get("/curated-models")
 async def curated_models() -> dict[str, Any]:
-    """Return the curated model catalogue the FirstRun wizard renders.
+    """Return the curated chat-model catalogue the FirstRun wizard renders.
 
     Shape::
 
@@ -264,13 +276,16 @@ async def curated_models() -> dict[str, Any]:
             "custom_allowed": true
         }
 
-    The wizard reads this once on mount and renders one card per entry.
-    Off-catalogue picks go through a separate "Custom Hugging Face URL"
-    form which calls ``POST /api/models`` + ``POST /api/models/{id}/pull``
-    directly.
+    Filtered to ``recommended_slot == "primary"`` — image models and any
+    future non-chat picks live in the same source list but have their own
+    placement in the wizard (step 4 capability pickers). Leaving them in
+    the chat picker would let an operator install Flux as their "chat
+    model", which is meaningless and previously confused users. Sourcing
+    capability picks happens through ``/api/capabilities``.
     """
+    chat_picks = [m for m in CURATED_MODELS if m.recommended_slot == "primary"]
     return {
-        "models": [m.model_dump(mode="json") for m in CURATED_MODELS],
+        "models": [m.model_dump(mode="json") for m in chat_picks],
         "custom_allowed": True,
     }
 

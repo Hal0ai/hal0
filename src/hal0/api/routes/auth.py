@@ -459,7 +459,7 @@ def _verify_first_run_otp(request: Request, body: dict[str, Any]) -> None:
 
 
 @router.post("/password")
-async def set_password(request: Request) -> Any:
+async def set_password(request: Request, response: Response) -> Any:
     """Set or rotate the owner password.
 
     Body::
@@ -474,10 +474,16 @@ async def set_password(request: Request) -> Any:
           * Non-loopback callers MUST present the OTP minted on
             startup at ``<state>/.first-run.lock`` (printed by the
             installer banner). FINDINGS §28.
+          * On success the response sets a ``hal0_session`` cookie so
+            the wizard's next writer call (PUT /api/config/models, the
+            capability pulls, /api/capabilities/...) authenticates as
+            the new owner. Without this the wizard would 401 on every
+            subsequent mutation — see #fix-firstrun-auth.
       - Rotation (password already set):
           * Requires writer scope (Bearer or cookie). Cookie path
             additionally enforces the CSRF tripwire — same as every
-            other writer-scoped mutation.
+            other writer-scoped mutation. No new cookie is issued; the
+            existing session stays valid.
 
     Always 400s a password shorter than 8 chars (server-side floor;
     the wizard surfaces a stronger UX hint).
@@ -532,6 +538,23 @@ async def set_password(request: Request) -> Any:
     # life-cycle obvious in code review.
     if not has_existing:
         first_run_lock.consume_lockfile()
+        # Mint a session cookie so the wizard's subsequent writer calls
+        # ride a normal cookie session instead of hitting AuthRequired
+        # on every mutation. Mirrors POST /api/auth/login exactly — same
+        # JWT helper, same cookie attributes — because once the password
+        # is set the operator IS the owner and skipping the explicit
+        # /api/auth/login round-trip is just a UX shortcut for the
+        # wizard. Rotation deliberately doesn't re-issue: the caller
+        # already had a session (or a Bearer) to pass require_writer.
+        token = create_session_token(user=_OWNER_USERNAME, scope=_OWNER_SCOPE)
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=token,
+            httponly=True,
+            samesite="lax",
+            secure=_request_is_tls(request),
+            path="/",
+        )
 
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:

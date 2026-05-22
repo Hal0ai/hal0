@@ -88,6 +88,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -176,6 +177,16 @@ _WRITER_SCOPES: frozenset[str] = frozenset({"admin", "all"})
 # ``Depends(require_writer)`` to those routes: when they do, this
 # helper keeps the first-run claim reachable without rewriting the
 # router wiring.
+#
+# The wizard also calls a handful of writer-gated routes BEFORE the
+# user finishes the password step (or chooses to skip it): persisting
+# the storage dir picks, pulling capability models, and registering
+# each pulled capability with the orchestrator. Those land below as
+# prefix/regex matches because they carry path variables (model id,
+# capability slot/child). The pre-password window is bounded by the
+# lockfile — once /api/auth/password or /api/install/complete consumes
+# it, this helper returns False for everything and the routes revert
+# to their declared writer gate.
 _FIRST_RUN_CLAIM_PATHS: frozenset[str] = frozenset(
     {
         "/api/install/state",
@@ -184,7 +195,29 @@ _FIRST_RUN_CLAIM_PATHS: frozenset[str] = frozenset(
         "/api/install/curated-models",
         "/api/install/pick-default",
         "/api/auth/password",
+        # Wizard step 2 — operator picks the model storage directories.
+        # Gated by require_writer on the live router; admitted here so
+        # the wizard can persist before a credential exists.
+        "/api/config/models",
     }
+)
+
+# Prefix matches for routes whose path carries variables. Each pattern
+# is anchored at the start of the path and used with ``re.fullmatch``,
+# so a stray suffix does NOT slip through (e.g. /api/models/foo/pull
+# matches but /api/models/foo/pull/extra does not).
+_FIRST_RUN_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # POST /api/models/{model_id}/pull — capability pulls launched from
+    # the wizard's install step. The model id segment is anything that
+    # isn't a slash; we deliberately keep it permissive because the
+    # registry's own validation already gates which ids actually exist.
+    re.compile(r"/api/models/[^/]+/pull"),
+    # POST /api/capabilities/{slot}/{child} — orchestrator registration
+    # the wizard fires after each capability pull lands. Slots + child
+    # names are short identifiers (embed/voice/img/...); permissive
+    # regex here is fine because the orchestrator rejects unknown
+    # slot/child combos with its own typed error.
+    re.compile(r"/api/capabilities/[^/]+/[^/]+"),
 )
 
 
@@ -205,11 +238,31 @@ def _password_is_set(request: Request) -> bool:
         return False
 
 
+def _path_is_claim_eligible(path: str) -> bool:
+    """True iff ``path`` is one of the routes the wizard reaches before
+    the operator has a credential.
+
+    Two layers:
+      - :data:`_FIRST_RUN_CLAIM_PATHS` for the fixed routes (cheap set
+        membership).
+      - :data:`_FIRST_RUN_CLAIM_PATTERNS` for the routes that carry a
+        variable segment (model id, capability slot/child) and need a
+        regex full-match.
+
+    Kept as a tiny pure helper so unit tests can exercise the
+    path-matching logic without standing up the full request pipeline.
+    """
+    if path in _FIRST_RUN_CLAIM_PATHS:
+        return True
+    return any(pattern.fullmatch(path) for pattern in _FIRST_RUN_CLAIM_PATTERNS)
+
+
 def _first_run_claim_active(request: Request) -> bool:
     """True iff the first-run claim window is currently open.
 
     Three conditions must hold:
-      1. The route being requested is in :data:`_FIRST_RUN_CLAIM_PATHS`.
+      1. The route being requested matches the claim-eligible set (see
+         :func:`_path_is_claim_eligible`).
       2. The owner password is not yet set.
       3. The installer's ``.first-run.lock`` file exists on disk
          (proof a fresh install just happened on this host).
@@ -220,7 +273,7 @@ def _first_run_claim_active(request: Request) -> bool:
     uninstaller); once it's gone, the only public surface is whatever
     the routers declare via absent-auth-dep.
     """
-    if request.url.path not in _FIRST_RUN_CLAIM_PATHS:
+    if not _path_is_claim_eligible(request.url.path):
         return False
     if _password_is_set(request):
         return False
