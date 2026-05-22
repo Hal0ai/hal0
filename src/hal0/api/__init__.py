@@ -10,9 +10,13 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 import structlog
 from fastapi import Depends, FastAPI
+
+if TYPE_CHECKING:
+    from hal0.lemonade.idle import IdleDriver
 
 from hal0 import __version__
 from hal0.api.auth import first_run as first_run_lock
@@ -234,6 +238,47 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
             )
 
 
+async def _maybe_start_lemonade_idle_driver(app: FastAPI) -> IdleDriver | None:
+    """Start the Lemonade idle-unload driver iff v0.2 backend is active.
+
+    Gated on ``HAL0_BACKEND=lemonade`` (manifest schema v2). Under
+    v0.1.x toolbox mode the existing ``SlotManager`` idle monitor
+    already covers the policy; the driver would be redundant noise.
+
+    Failures here MUST NOT block API startup — a busted Lemonade
+    config shouldn't keep the dashboard from coming up so the user
+    can fix it. The driver itself is also resilient to transient
+    lemond unavailability (see ``lemonade/idle.py`` docstring).
+
+    See ADR-0007 §Related, ADR-0006 §17.
+    """
+    import os
+
+    if os.environ.get("HAL0_BACKEND", "").strip().lower() != "lemonade":
+        return None
+    try:
+        from hal0.lemonade.client import LemonadeClient
+        from hal0.lemonade.idle import IdleDriver
+
+        client = LemonadeClient(
+            api_key=os.environ.get("LEMONADE_API_KEY") or None,
+        )
+        driver = IdleDriver(client)
+        await driver.start()
+        # Stash on app.state so /api/health surfaces + tests can find it.
+        app.state.lemonade_client = client
+        app.state.lemonade_idle_driver = driver
+        log.info("lemonade.idle.driver_attached")
+        return driver
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "lemonade.idle.driver_start_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("hal0.api.startup", version=__version__)
@@ -444,6 +489,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await refresh_task
 
+    # Lemonade idle-unload driver (ADR-0007 §Related, ADR-0006 §17). Only
+    # started when HAL0_BACKEND=lemonade is the active backend — under
+    # the v0.1.x per-modality toolbox model, SlotManager's own idle
+    # monitor (started above via start_idle_monitor) is the source of
+    # truth and this driver would be redundant. Stored on app.state so
+    # tests + future shutdown hooks can introspect it.
+    lemonade_idle_driver = await _maybe_start_lemonade_idle_driver(app)
+
     try:
         async with AsyncExitStack() as stack:
             for mgr in managers:
@@ -451,6 +504,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             stack.push_async_callback(_stop_refresh_task)
             yield
     finally:
+        if lemonade_idle_driver is not None:
+            await lemonade_idle_driver.stop()
         await slot_manager.stop_idle_monitor()
         await dispatcher.aclose()
         log.info("hal0.api.shutdown")

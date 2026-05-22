@@ -29,12 +29,17 @@ from hal0.lemonade.errors import (
     LemonadeTimeoutError,
     LemonadeUnavailableError,
 )
+from hal0.lemonade.idle import IdleDriver
+from hal0.lemonade.preload import PreloadError, preload_validate
 
 __all__ = [
+    "IdleDriver",
     "LemonadeClient",
     "LemonadeError",
     "LemonadeHTTPError",
     "LemonadeLoadError",
     "LemonadeTimeoutError",
     "LemonadeUnavailableError",
+    "PreloadError",
+    "preload_validate",
 ]
