@@ -254,6 +254,36 @@ mkdir -p \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
+# Production install ships the source tree into ${PREFIX} so `pip install
+# --editable` ends up pointing at a persistent location, not the temp dir
+# the bootstrap unpacks into (which gets cleaned on exit — and on a
+# tmpfs /tmp, doesn't survive a reboot). Dev installs skip this: their
+# REPO_ROOT is the operator's git checkout and we want pip's editable
+# link aimed there so source edits flow without a reinstall.
+if [[ "${DEV_MODE}" -eq 0 && "${REPO_ROOT}" != "${PREFIX}" ]]; then
+    if command -v rsync >/dev/null 2>&1; then
+        ui_spinner_run "Copying source to ${PREFIX}" \
+            rsync -a --delete \
+                --exclude='.venv/' \
+                --exclude='.git/' \
+                --exclude='__pycache__/' \
+                --exclude='*.pyc' \
+                --exclude='node_modules/' \
+                --exclude='.pytest_cache/' \
+                --exclude='.ruff_cache/' \
+                "${REPO_ROOT}/" "${PREFIX}/"
+    else
+        # rsync isn't strictly a prereq; tar-pipe falls back cleanly.
+        (cd "${REPO_ROOT}" && tar --exclude='.venv' --exclude='.git' \
+            --exclude='__pycache__' --exclude='*.pyc' \
+            --exclude='node_modules' --exclude='.pytest_cache' \
+            --exclude='.ruff_cache' -cf - .) \
+            | (cd "${PREFIX}" && tar -xf -)
+        info "copied source → ${PREFIX} (tar fallback)"
+    fi
+    REPO_ROOT="${PREFIX}"
+fi
+
 # Seed hal0.toml's [models].pull_root when the operator picked a non-default
 # directory, so the API and CLI both read the same value from the
 # canonical config without an extra dashboard step. Idempotent: a
