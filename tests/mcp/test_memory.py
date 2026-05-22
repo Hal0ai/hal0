@@ -117,17 +117,13 @@ async def test_memory_add_requires_text(wrapper: _FakeWrapper, dispatcher: Any) 
 
 
 @pytest.mark.asyncio
-async def test_memory_add_empty_text_rejected(
-    wrapper: _FakeWrapper, dispatcher: Any
-) -> None:
+async def test_memory_add_empty_text_rejected(wrapper: _FakeWrapper, dispatcher: Any) -> None:
     out = await dispatcher("memory_add", {"text": "   "})
     assert out["status"] == "error"
 
 
 @pytest.mark.asyncio
-async def test_memory_search_returns_results_list(
-    wrapper: _FakeWrapper, dispatcher: Any
-) -> None:
+async def test_memory_search_returns_results_list(wrapper: _FakeWrapper, dispatcher: Any) -> None:
     out = await dispatcher("memory_search", {"query": "cats"})
     assert out["status"] == "ok"
     assert out["results"] == [{"id": "id-1", "text": "hi", "score": 0.9}]
@@ -152,17 +148,13 @@ async def test_memory_search_private_mode_reads_both_datasets(
 
 
 @pytest.mark.asyncio
-async def test_memory_search_accepts_dataset_list(
-    wrapper: _FakeWrapper, dispatcher: Any
-) -> None:
+async def test_memory_search_accepts_dataset_list(wrapper: _FakeWrapper, dispatcher: Any) -> None:
     await dispatcher("memory_search", {"query": "x", "dataset": ["a", "b"]})
     assert wrapper.search_calls[0]["dataset"] == ["a", "b"]
 
 
 @pytest.mark.asyncio
-async def test_memory_search_limit_bounds(
-    wrapper: _FakeWrapper, dispatcher: Any
-) -> None:
+async def test_memory_search_limit_bounds(wrapper: _FakeWrapper, dispatcher: Any) -> None:
     out = await dispatcher("memory_search", {"query": "x", "limit": 0})
     assert out["status"] == "error"
     out = await dispatcher("memory_search", {"query": "x", "limit": 999})
@@ -170,9 +162,7 @@ async def test_memory_search_limit_bounds(
 
 
 @pytest.mark.asyncio
-async def test_memory_list_uses_shared_default(
-    wrapper: _FakeWrapper, dispatcher: Any
-) -> None:
+async def test_memory_list_uses_shared_default(wrapper: _FakeWrapper, dispatcher: Any) -> None:
     out = await dispatcher("memory_list", {})
     assert out["status"] == "ok"
     assert wrapper.list_calls[0]["dataset"] == "shared"
@@ -180,9 +170,7 @@ async def test_memory_list_uses_shared_default(
 
 
 @pytest.mark.asyncio
-async def test_memory_delete_returns_count(
-    wrapper: _FakeWrapper, dispatcher: Any
-) -> None:
+async def test_memory_delete_returns_count(wrapper: _FakeWrapper, dispatcher: Any) -> None:
     out = await dispatcher("memory_delete", {"ids": ["a", "b", "c"]})
     assert out["status"] == "ok"
     assert out["deleted"] == 3

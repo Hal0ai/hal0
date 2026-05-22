@@ -34,9 +34,7 @@ from hal0.mcp.approval_queue import ApprovalQueue
 def _build_app() -> FastAPI:
     app = FastAPI()
     error_codes.install(app)
-    app.include_router(
-        approvals_routes.router, prefix="/api/agent/approvals", tags=["approvals"]
-    )
+    app.include_router(approvals_routes.router, prefix="/api/agent/approvals", tags=["approvals"])
     app.state.approval_queue = ApprovalQueue()
     return app
 
@@ -67,9 +65,7 @@ def test_list_pending_empty_returns_empty_list(client: TestClient) -> None:
     assert response.json() == {"approvals": []}
 
 
-def test_list_pending_returns_enqueued_entries(
-    client: TestClient, queue: ApprovalQueue
-) -> None:
+def test_list_pending_returns_enqueued_entries(client: TestClient, queue: ApprovalQueue) -> None:
     import asyncio
 
     aid = asyncio.run(
@@ -168,9 +164,7 @@ def test_unavailable_queue_returns_503() -> None:
     """When app.state.approval_queue is absent, the dependency 503s."""
     app = FastAPI()
     error_codes.install(app)
-    app.include_router(
-        approvals_routes.router, prefix="/api/agent/approvals", tags=["approvals"]
-    )
+    app.include_router(approvals_routes.router, prefix="/api/agent/approvals", tags=["approvals"])
     # Deliberately do NOT set app.state.approval_queue.
     with TestClient(app) as client:
         response = client.get("/api/agent/approvals")

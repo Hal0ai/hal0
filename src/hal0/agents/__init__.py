@@ -13,19 +13,19 @@ writes. Runtime is whatever the bundled upstream does natively.
 from __future__ import annotations
 
 from hal0.agents.manager import (
+    BUNDLED_AGENTS,
     AgentAlreadyInstalledError,
     AgentManager,
     AgentNotFoundError,
     AgentRecord,
-    BUNDLED_AGENTS,
     HermesNotHal0AwareError,
 )
 
 __all__ = [
+    "BUNDLED_AGENTS",
     "AgentAlreadyInstalledError",
     "AgentManager",
     "AgentNotFoundError",
     "AgentRecord",
-    "BUNDLED_AGENTS",
     "HermesNotHal0AwareError",
 ]

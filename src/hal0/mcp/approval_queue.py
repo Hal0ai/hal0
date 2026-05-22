@@ -229,9 +229,7 @@ class ApprovalQueue:
             if entry is None:
                 raise KeyError(approval_id)
             if entry.state != "pending":
-                raise ValueError(
-                    f"approval {approval_id} already resolved (state={entry.state})"
-                )
+                raise ValueError(f"approval {approval_id} already resolved (state={entry.state})")
             entry.state = "approved"
             entry.decided_at = time.time()
             target = _primary_target(entry.tool, entry.args)
@@ -283,9 +281,7 @@ class ApprovalQueue:
             if entry is None:
                 raise KeyError(approval_id)
             if entry.state != "pending":
-                raise ValueError(
-                    f"approval {approval_id} already resolved (state={entry.state})"
-                )
+                raise ValueError(f"approval {approval_id} already resolved (state={entry.state})")
             entry.state = "denied"
             entry.decided_at = time.time()
             target = _primary_target(entry.tool, entry.args)

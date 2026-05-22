@@ -9,18 +9,16 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from hal0.agents import manager as mgr_mod
 from hal0.agents.manager import (
+    BUNDLED_AGENTS,
     AgentAlreadyInstalledError,
     AgentManager,
     AgentNotFoundError,
-    BUNDLED_AGENTS,
 )
-
 
 # ── Driver stub ──────────────────────────────────────────────────────────────
 

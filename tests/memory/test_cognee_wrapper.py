@@ -13,7 +13,7 @@ Local fastembed cache makes subsequent runs ~2-3s each.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+from datetime import UTC
 
 import pytest
 
@@ -31,7 +31,7 @@ def make_wrapper(cognee_dir, reset_cognee_singletons):
     ``reset_cognee_singletons`` teardown (which drops cognee from
     ``sys.modules``) sees a clean import on the next test.
     """
-    from hal0.memory.cognee_wrapper import CogneeWrapper  # noqa: PLC0415
+    from hal0.memory.cognee_wrapper import CogneeWrapper
 
     def _make(*, client_id: str = "test-client", private_mode: bool = False):
         return CogneeWrapper(
@@ -136,17 +136,17 @@ async def test_date_range_filter(make_wrapper):
     `datetime.now`), so we capture timestamps around the writes and
     use them as filter pivots.
     """
-    from datetime import datetime, timezone, timedelta  # noqa: PLC0415
+    from datetime import datetime, timedelta
 
     w = make_wrapper()
-    t0 = datetime.now(timezone.utc).isoformat()
+    t0 = datetime.now(UTC).isoformat()
     await w.add("first item by time")
     # Sleep just enough that the next item gets a later timestamp.
     await asyncio.sleep(0.05)
-    pivot = datetime.now(timezone.utc).isoformat()
+    pivot = datetime.now(UTC).isoformat()
     await asyncio.sleep(0.05)
     await w.add("second item by time")
-    t_end = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    t_end = (datetime.now(UTC) + timedelta(seconds=1)).isoformat()
 
     # after=pivot -> only the second item.
     later = await w.search(query="item by time", after=pivot, limit=10)
@@ -171,7 +171,7 @@ async def test_delete_single_id_decrements_list(make_wrapper):
     w = make_wrapper()
     a = await w.add("alpha")
     b = await w.add("beta")
-    c = await w.add("gamma")
+    await w.add("gamma")
 
     initial = await w.list_items(limit=50)
     assert {i["text"] for i in initial["items"]} == {"alpha", "beta", "gamma"}

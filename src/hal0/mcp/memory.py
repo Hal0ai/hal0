@@ -61,7 +61,7 @@ mounts at ``/mcp/memory`` via ``app.mount()``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -94,9 +94,7 @@ def _require(args: dict[str, Any], key: str, type_: type) -> Any:
         raise MemorySchemaError(f"missing required arg {key!r}")
     value = args[key]
     if not isinstance(value, type_):
-        raise MemorySchemaError(
-            f"arg {key!r} must be {type_.__name__}, got {type(value).__name__}"
-        )
+        raise MemorySchemaError(f"arg {key!r} must be {type_.__name__}, got {type(value).__name__}")
     return value
 
 
@@ -155,7 +153,7 @@ def _resolve_dataset(
 
 
 def _iso_now() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
+    return datetime.now(tz=UTC).isoformat()
 
 
 # ── Tool implementations ─────────────────────────────────────────────────────
@@ -248,10 +246,7 @@ async def _memory_search(
         dataset = [str(d) for d in requested]
     elif requested is None or (isinstance(requested, str) and not requested):
         # Private-mode read sees both shared + own-private namespace.
-        if private and client_id:
-            dataset = ["shared", f"private:{client_id}"]
-        else:
-            dataset = _DEFAULT_DATASET
+        dataset = ["shared", f"private:{client_id}"] if private and client_id else _DEFAULT_DATASET
     elif isinstance(requested, str):
         dataset = _resolve_dataset(requested, private=private, client_id=client_id)
     else:
@@ -369,9 +364,7 @@ def make_dispatcher(
         if private_resolver is not None:
             private = bool(private_resolver())
         try:
-            payload = await handler(
-                wrapper, args, client_id=client_id, private=private
-            )
+            payload = await handler(wrapper, args, client_id=client_id, private=private)
             return {"status": "ok", **payload}
         except MemorySchemaError as exc:
             return {

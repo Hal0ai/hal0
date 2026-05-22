@@ -293,9 +293,7 @@ async def _call_rest(
 # ── Audit ────────────────────────────────────────────────────────────────────
 
 
-def _audit(
-    *, client_id: str, tool: str, args: dict[str, Any], gated: bool, outcome: str
-) -> None:
+def _audit(*, client_id: str, tool: str, args: dict[str, Any], gated: bool, outcome: str) -> None:
     """Emit a structured audit row for one MCP tool invocation.
 
     Routes through the ``hal0.mcp.audit`` logger which inherits the

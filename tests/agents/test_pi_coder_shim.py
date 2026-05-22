@@ -13,9 +13,7 @@ from typing import Any
 
 import pytest
 
-from hal0.agents import pi_coder as pi_mod
 from hal0.agents.pi_coder import PiCoderDriver
-
 
 # ── Fake subprocess ──────────────────────────────────────────────────────────
 
@@ -93,7 +91,9 @@ def test_install_writes_adapter_config_with_bearer_header(
     driver._runner = _FakeRunner()  # type: ignore[assignment]
     driver.install(bearer_token="hal0_tok_xyz")
 
-    cfg_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "agents" / "pi-coder" / "pi-mcp-adapter.json"
+    cfg_path = (
+        Path(tmp_hal0_home) / "var-lib" / "hal0" / "agents" / "pi-coder" / "pi-mcp-adapter.json"
+    )
     assert cfg_path.exists()
     cfg = json.loads(cfg_path.read_text())
     assert cfg["version"] == 1
@@ -112,7 +112,9 @@ def test_install_writes_adapter_config_without_auth_when_no_token(
     driver._runner = _FakeRunner()  # type: ignore[assignment]
     driver.install(bearer_token=None)
 
-    cfg_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "agents" / "pi-coder" / "pi-mcp-adapter.json"
+    cfg_path = (
+        Path(tmp_hal0_home) / "var-lib" / "hal0" / "agents" / "pi-coder" / "pi-mcp-adapter.json"
+    )
     cfg = json.loads(cfg_path.read_text())
     # No headers key when no token — matches the auth-disabled dev
     # install branch.
@@ -127,8 +129,9 @@ def test_install_rerun_is_idempotent(driver: PiCoderDriver, tmp_hal0_home: str) 
     cleanly; no side effects on the FS layout."""
     driver._runner = _FakeRunner()  # type: ignore[assignment]
     driver.install(bearer_token="tok-1")
-    cfg_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "agents" / "pi-coder" / "pi-mcp-adapter.json"
-    first_mtime = cfg_path.stat().st_mtime_ns
+    cfg_path = (
+        Path(tmp_hal0_home) / "var-lib" / "hal0" / "agents" / "pi-coder" / "pi-mcp-adapter.json"
+    )
 
     # Different runner instance — first run wasn't memoised.
     driver._runner = _FakeRunner()  # type: ignore[assignment]
@@ -156,16 +159,16 @@ def test_install_subprocess_failure_raises_agent_error(driver: PiCoderDriver) ->
 def test_uninstall_removes_adapter_config(driver: PiCoderDriver, tmp_hal0_home: str) -> None:
     driver._runner = _FakeRunner()  # type: ignore[assignment]
     driver.install(bearer_token="tok")
-    cfg_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "agents" / "pi-coder" / "pi-mcp-adapter.json"
+    cfg_path = (
+        Path(tmp_hal0_home) / "var-lib" / "hal0" / "agents" / "pi-coder" / "pi-mcp-adapter.json"
+    )
     assert cfg_path.exists()
 
     driver.uninstall()
     assert not cfg_path.exists()
 
 
-def test_status_reflects_adapter_config_presence(
-    driver: PiCoderDriver, tmp_hal0_home: str
-) -> None:
+def test_status_reflects_adapter_config_presence(driver: PiCoderDriver, tmp_hal0_home: str) -> None:
     assert driver.status() == "broken"  # no install yet
     driver._runner = _FakeRunner()  # type: ignore[assignment]
     driver.install(bearer_token="tok")

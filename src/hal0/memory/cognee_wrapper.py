@@ -40,7 +40,7 @@ import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,7 @@ def _cognee() -> Any:
     if _COGNEE is None:
         with _COGNEE_LOCK:
             if _COGNEE is None:
-                import cognee  # noqa: PLC0415  — lazy by design
+                import cognee
 
                 _COGNEE = cognee
     return _COGNEE
@@ -198,9 +198,7 @@ class CogneeWrapper:
         self._private_mode = private_mode
         # Pre-compute the effective write-dataset so ``add`` is one branch
         # of a conditional, not a string-concat at every call.
-        self._write_dataset = (
-            f"{PRIVATE_PREFIX}{client_id}" if private_mode else SHARED_DATASET
-        )
+        self._write_dataset = f"{PRIVATE_PREFIX}{client_id}" if private_mode else SHARED_DATASET
         # Read-dataset list per ADR-0005 §3 — always `shared` plus this
         # client's own private namespace (if any items live there).
         self._read_datasets: list[str] = [SHARED_DATASET, f"{PRIVATE_PREFIX}{client_id}"]
@@ -341,14 +339,14 @@ class CogneeWrapper:
         cognee = _cognee()
         # Imports are local because they're only needed on the write
         # path — keeps the hal0 import graph small for read-only callers.
-        from cognee.modules.pipelines.tasks.task import Task  # noqa: PLC0415
-        from cognee.tasks.documents.classify_documents import (  # noqa: PLC0415
+        from cognee.modules.pipelines.tasks.task import Task
+        from cognee.tasks.documents.classify_documents import (
             classify_documents,
         )
-        from cognee.tasks.documents.extract_chunks_from_documents import (  # noqa: PLC0415
+        from cognee.tasks.documents.extract_chunks_from_documents import (
             extract_chunks_from_documents,
         )
-        from cognee.tasks.storage.add_data_points import add_data_points  # noqa: PLC0415
+        from cognee.tasks.storage.add_data_points import add_data_points
 
         tasks = [
             Task(classify_documents),
@@ -435,9 +433,7 @@ class CogneeWrapper:
         await self._chunk_and_embed(effective_dataset)
 
         cognee_dataset_id = (
-            str(add_result.dataset_id)
-            if hasattr(add_result, "dataset_id")
-            else None
+            str(add_result.dataset_id) if hasattr(add_result, "dataset_id") else None
         )
         # ``cognee.add`` doesn't echo the per-item data_id in the result
         # — we have to ask the dataset what its newest item is. Cheap
@@ -502,7 +498,7 @@ class CogneeWrapper:
         cognee = _cognee()
         # Local import: SearchType is part of Cognee's deep module tree;
         # importing at module level slows wrapper-only call sites.
-        from cognee.modules.search.types.SearchType import (  # noqa: PLC0415
+        from cognee.modules.search.types.SearchType import (
             SearchType,
         )
 
@@ -560,7 +556,7 @@ class CogneeWrapper:
         out: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         with self._sidecar_conn() as conn:
-            for text, score in zip(texts_in_order, scores_in_order):
+            for text, score in zip(texts_in_order, scores_in_order, strict=True):
                 if text is None:
                     continue
                 rows = conn.execute(
@@ -700,9 +696,7 @@ class CogneeWrapper:
                     (item_id,),
                 )
                 deleted += 1
-                wipes_by_dataset[row["dataset"]] = (
-                    wipes_by_dataset.get(row["dataset"], 0) + 1
-                )
+                wipes_by_dataset[row["dataset"]] = wipes_by_dataset.get(row["dataset"], 0) + 1
             conn.commit()
 
         self._audit(
@@ -785,14 +779,14 @@ class CogneeWrapper:
         returns the dataset_id but not the per-data_id; the official
         accessor for that is ``cognee.modules.data.methods.get_dataset_data``.
         """
-        cognee = _cognee()
+        _cognee()  # ensure cognee root is importable
         # Imports kept local for the same reason as the cognify pipeline
         # imports: keep the wrapper's module-import graph small.
-        from cognee.modules.data.methods.get_datasets import get_datasets  # noqa: PLC0415
-        from cognee.modules.data.methods.get_dataset_data import (  # noqa: PLC0415
+        from cognee.modules.data.methods.get_dataset_data import (
             get_dataset_data,
         )
-        from cognee.modules.users.methods import get_default_user  # noqa: PLC0415
+        from cognee.modules.data.methods.get_datasets import get_datasets
+        from cognee.modules.users.methods import get_default_user
 
         user = await get_default_user()
         for d in await get_datasets(user_id=user.id):
@@ -836,9 +830,7 @@ def _passes_filters(
             return False
     if before and record.timestamp >= before:
         return False
-    if after and record.timestamp <= after:
-        return False
-    return True
+    return not (after and record.timestamp <= after)
 
 
 def _chunk_text(chunk: Any) -> str | None:
@@ -866,7 +858,7 @@ def _chunk_score(chunk: Any) -> float | None:
 
 def _now_iso() -> str:
     """UTC ISO-8601 timestamp matching ADR-0005 §2 (date filter input)."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _clear_cognee_caches() -> None:
@@ -921,6 +913,7 @@ def _clear_cognee_caches() -> None:
 
 
 # ── async wrapper sync barrier ─────────────────────────────────────────────
+
 
 # Cognee internals occasionally schedule background work through
 # ``asyncio.ensure_future``. We do NOT block on those here — Cognee

@@ -18,6 +18,12 @@ from hal0.api.auth import rate_limit as auth_rate_limit
 from hal0.api.middleware import error_codes, request_id
 from hal0.api.middleware.auth import require_token
 from hal0.api.routes import (
+    agents as agents_routes,
+)
+from hal0.api.routes import (
+    approvals as approvals_routes,
+)
+from hal0.api.routes import (
     auth as auth_routes,
 )
 from hal0.api.routes import (
@@ -47,12 +53,6 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     proxmox as proxmox_routes,
-)
-from hal0.api.routes import (
-    agents as agents_routes,
-)
-from hal0.api.routes import (
-    approvals as approvals_routes,
 )
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config

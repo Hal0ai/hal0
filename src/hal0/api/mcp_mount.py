@@ -92,12 +92,10 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
         try:
             identity: AuthIdentity = await require_token(request)
-        except Exception as exc:  # noqa: BLE001 — Hal0Error subclasses raise w/ status
+        except Exception as exc:
             status = getattr(exc, "status", 401)
             code = getattr(exc, "code", "auth.required")
-            return JSONResponse(
-                status_code=status, content={"error": code, "detail": str(exc)}
-            )
+            return JSONResponse(status_code=status, content={"error": code, "detail": str(exc)})
 
         bearer = _resolve_bearer(request)
         client_id = identity.identity or "anonymous"

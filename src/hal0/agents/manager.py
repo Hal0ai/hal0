@@ -173,7 +173,9 @@ class AgentManager:
     def installed_names(self) -> list[str]:
         return [r.name for r in self.list()]
 
-    def install(self, name: str, *, switch: bool = False, bearer_token: str | None = None) -> AgentRecord:
+    def install(
+        self, name: str, *, switch: bool = False, bearer_token: str | None = None
+    ) -> AgentRecord:
         """Install ``name``. Single-pick enforced.
 
         ``switch=True`` performs atomic uninstall-then-install when a

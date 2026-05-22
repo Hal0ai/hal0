@@ -47,7 +47,7 @@ def mock_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             captured["base_url"] = base_url
             captured["timeout"] = timeout
 
-        async def __aenter__(self) -> "_MockClient":
+        async def __aenter__(self) -> _MockClient:
             return self
 
         async def __aexit__(self, *exc: Any) -> None:
@@ -61,9 +61,7 @@ def mock_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             captured["calls"].append(("POST", url, json, dict(headers or {})))
             return _MockResponse({"ok": "post"})
 
-        async def delete(
-            self, url: str, params: Any = None, headers: Any = None
-        ) -> _MockResponse:
+        async def delete(self, url: str, params: Any = None, headers: Any = None) -> _MockResponse:
             captured["calls"].append(("DELETE", url, params, dict(headers or {})))
             return _MockResponse({"ok": "delete"})
 
@@ -145,7 +143,7 @@ async def test_autonomous_read_dispatches_get_with_bearer(
     )
     assert result == {"ok": "get"}
     call = mock_transport["calls"][-1]
-    method, url, params, headers = call
+    method, url, _params, headers = call
     assert method == "GET"
     assert url == "http://t/api/slots"
     assert headers["Authorization"] == "Bearer token-abc"
@@ -227,7 +225,7 @@ async def test_gated_executor_hits_rest_on_approve(
     )
     aid = result["approval_id"]
     await queue.approve(aid)
-    method, url, params, headers = mock_transport["calls"][-1]
+    method, url, _params, headers = mock_transport["calls"][-1]
     assert method == "DELETE"
     assert url == "http://t/api/slots/scratch"
     assert headers["Authorization"] == "Bearer t"

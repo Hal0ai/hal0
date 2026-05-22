@@ -35,7 +35,6 @@ from hal0.agents.manager import (
 )
 from hal0.config import paths as _paths
 
-
 # Concrete probe surface — see module docstring. Both fire OR-ed; the
 # upstream maintainer needs to satisfy only one to flip the gate green.
 _HERMES_BIN_NAME = "hermes-agent"
@@ -126,9 +125,7 @@ class HermesDriver(AgentDriver):
                 check=True,
             )
         except Exception as exc:
-            raise AgentError(
-                f"hermes-agent install failed ({type(exc).__name__}: {exc})."
-            ) from exc
+            raise AgentError(f"hermes-agent install failed ({type(exc).__name__}: {exc}).") from exc
 
         # Write the env file Hermes will source on startup. Single
         # source of truth for the API URL + Bearer the agent uses to
