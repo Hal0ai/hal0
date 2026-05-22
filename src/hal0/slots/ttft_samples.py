@@ -25,7 +25,6 @@ from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-
 # 60s window matches what the prototype TUI defaults to — long enough
 # that a quiet slot's most recent sample still shows in the UI, short
 # enough that a sample from a stale workload ages out before it
@@ -44,9 +43,7 @@ class SlotSamples:
     """
 
     window_s: float = DEFAULT_WINDOW_S
-    ttft_samples: deque[tuple[float, float]] = field(
-        default_factory=lambda: deque(maxlen=128)
-    )
+    ttft_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=128))
     inflight: dict[str, float] = field(default_factory=dict)
 
     def request_started(self, req_id: str, now: float | None = None) -> None:

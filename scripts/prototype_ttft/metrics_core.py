@@ -30,9 +30,7 @@ class SlotSamples:
     """
 
     window_s: float = 60.0
-    ttft_samples: deque[tuple[float, float]] = field(
-        default_factory=lambda: deque(maxlen=128)
-    )
+    ttft_samples: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=128))
     inflight: dict[str, float] = field(default_factory=dict)
 
     def request_started(self, req_id: str, now: float | None = None) -> None:
