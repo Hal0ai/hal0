@@ -17,7 +17,10 @@ ADR-0005:
 
 ## Coupling captured for Wave 3 / future waves
 
-### 1. `/api/config/urls` needs a `hermes` field
+Items resolved after the orchestrator-wave merge are crossed out;
+**OPEN** items still need follow-up.
+
+### 1. `/api/config/urls` needs a `hermes` field — OPEN
 
 The sidebar Agent link goes to `urls.hermes` when an installed Hermes
 agent is detected. Backend currently exposes `openwebui` + `api` (see
@@ -27,7 +30,7 @@ fine, but loses the OWUI-style link-out fidelity.
 
 Owner: backend / `routes/config.py`.
 
-### 2. PTY-tap transcript endpoint
+### 2. PTY-tap transcript endpoint — OPEN
 
 `AgentChatTab.vue` currently opens an EventSource against
 `/api/agents/pi-coder/transcript` which does not yet exist. The
@@ -41,7 +44,7 @@ read-only display only; sending input is a separate ADR if pursued.
 Owner: backend / new route + a `pi-tail` shim spawning a screen/tmux
 session.
 
-### 3. Hermes hal0-awareness probe
+### 3. Hermes hal0-awareness probe — OPEN
 
 The first-run wizard step 7 disables the Hermes option when
 `s.form.hermesHal0Aware === false`, with a tooltip explaining why. The
@@ -51,7 +54,7 @@ the wizard load step to set the flag based on it.
 
 Owner: backend / `routes/agents.py` (extend with a probe GET).
 
-### 4. Audit row shape may need normalisation
+### 4. Audit row shape may need normalisation — OPEN (watch on first real install)
 
 `/api/agents/{name}/activity` parses journald `MESSAGE` blobs as JSON
 and pulls out `event`, `tool`, `args`, `client_id`, `outcome`. The
@@ -62,7 +65,7 @@ smoke test once a real bundled agent is installed will confirm.
 
 Owner: backend (structlog config) + this route (`agents.py:agent_activity`).
 
-### 5. Pending-chip arg matching
+### 5. Pending-chip arg matching — OPEN (watch on first real gated tool)
 
 `agentStore.pendingForResource(kind, target)` matches by `args.model_id
 / args.id / args.name` for models and `args.slot / args.name` for
@@ -74,7 +77,7 @@ matching row goes invisible (degrades safely, but loses the inline cue).
 
 Owner: shared — backend's MCP tool definitions + this store.
 
-### 6. Bulk "Clear all" semantics
+### 6. Bulk "Clear all" semantics — DEFERRED (Phase 9)
 
 `AgentApprovalInbox.onClearAll()` iterates `deny(id)` per entry — there
 is no bulk endpoint per ADR-0004 (audit row per decision). On a queue

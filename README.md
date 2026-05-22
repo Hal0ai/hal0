@@ -120,6 +120,22 @@ around `llama-server` by hand.
   against the workflow OIDC identity, then hands off to
   [`installer/install.sh`](./installer/install.sh).
 
+### Bundled agents (v0.2)
+
+hal0 ships **two MCP servers** and **one bundled agent app**. The MCP
+servers (`/mcp/admin` for slot / model / capability / config / hardware
+/ log admin and `/mcp/memory` for Cognee-backed long-term memory) are
+reachable by any MCP-speaking client — Claude Code, future RAG
+services, external scripts. The bundled agent is single-pick at install:
+`pi-coder` (CLI shape, `badlogic/pi-mono`) or `Hermes-Agent` (service
+shape). Pick one via the first-run wizard or `hal0 agent install
+<name>`; swap atomically with `--switch`. Capital-D destructive MCP
+calls (`model_pull`, `slot_delete`, `config_write`, etc.) gate through
+a header bell + inbox modal in the dashboard, with CLI parity via
+`hal0 agent approvals {list,approve,deny}`. See
+[docs/api/mcp.md](./docs/api/mcp.md) and
+[docs/api/agents.md](./docs/api/agents.md).
+
 ## Backends
 
 | Backend     | Hardware                | Use case                           |

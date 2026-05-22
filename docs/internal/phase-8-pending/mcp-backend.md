@@ -1,11 +1,10 @@
 # Wave 1 (MCP backend) — pending items
 
-Items the MCP-backend wave (this worktree) hit while building the admin
-+ memory MCP servers per ADR-0004 / ADR-0005. They are NOT blockers for
-the Wave-1 deliverables; they are coordination points other teams /
-follow-up PRs need to close.
+Items the MCP-backend wave hit while building the admin + memory MCP
+servers per ADR-0004 / ADR-0005. Resolved items are crossed out for the
+historical record; **OPEN** items still need follow-up.
 
-## 1. ADR-0004 §4 routes that don't match live REST surface
+## 1. ADR-0004 §4 routes that don't match live REST surface — DOCUMENTED, partial OPEN
 
 ADR-0004 §4's tool catalog names a few `/api/*` routes that don't
 exist verbatim in `src/hal0/api/routes/`. The MCP admin server routes
@@ -23,9 +22,15 @@ amendment (or a follow-up PR retitling the routes) can converge them.
 The MCP tool catalog stays ADR-faithful (the names agents see are the
 ones the ADR documents); only the HTTP target is adjusted in
 `_REST_MAP`. `model_pull` calls succeed today; `provider_credential_write`
-calls 404 until the route lands.
+calls 404 until the route lands. The public docs at `docs/api/mcp.md`
+also call out the ADR-vs-live reconciliation table so external readers
+see the same source-of-truth.
 
-## 2. `logs_tail` Bearer-token redaction (ADR-0004 §7)
+**OPEN — `provider_credential_write` REST route still missing.** The
+provider team needs to land `POST /api/providers/{name}/credentials`.
+Until then, that one gated tool 404s when the user approves it.
+
+## 2. `logs_tail` Bearer-token redaction (ADR-0004 §7) — OPEN
 
 ADR-0004 §7 says `logs_tail` (the autonomous-read tool wrapping
 `GET /api/logs`) must redact Bearer tokens and other obvious secrets
@@ -48,9 +53,10 @@ Recommend a small follow-up PR adding `hal0.api.routes.logs.redact_line()`
 plus a one-line mapping over `lines` in `list_logs` and per-yield in
 `journalctl_sse`. ~30 lines of additions + ~20 lines of tests.
 
-**STOPPED per brief rule; not modified.**
+**STOPPED per brief rule; not modified.** Still open after the
+orchestrator-wave merge — `logs_tail` continues to stream raw lines.
 
-## 3. Bearer → client_id extraction surface
+## 3. ~~Bearer → client_id extraction surface~~ — RESOLVED
 
 `src/hal0/api/middleware/auth.py` exposes `AuthIdentity` with an
 `identity` field (token label / forwarded email / session subject).
@@ -72,10 +78,11 @@ The orchestrator-wave includes site needs to:
    `AuthIdentity` from a dependency).
 3. Pass both pieces to the resolver.
 
-This is intentionally NOT wired in this wave because it touches
-`src/hal0/api/__init__.py`, which is the orchestrator's file.
+~~This is intentionally NOT wired in this wave~~ — landed via the
+orchestrator-wave merge (`108d1fb`); the `bearer_resolver` hook is
+populated from `AuthIdentity` on every MCP request.
 
-## 4. Cognee wrapper contract (Memory-engine wave dependency)
+## 4. ~~Cognee wrapper contract (Memory-engine wave dependency)~~ — RESOLVED
 
 `hal0.mcp.memory` assumes `hal0.memory.cognee_wrapper.CogneeWrapper`
 exposes:
@@ -106,12 +113,11 @@ async def delete(*, ids)
 }
 ```
 
-The wrapper module is owned by the Memory-engine wave; this wave
-imports it lazily inside `make_dispatcher` so the import order doesn't
-matter. If the wrapper lands with a different signature, only the
-keyword names in `_memory_*` handlers need adjustment.
+Landed in `77effca feat(phase-8): Cognee memory engine + wrapper
+(ADR-0005)`. The lazy import inside `make_dispatcher` resolves the
+wrapper at call time, so import ordering remains a non-issue.
 
-## 5. SDK dependency (`mcp`) — pyproject.toml owner
+## 5. ~~SDK dependency (`mcp`) — pyproject.toml owner~~ — RESOLVED
 
 The MCP server modules import `mcp.server.fastmcp.FastMCP`. The
 package is NOT yet in `pyproject.toml`; the Memory-engine wave owns
@@ -119,10 +125,11 @@ that change. Until then, hal0 boots fine (the MCP modules are only
 imported when the orchestrator chooses to mount them), and tests use
 a stub at `tests/mcp/conftest.py`.
 
-Recommended dep line: `mcp >= 1.0` (latest minor; SDK is pre-1.0 but
-the FastMCP class is stable on the >= 0.9 line).
+Landed via the orchestrator wave (`108d1fb`); `mcp` SDK is now a
+declared dependency in `pyproject.toml` and the MCP modules import
+unconditionally.
 
-## 6. Approval inbox SSE / REST wiring
+## 6. ~~Approval inbox SSE / REST wiring~~ — RESOLVED
 
 `src/hal0/api/routes/approvals.py` defines the routes and depends on
 `request.app.state.approval_queue`. The orchestrator wave needs to:
@@ -133,10 +140,13 @@ the FastMCP class is stable on the >= 0.9 line).
    ...)` with `Depends(require_writer)` on the POST routes (the GET
    surface uses `require_token`).
 
-The MCP admin server's `build_server()` accepts the queue instance, so
-the orchestrator wires the same `ApprovalQueue` into both surfaces.
+Landed via the orchestrator wave (`108d1fb`); a single `ApprovalQueue`
+is instantiated in the FastAPI lifespan and stashed on
+`app.state.approval_queue`, then wired into both the MCP admin
+server's `build_server()` and the approvals REST router (under
+`Depends(require_writer)` on the POST routes).
 
-## 7. Audit log → journald
+## 7. Audit log → journald — RESOLVED
 
 The MCP admin layer routes every tool invocation through the
 `hal0.mcp.audit` structlog logger. The main `hal0.api.__init__` does

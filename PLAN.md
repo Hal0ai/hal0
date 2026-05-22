@@ -793,7 +793,7 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 - Migrate haloai LXC → hal0 (cutover) — script ready (PR #22, `scripts/migrate-haloai.py` + 14-model curated allow-list); cutover script tested with synthetic fixtures, not yet against live haloai data
 - Public launch — pending §16 decisions (launch story, contribution model)
 
-**Phase 8 — Agents v0.2 (post-v1.0)** — combined Agents + MCP + basic memory release; design settled via grilling 2026-05-22, deliverables in `docs/adr/0004-agents.md` + `docs/adr/0005-memory-engine-cognee.md`.
+**Phase 8 — Agents v0.2 (post-v1.0)** — ✅ done 2026-05-22 — combined Agents + MCP + basic memory release; design settled via grilling 2026-05-22, deliverables in `docs/adr/0004-agents.md` + `docs/adr/0005-memory-engine-cognee.md`. Public API docs: [`docs/api/mcp.md`](./docs/api/mcp.md), [`docs/api/agents.md`](./docs/api/agents.md).
 
 - **Bundled agent app, single-pick at install.** Supported choices: `pi-coder` (CLI, `badlogic/pi-mono`) and `Hermes-Agent` (service, the haloai-internal one). User picks one via the first-run wizard or `hal0 agent {install,uninstall,list} <name>`; single-pick enforced; `--switch` flag for atomic swap. install.sh stays non-interactive (no `--agent` flag).
 - **hal0 admin MCP server at `/mcp/admin`.** Tools wrap existing `/api/*` routes only (rule: a tool ships iff it maps to an existing `/api/*` route — no new privileged surface). Bearer-token auth reused from ADR-0001. Two-tier scope: routine ops (slot status / list / `model_swap` / hardware probe / logs) autonomous; capital-D destructives (`model_pull`, `slot_restart/create/delete`, `capability_set`, `config_write`) gated.

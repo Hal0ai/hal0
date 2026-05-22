@@ -1,34 +1,35 @@
 # Wave 1 — Agent-installer pending coupling notes
 
 Coupling notes left for the orchestrator + sibling wave-1 teammates.
-Everything in this file is a follow-up someone else owns.
+Items still open after the orchestrator-wave merge are flagged
+**OPEN**; resolved ones are crossed out for the historical record.
 
-## 1. Orchestrator wires (NOT done in this worktree)
+## 1. ~~Orchestrator wires (NOT done in this worktree)~~ — RESOLVED
 
-Per the brief, this teammate does NOT edit `src/hal0/api/__init__.py`,
-`src/hal0/cli/main.py`, or `pyproject.toml`. The orchestrator needs to:
+~~Per the brief, this teammate does NOT edit `src/hal0/api/__init__.py`,
+`src/hal0/cli/main.py`, or `pyproject.toml`. The orchestrator needs to:~~
 
-- **API mount**: `include_router(routes.agents.router, prefix="/api/agents", tags=["agents"])` in `hal0.api.create_app` (or wherever the other routers are wired). Auth posture: GET is read-only-friendly; the mutations carry their own `require_writer` dep.
-- **CLI mount**: in `src/hal0/cli/main.py`, add:
-    ```python
-    from hal0.cli.agent_commands import app as agent_app
-    app.add_typer(agent_app, name="agent")
-    ```
-- **pyproject.toml**: no new top-level dependencies required. `tomli_w` + `httpx` + `typer` + `rich` + `fastapi` all already declared. (`subprocess` and `shutil` are stdlib.)
+~~- **API mount**: `include_router(routes.agents.router, prefix="/api/agents", tags=["agents"])` in `hal0.api.create_app` (or wherever the other routers are wired). Auth posture: GET is read-only-friendly; the mutations carry their own `require_writer` dep.~~
+~~- **CLI mount**: in `src/hal0/cli/main.py`, add `app.add_typer(agent_app, name="agent")`.~~
+~~- **pyproject.toml**: no new top-level dependencies required.~~
 
-## 2. MCP-backend coupling — approval route shape ASSUMED
+Landed in the orchestrator wave (`108d1fb feat(phase-8): orchestrator
+wires MCP + agents + approvals into the app`). Phase 8 v0.2 is shipped.
+
+## 2. ~~MCP-backend coupling — approval route shape ASSUMED~~ — RESOLVED
 
 `src/hal0/cli/agent_commands.py::approvals_*` calls these routes:
 
 - `GET    /api/agent/approvals`              → `{"approvals": [...]}`
-- `POST   /api/agent/approvals/{id}/approve` → `{}` (any 2xx)
-- `POST   /api/agent/approvals/{id}/deny`    → `{}` (any 2xx)
+- `POST   /api/agent/approvals/{id}/approve` → `{"approval": {...}}`
+- `POST   /api/agent/approvals/{id}/deny`    → `{"approval": {...}}`
 
-Shape per ADR-0004 §5 "Pending items" + §5 "CLI parity". Each approval
-row is rendered with keys: `id`, `tool`, `agent`, `requested_at`,
-`summary`. If the MCP-backend teammate ships a different envelope key
-(`items` instead of `approvals`, etc.), update
-`agent_commands.py::approvals_list` accordingly — single-point change.
+Landed in `src/hal0/api/routes/approvals.py` with the envelope key
+`approvals` matching the CLI's expectation. Each approval row carries
+`id`, `tool`, `args`, `client_id`, `enqueued_at`. The CLI rendering
+still expects `agent` / `requested_at` / `summary` keys that the live
+shape does not produce 1:1 — the CLI degrades to "—" placeholders
+which is acceptable for v0.2 but a follow-up could align the keys.
 
 The Bearer-token plumbing for these calls flows through the shared
 `hal0.cli._shared.api_*` helpers, which today do NOT inject an
@@ -37,13 +38,11 @@ a writer-scope token (it should — these are gated destructives), the
 CLI's `_shared.api_*` helpers need an auth-injection pass. Out of
 scope for this wave.
 
-## 3. Memory-engine coupling — `/mcp/memory` endpoint assumed
+## 3. ~~Memory-engine coupling — `/mcp/memory` endpoint assumed~~ — RESOLVED
 
-`pi_coder.py` writes the adapter config with `hal0-memory` server URL =
-`{HAL0_API_URL}/mcp/memory`. Per ADR-0005 §2 + CONTEXT.md "MCP servers"
-entry. If the memory-engine teammate lands the route at a different
-prefix (e.g. `/mcp/v1/memory`), update the `_MCP_MEMORY_PATH` constant
-in `src/hal0/agents/pi_coder.py`.
+Landed at `/mcp/memory` per `src/hal0/mcp/memory.py`; the
+`_MCP_MEMORY_PATH` constant in `pi_coder.py` matches the live mount
+point.
 
 ## 4. Token storage — best-effort read from `tokens.toml`
 
@@ -69,21 +68,19 @@ ships a different signal (e.g. a `hermes-agent version --capabilities`
 JSON surface), update the probe + the shell-script mirror in
 `installer/agents/hermes-agent.sh::probe_hermes_hal0_aware`.
 
-## 6. Nightly CI smoke test — NOT landed here
+## 6. ~~Nightly CI smoke test — NOT landed here~~ — RESOLVED
 
-PLAN.md §17 risk row says: "Nightly CI smoke test runs
-`installer/agents/pi-coder.sh` end-to-end against current upstream +
-asserts an MCP round-trip." That workflow file (suggested path
-`.github/workflows/agent-shim-smoke.yml`) is owned by the CI-smoke
-team. The shim scripts ship with informative error messages so the
-smoke test gets actionable failure output.
+Landed in `976c985 ci(phase-8): nightly pi-coder shim smoke test
+(ADR-0004 §3 mitigation)`. The shim scripts retain their informative
+error messages.
 
-## 7. First-run wizard picker — NOT landed here
+## 7. ~~First-run wizard picker — NOT landed here~~ — RESOLVED
 
-ADR-0004 §2: "Picker live in two places: first-run wizard step, plus
-`hal0 agent install <name>` CLI subcommand." The CLI half is shipped
-in this wave; the wizard step is owned by the firstrun-UI teammate. It
-should call `POST /api/agents/install` with the operator's pick.
+Step 7 of the first-run wizard (Agent picker) landed in
+`2083c05 feat(phase-8): dashboard /agent page + approval inbox +
+first-run picker`. The wizard fires `POST /api/agents/install` with
+the operator's pick. Hermes option is disabled when the
+hal0-awareness probe returns false.
 
 ## 8. Hermes service template — NOT landed here
 
