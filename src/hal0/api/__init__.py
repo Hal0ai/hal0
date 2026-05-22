@@ -373,41 +373,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.tps_events = collections.defaultdict(_new_tps_deque)
 
-    # Approval queue for gated MCP tool calls (ADR-0004 §5). One per
-    # FastAPI app instance — the dashboard's bell, the MCP admin server,
-    # and the CLI's ``hal0 agent approvals`` all read from the same
-    # in-process queue.
-    from hal0.mcp import ApprovalQueue
-
-    app.state.approval_queue = ApprovalQueue()
-
-    # Cognee-backed long-term memory wrapper (ADR-0005). Lazy-imported so
-    # an install with the ``hal0`` core deps but no ``memory`` extra still
-    # boots — the memory MCP just stays unmounted in that case. The
-    # wrapper's constructor does all setup synchronously; Cognee itself
-    # lazy-initialises its schema on the first ``add()`` call.
-    memory_wrapper = None
-    try:
-        from hal0.memory import CogneeWrapper
-
-        memory_wrapper = CogneeWrapper()
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning("hal0.memory.init_failed", error=str(exc))
-    app.state.memory_wrapper = memory_wrapper
-
-    # Mount the MCP admin + memory servers. Sub-ASGI apps under
-    # /mcp/admin and /mcp/memory with their own Bearer-gating middleware.
-    try:
-        from hal0.api.mcp_mount import mount_mcp_servers
-
-        mount_mcp_servers(
-            app,
-            approval_queue=app.state.approval_queue,
-            memory_wrapper=memory_wrapper,
-        )
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning("hal0.mcp.mount_failed", error=str(exc))
-
     log.info(
         "hal0.api.upstreams_loaded",
         count=len(upstreams.list()),
@@ -576,6 +541,35 @@ def create_app() -> FastAPI:
         tags=["approvals"],
         dependencies=_admin_auth,
     )
+
+    # ── MCP servers (ADR-0004 §4 + ADR-0005 §2) ─────────────────────
+    # Mounted BEFORE _mount_dashboard so the dashboard's SPA fallback
+    # doesn't shadow /mcp/* paths. ApprovalQueue + CogneeWrapper are
+    # constructed eagerly here (no async setup needed for either) so
+    # the mount can wire them in immediately.
+    from hal0.mcp import ApprovalQueue
+
+    app.state.approval_queue = ApprovalQueue()
+
+    memory_wrapper = None
+    try:
+        from hal0.memory import CogneeWrapper
+
+        memory_wrapper = CogneeWrapper()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("hal0.memory.init_failed", error=str(exc))
+    app.state.memory_wrapper = memory_wrapper
+
+    try:
+        from hal0.api.mcp_mount import mount_mcp_servers
+
+        mount_mcp_servers(
+            app,
+            approval_queue=app.state.approval_queue,
+            memory_wrapper=memory_wrapper,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("hal0.mcp.mount_failed", error=str(exc))
 
     _mount_dashboard(app)
 
