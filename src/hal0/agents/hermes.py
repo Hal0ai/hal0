@@ -51,6 +51,7 @@ def _installer_script_path() -> Path:
     repo_root = Path(__file__).resolve().parents[3]
     return repo_root / _INSTALLER_SCRIPT_REL
 
+
 # The wrapper binary name. Installed by installer/agents/hermes-agent.sh
 # to /usr/local/bin (root) or ~/.local/bin (user). Sourcing the env
 # file + exec'ing upstream `hermes` is the whole job.
