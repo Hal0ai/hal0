@@ -379,8 +379,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         names=[u.name for u in upstreams.list()],
     )
 
+    # Each mounted FastMCP server has a ``StreamableHTTPSessionManager``
+    # whose anyio task group must be started inside an async-context
+    # before any request can be dispatched. Mounted sub-apps don't get
+    # their own lifespans run automatically, so we enter each manager's
+    # ``run()`` ctxmgr from the parent lifespan via an AsyncExitStack.
+    # Without this every /mcp/* request fails with
+    # ``Task group is not initialized``.
+    from contextlib import AsyncExitStack
+
+    managers = getattr(app.state, "mcp_session_managers", []) or []
+
     try:
-        yield
+        async with AsyncExitStack() as stack:
+            for mgr in managers:
+                await stack.enter_async_context(mgr.run())
+            yield
     finally:
         await slot_manager.stop_idle_monitor()
         await dispatcher.aclose()

@@ -97,13 +97,17 @@ def test_classification_buckets_match_adr_0004() -> None:
         "provider_credential_write",
     ):
         assert t in gated
+    # `logs_tail` was promoted from autonomous-read to GATED per
+    # security review MED-1 — it stays gated until the journald
+    # redactor in routes/logs.py covers Bearer + X-API-Key + provider
+    # keys per ADR-0004 §7.
+    assert "logs_tail" in gated
     # ADR-0004 §4 reads.
     for t in (
         "slot_list",
         "slot_status",
         "model_list",
         "hardware_probe",
-        "logs_tail",
         "capability_list",
         "provider_list",
         "version_info",

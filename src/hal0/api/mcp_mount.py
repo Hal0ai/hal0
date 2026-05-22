@@ -138,9 +138,18 @@ def mount_mcp_servers(
         memory_dispatcher=memory_dispatcher,
         bearer_resolver=bearer_resolver,
     )
+    # ``streamable_http_app()`` must be called BEFORE
+    # ``session_manager`` is accessible — FastMCP creates the manager
+    # lazily on the first app build. The lifespan reads
+    # ``app.state.mcp_session_managers`` to enter each manager's
+    # ``run()`` ctxmgr (which actually starts the anyio task group);
+    # without that, mounted requests crash with
+    # ``Task group is not initialized``.
     admin_app: ASGIApp = admin_server.streamable_http_app()
     admin_app.add_middleware(MCPAuthMiddleware)
     app.mount("/mcp/admin", admin_app, name="mcp-admin")
+
+    session_managers = [admin_server.session_manager]
 
     if memory_wrapper is not None:
         from hal0.mcp.memory import build_server as build_memory_server
@@ -153,6 +162,9 @@ def mount_mcp_servers(
         memory_app: ASGIApp = memory_server.streamable_http_app()
         memory_app.add_middleware(MCPAuthMiddleware)
         app.mount("/mcp/memory", memory_app, name="mcp-memory")
+        session_managers.append(memory_server.session_manager)
+
+    app.state.mcp_session_managers = session_managers
 
     log.info(
         "hal0.mcp.mounted",

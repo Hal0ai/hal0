@@ -102,7 +102,12 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "slot_status",
         "model_list",
         "hardware_probe",
-        "logs_tail",
+        # logs_tail is intentionally NOT here — moved to GATED_TOOLS
+        # until the ADR-0004 §7 redaction lands in logs.py. Per
+        # security review MED-1: an agent dumping raw journald is a
+        # potential exfiltration vector for whatever secrets the log
+        # redactor doesn't yet cover. Gating now is defensive-cheap;
+        # demote back to autonomous-read once the redaction is in.
         "capability_list",
         "provider_list",
         "version_info",
@@ -134,6 +139,10 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "capability_set",
         "config_write",
         "provider_credential_write",
+        # logs_tail is gated until the redactor in logs.py covers
+        # Bearer + X-API-Key + provider keys (sk-/hf-/etc.) — see
+        # docs/internal/phase-8-pending/mcp-backend.md §2.
+        "logs_tail",
         # memory_delete with len(ids) > 1 routes here at call time.
     }
 )
