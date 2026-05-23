@@ -378,7 +378,15 @@ def test_registry_command_registered_on_main_app() -> None:
 
 
 def test_registry_import_help_mentions_force_and_dest() -> None:
+    # Strip ANSI escape codes + collapse all whitespace so typer's
+    # rich-renderer line-wrap (CI defaults to narrow terminals and
+    # splits `--force` across lines) does not break the substring
+    # assertions.
+    import re as _re
+
     result = runner.invoke(registry_app, ["import", "--help"])
     assert result.exit_code == 0, result.output
-    assert "--force" in result.output
-    assert "--dest" in result.output
+    plain = _re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    plain = _re.sub(r"\s+", "", plain)
+    assert "--force" in plain
+    assert "--dest" in plain
