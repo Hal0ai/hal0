@@ -324,6 +324,70 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     return merged
 
 
+def _next_free_slot_port(start: int = 8081, end: int = 8099) -> int:
+    """Return the next free port in the slots range (#275 bug 2).
+
+    Walks ``/etc/hal0/slots/*.toml`` collecting both top-level ``port``
+    and nested ``[server] port`` values. Returns the lowest port in
+    ``[start, end]`` not already claimed. The 8081-8099 range matches
+    PLAN.md §2 ports table.
+    """
+    import tomllib
+
+    from hal0.config.paths import hal0_etc_dir
+
+    used: set[int] = set()
+    slots_dir = hal0_etc_dir() / "slots"
+    if slots_dir.is_dir():
+        for f in slots_dir.glob("*.toml"):
+            try:
+                with f.open("rb") as fh:
+                    cfg = tomllib.load(fh)
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            top = cfg.get("port")
+            if isinstance(top, int):
+                used.add(top)
+            srv = cfg.get("server")
+            if isinstance(srv, dict):
+                nested = srv.get("port")
+                if isinstance(nested, int):
+                    used.add(nested)
+    for p in range(start, end + 1):
+        if p not in used:
+            return p
+    raise BadRequest(
+        f"no free port in {start}-{end} (all slots occupied)",
+        code="slot.no_free_port",
+    )
+
+
+def _normalize_create_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a POST /api/slots body to the canonical nested shape.
+
+    Two compat hops (#275 bugs 1 + 2):
+
+    1. Top-level ``model: "name"`` (Lemonade-shape) → ``model: {"default":
+       "name"}`` (nested [model] table). The serializer at slots.py:191
+       reads ``cfg.get("model").get("default")`` and the SlotConfig
+       pydantic model has a nested ModelConfig — but the audit-
+       recommended Lemonade-shape body POSTs a top-level string. The
+       result was ``model_default`` MISSING from /api/slots responses
+       for any slot created via POST.
+    2. Missing or zero ``port`` → auto-assign via
+       :func:`_next_free_slot_port`. Without this, new slots persist
+       ``port=0`` and the dashboard card shows ``port=0`` instead of a
+       useable port.
+    """
+    out = dict(body)
+    model_val = out.get("model")
+    if isinstance(model_val, str):
+        out["model"] = {"default": model_val}
+    if "port" not in out or not isinstance(out.get("port"), int) or out.get("port") in (0, None):
+        out["port"] = _next_free_slot_port()
+    return out
+
+
 @router.post("", status_code=201)
 async def create_slot(request: Request) -> dict[str, object]:
     """Create a new slot. Body: SlotConfig schema.
@@ -331,6 +395,13 @@ async def create_slot(request: Request) -> dict[str, object]:
     Writes /etc/hal0/slots/<name>.toml, the systemd drop-in override, the
     env file, and the initial state.json. Does NOT start the slot — the
     caller follows with POST /api/slots/<name>/load when ready.
+
+    Accepts both the Lemonade-shape body (top-level ``model: "name"``,
+    ``device: "gpu-vulkan"``, no ``port``) and the legacy nested shape
+    (``[model] default = "name"``, ``[server] port = 8081``). The body
+    is normalized to the nested shape via :func:`_normalize_create_body`
+    before persistence so the serializer + persistent TOML loaders see
+    one canonical shape.
     """
     sm = _get_slot_manager(request)
     try:
@@ -351,6 +422,7 @@ async def create_slot(request: Request) -> dict[str, object]:
             code="slot.name_required",
         )
 
+    body = _normalize_create_body(body)
     snap = await sm.create(name, body)
     return _slot_to_dict(snap, request)
 
