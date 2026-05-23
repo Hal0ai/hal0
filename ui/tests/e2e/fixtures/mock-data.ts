@@ -95,14 +95,28 @@ export const MOCK_DATA = {
       state: 'running', transport: 'stdio → http bridge', tools: 5, resources: 4, prompts: 0,
       version: '0.6.0', clients: [], activity: { rpm: 0, lastCall: null } },
     { id: 'obsidian-vault', name: 'obsidian-vault', provider: 'community', bundled: false,
-      state: 'installing', progress: 67, transport: 'stdio', tools: null, version: '0.4.2',
+      state: 'installing', progress: 67, progressLabel: 'pulling deps · uv pip install',
+      transport: 'stdio', tools: null, version: '0.4.2',
       clients: [], activity: { rpm: 0, lastCall: null } },
+    /* Slice #14 (#180): brave-search carries the `lastError` shape the
+       failed-state row block consumes (code pill + body), plus an empty
+       BRAVE_API_KEY env var so EditConfigModal's empty-input red-border
+       branch has a row to render. */
     { id: 'brave-search', name: 'brave-search', provider: 'modelcontextprotocol', bundled: false,
-      state: 'failed', transport: 'streamable-http', tools: 2, version: '0.7.0',
-      clients: [], activity: { rpm: 0, lastCall: null } },
+      state: 'failed', since: '—', transport: 'streamable-http', tools: 2, version: '0.7.0',
+      clients: [],
+      lastError: {
+        ts: '2026-05-23 09:14:22',
+        code: 'BRAVE_API_KEY_MISSING',
+        msg: 'Required env var BRAVE_API_KEY is unset. Server exited with code 78 (config error).',
+        attempts: 3,
+      },
+      env: { BRAVE_API_KEY: '' },
+      activity: { rpm: 0, lastCall: null } },
     { id: 'timed-reminders', name: 'timed-reminders', provider: 'community', bundled: false,
-      state: 'stopped', transport: 'stdio', tools: 4, version: '0.2.1',
-      clients: [], activity: { rpm: 0, lastCall: null } },
+      state: 'stopped', since: 'stopped 3h ago', transport: 'stdio',
+      tools: 4, version: '0.2.1', clients: [], note: 'Manually disabled · auto-start off',
+      activity: { rpm: 0, lastCall: null } },
   ],
 
   mcpClients: [

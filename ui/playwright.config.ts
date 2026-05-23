@@ -45,7 +45,9 @@ export default defineConfig({
   workers: 1,
   reporter: process.env.CI ? [['html', { open: 'never' }], ['line']] : 'list',
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    /* Port may be overridden via HAL0_E2E_PORT when a colliding vite
+       on 5173 is already running (e.g. parallel worktree teammates). */
+    baseURL: `http://127.0.0.1:${process.env.HAL0_E2E_PORT || 5173}`,
     trace: 'on-first-retry',
     video: 'retain-on-failure',
     screenshot: 'only-on-failure',
@@ -66,8 +68,8 @@ export default defineConfig({
        is started. The dev server proxies /api + /v1 to the configured
        backend; in mocked mode page.route short-circuits before any
        proxy hop. */
-    command: 'npx vite --port 5173 --strictPort --host 127.0.0.1',
-    url: 'http://127.0.0.1:5173',
+    command: `npx vite --port ${process.env.HAL0_E2E_PORT || 5173} --strictPort --host 127.0.0.1`,
+    url: `http://127.0.0.1:${process.env.HAL0_E2E_PORT || 5173}`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     stdout: 'ignore',
