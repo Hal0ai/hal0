@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI
 
 if TYPE_CHECKING:
     from hal0.lemonade.idle import IdleDriver
+    from hal0.lemonade.metrics_shim import MetricsShim
 
 from hal0 import __version__
 from hal0.api.auth import first_run as first_run_lock
@@ -239,6 +240,47 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
+
+
+async def _start_lemonade_metrics_shim(app: FastAPI) -> MetricsShim | None:
+    """Start the Lemonade metrics shim (PR-12, ADR-0008 §3).
+
+    Polls ``GET /v1/stats`` + ``GET /v1/health`` on a 5s cadence and
+    holds the latest snapshot on ``app.state.lemonade_metrics_shim`` so
+    the ``GET /api/metrics/prometheus`` route can read it synchronously
+    without blocking on a fresh upstream call per scrape.
+
+    Reuses the LemonadeClient attached by the idle driver — sharing the
+    client matches the pattern in :mod:`hal0.dispatcher.router` and
+    avoids opening a second connection pool against lemond. If the idle
+    driver failed to start (no client on app.state), the shim is
+    skipped: the shim is purely observability; a busted Lemonade config
+    must not block API startup.
+
+    Failures here never block lifespan progression — log + continue, the
+    /api/metrics/prometheus endpoint will simply return an empty
+    exposition body until the shim attaches successfully on a future
+    restart.
+    """
+    client = getattr(app.state, "lemonade_client", None)
+    if client is None:
+        log.info("lemonade.metrics.skipped_no_client")
+        return None
+    try:
+        from hal0.lemonade.metrics_shim import MetricsShim
+
+        shim = MetricsShim(client)
+        await shim.start()
+        app.state.lemonade_metrics_shim = shim
+        log.info("lemonade.metrics.shim_attached")
+        return shim
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning(
+            "lemonade.metrics.shim_start_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return None
 
 
 async def _start_lemonade_idle_driver(app: FastAPI) -> IdleDriver | None:
@@ -495,6 +537,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # the prior ``HAL0_BACKEND=lemonade`` gate retired in PR-10. Stored
     # on app.state so tests + future shutdown hooks can introspect it.
     lemonade_idle_driver = await _start_lemonade_idle_driver(app)
+    # Lemonade metrics shim (PR-12, plan §10.1 + §11). Shares the
+    # ``app.state.lemonade_client`` attached by the idle driver so we
+    # don't double up on connection pools against lemond. Provides the
+    # snapshot the /api/metrics/prometheus route reads.
+    lemonade_metrics_shim = await _start_lemonade_metrics_shim(app)
 
     try:
         async with AsyncExitStack() as stack:
@@ -503,6 +550,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             stack.push_async_callback(_stop_refresh_task)
             yield
     finally:
+        if lemonade_metrics_shim is not None:
+            await lemonade_metrics_shim.stop()
         if lemonade_idle_driver is not None:
             await lemonade_idle_driver.stop()
         await slot_manager.stop_idle_monitor()
