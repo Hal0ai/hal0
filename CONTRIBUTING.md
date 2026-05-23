@@ -1,9 +1,9 @@
 # Contributing to hal0
 
-hal0 is licensed [Apache 2.0](./LICENSE). hal0 is in **v0.1.0-alpha**;
-the contribution model is still being decided (see
-[`PLAN.md`](./PLAN.md) §16). External PRs aren't being merged yet;
-please open issues for discussion.
+hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.2.0** — the
+Lemonade Server adoption release. The contribution model is still
+being decided (see [`PLAN.md`](./PLAN.md) §16). External PRs aren't
+being merged yet; please open issues for discussion.
 
 When the model opens up, the shape will be:
 
@@ -23,9 +23,9 @@ is the last gate before a tagged release.
 
 | Tier | What it does | Where it runs | When | Local cmd |
 |---|---|---|---|---|
-| α  Unit | `pytest`, mocked systemd/docker/HTTP | any host, no daemons | every commit / PR | `make test` |
-| β  Integration | Real `hal0-slot@.service` + Vulkan-CPU toolbox + tiny GGUF; load → chat → swap → unload + SSE state stream | GitHub Actions runner (`integration.yml`) **and** any host with systemd + the template installed | every PR; required for merge | `make test-integration` |
-| γ  Release-gate | Full matrix — Vulkan, ROCm, NPU/FLM, STT/TTS smokes, OpenWebUI proxy, updater round-trip | `hal0-test` LXC (10.0.1.230) over SSH | per release candidate, not per-commit | `make release-test` |
+| α  Unit | `pytest`, mocked systemd/HTTP/Lemonade client | any host, no daemons | every commit / PR | `make test` |
+| β  Integration | Real `hal0-lemonade.service` + tiny GGUF; load → chat → swap → unload + slot state via `/v1/health` | GitHub Actions runner (`integration.yml`) **and** any host with systemd + Lemonade installed | every PR; required for merge | `make test-integration` |
+| γ  Release-gate | Full matrix — Lemonade `llamacpp` (Vulkan + ROCm + CPU), `flm:npu` trio, `whisper.cpp`, `kokoro:cpu`, `sd-cpp`, OpenWebUI proxy, updater round-trip | `hal0-test` LXC (10.0.1.230) over SSH | per release candidate, not per-commit | `make release-test` |
 
 ### α — unit (`make test`)
 
@@ -40,33 +40,34 @@ slower than that — integration-flavoured cases must be marked
 
 ### β — integration (`make test-integration`)
 
-Exercises the real systemd template unit and a real container. Needs
-root (the template lands in `/etc/systemd/system/`) and Docker.
+Exercises the real `hal0-lemonade.service` daemon. Needs root (units
+land in `/etc/systemd/system/`) and the Lemonade prerequisites
+(installed by `installer/install.sh`).
 
 Locally:
 
 ```sh
-sudo bash installer/install.sh --no-start    # writes hal0-slot@.service
+sudo bash installer/install.sh --no-start    # writes hal0-lemonade.service + config.json
 make test-integration
 ```
 
 In CI: `.github/workflows/integration.yml` does the install on the
-runner, builds `hal0-toolbox-vulkan` from `packaging/toolbox/vulkan.Dockerfile`,
-caches `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, and runs three gated cases
-in `tests/slots/test_integration.py`:
+runner, caches `Qwen/Qwen2.5-0.5B-Instruct-GGUF`, and runs the gated
+cases in `tests/slots/test_integration.py`:
 
-1. `test_end_to_end_load_serve_unload` — full create → load → unload → delete
-2. `test_state_transitions_visible_via_stream` — SSE state stream sees `starting → warming → ready`
+1. `test_end_to_end_load_serve_unload` — full slot register → load → unload → delete via `/v1/load` + `/v1/unload`
+2. `test_state_transitions_visible_via_stream` — slot state stream sees `starting → warming → ready` (from `/v1/health` polling + Lemonade `/logs/stream` events)
 3. `test_full_state_machine_round_trip_via_stream` — full round-trip incl. `unloading → offline`
 
-Wall-clock budget: ≤12 minutes (PLAN §10, Integration β). Toolbox
-image build is layer-cached via GHA so cold-cache runs are ~10 min,
-hot-cache ~4.
+Wall-clock budget: ≤12 minutes (PLAN §10, Integration β). Lemonade's
+embeddable tarball is layer-cached via GHA so cold-cache runs are
+~10 min, hot-cache ~4.
 
 ### γ — release-gate (`make release-test`)
 
 SSHes into the hal0-test LXC and walks a matrix of seven rows:
-**vulkan, rocm, flm (NPU), moonshine (STT), kokoro (TTS), updater,
+**llamacpp-vulkan, llamacpp-rocm, flm-npu (chat + trio asr/embed),
+whispercpp (STT), kokoro-cpu (TTS), sd-cpp (image), updater,
 openwebui**. Each row produces a structured record; the full report
 lands in `tests/release-gate-report.json`.
 
@@ -84,10 +85,9 @@ make release-test-report
 
 Row status is one of `pass | fail | skip | deferred`:
 
-- **skip** — a required image isn't pinned in `manifest.json` yet
-  (Team A territory). Non-blocking.
-- **deferred** — a cross-team dependency isn't merged yet (e.g.
-  Team D's updater CLI). Non-blocking, but flagged in the report.
+- **skip** — a required dependency isn't pinned in `manifest.json` yet
+  (e.g. a new FastFlowLM `.deb` version waiting on a smoke). Non-blocking.
+- **deferred** — a cross-team dependency isn't merged yet. Non-blocking, but flagged in the report.
 - **fail** — exits the script non-zero; blocks the release.
 
 The hal0-test LXC is shared with other agents; `make release-test`
@@ -102,7 +102,7 @@ tag. It walks the per-release gate:
 
 - backend tests green
 - UI build clean
-- toolbox images present in `manifest.json` with non-empty digests
+- Lemonade embeddable tarball + FastFlowLM `.deb` pinned in `manifest.json` with non-empty sha256s
 - `release-test` last run within 24 h and all-pass
 - git working tree clean, tag doesn't yet exist, `pyproject.toml`
   version matches the proposed tag

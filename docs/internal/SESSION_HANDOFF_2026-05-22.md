@@ -118,3 +118,14 @@ Mirror `docs/internal/lemonade-spike-runbook.md` shape. Validate on hal0 LXC 105
 - 4 specialist plan agents for Lemonade re-grill — read-only analysis, results captured in this doc + chat.
 - Live verify on hal0 LXC: dashboard agent install, MCP admin/memory enumeration.
 - Doc syncs: PLAN.md, README.md (hal0), CONTENT_BRIEF.md (hal0-web).
+
+## v0.2 ship-cut 2026-05-23
+
+The Lemonade migration shipped. ADR-0008 / ADR-0009 / ADR-0010
+landed in #154; the 22-PR adoption sequence (PR-2 #137 through PR-22
+— docs sync) is closed. README + PLAN + CHANGELOG + the v0.2 upgrade
+guide + release notes synced in PR-22. The "one open decision" in the
+section above was settled by the post-grill adoption plan
+(`docs/internal/lemonade-adoption-plan-2026-05-22.md`) — Path 4
+(Lemonade for all iGPU + NPU modalities) chosen, ADR-0006 / ADR-0007
+superseded.

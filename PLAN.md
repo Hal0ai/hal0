@@ -7,21 +7,122 @@ one-line install) and re-architected around the things that make hal0
 different from "a wrapper around llama-server": hardware-aware slots,
 clean lifecycle, and a real reliability bar.
 
-**Status (2026-05-22):** shipping as **v0.1.1** — Strix Halo, AMD GPU,
-NVIDIA GPU, and now WSL 2 + Proxmox VM + bare-metal-CPU-only Linux
-home installs. OpenAI-compatible inference, bundled OpenWebUI chat.
-v0.1.0-alpha was the cosign-keyless release-pipeline cut (2026-05-21);
-v0.1.1 (2026-05-22) is the first install that completes end-to-end on
-non-Strix-Halo hosts — the first-run wizard's writer calls authenticate
-cleanly, the chat model is optional (capabilities-only installs are a
-shape), the hardware probe is portable + platform-aware, and the
-capability dropdowns are seeded with real picks. Everything in §1
-"v0.1.1 ships" is in the box; v1.0 is the eventual stability/perf bar
-(see §1 "Path to v1.0").
+**Status (2026-05-23):** shipping as **v0.2.0** — the Lemonade Server
+migration release. AMD's Lemonade Server replaces the six per-modality
+toolbox containers and the `hal0-slot@.service` template as the
+unified inference runtime; `hal0-lemonade.service` supervises one
+`lemond` process per host. v0.2 also brings the OmniRouter client-side
+tool-calling loop (8 tools), the FLM trio NPU packing (chat + ASR +
+embed on one AMDXDNA hardware context), the first-run bundle picker
+(`hal0-Lite` / `Default` / `Pro` / `Max` + `LMX-Omni-52B-Halo`), the
+Lemonade admin panel + Journal panel in the dashboard, and the
+canonical `/var/lib/hal0/models/<recipe>/<capability>/` model layout.
+The 22-PR adoption sequence (PR-2 through PR-22) closes with this cut.
+v0.2 is a **breaking change** from v0.1.x — install.sh refuses to
+overwrite a v0.1.x state, prints the backup/wipe procedure, and ships
+`hal0 registry import` as the only recovery path. See
+[`docs/v0.2-upgrade.md`](docs/v0.2-upgrade.md) for the user-facing
+flow and [`docs/internal/lemonade-adoption-plan-2026-05-22.md`](docs/internal/lemonade-adoption-plan-2026-05-22.md)
+for the locked implementation contract.
+
+The v0.2 architecture decisions are recorded in
+[ADR-0008 (Lemonade adoption)](docs/internal/adr/0008-lemonade-adoption.md),
+[ADR-0009 (FLM trio NPU packing)](docs/internal/adr/0009-flm-trio-npu-packing.md),
+and [ADR-0010 (bundle picker — no default stack)](docs/internal/adr/0010-bundle-picker-no-default-stack.md).
+ADR-0006 / ADR-0007 are superseded.
+
+**Earlier shipping cuts:** v0.1.0-alpha (2026-05-21) was the
+cosign-keyless release-pipeline cut; v0.1.1 (2026-05-22) was the first
+install that completes end-to-end on non-Strix-Halo hosts;
+v0.2.0-alpha.3 (2026-05-22) shipped Phase 8 (Agents v0.2 + MCP +
+Cognee memory).
+
+**Path to v1.0** stays the same as v0.1's framing: stability bar,
+published perf baselines, docs parity. v0.3 is the next milestone —
+GPU TTS, KV% for GPU slots, Phase 8 polish + advanced memory,
+benchmarks/presets UI. See §1 "Path to v1.0" + §15 for the milestones.
 
 ---
 
 ## 1. Scope
+
+### v0.2 ships (current cut)
+
+The Lemonade Server adoption is now end-to-end. See
+[`docs/internal/lemonade-adoption-plan-2026-05-22.md`](docs/internal/lemonade-adoption-plan-2026-05-22.md)
+for the locked implementation contract (do not relitigate); the
+high-level deliverables are:
+
+- **Lemonade Server as the unified inference runtime.** One `lemond`
+  process per host on `127.0.0.1:13305`, supervised by
+  `hal0-lemonade.service`. Cache directory at
+  `/var/lib/hal0/lemonade/`. Six per-modality toolbox containers + the
+  `hal0-slot@.service` template retired.
+- **Capability dispatch via Lemonade.** `LemonadeProvider` is the only
+  `Provider` in v0.2; legacy provider classes are preserved as code
+  (still consumed by image-gen / hardware-probe / catalog non-slot
+  paths) but no longer in the dispatch path. The slot lifecycle state
+  machine in `src/hal0/slots/state.py` survives; per-slot systemd
+  + Provider ABC die.
+- **Slot model.** Bare-name identity + `type` (Lemonade vocab:
+  `llm | embedding | reranking | transcription | tts | image`) +
+  `device` (`gpu-rocm | gpu-vulkan | cpu | npu`) + `model` + `enabled`
+  + optional `default` + `group` for dashboard rollup. Six seeded
+  slots (`primary`, `embed`, `rerank`, `stt`, `tts`, `img`) plus three
+  NPU slots when FLM `.deb` is installed (`agent`, `stt-npu`,
+  `embed-npu`). User-added slots via `hal0 slot add NAME --type TYPE`.
+- **FLM trio NPU packing.** Lemonade's `flm.args = "--asr 1 --embed 1"`
+  packs chat + transcription + embedding into one `flm serve` process
+  on the single AMDXDNA hardware context. hal0's capability dispatcher
+  reads `/v1/health.loaded[].backend_url` for the FLM model and
+  routes `stt-npu` / `embed-npu` requests **directly** to that child's
+  port — Lemonade only knows about the chat role. NPU exclusivity (one
+  `device = "npu", type = "llm"` slot enabled at a time) enforced in
+  `capabilities.toml` validation. See ADR-0009.
+- **OmniRouter client-side tool-calling.** hal0 owns the OpenAI
+  tool-calling loop; Lemonade provides the tool endpoints. v0.2 ships
+  8 tools — 5 upstream-mirrored (`generate_image`, `edit_image`,
+  `text_to_speech`, `transcribe_audio`, `analyze_image`) and 3
+  hal0-custom (`embed_text`, `rerank_documents`, `route_to_chat`).
+  Dynamic per-request filtering by enabled-slot + required-label.
+- **Bundle picker on first run.** `capabilities.toml` ships empty;
+  the dashboard's first load renders four hardware-anchored tiers +
+  the AMD-curated `LMX-Omni-52B-Halo` kit + an explicit "Skip"
+  option. No silent defaults. See ADR-0010.
+- **Canonical model layout** at `/var/lib/hal0/models/<recipe>/<capability>/`;
+  Lemonade's `extra_models_dir` points here. Per-leaf symlinks
+  redirect to `/mnt/ai-models/` when a separate storage volume is in
+  use.
+- **Mandatory `llamacpp.args = "--parallel 1 --threads N"`** in the
+  lemond config baseline (N computed at install time as `(cores − 2) / 4`,
+  min 2). Without this, two concurrent child llama-servers deadlock
+  from CPU oversubscription. See memory
+  `hal0_lemonade_threads_deadlock`.
+- **Per-type LRU concurrency.** Six independent type budgets reported
+  by `/v1/health.max_models`; default budget set to 4 globally. Nuclear
+  evict-all only fires on `/v1/load` errors whose message does NOT
+  substring-match "not found" / "does not exist" / "No such file".
+  Active inference protection: a serving slot cannot be evicted out
+  from under a streaming request.
+- **`hal0 registry import`** — single command, restores `registry.toml`
+  from a v0.1.x backup tarball. Slot selections must be redone via
+  the bundle picker (alpha social contract).
+- **Settings → Lemonade admin panel** — `/internal/config` snapshot +
+  `/internal/set` atomic writes for a curated subset of keys.
+- **Journal panel folded into Logs tab** — Lemonade's `/logs/stream`
+  WebSocket streams into the dashboard's event ring.
+- **Metrics shim** — per-slot TTFT + tok/s + prompt_tokens via
+  `/v1/stats`; FLM-native KV% (`kv_token_occupancy_rate_percentage`)
+  on NPU slots. KV% reads `—` for GPU slots — see §12.1 of the
+  adoption plan for the accepted-missing rationale and the v0.2.x
+  patch path.
+- **`[CPU]` chip + tooltip** on the voice slot card disclosing that
+  kokoro is CPU-only in v0.2. GPU TTS deferred to v0.3.
+- **`HAL0_BACKEND=lemonade` env flag** introduced in PR-8 and removed
+  in PR-10 — Lemonade is the unconditional runtime now.
+
+The 22-PR adoption sequence (PR-2 #137 through PR-22) is closed.
+See §15 Phase 9 below for the per-PR map.
 
 ### v0.1.1 ships
 
@@ -146,13 +247,27 @@ sequence), then v0.2 deferred features as separate minor bumps.
 v0.1.1 is the latest patch in the `v0.1.x` line — bug fixes and
 non-Strix-Halo install completeness, no API shifts.
 
-### v0.2 (deferred)
+### v0.3 (next)
 
-- Memory subsystem
-- MCP support
-- Benchmarks UI + Presets UI
-- AUR PKGBUILD + Ubuntu PPA
-- Light mode toggle
+- **GPU-accelerated TTS** — closes the `[CPU]` chip on the voice slot
+  card; kokoro-vulkan or successor
+- **KV% for GPU slots** — Lemonade upstream populates the
+  `n_past`/`n_prompt_tokens`/`prompt` fields in `/slots`, or hal0
+  builds its own llama-server and swaps via `lemonade config set
+  llamacpp.{rocm_bin,vulkan_bin}`. v0.2.x patch path if upstream
+  takes >6 weeks (per ADR-0008 §Costs)
+- **Phase 8 polish + advanced memory** — Cognee graph extraction
+  (Kuzu) gated behind a configurable model + Memify pipeline +
+  additional source connectors. MCP client side of hal0 (bundled
+  agents reach external MCP servers with per-agent allow-list).
+  Memory federation across local + remote sources
+- **Benchmarks UI + Presets UI** — in-dashboard tok/s + latency runs;
+  curated loadout presets
+- **AUR PKGBUILD + Ubuntu PPA** — native distro packages
+- **`hal0.local` mDNS polish** — avahi auto-registration robustness
+- **Light mode toggle**
+- **Lemonade Omni vs hal0 capability-orchestrator interop strategy**
+  — coexist in v0.2; revisit pre-v0.3
 
 ### Strip (gone for good unless re-justified)
 
@@ -793,7 +908,7 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 - Migrate haloai LXC → hal0 (cutover) — script ready (PR #22, `scripts/migrate-haloai.py` + 14-model curated allow-list); cutover script tested with synthetic fixtures, not yet against live haloai data
 - Public launch — pending §16 decisions (launch story, contribution model)
 
-**Phase 8 — Agents v0.2 (post-v1.0)** — ✅ done 2026-05-22 — combined Agents + MCP + basic memory release; design settled via grilling 2026-05-22, deliverables in `docs/adr/0004-agents.md` + `docs/adr/0005-memory-engine-cognee.md`. Public API docs: [`docs/api/mcp.md`](./docs/api/mcp.md), [`docs/api/agents.md`](./docs/api/agents.md).
+**Phase 8 — Agents v0.2 (initially v0.2; shipped 2026-05-22 ahead of the Lemonade migration)** — ✅ done 2026-05-22 — combined Agents + MCP + basic memory release; design settled via grilling 2026-05-22, deliverables in `docs/adr/0004-agents.md` + `docs/adr/0005-memory-engine-cognee.md`. Public API docs: [`docs/api/mcp.md`](./docs/api/mcp.md), [`docs/api/agents.md`](./docs/api/agents.md).
 
 - **Bundled agent app, single-pick at install.** Supported choices: `pi-coder` (CLI, installed from `Hal0ai/pi-mono` fork via `@earendil-works/pi-coding-agent` on npm) and `Hermes-Agent` (service, installed via the hal0-owned `hal0-hermes` wrapper around upstream `hermes`). User picks one via the first-run wizard or `hal0 agent {install,uninstall,list} <name>`; single-pick enforced; `--switch` flag for atomic swap. install.sh stays non-interactive (no `--agent` flag).
 - **hal0 admin MCP server at `/mcp/admin`.** Tools wrap existing `/api/*` routes only (rule: a tool ships iff it maps to an existing `/api/*` route — no new privileged surface). Bearer-token auth reused from ADR-0001. Two-tier scope: routine ops (slot status / list / `model_swap` / hardware probe / logs) autonomous; capital-D destructives (`model_pull`, `slot_restart/create/delete`, `capability_set`, `config_write`) gated.
@@ -806,7 +921,26 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
   - `topoteretes/cognee-integrations/integrations/claude-code` — Claude Code plugin using six lifecycle hooks + `node_set` tagging (user-context / project-docs / agent-actions). Gives Claude Code users a second path into the same Cognee store, complementary to MCP.
   - `topoteretes/cognee-integrations/integrations/openclaw-skills` — `SKILL.md` + YAML-frontmatter format + Ingest → Execute → Observe → Amendify loop. Reference shape if hal0 ever grows agent-side skills (distinct from the platform "skills" = MCP tools settled here).
 
-**Phase 9 — Advanced memory + MCP client side (post-v0.2)** — unscheduled; deliverables in `docs/adr/0006-advanced-memory.md`.
+**Phase 9 — Lemonade migration (v0.2)** — ✅ done 2026-05-23 — Lemonade Server adopted as the unified inference runtime; six per-modality toolbox containers + the `hal0-slot@.service` template retired. Locked plan: [`docs/internal/lemonade-adoption-plan-2026-05-22.md`](docs/internal/lemonade-adoption-plan-2026-05-22.md). Architecture decisions: [ADR-0008](docs/internal/adr/0008-lemonade-adoption.md) (adoption), [ADR-0009](docs/internal/adr/0009-flm-trio-npu-packing.md) (FLM trio), [ADR-0010](docs/internal/adr/0010-bundle-picker-no-default-stack.md) (bundle picker). ADR-0006 / ADR-0007 superseded.
+
+22 PRs across 6 sub-phases:
+
+| Sub-phase | PRs | Scope |
+|---|---|---|
+| Foundation | PR-2 (#137), PR-3 (#156) | Lemonade HTTP client skeleton + typed `/v1/*` + `/internal/*` endpoints |
+| Install + registry | PR-4 (#157), PR-5 (#159), PR-6 (#141 → #151), PR-7 (#158) | PPA + FLM `.deb` + `hal0-lemonade.service` + `registry sync` + canonical model layout |
+| Slot layer rewrite | PR-8 (#161), PR-9 (#160), PR-10 (#162) | `LemonadeProvider` dispatch + toolbox + slot-template retirement + `SlotManager` simplification (~358 LOC delta) |
+| UI + metrics | PR-11 (#163), PR-12 (#179), PR-13 (#183), PR-14 (#184), PR-15 (#186) | Dashboard from `/v1/health` + metrics shim + Lemonade admin panel + Journal panel + `[CPU]` chip |
+| OmniRouter + bundles | PR-16 (#189), PR-17 (#196), PR-18 (#198) | Client-side OmniRouter (8 tools) + bundle picker + chat surface |
+| NPU + close-out | PR-19 (#201), PR-20 (#202), PR-21 (#203), PR-22 (this PR) | FLM trio dispatch + NPU exclusivity + v0.1.x detect + `hal0 registry import` + docs sync |
+
+Cross-cutting:
+- PR-2 #137 already shipped pre-grill; the adoption plan's PR-1 is implicit ("write the plan").
+- The `HAL0_BACKEND=lemonade` env flag introduced in PR-8 was removed in PR-10 (Lemonade is unconditional now).
+- Legacy provider classes (`hal0/providers/{llama_server,flm,moonshine,kokoro,comfyui}.py`) are preserved as code — still consumed by image-gen / hardware probe / catalog non-slot consumers — but no longer in the dispatch path.
+- v0.2.1 dashboard rewrite (slice #176, PR #199) cut over on `feat/dash-v2-rework` in parallel; PR #197 carries the v2 polish work and remains open at v0.2 ship.
+
+**Phase 10 — Advanced memory + MCP client side (post-v0.2)** — unscheduled; deliverables in `docs/adr/0006-advanced-memory.md` (file path may move; ADR-0006 is currently the Lemonade superseded ADR).
 
 - **Enable Cognee's advanced features** — graph extraction (Kuzu) gated behind a configurable model (small local models are unreliable at structured output; default to OpenRouter or a 70B-class local model for graph builds), Memify pipeline for memory hygiene, additional source connectors.
 - **MCP client side of hal0** — bundled agents can reach external MCP servers (filesystem scoped to `/var/lib/hal0/agents/<name>/workspace`, web search, third-party memory services like Supermemory or Hindsight). Per-agent allow-list in agent config.
@@ -815,7 +949,7 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 - **Migration importers** — one-shot scripts to pull upstream agent history into the Cognee store: `migrate-pi-memory-md.py`, `migrate-hermes-mem.py`, `migrate-mem0.py` (for users transitioning from existing mem0 installs).
 - **Optional self-improving skills loop** — adopt the openclaw-skills SKILL.md pattern if the bundled agent supports it; stretch goal, not a v0.3 commitment.
 
-**Total: ~10 weeks of focused work through v1.0.** Phase 8 (v0.2) is post-v1.0 and unestimated. Phases 1–6 closed in ~3 weeks of compressed sprint work + a multi-agent sweep on 2026-05-15.
+**Total: ~10 weeks of focused work through v1.0.** Phase 8 (Agents v0.2) shipped 2026-05-22 ahead of the Lemonade migration; Phase 9 (Lemonade) shipped 2026-05-23. Phases 1–6 closed in ~3 weeks of compressed sprint work + a multi-agent sweep on 2026-05-15.
 
 ---
 

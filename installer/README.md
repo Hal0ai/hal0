@@ -8,7 +8,7 @@ Non-interactive installer for hal0 — the open-source home AI inference platfor
 # From a clone of this repo:
 sudo bash installer/install.sh
 
-# Or point HuggingFace pulls at a larger disk:
+# Or point model pulls at a larger disk:
 sudo bash installer/install.sh --models-dir=/mnt/ai-models
 ```
 
@@ -18,35 +18,54 @@ sudo bash installer/install.sh --models-dir=/mnt/ai-models
 > and hands off to this `install.sh`. `git clone` + `sudo bash` still
 > works for development against a checkout.
 
-The toolbox container images (`ghcr.io/hal0ai/hal0-toolbox-*:v1`) are
-public on GHCR — `docker pull` works without a `docker login`. The
-installer pulls them in the background after the API comes up.
+> **v0.1.x users:** `install.sh` will detect existing v0.1.x state
+> (`/etc/hal0/slots/*.toml` AND no `/var/lib/hal0/lemonade/config.json`)
+> and refuse to overwrite it. See
+> [`docs/v0.2-upgrade.md`](../docs/v0.2-upgrade.md) for the backup +
+> wipe + reinstall procedure and the `hal0 registry import` recovery
+> command.
+
+As of v0.2, hal0 ships **AMD's Lemonade Server** as the unified
+inference runtime. The installer adds the `lemonade-team/stable`
+PPA, installs system prerequisites (libxrt-npu2, ffmpeg6, boost1.83,
+fftw3, FastFlowLM `.deb` on AMDXDNA NPU hosts), writes
+`/var/lib/hal0/lemonade/config.json` with a computed
+`--parallel 1 --threads N` line, and supervises one `lemond` daemon
+via `hal0-lemonade.service`. The six v0.1.x toolbox container images
+are no longer required, built, or pulled.
 
 ## What the installer does
 
-1. **Pre-flight checks** — confirms Python 3.11–3.14 is on `$PATH`, systemd is present (skipped in `--dev`), and probes for Docker (a soft warning if missing; slot launches will fail until it's installed).
-2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed). The slot template runs the toolbox containers as root by design — the container itself is the sandbox boundary, not the host user. Override with `HAL0_USER=...` if you want a different unit user, but the default is intentional.
-3. **Layout** — creates `/opt/hal0/` (code + venv), `/etc/hal0/{,slots}` (config), `/var/lib/hal0/{models,registry,slots,openwebui,cache}` (state). In `--dev` everything lands under `$PWD/.hal0ai/` instead.
-4. **Installs hal0** — creates a venv at `/opt/hal0/.venv/` and `pip install -e`'s the checkout into it. There is no versioned install dir or `current` symlink yet — the venv tracks the checkout in editable mode.
-5. **Builds the dashboard UI** — runs `npm install && npm run build` in `ui/` if `ui/dist/` is missing and `npm` is available. Skipped (with a warning) when `npm` is absent.
-6. **Config defaults** — writes `/etc/hal0/hal0.toml`, `api.env`, `openwebui.env` (rendered by `hal0.openwebui.env_writer`), and slot skeletons for `primary`, `embed`, `stt`, `tts`. Existing files are **never clobbered** on re-run.
-7. **systemd units** — writes `hal0-api.service`, copies `hal0-openwebui.service` and `hal0-slot@.service` from `packaging/systemd/` to `/etc/systemd/system/`, reloads the daemon, enables and starts `hal0-api` + `hal0-openwebui` (unless `--no-start`).
-8. **Hardware probe + final summary** — prints detected backends and reachable URLs. Skip the probe with `HAL0_NO_PROBE=1`.
+1. **Pre-flight checks** — confirms Python 3.11–3.14 is on `$PATH`, systemd is present (skipped in `--dev`).
+2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed). The `lemond` daemon runs under the `hal0` system user written into `hal0-lemonade.service`. Override with `HAL0_USER=...` if you want a different unit user, but the default is intentional.
+3. **v0.1.x detection** — refuses to overwrite a v0.1.x install (`/etc/hal0/slots/*.toml` present, `/var/lib/hal0/lemonade/config.json` absent). Prints backup + wipe instructions and exits non-zero. See [`docs/v0.2-upgrade.md`](../docs/v0.2-upgrade.md).
+4. **Layout** — creates `/opt/hal0/` (code + venv), `/etc/hal0/` (config), `/var/lib/hal0/{models,registry,lemonade,openwebui,cache}` (state). In `--dev` everything lands under `$PWD/.hal0ai/` instead.
+5. **Lemonade prerequisites** — installs the `lemonade-team/stable` PPA, the Lemonade embeddable tarball pinned in `manifest.json`, system libs (libxrt-npu2, ffmpeg6, boost1.83, fftw3), and (on AMDXDNA NPU hosts) the pinned FastFlowLM `.deb`.
+6. **Installs hal0** — creates a venv at `/opt/hal0/.venv/` and `pip install -e`'s the checkout into it. There is no versioned install dir or `current` symlink yet — the venv tracks the checkout in editable mode.
+7. **Builds the dashboard UI** — runs `npm install && npm run build` in `ui/` if `ui/dist/` is missing and `npm` is available. Skipped (with a warning) when `npm` is absent.
+8. **Config defaults** — writes `/etc/hal0/hal0.toml`, `api.env`, `openwebui.env`, and `/var/lib/hal0/lemonade/config.json` with computed `llamacpp.args = "--parallel 1 --threads N"` (N = `(cores − 2) / 4`, min 2) plus `flm.args = "--asr 1 --embed 1"`. `capabilities.toml` ships empty by design — the first-run dashboard renders the bundle picker. Existing files are **never clobbered** on re-run.
+9. **systemd units** — writes `hal0-api.service`, copies `hal0-lemonade.service` and `hal0-openwebui.service` from `packaging/systemd/` to `/etc/systemd/system/`, reloads the daemon, enables and starts `hal0-api` + `hal0-lemonade` + `hal0-openwebui` (unless `--no-start`).
+10. **Hardware probe + final summary** — prints detected backends, the FLM `.deb` install state (NPU only), and reachable URLs. Skip the probe with `HAL0_NO_PROBE=1`.
 
 The installer is **idempotent** — safe to re-run after a partial failure or to update configuration defaults.
 
-### Pulling toolbox images
+### Lemonade daemon
 
-Toolbox images live under `ghcr.io/hal0ai/hal0-toolbox-*` and are **public**;
-the installer (and `hal0 slot load` at runtime) pull them anonymously. No
-`docker login` is required — even on a hardened LAN box that has never seen
-a GHCR credential.
+The `lemond` process is the only runtime hal0 supervises in v0.2. It
+listens loopback-only on `127.0.0.1:13305`; the hal0-api service on
+8080 fronts external access. The daemon's cache directory at
+`/var/lib/hal0/lemonade/` holds:
 
-The pinned image digests are tracked in [`manifest.json`](../manifest.json)
-and refreshed by `.github/workflows/toolbox.yml` after every build. Run
-`hal0 doctor toolbox-pull` to verify each pinned image is reachable from
-this host (anonymous OCI v2 token-exchange + HEAD on the manifest URL —
-no `docker pull` needed).
+- `config.json` — the persisted daemon config (read by `lemond` on
+  start, written atomically by hal0's `/internal/set` calls).
+- `resources/server_models.json` — generated by `hal0 registry sync`
+  from `/var/lib/hal0/registry/registry.toml`.
+- `user_models.json` — user-pulled models via `POST /v1/pull`.
+
+The pinned Lemonade and FastFlowLM versions are tracked in
+[`manifest.json`](../manifest.json) and refreshed per release. Run
+`hal0 doctor` to verify daemon reachability and (on NPU hosts) FLM
+install state.
 
 ## Environment variables
 
@@ -58,10 +77,8 @@ These are the variables `installer/install.sh` actually reads:
 | `HAL0_PORT` | `8080` | hal0 API port |
 | `HAL0_USER` | `root` | systemd unit user (see §What the installer does) |
 | `HAL0_PYTHON` | `python3` | Python interpreter used to build the venv |
-| `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where HuggingFace pulls land; same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
+| `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where model pulls land (Lemonade's `extra_models_dir`); same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
-| `HAL0_TOOLBOX_IMAGE_VULKAN` | _(unset)_ | Override the Vulkan toolbox image ref written into `api.env` |
-| `HAL0_TOOLBOX_IMAGE_ROCM` | _(unset)_ | Override the ROCm toolbox image ref written into `api.env` |
 | `HAL0_PUBLIC_HOST` | `hal0.local` | Public hostname rendered into the Caddyfile (TLS default install path) |
 | `HAL0_TLS_EMAIL` | `admin@$HAL0_PUBLIC_HOST` | Contact email for Let's Encrypt (when not `tls internal`) |
 | `HAL0_OPENWEBUI_PORT` † | `3001` | OpenWebUI host port — **dev mode only** |
@@ -190,17 +207,11 @@ Use `scripts/dev-bootstrap.sh` to actually start services during development.
 
 ### `--dev` mode limitations
 
-`--dev` is a contributor convenience, not a runtime path. The installer writes the same systemd units (`hal0-api.service`, `hal0-slot@.service`, `hal0-openwebui.service`) into the dev tree, but it does **not** register them with the host's systemd. Concretely:
+`--dev` is a contributor convenience, not a runtime path. The installer writes the same systemd units (`hal0-api.service`, `hal0-lemonade.service`, `hal0-openwebui.service`) into the dev tree, but it does **not** register them with the host's systemd. Concretely:
 
 - Units land in `$PWD/.hal0ai/etc/systemd/system/`.
 - The host's `systemctl` only searches `/etc/systemd/system/` and `/usr/lib/systemd/system/`, so it cannot see them.
-- Any flow that ends in `systemctl start hal0-slot@<name>` will fail with:
-
-  ```
-  Failed to start hal0-slot@primary.service: Unit hal0-slot@primary.service not found.
-  ```
-
-  In particular, `hal0 slot create && hal0 slot load` cannot bring a slot up in `--dev`.
+- Any flow that ends in `systemctl start hal0-lemonade` will fail with `Unit hal0-lemonade.service not found.` In particular, `hal0 slot add` + `hal0 model pull` requests routed through the capability dispatcher will fail because there is no `lemond` daemon for the dispatcher to call.
 
 Two ways to resolve this, depending on what you're trying to do:
 
@@ -210,20 +221,20 @@ Two ways to resolve this, depending on what you're trying to do:
    sudo bash installer/install.sh
    ```
 
-   Real install puts units under `/etc/systemd/system/`, runs `systemctl daemon-reload`, and `hal0 slot load` works end-to-end.
+   Real install puts units under `/etc/systemd/system/`, runs `systemctl daemon-reload`, and the full Lemonade pipeline works end-to-end.
 
 2. **Or link the dev units into the system search path.** Keeps the dev tree as the source of truth, but tells the host systemd where to find the units:
 
    ```sh
-   sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-slot@.service"
+   sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-lemonade.service"
    sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-api.service"
    sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-openwebui.service"
    sudo systemctl daemon-reload
    ```
 
-   After that, `hal0 slot create && hal0 slot load` works against the dev tree. Edits to the linked unit files take effect after another `systemctl daemon-reload`.
+   After that, slot operations work against the dev tree. Edits to the linked unit files take effect after another `systemctl daemon-reload`.
 
-The installer prints the same warning block at the end of every `--dev` run as a reminder. Tracked under harness finding #6 / task #24.
+The installer prints the same warning block at the end of every `--dev` run as a reminder.
 
 ## Uninstall
 
@@ -255,28 +266,36 @@ HAL0_PORT=8090 sudo bash installer/install.sh
 
 After changing the port, update `/etc/hal0/api.env` and `/etc/hal0/openwebui.env` to match, then `systemctl restart hal0-api hal0-openwebui`.
 
-### Docker not installed
+### Lemonade daemon not reachable
 
 ```
-✗ pre-flight failed: docker not installed.
+hal0 doctor: lemond unreachable on 127.0.0.1:13305
 ```
 
-Install Docker:
+Check the unit:
 
 ```sh
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-newgrp docker
+systemctl status hal0-lemonade
+journalctl -fu hal0-lemonade
 ```
 
-### Docker daemon not accessible
+Common causes: the Lemonade prerequisites failed to install (re-run
+`installer/install.sh`), `llamacpp.args` was hand-edited to an
+unbounded value and the daemon crashed on first multi-LLM load (revert
+to `--parallel 1 --threads N`; see `hal0_lemonade_threads_deadlock`
+memory), or a port conflict on 13305 (override via
+`/var/lib/hal0/lemonade/config.json` `port` key).
+
+### FLM .deb missing (NPU host only)
 
 ```
-✗ pre-flight failed: docker daemon not running or not accessible.
+hal0 doctor: AMDXDNA NPU detected but FastFlowLM not installed
 ```
 
-Start the daemon: `sudo systemctl start docker`  
-Or add your user to the docker group and re-login.
+The Lemonade `flm:npu` recipe needs the FastFlowLM `.deb` package.
+The installer handles this automatically on AMDXDNA hosts, but if you
+installed on a non-NPU host and later added the hardware, re-run
+`installer/install.sh` to pick up the FLM prerequisites.
 
 ### Not enough disk space
 
@@ -299,8 +318,9 @@ Check logs:
 
 ```sh
 journalctl -fu hal0-api
+journalctl -fu hal0-lemonade
 journalctl -fu hal0-openwebui
-systemctl status hal0-api hal0-openwebui
+systemctl status hal0-api hal0-lemonade hal0-openwebui
 ```
 
 ### OpenWebUI can't reach the API
