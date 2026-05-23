@@ -32,14 +32,33 @@ const DEFAULTS = Object.freeze({
   // Dashboard / view (slice #169)
   chatVariant: 'active',      // 'active' | 'empty'
   heroVariant: 'returning',   // 'returning' | 'post-install' | 'skip-path-empty'
+  // ── User-facing appearance knobs (slice #173, Settings → Appearance).
+  // Persist even in non-DEV builds because they're real preferences the
+  // operator changes, not a designer-only knob. Persistence is gated
+  // separately in `persist()` below.
+  theme: 'dark',              // 'dark' (only option for v0.2; v0.3 adds light/auto)
+  density: 'comfortable',     // 'compact' | 'comfortable' | 'spacious'
 })
 
+// Appearance keys (theme + density) persist in PROD too — they're real
+// user preferences, not designer knobs. Everything else is dev-only.
+const APPEARANCE_KEYS = ['theme', 'density']
+
 function loadPersisted() {
-  if (!IS_DEV) return { ...DEFAULTS }
   try {
     const raw = localStorage.getItem(LS_KEY)
     if (!raw) return { ...DEFAULTS }
     const parsed = JSON.parse(raw)
+    if (!IS_DEV) {
+      // In prod, only re-hydrate appearance keys; designer-only knobs
+      // stay at their DEFAULTS so accidentally-persisted dev state from
+      // an earlier build doesn't leak into the operator's view.
+      const out = { ...DEFAULTS }
+      for (const k of APPEARANCE_KEYS) {
+        if (parsed[k] !== undefined) out[k] = parsed[k]
+      }
+      return out
+    }
     return { ...DEFAULTS, ...parsed }
   } catch {
     return { ...DEFAULTS }
@@ -47,11 +66,17 @@ function loadPersisted() {
 }
 
 function persist(state) {
-  if (!IS_DEV) return
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify(state))
+    if (IS_DEV) {
+      localStorage.setItem(LS_KEY, JSON.stringify(state))
+      return
+    }
+    // Prod — persist appearance only.
+    const subset = {}
+    for (const k of APPEARANCE_KEYS) subset[k] = state[k]
+    localStorage.setItem(LS_KEY, JSON.stringify(subset))
   } catch {
-    // localStorage quota / disabled — silently ignore in dev.
+    // localStorage quota / disabled — silently ignore.
   }
 }
 
@@ -67,6 +92,9 @@ export const useTweaksStore = defineStore('tweaks', () => {
   // Slice #169 — dashboard variants (chat surface + hero strip flavour)
   const chatVariant       = ref(initial.chatVariant)
   const heroVariant       = ref(initial.heroVariant)
+  // Slice #173 — Settings → Appearance
+  const theme             = ref(initial.theme)
+  const density           = ref(initial.density)
 
   function snapshot() {
     return {
@@ -78,12 +106,14 @@ export const useTweaksStore = defineStore('tweaks', () => {
       personaPlacement: personaPlacement.value,
       chatVariant: chatVariant.value,
       heroVariant: heroVariant.value,
+      theme: theme.value,
+      density: density.value,
     }
   }
 
   // Persist on any change — cheap enough for dev-only overlay.
   watch(
-    [slotCardVariant, npuVariant, heroStrip, composerState, firstrunLayout, personaPlacement, chatVariant, heroVariant],
+    [slotCardVariant, npuVariant, heroStrip, composerState, firstrunLayout, personaPlacement, chatVariant, heroVariant, theme, density],
     () => persist(snapshot()),
   )
 
@@ -96,6 +126,8 @@ export const useTweaksStore = defineStore('tweaks', () => {
     personaPlacement.value = DEFAULTS.personaPlacement
     chatVariant.value      = DEFAULTS.chatVariant
     heroVariant.value      = DEFAULTS.heroVariant
+    theme.value            = DEFAULTS.theme
+    density.value          = DEFAULTS.density
   }
 
   return {
@@ -103,6 +135,7 @@ export const useTweaksStore = defineStore('tweaks', () => {
     slotCardVariant, npuVariant, heroStrip, composerState,
     firstrunLayout, personaPlacement,
     chatVariant, heroVariant,
+    theme, density,
     // actions
     snapshot, reset,
     // constants
