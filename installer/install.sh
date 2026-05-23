@@ -432,61 +432,11 @@ if [[ ! -f "${API_ENV}" ]]; then
     cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
-# Auth is **on by default** as of v1.0 (security review §36). The wizard
-# captures the owner password on first visit; until then, only the wizard
-# claim paths (/api/install/*, /api/auth/password) are reachable without
-# credentials. Set HAL0_AUTH_DISABLED=1 to opt back into the pre-v1
-# trusted-LAN open posture — only safe on single-user dev boxes.
-# HAL0_AUTH_DISABLED=1
 # Uncomment to pin specific toolbox images:
 # HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0ai/hal0-toolbox-vulkan:v1
 # HAL0_TOOLBOX_IMAGE_ROCM=ghcr.io/hal0ai/hal0-toolbox-rocm:v1
 EOF
     info "wrote ${API_ENV}"
-fi
-
-# ── First-run claim lockfile ─────────────────────────────────────────
-# Per security review §36 (auth-on-by-default) + §28 (first-run claim
-# race), drop a one-time-password lockfile that scopes the
-# unauthenticated wizard window to operators who can read this file on
-# disk. The middleware honours the lockfile only while the owner
-# password is unset; once the wizard finishes, the file is deleted.
-#
-# The OTP is a UUID hex (128 bits, plenty for a one-shot bootstrap).
-# Owner = the API service user (root in the v1 install layout — see
-# HAL0_USER above). Mode 0600 so neighbours on the host cannot read
-# the value out of band. The summary box surfaces it once at the end
-# of the install for the operator to type into the wizard's first
-# prompt.
-FIRST_RUN_LOCK="${VAR_DIR}/.first-run.lock"
-FIRST_RUN_OTP=""
-if [[ ! -f "${FIRST_RUN_LOCK}" ]]; then
-    # Mint a UUID OTP. ``uuidgen`` lives in util-linux on every host
-    # we ship to; falling back to ``/proc/sys/kernel/random/uuid``
-    # keeps minimal containers (no util-linux) working.
-    if command -v uuidgen >/dev/null 2>&1; then
-        FIRST_RUN_OTP="$(uuidgen | tr -d '-' | tr 'A-Z' 'a-z')"
-    elif [[ -r /proc/sys/kernel/random/uuid ]]; then
-        FIRST_RUN_OTP="$(tr -d '-' </proc/sys/kernel/random/uuid)"
-    else
-        FIRST_RUN_OTP="$(${PY} -c 'import uuid; print(uuid.uuid4().hex)')"
-    fi
-    # Write atomically: temp file in the same directory + rename, so a
-    # crash mid-write doesn't leave a half-empty lockfile with the wrong
-    # mode. ``install -m 0600`` would also set ownership, but we just
-    # need mode here — the service user owns ${VAR_DIR} already.
-    LOCK_TMP="$(mktemp "${FIRST_RUN_LOCK}.XXXXXX")"
-    printf 'otp=%s\n' "${FIRST_RUN_OTP}" > "${LOCK_TMP}"
-    chmod 0600 "${LOCK_TMP}"
-    mv "${LOCK_TMP}" "${FIRST_RUN_LOCK}"
-    info "wrote ${FIRST_RUN_LOCK} (first-run claim OTP, mode 0600)"
-else
-    # Idempotent rerun: keep the existing OTP in place so a re-run
-    # doesn't invalidate a token the operator already noted from a
-    # prior install attempt. Parse out the value to redisplay in the
-    # summary box.
-    FIRST_RUN_OTP="$(awk -F= '$1=="otp"{print $2; exit}' "${FIRST_RUN_LOCK}" 2>/dev/null || true)"
-    info "${FIRST_RUN_LOCK} already exists — reusing existing OTP"
 fi
 
 UPSTREAMS_TOML="${ETC_DIR}/upstreams.toml"
@@ -1333,24 +1283,9 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
         "$(printf 'Dashboard   %shttp://%s:%s%s' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}")"
         "$(printf 'Chat        %shttp://%s:3001%s' "${BLU}" "${HOST}" "${RST}")"
         "$(printf 'TLS         %supstream-only (front with Traefik / nginx / Cloudflare Tunnel)%s' "${DIM}" "${RST}")"
-        "$(printf 'Auth        %slocked — finish first-run wizard to set a password%s' "${DIM}" "${RST}")"
+        "$(printf 'Auth        %sopen on the trusted LAN — front with a reverse proxy if exposed%s' "${DIM}" "${RST}")"
         "$(printf 'Logs        %sjournalctl -fu hal0-api%s' "${DIM}" "${RST}")"
     )
-
-    # First-run claim OTP. The wizard's "Set a password" step asks for
-    # this verbatim; it proves the operator can read root-owned files
-    # on the host and prevents a LAN attacker from racing in to claim
-    # ownership before the legitimate operator opens the dashboard.
-    # The lockfile is auto-deleted once the password is set.
-    if [[ -n "${FIRST_RUN_OTP:-}" ]]; then
-        SUMMARY_LINES+=(
-            ""
-            "$(printf '%sFirst-run OTP:%s' "${BOLD}" "${RST}")"
-            "$(printf '  %s%s%s' "${AMBER}" "${FIRST_RUN_OTP}" "${RST}")"
-            "$(printf '  %spaste this into the wizard to claim ownership.%s' "${DIM}" "${RST}")"
-            "$(printf '  %slockfile: %s%s' "${DIM}" "${FIRST_RUN_LOCK}" "${RST}")"
-        )
-    fi
 fi
 
 # Reachability list — only shown when we have entries beyond the
@@ -1375,49 +1310,6 @@ SUMMARY_LINES+=(
     "$(printf '  %shal0 model list%s     list known models' "${BOLD}" "${RST}")"
     "$(printf '  %shal0 config show%s    inspect %s/hal0.toml' "${BOLD}" "${RST}" "${ETC_DIR}")"
 )
-
-# First-run OTP banner (FINDINGS §28). The API mints a one-time token
-# at ``${VAR_DIR}/.first-run.lock`` whenever the owner password is
-# unset. Operators reaching the dashboard from a non-loopback host
-# (browser on a laptop hitting hal0.local) need to paste this token
-# into the wizard's password step. Loopback callers (a curl on the
-# host itself) bypass the gate, so a local install with `curl
-# http://127.0.0.1:8080/api/auth/password ...` still works without
-# the token.
-#
-# The lockfile may not exist yet (the API is still starting; the file
-# is created in the lifespan hook). We poll briefly and surface the
-# token when it lands, otherwise fall back to a "find it at <path>"
-# hint so the operator knows where to look.
-if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
-    FIRST_RUN_LOCK="${VAR_DIR}/.first-run.lock"
-    FIRST_RUN_OTP=""
-    for _attempt in 1 2 3 4 5; do
-        if [[ -r "${FIRST_RUN_LOCK}" ]]; then
-            # Lockfile is JSON {"otp": "...", "created_at": N}. Use
-            # grep + sed rather than depending on jq being installed —
-            # the installer cannot assume jq is on the host.
-            FIRST_RUN_OTP="$(sed -nE 's/.*"otp"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "${FIRST_RUN_LOCK}" 2>/dev/null || true)"
-            [[ -n "${FIRST_RUN_OTP}" ]] && break
-        fi
-        sleep 1
-    done
-
-    SUMMARY_LINES+=(
-        ""
-        "$(printf '%sFirst-run setup token:%s' "${BOLD}" "${RST}")"
-    )
-    if [[ -n "${FIRST_RUN_OTP}" ]]; then
-        SUMMARY_LINES+=(
-            "$(printf '  %s%s%s' "${BLU}" "${FIRST_RUN_OTP}" "${RST}")"
-            "$(printf '  %sPaste into the wizard password step. Loopback callers (curl on this host) bypass it.%s' "${DIM}" "${RST}")"
-        )
-    else
-        SUMMARY_LINES+=(
-            "$(printf '  %s(API still starting — read it from %s once available)%s' "${DIM}" "${FIRST_RUN_LOCK}" "${RST}")"
-        )
-    fi
-fi
 
 # --dev mode caveat — systemd units were written into the dev tree, not
 # /etc/systemd/system, so the host's systemctl does not see them. The
