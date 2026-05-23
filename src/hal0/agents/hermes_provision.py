@@ -1542,8 +1542,255 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
     )
 
 
-_phase_smoke_tests = _stub("smoke_tests")
-_phase_self_report = _stub("self_report")
+# ── Phase K: smoke_tests ────────────────────────────────────────────────────
+#
+# Six non-fatal probes per plan §14 + #246. Each surface check writes a
+# `passed: bool` row into PhaseResult.details["results"]; failures
+# also carry a remediation hint operators can paste at the user.
+#
+# The phase status is OK even with failures — smoke_tests are
+# diagnostic, not gating. self_report surfaces the rollup in the
+# bootstrap-completion memory item.
+
+
+def _wrapper_bin() -> Path:
+    return WRAPPER_INSTALL_PATH
+
+
+def _smoke_chat_completions(state: BootstrapState) -> tuple[bool, str]:
+    """POST against model.base_url/chat/completions; assert 'ready' in reply.
+
+    Reads the live config.yaml so we hit whatever model_automap left
+    behind, not a hardcoded URL.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    config_path = Path(state.hermes_home) / "config.yaml"
+    if not config_path.exists():
+        return (False, "config.yaml missing — bootstrap incomplete")
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return (False, f"config parse: {exc}")
+    base_url = (cfg.get("model") or {}).get("base_url", "")
+    if not base_url:
+        return (False, "model.base_url unset in config.yaml")
+    body = json.dumps({"messages": [{"role": "user", "content": "Reply with 'ready'"}]}).encode(
+        "utf-8"
+    )
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    req = Request(
+        f"{base_url.rstrip('/')}/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=10.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
+        return (False, f"chat/completions: {exc}")
+    try:
+        msg = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return (False, "response missing choices[0].message.content")
+    return ("ready" in msg.lower(), msg[:120])
+
+
+def _smoke_memory_roundtrip(state: BootstrapState) -> tuple[bool, str]:
+    add = _mcp_memory_call(
+        "tools/call",
+        {
+            "name": "memory_add",
+            "arguments": {
+                "text": "hal0 smoke-test marker",
+                "tags": ["smoke-test"],
+                "dataset": f"private:{state.agent_id}",
+            },
+        },
+        agent_id=state.agent_id,
+        private=True,
+    )
+    if not add["ok"]:
+        return (False, f"memory_add: {add['error']}")
+    search = _mcp_memory_call(
+        "tools/call",
+        {
+            "name": "memory_search",
+            "arguments": {
+                "query": "smoke-test marker",
+                "tags": ["smoke-test"],
+                "dataset": f"private:{state.agent_id}",
+                "limit": 5,
+            },
+        },
+        agent_id=state.agent_id,
+        private=True,
+    )
+    if not search["ok"]:
+        return (False, f"memory_search: {search['error']}")
+    items = (search["result"] or {}).get("items") if isinstance(search["result"], dict) else []
+    if items:
+        return (True, f"{len(items)} item(s) returned")
+    return (False, "memory_search returned no items for just-written marker")
+
+
+def _smoke_admin_tools_list(state: BootstrapState) -> tuple[bool, str]:
+    probe = _probe_mcp_server(
+        "http://127.0.0.1:8080/mcp/admin",
+        agent_id=state.agent_id,
+        private=False,
+    )
+    if not probe["ok"]:
+        return (False, probe["error"] or "unreachable")
+    n = len(probe["tools"])
+    return (n >= 5, f"{n} tools advertised")
+
+
+def _smoke_hermes_md_contains_primary(state: BootstrapState) -> tuple[bool, str]:
+    hermes_md = ETC_HAL0_DIR / "HERMES.md"
+    if not hermes_md.exists():
+        return (False, f"{hermes_md} not present")
+    config = Path(state.hermes_home) / "config.yaml"
+    if not config.exists():
+        return (False, "config.yaml missing")
+    import yaml  # type: ignore[import-untyped]
+
+    try:
+        cfg = yaml.safe_load(config.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return (False, f"config parse: {exc}")
+    primary = (cfg.get("model") or {}).get("default", "")
+    if not primary:
+        return (True, "no primary configured; skipping content check")
+    body = hermes_md.read_text(encoding="utf-8")
+    return (
+        primary in body,
+        f"primary='{primary}' {'in' if primary in body else 'missing from'} HERMES.md",
+    )
+
+
+def _smoke_wrapper_ready(_state: BootstrapState) -> tuple[bool, str]:
+    wrapper = _wrapper_bin()
+    if not wrapper.exists():
+        return (False, f"wrapper missing at {wrapper}")
+    try:
+        result = subprocess.run(  # nosec B603 — known-safe argv
+            [str(wrapper), "--hal0-ready"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (False, f"wrapper exec: {exc}")
+    return (result.returncode == 0, f"--hal0-ready rc={result.returncode}")
+
+
+def _smoke_hermes_doctor(_state: BootstrapState) -> tuple[bool, str]:
+    venv_hermes = _venv_python(Path(_state.venv)).parent / "hermes"
+    if not venv_hermes.exists():
+        return (False, f"hermes binary missing at {venv_hermes}")
+    try:
+        result = subprocess.run(  # nosec B603 — known-safe argv
+            [str(venv_hermes), "doctor"],
+            check=False,
+            capture_output=True,
+            timeout=30,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (False, f"hermes doctor: {exc}")
+    return (result.returncode == 0, f"rc={result.returncode}")
+
+
+def _phase_smoke_tests(state: BootstrapState) -> PhaseResult:
+    """Run six diagnostic probes; collect results into the checkpoint."""
+    probes = [
+        ("wrapper_ready", _smoke_wrapper_ready),
+        ("hermes_doctor", _smoke_hermes_doctor),
+        ("chat_completions", _smoke_chat_completions),
+        ("memory_roundtrip", _smoke_memory_roundtrip),
+        ("admin_tools_list", _smoke_admin_tools_list),
+        ("hermes_md_contains_primary", _smoke_hermes_md_contains_primary),
+    ]
+    results: dict[str, dict[str, Any]] = {}
+    failures: list[str] = []
+    for name, fn in probes:
+        try:
+            passed, detail = fn(state)
+        except Exception as exc:
+            passed, detail = (False, f"{type(exc).__name__}: {exc}")
+        results[name] = {"passed": passed, "detail": detail}
+        if not passed:
+            failures.append(f"{name}: {detail}")
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={"results": results, "failures": failures},
+    )
+
+
+# ── Phase L: self_report ────────────────────────────────────────────────────
+#
+# Final summary memory item under private:<agent_id> — first thing
+# the agent recalls on next session start. Includes the smoke-test
+# rollup so a degraded install surfaces in chat.
+
+
+def _phase_self_report(state: BootstrapState) -> PhaseResult:
+    """Write a bootstrap-completion summary into the agent's private namespace.
+
+    Failure of the memory write is non-fatal — same posture as
+    namespace_register (#243): the memory layer being unavailable
+    shouldn't fail bootstrap.
+    """
+    smoke = (state.phases.get("smoke_tests") or {}).get("details") or {}
+    smoke_failures = smoke.get("failures") or []
+    primary_alias = ""
+    config_path = Path(state.hermes_home) / "config.yaml"
+    if config_path.exists():
+        try:
+            import yaml  # type: ignore[import-untyped]
+
+            cfg = yaml.safe_load(config_path.read_text()) or {}
+            primary_alias = (cfg.get("model") or {}).get("default", "")
+        except (OSError, Exception):
+            pass
+
+    text = (
+        f"Hermes-Agent bootstrap completed. Pinned to "
+        f"hermes-agent {_hermes_version_pin()} on hal0 {_hal0_version_string()}. "
+        f"Primary model: {primary_alias or 'unwired'}. "
+        f"Smoke failures: {len(smoke_failures)}."
+    )
+    add = _mcp_memory_call(
+        "tools/call",
+        {
+            "name": "memory_add",
+            "arguments": {
+                "text": text,
+                "tags": ["bootstrap", "self-report"],
+                "dataset": f"private:{state.agent_id}",
+                "metadata": {
+                    "bootstrap_version": 1,
+                    "smoke_failures": smoke_failures,
+                    "completed_at": _utcnow(),
+                },
+            },
+        },
+        agent_id=state.agent_id,
+        private=True,
+    )
+    if not add["ok"]:
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            details={"published": False, "warning": add["error"]},
+        )
+    summary_id = None
+    if isinstance(add["result"], dict):
+        summary_id = add["result"].get("id")
+    return PhaseResult(status=PhaseStatus.OK, details={"published": True, "summary_id": summary_id})
 
 
 PHASES: list[tuple[str, Callable[[BootstrapState], PhaseResult]]] = [
