@@ -836,7 +836,183 @@ def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
 
 
 _phase_context_link = _stub("context_link")
-_phase_namespace_register = _stub("namespace_register")
+
+
+# ── Phase H: namespace_register ─────────────────────────────────────────────
+#
+# Writes the Hermes-Agent identity card to the `agents` Cognee dataset
+# (ADR-0011). Card is immutable post-write — re-bootstrap deletes the
+# existing card and writes a fresh one to refresh metadata (the only
+# legitimate post-install write). On hal0-memory failure, log + continue
+# (per #243 sharpening + ADR-0013); the card is nice-to-have and
+# bootstrap MUST NOT fail because the peer registry is down.
+
+
+AGENT_IDENTITY_TAG = "agent-identity"
+AGENTS_DATASET = "agents"
+
+
+def _hermes_version_pin() -> str:
+    req = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
+    try:
+        for line in req.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("hermes-agent=="):
+                return line.split("==", 1)[1].split("#", 1)[0].strip()
+    except OSError:
+        pass
+    return "unknown"
+
+
+def _hal0_version_string() -> str:
+    try:
+        from hal0 import __version__
+
+        return __version__
+    except (ImportError, AttributeError):
+        return "unknown"
+
+
+def _build_identity_card(state: BootstrapState) -> dict[str, Any]:
+    """Schema v1 per ADR-0011 §4. Text + structured metadata."""
+    return {
+        "text": (
+            "I am Hermes, the hal0 admin agent. I have read/write access to the slot "
+            "lifecycle and the memory store on this host. I can do generalist chat and "
+            "code review on the LAN."
+        ),
+        "tags": [AGENT_IDENTITY_TAG, "hermes"],
+        "dataset": AGENTS_DATASET,
+        "metadata": {
+            "agent_id": state.agent_id,
+            "display_name": "Hermes (hal0 admin)",
+            "namespace": f"private:{state.agent_id}",
+            "roles": ["homelab-admin", "generalist-chat", "memory-curator"],
+            "endpoint": {
+                "type": "mcp-serve",
+                "url": "http://127.0.0.1:8081/mcp",
+                "transport": "streamable-http",
+            },
+            "delegation": {
+                "accepts_tasks_from": ["claude-code", "pi-coder", "user"],
+                "max_concurrent": 3,
+            },
+            "hal0_state": {
+                "registered_at": _utcnow(),
+                "bootstrap_version": 1,
+                "hal0_version": _hal0_version_string(),
+                "hermes_version": _hermes_version_pin(),
+            },
+        },
+    }
+
+
+def _mcp_memory_call(
+    method: str,
+    params: dict[str, Any],
+    *,
+    agent_id: str,
+    base_url: str = "http://127.0.0.1:8080/mcp/memory",
+    timeout: float = 5.0,
+    private: bool = False,
+) -> dict[str, Any]:
+    """JSON-RPC POST to the hal0-memory MCP server. Stdlib transport."""
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(
+        "utf-8"
+    )
+    headers = {"Content-Type": "application/json", "X-hal0-Agent": agent_id}
+    if private:
+        headers["X-hal0-Private"] = "1"
+    req = Request(base_url, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "result": data.get("result")}
+
+
+def _phase_namespace_register(state: BootstrapState) -> PhaseResult:
+    """Write the Hermes identity card to the `agents` Cognee dataset.
+
+    Idempotency: search for an existing card by ``agent_id`` first;
+    if present, delete it before writing the fresh one (cards are
+    immutable per ADR-0011 §2, but bootstrap rewrites refresh the
+    snapshot of hal0_version + hermes_version).
+
+    Failure mode: any MCP transport error logs + returns OK with a
+    warning. Bootstrap MUST NOT block on registry unavailability.
+    """
+    card = _build_identity_card(state)
+    warnings: list[str] = []
+
+    # Look up existing card so re-bootstrap doesn't accumulate duplicates.
+    search = _mcp_memory_call(
+        "tools/call",
+        {
+            "name": "memory_search",
+            "arguments": {
+                "query": state.agent_id,
+                "tags": [AGENT_IDENTITY_TAG],
+                "dataset": AGENTS_DATASET,
+                "limit": 50,
+            },
+        },
+        agent_id=state.agent_id,
+    )
+    existing_ids: list[str] = []
+    if search["ok"] and isinstance(search["result"], dict):
+        items = search["result"].get("items") or []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            md = item.get("metadata") or {}
+            if md.get("agent_id") == state.agent_id and item.get("id"):
+                existing_ids.append(item["id"])
+    elif not search["ok"]:
+        warnings.append(f"memory_search: {search['error']}")
+
+    if existing_ids:
+        deleted = _mcp_memory_call(
+            "tools/call",
+            {"name": "memory_delete", "arguments": {"ids": existing_ids}},
+            agent_id=state.agent_id,
+        )
+        if not deleted["ok"]:
+            warnings.append(f"memory_delete: {deleted['error']}")
+
+    add = _mcp_memory_call(
+        "tools/call",
+        {"name": "memory_add", "arguments": card},
+        agent_id=state.agent_id,
+    )
+    if not add["ok"]:
+        # Bootstrap continues — the card is nice-to-have, not a blocker.
+        warnings.append(f"memory_add: {add['error']}")
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            details={"registered": False, "warnings": warnings, "card": card},
+            reason="hal0-memory unreachable; identity card not registered (continuing)",
+        )
+
+    memory_id = None
+    if isinstance(add["result"], dict):
+        memory_id = add["result"].get("id")
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            "registered": True,
+            "memory_id": memory_id,
+            "card": card,
+            "warnings": warnings,
+            "refreshed_existing": bool(existing_ids),
+        },
+    )
+
+
 _phase_model_automap = _stub("model_automap")
 _phase_voice_wire = _stub("voice_wire")
 _phase_smoke_tests = _stub("smoke_tests")

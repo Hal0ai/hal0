@@ -579,6 +579,90 @@ def test_mcp_wire_phase_degrades_not_fails_on_unreachable_server(
     assert "connection refused" in out.details["warnings"][0]
 
 
+# ── #243 phase impl — namespace_register + identity card schema ─────────────
+
+
+def test_build_identity_card_matches_schema_v1() -> None:
+    state = hp.BootstrapState(agent_id="hermes-agent")
+    card = hp._build_identity_card(state)
+    assert card["dataset"] == hp.AGENTS_DATASET
+    assert hp.AGENT_IDENTITY_TAG in card["tags"]
+    md = card["metadata"]
+    # Required fields per ADR-0011 §4.
+    for required in ("agent_id", "display_name", "namespace", "hal0_state"):
+        assert required in md, f"required field missing: {required}"
+    assert md["namespace"] == "private:hermes-agent"
+    assert md["hal0_state"]["bootstrap_version"] == 1
+    assert md["hal0_state"]["registered_at"]
+
+
+def test_namespace_register_registers_card_on_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = hp.BootstrapState()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _fake_mcp(method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        calls.append((method, params))
+        name = params.get("name")
+        if name == "memory_search":
+            return {"ok": True, "result": {"items": []}}
+        if name == "memory_add":
+            return {"ok": True, "result": {"id": "mem_abc"}}
+        return {"ok": True, "result": {}}
+
+    monkeypatch.setattr(hp, "_mcp_memory_call", _fake_mcp)
+    out = hp._phase_namespace_register(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["registered"] is True
+    assert out.details["memory_id"] == "mem_abc"
+    # First call is the search; second is the add.
+    assert any(p[1]["name"] == "memory_search" for p in calls)
+    assert any(p[1]["name"] == "memory_add" for p in calls)
+
+
+def test_namespace_register_refreshes_existing_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = hp.BootstrapState()
+
+    def _fake_mcp(method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        name = params.get("name")
+        if name == "memory_search":
+            return {
+                "ok": True,
+                "result": {
+                    "items": [{"id": "old_mem_id", "metadata": {"agent_id": "hermes-agent"}}]
+                },
+            }
+        if name == "memory_delete":
+            return {"ok": True, "result": {"deleted": 1}}
+        if name == "memory_add":
+            return {"ok": True, "result": {"id": "new_mem_id"}}
+        return {"ok": True, "result": {}}
+
+    monkeypatch.setattr(hp, "_mcp_memory_call", _fake_mcp)
+    out = hp._phase_namespace_register(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["refreshed_existing"] is True
+
+
+def test_namespace_register_continues_on_mcp_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0013: registry failure logs + continues; bootstrap doesn't block."""
+    state = hp.BootstrapState()
+    monkeypatch.setattr(
+        hp,
+        "_mcp_memory_call",
+        lambda *a, **kw: {"ok": False, "error": "connection refused"},
+    )
+    out = hp._phase_namespace_register(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["registered"] is False
+    assert any("memory_add" in w for w in out.details["warnings"])
+
+
 def test_mcp_wire_phase_skips_server_not_in_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

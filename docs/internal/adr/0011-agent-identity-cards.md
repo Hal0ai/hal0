@@ -1,6 +1,6 @@
 # ADR 0011 — Agent identity cards (Phase 8, v0.3)
 
-- **Status:** Draft
+- **Status:** Accepted (2026-05-23, post-implementation review for #243)
 - **Date:** 2026-05-23
 - **Drivers:** `/grill-me` session 2026-05-23 against `docs/internal/hermes-bootstrap-plan-2026-05-23.md`; bundled Hermes agent v0.3 needs to publish itself + discover peers
 - **Implementing PRs:** PR-1 (this ADR + new MCP admin tools) per the bootstrap plan §23
@@ -153,9 +153,14 @@ The convention is agent-agnostic. When the pi-coder bootstrap lands
 (Phase 8 follow-up after Hermes), it writes its own card under the same
 schema. Same for any future bundled or aftermarket agent.
 
-The hal0 CLI ships a `hal0 agent list` command in v0.3 that
+The hal0 CLI ships a `hal0 agent peers` command in v0.3 that
 enumerates identity cards (a thin wrapper over the `memory_search`
-call shown above).
+call shown above). The `peers` name avoids collision with the
+pre-existing `hal0 agent list` (which lists locally-installed bundled
+agents per v0.2's `AgentManager.list()` contract). The two surfaces
+are complementary: `list` shows what's bundled on this host;
+`peers` shows what's discoverable in the shared Cognee `agents`
+dataset.
 
 ## Consequences
 

@@ -257,6 +257,83 @@ def approvals_deny(
 # ── Bootstrap (Hermes provisioning, Phase 10) ────────────────────────────────
 
 
+@app.command("peers")
+def agent_peers() -> None:
+    """List discoverable agent identity cards (ADR-0011 §6).
+
+    Thin wrapper over ``memory_search`` against the dedicated
+    ``agents`` Cognee dataset. Sibling of ``hal0 agent list`` (which
+    shows installed bundled agents on this host); ``peers`` shows
+    every card published into the federated registry.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+
+    body = _json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_search",
+                "arguments": {
+                    "query": "agent identity",
+                    "tags": ["agent-identity"],
+                    "dataset": "agents",
+                    "limit": 50,
+                },
+            },
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"{url}/mcp/memory",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-hal0-Agent": "hal0-cli",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, _json.JSONDecodeError) as exc:
+        die(f"memory MCP unreachable: {exc}")
+        return
+
+    items = []
+    result = data.get("result") if isinstance(data, dict) else None
+    if isinstance(result, dict):
+        items = result.get("items") or []
+    if not items:
+        console.print("[dim]No agent identity cards published yet.[/dim]")
+        return
+
+    table = Table(title=f"Agent peers ({len(items)})")
+    table.add_column("Agent ID", style="bold")
+    table.add_column("Display name")
+    table.add_column("Roles")
+    table.add_column("Endpoint")
+    table.add_column("Registered")
+    for item in items:
+        md = item.get("metadata") or {} if isinstance(item, dict) else {}
+        endpoint = md.get("endpoint") or {}
+        hal0_state = md.get("hal0_state") or {}
+        table.add_row(
+            str(md.get("agent_id") or "—"),
+            str(md.get("display_name") or "—"),
+            ", ".join(md.get("roles") or []) or "—",
+            str(endpoint.get("url") or "—"),
+            str(hal0_state.get("registered_at") or "—"),
+        )
+    console.print(table)
+
+
 @bootstrap_app.command("hermes")
 def bootstrap_hermes(
     repair: bool = typer.Option(
