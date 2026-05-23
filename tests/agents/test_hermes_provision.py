@@ -862,3 +862,91 @@ def test_voice_wire_skips_when_no_voice_slot(
     monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
     out = hp._phase_voice_wire(state)
     assert out.status == hp.PhaseStatus.SKIP
+
+
+# ── #246 phase impls — smoke_tests + self_report ────────────────────────────
+
+
+def test_smoke_tests_phase_runs_each_probe_collecting_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    # All six probes return (True, "...") so we exercise the rollup
+    # without depending on a real Hermes binary or HTTP listener.
+    monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s: (True, "ok"))
+    monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s: (True, "ok"))
+    monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s: (True, "ready"))
+    monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s: (True, "1 item"))
+    monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s: (True, "8 tools"))
+    monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s: (True, "ok"))
+    out = hp._phase_smoke_tests(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["failures"] == []
+    assert set(out.details["results"].keys()) == {
+        "wrapper_ready",
+        "hermes_doctor",
+        "chat_completions",
+        "memory_roundtrip",
+        "admin_tools_list",
+        "hermes_md_contains_primary",
+    }
+
+
+def test_smoke_tests_phase_records_failures_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    monkeypatch.setattr(hp, "_smoke_wrapper_ready", lambda s: (False, "wrapper missing"))
+    monkeypatch.setattr(hp, "_smoke_hermes_doctor", lambda s: (True, "ok"))
+    monkeypatch.setattr(hp, "_smoke_chat_completions", lambda s: (False, "503"))
+    monkeypatch.setattr(hp, "_smoke_memory_roundtrip", lambda s: (True, "1 item"))
+    monkeypatch.setattr(hp, "_smoke_admin_tools_list", lambda s: (True, "8 tools"))
+    monkeypatch.setattr(hp, "_smoke_hermes_md_contains_primary", lambda s: (True, "ok"))
+    out = hp._phase_smoke_tests(state)
+    assert out.status == hp.PhaseStatus.OK  # diagnostic — not a blocker
+    assert len(out.details["failures"]) == 2
+    assert any("wrapper_ready" in f for f in out.details["failures"])
+
+
+def test_self_report_writes_summary_memory_and_handles_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    state.phases["smoke_tests"] = {
+        "status": "ok",
+        "details": {"failures": ["chat_completions: 503"]},
+    }
+    # Pre-render config so primary alias gets picked up.
+    (tmp_path / "hh").mkdir()
+    (tmp_path / "hh" / "config.yaml").write_text("model:\n  default: qwen3:8b\n", encoding="utf-8")
+    captured: list[tuple[str, dict[str, Any]]] = []
+
+    def _fake_mcp(method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        captured.append((method, params))
+        return {"ok": True, "result": {"id": "mem_xyz"}}
+
+    monkeypatch.setattr(hp, "_mcp_memory_call", _fake_mcp)
+    out = hp._phase_self_report(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["published"] is True
+    assert out.details["summary_id"] == "mem_xyz"
+    # Verify the memory write captures the smoke-test rollup.
+    sent_text = captured[0][1]["arguments"]["text"]
+    assert "qwen3:8b" in sent_text
+    assert "Smoke failures: 1" in sent_text
+
+
+def test_self_report_continues_when_memory_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    (tmp_path / "hh").mkdir()
+    monkeypatch.setattr(
+        hp,
+        "_mcp_memory_call",
+        lambda *a, **kw: {"ok": False, "error": "connection refused"},
+    )
+    out = hp._phase_self_report(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["published"] is False
+    assert "refused" in out.details["warning"]

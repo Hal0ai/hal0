@@ -95,6 +95,28 @@ def registry_dir() -> Path:
     return var_lib() / "registry"
 
 
+def agents_config_dir() -> Path:
+    """Return the per-agent allow-list config directory.
+
+    ADR-0013 §1: each bundled or user-added agent gets one TOML at
+    ``/etc/hal0/agents/<name>.toml`` carrying its workspace path,
+    enabled MCP servers, per-server auth, and the three-tier tool
+    classification (allow / gated / blocked).
+    """
+    return etc() / "agents"
+
+
+def agent_workspace_dir(agent_name: str) -> Path:
+    """Return the filesystem sandbox root for a bundled agent.
+
+    ADR-0013 §5: the agent driver chroots/bind-mounts the agent process
+    to this path; writes outside require ADR-0004 approval. Each agent
+    gets its own subtree so a malicious / buggy agent can't poke at
+    another's workspace.
+    """
+    return var_lib() / "agents" / agent_name / "workspace"
+
+
 def models_dir() -> Path:
     """Return the default model cache directory (/var/lib/hal0/models/)."""
     return var_lib() / "models"

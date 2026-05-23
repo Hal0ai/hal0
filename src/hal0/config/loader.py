@@ -27,6 +27,7 @@ import tomli_w
 from hal0.config import paths
 from hal0.config.schema import (
     CURRENT_SCHEMA_VERSION,
+    AgentConfig,
     Hal0Config,
     HardwareInfo,
     ProvidersConfig,
@@ -376,6 +377,46 @@ def save_upstreams_config(cfg: UpstreamsConfig, path: Path | None = None) -> Non
     write_toml_atomic(target, cfg.model_dump(mode="python"))
 
 
+# ── agents/<name>.toml (ADR-0013) ─────────────────────────────────────────────
+
+
+def load_agent_config(agent_name: str, path: Path | None = None) -> AgentConfig:
+    """Load and validate ``/etc/hal0/agents/<agent_name>.toml`` (ADR-0013).
+
+    Raises:
+        ConfigNotFound: file missing.
+        ConfigParseError: bad TOML or schema-validation failure.
+    """
+    target = path if path is not None else paths.agents_config_dir() / f"{agent_name}.toml"
+    raw = _read_toml(Path(target))
+    try:
+        return AgentConfig.model_validate(raw)
+    except Exception as exc:
+        raise ConfigParseError(
+            f"failed to validate agent config {agent_name!r} at {target}: {exc}",
+            details={"path": str(target), "agent": agent_name, "reason": str(exc)},
+        ) from exc
+
+
+def save_agent_config(cfg: AgentConfig, path: Path | None = None) -> None:
+    """Atomically write an agent config TOML (ADR-0013).
+
+    ``exclude_none=True`` keeps tomli_w from choking on optional blocks
+    (``auth.env``, ``server.url`` on builtins).
+    """
+    target = path if path is not None else paths.agents_config_dir() / f"{cfg.agent.name}.toml"
+    data = cfg.model_dump(mode="python", exclude_none=True)
+    write_toml_atomic(target, data)
+
+
+def list_agent_configs() -> list[str]:
+    """Return every configured agent name (stem of /etc/hal0/agents/*.toml)."""
+    d = paths.agents_config_dir()
+    if not d.exists():
+        return []
+    return sorted(f.stem for f in d.glob("*.toml") if f.is_file())
+
+
 # ── hardware.json (JSON, not TOML) ────────────────────────────────────────────
 
 
@@ -573,7 +614,9 @@ __all__ = [
     "ConfigError",
     "ConfigNotFound",
     "ConfigParseError",
+    "list_agent_configs",
     "list_slots",
+    "load_agent_config",
     "load_hal0_config",
     "load_hardware_info",
     "load_manifest",
@@ -581,6 +624,7 @@ __all__ = [
     "load_slot_config",
     "load_upstreams_config",
     "manifest_image_ref",
+    "save_agent_config",
     "save_hal0_config",
     "save_hardware_info",
     "save_providers_config",

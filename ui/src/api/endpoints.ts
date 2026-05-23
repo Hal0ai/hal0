@@ -58,6 +58,10 @@ export const ENDPOINTS = {
   agentMcpClient: (name: string) =>
     `/api/agents/mcp/clients/${encodeURIComponent(name)}`,
 
+  // ── Memory (ADR-0014 graph-extraction gate) ──────────────────────
+  memoryGraphStatus: '/api/memory/graph/status',
+  memoryGraph: '/api/memory/graph',
+
   // ── Logs (HTTP historical + SSE tail + WS lemond) ────────────────
   logs: '/api/logs',
   logsStream: '/api/logs/stream',
