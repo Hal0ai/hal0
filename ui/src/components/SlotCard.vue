@@ -95,6 +95,18 @@ const coresidentTitle = computed(() => {
   return ''
 })
 
+// PR-15: kokoro:cpu disclosure. Plan §1 #2 + ADR-0008 §2 locked
+// kokoro:cpu as the only v0.2 TTS recipe. There is no GPU-Kokoro on
+// Linux upstream — so we surface a small "[CPU]" chip + tooltip on the
+// voice slot card to make the constraint legible without a banner.
+// Hard-coded to provider === 'kokoro' per plan; no device-detection
+// logic. GPU-accelerated TTS will land in v0.3.
+const isKokoroCpu = computed(() => {
+  const provider = (props.slot.provider || '').toLowerCase()
+  return provider === 'kokoro'
+})
+const cpuOnlyTooltip = 'Kokoro TTS runs on CPU in v0.2. GPU-accelerated TTS is planned for v0.3.'
+
 const modelLabel = computed(() => {
   const raw = props.slot.model_name || props.slot.model || props.slot.model_id || ''
   const s = typeof raw === 'string' ? raw : (raw?.default ?? '')
@@ -519,6 +531,18 @@ const sparkSvg = computed(() => {
         data-testid="coresident-badge"
         :title="coresidentTitle"
       >{{ coresidentLabel }}</span>
+      <!-- PR-15: kokoro:cpu disclosure chip. Voice slot only. Neutral
+           slate hue (info, not warning). Native title= for tooltip is
+           keyboard-accessible by default; aria-label disambiguates the
+           bare "[CPU]" glyph for screen readers. -->
+      <span
+        v-if="isKokoroCpu"
+        class="sc-chip cpu-only"
+        data-testid="cpu-only-chip"
+        :title="cpuOnlyTooltip"
+        :aria-label="`CPU-only backend — ${cpuOnlyTooltip}`"
+        tabindex="0"
+      >CPU</span>
       <span class="sc-port mono">{{ slot.port ? `:${slot.port}` : '—' }}</span>
     </div>
 
@@ -909,6 +933,24 @@ const sparkSvg = computed(() => {
   color: var(--hal0-accent);
   border-color: color-mix(in srgb, var(--hal0-accent) 50%, transparent);
   background: color-mix(in srgb, var(--hal0-accent) 12%, transparent);
+}
+
+/* PR-15: kokoro:cpu disclosure chip on the voice slot card. Slate /
+   neutral palette so it reads as "info" rather than "warning" — the
+   constraint is intentional in v0.2, not an error state. Focusable so
+   keyboard users can see the native title= tooltip. */
+.sc-chip.cpu-only {
+  margin-left: 6px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--color-fg-muted);
+  border-color: var(--color-border-hi);
+  background: var(--color-surface-3);
+  cursor: help;
+}
+.sc-chip.cpu-only:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 /* Hardware target chip — colour-coded so the user can see at a glance

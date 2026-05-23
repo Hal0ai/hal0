@@ -741,6 +741,28 @@ onMounted(async () => {
         </div>
       </Card>
 
+      <!-- ── Lemonade admin link (PR-13) ─────────────────────────── -->
+      <Card>
+        <div class="lemonade-link-row">
+          <div>
+            <h3 class="section-title">Lemonade backend</h3>
+            <p class="field-hint">
+              Runtime config of the bundled <code class="mono">lemond</code> daemon —
+              backends, ctx_size, concurrency budget, FLM NPU args. Edits go through
+              <code class="mono">/internal/set</code>; some take effect immediately,
+              others apply at the next model load.
+            </p>
+          </div>
+          <router-link
+            :to="{ name: 'settings-lemonade' }"
+            class="btn-ghost"
+            data-testid="lemonade-admin-link"
+          >
+            Open Lemonade admin
+          </router-link>
+        </div>
+      </Card>
+
       <!-- ── Model locations panel ───────────────────────────────── -->
       <Card>
         <h3 class="section-title">Model locations</h3>
@@ -1341,6 +1363,19 @@ onMounted(async () => {
 .roots-actions { display: flex; align-items: center; gap: 12px; margin-top: 6px; flex-wrap: wrap; }
 .auto-scan-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-fg-muted); cursor: pointer; }
 .auto-scan-label input[type="checkbox"] { accent-color: var(--hal0-accent); }
+
+/* ── Lemonade admin link card (PR-13) ──────────────────────────── */
+.lemonade-link-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lemonade-link-row .btn-ghost {
+  flex-shrink: 0;
+  text-decoration: none;
+}
 
 /* ── Proxmox integration panel ──────────────────────────────────── */
 .proxmox-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }

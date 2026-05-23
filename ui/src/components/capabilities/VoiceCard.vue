@@ -32,6 +32,20 @@ const ENDPOINTS = {
   tts: '/v1/audio/speech',
 }
 
+// PR-15: kokoro:cpu disclosure. Plan §1 #2 + ADR-0008 §2 locked
+// kokoro:cpu as the only v0.2 TTS recipe — no GPU-Kokoro on Linux
+// upstream. The TTS sub-section gets a small "[CPU]" chip + tooltip so
+// the constraint is legible without a banner. Hard-coded to
+// provider === 'kokoro' per plan; no device-detection logic. GPU TTS
+// will land in v0.3.
+const CPU_ONLY_TOOLTIP =
+  'Kokoro TTS runs on CPU in v0.2. GPU-accelerated TTS is planned for v0.3.'
+function isCpuOnly(capability) {
+  if (capability !== 'tts') return false
+  const provider = (props.selection?.[capability]?.provider || '').toLowerCase()
+  return provider === 'kokoro'
+}
+
 function portFor(capability) {
   const name = SLOT_NAME[capability]
   return system.slots.find((s) => s.name === name)?.port ?? null
@@ -216,6 +230,19 @@ const headerPill = computed(() => {
             {{ selection?.[c]?.status || 'offline' }}
           </span>
           <span class="cap-section-label">{{ c.toUpperCase() }}</span>
+          <!-- PR-15: kokoro:cpu disclosure chip on the TTS sub-section.
+               Neutral slate hue (info, not warning); the constraint is
+               intentional in v0.2. Focusable so keyboard users can see
+               the native title= tooltip. aria-label includes the full
+               disclosure copy for screen-reader users. -->
+          <span
+            v-if="isCpuOnly(c)"
+            class="cap-cpu-chip"
+            data-testid="cpu-only-chip"
+            :title="CPU_ONLY_TOOLTIP"
+            :aria-label="`CPU-only backend — ${CPU_ONLY_TOOLTIP}`"
+            tabindex="0"
+          >CPU</span>
           <span class="cap-section-sub">
             {{ ENDPOINTS[c] }}
             <span v-if="portFor(c)" class="cap-section-port">· :{{ portFor(c) }}</span>
@@ -328,4 +355,26 @@ const headerPill = computed(() => {
 
 /* Picker layout lives in the shared non-scoped block in
  * CapabilitiesSection.vue so all three cards stay aligned. */
+
+/* PR-15: kokoro:cpu disclosure chip on the TTS sub-section header.
+ * Slate / neutral palette so it reads as "info" rather than "warning" —
+ * the constraint is intentional in v0.2, not an error state. cursor:
+ * help to advertise the tooltip on hover. */
+.cap-cpu-chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  color: var(--color-fg-muted);
+  border: 1px solid var(--color-border-hi);
+  background: var(--color-surface-3);
+  cursor: help;
+}
+.cap-cpu-chip:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 2px;
+}
 </style>

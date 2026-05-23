@@ -146,6 +146,50 @@ def _record_nonstreaming_throughput(
     events.append((time.monotonic(), int(completion)))
 
 
+def _record_flm_native_metrics(
+    body_bytes: bytes,
+    app_state: Any,
+    slot_name: str | None,
+    model_name: str | None,
+) -> None:
+    """Sniff FLM-native perf fields from a chat-completion response body.
+
+    PR-12 (plan §11 + §12.1 + memory ``hal0_lemonade_flm_npu_install``).
+    FastFlowLM emits ``decoding_speed_tps`` / ``prefill_speed_tps`` /
+    ``prefill_duration_ttft`` / ``kv_token_occupancy_rate_percentage`` /
+    ``decoding_duration`` INSIDE the chat-completion response body —
+    not via ``/v1/stats``. This hook hands those fields to the
+    MetricsShim's in-memory store so the next /api/metrics/prometheus
+    scrape includes them.
+
+    The discriminator is presence of any FLM field in the payload
+    (handled by ``FlmMetrics.from_payload``). Non-FLM upstreams produce
+    no FLM keys → no-op. This keeps the dispatcher path uncoupled from
+    recipe routing — we don't need to ask "is this slot llamacpp or
+    flm?" before recording; the payload shape answers itself.
+
+    Robust by design: any failure (no shim attached, bad slot/model,
+    unparseable JSON) is silently swallowed so a metrics glitch never
+    affects the user-visible chat response.
+    """
+    shim = getattr(app_state, "lemonade_metrics_shim", None)
+    if shim is None or not body_bytes or not slot_name or not model_name:
+        return
+    try:
+        data = json.loads(body_bytes)
+    except (ValueError, TypeError):
+        return
+    if not isinstance(data, dict):
+        return
+    try:
+        shim.record_flm_metrics(slot_name, model_name, data)
+    except Exception:  # pragma: no cover — defensive
+        # The shim's record_flm_metrics is documented as non-raising,
+        # but we wrap defensively so a future contract slip can't take
+        # down the chat path.
+        return
+
+
 async def _read_json_body(request: Request) -> dict[str, Any]:
     """Best-effort JSON parse.  Empty / malformed bodies become ``{}``.
 
@@ -212,6 +256,18 @@ async def _dispatch_and_forward(
         )
     if isinstance(response, Response) and getattr(response, "body", None):
         _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
+        # PR-12: FLM-native metric ingest. The hook is unconditional —
+        # ``record_flm_metrics`` only acts when the payload carries FLM
+        # fields, so non-FLM upstreams pay only a JSON parse. Streaming
+        # FLM responses (where the same fields land in the final SSE
+        # chunk) are deferred to a follow-up; plan §11 PR-12 scope is
+        # the non-streaming hook + the /v1/stats poll surface.
+        _record_flm_native_metrics(
+            response.body,
+            request.app.state,
+            call.upstream_name,
+            call.resolved_model,
+        )
     return response
 
 

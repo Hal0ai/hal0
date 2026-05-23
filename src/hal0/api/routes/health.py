@@ -1,17 +1,21 @@
 """Health, status, metrics, features.
 
 Routes mounted under /api:
-  GET  /api/status            — overall liveness + summary (dashboard polls this)
-  GET  /api/health/system     — deep health (slots, disk, ram)
-  GET  /api/metrics           — JSON metrics
-  GET  /api/features          — feature flags
-  PUT  /api/features/{name}   — toggle feature flag
+  GET  /api/status              — overall liveness + summary (dashboard polls this)
+  GET  /api/health/system       — deep health (slots, disk, ram)
+  GET  /api/metrics             — JSON metrics
+  GET  /api/metrics/prometheus  — Prometheus exposition (Lemonade /v1/stats + FLM native)
+  GET  /api/features            — feature flags
+  PUT  /api/features/{name}     — toggle feature flag
 
-Note (issue #36): a /api/metrics/prometheus route was advertised in this
-docstring and in the historical PUBLIC_PATHS allowlist but was never
-implemented. Both stubs are removed until a real prometheus_client-
-backed exporter ships. (PUBLIC_PATHS itself was deleted by ADR-0001
-Child B; routes are now public by virtue of not declaring an auth dep.)
+History (issue #36 → PR-12): the v0.1.x ``/api/metrics/prometheus`` stub
+was deleted by ADR-0001 Child B because the underlying scrape (per-slot
+toolbox /metrics) didn't survive the Lemonade migration (plan §12.1).
+PR-12 re-introduces the route on top of :mod:`hal0.lemonade.metrics_shim`
+— the underlying surfaces are ``GET /v1/stats`` + ``GET /v1/health`` +
+FLM-native fields sniffed from ``POST /v1/chat/completions`` response
+bodies. KV% for GPU/llamacpp slots remains ``—`` in v0.2 (accepted gap,
+plan §12.1).
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
 
 from hal0 import __version__
 
@@ -94,6 +99,33 @@ async def health_system() -> dict[str, object]:
 @router.get("/metrics")
 async def metrics() -> dict[str, object]:
     return {"slots": {}, "hardware": {}, "dispatcher": {}}
+
+
+@router.get("/metrics/prometheus")
+async def metrics_prometheus(request: Request) -> Response:
+    """Prometheus text-exposition surface (PR-12, plan §10.1 + §11).
+
+    Backed by :class:`hal0.lemonade.metrics_shim.MetricsShim` on
+    ``app.state.lemonade_metrics_shim`` (started in the api lifespan).
+    If the shim isn't attached (e.g. tests bypassing lifespan, or
+    Lemonade unreachable since boot), returns an empty exposition body
+    rather than 500 — Prometheus treats that as "no series", which is
+    the correct "no data yet" state.
+
+    Public route by convention (no auth dependency declared). Operators
+    behind a reverse proxy should restrict ``/api/metrics/prometheus``
+    at the edge if they want to limit scraper access; hal0-internal
+    enforcement would block standard Prometheus scrapers that don't
+    speak hal0's bearer-token auth.
+    """
+    from hal0.lemonade.metrics_shim import MetricsShim
+    from hal0.lemonade.prometheus_format import render_prometheus_exposition
+
+    shim: MetricsShim | None = getattr(request.app.state, "lemonade_metrics_shim", None)
+    snapshot = shim.snapshot() if shim is not None else None
+    body = render_prometheus_exposition(snapshot)
+    # Prometheus text format 0.0.4: ``text/plain; version=0.0.4; charset=utf-8``.
+    return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @router.get("/features")

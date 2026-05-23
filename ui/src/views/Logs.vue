@@ -27,12 +27,29 @@
  * the user in a terminal.
  */
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
 import { api } from '../composables/useApi.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
+import LemonadeJournalPanel from '../components/LemonadeJournalPanel.vue'
 
 const system = useSystemStore()
+const route = useRoute()
+const router = useRouter()
+
+// PR-14: two-tab surface — systemd journal (default, prior behaviour)
+// and Lemonade daemon log. Tab state lives in ?tab=… so the URL is
+// shareable + reload-stable, mirroring Agent.vue's pattern.
+const TABS = ['systemd', 'lemonade']
+const activeTab = computed(() => {
+  const t = String(route.query.tab || 'systemd')
+  return TABS.includes(t) ? t : 'systemd'
+})
+function selectTab(tab) {
+  if (tab === activeTab.value) return
+  router.replace({ query: { ...route.query, tab } })
+}
 
 const lines      = ref([])
 const filter     = ref({
@@ -212,7 +229,7 @@ onUnmounted(closeStream)
 <template>
   <div class="logs-page">
     <PageHeader eyebrow="Journal" title="Logs" subtitle="Live systemd journal tail">
-      <template #actions>
+      <template v-if="activeTab === 'systemd'" #actions>
         <div class="status-dot-wrap" :title="connected ? 'SSE connected' : (frozen ? 'frozen' : 'disconnected')" aria-label="SSE connection status">
           <span class="dot" :class="frozen ? 'dot-frozen' : (connected ? 'dot-live' : 'dot-off')" aria-hidden="true" />
           <span class="dot-label">{{ frozen ? 'frozen' : (connected ? 'live' : 'offline') }}</span>
@@ -237,8 +254,24 @@ onUnmounted(closeStream)
       </template>
     </PageHeader>
 
-    <!-- Filters -->
-    <div class="filters-bar">
+    <!-- Tabs: systemd journal (default) | Lemonade daemon log (PR-14). -->
+    <nav class="tabs" role="tablist" aria-label="Log sources">
+      <button
+        v-for="t in TABS"
+        :key="t"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === t"
+        :class="['tab', { active: activeTab === t }]"
+        :data-testid="`logs-tab-${t}`"
+        @click="selectTab(t)"
+      >
+        <span class="tab-label">{{ t === 'systemd' ? 'systemd' : 'Lemonade' }}</span>
+      </button>
+    </nav>
+
+    <!-- systemd journal pane (existing surface) -->
+    <div v-if="activeTab === 'systemd'" class="filters-bar">
       <label class="sr-only" for="log-unit-filter">Unit</label>
       <select id="log-unit-filter" v-model="filter.unit" class="filter-select">
         <option v-for="o in unitOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
@@ -293,7 +326,7 @@ onUnmounted(closeStream)
     </div>
 
     <!-- Log box -->
-    <div class="page-body">
+    <div v-if="activeTab === 'systemd'" class="page-body">
       <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
 
       <Card :padded="false" class="logbox-card">
@@ -322,12 +355,61 @@ onUnmounted(closeStream)
         </div>
       </Card>
     </div>
+
+    <!-- Lemonade daemon journal pane (PR-14, plan §11 + §2.2). -->
+    <div v-else-if="activeTab === 'lemonade'" class="page-body lemonade-body">
+      <LemonadeJournalPanel />
+    </div>
   </div>
 </template>
 
 <style scoped>
 .logs-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .page-body { padding: 0 24px 20px; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.lemonade-body { padding: 16px 24px 20px; }
+
+/* Tab bar mirrors Agent.vue so navigation feels uniform across the app. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: transparent;
+  border: none;
+  color: var(--color-fg-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  text-transform: capitalize;
+  transition: color 0.12s;
+}
+.tab:hover { color: var(--color-fg); }
+.tab.active { color: var(--hal0-accent); }
+.tab.active::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--hal0-accent);
+  border-radius: 2px 2px 0 0;
+  box-shadow: 0 0 12px -2px var(--hal0-accent);
+}
+.tab:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
 
 .filters-bar {
   display: flex;
