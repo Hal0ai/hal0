@@ -1,0 +1,9 @@
+# hal0-owned Hermes provider profile plugin manifest.
+#
+# Real wiring (provider/factory entries) lands in #241. v0.3 scaffold
+# (#240) just ships the directory + this manifest so Hermes's plugin
+# loader has a valid target to resolve.
+name: hal0
+kind: model-provider
+version: 0.1.0
+description: hal0-native provider profile — points Hermes at the live primary slot.
