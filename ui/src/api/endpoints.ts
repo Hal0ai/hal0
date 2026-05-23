@@ -53,6 +53,10 @@ export const ENDPOINTS = {
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',
 
+  // ── Memory (ADR-0014 graph-extraction gate) ──────────────────────
+  memoryGraphStatus: '/api/memory/graph/status',
+  memoryGraph: '/api/memory/graph',
+
   // ── Logs (HTTP historical + SSE tail + WS lemond) ────────────────
   logs: '/api/logs',
   logsStream: '/api/logs/stream',
