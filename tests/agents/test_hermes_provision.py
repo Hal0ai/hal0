@@ -84,11 +84,16 @@ def test_run_marks_every_phase_ok_on_fresh(
     tmp_path: Path, state_with_tmp_paths: hp.BootstrapState
 ) -> None:
     result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
+    # voice_wire legitimately returns SKIP when no STT/TTS slots are
+    # configured (most CI envs); accept both OK and SKIP for that phase.
+    skip_ok = {"voice_wire"}
     for name in hp.PHASE_NAMES:
-        assert result.phases[name]["status"] == hp.PhaseStatus.OK.value
+        status = result.phases[name]["status"]
+        allowed = {hp.PhaseStatus.OK.value} | (
+            {hp.PhaseStatus.SKIP.value} if name in skip_ok else set()
+        )
+        assert status in allowed, f"{name}: unexpected {status}"
     assert result.failed == []
-    # Skipped is empty on a fresh run because no checkpoint exists.
-    assert result.skipped == []
 
 
 def test_state_file_written_and_round_trips(
@@ -119,8 +124,15 @@ def test_repair_flag_forces_rerun(tmp_path: Path, state_with_tmp_paths: hp.Boots
     second = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, repair=True)
     # Repair re-runs everything → nothing was skipped via checkpoint.
     assert second.skipped == []
+    # voice_wire legitimately returns SKIP when no STT/TTS slots exist
+    # (same posture as the fresh-run test above).
+    skip_ok = {"voice_wire"}
     for name in hp.PHASE_NAMES:
-        assert second.phases[name]["status"] == hp.PhaseStatus.OK.value
+        status = second.phases[name]["status"]
+        allowed = {hp.PhaseStatus.OK.value} | (
+            {hp.PhaseStatus.SKIP.value} if name in skip_ok else set()
+        )
+        assert status in allowed, f"{name}: unexpected {status}"
 
 
 def test_skip_phase_records_skip_reason(
@@ -761,3 +773,92 @@ def test_context_link_falls_back_when_soul_render_fails(
     soul = (hermes_home / "SOUL.md").read_text()
     assert "hal0 admin agent" in soul
     assert any("SOUL.md render" in w for w in out.details["warnings"])
+
+
+# ── #245 phase impls — model_automap + voice_wire ───────────────────────────
+
+
+def test_model_automap_writes_aliases_from_chat_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    # Pre-render config.yaml so model_automap has something to rewrite.
+    (hermes_home / "config.yaml").write_text(
+        hp._render_config_yaml(
+            primary={"model_id": "p", "backend_url": "u", "context_length": 8000},
+            agent_id="hermes-agent",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    monkeypatch.setattr(
+        hp,
+        "_fetch_slots",
+        lambda: [
+            {
+                "name": "primary",
+                "capability": "chat",
+                "model_id": "qwen3:8b",
+                "backend_url": "http://127.0.0.1:8001/v1",
+                "state": "ready",
+            },
+            {
+                "name": "coder",
+                "capability": "chat",
+                "model_id": "qwen-coder",
+                "backend_url": "http://127.0.0.1:8002/v1",
+                "state": "ready",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kw: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    out = hp._phase_model_automap(state)
+    assert out.status == hp.PhaseStatus.OK
+    rendered = (hermes_home / "config.yaml").read_text()
+    assert "coder" in out.details["aliases_written"]
+    assert "primary" in out.details["aliases_written"]
+    # YAML body actually carries the aliases.
+    assert "qwen-coder" in rendered
+
+
+def test_model_automap_idempotent_hash_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    (hermes_home / "config.yaml").write_text(
+        hp._render_config_yaml(
+            primary={"model_id": "p", "backend_url": "u", "context_length": 8000},
+            agent_id="hermes-agent",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kw: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    out1 = hp._phase_model_automap(state)
+    out2 = hp._phase_model_automap(state)
+    # First run rewrites (or doesn't, if already canonical); second run
+    # observes hash equality and marks unchanged.
+    assert out2.details.get("unchanged") is True
+    assert out1.hash == out2.hash
+
+
+def test_voice_wire_skips_when_no_voice_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    out = hp._phase_voice_wire(state)
+    assert out.status == hp.PhaseStatus.SKIP

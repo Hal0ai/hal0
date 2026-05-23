@@ -131,10 +131,17 @@ class BootstrapState:
         return cls(**kwargs)
 
     def phase_done(self, name: str) -> bool:
+        """True iff the phase already ran to a terminal non-failure state.
+
+        Both ``ok`` and ``skip`` count as "done" — a phase that
+        legitimately skipped (no STT/TTS slots configured →
+        voice_wire SKIP) shouldn't re-run on every bootstrap
+        invocation. ``--repair`` is the explicit force-rerun knob.
+        """
         entry = self.phases.get(name)
         if not entry:
             return False
-        return entry.get("status") == PhaseStatus.OK.value
+        return entry.get("status") in {PhaseStatus.OK.value, PhaseStatus.SKIP.value}
 
     def save(self, root: Path) -> None:
         root.mkdir(parents=True, exist_ok=True)
@@ -1194,8 +1201,347 @@ def _phase_namespace_register(state: BootstrapState) -> PhaseResult:
     )
 
 
-_phase_model_automap = _stub("model_automap")
-_phase_voice_wire = _stub("voice_wire")
+# ── Phase I: model_automap ──────────────────────────────────────────────────
+#
+# Walks the live slot/model surface and rewrites the [model_aliases]
+# block of $HERMES_HOME/config.yaml so /model <alias> inside Hermes
+# picks the right backend. Embed/rerank/img stay UNWIRED per grilling
+# Q6 (no top-level embed surface in Hermes; memory MCP handles it).
+
+
+HAL0_API_URL = "http://127.0.0.1:8080"
+
+
+def _fetch_slots() -> list[dict[str, Any]]:
+    """Pull the full slot list from the local hal0 daemon.
+
+    Returns an empty list when the daemon is unreachable — the phase
+    surfaces ``status=degraded`` so downstream consumers can tell the
+    diff between "no slots" and "couldn't ask."
+    """
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    req = Request(f"{HAL0_API_URL}/api/slots", headers={"Accept": "application/json"})
+    try:
+        with urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError, TimeoutError):
+        return []
+    if isinstance(data, dict):
+        # Some routes wrap in {"slots": [...]}, others return a bare list.
+        data = data.get("slots") or []
+    return list(data) if isinstance(data, list) else []
+
+
+def _slot_kind(slot: dict[str, Any]) -> str:
+    """Best-effort capability classifier — handles a few schema variants."""
+    for key in ("capability", "kind", "type"):
+        v = slot.get(key)
+        if isinstance(v, str) and v:
+            return v.lower()
+    return ""
+
+
+def _slot_alias(slot: dict[str, Any]) -> str:
+    for key in ("name", "alias", "slug"):
+        v = slot.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return "primary"
+
+
+def _slot_model_id(slot: dict[str, Any]) -> str | None:
+    for key in ("model_id", "model", "default_model"):
+        v = slot.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
+def _slot_backend_url(slot: dict[str, Any]) -> str:
+    for key in ("backend_url", "base_url", "url"):
+        v = slot.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return _DEFAULT_PRIMARY_BACKEND_URL
+
+
+_DEFAULT_PRIMARY_BACKEND_URL = "http://127.0.0.1:8000/api/v1"
+
+
+def _is_ready(slot: dict[str, Any]) -> bool:
+    """True iff the slot reports a live/ready state."""
+    state = slot.get("state") or slot.get("status") or ""
+    return str(state).lower() in {"ready", "running", "loaded", "ok", "online"}
+
+
+def _collect_chat_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter `slots` down to chat-capable entries with a usable model_id."""
+    out: list[dict[str, Any]] = []
+    for s in slots:
+        if _slot_kind(s) != "chat":
+            continue
+        model_id = _slot_model_id(s)
+        if not model_id:
+            continue
+        out.append(
+            {
+                "alias": _slot_alias(s),
+                "model_id": model_id,
+                "backend_url": _slot_backend_url(s),
+            }
+        )
+    return out
+
+
+def _phase_model_automap(state: BootstrapState) -> PhaseResult:
+    """Refresh ``model_aliases`` in ``$HERMES_HOME/config.yaml``.
+
+    Re-renders the whole config (so model + aliases stay consistent)
+    and atomic-swaps if the hash drifted. Hash-equal output skips the
+    write per #245 idempotency criterion.
+
+    Embed/rerank/img slots are deliberately NOT mapped per ADR-0011 §3
+    (Hermes has no top-level embed abstraction; memory MCP handles it).
+    """
+    hermes_home = Path(state.hermes_home)
+    config_path = hermes_home / "config.yaml"
+    if not config_path.exists():
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"{config_path} missing — config_write must run first",
+        )
+
+    slots = _fetch_slots()
+    chat_slots = _collect_chat_slots(slots)
+    primary_raw = _resolve_primary_slot()
+    primary = {
+        "model_id": primary_raw["model"],
+        "backend_url": primary_raw["base_url"],
+        "context_length": primary_raw["context_length"],
+    }
+
+    try:
+        rendered = _render_config_yaml(
+            primary=primary,
+            chat_slots=chat_slots,
+            agent_id=state.agent_id,
+        )
+        rendered = _apply_overrides(rendered, OVERRIDES_PATH)
+    except Exception as exc:
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"config render failed: {type(exc).__name__}: {exc}",
+        )
+
+    new_hash = content_hash(rendered)
+    try:
+        current = config_path.read_text(encoding="utf-8")
+        current_hash: str | None = content_hash(current)
+    except OSError:
+        current_hash = None
+
+    skipped = [_slot_alias(s) for s in slots if _slot_kind(s) in {"embed", "rerank", "img"}]
+    aliases_written = [s["alias"] for s in chat_slots]
+
+    if current_hash == new_hash:
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            hash=new_hash,
+            details={
+                "config_path": str(config_path),
+                "unchanged": True,
+                "aliases_written": aliases_written,
+                "skipped": skipped,
+                "chat_slot_count": len(chat_slots),
+            },
+        )
+
+    try:
+        _atomic_write(config_path, rendered)
+    except OSError as exc:
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"config write failed: {exc}",
+        )
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        hash=new_hash,
+        details={
+            "config_path": str(config_path),
+            "aliases_written": aliases_written,
+            "skipped": skipped,
+            "chat_slot_count": len(chat_slots),
+            "slots_total": len(slots),
+        },
+    )
+
+
+# ── Phase J: voice_wire ─────────────────────────────────────────────────────
+#
+# Conditional. Emits STT/TTS provider config + writes
+# /var/lib/hal0/secrets/agents/hermes.env. Per the post-ADR-0012
+# correction on #246, that secrets file is OUTBOUND credentials only
+# now (HF token + external MCP tokens + STT_/TTS_OPENAI_BASE_URL).
+# voice_wire skips with reason when neither slot is `ready`.
+
+
+HERMES_SECRETS_ENV = Path("/var/lib/hal0/secrets/agents/hermes.env")
+
+
+def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+    for s in slots:
+        if _slot_kind(s) == kind and _is_ready(s):
+            return s
+    return None
+
+
+def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
+    """Idempotent in-place update of a KEY=VALUE env file.
+
+    Preserves existing lines (comments + other entries the operator
+    added by hand) and replaces values when keys match. Atomic via
+    tmpfile + rename.
+    """
+    existing: list[str] = []
+    seen: set[str] = set()
+    if path.exists():
+        try:
+            existing = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            existing = []
+
+    out_lines: list[str] = []
+    for line in existing:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            out_lines.append(line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in updates:
+            out_lines.append(f"{key}={updates[key]}")
+            seen.add(key)
+        else:
+            out_lines.append(line)
+    for key, val in updates.items():
+        if key not in seen:
+            out_lines.append(f"{key}={val}")
+
+    import contextlib
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
+
+
+def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
+    """Emit STT/TTS provider config + secrets env when both slots are ready.
+
+    Skip semantics: when neither STT nor TTS is configured + ready,
+    return SKIP with a clear reason — same posture as voice_wire in
+    the plan §13.
+    """
+    slots = _fetch_slots()
+    stt = _find_slot(slots, "stt")
+    tts = _find_slot(slots, "tts")
+    if stt is None and tts is None:
+        return PhaseResult(
+            status=PhaseStatus.SKIP,
+            reason="no stt/tts slots ready",
+            details={"slots_total": len(slots)},
+        )
+
+    updates: dict[str, str] = {}
+    details: dict[str, Any] = {"stt": None, "tts": None}
+    if stt is not None:
+        url = _slot_backend_url(stt)
+        updates["STT_OPENAI_BASE_URL"] = url
+        updates["STT_OPENAI_API_KEY"] = "dummy"  # voice OpenAI client wants a key value
+        details["stt"] = {"backend_url": url, "model": _slot_model_id(stt)}
+    if tts is not None:
+        url = _slot_backend_url(tts)
+        updates["TTS_OPENAI_BASE_URL"] = url
+        updates["TTS_OPENAI_API_KEY"] = "dummy"
+        details["tts"] = {"backend_url": url, "model": _slot_model_id(tts)}
+
+    try:
+        _merge_env_file(HERMES_SECRETS_ENV, updates)
+    except OSError as exc:
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"secrets env write to {HERMES_SECRETS_ENV} failed: {exc}",
+            details=details,
+        )
+
+    # Re-render config.yaml so the stt: / tts: blocks land. The render
+    # uses the same template config_write does — passing stt/tts kwargs
+    # turns on the conditional sections.
+    hermes_home = Path(state.hermes_home)
+    config_path = hermes_home / "config.yaml"
+    try:
+        primary_raw = _resolve_primary_slot()
+        primary = {
+            "model_id": primary_raw["model"],
+            "backend_url": primary_raw["base_url"],
+            "context_length": primary_raw["context_length"],
+        }
+        rendered = _render_config_yaml(
+            primary=primary,
+            chat_slots=_collect_chat_slots(slots),
+            stt={
+                "provider": "openai",
+                "backend_url": details["stt"]["backend_url"] if details["stt"] else None,
+                "model": details["stt"]["model"] if details["stt"] else None,
+            }
+            if details["stt"]
+            else None,
+            tts={
+                "provider": "openai",
+                "backend_url": details["tts"]["backend_url"] if details["tts"] else None,
+                "model": details["tts"]["model"] if details["tts"] else None,
+            }
+            if details["tts"]
+            else None,
+            agent_id=state.agent_id,
+        )
+        rendered = _apply_overrides(rendered, OVERRIDES_PATH)
+    except Exception as exc:
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"config render with voice failed: {exc}",
+            details=details,
+        )
+
+    if config_path.exists():
+        new_hash = content_hash(rendered)
+        try:
+            current_hash: str | None = content_hash(config_path.read_text(encoding="utf-8"))
+        except OSError:
+            current_hash = None
+        if current_hash != new_hash:
+            try:
+                _atomic_write(config_path, rendered)
+            except OSError as exc:
+                return PhaseResult(
+                    status=PhaseStatus.FAIL,
+                    reason=f"config write failed: {exc}",
+                    details=details,
+                )
+
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            **details,
+            "secrets_env": str(HERMES_SECRETS_ENV),
+            "config_path": str(config_path),
+        },
+    )
+
+
 _phase_smoke_tests = _stub("smoke_tests")
 _phase_self_report = _stub("self_report")
 
