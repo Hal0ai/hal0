@@ -1,4 +1,12 @@
 // hal0 dashboard — Dashboard view (chat, snapshot, hero)
+//
+// Phase B1: SnapshotStrip + PersonaPicker drive off `useSlots()`; the
+// chat composer keeps its prototype shell + scripted demo bubbles
+// (Phase B2 owns real chat wiring against /v1/chat/completions).
+
+import { useSlots } from '@/api/hooks/useSlots'
+import { useLemondRollup } from '@/api/hooks/useLemonade'
+
 const { useState: useStateD, useRef: useRefD, useEffect: useEffectD } = React;
 
 // ─── Snapshot strip ───
@@ -439,7 +447,15 @@ function ThroughputCard() {
 }
 
 // ─── Dashboard view shell ───
-function DashboardView({ chatState, setChatState, slots, persona, setPersona, onGo, showHero, onDismissHero, personaPlacement, composerState }) {
+function DashboardView({ chatState, setChatState, slots: slotsProp, persona, setPersona, onGo, showHero, onDismissHero, personaPlacement, composerState }) {
+  // Phase B1: live slot list; fall back to the prop (HAL0_DATA.slots
+  // from main.jsx) until /api/slots returns. Keeps the surface usable
+  // on first paint and in mock dev.
+  const slotsQuery = useSlots();
+  const slots = (slotsQuery.data && slotsQuery.data.length > 0) ? slotsQuery.data : slotsProp;
+  // Lemond rollup so the hero strip / chip read live state instead of
+  // the static HAL0_DATA.lemond fixture.
+  const lemond = useLemondRollup();
   // Skip-path: no slots configured → render empty hero, no chat surface
   if (chatState === "skip") {
     return (
@@ -475,7 +491,7 @@ function DashboardView({ chatState, setChatState, slots, persona, setPersona, on
             <span className="dim"> · last message <span className="mono">14:02:22</span></span>
           </div>
           <div className="spacer" />
-          <span className="mono" style={{fontSize: 10, color: "var(--fg-4)"}}>steady · {HAL0_DATA.slots.filter(s => s.state !== "empty").length} slots up</span>
+          <span className="mono" style={{fontSize: 10, color: "var(--fg-4)"}}>steady · {slots.filter(s => s.state !== "empty").length} slots up · lemond {lemond.status}</span>
           <span className="close" onClick={onDismissHero} role="button" aria-label="Dismiss hero">{Icons.close}</span>
         </div>
       )}

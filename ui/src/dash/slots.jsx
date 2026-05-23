@@ -1,4 +1,11 @@
 // hal0 dashboard — Slots view (SlotCard, NPU trio variants, group sections)
+//
+// Phase B1: live slot list via `useSlots`. The prototype JSX passes a
+// `slots` prop from main.jsx (HAL0_DATA.slots fallback); we union the
+// hook on top so first paint + mock-mode still works.
+
+import { useSlots } from '@/api/hooks/useSlots'
+
 const { useState: useStateS } = React;
 
 // ─── Mini sparkline for slot card ───
@@ -284,7 +291,9 @@ function NpuReactor({ slots }) {
 }
 
 // ─── Slots view ───
-function SlotsView({ slots, slotVariant, npuVariant, slotParam }) {
+function SlotsView({ slots: slotsProp, slotVariant, npuVariant, slotParam }) {
+  const slotsQuery = useSlots();
+  const slots = (slotsQuery.data && slotsQuery.data.length > 0) ? slotsQuery.data : slotsProp;
   const [createOpen, setCreateOpen] = useStateS(false);
   const [createDefaults, setCreateDefaults] = useStateS({});
   const [editName, setEditName] = useStateS(null);

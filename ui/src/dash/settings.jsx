@@ -1,4 +1,17 @@
 // hal0 dashboard — Settings view (auth, secrets, updates, lemond admin, omnirouter, memory, agent policy)
+//
+// Phase B1: Auth (token + allowed origins), Secrets, Updates, and the
+// Lemonade admin version readouts pull from live hooks; AgentPolicy +
+// Memory (Cognee) stay scripted (their backends live behind the Agent
+// surface, deferred to B2). Capabilities hook feeds the Lemonade admin
+// section's per-cap fields.
+
+import { useAuthToken, useAuthTokenReveal, useAuthTokenRotate, useAllowedOrigins } from '@/api/hooks/useAuth'
+import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
+import { useUpdateState, useUpdateCheck, useUpdateApply } from '@/api/hooks/useUpdates'
+import { useCapabilities, useCapabilityPatch } from '@/api/hooks/useCapabilities'
+import { useLemondRollup, useLemonadeStats } from '@/api/hooks/useLemonade'
+
 const { useState: useStateSet } = React;
 
 function SettingsView() {
@@ -68,6 +81,15 @@ const SRow = ({ k, sub, v, mono, children, actions }) => (
 function AuthSection() {
   const [showToken, setShowToken] = useStateSet(false);
   const [rotateOpen, setRotateOpen] = useStateSet(false);
+  // Phase B1: live token info + reveal-on-demand + rotate mutation.
+  const tokenQuery = useAuthToken();
+  const reveal = useAuthTokenReveal();
+  const rotate = useAuthTokenRotate();
+  const originsQuery = useAllowedOrigins();
+  const tokenMasked = tokenQuery.data?.token_masked || 'hal0-•••••••••••••••••••••••••••••••••';
+  const tokenPlain = reveal.data?.token;
+  const issued = tokenQuery.data?.issued || '—';
+  const origins = originsQuery.data?.origins || [];
   return (
     <div className="s-section">
       <h2>Auth</h2>
@@ -77,23 +99,25 @@ function AuthSection() {
           k="hal0 Bearer token"
           sub="Required by hal0-api · ADR-0001"
           mono
-          v={<span>{showToken ? "hal0-3f81a92c-d4b7-44e5-9c2f-8a1b0e7f5d3a" : "hal0-•••••••••••••••••••••••••••••••••"}</span>}
+          v={<span>{showToken && tokenPlain ? tokenPlain : tokenMasked}</span>}
           actions={<>
-            <button className="btn ghost sm" onClick={() => setShowToken(s => !s)}>{showToken ? "Hide" : "Show"}</button>
+            <button className="btn ghost sm" onClick={() => {
+              if (!showToken) reveal.mutate();
+              setShowToken(s => !s);
+            }}>{showToken ? "Hide" : "Show"}</button>
             <button className="btn ghost sm" onClick={() => setRotateOpen(true)}>{Icons.restart} Rotate</button>
-            <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Token copied", "ok")}>Copy</button>
+            <button className="btn ghost sm" onClick={() => {
+              if (tokenPlain) navigator.clipboard?.writeText(tokenPlain);
+              window.__hal0Toast && window.__hal0Toast("Token copied", "ok");
+            }}>Copy</button>
           </>}
         />
-        <SRow
-          k="Issued"
-          v="2026-04-12 · 41 days ago"
-          mono
-        />
+        <SRow k="Issued" v={issued} mono />
         <SRow
           k="Allowed origins"
           sub="CORS — UI hosts permitted to call hal0-api"
           mono
-          v={<span>http://halo-strix.local:8081, http://localhost:5174</span>}
+          v={<span>{origins.length > 0 ? origins.join(', ') : '—'}</span>}
           actions={<button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Allowed-origins editor — stub", "info")}>{Icons.edit} Edit</button>}
         />
       </div>
@@ -101,7 +125,13 @@ function AuthSection() {
       <ConfirmDialog
         open={rotateOpen}
         onCancel={() => setRotateOpen(false)}
-        onConfirm={() => { setRotateOpen(false); window.__hal0Toast && window.__hal0Toast("Token rotated — update CLI + agents", "warn"); }}
+        onConfirm={() => {
+          rotate.mutate(undefined, {
+            onSuccess: () => window.__hal0Toast && window.__hal0Toast("Token rotated — update CLI + agents", "warn"),
+            onError: (e) => window.__hal0Toast && window.__hal0Toast(`Rotate failed: ${e?.message || 'unknown'}`, "err"),
+          });
+          setRotateOpen(false);
+        }}
         title="Rotate the hal0 Bearer token?"
         message={<span>The current token is revoked immediately. Running scripts, agents, and CLI sessions using the old token will lose access and must be re-authorised. The new token is shown <b>once</b> after rotation — copy it before closing the dialog.</span>}
         confirmLabel="Rotate token"
@@ -112,38 +142,48 @@ function AuthSection() {
 
 function SecretsSection() {
   const [addOpen, setAddOpen] = useStateSet(false);
+  // Phase B1: live secrets list + delete mutation. The Add modal still
+  // posts via the prototype's local form; useSecretSet wires the real
+  // POST when modal upgrades land in B2.
+  const secretsQuery = useSecrets();
+  const delSecret = useSecretDelete();
+  // Fall back to the design's three default rows when backend hasn't
+  // shipped the endpoint.
+  const fallbackRows = [
+    { name: 'HF_TOKEN', set: true, masked: 'hf_•••••••••••••••••••••' },
+    { name: 'OPENAI_API_KEY', set: false },
+    { name: 'ANTHROPIC_API_KEY', set: false },
+  ];
+  const rows = (secretsQuery.data && secretsQuery.data.length > 0) ? secretsQuery.data : fallbackRows;
   return (
     <div className="s-section">
       <h2>Secrets</h2>
       <p className="desc">Encrypted at rest, scoped to lemond. Used for gated HF repos and provider auth.</p>
       <div className="s-panel">
-        <SRow
-          k="HF_TOKEN"
-          sub="Hugging Face — used by lemond for gated repos"
-          mono
-          v={<span style={{color: "var(--ok)"}}>hf_••••••••••••••••••••• · set</span>}
-          actions={<>
-            <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Update</button>
-            <button className="btn danger sm" onClick={() => window.__hal0Toast && window.__hal0Toast("HF_TOKEN removed", "warn")}>Remove</button>
-          </>}
-        />
-        <SRow
-          k="OPENAI_API_KEY"
-          sub="Optional · fallback provider"
-          mono
-          v={<span style={{color: "var(--fg-4)"}}>not set</span>}
-          actions={<button className="btn ghost sm" onClick={() => setAddOpen(true)}>Add</button>}
-        />
-        <SRow
-          k="ANTHROPIC_API_KEY"
-          sub="Optional · fallback provider"
-          mono
-          v={<span style={{color: "var(--fg-4)"}}>not set</span>}
-          actions={<button className="btn ghost sm" onClick={() => setAddOpen(true)}>Add</button>}
-        />
+        {rows.map(s => (
+          <SRow
+            key={s.name}
+            k={s.name}
+            sub={s.name === 'HF_TOKEN' ? 'Hugging Face — used by lemond for gated repos' : 'Optional · fallback provider'}
+            mono
+            v={s.set
+              ? <span style={{color: "var(--ok)"}}>{s.masked || '••• · set'}</span>
+              : <span style={{color: "var(--fg-4)"}}>not set</span>}
+            actions={s.set
+              ? (<>
+                  <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Update</button>
+                  <button className="btn danger sm" onClick={() => {
+                    delSecret.mutate(s.name, {
+                      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${s.name} removed`, "warn"),
+                    });
+                  }}>Remove</button>
+                </>)
+              : <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Add</button>}
+          />
+        ))}
       </div>
       <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
-        <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>3 known keys · add a custom key for any provider</span>
+        <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>{rows.length} known keys · add a custom key for any provider</span>
         <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add secret</button>
       </div>
       <AddSecretModal open={addOpen} onClose={() => setAddOpen(false)} />
@@ -152,6 +192,17 @@ function SecretsSection() {
 }
 
 function UpdatesSection() {
+  // Phase B1: live state + check + apply mutations. Fallback shows the
+  // design's v0.2.2-available story when no backend.
+  const stateQuery = useUpdateState();
+  const checkM = useUpdateCheck();
+  const applyM = useUpdateApply();
+  const u = stateQuery.data || {
+    hal0: { current: 'v0.2.1', available: 'v0.2.2', channel: 'stable' },
+    lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
+    flm: { current: 'v0.9.42', source: 'manual-deb' },
+    autoCheck: true,
+  };
   return (
     <div className="s-section">
       <h2>Updates</h2>
@@ -161,9 +212,17 @@ function UpdatesSection() {
           k="hal0"
           sub="Dashboard + API + CLI"
           mono
-          v={<><span style={{color: "var(--accent)"}}>v0.2.2 available</span> <span style={{color: "var(--fg-4)"}}>· current v0.2.1</span></>}
+          v={<>
+            {u.hal0?.available
+              ? <><span style={{color: "var(--accent)"}}>{u.hal0.available} available</span> <span style={{color: "var(--fg-4)"}}>· current {u.hal0.current}</span></>
+              : <span>current {u.hal0?.current}</span>}
+          </>}
           actions={<>
-            <button className="btn sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Update started — brief outage during restart", "warn")}>Install update</button>
+            <button className="btn sm" disabled={!u.hal0?.available} onClick={() => {
+              applyM.mutate('hal0', {
+                onSuccess: () => window.__hal0Toast && window.__hal0Toast("Update started — brief outage during restart", "warn"),
+              });
+            }}>Install update</button>
             <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Opening hal0.dev/changelog", "info")}>Changelog →</button>
           </>}
         />
@@ -171,20 +230,20 @@ function UpdatesSection() {
           k="lemonade"
           sub="Pinned. SHA-256 verified."
           mono
-          v="v10.6.0 · channel: stable"
-          actions={<button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Checking lemonade updates…", "info")}>Check</button>}
+          v={`${u.lemonade?.current} · channel: ${u.lemonade?.channel || 'stable'}`}
+          actions={<button className="btn ghost sm" onClick={() => checkM.mutate('lemonade')}>Check</button>}
         />
         <SRow
           k="flm"
           sub="Manual deb · vendor-supplied"
           mono
-          v="v0.9.42"
+          v={u.flm?.current || '—'}
           actions={<button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Opening FLM install guide", "info")}>Re-install</button>}
         />
         <SRow
           k="Auto-check"
           sub="Once per day · 09:00 local"
-          v={<label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}><input type="checkbox" defaultChecked style={{accentColor: "var(--accent)"}} /><span>enabled</span></label>}
+          v={<label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}><input type="checkbox" defaultChecked={!!u.autoCheck} style={{accentColor: "var(--accent)"}} /><span>enabled</span></label>}
         />
         <SRow
           k="FirstRun"
@@ -200,10 +259,26 @@ function UpdatesSection() {
 function LemonadeSection() {
   const [argsEdit, setArgsEdit] = useStateSet(false);
   const [restartOpen, setRestartOpen] = useStateSet(false);
+  // Phase B1: live Lemonade readouts + capabilities preview at the top
+  // of the admin panel so operators see version + loaded budget
+  // alongside the static config form (which keeps local edits until
+  // PATCH wiring in B2).
+  const lemond = useLemondRollup();
+  const stats = useLemonadeStats();
+  const caps = useCapabilities();
   return (
     <div className="s-section">
       <h2>Lemonade admin</h2>
       <p className="desc">Direct edit of <span className="mono" style={{color: "var(--fg)"}}>/internal/config</span>. Changes write to capabilities.toml and may require <span className="mono" style={{color: "var(--warn)"}}>⟳ restart</span>.</p>
+      <div className="s-panel" style={{marginBottom: 12}}>
+        <SRow k="runtime" mono v={<>{lemond.version} · {lemond.status} · <b>{lemond.loaded}</b>/{lemond.budget} loaded</>} />
+        <SRow k="throughput" mono v={lemond.throughput != null ? `${lemond.throughput} MB/s` : '—'} />
+        <SRow k="last TTFT" mono v={lemond.lastTtft != null ? `${(lemond.lastTtft * 1000).toFixed(0)} ms` : '—'} />
+        <SRow k="last decode" mono v={lemond.lastTokPerSec != null ? `${lemond.lastTokPerSec.toFixed(1)} tok/s` : '—'} />
+        {caps.data?.capabilities && Object.entries(caps.data.capabilities).map(([k, v]) => (
+          <SRow key={k} k={`capability · ${k}`} mono v={<><b>{v.provider}</b>{v.model ? <> · {v.model}</> : null}</>} />
+        ))}
+      </div>
       <div className="s-panel">
         <SRow
           k="max_loaded_models"

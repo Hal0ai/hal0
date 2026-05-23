@@ -1,4 +1,13 @@
 // hal0 dashboard — chrome (TopBar, Sidebar, Footer, Wordmark, ApprovalModal)
+//
+// Phase B1: Sidebar + Footer + TopBar now read lemond status from the
+// `useLemondRollup` hook (live polling /v1/health every 2s). Fields
+// fall back to the legacy HAL0_DATA.lemond shape when the hook hasn't
+// yet returned (initial paint / mock build), so prototype layout is
+// unchanged.
+
+import { useLemondRollup } from '@/api/hooks/useLemonade'
+import { useLogsStream } from '@/api/hooks/useLogs'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -144,49 +153,57 @@ function Sidebar({ route, onGo }) {
         ))}
       </div>
       <div className="sb-spacer" />
-      <div className="sb-status">
-        <div className="row">
-          <span className="k">lemond</span>
-          <span className="v up"><span className="dot" />{HAL0_DATA.lemond.status}</span>
-        </div>
-        <div className="row">
-          <span className="k">version</span>
-          <span className="v">{HAL0_DATA.lemond.version}</span>
-        </div>
-        <div className="ln" />
-        <div className="row">
-          <span className="k">loaded</span>
-          <span className="v"><b>{HAL0_DATA.lemond.loaded}</b>/{HAL0_DATA.lemond.budget}</span>
-        </div>
-        <div className="row">
-          <span className="k">npu</span>
-          <span className="v" style={{color: "var(--dev-npu)"}}><span className="dot" />coresident</span>
-        </div>
-        <div className="nudge" onClick={() => onGo("logs")}>View runtime logs →</div>
+      <SidebarStatusBlock onGo={onGo} />
+    </div>
+  );
+}
+
+// Phase B1 — live lemond status block. Wraps `useLemondRollup` so the
+// hook only runs when the sidebar is mounted.
+function SidebarStatusBlock({ onGo }) {
+  const L = useLemondRollup();
+  const statusClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
+  return (
+    <div className="sb-status">
+      <div className="row">
+        <span className="k">lemond</span>
+        <span className={"v " + statusClass}><span className="dot" />{L.status}</span>
       </div>
+      <div className="row">
+        <span className="k">version</span>
+        <span className="v">{L.version}</span>
+      </div>
+      <div className="ln" />
+      <div className="row">
+        <span className="k">loaded</span>
+        <span className="v"><b>{L.loaded}</b>/{L.budget}</span>
+      </div>
+      <div className="row">
+        <span className="k">npu</span>
+        <span className="v" style={{color: "var(--dev-npu)"}}><span className="dot" />coresident</span>
+      </div>
+      <div className="nudge" onClick={() => onGo("logs")}>View runtime logs →</div>
     </div>
   );
 }
 
 // ─── Footer ───
 function Footer({ updateAvailable = true, expanded = false, onToggle, journal = HAL0_DATA.journal }) {
-  const L = HAL0_DATA.lemond;
+  // Phase B1: footer chips and journal pane now run off live hooks.
+  // Lemond rollup gives live status / loaded / throughput / queued.
+  // useLogsStream subscribes to /api/logs/stream when the pane is
+  // expanded (saves opening an SSE we don't render).
+  const L = useLemondRollup();
+  const live = useLogsStream({ follow: expanded });
   const [paneSrc, setPaneSrc] = useStateC("merged");
   const [paneQ, setPaneQ] = useStateC("");
-  // Extended journal — replays the slot lifecycle from a slightly bigger ring
-  const extended = [
-    { ts: "13:58:12.114", source: "hal0",   level: "info", msg: "session ftr-103 closed · 14 messages" },
-    { ts: "13:59:04.218", source: "lemond", level: "info", msg: "llm_load_tensors: offloaded 49/49 layers to GPU" },
-    { ts: "13:59:11.443", source: "hal0",   level: "ok",   msg: "slot:coder state loading → idle · 7.0s" },
-    { ts: "14:00:18.290", source: "hal0",   level: "ok",   msg: "tool_call read_file path=src/hal0/launchers/slot_manager.py" },
-    { ts: "14:01:42.117", source: "hal0",   level: "ok",   msg: "session ftr-104 opened persona=primary" },
-    { ts: "14:01:58.341", source: "lemond", level: "info", msg: "ggml_init_cublas: found 1 ROCm device gfx1151" },
-    { ts: "14:02:02.117", source: "lemond", level: "ok",   msg: "POST /v1/load model=qwen3.6-27b-mtp backend=llamacpp:rocm" },
-    ...journal,
-    { ts: "14:02:30.117", source: "lemond", level: "ok",   msg: "POST /v1/load model=sd-turbo backend=sdcpp:rocm (tool dispatch)" },
-    { ts: "14:02:32.290", source: "hal0",   level: "ok",   msg: "tool_call generate_image · 4.1s · 2.4 MB" },
-    { ts: "14:02:36.117", source: "hal0",   level: "info", msg: "slot:img state serving → idle" },
-  ].sort((a, b) => a.ts.localeCompare(b.ts));
+  // Phase B1: mux the live SSE ring on top of the static journal.
+  // When the pane is expanded the ring fills in; collapsed it's just
+  // the lookup from props, preserving the design's hero-feel even
+  // before SSE primes.
+  const extended = (live.ring && live.ring.length > 0)
+    ? [...live.ring].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''))
+    : [...journal].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
 
   const filtered = extended.filter(e => {
     if (paneSrc !== "merged" && e.source !== paneSrc) return false;
@@ -240,14 +257,14 @@ function Footer({ updateAvailable = true, expanded = false, onToggle, journal = 
         </div>
       )}
       <div className="foot-chips">
-        <div className="foot-chip up">
+        <div className={"foot-chip " + (L.status === 'up' ? 'up' : '')}>
           <span className="dot" />
           <span className="k">lemond:</span>
           <span className="v">{L.status}</span>
         </div>
         <div className="foot-chip">
           <span className="k">throughput</span>
-          <span className="v num">{L.throughput} MB/s</span>
+          <span className="v num">{L.throughput != null ? `${L.throughput} MB/s` : '—'}</span>
         </div>
         <div className="foot-chip">
           <span className="k">loaded</span>
