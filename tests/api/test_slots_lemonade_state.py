@@ -329,6 +329,86 @@ def test_legacy_fields_still_present(
         assert not missing, f"slot {slot} missing legacy keys: {missing}"
 
 
+# ── PR-18 persona-surface fields ───────────────────────────────────────────
+
+
+def test_list_slots_emits_type_and_model_default_for_persona_dropdown(
+    npu_trio_slot_root: Path,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """PR-18: each entry carries ``type`` + ``model_default`` + ``enabled``.
+
+    The dashboard's persona dropdown filters /api/slots to ``type=llm``
+    rows and uses ``model_default`` as the value posted in
+    ``body.model``. Without these fields the dropdown would need a
+    second per-slot config fetch — adding them at the list level keeps
+    page-load to a single round trip.
+    """
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200
+    by_name = {e["name"]: e for e in r.json()}
+
+    # The chat anchor is type=llm with a default model.
+    agent = by_name["agent"]
+    assert agent["type"] == "llm"
+    assert agent["model_default"] == "gemma3-1b"
+    assert agent["enabled"] is True
+
+    # The transcription sibling is type=transcription — the dashboard's
+    # persona dropdown filters this row OUT.
+    stt = by_name["stt-npu"]
+    assert stt["type"] == "transcription"
+    assert stt["model_default"] == "whisper-v3"
+
+
+def test_list_slots_emits_labels_for_tool_calling_gate(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """PR-18: ``labels`` is lifted from ``[model] labels = [...]``.
+
+    The dashboard's OmniRouter toggle is auto-enabled when the active
+    persona's model advertises ``tool-calling``. The label list arrives
+    on the list endpoint so the UI doesn't need a per-slot /config
+    fetch to decide whether to show the toggle.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3-4b"',
+            'labels = ["tool-calling", "vision"]',
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    assert by_name["primary"]["labels"] == ["tool-calling", "vision"]
+    assert by_name["primary"]["type"] == "llm"
+    assert by_name["primary"]["model_default"] == "qwen3-4b"
+
+
+def test_list_slots_omits_labels_when_none_declared(
+    npu_trio_slot_root: Path,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """Labels list is omitted (not empty) when the slot config has no
+    ``model.labels`` entry. Keeps the wire payload tight and matches
+    the existing pattern of only emitting fields with content.
+    """
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    # The NPU trio TOMLs in the fixture don't carry a labels field.
+    assert "labels" not in by_name["agent"]
+
+
 def test_list_degrades_when_lemonade_unreachable(
     npu_trio_slot_root: Path,
     isolated_client: TestClient,

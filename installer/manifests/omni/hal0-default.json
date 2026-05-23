@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "hal0": {
+    "name": "hal0-Default",
+    "min_ram_gb": 32,
+    "primary": {
+      "slot": "chat.primary",
+      "model_name": "qwen3.5-9b",
+      "size_gb": 6.9,
+      "lru": false
+    },
+    "coder": null,
+    "aux": [
+      {
+        "slot": "embed",
+        "model_name": "nomic-v1.5",
+        "size_gb": 0.3,
+        "lru": false
+      },
+      {
+        "slot": "stt",
+        "model_name": "whisper-tiny",
+        "size_gb": 0.075,
+        "lru": false
+      },
+      {
+        "slot": "tts",
+        "model_name": "kokoro:cpu",
+        "size_gb": 0.35,
+        "lru": false
+      }
+    ],
+    "npu_trio_shown": false,
+    "npu_trio_optin": false,
+    "display_label": "hal0-Default",
+    "display_subtitle": "Balanced chat + embed + voice for 32 GB+ boxes",
+    "vendor": "hal0"
+  },
+  "omni": {
+    "kind": "collection.omni",
+    "name": "hal0-Default",
+    "description": "Recommended starter bundle: chat, embed, STT, TTS.",
+    "members": [
+      { "model_name": "qwen3.5-9b" },
+      { "model_name": "nomic-v1.5" },
+      { "model_name": "whisper-tiny" },
+      { "model_name": "kokoro:cpu" }
+    ]
+  }
+}

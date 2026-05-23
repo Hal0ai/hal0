@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "hal0": {
+    "name": "hal0-Pro",
+    "min_ram_gb": 64,
+    "primary": {
+      "slot": "chat.primary",
+      "model_name": "Qwen3.6-27B-MTP",
+      "size_gb": 18.8,
+      "lru": false
+    },
+    "coder": {
+      "slot": "chat.coder",
+      "model_name": "Qwen3-Coder-30B-A3B",
+      "size_gb": 18.6,
+      "lru": true
+    },
+    "aux": [
+      {
+        "slot": "embed",
+        "model_name": "nomic-v1.5",
+        "size_gb": 0.3,
+        "lru": false
+      },
+      {
+        "slot": "rerank",
+        "model_name": "bge-reranker-v2-m3",
+        "size_gb": 0.45,
+        "lru": false
+      },
+      {
+        "slot": "stt",
+        "model_name": "whisper-base",
+        "size_gb": 0.15,
+        "lru": false
+      },
+      {
+        "slot": "tts",
+        "model_name": "kokoro:cpu",
+        "size_gb": 0.35,
+        "lru": false
+      },
+      {
+        "slot": "img",
+        "model_name": "sd-turbo",
+        "size_gb": 1.4,
+        "lru": true
+      }
+    ],
+    "npu_trio_shown": true,
+    "npu_trio_optin": false,
+    "display_label": "hal0-Pro",
+    "display_subtitle": "Chat + coder + embed/rerank + STT + TTS + image, 64 GB+",
+    "vendor": "hal0"
+  },
+  "omni": {
+    "kind": "collection.omni",
+    "name": "hal0-Pro",
+    "description": "Pro bundle: chat, coder (LRU), embed/rerank, voice, image.",
+    "members": [
+      { "model_name": "Qwen3.6-27B-MTP" },
+      { "model_name": "Qwen3-Coder-30B-A3B" },
+      { "model_name": "nomic-v1.5" },
+      { "model_name": "bge-reranker-v2-m3" },
+      { "model_name": "whisper-base" },
+      { "model_name": "kokoro:cpu" },
+      { "model_name": "sd-turbo" }
+    ]
+  }
+}

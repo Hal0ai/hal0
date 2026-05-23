@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "hal0": {
+    "name": "LMX-Omni-52B-Halo",
+    "min_ram_gb": 100,
+    "primary": {
+      "slot": "chat.primary",
+      "model_name": "Qwen3.6-35B-A3B-MTP",
+      "size_gb": 23.8,
+      "lru": false
+    },
+    "coder": null,
+    "aux": [
+      {
+        "slot": "stt",
+        "model_name": "Whisper-Large-v3-Turbo",
+        "size_gb": 1.6,
+        "lru": false
+      },
+      {
+        "slot": "tts",
+        "model_name": "kokoro-v1",
+        "size_gb": 0.35,
+        "lru": false
+      },
+      {
+        "slot": "img",
+        "model_name": "Flux-2-Klein-9B",
+        "size_gb": 9.0,
+        "lru": false
+      }
+    ],
+    "npu_trio_shown": false,
+    "npu_trio_optin": false,
+    "display_label": "LMX-Omni-52B-Halo",
+    "display_subtitle": "AMD-curated kit — vendor-blessed Strix Halo bundle",
+    "vendor": "amd"
+  },
+  "omni": {
+    "kind": "collection.omni",
+    "name": "LMX-Omni-52B-Halo",
+    "description": "AMD's curated triple-modality kit for Strix Halo.",
+    "members": [
+      { "model_name": "Qwen3.6-35B-A3B-MTP" },
+      { "model_name": "Whisper-Large-v3-Turbo" },
+      { "model_name": "kokoro-v1" },
+      { "model_name": "Flux-2-Klein-9B" }
+    ]
+  }
+}

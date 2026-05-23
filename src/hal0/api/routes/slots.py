@@ -191,10 +191,32 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
             continue
         enabled = cfg.get("enabled") is not False
         model_default = ""
+        model_labels: list[str] = []
         model_section = cfg.get("model")
         if isinstance(model_section, dict):
             model_default = str(model_section.get("default") or "")
+            raw_labels = model_section.get("labels", ())
+            if isinstance(raw_labels, (list, tuple)):
+                model_labels = [str(x) for x in raw_labels]
         entry: dict[str, Any] = {}
+
+        # PR-18: lift slot ``type`` + model ``labels`` + model ``default``
+        # + ``enabled`` so the dashboard's chat surface can build the
+        # persona dropdown (which chat-type slots are enabled?) and
+        # decide whether to opt in to OmniRouter (does the active
+        # persona's model carry the ``tool-calling`` label?) without
+        # making a second call to /api/slots/{name}/config per slot.
+        # The fields are purely additive — pre-PR-18 consumers ignore
+        # them.
+        slot_type = cfg.get("type")
+        if isinstance(slot_type, str) and slot_type:
+            entry["type"] = slot_type
+        if model_default:
+            entry["model_default"] = model_default
+        if model_labels:
+            entry["labels"] = model_labels
+        entry["enabled"] = enabled
+
         loaded_entry = loaded_by_model.get(model_default) if model_default else None
         if not enabled:
             entry["lemonade_state"] = "disabled"
