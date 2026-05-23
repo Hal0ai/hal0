@@ -77,8 +77,8 @@ Endpoint: `/mcp/memory`. Auth = existing Bearer token (ADR-0001). Client identit
 - hal0 MCP server enriches each call with `client_id` from Bearer token before the write hits Cognee.
 - Mirrored to journald for unified hal0 log inspection.
 
-### 6. Cognee features deferred to Phase 9
-- **Graph extraction** (Kuzu) — requires structured-output-reliable LLM. Gate behind a configurable model. Default in Phase 9 will route graph builds to OpenRouter (or 70B-class local model if available) because small local models (qwen3:8b-class) flake on Cognee's structured-output prompts.
+### 6. Cognee features deferred to Phase 9 (graph-extraction model gate settled in ADR-0014, 2026-05-23)
+- **Graph extraction** (Kuzu) — requires structured-output-reliable LLM. Gate behind a configurable model. Default in Phase 9 will route graph builds to OpenRouter (or 70B-class local model if available) because small local models (qwen3:8b-class) flake on Cognee's structured-output prompts. **See [ADR-0014](0014-cognee-graph-extraction-model-gate.md) for the v0.3 decision** — graph defaults OFF, opt-in via dashboard toggle, route enum `upstream` / `primary` / `agent`, eval suite deferred to v0.4.
 - **Memify pipeline** — periodic memory hygiene (stale node cleanup, association strengthening, fact reweighting).
 - **Source connectors** — 30+ available (Slack, Notion, docs, images, audio). Optional bolt-ons in Phase 9.
 - **RBAC + granular permissions** — Cognee's built-in dataset-scoped permissions surface in dashboard.
