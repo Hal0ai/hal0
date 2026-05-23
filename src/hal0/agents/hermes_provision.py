@@ -492,8 +492,205 @@ def _phase_home_init(state: BootstrapState) -> PhaseResult:
     )
 
 
-_phase_env_probe = _stub("env_probe")
-_phase_config_write = _stub("config_write")
+# ── Phase C: env_probe ──────────────────────────────────────────────────────
+#
+# Walks the hal0-admin MCP probe tools (#237) and stashes a snapshot
+# under ``$HERMES_HOME/`` so config_write + context_link can render
+# from the same point-in-time view. We call the probe functions
+# directly rather than HTTP-roundtripping the local MCP — same data,
+# zero dispatcher hop, easier to test.
+
+
+def _read_env_probe() -> dict[str, Any]:
+    """Compose the env_report snapshot. Late-imports keep the bootstrap
+    importable when the MCP probes module shifts location."""
+    from hal0.mcp import probes  # local import for late binding
+
+    return {
+        "env_report": probes.env_report(),
+        "gpu_target_version": probes.gpu_target_version(),
+        "npu_status": probes.npu_status(),
+        "ai_models": probes.model_store_probe("/mnt/ai-models"),
+    }
+
+
+def _phase_env_probe(state: BootstrapState) -> PhaseResult:
+    """Capture a host-environment snapshot for downstream phases.
+
+    Writes the snapshot to ``$HERMES_HOME/env-<ts>.json`` AND keeps a
+    pointer in ``provision.json``. Snapshot is overwritten on every
+    re-run because it's a point-in-time view, not a checkpoint.
+    """
+    snapshot = _read_env_probe()
+    ts = _utcnow().replace(":", "").replace("-", "")
+    hermes_home = Path(state.hermes_home)
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    snapshot_path = hermes_home / f"env-{ts}.json"
+    snapshot_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            "snapshot_path": str(snapshot_path),
+            "strix_halo": snapshot["env_report"].get("cpu", {}).get("strix_halo"),
+            "gfx": snapshot["gpu_target_version"].get("gfx"),
+            "npu_present": snapshot["npu_status"].get("present"),
+        },
+    )
+
+
+# ── Phase E: config_write ───────────────────────────────────────────────────
+
+
+CONFIG_TEMPLATE_PATH = Path(__file__).resolve().parent / "hermes_templates" / "config.yaml.j2"
+
+
+def _resolve_primary_slot(*, fetcher: Callable[[], dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Pick the live primary chat slot from the local hal0 daemon.
+
+    Returns a dict with the keys the config template needs. Falls back
+    to a safe-but-unwired placeholder when no slot is loaded — the
+    self_report phase surfaces this in the bootstrap summary.
+    """
+    fallback = {
+        "model": "primary",
+        "base_url": "http://127.0.0.1:8000/api/v1",
+        "context_length": 32768,
+    }
+    if fetcher is None:
+
+        def _real() -> dict[str, Any]:
+            from urllib.error import URLError
+            from urllib.request import urlopen
+
+            try:
+                with urlopen("http://127.0.0.1:8080/v1/health", timeout=2.0) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except (URLError, OSError, json.JSONDecodeError):
+                return {}
+
+        fetcher = _real
+    data = fetcher() or {}
+    loaded = data.get("loaded") or data.get("slots") or []
+    if isinstance(loaded, list) and loaded:
+        first = loaded[0] if isinstance(loaded[0], dict) else {}
+        return {
+            "model": first.get("model") or first.get("model_id") or fallback["model"],
+            "base_url": first.get("backend_url") or fallback["base_url"],
+            "context_length": int(first.get("context_length") or fallback["context_length"]),
+        }
+    return fallback
+
+
+def _render_config_yaml(
+    *,
+    primary: dict[str, Any] | None,
+    chat_slots: list[dict[str, Any]] | None = None,
+    stt: dict[str, Any] | None = None,
+    tts: dict[str, Any] | None = None,
+    agent_id: str = "hermes-agent",
+    mcp_admin_url: str = "http://127.0.0.1:8080/mcp/admin",
+    mcp_memory_url: str = "http://127.0.0.1:8080/mcp/memory",
+) -> str:
+    """Render the Hermes config.yaml via Jinja2.
+
+    Variable shape matches the template's docstring (see
+    ``src/hal0/agents/hermes_templates/config.yaml.j2``). Jinja2 is
+    pinned in pyproject so the dep is always present in production
+    bootstraps — no fallback needed.
+    """
+    from jinja2 import Environment, FileSystemLoader
+
+    env = Environment(
+        loader=FileSystemLoader(str(CONFIG_TEMPLATE_PATH.parent)),
+        keep_trailing_newline=True,
+        autoescape=False,  # YAML output — escaping would corrupt literal strings.
+    )
+    tpl = env.get_template(CONFIG_TEMPLATE_PATH.name)
+    return tpl.render(
+        primary=primary,
+        chat_slots=chat_slots or [],
+        stt=stt,
+        tts=tts,
+        agent_id=agent_id,
+        mcp_admin_url=mcp_admin_url,
+        mcp_memory_url=mcp_memory_url,
+    )
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Recursive dict merge — overlay wins; nested dicts merge."""
+    out = dict(base)
+    for k, v in overlay.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _apply_overrides(rendered_yaml: str, overrides_path: Path) -> str:
+    """Deep-merge ``overrides_path`` (if present) on top of rendered YAML.
+
+    Re-emits YAML via stdlib (json round-trip is the fallback when
+    PyYAML isn't installed — the resulting JSON is still valid YAML).
+    """
+    if not overrides_path.exists():
+        return rendered_yaml
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return rendered_yaml  # PyYAML not installed; ship as-is.
+    base = yaml.safe_load(rendered_yaml) or {}
+    overlay = yaml.safe_load(overrides_path.read_text()) or {}
+    merged = _deep_merge(base, overlay)
+    return yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
+
+
+OVERRIDES_PATH = Path("/etc/hal0/agents/hermes/overrides.yaml")
+
+
+def _phase_config_write(state: BootstrapState) -> PhaseResult:
+    """Atomically render ``$HERMES_HOME/config.yaml`` from the template.
+
+    Idempotent: hash-equal output skips the write. Overrides at
+    ``/etc/hal0/agents/hermes/overrides.yaml`` deep-merge on top.
+    """
+    hermes_home = Path(state.hermes_home)
+    config_path = hermes_home / "config.yaml"
+    primary_raw = _resolve_primary_slot()
+    # The template names the dict keys ``model_id``/``backend_url``;
+    # _resolve_primary_slot returns ``model``/``base_url`` for less
+    # cognitive load at call sites. Translate at the seam.
+    primary = {
+        "model_id": primary_raw["model"],
+        "backend_url": primary_raw["base_url"],
+        "context_length": primary_raw["context_length"],
+    }
+    rendered = _render_config_yaml(
+        primary=primary,
+        agent_id=state.agent_id,
+    )
+    rendered = _apply_overrides(rendered, OVERRIDES_PATH)
+    new_hash = content_hash(rendered)
+
+    if config_path.exists() and content_hash(config_path.read_text(encoding="utf-8")) == new_hash:
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            hash=new_hash,
+            details={"config_path": str(config_path), "unchanged": True},
+        )
+
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    tmp = config_path.with_suffix(".yaml.tmp")
+    tmp.write_text(rendered, encoding="utf-8")
+    os.replace(tmp, config_path)
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        hash=new_hash,
+        details={"config_path": str(config_path), "primary_model": primary["model_id"]},
+    )
+
+
 _phase_mcp_wire = _stub("mcp_wire")
 _phase_context_link = _stub("context_link")
 _phase_namespace_register = _stub("namespace_register")

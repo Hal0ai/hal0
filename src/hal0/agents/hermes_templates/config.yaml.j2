@@ -1,0 +1,127 @@
+{# Hermes-Agent config.yaml — rendered by hal0's config_write phase (issue #241).
+   See docs/internal/hermes-bootstrap-plan-2026-05-23.md §8 for the contract.
+   The render is hashed and atomically swapped into $HERMES_HOME/config.yaml;
+   overrides.yaml (if present) deep-merges on top per the upstream-edit-friendly
+   escape hatch.
+
+   Variables expected (every key has a sensible default; missing values are
+   tolerated so a partial env_probe doesn't crash the render):
+     primary          — dict or None ({model_id, backend_url, context_length})
+     chat_slots       — list[dict]   ({alias, model_id, backend_url})
+     stt              — dict or None ({provider, backend_url, model})
+     tts              — dict or None ({provider, backend_url, model})
+     agent_id         — str          (default "hermes-agent")
+     mcp_admin_url    — str
+     mcp_memory_url   — str
+#}# Managed by hal0 (issue #241). Edits MAY be overwritten by
+# `hal0 agent bootstrap hermes`. Drop a file at
+# /etc/hal0/agents/hermes/overrides.yaml to merge on top.
+
+model:
+{%- if primary %}
+  default: {{ primary.model_id | tojson }}
+  provider: "hal0"
+  base_url: {{ primary.backend_url | tojson }}
+{%- if primary.context_length %}
+  context_length: {{ primary.context_length }}
+{%- endif %}
+{%- else %}
+  # No chat slot was ready at bootstrap time — operator must wire one
+  # before the agent can serve completions. Re-run bootstrap with
+  # `--repair` once the primary slot is loaded to refresh this section.
+  default: ""
+  provider: "hal0"
+  base_url: "http://127.0.0.1:8000/api/v1"
+{%- endif %}
+
+providers:
+  hal0:
+    request_timeout_seconds: 300
+    stale_timeout_seconds: 900
+
+{%- if chat_slots %}
+
+model_aliases:
+{%- for slot in chat_slots %}
+  {{ slot.alias }}:
+    model: {{ slot.model_id | tojson }}
+    provider: "hal0"
+    base_url: {{ slot.backend_url | tojson }}
+{%- endfor %}
+{%- endif %}
+
+memory:
+  # Hal0MemoryProvider plugin (#242). MCP server stays mounted in parallel
+  # so an operator can call memory_delete by hand without going through
+  # the agent loop.
+  provider: "hal0-memory"
+  memory_enabled: true
+  user_profile_enabled: true
+  nudge_interval: 10
+  # ADR-0014: graph extraction defaults OFF. Honored by Hal0MemoryProvider.
+  graph:
+    enabled: false
+    route: "upstream"
+
+mcp_servers:
+  hal0-admin:
+    url: {{ mcp_admin_url | tojson }}
+    headers:
+      # ADR-0012: no Bearer; agent identity flows via X-hal0-Agent
+      # which MCPIdentityMiddleware (renamed from MCPAuthMiddleware)
+      # treats as the client_id for private:<client_id> namespacing.
+      X-hal0-Agent: {{ agent_id | tojson }}
+    timeout: 60
+  hal0-memory:
+    url: {{ mcp_memory_url | tojson }}
+    headers:
+      X-hal0-Agent: {{ agent_id | tojson }}
+      X-hal0-Private: "1"
+    timeout: 30
+
+skills:
+  external_dirs:
+    - "/etc/hal0/agent-skills"
+    - "/var/lib/hal0/skills"
+  creation_nudge_interval: 15
+
+terminal:
+  backend: "local"
+  cwd: "/etc/hal0"
+
+agent:
+  max_turns: 60
+  reasoning_effort: "medium"
+
+display:
+  bell_on_complete: false
+  show_reasoning: false
+
+auxiliary:
+  vision: { provider: "main", model: "" }
+  web_extract: { provider: "main", model: "" }
+  session_search: { provider: "main", model: "" }
+
+{%- if stt %}
+
+stt:
+  provider: {{ stt.provider | default("openai") | tojson }}
+{%- if stt.model %}
+  openai:
+    model: {{ stt.model | tojson }}
+{%- endif %}
+{%- endif %}
+{%- if tts %}
+
+tts:
+  provider: {{ tts.provider | default("openai") | tojson }}
+{%- if tts.model %}
+  openai:
+    model: {{ tts.model | tojson }}
+{%- endif %}
+{%- endif %}
+
+hooks:
+  on_session_start:
+    - command: "/usr/lib/hal0/hermes-hooks/inject-system-state.sh"
+      timeout: 2

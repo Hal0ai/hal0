@@ -376,3 +376,128 @@ def test_resolve_python311_falls_back_to_sys_executable() -> None:
     out = hp._resolve_python311(prober=lambda _name: None)
     # CI runs on >= 3.11 (pyproject pin); falls back to sys.executable.
     assert out is not None
+
+
+# ── #241 phase impls — env_probe / config_write ─────────────────────────────
+
+
+def test_env_probe_writes_snapshot_to_hermes_home(tmp_path: Path) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    out = hp._phase_env_probe(state)
+    assert out.status == hp.PhaseStatus.OK
+    snap = Path(out.details["snapshot_path"])
+    assert snap.exists()
+    import json as _json
+
+    data = _json.loads(snap.read_text())
+    for key in ("env_report", "gpu_target_version", "npu_status", "ai_models"):
+        assert key in data
+
+
+def test_resolve_primary_slot_uses_loaded_entry() -> None:
+    fake = lambda: {  # noqa: E731
+        "loaded": [
+            {"model": "qwen3:8b", "backend_url": "http://127.0.0.1:8001", "context_length": 16384}
+        ]
+    }
+    out = hp._resolve_primary_slot(fetcher=fake)
+    assert out["model"] == "qwen3:8b"
+    assert out["base_url"] == "http://127.0.0.1:8001"
+    assert out["context_length"] == 16384
+
+
+def test_resolve_primary_slot_fallback_when_no_loaded_slots() -> None:
+    out = hp._resolve_primary_slot(fetcher=lambda: {})
+    assert out["model"] == "primary"
+    assert out["context_length"] == 32768
+
+
+def test_render_config_yaml_includes_primary_block() -> None:
+    rendered = hp._render_config_yaml(
+        primary={
+            "model_id": "qwen3:8b",
+            "backend_url": "http://127.0.0.1:8001/v1",
+            "context_length": 16384,
+        },
+        agent_id="hermes-agent",
+    )
+    assert '"qwen3:8b"' in rendered
+    assert '"http://127.0.0.1:8001/v1"' in rendered
+    assert 'X-hal0-Agent: "hermes-agent"' in rendered
+    # ADR-0014: graph extraction defaults OFF.
+    assert "enabled: false" in rendered
+
+
+def test_render_config_yaml_no_primary_emits_safe_placeholder() -> None:
+    rendered = hp._render_config_yaml(primary=None, agent_id="hermes-agent")
+    assert 'default: ""' in rendered
+    assert "127.0.0.1:8000/api/v1" in rendered
+
+
+def test_render_config_yaml_chat_slots_become_aliases() -> None:
+    rendered = hp._render_config_yaml(
+        primary={"model_id": "p", "backend_url": "u", "context_length": 8000},
+        chat_slots=[
+            {"alias": "coder", "model_id": "qwen-coder", "backend_url": "http://x"},
+        ],
+        agent_id="hermes-agent",
+    )
+    assert "model_aliases:" in rendered
+    assert "coder:" in rendered
+    assert '"qwen-coder"' in rendered
+
+
+def test_config_write_phase_writes_yaml_idempotently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-such-overrides.yaml")
+    out1 = hp._phase_config_write(state)
+    assert out1.status == hp.PhaseStatus.OK
+    cfg = Path(out1.details["config_path"])
+    assert cfg.exists()
+    first_hash = out1.hash
+    # Re-run is a no-op (hash equals on-disk).
+    out2 = hp._phase_config_write(state)
+    assert out2.details.get("unchanged") is True
+    assert out2.hash == first_hash
+
+
+def test_config_write_phase_applies_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text("agent:\n  max_turns: 999\n")
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", overrides)
+    out = hp._phase_config_write(state)
+    assert out.status == hp.PhaseStatus.OK
+    cfg = Path(out.details["config_path"]).read_text()
+    assert "999" in cfg
+
+
+def test_deep_merge_recurses() -> None:
+    base = {"a": {"b": 1, "c": 2}, "d": 3}
+    overlay = {"a": {"c": 99, "e": 4}}
+    merged = hp._deep_merge(base, overlay)
+    assert merged == {"a": {"b": 1, "c": 99, "e": 4}, "d": 3}
+
+
+def test_hal0_profile_plugin_file_present() -> None:
+    """The plugin source file ships in the wheel + has the required hooks."""
+    repo_root = hp.REPO_ROOT_FOR_INSTALLER
+    src = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0" / "__init__.py"
+    body = src.read_text()
+    assert "Hal0Profile" in body
+    assert "register_provider" in body
+    assert "hermes-on-hal0" in body  # User-Agent header marker

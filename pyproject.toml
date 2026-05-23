@@ -57,6 +57,13 @@ dependencies = [
   # MIT-licensed Python SDK; consumed by hal0.mcp.* — required at
   # import time, hence core (not optional).
   "mcp==1.27.0",
+  # v0.3 Hermes-Agent bootstrap (issue #241): config_write phase
+  # renders $HERMES_HOME/config.yaml from a Jinja2 template + deep-merges
+  # /etc/hal0/agents/hermes/overrides.yaml. Both libs were already
+  # transitive via cognee/fastapi; pin them explicitly so the bootstrap
+  # surface stops relying on a sibling package keeping them on disk.
+  "Jinja2>=3.1",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
