@@ -10,8 +10,16 @@
  * the documented API contract.
  */
 import { test as base, Route, Request, Page } from '@playwright/test'
+import { MOCK_DATA } from './mock-data'
 
 export const LIVE = process.env.HAL0_E2E_LIVE === '1'
+
+/**
+ * Re-export the v2 mock-data constants so specs and helpers don't have
+ * to know which file owns the shape. Mirrors `MOCK_DATA` in
+ * `ui/src/composables/useMock.js` per slice #166.
+ */
+export { MOCK_DATA } from './mock-data'
 
 /* ── Default mock responses ──────────────────────────────────────── */
 
@@ -224,6 +232,45 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   await page.route('**/api/agent/approvals', (route) =>
     json(route, { approvals: state.agentApprovals }),
   )
+}
+
+/**
+ * Pre-route every `/api/mcp/*` endpoint to the v0.3 mock shapes from
+ * `useMock.js`. Slice #14 (#180) will switch to a real store and add
+ * its own routing; until then any spec touching the MCP surface can
+ * call `await mockMcpEndpoints(page)` after `installDefaultMocks` to
+ * cover servers / clients / catalog in one line.
+ *
+ * Routes registered here win over the catch-all because Playwright
+ * matches in reverse-registration order — call AFTER installDefaultMocks.
+ */
+export async function mockMcpEndpoints(page: Page) {
+  if (LIVE) return
+  await page.route('**/api/mcp/servers', (route) =>
+    json(route, { servers: MOCK_DATA.mcpServers }),
+  )
+  await page.route('**/api/mcp/clients', (route) =>
+    json(route, { clients: MOCK_DATA.mcpClients }),
+  )
+  await page.route('**/api/mcp/catalog', (route) =>
+    json(route, { entries: MOCK_DATA.mcpCatalog }),
+  )
+  await page.route('**/api/mcp/servers/*', (route) => {
+    const url = route.request().url()
+    const id = url.split('/').pop()!.split('?')[0]
+    const found = MOCK_DATA.mcpServers.find((s) => s.id === id)
+    return json(route, found || {}, found ? 200 : 404)
+  })
+}
+
+/**
+ * Pre-route `/v1/stats` (Lemonade-native, consumed by PR-12 #179 server
+ * side; mirrored by useMock.js client side). Specs that exercise the
+ * lemonade store's stats polling should call this after default mocks.
+ */
+export async function mockV1Stats(page: Page) {
+  if (LIVE) return
+  await page.route('**/v1/stats', (route) => json(route, MOCK_DATA.v1Stats))
 }
 
 /* ── Test fixture wiring ─────────────────────────────────────────── */
