@@ -48,6 +48,24 @@ class SlotProvider(StrEnum):
 SlotBackend = SlotProvider
 
 
+class SlotType(StrEnum):
+    """Lemonade-shape slot type enum (#275 bug 3).
+
+    Maps to the Lemonade vocab from PLAN.md §1 v0.2 slot model:
+    ``llm | embedding | reranking | transcription | tts | image``.
+    The dispatcher routes by ``type`` (per ADR-0008 §6); without this
+    flag the CLI couldn't create embedding/rerank/transcription/tts
+    slots at all.
+    """
+
+    llm = "llm"
+    embedding = "embedding"
+    reranking = "reranking"
+    transcription = "transcription"
+    tts = "tts"
+    image = "image"
+
+
 class SlotHardware(StrEnum):
     """Hardware backends valid for a slot (mirrors SlotConfig.backend).
 
@@ -289,10 +307,24 @@ def slot_logs(
 @app.command("create")
 def slot_create(
     name: str = typer.Argument(..., help="Slot name (e.g. primary, embed, stt)"),
+    type_: SlotType = typer.Option(
+        SlotType.llm,
+        "--type",
+        "-t",
+        help=(
+            "Lemonade slot type: llm | embedding | reranking | transcription | tts | image. "
+            "Determines how the dispatcher routes requests (ADR-0008 §6)."
+        ),
+        case_sensitive=False,
+    ),
     provider: SlotProvider = typer.Option(
         "llama-server",
         "--provider",
-        help="Inference provider (engine) for the slot.",
+        help=(
+            "[Legacy v0.1] Inference provider (engine) for the slot. "
+            "Under Lemonade (v0.2+), provider is determined by --type; "
+            "this flag is preserved for backward-compat with older slot TOMLs."
+        ),
         case_sensitive=False,
     ),
     hardware: SlotHardware | None = typer.Option(
@@ -300,7 +332,8 @@ def slot_create(
         "--hardware",
         help=(
             "Hardware backend: vulkan | rocm | cpu. "
-            "Default: auto-detected from /etc/hal0/hardware.json (vulkan if no probe)."
+            "Default: auto-detected from /etc/hal0/hardware.json (vulkan if no probe). "
+            "Lemonade-shape `device` is derived: vulkan→gpu-vulkan, rocm→gpu-rocm, cpu→cpu."
         ),
         case_sensitive=False,
     ),
@@ -351,8 +384,19 @@ def slot_create(
             return
 
     hw = hardware.value if hardware is not None else _detect_default_hardware()
+    # Lemonade-shape `device` (gpu-vulkan / gpu-rocm / cpu / npu) derives
+    # from the v0.1 hardware enum: vulkan/rocm → gpu-vulkan/gpu-rocm; cpu
+    # stays cpu; npu has no v0.1 hardware equivalent (set --hardware via
+    # the legacy schema upgrade path).
+    device = {
+        "vulkan": "gpu-vulkan",
+        "rocm": "gpu-rocm",
+        "cpu": "cpu",
+    }.get(hw, hw)
     body: dict[str, Any] = {
         "name": name,
+        "type": type_.value,
+        "device": device,
         "backend": hw,  # SlotConfig.backend = hardware target (vulkan/rocm/cpu/...)
         "provider": str(provider),
         "model": {"default": model, "context_size": ctx_size},
