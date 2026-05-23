@@ -949,6 +949,17 @@ else
         chown -R hal0:hal0 "${LEMONADE_PREFIX}"
     fi
 
+    # HuggingFace hub cache for /v1/pull downloads (#275 bug 4). The hal0
+    # user's HOME is ${VAR_DIR} (per useradd above), so HF's default
+    # cache lands at ${VAR_DIR}/.cache/huggingface/hub. Without this,
+    # the first POST /v1/pull fails with "Permission denied" because
+    # ${VAR_DIR} is created by this script as root and never reassigned
+    # to hal0. Pre-create the leaf dir + give hal0 ownership of the
+    # cache tree (NOT the whole VAR_DIR — slot state.json + registry
+    # are written by hal0-api which runs as ${HAL0_USER}, default root).
+    mkdir -p "${VAR_DIR}/.cache/huggingface/hub"
+    chown -R hal0:hal0 "${VAR_DIR}/.cache"
+
     # 3. Cache dir + config.json. Atomic write (tempfile in the same
     #    directory + mv) so a crash mid-write doesn't leave lemond
     #    parsing a half-written JSON file on next start. Overwrite on
