@@ -1,7 +1,23 @@
 <script setup>
-import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
+/**
+ * TopBar.vue — v2 dash chrome (slice #168).
+ *
+ * Layout left → right:
+ *   Wordmark + version chip │ route eyebrow │ spacer │
+ *   ⌘K btn │ host chip │ AgentApprovalBell
+ *
+ * The wordmark+version block is duplicated across the dashboard's
+ * marketing surface; it stays here at 18px to match the v0.3 design
+ * source (/tmp/hal0-design-v3/dash/chrome.jsx ~lines 87–115).
+ *
+ * Mobile (<720px): the hamburger replaces the wordmark block (the
+ * <BottomTabs> takes over primary nav).
+ */
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
-import { useSlotStats } from '../composables/useSlotStats.js'
+import { useLemonadeStore } from '../stores/lemonade.js'
+import { useToastStore } from '../stores/toast.js'
 import Wordmark from './Wordmark.vue'
 import AgentApprovalBell from './AgentApprovalBell.vue'
 
@@ -11,106 +27,125 @@ const props = defineProps({
 })
 const emit = defineEmits(['toggle-sidebar', 'open-cmdk'])
 
-const system = useSystemStore()
+const route    = useRoute()
+const system   = useSystemStore()
+const lemonade = useLemonadeStore()
+const toasts   = useToastStore()
 
-// ── Derived status ─────────────────────────────────────────────────
-const apiHealth = computed(() => {
-  if (!system.status) return 'unknown'
-  if (system.error)   return 'error'
-  return 'ok'
-})
-
-const statusColor = computed(() => ({
-  ok:      'bg-success',
-  error:   'bg-danger',
-  unknown: 'bg-fg-faint',
-}[apiHealth.value]))
-
+// ── Version ──────────────────────────────────────────────────────────
 const version = computed(() => system.status?.version ?? null)
-// Highlight the version pill while we ship prereleases — alpha/beta/rc
-// in the version string flips it amber so operators see at a glance
-// that this isn't a stable build. Falls back to the muted default once
-// we tag a stable v1.0.0.
-const isPrerelease = computed(() => {
-  const v = version.value ?? ''
-  return /-(alpha|beta|rc)\b/i.test(v) || /(a\d+|b\d+|rc\d+)$/i.test(v)
+
+// ── Eyebrow ──────────────────────────────────────────────────────────
+// Matches the v0.3 chrome.jsx labels table: [eyebrow, title] per route
+// name. ``firstrun`` suppresses the breadcrumb so the wizard reads
+// clean.
+const ROUTE_LABELS = {
+  dashboard:  ['Overview',  'Dashboard'],
+  firstrun:   ['Setup',     'FirstRun'],
+  slots:      ['Lifecycle', 'Slots'],
+  'slot-detail': ['Lifecycle', 'Slots'],
+  models:     ['Catalog',   'Models'],
+  hardware:   ['System',    'Hardware'],
+  backends:   ['Runtime',   'Backends'],
+  providers:  ['Runtime',   'Providers'],
+  logs:       ['Runtime',   'Logs'],
+  agent:      ['Tools',     'Agent'],
+  'agents-mcp':    ['Tools', 'MCP Servers'],
+  'agents-memory': ['Tools', 'Memory'],
+  settings:   ['Configure', 'Settings'],
+}
+
+const eyebrow = computed(() => {
+  const name = route.name ? String(route.name) : ''
+  return ROUTE_LABELS[name] || ['', '']
 })
 
-const { running: runningSlots, total: totalSlots } = useSlotStats()
+const showEyebrow = computed(() => route.name !== 'firstrun' && eyebrow.value[0])
+
+// ── Host chip ───────────────────────────────────────────────────────
+// Reads hostname from /api/status (system store). Uptime is a placeholder
+// — when /v1/health surfaces a host uptime in a future Lemonade build it
+// can drop in here without a UI change.
+const hostname = computed(() => system.status?.hostname || 'hal0')
+const hostUptime = computed(() => {
+  // /api/status does not yet carry uptime; show the lemond version as a
+  // poor-man's "we're connected to something" once it lands, otherwise
+  // ``up`` with no value (the design tolerates the empty case).
+  const v = lemonade.version
+  return v ? `lemond ${v}` : 'up'
+})
+const hostHealthy = computed(() => lemonade.health === 'up')
+
+// ── ⌘K stub ──────────────────────────────────────────────────────────
+// The real command palette lands in slice #175; until then, a click on
+// the trigger surfaces a toast through the v2 store so operators see
+// the affordance is wired.
+function onCmdK() {
+  emit('open-cmdk')
+  toasts.push('Command palette — slice #12', 'info')
+}
 </script>
 
 <template>
-  <header
-    class="topbar"
-    role="banner"
-    aria-label="Top navigation bar"
-  >
-    <!-- Left: hamburger + brand -->
-    <div class="topbar-brand">
+  <header class="topbar" role="banner" aria-label="Top navigation bar">
+    <!-- Brand block: hamburger (mobile) + wordmark + version pill -->
+    <div class="tb-brand">
       <button
-        class="icon-btn"
-        @click="$emit('toggle-sidebar')"
-        :aria-label="isMobile && sidebarOpen ? 'Close menu' : 'Toggle sidebar'"
-        :aria-expanded="sidebarOpen"
-        :aria-controls="'sidebar'"
+        v-if="isMobile"
+        class="tb-hamburger"
         type="button"
+        :aria-label="sidebarOpen ? 'Close menu' : 'Open menu'"
+        :aria-expanded="sidebarOpen"
+        @click="emit('toggle-sidebar')"
       >
-        <!-- hamburger / close icon -->
-        <svg v-if="isMobile && sidebarOpen" width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+        <svg v-if="sidebarOpen" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <path d="M4 4l8 8M12 4l-8 8" stroke-linecap="round" />
         </svg>
-        <svg v-else width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/>
+        <svg v-else width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <path d="M3 5h10M3 8h10M3 11h10" stroke-linecap="round" />
         </svg>
       </button>
-
       <Wordmark size="text-base" />
       <span
         v-if="version"
-        class="version-pill"
-        :class="{ 'version-pill--prerelease': isPrerelease }"
-        :title="isPrerelease ? `Prerelease — v${version}. APIs may shift across 0.1.x tags.` : `Version ${version}`"
+        class="ver mono"
+        :title="`Version ${version}`"
       >v{{ version }}</span>
     </div>
 
-    <!-- Center: command palette trigger -->
-    <div class="topbar-center">
-      <button
-        class="cmdk-trigger"
-        @click="$emit('open-cmdk')"
-        :aria-label="'Open command palette (Ctrl+K)'"
-        type="button"
-      >
-        <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M10.5 18a7.5 7.5 0 100-15 7.5 7.5 0 000 15z"/>
-        </svg>
-        <span class="cmdk-text">Search · jump · act…</span>
-        <kbd class="kbd" aria-hidden="true">⌘K</kbd>
-      </button>
+    <!-- Route eyebrow (centre-left) -->
+    <div v-if="showEyebrow" class="tb-eyebrow mono" aria-hidden="true">
+      <span class="seg">{{ eyebrow[0] }}</span>
+      <span class="sep">/</span>
+      <span class="now">{{ eyebrow[1] }}</span>
     </div>
 
-    <!-- Right: agent approvals bell + slot count + status dot -->
-    <div class="topbar-right">
-      <!-- Phase 8 agent-approvals bell. Canonical surface per ADR-0004
-           §5 — visible regardless of which page the operator is on, so
-           a gated tool call never goes unnoticed. -->
-      <AgentApprovalBell />
+    <div class="tb-spacer" />
 
-      <span v-if="totalSlots > 0" class="slot-stat" aria-label="`${runningSlots} of ${totalSlots} slots running`">
-        <span class="slot-dot" :class="runningSlots > 0 ? 'live' : ''" aria-hidden="true" />
-        <span class="mono-text">{{ runningSlots }}/{{ totalSlots }}</span>
-        <span class="sr-only"> slots running</span>
-      </span>
+    <!-- ⌘K trigger -->
+    <button class="tb-cmdk" type="button" @click="onCmdK" aria-label="Open command palette (Ctrl+K)">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <circle cx="7" cy="7" r="4" />
+        <path d="M10 10l3 3" stroke-linecap="round" />
+      </svg>
+      <span class="cmdk-text">Command palette</span>
+      <kbd>⌘K</kbd>
+    </button>
 
-      <!-- API health indicator -->
-      <div
-        class="health-dot"
-        :class="statusColor"
-        :title="`API ${apiHealth}`"
-        role="status"
-        :aria-label="`API status: ${apiHealth}`"
-      />
+    <!-- Host chip -->
+    <div
+      class="tb-host"
+      :class="{ down: !hostHealthy }"
+      :title="`Connected host: ${hostname}`"
+      role="status"
+    >
+      <span class="host-dot" />
+      <b>{{ hostname }}</b>
+      <span class="ut">· {{ hostUptime }}</span>
     </div>
+
+    <!-- Agent approvals bell (canonical surface per ADR-0004 §5) -->
+    <AgentApprovalBell />
   </header>
 </template>
 
@@ -120,20 +155,16 @@ const { running: runningSlots, total: totalSlots } = useSlotStats()
   grid-row: 1;
   display: flex;
   align-items: center;
-  height: 44px;
-  /* Vacuum-tube treatment — solid-state hal0-nav from the marketing site:
-   * near-black at 85% with a heavy blur, plus an amber halo glow under
-   * the filament that the ::after pseudo paints along the bottom edge. */
-  background: rgba(10, 10, 10, 0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 1px 24px -10px rgba(255, 176, 0, 0.28);
-  padding: 0 12px 0 0;
-  gap: 8px;
-  z-index: 30;
+  gap: 16px;
+  padding: 0 20px 0 18px;
+  height: 52px;
+  background: var(--color-bg, #0a0a0a);
+  border-bottom: 1px solid var(--color-border, #2a2a2a);
   position: relative;
+  z-index: 30;
 }
 
+/* Amber halo under the topbar — picked up from the marketing site. */
 .topbar::after {
   content: '';
   position: absolute;
@@ -144,174 +175,135 @@ const { running: runningSlots, total: totalSlots } = useSlotStats()
   background: linear-gradient(
     to right,
     transparent 0%,
-    color-mix(in srgb, var(--hal0-accent) 60%, transparent) 50%,
+    color-mix(in srgb, var(--hal0-accent) 55%, transparent) 50%,
     transparent 100%
   );
   pointer-events: none;
 }
 
-/* ── Brand ─────────────────────────────────────────────────────── */
-.topbar-brand {
+/* ── Brand block ───────────────────────────────────────────────── */
+.tb-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 14px 0 14px;
-  height: 100%;
-  border-right: 1px solid var(--color-border);
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  width: calc(232px - 18px);
   flex-shrink: 0;
-  min-width: 220px;
 }
 
-.icon-btn {
+.tb-hamburger {
   width: 28px;
   height: 28px;
-  border-radius: var(--radius);
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: 1px solid transparent;
+  border-radius: var(--radius, 6px);
   color: var(--color-fg-muted);
   cursor: pointer;
-  flex-shrink: 0;
-  transition: background 0.1s, color 0.1s;
 }
-.icon-btn:hover {
+.tb-hamburger:hover {
   background: var(--color-surface-2);
   color: var(--color-fg);
 }
 
-.version-pill {
-  font-family: var(--font-mono);
+.ver {
+  color: var(--color-fg-faint);
   font-size: 10px;
-  /* Slashed-zero so a "v1.0.0" reads in the wordmark's voice. */
+  letter-spacing: 0.04em;
   font-feature-settings: 'zero' 1;
+  font-family: var(--font-mono);
   padding: 2px 6px;
   border-radius: 4px;
   background: var(--color-surface-2);
-  color: var(--color-fg-faint);
-  border: 1px solid color-mix(in srgb, var(--hal0-accent) 25%, var(--hal0-border));
+  border: 1px solid color-mix(in srgb, var(--hal0-accent) 25%, var(--color-border));
 }
 
-.version-pill--prerelease {
-  /* Amber-on-amber so operators see at a glance that this is an
-     unstable build. Reverts to the muted default for stable tags. */
-  background: color-mix(in srgb, var(--hal0-accent) 14%, var(--color-surface-2));
-  color: var(--hal0-accent);
-  border-color: color-mix(in srgb, var(--hal0-accent) 55%, transparent);
-  font-weight: 600;
-}
-
-/* ── Center ────────────────────────────────────────────────────── */
-.topbar-center {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-}
-
-.cmdk-trigger {
+/* ── Route eyebrow ─────────────────────────────────────────────── */
+.tb-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-fg-muted);
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  max-width: 400px;
-  padding: 6px 10px;
-  border-radius: var(--radius);
+  letter-spacing: 0.02em;
+}
+.tb-eyebrow .sep { color: var(--color-fg-faint); }
+.tb-eyebrow .now { color: var(--color-fg); font-weight: 500; }
+
+.tb-spacer { flex: 1; }
+
+/* ── ⌘K trigger ────────────────────────────────────────────────── */
+.tb-cmdk {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  height: 30px;
   border: 1px solid var(--color-border);
-  background: var(--color-surface-2);
-  color: var(--color-fg-faint);
-  font-size: 12px;
-  font-family: var(--font-mono);
-  font-feature-settings: 'zero' 1;
-  letter-spacing: -0.01em;
-  cursor: pointer;
-  transition: border-color 0.1s, color 0.1s;
-}
-.cmdk-trigger:hover {
-  border-color: var(--color-border-hi);
+  border-radius: var(--radius, 6px);
+  background: transparent;
   color: var(--color-fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
 }
-.cmdk-text {
-  flex: 1;
-  text-align: left;
+.tb-cmdk:hover {
+  color: var(--color-fg);
+  border-color: var(--color-border-hi);
 }
-.kbd {
+.tb-cmdk kbd {
   font-family: var(--font-mono);
   font-size: 10px;
   padding: 1px 5px;
   border-radius: 3px;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
-  color: var(--color-fg-faint);
-}
-
-/* ── Right ─────────────────────────────────────────────────────── */
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.slot-stat {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
   color: var(--color-fg-muted);
 }
-.slot-dot {
+
+/* ── Host chip ─────────────────────────────────────────────────── */
+.tb-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius, 6px);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-fg-muted);
+  cursor: default;
+}
+.tb-host b {
+  color: var(--color-fg);
+  font-weight: 500;
+}
+.tb-host .ut { color: var(--color-fg-faint); }
+.tb-host .host-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--color-fg-faint);
-  flex-shrink: 0;
-}
-.slot-dot.live {
   background: var(--color-success);
-  /* Brighter halo when slots are running — "the rack is on". */
-  box-shadow: 0 0 10px 0 var(--color-success);
+  box-shadow: 0 0 8px var(--color-success);
 }
-.mono-text {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-feature-settings: 'zero' 1;
+.tb-host.down .host-dot {
+  background: var(--color-danger);
+  box-shadow: 0 0 6px var(--color-danger);
 }
 
-.health-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.bg-success { background: var(--color-success); box-shadow: 0 0 6px -1px var(--color-success); }
-.bg-danger  { background: var(--color-danger); }
-.bg-fg-faint { background: var(--color-fg-faint); }
-
-/* ── Mobile ────────────────────────────────────────────────────── */
-@media (max-width: 768px) {
-  .topbar-brand {
-    min-width: unset;
-    border-right: none;
-    gap: 6px;
-    padding: 0 8px 0 10px;
-  }
-  .topbar-brand :deep(.wordmark),
-  .version-pill { display: none; }
-  .topbar-center { padding: 0 8px; }
-  .slot-stat { display: none; }
-}
-
-/* Utility */
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+/* ── Mobile <720 ───────────────────────────────────────────────── */
+@media (max-width: 719px) {
+  .topbar { padding: 0 10px; gap: 8px; }
+  .tb-brand { width: auto; gap: 6px; }
+  .tb-eyebrow { display: none; }
+  .tb-cmdk .cmdk-text,
+  .tb-cmdk kbd { display: none; }
+  .tb-host .ut { display: none; }
 }
 </style>
