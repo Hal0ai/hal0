@@ -167,22 +167,24 @@ def test_v1_models_still_handled_by_aggregator(
     assert lemonade_state["requests"] == []
 
 
-def test_v1_chat_completions_still_hits_dispatcher(
+def test_v1_chat_completions_falls_through_to_proxy_when_dispatcher_has_no_route(
     client: TestClient, lemonade_state: dict[str, Any]
 ) -> None:
-    """POST /v1/chat/completions stays on the dispatcher path.
+    """POST /v1/chat/completions with no dispatcher route → falls through to proxy.
 
-    With no upstreams configured the dispatcher returns its own
-    ``dispatch.no_route`` envelope. The proxy must NOT have been
-    consulted.
+    Pre-#277 the dispatcher's ``dispatch.no_route`` 404 surfaced verbatim
+    and the proxy was never touched. Post-#277, the dispatcher catches
+    NoRouteFound inside ``_dispatch_and_forward`` and delegates to the
+    lemonade_proxy catch-all — so this request DOES reach the proxy.
+    See #275 bug 5 + PR #277.
     """
-    r = client.post(
+    client.post(
         "/v1/chat/completions",
         json={"model": "primary", "messages": [{"role": "user", "content": "hi"}]},
     )
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "dispatch.no_route"
-    assert lemonade_state["requests"] == []
+    # Proxy hit Lemonade, which is the test mock — accept whatever the
+    # mock returns. The KEY assertion is that the proxy got the request.
+    assert lemonade_state["requests"], "proxy should have been consulted on dispatcher no_route"
 
 
 # ── error paths ─────────────────────────────────────────────────────────────
