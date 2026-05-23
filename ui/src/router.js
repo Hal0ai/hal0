@@ -46,10 +46,16 @@ const routes = [
     meta: { title: 'Logs' },
   },
   {
+    // v2 IA: /providers renamed → /backends. Old route kept as a
+    // redirect so external bookmarks + tests don't 404 mid-rebase.
     path: '/providers',
-    name: 'providers',
-    component: () => import('./views/Providers.vue'),
-    meta: { title: 'Providers' },
+    redirect: { name: 'backends' },
+  },
+  {
+    path: '/backends',
+    name: 'backends',
+    component: () => import('./views/Backends.vue'),
+    meta: { title: 'Backends' },
   },
   {
     path: '/settings',

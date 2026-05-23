@@ -155,11 +155,14 @@ test('auto-scroll toggle is wired and reflects checkbox state', async ({
   await expect(page.getByTestId('lemonade-journal-line')).toHaveCount(1)
 })
 
-test('switching tabs from systemd to lemonade reveals the journal pane', async ({
+test('switching source from merged to lemond reveals the journal pane', async ({
   page,
   mockState,
   cleanState,
 }) => {
+  // v2 Logs view (slice #174): no per-unit selector — source is a
+  // segmented toggle (merged / hal0 / lemond). Pivot to 'lemond' to
+  // surface the LemonadeJournalPanel.
   await page.route('**/api/logs*', (route) => {
     if (route.request().url().includes('/api/logs/stream')) {
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' })
@@ -167,14 +170,10 @@ test('switching tabs from systemd to lemonade reveals the journal pane', async (
     return json(route, { unit: '', lines: [], count: 0 })
   })
 
-  // Default landing on /logs == systemd tab; the journal pane is hidden.
   await page.goto('/logs')
+  await expect(page.getByTestId('log-viewport')).toBeVisible()
   await expect(page.getByTestId('lemonade-journal')).toHaveCount(0)
-  // The existing filters bar (unit selector) is visible.
-  await expect(page.locator('#log-unit-filter')).toBeVisible()
 
-  // Tab into Lemonade — pane appears, filters bar disappears.
-  await page.getByTestId('logs-tab-lemonade').click()
+  await page.getByTestId('log-source-lemond').click()
   await expect(page.getByTestId('lemonade-journal')).toBeVisible()
-  await expect(page.locator('#log-unit-filter')).toHaveCount(0)
 })

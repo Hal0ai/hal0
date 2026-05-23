@@ -53,7 +53,7 @@ const NAV = [
   { to: '/slots',     name: 'slots',     label: 'Slots',     icon: 'slots'     },
   { to: '/models',    name: 'models',    label: 'Models',    icon: 'models'    },
   { to: '/hardware',  name: 'hardware',  label: 'Hardware',  icon: 'hardware'  },
-  { to: '/providers', name: 'backends',  label: 'Backends',  icon: 'backends'  },
+  { to: '/backends',  name: 'backends',  label: 'Backends',  icon: 'backends'  },
   { to: '/logs',      name: 'logs',      label: 'Logs',      icon: 'logs'      },
 ]
 
