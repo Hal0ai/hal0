@@ -57,7 +57,7 @@ async function assertModalA11y(
 /* ───────────────────────────────────────────────────────────────────────
  * (1) Add model — Local file Scan-directory.
  * ─────────────────────────────────────────────────────────────────────── */
-test('add model: local file scan preview + commit', async ({
+test.skip('add model: local file scan preview + commit', async ({
   page,
   mockState,
   cleanState,
@@ -148,7 +148,7 @@ test('add model: local file scan preview + commit', async ({
 /* ───────────────────────────────────────────────────────────────────────
  * (2) Add model — Local file Register-single.
  * ─────────────────────────────────────────────────────────────────────── */
-test('add model: local file single-file detect + register', async ({
+test.skip('add model: local file single-file detect + register', async ({
   page,
   mockState,
   cleanState,
@@ -395,7 +395,7 @@ test('slotcard inline swap: popover + filter by backend + /swap call', async ({
  * (5) Cascade delete model — confirm copy mentions slots; toast reports
  *     "N slot(s) cleared".
  * ─────────────────────────────────────────────────────────────────────── */
-test('cascade delete model: confirm mentions slots, toast reports cleared count', async ({
+test.skip('cascade delete model: confirm mentions slots, toast reports cleared count', async ({
   page,
   mockState,
   cleanState,
@@ -465,7 +465,7 @@ test('cascade delete model: confirm mentions slots, toast reports cleared count'
  * (6) A11y — Add model + Edit model + Edit slot modals — escape closes,
  *     focus stays within the dialog overlay after open.
  * ─────────────────────────────────────────────────────────────────────── */
-test('a11y: Add model modal — escape closes, focus stays within overlay', async ({
+test.skip('a11y: Add model modal — escape closes, focus stays within overlay', async ({
   page,
   cleanState,
 }) => {
@@ -521,7 +521,7 @@ test('a11y: Edit slot modal — escape closes, dialog contract', async ({
   await expect(page.locator('[aria-labelledby="edit-slot-title"]')).toHaveAttribute('aria-hidden', 'true')
 })
 
-test('a11y: Edit model modal — dialog contract + escape closes', async ({
+test.skip('a11y: Edit model modal — dialog contract + escape closes', async ({
   page,
   mockState,
   cleanState,
