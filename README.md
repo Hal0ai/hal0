@@ -272,11 +272,10 @@ only), set `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env` and restart
 `hal0-api`. The legacy `HAL0_AUTH_ENABLED=0` falsy form is still
 honoured for compatibility.
 
-The default install runs Caddy in front for TLS termination (Caddy's
-internal CA on `.local` hosts, Let's Encrypt for real DNS-resolvable
-hostnames). Use `--no-tls` to skip Caddy and front hal0 with your own
-reverse proxy. See [`installer/README.md`](./installer/README.md) for
-the full flow.
+TLS termination is upstream's job. `hal0-api` binds `0.0.0.0:8080`
+directly; front it with Traefik, nginx, Cloudflare Tunnel, or whatever
+edge proxy you already run. See [`installer/README.md`](./installer/README.md)
+for example reverse-proxy configs.
 
 ### Proxmox integration (optional)
 
@@ -320,9 +319,9 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
 - Carried forward from v0.1.x: OpenAI-compatible `/v1/*`, portable
   hardware probe, capability slots overlay + orchestrator, dispatcher
   with single-flight + cold-cache prefetch, bundled OpenWebUI on
-  `:3001`, Caddy + auth + HTTPS, cosign-keyless self-update with
-  rollback, bundled agents (pi-coder / Hermes-Agent) + MCP admin +
-  Cognee memory MCP
+  `:3001`, auth (password + tokens) in FastAPI, cosign-keyless
+  self-update with rollback, bundled agents (pi-coder / Hermes-Agent)
+  + MCP admin + Cognee memory MCP
 
 ### Soon (v0.3)
 

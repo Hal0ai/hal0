@@ -30,8 +30,8 @@ That means the standard MCP SDK Streamable-HTTP transport works against
 them out of the box — point any client at the full URL and go.
 
 ```
-https://hal0.local/mcp/admin       (TLS via Caddy / your proxy)
-http://hal0.local:8080/mcp/admin   (direct, no proxy)
+http://hal0.local:8080/mcp/admin   (direct)
+https://hal0.example.com/mcp/admin (TLS via your upstream reverse proxy)
 ```
 
 The memory server is a **focused alternative mount** — it exposes only the

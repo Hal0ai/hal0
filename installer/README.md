@@ -79,8 +79,6 @@ These are the variables `installer/install.sh` actually reads:
 | `HAL0_PYTHON` | `python3` | Python interpreter used to build the venv |
 | `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where model pulls land (Lemonade's `extra_models_dir`); same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
-| `HAL0_PUBLIC_HOST` | `hal0.local` | Public hostname rendered into the Caddyfile (TLS default install path) |
-| `HAL0_TLS_EMAIL` | `admin@$HAL0_PUBLIC_HOST` | Contact email for Let's Encrypt (when not `tls internal`) |
 | `HAL0_OPENWEBUI_PORT` † | `3001` | OpenWebUI host port — **dev mode only** |
 
 † `HAL0_OPENWEBUI_PORT` is honored by `scripts/dev-bootstrap.sh` (the dev-mode launcher). The installed `hal0-openwebui.service` hardcodes `:3001`; to change it post-install, edit `/etc/systemd/system/hal0-openwebui.service` and reload.
@@ -93,10 +91,10 @@ HAL0_PORT=9090 sudo bash installer/install.sh
 
 ## Authentication
 
-Per [ADR-0001](../docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md), **all auth
-now lives in FastAPI** — there is no edge-auth layer in Caddy. The Caddyfile is
-a dumb TLS terminator + reverse proxy (`packaging/caddy/Caddyfile.template`,
-~42 lines, no `basicauth`, no path matchers, no allowlist).
+All auth lives in FastAPI. There is no edge-auth layer — the installer
+does not ship a reverse proxy. If you need TLS or edge auth, front
+hal0 with Traefik, nginx, Cloudflare Tunnel, or your own preferred
+upstream (see [TLS](#tls) below).
 
 As of v0.1.0-alpha (security review §36, 2026-05-21), a fresh install **starts
 locked**. The API rejects anonymous requests on every admin route and
@@ -130,8 +128,8 @@ Mint a Bearer token via the Settings UI (Authentication panel → Create token)
 or directly:
 
 ```sh
-curl -k -H 'Authorization: Bearer hal0_<admin-token>' \
-  https://hal0.local/api/auth/tokens \
+curl -H 'Authorization: Bearer hal0_<admin-token>' \
+  http://hal0.local:8080/api/auth/tokens \
   -H 'Content-Type: application/json' \
   -d '{"label": "openwebui-bridge", "scope": "all"}'
 ```
@@ -139,44 +137,34 @@ curl -k -H 'Authorization: Bearer hal0_<admin-token>' \
 The raw token is in the response **once** — copy it immediately. To revoke:
 
 ```sh
-curl -k -H 'Authorization: Bearer hal0_<admin-token>' -X DELETE \
-  https://hal0.local/api/auth/tokens/<token-id>
+curl -H 'Authorization: Bearer hal0_<admin-token>' -X DELETE \
+  http://hal0.local:8080/api/auth/tokens/<token-id>
 ```
 
 ### TLS
 
-The default install path runs Caddy in front of FastAPI for TLS termination.
-The `tls internal` directive in the rendered Caddyfile mints a self-signed
-certificate via Caddy's internal CA — picked automatically when
-`HAL0_PUBLIC_HOST` ends in `.local` or is `localhost`. For a real
-DNS-resolvable hostname, set `HAL0_PUBLIC_HOST` and `HAL0_TLS_EMAIL`; Caddy
-provisions a Let's Encrypt cert on the first reload.
+hal0 does not ship an edge proxy or TLS terminator. The API binds
+`0.0.0.0:8080`; put TLS in front with whatever you already run —
+Traefik, nginx, Cloudflare Tunnel, Caddy as a standalone service, an
+LXC's upstream reverse proxy, etc. Two common patterns:
 
-If avahi-daemon is running, the installer drops `/etc/avahi/services/hal0.service`
-so `hal0.local` resolves on the LAN. Without avahi, add a static `/etc/hosts`
-entry on each client: `<hal0-ip>  hal0.local`.
+- **Traefik / nginx upstream** — point a router/server at
+  `http://<hal0-host>:8080/` and terminate TLS at the edge. Pass
+  through `/`, `/api/*`, `/v1/*`, `/mcp/*` — hal0 is a single
+  monolithic FastAPI app, no path splits needed.
+- **mDNS-friendly local dev** — run avahi on the host and add a
+  static `<hal0-ip>  hal0.local` entry on each client. The dashboard
+  works fine over plain HTTP on a trusted LAN.
 
-### Skip Caddy entirely (`--no-tls`)
-
-```sh
-sudo bash installer/install.sh --no-tls
-```
-
-`--no-tls` skips the Caddy install and Caddyfile render. FastAPI binds
-`0.0.0.0:8080` and is reachable directly at `http://<host>:8080/`. This is
-the right path when hal0 sits behind an existing reverse proxy (for example,
-the staging deployment behind Traefik) — front it with whatever TLS and auth
-layer your edge already provides.
-
-`--dev` implies `--no-tls`; there is no system Caddy install in a dev tree.
+Examples for each upstream live in `docs/operate/tls.md`.
 
 ### Upgrade notes
 
-Existing installs that used the old `--auth=basic` path lose **edge auth**
-on next install upgrade — the Caddyfile no longer carries `basicauth`.
-And as of v0.1.0-alpha (security review §36), the FastAPI gate is on by
-default: anonymous requests get 401 on admin and `/v1/*` routes. To
-recover:
+Existing installs that used the old `--auth=basic` path lost **edge
+auth** when ADR-0001 collapsed the Caddyfile in v0.1.0-alpha. As of
+this release the installer no longer ships any edge proxy at all —
+the prior Caddy unit is left untouched on existing hosts but
+`install.sh` neither manages it nor depends on it. To recover:
 
 - **Set a password in the dashboard wizard.** On first load after upgrade,
   the wizard's password-setup step calls `POST /api/auth/password` and
@@ -184,16 +172,17 @@ recover:
   also prints a one-time OTP that the wizard requires for first-run
   claim; copy it out of the installer transcript or read it directly
   from `/var/lib/hal0/.first-run.lock`.
-- **Install with `--no-tls`** and front hal0 with your own reverse proxy
-  (Traefik, nginx, Caddy you manage outside hal0, Cloudflare Tunnel, etc.).
-  Your edge owns auth. Setting `HAL0_AUTH_DISABLED=1` in
-  `/etc/hal0/api.env` collapses hal0's own gate back to pass-through;
-  do this only when the outer proxy is the trust boundary.
+- **Front hal0 with your own reverse proxy** (Traefik, nginx, Caddy you
+  manage outside hal0, Cloudflare Tunnel, etc.) and let the edge own
+  auth. Setting `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env` collapses
+  hal0's own gate back to pass-through; do this only when the outer
+  proxy is the trust boundary.
 
 Bearer tokens minted under the prior install continue to work — token storage
 moved with the rest of auth into the FastAPI store (no migration required).
-The Caddy `basicauth` credentials themselves are not migrated; re-entry via
-the wizard's password-setup step is the supported path.
+Legacy `basicauth` credentials from the long-retired `--auth=basic` path
+are not migrated; re-entry via the wizard's password-setup step is the
+supported path.
 
 ## Dev mode (`--dev`)
 

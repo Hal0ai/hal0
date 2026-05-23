@@ -36,7 +36,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/preflight.sh"
 # Poll `systemctl is-active` for up to `timeout` seconds. Returns 0 the
 # moment the unit reports active, 1 on timeout. Use instead of a flat
 # `sleep N; is-active` so slow first boots (OpenWebUI pulling images,
-# Caddy provisioning TLS) don't get falsely flagged as failures.
+# Lemonade backend init) don't get falsely flagged as failures.
 wait_active() {
     local unit="$1"
     # `local` evaluates all RHS *before* any name binds, so a one-liner
@@ -53,14 +53,10 @@ wait_active() {
 
 DEV_MODE=0
 NO_START=0
-# TLS posture (per ADR-0001 Child B):
-#   default — install Caddy as a dumb TLS terminator + reverse proxy on
-#             :443 in front of the API on 127.0.0.1:8080. Auth (password
-#             + session cookies + Bearer) lives entirely in FastAPI.
-#   --no-tls — skip Caddy. FastAPI binds 0.0.0.0:8080 directly. Right
-#             for hosts behind an existing reverse proxy (Traefik etc.)
-#             or for trusted-LAN dev boxes that don't need TLS.
-NO_TLS=0
+# TLS posture: hal0-api binds 0.0.0.0:8080 directly. TLS termination,
+# DNS, and any per-host certs are the responsibility of an upstream
+# reverse proxy (Traefik, nginx, Cloudflare Tunnel) — hal0 does not ship
+# an edge terminator. See docs/operate/tls.md for example proxies.
 # Pull destination for `hal0 model pull` and the dashboard's pull buttons.
 # Empty → ask interactively when stdin is a tty, default to <var-lib>/models
 # otherwise. The chosen path is written to hal0.toml as [models].pull_root
@@ -70,17 +66,12 @@ for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
         --no-start) NO_START=1 ;;
-        --no-tls) NO_TLS=1 ;;
         --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
         --help|-h)
             cat <<EOF
-Usage: install.sh [--dev] [--no-start] [--no-tls] [--models-dir=PATH]
+Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
   --dev               install under \$PWD/.hal0ai/, no systemd setup
   --no-start          set up everything but don't enable/start the API
-  --no-tls            skip the Caddy reverse proxy; bind FastAPI on
-                      0.0.0.0:8080 directly. No TLS, no edge proxy. Auth
-                      (password + tokens) still works — set it up in the
-                      first-run wizard or via the dashboard's Settings panel.
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
@@ -136,16 +127,6 @@ V01_EOF
     unset v01_slots_found
 fi
 
-# --dev implies --no-tls — there's no system Caddy install in a dev tree
-# and the prefix-relative unit paths won't match Caddy's expectations
-# anyway. Warn the operator if they passed --no-tls redundantly.
-if [[ "${DEV_MODE}" -eq 1 ]]; then
-    if [[ "${NO_TLS}" -eq 0 ]]; then
-        info "--dev implies --no-tls (no system Caddy install in dev tree)"
-    fi
-    NO_TLS=1
-fi
-
 # Banner first — before any info/warn so the brand greets the user
 # rather than hiding behind a "Dev mode …" line.
 ui_banner
@@ -154,19 +135,9 @@ HAL0_PORT="${HAL0_PORT:-8080}"
 HAL0_USER="${HAL0_USER:-root}"
 PY="${HAL0_PYTHON:-python3}"
 
-# API bind host:
-#   --no-tls         → 0.0.0.0 (the API is the front door)
-#   default (Caddy)  → 127.0.0.1 (Caddy on :443 is the front door; the
-#                                 API is loopback-only so it can't be
-#                                 reached around the TLS terminator)
-# DEV_MODE forces NO_TLS=1 above, so dev installs bind 0.0.0.0 too —
-# matches the prior behaviour where dev installs were directly reachable
-# on the LAN for testing.
-if [[ "${NO_TLS}" -eq 1 ]]; then
-    API_BIND_HOST="0.0.0.0"
-else
-    API_BIND_HOST="127.0.0.1"
-fi
+# API binds 0.0.0.0:8080 unconditionally. TLS is upstream's job — see
+# the comment on TLS posture near the flag parser.
+API_BIND_HOST="0.0.0.0"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     PREFIX="${HAL0_PREFIX:-${PWD}/.hal0ai}"
@@ -203,13 +174,9 @@ if [[ "${MODELS_DIR}" != /* ]]; then
 fi
 info "Pull destination: ${MODELS_DIR}"
 
-# Step total — base 8, +1 for the optional TLS / Caddy setup. Kept
-# here so editors who add or remove a ui_step bump the visible counter
-# in the same diff.
+# Step total. Kept here so editors who add or remove a ui_step bump the
+# visible counter in the same diff.
 UI_STEP_TOTAL=10                                    # +1 for "Lemonade daemon" (PR-5)
-if [[ "${NO_TLS}" -eq 0 ]]; then
-    UI_STEP_TOTAL=$((UI_STEP_TOTAL + 1))           # "TLS (Caddy reverse proxy)"
-fi
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
@@ -223,9 +190,6 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
             warn "         Retry with HAL0_PYTHON=python3.12 sudo bash install.sh" ;;
         "Service start")
             warn "Recovery: journalctl -u hal0-api -n 60" ;;
-        "TLS (Caddy reverse proxy)")
-            warn "Recovery: install caddy by hand and re-run,"
-            warn "         or rerun with --no-tls to skip the reverse proxy entirely." ;;
         "Hardware probe")
             warn "Recovery: rerun with HAL0_NO_PROBE=1 and file an issue with"
             warn "         /etc/hal0/hardware.json (if present) attached." ;;
@@ -244,7 +208,6 @@ if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
         warn "Re-exec under sudo"
         exec sudo -E HAL0_PORT="${HAL0_PORT}" HAL0_USER="${HAL0_USER}" HAL0_PYTHON="${PY}" \
             HAL0_PREFIX="${HAL0_PREFIX:-}" HAL0_NO_PROBE="${HAL0_NO_PROBE:-}" \
-            HAL0_PUBLIC_HOST="${HAL0_PUBLIC_HOST:-}" HAL0_TLS_EMAIL="${HAL0_TLS_EMAIL:-}" \
             bash "$0" "$@"
     else
         die "must run as root (sudo bash install.sh)"
@@ -535,143 +498,13 @@ EOF
     info "wrote ${UPSTREAMS_TOML}"
 fi
 
-# ── TLS / Caddy reverse proxy (default unless --no-tls) ──────────────
-#
-# Per ADR-0001 Child B, Caddy is now a dumb TLS terminator + reverse
-# proxy — no basic_auth at the edge, no PUBLIC_PATHS allowlist, no
-# admin credential prompts. Auth (password + session cookies + Bearer
-# tokens) lives entirely in FastAPI; the wizard owns first-run
-# credential capture.
-#
-# Two paths from here:
-#   NO_TLS=1 — skip this whole block. API binds 0.0.0.0:8080 directly.
-#   default  — install Caddy, render the minimal Caddyfile, write the
-#              systemd unit. Caddy listens on :443, proxies to the API
-#              on 127.0.0.1:8080. Auth (if any) is whatever the
-#              operator sets up via the wizard.
-#
-# Done BEFORE the openwebui env writer so trusted-header keys are baked
-# in on the first render rather than requiring a second pass.
+# TLS termination is upstream's job — hal0 no longer ships an edge
+# proxy. The API binds 0.0.0.0:8080 directly and any TLS / certs are
+# handled by Traefik / nginx / Cloudflare Tunnel in front of it. See
+# docs/operate/tls.md for example proxy configs.
+# HAL0_AUTH_ENABLED_FOR_RENDER kept for OWUI prewire compatibility — set
+# to "0" until the auth-removal sweep collapses that flag entirely.
 HAL0_AUTH_ENABLED_FOR_RENDER="0"
-if [[ "${NO_TLS}" -eq 0 ]]; then
-    ui_step "TLS (Caddy reverse proxy)"
-
-    # Caddy install — Debian/Ubuntu via apt, Arch/CachyOS via pacman.
-    # Anything else falls through with a manual-install hint.
-    if ! command -v caddy >/dev/null; then
-        if command -v apt-get >/dev/null; then
-            info "installing caddy via apt"
-            apt-get update -qq
-            # The official caddy package on Debian needs a third-party
-            # repo; for a polished installer we pin to the cloudsmith
-            # mirror in a v0.3 follow-up. For the POC, surface the
-            # missing-binary path so an operator can apt install caddy
-            # by hand and re-run.
-            APT_ERR="$(mktemp)"
-            if ! apt-get install -y caddy 2>"${APT_ERR}"; then
-                warn "apt failed to install caddy:"
-                sed 's/^/    /' "${APT_ERR}" >&2
-                warn "Install per https://caddyserver.com/docs/install#debian-ubuntu-raspbian and re-run."
-            fi
-            rm -f "${APT_ERR}"
-        elif command -v pacman >/dev/null; then
-            info "installing caddy via pacman"
-            pacman -S --noconfirm caddy
-        else
-            warn "no recognised package manager for caddy; install it from https://caddyserver.com/docs/install and re-run"
-        fi
-    fi
-    if ! command -v caddy >/dev/null; then
-        die "caddy binary not on PATH after install attempt — see warnings above (or rerun with --no-tls)"
-    fi
-    info "caddy: $(caddy version 2>/dev/null | head -n1 || echo unknown)"
-
-    # Public host + TLS posture. HAL0_PUBLIC_HOST defaults to hal0.local
-    # for the mDNS case (Caddy's internal CA mints a self-signed cert).
-    # For a real DNS-resolvable host the operator sets HAL0_PUBLIC_HOST
-    # + HAL0_TLS_EMAIL and Caddy runs ACME against Let's Encrypt.
-    HAL0_PUBLIC_HOST="${HAL0_PUBLIC_HOST:-hal0.local}"
-    HAL0_TLS_EMAIL="${HAL0_TLS_EMAIL:-admin@${HAL0_PUBLIC_HOST}}"
-
-    # Decide the `tls` directive value. ``internal`` triggers Caddy's
-    # private CA path (right for *.local + IP literals); anything else
-    # is treated as an ACME contact email. We auto-detect *.local here
-    # so a fresh ``sudo bash install.sh`` does the right thing without
-    # the operator having to know that ACME-on-.local fails noisily.
-    if [[ "${HAL0_PUBLIC_HOST}" == *.local || "${HAL0_PUBLIC_HOST}" == "localhost" ]]; then
-        HAL0_TLS_DIRECTIVE="internal"
-    else
-        HAL0_TLS_DIRECTIVE="${HAL0_TLS_EMAIL}"
-    fi
-
-    # Render the Caddyfile from the template. Python so the renderer
-    # doesn't depend on envsubst / coreutils on minimal hosts; the
-    # template only ships {$KEY} / {$KEY:default} placeholders that the
-    # renderer expands at install time.
-    CADDY_TEMPLATE="${REPO_ROOT}/packaging/caddy/Caddyfile.template"
-    CADDY_TARGET="${ETC_DIR}/Caddyfile"
-    if [[ ! -f "${CADDY_TEMPLATE}" ]]; then
-        die "Caddyfile template missing at ${CADDY_TEMPLATE}"
-    fi
-    HAL0_PUBLIC_HOST="${HAL0_PUBLIC_HOST}" \
-    HAL0_TLS_EMAIL="${HAL0_TLS_EMAIL}" \
-    HAL0_TLS_DIRECTIVE="${HAL0_TLS_DIRECTIVE}" \
-    "${PY}" - "${CADDY_TEMPLATE}" "${CADDY_TARGET}" <<'PY'
-import os, sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
-# Caddy's own ${VAR:default} placeholder syntax is what the template
-# uses inside its config — preserve those by only substituting the
-# specific keys we know about. Anything else is passed through verbatim
-# so Caddy's runtime substitution still works.
-keys = ("HAL0_PUBLIC_HOST", "HAL0_TLS_EMAIL", "HAL0_TLS_DIRECTIVE")
-for k in keys:
-    val = os.environ.get(k, "")
-    text = text.replace("{$" + k + "}", val)
-    # Match {$KEY:default} regardless of default value.
-    while True:
-        marker = "{$" + k + ":"
-        i = text.find(marker)
-        if i < 0:
-            break
-        j = text.find("}", i)
-        if j < 0:
-            break
-        text = text[:i] + val + text[j+1:]
-open(dst, "w").write(text)
-# 0644 so the unprivileged 'caddy' user can read the rendered file.
-# Nothing in this template is sensitive post-ADR-0001 (no password
-# hashes, no secrets — just hostname + ACME email).
-os.chmod(dst, 0o644)
-print(f"  rendered {dst}")
-PY
-    info "wrote ${CADDY_TARGET}"
-
-    # systemd unit drop-in.
-    CADDY_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-caddy.service"
-    CADDY_UNIT_DST="${UNIT_DIR}/hal0-caddy.service"
-    if [[ -f "${CADDY_UNIT_SRC}" ]]; then
-        cp "${CADDY_UNIT_SRC}" "${CADDY_UNIT_DST}"
-        info "wrote ${CADDY_UNIT_DST}"
-    else
-        warn "${CADDY_UNIT_SRC} not found — Caddy unit not installed"
-    fi
-
-    # Avahi (best-effort).
-    if command -v avahi-daemon >/dev/null && [[ -d /etc/avahi/services ]]; then
-        cp "${REPO_ROOT}/packaging/avahi/hal0.service" /etc/avahi/services/hal0.service
-        info "wrote /etc/avahi/services/hal0.service (mDNS announcing ${HAL0_PUBLIC_HOST})"
-    else
-        warn "avahi-daemon not present; add an /etc/hosts entry on clients: '<this-host-ip> ${HAL0_PUBLIC_HOST}'"
-    fi
-
-    # Auth is on by default at the API level (v1.0 security review §36)
-    # — we still flip OpenWebUI's prewire to use the Caddy SSO header
-    # because that's a Caddy-fronted concern. For the API itself the
-    # env var is the legacy switch; the new HAL0_AUTH_DISABLED escape
-    # hatch is documented in the api.env template instead.
-    HAL0_AUTH_ENABLED_FOR_RENDER="1"
-fi
 
 # OpenWebUI prewire env. Rendered via the just-installed venv so the
 # defaults live in exactly one place (src/hal0/openwebui/env_writer.py).
@@ -1232,7 +1065,7 @@ UNIT
     # daemon-reload is idempotent — always safe to call. enable (no
     # --now) so the unit auto-starts on boot; the Service start block at
     # the end of install.sh handles the first start in lockstep with
-    # hal0-api / hal0-openwebui / hal0-caddy.
+    # hal0-api / hal0-openwebui.
     systemctl daemon-reload
     if [[ -x "${LEMONADE_PREFIX}/lemond" ]]; then
         systemctl enable hal0-lemonade.service >/dev/null 2>&1 || \
@@ -1344,27 +1177,6 @@ else
         fi
     fi
 
-    # Default (TLS) install: bring up Caddy in front. Per ADR-0001 Child B
-    # this is a dumb TLS terminator + reverse proxy — no edge auth, no
-    # round-trip self-test against a credential (because there is no
-    # credential at the edge anymore). The wizard captures a password
-    # post-install; until then the server is open on the LAN, matching
-    # the trusted-LAN default documented in the ADR.
-    if [[ "${NO_TLS}" -eq 0 && -f "${UNIT_DIR}/hal0-caddy.service" ]]; then
-        systemctl restart hal0-api
-        systemctl restart hal0-openwebui || true
-        systemctl enable --now hal0-caddy
-        if wait_active hal0-caddy 15; then
-            info "hal0-caddy is running (https://${HAL0_PUBLIC_HOST:-hal0.local}/)"
-        else
-            warn "hal0-caddy not yet active; check 'journalctl -u hal0-caddy -n 60'"
-        fi
-        # Reload avahi so the freshly-dropped service file is announced
-        # (best-effort — failing reload doesn't break anything).
-        if command -v systemctl >/dev/null && systemctl is-active --quiet avahi-daemon; then
-            systemctl reload avahi-daemon || true
-        fi
-    fi
 fi
 
 HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
@@ -1377,42 +1189,33 @@ HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 # Tailscale entry; nothing in this block can fail the installer.
 REACH_LINES=()
 
-if [[ "${NO_TLS}" -eq 0 ]]; then
-    HOSTNAME_FOR_REACH="${HAL0_PUBLIC_HOST:-hal0.local}"
-    DASHBOARD_URL="https://${HOSTNAME_FOR_REACH}/"
-    REACH_LINES+=("mDNS"$'\t'"https://${HOSTNAME_FOR_REACH}/")
-else
-    DASHBOARD_URL="http://${HOST}:${HAL0_PORT}/"
-    # All IPv4 addresses on this host. `hostname -I` already excludes
-    # loopback. Add an avahi mDNS entry only if we wrote the service file.
-    if command -v hostname >/dev/null 2>&1; then
-        for ip in $(hostname -I 2>/dev/null); do
-            REACH_LINES+=("LAN"$'\t'"http://${ip}:${HAL0_PORT}/")
-        done
-    fi
-    if [[ -f /etc/avahi/services/hal0.service ]]; then
-        REACH_LINES+=("mDNS"$'\t'"http://${HAL0_PUBLIC_HOST:-hal0.local}:${HAL0_PORT}/")
-    fi
-    # Tailscale — show whichever tailnet IPs are present. Never fatal.
-    if command -v tailscale >/dev/null 2>&1; then
-        for ts in $(tailscale ip -4 2>/dev/null) $(tailscale ip -6 2>/dev/null); do
-            # Bracket IPv6 for URL grammar.
-            if [[ "$ts" == *:* ]]; then
-                REACH_LINES+=("Tailscale"$'\t'"http://[${ts}]:${HAL0_PORT}/")
-            else
-                REACH_LINES+=("Tailscale"$'\t'"http://${ts}:${HAL0_PORT}/")
-            fi
-        done
-    fi
-    # Up to 2 globally-routable IPv6 addresses — useful for direct LAN
-    # access on dual-stack networks. `ip` is in iproute2; on non-Linux
-    # exotic minimal containers it may be missing — silent skip.
-    if command -v ip >/dev/null 2>&1; then
-        v6_addrs=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | head -2)
-        for v6 in $v6_addrs; do
-            REACH_LINES+=("IPv6"$'\t'"http://[${v6}]:${HAL0_PORT}/")
-        done
-    fi
+DASHBOARD_URL="http://${HOST}:${HAL0_PORT}/"
+# All IPv4 addresses on this host. `hostname -I` already excludes
+# loopback.
+if command -v hostname >/dev/null 2>&1; then
+    for ip in $(hostname -I 2>/dev/null); do
+        REACH_LINES+=("LAN"$'\t'"http://${ip}:${HAL0_PORT}/")
+    done
+fi
+# Tailscale — show whichever tailnet IPs are present. Never fatal.
+if command -v tailscale >/dev/null 2>&1; then
+    for ts in $(tailscale ip -4 2>/dev/null) $(tailscale ip -6 2>/dev/null); do
+        # Bracket IPv6 for URL grammar.
+        if [[ "$ts" == *:* ]]; then
+            REACH_LINES+=("Tailscale"$'\t'"http://[${ts}]:${HAL0_PORT}/")
+        else
+            REACH_LINES+=("Tailscale"$'\t'"http://${ts}:${HAL0_PORT}/")
+        fi
+    done
+fi
+# Up to 2 globally-routable IPv6 addresses — useful for direct LAN
+# access on dual-stack networks. `ip` is in iproute2; on non-Linux
+# exotic minimal containers it may be missing — silent skip.
+if command -v ip >/dev/null 2>&1; then
+    v6_addrs=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | head -2)
+    for v6 in $v6_addrs; do
+        REACH_LINES+=("IPv6"$'\t'"http://[${v6}]:${HAL0_PORT}/")
+    done
 fi
 
 # ── Live hello prompt ──────────────────────────────────────────────────────
@@ -1523,30 +1326,16 @@ SUMMARY_LINES=(
     "$(printf 'Data        %s%s%s' "${BLU}" "${VAR_DIR}" "${RST}")"
 )
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
-    if [[ "${NO_TLS}" -eq 0 ]]; then
-        # TLS-default install: Caddy fronts both services, dashboard
-        # lives on https://<public-host>/. Auth is **on by default**
-        # (v1.0 security review §36); the wizard captures the owner
-        # password using the one-time OTP printed below.
-        HOSTNAME_FOR_DISPLAY="${HAL0_PUBLIC_HOST:-hal0.local}"
-        SUMMARY_LINES+=(
-            "$(printf 'Dashboard   %shttps://%s/%s' "${BLU}" "${HOSTNAME_FOR_DISPLAY}" "${RST}")"
-            "$(printf 'Chat        %shttp://%s:3001%s' "${BLU}" "${HOST}" "${RST}")"
-            "$(printf 'Auth        %slocked — finish first-run wizard to set a password%s' "${DIM}" "${RST}")"
-            "$(printf 'Logs        %sjournalctl -fu hal0-caddy hal0-api hal0-openwebui%s' "${DIM}" "${RST}")"
-        )
-    else
-        # --no-tls: API binds 0.0.0.0:8080 directly. No TLS, no edge
-        # proxy. Auth is still on by default; only the wizard claim
-        # paths are reachable until the operator sets a password.
-        SUMMARY_LINES+=(
-            "$(printf 'Dashboard   %shttp://%s:%s%s' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}")"
-            "$(printf 'Chat        %shttp://%s:3001%s' "${BLU}" "${HOST}" "${RST}")"
-            "$(printf 'TLS         %soff (--no-tls) — no TLS, no edge proxy%s' "${DIM}" "${RST}")"
-            "$(printf 'Auth        %slocked — finish first-run wizard to set a password%s' "${DIM}" "${RST}")"
-            "$(printf 'Logs        %sjournalctl -fu hal0-api%s' "${DIM}" "${RST}")"
-        )
-    fi
+    # hal0-api binds 0.0.0.0:8080. TLS / DNS is whatever upstream proxy
+    # you put in front. Auth (password + tokens) still works — set it
+    # up in the first-run wizard or via the dashboard Settings panel.
+    SUMMARY_LINES+=(
+        "$(printf 'Dashboard   %shttp://%s:%s%s' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}")"
+        "$(printf 'Chat        %shttp://%s:3001%s' "${BLU}" "${HOST}" "${RST}")"
+        "$(printf 'TLS         %supstream-only (front with Traefik / nginx / Cloudflare Tunnel)%s' "${DIM}" "${RST}")"
+        "$(printf 'Auth        %slocked — finish first-run wizard to set a password%s' "${DIM}" "${RST}")"
+        "$(printf 'Logs        %sjournalctl -fu hal0-api%s' "${DIM}" "${RST}")"
+    )
 
     # First-run claim OTP. The wizard's "Set a password" step asks for
     # this verbatim; it proves the operator can read root-owned files
