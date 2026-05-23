@@ -28,6 +28,9 @@ import datetime
 import hashlib
 import json
 import os
+import shutil
+import subprocess  # nosec B404 — needed to spawn python -m venv + pip
+import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
@@ -181,10 +184,315 @@ def _stub(name: str) -> Callable[[BootstrapState], PhaseResult]:
     return _phase
 
 
-_phase_preflight = _stub("preflight")
-_phase_install = _stub("install")
+# Pinned constants — keep these in sync with installer/agents/hermes/
+# requirements.txt and the wrapper script. The constants are exposed
+# at module scope so tests can monkey-patch them onto a tmp path.
+PYTHON_MIN = (3, 11)
+MIN_FREE_GIB = 4
+DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/status"
+WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
+REPO_ROOT_FOR_INSTALLER = Path(__file__).resolve().parents[3]
+
+
+# ── Phase A: preflight ──────────────────────────────────────────────────────
+
+
+def _http_get(url: str, *, timeout: float = 3.0) -> int:
+    """Cheap stdlib reachability check — returns HTTP status or 0 on error.
+
+    Used by preflight to confirm the hal0 daemon is up before we start
+    spawning subprocesses. Stdlib-only (no requests / httpx) keeps the
+    bootstrap importable on minimal install paths.
+    """
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    try:
+        req = Request(url, headers={"Accept": "application/json"})
+        with urlopen(req, timeout=timeout) as resp:
+            return int(resp.status)
+    except (URLError, OSError, TimeoutError):
+        return 0
+
+
+def _phase_preflight(state: BootstrapState) -> PhaseResult:
+    """Hard-fail when the host can't host Hermes.
+
+    Documented blockers (plan §4):
+
+    * Python ≥ 3.11 available — bootstrap shells out to a venv with
+      explicit Python; we verify the running interpreter qualifies so
+      we can re-use ``sys.executable`` instead of hunting PATH.
+    * ``hal0`` daemon reachable at ``/api/status`` — agents that can't
+      reach hal0 are useless. Catch it now instead of during config_write.
+    * ``/var/lib/hal0/`` writable — we'll be writing the venv + HERMES_HOME
+      there in the next phase.
+    * ≥ 4 GiB free under ``/var/lib/hal0/`` — Hermes deps + a typical
+      memory cache run ~3 GiB; 4 GiB leaves headroom for venv rebuild.
+    """
+    failures: list[str] = []
+    details: dict[str, Any] = {}
+
+    py_version = sys.version_info[:3]
+    details["python_version"] = ".".join(str(p) for p in py_version)
+    if py_version < PYTHON_MIN:
+        failures.append(
+            f"python {'.'.join(str(p) for p in PYTHON_MIN)}+ required, "
+            f"have {details['python_version']} — run `apt install python3.11`",
+        )
+
+    rc = _http_get(DAEMON_HEALTH_URL)
+    details["daemon_http_status"] = rc
+    if rc != 200:
+        failures.append(
+            f"hal0 daemon unreachable at {DAEMON_HEALTH_URL} (status={rc or 'no-response'}) "
+            "— run `systemctl start hal0`",
+        )
+
+    var_lib = Path(state.venv).parent.parent  # /var/lib/hal0/
+    details["var_lib_path"] = str(var_lib)
+    if not var_lib.exists() or not os.access(var_lib, os.W_OK):
+        failures.append(
+            f"{var_lib} not writable — run `sudo install -d -o hal0 -g hal0 -m 0755 {var_lib}`",
+        )
+    else:
+        st = os.statvfs(var_lib)
+        free_gib = st.f_bavail * st.f_frsize / (1024**3)
+        details["free_gib"] = round(free_gib, 2)
+        if free_gib < MIN_FREE_GIB:
+            failures.append(
+                f"{var_lib} has {free_gib:.1f} GiB free; need >= {MIN_FREE_GIB} — clear space",
+            )
+
+    if failures:
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            details=details,
+            reason="; ".join(failures),
+        )
+    return PhaseResult(status=PhaseStatus.OK, details=details)
+
+
+# ── Phase B: install ────────────────────────────────────────────────────────
+
+
+def _resolve_python311(prober: Callable[[str], str | None] = shutil.which) -> str | None:
+    """Find a python3.11 interpreter; fall back to the running one when it qualifies.
+
+    Prefers an explicit ``python3.11`` on PATH so the venv pins minor
+    version regardless of what ``sys.executable`` is. Falls back to
+    ``sys.executable`` only when the running interpreter is itself
+    3.11+ — keeps tests usable on Python 3.12+ CI shards.
+    """
+    explicit = prober("python3.11")
+    if explicit:
+        return explicit
+    if sys.version_info[:2] >= PYTHON_MIN:
+        return sys.executable
+    return None
+
+
+def _venv_python(venv: Path) -> Path:
+    return venv / "bin" / "python"
+
+
+def _install_venv(
+    venv: Path,
+    requirements: Path,
+    *,
+    runner: Any = subprocess,
+    python_resolver: Callable[[], str | None] = _resolve_python311,
+) -> None:
+    """Create the venv at ``venv`` and install ``requirements`` into it.
+
+    Two-step: ``python3.11 -m venv`` then ``pip install -r``. We don't
+    use ``uv`` here to keep the dependency footprint zero — the
+    runtime venv is small and pip is universally available.
+    """
+    py = python_resolver()
+    if py is None:
+        raise RuntimeError("no python 3.11 interpreter found on PATH")
+    venv.parent.mkdir(parents=True, exist_ok=True)
+    if not venv.exists():
+        runner.run([py, "-m", "venv", str(venv)], check=True)  # nosec B603
+    pip = _venv_python(venv)
+    runner.run(  # nosec B603 — argv from local config
+        [str(pip), "-m", "pip", "install", "--upgrade", "pip"],
+        check=True,
+    )
+    runner.run(  # nosec B603
+        [str(pip), "-m", "pip", "install", "-r", str(requirements)],
+        check=True,
+    )
+
+
+def _copy_wrapper(wrapper_src: Path, wrapper_dst: Path) -> None:
+    """Copy + chmod the wrapper into ``wrapper_dst``."""
+    wrapper_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(wrapper_src, wrapper_dst)
+    wrapper_dst.chmod(0o755)
+
+
+def _copy_plugin_tree(src: Path, dst: Path) -> None:
+    """Mirror a plugin directory (idempotent)."""
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+
+
+def _phase_install(state: BootstrapState) -> PhaseResult:
+    """Provision the managed Hermes venv + wrapper + plugin stubs.
+
+    The plugin stubs at ``installer/agents/hermes/plugins/{hal0,hal0-memory}/``
+    are copied verbatim into ``$HERMES_HOME/plugins/{model-providers/hal0,memory/hal0-memory}/``.
+    Real plugin bodies arrive in #241 + #242; this phase just stages
+    the directory layout so re-runs after those slices land are a
+    file-by-file overlay, not a structural change.
+
+    Skips heavy work when the venv binary already exists at the
+    expected version — re-runs of ``hal0 agent bootstrap hermes`` are
+    cheap unless ``--repair`` forces re-install.
+    """
+    details: dict[str, Any] = {}
+    venv = Path(state.venv)
+    requirements = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
+    wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hal0-hermes"
+    plugin_src_root = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
+
+    if not requirements.is_file():
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"requirements.txt missing at {requirements}",
+        )
+    if not wrapper_src.is_file():
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"wrapper source missing at {wrapper_src}",
+        )
+
+    hermes_bin = _venv_python(venv).parent / "hermes"
+    if not hermes_bin.exists():
+        try:
+            _install_venv(venv, requirements)
+        except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
+            return PhaseResult(
+                status=PhaseStatus.FAIL,
+                reason=f"venv install failed: {exc}",
+                details=details,
+            )
+    details["venv"] = str(venv)
+    details["hermes_bin"] = str(hermes_bin)
+
+    try:
+        _copy_wrapper(wrapper_src, WRAPPER_INSTALL_PATH)
+        details["wrapper"] = str(WRAPPER_INSTALL_PATH)
+    except OSError as exc:
+        # Non-root operators land here — surface so the user can sudo.
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"wrapper install to {WRAPPER_INSTALL_PATH} failed: {exc}",
+            details=details,
+        )
+
+    # Plugin stubs into HERMES_HOME-shaped locations. Real bodies in #241/#242.
+    # Claim HERMES_HOME with the .hal0-managed marker FIRST so home_init's
+    # "is this my tree?" check passes — install populates HERMES_HOME with
+    # plugin dirs, so it has to be the phase that stamps the marker.
+    hermes_home = Path(state.hermes_home)
+    claimed, reason = _claim_hermes_home(hermes_home)
+    if not claimed:
+        return PhaseResult(status=PhaseStatus.FAIL, reason=reason)
+    plugin_targets = {
+        "hal0": hermes_home / "plugins" / "model-providers" / "hal0",
+        "hal0-memory": hermes_home / "plugins" / "memory" / "hal0-memory",
+    }
+    for src_name, dst in plugin_targets.items():
+        src = plugin_src_root / src_name
+        if not src.exists():
+            return PhaseResult(
+                status=PhaseStatus.FAIL,
+                reason=f"plugin source missing at {src}",
+            )
+        try:
+            _copy_plugin_tree(src, dst)
+        except OSError as exc:
+            return PhaseResult(
+                status=PhaseStatus.FAIL,
+                reason=f"plugin copy {src} -> {dst} failed: {exc}",
+            )
+    details["plugins"] = [str(p) for p in plugin_targets.values()]
+    return PhaseResult(status=PhaseStatus.OK, details=details)
+
+
+# ── Phase D: home_init ──────────────────────────────────────────────────────
+
+
+_HAL0_MANAGED_MARKER = ".hal0-managed"
+
+
+def _claim_hermes_home(hermes_home: Path) -> tuple[bool, str | None]:
+    """Stamp the ``.hal0-managed`` marker — or refuse if HERMES_HOME isn't ours.
+
+    Returns ``(claimed, reason)``: ``claimed=True`` on success;
+    ``claimed=False`` with a ``reason`` when the dir is populated and
+    lacks the marker (user's pre-existing ~/.hermes — bail). Used by
+    both install (which has to write plugins into the tree) and
+    home_init (which makes the layout canonical).
+    """
+    marker = hermes_home / _HAL0_MANAGED_MARKER
+    if hermes_home.exists() and not marker.exists() and any(hermes_home.iterdir()):
+        return (
+            False,
+            f"{hermes_home} exists and is not hal0-managed "
+            f"(missing {_HAL0_MANAGED_MARKER}). Move it aside before re-running.",
+        )
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    if not marker.exists():
+        marker.write_text(
+            "hal0 — this HERMES_HOME is managed by hal0 (issue #240). Edits may be overwritten.\n",
+            encoding="utf-8",
+        )
+    return (True, None)
+
+
+def _phase_home_init(state: BootstrapState) -> PhaseResult:
+    """Make the ``$HERMES_HOME`` layout canonical.
+
+    Install (#240's first phase) already claimed the marker; home_init
+    is responsible for the wider directory tree Hermes expects.
+    Re-claiming via :func:`_claim_hermes_home` is harmless when install
+    already did so, and necessary when home_init runs first
+    (``--skip-phase install``).
+    """
+    hermes_home = Path(state.hermes_home)
+    claimed, reason = _claim_hermes_home(hermes_home)
+    if not claimed:
+        return PhaseResult(status=PhaseStatus.FAIL, reason=reason)
+
+    standard_subdirs = (
+        "memories",
+        "skills",
+        "plugins",
+        "plugins/memory",
+        "plugins/model-providers",
+        "logs",
+        "sessions",
+        "profiles",
+        "mcp-tokens",
+    )
+    for sub in standard_subdirs:
+        (hermes_home / sub).mkdir(parents=True, exist_ok=True)
+
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            "hermes_home": str(hermes_home),
+            "marker": str(hermes_home / _HAL0_MANAGED_MARKER),
+        },
+    )
+
+
 _phase_env_probe = _stub("env_probe")
-_phase_home_init = _stub("home_init")
 _phase_config_write = _stub("config_write")
 _phase_mcp_wire = _stub("mcp_wire")
 _phase_context_link = _stub("context_link")
@@ -259,6 +567,7 @@ def run(
     skip_phases: tuple[str, ...] = (),
     state_root: Path | None = None,
     verbose: bool = False,
+    initial_state: BootstrapState | None = None,
 ) -> RunResult:
     """Run every phase in order, persisting checkpoints to ``state_root``.
 
@@ -267,12 +576,15 @@ def run(
     * ``skip_phases`` — skip the named phases (logged as ``skip``).
     * ``state_root`` — overrides the default ``provision.json`` location;
       tests pass a ``tmp_path``.
+    * ``initial_state`` — seed state when no checkpoint exists; tests
+      pass one with `hermes_home` + `venv` pointed at `tmp_path` so the
+      real install/home_init phases don't need write access to /var/lib.
 
     Returns a :class:`RunResult` capturing the post-run state + the
     per-phase outcomes the CLI surface pretty-prints.
     """
     root = state_root if state_root is not None else _DEFAULT_STATE_ROOT
-    state = BootstrapState.load(root) or BootstrapState()
+    state = BootstrapState.load(root) or initial_state or BootstrapState()
     if state.started_at is None or repair:
         state.started_at = _utcnow()
         state.completed_at = None

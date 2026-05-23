@@ -1,0 +1,10 @@
+# hal0-memory MCP-backed Hermes memory provider plugin manifest.
+#
+# Real wiring (memory_provider class registration + Cognee graph-gate
+# config read) lands in #242. v0.3 scaffold (#240) just ships the
+# directory + this manifest so Hermes's plugin loader has a valid
+# target to resolve.
+name: hal0-memory
+kind: memory-provider
+version: 0.1.0
+description: hal0-memory MCP-backed memory provider — talks to hal0's Cognee store.
