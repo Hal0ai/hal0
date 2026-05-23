@@ -50,6 +50,36 @@ export interface Slot {
 const SLOTS_POLL_MS = 5_000
 const SLOT_DETAIL_POLL_MS = 2_500
 
+// Backend /api/slots can omit `metrics` (and other fields) for offline /
+// not-yet-loaded slots. Components dereference `slot.metrics.toks` etc.
+// directly, so guarantee a present object with neutral defaults.
+const DEFAULT_METRICS: SlotMetrics = {
+  toks: 0,
+  ttft: null,
+  ctx: 0,
+  kv: null,
+  mem: 0,
+  rpm: 0,
+  lat: null,
+  dim: 0,
+  xrt: 0,
+  precision: '',
+  maxDocs: 0,
+  secs: 0,
+  voice: '',
+  avg: 0,
+  res: '',
+}
+
+function normalizeSlot(s: any): Slot {
+  return {
+    ...s,
+    metrics: { ...DEFAULT_METRICS, ...(s?.metrics ?? {}) },
+    spark: Array.isArray(s?.spark) ? s.spark : [],
+    model: s?.model ?? s?.model_id ?? s?.model_default ?? '',
+  }
+}
+
 async function fetchSlotsUnion(): Promise<Slot[]> {
   // Race /api/status (which may have stale slot list) + /api/slots
   // (authoritative for real slots). Real wins on conflict.
@@ -71,7 +101,7 @@ async function fetchSlotsUnion(): Promise<Slot[]> {
   const byName = new Map<string, Slot>()
   for (const s of statusSlots) byName.set(s.name, s)
   for (const s of realSlots) byName.set(s.name, s)
-  return [...byName.values()]
+  return [...byName.values()].map(normalizeSlot)
 }
 
 export function useSlots(): UseQueryResult<Slot[]> {
@@ -89,7 +119,7 @@ export function useSlots(): UseQueryResult<Slot[]> {
 export function useSlotDetail(name: string | null | undefined): UseQueryResult<Slot> {
   return useQuery({
     queryKey: ['slots', name],
-    queryFn: () => apiGet<Slot>(ENDPOINTS.slot(name as string)),
+    queryFn: async () => normalizeSlot(await apiGet<any>(ENDPOINTS.slot(name as string))),
     enabled: !!name,
     refetchInterval: SLOT_DETAIL_POLL_MS,
   })
