@@ -94,7 +94,7 @@ function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, men
       </div>
       <div className="slot-chips">
         <span className="chip">{type}</span>
-        <span className={"chip dev-" + device.replace("gpu-", "")}>{device}</span>
+        <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
         {cpuOnly && <span className="chip">[CPU]</span>}
         <span className="chip" style={{color: state === "serving" ? "var(--accent)" : state === "ready" ? "var(--ok)" : state === "idle" ? "var(--fg-3)" : "var(--fg-3)"}}>
           {state}
@@ -140,7 +140,7 @@ function SlotListRow({ slot, onEdit }) {
       <span className="ml">{model}</span>
       <span className="ch">
         <span className="chip">{type}</span>
-        <span className={"chip dev-" + device.replace("gpu-", "")}>{device}</span>
+        <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
       </span>
       <span className="met">
         <b>{tps}</b>

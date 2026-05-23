@@ -24,7 +24,7 @@ function SnapshotStrip({ slots, onGo }) {
             <span className={"dot " + s.state} />
             <span className="name mono">{s.name}</span>
             <span className="model mono">{s.model}</span>
-            <span className={"chip dev-" + s.device.replace("gpu-", "")}>{s.device}</span>
+            <span className={"chip dev-" + (s.device || "cpu").replace("gpu-", "")}>{s.device}</span>
             <span className="badge">
               {s.isDefault && <span className="chip outlined amber">default</span>}
               {s.coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
@@ -48,7 +48,7 @@ function PersonaPicker({ slots, current, onPick, open, onToggle, noTools }) {
     <div className="persona" onClick={onToggle}>
       <span className="dot" />
       <span className="nm">
-        Persona <b>{cur.name}</b><span className="sub">· {cur.device.replace("gpu-", "")}</span>
+        Persona <b>{cur.name}</b><span className="sub">· {(cur.device || "cpu").replace("gpu-", "")}</span>
       </span>
       {noTools && <span className="chip warn" style={{marginLeft: 6}}>no tools</span>}
       <span className="chev">{Icons.chev}</span>
@@ -67,7 +67,7 @@ function PersonaPicker({ slots, current, onPick, open, onToggle, noTools }) {
                 <span className={"dot " + s.state} />
                 <div>
                   <div className="name">{s.name} {s.isDefault && <span style={{color: "var(--accent)", fontSize: 10, marginLeft: 4}}>· default</span>}</div>
-                  <div className="sub">{s.model} · {s.device.replace("gpu-", "")}</div>
+                  <div className="sub">{s.model} · {(s.device || "cpu").replace("gpu-", "")}</div>
                   {isNpu && !isCur && cur.device === "npu" && (
                     <div className="warn">Pauses voice + embed ~14s while FLM swaps</div>
                   )}

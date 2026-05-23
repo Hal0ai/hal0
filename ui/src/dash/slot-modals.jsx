@@ -36,7 +36,7 @@ function CreateSlotModal({ open, onClose, defaults = {} }) {
 
   const compatible = HAL0_DATA.models.filter(m =>
     m.type === type &&
-    (device === "cpu" || m.device === device.replace("gpu-", "") || (device === "npu" && m.device === "npu"))
+    (device === "cpu" || m.device === (device || "cpu").replace("gpu-", "") || (device === "npu" && m.device === "npu"))
   );
 
   const npuAvailable = HAL0_DATA.host.npu.present;
@@ -414,7 +414,7 @@ function EmptySlotCard({ name, type, group, device, onConfigure }) {
       </div>
       <div className="slot-chips">
         <span className="chip">{type}</span>
-        <span className={"chip dev-" + device.replace("gpu-", "")}>{device}</span>
+        <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
         <span className="chip">{group}</span>
       </div>
       <div style={{padding: "10px 12px", background: "var(--accent-soft)", border: "1px solid var(--accent-line)", borderRadius: "var(--rad-sm)", display: "flex", alignItems: "center", gap: 8}}>
