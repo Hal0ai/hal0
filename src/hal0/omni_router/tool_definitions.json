@@ -1,0 +1,210 @@
+{
+  "_pin": {
+    "_comment_1": "Mirrored from upstream Lemonade's renderer/utils/toolDefinitions.json.",
+    "_comment_2": "Five tools (generate_image, edit_image, text_to_speech, transcribe_audio,",
+    "_comment_3": "analyze_image) are upstream-sourced; three (embed_text, rerank_documents,",
+    "_comment_4": "route_to_chat) are hal0-custom. Plan §7.2 + §7.5.",
+    "_comment_5": "Drift-detection script (scripts/check-tool-definitions.sh) is plan §7.5,",
+    "_comment_6": "deferred to a follow-up PR.",
+    "upstream_repo": "lemonade-sdk/lemonade",
+    "upstream_path": "src/app/src/renderer/utils/toolDefinitions.json",
+    "upstream_commit": "TBD-placeholder-replace-on-drift-script",
+    "upstream_sha256": "TBD-placeholder-replace-on-drift-script",
+    "last_reviewed": "2026-05-23"
+  },
+  "tools": [
+    {
+      "name": "generate_image",
+      "source": "upstream",
+      "target_slot_type": "image",
+      "required_model_labels": ["image"],
+      "endpoint": "/v1/images/generations",
+      "description": "Generate an image from a text prompt. Use when the user explicitly asks for an image, drawing, illustration, or visual.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "The text prompt describing the desired image."
+          },
+          "size": {
+            "type": "string",
+            "description": "Image size as 'WIDTHxHEIGHT' (e.g. '1024x1024'). Optional."
+          },
+          "n": {
+            "type": "integer",
+            "description": "Number of images to generate. Optional, default 1.",
+            "minimum": 1,
+            "maximum": 4
+          }
+        },
+        "required": ["prompt"]
+      }
+    },
+    {
+      "name": "edit_image",
+      "source": "upstream",
+      "target_slot_type": "image",
+      "required_model_labels": ["edit"],
+      "endpoint": "/v1/images/edits",
+      "description": "Edit an existing image with an edit prompt. Use when the user provides an image and asks for a modification.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "image": {
+            "type": "string",
+            "description": "Base64-encoded source image, or a URL to the image."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The edit instruction (e.g. 'make the sky purple')."
+          },
+          "size": {
+            "type": "string",
+            "description": "Output image size as 'WIDTHxHEIGHT'. Optional."
+          }
+        },
+        "required": ["image", "prompt"]
+      }
+    },
+    {
+      "name": "text_to_speech",
+      "source": "upstream",
+      "target_slot_type": "tts",
+      "required_model_labels": ["tts"],
+      "endpoint": "/v1/audio/speech",
+      "description": "Synthesise speech audio from text. Use when the user asks for spoken output, audio narration, or a voice response.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "description": "The text to speak."
+          },
+          "voice": {
+            "type": "string",
+            "description": "Optional voice id (engine-specific)."
+          }
+        },
+        "required": ["input"]
+      }
+    },
+    {
+      "name": "transcribe_audio",
+      "source": "upstream",
+      "target_slot_type": "transcription",
+      "required_model_labels": ["transcription"],
+      "endpoint": "/v1/audio/transcriptions",
+      "description": "Transcribe audio to text. Use when the user provides an audio file or recording and asks for a transcript.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "audio": {
+            "type": "string",
+            "description": "Base64-encoded audio file (WAV/MP3/etc.) or a URL."
+          },
+          "language": {
+            "type": "string",
+            "description": "Optional ISO-639-1 language hint (e.g. 'en')."
+          }
+        },
+        "required": ["audio"]
+      }
+    },
+    {
+      "name": "analyze_image",
+      "source": "upstream",
+      "target_slot_type": "llm",
+      "required_model_labels": ["vision"],
+      "endpoint": "/v1/chat/completions",
+      "description": "Analyse the contents of an image and answer a question about it. Use when the user provides an image and asks what's in it, to read text in it, or to reason about it.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "image": {
+            "type": "string",
+            "description": "Base64-encoded image, or a URL to the image."
+          },
+          "question": {
+            "type": "string",
+            "description": "What to ask about the image."
+          }
+        },
+        "required": ["image", "question"]
+      }
+    },
+    {
+      "name": "embed_text",
+      "source": "hal0",
+      "target_slot_type": "embedding",
+      "required_model_labels": ["embeddings"],
+      "endpoint": "/v1/embeddings",
+      "description": "Compute embedding vectors for one or more text snippets. Use only when the user explicitly asks for embeddings or a similarity computation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "One or more text strings to embed."
+          }
+        },
+        "required": ["input"]
+      }
+    },
+    {
+      "name": "rerank_documents",
+      "source": "hal0",
+      "target_slot_type": "reranking",
+      "required_model_labels": ["reranking"],
+      "endpoint": "/v1/rerank",
+      "description": "Reorder a list of documents by relevance to a query. Use only when the user explicitly asks for reranking or relevance scoring.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The query the documents will be ranked against."
+          },
+          "documents": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Documents to rerank."
+          },
+          "top_n": {
+            "type": "integer",
+            "description": "Return only the top N. Optional.",
+            "minimum": 1
+          }
+        },
+        "required": ["query", "documents"]
+      }
+    },
+    {
+      "name": "route_to_chat",
+      "source": "hal0",
+      "target_slot_type": "llm",
+      "required_model_labels": [],
+      "endpoint": null,
+      "description": "Delegate a single message to another chat slot (e.g. 'coder' for code questions, 'agent' for tool-using tasks). Use only when a specialised model would clearly do better.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Slot name to delegate to. Must be an enabled chat slot."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Self-contained task description for the target slot."
+          },
+          "context": {
+            "type": "string",
+            "description": "Optional: bullet-summary of prior conversation the target should know."
+          }
+        },
+        "required": ["target", "prompt"]
+      }
+    }
+  ]
+}

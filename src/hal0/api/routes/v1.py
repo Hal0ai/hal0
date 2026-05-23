@@ -337,7 +337,81 @@ async def get_model(
 
 @router.post("/chat/completions")
 async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Response:
-    return await _dispatch_and_forward(request, dispatcher)
+    # PR-16: OmniRouter opt-in. When the body carries ``"omni": true``
+    # AND we can resolve the request to a known chat slot whose model
+    # advertises ``tool-calling``, route through the client-side
+    # tool-calling loop instead of doing a direct passthrough. Plan §7
+    # + ADR-0008 §8.
+    #
+    # The opt-in mechanism is a body field (vs query param) because:
+    #   1. ``_dispatch_and_forward`` already parses the body, so we
+    #      pay no extra read cost.
+    #   2. Clients sending the OpenAI-shape body already carry their
+    #      knobs in JSON; ``"omni": true`` is the same shape.
+    #   3. Stripping the field before forwarding is one line in the
+    #      OmniRouter (see ``_strip_omni``).
+    #
+    # When OmniRouter is unavailable (no slot_manager, no lemonade
+    # client, or the request doesn't match a chat slot we own) we
+    # fall back to the standard dispatch path.
+    body = await _read_json_body(request)
+    if body.get("omni") is True:
+        looped = await _maybe_run_omni_loop(request, body)
+        if looped is not None:
+            return looped
+    # Strip the knob before forwarding so the upstream never sees it
+    # — Lemonade would reject the unknown field on strict-mode
+    # backends.
+    if "omni" in body:
+        body = {k: v for k, v in body.items() if k != "omni"}
+    return await _dispatch_and_forward(request, dispatcher, body=body)
+
+
+async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Response | None:
+    """Attempt to run the OmniRouter loop for this chat request.
+
+    Returns:
+        A FastAPI ``Response`` when the loop ran (success or surfaced
+        error), or ``None`` if we can't route through the loop (no
+        OmniRouter, unknown caller slot, etc.) — the caller then
+        falls back to the standard dispatch path.
+
+    PR-16 scope. Streaming responses are deferred to PR-18; this path
+    always returns a non-streaming JSON Response.
+    """
+    omni = getattr(request.app.state, "omni_router", None)
+    if omni is None:
+        return None
+    # Resolve the caller slot. We look up by the request's ``model``
+    # field against configured slots' ``model.default``. The first
+    # matching enabled slot wins.
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if slot_manager is None:
+        return None
+    requested_model = body.get("model")
+    if not isinstance(requested_model, str) or not requested_model:
+        return None
+    configs = await slot_manager.iter_configs()
+    caller_slot_name: str | None = None
+    for cfg in configs:
+        if cfg.get("type") != "llm":
+            continue
+        if not cfg.get("enabled", True):
+            continue
+        model_section = cfg.get("model") or {}
+        if isinstance(model_section, dict):
+            default = model_section.get("default", "")
+            if isinstance(default, str) and default == requested_model:
+                caller_slot_name = str(cfg.get("name", ""))
+                break
+    if caller_slot_name is None:
+        return None
+    result = await omni.run_loop(caller_slot_name=caller_slot_name, body=body)
+    return Response(
+        content=json.dumps(result).encode("utf-8"),
+        status_code=200,
+        media_type="application/json",
+    )
 
 
 @router.post("/completions")

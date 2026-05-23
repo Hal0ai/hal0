@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+import httpx
 import structlog
 from fastapi import Depends, FastAPI
 
@@ -546,6 +548,39 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # snapshot the /api/metrics/prometheus route reads.
     lemonade_metrics_shim = await _start_lemonade_metrics_shim(app)
 
+    # OmniRouter (PR-16, plan §7 + ADR-0008 §8). Client-side OpenAI
+    # tool-calling loop. Wired here so the /v1/chat/completions route
+    # can pick it up via ``request.app.state.omni_router`` when a
+    # request body carries ``omni: true``. The router holds a
+    # dedicated httpx client so its lifetime is decoupled from the
+    # LemonadeClient (which owns its own connection pool for the
+    # control plane).
+    omni_router_client: httpx.AsyncClient | None = None
+    try:
+        from hal0.omni_router import OmniRouter
+
+        omni_router_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0),
+            follow_redirects=False,
+        )
+        lemonade_base_url = os.environ.get("LEMONADE_BASE_URL", "http://127.0.0.1:13305")
+        app.state.omni_router = OmniRouter(
+            slot_manager=slot_manager,
+            http_client=omni_router_client,
+            lemonade_base_url=lemonade_base_url,
+        )
+        log.info("omni_router.attached", base_url=lemonade_base_url)
+    except Exception as exc:
+        # Never let OmniRouter failure block API startup — the chat
+        # route falls back to direct dispatch when ``omni_router`` is
+        # absent, which is the same behaviour as the pre-PR-16 baseline.
+        log.warning(
+            "omni_router.start_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        app.state.omni_router = None
+
     try:
         async with AsyncExitStack() as stack:
             for mgr in managers:
@@ -557,6 +592,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await lemonade_metrics_shim.stop()
         if lemonade_idle_driver is not None:
             await lemonade_idle_driver.stop()
+        if omni_router_client is not None:
+            with contextlib.suppress(Exception):
+                await omni_router_client.aclose()
         await slot_manager.stop_idle_monitor()
         await dispatcher.aclose()
         log.info("hal0.api.shutdown")
