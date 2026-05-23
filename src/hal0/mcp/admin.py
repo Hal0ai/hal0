@@ -93,6 +93,7 @@ import httpx
 import structlog
 
 from hal0.mcp.approval_queue import ApprovalQueue
+from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
@@ -186,6 +187,13 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "capability_list",
         "provider_list",
         "version_info",
+        # Host-introspection probes (issue #237). Pure-read against
+        # /sys/, /proc/, and lsmod — no REST round-trip, no mutation.
+        # Hermes-Agent bootstrap consumes these in its env_probe phase.
+        "gpu_target_version",
+        "npu_status",
+        "env_report",
+        "model_store_probe",
     }
 )
 
@@ -481,6 +489,11 @@ async def _execute_tool(
     if tool.startswith("memory_") and memory_dispatcher is not None:
         return await memory_dispatcher(tool, args)
 
+    # Host-introspection probes run in-process — no REST hop. See
+    # :mod:`hal0.mcp.probes` for the per-probe implementations.
+    if tool in PROBE_TOOLS:
+        return await dispatch_probe(tool, args)
+
     if tool not in _REST_MAP:
         # memory_* tools without a dispatcher fall through to REST,
         # but we don't have REST routes for them yet — return a
@@ -561,6 +574,19 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "version_info": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Host-introspection probes — pure sysfs/procfs reads.
+    "gpu_target_version": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "npu_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "env_report": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "model_store_probe": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     # Read-shaped memory tools — surface a Cognee query, no writes.
@@ -673,6 +699,23 @@ def build_server(
     _register("capability_list", "Capability overlay state — backends + selections.")
     _register("provider_list", "List configured providers.")
     _register("version_info", "hal0 version + runtime status.")
+    # Host-introspection probes (issue #237)
+    _register(
+        "gpu_target_version",
+        "Decode KFD's gfx_target_version to a gfxNNNN string (e.g. gfx1151).",
+    )
+    _register(
+        "npu_status",
+        "Report XDNA NPU presence + driver binding (LXC-correct, no modinfo).",
+    )
+    _register(
+        "env_report",
+        "Composite host snapshot — container, CPU, RAM, GPU, NPU, network, tooling.",
+    )
+    _register(
+        "model_store_probe",
+        "Probe a model-store path: fstype, free/total bytes, writable, UMA-aware.",
+    )
     # Autonomous write
     _register("model_swap", "Hot-swap the primary slot to a new model.")
     _register("memory_add", "Add an item to long-term memory.")
