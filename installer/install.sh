@@ -974,7 +974,7 @@ else
   "host": "127.0.0.1",
   "port": 13305,
   "ctx_size": 4096,
-  "max_loaded_models": 4,
+  "max_loaded_models": 8,
   "extra_models_dir": "/var/lib/hal0/models",
   "global_timeout": 900,
   "no_broadcast": true,
