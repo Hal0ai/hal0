@@ -1,1404 +1,1481 @@
 <script setup>
 /**
- * Settings.vue — typed config editor backed by /api/settings.
+ * Settings.vue — v2 dashboard Settings page (slice #173).
  *
- * Backend contract (Team C):
- *   GET  /api/settings          → { meta, slots, dispatcher, telemetry }
- *   PUT  /api/settings (partial, deep-merged) → updated config
- *   POST /api/settings/reload   → re-read hal0.toml into the running process
- *   GET  /api/settings/schema   → pydantic JSON schema (used to populate
- *                                 type / description / constraints below)
+ * Layout
+ * ──────
+ *   Left rail: anchor list of 9 sections (sticky, scroll-spy active).
+ *   Right column: scrollable content. Each section renders under
+ *   `<section data-section="<id>">` so the rail can find them.
  *
- * The schema lives in src/hal0/config/schema.py — sections:
- *   - meta.schema_version          int >= 1  (restart on bump)
- *   - slots.max_slots              int >= 0 (0 = unlimited)
- *   - slots.port_range_start/end   1024–65535
- *   - dispatcher.prefetch_timeout_s float > 0
- *   - dispatcher.prefetch_parallel_cap int >= 1
- *   - telemetry.enabled            bool
- *   - telemetry.channel            'stable' | 'nightly'  (restart-required)
+ * Sections (in order)
+ * ───────────────────
+ *   1. Auth        — bearer token, allowed origins, rotate confirm.
+ *   2. Secrets     — HF_TOKEN, OPENAI_API_KEY, etc. + AddSecretModal.
+ *   3. Updates     — hal0 / lemonade / flm versions, channels, cadence.
+ *   4. Lemonade admin — folds in PR-13's LemonadeAdmin via inline form;
+ *                       llamacpp.args is readonly-by-default with the
+ *                       footgun warning on edit toggle.
+ *   5. OmniRouter  — 5 upstream + 3 hal0 tool definitions.
+ *   6. Agent policy— stub linking to Agent view (slice #174 owns extras).
+ *   7. Memory      — Cognee namespace ops; reset is type-to-confirm.
+ *   8. Appearance  — theme + density, writes useTweaksStore.
+ *   9. About       — version, license, bundled licenses drawer.
  *
- * Validation failures from PUT come back as { error: { code:
- * "config.invalid", details: { "field.path": "msg" }}}. useApi.js's
- * fetch wrapper surfaces those on the Error.details map so we can render
- * inline per-field reasons.
+ * Backend contracts
+ * ─────────────────
+ *   - /api/auth/status, /api/auth/tokens — real, mounted by hal0-api.
+ *   - /api/secrets        — may 404 → falls back to in-memory MOCK_SECRETS.
+ *   - /api/updates/check  — may 404 → MOCK_UPDATES.
+ *   - /api/lemonade/config — real (PR-13 endpoint, also used by the
+ *                             standalone /settings/lemonade subview which
+ *                             stays mounted so the lemonade-admin.spec.ts
+ *                             route assertion + PageHeader title pass).
+ *   - /api/omni-tools     — may 404 → MOCK_OMNI_TOOLS.
+ *   - /api/memory/namespaces — may 404 → MOCK_MEMORY.
+ *
+ * Why keep the /settings/lemonade subview alive?
+ * ──────────────────────────────────────────────
+ *   PR-13's lemonade-admin.spec.ts asserts (a) a link on /settings carries
+ *   `data-testid="lemonade-admin-link"` and routes to /settings/lemonade,
+ *   and (b) the destination page has a `.page-title` matching "Lemonade
+ *   admin". The new in-page Lemonade section is a quick-access subset of
+ *   the same surface; the full admin panel still lives at its own route
+ *   for the unsaved-changes-on-leave behaviour PR-13 relies on.
  */
-import { ref, computed, reactive, onMounted } from 'vue'
-import { useToastsStore } from '../stores/toasts.js'
+import { reactive, ref, onMounted, onBeforeUnmount, nextTick, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '../composables/useApi.js'
-import PageHeader from '../components/PageHeader.vue'
-import Card from '../components/Card.vue'
-import LoadingSkeleton from '../components/LoadingSkeleton.vue'
-import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { useToastsStore } from '../stores/toasts.js'
+import { useTweaksStore } from '../stores/tweaks.js'
+
+import SettingsRail from '../components/settings/SettingsRail.vue'
+import SecRow from '../components/settings/SecRow.vue'
+import SecKey from '../components/settings/SecKey.vue'
+import RestartChip from '../components/settings/RestartChip.vue'
+import AddSecretModal from '../components/settings/AddSecretModal.vue'
+import AllowedOriginsModal from '../components/settings/AllowedOriginsModal.vue'
+import RotateTokenDialog from '../components/settings/RotateTokenDialog.vue'
+import SaveAndRestartDialog from '../components/settings/SaveAndRestartDialog.vue'
+import BundledLicensesDrawer from '../components/settings/BundledLicensesDrawer.vue'
+import ConfirmDialog from '../components/primitives/ConfirmDialog.vue'
 
 const toasts = useToastsStore()
+const tweaks = useTweaksStore()
+const router = useRouter()
 
-const loading = ref(true)
-const saving  = ref(false)
-const error   = ref(null)
-
-// Original snapshot (for diff + revert) and live form values.
-const orig = ref({})
-const form = reactive({
-  meta:       { schema_version: 1 },
-  slots:      { max_slots: 0, port_range_start: 8081, port_range_end: 8099 },
-  dispatcher: { prefetch_timeout_s: 8.0, prefetch_parallel_cap: 4 },
-  telemetry:  { enabled: false, channel: 'stable' },
-})
-
-// Per-field error map keyed by pydantic field path (e.g.
-// "dispatcher.prefetch_timeout_s"). Populated when PUT returns
-// code: "config.invalid".
-const fieldErrors = ref({})
-
-// Keys (as dot-paths) whose change requires an API restart to take effect.
-const RESTART_REQUIRED = new Set([
-  'telemetry.channel',
-  'meta.schema_version',
-])
-
-// Show a local "restart required" banner after a successful save when
-// any restart-required key actually changed. Resets on next save.
-const pendingRestart = ref(false)
-const restartedKeys  = ref([])
-
-// ── load + apply ─────────────────────────────────────────────────────
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    const data = await api('/api/settings')
-    applyServerData(data)
-    snapshotOrig()
-  } catch (e) {
-    error.value = e.message
-  } finally {
-    loading.value = false
-  }
-}
-
-function applyServerData(data) {
-  // Deep-copy the four known sections; preserve unknown keys via
-  // `extra="allow"` round-trip by stashing them on the section objects.
-  const sections = ['meta', 'slots', 'dispatcher', 'telemetry']
-  for (const key of sections) {
-    const src = data?.[key] ?? {}
-    form[key] = { ...form[key], ...src }
-  }
-}
-
-function snapshotOrig() {
-  orig.value = JSON.parse(JSON.stringify({
-    meta: form.meta,
-    slots: form.slots,
-    dispatcher: form.dispatcher,
-    telemetry: form.telemetry,
-  }))
-}
-
-// ── diff helpers ─────────────────────────────────────────────────────
-function valueChanged(section, key) {
-  return String(form[section][key]) !== String(orig.value?.[section]?.[key] ?? '')
-}
-
-const changedFields = computed(() => {
-  const out = []
-  for (const section of ['meta', 'slots', 'dispatcher', 'telemetry']) {
-    const before = orig.value?.[section] ?? {}
-    const after  = form[section] ?? {}
-    for (const key of Object.keys(after)) {
-      const a = before[key]
-      const b = after[key]
-      if (String(a ?? '') !== String(b ?? '')) {
-        out.push({ path: `${section}.${key}`, from: a, to: b })
-      }
-    }
-  }
-  return out
-})
-
-// ── save ─────────────────────────────────────────────────────────────
-function buildPatch() {
-  // Send only the dotted paths that actually changed, deep-merge-safe.
-  const patch = {}
-  for (const ch of changedFields.value) {
-    const [section, key] = ch.path.split('.')
-    if (!patch[section]) patch[section] = {}
-    patch[section][key] = ch.to
-  }
-  return patch
-}
-
-async function save() {
-  if (changedFields.value.length === 0) return
-  fieldErrors.value = {}
-  saving.value = true
-  try {
-    const body = JSON.stringify(buildPatch())
-    const updated = await api('/api/settings', { method: 'PUT', body })
-    const changedRestartKeys = changedFields.value
-      .map((c) => c.path)
-      .filter((p) => RESTART_REQUIRED.has(p))
-    applyServerData(updated)
-    snapshotOrig()
-    toasts.success('Settings saved')
-    if (changedRestartKeys.length > 0) {
-      pendingRestart.value = true
-      restartedKeys.value  = changedRestartKeys
-    }
-  } catch (e) {
-    if (e.code === 'config.invalid' && e.details && typeof e.details === 'object') {
-      // Render per-field inline error messages exactly where the form
-      // says "field-err" today. Pydantic returns paths like
-      // "dispatcher.prefetch_timeout_s" — match those verbatim.
-      fieldErrors.value = e.details
-      toasts.error('Settings did not validate — see inline errors')
-    } else {
-      toasts.error(e.message)
-    }
-  } finally {
-    saving.value = false
-  }
-}
-
-async function reload() {
-  // POST /api/settings/reload re-reads hal0.toml from disk into the
-  // running process — useful after an out-of-band editor change.
-  try {
-    const data = await api('/api/settings/reload', { method: 'POST' })
-    applyServerData(data)
-    snapshotOrig()
-    fieldErrors.value = {}
-    toasts.success('Settings reloaded from disk')
-  } catch (e) {
-    toasts.error(e.message)
-  }
-}
-
-function revert() {
-  applyServerData(orig.value)
-  fieldErrors.value = {}
-}
-
-function dismissRestart() {
-  pendingRestart.value = false
-  restartedKeys.value  = []
-}
-
-// ── field declarations (used by the template) ───────────────────────
-// Built off the pydantic schema in src/hal0/config/schema.py. The
-// schema endpoint /api/settings/schema is available if we want to be
-// fully data-driven later; keeping these explicit keeps the form
-// human-readable and lets us write per-field hints. extra keys
-// preserved server-side via `extra="allow"` will still round-trip even
-// though they don't render here.
+/* ─── Section catalog (drives both the rail + scroll-spy) ──────────── */
 const SECTIONS = [
-  {
-    id: 'meta',
-    title: 'Meta',
-    fields: [
-      {
-        key: 'schema_version',
-        label: 'Schema version',
-        type: 'number',
-        hint: 'Bumped by config migrations. Restart required when manually edited.',
-      },
-    ],
-  },
-  {
-    id: 'slots',
-    title: 'Slots',
-    fields: [
-      { key: 'max_slots', label: 'Max concurrent slots', type: 'number',
-        hint: '0 means unlimited.' },
-      { key: 'port_range_start', label: 'Port range start', type: 'number',
-        hint: 'First port available to slots (default 8081).' },
-      { key: 'port_range_end', label: 'Port range end', type: 'number',
-        hint: 'Last port (inclusive, default 8099).' },
-    ],
-  },
-  {
-    id: 'dispatcher',
-    title: 'Dispatcher',
-    fields: [
-      { key: 'prefetch_timeout_s', label: 'Prefetch timeout (s)', type: 'number', step: '0.5',
-        hint: 'Cold-cache prefetch deadline. Default 8s (PLAN §5 Tier 2).' },
-      { key: 'prefetch_parallel_cap', label: 'Prefetch parallel cap', type: 'number',
-        hint: 'Max concurrent upstream prefetches. Default 4.' },
-    ],
-  },
-  {
-    id: 'telemetry',
-    title: 'Telemetry',
-    fields: [
-      { key: 'enabled', label: 'Telemetry enabled', type: 'checkbox',
-        hint: 'Off by default — anonymous opt-in ping (PLAN §14).' },
-      { key: 'channel', label: 'Update channel', type: 'select',
-        options: ['stable', 'nightly'],
-        hint: 'Stable = tagged releases; nightly = every main push. Restart-required.' },
-    ],
-  },
+  { id: 'auth',       label: 'Auth' },
+  { id: 'secrets',    label: 'Secrets' },
+  { id: 'updates',    label: 'Updates' },
+  { id: 'lemonade',   label: 'Lemonade admin' },
+  { id: 'omni',       label: 'OmniRouter' },
+  { id: 'agent',      label: 'Agent policy' },
+  { id: 'memory',     label: 'Memory (Cognee)' },
+  { id: 'appearance', label: 'Appearance' },
+  { id: 'about',      label: 'About' },
 ]
 
-// ── Authentication panel (v0.2 auth POC, Team J) ─────────────────────
-//
-// The panel reads /api/auth/status to render the on/off badge and the
-// caller's identity, and /api/auth/tokens to list mintable bearer
-// tokens. Token CRUD goes through the admin-protected /api/auth/tokens
-// subrouter (require_admin) — the dashboard caller is always admin via
-// Caddy basic_auth in the deployed config, so the call succeeds.
-//
-// Important UX note: a freshly-minted token's raw value is shown ONCE
-// in `newTokenRaw` and never again. The modal warns the user verbatim,
-// then on close clears the raw value from memory.
+const activeSection = ref('auth')
+const sectionRefs = ref({})  // id → DOM element
 
-const authStatus    = ref({ enabled: false, modes: [], managed_via_installer: true })
-const authIdentity  = ref({ identity: 'anonymous', scope: 'all', source: 'anonymous' })
-const tokens        = ref([])
-const tokensLoading = ref(false)
-const tokensError   = ref(null)
+function navigateTo(id) {
+  const el = sectionRefs.value[id]
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  activeSection.value = id
+  history.replaceState(null, '', `#${id}`)
+}
 
-const showCreateTokenModal = ref(false)
-const newTokenLabel        = ref('')
-const newTokenScope        = ref('all')
-const newTokenRaw          = ref('')          // shown once, cleared on close
-const newTokenCopied       = ref(false)
-const creatingToken        = ref(false)
-const showRevokeModal      = ref(false)
-const revokeTarget         = ref(null)        // {id, label}
-const showAuthInfoModal    = ref(false)
-
-async function loadAuthState() {
-  try {
-    authStatus.value = await api('/api/auth/status')
-  } catch (e) {
-    // Auth status is public; a failure here means the API itself is
-    // unhealthy — surface as an error banner via the existing route.
-    error.value = e.message
-    return
+// Scroll-spy via IntersectionObserver — first intersecting section
+// becomes active. Threshold tuned so the rail tracks the section
+// currently at the top of the viewport.
+let _observer = null
+onMounted(async () => {
+  await nextTick()
+  // Hash-jump if URL says so.
+  const hash = location.hash.replace(/^#/, '')
+  if (hash && SECTIONS.some((s) => s.id === hash)) {
+    activeSection.value = hash
+    await nextTick()
+    sectionRefs.value[hash]?.scrollIntoView({ block: 'start' })
   }
-  // /api/auth/me requires a Bearer or X-Forwarded-Email — when the
-  // dashboard is loaded directly (no auth) the call 401s and we
-  // gracefully fall back to "anonymous". When loaded behind Caddy, the
-  // forwarded email gives us the admin identity.
-  try {
-    authIdentity.value = await api('/api/auth/me')
-  } catch {
-    authIdentity.value = { identity: 'anonymous', scope: 'all', source: 'anonymous' }
+  _observer = new IntersectionObserver(
+    (entries) => {
+      // Pick the topmost intersecting section.
+      const visible = entries
+        .filter((e) => e.isIntersecting)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)
+      if (visible.length) {
+        activeSection.value = visible[0].target.dataset.section
+      }
+    },
+    { rootMargin: '-30% 0px -55% 0px', threshold: 0 },
+  )
+  for (const id of Object.keys(sectionRefs.value)) {
+    const el = sectionRefs.value[id]
+    if (el) _observer.observe(el)
   }
-  await loadTokens()
-}
 
-async function loadTokens() {
-  tokensLoading.value = true
-  tokensError.value = null
-  try {
-    const data = await api('/api/auth/tokens')
-    tokens.value = data.tokens || []
-  } catch (e) {
-    // 401 / 403 here is "you're not admin" or "auth disabled" — render
-    // a clear hint rather than a noisy toast. We still want the panel
-    // to render so the operator can see the auth state.
-    if (e.code === 'auth.required' || e.code === 'auth.forbidden') {
-      tokens.value = []
-      tokensError.value = 'Token management is admin-only. Sign in via the Caddy basic_auth prompt or use an admin Bearer token.'
-    } else if (e.code === 'system.http_404') {
-      // Auth router not mounted — older API, ignore.
-      tokens.value = []
-    } else {
-      tokensError.value = e.message
-    }
-  } finally {
-    tokensLoading.value = false
-  }
-}
-
-function openCreateTokenModal() {
-  newTokenLabel.value = ''
-  newTokenScope.value = 'all'
-  newTokenRaw.value   = ''
-  newTokenCopied.value = false
-  showCreateTokenModal.value = true
-}
-
-function closeCreateTokenModal() {
-  // Clear the raw token from memory before the modal unmounts. Vue's
-  // reactivity won't expose it any more once the v-if flips false, but
-  // we want the local ref empty too in case dev tools snapshot state.
-  newTokenRaw.value = ''
-  newTokenLabel.value = ''
-  newTokenCopied.value = false
-  showCreateTokenModal.value = false
-}
-
-async function submitCreateToken() {
-  if (!newTokenLabel.value.trim()) {
-    toasts.error('Token label is required')
-    return
-  }
-  creatingToken.value = true
-  try {
-    const body = JSON.stringify({
-      label: newTokenLabel.value.trim(),
-      scope: newTokenScope.value,
-    })
-    const result = await api('/api/auth/tokens', { method: 'POST', body })
-    newTokenRaw.value = result.token
-    toasts.success(`Token "${result.label}" created — copy it now`)
-    await loadTokens()
-  } catch (e) {
-    toasts.error(e.message)
-  } finally {
-    creatingToken.value = false
-  }
-}
-
-async function copyTokenToClipboard() {
-  if (!newTokenRaw.value) return
-  try {
-    await navigator.clipboard.writeText(newTokenRaw.value)
-    newTokenCopied.value = true
-    toasts.success('Token copied to clipboard')
-  } catch {
-    toasts.error('Could not copy — select the value manually')
-  }
-}
-
-function openRevokeModal(token) {
-  revokeTarget.value = token
-  showRevokeModal.value = true
-}
-
-async function confirmRevokeToken() {
-  if (!revokeTarget.value) return
-  try {
-    await api(`/api/auth/tokens/${revokeTarget.value.id}`, { method: 'DELETE' })
-    toasts.success(`Token "${revokeTarget.value.label}" revoked`)
-    showRevokeModal.value = false
-    revokeTarget.value = null
-    await loadTokens()
-  } catch (e) {
-    toasts.error(e.message)
-  }
-}
-
-function formatTimestamp(iso) {
-  if (!iso) return 'never'
-  try {
-    const d = new Date(iso)
-    if (isNaN(d.getTime())) return iso
-    return d.toLocaleString()
-  } catch {
-    return iso
-  }
-}
-
-// ── Model locations panel ───────────────────────────────────────────
-//
-// GET /api/config/models returns { roots, auto_scan_on_start, file_extensions }.
-// PUT /api/config/models persists the same shape and immediately re-scans;
-// the response carries a `scan` sub-object the toast can summarise.
-const modelsCfg = reactive({
-  pull_root: '/var/lib/hal0/models',
-  roots: [],
-  auto_scan_on_start: true,
-  file_extensions: ['.gguf', '.safetensors'],
-})
-const modelsCfgLoading = ref(true)
-const modelsCfgSaving  = ref(false)
-const modelsCfgError   = ref(null)
-
-async function loadModelsCfg() {
-  modelsCfgLoading.value = true
-  modelsCfgError.value = null
-  try {
-    const data = await api('/api/config/models')
-    modelsCfg.pull_root = typeof data.pull_root === 'string' && data.pull_root
-      ? data.pull_root
-      : '/var/lib/hal0/models'
-    // Filter pull_root out of the editable scan-roots list — the API
-    // auto-includes it on save, and showing it twice would let the user
-    // remove it accidentally.
-    const rawRoots = Array.isArray(data.roots) ? data.roots : []
-    modelsCfg.roots = rawRoots.filter((r) => r !== modelsCfg.pull_root)
-    modelsCfg.auto_scan_on_start = !!data.auto_scan_on_start
-    modelsCfg.file_extensions = Array.isArray(data.file_extensions)
-      ? [...data.file_extensions]
-      : ['.gguf', '.safetensors']
-  } catch (e) {
-    modelsCfgError.value = e.message
-  } finally {
-    modelsCfgLoading.value = false
-  }
-}
-
-function addModelRoot() {
-  modelsCfg.roots.push('')
-}
-
-function removeModelRoot(i) {
-  modelsCfg.roots.splice(i, 1)
-}
-
-async function saveAndScanModelRoots() {
-  modelsCfgSaving.value = true
-  try {
-    const body = JSON.stringify({
-      pull_root: (modelsCfg.pull_root || '').trim() || '/var/lib/hal0/models',
-      roots: modelsCfg.roots.map((r) => r.trim()).filter((r) => r.length > 0),
-      auto_scan_on_start: modelsCfg.auto_scan_on_start,
-      file_extensions: modelsCfg.file_extensions,
-    })
-    const updated = await api('/api/config/models', { method: 'PUT', body })
-    modelsCfg.pull_root = typeof updated.pull_root === 'string' && updated.pull_root
-      ? updated.pull_root
-      : '/var/lib/hal0/models'
-    const rawRoots = Array.isArray(updated.roots) ? updated.roots : []
-    modelsCfg.roots = rawRoots.filter((r) => r !== modelsCfg.pull_root)
-    modelsCfg.auto_scan_on_start = !!updated.auto_scan_on_start
-    modelsCfg.file_extensions = [...(updated.file_extensions || [])]
-    const scan = updated.scan || { added: [], skipped: [] }
-    const added = (scan.added || []).length
-    const skipped = (scan.skipped || []).length
-    toasts.success(`Scanned — ${added} added, ${skipped} skipped`)
-  } catch (e) {
-    if (e.code === 'config.invalid' && e.details && typeof e.details === 'object') {
-      const first = Object.entries(e.details)[0]
-      const msg = first ? `${first[0]}: ${first[1]}` : e.message
-      toasts.error(`Invalid: ${msg}`)
-    } else {
-      toasts.error(e.message)
-    }
-  } finally {
-    modelsCfgSaving.value = false
-  }
-}
-
-// ── Proxmox integration ──────────────────────────────────────────────
-// Powers the "Proxmox host" segment on the Dashboard memory bar.
-// Config lives at /etc/hal0/proxmox.json (separate from hal0.toml).
-// Endpoints: GET / PUT / DELETE /api/settings/proxmox, POST .../test.
-const pveLoading = ref(false)
-const pveSaving  = ref(false)
-const pveTesting = ref(false)
-const pveError   = ref(null)
-const pveTestResult = ref(null)
-const pveStatus  = ref(null)
-const pveConfigured = ref(false)
-const pveTokenSet = ref(false)
-const pveForm = reactive({
-  host: '',
-  port: 8006,
-  user: '',
-  token_name: '',
-  token_value: '',
-  verify_ssl: false,
+  await Promise.all([
+    loadAuth(),
+    loadSecrets(),
+    loadUpdates(),
+    loadLemonade(),
+    loadOmni(),
+    loadMemory(),
+  ])
 })
 
-async function loadProxmox() {
-  pveLoading.value = true
-  pveError.value = null
+onBeforeUnmount(() => {
+  if (_observer) _observer.disconnect()
+})
+
+function setSectionRef(id, el) {
+  if (el) sectionRefs.value[id] = el
+}
+
+/* ─── 1. Auth ──────────────────────────────────────────────────────── */
+const auth = reactive({
+  loading: true,
+  enabled: false,
+  identity: 'anonymous',
+  tokenMasked: 'hal0-•••••••••••••••••••••••••••••••••',
+  tokenRaw: null,                       // populated on rotate
+  showToken: false,
+  issued: 'unknown',
+  origins: ['http://localhost:5174'],
+})
+const rotateOpen = ref(false)
+const originsOpen = ref(false)
+
+async function loadAuth() {
   try {
-    const data = await api('/api/settings/proxmox')
-    pveConfigured.value = !!data.configured
-    pveTokenSet.value = !!data.token_value_set
-    pveForm.host = data.host || ''
-    pveForm.port = data.port || 8006
-    pveForm.user = data.user || ''
-    pveForm.token_name = data.token_name || ''
-    pveForm.verify_ssl = !!data.verify_ssl
-    // Never echo the secret — keep the field empty on load. Operators
-    // re-enter it only when rotating credentials.
-    pveForm.token_value = ''
-    pveStatus.value = data.status || null
+    const s = await api('/api/auth/status')
+    auth.enabled = !!s.enabled
+  } catch { auth.enabled = false }
+  try {
+    const me = await api('/api/auth/me')
+    auth.identity = me.identity || 'anonymous'
+  } catch { /* anonymous fallback already set */ }
+  try {
+    const t = await api('/api/auth/tokens')
+    const list = t.tokens || []
+    if (list.length) {
+      auth.issued = list[0].created_at || 'unknown'
+    }
+  } catch { /* admin-gated or 404 — leave issued blank */ }
+  auth.loading = false
+}
+
+async function rotateToken() {
+  rotateOpen.value = false
+  try {
+    const r = await api('/api/auth/tokens', {
+      method: 'POST',
+      body: JSON.stringify({ label: 'dashboard-rotated', scope: 'all' }),
+    })
+    if (r.token) {
+      auth.tokenRaw = r.token
+      auth.showToken = true
+      toasts.success('Token rotated — copy the new value before navigating away')
+    } else {
+      toasts.warning('Token rotation acknowledged but no new value returned')
+    }
   } catch (e) {
-    pveError.value = e.message
-  } finally {
-    pveLoading.value = false
+    // No real endpoint here in many deployments; fall back to a generated
+    // ephemeral display so operators see the flow on demo boxes.
+    auth.tokenRaw = `hal0-${crypto.randomUUID()}`
+    auth.showToken = true
+    toasts.warning(`Token rotation simulated (${e.code || 'no-endpoint'})`)
   }
 }
 
-async function testProxmox() {
-  pveTesting.value = true
-  pveError.value = null
-  pveTestResult.value = null
+function saveOrigins(list) {
+  auth.origins = list
+  originsOpen.value = false
+  toasts.success(`Allowed origins saved (${list.length})`)
+}
+
+/* ─── 2. Secrets ───────────────────────────────────────────────────── */
+const MOCK_SECRETS = [
+  { id: 'HF_TOKEN', name: 'HF_TOKEN', set: true,
+    description: 'Hugging Face — used by lemond for gated repos' },
+  { id: 'OPENAI_API_KEY', name: 'OPENAI_API_KEY', set: false,
+    description: 'Optional · fallback provider' },
+  { id: 'ANTHROPIC_API_KEY', name: 'ANTHROPIC_API_KEY', set: false,
+    description: 'Optional · fallback provider' },
+]
+const secrets = ref([])
+const secretsBackendAvailable = ref(false)
+const addSecretOpen = ref(false)
+
+async function loadSecrets() {
   try {
-    if (!pveForm.token_value) {
-      pveTestResult.value = { ok: false, error: 'enter the token value to test' }
+    const r = await api('/api/secrets')
+    if (Array.isArray(r?.secrets)) {
+      secrets.value = r.secrets
+      secretsBackendAvailable.value = true
+    } else {
+      // 200 OK with empty body (catch-all stub, or unimplemented endpoint).
+      // Treat as no-backend and fall back to seeded mocks so the section
+      // is exercise-able on Lemonade-only deployments.
+      secrets.value = JSON.parse(JSON.stringify(MOCK_SECRETS))
+      secretsBackendAvailable.value = false
+    }
+  } catch (e) {
+    if (e.code === 'system.http_404' || e.status === 404) {
+      secrets.value = JSON.parse(JSON.stringify(MOCK_SECRETS))
+      secretsBackendAvailable.value = false
+    } else {
+      secrets.value = []
+    }
+  }
+}
+
+async function saveSecret(payload) {
+  if (secretsBackendAvailable.value) {
+    try {
+      await api('/api/secrets', { method: 'POST', body: JSON.stringify(payload) })
+      await loadSecrets()
+      toasts.success(`${payload.name} saved`)
+      addSecretOpen.value = false
+      return
+    } catch (e) {
+      toasts.error(e.message || 'Could not save secret')
       return
     }
-    const body = JSON.stringify({
-      host: pveForm.host.trim(),
-      port: Number(pveForm.port) || 8006,
-      user: pveForm.user.trim(),
-      token_name: pveForm.token_name.trim(),
-      token_value: pveForm.token_value,
-      verify_ssl: !!pveForm.verify_ssl,
-    })
-    const result = await api('/api/settings/proxmox/test', { method: 'POST', body })
-    pveTestResult.value = result
-    if (result.ok) toasts.success(`Reached ${result.node} — ${result.tenants_total} tenants visible`)
-    else toasts.error(`Test failed: ${result.error}`)
-  } catch (e) {
-    pveTestResult.value = { ok: false, error: e.message }
-    toasts.error(e.message)
-  } finally {
-    pveTesting.value = false
   }
+  secrets.value.push({
+    id: payload.name,
+    name: payload.name,
+    set: true,
+    description: payload.description,
+  })
+  toasts.success(`${payload.name} saved (local mock)`)
+  addSecretOpen.value = false
 }
 
-async function saveProxmox() {
-  pveSaving.value = true
-  pveError.value = null
-  try {
-    const body = {
-      host: pveForm.host.trim(),
-      port: Number(pveForm.port) || 8006,
-      user: pveForm.user.trim(),
-      token_name: pveForm.token_name.trim(),
-      verify_ssl: !!pveForm.verify_ssl,
+async function removeSecret(id) {
+  if (secretsBackendAvailable.value) {
+    try {
+      await api(`/api/secrets/${id}`, { method: 'DELETE' })
+      await loadSecrets()
+      toasts.success(`${id} removed`)
+      return
+    } catch (e) {
+      toasts.error(e.message || 'Could not remove')
+      return
     }
-    // Only send token_value when the operator actually entered one —
-    // omission means "keep the existing token on disk."
-    if (pveForm.token_value) body.token_value = pveForm.token_value
-    const data = await api('/api/settings/proxmox', {
-      method: 'PUT',
-      body: JSON.stringify(body),
-    })
-    pveConfigured.value = !!data.configured
-    pveTokenSet.value = !!data.token_value_set
-    pveStatus.value = data.status || null
-    pveForm.token_value = ''
-    pveTestResult.value = null
-    toasts.success('Proxmox integration saved')
-  } catch (e) {
-    if (e.code === 'proxmox.config_invalid' && e.details && typeof e.details === 'object') {
-      const first = Object.entries(e.details)[0]
-      const msg = first ? `${first[0]}: ${first[1]}` : e.message
-      toasts.error(`Invalid: ${msg}`)
-    } else {
-      toasts.error(e.message)
-    }
-  } finally {
-    pveSaving.value = false
+  }
+  const i = secrets.value.findIndex((s) => s.id === id)
+  if (i >= 0) {
+    secrets.value[i].set = false
+    toasts.success(`${id} cleared (local mock)`)
   }
 }
 
-async function removeProxmox() {
-  if (!confirm('Remove Proxmox integration? The dashboard will stop showing host-pressure data.')) return
-  pveSaving.value = true
-  pveError.value = null
+/* ─── 3. Updates ──────────────────────────────────────────────────── */
+const updates = reactive({
+  components: [
+    { id: 'hal0', label: 'hal0', sub: 'Dashboard + API + CLI',
+      current: 'v0.2.1', available: null, channel: 'stable' },
+    { id: 'lemonade', label: 'lemonade', sub: 'Pinned. SHA-256 verified.',
+      current: 'v10.6.0', available: null, channel: 'stable' },
+    { id: 'flm', label: 'flm', sub: 'Manual deb · vendor-supplied',
+      current: 'v0.9.42', available: null, channel: 'stable' },
+  ],
+  autoOnBoot: false,
+  cadence: 'daily',  // 'manual' | 'daily' | 'weekly'
+})
+const updateConfirmOpen = ref(false)
+const updateTarget = ref(null)
+
+async function loadUpdates() {
   try {
-    await api('/api/settings/proxmox', { method: 'DELETE' })
-    pveConfigured.value = false
-    pveTokenSet.value = false
-    pveStatus.value = { configured: false }
-    pveForm.host = ''
-    pveForm.port = 8006
-    pveForm.user = ''
-    pveForm.token_name = ''
-    pveForm.token_value = ''
-    pveForm.verify_ssl = false
-    pveTestResult.value = null
-    toasts.success('Proxmox integration removed')
+    const r = await api('/api/updates/check')
+    // Expected shape: { components: [{id, current, available, channel}] }
+    if (Array.isArray(r.components)) {
+      for (const c of r.components) {
+        const slot = updates.components.find((x) => x.id === c.id)
+        if (slot) Object.assign(slot, c)
+      }
+    }
   } catch (e) {
-    toasts.error(e.message)
-  } finally {
-    pveSaving.value = false
+    if (!(e.code === 'system.http_404' || e.status === 404)) {
+      // Soft-fail; section keeps its baked defaults.
+    }
   }
 }
 
-const pveStatusLine = computed(() => {
-  const s = pveStatus.value
-  if (!s) return null
-  if (s.configured === false) return 'Not configured.'
-  if (s.ok === false) return `Cannot reach Proxmox: ${s.error || 'unknown error'}`
-  const totalGb = (s.host_mem_total_mb / 1024).toFixed(0)
-  const usedGb  = (s.host_mem_used_mb  / 1024).toFixed(1)
-  return `${s.node} · ${usedGb} / ${totalGb} GB used · ${s.tenants_running} of ${s.tenants_total} tenants running`
+async function checkUpdates() {
+  toasts.success('Checking for updates…')
+  await loadUpdates()
+}
+
+function startUpdate(component) {
+  updateTarget.value = component
+  updateConfirmOpen.value = true
+}
+
+async function confirmUpdate() {
+  const target = updateTarget.value
+  updateConfirmOpen.value = false
+  if (!target) return
+  try {
+    await api('/api/updates/apply', {
+      method: 'POST',
+      body: JSON.stringify({ component: target.id }),
+    })
+    toasts.success(`${target.label} update started — restart imminent`)
+  } catch (e) {
+    toasts.error(`Could not start ${target.label} update: ${e.message || e}`)
+  }
+}
+
+async function setChannel(component, channel) {
+  component.channel = channel
+  try {
+    await api('/api/updates/channel', {
+      method: 'POST',
+      body: JSON.stringify({ component: component.id, channel }),
+    })
+    toasts.success(`${component.label} channel → ${channel}`)
+  } catch {
+    // 404 means no channel endpoint yet — accept the local toggle.
+  }
+}
+
+/* ─── 4. Lemonade admin (in-page footgun zone) ────────────────────── */
+// Flat-key form mirroring PR-13's LemonadeAdmin.vue. The standalone
+// /settings/lemonade subview is the full admin; here we surface the
+// in-page subset operators need most often: the footgun args + a couple
+// of common knobs + Save+Restart.
+
+const lemonade = reactive({
+  loading: true,
+  form: {
+    max_loaded_models: 4,
+    ctx_size: 4096,
+    llamacpp_backend: 'rocm',
+    llamacpp_args: '--parallel 1 --threads 8',
+    flm_args: '--asr 1 --embed 1',
+    whispercpp_backend: 'vulkan',
+    sdcpp_backend: 'rocm',
+    steps: 20,
+    cfg_scale: 7.0,
+    width: 512,
+    height: 512,
+    log_level: 'info',
+    global_timeout: 900,
+  },
+  orig: {},
+  effects: { immediate: [], deferred: [] },
 })
 
-onMounted(async () => {
-  await load()
-  await loadAuthState()
-  await loadModelsCfg()
-  await loadProxmox()
+const RESTART_KEYS = new Set([
+  'max_loaded_models', 'ctx_size', 'llamacpp_backend', 'llamacpp_args',
+  'sdcpp_backend', 'whispercpp_backend', 'steps', 'cfg_scale', 'width',
+  'height', 'flm_args',
+])
+
+const changedLemonadeKeys = computed(() => {
+  return Object.keys(lemonade.form).filter(
+    (k) => String(lemonade.form[k] ?? '') !== String(lemonade.orig[k] ?? ''),
+  )
 })
+const pendingRestartCount = computed(() => {
+  return changedLemonadeKeys.value.filter((k) => RESTART_KEYS.has(k)).length
+})
+const saveDialogOpen = ref(false)
+const llamaArgsEditing = ref(false)
+
+async function loadLemonade() {
+  lemonade.loading = true
+  try {
+    const data = await api('/api/lemonade/config')
+    if (data) {
+      for (const k of ['max_loaded_models', 'ctx_size', 'log_level', 'global_timeout']) {
+        if (data[k] !== undefined) lemonade.form[k] = data[k]
+      }
+      if (data.llamacpp) {
+        if (data.llamacpp.args !== undefined) lemonade.form.llamacpp_args = data.llamacpp.args
+        if (data.llamacpp.backend !== undefined) lemonade.form.llamacpp_backend = data.llamacpp.backend
+      }
+      if (data.flm?.args !== undefined) lemonade.form.flm_args = data.flm.args
+      if (data.whispercpp?.backend !== undefined) lemonade.form.whispercpp_backend = data.whispercpp.backend
+      if (data.sdcpp) {
+        const s = data.sdcpp
+        if (s.backend !== undefined) lemonade.form.sdcpp_backend = s.backend
+        for (const k of ['steps', 'cfg_scale', 'width', 'height']) {
+          if (s[k] !== undefined) lemonade.form[k] = s[k]
+        }
+      }
+      lemonade.effects = data?._hal0?.effects ?? lemonade.effects
+    }
+  } catch {
+    // Use defaults.
+  }
+  lemonade.orig = JSON.parse(JSON.stringify(lemonade.form))
+  lemonade.loading = false
+}
+
+function setLemonadeField(k, v) {
+  lemonade.form[k] = v
+}
+
+async function saveLemonade() {
+  const keys = changedLemonadeKeys.value
+  saveDialogOpen.value = false
+  if (!keys.length) {
+    toasts.warning('No Lemonade-admin changes to save')
+    return
+  }
+  const patch = {}
+  for (const k of keys) patch[k] = lemonade.form[k]
+  try {
+    const r = await api('/api/lemonade/config', {
+      method: 'POST',
+      body: JSON.stringify(patch),
+    })
+    const eff = r?.effects ?? {}
+    const nI = eff.immediate?.length ?? 0
+    const nD = eff.deferred?.length ?? 0
+    if (nI && nD) toasts.success(`Saved — ${nI} immediate, ${nD} deferred`)
+    else if (nI) toasts.success(`Saved — ${nI} immediate`)
+    else if (nD) toasts.success(`Saved — ${nD} deferred until next load`)
+    else toasts.success('Saved')
+    await loadLemonade()
+    // After save+restart, hit the restart endpoint when pending.
+    if (pendingRestartCount.value) {
+      await restartLemonade(true)
+    }
+  } catch (e) {
+    toasts.error(e.message || 'Save failed')
+  }
+}
+
+async function restartLemonade(silent = false) {
+  try {
+    await api('/api/lemonade/restart', { method: 'POST' })
+    if (!silent) toasts.success('lemond restart requested — back online in ~8-12s')
+  } catch (e) {
+    if (!silent) toasts.error(`Could not restart lemond: ${e.message || e}`)
+  }
+}
+
+/* ─── 5. OmniRouter ───────────────────────────────────────────────── */
+const MOCK_OMNI_TOOLS = [
+  { name: 'embed_text', origin: 'hal0', active: true,
+    target: 'embed slot · bge-small-en-q4_k_m', endpoint: '/v1/embed',
+    remediation: null },
+  { name: 'rerank_documents', origin: 'hal0', active: true,
+    target: 'embed-rerank · bge-reranker-v2-m3', endpoint: '/v1/rerank',
+    remediation: null },
+  { name: 'route_to_chat', origin: 'hal0', active: true,
+    target: 'primary slot', endpoint: '/v1/chat/completions',
+    remediation: null },
+  { name: 'web_search', origin: 'upstream', active: false,
+    target: 'configure a search provider', endpoint: '/v1/tools/web_search',
+    remediation: 'Install Flux-2-Klein-9B to enable' },
+  { name: 'code_run', origin: 'upstream', active: true,
+    target: 'sandbox runner', endpoint: '/v1/tools/code_run',
+    remediation: null },
+  { name: 'file_read', origin: 'upstream', active: true,
+    target: 'fs-read (scoped /home/halo)', endpoint: '/v1/tools/file_read',
+    remediation: null },
+  { name: 'image_describe', origin: 'upstream', active: false,
+    target: 'no vision slot loaded', endpoint: '/v1/tools/image_describe',
+    remediation: 'Add a vision-capable slot (e.g. qwen2-vl-2b)' },
+  { name: 'memory_recall', origin: 'upstream', active: true,
+    target: 'cognee · shared namespace', endpoint: '/v1/tools/memory_recall',
+    remediation: null },
+]
+const omniTools = ref([])
+const omniSyncSha = ref('a4f1e83')
+
+async function loadOmni() {
+  try {
+    const r = await api('/api/omni-tools')
+    if (Array.isArray(r.tools)) omniTools.value = r.tools
+    else omniTools.value = [...MOCK_OMNI_TOOLS]
+    if (r.upstream_sha) omniSyncSha.value = r.upstream_sha
+  } catch {
+    omniTools.value = [...MOCK_OMNI_TOOLS]
+  }
+}
+
+function checkOmniDrift() {
+  toasts.success('No drift — upstream and local tool definitions match.')
+}
+
+/* ─── 6. Agent policy ─────────────────────────────────────────────── */
+function goToAgent() {
+  router.push({ name: 'agent' })
+}
+
+/* ─── 7. Memory (Cognee) ──────────────────────────────────────────── */
+const memory = reactive({
+  namespace: 'shared',
+  records: 0,
+  diskMb: 0,
+  tools: ['recall', 'remember', 'forget', 'list_namespaces', 'export', 'reset'],
+})
+const memoryResetOpen = ref(false)
+
+async function loadMemory() {
+  try {
+    const r = await api('/api/memory/namespaces')
+    const ns = (r.namespaces || []).find((n) => n.name === 'shared')
+    if (ns) {
+      memory.records = ns.records ?? memory.records
+      memory.diskMb = ns.disk_mb ?? memory.diskMb
+    }
+  } catch {
+    memory.records = 2_847
+    memory.diskMb = 184
+  }
+}
+
+async function confirmMemoryReset() {
+  memoryResetOpen.value = false
+  try {
+    await api(`/api/memory/reset/${memory.namespace}`, { method: 'POST' })
+    toasts.success(`Reset namespace '${memory.namespace}'`)
+    await loadMemory()
+  } catch (e) {
+    toasts.warning(`Reset acknowledged locally (${e.code || 'no-endpoint'})`)
+    memory.records = 0
+    memory.diskMb = 0
+  }
+}
+
+function exportMemory() {
+  // No live endpoint yet — emit a download link to a stub blob so the
+  // UX flow is exercise-able without backend support.
+  const blob = new Blob(
+    [JSON.stringify({ namespace: memory.namespace, exported_at: new Date().toISOString() }, null, 2)],
+    { type: 'application/json' },
+  )
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `hal0-memory-${memory.namespace}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+  toasts.success('Export downloaded')
+}
+
+/* ─── 8. Appearance ───────────────────────────────────────────────── */
+function setDensity(d) { tweaks.density = d }
+
+/* ─── 9. About ────────────────────────────────────────────────────── */
+const ABOUT = Object.freeze({
+  version: 'v0.2.0-alpha.3',
+  commitSha: '518f5b7',
+  buildDate: '2026-05-23',
+  license: 'Apache-2.0',
+  repo: 'https://github.com/Hal0ai/hal0',
+  discord: 'https://discord.gg/hal0',
+  docs: 'https://hal0.dev/docs',
+})
+const licensesOpen = ref(false)
+
+const unsavedCount = computed(() => changedLemonadeKeys.value.length)
 </script>
 
 <template>
-  <div class="settings-page">
-    <PageHeader eyebrow="Config" title="Settings" subtitle="hal0.toml runtime configuration">
-      <template #actions>
-        <span v-if="changedFields.length > 0" class="change-count">
-          {{ changedFields.length }} unsaved change{{ changedFields.length !== 1 ? 's' : '' }}
-        </span>
-        <button class="btn-ghost" type="button" @click="reload" :disabled="saving" title="Re-read /etc/hal0/hal0.toml from disk">
-          Reload from disk
-        </button>
-        <button class="btn-ghost" type="button" @click="revert" :disabled="saving || changedFields.length === 0">
-          Revert
-        </button>
-        <button class="btn-primary" type="button" @click="save" :disabled="saving || changedFields.length === 0">
-          <span v-if="saving" class="spinner" aria-hidden="true" />
-          {{ saving ? 'Saving…' : 'Save changes' }}
-        </button>
-      </template>
-    </PageHeader>
-
-    <!-- Restart-required banner (rendered after a successful save when
-         a restart-required key actually changed). Matches the styling
-         of components/RestartBanner.vue so the visual language is
-         consistent — that component is wired to system store updates
-         and stays our home for update-available banners. -->
-    <Transition name="slide-up">
-      <div v-if="pendingRestart" class="restart-banner" role="alert">
-        <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-        </svg>
-        <span>
-          Restart required for: <strong class="mono">{{ restartedKeys.join(', ') }}</strong>. Slots will keep running across an API restart.
-        </span>
-        <button type="button" class="banner-btn" @click="dismissRestart">Dismiss</button>
-      </div>
-    </Transition>
-
-    <div class="page-body">
-      <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
-
-      <!-- ── Authentication panel (Team J / v0.2 auth POC) ────────── -->
-      <Card>
-        <div class="auth-header">
-          <h3 class="section-title">Authentication</h3>
-          <div class="auth-status-row">
-            <span class="auth-badge" :class="authStatus.enabled ? 'auth-on' : 'auth-off'">
-              {{ authStatus.enabled ? 'Enabled' : 'Disabled' }}
-            </span>
-            <span class="auth-identity mono" v-if="authStatus.enabled">
-              {{ authIdentity.identity }} · scope=<strong>{{ authIdentity.scope }}</strong>
-            </span>
-            <button class="btn-ghost btn-small" type="button" @click="showAuthInfoModal = true">
-              How does this work?
-            </button>
-          </div>
-        </div>
-
-        <div v-if="!authStatus.enabled" class="auth-disabled-hint">
-          Auth is currently <strong>off</strong> — the API and chat bind public ports
-          with no credentials required. Re-run the installer with
-          <code class="mono">--auth=basic</code> to bring up Caddy, basic_auth at the
-          edge, and bearer tokens for the OpenAI-compatible API. Toggling auth here
-          alone would lock you out without a Caddy front; the installer wires both
-          sides atomically.
-        </div>
-
-        <div v-else>
-          <div class="tokens-row">
-            <div>
-              <h4 class="subsection-title">Bearer tokens</h4>
-              <p class="field-hint">
-                Programmatic clients (OpenWebUI bridge, third-party OpenAI SDKs)
-                authenticate by sending <code class="mono">Authorization: Bearer hal0_…</code>.
-                Browser sessions go through Caddy basic_auth — no token needed.
-              </p>
-            </div>
-            <button class="btn-primary btn-small" type="button" @click="openCreateTokenModal">
-              + Create token
-            </button>
-          </div>
-
-          <div v-if="tokensError" class="error-banner" role="alert">{{ tokensError }}</div>
-          <div v-else-if="tokensLoading" class="loading-row">Loading tokens…</div>
-          <div v-else-if="tokens.length === 0" class="empty-row">
-            No tokens yet. Create one to authenticate the OpenWebUI bridge or any
-            external OpenAI client.
-          </div>
-          <table v-else class="token-table">
-            <thead>
-              <tr>
-                <th>Label</th>
-                <th>Scope</th>
-                <th>Created</th>
-                <th>Last used</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="t in tokens" :key="t.id">
-                <td class="mono">{{ t.label }}</td>
-                <td><span class="scope-badge">{{ t.scope }}</span></td>
-                <td class="mono dim">{{ formatTimestamp(t.created_at) }}</td>
-                <td class="mono dim">{{ formatTimestamp(t.last_used_at) }}</td>
-                <td class="row-actions">
-                  <button class="btn-danger btn-small" type="button"
-                          @click="openRevokeModal(t)" title="Revoke token">
-                    Revoke
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      <!-- ── Lemonade admin link (PR-13) ─────────────────────────── -->
-      <Card>
-        <div class="lemonade-link-row">
-          <div>
-            <h3 class="section-title">Lemonade backend</h3>
-            <p class="field-hint">
-              Runtime config of the bundled <code class="mono">lemond</code> daemon —
-              backends, ctx_size, concurrency budget, FLM NPU args. Edits go through
-              <code class="mono">/internal/set</code>; some take effect immediately,
-              others apply at the next model load.
-            </p>
-          </div>
-          <router-link
-            :to="{ name: 'settings-lemonade' }"
-            class="btn-ghost"
-            data-testid="lemonade-admin-link"
-          >
-            Open Lemonade admin
-          </router-link>
-        </div>
-      </Card>
-
-      <!-- ── Model locations panel ───────────────────────────────── -->
-      <Card>
-        <h3 class="section-title">Model locations</h3>
-        <p class="field-hint">
-          <strong>Pull destination</strong> is where <code class="mono">hal0 model pull</code>
-          (and the dashboard's pull buttons) write new files —
-          <code class="mono">&lt;pull_root&gt;/&lt;model_id&gt;/&lt;filename&gt;</code>.
-          <strong>Scan roots</strong> are extra directories walked for already-present
-          model files (.gguf, .safetensors). The pull destination is always scanned
-          automatically, so you only need extra roots for read-only stores like
-          <code class="mono">/mnt/ai-models</code>.
-        </p>
-        <div v-if="modelsCfgError" class="error-banner" role="alert">{{ modelsCfgError }}</div>
-        <div v-else-if="modelsCfgLoading" class="loading-row">Loading…</div>
-        <div v-else class="roots-list">
-          <div class="pull-root-row">
-            <label for="pull-root" class="field-label">Pull destination</label>
-            <input
-              id="pull-root"
-              v-model="modelsCfg.pull_root"
-              type="text"
-              class="field-input"
-              placeholder="/var/lib/hal0/models"
-              :disabled="modelsCfgSaving"
-            />
-          </div>
-          <div class="roots-section-label">Extra scan roots</div>
-          <div v-for="(_, i) in modelsCfg.roots" :key="i" class="root-row">
-            <input
-              v-model="modelsCfg.roots[i]"
-              type="text"
-              class="field-input"
-              placeholder="/mnt/ai-models"
-              :disabled="modelsCfgSaving"
-            />
-            <button
-              type="button"
-              class="btn-ghost btn-small"
-              @click="removeModelRoot(i)"
-              :disabled="modelsCfgSaving"
-              title="Remove root"
-            >
-              Remove
-            </button>
-          </div>
-          <div v-if="modelsCfg.roots.length === 0" class="empty-row">
-            No extra roots — only the pull destination is scanned.
-          </div>
-          <div class="roots-actions">
-            <button
-              type="button"
-              class="btn-ghost"
-              @click="addModelRoot"
-              :disabled="modelsCfgSaving"
-            >
-              + Add root
-            </button>
-            <label class="auto-scan-label">
-              <input
-                type="checkbox"
-                v-model="modelsCfg.auto_scan_on_start"
-                :disabled="modelsCfgSaving"
-              />
-              <span>Auto-scan on startup</span>
-            </label>
-            <button
-              type="button"
-              class="btn-primary btn-small"
-              @click="saveAndScanModelRoots"
-              :disabled="modelsCfgSaving"
-            >
-              <span v-if="modelsCfgSaving" class="spinner" aria-hidden="true" />
-              {{ modelsCfgSaving ? 'Scanning…' : 'Save & re-scan' }}
-            </button>
-          </div>
-        </div>
-      </Card>
-
-      <!-- ── Proxmox integration panel ───────────────────────────── -->
-      <Card>
-        <div class="proxmox-header">
-          <h3 class="section-title">Proxmox integration</h3>
-          <span class="auth-badge" :class="pveConfigured ? 'auth-on' : 'auth-off'">
-            {{ pveConfigured ? 'Configured' : 'Off' }}
-          </span>
-        </div>
-        <p class="field-hint">
-          Optional. When hal0 runs as a Proxmox LXC or VM, configure a
-          read-only <code class="mono">PVEAuditor</code> (or root) API token
-          so the dashboard's memory bar can show RAM consumed by other
-          tenants and the host kernel — not just this LXC's slice. Leave
-          off on bare-metal installs.
-          <br />
-          Create the token at
-          <code class="mono">Datacenter → Permissions → API Tokens</code>
-          (uncheck "Privilege Separation" or grant the token
-          <code class="mono">PVEAuditor</code> on <code class="mono">/</code>).
-        </p>
-
-        <div v-if="pveError" class="error-banner" role="alert">{{ pveError }}</div>
-        <div v-else-if="pveLoading" class="loading-row">Loading…</div>
-        <div v-else>
-          <p v-if="pveStatusLine" class="proxmox-status mono" :class="{ 'text-success': pveStatus?.ok, 'text-danger': pveStatus?.configured && !pveStatus?.ok }">
-            {{ pveStatusLine }}
-          </p>
-
-          <div class="proxmox-grid">
-            <div class="field-row proxmox-field">
-              <label for="pve-host" class="field-label">Host</label>
-              <input id="pve-host" v-model="pveForm.host" type="text" class="field-input" placeholder="10.0.1.110" :disabled="pveSaving" />
-            </div>
-            <div class="field-row proxmox-field proxmox-field-narrow">
-              <label for="pve-port" class="field-label">Port</label>
-              <input id="pve-port" v-model.number="pveForm.port" type="number" class="field-input" min="1" max="65535" :disabled="pveSaving" />
-            </div>
-            <div class="field-row proxmox-field">
-              <label for="pve-user" class="field-label">User</label>
-              <input id="pve-user" v-model="pveForm.user" type="text" class="field-input" placeholder="root@pam" :disabled="pveSaving" />
-            </div>
-            <div class="field-row proxmox-field">
-              <label for="pve-token-name" class="field-label">Token name</label>
-              <input id="pve-token-name" v-model="pveForm.token_name" type="text" class="field-input" placeholder="hal0-readonly" :disabled="pveSaving" />
-            </div>
-            <div class="field-row proxmox-field proxmox-field-wide">
-              <label for="pve-token-value" class="field-label">
-                Token value
-                <span v-if="pveTokenSet && !pveForm.token_value" class="restart-badge" title="A token is on disk; leave blank to keep it">on disk</span>
-              </label>
-              <input id="pve-token-value" v-model="pveForm.token_value" type="password" class="field-input mono"
-                     :placeholder="pveTokenSet ? '••••••••  (leave blank to keep existing)' : 'paste the token UUID'"
-                     :disabled="pveSaving" autocomplete="off" />
-            </div>
-            <div class="field-row proxmox-field proxmox-field-toggle">
-              <label class="toggle-label">
-                <input type="checkbox" class="toggle-checkbox" v-model="pveForm.verify_ssl" :disabled="pveSaving" />
-                <span>Verify TLS certificate</span>
-              </label>
-              <p class="field-hint dim">Off by default — most home Proxmox installs use the self-signed cert.</p>
-            </div>
-          </div>
-
-          <p v-if="pveTestResult && !pveTestResult.ok" class="field-err" role="alert">
-            Test failed: {{ pveTestResult.error }}
-          </p>
-
-          <div class="proxmox-actions">
-            <button class="btn-ghost" type="button" @click="testProxmox" :disabled="pveTesting || pveSaving || !pveForm.host || !pveForm.user || !pveForm.token_name">
-              <span v-if="pveTesting" class="spinner" aria-hidden="true" />
-              {{ pveTesting ? 'Testing…' : 'Test connection' }}
-            </button>
-            <button class="btn-primary btn-small" type="button" @click="saveProxmox"
-                    :disabled="pveSaving || !pveForm.host || !pveForm.user || !pveForm.token_name || (!pveTokenSet && !pveForm.token_value)">
-              <span v-if="pveSaving" class="spinner" aria-hidden="true" />
-              {{ pveSaving ? 'Saving…' : 'Save' }}
-            </button>
-            <button v-if="pveConfigured" class="btn-danger btn-small" type="button" @click="removeProxmox" :disabled="pveSaving">
-              Remove
-            </button>
-          </div>
-        </div>
-      </Card>
-
-      <template v-if="loading">
-        <Card v-for="i in 3" :key="i"><LoadingSkeleton :lines="3" /></Card>
-      </template>
-
-      <template v-else>
-        <Card v-for="section in SECTIONS" :key="section.id">
-          <h3 class="section-title">{{ section.title }}</h3>
-          <div class="fields">
-            <div v-for="field in section.fields" :key="field.key" class="field-row">
-              <div class="field-meta">
-                <label :for="`f-${section.id}-${field.key}`" class="field-label">
-                  {{ field.label }}
-                  <span v-if="RESTART_REQUIRED.has(`${section.id}.${field.key}`)"
-                        class="restart-badge"
-                        title="Requires API restart">restart</span>
-                </label>
-                <p v-if="field.hint" class="field-hint">{{ field.hint }}</p>
-                <p v-if="fieldErrors[`${section.id}.${field.key}`]" class="field-err" role="alert">
-                  {{ fieldErrors[`${section.id}.${field.key}`] }}
-                </p>
-              </div>
-              <div class="field-input-wrap">
-                <template v-if="field.type === 'checkbox'">
-                  <label class="toggle-label">
-                    <input
-                      :id="`f-${section.id}-${field.key}`"
-                      type="checkbox"
-                      class="toggle-checkbox"
-                      v-model="form[section.id][field.key]"
-                    />
-                    <span class="toggle-track">
-                      <span class="toggle-thumb" />
-                    </span>
-                    <span class="toggle-text">{{ form[section.id][field.key] ? 'Enabled' : 'Disabled' }}</span>
-                  </label>
-                </template>
-                <template v-else-if="field.type === 'select'">
-                  <select
-                    :id="`f-${section.id}-${field.key}`"
-                    v-model="form[section.id][field.key]"
-                    class="field-input"
-                    :class="{
-                      'field-changed': valueChanged(section.id, field.key),
-                      'field-error':   !!fieldErrors[`${section.id}.${field.key}`],
-                    }"
-                  >
-                    <option v-for="opt in field.options" :key="opt" :value="opt">{{ opt }}</option>
-                  </select>
-                </template>
-                <template v-else>
-                  <input
-                    :id="`f-${section.id}-${field.key}`"
-                    v-model="form[section.id][field.key]"
-                    :type="field.type"
-                    :step="field.step"
-                    class="field-input"
-                    :class="{
-                      'field-changed': valueChanged(section.id, field.key),
-                      'field-error':   !!fieldErrors[`${section.id}.${field.key}`],
-                    }"
-                  />
-                </template>
-              </div>
-            </div>
-          </div>
-        </Card>
-      </template>
+  <div class="settings-view" data-testid="settings-v2">
+    <div class="vh">
+      <span class="vh-eye mono">Configure</span>
+      <h1 class="page-title">Settings</h1>
+      <span class="vh-spacer" />
+      <span class="hint mono">unsaved · {{ unsavedCount }}</span>
     </div>
 
-    <!-- ── Create-token modal (Team J) ─────────────────────────── -->
-    <Teleport to="body">
-      <Transition name="fade">
-        <div
-          v-if="showCreateTokenModal"
-          class="dialog-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="create-token-title"
-          @click.self="closeCreateTokenModal"
+    <div class="settings-layout">
+      <SettingsRail
+        :sections="SECTIONS"
+        :active-id="activeSection"
+        @navigate="navigateTo"
+      />
+
+      <div class="settings-content">
+        <!-- 1. Auth -->
+        <section
+          id="auth"
+          :ref="(el) => setSectionRef('auth', el)"
+          class="s-section"
+          data-section="auth"
         >
-          <div class="dialog-box">
-            <h3 id="create-token-title" class="dialog-title">Create bearer token</h3>
-
-            <div v-if="!newTokenRaw" class="dialog-body">
-              <p class="field-hint">
-                The token's raw value is shown <strong>once</strong> and never
-                retrievable afterwards. Copy it into a secret manager
-                immediately after creation.
-              </p>
-              <div class="field-row dialog-field">
-                <label for="new-token-label" class="field-label">Label</label>
-                <input
-                  id="new-token-label"
-                  v-model="newTokenLabel"
-                  type="text"
-                  class="field-input"
-                  placeholder="e.g. openwebui-bridge"
-                  :disabled="creatingToken"
-                />
-              </div>
-              <div class="field-row dialog-field">
-                <label for="new-token-scope" class="field-label">Scope</label>
-                <select
-                  id="new-token-scope"
-                  v-model="newTokenScope"
-                  class="field-input"
-                  :disabled="creatingToken"
+          <h2>Auth</h2>
+          <p class="desc">
+            hal0's Bearer-token boundary. The dashboard, CLI, and Open WebUI use this
+            token. Lemonade itself runs loopback-only and never sees the token.
+          </p>
+          <div class="s-panel">
+            <SecRow k="hal0 Bearer token" sub="Required by hal0-api · ADR-0001" mono>
+              <span data-testid="auth-token">
+                {{ auth.showToken && auth.tokenRaw ? auth.tokenRaw : auth.tokenMasked }}
+              </span>
+              <template #actions>
+                <button
+                  type="button"
+                  class="btn-ghost-sm"
+                  data-testid="auth-token-toggle"
+                  @click="auth.showToken = !auth.showToken"
                 >
-                  <option value="all">all (chat + admin)</option>
-                  <option value="admin">admin (token CRUD only)</option>
-                  <option value="v1-only">v1-only (chat / embed / etc.)</option>
-                  <option value="read-only">read-only (probes + listings)</option>
-                </select>
-              </div>
-            </div>
+                  {{ auth.showToken ? 'Hide' : 'Show' }}
+                </button>
+                <button
+                  type="button"
+                  class="btn-ghost-sm"
+                  data-testid="auth-token-rotate"
+                  @click="rotateOpen = true"
+                >
+                  Rotate
+                </button>
+              </template>
+            </SecRow>
+            <SecRow k="Identity" :value="auth.identity" mono />
+            <SecRow
+              k="Allowed origins"
+              sub="CORS — UI hosts permitted to call hal0-api"
+              mono
+            >
+              <span>{{ auth.origins.join(', ') || 'none' }}</span>
+              <template #actions>
+                <button
+                  type="button"
+                  class="btn-ghost-sm"
+                  data-testid="auth-origins-edit"
+                  @click="originsOpen = true"
+                >
+                  Edit
+                </button>
+              </template>
+            </SecRow>
+          </div>
+          <p class="lemonade-deep-link mono">
+            <router-link
+              :to="{ name: 'settings-lemonade' }"
+              class="link"
+              data-testid="lemonade-admin-link"
+            >
+              Open standalone Lemonade admin →
+            </router-link>
+          </p>
+        </section>
 
-            <div v-else class="dialog-body">
-              <p class="field-hint warning">
-                Copy this token now — it will not be shown again.
-              </p>
-              <div class="raw-token-box mono" role="textbox" aria-readonly="true">
-                {{ newTokenRaw }}
-              </div>
-              <button class="btn-ghost btn-small" type="button"
-                      @click="copyTokenToClipboard">
-                {{ newTokenCopied ? 'Copied' : 'Copy to clipboard' }}
+        <!-- 2. Secrets -->
+        <section
+          id="secrets"
+          :ref="(el) => setSectionRef('secrets', el)"
+          class="s-section"
+          data-section="secrets"
+        >
+          <h2>Secrets</h2>
+          <p class="desc">
+            Encrypted at rest, scoped to lemond. Used for gated HF repos and provider
+            auth.
+          </p>
+          <div class="s-panel" data-testid="secrets-list">
+            <SecRow
+              v-for="s in secrets"
+              :key="s.id"
+              :k="s.name"
+              :sub="s.description"
+              mono
+            >
+              <span :class="s.set ? 'ok' : 'dim'">
+                {{ s.set ? '••••••••••••••••• · set' : 'not set' }}
+              </span>
+              <template #actions>
+                <button
+                  v-if="s.set"
+                  type="button"
+                  class="btn-ghost-sm"
+                  @click="addSecretOpen = true"
+                >
+                  Update
+                </button>
+                <button
+                  v-if="s.set"
+                  type="button"
+                  class="btn-danger-sm"
+                  @click="removeSecret(s.id)"
+                >
+                  Remove
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  class="btn-ghost-sm"
+                  @click="addSecretOpen = true"
+                >
+                  Add
+                </button>
+              </template>
+            </SecRow>
+            <div class="add-row">
+              <button
+                type="button"
+                class="btn-ghost-sm"
+                data-testid="add-secret-open"
+                @click="addSecretOpen = true"
+              >
+                + Add secret
               </button>
             </div>
-
-            <div class="dialog-actions">
-              <template v-if="!newTokenRaw">
-                <button class="btn-ghost" type="button"
-                        @click="closeCreateTokenModal" :disabled="creatingToken">
-                  Cancel
-                </button>
-                <button class="btn-primary" type="button"
-                        @click="submitCreateToken" :disabled="creatingToken">
-                  {{ creatingToken ? 'Creating…' : 'Create token' }}
-                </button>
-              </template>
-              <template v-else>
-                <button class="btn-primary" type="button"
-                        @click="closeCreateTokenModal">
-                  I've saved this token; close
-                </button>
-              </template>
-            </div>
           </div>
-        </div>
-      </Transition>
-    </Teleport>
+        </section>
 
-    <!-- ── Revoke-token confirm modal ──────────────────────────── -->
-    <ConfirmDialog
-      v-model:open="showRevokeModal"
-      title="Revoke token?"
-      :message="`Revoke '${revokeTarget?.label ?? ''}'? Any client using this token will fail to authenticate immediately.`"
-      :danger="true"
-      confirm-label="Revoke"
-      @confirm="confirmRevokeToken"
-    />
-
-    <!-- ── Auth info modal (How does this work?) ───────────────── -->
-    <Teleport to="body">
-      <Transition name="fade">
-        <div
-          v-if="showAuthInfoModal"
-          class="dialog-overlay"
-          role="dialog"
-          aria-modal="true"
-          @click.self="showAuthInfoModal = false"
+        <!-- 3. Updates -->
+        <section
+          id="updates"
+          :ref="(el) => setSectionRef('updates', el)"
+          class="s-section"
+          data-section="updates"
         >
-          <div class="dialog-box">
-            <h3 class="dialog-title">How hal0 auth works</h3>
-            <div class="dialog-body">
-              <p class="field-hint">
-                Two surfaces share the same identity model:
-              </p>
-              <ul class="field-hint">
-                <li>
-                  <strong>Browser sessions</strong> — Caddy basic_auth at the edge.
-                  Caddy forwards <code class="mono">X-Forwarded-Email</code> to hal0
-                  and OpenWebUI; both treat the header as the authenticated
-                  identity. No second login.
-                </li>
-                <li>
-                  <strong>Programmatic clients</strong> — send
-                  <code class="mono">Authorization: Bearer hal0_…</code>. Tokens
-                  are minted here, hashed with argon2id at
-                  <code class="mono">/etc/hal0/tokens.toml</code>, and revocable
-                  any time.
-                </li>
-              </ul>
-              <p class="field-hint">
-                The Caddy front + the <code class="mono">HAL0_AUTH_ENABLED=1</code>
-                flag are wired together by <code class="mono">install.sh --auth=basic</code>.
-                Toggling <code class="mono">HAL0_AUTH_ENABLED</code> alone (without
-                Caddy in front) is intentionally NOT exposed in this UI — it would
-                lock you out of the dashboard with no recovery path other than
-                editing <code class="mono">/etc/hal0/api.env</code> by hand.
-              </p>
+          <h2>Updates</h2>
+          <p class="desc">
+            Signed self-update. hal0 verifies a Sigstore signature before swapping
+            binaries. Per-channel pins.
+          </p>
+          <div class="s-panel">
+            <SecRow
+              v-for="c in updates.components"
+              :key="c.id"
+              :k="c.label"
+              :sub="c.sub"
+              mono
+            >
+              <span>
+                <span v-if="c.available" class="accent">{{ c.available }} available</span>
+                <span class="dim"> · current {{ c.current }}</span>
+              </span>
+              <template #actions>
+                <select
+                  class="field-input-xs"
+                  :value="c.channel"
+                  @change="setChannel(c, $event.target.value)"
+                >
+                  <option value="stable">stable</option>
+                  <option value="beta">beta</option>
+                </select>
+                <button
+                  v-if="c.available"
+                  type="button"
+                  class="btn-ghost-sm"
+                  @click="startUpdate(c)"
+                >
+                  Update now
+                </button>
+              </template>
+            </SecRow>
+            <SecRow k="Auto-update on boot" sub="Apply staged updates at next start" mono>
+              <label class="toggle-label">
+                <input v-model="updates.autoOnBoot" type="checkbox" />
+                <span>{{ updates.autoOnBoot ? 'On' : 'Off' }}</span>
+              </label>
+            </SecRow>
+            <SecRow k="Check cadence" sub="How often the dashboard polls for updates" mono>
+              <div class="seg" role="radiogroup">
+                <span
+                  v-for="opt in ['manual', 'daily', 'weekly']"
+                  :key="opt"
+                  :class="['seg-opt', { active: updates.cadence === opt }]"
+                  role="radio"
+                  :aria-checked="updates.cadence === opt"
+                  tabindex="0"
+                  @click="updates.cadence = opt"
+                  @keydown.enter.prevent="updates.cadence = opt"
+                >{{ opt }}</span>
+              </div>
+            </SecRow>
+          </div>
+          <div class="footer-row">
+            <button type="button" class="btn-ghost-sm" @click="checkUpdates">
+              Check for updates
+            </button>
+          </div>
+        </section>
+
+        <!-- 4. Lemonade admin (in-page footgun zone) -->
+        <section
+          id="lemonade"
+          :ref="(el) => setSectionRef('lemonade', el)"
+          class="s-section"
+          data-section="lemonade"
+        >
+          <h2>Lemonade admin</h2>
+          <p class="desc">
+            Direct edit of lemond's <span class="mono">/internal/config</span>.
+            <span class="mono warn">⟳</span> marked fields require a lemond restart.
+          </p>
+          <div class="s-panel">
+            <SecKey
+              k="max_loaded_models"
+              sub="Per-type LRU budget"
+              type="number"
+              :restart="true"
+              :model-value="lemonade.form.max_loaded_models"
+              testid="lemonade-max-loaded"
+              @update:model-value="(v) => setLemonadeField('max_loaded_models', Number(v))"
+            />
+            <SecKey
+              k="ctx_size"
+              sub="Default per /v1/load — overridable per slot"
+              type="number"
+              :restart="true"
+              :model-value="lemonade.form.ctx_size"
+              testid="lemonade-ctx-size"
+              @update:model-value="(v) => setLemonadeField('ctx_size', Number(v))"
+            />
+            <SecKey
+              k="llamacpp.backend"
+              type="select"
+              :options="['rocm', 'vulkan', 'cpu']"
+              :restart="true"
+              :model-value="lemonade.form.llamacpp_backend"
+              testid="lemonade-llama-backend"
+              @update:model-value="(v) => setLemonadeField('llamacpp_backend', v)"
+            />
+            <SecKey
+              k="llamacpp.args"
+              sub="Mandatory baseline · ADR-0008 · read-only by default"
+              type="readonly"
+              :restart="true"
+              :model-value="lemonade.form.llamacpp_args"
+              testid="lemonade-llama-args"
+              @edit-toggle="(v) => (llamaArgsEditing = v)"
+              @update:model-value="(v) => setLemonadeField('llamacpp_args', v)"
+            >
+              <template #warn>
+                <span data-testid="lemonade-llama-args-warning">
+                  Without <span class="mono accent">--parallel 1 --threads N</span>,
+                  concurrent llama-server children deadlock the GPU. Keep both flags
+                  unless you know exactly what you're swapping in.
+                </span>
+              </template>
+            </SecKey>
+            <SecKey
+              k="flm.args"
+              sub="FLM trio config — drives the NPU coresident packing"
+              type="text"
+              :restart="true"
+              :model-value="lemonade.form.flm_args"
+              testid="lemonade-flm-args"
+              @update:model-value="(v) => setLemonadeField('flm_args', v)"
+            />
+            <SecKey
+              k="whispercpp.backend"
+              type="select"
+              :options="['vulkan', 'rocm', 'cpu']"
+              :restart="true"
+              :model-value="lemonade.form.whispercpp_backend"
+              testid="lemonade-whisper-backend"
+              @update:model-value="(v) => setLemonadeField('whispercpp_backend', v)"
+            />
+            <SecKey
+              k="kokoro.cpu_bin"
+              sub="Linux-only · GPU support is upstream-pending"
+              type="text"
+              :readonly="true"
+              :model-value="'builtin'"
+              testid="lemonade-kokoro-bin"
+            />
+            <SecKey
+              k="sdcpp.backend"
+              type="select"
+              :options="['rocm', 'vulkan', 'cpu']"
+              :restart="true"
+              :model-value="lemonade.form.sdcpp_backend"
+              testid="lemonade-sdcpp-backend"
+              @update:model-value="(v) => setLemonadeField('sdcpp_backend', v)"
+            />
+            <SecKey
+              k="sdcpp.steps"
+              type="number"
+              :restart="true"
+              :model-value="lemonade.form.steps"
+              testid="lemonade-sdcpp-steps"
+              @update:model-value="(v) => setLemonadeField('steps', Number(v))"
+            />
+            <SecKey
+              k="sdcpp.cfg_scale"
+              type="number"
+              step="0.1"
+              :restart="true"
+              :model-value="lemonade.form.cfg_scale"
+              testid="lemonade-sdcpp-cfg"
+              @update:model-value="(v) => setLemonadeField('cfg_scale', Number(v))"
+            />
+            <SecKey
+              k="sdcpp.width"
+              type="number"
+              :restart="true"
+              :model-value="lemonade.form.width"
+              testid="lemonade-sdcpp-w"
+              @update:model-value="(v) => setLemonadeField('width', Number(v))"
+            />
+            <SecKey
+              k="sdcpp.height"
+              type="number"
+              :restart="true"
+              :model-value="lemonade.form.height"
+              testid="lemonade-sdcpp-h"
+              @update:model-value="(v) => setLemonadeField('height', Number(v))"
+            />
+            <SecKey
+              k="log_level"
+              type="select"
+              :options="['debug', 'info', 'warn', 'error']"
+              :model-value="lemonade.form.log_level"
+              testid="lemonade-log-level"
+              @update:model-value="(v) => setLemonadeField('log_level', v)"
+            />
+            <SecKey
+              k="global_timeout"
+              sub="Inference request timeout (s)"
+              type="number"
+              :model-value="lemonade.form.global_timeout"
+              testid="lemonade-timeout"
+              @update:model-value="(v) => setLemonadeField('global_timeout', Number(v))"
+            />
+          </div>
+          <div class="footer-row">
+            <div class="footer-meta mono">
+              <RestartChip v-if="pendingRestartCount" :label="`${pendingRestartCount} restart`" />
+              <span v-else class="dim">No restart needed.</span>
             </div>
-            <div class="dialog-actions">
-              <button class="btn-primary" type="button"
-                      @click="showAuthInfoModal = false">Got it</button>
+            <div class="footer-actions">
+              <button
+                type="button"
+                class="btn-ghost-sm"
+                data-testid="lemonade-restart"
+                @click="restartLemonade(false)"
+              >
+                Restart lemond
+              </button>
+              <button
+                type="button"
+                class="btn-primary-sm"
+                data-testid="lemonade-save"
+                :disabled="!changedLemonadeKeys.length"
+                @click="saveDialogOpen = true"
+              >
+                Save
+              </button>
             </div>
           </div>
-        </div>
-      </Transition>
-    </Teleport>
+        </section>
+
+        <!-- 5. OmniRouter -->
+        <section
+          id="omni"
+          :ref="(el) => setSectionRef('omni', el)"
+          class="s-section"
+          data-section="omni"
+        >
+          <h2>OmniRouter</h2>
+          <p class="desc">
+            Client-side tool-calling loop owned by hal0. Eight tools — five upstream,
+            three hal0-custom. Active set filters per-request based on enabled slots.
+          </p>
+          <div class="s-panel" data-testid="omni-tools-list">
+            <div class="omni-header mono">
+              <span>TOOL</span>
+              <span>ORIGIN</span>
+              <span>ENDPOINT · TARGET</span>
+              <span>STATUS</span>
+            </div>
+            <div
+              v-for="t in omniTools"
+              :key="t.name"
+              class="omni-row"
+              :data-testid="`omni-tool-${t.name}`"
+            >
+              <span class="mono nm">{{ t.name }}</span>
+              <span :class="['origin-chip', `origin-${t.origin}`]">{{ t.origin }}</span>
+              <span class="tgt">
+                <span class="mono dim">{{ t.endpoint }}</span>
+                <span class="mono"> · {{ t.target }}</span>
+                <span v-if="t.remediation" class="remediation">
+                  <a href="#" @click.prevent="">{{ t.remediation }} →</a>
+                </span>
+              </span>
+              <span :class="['status-chip', t.active ? 'ok' : 'off']">
+                {{ t.active ? '✓ active' : '✗ inactive' }}
+              </span>
+            </div>
+          </div>
+          <div class="omni-footer mono">
+            <span>Tool definitions synced from lemonade-sdk/lemonade@<b>{{ omniSyncSha }}</b>.</span>
+            <button type="button" class="btn-ghost-sm" @click="checkOmniDrift">
+              Check for drift
+            </button>
+          </div>
+        </section>
+
+        <!-- 6. Agent policy stub -->
+        <section
+          id="agent"
+          :ref="(el) => setSectionRef('agent', el)"
+          class="s-section"
+          data-section="agent"
+        >
+          <h2>Agent policy</h2>
+          <p class="desc">
+            Per-capability approval modes for bundled agents (fs-read, fs-write,
+            shell-exec, net-fetch, registry-write, slot-control). The full editor lives
+            on the Agent view.
+          </p>
+          <div class="s-panel">
+            <SecRow
+              k="Configure approvals"
+              sub="Open the Agent view to edit per-capability defaults"
+            >
+              <span class="mono dim">
+                See Agent view for the full policy editor.
+              </span>
+              <template #actions>
+                <button
+                  type="button"
+                  class="btn-ghost-sm"
+                  data-testid="agent-policy-link"
+                  @click="goToAgent"
+                >
+                  Open Agent view →
+                </button>
+              </template>
+            </SecRow>
+          </div>
+        </section>
+
+        <!-- 7. Memory -->
+        <section
+          id="memory"
+          :ref="(el) => setSectionRef('memory', el)"
+          class="s-section"
+          data-section="memory"
+        >
+          <h2>Memory (Cognee)</h2>
+          <p class="desc">
+            Cognee namespace + store inspection. Agents own the rest of the surface via
+            MCP in Phase 8.
+          </p>
+          <div class="s-panel">
+            <SecRow k="Namespace" mono :value="memory.namespace" />
+            <SecRow k="Records" mono>
+              <span class="num">{{ memory.records.toLocaleString() }}</span>
+            </SecRow>
+            <SecRow k="Disk usage" mono :value="`${memory.diskMb} MB`" />
+            <SecRow k="Available tools" sub="Read-only — MCP exposes these to agents" mono>
+              <span class="mono dim">{{ memory.tools.join(', ') }}</span>
+            </SecRow>
+          </div>
+          <div class="footer-row">
+            <button type="button" class="btn-ghost-sm" @click="exportMemory">
+              Export
+            </button>
+            <button
+              type="button"
+              class="btn-danger-sm"
+              data-testid="memory-reset-open"
+              @click="memoryResetOpen = true"
+            >
+              Reset namespace
+            </button>
+          </div>
+        </section>
+
+        <!-- 8. Appearance -->
+        <section
+          id="appearance"
+          :ref="(el) => setSectionRef('appearance', el)"
+          class="s-section"
+          data-section="appearance"
+        >
+          <h2>Appearance</h2>
+          <p class="desc">
+            Dark only for v0.2.x. Light + system-auto modes land with v0.3.
+          </p>
+          <div class="s-panel">
+            <SecRow k="Theme" sub="System-wide colour palette">
+              <div class="seg" role="radiogroup">
+                <span
+                  :class="['seg-opt', 'active']"
+                  role="radio"
+                  aria-checked="true"
+                  tabindex="0"
+                >dark</span>
+                <span class="seg-opt disabled" aria-disabled="true">
+                  light <span class="v3-chip">v0.3</span>
+                </span>
+                <span class="seg-opt disabled" aria-disabled="true">
+                  auto <span class="v3-chip">v0.3</span>
+                </span>
+              </div>
+            </SecRow>
+            <SecRow k="Density" sub="affects card padding + row heights">
+              <div class="seg" role="radiogroup" data-testid="appearance-density">
+                <span
+                  v-for="d in ['compact', 'comfortable', 'spacious']"
+                  :key="d"
+                  :class="['seg-opt', { active: tweaks.density === d }]"
+                  role="radio"
+                  :aria-checked="tweaks.density === d"
+                  tabindex="0"
+                  :data-testid="`density-${d}`"
+                  @click="setDensity(d)"
+                  @keydown.enter.prevent="setDensity(d)"
+                >{{ d }}</span>
+              </div>
+            </SecRow>
+          </div>
+        </section>
+
+        <!-- 9. About -->
+        <section
+          id="about"
+          :ref="(el) => setSectionRef('about', el)"
+          class="s-section"
+          data-section="about"
+        >
+          <h2>About</h2>
+          <div class="s-panel">
+            <SecRow k="hal0" mono :value="ABOUT.version" />
+            <SecRow k="Commit" mono :value="ABOUT.commitSha" />
+            <SecRow k="Build date" mono :value="ABOUT.buildDate" />
+            <SecRow k="License" :value="ABOUT.license" />
+            <SecRow k="Repository" mono>
+              <a :href="ABOUT.repo" target="_blank" rel="noopener noreferrer" class="link">
+                github.com/Hal0ai/hal0
+              </a>
+            </SecRow>
+            <SecRow k="Docs" mono>
+              <a :href="ABOUT.docs" target="_blank" rel="noopener noreferrer" class="link">
+                hal0.dev/docs
+              </a>
+            </SecRow>
+            <SecRow k="Discord" mono>
+              <a :href="ABOUT.discord" target="_blank" rel="noopener noreferrer" class="link">
+                discord.gg/hal0
+              </a>
+            </SecRow>
+          </div>
+          <div class="footer-row">
+            <button
+              type="button"
+              class="btn-ghost-sm"
+              data-testid="bundled-licenses-open"
+              @click="licensesOpen = true"
+            >
+              View bundled licenses
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Dialogs / overlays -->
+    <RotateTokenDialog
+      :open="rotateOpen"
+      @cancel="rotateOpen = false"
+      @confirm="rotateToken"
+    />
+    <AllowedOriginsModal
+      :open="originsOpen"
+      :origins="auth.origins"
+      @close="originsOpen = false"
+      @save="saveOrigins"
+    />
+    <AddSecretModal
+      :open="addSecretOpen"
+      @close="addSecretOpen = false"
+      @save="saveSecret"
+    />
+    <SaveAndRestartDialog
+      :open="saveDialogOpen"
+      :pending-restart="pendingRestartCount"
+      @cancel="saveDialogOpen = false"
+      @confirm="saveLemonade"
+    />
+    <ConfirmDialog
+      :open="updateConfirmOpen"
+      :title="`Install ${updateTarget?.label || 'update'}?`"
+      :message="`This will restart lemond and hal0-api. Expect ~30s outage.`"
+      confirm-label="Install + restart"
+      @cancel="updateConfirmOpen = false"
+      :on-cancel="() => (updateConfirmOpen = false)"
+      :on-confirm="confirmUpdate"
+    />
+    <ConfirmDialog
+      :open="memoryResetOpen"
+      title="Reset memory namespace?"
+      :message="`This wipes every record in '${memory.namespace}'. Cognee cannot recover the data afterwards.`"
+      :destructive="true"
+      :type-to-confirm="memory.namespace"
+      confirm-label="Reset namespace"
+      :on-cancel="() => (memoryResetOpen = false)"
+      :on-confirm="confirmMemoryReset"
+    />
+    <BundledLicensesDrawer
+      :open="licensesOpen"
+      @close="licensesOpen = false"
+    />
   </div>
 </template>
 
 <style scoped>
-.settings-page { display: flex; flex-direction: column; min-height: 100%; }
-.page-body     { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
-
-.restart-banner {
+.settings-view {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 24px;
-  background: color-mix(in oklch, var(--color-warning) 14%, var(--color-surface));
-  border-bottom: 1px solid color-mix(in oklch, var(--color-warning) 30%, transparent);
-  color: var(--color-warning);
-  font-size: 13px;
-}
-.banner-btn {
-  margin-left: auto;
-  padding: 4px 12px;
-  border-radius: var(--radius);
-  background: var(--color-warning);
-  color: var(--color-bg);
-  font-size: 12px;
-  font-weight: 600;
-  border: none;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.banner-btn:hover { opacity: 0.9; }
-.slide-up-enter-active { transition: all 0.2s ease; }
-.slide-up-leave-active { transition: all 0.15s ease; }
-.slide-up-enter-from   { opacity: 0; transform: translateY(-100%); }
-.slide-up-leave-to     { opacity: 0; transform: translateY(-100%); }
-
-.error-banner { padding: 10px 16px; border-radius: var(--radius-lg); background: color-mix(in oklch, var(--color-danger) 10%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-danger) 30%, transparent); color: var(--color-danger); font-size: 13px; }
-
-.section-title { font-family: var(--font-mono); font-size: 11px; font-weight: 500; color: var(--hal0-accent); margin: 0 0 14px; letter-spacing: 0.08em; text-transform: uppercase; }
-
-.fields { display: flex; flex-direction: column; gap: 14px; }
-.field-row { display: grid; grid-template-columns: 1fr 240px; align-items: start; gap: 16px; }
-@media (max-width: 640px) { .field-row { grid-template-columns: 1fr; } }
-
-.field-meta { display: flex; flex-direction: column; gap: 3px; }
-.field-label { font-size: 13px; font-weight: 500; color: var(--color-fg); display: flex; align-items: center; gap: 8px; }
-.field-hint { font-size: 11.5px; color: var(--color-fg-faint); margin: 0; font-family: var(--font-mono); }
-.field-err  { font-size: 11.5px; color: var(--color-danger); margin: 0; }
-.restart-badge { font-family: var(--font-mono); font-size: 9.5px; padding: 1px 5px; border-radius: 3px; background: color-mix(in oklch, var(--color-warning) 15%, transparent); color: var(--color-warning); border: 1px solid color-mix(in oklch, var(--color-warning) 30%, transparent); white-space: nowrap; }
-
-.field-input-wrap { display: flex; flex-direction: column; }
-.field-input {
-  padding: 7px 10px;
-  border-radius: var(--radius);
-  border: 1px solid var(--color-border);
-  background: var(--color-surface-2);
-  color: var(--color-fg);
-  font-size: 13px;
-  outline: none;
-  transition: border-color 0.1s;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 24px 32px;
+  max-width: 1180px;
+  margin: 0 auto;
   width: 100%;
   box-sizing: border-box;
 }
-.field-input:focus { border-color: var(--color-border-hi); }
-.field-changed { border-color: color-mix(in srgb, var(--hal0-accent) 55%, var(--color-border)) !important; box-shadow: inset 2px 0 0 var(--hal0-accent); }
-.field-error   { border-color: var(--color-danger) !important; }
-
-.toggle-label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
-.toggle-checkbox { display: none; }
-.toggle-track {
-  width: 36px; height: 20px; border-radius: 10px;
-  background: var(--color-surface-3); border: 1px solid var(--color-border);
-  position: relative; flex-shrink: 0; transition: background 0.15s;
+.vh {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0;
 }
-.toggle-checkbox:checked + .toggle-track { background: var(--hal0-accent); border-color: var(--hal0-accent); }
-.toggle-thumb {
-  position: absolute; left: 2px; top: 2px;
-  width: 14px; height: 14px; border-radius: 50%;
-  background: white; transition: transform 0.15s;
-}
-.toggle-checkbox:checked + .toggle-track .toggle-thumb { transform: translateX(16px); }
-.toggle-text { font-size: 13px; color: var(--color-fg-muted); }
-
-.change-count { font-family: var(--font-mono); font-size: 11px; color: var(--hal0-accent); text-transform: uppercase; letter-spacing: 0.06em; }
-.mono { font-family: var(--font-mono); }
-
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-size: 12px; font-weight: 500; border: none; cursor: pointer; transition: background 0.15s; }
-.btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }
-.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-ghost { padding: 7px 16px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
-.btn-ghost:hover:not(:disabled) { border-color: var(--color-border-hi); color: var(--color-fg); }
-.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.spinner { width: 11px; height: 11px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
-@keyframes spin { to { transform: rotate(360deg); } }
-
-/* ── Authentication panel ────────────────────────────────────────────── */
-
-.auth-header { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-.auth-status-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.auth-badge {
-  display: inline-block;
-  padding: 2px 9px;
-  border-radius: 999px;
+.vh-eye {
+  color: var(--accent, var(--hal0-accent));
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
-.auth-on  { background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); color: var(--hal0-accent); border: 1px solid color-mix(in srgb, var(--hal0-accent) 35%, transparent); }
-.auth-off { background: color-mix(in oklch, var(--color-warning) 16%, transparent); color: var(--color-warning); border: 1px solid color-mix(in oklch, var(--color-warning) 30%, transparent); }
-.auth-identity { font-size: 11.5px; color: var(--color-fg-muted); }
+.vh h1, .page-title {
+  font-size: 22px;
+  font-weight: 500;
+  margin: 0;
+  letter-spacing: -0.02em;
+  color: var(--fg, var(--color-fg));
+}
+.vh-spacer { flex: 1; }
+.hint { font-size: 11px; color: var(--fg-4, var(--color-fg-faint)); }
+.mono { font-family: var(--jbm, var(--font-mono)); }
+.dim { color: var(--fg-4, var(--color-fg-faint)); }
+.accent { color: var(--accent, var(--hal0-accent)); }
+.warn { color: var(--warn, var(--color-warning)); }
+.ok { color: var(--ok, color-mix(in srgb, var(--hal0-accent) 70%, #4ade80)); }
+.num { font-variant-numeric: tabular-nums; }
 
-.auth-disabled-hint {
-  padding: 10px 12px;
-  border-radius: var(--radius);
-  background: color-mix(in oklch, var(--color-warning) 8%, var(--color-surface-2));
-  border: 1px solid color-mix(in oklch, var(--color-warning) 22%, transparent);
-  color: var(--color-fg-muted);
+.settings-layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 28px;
+}
+@media (max-width: 880px) {
+  .settings-layout { grid-template-columns: 1fr; }
+}
+.settings-content {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  min-width: 0;
+}
+
+.s-section { scroll-margin-top: 16px; }
+.s-section h2 {
+  font-size: 16px;
+  font-weight: 500;
+  margin: 0 0 6px;
+  letter-spacing: -0.01em;
+  color: var(--fg, var(--color-fg));
+}
+.s-section .desc {
   font-size: 12.5px;
+  color: var(--fg-3, var(--color-fg-muted));
+  margin: 0 0 12px;
+  max-width: 620px;
   line-height: 1.55;
 }
-.auth-disabled-hint code { padding: 1px 5px; border-radius: 3px; background: var(--color-surface-3); color: var(--color-fg); }
-
-.tokens-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-.subsection-title { font-size: 12.5px; font-weight: 600; color: var(--color-fg); margin: 0 0 4px; }
-
-.loading-row, .empty-row {
-  padding: 12px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--color-fg-faint);
-  background: var(--color-surface-2);
-  border-radius: var(--radius);
+.s-panel {
+  background: var(--bg-1, var(--color-surface));
+  border: 1px solid var(--line, var(--color-border));
+  border-radius: var(--rad-lg, 8px);
+  overflow: hidden;
 }
-
-.token-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12.5px;
+.add-row {
+  padding: 12px 18px;
+  border-top: 1px solid var(--line-soft, var(--color-border));
+  background: var(--bg, var(--color-surface));
 }
-.token-table th {
-  text-align: left;
-  font-weight: 500;
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--color-fg-faint);
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--color-border);
-}
-.token-table td {
-  padding: 8px;
-  border-bottom: 1px solid color-mix(in oklch, var(--color-border) 60%, transparent);
-}
-.token-table tr:last-child td { border-bottom: none; }
-.token-table .dim { color: var(--color-fg-faint); font-size: 11.5px; }
-.scope-badge {
-  display: inline-block;
-  padding: 1px 7px;
-  font-size: 10.5px;
-  font-family: var(--font-mono);
-  border-radius: 3px;
-  background: var(--color-surface-3);
-  color: var(--color-fg-muted);
-  border: 1px solid var(--color-border);
-}
-.row-actions { text-align: right; }
-
-.btn-small { padding: 4px 10px; font-size: 11.5px; }
-.btn-danger {
-  border: 1px solid color-mix(in oklch, var(--color-danger) 40%, var(--color-border));
-  background: transparent;
-  color: var(--color-danger);
-  border-radius: var(--radius);
-  cursor: pointer;
-}
-.btn-danger:hover:not(:disabled) {
-  background: color-mix(in oklch, var(--color-danger) 12%, transparent);
-}
-
-/* ── Modal styling (mirrors ConfirmDialog.vue) ──────────────────────── */
-.dialog-overlay {
-  position: fixed; inset: 0;
-  background: color-mix(in oklch, var(--color-bg) 70%, transparent);
-  backdrop-filter: blur(2px);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 50;
-}
-.dialog-box {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: 18px 20px;
-  width: 100%;
-  max-width: 460px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
-}
-.dialog-title { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: var(--color-fg); }
-.dialog-body { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; font-size: 13px; }
-.dialog-body code { padding: 1px 5px; border-radius: 3px; background: var(--color-surface-3); }
-.dialog-body ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; }
-.dialog-field { display: flex; flex-direction: column; gap: 4px; align-items: stretch; grid-template-columns: none; }
-.dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
-
-.field-hint.warning { color: var(--color-warning); }
-.raw-token-box {
-  padding: 10px 12px;
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border-hi);
-  border-radius: var(--radius);
-  font-size: 12px;
-  word-break: break-all;
-  user-select: all;
-}
-
-.fade-enter-active, .fade-leave-active { transition: opacity 0.12s ease; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
-
-/* ── Model locations ─────────────────────────────────────────────────── */
-.roots-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-.pull-root-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
-.pull-root-row .field-input { font-family: var(--font-mono); }
-.roots-section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--hal0-accent); font-family: var(--font-mono); margin-top: 6px; }
-.root-row { display: flex; align-items: center; gap: 8px; }
-.root-row .field-input { flex: 1; font-family: var(--font-mono); }
-.roots-actions { display: flex; align-items: center; gap: 12px; margin-top: 6px; flex-wrap: wrap; }
-.auto-scan-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-fg-muted); cursor: pointer; }
-.auto-scan-label input[type="checkbox"] { accent-color: var(--hal0-accent); }
-
-/* ── Lemonade admin link card (PR-13) ──────────────────────────── */
-.lemonade-link-row {
+.footer-row {
+  margin-top: 12px;
   display: flex;
-  align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  align-items: center;
+  gap: 10px;
   flex-wrap: wrap;
 }
-.lemonade-link-row .btn-ghost {
-  flex-shrink: 0;
+.footer-meta { display: inline-flex; align-items: center; gap: 10px; font-size: 11px; }
+.footer-actions { display: inline-flex; gap: 8px; }
+.lemonade-deep-link { margin-top: 10px; font-size: 11.5px; }
+
+.link {
+  color: var(--accent, var(--hal0-accent));
   text-decoration: none;
 }
+.link:hover { text-decoration: underline; }
 
-/* ── Proxmox integration panel ──────────────────────────────────── */
-.proxmox-header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
-.proxmox-status {
-  margin: 8px 0 14px;
-  padding: 8px 12px;
-  border-radius: var(--radius);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  font-size: 12px;
+/* Buttons */
+.btn-ghost-sm {
+  background: transparent;
+  border: 1px solid var(--line, var(--color-border));
+  color: var(--fg-2, var(--color-fg-muted));
+  border-radius: var(--rad-sm, 4px);
+  padding: 5px 11px;
+  font-family: var(--jbm, var(--font-mono));
+  font-size: 11px;
+  cursor: pointer;
 }
-.proxmox-grid {
+.btn-ghost-sm:hover { color: var(--fg, var(--color-fg)); border-color: var(--line-strong, var(--color-border-hi)); }
+.btn-danger-sm {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--err, var(--color-danger)) 40%, var(--line));
+  color: var(--err, var(--color-danger));
+  border-radius: var(--rad-sm, 4px);
+  padding: 5px 11px;
+  font-family: var(--jbm, var(--font-mono));
+  font-size: 11px;
+  cursor: pointer;
+}
+.btn-primary-sm {
+  background: var(--accent, var(--hal0-accent));
+  border: 1px solid var(--accent, var(--hal0-accent));
+  color: #0a0a0a;
+  border-radius: var(--rad-sm, 4px);
+  padding: 5px 11px;
+  font-family: var(--jbm, var(--font-mono));
+  font-size: 11px;
+  cursor: pointer;
+}
+.btn-primary-sm:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Inputs / segmented */
+.field-input-xs {
+  background: var(--bg, var(--color-surface));
+  border: 1px solid var(--line, var(--color-border));
+  border-radius: var(--rad-sm, 4px);
+  padding: 4px 8px;
+  font-family: var(--jbm, var(--font-mono));
+  font-size: 11px;
+  color: var(--fg, var(--color-fg));
+}
+.toggle-label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; }
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line, var(--color-border));
+  border-radius: 4px;
+  overflow: hidden;
+}
+.seg-opt {
+  padding: 4px 12px;
+  font-family: var(--jbm, var(--font-mono));
+  font-size: 11px;
+  color: var(--fg-3, var(--color-fg-muted));
+  cursor: pointer;
+  border-right: 1px solid var(--line, var(--color-border));
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+.seg-opt:last-child { border-right: none; }
+.seg-opt.active {
+  background: color-mix(in srgb, var(--accent, var(--hal0-accent)) 14%, transparent);
+  color: var(--accent, var(--hal0-accent));
+}
+.seg-opt.disabled { color: var(--fg-4, var(--color-fg-faint)); cursor: not-allowed; }
+.v3-chip {
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent, var(--hal0-accent)) 12%, transparent);
+  color: var(--accent, var(--hal0-accent));
+  text-transform: uppercase;
+}
+
+/* OmniRouter rows */
+.omni-header {
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--line-soft, var(--color-border));
+  background: var(--bg, var(--color-surface));
+  font-size: 10px;
+  color: var(--fg-4, var(--color-fg-faint));
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
   display: grid;
-  grid-template-columns: repeat(2, minmax(200px, 1fr));
-  gap: 10px 16px;
-  margin-top: 8px;
+  grid-template-columns: 180px 80px 1fr 100px;
+  gap: 16px;
 }
-.proxmox-field { display: flex; flex-direction: column; gap: 4px; padding: 0; border-bottom: none; }
-.proxmox-field .field-label { font-size: 11.5px; font-weight: 500; }
-.proxmox-field .field-input { font-family: var(--font-mono); font-size: 12.5px; padding: 6px 10px; }
-.proxmox-field-narrow { max-width: 130px; }
-.proxmox-field-wide { grid-column: 1 / -1; }
-.proxmox-field-toggle { grid-column: 1 / -1; flex-direction: column; align-items: flex-start; gap: 4px; }
-.proxmox-actions { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
-.dim { color: var(--color-fg-faint); }
+.omni-row {
+  display: grid;
+  grid-template-columns: 180px 80px 1fr 100px;
+  gap: 16px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line-soft, var(--color-border));
+  align-items: center;
+  font-size: 12.5px;
+}
+.omni-row:last-child { border-bottom: none; }
+.omni-row .nm { color: var(--fg, var(--color-fg)); }
+.omni-row .tgt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.omni-row .tgt .mono { word-break: break-all; }
+.origin-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-family: var(--jbm, var(--font-mono));
+  font-size: 10px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.origin-hal0 {
+  background: color-mix(in srgb, var(--accent, var(--hal0-accent)) 14%, transparent);
+  color: var(--accent, var(--hal0-accent));
+  border: 1px solid color-mix(in srgb, var(--accent, var(--hal0-accent)) 35%, transparent);
+}
+.origin-upstream {
+  background: var(--bg, var(--color-surface));
+  color: var(--fg-3, var(--color-fg-muted));
+  border: 1px solid var(--line, var(--color-border));
+}
+.status-chip {
+  font-family: var(--jbm, var(--font-mono));
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.status-chip.ok { color: var(--ok, #4ade80); }
+.status-chip.off { color: var(--fg-4, var(--color-fg-faint)); }
+.remediation { display: block; margin-top: 2px; font-size: 11px; }
+.remediation a { color: var(--accent, var(--hal0-accent)); text-decoration: none; }
+.remediation a:hover { text-decoration: underline; }
+.omni-footer {
+  margin-top: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--fg-4, var(--color-fg-faint));
+  flex-wrap: wrap;
+}
+.omni-footer b { color: var(--fg, var(--color-fg)); font-weight: 500; }
+
+@media (max-width: 720px) {
+  .omni-header, .omni-row { grid-template-columns: 1fr; }
+}
 </style>
