@@ -479,9 +479,7 @@ async def test_internal_set_posts_atomic_key_value_body() -> None:
 
     async with _mock_transport(h) as transport:
         client = LemonadeClient(http_client=transport, api_key="hal0-internal-token")
-        result = await client.internal_set(
-            {"log_level": "debug", "max_loaded_models": 4}
-        )
+        result = await client.internal_set({"log_level": "debug", "max_loaded_models": 4})
         assert result == {"applied": ["log_level", "max_loaded_models"]}
 
     assert captured["method"] == "POST"

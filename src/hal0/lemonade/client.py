@@ -215,9 +215,7 @@ class LemonadeClient:
             body["llamacpp_backend"] = llamacpp_backend
         if llamacpp_args is not None:
             body["llamacpp_args"] = (
-                llamacpp_args
-                if isinstance(llamacpp_args, str)
-                else " ".join(llamacpp_args)
+                llamacpp_args if isinstance(llamacpp_args, str) else " ".join(llamacpp_args)
             )
         async with self._request(
             "POST", "/v1/load", json=body, timeout=self._load_timeout_s
