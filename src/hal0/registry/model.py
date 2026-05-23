@@ -147,3 +147,42 @@ class Model(BaseModel):
         if not v.strip():
             raise ValueError("model path must not be empty")
         return v
+
+
+# ── Namespace derivation ─────────────────────────────────────────────────────
+#
+# The dashboard surfaces a two-bucket split — "blessed" (curated /
+# pre-baked artifacts laid out under
+# ``/var/lib/hal0/models/<recipe>/<capability>/``) vs "pulled" (anything
+# we downloaded into the registry's pull tree or that the operator
+# hand-registered). The rule is path-shape only — see issue #220 for
+# the locked decision — so a single source of truth for the derivation
+# keeps every consumer in sync.
+
+_BLESSED_PREFIX = "/var/lib/hal0/models/"
+
+
+def _derive_ns(model: Model) -> str:
+    """Return ``"blessed"`` if ``model.path`` sits under a recipe/capability
+    directory inside the blessed model root, else ``"pulled"``.
+
+    Rule (issue #220 — do not relitigate): a path is blessed iff it
+    begins with ``/var/lib/hal0/models/<recipe>/<capability>/`` — i.e.
+    after the blessed root there are at least two more directory
+    components before the file. The pull tree layout
+    (``/var/lib/hal0/models/<id>/<file>``) only has one component after
+    the root and is therefore "pulled".
+    """
+    path = (model.path or "").strip()
+    if not path or not path.startswith(_BLESSED_PREFIX):
+        return "pulled"
+    tail = path[len(_BLESSED_PREFIX) :]
+    # Need: <recipe>/<capability>/<rest>. That's 2 separators with
+    # non-empty leading segments.
+    parts = tail.split("/")
+    if len(parts) < 3:
+        return "pulled"
+    recipe, capability = parts[0], parts[1]
+    if not recipe or not capability:
+        return "pulled"
+    return "blessed"

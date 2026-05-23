@@ -1,24 +1,39 @@
 // hal0 dashboard — Models view (catalog + detail + downloads)
 //
-// Phase B1: catalog drives off `useModels()`. Mock fallback retains the
-// HAL0_DATA.models shape so dev + mock builds render. Downloads pane
-// keeps its local optimistic-state UI; per-row SSE wiring lands when
-// the prototype's DownloadRow swaps to `usePullJob(id)` (Phase B2).
+// Phase B2 wireup (#220 brief): the catalog is driven entirely by
+// useModels(); the HAL0_DATA fallback is gone now the backend always
+// emits ``ns`` on every row. The detail pane's Recipe section reads
+// each model's persisted ``defaults`` and writes them back via PUT
+// /api/models/{id}, and the Downloads pane is a thin shell around
+// per-row usePullJob() instances tracked by model_id.
 
-import { useModels } from '@/api/hooks/useModels'
+import { useModels, usePullJob, fmtBytes } from '@/api/hooks/useModels'
 
-const { useState: useStateM } = React;
+const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
 function ModelsView() {
-  const [selId, setSelId] = useStateM("qwen3.6-27b-mtp");
+  const [selId, setSelId] = useStateM(null);
   const [filters, setFilters] = useStateM({ type: null, device: null, ns: null });
   const [addOpen, setAddOpen] = useStateM(false);
+  const [recipeOpen, setRecipeOpen] = useStateM(false);
   const [delModel, setDelModel] = useStateM(null);
+  // Track which model_ids the user has launched a pull for this
+  // session — the Downloads pane renders one DownloadRow per entry
+  // and each row owns its own usePullJob() instance (which reattaches
+  // to an in-flight pull on mount).
+  const [activePulls, setActivePulls] = useStateM([]);
 
   const modelsQuery = useModels();
-  const modelList = (modelsQuery.data && modelsQuery.data.length > 0)
-    ? modelsQuery.data
-    : HAL0_DATA.models;
+  const modelList = modelsQuery.data ?? [];
+
+  // Auto-pick the first installed model on first render so the detail
+  // pane never opens empty.
+  useEffectM(() => {
+    if (!selId && modelList.length) {
+      const first = modelList.find(m => m.installed) || modelList[0];
+      if (first) setSelId(first.id);
+    }
+  }, [modelList, selId]);
 
   const selected = modelList.find(m => m.id === selId) || modelList[0];
 
@@ -30,11 +45,22 @@ function ModelsView() {
   };
   const installed = modelList.filter(m => m.installed && fil(m));
   const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && fil(m));
-  const userNs = modelList.filter(m => m.ns === "pulled" && fil(m));
+  const userNs = modelList.filter(m => m.ns === "pulled" && !m.installed && fil(m));
 
   const toggle = (k, v) => setFilters(f => ({ ...f, [k]: f[k] === v ? null : v }));
 
-  const recipe = HAL0_DATA.recipe[selId] || HAL0_DATA.recipe["qwen3.6-27b-mtp"];
+  // Listen for any other surface (FirstRun, Add modal) that starts a
+  // pull and surface it in our Downloads pane.
+  useEffectM(() => {
+    const handler = (e) => {
+      const id = e?.detail?.modelId;
+      if (id) setActivePulls(prev => prev.includes(id) ? prev : [...prev, id]);
+    };
+    window.addEventListener("hal0:pull-started", handler);
+    return () => window.removeEventListener("hal0:pull-started", handler);
+  }, []);
+
+  const removeActive = (id) => setActivePulls(prev => prev.filter(x => x !== id));
 
   return (
     <div className="view">
@@ -99,6 +125,15 @@ function ModelsView() {
             <span className="right">sort: <span style={{color: "var(--fg-2)"}}>installed</span> ▾</span>
           </div>
 
+          {modelsQuery.isPending && (
+            <div style={{padding: 16, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)"}}>Loading models…</div>
+          )}
+          {modelsQuery.isError && (
+            <div style={{padding: 16, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--err)"}}>
+              {modelsQuery.error?.message || "Failed to load models"}
+            </div>
+          )}
+
           {installed.length > 0 && <div className="mdl-section-label">Installed · {installed.length}</div>}
           {installed.map(m => (
             <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
@@ -117,12 +152,18 @@ function ModelsView() {
 
         {/* ── Detail + Downloads ── */}
         <div style={{display: "flex", flexDirection: "column", gap: 14}}>
-          <ModelDetail model={selected} recipe={recipe} onDelete={() => setDelModel(selected)} />
-          <DownloadsPane />
+          <ModelDetail
+            model={selected}
+            onDelete={() => setDelModel(selected)}
+            onEdit={() => setRecipeOpen(true)}
+            onPullStarted={(id) => setActivePulls(prev => prev.includes(id) ? prev : [...prev, id])}
+          />
+          <DownloadsPane activeIds={activePulls} onRemove={removeActive} />
         </div>
       </div>
 
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} />
+      <RecipeEditorModal open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
       <DeleteModelDialog open={!!delModel} onClose={() => setDelModel(null)} model={delModel} />
     </div>
   );
@@ -133,11 +174,11 @@ function ModelRow({ model, selected, onSelect }) {
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
       <span className={"dot " + (model.installed ? "ready" : "empty")} />
       <span className="nm">
-        {model.longName}
-        <span className="sub">{model.repo}</span>
+        {model.longName || model.name || model.id}
+        <span className="sub">{model.repo || model.hf_repo || ""}</span>
       </span>
-      <span className="sz num">{model.params}</span>
-      <span className="sz num">{model.size}</span>
+      <span className="sz num">{model.params || ""}</span>
+      <span className="sz num">{model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "")}</span>
       <span className="tg">
         {model.installed
           ? <span className="chip ok">installed</span>
@@ -147,35 +188,73 @@ function ModelRow({ model, selected, onSelect }) {
   );
 }
 
-function ModelDetail({ model, recipe, onDelete }) {
+function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
+  const pull = usePullJob();
+  if (!model) {
+    return (
+      <div className="mdl-detail">
+        <div className="mdl-detail-h" style={{padding: 24, color: "var(--fg-4)"}}>No model selected.</div>
+      </div>
+    );
+  }
+  // Render the persisted defaults — pydantic ModelDefaults shape:
+  // {context_size, n_gpu_layers, rope_freq_base, extra_args}.
+  const defaults = model.defaults || {};
+  const recipeRows = [
+    ["context_size", defaults.context_size],
+    ["n_gpu_layers", defaults.n_gpu_layers],
+    ["rope_freq_base", defaults.rope_freq_base],
+    ["extra_args", defaults.extra_args],
+  ].filter(([, v]) => v !== null && v !== undefined && v !== "");
+
+  const onPull = async () => {
+    try {
+      await pull.start(model.id);
+      onPullStarted && onPullStarted(model.id);
+      window.dispatchEvent(new CustomEvent("hal0:pull-started", { detail: { modelId: model.id } }));
+      window.__hal0Toast && window.__hal0Toast(
+        `Pulling ${model.longName || model.id} · ${model.size || fmtBytes(model.size_bytes || 0)}`,
+        "info",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Pull failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
+
   return (
     <div className="mdl-detail">
       <div className="mdl-detail-h">
         <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 6}}>
           <div className={"dot " + (model.installed ? "ready" : "empty")} />
-          <div className="nm mono">{model.longName}</div>
+          <div className="nm mono">{model.longName || model.name || model.id}</div>
           <span style={{marginLeft: "auto"}}>
             {model.installed
               ? <span className="chip ok">installed</span>
               : <span className="chip amber">available</span>}
           </span>
         </div>
-        <div className="repo">{model.repo}</div>
+        <div className="repo">{model.repo || model.hf_repo || model.id}</div>
       </div>
       <div className="mdl-detail-meta">
-        <div><div className="k">params</div><div className="v">{model.params}</div></div>
-        <div><div className="k">size</div><div className="v">{model.size}</div></div>
-        <div><div className="k">type</div><div className="v">{model.type}</div></div>
-        <div><div className="k">device</div><div className="v">{model.device}</div></div>
-        <div><div className="k">runtime</div><div className="v">{model.runtime}</div></div>
-        <div><div className="k">namespace</div><div className="v">{model.ns}</div></div>
+        <div><div className="k">params</div><div className="v">{model.params || "—"}</div></div>
+        <div><div className="k">size</div><div className="v">{model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "—")}</div></div>
+        <div><div className="k">type</div><div className="v">{model.type || (model.capabilities?.[0]) || "—"}</div></div>
+        <div><div className="k">device</div><div className="v">{model.device || (model.backends?.[0]) || "—"}</div></div>
+        <div><div className="k">runtime</div><div className="v">{model.runtime || "—"}</div></div>
+        <div><div className="k">namespace</div><div className="v">{model.ns || "—"}</div></div>
       </div>
       <div className="mdl-detail-labels">
-        {model.labels.map(l => <span key={l} className="chip">{l}</span>)}
+        {(model.labels || model.capabilities || []).map(l => <span key={l} className="chip">{l}</span>)}
       </div>
       <div className="mdl-detail-recipe">
         <div className="lbl">recipe options</div>
-        {Object.entries(recipe).map(([k, v]) => (
+        {recipeRows.length === 0 ? (
+          <div className="mono" style={{fontSize: 12, color: "var(--fg-4)", fontStyle: "italic"}}>
+            No defaults set — launcher will use its own.
+          </div>
+        ) : recipeRows.map(([k, v]) => (
           <div key={k} className="ro-row">
             <span className="k">{k}</span>
             <span className="v">{String(v)}</span>
@@ -183,7 +262,7 @@ function ModelDetail({ model, recipe, onDelete }) {
         ))}
         <div style={{marginTop: 10, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)", display: "flex", gap: 6, alignItems: "center"}}>
           <span style={{color: "var(--warn)"}}>⟳</span>
-          <span>ctx_size + llamacpp_backend require slot restart to apply.</span>
+          <span>context_size + extra_args require slot restart to apply.</span>
         </div>
       </div>
       <UsedByPanel model={model} />
@@ -191,14 +270,16 @@ function ModelDetail({ model, recipe, onDelete }) {
       <div className="mdl-detail-actions">
         {model.installed ? (
           <>
-            <button className="btn" onClick={() => window.__hal0Toast && window.__hal0Toast(`Loading ${model.longName}…`, "info")}>Load now</button>
-            <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Recipe editor — coming next batch", "info")}>{Icons.edit} Edit options</button>
+            <button className="btn" onClick={() => window.__hal0Toast && window.__hal0Toast(`Loading ${model.longName || model.id}…`, "info")}>Load now</button>
+            <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit options</button>
             <button className="btn danger sm" onClick={onDelete}>{Icons.unload} Delete</button>
           </>
         ) : (
           <>
-            <button className="btn" onClick={() => window.__hal0Toast && window.__hal0Toast(`Pulling ${model.longName} · ${model.size}`, "info")}>{Icons.download} Pull ({model.size})</button>
-            <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Opening huggingface.co/${model.repo}`, "info")}>View on HF →</button>
+            <button className="btn" onClick={onPull} disabled={pull.inFlight}>
+              {Icons.download} {pull.inFlight ? `Pulling ${pull.pct ?? 0}%` : `Pull (${model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "—")})`}
+            </button>
+            <button className="btn ghost sm" onClick={() => window.open(`https://huggingface.co/${model.repo || model.hf_repo || ""}`, "_blank")}>View on HF →</button>
           </>
         )}
       </div>
@@ -206,42 +287,23 @@ function ModelDetail({ model, recipe, onDelete }) {
   );
 }
 
-function DownloadsPane() {
-  const [downloads, setDownloads] = useStateM(HAL0_DATA.downloads);
-  const active = downloads.filter(d => d.state === "pulling" || d.state === "queued" || d.state === "paused" || d.state === "error" || d.state === "cancelled");
-  const update = (dl, patch) => setDownloads(ds => ds.map(d => d === dl ? { ...d, ...patch } : d));
-  const remove = (dl) => setDownloads(ds => ds.filter(d => d !== dl));
+function DownloadsPane({ activeIds, onRemove }) {
   return (
     <div className="mdl-dl">
       <div className="mdl-dl-h">
         <span>Downloads</span>
-        <span className="ct mono">{active.length}</span>
-        {active.length > 0 && (
-          <span style={{marginLeft: "auto", color: "var(--fg-4)", textTransform: "none", letterSpacing: 0, fontFamily: "var(--jbm)", fontSize: 11}}>~12.4 MB/s</span>
-        )}
+        <span className="ct mono">{activeIds.length}</span>
       </div>
-      {active.length === 0 ? (
+      {activeIds.length === 0 ? (
         <div style={{padding: "32px 16px", textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>
           <div style={{marginBottom: 6}}>No active downloads.</div>
           <div style={{fontSize: 11, color: "var(--fg-5)"}}>Add a model from the catalog or via "Add by HF coords".</div>
         </div>
       ) : (
-        active.slice(0, 5).map((d, i) => (
-          <DownloadRow
-            key={i}
-            dl={d}
-            onPause={(dl) => update(dl, { state: "paused" })}
-            onResume={(dl) => update(dl, { state: "pulling" })}
-            onCancel={(dl) => update(dl, { state: "cancelled" })}
-            onRetry={(dl) => update(dl, { state: "pulling", pct: 0 })}
-            onRemove={remove}
-          />
+        activeIds.slice(0, 8).map(id => (
+          <DownloadRow key={id} modelId={id} onRemove={onRemove} />
         ))
       )}
-      <div style={{padding: "10px 16px", display: "flex", gap: 6, borderTop: active.length ? "1px solid var(--line-soft)" : "none"}}>
-        <button className="btn ghost sm" style={{flex: 1, justifyContent: "center"}} disabled={!active.length} onClick={() => setDownloads(ds => ds.map(d => d.state === "pulling" ? { ...d, state: "paused" } : d))}>Pause all</button>
-        <button className="btn ghost sm" style={{flex: 1, justifyContent: "center"}} onClick={() => window.__hal0Toast && window.__hal0Toast("Full downloads view — coming next batch", "info")}>View all</button>
-      </div>
     </div>
   );
 }

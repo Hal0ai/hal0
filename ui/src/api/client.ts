@@ -114,6 +114,10 @@ export const apiPost = <T = unknown>(path: string, body?: ApiOptions['body']) =>
 export const apiPatch = <T = unknown>(path: string, body?: ApiOptions['body']) =>
   api<T>(path, { method: 'PATCH', body })
 
+/** Convenience: typed PUT with JSON body. */
+export const apiPut = <T = unknown>(path: string, body?: ApiOptions['body']) =>
+  api<T>(path, { method: 'PUT', body })
+
 /** Convenience: typed DELETE. */
 export const apiDelete = <T = unknown>(path: string) =>
   api<T>(path, { method: 'DELETE' })

@@ -16,14 +16,17 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
+from hal0.errors import Hal0Error
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
 from hal0.registry.detect import DetectionResult, detect
 from hal0.registry.discover import is_skippable, scan_and_register
+from hal0.registry.model import _derive_ns
 from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
@@ -117,6 +120,11 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "owned_by": u.name,
                     "upstream": u.name,
                     "installed": False,
+                    # Upstream-only rows have no local path → "pulled"
+                    # by the path-shape rule (issue #220). The
+                    # blessed bucket is reserved for files actually
+                    # laid out under the blessed recipe tree.
+                    "ns": "pulled",
                 }
             )
     return {"models": data, "count": len(data), "filtered_aliases": filtered}
@@ -484,10 +492,25 @@ async def create_model(request: Request) -> dict[str, Any]:
 
 
 def _model_to_dict(model: Any) -> dict[str, Any]:
-    """Serialise a registry Model to the dashboard's flat shape."""
+    """Serialise a registry Model to the dashboard's flat shape.
+
+    Always attaches the ``ns`` ("blessed" | "pulled") namespace bucket
+    so the dashboard's Models view can group rows without re-deriving
+    it client-side. The rule is path-shape only (see :func:`_derive_ns`
+    + issue #220).
+    """
     if hasattr(model, "model_dump"):
-        return model.model_dump(mode="json")
-    return {**getattr(model, "__dict__", {})}
+        dumped = model.model_dump(mode="json")
+    else:
+        dumped = {**getattr(model, "__dict__", {})}
+    # Only registry-backed Model instances have a ``path``; the upstream
+    # rows assembled in :func:`list_models` already set ``ns`` directly.
+    if "ns" not in dumped and hasattr(model, "path"):
+        try:
+            dumped["ns"] = _derive_ns(model)
+        except Exception:
+            dumped["ns"] = "pulled"
+    return dumped
 
 
 @router.get("/{model_id}")
@@ -1049,6 +1072,263 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ── HuggingFace inspect (POST /api/models/inspect) ────────────────────────────
+
+
+# In-process TTL cache keyed by normalised HF repo id. Storing the whole
+# response shape (variants + tags + metadata) keeps repeat Inspect clicks
+# on the same modal session free; the 5 minute TTL is short enough that
+# a freshly-uploaded quant lands within one render.
+_INSPECT_TTL_SECONDS = 300
+_INSPECT_TIMEOUT_SECONDS = 8.0
+_INSPECT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_INSPECT_GGUF_SUFFIX = ".gguf"
+
+
+class _HFUpstreamError(Hal0Error):
+    """502 — fetching huggingface.co failed (network, 5xx, or unparseable)."""
+
+    code = "hf.unreachable"
+    status = 502
+
+
+def _normalise_hf_repo(value: str) -> str:
+    """Reduce a HF repo input to ``org/name``.
+
+    Accepts the canonical ``org/name`` slug and a full
+    ``https://huggingface.co/org/name[/...]`` URL — both are surfaced
+    in the dashboard's Add-by-HF modal. Trims trailing slashes and
+    drops the ``/tree/<rev>`` / ``/blob/<rev>/...`` suffixes that the
+    HF UI tends to copy along with the slug.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    # Strip protocol + host so we can normalise URL + slug uniformly.
+    for prefix in ("https://huggingface.co/", "http://huggingface.co/", "huggingface.co/"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :]
+            break
+    raw = raw.strip("/")
+    # Drop /tree/<rev> or /blob/<rev>/<path> if the user pasted a deep link.
+    parts = raw.split("/")
+    repo = f"{parts[0]}/{parts[1]}" if len(parts) >= 2 else raw
+    return repo
+
+
+def _extract_readme_excerpt(card_data: Any, limit: int = 400) -> str:
+    """Pull a short README excerpt from the HF model API payload.
+
+    HF returns the model card body under different shapes depending on
+    the endpoint. ``cardData`` carries YAML frontmatter; the actual
+    README body comes back under ``description`` or ``card``. Use
+    whatever is present and truncate hard so the modal stays light.
+    """
+    candidates: list[str] = []
+    if isinstance(card_data, dict):
+        for key in ("description", "card", "readme"):
+            v = card_data.get(key)
+            if isinstance(v, str) and v.strip():
+                candidates.append(v.strip())
+    if not candidates:
+        return ""
+    text = candidates[0]
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "…"
+
+
+def _format_size(size_bytes: int | None) -> str:
+    """Format bytes as a short human label used in the variant dropdown."""
+    if not isinstance(size_bytes, int) or size_bytes <= 0:
+        return "—"
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024**2:
+        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024**3:
+        return f"{size_bytes / 1024**2:.1f} MB"
+    return f"{size_bytes / 1024**3:.2f} GB"
+
+
+async def _fetch_hf_repo(repo: str) -> dict[str, Any]:
+    """Fetch HF model metadata + tree listing for ``repo``.
+
+    Returns the shape consumed by :func:`inspect_model`. Raises a
+    typed :class:`hal0.errors.Hal0Error` subclass on transport failure
+    or 404 so the route maps it to the dashboard envelope.
+    """
+    headers = {"Accept": "application/json"}
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+
+    meta_url = f"https://huggingface.co/api/models/{repo}"
+    tree_url = f"https://huggingface.co/api/models/{repo}/tree/main"
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(_INSPECT_TIMEOUT_SECONDS),
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            meta_res, tree_res = await asyncio.gather(
+                client.get(meta_url),
+                client.get(tree_url),
+            )
+    except (httpx.TimeoutException, httpx.HTTPError) as exc:
+        raise _HFUpstreamError(
+            f"failed to reach huggingface.co for {repo!r}: {exc.__class__.__name__}",
+            code="hf.unreachable",
+            details={"repo": repo, "error": str(exc)},
+        ) from exc
+
+    if meta_res.status_code == 404:
+        raise NotFound(
+            f"hugging face repo {repo!r} not found",
+            code="hf.repo_not_found",
+            details={"repo": repo},
+        )
+    if meta_res.status_code >= 400:
+        raise _HFUpstreamError(
+            f"hugging face metadata fetch returned {meta_res.status_code}",
+            code="hf.upstream_error",
+            details={"repo": repo, "status": meta_res.status_code},
+        )
+    if tree_res.status_code >= 400:
+        # A missing tree (private repo, gated, etc.) is recoverable —
+        # we still surface tags + metadata, just with no variants.
+        tree_payload: list[Any] = []
+    else:
+        try:
+            tree_payload = tree_res.json() or []
+        except ValueError:
+            tree_payload = []
+
+    try:
+        meta_payload = meta_res.json() or {}
+    except ValueError:
+        meta_payload = {}
+
+    variants: list[dict[str, Any]] = []
+    for entry in tree_payload:
+        if not isinstance(entry, dict):
+            continue
+        rel = entry.get("path") or entry.get("rfilename")
+        if not isinstance(rel, str):
+            continue
+        if not rel.lower().endswith(_INSPECT_GGUF_SUFFIX):
+            continue
+        # HF's tree API reports the *pointer file* size in ``size`` for
+        # LFS objects; the real bytes live under ``lfs.size``. Prefer
+        # the LFS size when present so the modal shows the real
+        # download size, not the 100-byte pointer.
+        size_raw: Any = None
+        lfs = entry.get("lfs")
+        if isinstance(lfs, dict):
+            size_raw = lfs.get("size")
+        if size_raw is None:
+            size_raw = entry.get("size")
+        try:
+            size_bytes = int(size_raw) if size_raw is not None else 0
+        except (TypeError, ValueError):
+            size_bytes = 0
+        # Use the GGUF filename as the canonical variant id — that's
+        # also what the pull endpoint resolves against (hf_filename).
+        variants.append(
+            {
+                "id": rel,
+                "size_bytes": size_bytes,
+                "size": _format_size(size_bytes),
+                "info": _format_size(size_bytes) + " · single file",
+            }
+        )
+    variants.sort(key=lambda v: v.get("size_bytes") or 0)
+
+    tags_raw = meta_payload.get("tags") or []
+    tags = [t for t in tags_raw if isinstance(t, str)]
+
+    license_label = ""
+    card = meta_payload.get("cardData")
+    if isinstance(card, dict):
+        lic = card.get("license")
+        if isinstance(lic, str):
+            license_label = lic
+    if not license_label:
+        # Fallback: HF exposes the top-level "license" sometimes.
+        lic = meta_payload.get("license")
+        if isinstance(lic, str):
+            license_label = lic
+
+    return {
+        "variants": variants,
+        "tags": tags,
+        "metadata": {
+            "license": license_label,
+            "readme_excerpt": _extract_readme_excerpt(card),
+        },
+    }
+
+
+@router.post("/inspect")
+async def inspect_model(request: Request) -> dict[str, Any]:
+    """Inspect a HuggingFace repo and return pullable variants + metadata.
+
+    Body shape (either key accepted, ``hf_url`` is the dashboard's older
+    alias)::
+
+        {"hf_repo": "unsloth/Qwen3-8B-GGUF"}
+        {"hf_url":  "https://huggingface.co/unsloth/Qwen3-8B-GGUF"}
+
+    Response::
+
+        {
+          "repo": "...",
+          "variants": [{"id": "qwen3-8b-q4_k_m.gguf", "size_bytes": ..., "info": "..."}],
+          "tags": ["text-generation", ...],
+          "metadata": {"license": "...", "readme_excerpt": "..."}
+        }
+
+    Cached for ~5 minutes per repo. HF unreachable / 5xx → ``502``
+    with ``hf.unreachable`` / ``hf.upstream_error``. Repo missing →
+    ``404`` with ``hf.repo_not_found``.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+
+    repo_input = body.get("hf_repo")
+    if not isinstance(repo_input, str) or not repo_input.strip():
+        repo_input = body.get("hf_url")
+    if not isinstance(repo_input, str) or not repo_input.strip():
+        raise BadRequest(
+            "either 'hf_repo' (org/name) or 'hf_url' is required",
+            code="hf.bad_request",
+        )
+
+    repo = _normalise_hf_repo(repo_input)
+    if "/" not in repo:
+        raise BadRequest(
+            f"'{repo_input}' is not a valid org/name HF repo coordinate",
+            code="hf.bad_request",
+            details={"input": repo_input},
+        )
+
+    now = time.time()
+    cached = _INSPECT_CACHE.get(repo)
+    if cached is not None and now - cached[0] < _INSPECT_TTL_SECONDS:
+        payload = dict(cached[1])
+        payload["repo"] = repo
+        payload["cached"] = True
+        return payload
+
+    result = await _fetch_hf_repo(repo)
+    _INSPECT_CACHE[repo] = (now, result)
+    return {"repo": repo, "cached": False, **result}
 
 
 @router.post("/{model_id}/pull/cancel")

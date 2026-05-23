@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiDelete, apiGet, apiPost, Hal0Error } from '../client'
+import { apiDelete, apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 export interface Model {
@@ -52,17 +52,55 @@ export function useModel(id: string | null | undefined) {
   })
 }
 
+export interface ModelInspectVariant {
+  id: string
+  size_bytes: number
+  size: string
+  info: string
+}
+
+export interface ModelInspectResponse {
+  repo: string
+  cached: boolean
+  variants: ModelInspectVariant[]
+  tags: string[]
+  metadata: {
+    license: string
+    readme_excerpt: string
+  }
+}
+
 export function useModelInspect() {
-  // POST a HF coord and get back a curated-model preview.
-  return useMutation({
-    mutationFn: (body: { hf_url: string }) => apiPost(ENDPOINTS.modelInspect, body),
+  // POST a HF coord and get back the repo's pullable GGUF variants
+  // plus tags + license + a short README excerpt. Accepts either an
+  // ``hf_repo`` slug or the older ``hf_url`` alias.
+  return useMutation<ModelInspectResponse, Hal0Error, { hf_repo?: string; hf_url?: string }>({
+    mutationFn: (body) => apiPost<ModelInspectResponse>(ENDPOINTS.modelInspect, body),
   })
+}
+
+export interface ModelDeleteResponse {
+  id: string
+  deleted: boolean
+  affected_slots: string[]
 }
 
 export function useModelDelete() {
   const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) => apiDelete(ENDPOINTS.model(id)),
+  return useMutation<ModelDeleteResponse, Hal0Error, string>({
+    mutationFn: (id: string) => apiDelete<ModelDeleteResponse>(ENDPOINTS.model(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
+  })
+}
+
+export function useModelUpdate() {
+  // Partial update — PUT /api/models/{id} with any subset of
+  // ``name | capabilities | backends | defaults``. The dashboard's
+  // Recipe editor uses this for the per-model defaults section.
+  const qc = useQueryClient()
+  return useMutation<Model, Hal0Error, { id: string; body: Record<string, unknown> }>({
+    mutationFn: ({ id, body }) =>
+      apiPut<Model>(ENDPOINTS.model(id), body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
   })
 }
