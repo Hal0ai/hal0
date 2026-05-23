@@ -852,6 +852,269 @@ class MemoryGraphConfig(BaseModel):
         return self
 
 
+# ── AgentConfig (ADR-0013) ─────────────────────────────────────────────────────
+
+# ADR-0013 §1: schema version pin so a future incompatible change
+# (e.g. nesting tool policies under a `[mcp.servers.<name>.policy]`
+# block) can detect + migrate old agent TOMLs without silent breakage.
+AGENT_CONFIG_SCHEMA_VERSION = 1
+
+# ADR-0013 §6: outbound auth styles. Today only ``bearer-from-env``
+# (token loaded at agent-process startup from an env file or
+# systemd-credential) is implemented. Listed as a frozenset so future
+# additions (mtls, oauth-device-flow, …) extend a single source.
+_VALID_AGENT_AUTH_KINDS = frozenset({"none", "bearer-from-env"})
+
+AgentAuthKindLiteral = Literal["none", "bearer-from-env"]
+
+
+class AgentAuthConfig(BaseModel):
+    """``[mcp.servers.<name>.auth]`` block.
+
+    ADR-0013 §6: indirection via env var keeps tokens out of TOML so
+    the config file remains commit-safe and the dashboard can render
+    it. The actual token is loaded by the agent driver at process
+    startup (from systemd-credential or a 0600 env file) and never
+    appears on the command line.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    kind: AgentAuthKindLiteral = Field(
+        default="none",
+        description=(
+            "Outbound auth style. 'none' = no auth header. "
+            "'bearer-from-env' = read token from the env var named in `env`."
+        ),
+    )
+    env: str | None = Field(
+        default=None,
+        description=(
+            "Env-var name to read for the bearer token. Required when kind == 'bearer-from-env'."
+        ),
+    )
+
+    @field_validator("kind")
+    @classmethod
+    def kind_valid(cls, v: str) -> str:
+        if v not in _VALID_AGENT_AUTH_KINDS:
+            raise ValueError(
+                f"agent auth kind {v!r} not valid; choose from {sorted(_VALID_AGENT_AUTH_KINDS)}"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def env_required_for_bearer(self) -> AgentAuthConfig:
+        if self.kind == "bearer-from-env" and (not self.env or not self.env.strip()):
+            raise ValueError("auth.env (env-var name) required when auth.kind = 'bearer-from-env'")
+        return self
+
+
+class ToolPolicy(BaseModel):
+    """``[mcp.servers.<name>.tools]`` block — three-tier classification.
+
+    ADR-0013 §4:
+
+    - ``allow``  : autonomous call (no approval queue).
+    - ``gated``  : enqueue via ADR-0004 approval queue, await user pick.
+    - ``blocked``: hard-reject at the client; never reaches the server.
+
+    The lists MUST be disjoint — overlap is operator error and surfaces
+    as a load-time ValidationError with the offending tool name in the
+    message, NOT a silent "which list wins?" decision.
+
+    Default is empty on all three axes. Combined with the default-deny
+    posture in :class:`MCPServerConfig`, that means an MCP server with
+    no ``tools`` block has *zero* callable tools — which is what we
+    want for a fresh registration the user hasn't reviewed yet.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    allow: list[str] = Field(
+        default_factory=list,
+        description=("Tools the agent may call autonomously. Empty = no autonomous tools."),
+    )
+    gated: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tools the agent may request; each call enqueues an "
+            "approval (ADR-0004 §5). Empty = no gated tools."
+        ),
+    )
+    blocked: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tools hard-rejected at the client. Installer-pinned "
+            "blocks (e.g. delete_repo on github-mcp) protect against "
+            "dashboard edits surfacing dangerous tools."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def lists_are_disjoint(self) -> ToolPolicy:
+        """Reject overlap between allow / gated / blocked.
+
+        Operators sometimes paste-edit a TOML and forget to remove a
+        tool from one list when promoting/demoting it; we catch that
+        at load time with a specific error so they don't ship a config
+        whose behavior depends on whichever check happens first at
+        dispatch.
+        """
+        allow_set = set(self.allow)
+        gated_set = set(self.gated)
+        blocked_set = set(self.blocked)
+        overlaps: list[tuple[str, str, set[str]]] = [
+            ("allow", "gated", allow_set & gated_set),
+            ("allow", "blocked", allow_set & blocked_set),
+            ("gated", "blocked", gated_set & blocked_set),
+        ]
+        for a, b, shared in overlaps:
+            if shared:
+                # Sort the offenders so error messages are deterministic
+                # across dict-iteration orderings (matters for tests).
+                names = sorted(shared)
+                raise ValueError(
+                    f"tools.{a} and tools.{b} overlap on {names!r}; "
+                    "each tool must appear in at most one list"
+                )
+        return self
+
+
+class MCPServerConfig(BaseModel):
+    """One ``[mcp.servers.<name>]`` entry in an agent TOML.
+
+    ADR-0013 §3: server-axis default-deny — only servers listed here
+    are reachable. ``builtin = true`` marks hal0-admin / hal0-memory
+    which are always reachable for bundled agents and can't be removed
+    without an explicit override.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    url: str | None = Field(
+        default=None,
+        description=(
+            "MCP server URL. Empty for builtin servers (hal0 mounts "
+            "those internally at /mcp/admin + /mcp/memory). Required "
+            "for user-added servers — stdio:// for local processes, "
+            "http(s):// for remote."
+        ),
+    )
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "When False, the server registration round-trips through "
+            "config but is not connected at agent startup."
+        ),
+    )
+    builtin: bool = Field(
+        default=False,
+        description=(
+            "ADR-0013 §6: marks hal0-admin / hal0-memory. Bundled-agent "
+            "installers set this; user-added servers leave it False."
+        ),
+    )
+    auth: AgentAuthConfig = Field(default_factory=AgentAuthConfig)
+    tools: ToolPolicy = Field(default_factory=ToolPolicy)
+
+    @model_validator(mode="after")
+    def url_required_for_external(self) -> MCPServerConfig:
+        """External (non-builtin) servers must declare a URL."""
+        if not self.builtin and (self.url is None or not self.url.strip()):
+            raise ValueError("mcp.servers.<name>.url required for non-builtin servers")
+        return self
+
+
+class AgentMetadataConfig(BaseModel):
+    """``[agent]`` block — name + display + filesystem sandbox root."""
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    name: str = Field(..., description="Agent identifier (e.g. 'hermes').")
+    display: str = Field(
+        default="",
+        description="Human-readable label for the dashboard.",
+    )
+    workspace: str = Field(
+        default="",
+        description=(
+            "Filesystem sandbox root (ADR-0013 §5). Empty falls back "
+            "to the canonical /var/lib/hal0/agents/<name>/workspace at "
+            "load time."
+        ),
+    )
+
+    @field_validator("name")
+    @classmethod
+    def name_valid(cls, v: str) -> str:
+        # Agent names land in filesystem paths + systemd unit names —
+        # keep them strict (lowercase alphanumeric + hyphen, max 32 chars).
+        import re
+
+        if not v or not v.strip():
+            raise ValueError("agent name must not be empty")
+        if not re.match(r"^[a-z0-9][a-z0-9-]{0,31}$", v):
+            raise ValueError(
+                f"agent name {v!r}: use lowercase alphanumeric + hyphens "
+                "(must start with alphanumeric, max 32 chars)"
+            )
+        return v
+
+
+class AgentMCPConfig(BaseModel):
+    """``[mcp]`` block container.
+
+    Holds the ``servers`` map. Lives as its own model so future MCP-
+    wide knobs (default-deny override, connect-timeout, retry-backoff)
+    have an obvious home that round-trips through pydantic.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
+class AgentConfig(BaseModel):
+    """Top-level shape of ``/etc/hal0/agents/<name>.toml`` (ADR-0013 §1).
+
+    ADR-0013 §1 spells out one file per agent — installer for bundled,
+    user for user-added. Preserved across ``hal0 update``. Schema
+    validated at agent bootstrap time + on dashboard-edit save.
+
+    The ``mcp.servers`` map is dict-of-:class:`MCPServerConfig`. Pydantic
+    accepts dicts on a ``dict[str, ...]`` field natively, so the TOML
+    shape ``[mcp.servers.filesystem]`` round-trips cleanly without a
+    custom flattener.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    schema_version: int = Field(
+        default=AGENT_CONFIG_SCHEMA_VERSION,
+        ge=1,
+        description=(
+            "Pin so an incompatible future change (e.g. nested tool "
+            "policies) can detect old files + migrate."
+        ),
+    )
+    agent: AgentMetadataConfig = Field(...)
+    mcp: AgentMCPConfig = Field(default_factory=AgentMCPConfig)
+
+    @field_validator("schema_version")
+    @classmethod
+    def schema_version_known(cls, v: int) -> int:
+        # Reject future versions explicitly so a downgrade doesn't
+        # silently accept a config it can't actually understand.
+        if v > AGENT_CONFIG_SCHEMA_VERSION:
+            raise ValueError(
+                f"agent schema_version {v} is newer than this hal0 "
+                f"understands ({AGENT_CONFIG_SCHEMA_VERSION}); "
+                "upgrade hal0 or pin the agent config to an older version"
+            )
+        return v
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
@@ -948,11 +1211,17 @@ class Hal0Config(BaseModel):
 
 
 __all__ = [
+    "AGENT_CONFIG_SCHEMA_VERSION",
     "BACKEND_TO_DEVICE",
     "CAPABILITIES_SCHEMA_VERSION_CURRENT",
     "CAPABILITIES_SCHEMA_VERSION_LEGACY",
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_DEVICE",
+    "AgentAuthConfig",
+    "AgentAuthKindLiteral",
+    "AgentConfig",
+    "AgentMCPConfig",
+    "AgentMetadataConfig",
     "DeviceLiteral",
     "DispatcherConfig",
     "GPUInfo",
@@ -960,6 +1229,7 @@ __all__ = [
     "GraphUpstreamConfig",
     "Hal0Config",
     "HardwareInfo",
+    "MCPServerConfig",
     "MemoryConfig",
     "MemoryGraphConfig",
     "MetaConfig",
@@ -972,6 +1242,7 @@ __all__ = [
     "SlotConfig",
     "SlotsConfig",
     "TelemetryConfig",
+    "ToolPolicy",
     "UpstreamEntry",
     "UpstreamsConfig",
     "map_backend_to_device",
