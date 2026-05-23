@@ -37,6 +37,11 @@ function buildHealth() {
     max_loaded: L.budget ?? 4,
     version: L.version ?? 'v10.6.0',
     throughput_mbps: L.throughput ?? null,
+    // #221 — `queued` + `coresident` round-trip via the mock so the demo
+    // chips keep rendering. Lemonade itself does not surface these on
+    // /v1/health today; production hides the chips when they're absent.
+    queued: typeof L.queued === 'number' ? L.queued : null,
+    coresident: typeof L.coresident === 'boolean' ? L.coresident : null,
   }
 }
 

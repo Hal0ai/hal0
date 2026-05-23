@@ -22,6 +22,12 @@ export interface LemonadeHealth {
   max_loaded: number | null
   version: string | null
   throughput_mbps: number | null
+  // Lemonade /v1/health does not currently surface a queue depth or a
+  // coresident rollup (see hal0_lemonade_v1_load_schema). The hook
+  // preserves them as `null` so the UI can distinguish "not surfaced"
+  // from "really zero" and hide chips that have no real signal yet.
+  queued: number | null
+  coresident: boolean | null
 }
 
 export interface LemonadeStats {
@@ -47,6 +53,9 @@ export function useLemonadeHealth(): UseQueryResult<LemonadeHealth> {
         version: typeof body?.version === 'string' ? body.version : null,
         throughput_mbps:
           typeof body?.throughput_mbps === 'number' ? body.throughput_mbps : null,
+        // Explicit null (NOT 0) when the field is missing — see #221.
+        queued: typeof body?.queued === 'number' ? body.queued : null,
+        coresident: typeof body?.coresident === 'boolean' ? body.coresident : null,
       }
     },
     refetchInterval: POLL_HEALTH_MS,
@@ -86,8 +95,11 @@ export function useLemondRollup() {
     loaded: h?.loaded.length ?? 0,
     budget: h?.max_loaded ?? 4,
     throughput: h?.throughput_mbps ?? null,
-    queued: 0,
-    coresident: true,
+    // queued + coresident are null until Lemonade exposes them on
+    // /v1/health (#221, follow-up filed). Chips that consume these
+    // guard with `!= null` so they hide instead of lying with 0.
+    queued: h?.queued ?? null,
+    coresident: h?.coresident ?? null,
     lastTtft: stats.data?.time_to_first_token ?? null,
     lastTokPerSec: stats.data?.tokens_per_second ?? null,
   }

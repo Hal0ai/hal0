@@ -178,10 +178,12 @@ function SidebarStatusBlock({ onGo }) {
         <span className="k">loaded</span>
         <span className="v"><b>{L.loaded}</b>/{L.budget}</span>
       </div>
-      <div className="row">
-        <span className="k">npu</span>
-        <span className="v" style={{color: "var(--dev-npu)"}}><span className="dot" />coresident</span>
-      </div>
+      {L.coresident && (
+        <div className="row">
+          <span className="k">npu</span>
+          <span className="v" style={{color: "var(--dev-npu)"}}><span className="dot" />coresident</span>
+        </div>
+      )}
       <div className="nudge" onClick={() => onGo("logs")}>View runtime logs →</div>
     </div>
   );
@@ -270,15 +272,19 @@ function Footer({ updateAvailable = true, expanded = false, onToggle, journal = 
           <span className="k">loaded</span>
           <span className="v num">{L.loaded}/{L.budget}</span>
         </div>
-        <div className="foot-chip" style={{ color: "var(--dev-npu)" }}>
-          <span className="dot" />
-          <span className="k">npu</span>
-          <span className="v">coresident</span>
-        </div>
-        <div className="foot-chip">
-          <span className="k">queued</span>
-          <span className="v num">{L.queued}</span>
-        </div>
+        {L.coresident && (
+          <div className="foot-chip" style={{ color: "var(--dev-npu)" }}>
+            <span className="dot" />
+            <span className="k">npu</span>
+            <span className="v">coresident</span>
+          </div>
+        )}
+        {L.queued != null && (
+          <div className="foot-chip">
+            <span className="k">queued</span>
+            <span className="v num">{L.queued}</span>
+          </div>
+        )}
         {updateAvailable && (
           <div className="foot-chip accent">
             <span className="k">●</span>

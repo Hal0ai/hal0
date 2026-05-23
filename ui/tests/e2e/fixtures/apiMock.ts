@@ -50,8 +50,12 @@ export async function installDefaultMocks(page: Page, state: MockState) {
 
   // Catch-all FIRST so per-route registrations after this win
   // (Playwright matches routes in reverse-registration order).
-  await page.route('**/api/**', (route) => json(route, {}))
-  await page.route('**/v1/**', (route) => json(route, {}))
+  //
+  // Patterns are anchored on the URL origin so they don't accidentally
+  // intercept Vite module imports under `/src/api/…` (which would be
+  // fulfilled with JSON and break React mount with a MIME error).
+  await page.route(/^https?:\/\/[^/]+\/api\//, (route) => json(route, {}))
+  await page.route(/^https?:\/\/[^/]+\/v1\//, (route) => json(route, {}))
 
   await page.route('**/api/status', (route) =>
     json(route, {
