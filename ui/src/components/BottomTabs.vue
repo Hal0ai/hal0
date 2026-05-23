@@ -27,7 +27,7 @@ const TABS = [
 
 const MORE_ITEMS = [
   { to: '/hardware',  label: 'Hardware' },
-  { to: '/providers', label: 'Backends' },
+  { to: '/backends',  label: 'Backends' },
   { to: '/agent',     label: 'Agent'    },
   { to: '/settings',  label: 'Settings' },
 ]

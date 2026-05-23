@@ -1,57 +1,30 @@
 /**
  * hardware.spec.ts — γ-6 Hardware probe re-run (PLAN §10.3 path 6).
  *
- * Covers: from /hardware, assert UMA breakdown bar renders with
- * `unified_memory_mb` total and segmented chunks for GTT/RAM/VRAM.
- * Click "Re-probe", mock `POST /api/install/probe` to mutate
- * unified_memory_mb. Bar updates; stat tiles reflect new numbers.
+ * Adapted for the v2 Hardware view (slice #174): vertical-stack of 6
+ * panels (Host / CPU / GPU / NPU / Memory / Storage). The refresh
+ * button re-hits /api/hardware (not /api/install/probe; that's
+ * FirstRun-specific). The unified-memory bar now lives inside the
+ * Memory card (`<MemoryBar>` segments).
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
-test('renders UMA breakdown, re-probes, sees updated numbers', async ({
+test('renders 6 hardware panels and refresh re-hits /api/hardware', async ({
   page,
   mockState,
   cleanState,
 }) => {
-  // Default mockState is UMA 128 GB. After re-probe, mutate to 64 GB.
-  await page.route('**/api/install/probe', (route) => {
-    mockState.installProbeCount += 1
-    mockState.hardware.unified_memory_mb = 64 * 1024
-    mockState.hardware.ram_total_mb = 64 * 1024
-    mockState.statsHardware.unified_memory_mb = 64 * 1024
-    mockState.statsHardware.ram_total_mb = 64 * 1024
-    return json(route, { ok: true, hardware: mockState.hardware })
+  let hardwareHits = 0
+  await page.route('**/api/hardware', (route) => {
+    hardwareHits += 1
+    return json(route, mockState.hardware)
   })
 
   await page.goto('/hardware')
+  await expect(page.locator('h1').filter({ hasText: 'Hardware' })).toBeVisible()
+  await expect(page.getByTestId('hw-card')).toHaveCount(6)
 
-  // ── UMA breakdown visible with default 128 GB ──────────────
-  // Section heading "Memory breakdown" is the UMA-only block.
-  const memSection = page.locator('section[aria-labelledby="mem-heading"]')
-  await expect(memSection).toBeVisible()
-  await expect(memSection.locator('.bar-total')).toHaveText('128 GB pool')
-
-  // Each non-zero segment renders a <div class="bar-seg seg-*">.
-  // The probe's defaults yield GTT + System RAM + Free — three
-  // segments. The legend echoes them.
-  await expect(memSection.locator('.bar-seg.seg-gtt')).toHaveCount(1)
-  await expect(memSection.locator('.bar-seg.seg-sys')).toHaveCount(1)
-  await expect(memSection.locator('.bar-seg.seg-free')).toHaveCount(1)
-
-  // Tile shows 128 GB total.
-  const unifiedTile = page.locator('.tile', { hasText: /Unified memory/ })
-  await expect(unifiedTile.locator('.tile-value')).toContainText('128')
-
-  // ── Re-probe → simulated hot-plug halves memory ───────────
-  const probeResp = page.waitForResponse(
-    (r) => r.url().endsWith('/api/install/probe') && r.request().method() === 'POST',
-  )
-  await page.getByRole('button', { name: /Re-probe/ }).click()
-  await probeResp
-
-  // The page calls loadHardware() after probe + status. Wait for
-  // the bar to reflect the new total.
-  await expect(memSection.locator('.bar-total')).toHaveText('64 GB pool', { timeout: 5_000 })
-  await expect(unifiedTile.locator('.tile-value')).toContainText('64')
-  expect(mockState.installProbeCount).toBe(1)
+  // Refresh triggers another GET /api/hardware.
+  await page.getByTestId('hw-refresh').click()
+  await expect.poll(() => hardwareHits, { timeout: 5000 }).toBeGreaterThanOrEqual(2)
 })

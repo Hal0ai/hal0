@@ -23,7 +23,7 @@ const NAV = [
   { id: 'nav:models',     label: 'Models',     hint: 'registry',   kind: 'nav',    to: '/models' },
   { id: 'nav:hardware',   label: 'Hardware',   hint: 'probe',      kind: 'nav',    to: '/hardware' },
   { id: 'nav:logs',       label: 'Logs',       hint: 'stream',     kind: 'nav',    to: '/logs' },
-  { id: 'nav:providers',  label: 'Providers',  hint: 'upstreams',  kind: 'nav',    to: '/providers' },
+  { id: 'nav:backends',   label: 'Backends',   hint: 'runtime',    kind: 'nav',    to: '/backends' },
   { id: 'nav:settings',   label: 'Settings',   hint: 'config',     kind: 'nav',    to: '/settings' },
   { id: 'nav:welcome',    label: 'First-run wizard', hint: 'setup', kind: 'nav',   to: '/welcome' },
 ]
