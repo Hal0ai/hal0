@@ -31,14 +31,42 @@ export interface Model {
 
 const MODELS_POLL_MS = 30_000
 
+/**
+ * Normalize a model row from the wire. Mirrors the HAL0_DATA mock
+ * in ui/src/dash/data.jsx. Critical default: `labels: []` — models.jsx
+ * does `model.labels.map(...)` unguarded.
+ */
+export function normalizeModel(raw: any): Model {
+  const src = (raw && typeof raw === 'object') ? raw : {}
+  return {
+    id: typeof src.id === 'string' ? src.id : '',
+    longName: typeof src.longName === 'string' ? src.longName : (src.id ?? ''),
+    repo: typeof src.repo === 'string' ? src.repo : '',
+    params: typeof src.params === 'string' ? src.params : '',
+    size: typeof src.size === 'string' ? src.size : '',
+    labels: Array.isArray(src.labels) ? src.labels.filter((x: any) => typeof x === 'string') : [],
+    type: typeof src.type === 'string' ? src.type : 'llm',
+    device: typeof src.device === 'string' ? src.device : 'cpu',
+    ns: typeof src.ns === 'string' ? src.ns : 'pulled',
+    installed: !!src.installed,
+    runtime: typeof src.runtime === 'string' ? src.runtime : '',
+  }
+}
+
+function normalizeModels(raw: any): Model[] {
+  if (!Array.isArray(raw)) return []
+  return raw.map(normalizeModel)
+}
+
 export function useModels() {
   return useQuery({
     queryKey: ['models'],
     queryFn: async () => {
       const body = await apiGet<any>(ENDPOINTS.models)
-      if (Array.isArray(body)) return body as Model[]
-      if (Array.isArray(body?.models)) return body.models as Model[]
-      return []
+      const arr = Array.isArray(body)
+        ? body
+        : (Array.isArray(body?.models) ? body.models : [])
+      return normalizeModels(arr)
     },
     refetchInterval: MODELS_POLL_MS,
   })
@@ -47,7 +75,7 @@ export function useModels() {
 export function useModel(id: string | null | undefined) {
   return useQuery({
     queryKey: ['models', id],
-    queryFn: () => apiGet<Model>(ENDPOINTS.model(id as string)),
+    queryFn: async () => normalizeModel(await apiGet<any>(ENDPOINTS.model(id as string))),
     enabled: !!id,
   })
 }

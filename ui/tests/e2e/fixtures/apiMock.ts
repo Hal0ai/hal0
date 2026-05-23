@@ -50,8 +50,22 @@ export async function installDefaultMocks(page: Page, state: MockState) {
 
   // Catch-all FIRST so per-route registrations after this win
   // (Playwright matches routes in reverse-registration order).
-  await page.route('**/api/**', (route) => json(route, {}))
-  await page.route('**/v1/**', (route) => json(route, {}))
+  //
+  // IMPORTANT: glob `**/api/**` matches ANY path containing `/api/` — that
+  // includes Vite-served source modules like `/src/api/hooks/useSlots.ts`,
+  // which then get fulfilled with `{}` (application/json) and refuse to load
+  // as ESM modules ("Expected JavaScript module" MIME error). The React tree
+  // never mounts.
+  //
+  // Scope the catch-all to absolute /api/* + /v1/* on the origin (i.e. paths
+  // that start with /api/ or /v1/) so dev-server module URLs pass through.
+  await page.route(/\/(api|v1)\//, (route) => {
+    const u = new URL(route.request().url())
+    if (u.pathname.startsWith('/api/') || u.pathname.startsWith('/v1/')) {
+      return json(route, {})
+    }
+    return route.continue()
+  })
 
   await page.route('**/api/status', (route) =>
     json(route, {
