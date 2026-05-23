@@ -142,6 +142,13 @@ onUnmounted(() => {
     }"
     data-testid="app-shell"
   >
+    <!-- Skip-link — visible only on focus, jumps to the route view.
+         First focusable element in the document so Tab from page top
+         exposes it before any other UI. -->
+    <a href="#main-content" class="skip-link" data-testid="skip-link">
+      Skip to main content
+    </a>
+
     <TopBar
       :is-mobile="isMobile || isDrawer"
       :sidebar-open="sidebarOpen"

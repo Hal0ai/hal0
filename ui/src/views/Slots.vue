@@ -40,6 +40,8 @@ import NpuBlock from '../components/slots/NpuBlock.vue'
 import NpuReactor from '../components/slots/NpuReactor.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import AgentPendingChip from '../components/agent/AgentPendingChip.vue'
+import SlotCardSkeleton from '../components/skeletons/SlotCardSkeleton.vue'
+import NpuSubRowSkeleton from '../components/skeletons/NpuSubRowSkeleton.vue'
 
 const route   = useRoute()
 const router  = useRouter()
@@ -157,7 +159,13 @@ const SKIP_PATH_SEEDS = Object.freeze([
   { name: 'tts',      type: 'tts',          group: 'voice', device: 'cpu' },
 ])
 
-const showSkipPath = computed(() => totalSlots.value === 0 && !system.loading)
+const showSkipPath = computed(() => totalSlots.value === 0 && !system.loading && !!system.status)
+
+// Initial-load skeleton: render placeholder cards on first paint, before
+// /api/status has ever returned. ``system.loading`` flips true on every
+// background poll, so we gate on ``!system.status`` to avoid flashing
+// skeletons over already-rendered slots.
+const showInitialSkeleton = computed(() => !system.status && system.loading)
 
 watch(showSkipPath, (skip) => {
   if (skip) banners.show('skip-path')
@@ -278,8 +286,22 @@ function errorFor(slot) {
          drift, model-missing, all-disabled, skip-path) + global. -->
     <BannerStack scope="slots" />
 
+    <!-- ── Initial-load skeleton (slice #175) ────────────────────── -->
+    <section v-if="showInitialSkeleton" class="sec-grp" data-testid="slots-skeleton">
+      <div class="sec">
+        <h2>Loading slots<span class="ct mono">—</span></h2>
+        <div class="rule" />
+      </div>
+      <div class="slots-grid">
+        <SlotCardSkeleton v-for="i in 4" :key="i" />
+      </div>
+      <div class="npu-skel-stack" aria-hidden="true">
+        <NpuSubRowSkeleton v-for="i in 3" :key="`npu-${i}`" />
+      </div>
+    </section>
+
     <!-- ── Skip-path: 6 seeded EmptySlotCards ────────────────────── -->
-    <template v-if="showSkipPath">
+    <template v-else-if="showSkipPath">
       <section class="sec-grp">
         <div class="sec">
           <h2>Configure your slots<span class="ct mono">{{ SKIP_PATH_SEEDS.length }}</span></h2>
