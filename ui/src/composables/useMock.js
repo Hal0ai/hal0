@@ -371,7 +371,7 @@ function buildBackends() {
 function buildBackendById(id) {
   const b = MOCK_DATA.backends.find((x) => x.id === id)
   if (!b) return null
-  // Per useCapabilities composable: backend snapshots include loaded models.
+  // Backend snapshots include loaded models so the UI can render them inline.
   return {
     ...b,
     loaded: MOCK_DATA.slots
