@@ -42,6 +42,7 @@ function SnapshotStrip({ slots, onGo }) {
 
 // ─── Persona dropdown ───
 function PersonaPicker({ slots, current, onPick, open, onToggle, noTools }) {
+  if (!slots || slots.length === 0) return null;
   const cur = slots.find(s => s.name === current) || slots[0];
   const chatSlots = slots.filter(s => s.type === "llm");
   return (
