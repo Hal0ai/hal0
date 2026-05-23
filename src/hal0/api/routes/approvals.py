@@ -39,10 +39,9 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -54,7 +53,6 @@ router = APIRouter()
 # of ADR-0004 §5. POST /approve and POST /deny carry this dep
 # explicitly; GETs (list + SSE) keep the looser require_token gate
 # applied by the include_router prefix in the API factory.
-_writer_only = [Depends(require_writer)]
 
 
 # SSE keep-alive cadence — matches /api/events to keep the proxy
@@ -107,7 +105,7 @@ async def list_pending(request: Request) -> dict[str, Any]:
     return {"approvals": queue.list_pending()}
 
 
-@router.post("/{approval_id}/approve", dependencies=_writer_only)
+@router.post("/{approval_id}/approve")
 async def approve_approval(approval_id: str, request: Request) -> dict[str, Any]:
     """Approve one pending entry; the queue runs the bound executor.
 
@@ -132,7 +130,7 @@ async def approve_approval(approval_id: str, request: Request) -> dict[str, Any]
     return {"approval": result}
 
 
-@router.post("/{approval_id}/deny", dependencies=_writer_only)
+@router.post("/{approval_id}/deny")
 async def deny_approval(approval_id: str, request: Request) -> dict[str, Any]:
     """Deny one pending entry; no executor runs."""
     queue = _queue(request)

@@ -15,14 +15,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.hardware import pve
-
-_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -109,7 +106,7 @@ async def get_proxmox_config() -> dict[str, Any]:
     return body
 
 
-@router.put("", dependencies=_writer)
+@router.put("")
 async def put_proxmox_config(request: Request) -> dict[str, Any]:
     """Write /etc/hal0/proxmox.json from the supplied body.
 
@@ -172,7 +169,7 @@ async def put_proxmox_config(request: Request) -> dict[str, Any]:
     return await get_proxmox_config()
 
 
-@router.delete("", dependencies=_writer)
+@router.delete("")
 async def delete_proxmox_config(request: Request) -> dict[str, Any]:
     """Remove the Proxmox config file (returns to 'not configured')."""
     try:
@@ -196,7 +193,7 @@ async def delete_proxmox_config(request: Request) -> dict[str, Any]:
     return {"configured": False, "existed": existed}
 
 
-@router.post("/test", dependencies=_writer)
+@router.post("/test")
 async def test_proxmox_config(request: Request) -> dict[str, Any]:
     """Validate a candidate config WITHOUT writing it.
 

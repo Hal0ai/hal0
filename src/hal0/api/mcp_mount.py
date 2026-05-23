@@ -22,16 +22,20 @@ from dataclasses import dataclass
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
-from hal0.api.middleware.auth import (
-    AuthIdentity,
-    _resolve_bearer,
-    require_token,
-)
-
 log = structlog.get_logger("hal0.api.mcp_mount")
+
+
+def _resolve_bearer(request: Request) -> str | None:
+    """Extract a bearer token from the Authorization header, if present."""
+    raw = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not raw:
+        return None
+    parts = raw.strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None
 
 
 @dataclass
@@ -77,28 +81,18 @@ def private_resolver() -> bool:
 
 
 class MCPAuthMiddleware(BaseHTTPMiddleware):
-    """Bearer-gate the mounted MCP server + stash caller ctx in a contextvar.
+    """Stash MCP caller ctx in a contextvar (auth removed in v0.3).
 
-    Requires ``Authorization: Bearer <token>`` (resolves through hal0's
-    existing ``require_token`` dependency so token-store, session-cookie,
-    and forwarded-email paths all behave the same as REST routes do).
-
-    On success: stashes ``(bearer, client_id, private)`` in the
-    module-level contextvar so the FastMCP tool handlers can pull it
-    via the resolver callbacks above. On failure: returns the same JSON
-    shape any other authed REST route would.
+    The middleware no longer enforces bearer auth — that surface was
+    removed alongside the FastAPI auth modules. It still parses any
+    Authorization: Bearer token off the request (so upstream tools that
+    do pass one can be identified for logging / scoping) but does not
+    require one.
     """
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
-        try:
-            identity: AuthIdentity = await require_token(request)
-        except Exception as exc:
-            status = getattr(exc, "status", 401)
-            code = getattr(exc, "code", "auth.required")
-            return JSONResponse(status_code=status, content={"error": code, "detail": str(exc)})
-
         bearer = _resolve_bearer(request)
-        client_id = identity.identity or "anonymous"
+        client_id = bearer or "anonymous"
         private = request.headers.get("x-hal0-private", "").lower() in {"1", "true"}
 
         token = _caller.set(_MCPCallerCtx(bearer=bearer, client_id=client_id, private=private))

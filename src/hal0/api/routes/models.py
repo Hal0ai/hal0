@@ -16,10 +16,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 
-from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
@@ -35,7 +34,6 @@ from hal0.registry.pull import (
 )
 
 # See slots.py for the writer-gate rationale.
-_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -145,7 +143,7 @@ async def list_catalogue() -> dict[str, Any]:
     }
 
 
-@router.post("/scan/preview", dependencies=_writer)
+@router.post("/scan/preview")
 async def scan_preview(request: Request) -> dict[str, Any]:
     """Walk the requested paths and return :class:`DetectionResult` rows.
 
@@ -267,7 +265,7 @@ async def scan_preview(request: Request) -> dict[str, Any]:
     return {"preview": preview, "count": len(preview)}
 
 
-@router.post("/scan", dependencies=_writer)
+@router.post("/scan")
 async def scan_models(request: Request) -> dict[str, Any]:
     """Walk model roots and register new files — legacy auto-scan, or
     commit a user-edited preview when ``rows`` is supplied.
@@ -437,7 +435,7 @@ def _suggest_id_from_path(p: Path) -> str:
     return _normalise_id(p.stem)
 
 
-@router.post("", status_code=201, dependencies=_writer)
+@router.post("", status_code=201)
 async def create_model(request: Request) -> dict[str, Any]:
     """Register a new model in the local ModelRegistry.
 
@@ -510,7 +508,7 @@ async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     )
 
 
-@router.put("/{model_id}", dependencies=_writer)
+@router.put("/{model_id}")
 async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     """Apply partial updates to a registered model's metadata.
 
@@ -643,7 +641,7 @@ async def _unload_slot_if_running(request: Request, slot_name: str) -> None:
         await sm.unload(slot_name)
 
 
-@router.delete("/{model_id}", dependencies=_writer)
+@router.delete("/{model_id}")
 async def delete_model(
     model_id: str,
     request: Request,
@@ -876,7 +874,7 @@ def _eta_s(job: PullJob, speed_bps: float) -> float | None:
     return remaining / speed_bps
 
 
-@router.post("/{model_id}/pull", status_code=202, dependencies=_writer)
+@router.post("/{model_id}/pull", status_code=202)
 async def pull_model(
     model_id: str,
     request: Request,
@@ -1053,7 +1051,7 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
     )
 
 
-@router.post("/{model_id}/pull/cancel", dependencies=_writer)
+@router.post("/{model_id}/pull/cancel")
 async def pull_cancel(model_id: str, request: Request) -> dict[str, object]:
     """Request cancellation of an in-flight pull.
 

@@ -15,25 +15,19 @@ from typing import TYPE_CHECKING
 
 import httpx
 import structlog
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 
 if TYPE_CHECKING:
     from hal0.lemonade.idle import IdleDriver
     from hal0.lemonade.metrics_shim import MetricsShim
 
 from hal0 import __version__
-from hal0.api.auth import first_run as first_run_lock
-from hal0.api.auth import rate_limit as auth_rate_limit
 from hal0.api.middleware import error_codes, request_id
-from hal0.api.middleware.auth import require_token
 from hal0.api.routes import (
     agents as agents_routes,
 )
 from hal0.api.routes import (
     approvals as approvals_routes,
-)
-from hal0.api.routes import (
-    auth as auth_routes,
 )
 from hal0.api.routes import (
     backends as backends_routes,
@@ -423,32 +417,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     from hal0.hardware import HardwareStats
 
-    # First-run OTP lockfile (FINDINGS §28). When no owner password is
-    # set yet, mint (or reuse) a one-time token in
-    # ``<state>/.first-run.lock`` so a non-loopback caller has to
-    # present it before claiming ownership. We only mint if the
-    # password store is empty — once a password is set the lockfile
-    # has no purpose. Failures here are non-fatal: log + continue,
-    # because a missing lockfile collapses the route to "loopback-only"
-    # which is still strictly safer than the pre-fix open-LAN window.
-    try:
-        from hal0.auth.tokens import get_or_create_store
-
-        _bootstrap_store = get_or_create_store(app.state)
-        if _bootstrap_store.get_password_hash() is None:
-            lock = first_run_lock.mint_lockfile()
-            log.info(
-                "auth.first_run_lock.ready",
-                path=str(lock.path),
-            )
-        else:
-            # Password already set on this install — clean up any stale
-            # lockfile left over from the install run so a future
-            # rotation doesn't trip over a dangling token.
-            first_run_lock.consume_lockfile()
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning("auth.first_run_lock.mint_failed", error=str(exc))
-
     app.state.upstreams = upstreams
     app.state.model_registry = model_registry
     app.state.hal0_config = hal0_cfg
@@ -659,34 +627,13 @@ def create_app() -> FastAPI:
     request_id.install(app)
     error_codes.install(app)
 
-    # IP-bucket rate limiter for the auth surface (FINDINGS §32).
-    # Routes pull this off ``app.state.auth_rate_limiter`` via
-    # ``hal0.api.auth.rate_limit.check_rate_limit``. Installing here so
-    # the limiter exists before lifespan runs — tests that swap in a
-    # custom limiter (e.g. with a stub clock) can do so after the
-    # TestClient construction by reassigning ``app.state``.
-    auth_rate_limit.install(app)
-
-    # ── Auth wiring ──────────────────────────────────────────────────
-    # Per ADR-0001 Child B, the PUBLIC_PATHS frozenset is gone. A route
-    # is public iff its router (or route) does NOT declare an auth
-    # dependency — there is no allowlist to consult, the FastAPI graph
-    # IS the policy.
-    #
-    # The /api/auth router is mounted bare — /status, /login, /logout,
-    # /password (first-run path) are intentionally public; /me declares
-    # require_token at the function level; the /tokens subrouter
-    # declares require_admin at the subrouter level.
-    app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
-
     # /v1 is split into a public probe (GET /v1/models + /v1/models/{id})
     # and a writer surface that requires auth. The split lives in v1.py
     # via v1.public_router (probes) + v1.router (inference). OpenAI
     # clients historically GET /v1/models before sending an Authorization
     # header — keeping that probe auth-free preserves SDK compatibility.
     app.include_router(v1.public_router, prefix="/v1", tags=["v1"])
-    _v1_auth = [Depends(require_token)]
-    app.include_router(v1.router, prefix="/v1", tags=["v1"], dependencies=_v1_auth)
+    app.include_router(v1.router, prefix="/v1", tags=["v1"])
 
     # Issue #212: Lemonade reverse-proxy catch-all on /v1/{path:path}.
     # Mounted AFTER the dispatcher-owned v1 routers so every explicit
@@ -699,12 +646,7 @@ def create_app() -> FastAPI:
         lemonade_proxy_routes.router,
         prefix="/v1",
         tags=["v1", "lemonade-proxy"],
-        dependencies=_v1_auth,
     )
-
-    # Single-purpose protected routers — every endpoint requires a token
-    # (or session cookie / forwarded email) when HAL0_AUTH_ENABLED=1.
-    _admin_auth = [Depends(require_token)]
 
     # /api/install drives the first-run wizard. When HAL0_AUTH_ENABLED is
     # unset, the gate is a pure pass-through (require_token short-circuits
@@ -717,14 +659,11 @@ def create_app() -> FastAPI:
         installer.router,
         prefix="/api/install",
         tags=["installer"],
-        dependencies=_admin_auth,
     )
-    app.include_router(slots.router, prefix="/api/slots", tags=["slots"], dependencies=_admin_auth)
-    app.include_router(
-        models.router, prefix="/api/models", tags=["models"], dependencies=_admin_auth
-    )
-    app.include_router(hardware.router, prefix="/api", tags=["hardware"], dependencies=_admin_auth)
-    app.include_router(logs.router, prefix="/api/logs", tags=["logs"], dependencies=_admin_auth)
+    app.include_router(slots.router, prefix="/api/slots", tags=["slots"])
+    app.include_router(models.router, prefix="/api/models", tags=["models"])
+    app.include_router(hardware.router, prefix="/api", tags=["hardware"])
+    app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
     # PR-11: Lemonade log proxy — surfaces the /logs/stream WS as SSE
     # streams the dashboard consumes for the journal panel (PR-14) and
     # the nuclear-evict toast banner. Same admin auth as the rest of
@@ -733,7 +672,6 @@ def create_app() -> FastAPI:
         lemonade_logs_routes.router,
         prefix="/api/lemonade",
         tags=["lemonade", "logs"],
-        dependencies=_admin_auth,
     )
     # PR-13: Lemonade admin panel — GET /api/lemonade/config + POST
     # /api/lemonade/config wrap lemond's /internal/config + /internal/set
@@ -745,13 +683,11 @@ def create_app() -> FastAPI:
         lemonade_admin_routes.router,
         prefix="/api/lemonade",
         tags=["lemonade", "admin"],
-        dependencies=_admin_auth,
     )
     app.include_router(
         settings.router,
         prefix="/api/settings",
         tags=["settings"],
-        dependencies=_admin_auth,
     )
     # Proxmox integration sub-router (config file at /etc/hal0/proxmox.json).
     # Mounted as a sibling under /api/settings/proxmox so the dashboard's
@@ -760,16 +696,12 @@ def create_app() -> FastAPI:
         proxmox_routes.router,
         prefix="/api/settings/proxmox",
         tags=["settings", "proxmox"],
-        dependencies=_admin_auth,
     )
-    app.include_router(
-        providers.router, prefix="/api", tags=["providers"], dependencies=_admin_auth
-    )
+    app.include_router(providers.router, prefix="/api", tags=["providers"])
     app.include_router(
         updater.router,
         prefix="/api/updates",
         tags=["updater"],
-        dependencies=_admin_auth,
     )
 
     # Capability slots overlay — operator-facing grouping of embed /
@@ -780,7 +712,6 @@ def create_app() -> FastAPI:
         capabilities_routes.router,
         prefix="/api/capabilities",
         tags=["capabilities"],
-        dependencies=_admin_auth,
     )
 
     # First-run bundle picker (ADR-0010 / PR-17). Admin-gated for
@@ -792,7 +723,6 @@ def create_app() -> FastAPI:
         bundles_routes.router,
         prefix="/api/bundles",
         tags=["bundles"],
-        dependencies=_admin_auth,
     )
 
     # Backend introspection — live status + currently-loaded children
@@ -803,7 +733,6 @@ def create_app() -> FastAPI:
         backends_routes.router,
         prefix="/api/backends",
         tags=["backends"],
-        dependencies=_admin_auth,
     )
 
     # NPU trio swap-status (PR-20). One read-only endpoint that merges
@@ -814,7 +743,6 @@ def create_app() -> FastAPI:
         npu.router,
         prefix="/api/npu",
         tags=["npu"],
-        dependencies=_admin_auth,
     )
 
     # Health + config/urls routers carry endpoints that are entirely
@@ -833,9 +761,7 @@ def create_app() -> FastAPI:
     # Image cache — generated PNGs from /v1/images/generations.  Admin
     # auth gate: cached PNGs live at predictable /api/images/cache/<uuid>
     # URLs and could leak prompts via filename if exposed publicly.
-    app.include_router(
-        images.router, prefix="/api/images", tags=["images"], dependencies=_admin_auth
-    )
+    app.include_router(images.router, prefix="/api/images", tags=["images"])
 
     # Bundled-agent lifecycle (ADR-0004 §2). Install / uninstall / list /
     # status. Single-pick + atomic switch enforced inside AgentManager.
@@ -843,7 +769,6 @@ def create_app() -> FastAPI:
         agents_routes.router,
         prefix="/api/agents",
         tags=["agents"],
-        dependencies=_admin_auth,
     )
 
     # Approval inbox (ADR-0004 §5). The dashboard bell, the MCP admin
@@ -855,7 +780,6 @@ def create_app() -> FastAPI:
         approvals_routes.router,
         prefix="/api/agent/approvals",
         tags=["approvals"],
-        dependencies=_admin_auth,
     )
 
     # ── MCP servers (ADR-0004 §4 + ADR-0005 §2) ─────────────────────

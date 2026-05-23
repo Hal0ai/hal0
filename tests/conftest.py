@@ -13,29 +13,6 @@ from hal0.api import create_app
 pytest_plugins = ()
 
 
-@pytest.fixture(autouse=True)
-def _auth_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opt every test out of the v1.0 auth-on-by-default posture.
-
-    As of security review §36 (2026-05-21), ``auth_enabled()`` defaults
-    to True when ``HAL0_AUTH_ENABLED`` is unset. The pre-v1 test suite
-    was written against an open-by-default API surface — propagating
-    the new default into every fixture would require minting an admin
-    token in ~449 places. The cheap, contained alternative is to make
-    every test start with ``HAL0_AUTH_DISABLED=1`` and let the small
-    set of auth-focused tests flip it off again via their own
-    ``monkeypatch.delenv`` + ``monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")``
-    setup.
-
-    Autouse so import-time fixture choice is implicit; individual
-    auth-aware tests (test_auth_middleware, test_auth_writer_scope,
-    test_no_public_paths, test_password_auth, test_auth_routes) start
-    by deleting ``HAL0_AUTH_DISABLED`` and setting ``HAL0_AUTH_ENABLED=1``
-    so they exercise the real production gate.
-    """
-    monkeypatch.setenv("HAL0_AUTH_DISABLED", "1")
-
-
 @pytest.fixture(scope="function")
 def app(tmp_hal0_home: str) -> FastAPI:
     """Return a fresh FastAPI app instance, filesystem-isolated under tmp_hal0_home.

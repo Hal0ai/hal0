@@ -18,18 +18,15 @@ import asyncio
 import os
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
-from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import scan_and_register
 
 router = APIRouter()
-
-_writer = [Depends(require_writer)]
 
 
 class ConfigInvalidError(Hal0Error):
@@ -198,7 +195,7 @@ async def get_models_config() -> dict[str, Any]:
     return cfg.models.model_dump(mode="json")
 
 
-@router.put("/models", dependencies=_writer)
+@router.put("/models")
 async def update_models_config(request: Request) -> dict[str, Any]:
     """Replace the [models] section, persist hal0.toml, then re-scan.
 

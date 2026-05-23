@@ -23,7 +23,7 @@ import contextlib
 import json
 import shutil
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 
 from hal0.agents import (
     AgentAlreadyInstalledError,
@@ -32,10 +32,7 @@ from hal0.agents import (
     HermesNotHal0AwareError,
 )
 from hal0.agents.manager import BUNDLED_AGENTS
-from hal0.api.middleware.auth import require_writer
 from hal0.errors import BadRequest, Conflict, Hal0Error, NotFound
-
-_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -61,7 +58,7 @@ async def list_agents() -> dict[str, object]:
 # ── POST /api/agents/install ──────────────────────────────────────────────────
 
 
-@router.post("/install", dependencies=_writer)
+@router.post("/install")
 async def install_agent(body: dict[str, object]) -> dict[str, object]:
     """Install a bundled agent. Body shape: ``{"name": str, "switch"?:
     bool}``.
@@ -262,7 +259,7 @@ async def agent_activity(
 # ── DELETE /api/agents/{name} ─────────────────────────────────────────────────
 
 
-@router.delete("/{name}", dependencies=_writer)
+@router.delete("/{name}")
 async def uninstall_agent(name: str) -> dict[str, str]:
     """Uninstall a bundled agent.
 

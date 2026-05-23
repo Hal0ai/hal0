@@ -23,10 +23,9 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
-from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
 from hal0.upstreams.integrations import get_catalog
@@ -42,7 +41,6 @@ _log = structlog.get_logger(__name__)
 _ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 # See slots.py for the writer-gate rationale.
-_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -115,7 +113,7 @@ async def get_upstream(name: str, request: Request) -> dict[str, Any]:
     return _serialize_upstream(u, last_models=model_cache.get(name))
 
 
-@router.post("/upstreams/{name}/test", dependencies=_writer)
+@router.post("/upstreams/{name}/test")
 async def test_upstream(name: str, request: Request) -> dict[str, Any]:
     """Probe ``/v1/models`` on ``name`` and return a reachability report.
 
@@ -247,7 +245,7 @@ def _write_credential_to_api_env(api_env: Path, key: str, value: str) -> None:
         raise
 
 
-@router.post("/providers/{name}/credentials", dependencies=_writer)
+@router.post("/providers/{name}/credentials")
 async def write_provider_credential(
     name: str,
     body: ProviderCredentialBody,

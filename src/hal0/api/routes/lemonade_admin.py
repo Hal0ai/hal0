@@ -48,9 +48,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 
-from hal0.api.middleware.auth import require_writer
 from hal0.errors import BadRequest, Hal0Error
 
 router = APIRouter()
@@ -58,7 +57,6 @@ router = APIRouter()
 # See settings.py for the writer-gate rationale: GET stays on the parent
 # admin gate (require_token), POST additionally requires writer scope so
 # cookie sessions ride through the CSRF tripwire alongside Bearer tokens.
-_writer = [Depends(require_writer)]
 
 
 # ── key taxonomy (plan §2.2) ──────────────────────────────────────────
@@ -286,7 +284,7 @@ async def get_lemonade_config(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/config", dependencies=_writer)
+@router.post("/config")
 async def set_lemonade_config(request: Request) -> dict[str, Any]:
     """Apply a partial config update against ``lemond /internal/set``.
 

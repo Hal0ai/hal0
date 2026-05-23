@@ -17,10 +17,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 
 from hal0.api.deps import SlotManagerDep
-from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import BadRequest
 from hal0.capabilities.catalog import available_backends, get_backend
 from hal0.capabilities.orchestrator import _CHILD_TO_SLOT
@@ -30,7 +29,6 @@ from hal0.errors import Hal0Error, NotFound
 router = APIRouter()
 
 # Writer-scope gate for the POST routes (mirrors the slots router pattern).
-_writer = [Depends(require_writer)]
 
 # ── NPU dynamic-slot config ───────────────────────────────────────────────────
 # The NPU backend supports operator-driven slot creation from the dashboard's
@@ -326,7 +324,7 @@ async def _allocate_npu_port(slot_manager: SlotManagerDep) -> int:
     )
 
 
-@router.post("/npu/load", dependencies=_writer)
+@router.post("/npu/load")
 async def load_npu_model(request: Request, slot_manager: SlotManagerDep) -> dict[str, Any]:
     """Create + load an FLM slot for one model tag.
 
@@ -398,7 +396,7 @@ async def load_npu_model(request: Request, slot_manager: SlotManagerDep) -> dict
     }
 
 
-@router.post("/npu/unload", dependencies=_writer)
+@router.post("/npu/unload")
 async def unload_npu_model(request: Request, slot_manager: SlotManagerDep) -> dict[str, Any]:
     """Unload + delete a dynamically-created NPU slot.
 

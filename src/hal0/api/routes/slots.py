@@ -29,10 +29,9 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.slots.manager import Slot, SlotManager
 
@@ -40,7 +39,6 @@ from hal0.slots.manager import Slot, SlotManager
 # The router itself is mounted with require_token at include_router() time
 # (see hal0.api.create_app), which keeps GETs open to read-only tokens
 # while these per-route deps enforce the writer scope on mutations.
-_writer = [Depends(require_writer)]
 
 router = APIRouter()
 
@@ -326,7 +324,7 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     return merged
 
 
-@router.post("", status_code=201, dependencies=_writer)
+@router.post("", status_code=201)
 async def create_slot(request: Request) -> dict[str, object]:
     """Create a new slot. Body: SlotConfig schema.
 
@@ -823,7 +821,7 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         raise
 
 
-@router.delete("/{name}", dependencies=_writer)
+@router.delete("/{name}")
 async def delete_slot(name: str, request: Request) -> dict[str, object]:
     """Delete a slot. If the slot is running, it is stopped first.
 
@@ -844,7 +842,7 @@ async def get_slot_config(name: str, request: Request) -> dict[str, object]:
     return cfg
 
 
-@router.put("/{name}/config", dependencies=_writer)
+@router.put("/{name}/config")
 async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     """Update a slot's config. Body: partial SlotConfig (shallow merge)."""
     sm = _get_slot_manager(request)
@@ -862,7 +860,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     return _slot_to_dict(snap, request)
 
 
-@router.patch("/{name}/defaults", dependencies=_writer)
+@router.patch("/{name}/defaults")
 async def update_slot_defaults(name: str, request: Request) -> dict[str, object]:
     """Update slot defaults (ctx_size, temperature, etc.).
 
@@ -884,7 +882,7 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
     return _slot_to_dict(snap, request)
 
 
-@router.post("/{name}/backend", dependencies=_writer)
+@router.post("/{name}/backend")
 async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     """Switch a slot's backend (e.g., vulkan → rocm)."""
     sm = _get_slot_manager(request)
@@ -909,7 +907,7 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
 # ── lifecycle ──────────────────────────────────────────────────────────────
 
 
-@router.post("/{name}/load", dependencies=_writer)
+@router.post("/{name}/load")
 async def load_slot(name: str, request: Request) -> dict[str, object]:
     """Load a model into a slot. Optional body: {"model_id": "..."}.
 
@@ -944,21 +942,21 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
     return _slot_to_dict(snap, request)
 
 
-@router.post("/{name}/unload", dependencies=_writer)
+@router.post("/{name}/unload")
 async def unload_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
     snap = await sm.unload(name)
     return _slot_to_dict(snap, request)
 
 
-@router.post("/{name}/restart", dependencies=_writer)
+@router.post("/{name}/restart")
 async def restart_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
     snap = await sm.restart(name)
     return _slot_to_dict(snap, request)
 
 
-@router.post("/{name}/swap", dependencies=_writer)
+@router.post("/{name}/swap")
 async def swap_slot(name: str, request: Request) -> dict[str, object]:
     """Hot-swap a slot's model. Body: {"model_id": "..."}.
 

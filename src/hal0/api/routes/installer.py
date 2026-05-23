@@ -31,10 +31,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 
-from hal0.api.auth import first_run as first_run_lock
-from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
@@ -50,7 +48,6 @@ from hal0.registry.store import ModelAlreadyExists
 # while these per-route deps enforce the writer scope on mutations. Both
 # gates short-circuit to a pass-through when HAL0_AUTH_ENABLED is unset,
 # preserving the fresh-install / first-run wizard UX.
-_writer = [Depends(require_writer)]
 
 # Slot-name policy — mirrors ``SlotConfig.name`` in hal0.config.schema so a
 # slot name accepted by the API installer endpoints is also accepted by the
@@ -186,7 +183,7 @@ async def install_state(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/probe", dependencies=_writer)
+@router.post("/probe")
 async def install_probe(request: Request) -> dict[str, Any]:
     """Re-run the hardware probe and rewrite ``/etc/hal0/hardware.json``.
 
@@ -207,7 +204,7 @@ async def install_probe(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/complete", dependencies=_writer)
+@router.post("/complete")
 async def install_complete(request: Request) -> dict[str, Any]:
     """Mark the FirstRun wizard as complete by writing the sentinel.
 
@@ -255,9 +252,6 @@ async def install_complete(request: Request) -> dict[str, Any]:
         if tmp_path is not None:
             with contextlib.suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
-
-    # Idempotent — consume_lockfile() is a no-op if the file is already gone.
-    first_run_lock.consume_lockfile()
 
     return {"first_run": False, "sentinel_path": str(sentinel)}
 
@@ -405,7 +399,7 @@ def _assign_to_slot(slot: str, model_id: str) -> Path:
     return slot_path
 
 
-@router.post("/pick-default", dependencies=_writer)
+@router.post("/pick-default")
 async def pick_default(
     request: Request,
     background: BackgroundTasks,
@@ -484,7 +478,7 @@ async def pick_default(
     }
 
 
-@router.put("/slots/{slot}/model", dependencies=_writer)
+@router.put("/slots/{slot}/model")
 async def set_slot_default_model(slot: str, request: Request) -> dict[str, Any]:
     # Persist-only counterpart to /api/slots/{name}/swap.  Hot-swap changes
     # the running container; this writes model.default into
