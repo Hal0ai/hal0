@@ -58,6 +58,16 @@ const routes = [
     meta: { title: 'Settings' },
   },
   {
+    // PR-13: Lemonade admin panel — config view + edit of lemond's
+    // /internal/config surface. Separate route (not a section on the
+    // main Settings page) so the unsaved-changes-on-leave behaviour
+    // stays isolated to this panel.
+    path: '/settings/lemonade',
+    name: 'settings-lemonade',
+    component: () => import('./views/Settings/LemonadeAdmin.vue'),
+    meta: { title: 'Lemonade admin' },
+  },
+  {
     // Phase 8 bundled-agent surface. The page is one host component
     // with horizontal tabs driven by ?tab=overview|inbox|activity|chat
     // so the URL is shareable + reload-stable.

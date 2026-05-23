@@ -59,6 +59,53 @@ export const DEFAULT_SETTINGS = {
   dispatcher: { prefetch_timeout_s: 8.0, prefetch_parallel_cap: 4 },
   telemetry: { enabled: false, channel: 'stable' },
 }
+/**
+ * PR-13 Lemonade admin defaults — what GET /api/lemonade/config returns
+ * in the absence of a per-spec override. Shape matches the real lemond
+ * /internal/config snapshot plus the hal0-added ``_hal0`` metadata
+ * block the route appends (see hal0.api.routes.lemonade_admin).
+ */
+export const DEFAULT_LEMONADE_CONFIG = {
+  host: '127.0.0.1',
+  port: 13305,
+  ctx_size: 4096,
+  max_loaded_models: 4,
+  extra_models_dir: '/var/lib/hal0/models',
+  global_timeout: 900,
+  no_broadcast: true,
+  log_level: 'info',
+  llamacpp: { args: '--parallel 1 --threads 8', backend: 'rocm' },
+  flm: { args: '--asr 1 --embed 1' },
+  whispercpp: { backend: 'vulkan' },
+  sdcpp: { backend: 'rocm', steps: 20, cfg_scale: 7.0, width: 512, height: 512 },
+  _hal0: {
+    effects: {
+      immediate: [
+        'extra_models_dir',
+        'global_timeout',
+        'host',
+        'log_level',
+        'no_broadcast',
+        'port',
+      ],
+      deferred: [
+        'cfg_scale',
+        'ctx_size',
+        'flm_args',
+        'height',
+        'llamacpp_args',
+        'llamacpp_backend',
+        'max_loaded_models',
+        'sdcpp_backend',
+        'steps',
+        'whispercpp_backend',
+        'width',
+      ],
+    },
+    locked: { extra_models_dir: '/var/lib/hal0/models' },
+  },
+}
+
 export const DEFAULT_CURATED_MODELS = {
   models: [
     {
@@ -115,6 +162,10 @@ export type MockState = {
   agentApprovals: any[]
   /** Installed bundled agents returned by GET /api/agents (Phase 8). */
   agentInstalled: any[]
+  /** Lemonade /internal/config snapshot returned by GET /api/lemonade/config (PR-13). */
+  lemonadeConfig: any
+  /** Last POST /api/lemonade/config patch body — for assertions. */
+  lemonadeLastPatch: Record<string, any> | null
 }
 
 export function makeMockState(): MockState {
@@ -133,6 +184,8 @@ export function makeMockState(): MockState {
     slotSnapshots: {},
     agentApprovals: [],
     agentInstalled: [],
+    lemonadeConfig: JSON.parse(JSON.stringify(DEFAULT_LEMONADE_CONFIG)),
+    lemonadeLastPatch: null,
   }
 }
 
@@ -189,6 +242,84 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   })
   await page.route('**/api/settings/reload', (route) => json(route, state.settings))
   await page.route('**/api/settings/schema', (route) => json(route, {}))
+
+  /* PR-13: Lemonade admin panel. GET returns the seeded snapshot;
+     POST validates against the same key gates the backend enforces
+     (unknown key → 400, llamacpp_args missing --threads or below 2 →
+     400, flm_args missing either trio flag → 400). The mock mirrors
+     the real route's response envelope so the UI's success-toast +
+     inline-error code paths are exercised end-to-end. */
+  await page.route('**/api/lemonade/config', (route) => {
+    const req: Request = route.request()
+    if (req.method() === 'POST') {
+      const patch = JSON.parse(req.postData() || '{}')
+      state.lemonadeLastPatch = patch
+      const immediate = new Set([
+        'port', 'host', 'log_level', 'global_timeout', 'no_broadcast', 'extra_models_dir',
+      ])
+      const deferred = new Set([
+        'max_loaded_models', 'ctx_size', 'llamacpp_backend', 'llamacpp_args',
+        'sdcpp_backend', 'whispercpp_backend', 'steps', 'cfg_scale', 'width', 'height',
+        'flm_args',
+      ])
+      const known = new Set([...immediate, ...deferred])
+      const errors: Record<string, string> = {}
+      for (const [key, value] of Object.entries(patch)) {
+        if (!known.has(key)) {
+          errors[key] = `unknown key — admin-editable keys are ${[...known].sort()}`
+          continue
+        }
+        if (key === 'llamacpp_args' && typeof value === 'string') {
+          const m = value.match(/(?:^|\s)--threads(?:\s+|=)(\d+)(?=\s|$)/)
+          if (!m) {
+            errors.llamacpp_args = 'must include --threads N where N >= 2'
+          } else if (parseInt(m[1], 10) < 2) {
+            errors.llamacpp_args = `--threads ${m[1]} is below the required minimum of 2`
+          }
+        }
+        if (key === 'flm_args' && typeof value === 'string') {
+          if (!/--asr\s+1(?:\s|$)/.test(value)) errors.flm_args = 'must include --asr 1 (FLM trio mandate, plan §5)'
+          else if (!/--embed\s+1(?:\s|$)/.test(value)) errors.flm_args = 'must include --embed 1 (FLM trio mandate, plan §5)'
+        }
+        if (key === 'extra_models_dir' && value !== '/var/lib/hal0/models') {
+          errors.extra_models_dir = "must equal '/var/lib/hal0/models'"
+        }
+      }
+      if (Object.keys(errors).length > 0) {
+        return route.fulfill({
+          status: 400,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: {
+              code: 'lemonade.config_invalid',
+              message: 'one or more keys failed validation',
+              details: errors,
+            },
+          }),
+        })
+      }
+      // Merge accepted patch into the snapshot (flat keys → nested for
+      // llamacpp / flm / whispercpp / sdcpp).
+      for (const [k, v] of Object.entries(patch)) {
+        if (k === 'llamacpp_args') state.lemonadeConfig.llamacpp.args = v
+        else if (k === 'llamacpp_backend') state.lemonadeConfig.llamacpp.backend = v
+        else if (k === 'flm_args') state.lemonadeConfig.flm.args = v
+        else if (k === 'whispercpp_backend') state.lemonadeConfig.whispercpp.backend = v
+        else if (k === 'sdcpp_backend') state.lemonadeConfig.sdcpp.backend = v
+        else if (['steps', 'cfg_scale', 'width', 'height'].includes(k)) state.lemonadeConfig.sdcpp[k] = v
+        else state.lemonadeConfig[k] = v
+      }
+      const touched = Object.keys(patch)
+      return json(route, {
+        applied: { applied: touched },
+        effects: {
+          immediate: touched.filter((k) => immediate.has(k)).sort(),
+          deferred: touched.filter((k) => deferred.has(k)).sort(),
+        },
+      })
+    }
+    return json(route, state.lemonadeConfig)
+  })
   await page.route('**/api/models', (route) => {
     const req: Request = route.request()
     if (req.method() === 'POST') {

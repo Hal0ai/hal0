@@ -59,6 +59,9 @@ from hal0.api.routes import (
     v1,
 )
 from hal0.api.routes import (
+    lemonade_admin as lemonade_admin_routes,
+)
+from hal0.api.routes import (
     lemonade_logs as lemonade_logs_routes,
 )
 from hal0.api.routes import (
@@ -634,6 +637,18 @@ def create_app() -> FastAPI:
         lemonade_logs_routes.router,
         prefix="/api/lemonade",
         tags=["lemonade", "logs"],
+        dependencies=_admin_auth,
+    )
+    # PR-13: Lemonade admin panel — GET /api/lemonade/config + POST
+    # /api/lemonade/config wrap lemond's /internal/config + /internal/set
+    # so the Settings → Lemonade admin panel can read + edit runtime
+    # config without bypassing hal0's auth. Same admin gate as the log
+    # proxy; POST additionally declares require_writer at the route
+    # level so cookie sessions ride the CSRF tripwire.
+    app.include_router(
+        lemonade_admin_routes.router,
+        prefix="/api/lemonade",
+        tags=["lemonade", "admin"],
         dependencies=_admin_auth,
     )
     app.include_router(
