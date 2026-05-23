@@ -35,6 +35,7 @@ import LogFilterBar from '../components/logs/LogFilterBar.vue'
 import LogLine from '../components/logs/LogLine.vue'
 import LogGroup from '../components/logs/LogGroup.vue'
 import JumpToLivePill from '../components/logs/JumpToLivePill.vue'
+import JournalLineSkeleton from '../components/skeletons/JournalLineSkeleton.vue'
 
 const system = useSystemStore()
 const banners = useBannerStore()
@@ -235,7 +236,18 @@ onUnmounted(() => {
           @scroll="onScroll"
         >
           <template v-if="grouped.length === 0">
-            <div v-if="lines.length === 0" class="empty mono">No logs yet…</div>
+            <!-- Initial-load skeleton — slice #175. Render placeholder
+                 journal lines while the SSE stream warms up so the
+                 viewport doesn't snap from "No logs yet…" to a 100-row
+                 dump. Stops as soon as one real line arrives. -->
+            <div
+              v-if="lines.length === 0 && !paused"
+              class="logs-skel"
+              data-testid="logs-skeleton"
+            >
+              <JournalLineSkeleton v-for="i in 8" :key="i" />
+            </div>
+            <div v-else-if="lines.length === 0" class="empty mono">No logs yet…</div>
             <div v-else class="empty mono">No log lines match filters</div>
           </template>
           <template v-else>

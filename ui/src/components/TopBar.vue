@@ -20,6 +20,8 @@ import { useLemonadeStore } from '../stores/lemonade.js'
 import { useToastStore } from '../stores/toast.js'
 import Wordmark from './Wordmark.vue'
 import AgentApprovalBell from './AgentApprovalBell.vue'
+import Menu from './primitives/Menu.vue'
+import { ref } from 'vue'
 
 const props = defineProps({
   isMobile: Boolean,
@@ -75,6 +77,59 @@ const hostUptime = computed(() => {
   return v ? `lemond ${v}` : 'up'
 })
 const hostHealthy = computed(() => lemonade.health === 'up')
+
+// ── Overflow menu ────────────────────────────────────────────────────
+// `⋯` next to the host chip; jumps to external surfaces (Chat Pro UI,
+// docs, GitHub, Discord). Items go through useToastStore for the
+// stub-Discord case so the operator sees feedback.
+const overflowBtnEl = ref(null)
+const overflowOpen  = ref(false)
+
+function openExternal(href, label) {
+  // Use a real anchor so target=_blank semantics + noopener apply
+  // even though we trigger it programmatically.
+  const a = document.createElement('a')
+  a.href = href
+  a.target = '_blank'
+  a.rel = 'noopener noreferrer'
+  // Tag the element so the spec can find it in the DOM after the click.
+  if (label) a.setAttribute('data-overflow-label', label)
+  document.body.appendChild(a)
+  a.click()
+  // Leave the element in the DOM briefly so the spec can read target.
+  setTimeout(() => a.remove(), 50)
+}
+
+const overflowItems = [
+  {
+    label: 'Open Chat Pro UI',
+    onClick: () => openExternal('https://hal0-chat.thinmint.dev', 'chat-pro'),
+  },
+  {
+    label: 'Docs',
+    onClick: () => openExternal('https://hal0.dev/docs/v0.2-upgrade', 'docs'),
+  },
+  {
+    label: 'GitHub',
+    onClick: () => openExternal('https://github.com/Hal0ai/hal0', 'github'),
+  },
+  {
+    label: 'Discord',
+    // Placeholder URL — the real invite lands once the community
+    // server is provisioned. Toast surfaces the "coming soon" hint.
+    onClick: () => {
+      toasts.push('Discord link coming', 'info')
+    },
+  },
+]
+
+function toggleOverflow() {
+  overflowOpen.value = !overflowOpen.value
+}
+
+function closeOverflow() {
+  overflowOpen.value = false
+}
 
 // ── ⌘K stub ──────────────────────────────────────────────────────────
 // The real command palette lands in slice #175; until then, a click on
@@ -143,6 +198,33 @@ function onCmdK() {
       <b>{{ hostname }}</b>
       <span class="ut">· {{ hostUptime }}</span>
     </div>
+
+    <!-- Overflow menu (slice #175). External-link jumps live here so
+         the TopBar stays uncluttered. -->
+    <button
+      ref="overflowBtnEl"
+      class="tb-overflow"
+      type="button"
+      :aria-expanded="overflowOpen"
+      aria-haspopup="menu"
+      aria-label="More options"
+      data-testid="topbar-overflow"
+      @click="toggleOverflow"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <circle cx="5"  cy="12" r="1.6" />
+        <circle cx="12" cy="12" r="1.6" />
+        <circle cx="19" cy="12" r="1.6" />
+      </svg>
+    </button>
+
+    <Menu
+      :open="overflowOpen"
+      :anchor="overflowBtnEl"
+      :items="overflowItems"
+      :on-close="closeOverflow"
+      side="right"
+    />
 
     <!-- Agent approvals bell (canonical surface per ADR-0004 §5) -->
     <AgentApprovalBell />
@@ -295,6 +377,24 @@ function onCmdK() {
 .tb-host.down .host-dot {
   background: var(--color-danger);
   box-shadow: 0 0 6px var(--color-danger);
+}
+
+/* ── Overflow ⋯ button ─────────────────────────────────────────── */
+.tb-overflow {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius, 6px);
+  color: var(--color-fg-muted);
+  cursor: pointer;
+}
+.tb-overflow:hover {
+  color: var(--color-fg);
+  border-color: var(--color-border-hi);
 }
 
 /* ── Mobile <720 ───────────────────────────────────────────────── */

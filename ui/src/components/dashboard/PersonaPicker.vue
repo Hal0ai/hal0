@@ -28,6 +28,10 @@ const system = useSystemStore()
 
 const open = ref(false)
 const rootEl = ref(null)
+// Active descendant index for ArrowUp / ArrowDown keyboard nav.
+// -1 = nothing focused yet; on first ArrowDown we land on item 0.
+const activeIndex = ref(-1)
+const LISTBOX_ID = 'persona-listbox'
 
 const llmSlots = computed(() =>
   (system.slots || []).filter((s) => (s.type || 'llm').toLowerCase() === 'llm'),
@@ -55,6 +59,36 @@ function addSlot() {
 function toggle() {
   if (props.disabled) return
   open.value = !open.value
+  // Seed active index to the currently-selected slot when opening so
+  // ArrowDown moves to the NEXT item (not back to the head of the list).
+  if (open.value) {
+    const i = llmSlots.value.findIndex((s) => s.name === current.value?.name)
+    activeIndex.value = i >= 0 ? i : -1
+  }
+}
+
+function onKeyTrigger(e) {
+  if (props.disabled) return
+  // ArrowDown / Enter / Space — open and focus first item.
+  if (['ArrowDown', 'Enter', ' '].includes(e.key)) {
+    if (!open.value) {
+      e.preventDefault()
+      open.value = true
+      const cur = llmSlots.value.findIndex((s) => s.name === current.value?.name)
+      activeIndex.value = cur >= 0 ? cur : 0
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      activeIndex.value = Math.min(llmSlots.value.length - 1, activeIndex.value + 1)
+    }
+  } else if (e.key === 'ArrowUp' && open.value) {
+    e.preventDefault()
+    activeIndex.value = Math.max(0, activeIndex.value - 1)
+  } else if (e.key === 'Escape' && open.value) {
+    open.value = false
+  } else if (e.key === 'Enter' && open.value && activeIndex.value >= 0) {
+    e.preventDefault()
+    pick(llmSlots.value[activeIndex.value])
+  }
 }
 
 function onClickOutside(e) {
@@ -82,10 +116,15 @@ watch(
       class="persona"
       :class="{ disabled }"
       :disabled="disabled"
+      role="combobox"
       :aria-expanded="open"
-      :aria-haspopup="true"
+      :aria-haspopup="'listbox'"
+      :aria-controls="LISTBOX_ID"
+      :aria-activedescendant="open && activeIndex >= 0 ? `persona-opt-${llmSlots[activeIndex]?.name}` : undefined"
+      :aria-label="`Persona: ${current?.name || 'none'}. Press to swap chat persona.`"
       data-testid="persona-trigger"
       @click="toggle"
+      @keydown="onKeyTrigger"
     >
       <span class="dot" />
       <span class="nm">
@@ -95,17 +134,26 @@ watch(
       </span>
       <span class="chev" aria-hidden="true">⌄</span>
     </button>
-    <div v-if="open" class="persona-menu" role="menu" data-testid="persona-menu">
-      <div class="pm-h">Chat persona</div>
+    <div
+      v-if="open"
+      :id="LISTBOX_ID"
+      class="persona-menu"
+      role="listbox"
+      aria-label="Chat persona"
+      data-testid="persona-menu"
+    >
+      <div class="pm-h" aria-hidden="true">Chat persona</div>
       <div v-if="llmSlots.length === 0" class="pm-empty">No chat slots configured.</div>
       <div
-        v-for="slot in llmSlots"
+        v-for="(slot, idx) in llmSlots"
+        :id="`persona-opt-${slot.name}`"
         :key="slot.name"
         class="pm-item"
-        :class="{ active: current?.name === slot.name }"
+        :class="{ active: current?.name === slot.name, focused: activeIndex === idx }"
         :data-testid="`persona-item-${slot.name}`"
-        role="menuitem"
-        tabindex="0"
+        role="option"
+        :aria-selected="current?.name === slot.name"
+        tabindex="-1"
         @click="pick(slot)"
         @keydown.enter="pick(slot)"
       >
@@ -202,8 +250,14 @@ watch(
   align-items: center;
   outline: none;
 }
-.pm-item:hover, .pm-item:focus-visible {
+.pm-item:hover,
+.pm-item:focus-visible,
+.pm-item.focused {
   background: var(--color-surface-3, var(--bg-3, #202020));
+  outline: none;
+}
+.pm-item.focused {
+  box-shadow: inset 2px 0 0 var(--hal0-accent, var(--accent, #feaf00));
 }
 .pm-item.active {
   background: color-mix(in oklab, var(--hal0-accent, #feaf00) 12%, transparent);

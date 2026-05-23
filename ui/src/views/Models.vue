@@ -38,6 +38,7 @@ import Drawer from '../components/primitives/Drawer.vue'
 
 import ModelList from '../components/models/ModelList.vue'
 import ModelDetail from '../components/models/ModelDetail.vue'
+import ModelRowSkeleton from '../components/skeletons/ModelRowSkeleton.vue'
 import DownloadsPane from '../components/models/DownloadsPane.vue'
 import AddByHFModal from '../components/models/AddByHFModal.vue'
 import DeleteModelDialog from '../components/models/DeleteModelDialog.vue'
@@ -420,7 +421,19 @@ const detailIsEmpty = computed(() => !selected.value)
       :class="['models-layout', { compact: isCompact }]"
       data-test="models-layout"
     >
+      <!-- Initial-load skeleton — slice #175. Render placeholder rows
+           while the very first /api/models call is in flight so the
+           three-pane layout doesn't shift when results land. -->
+      <div
+        v-if="loading && models.length === 0"
+        class="models-list-skel"
+        data-testid="models-list-skeleton"
+      >
+        <ModelRowSkeleton v-for="i in 6" :key="i" />
+      </div>
+
       <ModelList
+        v-else
         :models="models"
         :selected-id="selectedId"
         @update:selected-id="selectModel"

@@ -24,9 +24,15 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '../../stores/system.js'
+import SnapshotRowSkeleton from '../skeletons/SnapshotRowSkeleton.vue'
 
 const router = useRouter()
 const system = useSystemStore()
+
+// Initial-load skeleton: render placeholder rows before /api/status
+// has ever returned (gate on !status, not on loading, so re-polls
+// don't flash skeletons over already-rendered rows).
+const showSkeleton = computed(() => !system.status && system.loading)
 
 const SLOT_ORDER = ['primary', 'nano', 'agent', 'embed', 'embed-rerank', 'stt', 'tts', 'img']
 function orderKey(name) {
@@ -111,7 +117,15 @@ function configureClick(e, slot) {
       <span class="ct">· {{ rows.length }}</span>
       <span class="right" @click="router.push('/slots')">Manage slots →</span>
     </header>
-    <div v-if="rows.length === 0" class="snap-empty">
+    <div
+      v-if="showSkeleton"
+      class="snap-rows skel-rows"
+      data-testid="snapshot-skeleton"
+      aria-busy="true"
+    >
+      <SnapshotRowSkeleton v-for="i in 5" :key="i" />
+    </div>
+    <div v-else-if="rows.length === 0" class="snap-empty">
       No slots configured.
       <a href="#" @click.prevent="router.push('/slots')">Configure slots →</a>
     </div>

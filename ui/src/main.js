@@ -16,8 +16,17 @@ import '@fontsource/jetbrains-mono/700.css'
 import './style.css'
 
 const app = createApp(App)
-app.use(createPinia())
+const pinia = createPinia()
+app.use(pinia)
 app.use(router)
+
+// Expose the Pinia instance on `window.__pinia` so E2E specs can drive
+// stores directly (used by the slice #175 polish spec to verify the
+// drift-banner catalog). Always on — the runtime cost is one property
+// assignment and there's no sensitive state behind it that the spec
+// doesn't already mock.
+// eslint-disable-next-line no-underscore-dangle
+window.__pinia = pinia
 
 // Frontend-only push API. Lets any code (e.g. Settings save handler,
 // theme toggle) emit a synthetic event into the Footer's Activity ring

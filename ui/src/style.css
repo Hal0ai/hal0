@@ -274,10 +274,69 @@ code, pre, kbd, .tabular, .mono {
 ::-webkit-scrollbar-thumb:hover { background: var(--hal0-border-strong); }
 
 /* ─── Focus ring — amber, matches hal0-web ─────────────────────── */
+/*
+ * `--focus-ring` is the canonical shadow recipe components can opt into
+ * (mirrors the design source's `:focus-visible { outline: 2px solid var(--accent) }`
+ * but as a box-shadow so it can compose with rounded corners). The
+ * global `:focus-visible` rule keeps outline-based focus for non-opt-in
+ * elements so keyboard nav has a visible ring everywhere.
+ */
+:root {
+  --focus-ring: 0 0 0 2px var(--hal0-accent);
+}
 :focus-visible {
   outline: 2px solid var(--hal0-accent);
   outline-offset: 3px;
   border-radius: 2px;
+}
+
+/* ─── Skip-link — visible only on focus, jumps to <main id> ────── */
+.skip-link {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 100;
+  padding: 8px 12px;
+  background: var(--hal0-bg-elevated);
+  color: var(--hal0-accent);
+  border: 1px solid var(--hal0-accent);
+  border-radius: 4px;
+  font-family: var(--hal0-font-mono);
+  font-size: 12px;
+  text-decoration: none;
+  transform: translateY(-200%);
+  transition: transform 0.12s ease;
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ─── Skeleton loaders — shared shimmer for v2 skeleton variants ── */
+.skel {
+  background: linear-gradient(
+    90deg,
+    var(--bg-1, var(--hal0-bg-elevated)) 0%,
+    var(--bg-2, #161616) 50%,
+    var(--bg-1, var(--hal0-bg-elevated)) 100%
+  );
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+}
+.skel-line { height: 10px; width: 100%; }
+.skel-line.short { width: 40%; }
+.skel-line.med   { width: 60%; }
+.skel-chip { display: inline-block; height: 18px; width: 60px; border-radius: 4px; vertical-align: middle; }
+.skel-dot  { display: inline-block; width: 8px;  height: 8px;  border-radius: 50%; vertical-align: middle; }
+@keyframes skel-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel { animation: none; }
 }
 
 /* Selection in accent — small touch, big personality. */
