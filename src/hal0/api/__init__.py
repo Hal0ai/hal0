@@ -71,6 +71,9 @@ from hal0.api.routes import (
     lemonade_logs as lemonade_logs_routes,
 )
 from hal0.api.routes import (
+    lemonade_proxy as lemonade_proxy_routes,
+)
+from hal0.api.routes import (
     proxmox as proxmox_routes,
 )
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
@@ -684,6 +687,20 @@ def create_app() -> FastAPI:
     app.include_router(v1.public_router, prefix="/v1", tags=["v1"])
     _v1_auth = [Depends(require_token)]
     app.include_router(v1.router, prefix="/v1", tags=["v1"], dependencies=_v1_auth)
+
+    # Issue #212: Lemonade reverse-proxy catch-all on /v1/{path:path}.
+    # Mounted AFTER the dispatcher-owned v1 routers so every explicit
+    # inference path (chat, completions, embeddings, rerankings, audio,
+    # images, models) keeps its dispatcher handler; only un-covered
+    # paths (/v1/health, /v1/stats, /v1/load, /v1/unload, /v1/system-info,
+    # /v1/params, …) fall through to Lemonade. Same admin auth as the
+    # rest of the writer /v1 surface.
+    app.include_router(
+        lemonade_proxy_routes.router,
+        prefix="/v1",
+        tags=["v1", "lemonade-proxy"],
+        dependencies=_v1_auth,
+    )
 
     # Single-purpose protected routers — every endpoint requires a token
     # (or session cookie / forwarded email) when HAL0_AUTH_ENABLED=1.
