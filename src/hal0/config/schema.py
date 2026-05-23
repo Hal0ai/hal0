@@ -733,6 +733,139 @@ class TelemetryConfig(BaseModel):
         return v
 
 
+# ── MemoryGraphConfig (ADR-0014) ──────────────────────────────────────────────
+
+# ADR-0014 §2: typed enum for the graph-extraction route.
+# - "upstream": resolve via providers.toml + upstreams.toml
+# - "primary":  uses the live `primary` slot (user owns quality)
+# - "agent":    uses the dedicated agent slot if installed
+GraphRouteLiteral = Literal["upstream", "primary", "agent"]
+_VALID_GRAPH_ROUTES = frozenset({"upstream", "primary", "agent"})
+
+
+class GraphUpstreamConfig(BaseModel):
+    """[memory.graph.upstream] section — provider + model for route=upstream.
+
+    Required when ``MemoryGraphConfig.route == "upstream"`` AND the
+    graph-extraction feature is enabled. ``api_key`` is NEVER held here
+    — credentials resolve from ``providers.toml`` via the existing
+    ``ProviderEntry.auth_value_env`` indirection so secrets never land
+    in a config file the dashboard reads.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    provider: str = Field(
+        default="openrouter",
+        description=(
+            "Upstream provider id, e.g. 'openrouter' | 'anthropic' | "
+            "'openai' | 'custom'. Must match a configured provider in "
+            "providers.toml so api_key resolution works."
+        ),
+    )
+    model: str = Field(
+        default="",
+        description=(
+            "Model id the provider understands, e.g. "
+            "'anthropic/claude-3.5-sonnet'. Empty is rejected when the "
+            "parent route == 'upstream' and enabled = true."
+        ),
+    )
+
+    @field_validator("provider")
+    @classmethod
+    def provider_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("memory.graph.upstream.provider must not be empty")
+        return v
+
+
+class MemoryGraphConfig(BaseModel):
+    """[memory.graph] section of hal0.toml (ADR-0014).
+
+    Controls whether Cognee's graph-extraction pipeline runs after
+    ``memory_add`` (the cognify step that pulls entities + relations
+    via an LLM with structured output).
+
+    ADR-0014 §1: defaults OFF in v0.3. Small local models flake on
+    structured-output prompts; enabling silently would leave the graph
+    view empty and confuse users. ADR-0014 §5: ``route = "upstream"`` is
+    the default *suggestion* when the user toggles on but is NEVER the
+    default behavior.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "When False (the v0.3 default per ADR-0014 §1), memory_add "
+            "skips the graph-extraction cognify pass. memory_search's "
+            "vector mode keeps working — the gate only affects graph "
+            "builds + graph/hybrid search modes."
+        ),
+    )
+    route: GraphRouteLiteral = Field(
+        default="upstream",
+        description=(
+            "Where to dispatch the graph-extraction LLM call when "
+            "enabled. ADR-0014 §2: 'upstream' resolves via "
+            "providers.toml, 'primary' uses the live primary slot, "
+            "'agent' uses the dedicated agent slot."
+        ),
+    )
+    upstream: GraphUpstreamConfig | None = Field(
+        default=None,
+        description=(
+            "Provider + model for route='upstream'. None when route is "
+            "'primary' or 'agent'. Required when enabled = true AND "
+            "route == 'upstream'."
+        ),
+    )
+
+    @field_validator("route")
+    @classmethod
+    def route_valid(cls, v: str) -> str:
+        if v not in _VALID_GRAPH_ROUTES:
+            raise ValueError(
+                f"memory.graph.route {v!r} is not valid; choose from {sorted(_VALID_GRAPH_ROUTES)}"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def route_upstream_requires_model(self) -> MemoryGraphConfig:
+        """When enabled + route=upstream, demand provider + model.
+
+        Only enforced when ``enabled = true`` so the install-time
+        default (enabled=false, no upstream block) round-trips cleanly.
+        A user toggling on through the dashboard hits this validator
+        and gets a field-path error if they didn't supply the upstream
+        block.
+        """
+        if not self.enabled:
+            return self
+        if self.route == "upstream" and (self.upstream is None or not self.upstream.model.strip()):
+            raise ValueError(
+                "memory.graph.upstream.{provider,model} required when "
+                "enabled = true and route = 'upstream'"
+            )
+        return self
+
+
+class MemoryConfig(BaseModel):
+    """[memory] section of hal0.toml.
+
+    Container for the per-subsystem memory tunables; today only
+    ``[memory.graph]`` lives here (ADR-0014) but the section exists so
+    future memory features (retention, prune-policy, archival) land
+    under a single namespace rather than scattering top-level tables.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
+
+
 class ModelsConfig(BaseModel):
     """[models] section of hal0.toml — discovery + auto-detect."""
 
@@ -811,6 +944,7 @@ class Hal0Config(BaseModel):
     dispatcher: DispatcherConfig = Field(default_factory=DispatcherConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
 
 
 __all__ = [
@@ -822,8 +956,12 @@ __all__ = [
     "DeviceLiteral",
     "DispatcherConfig",
     "GPUInfo",
+    "GraphRouteLiteral",
+    "GraphUpstreamConfig",
     "Hal0Config",
     "HardwareInfo",
+    "MemoryConfig",
+    "MemoryGraphConfig",
     "MetaConfig",
     "ModelConfig",
     "ModelsConfig",

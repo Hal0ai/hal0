@@ -169,7 +169,13 @@ def save_hal0_config(cfg: Hal0Config, path: Path | None = None) -> None:
         path: Override path.  If None, uses hal0.config.paths.hal0_toml().
     """
     target = path if path is not None else paths.hal0_toml()
-    data = cfg.model_dump(mode="python", exclude_none=False)
+    # ``exclude_none=True`` keeps tomli_w happy — None has no TOML
+    # representation and tomli_w raises TypeError on it. Pydantic
+    # re-supplies the default on load, so dropping None on write is
+    # safe for any field whose default is None (e.g. the ADR-0014
+    # ``memory.graph.upstream`` block when the user picks a local
+    # route).
+    data = cfg.model_dump(mode="python", exclude_none=True)
     write_toml_atomic(target, data)
 
 

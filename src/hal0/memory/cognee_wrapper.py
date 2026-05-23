@@ -166,6 +166,8 @@ class CogneeWrapper:
         embedding_provider: str = "fastembed",
         embedding_model: str = "BAAI/bge-small-en-v1.5",
         embedding_dimensions: int = 384,
+        graph_enabled: bool = False,
+        graph_route: str = "upstream",
     ) -> None:
         """Configure Cognee + the sidecar SQLite index.
 
@@ -182,6 +184,16 @@ class CogneeWrapper:
         :param embedding_provider/model/dimensions: Match the ADR-0005
             §1 default (fastembed + bge-small-en-v1.5, 384-dim). Tests
             override these to keep the embedding model tiny.
+        :param graph_enabled: ADR-0014 §1 — when True, ``add`` enqueues a
+            background ``cognee.cognify`` pass after the foreground add
+            returns (entity + relation extraction for ``search(mode=
+            "graph"|"hybrid")``). Default False per ADR-0014: structured-
+            output reliability on small local models is too low for a
+            silent default. The vector path is unaffected.
+        :param graph_route: ADR-0014 §2 — "upstream" | "primary" |
+            "agent". Stored for dashboard/CLI introspection (``status``);
+            the LLM-routing implementation itself lands in v0.4 with the
+            eval suite. v0.3 ships the gate + the introspection surface.
         """
         self._cognee_dir = Path(cognee_dir)
         self._cognee_dir.mkdir(parents=True, exist_ok=True)
@@ -206,6 +218,23 @@ class CogneeWrapper:
         self._embedding_provider = embedding_provider
         self._embedding_model = embedding_model
         self._embedding_dimensions = embedding_dimensions
+
+        # ADR-0014 §1+§2 — graph extraction toggle + route, mutable so
+        # the dashboard/CLI flip path can update them without rebuilding
+        # Cognee (which would re-init embeddings + LanceDB).
+        self._graph_enabled = bool(graph_enabled)
+        self._graph_route = str(graph_route or "upstream")
+        # ADR-0014 §6 — per-build error counter; the dashboard renders
+        # this as a chip beside the toggle. Bounded so the chip stays
+        # one line.
+        self._graph_build_errors = 0
+        self._graph_builds_ok = 0
+        self._graph_last_built_at: str | None = None
+        self._graph_last_error: str | None = None
+        # In-flight graph build tasks. Tracked so ``set_graph_enabled
+        # (False)`` (ADR-0014 §6 cancel-in-flight) can cooperatively
+        # cancel without leaving zombie tasks attached to the loop.
+        self._graph_tasks: set[asyncio.Task[Any]] = set()
 
         # Tail buffer of audit events emitted by this instance. The
         # structlog channel is the production audit-log surface
@@ -463,7 +492,117 @@ class CogneeWrapper:
             conn.commit()
 
         self._audit("add", effective_dataset, item_id=item_id, tags=list(tags))
+
+        # ADR-0014 §1+§6 — when graph extraction is on, enqueue a
+        # background cognify pass after the foreground add returns. The
+        # task is registered so ``set_graph_enabled(False)`` (and the
+        # ADR-0014 §6 "disable cancels in-flight" path) can cancel
+        # cleanly without leaving zombie pipeline work. Failures are
+        # caught + counted inside ``_build_graph`` so a flaky
+        # structured-output LLM never blocks ingestion.
+        if self._graph_enabled:
+            try:
+                task = asyncio.create_task(self._build_graph(effective_dataset))
+            except RuntimeError:
+                # No running loop (rare: sync test harness). Treat as
+                # no-op — gate is still respected, build just doesn't
+                # fire.
+                task = None
+            if task is not None:
+                self._graph_tasks.add(task)
+                task.add_done_callback(self._graph_tasks.discard)
         return {"id": item_id, "timestamp": timestamp}
+
+    # ── ADR-0014 graph extraction ──────────────────────────────────────
+
+    async def _build_graph(self, dataset: str) -> None:
+        """Run ``cognee.cognify`` on a dataset, counting outcomes.
+
+        Errors are caught + reported via :py:meth:`graph_status` rather
+        than re-raised — per ADR-0014 §6, failed builds log + drop
+        silently so a misconfigured graph route can never block memory
+        ingestion. Route resolution itself (upstream vs primary vs
+        agent) lands in v0.4 with the eval suite; v0.3 runs Cognee's
+        default cognify against whatever ``LLM_API_KEY`` the env carries.
+        """
+        cognee = _cognee()
+        try:
+            await cognee.cognify(datasets=[dataset], run_in_background=False)
+        except asyncio.CancelledError:
+            # ADR-0014 §6 "disable cancels in-flight" — let the
+            # cancellation propagate so the task set drops the entry.
+            raise
+        except Exception as exc:
+            self._graph_build_errors = min(self._graph_build_errors + 1, 9_999)
+            self._graph_last_error = f"{type(exc).__name__}: {exc}"[:200]
+            self._graph_last_built_at = _now_iso()
+            _audit_logger().warning(
+                "hal0.memory.graph.build_failed",
+                client_id=self._client_id,
+                dataset=dataset,
+                error=self._graph_last_error,
+                route=self._graph_route,
+            )
+            return
+        self._graph_builds_ok += 1
+        self._graph_last_built_at = _now_iso()
+        self._graph_last_error = None
+        _audit_logger().info(
+            "hal0.memory.graph.build_ok",
+            client_id=self._client_id,
+            dataset=dataset,
+            route=self._graph_route,
+        )
+
+    def graph_status(self) -> dict[str, Any]:
+        """Return the ADR-0014 §status payload for dashboard + CLI.
+
+        Shape::
+
+            {
+              "enabled":   bool,
+              "route":     "upstream" | "primary" | "agent",
+              "in_flight": int,
+              "builds_ok": int,
+              "errors":    int,
+              "last_built_at": iso8601 | None,
+              "last_error":    str | None,
+            }
+        """
+        return {
+            "enabled": self._graph_enabled,
+            "route": self._graph_route,
+            "in_flight": len(self._graph_tasks),
+            "builds_ok": self._graph_builds_ok,
+            "errors": self._graph_build_errors,
+            "last_built_at": self._graph_last_built_at,
+            "last_error": self._graph_last_error,
+        }
+
+    def set_graph_enabled(self, enabled: bool, route: str | None = None) -> None:
+        """Flip the graph-extraction gate at runtime (ADR-0014 §6).
+
+        Setting ``enabled = False`` cancels in-flight build tasks so a
+        disable-while-busy doesn't dribble out cognify writes after the
+        user thinks the feature is off.
+
+        ``route`` updates the stored route label (``upstream`` /
+        ``primary`` / ``agent``). The actual route-resolution
+        implementation lands in v0.4 with the eval suite; v0.3 stores
+        the pick so a process restart preserves user intent + the
+        dashboard always reflects current state.
+        """
+        if route is not None and route not in {"upstream", "primary", "agent"}:
+            raise ValueError(
+                f"graph route {route!r} is not valid; choose from 'upstream' | 'primary' | 'agent'"
+            )
+        if route is not None:
+            self._graph_route = route
+        if not enabled and self._graph_enabled:
+            # Disable flip — cancel anything in flight per ADR-0014 §6.
+            for t in list(self._graph_tasks):
+                t.cancel()
+        self._graph_enabled = bool(enabled)
 
     async def search(
         self,
@@ -473,6 +612,7 @@ class CogneeWrapper:
         tags: list[str] | None = None,
         before: str | None = None,
         after: str | None = None,
+        mode: str = "vector",
     ) -> list[dict[str, Any]]:
         """Vector + filter search. Returns list of dicts (MemoryRecord shape).
 
@@ -493,6 +633,23 @@ class CogneeWrapper:
         """
         if tags is None:
             tags = []
+        # ADR-0014 §6 — accept the mode param so callers (MCP + CLI +
+        # dashboard) can already opt in to graph/hybrid; v0.3 falls
+        # back to vector for graph + hybrid because the route
+        # resolution lands in v0.4. We still validate so a typo
+        # surfaces immediately.
+        if mode not in {"vector", "graph", "hybrid"}:
+            raise ValueError(
+                f"search mode {mode!r} is not valid; choose from 'vector' | 'graph' | 'hybrid'"
+            )
+        if mode != "vector" and not self._graph_enabled:
+            _audit_logger().info(
+                "hal0.memory.search.mode_fallback",
+                client_id=self._client_id,
+                requested_mode=mode,
+                resolved_mode="vector",
+                reason="graph_extraction_disabled",
+            )
         allowed_datasets = self._allowed_read_datasets(dataset)
 
         cognee = _cognee()

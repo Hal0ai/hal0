@@ -68,6 +68,9 @@ from hal0.api.routes import (
     lemonade_proxy as lemonade_proxy_routes,
 )
 from hal0.api.routes import (
+    memory as memory_routes,
+)
+from hal0.api.routes import (
     proxmox as proxmox_routes,
 )
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
@@ -697,6 +700,16 @@ def create_app() -> FastAPI:
         prefix="/api/settings/proxmox",
         tags=["settings", "proxmox"],
     )
+    # ADR-0014 memory.graph gate + status. Mounted under /api/memory
+    # so the dashboard Memory tab + `hal0 memory graph` CLI both read
+    # + write through one surface. Constructed early enough that the
+    # dashboard SPA fallback doesn't shadow these paths.
+    app.include_router(
+        memory_routes.router,
+        prefix="/api/memory",
+        tags=["memory"],
+    )
+
     app.include_router(providers.router, prefix="/api", tags=["providers"])
     app.include_router(
         updater.router,
@@ -795,7 +808,23 @@ def create_app() -> FastAPI:
     try:
         from hal0.memory import CogneeWrapper
 
-        memory_wrapper = CogneeWrapper()
+        # ADR-0014: pull [memory.graph] gate + route at boot so a
+        # process restart preserves the user's pick. Defaults match
+        # the v0.3 ship matrix (enabled=False, route="upstream").
+        try:
+            _hal0_cfg = load_hal0_config()
+            _graph_cfg = _hal0_cfg.memory.graph
+            _graph_enabled = bool(_graph_cfg.enabled)
+            _graph_route = str(_graph_cfg.route)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("hal0.memory.graph_cfg_load_failed", error=str(exc))
+            _graph_enabled = False
+            _graph_route = "upstream"
+
+        memory_wrapper = CogneeWrapper(
+            graph_enabled=_graph_enabled,
+            graph_route=_graph_route,
+        )
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("hal0.memory.init_failed", error=str(exc))
     app.state.memory_wrapper = memory_wrapper
