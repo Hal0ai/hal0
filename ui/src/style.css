@@ -45,6 +45,79 @@
   --hal0-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* ─── Dashboard v2 token vocabulary ──────────────────────────────
+ * Additive layer for the v0.2.1 dashboard rewrite (#148, #164).
+ * Mirrors the design bundle (project/dashboard.css) verbatim while
+ * aliasing the existing --hal0-* tokens where they overlap so brand
+ * tokens remain the single source of truth.
+ *
+ * Existing components continue to read --hal0-* / --color-* and are
+ * untouched; new v2 components opt into these short names. Both
+ * resolve to the same colours. */
+:root {
+  /* Surface ramp — raised surface steps above --hal0-bg. */
+  --bg-1:         var(--hal0-bg-elevated);  /* #141414 */
+  --bg-2:         #161616;                  /* design step */
+  --bg-3:         var(--hal0-bg-raised);    /* #1c1c1c */
+  --bg-4:         #232323;                  /* design step */
+
+  /* Foreground ramp — text dimming steps. */
+  --fg-2:         var(--hal0-fg-muted);     /* #c8c2bd */
+  --fg-3:         #8a8a85;
+  --fg-4:         #5c5c58;
+  --fg-5:         #3d3d3a;
+
+  /* Border ramp. */
+  --line:         var(--hal0-border);          /* #262626 */
+  --line-soft:    #1c1c1c;
+  --line-strong:  var(--hal0-border-strong);   /* #3a3a3a */
+
+  /* Accent shorthands — alias --hal0-accent variants. */
+  --accent:       var(--hal0-accent);
+  --accent-soft:  rgba(255, 176, 0, 0.10);
+  --accent-line:  rgba(255, 176, 0, 0.34);
+  --accent-bg:    #2a1d00;
+  --accent-glow:  var(--hal0-accent-glow);
+
+  /* Device chip colours. */
+  --dev-rocm:     #d76b6b;
+  --dev-vulkan:   #7fb8ff;
+  --dev-cpu:      #9c9c95;
+  --dev-npu:      #c896ff;
+
+  /* Status semantic — solid + soft (~10% alpha) + line (~30% alpha). */
+  --ok:           #6fcf97;
+  --ok-soft:      rgba(111, 207, 151, 0.10);
+  --ok-line:      rgba(111, 207, 151, 0.30);
+  --warn:         #e8b94e;
+  --warn-soft:    rgba(232, 185, 78, 0.10);
+  --warn-line:    rgba(232, 185, 78, 0.30);
+  --err:          #ef6b6b;
+  --err-soft:     rgba(239, 107, 107, 0.10);
+  --err-line:     rgba(239, 107, 107, 0.30);
+  --info:         #7fb8ff;
+  --info-soft:    rgba(127, 184, 255, 0.10);
+  --info-line:    rgba(127, 184, 255, 0.30);
+
+  /* Radii (short names; --radius-* aliases below stay for legacy). */
+  --rad-sm: 4px;
+  --rad:    6px;
+  --rad-lg: 10px;
+  --rad-xl: 14px;
+
+  /* Motion vocabulary — single shared curve, three durations.
+   * Curve matches --hal0-ease (cubic-bezier(0.22, 1, 0.36, 1)).
+   * The *-dur tokens are the canonical durations; the bare names
+   * are pre-composed transition shorthands for the common case. */
+  --ease-curve:    cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-fast-dur:    120ms;
+  --ease-medium-dur:  240ms;
+  --ease-slow-dur:    500ms;
+  --ease-fast:    var(--ease-fast-dur)   var(--ease-curve);
+  --ease-medium:  var(--ease-medium-dur) var(--ease-curve);
+  --ease-slow:    var(--ease-slow-dur)   var(--ease-curve);
+}
+
 /* ─── Size-adjusted fallback fonts ───────────────────────────────
  * Without these, the swap from system fallback → real webfont reflows
  * headings and inflates CLS. See hal0-web/src/styles/fonts.css for the
