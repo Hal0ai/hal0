@@ -3,6 +3,8 @@
 // carries a live "call timeline" — 60s of tool calls scrolling right→left,
 // recent ones glowing amber. Page feels like a monitor, not a list.
 
+import { useAgentMcpClients } from '@/api/hooks/useAgentMcpClients'
+
 const { useState: useStateM, useEffect: useEffectM, useRef: useRefM, useMemo: useMemoM, useCallback: useCallbackM } = React;
 
 // ─── Live activity bus ───────────────────────────────────────────────
@@ -383,6 +385,10 @@ function PlusIcon() {
 
 // ─── Main view ──────────────────────────────────────────────────────
 function McpView() {
+  // ADR-0013 §8 — top-level mode toggle: servers (existing) | clients
+  // (new per-agent view). Defaults to "servers" so existing nav stays
+  // unchanged.
+  const [mode, setMode] = useStateM("servers");
   const [servers, setServers] = useStateM(MCP_SERVERS);
   const [filter, setFilter] = useStateM("all");
   const [menuId, setMenuId] = useStateM(null);
@@ -426,13 +432,40 @@ function McpView() {
     <div className="view mcp-view">
       <div className="vh">
         <span className="vh-eye mono">Agents · v0.3</span>
-        <h1>MCP Servers</h1>
+        <h1>{mode === "servers" ? "MCP Servers" : "MCP Clients"}</h1>
         <span className="vh-spacer" />
-        <span className="hint mono">hal0 hosts an arbitrary number of MCP servers · clients connect over <span style={{color: "var(--fg-2)"}}>{MCP_HOST_BASE}/mcp/*</span></span>
-        <button className="btn ghost" onClick={() => setTeachOpen(true)}>Connect a client</button>
-        <button className="btn" onClick={() => setInstallOpen(true)}><PlusIcon /> Install</button>
+        {mode === "servers"
+          ? <span className="hint mono">hal0 hosts an arbitrary number of MCP servers · clients connect over <span style={{color: "var(--fg-2)"}}>{MCP_HOST_BASE}/mcp/*</span></span>
+          : <span className="hint mono">per-agent allow-lists · ADR-0013 · read-only in v0.3 alpha</span>
+        }
+        {mode === "servers" && <button className="btn ghost" onClick={() => setTeachOpen(true)}>Connect a client</button>}
+        {mode === "servers" && <button className="btn" onClick={() => setInstallOpen(true)}><PlusIcon /> Install</button>}
       </div>
 
+      {/* ADR-0013 §8 mode switch — Servers (what we host) | Clients
+          (what our bundled agents are allowed to reach out to). */}
+      <div className="mcp-filterbar" style={{marginTop: 0, marginBottom: 14}}>
+        <div className="mcp-tabs">
+          <button
+            className={"mcp-tab" + (mode === "servers" ? " on" : "")}
+            onClick={() => setMode("servers")}
+          >
+            <span>Servers</span>
+            <span className="mcp-tab-ct num">{servers.length}</span>
+          </button>
+          <button
+            className={"mcp-tab" + (mode === "clients" ? " on" : "")}
+            onClick={() => setMode("clients")}
+          >
+            <span>Clients</span>
+            <span className="mcp-tab-ct num">per-agent</span>
+          </button>
+        </div>
+      </div>
+
+      {mode === "clients" ? <McpClientsView /> : null}
+      {mode !== "servers" ? null : (
+      <>
       {/* KPI strip */}
       <McpKpiStrip servers={servers} clients={MCP_CLIENTS} calls={calls} now={now} />
 
@@ -534,7 +567,114 @@ function McpView() {
 
       {/* How-to-connect modal */}
       <ConnectClientModal open={teachOpen} onClose={() => setTeachOpen(false)} />
+      </>
+      )}
     </div>
+  );
+}
+
+// ─── ADR-0013 §8 per-agent Clients view (read-only alpha) ──────────────
+//
+// One card per installed agent (hermes, pi-coder, …). Each card lists
+// the [mcp.servers.*] entries from the agent's TOML, the three-color
+// chip per server, the auth.kind + token status (no token rendering),
+// and the per-tool classification chips.
+function McpClientsView() {
+  const list = useAgentMcpClients();
+  if (list.isLoading) {
+    return <div className="mcp-empty mono">Loading agent allow-lists…</div>;
+  }
+  if (list.isError) {
+    return (
+      <div className="mcp-empty mono" style={{color: "var(--err, #c66)"}}>
+        Could not load agent allow-lists: {String(list.error?.message || "unknown")}
+      </div>
+    );
+  }
+  const agents = list.data?.agents || [];
+  if (agents.length === 0) {
+    return (
+      <div className="mcp-empty mono">
+        No agents installed. Install Hermes via <span style={{color: "var(--fg-2)"}}>hal0 agent install hermes</span> to see this view populated.
+      </div>
+    );
+  }
+  return (
+    <div style={{display: "flex", flexDirection: "column", gap: 14}}>
+      {agents.map(a => <AgentMcpCard key={a.name} agent={a} />)}
+    </div>
+  );
+}
+
+function AgentMcpCard({ agent }) {
+  return (
+    <div className="card" style={{padding: 18}}>
+      <div style={{display: "flex", alignItems: "baseline", gap: 14, marginBottom: 12}}>
+        <span className="mono" style={{fontSize: 16, fontWeight: 500, letterSpacing: "-0.02em"}}>{agent.display || agent.name}</span>
+        <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>{agent.name}</span>
+        <span style={{marginLeft: "auto", fontSize: 11, color: "var(--fg-3)", fontFamily: "var(--jbm)"}}>
+          workspace: <span className="mono" style={{color: "var(--fg-2)"}}>{agent.workspace}</span>
+        </span>
+      </div>
+      <div style={{display: "grid", gap: 10}}>
+        {agent.servers.map(s => <AgentMcpServerRow key={s.name} server={s} />)}
+      </div>
+    </div>
+  );
+}
+
+function AgentMcpServerRow({ server }) {
+  const healthColor = {
+    green: "var(--ok, #6c6)",
+    yellow: "var(--warn, #cb6)",
+    red: "var(--err, #c66)",
+    unknown: "var(--fg-4)",
+  }[server.health] || "var(--fg-4)";
+  return (
+    <div style={{padding: "10px 12px", border: "1px solid var(--line-soft)", borderRadius: "var(--rad)", background: "var(--bg-2)"}}>
+      <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 6}}>
+        <span style={{display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: healthColor, flexShrink: 0}} title={`health: ${server.health}`} />
+        <span className="mono" style={{fontSize: 13, fontWeight: 500, color: "var(--fg)"}}>{server.name}</span>
+        {server.builtin && <span className="chip">builtin</span>}
+        {!server.enabled && <span className="chip" style={{color: "var(--fg-4)"}}>disabled</span>}
+        {server.url && <span className="mono" style={{fontSize: 11, color: "var(--fg-4)", marginLeft: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{server.url}</span>}
+        <span style={{marginLeft: "auto", display: "flex", gap: 6, alignItems: "center"}}>
+          <AuthChip auth={server.auth} />
+        </span>
+      </div>
+      <div style={{display: "flex", flexWrap: "wrap", gap: 4}}>
+        {server.tools.allow.map(t => (
+          <span key={"a-" + t} className="chip ok" title="allow — autonomous call">{t}</span>
+        ))}
+        {server.tools.gated.map(t => (
+          <span key={"g-" + t} className="chip amber" title="gated — approval queue">{t}</span>
+        ))}
+        {server.tools.blocked.map(t => (
+          <span key={"b-" + t} className="chip err" title="blocked — hard reject">{t}</span>
+        ))}
+        {server.tools.allow.length + server.tools.gated.length + server.tools.blocked.length === 0 && (
+          <span className="mono" style={{fontSize: 11, color: "var(--fg-5)"}}>
+            no tools listed — default-deny means nothing callable
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AuthChip({ auth }) {
+  if (auth.kind === "none") {
+    return <span className="chip" style={{fontSize: 10}}>no-auth</span>;
+  }
+  const tone = auth.tokenStatus === "present" ? "ok" : auth.tokenStatus === "missing" ? "err" : "";
+  return (
+    <span
+      className={"chip " + tone}
+      title={`token via env: ${auth.env || "(unset)"} — status: ${auth.tokenStatus}`}
+      style={{fontSize: 10}}
+    >
+      bearer · {auth.tokenStatus}
+    </span>
   );
 }
 
