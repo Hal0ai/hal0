@@ -4,7 +4,7 @@
 - **Date:** 2026-05-23
 - **Drivers:** `/grill-me` session 2026-05-23 against `docs/internal/hermes-bootstrap-plan-2026-05-23.md`; bundled Hermes agent v0.3 needs to publish itself + discover peers
 - **Implementing PRs:** PR-1 (this ADR + new MCP admin tools) per the bootstrap plan §23
-- **Related:** ADR-0004 (Agents v0.2), ADR-0005 (Memory engine = Cognee), **ADR-0012 (Remove auth and Caddy entirely)** — supersedes the bearer-token identity model assumed in Draft 2 of the bootstrap plan; identity now flows from an `X-hal0-Agent` header (no auth).
+- **Related:** ADR-0004 (Agents v0.2), ADR-0005 (Memory engine = Cognee), **ADR-0012 (Remove auth and Caddy entirely)** — supersedes the bearer-token identity model assumed in Draft 2 of the bootstrap plan; identity now flows from an `X-hal0-Agent` header (no auth). ADR-0013 (MCP-client allow-list) defines the per-agent server + tool allow-lists at `/etc/hal0/agents/<name>.toml`; a future card schema (v2+) may surface a derived `allowed_tools` projection from that allow-list (the allow-list is the source of truth, not the card).
 
 ## Identity sourcing update (post-ADR-0012)
 
