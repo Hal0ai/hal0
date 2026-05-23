@@ -159,15 +159,103 @@ async def test_load_includes_optional_fields_when_provided() -> None:
             recipe="llamacpp:rocm",
             ctx_size=8192,
             llamacpp_backend="rocm",
-            llamacpp_args=["--parallel", "2"],
+            llamacpp_args=["--parallel", "1", "--threads", "8"],
         )
+        # llamacpp_args is wire-serialised as a single space-separated
+        # string — Lemonade's nlohmann::json parser raises
+        # "type must be string, but is array" on a list.
         assert captured["body"] == {
             "model_name": "hermes-4-14b",
             "recipe": "llamacpp:rocm",
             "ctx_size": 8192,
             "llamacpp_backend": "rocm",
-            "llamacpp_args": ["--parallel", "2"],
+            "llamacpp_args": "--parallel 1 --threads 8",
         }
+
+
+# ── llamacpp_args serialization (ADR-0008 §4 + spike #2) ────────────
+
+
+@pytest.mark.asyncio
+async def test_load_omits_llamacpp_args_when_none() -> None:
+    """``None`` → key absent from the JSON body. Never send JSON ``null``
+    (nlohmann's unconditional accessor raises "type must be string, but
+    is null"). See ``hal0_lemonade_v1_load_schema`` memory."""
+
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        captured["body"] = _json.loads(req.content.decode())
+        return httpx.Response(200, json={"status": "loaded"})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport)
+        await client.load("hermes-4-14b", llamacpp_args=None)
+        assert "llamacpp_args" not in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_load_forwards_llamacpp_args_string_verbatim() -> None:
+    """A pre-joined string is the canonical wire shape — pass it
+    through unchanged so callers that already hold the config-file
+    representation don't pay a needless split/join round-trip."""
+
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        captured["body"] = _json.loads(req.content.decode())
+        return httpx.Response(200, json={"status": "loaded"})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport)
+        await client.load("hermes-4-14b", llamacpp_args="--threads 8")
+        assert captured["body"]["llamacpp_args"] == "--threads 8"
+
+
+@pytest.mark.asyncio
+async def test_load_joins_llamacpp_args_list_with_single_spaces() -> None:
+    """List input is joined with single spaces — the shape recommended
+    in ADR-0008 §4 (``"--parallel 1 --threads N"``)."""
+
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        captured["body"] = _json.loads(req.content.decode())
+        return httpx.Response(200, json={"status": "loaded"})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport)
+        await client.load(
+            "hermes-4-14b",
+            llamacpp_args=["--parallel", "1", "--threads", "8"],
+        )
+        assert captured["body"]["llamacpp_args"] == "--parallel 1 --threads 8"
+
+
+@pytest.mark.asyncio
+async def test_load_empty_list_becomes_empty_string() -> None:
+    """An empty list is forwarded as the empty string, which Lemonade
+    treats as a "use default" sentinel via ``is_empty_option`` — distinct
+    from omitting the key entirely."""
+
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        captured["body"] = _json.loads(req.content.decode())
+        return httpx.Response(200, json={"status": "loaded"})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport)
+        await client.load("hermes-4-14b", llamacpp_args=[])
+        assert captured["body"]["llamacpp_args"] == ""
 
 
 @pytest.mark.asyncio
@@ -324,3 +412,123 @@ async def test_aclose_does_not_close_borrowed_client() -> None:
     # Borrowed client should remain usable
     assert not transport.is_closed
     await transport.aclose()
+
+
+# ── /internal/* — loopback-only control endpoints (plan §2.2) ────────
+
+
+@pytest.mark.asyncio
+async def test_shutdown_posts_to_internal_shutdown_with_auth() -> None:
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        captured["method"] = req.method
+        captured["path"] = req.url.path
+        captured["auth"] = req.headers.get("authorization", "")
+        captured["body"] = req.content.decode() if req.content else ""
+        return httpx.Response(200, json={"status": "shutting_down"})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport, api_key="hal0-internal-token")
+        assert await client.shutdown() == {"status": "shutting_down"}
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/internal/shutdown"
+    assert captured["auth"] == "Bearer hal0-internal-token"
+    # No body required for shutdown — plan §2.2.
+    assert captured["body"] == ""
+
+
+@pytest.mark.asyncio
+async def test_internal_config_gets_runtime_snapshot_with_auth() -> None:
+    snapshot = {
+        "host": "127.0.0.1",
+        "port": 13305,
+        "ctx_size": 4096,
+        "llamacpp": {"args": "--parallel 1 --threads 8", "backend": "rocm"},
+    }
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        captured["method"] = req.method
+        captured["path"] = req.url.path
+        captured["auth"] = req.headers.get("authorization", "")
+        return httpx.Response(200, json=snapshot)
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport, api_key="hal0-internal-token")
+        assert await client.internal_config() == snapshot
+
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/internal/config"
+    assert captured["auth"] == "Bearer hal0-internal-token"
+
+
+@pytest.mark.asyncio
+async def test_internal_set_posts_atomic_key_value_body() -> None:
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        captured["method"] = req.method
+        captured["path"] = req.url.path
+        captured["auth"] = req.headers.get("authorization", "")
+        captured["body"] = _json.loads(req.content.decode())
+        return httpx.Response(200, json={"applied": list(captured["body"])})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport, api_key="hal0-internal-token")
+        result = await client.internal_set(
+            {"log_level": "debug", "max_loaded_models": 4}
+        )
+        assert result == {"applied": ["log_level", "max_loaded_models"]}
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/internal/set"
+    assert captured["auth"] == "Bearer hal0-internal-token"
+    assert captured["body"] == {"log_level": "debug", "max_loaded_models": 4}
+
+
+@pytest.mark.asyncio
+async def test_internal_cleanup_cache_posts_with_empty_body() -> None:
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        captured["method"] = req.method
+        captured["path"] = req.url.path
+        captured["auth"] = req.headers.get("authorization", "")
+        captured["body"] = req.content.decode() if req.content else ""
+        return httpx.Response(200, json={"removed_bytes": 0})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport, api_key="hal0-internal-token")
+        assert await client.internal_cleanup_cache() == {"removed_bytes": 0}
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/internal/cleanup-cache"
+    assert captured["auth"] == "Bearer hal0-internal-token"
+    assert captured["body"] == ""
+
+
+@pytest.mark.asyncio
+async def test_internal_endpoints_raise_lemonade_http_error_on_non_2xx() -> None:
+    """The four ``/internal/*`` endpoints route through the generic
+    ``_raise_for_status`` chokepoint — non-2xx must surface as
+    ``LemonadeHTTPError``, NOT ``LemonadeLoadError`` (which is reserved
+    for ``/v1/load``'s evict-all blast radius per ADR-0008 §3)."""
+
+    def h(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": "loopback only"})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport)
+        for coro in (
+            client.shutdown(),
+            client.internal_config(),
+            client.internal_set({"log_level": "info"}),
+            client.internal_cleanup_cache(),
+        ):
+            with pytest.raises(LemonadeHTTPError) as exc:
+                await coro
+            assert exc.value.status_code == 403

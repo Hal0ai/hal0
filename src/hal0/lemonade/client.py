@@ -1,25 +1,30 @@
 """HTTP client for the Lemonade Server control plane.
 
-This is the foundational layer for the v0.2 migration (ADR-0006). Every
-later PR — Provider, SlotManager rewire, metrics, preload validation —
-goes through this wrapper. Inference forward endpoints
-(``/v1/chat/completions``, ``/v1/embeddings``, ...) are NOT included
-here; hal0's existing dispatcher already speaks the OpenAI-compatible
-shape unchanged and proxies them directly. This client owns only the
-control-plane surface.
+This is the foundational layer for the v0.2 migration (ADR-0008). Every
+later PR — Provider, SlotManager rewire, metrics — goes through this
+wrapper. Inference forward endpoints (``/v1/chat/completions``,
+``/v1/embeddings``, ...) are NOT included here; hal0's existing
+dispatcher already speaks the OpenAI-compatible shape unchanged and
+proxies them directly. This client owns only the control-plane surface.
 
-Endpoints covered (per ADR-0006 §3):
+Endpoints covered (per ADR-0008 §1 + plan §2.2):
 
-  ``GET  /live``         liveness probe; unauthenticated; cheap
-  ``GET  /v1/health``    full health + ``loaded[]`` of model_names
-  ``GET  /v1/stats``     last-request perf snapshot (metrics shim §9)
-  ``POST /v1/load``      load a registered model
-  ``POST /v1/unload``    unload by model_name
-  ``POST /v1/pull``      download a model from upstream
+  ``GET  /live``                  liveness probe; unauthenticated; cheap
+  ``GET  /v1/health``             full health + ``loaded[]`` of model_names
+  ``GET  /v1/stats``              last-request perf snapshot (metrics shim)
+  ``POST /v1/load``               load a registered model
+  ``POST /v1/unload``             unload by model_name
+  ``POST /v1/pull``               download a model from upstream
+  ``POST /internal/shutdown``     clean unload + exit (systemd ExecStop)
+  ``GET  /internal/config``       full runtime config snapshot
+  ``POST /internal/set``          atomic config setter
+  ``POST /internal/cleanup-cache``  HF cache hygiene (weekly cron)
 
 Bearer auth: hal0 ↔ lemond is loopback-only; the token is hal0's own
-``LEMONADE_API_KEY`` (ADR-0006 §Related → ADR-0001), distinct from the
-``HAL0_BEARER_TOKEN`` users hit hal0-api with.
+``LEMONADE_API_KEY`` (ADR-0008 §1 + ADR-0001), distinct from the
+``HAL0_BEARER_TOKEN`` users hit hal0-api with. The four ``/internal/*``
+endpoints are loopback-only at the lemond layer (403 from non-localhost)
+in addition to the Bearer check.
 """
 
 from __future__ import annotations
@@ -40,13 +45,16 @@ from hal0.lemonade.errors import (
 
 log = logging.getLogger(__name__)
 
-# ADR-0006 §6: lemond binds 127.0.0.1:9100 in the systemd unit.
-DEFAULT_BASE_URL = "http://127.0.0.1:9100"
+# ADR-0008 §1: lemond binds 127.0.0.1:13305 (Lemonade default) loopback-
+# only, supervised by the hal0-lemonade.service systemd unit.
+DEFAULT_BASE_URL = "http://127.0.0.1:13305"
 
-# ADR-0007 §5: hard timeout on /v1/load specifically. Other control
-# plane calls get a shorter budget — they're either cheap (/live, /v1/health)
-# or background (/v1/pull which returns immediately and streams progress
-# elsewhere — handled by a separate progress polling loop).
+# ADR-0008 §3 + §4: hard timeout on /v1/load specifically. /v1/load has
+# evict-all blast radius and is never retried by this client (the caller
+# decides recovery). Other control-plane calls get a shorter budget —
+# they're either cheap (/live, /v1/health) or background (/v1/pull which
+# returns immediately and streams progress elsewhere — handled by a
+# separate progress polling loop).
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_LOAD_TIMEOUT_S = 120.0
 
@@ -57,16 +65,17 @@ class LemonadeClient:
     Design notes:
     - Stateless aside from the shared ``httpx.AsyncClient`` (matching
       the pattern in ``dispatcher/router.py``). Construct one per
-      hal0-api process; share across SlotManager + metrics poller +
-      preload validator.
+      hal0-api process; share across SlotManager + metrics poller.
     - HTTP errors are re-raised as ``LemonadeError`` subclasses so
       callers never import httpx. Network failures bubble as
       ``LemonadeUnavailableError``; timeouts as ``LemonadeTimeoutError``;
       non-2xx as ``LemonadeHTTPError`` (or ``LemonadeLoadError`` for
       the special /v1/load case).
-    - No automatic retries. ADR-0007 §4 forbids retrying /v1/load
-      (would guarantee another evict-all); the rest of the API is
-      idempotent enough that the caller decides retry policy.
+    - No automatic retries. ADR-0008 §3 (nuclear-evict's "not found"
+      exemption) forbids retrying /v1/load — a non-not-found failure
+      already triggered evict-all; another attempt would just repeat
+      the blast radius. The rest of the API is idempotent enough that
+      the caller decides retry policy.
     """
 
     def __init__(
@@ -147,9 +156,11 @@ class LemonadeClient:
     async def stats(self) -> dict[str, Any]:
         """Returns the parsed JSON body of ``GET /v1/stats``.
 
-        Lemonade's last-request perf snapshot. ADR-0006 §9 makes this
-        the source of truth for hal0's Prometheus shim, replacing the
-        v0.1.x ``/metrics`` scrape that doesn't survive the migration.
+        Lemonade's last-request perf snapshot. Per ADR-0008 + plan §2.2
+        + §12.1 this is the source of truth for hal0's Prometheus shim
+        (TTFT, tok/s, prompt_tokens), replacing the v0.1.x ``/metrics``
+        scrape that doesn't survive the migration. KV% for GPU slots is
+        NOT in /v1/stats — accepted gap, see plan §12.1.
         """
         async with self._request("GET", "/v1/stats") as resp:
             self._raise_for_status(resp)
@@ -164,22 +175,36 @@ class LemonadeClient:
         recipe: str | None = None,
         ctx_size: int | None = None,
         llamacpp_backend: str | None = None,
-        llamacpp_args: list[str] | None = None,
+        llamacpp_args: str | list[str] | None = None,
     ) -> dict[str, Any]:
         """Load a model into the Lemonade pool.
 
-        Per ADR-0006 §3 + the v1_load_schema memory, only
-        ``model_name`` is required. Optional kwargs map directly to
+        Per ADR-0008 §3 + the ``hal0_lemonade_v1_load_schema`` memory,
+        only ``model_name`` is required. Optional kwargs map directly to
         Lemonade's documented load fields. The reserved-args list
         (``--reranking``, ``--embedding``, ``--ctx-size``, ``-ngl``,
         etc.) is hardcoded in lemond's router and is NOT extensible —
         any reserved arg passed via ``llamacpp_args`` will trigger a
         4xx. Validate at the caller layer.
 
+        ``llamacpp_args`` wire format is a SINGLE SPACE-SEPARATED
+        STRING (Lemonade's C++ JSON parser, nlohmann::json, throws
+        "type must be string, but is array" on a list — confirmed in
+        spike #2 and the api.md research note). For caller ergonomics
+        this method accepts either:
+
+        - ``None`` — key omitted from the body entirely. NEVER send
+          JSON ``null``; ``request_json["llamacpp_args"]`` is an
+          unconditional accessor and nlohmann raises on null.
+        - ``str`` — forwarded verbatim (e.g. ``"--threads 8"``).
+        - ``list[str]`` — joined with single spaces; ``[]`` becomes
+          the empty string ``""``, which Lemonade treats as
+          "use default" via the ``is_empty_option`` sentinel.
+
         Returns the parsed response body on success. Raises
         ``LemonadeLoadError`` on 4xx/5xx — critically distinct from
         the generic HTTP error class because a /v1/load failure has
-        evict-all blast radius (ADR-0007).
+        evict-all blast radius (ADR-0008 §3).
         """
         body: dict[str, Any] = {"model_name": model_name}
         if recipe is not None:
@@ -189,7 +214,11 @@ class LemonadeClient:
         if llamacpp_backend is not None:
             body["llamacpp_backend"] = llamacpp_backend
         if llamacpp_args is not None:
-            body["llamacpp_args"] = llamacpp_args
+            body["llamacpp_args"] = (
+                llamacpp_args
+                if isinstance(llamacpp_args, str)
+                else " ".join(llamacpp_args)
+            )
         async with self._request(
             "POST", "/v1/load", json=body, timeout=self._load_timeout_s
         ) as resp:
@@ -227,6 +256,66 @@ class LemonadeClient:
         if allow_overwrite:
             body["allow_overwrite"] = True
         async with self._request("POST", "/v1/pull", json=body) as resp:
+            self._raise_for_status(resp)
+            return resp.json()
+
+    # ── /internal/shutdown ─────────────────────────────────────────
+
+    async def shutdown(self) -> dict[str, Any]:
+        """Request a clean unload + process exit from lemond.
+
+        Wired to the systemd unit's ``ExecStop`` (plan §3). Loopback-
+        only at the lemond layer (lemond returns 403 from a non-
+        localhost caller) on top of the same Bearer auth as ``/v1/*``.
+        Returns the parsed JSON body on success; callers typically
+        ignore it and watch the unit's state.
+        """
+        async with self._request("POST", "/internal/shutdown") as resp:
+            self._raise_for_status(resp)
+            return resp.json()
+
+    # ── /internal/config ───────────────────────────────────────────
+
+    async def internal_config(self) -> dict[str, Any]:
+        """Return the full runtime config snapshot from lemond.
+
+        Source of truth for the Settings → Lemonade admin panel
+        (plan §11 PR-13). Per plan §2.2 this surface is loopback-only
+        at the lemond layer; non-localhost callers get 403.
+        """
+        async with self._request("GET", "/internal/config") as resp:
+            self._raise_for_status(resp)
+            return resp.json()
+
+    # ── /internal/set ──────────────────────────────────────────────
+
+    async def internal_set(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Atomically set one or more runtime-config keys on lemond.
+
+        Body shape: ``{key: value, ...}``. Keys split into "immediate
+        effect" (``port``, ``host``, ``log_level``, ``global_timeout``,
+        ``no_broadcast``, ``extra_models_dir``) and "deferred until
+        next load" (``max_loaded_models``, ``ctx_size``,
+        ``llamacpp_backend``, ``llamacpp_args``, ``sdcpp_backend``,
+        ``whispercpp_backend``, ``steps``, ``cfg_scale``, ``width``,
+        ``height``, ``flm_args``) — see plan §2.2.
+
+        ADR-0008 §7: hal0 does NOT use the ``extra.*`` namespace,
+        so callers should not flip extra-models-dir auto-discovery on.
+        """
+        async with self._request("POST", "/internal/set", json=values) as resp:
+            self._raise_for_status(resp)
+            return resp.json()
+
+    # ── /internal/cleanup-cache ────────────────────────────────────
+
+    async def internal_cleanup_cache(self) -> dict[str, Any]:
+        """Trigger HuggingFace cache hygiene on lemond.
+
+        Wired to a weekly cron in plan §2.2. Returns the parsed JSON
+        body — typically a small report dict; callers log it.
+        """
+        async with self._request("POST", "/internal/cleanup-cache") as resp:
             self._raise_for_status(resp)
             return resp.json()
 
