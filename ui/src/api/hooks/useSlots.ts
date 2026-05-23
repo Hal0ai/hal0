@@ -71,9 +71,55 @@ const DEFAULT_METRICS: SlotMetrics = {
   res: '',
 }
 
+// Backend /api/slots returns sparse slots without `type`, `device`, or
+// `group` for built-in slots (primary, embed, stt, …). The v3 SlotsView
+// groups via `slots.filter(s => s.group === "chat")` etc., so without
+// inference the page renders just the header — looks blank/black.
+// Infer from BUILTIN_SLOTS conventions (primary→chat/llm, embed→embed/…).
+function inferSlotShape(s: any): { type: string; group: string; device: string } {
+  const name = String(s?.name ?? '').toLowerCase()
+  const provider = String(s?.provider ?? '').toLowerCase()
+  const backend = String(s?.backend ?? s?.metadata?.backend ?? '').toLowerCase()
+
+  let type = s?.type as string | undefined
+  let group = s?.group as string | undefined
+  let device = s?.device as string | undefined
+
+  if (!type || !group) {
+    if (name === 'primary' || name === 'coder' || name === 'agent' || name.includes('chat')) {
+      type ??= 'llm'; group ??= 'chat'
+    } else if (name === 'rerank' || name.includes('rerank')) {
+      type ??= 'reranking'; group ??= 'embed'
+    } else if (name === 'embed' || name.includes('embed')) {
+      type ??= 'embedding'; group ??= 'embed'
+    } else if (name === 'stt' || name.includes('whisper') || name.includes('moonshine')) {
+      type ??= 'transcription'; group ??= 'voice'
+    } else if (name === 'tts' || name.includes('kokoro') || name.includes('vibe')) {
+      type ??= 'tts'; group ??= 'voice'
+    } else if (name === 'img' || name === 'image' || name.includes('image') || name.includes('sd')) {
+      type ??= 'image'; group ??= 'img'
+    } else if (provider.includes('llama') || provider.includes('llm')) {
+      type ??= 'llm'; group ??= 'chat'
+    }
+  }
+
+  if (!device) {
+    if (backend === 'vulkan' || backend === 'rocm') device = 'gpu-' + backend
+    else if (backend === 'flm' || backend === 'npu') device = 'npu'
+    else if (backend === 'cpu' || backend.includes('cpu')) device = 'cpu'
+    else device = 'cpu'
+  }
+
+  return { type: type ?? 'llm', group: group ?? 'chat', device }
+}
+
 function normalizeSlot(s: any): Slot {
+  const shape = inferSlotShape(s)
   return {
     ...s,
+    type: shape.type,
+    group: shape.group,
+    device: shape.device,
     metrics: { ...DEFAULT_METRICS, ...(s?.metrics ?? {}) },
     spark: Array.isArray(s?.spark) ? s.spark : [],
     model: s?.model ?? s?.model_id ?? s?.model_default ?? '',

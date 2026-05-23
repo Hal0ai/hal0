@@ -18,12 +18,44 @@ export interface Hardware {
   npu?: { present: boolean; columns?: number; ctx?: number }
 }
 
+// Backend /api/hardware returns a flat shape (cpu_model, ram_mb, gpu_name,
+// npu.{present}, …). HardwareView dereferences nested fields like
+// H.ram.total, H.npu.columns directly — passing the raw response makes
+// the page crash with "Cannot read properties of undefined". Normalize
+// into the v3 component shape, falling back to neutral defaults for
+// fields the backend doesn't surface (columns/ctx, hostname, uptime).
+function normalizeHardware(raw: any): Hardware {
+  const ramTotalMb = Number(raw?.ram_mb ?? raw?.ram_total_mb ?? 0)
+  const ramFreeMb = Number(raw?.ram_available_mb ?? 0)
+  const ramUsedMb = Math.max(0, ramTotalMb - ramFreeMb)
+  const mbToGb = (mb: number) => Math.round((mb / 1024) * 10) / 10
+  const cores = Number(raw?.cpu_cores ?? 0)
+  const threads = Number(raw?.cpu_threads ?? cores)
+  return {
+    name: raw?.hostname ?? raw?.name ?? raw?.extra?.hostname ?? '',
+    uptime: raw?.uptime ?? '',
+    cpu: raw?.cpu_model ?? raw?.cpu_name ?? raw?.cpu ?? '',
+    cores: cores ? `${cores}c · ${threads}t` : '',
+    gpu: raw?.gpu_name ?? raw?.gpus?.[0]?.name ?? raw?.gpu ?? '',
+    ram: {
+      total: mbToGb(ramTotalMb),
+      used: mbToGb(ramUsedMb),
+      free: mbToGb(ramFreeMb),
+    },
+    npu: {
+      present: !!(raw?.npu?.present ?? raw?.npu_present),
+      columns: Number(raw?.npu?.columns ?? 0),
+      ctx: Number(raw?.npu?.ctx ?? 0),
+    },
+  }
+}
+
 const POLL_MS = 10_000
 
 export function useHardware() {
   return useQuery({
     queryKey: ['hardware'],
-    queryFn: () => apiGet<Hardware>(ENDPOINTS.hardware),
+    queryFn: async () => normalizeHardware(await apiGet<any>(ENDPOINTS.hardware)),
     refetchInterval: POLL_MS,
   })
 }
