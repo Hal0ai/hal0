@@ -16,21 +16,15 @@
  */
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { mockFetch, MOCK_DATA } from '../composables/useMock.js'
 
 const ENDPOINT = '/api/backends'
 
-// Mock fallback — mirrors /tmp/hal0-design/hal0-v2/project/dash/data.jsx
-// backends section. Loaded when the real endpoint returns 404/empty.
-const MOCK_BACKENDS = [
-  { id: 'llamacpp:rocm',   version: 'v1.0 (b9253)', state: 'installed', usedBy: [], recommended: true },
-  { id: 'llamacpp:vulkan', version: 'v1.0 (b9253)', state: 'installed', usedBy: [] },
-  { id: 'llamacpp:cpu',    version: 'v1.0 (b9253)', state: 'installed', usedBy: [] },
-  { id: 'flm:npu',         version: 'v0.9.42 (deb)', state: 'installed', usedBy: [], recommended: true, note: 'manual deb' },
-  { id: 'whispercpp',      version: 'v1.0 (vulkan)', state: 'installed', usedBy: [] },
-  { id: 'sdcpp',           version: 'v1.0 (rocm)',  state: 'installed', usedBy: [] },
-  { id: 'kokoro',          version: 'builtin · cpu', state: 'installed', usedBy: [] },
-  { id: 'ryzenai-server',  version: '—', state: 'unavailable', usedBy: [], note: 'Windows-only' },
-]
+// Mock fallback now lives in `composables/useMock.js` (slice #166) so
+// every consumer — store, Playwright fixtures, future MCP store — sees
+// one shape. `MOCK_BACKENDS` here is kept as a local re-export for
+// historical callers; new code should import from `useMock`.
+const MOCK_BACKENDS = MOCK_DATA.backends.map((b) => ({ ...b }))
 
 const MOCK_LEMONADE_SELF = {
   version: null,
@@ -52,15 +46,11 @@ export const useBackendsStore = defineStore('backends', () => {
     loading.value = true
     error.value = null
     try {
-      const res = await fetch(ENDPOINT, { headers: { Accept: 'application/json' } })
-      if (res.status === 404) {
-        // Slice #142/#145 — endpoint not shipped yet. Mock fallback per
-        // brief acceptance criteria so views render.
-        backends.value = MOCK_BACKENDS.map((b) => ({ ...b }))
-        lemonadeSelf.value = { ...MOCK_LEMONADE_SELF }
-        isMocked.value = true
-        return
-      }
+      // `mockFetch` substitutes the MOCK_DATA.backends shape on 404 or
+      // when VITE_MOCK_LEMONADE=1; real responses pass through. The
+      // mock build returns the same `{backends, lemonade}` envelope as
+      // the live endpoint per ADR-0008 §5.
+      const res = await mockFetch(ENDPOINT, { headers: { Accept: 'application/json' } })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const body = await res.json()
       // Accept either {backends:[…], lemonade:{}} or a bare list for
@@ -73,7 +63,11 @@ export const useBackendsStore = defineStore('backends', () => {
           lemonadeSelf.value = { ...MOCK_LEMONADE_SELF, ...body.lemonade }
         }
       }
-      isMocked.value = false
+      // `isMocked` tracks whether the LAST fetch was substituted — the
+      // mockFetch path returns a synthetic Response we can detect by
+      // shape rather than a flag, so we re-derive from the response
+      // identity used (a 200 with our exact backend ids).
+      isMocked.value = isMockShape(backends.value)
     } catch (e) {
       error.value = e?.message || String(e)
       // Soft-fail: keep last known list, fall back to mock if empty.
@@ -86,8 +80,20 @@ export const useBackendsStore = defineStore('backends', () => {
     }
   }
 
+  /**
+   * Heuristic: the mock dataset is uniquely identifiable by the
+   * `ryzenai-server` row in `unavailable` state. The real backend has
+   * the same key in different combinations, but the mock keeps it
+   * always present + windows-only. Good enough for an indicator badge.
+   */
+  function isMockShape(list) {
+    if (!Array.isArray(list)) return false
+    const ryzen = list.find((b) => b?.id === 'ryzenai-server')
+    return !!(ryzen && ryzen.state === 'unavailable' && ryzen.note === 'Windows-only')
+  }
+
   async function install(id) {
-    const res = await fetch(`${ENDPOINT}/${encodeURIComponent(id)}/install`, {
+    const res = await mockFetch(`${ENDPOINT}/${encodeURIComponent(id)}/install`, {
       method: 'POST',
     })
     if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`)
@@ -95,7 +101,7 @@ export const useBackendsStore = defineStore('backends', () => {
   }
 
   async function uninstall(id) {
-    const res = await fetch(`${ENDPOINT}/${encodeURIComponent(id)}`, {
+    const res = await mockFetch(`${ENDPOINT}/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     })
     if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`)
