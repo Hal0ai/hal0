@@ -1,4 +1,4 @@
-"""LemonadeProvider — v0.2 unified-runtime Provider (PR-8).
+"""LemonadeProvider — v0.2 unified-runtime Provider (PR-8 + PR-10).
 
 In v0.1.x every backend (llama-server, FLM, Moonshine, Kokoro, …) was a
 separate Provider class that spawned its own toolbox container under a
@@ -10,18 +10,22 @@ slot abstraction and Lemonade's HTTP control plane.
 Where this fits in the abstraction stack:
 
   - SlotManager keeps its v0.1.x public surface (``load`` / ``unload`` /
-    ``swap`` / ``status`` / …). Per PR-8 contract, no caller signatures
-    change. SlotManager internally gates between the legacy
-    docker/systemd path and the Lemonade path on ``HAL0_BACKEND``.
-  - Under ``HAL0_BACKEND=lemonade``, SlotManager calls
-    :meth:`LemonadeProvider.load` / :meth:`unload` instead of writing an
-    override.conf and running ``systemctl start``. The active Lemonade
-    daemon (``hal0-lemonade.service``, port 13305) owns every child
-    process. There is no per-slot container to render.
-  - Under the legacy backend mode, every other Provider in
-    :mod:`hal0.providers` continues to work unchanged. Phase 3's PR-10
-    will retire those providers and the systemd path; until then they
-    live alongside this class.
+    ``swap`` / ``status`` / …). No caller signatures change. After
+    PR-10, SlotManager unconditionally dispatches through this class —
+    the prior ``HAL0_BACKEND`` env gate retired and the legacy
+    docker/systemd code paths inside SlotManager went with it.
+  - SlotManager calls :meth:`LemonadeProvider.load` / :meth:`unload`
+    instead of writing an override.conf and running ``systemctl
+    start``. The active Lemonade daemon (``hal0-lemonade.service``,
+    port 13305) owns every child process. There is no per-slot
+    container to render.
+  - Legacy Provider classes (``LlamaServerProvider``, ``FLMProvider``,
+    ``MoonshineProvider``, ``KokoroProvider``, ``ComfyUIProvider``)
+    survive in :mod:`hal0.providers` for now — non-SlotManager callers
+    (image-gen pipeline in ``api/routes/v1.py``, NPU footprint probes
+    in ``api/routes/hardware.py``, FLM catalog reads in
+    ``registry/pull.py``) still reference them. Their SlotManager
+    dispatch role is dead, but the class surfaces are not yet retired.
 
 ABC compliance notes:
 
@@ -182,30 +186,6 @@ def _slot_extra_args(slot_cfg: dict[str, Any]) -> str | None:
     return None
 
 
-# ── env override (test seam) ────────────────────────────────────────────────
-
-
-def _env_backend() -> str:
-    """Read the active backend mode from the environment.
-
-    Centralised so tests can monkeypatch one symbol instead of poking
-    ``os.environ`` directly. The match is case-insensitive + stripped
-    so accidental whitespace in ``hal0-api.service`` env files doesn't
-    silently disable the Lemonade path.
-    """
-    return (os.environ.get("HAL0_BACKEND") or "").strip().lower()
-
-
-def lemonade_active() -> bool:
-    """True when ``HAL0_BACKEND=lemonade`` is in effect.
-
-    Public helper so SlotManager + tests can gate on the same predicate
-    without duplicating the env-var spelling. Matches the gating in
-    :func:`hal0.api._maybe_start_lemonade_idle_driver`.
-    """
-    return _env_backend() == "lemonade"
-
-
 # ── provider ────────────────────────────────────────────────────────────────
 
 
@@ -241,7 +221,7 @@ class LemonadeProvider(Provider):
 
         Reads ``LEMONADE_API_KEY`` from the environment on first
         construction (same convention as
-        :func:`hal0.api._maybe_start_lemonade_idle_driver`). Subsequent
+        :func:`hal0.api._start_lemonade_idle_driver`). Subsequent
         calls reuse the same instance.
         """
         if self._client is None:
@@ -388,13 +368,13 @@ class LemonadeProvider(Provider):
         """No per-slot systemd unit under Lemonade.
 
         Reachable only via :func:`hal0.slots.unit_template.render_override`,
-        which SlotManager skips on the Lemonade-active branch. Raising
-        ensures we fail loudly if the skip is ever wired wrong.
+        which SlotManager no longer calls (PR-10 retired the legacy
+        systemd render path). Raising ensures we fail loudly if any
+        future caller wires this through by mistake.
         """
         raise NotImplementedError(
             "LemonadeProvider has no per-slot systemd unit; lemond owns "
-            "process lifecycle. SlotManager must skip render_override "
-            "when HAL0_BACKEND=lemonade."
+            "process lifecycle (ADR-0008 §1)."
         )
 
     # ── lifecycle (new methods on top of the ABC) ──────────────────────────
@@ -535,5 +515,4 @@ class LemonadeProvider(Provider):
 __all__ = [
     "LemonadeProvider",
     "device_to_backend",
-    "lemonade_active",
 ]

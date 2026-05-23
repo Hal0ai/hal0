@@ -26,18 +26,22 @@ from hal0.providers.llama_server import LlamaServerProvider
 from hal0.providers.moonshine import MoonshineProvider
 
 # Provider name → singleton instance.  Providers are stateless (per the
-# ABC contract), so one instance per process is enough.  SlotManager
-# itself stays provider-agnostic; the unit-template renderer (which is
-# logically "provider-systemd glue") is the only caller of get_provider.
+# ABC contract), so one instance per process is enough.
 #
-# v0.2 (ADR-0008 §2): Lemonade is the only runtime — slots no longer
-# spawn per-modality toolbox containers. ``LemonadeProvider`` is the
-# operational provider for every slot when ``HAL0_BACKEND=lemonade``;
-# the others survive in this table because PR-9 only retired the
-# Dockerfiles + systemd template, not the Python provider classes (per
-# the anti-scope in PR-8's brief — PR-10 owns their removal). The
-# v0.1.x toolbox path remains intact for any caller still on
-# ``HAL0_BACKEND`` ≠ ``lemonade``.
+# v0.2 (ADR-0008 §1/§2): Lemonade is the sole inference backend. After
+# PR-10 SlotManager dispatches every lifecycle call through
+# ``LemonadeProvider`` unconditionally — the prior ``HAL0_BACKEND``
+# env gate retired and the legacy systemd render path inside
+# SlotManager went with it.
+#
+# The other Provider classes survive in this registry because
+# non-SlotManager callers still reference them: ``api/routes/v1.py``
+# drives ``ComfyUIProvider`` directly for the image-gen pipeline,
+# ``api/routes/hardware.py`` reads ``flm_served_models()`` for NPU
+# footprint, ``registry/pull.py`` consults ``_probe_flm_catalog`` for
+# FLM model resolution, ``voice/__init__.py`` re-exports Kokoro +
+# Moonshine for the voice surface. Retiring those classes is a
+# follow-up PR; PR-10's scope ends at the SlotManager surface.
 _PROVIDERS: dict[str, Provider] = {
     "lemonade": LemonadeProvider(),
     "llama-server": LlamaServerProvider(),

@@ -13,69 +13,72 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import hal0.providers as providers_mod
 from hal0.api import create_app
-from hal0.slots import manager as mgr_mod
-from hal0.slots.manager import SlotManager
+from hal0.lemonade.client import LemonadeClient
+from hal0.providers.lemonade import LemonadeProvider
 
-# ── shared fakes (mirrors test_slots_routes.py) ─────────────────────────────
-
-
-class _FakeProc:
-    def __init__(self, rc: int = 0) -> None:
-        self.returncode = rc
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        return b"", b""
-
-    def kill(self) -> None:
-        pass
-
-    async def wait(self) -> int:
-        return self.returncode
+# ── Lemonade stub (PR-10) ────────────────────────────────────────────────────
 
 
 @pytest.fixture
-def systemctl_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    state: dict[str, Any] = {"calls": [], "is_active_state": "inactive"}
+def systemctl_stub() -> Iterator[dict[str, Any]]:
+    """Compatibility shim — installs a Lemonade stub provider.
 
-    async def fake_create(*args: str, **_: Any) -> _FakeProc:
-        cmd = list(args)
-        state["calls"].append(cmd)
-        if cmd[:1] != ["systemctl"]:
-            raise AssertionError(f"unexpected subprocess: {cmd}")
-        action = cmd[1] if len(cmd) > 1 else ""
-        if action == "is-active":
-            return _FakeProc(rc=0 if state["is_active_state"] == "active" else 3)
-        if action == "start":
-            state["is_active_state"] = "active"
-            return _FakeProc(rc=0)
-        if action == "stop":
-            state["is_active_state"] = "inactive"
-            return _FakeProc(rc=0)
-        return _FakeProc(rc=0)
+    PR-10 retired systemctl dispatch; the fixture name is kept so the
+    existing tests don't have to be re-signed. The returned dict
+    carries a ``_lemonade`` key with the underlying Lemonade state
+    dict so tests can mutate it if needed.
+    """
+    state: dict[str, Any] = {
+        "loaded": [{"model_name": "qwen3-4b-q4_k_m"}],
+        "load_calls": [],
+        "unload_calls": [],
+    }
 
-    monkeypatch.setattr(mgr_mod.asyncio, "create_subprocess_exec", fake_create)
-    return state
+    def h(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/load":
+            body = json.loads(req.content.decode() or "{}")
+            state["load_calls"].append(body)
+            state["loaded"] = [{"model_name": body.get("model_name", "")}]
+            return httpx.Response(200, json={"status": "loaded"})
+        if req.url.path == "/v1/unload":
+            body = json.loads(req.content.decode() or "{}")
+            state["unload_calls"].append(body)
+            state["loaded"] = []
+            return httpx.Response(200, json={"status": "unloaded"})
+        if req.url.path == "/v1/health":
+            return httpx.Response(200, json={"loaded": state["loaded"]})
+        return httpx.Response(404, json={"detail": f"unmocked {req.url.path}"})
+
+    transport = httpx.AsyncClient(
+        transport=httpx.MockTransport(h),
+        base_url="http://test",
+    )
+    provider = LemonadeProvider(client=LemonadeClient(http_client=transport))
+    original = providers_mod._PROVIDERS["lemonade"]
+    providers_mod._PROVIDERS["lemonade"] = provider
+
+    yield {"calls": [], "is_active_state": "active", "_lemonade": state}
+
+    providers_mod._PROVIDERS["lemonade"] = original
 
 
-@pytest.fixture
-def stub_await_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the SlotManager's health probe immediately return READY."""
-    from hal0.slots.state import SlotState
-
-    async def _ok(self: SlotManager, slot_name: str, port: int, provider: str) -> SlotState:
-        return SlotState.READY
-
-    monkeypatch.setattr(SlotManager, "_await_ready", _ok)
+@pytest.fixture(autouse=False)
+def stub_await_ready() -> None:
+    """No-op (PR-10): _await_ready is Lemonade-aware and short-circuits."""
+    return None
 
 
 # ── isolated app fixture (lifespan resolves under tmp_hal0_home) ────────────

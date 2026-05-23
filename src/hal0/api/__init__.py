@@ -238,24 +238,22 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
             )
 
 
-async def _maybe_start_lemonade_idle_driver(app: FastAPI) -> IdleDriver | None:
-    """Start the Lemonade idle-unload driver iff v0.2 backend is active.
+async def _start_lemonade_idle_driver(app: FastAPI) -> IdleDriver | None:
+    """Start the Lemonade idle-unload driver.
 
-    Gated on ``HAL0_BACKEND=lemonade`` (manifest schema v2). Under
-    v0.1.x toolbox mode the existing ``SlotManager`` idle monitor
-    already covers the policy; the driver would be redundant noise.
+    v0.2 (ADR-0008 §1): Lemonade is the sole inference backend; this
+    driver always starts. PR-10 removed the prior ``HAL0_BACKEND``
+    gate — the v0.1.x toolbox path no longer exists.
 
     Failures here MUST NOT block API startup — a busted Lemonade
     config shouldn't keep the dashboard from coming up so the user
     can fix it. The driver itself is also resilient to transient
     lemond unavailability (see ``lemonade/idle.py`` docstring).
 
-    See ADR-0007 §Related, ADR-0006 §17.
+    See ADR-0007 §Related, ADR-0008 §1.
     """
     import os
 
-    if os.environ.get("HAL0_BACKEND", "").strip().lower() != "lemonade":
-        return None
     try:
         from hal0.lemonade.client import LemonadeClient
         from hal0.lemonade.idle import IdleDriver
@@ -489,13 +487,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await refresh_task
 
-    # Lemonade idle-unload driver (ADR-0007 §Related, ADR-0006 §17). Only
-    # started when HAL0_BACKEND=lemonade is the active backend — under
-    # the v0.1.x per-modality toolbox model, SlotManager's own idle
-    # monitor (started above via start_idle_monitor) is the source of
-    # truth and this driver would be redundant. Stored on app.state so
-    # tests + future shutdown hooks can introspect it.
-    lemonade_idle_driver = await _maybe_start_lemonade_idle_driver(app)
+    # Lemonade idle-unload driver (ADR-0007 §Related, ADR-0008 §1). v0.2
+    # makes Lemonade the sole backend, so this driver always starts —
+    # the prior ``HAL0_BACKEND=lemonade`` gate retired in PR-10. Stored
+    # on app.state so tests + future shutdown hooks can introspect it.
+    lemonade_idle_driver = await _start_lemonade_idle_driver(app)
 
     try:
         async with AsyncExitStack() as stack:

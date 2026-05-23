@@ -1,26 +1,33 @@
-"""Slot lifecycle manager.
+"""Slot lifecycle manager (v0.2 — Lemonade-only).
 
-SlotManager owns every aspect of slot lifecycle: spawn, terminate, load,
-unload, restart, swap, create, delete.  It talks to systemd via asyncio
-subprocesses, reads and writes slot env files via
-hal0.config.env.write_env_atomic, and persists state transitions to
-/var/lib/hal0/slots/<name>/state.json.
+SlotManager owns every aspect of slot lifecycle: load, unload, swap,
+status, restart, create, delete. It dispatches every state-changing
+call through :class:`LemonadeProvider` (PR-10 retired the legacy
+docker/systemd path; ADR-0008 §1 makes Lemonade the sole backend).
 
-Port target: haloai lib/slots.py (1082 lines).
-Refactored for the state machine defined in hal0.slots.state (PLAN.md §5 Tier 3).
+State transitions are persisted atomically to
+``/var/lib/hal0/slots/<name>/state.json`` (see :mod:`hal0.slots.state`).
+The state machine survives v0.2 unchanged — only the side effects of
+each transition changed (from "systemctl start hal0-slot@..." to
+"POST /v1/load on lemond").
 
 Architectural boundaries (ARCHITECTURE.md "Key boundaries"):
-  - This module is *pure systemd*.  It does not import providers.  It does
-    not make HTTP calls except for the health probe (which is a slot
-    *lifecycle* concern, not a routing concern).
-  - It depends on hal0.config.paths, hal0.config.env, and the rendering
-    helpers in hal0.slots.unit_template.  It does NOT import from
-    hal0.dispatcher.
-  - All public methods return :class:`Slot` snapshots, never dicts —
-    haloai's ``{"ok": False, "error": "..."}`` return shape is replaced
-    by typed Hal0Error subclasses (Tier 1).
+  - SlotManager talks to lemond exclusively via
+    :func:`hal0.providers.lemonade_provider`. No subprocess spawning,
+    no per-slot HTTP probing — the daemon is the source of truth.
+  - All public methods return :class:`Slot` snapshots, never dicts.
+    Errors raise typed Hal0Error subclasses.
+  - This module does NOT import from :mod:`hal0.dispatcher`.
 
-See PLAN.md §3 (module port plan) and PLAN.md §5 (reliability work).
+The v0.1.x public surface (``load`` / ``unload`` / ``swap`` /
+``status`` / ``create`` / ``update_config`` / …) is preserved
+verbatim so api/routes, dispatcher, and orchestrator callers do not
+need to migrate in PR-10.
+
+New in PR-10: :data:`SEEDED_SLOTS`, :data:`NPU_SEEDED_SLOTS`, plus
+routing helpers (:meth:`SlotManager.default_slot_for`,
+:meth:`SlotManager.route_for_request`,
+:meth:`SlotManager.add_slot`, :meth:`SlotManager.remove_slot`).
 """
 
 from __future__ import annotations
@@ -28,19 +35,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import random
+import re
+import shutil
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
-
 from hal0.config import paths
 from hal0.slots.state import (
     IllegalSlotTransition,
     SlotConfigError,
-    SlotHealthFailed,
     SlotNotFound,
     SlotSpawnFailed,
     SlotState,
@@ -50,11 +55,6 @@ from hal0.slots.state import (
     read_state,
     write_state_atomic,
 )
-from hal0.slots.unit_template import (
-    override_path,
-    render_override,
-    write_slot_env,
-)
 
 if TYPE_CHECKING:
     from hal0.config.schema import SlotConfig
@@ -62,46 +62,45 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# ── Seeded slot catalogue (PR-10, plan §4.2 + §10.2) ────────────────────────
+
+#: Slots that exist on every hal0 install regardless of hardware. The
+#: dashboard creates these as empty cards at first run; the bundle
+#: picker (Phase 5) populates their ``model.default`` fields.
+SEEDED_SLOTS: tuple[str, ...] = ("primary", "embed", "rerank", "stt", "tts", "img")
+
+#: NPU slots seeded only when the FastFlowLM ``.deb`` is installed
+#: (``shutil.which('flm')`` truthy). These back the AMDXDNA hardware
+#: context's trio mode — chat + ASR + embed coresident in one FLM
+#: process (ADR-0008 §5). Opt-in enabled at Pro+ bundle tier.
+NPU_SEEDED_SLOTS: tuple[str, ...] = ("agent", "stt-npu", "embed-npu")
+
+#: Lemonade-vocabulary slot types (plan §4.1).
+_VALID_SLOT_TYPES: frozenset[str] = frozenset(
+    {"llm", "embedding", "reranking", "transcription", "tts", "image"}
+)
+
+#: Slot-name policy: kebab-case, max 32 chars, leading alphanumeric.
+_SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
 # ── Tunables ─────────────────────────────────────────────────────────────────
 
-# TIER1: Replaces haloai's hardcoded 2s cold-boot probe at lib/upstreams.py:500.
-# Adaptive backoff: (0.5s, 1s, 2s, 5s, 10s) with ±20% jitter.  Total grace
-# capped at HEALTH_GRACE_TOTAL_S.  Per-slot override may live in
-# hardware.json once the hardware-probe agent's contract lands.
-_HEALTH_BACKOFF_S: tuple[float, ...] = (0.5, 1.0, 2.0, 5.0, 10.0)
-_HEALTH_GRACE_TOTAL_S: float = 180.0
-_HEALTH_PROBE_TIMEOUT_S: float = 5.0
-_SENTINEL_PROMPT: str = "ping"
-
-# How long systemctl operations get before we treat them as hung.
-_SYSTEMCTL_TIMEOUT_S: float = 30.0
-
-# TIER1: Push-driven failure detector.  While a slot is in a "live" state
-# (READY / SERVING / IDLE) a background task polls ``systemctl is-active``
-# every _FAIL_WATCH_INTERVAL_S seconds.  When the unit unexpectedly dies
-# (OOM, segfault, mid-warmup pull failure, …) the watcher flips state to
-# ERROR and emits the SSE frame within ~1s of detection, instead of
-# waiting for the next ``status()`` poll or for ``_await_ready``'s 180s
-# grace to expire.  See task #11.
+# Push-driven failure detector. While a slot is in a "live" state
+# (READY / SERVING / IDLE) a background task polls is_active every
+# _FAIL_WATCH_INTERVAL_S seconds. When the slot drops out of lemond's
+# loaded[] (model evicted, lemond died) the watcher flips state to
+# ERROR and emits an SSE frame within ~1s.
 _FAIL_WATCH_INTERVAL_S: float = 2.0
 _FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
     {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
 )
 
-# Idle-monitor defaults.  A READY slot whose last activity is older than
-# _IDLE_AFTER_S gets demoted to IDLE so dashboards / unload heuristics can
-# distinguish "warm but quiet" from "warm and serving".  Per task #10, the
-# default matches haloai's 300s; constructor args + start_idle_monitor()
-# accept overrides for tests and ops tuning.
+# Idle-monitor defaults. A READY slot whose last activity is older than
+# _IDLE_AFTER_S gets demoted to IDLE so dashboards / unload heuristics
+# can distinguish "warm but quiet" from "warm and serving".
 _IDLE_AFTER_S: float = 300.0
 _IDLE_MONITOR_INTERVAL_S: float = 30.0
-
-# ISSUE #31: How long ``_await_ready`` waits in the "alive but no model"
-# regime before resolving the slot to IDLE instead of continuing to wait
-# for a model to appear.  Kept short so a llama-server launched with
-# ``--model ""`` doesn't sit in WARMING for the full 180s grace window
-# before the dashboard sees an actionable state.
-_IDLE_STABILISE_S: float = 3.0
 
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
@@ -182,7 +181,13 @@ class SlotManager:
       3. Pushed onto in-memory async queues for any state_stream() subscribers.
     """
 
-    BUILTIN_SLOTS: tuple[str, ...] = ("primary", "embed", "stt", "tts", "img")
+    # Class-level alias for module-level :data:`SEEDED_SLOTS`. Kept
+    # spelt the same as v0.1.x so caller code (and the test
+    # ``BUILTIN_SLOTS in SlotManager`` check) keeps working.
+    # ``seeded_slots()`` is the source of truth — it composes
+    # SEEDED_SLOTS with NPU_SEEDED_SLOTS when an FLM runtime is
+    # present.
+    BUILTIN_SLOTS: tuple[str, ...] = SEEDED_SLOTS
 
     def __init__(
         self,
@@ -206,9 +211,10 @@ class SlotManager:
         self._subscribers: list[asyncio.Queue[SlotStateRecord]] = []
         # Idle-tracking — last request timestamp per slot.
         self._last_used: dict[str, float] = {}
-        # TIER1: per-slot background tasks that poll systemctl is-active and
-        # push a READY→ERROR transition the instant the unit dies.  Keyed by
-        # slot name; only present while the slot is in a live state.
+        # Per-slot background tasks that poll lemond's loaded[] list
+        # and push a READY→ERROR transition when the model drops out
+        # (eviction, lemond restart, etc). Keyed by slot name; only
+        # present while the slot is in a live state.
         self._fail_watchers: dict[str, asyncio.Task[None]] = {}
         # PULLING — optional model-pull hook + cache predicate.  When
         # ``pull_runner`` is unset, load() never enters PULLING (the model
@@ -234,10 +240,6 @@ class SlotManager:
         self._idle_monitor_task: asyncio.Task[None] | None = None
 
     # ── helpers ──────────────────────────────────────────────────────────────
-
-    def _service_name(self, name: str) -> str:
-        """systemd template-unit instance for this slot."""
-        return f"hal0-slot@{name}.service"
 
     def _lock(self, name: str) -> asyncio.Lock:
         if name not in self._locks:
@@ -470,10 +472,10 @@ class SlotManager:
         existing.cancel()
 
     async def _fail_watch_loop(self, slot_name: str) -> None:
-        """Poll ``systemctl is-active`` and flip to ERROR on unit death.
+        """Poll lemond's loaded[] and flip to ERROR on model eviction.
 
         Runs as a background task while the slot is in READY/SERVING/IDLE.
-        Detection latency = up to one poll interval (~2s).  Exits cleanly
+        Detection latency = up to one poll interval (~2s). Exits cleanly
         once the slot leaves the live-state set, by self-cancel via the
         ERROR transition, or via outer ``task.cancel()``.
         """
@@ -490,7 +492,7 @@ class SlotManager:
                 try:
                     active = await self._is_active(slot_name)
                 except Exception as exc:
-                    # systemctl failure is unusual — log and keep polling.
+                    # Probe failure is unusual — log and keep polling.
                     log.warning(
                         "slot.fail_watch_is_active_failed",
                         extra={"slot": slot_name, "error": str(exc)},
@@ -498,9 +500,9 @@ class SlotManager:
                     continue
                 if active:
                     continue
-                # Unit went inactive/failed while we believed it was live.
-                # Re-check state once more — load/unload may have moved us
-                # legitimately during the is-active call.
+                # Model dropped out of lemond while we believed it was
+                # live. Re-check state once more — load/unload may have
+                # moved us legitimately during the probe.
                 current = self._current_state(slot_name)
                 if current not in _FAIL_WATCH_LIVE_STATES:
                     return
@@ -508,7 +510,7 @@ class SlotManager:
                     await self._transition(
                         slot_name,
                         SlotState.ERROR,
-                        message="systemd unit died unexpectedly",
+                        message="model dropped from lemond unexpectedly",
                         force=True,
                     )
                 except Exception as exc:
@@ -521,58 +523,14 @@ class SlotManager:
             # Normal shutdown path — slot left live-state cleanly.
             raise
 
-    # ── systemctl wrapper ────────────────────────────────────────────────────
+    async def _is_active(self, slot_name: str) -> bool:
+        """Lemonade-mode "is the slot live" probe.
 
-    async def _systemctl(self, *args: str) -> tuple[int, str, str]:
-        """Run a systemctl command and return (rc, stdout, stderr).
-
-        TIER1: returns the full triple — callers decide how to react.
-        haloai's bool-only return at lib/slots.py:177-186 hid the stderr
-        needed to surface a meaningful error envelope.
-        """
-        proc = await asyncio.create_subprocess_exec(
-            "systemctl",
-            *args,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=_SYSTEMCTL_TIMEOUT_S
-            )
-        except TimeoutError as exc:
-            proc.kill()
-            with contextlib.suppress(asyncio.CancelledError):
-                await proc.wait()
-            raise SlotSpawnFailed(
-                f"systemctl {' '.join(args)} timed out after {_SYSTEMCTL_TIMEOUT_S}s",
-                details={"args": list(args)},
-            ) from exc
-        rc = proc.returncode if proc.returncode is not None else -1
-        return (
-            rc,
-            stdout.decode(errors="replace"),
-            stderr.decode(errors="replace"),
-        )
-
-    async def _is_active(self, name: str) -> bool:
-        # v0.2 (ADR-0008 §6): under Lemonade there is no per-slot systemd
-        # unit; "is-active" maps to "is the slot's model in lemond's
-        # loaded[]". Failures of the lemond probe are treated as
-        # inactive so the status() reconciler doesn't lock a slot into
-        # a stale READY when lemond is down.
-        if _lemonade_active():
-            return await self._lemonade_is_active(name)
-        rc, _, _ = await self._systemctl("is-active", self._service_name(name))
-        return rc == 0
-
-    async def _lemonade_is_active(self, slot_name: str) -> bool:
-        """Lemonade-mode replacement for systemctl is-active.
-
-        True when the slot's configured model appears in lemond's
-        ``/v1/health.loaded[]``. Probe errors are coerced to False so
-        ``status()``'s drift reconciler runs (re-load on next request).
+        v0.2 (ADR-0008 §1/§6): there is no per-slot systemd unit; the
+        question "is the slot active?" maps to "does the slot's
+        configured model appear in lemond's ``/v1/health.loaded[]``?".
+        Probe errors are coerced to ``False`` so ``status()``'s drift
+        reconciler runs (and re-loads on the next request).
         """
         cfg = await self._maybe_load_config(slot_name)
         if not cfg:
@@ -707,7 +665,7 @@ class SlotManager:
         return await self.load(slot_name)
 
     async def swap(self, slot_name: str, new_model_id: str) -> Slot:
-        """Hot-swap a slot's model: terminate → rewrite env → spawn → await."""
+        """Hot-swap a slot's model: unload current, load new via Lemonade."""
         if not new_model_id:
             raise SlotConfigError("swap requires a non-empty model id")
         self._ensure_known(slot_name)
@@ -719,18 +677,17 @@ class SlotManager:
     async def status(self, slot_name: str) -> Slot:
         """Return a snapshot of the current slot state.
 
-        Combines the persisted state.json with a live systemd `is-active`
-        check.  Reconciliation runs in BOTH directions:
+        Combines the persisted state.json with a live "is the model
+        in lemond's loaded[]?" probe. Reconciliation runs in both
+        directions:
 
-          - state.json says READY/SERVING/IDLE but the unit is dead →
-            transition to ERROR so the dashboard reflects reality.
-          - state.json says OFFLINE / ERROR (or is missing) but the unit
-            is *active* and a fast health probe succeeds → adopt the
-            running slot into READY/IDLE.  This is the issue #30 fix: a
-            kokoro / moonshine slot started outside ``load()`` (e.g. via
-            ``systemctl enable --now`` on boot, or by an external
-            orchestrator) used to sit at OFFLINE forever because the
-            state writer was only driven by the load() path.
+          - state.json says READY/SERVING/IDLE but the model has been
+            evicted from lemond → transition to ERROR so the dashboard
+            reflects reality.
+          - state.json says OFFLINE / ERROR (or is missing) but the
+            model is live in lemond → adopt the running slot into
+            READY. Covers the case where another process or a manual
+            ``/v1/load`` populated lemond out-of-band.
         """
         self._ensure_known(slot_name)
         rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
@@ -761,42 +718,26 @@ class SlotManager:
                 if cfg
                 else {},
             )
-        # Reconcile with systemd reality.
+        # Reconcile with lemond reality.
         observed = rec.state
         if observed in (SlotState.READY, SlotState.SERVING, SlotState.IDLE) and not active:
-            # systemd says dead; record reflects ready — drift.
+            # lemond says the model is not loaded; record reflects
+            # ready — drift, demote to ERROR.
             await self._transition(
                 slot_name,
                 SlotState.ERROR,
-                message="systemd unit not active",
+                message="model not loaded in lemond",
                 force=True,
             )
             observed = SlotState.ERROR
         elif observed in (SlotState.OFFLINE, SlotState.ERROR) and active:
-            # ISSUE #30: the inverse drift — state.json says we're not
-            # running, but systemd has a live unit.  Adoption probe
-            # picks the appropriate ready/idle state for the running
-            # process.  Failure of the probe leaves the record alone so
-            # the next status() call retries.
+            # Inverse drift — state.json says we're not running, but
+            # lemond holds the model. Adoption picks the slot up.
             cfg = await self._maybe_load_config(slot_name)
             if cfg:
                 adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
                 if adopted is not None:
                     return adopted
-        elif observed in (SlotState.READY, SlotState.SERVING) and active and not rec.model_id:
-            # Migration / self-healing: a stale state.json from before the
-            # adoption guard could have READY/SERVING with model_id="".
-            # Re-run adoption when the provider actually needs a model so
-            # the record either picks up a live model_id from /v1/models
-            # or demotes to IDLE.  Gate on the empty-model-id check so the
-            # hot path stays cheap on healthy records.
-            provider_hint = rec.extra.get("provider")
-            if provider_hint and provider_requires_model(str(provider_hint)):
-                cfg = await self._maybe_load_config(slot_name)
-                if cfg:
-                    adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
-                    if adopted is not None:
-                        return adopted
         # Re-hydrate the top-level backend from the slot's TOML when the
         # state.json record predates the extras-carry change (older state
         # files were written without ``extra.backend``). The dashboard's
@@ -854,13 +795,13 @@ class SlotManager:
     async def iter_configs(self) -> list[dict[str, Any]]:
         """Return raw slot config dicts for every configured slot.
 
-        Lightweight — reads TOML only, never calls systemctl.  Intended
+        Lightweight — reads TOML only, never touches lemond. Intended
         for startup hooks (e.g. ``lifespan`` auto-registering slots as
-        upstreams) that need slot metadata before any real systemd
+        upstreams) that need slot metadata before any real lifecycle
         interaction.
 
         Returns:
-            One dict per slot, in stable order.  Each dict carries at
+            One dict per slot, in stable order. Each dict carries at
             least ``name`` and ``port``; the rest of the SlotConfig
             shape (``backend``, ``provider``, …) round-trips verbatim.
         """
@@ -878,14 +819,199 @@ class SlotManager:
             out.append(cfg)
         return out
 
+    # ── PR-10: seeded slot catalogue + routing helpers ──────────────────────
+
+    @staticmethod
+    def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
+        """Return the seeded slot list, optionally including the NPU trio.
+
+        :data:`SEEDED_SLOTS` lands on every hal0 install. The NPU trio
+        (``agent`` / ``stt-npu`` / ``embed-npu``) only seeds when the
+        FastFlowLM ``.deb`` is installed (``shutil.which('flm')``
+        truthy). Per plan §10.2 + §4.2 + ADR-0008 §5.
+
+        Args:
+            include_npu: ``None`` (default) detects FLM presence at
+                runtime; ``True`` forces inclusion (tests + the bundle
+                picker's preview mode); ``False`` forces exclusion.
+        """
+        if include_npu is None:
+            include_npu = bool(shutil.which("flm"))
+        if include_npu:
+            return SEEDED_SLOTS + NPU_SEEDED_SLOTS
+        return SEEDED_SLOTS
+
+    async def default_slot_for(self, slot_type: str) -> str | None:
+        """Return the name of the slot with ``type=slot_type`` and ``default=true``.
+
+        Plan §4.4 step 1. Exactly one ``default = true`` per type is
+        allowed; two defaults raise :class:`SlotConfigError` so the
+        misconfiguration surfaces at the routing call site instead of
+        silently picking one. Returns ``None`` when no slot of the
+        type has ``default = true`` (the caller is expected to
+        fall-through to the first enabled slot — see
+        :meth:`route_for_request`).
+        """
+        candidates: list[str] = []
+        for cfg in await self.iter_configs():
+            if cfg.get("type") != slot_type:
+                continue
+            if cfg.get("default") is True:
+                candidates.append(str(cfg.get("name", "")))
+        if len(candidates) > 1:
+            raise SlotConfigError(
+                f"slot type {slot_type!r} has multiple default=true slots: "
+                f"{candidates}; exactly one is allowed",
+                details={"type": slot_type, "candidates": candidates},
+            )
+        return candidates[0] if candidates else None
+
+    async def route_for_request(
+        self,
+        slot_type: str,
+        *,
+        required_labels: tuple[str, ...] = (),
+    ) -> str | None:
+        """Resolve a request of type ``slot_type`` to a concrete slot name.
+
+        Plan §4.4 four-step routing:
+
+          1. **Type match + default.** If a slot of ``type=slot_type``
+             carries ``default = true``, prefer it.
+          2. **Label filter overlay.** When ``required_labels`` is
+             non-empty, the chosen slot's model must advertise every
+             required label (sourced from the slot's
+             ``model.labels`` list). The default is dropped if it
+             can't satisfy the overlay.
+          3. **Fall-through.** Otherwise pick the first ``enabled =
+             true`` slot of ``slot_type`` in TOML declaration order
+             (still satisfying the label overlay if any).
+          4. ``None`` when nothing matches.
+        """
+
+        def _labels_of(cfg: dict[str, Any]) -> set[str]:
+            model = cfg.get("model") or {}
+            if isinstance(model, dict):
+                raw = model.get("labels", ())
+                if isinstance(raw, (list, tuple)):
+                    return {str(x) for x in raw}
+            return set()
+
+        def _satisfies(cfg: dict[str, Any]) -> bool:
+            if not required_labels:
+                return True
+            return set(required_labels).issubset(_labels_of(cfg))
+
+        configs = [c for c in await self.iter_configs() if c.get("type") == slot_type]
+
+        # Step 1+2: try the default first.
+        default_name = await self.default_slot_for(slot_type)
+        if default_name is not None:
+            default_cfg = next((c for c in configs if c.get("name") == default_name), None)
+            if (
+                default_cfg is not None
+                and default_cfg.get("enabled", True)
+                and _satisfies(default_cfg)
+            ):
+                return default_name
+
+        # Step 3: fall-through to first enabled + label-matching slot.
+        for cfg in configs:
+            if not cfg.get("enabled", True):
+                continue
+            if not _satisfies(cfg):
+                continue
+            return str(cfg.get("name", ""))
+
+        return None
+
+    async def add_slot(
+        self,
+        name: str,
+        *,
+        type: str,
+        model: str,
+        device: str = "gpu-rocm",
+        group: str = "custom",
+        port: int = 8081,
+    ) -> Slot:
+        """Programmatic ``hal0 slot add`` (plan §4.3).
+
+        Validates kebab-case name, rejects seeded-name collisions,
+        rejects unknown slot types. The default ``port`` matches the
+        lemond control-plane port — Lemonade ignores per-slot ports
+        but the SlotConfig schema requires one in the 8081-8099 range.
+
+        Args:
+            name: Kebab-case identifier; must not collide with a
+                seeded slot (``SEEDED_SLOTS`` plus ``NPU_SEEDED_SLOTS``,
+                independently of whether FLM is installed).
+            type: One of ``llm | embedding | reranking | transcription
+                | tts | image``.
+            model: Lemonade model name to load by default.
+            device: Hardware preference (``gpu-rocm | gpu-vulkan | cpu
+                | npu``); see ``map_backend_to_device``. Default
+                ``gpu-rocm`` matches Strix Halo seed semantics.
+            group: Dashboard rollup group (default ``custom``).
+            port: SlotConfig.port — kept for schema validity even
+                though Lemonade doesn't use per-slot ports.
+        """
+        if not _SLOT_NAME_RE.match(name):
+            raise SlotConfigError(
+                f"slot name {name!r}: use lowercase alphanumeric, hyphens, underscores; "
+                f"start with alphanumeric; max 32 chars",
+                details={"slot": name},
+            )
+        # Reject collisions with ALL seeded slots (include the NPU trio
+        # regardless of FLM presence — the names are reserved).
+        reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
+        if name in reserved:
+            raise SlotConfigError(
+                f"slot {name!r} collides with a seeded slot; pick a different name",
+                details={"slot": name, "reserved": sorted(reserved)},
+            )
+        if type not in _VALID_SLOT_TYPES:
+            raise SlotConfigError(
+                f"slot type {type!r} is not one of {sorted(_VALID_SLOT_TYPES)}",
+                details={"slot": name, "type": type},
+            )
+        cfg = {
+            "name": name,
+            "port": port,
+            "type": type,
+            "device": device,
+            "provider": "lemonade",
+            "enabled": True,
+            "group": group,
+            "model": {"default": model},
+        }
+        return await self.create(name, cfg)
+
+    async def remove_slot(self, name: str) -> None:
+        """Programmatic ``hal0 slot remove`` (plan §4.3).
+
+        Rejects seeded-slot names (use :meth:`unload` or
+        ``capabilities.toml`` to disable a seeded slot, not delete it).
+        No side effect on the underlying Lemonade model — the model
+        stays in lemond's catalog.
+        """
+        reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
+        if name in reserved:
+            raise SlotConfigError(
+                f"slot {name!r} is seeded; cannot remove (disable it via capabilities.toml)",
+                details={"slot": name, "reserved": sorted(reserved)},
+            )
+        await self.delete(name)
+
     # ── low-level lifecycle ──────────────────────────────────────────────────
 
     async def spawn(self, slot_name: str, slot_cfg: SlotConfig | dict[str, Any]) -> Slot:
-        """Low-level: render env + override, then systemctl start.
+        """Low-level: dispatch a Lemonade ``/v1/load`` for this slot.
 
         Called by load() after the model is confirmed present in the
-        registry.  Public for tests and for the installer's first-run path.
-        Acquires the per-slot lock; load() callers can use _spawn_locked.
+        registry. Public for tests + the installer's first-run path.
+        Acquires the per-slot lock; ``load()``'s callers can use
+        ``_spawn_locked`` directly.
         """
         async with self._lock(slot_name):
             await self._spawn_locked(slot_name, slot_cfg, _model_default(slot_cfg))
@@ -899,87 +1025,28 @@ class SlotManager:
     ) -> None:
         """Spawn body — caller already holds the per-slot lock.
 
-        v0.2 (ADR-0008 §6): when ``HAL0_BACKEND=lemonade`` we delegate
-        to :meth:`LemonadeProvider.load` instead of rendering an
-        override.conf + running ``systemctl start``. The per-slot
-        systemd template ``hal0-slot@.service`` no longer exists (PR-9
-        retired it); the lemond daemon owns process lifecycle and
-        ``/v1/load`` is the single control-plane entry point.
+        v0.2 (ADR-0008 §1/§6): every slot dispatches through
+        :meth:`LemonadeProvider.load`. The per-slot systemd template
+        ``hal0-slot@.service`` retired in PR-9; the lemond daemon owns
+        process lifecycle and ``/v1/load`` is the single control-plane
+        entry point.
 
-        Legacy (v0.1.x) toolbox path is preserved unchanged for any
-        deployment still on the per-modality container model. PR-10
-        retires that path along with the SlotManager simplification.
-        """
-        model_info = await self._resolve_model_info(model_id)
-
-        if _lemonade_active():
-            await self._spawn_via_lemonade(slot_name, slot_cfg, model_id, model_info)
-            return
-
-        # TIER1: atomic env write — write_slot_env() delegates to
-        # write_env_atomic (tmpfile + os.replace).  haloai's
-        # lib/slots.py:551-622 was rewritten here.
-        write_slot_env(slot_name, slot_cfg, model_info, model_id_override=model_id)
-
-        # Render the per-slot drop-in.  We rewrite on every spawn so a
-        # backend/port edit picked up via update_config takes effect on
-        # next start.
-        override = render_override(slot_name, slot_cfg, model_info)
-        op = override_path(slot_name)
-        try:
-            op.parent.mkdir(parents=True, exist_ok=True)
-            op.write_text(override, encoding="utf-8")
-        except OSError as exc:
-            raise SlotSpawnFailed(
-                f"failed to write override.conf for {slot_name!r}: {exc}",
-                details={"slot": slot_name, "path": str(op)},
-            ) from exc
-
-        # daemon-reload then start.  Tolerant of "no such unit" only if
-        # daemon-reload itself fails for a hard reason.
-        rc, _, stderr = await self._systemctl("daemon-reload")
-        if rc != 0:
-            raise SlotSpawnFailed(
-                f"systemctl daemon-reload failed: {stderr.strip()}",
-                details={"slot": slot_name},
-            )
-        rc, _, stderr = await self._systemctl("start", self._service_name(slot_name))
-        if rc != 0:
-            raise SlotSpawnFailed(
-                f"systemctl start hal0-slot@{slot_name} failed: {stderr.strip()}",
-                details={"slot": slot_name, "stderr": stderr.strip()},
-            )
-
-    async def _spawn_via_lemonade(
-        self,
-        slot_name: str,
-        slot_cfg: SlotConfig | dict[str, Any],
-        model_id: str | None,
-        model_info: dict[str, Any],
-    ) -> None:
-        """Lemonade-mode spawn: POST /v1/load through LemonadeProvider.
-
-        Lemond is shared across every hal0 slot; the slot abstraction
-        survives only as identity + state. ``model_id`` (when set)
-        overrides the slot config's ``model.default`` for swap semantics
-        — :meth:`LemonadeProvider.load` resolves ``model.default`` itself,
+        ``model_id`` (when set) overrides the slot config's
+        ``model.default`` for swap semantics —
+        :meth:`LemonadeProvider.load` resolves ``model.default`` itself,
         so we synthesise a transient override on the cfg dict.
 
         Any :class:`LemonadeError` subclass is wrapped as
         :class:`SlotSpawnFailed` so the caller's ``except Exception ->
-        ERROR`` branch in :meth:`load` records a stable error envelope
-        with ``slot.spawn_failed`` semantics.
+        ERROR`` branch in :meth:`load` records a stable error envelope.
         """
-        # Re-import locally so the module-level import order stays
-        # clean (providers/__init__.py imports from this subtree's
-        # config/registry modules).
         from hal0.lemonade.errors import LemonadeError
         from hal0.providers import lemonade_provider
 
+        model_info = await self._resolve_model_info(model_id)
+
         cfg = _cfg_to_dict(slot_cfg)
         if model_id:
-            # Honour the model override the same way the toolbox path
-            # does via ``write_slot_env(..., model_id_override=...)``.
             existing_model = cfg.get("model")
             base_model = existing_model if isinstance(existing_model, dict) else {}
             cfg = {**cfg, "model": {**base_model, "default": model_id}}
@@ -997,55 +1064,26 @@ class SlotManager:
             ) from exc
         except ValueError as exc:
             # LemonadeProvider raises ValueError for "no model set" —
-            # surface as a typed slot error consistent with the toolbox
-            # path's missing-config behaviour.
+            # surface as a typed slot error.
             raise SlotConfigError(
                 f"lemonade load for {slot_name!r} rejected: {exc}",
                 details={"slot": slot_name},
             ) from exc
 
     async def terminate(self, slot_name: str, *, timeout_s: float = 30.0) -> None:
-        """Low-level: issue stop and wait for the slot to be unloaded.
+        """Tell Lemonade to unload the slot's model and wait for confirmation.
 
-        Public because the dispatcher's idle-monitor calls it directly to
-        release VRAM without going through unload()'s state-machine
-        ceremony.  TIER1: bubbles stderr on failure.
+        v0.2 (ADR-0008 §1/§6): every slot dispatches through
+        :meth:`LemonadeProvider.unload`. Idempotent — the provider
+        returns a noop dict when no model is assigned, and Lemonade
+        itself treats unload-of-unloaded as a no-op.
 
-        v0.2 (ADR-0008): under Lemonade we POST /v1/unload via
-        :meth:`LemonadeProvider.unload` instead of calling
-        ``systemctl stop``. Mirrors the spawn branch above.
-        """
-        if _lemonade_active():
-            await self._terminate_via_lemonade(slot_name, timeout_s=timeout_s)
-            return
-
-        rc, _, stderr = await self._systemctl("stop", self._service_name(slot_name))
-        if rc != 0:
-            raise SlotSpawnFailed(
-                f"systemctl stop hal0-slot@{slot_name} failed: {stderr.strip()}",
-                details={"slot": slot_name, "stderr": stderr.strip()},
-            )
-        # Poll for is-active to flip to inactive — systemctl stop returns
-        # before the container actually exits when Type=simple.
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if not await self._is_active(slot_name):
-                return
-            await asyncio.sleep(0.5)
-        raise SlotSpawnFailed(
-            f"slot {slot_name!r} still active {timeout_s}s after systemctl stop",
-            details={"slot": slot_name},
-        )
-
-    async def _terminate_via_lemonade(self, slot_name: str, *, timeout_s: float) -> None:
-        """Lemonade-mode terminate: POST /v1/unload through LemonadeProvider.
-
-        Idempotent — LemonadeProvider.unload returns a noop dict when no
-        model is assigned, and Lemonade itself treats unload of an
-        unloaded model as a no-op. We still poll ``_is_active`` to
-        match the toolbox path's "stop returns before exit" contract;
-        in practice /v1/unload is synchronous so the first check
-        succeeds.
+        Public because the dispatcher's idle-monitor calls it directly
+        to release VRAM without going through ``unload()``'s
+        state-machine ceremony. ``timeout_s`` is preserved in the
+        signature for caller compatibility; in practice
+        ``/v1/unload`` is synchronous and the first ``_is_active``
+        check succeeds.
         """
         from hal0.lemonade.errors import LemonadeError
         from hal0.providers import lemonade_provider
@@ -1066,11 +1104,8 @@ class SlotManager:
                 details={"slot": slot_name, "error_type": type(exc).__name__},
             ) from exc
 
-        # Confirm with a single is-active probe before returning so the
-        # surrounding state transitions see a consistent view. We don't
-        # busy-loop the full timeout_s budget for Lemonade because the
-        # unload call is synchronous — but we keep the parameter in
-        # the signature so callers don't have to special-case backends.
+        # Confirm with a single is-active probe so surrounding state
+        # transitions see a consistent view.
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if not await self._is_active(slot_name):
@@ -1093,13 +1128,17 @@ class SlotManager:
     ) -> Slot:
         """Create a new dynamic slot's persistent on-disk state.
 
-        Writes the slot TOML to /etc/hal0/slots/<name>.toml, the override
-        drop-in, the env file, and the initial state.json (OFFLINE).  Does
-        NOT start the slot — that's load()'s job.
+        Writes ``/etc/hal0/slots/<name>.toml`` and an initial
+        ``state.json`` (OFFLINE). Does NOT start the slot — that's
+        ``load()``'s job.
 
-        NOTE: TOML serialisation depends on tomli_w which is in
-        pyproject.toml; this keeps the slot config writable without a
-        cross-subtree dependency on config/loader.py.
+        v0.2 (PR-10): no per-slot systemd override or env file is
+        rendered — lemond owns process lifecycle. The TOML is the only
+        on-disk artefact.
+
+        TOML serialisation depends on ``tomli_w`` (declared in
+        pyproject.toml); kept inline so this module doesn't pull in
+        ``config/loader.py``.
         """
         try:
             import tomli_w
@@ -1119,12 +1158,6 @@ class SlotManager:
                 details={"slot": slot_name},
             ) from exc
 
-        # Pre-render env + override so the slot is ready to start.
-        write_slot_env(slot_name, cfg_dict, model_info=None)
-        op = override_path(slot_name)
-        op.parent.mkdir(parents=True, exist_ok=True)
-        op.write_text(render_override(slot_name, cfg_dict, model_info=None), encoding="utf-8")
-
         # Initialise state.
         await self._transition(
             slot_name,
@@ -1133,17 +1166,17 @@ class SlotManager:
             model_id=_model_default(cfg_dict) or None,
             extra={
                 "backend": cfg_dict.get("backend", "vulkan"),
-                "provider": cfg_dict.get("provider", "llama-server"),
+                "provider": cfg_dict.get("provider", "lemonade"),
             },
             force=True,
         )
         return await self.status(slot_name)
 
     async def delete(self, slot_name: str) -> None:
-        """Delete a dynamic slot.  Built-in slots cannot be deleted."""
-        if slot_name in self.BUILTIN_SLOTS:
+        """Delete a dynamic slot. Seeded slots cannot be deleted."""
+        if slot_name in self.seeded_slots():
             raise SlotConfigError(
-                f"cannot delete built-in slot {slot_name!r}",
+                f"cannot delete seeded slot {slot_name!r}",
                 details={"slot": slot_name},
             )
         self._ensure_known(slot_name)
@@ -1152,10 +1185,8 @@ class SlotManager:
         if current != SlotState.OFFLINE:
             await self.unload(slot_name)
 
-        # Remove override drop-in, env, state.json, and the slot config.
+        # Remove state.json and the slot config.
         for path in (
-            override_path(slot_name),
-            paths.slot_data_dir(slot_name) / "env",
             self._state_file(slot_name),
             self._config_file(slot_name),
         ):
@@ -1165,15 +1196,18 @@ class SlotManager:
         self._states.pop(slot_name, None)
         self._locks.pop(slot_name, None)
         self._last_used.pop(slot_name, None)
-        # daemon-reload so systemd notices the missing drop-in.
-        await self._systemctl("daemon-reload")
 
     async def update_config(
         self,
         slot_name: str,
         updates: dict[str, Any],
     ) -> Slot:
-        """Apply partial updates to a slot's TOML.  Re-renders override+env."""
+        """Apply partial updates to a slot's TOML.
+
+        v0.2 (PR-10): rewriting the TOML is enough — lemond reads the
+        runtime config on the next ``/v1/load`` call. No per-slot
+        systemd override or env file to re-render.
+        """
         self._ensure_known(slot_name)
         try:
             import tomli_w
@@ -1183,7 +1217,7 @@ class SlotManager:
         cfg = await self._load_slot_config(slot_name)
         cfg_dict = _cfg_to_dict(cfg)
         # Shallow merge — nested dicts are replaced wholesale to keep update
-        # semantics predictable.  Callers wanting a partial nested update
+        # semantics predictable. Callers wanting a partial nested update
         # build the sub-dict on their side first.
         cfg_dict.update(updates)
 
@@ -1194,12 +1228,6 @@ class SlotManager:
             raise SlotConfigError(
                 f"failed to rewrite {cfg_path}: {exc}",
             ) from exc
-
-        # Re-render env + override so the next start picks up changes.
-        write_slot_env(slot_name, cfg_dict, model_info=None)
-        op = override_path(slot_name)
-        op.parent.mkdir(parents=True, exist_ok=True)
-        op.write_text(render_override(slot_name, cfg_dict, model_info=None), encoding="utf-8")
 
         return await self.status(slot_name)
 
@@ -1458,7 +1486,7 @@ class SlotManager:
                 "name": slot_name,
                 "port": rec.port,
                 "backend": rec.extra.get("backend", "vulkan"),
-                "provider": rec.extra.get("provider", "llama-server"),
+                "provider": rec.extra.get("provider", "lemonade"),
                 "model": {"default": rec.model_id or ""},
             }
         try:
@@ -1521,212 +1549,39 @@ class SlotManager:
     # ── health probe (TIER1 tightened) ───────────────────────────────────────
 
     async def _await_ready(self, slot_name: str, port: int, provider: str) -> SlotState:
-        """Block until the slot's HTTP health probe converges, return final state.
+        """Resolve the slot's final readiness state after a Lemonade load.
 
-        Returns:
-            SlotState.READY when the upstream is reachable AND can fulfil an
-            inference request (sentinel passes / model_loaded=true / etc.).
-            SlotState.IDLE when the upstream is reachable but cannot serve
-            requests right now — for example llama-server / FLM /
-            kokoro launched with no model. Issue #31: ``ready`` would be
-            an active UX trap here because routers pick ready slots first
-            and immediately 4xx on every inference call.
+        v0.2 (ADR-0008 §1/§6): ``_spawn_locked`` calls Lemonade's
+        ``/v1/load`` which blocks until lemond has the model loaded.
+        Any failure raises before we get here. So this method only
+        answers "did the model actually end up in lemond's
+        ``loaded[]``?". A confirming :meth:`LemonadeProvider.status`
+        call separates the "loaded → READY" path from the
+        "modelless slot → IDLE" path.
 
-        Raises:
-            SlotHealthFailed: the upstream never became reachable at all
-            within the grace window (transport errors, timeouts).
-
-        TIER1 fix for haloai lib/slots.py:899-920 and lib/upstreams.py:500-520:
-          - Adaptive backoff (0.5, 1, 2, 5, 10s).
-          - Total grace window of 180s, no per-probe 2s hardcap.
-          - FLM / vLLM-style providers (anything OpenAI-compatible without
-            a /health endpoint) require a *non-empty* /v1/models response
-            AND a tiny /v1/chat/completions with max_tokens=1 before we
-            declare READY.  Empty /v1/models is no longer "good enough".
-
-        ISSUE #31: After the upstream stabilises (probe stops returning
-        transport errors), an empty ``/v1/models`` or ``model_loaded=false``
-        body resolves the slot to IDLE rather than retrying until the
-        grace window expires.  This lets dashboards distinguish
-        "container running with no model" from "container failing to
-        start".
-
-        v0.2 (ADR-0008 §3 + §6): under Lemonade the load is synchronous —
-        ``POST /v1/load`` blocks until the model is paged into the
-        backend (or returns a documented error). When ``_spawn_locked``
-        returned 2xx via :meth:`LemonadeProvider.load`, the model is by
-        construction ready to serve. Short-circuit to READY rather than
-        opening an HTTP probe against a slot port that doesn't host a
-        per-slot process under Lemonade.
-        """
-        if _lemonade_active():
-            return await self._lemonade_await_ready(slot_name, provider)
-        deadline = time.monotonic() + _HEALTH_GRACE_TOTAL_S
-        # Once the upstream returns ANY structured response (even one
-        # indicating no model), we know it's alive.  After ``_IDLE_STABILISE_S``
-        # of consecutive "alive but empty" responses we resolve to IDLE
-        # instead of waiting the full grace window for a model to appear.
-        idle_observation_since: float | None = None
-        attempt = 0
-        last_error: str = "no probe yet"
-        url = f"http://127.0.0.1:{port}"
-
-        def _observed_idle() -> SlotState | None:
-            """Promote a steady stream of "alive-but-no-model" observations to IDLE.
-
-            Closure over ``idle_observation_since`` so the caller can clear
-            the timer if the slot recovers (e.g. a model finishes loading
-            mid-warmup).
-            """
-            nonlocal idle_observation_since
-            if idle_observation_since is None:
-                idle_observation_since = time.monotonic()
-                return None
-            if (time.monotonic() - idle_observation_since) >= _IDLE_STABILISE_S:
-                return SlotState.IDLE
-            return None
-
-        while time.monotonic() < deadline:
-            backoff = _HEALTH_BACKOFF_S[min(attempt, len(_HEALTH_BACKOFF_S) - 1)]
-            jitter = backoff * 0.2 * (random.random() * 2 - 1)
-            wait_s = max(0.1, backoff + jitter)
-            try:
-                async with httpx.AsyncClient(timeout=_HEALTH_PROBE_TIMEOUT_S) as client:
-                    strategy = _provider_health_strategy(provider)
-                    if strategy == "chat_sentinel":
-                        # FLM / vLLM path — providers that advertise
-                        # models before inference works.
-                        resp = await client.get(f"{url}/v1/models")
-                        if resp.status_code == 200:
-                            data = (
-                                resp.json()
-                                if "json" in resp.headers.get("content-type", "")
-                                else {}
-                            )
-                            models = data.get("data", []) if isinstance(data, dict) else []
-                            if models:
-                                idle_observation_since = None
-                                if await _sentinel_inference(client, url, models[0]):
-                                    return SlotState.READY
-                                last_error = "sentinel inference failed"
-                            else:
-                                # ISSUE #31: /v1/models is empty but the
-                                # endpoint is alive — this is the canonical
-                                # llama-server --model "" / FLM no-model
-                                # shape.  Stabilise to IDLE rather than
-                                # treat as a transient failure.
-                                last_error = "/v1/models returned empty data array"
-                                idle = _observed_idle()
-                                if idle is not None:
-                                    return idle
-                        else:
-                            idle_observation_since = None
-                            last_error = f"/v1/models HTTP {resp.status_code}"
-                    elif strategy == "health_with_model_loaded":
-                        # Moonshine: /health stays 200 while model is
-                        # loading; require model_loaded=true in body.
-                        resp = await client.get(f"{url}/health")
-                        if resp.status_code == 200:
-                            try:
-                                body = resp.json()
-                            except Exception:
-                                body = {}
-                            if isinstance(body, dict) and body.get("model_loaded"):
-                                idle_observation_since = None
-                                return SlotState.READY
-                            # ISSUE #31: /health returns 200 but the
-                            # body advertises no loaded model — the
-                            # container is up, just empty.
-                            last_error = f"/health 200 but model_loaded != true (body={body!r})"
-                            idle = _observed_idle()
-                            if idle is not None:
-                                return idle
-                        else:
-                            idle_observation_since = None
-                            last_error = f"/health HTTP {resp.status_code}"
-                    else:
-                        # llama-server / kokoro — /health 2xx is authoritative.
-                        # ISSUE #31: pair /health with a /v1/models probe
-                        # so a llama-server launched with --model "" lands
-                        # in IDLE instead of READY.  /health alone reports
-                        # 200 even when no model is loaded.
-                        resp = await client.get(f"{url}/health")
-                        if resp.status_code == 200:
-                            try:
-                                models_resp = await client.get(f"{url}/v1/models")
-                            except httpx.HTTPError:
-                                # /v1/models may not exist on every
-                                # /health-based provider (comfyui, custom
-                                # backends).  /health 2xx is sufficient.
-                                idle_observation_since = None
-                                return SlotState.READY
-                            if models_resp.status_code != 200:
-                                # Same: provider doesn't expose /v1/models.
-                                idle_observation_since = None
-                                return SlotState.READY
-                            try:
-                                models_data = models_resp.json()
-                            except Exception:
-                                models_data = {}
-                            models = (
-                                models_data.get("data", []) if isinstance(models_data, dict) else []
-                            )
-                            if models:
-                                idle_observation_since = None
-                                return SlotState.READY
-                            # /health=200 but /v1/models is empty:
-                            # container is up with no model loaded.
-                            last_error = "/health 200 but /v1/models empty"
-                            idle = _observed_idle()
-                            if idle is not None:
-                                return idle
-                        else:
-                            idle_observation_since = None
-                            last_error = f"/health HTTP {resp.status_code}"
-            except httpx.HTTPError as exc:
-                # Transport error → upstream genuinely unreachable; do
-                # not let prior idle observations carry over.
-                idle_observation_since = None
-                last_error = f"http error: {exc}"
-            except Exception as exc:
-                # TIER1: log + retain message; never silent.
-                log.warning(
-                    "slot.health_probe_unexpected_error",
-                    extra={"slot": slot_name, "error": str(exc)},
-                )
-                idle_observation_since = None
-                last_error = f"unexpected: {exc}"
-            attempt += 1
-            await asyncio.sleep(wait_s)
-
-        raise SlotHealthFailed(
-            f"slot {slot_name!r} did not become healthy within {_HEALTH_GRACE_TOTAL_S}s",
-            details={"slot": slot_name, "last_error": last_error},
-        )
-
-    async def _lemonade_await_ready(self, slot_name: str, provider: str) -> SlotState:
-        """Lemonade-mode readiness resolution.
-
-        ``_spawn_locked``'s Lemonade branch calls /v1/load which blocks
-        until lemond has the model loaded; any failure raises before we
-        get here. So the only question this method answers is "did the
-        model actually end up in lemond's loaded[]?". A confirming
-        :meth:`LemonadeProvider.status` call separates the
-        "loaded — go READY" path from the "modelless slot — go IDLE"
-        path that the toolbox provider's _await_ready handles for
-        --model "" launches.
+        ``port`` and ``provider`` parameters survive in the signature
+        for caller compatibility; under Lemonade neither matters
+        (lemond is on a fixed port, every slot speaks OpenAI). They're
+        accepted and ignored.
 
         The probe is best-effort: if lemond is briefly unreachable
-        (transient daemon hiccup) we still resolve READY because /v1/load
-        already returned 2xx. Demotion to ERROR happens via the fail
-        watcher's next tick if the model genuinely isn't loaded.
+        (transient daemon hiccup) we still resolve READY because
+        ``/v1/load`` already returned 2xx. Demotion to ERROR happens
+        via the fail watcher's next tick if the model genuinely isn't
+        loaded.
+
+        Returns:
+            SlotState.READY when the model is in ``/v1/health.loaded[]``.
+            SlotState.IDLE when the slot has no model assigned (modelless).
         """
+        del port, provider  # accepted for signature compatibility only
+
         cfg = await self._maybe_load_config(slot_name)
         if not cfg:
             return SlotState.READY  # nothing more to verify
         model_name = _model_default(cfg)
         if not model_name:
-            return SlotState.IDLE  # modelless slot; mirrors toolbox path
+            return SlotState.IDLE  # modelless slot
         try:
             from hal0.providers import lemonade_provider
 
@@ -1751,51 +1606,47 @@ class SlotManager:
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
 
     async def _maybe_adopt_running_slot(self, slot_name: str, cfg: dict[str, Any]) -> Slot | None:
-        """Adopt a running-but-OFFLINE slot into READY/IDLE if its probe passes.
+        """Adopt a slot whose model is live in lemond but whose state.json is stale.
 
-        Returns the post-adoption Slot snapshot, or ``None`` when the slot
-        is not (yet) adoptable — caller falls back to the on-disk record.
+        Returns the post-adoption Slot snapshot, or ``None`` when the
+        slot's model is not in ``/v1/health.loaded[]`` — caller falls
+        back to the on-disk record.
 
-        Called from ``status()`` when ``state.json`` reports OFFLINE/ERROR
-        but ``systemctl is-active`` reports the unit is up.  Resolves
-        issue #30: kokoro / moonshine slots started outside the hal0
-        ``load()`` lifecycle used to sit at OFFLINE forever.
+        v0.2 (ADR-0008): drift detection collapses to "is the slot's
+        configured model in lemond's ``loaded[]``?". A slot whose
+        model was loaded out-of-band (e.g. by another hal0-api
+        instance or a manual /v1/load call) gets recognised the next
+        time the dashboard polls ``status()``.
         """
         port = _cfg_port(cfg)
-        provider = _cfg_provider(cfg)
-        if port <= 0:
+        model_id = _model_default(cfg) or None
+        if model_id is None:
+            # No model configured → nothing to adopt. Modelless slots
+            # under Lemonade resolve as IDLE via the normal status path.
             return None
-        ok, resolved, detail = await self._probe_once(port, provider)
-        if not ok or resolved is None:
+        try:
+            from hal0.providers import lemonade_provider
+
+            snap = await lemonade_provider().status({"name": slot_name, **cfg})
+        except Exception as exc:
             log.debug(
                 "slot.adoption_probe_skipped",
-                extra={"slot": slot_name, "port": port, "detail": detail},
+                extra={"slot": slot_name, "error": str(exc)},
             )
             return None
-        model_id = _model_default(cfg) or None
+        if not snap.get("loaded"):
+            return None
+
+        resolved = SlotState.READY
         extras: dict[str, Any] = {
             "backend": cfg.get("backend", "vulkan"),
-            "provider": cfg.get("provider", "llama-server"),
+            "provider": cfg.get("provider", "lemonade"),
             "adopted": True,
         }
-        # Modelless adoption to READY is the original bug: a slot with
-        # no [model] default and an empty /v1/models would land at READY
-        # with model_id=None.  For providers that need an explicit model
-        # we either sniff one from /v1/models or demote to IDLE.
-        detected_model: str | None = None
-        if resolved == SlotState.READY and model_id is None and provider_requires_model(provider):
-            detected_model = await _fetch_first_concrete_model(port)
-            if detected_model:
-                model_id = detected_model
-                extras["detected_model"] = detected_model
-            else:
-                resolved = SlotState.IDLE
-                extras["degraded_to_idle"] = True
-                detail = f"{detail}; no model_id available — demoted to idle"
+        detail = "model present in /v1/health.loaded[]"
         # ``force=True`` is required: the legal-transition map does not
-        # contain offline→ready or offline→idle.  Adoption is the
-        # exception — the state machine is recovering from drift, not
-        # following the normal load() path.
+        # contain offline→ready. Adoption is the exception — the state
+        # machine is recovering from drift, not following load().
         await self._transition(
             slot_name,
             resolved,
@@ -1812,14 +1663,9 @@ class SlotManager:
                 "port": port,
                 "resolved": resolved.value,
                 "detail": detail,
-                "detected_model": detected_model,
-                "degraded_to_idle": extras.get("degraded_to_idle", False),
             },
         )
         # Build the Slot snapshot directly from the just-written record.
-        # We deliberately do NOT recurse through ``status()`` here — the
-        # caller already checked is-active, and another full pass would
-        # re-probe systemctl + re-run the reconciler.
         rec = self._states[slot_name]
         return Slot(
             name=slot_name,
@@ -1833,89 +1679,6 @@ class SlotManager:
                 **rec.extra,
             },
         )
-
-    async def _probe_once(self, port: int, provider: str) -> tuple[bool, SlotState | None, str]:
-        """One-shot health probe — no retries, no backoff.
-
-        Used by ``status()`` to adopt an already-running slot (issue #30):
-        when state.json reports OFFLINE but ``systemctl is-active`` says
-        the unit is up, a single round-trip to the provider's health
-        surface decides whether to promote the slot to READY/IDLE or
-        leave it alone.
-
-        Returns:
-            ``(ok, resolved, detail)``:
-              - ``ok=True``  + ``resolved=READY``: model loaded and
-                serving (kokoro/llama-server /health 2xx + non-empty
-                /v1/models, moonshine /health body model_loaded=true,
-                FLM sentinel passes).
-              - ``ok=True``  + ``resolved=IDLE``: process reachable but
-                no model loaded — analogous to the warming→idle case in
-                ``_await_ready``.
-              - ``ok=False`` + ``resolved=None``: not yet adoptable.
-                ``detail`` carries a human-readable last_error so the
-                caller can log or surface it.
-        """
-        url = f"http://127.0.0.1:{port}"
-        strategy = _provider_health_strategy(provider)
-        try:
-            async with httpx.AsyncClient(timeout=_HEALTH_PROBE_TIMEOUT_S) as client:
-                if strategy == "chat_sentinel":
-                    resp = await client.get(f"{url}/v1/models")
-                    if resp.status_code != 200:
-                        return False, None, f"/v1/models HTTP {resp.status_code}"
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        data = {}
-                    models = data.get("data", []) if isinstance(data, dict) else []
-                    if not models:
-                        # Process alive, no model — IDLE, not OFFLINE.
-                        return True, SlotState.IDLE, "/v1/models empty"
-                    # Don't run a sentinel inference here — adoption must
-                    # be cheap.  A successful /v1/models with at least one
-                    # entry is enough to call the slot READY for status()
-                    # purposes; if the next real request 5xxs, the
-                    # fail-watcher / status reconciler will demote it.
-                    return True, SlotState.READY, "/v1/models non-empty"
-                if strategy == "health_with_model_loaded":
-                    resp = await client.get(f"{url}/health")
-                    if resp.status_code != 200:
-                        return False, None, f"/health HTTP {resp.status_code}"
-                    try:
-                        body = resp.json()
-                    except Exception:
-                        body = {}
-                    if isinstance(body, dict) and body.get("model_loaded"):
-                        return True, SlotState.READY, "model_loaded"
-                    return True, SlotState.IDLE, "model_loaded != true"
-                # /health-based providers: pair /health with /v1/models
-                # so a slot started with no model resolves to IDLE.
-                resp = await client.get(f"{url}/health")
-                if resp.status_code != 200:
-                    return False, None, f"/health HTTP {resp.status_code}"
-                try:
-                    models_resp = await client.get(f"{url}/v1/models")
-                except httpx.HTTPError:
-                    return True, SlotState.READY, "/health 2xx (no /v1/models)"
-                if models_resp.status_code != 200:
-                    return True, SlotState.READY, "/health 2xx (/v1/models not exposed)"
-                try:
-                    models_data = models_resp.json()
-                except Exception:
-                    models_data = {}
-                models = models_data.get("data", []) if isinstance(models_data, dict) else []
-                if models:
-                    return True, SlotState.READY, "/v1/models non-empty"
-                return True, SlotState.IDLE, "/v1/models empty"
-        except httpx.HTTPError as exc:
-            return False, None, f"http error: {exc}"
-        except Exception as exc:
-            log.warning(
-                "slot.adoption_probe_unexpected_error",
-                extra={"port": port, "provider": provider, "error": str(exc)},
-            )
-            return False, None, f"unexpected: {exc}"
 
 
 # ── module-level helpers ─────────────────────────────────────────────────────
@@ -1937,7 +1700,7 @@ def _cfg_port(cfg: SlotConfig | dict[str, Any]) -> int:
 
 def _cfg_provider(cfg: SlotConfig | dict[str, Any]) -> str:
     d = _cfg_to_dict(cfg)
-    return str(d.get("provider") or d.get("slot", {}).get("provider") or "llama-server")
+    return str(d.get("provider") or d.get("slot", {}).get("provider") or "lemonade")
 
 
 def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
@@ -1948,130 +1711,9 @@ def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
     return ""
 
 
-def _lemonade_active() -> bool:
-    """Return True when SlotManager should dispatch through Lemonade.
-
-    Thin re-export of :func:`hal0.providers.lemonade.lemonade_active`
-    so manager-internal call sites don't have to reach into the
-    providers subtree. Re-import on each call keeps the gating
-    monkey-patchable in tests without touching this module's
-    namespace.
-    """
-    from hal0.providers.lemonade import lemonade_active
-
-    return lemonade_active()
-
-
-def _provider_health_strategy(provider: str) -> str:
-    """Pick the readiness probe shape for a provider.
-
-    Returns one of:
-      - ``"health"``: GET /health → 2xx is sufficient. Used by
-        llama-server (canonical) and kokoro (whose /health body is
-        either empty or ``{"status":"ok"}``).
-      - ``"health_with_model_loaded"``: GET /health → 2xx + JSON body
-        with ``model_loaded == true``. Used by moonshine, whose /health
-        returns ``{model_loaded, model_id, model_arch}`` and stays 200
-        even while the model is still loading.
-      - ``"chat_sentinel"``: GET /v1/models must be non-empty AND a
-        ``max_tokens=1`` POST /v1/chat/completions must 2xx. Used by FLM
-        and vLLM, both of which advertise models before inference works.
-    """
-    p = provider.lower()
-    if p in ("llama-server", "llama_server", "llamacpp", "kokoro", "comfyui"):
-        # comfyui's /system_stats is the health surface; the provider
-        # health() method already validates it. No chat sentinel applies
-        # (image-gen models are too expensive to probe per readiness).
-        return "health"
-    if p in ("moonshine",):
-        return "health_with_model_loaded"
-    return "chat_sentinel"
-
-
-# Duplicated from hal0.api.routes.models._ALIAS_NAMES to avoid pulling the
-# FastAPI surface into the pure-systemd slot layer (ARCHITECTURE.md "Key
-# boundaries"). Keep in sync.
-_ROUTING_ALIAS_NAMES: frozenset[str] = frozenset(
-    {
-        "primary",
-        "medium",
-        "tiny",
-        "embed",
-        "rerank",
-        "npu",
-        "coding",
-        "coder",
-        "whisper",
-        "moonshine",
-        "vibevoice",
-        "kokoro",
-        "tts-1",
-        "tts-1-hd",
-        "bge-reranker",
-        "nomic-embed",
-    }
-)
-
-
-def _is_routing_alias(model_id: str) -> bool:
-    """Drop haloai:* + known routing shortcuts when sniffing real model ids."""
-    if not model_id:
-        return True
-    if model_id.startswith("haloai:"):
-        return True
-    return model_id in _ROUTING_ALIAS_NAMES
-
-
-async def _fetch_first_concrete_model(port: int) -> str | None:
-    """Best-effort: GET /v1/models on the slot and return the first non-alias id."""
-    url = f"http://127.0.0.1:{port}/v1/models"
-    try:
-        async with httpx.AsyncClient(timeout=_HEALTH_PROBE_TIMEOUT_S) as client:
-            resp = await client.get(url)
-    except httpx.HTTPError:
-        return None
-    if resp.status_code != 200:
-        return None
-    try:
-        data = resp.json()
-    except Exception:
-        return None
-    entries = data.get("data", []) if isinstance(data, dict) else []
-    for entry in entries:
-        mid = entry.get("id") if isinstance(entry, dict) else None
-        if isinstance(mid, str) and not _is_routing_alias(mid):
-            return mid
-    return None
-
-
-async def _sentinel_inference(
-    client: httpx.AsyncClient,
-    url: str,
-    model_entry: dict[str, Any],
-) -> bool:
-    """Send a max_tokens=1 sentinel /v1/chat/completions and accept any 2xx.
-
-    TIER1: An OpenAI-compatible /v1/models is necessary but not sufficient
-    — we have seen FLM advertise models that immediately 500 on first
-    inference.  This sentinel exercises the inference path so READY
-    actually means ready.
-    """
-    model_id = (model_entry.get("id") if isinstance(model_entry, dict) else None) or "sentinel"
-    payload = {
-        "model": model_id,
-        "messages": [{"role": "user", "content": _SENTINEL_PROMPT}],
-        "max_tokens": 1,
-        "temperature": 0.0,
-        "stream": False,
-    }
-    try:
-        resp = await client.post(f"{url}/v1/chat/completions", json=payload)
-    except httpx.HTTPError:
-        return False
-    return 200 <= resp.status_code < 300
-
-
 __all__ = [
+    "NPU_SEEDED_SLOTS",
+    "SEEDED_SLOTS",
     "Slot",
     "SlotManager",
 ]

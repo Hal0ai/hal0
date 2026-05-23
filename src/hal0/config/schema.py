@@ -80,9 +80,13 @@ BACKEND_TO_DEVICE: dict[str, str] = {
     "npu": "npu",
 }
 
-# TIER1: valid provider names.  Maps to the Provider ABC implementations
-# under hal0.providers.
-_VALID_PROVIDERS = frozenset({"llama-server", "flm", "moonshine", "kokoro"})
+# Valid provider names. ``"lemonade"`` is the v0.2 default (ADR-0008
+# §2: Lemonade is the only Provider that drives slot lifecycle); the
+# pre-v0.2 names remain accepted so legacy slot TOMLs round-trip
+# without raising. Non-Lemonade values are deprecated and ignored by
+# SlotManager — the provider field exists only for round-trip + UI
+# label compatibility.
+_VALID_PROVIDERS = frozenset({"lemonade", "llama-server", "flm", "moonshine", "kokoro"})
 
 # Slot port range.  8080 is the hal0 API; slots get 8081-8099.
 _SLOT_PORT_MIN = 8081
@@ -226,8 +230,13 @@ class SlotConfig(BaseModel):
         ),
     )
     provider: str = Field(
-        default="llama-server",
-        description="Provider name: 'llama-server' | 'flm' | 'moonshine' | 'kokoro'.",
+        default="lemonade",
+        description=(
+            "DEPRECATED (v0.2): the slot's runtime provider. Lemonade is the "
+            "sole inference backend (ADR-0008 §2); the legacy values "
+            "('llama-server' | 'flm' | 'moonshine' | 'kokoro') round-trip "
+            "for backwards compatibility but SlotManager ignores them."
+        ),
     )
     enabled: bool = Field(
         default=True,

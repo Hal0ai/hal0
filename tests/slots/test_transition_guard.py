@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from hal0.slots.manager import SlotManager
 from hal0.slots.state import SlotState
@@ -20,7 +19,6 @@ from hal0.slots.state import SlotState
 
 async def test_transition_blocks_modelless_ready_for_llama_server(
     tmp_hal0_home: str,
-    systemctl_stub: dict[str, Any],
 ) -> None:
     """READY + empty model_id + llama-server → coerced to IDLE on disk."""
     sm = SlotManager()
@@ -42,7 +40,6 @@ async def test_transition_blocks_modelless_ready_for_llama_server(
 
 async def test_transition_allows_modelless_ready_for_kokoro(
     tmp_hal0_home: str,
-    systemctl_stub: dict[str, Any],
 ) -> None:
     """Self-managed providers may persist READY without a model_id."""
     sm = SlotManager()
@@ -62,7 +59,6 @@ async def test_transition_allows_modelless_ready_for_kokoro(
 
 async def test_transition_allows_ready_with_model_id(
     tmp_hal0_home: str,
-    systemctl_stub: dict[str, Any],
 ) -> None:
     """The guard must not interfere with a normal READY transition."""
     sm = SlotManager()

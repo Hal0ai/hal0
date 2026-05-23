@@ -1,109 +1,106 @@
-"""Pytest fixtures and marker registration for the slots subtree."""
+"""Pytest fixtures and marker registration for the slots subtree.
+
+v0.2 (PR-10): SlotManager dispatches every state change through
+Lemonade. The fixtures here mock that boundary — there is no
+systemctl-stub fixture any more.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
-from hal0.slots import manager as mgr_mod
+from hal0.lemonade.client import LemonadeClient
+from hal0.providers.lemonade import LemonadeProvider
 from hal0.slots.manager import SlotManager
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register the integration marker so --strict-markers stays clean.
 
-    The integration suite needs hal0-slot@.service installed on the host
-    and is intended for CI / release-gate runs only.  See PLAN.md §10.
+    The integration suite needs a real lemond daemon reachable on
+    127.0.0.1:13305 and is intended for CI / release-gate runs only.
     """
     config.addinivalue_line(
         "markers",
-        "integration: end-to-end slot lifecycle tests requiring a real "
-        "hal0-slot@.service installation",
+        "integration: end-to-end slot lifecycle tests requiring a real lemond daemon on the host",
     )
 
 
 # ── shared fixtures ─────────────────────────────────────────────────────────
-#
-# Consumed by test_manager.py, test_fail_watcher.py, and the
-# state-state-state suite (test_pulling_serving_idle) so the systemctl +
-# health-probe stubs aren't duplicated across files.
 
 
-class _FakeProc:
-    """Stand-in for asyncio.subprocess.Process used by systemctl calls."""
-
-    def __init__(self, rc: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> None:
-        self.returncode = rc
-        self._stdout = stdout
-        self._stderr = stderr
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        return self._stdout, self._stderr
-
-    def kill(self) -> None:
-        pass
-
-    async def wait(self) -> int:
-        return self.returncode
+def _mock_provider(handler) -> LemonadeProvider:
+    """Build a LemonadeProvider backed by httpx.MockTransport."""
+    transport = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://test",
+    )
+    return LemonadeProvider(client=LemonadeClient(http_client=transport))
 
 
 @pytest.fixture
-def systemctl_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Intercept asyncio.create_subprocess_exec and record systemctl invocations.
+def lemonade_stub(monkeypatch: pytest.MonkeyPatch):
+    """Replace the singleton LemonadeProvider with an httpx-mock-backed one.
 
-    Returns a dict tracking calls; tests can also set entries to simulate
-    failure rcs by mutating ``state["force_rc"][(action, service)] = rc``,
-    and flip ``state["is_active_state"]`` to drive the fail-watcher.
+    Tests pass the handler they want to drive Lemonade's HTTP responses
+    with; the fixture installs the mock provider into
+    ``hal0.providers._PROVIDERS`` so SlotManager's
+    ``lemonade_provider()`` lookup finds it.
+
+    Yields a factory: ``provider = lemonade_stub(handler)``.
+    """
+    import hal0.providers as providers_mod
+
+    original = providers_mod._PROVIDERS["lemonade"]
+
+    def _install(handler) -> LemonadeProvider:
+        provider = _mock_provider(handler)
+        providers_mod._PROVIDERS["lemonade"] = provider
+        return provider
+
+    yield _install
+
+    providers_mod._PROVIDERS["lemonade"] = original
+
+
+@pytest.fixture
+def lemonade_loaded_stub(lemonade_stub):
+    """Convenience: install a Lemonade stub that fakes a happy-path lifecycle.
+
+    The default state advertises ``[{model_name: "qwen3-4b-q4_k_m"}]``
+    in ``/v1/health.loaded[]`` — matches the model the ``slot_root``
+    fixture writes into ``primary.toml``. Tests can mutate the
+    returned ``state`` dict to drive eviction / drift scenarios.
     """
     state: dict[str, Any] = {
-        "calls": [],
-        "is_active_state": "inactive",  # flips to 'active' after start
-        "force_rc": {},  # {("action", "service"): rc}
+        "loaded": [{"model_name": "qwen3-4b-q4_k_m"}],
+        "load_calls": [],
+        "unload_calls": [],
     }
 
-    async def fake_create(*args: str, **_: Any) -> _FakeProc:
-        cmd = list(args)
-        state["calls"].append(cmd)
-        if cmd[:1] != ["systemctl"]:
-            raise AssertionError(f"unexpected subprocess: {cmd}")
-        action = cmd[1] if len(cmd) > 1 else ""
-        service = cmd[2] if len(cmd) > 2 else ""
-        key = (action, service)
-        if key in state["force_rc"]:
-            return _FakeProc(rc=state["force_rc"][key])
-        if action == "is-active":
-            return _FakeProc(rc=0 if state["is_active_state"] == "active" else 3)
-        if action == "start":
-            state["is_active_state"] = "active"
-            return _FakeProc(rc=0)
-        if action == "stop":
-            state["is_active_state"] = "inactive"
-            return _FakeProc(rc=0)
-        if action == "daemon-reload":
-            return _FakeProc(rc=0)
-        return _FakeProc(rc=0)
+    def h(req: httpx.Request) -> httpx.Response:
+        import json as _json
 
-    monkeypatch.setattr(mgr_mod.asyncio, "create_subprocess_exec", fake_create)
+        if req.url.path == "/v1/load":
+            body = _json.loads(req.content.decode() or "{}")
+            state["load_calls"].append(body)
+            state["loaded"] = [{"model_name": body.get("model_name", "")}]
+            return httpx.Response(200, json={"status": "loaded"})
+        if req.url.path == "/v1/unload":
+            body = _json.loads(req.content.decode() or "{}")
+            state["unload_calls"].append(body)
+            state["loaded"] = []
+            return httpx.Response(200, json={"status": "unloaded"})
+        if req.url.path == "/v1/health":
+            return httpx.Response(200, json={"loaded": state["loaded"]})
+        return httpx.Response(404, json={"detail": f"unmocked {req.url.path}"})
+
+    lemonade_stub(h)
     return state
-
-
-@pytest.fixture
-def stub_await_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Short-circuit the HTTP health probe so unit tests don't sleep.
-
-    Returns ``SlotState.READY`` so callers exercise the happy-path
-    transition.  Tests that need to drive the new WARMING → IDLE edge
-    (issue #31) stub ``_await_ready`` themselves to return
-    ``SlotState.IDLE``.
-    """
-    from hal0.slots.state import SlotState
-
-    async def _ok(self: SlotManager, slot_name: str, port: int, provider: str) -> SlotState:
-        return SlotState.READY
-
-    monkeypatch.setattr(SlotManager, "_await_ready", _ok)
 
 
 @pytest.fixture
@@ -117,7 +114,7 @@ def slot_root(tmp_hal0_home: str) -> Path:
                 'name = "primary"',
                 "port = 8081",
                 'backend = "vulkan"',
-                'provider = "llama-server"',
+                'provider = "lemonade"',
                 "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
@@ -127,3 +124,10 @@ def slot_root(tmp_hal0_home: str) -> Path:
         encoding="utf-8",
     )
     return root
+
+
+# Keep ``SlotManager`` importable from this conftest so tests that
+# reach into the module-level namespace (e.g. monkeypatching) don't
+# have to re-import. Tests use it via the fixture above; the public
+# symbol is exported for ergonomics.
+__all__ = ["SlotManager", "lemonade_loaded_stub", "lemonade_stub", "slot_root"]

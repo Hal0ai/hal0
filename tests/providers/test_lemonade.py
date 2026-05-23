@@ -1,6 +1,6 @@
 """Unit tests for ``hal0.providers.lemonade.LemonadeProvider``.
 
-PR-8 capability dispatch wiring. Covers:
+PR-8 + PR-10 capability dispatch wiring. Covers:
 
   * ``device_to_backend`` mapping (plan §4.1 + ADR-0008 §6)
   * ``LemonadeProvider.load`` body construction → ``LemonadeClient.load``
@@ -10,7 +10,9 @@ PR-8 capability dispatch wiring. Covers:
   * ABC stub behaviour (``container_spec`` /
     ``render_systemd_override`` raise; ``build_env`` /
     ``image_ref`` / ``start_cmd`` return informational data)
-  * ``lemonade_active`` env-var gating
+
+PR-10 deleted the ``lemonade_active`` env gate (ADR-0008 §1: Lemonade
+is the sole backend; no toggle).
 
 Mocks ``LemonadeClient`` via ``httpx.MockTransport`` — same pattern as
 ``tests/lemonade/test_client.py``. We exercise the full request path
@@ -30,7 +32,6 @@ from hal0.lemonade.errors import LemonadeHTTPError, LemonadeLoadError
 from hal0.providers.lemonade import (
     LemonadeProvider,
     device_to_backend,
-    lemonade_active,
 )
 
 
@@ -89,26 +90,6 @@ def test_device_to_backend_unknown_falls_back_to_double_none() -> None:
 def test_device_to_backend_is_case_insensitive() -> None:
     assert device_to_backend("GPU-ROCM") == (None, "rocm")
     assert device_to_backend("  npu  ") == ("flm", None)
-
-
-# ── lemonade_active ──────────────────────────────────────────────────
-
-
-def test_lemonade_active_true_when_env_matches(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HAL0_BACKEND", "lemonade")
-    assert lemonade_active() is True
-
-
-def test_lemonade_active_false_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("HAL0_BACKEND", raising=False)
-    assert lemonade_active() is False
-
-
-def test_lemonade_active_tolerates_whitespace_and_case(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("HAL0_BACKEND", "  Lemonade ")
-    assert lemonade_active() is True
 
 
 # ── load() — request body construction ───────────────────────────────

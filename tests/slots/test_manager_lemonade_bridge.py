@@ -1,14 +1,13 @@
-"""SlotManager → LemonadeProvider bridge tests (PR-8).
+"""SlotManager → LemonadeProvider bridge tests (PR-8 + PR-10).
 
-Validates that when ``HAL0_BACKEND=lemonade`` is in effect, the slot
-lifecycle methods on :class:`SlotManager` route through
-:class:`LemonadeProvider` instead of writing override.conf +
-systemctl-driving a per-slot toolbox container.
+Validates that the slot lifecycle methods on :class:`SlotManager`
+route through :class:`LemonadeProvider`. PR-10 made this dispatch
+unconditional; the ``HAL0_BACKEND`` env gate retired.
 
-Caller-surface guarantee: the public method signatures on SlotManager
-must NOT change in PR-8 (PR-10 owns those). These tests exercise the
-same method names + arg shapes as the v0.1.x toolbox path — only the
-backend changes.
+Caller-surface guarantee: the public method signatures on
+SlotManager do NOT change — these tests exercise the same method
+names + arg shapes as v0.1.x callers (api/routes, dispatcher,
+orchestrator) use.
 """
 
 from __future__ import annotations
@@ -37,9 +36,13 @@ def _mock_provider(handler) -> LemonadeProvider:
 
 
 @pytest.fixture
-def lemonade_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Activate the Lemonade-dispatch branch of SlotManager."""
-    monkeypatch.setenv("HAL0_BACKEND", "lemonade")
+def lemonade_env() -> None:
+    """No-op fixture (PR-10 retired the HAL0_BACKEND gate).
+
+    Kept as a parameter name so existing tests in this file don't need
+    re-signing; Lemonade dispatch is unconditional now.
+    """
+    return None
 
 
 @pytest.fixture

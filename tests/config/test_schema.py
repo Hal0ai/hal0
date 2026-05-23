@@ -36,7 +36,8 @@ class TestSlotConfig:
         assert s.name == "primary"
         assert s.port == 8081
         assert s.backend == "vulkan"
-        assert s.provider == "llama-server"
+        # PR-10 (ADR-0008 §2): provider defaults to "lemonade".
+        assert s.provider == "lemonade"
         assert s.enabled is True
         assert isinstance(s.model, ModelConfig)
 

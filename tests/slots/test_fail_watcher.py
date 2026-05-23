@@ -1,9 +1,9 @@
-"""Tests for SlotManager's push-driven failure detector (task #11).
+"""Tests for SlotManager's push-driven failure detector.
 
-When a slot's systemd unit dies unexpectedly while the slot is in a live
-state (READY / SERVING / IDLE), the manager must flip to ERROR and emit
-the SSE frame within ~1s — not on the next ``status()`` poll or after
-``_await_ready``'s 180s grace.
+When a slot's model drops out of lemond's ``/v1/health.loaded[]`` while
+the slot is in a live state (READY / SERVING / IDLE), the manager
+must flip to ERROR and emit the SSE frame within ~1s — not on the next
+``status()`` poll.
 
 These tests monkeypatch the fail-watch poll interval down to a few
 hundred milliseconds so they finish quickly while still exercising the
@@ -46,15 +46,12 @@ async def _wait_for_state(
     return rec.state if rec is not None else SlotState.OFFLINE
 
 
-async def test_fail_watcher_pushes_error_within_5s_on_unit_death(
+async def test_fail_watcher_pushes_error_when_model_drops_from_lemond(
     slot_root: Any,
-    systemctl_stub: dict[str, Any],
-    stub_await_ready: None,
+    lemonade_loaded_stub: dict[str, Any],
     fast_fail_watch: None,
 ) -> None:
-    """Unit going inactive while slot is READY must trigger an ERROR
-    transition pushed by the watcher — not by a subsequent status() call.
-    """
+    """Model leaving lemond's loaded[] while slot is READY must trigger ERROR."""
     sm = SlotManager()
     snap = await sm.load("primary")
     assert snap.state == SlotState.READY
@@ -62,9 +59,9 @@ async def test_fail_watcher_pushes_error_within_5s_on_unit_death(
     assert "primary" in sm._fail_watchers
     assert not sm._fail_watchers["primary"].done()
 
-    # Simulate the systemd unit dying out-of-band (OOM / segfault).  No
-    # call to status() — the push-driven watcher is what should react.
-    systemctl_stub["is_active_state"] = "inactive"
+    # Simulate eviction: lemond no longer reports the model as loaded.
+    # No call to status() — the push-driven watcher is what should react.
+    lemonade_loaded_stub["loaded"] = []
 
     observed = await _wait_for_state(sm, "primary", SlotState.ERROR, timeout_s=5.0)
     assert observed == SlotState.ERROR, (
@@ -72,13 +69,12 @@ async def test_fail_watcher_pushes_error_within_5s_on_unit_death(
     )
 
     rec = sm._states["primary"]
-    assert "systemd" in rec.message.lower() or "died" in rec.message.lower(), (
+    assert "lemond" in rec.message.lower() or "dropped" in rec.message.lower(), (
         f"ERROR record should carry an explanatory message (got {rec.message!r})"
     )
     # Watcher is one-shot — it should have exited after firing.
     watcher = sm._fail_watchers.get("primary")
     if watcher is not None:
-        # cooperative — wait briefly for the cancel/return to land
         for _ in range(20):
             if watcher.done():
                 break
@@ -88,8 +84,7 @@ async def test_fail_watcher_pushes_error_within_5s_on_unit_death(
 
 async def test_fail_watcher_emits_sse_frame_for_pushed_error(
     slot_root: Any,
-    systemctl_stub: dict[str, Any],
-    stub_await_ready: None,
+    lemonade_loaded_stub: dict[str, Any],
     fast_fail_watch: None,
 ) -> None:
     """The watcher-triggered ERROR transition must broadcast to SSE subscribers."""
@@ -98,11 +93,9 @@ async def test_fail_watcher_emits_sse_frame_for_pushed_error(
 
     # Subscribe before the failure so we observe the watcher-emitted frame.
     stream = sm.state_stream()
-    # Drain any frames already enqueued for late subscribers (there should
-    # be none — subscriber list grew after load()), then trigger failure.
-    systemctl_stub["is_active_state"] = "inactive"
+    # Trigger failure.
+    lemonade_loaded_stub["loaded"] = []
 
-    # Pull frames until we see ERROR, with a hard timeout.
     async def _next_error() -> str:
         async for rec in stream:
             if rec.state == SlotState.ERROR:
@@ -113,13 +106,12 @@ async def test_fail_watcher_emits_sse_frame_for_pushed_error(
         msg = await asyncio.wait_for(_next_error(), timeout=5.0)
     except TimeoutError:
         pytest.fail("watcher did not emit an ERROR SSE frame within 5s")
-    assert "systemd" in msg.lower() or "died" in msg.lower()
+    assert "lemond" in msg.lower() or "dropped" in msg.lower()
 
 
 async def test_fail_watcher_does_not_fire_when_slot_unloads_cleanly(
     slot_root: Any,
-    systemctl_stub: dict[str, Any],
-    stub_await_ready: None,
+    lemonade_loaded_stub: dict[str, Any],
     fast_fail_watch: None,
 ) -> None:
     """A clean unload() must cancel the watcher; no spurious ERROR push."""
