@@ -92,6 +92,50 @@ EOF
     esac
 done
 
+# ── v0.1.x state detection ─────────────────────────────────────────────────
+# v0.2 is a breaking change: slot architecture, model layout, and runtime have
+# all changed (see lemonade-adoption-plan §9). The installer refuses to run
+# over a v0.1.x state — there is no migration path beyond the registry, and
+# the only safe option is back-up + wipe.
+#
+# Detection criterion (plan §9):
+#   /etc/hal0/slots/*.toml exists  AND  /var/lib/hal0/lemonade/config.json absent.
+#
+# Both conditions matter: the slots dir is the v0.1.x fingerprint, and the
+# absence of the Lemonade config is what tells us this isn't a previously
+# completed v0.2 install with leftover v0.1.x slot files (PR-9 will retire
+# /etc/hal0/slots/ but until then a partial v0.2 box could still have files
+# there).
+#
+# Runs BEFORE the DEV_MODE check on purpose: dev mode does NOT bypass the
+# refusal. Escape hatch is HAL0_SKIP_V01_DETECT=1 (CI + worktree tests).
+# Idempotent — only checks two paths, no side effects.
+if [[ "${HAL0_SKIP_V01_DETECT:-0}" != "1" ]]; then
+    v01_slots_found=0
+    if compgen -G "/etc/hal0/slots/*.toml" >/dev/null 2>&1; then
+        v01_slots_found=1
+    fi
+    if [[ "${v01_slots_found}" -eq 1 && ! -f "/var/lib/hal0/lemonade/config.json" ]]; then
+        cat <<'V01_EOF' >&2
+hal0 v0.1.x detected. v0.2 is a breaking change — slot architecture, model layout,
+and runtime have all changed. The installer will not overwrite a v0.1.x state.
+
+To preserve your configuration:
+  sudo tar czf hal0-v0.1-backup-$(date +%F).tar.gz /etc/hal0 /var/lib/hal0/registry
+
+To wipe v0.1.x and start fresh:
+  sudo systemctl stop 'hal0-slot@*' hal0-api
+  sudo systemctl disable 'hal0-slot@*' hal0-api
+  sudo rm -rf /etc/hal0 /var/lib/hal0 /opt/hal0
+  # then re-run this installer
+
+Or read the v0.2 migration notes: https://hal0.dev/docs/v0.2-upgrade
+V01_EOF
+        exit 1
+    fi
+    unset v01_slots_found
+fi
+
 # --dev implies --no-tls — there's no system Caddy install in a dev tree
 # and the prefix-relative unit paths won't match Caddy's expectations
 # anyway. Warn the operator if they passed --no-tls redundantly.
