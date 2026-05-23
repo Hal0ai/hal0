@@ -2,10 +2,13 @@
  * stores/banner.js — Pinia store for the v2 dashboard banner catalog.
  *
  * One source of truth for every "banner state" the design calls out.
- * The 18 entries below mirror the BANNER_CATALOG in
- * /tmp/hal0-design/hal0-v2/project/dash/primitives.jsx verbatim, with
+ * The 19 entries below mirror the BANNER_CATALOG in
+ * /tmp/hal0-design-v3/dash/primitives.jsx (v0.3) verbatim, with the
  * JSX ``body`` collapsed to plain strings (Vue components render the
  * monospace + emphasis via their own template).
+ *
+ * Slice #167 added the 19th entry, `skip-path` (slots scope, info kind),
+ * which is the v0.3 fold-in for the FirstRun "skip the picker" surface.
  *
  * Banners are scope-tagged so a view (Dashboard / Slots / Models / …)
  * can ask for ``activeByScope('slots')`` and get only the banners
@@ -25,7 +28,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 
 // ─────────────────────────────────────────────────────────────────────
-// Catalog — 18 entries, exact id + scope + kind + copy from the
+// Catalog — 19 entries, exact id + scope + kind + copy from the
 // design prototype. Body strings drop the JSX wrappers; Vue templates
 // can re-apply mono/strong styling on render.
 // ─────────────────────────────────────────────────────────────────────
@@ -201,6 +204,21 @@ export const BANNER_CATALOG = Object.freeze([
     actions: [
       { label: 'Take the tour', primary: true },
       { label: 'Dismiss' },
+    ],
+  },
+
+  // ── Slots (skip-path) — added in v0.3 fold-in (slice #167) ──────
+  // Mirror of /tmp/hal0-design-v3/dash/primitives.jsx lines 372–380.
+  // Lives under "slots" scope: shown on the Slots route when the user
+  // skipped the FirstRun bundle picker, prompting them to configure
+  // each seeded slot one-by-one or re-run the picker.
+  {
+    id: 'skip-path', scope: 'slots', kind: 'info',
+    eyebrow: 'Slots · skip-path',
+    heading: 'Six seeded slots, none configured',
+    body: 'You skipped the bundle picker. Each seeded slot below has a Configure button that opens the Create-slot modal pre-filled. Or run the bundle picker again from Settings → FirstRun.',
+    actions: [
+      { label: 'Run picker', primary: true },
     ],
   },
 ])
