@@ -31,7 +31,7 @@ function SnapshotStrip({ slots, onGo }) {
               {s.cpuOnly && <span className="chip">[CPU]</span>}
             </span>
             <span className="num mono" style={{color: "var(--fg-3)", fontSize: 11, textAlign: "right"}}>
-              {s.state === "serving" ? `${s.metrics.toks} tok/s` : s.state}
+              {s.state === "serving" ? `${s.(metrics metrics.toksmetrics.toks metrics.toks)} tok/s` : s.state}
             </span>
           </div>
         ))}
@@ -76,7 +76,7 @@ function PersonaPicker({ slots, current, onPick, open, onToggle, noTools }) {
                     <div className="sub" style={{color: "var(--dev-npu)"}}>coresident with stt-npu + embed-npu</div>
                   )}
                 </div>
-                <span style={{color: "var(--fg-4)", fontSize: 10}}>{s.metrics.toks ? `${s.metrics.toks}t/s` : ""}</span>
+                <span style={{color: "var(--fg-4)", fontSize: 10}}>{s.(metrics metrics.toksmetrics.toks metrics.toks) ? `${s.(metrics metrics.toksmetrics.toks metrics.toks)}t/s` : ""}</span>
               </div>
             );
           })}

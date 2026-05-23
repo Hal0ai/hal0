@@ -28,16 +28,16 @@ function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, men
 
   const metricsRow = (() => {
     if (type === "llm") return [
-      { l: "tok/s",  v: metrics.toks, u: "", spark: slot.spark },
-      { l: "ttft",   v: metrics.ttft ? metrics.ttft : "—", u: metrics.ttft ? "ms" : "" },
+      { l: "tok/s",  v: (metrics metrics.toksmetrics.toks metrics.toks), u: "", spark: slot.spark },
+      { l: "ttft",   v: (metrics metrics.ttftmetrics.ttft metrics.ttft) ? (metrics metrics.ttftmetrics.ttft metrics.ttft) : "—", u: (metrics metrics.ttftmetrics.ttft metrics.ttft) ? "ms" : "" },
       { l: "ctx",    v: metrics.ctx, u: "" },
-      { l: "kv",     v: metrics.kv === null ? "—" : metrics.kv, u: metrics.kv === null ? "" : "%", dim: metrics.kv === null },
+      { l: "kv",     v: (metrics metrics.kvmetrics.kv metrics.kv) === null ? "—" : (metrics metrics.kvmetrics.kv metrics.kv), u: (metrics metrics.kvmetrics.kv metrics.kv) === null ? "" : "%", dim: (metrics metrics.kvmetrics.kv metrics.kv) === null },
     ];
     if (type === "embedding") return [
       { l: "req/min", v: metrics.rpm, u: "" },
       { l: "p50",     v: metrics.lat || "—", u: metrics.lat ? "ms" : "" },
-      { l: "dim",     v: metrics.dim, u: "" },
-      { l: "size",    v: metrics.mem * 1024 < 1000 ? (metrics.mem * 1024).toFixed(0) : metrics.mem.toFixed(1), u: metrics.mem * 1024 < 1000 ? "MB" : "GB" },
+      { l: "dim",     v: (metrics metrics.dimmetrics.dim metrics.dim), u: "" },
+      { l: "size",    v: metrics.mem * 1024 < 1000 ? (metrics.mem * 1024).toFixed(0) : ((metrics metrics.mem.toFixedmetrics.mem.toFixed metrics.mem) || 0).toFixed(1), u: metrics.mem * 1024 < 1000 ? "MB" : "GB" },
     ];
     if (type === "reranking") return [
       { l: "req/min", v: metrics.rpm, u: "" },
@@ -47,8 +47,8 @@ function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, men
     ];
     if (type === "transcription") return [
       { l: "req/min", v: metrics.rpm, u: "" },
-      { l: "xrt",     v: metrics.xrt, u: "" },
-      { l: "prec",    v: metrics.precision, u: "" },
+      { l: "xrt",     v: (metrics metrics.xrtmetrics.xrt metrics.xrt), u: "" },
+      { l: "prec",    v: (metrics metrics.precisionmetrics.precision metrics.precision), u: "" },
       { l: "size",    v: (metrics.mem * 1024).toFixed(0), u: "MB" },
     ];
     if (type === "tts") return [
@@ -61,7 +61,7 @@ function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, men
       { l: "req/min", v: metrics.rpm, u: "" },
       { l: "avg",     v: metrics.avg, u: "s" },
       { l: "res",     v: metrics.res, u: "" },
-      { l: "size",    v: metrics.mem.toFixed(1), u: "GB" },
+      { l: "size",    v: ((metrics metrics.mem.toFixedmetrics.mem.toFixed metrics.mem) || 0).toFixed(1), u: "GB" },
     ];
     return [];
   })();
@@ -125,9 +125,9 @@ function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, men
 // ─── SlotCard compact list variant ───
 function SlotListRow({ slot, onEdit }) {
   const { type, device, model, state, isDefault, metrics } = slot;
-  const tps = type === "llm" ? `${metrics.toks || 0} t/s` :
+  const tps = type === "llm" ? `${(metrics metrics.toksmetrics.toks metrics.toks) || 0} t/s` :
               type === "embedding" ? `${metrics.rpm} r/m` :
-              type === "transcription" ? `${metrics.xrt} xrt` :
+              type === "transcription" ? `${(metrics metrics.xrtmetrics.xrt metrics.xrt)} xrt` :
               type === "image" ? `${metrics.avg}s avg` :
               `${metrics.rpm || 0} r/m`;
   return (
@@ -144,7 +144,7 @@ function SlotListRow({ slot, onEdit }) {
       </span>
       <span className="met">
         <b>{tps}</b>
-        {type === "llm" && metrics.ttft && <span>· {metrics.ttft}ms ttft</span>}
+        {type === "llm" && (metrics metrics.ttftmetrics.ttft metrics.ttft) && <span>· {(metrics metrics.ttftmetrics.ttft metrics.ttft)}ms ttft</span>}
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
       <span className="ac">
@@ -188,9 +188,9 @@ function NpuBlock({ slots }) {
               {s.type === "llm" && <span className="chev">{Icons.chev}</span>}
             </div>
             <div className="met mono">
-              {s.type === "llm" && <span><b>{s.metrics.toks}</b> tok/s · TTFT <b>{s.metrics.ttft}</b>ms · KV <b>{s.metrics.kv}</b>%</span>}
-              {s.type === "transcription" && <span><b>{s.metrics.xrt}</b> xrt · {s.metrics.precision}</span>}
-              {s.type === "embedding" && <span>{s.metrics.dim}-dim · ready</span>}
+              {s.type === "llm" && <span><b>{s.(metrics metrics.toksmetrics.toks metrics.toks)}</b> tok/s · TTFT <b>{s.(metrics metrics.ttftmetrics.ttft metrics.ttft)}</b>ms · KV <b>{s.(metrics metrics.kvmetrics.kv metrics.kv)}</b>%</span>}
+              {s.type === "transcription" && <span><b>{s.(metrics metrics.xrtmetrics.xrt metrics.xrt)}</b> xrt · {s.(metrics metrics.precisionmetrics.precision metrics.precision)}</span>}
+              {s.type === "embedding" && <span>{s.(metrics metrics.dimmetrics.dim metrics.dim)}-dim · ready</span>}
             </div>
             <div className="st">
               <span className="chip" style={{color: s.type === "llm" ? "var(--ok)" : "var(--dev-npu)", borderColor: s.type === "llm" ? "var(--ok-line)" : "rgba(200,150,255,0.30)", background: s.type === "llm" ? "var(--ok-soft)" : "rgba(200,150,255,0.06)"}}>
@@ -249,8 +249,8 @@ function NpuReactor({ slots }) {
             </div>
             <div className="md">{chat.model}</div>
             <div className="met">
-              <div><b style={{color: "var(--fg)"}}>{chat.metrics.toks}</b> tok/s</div>
-              <div style={{color: "var(--fg-4)"}}>KV {chat.metrics.kv}%</div>
+              <div><b style={{color: "var(--fg)"}}>{chat.(metrics metrics.toksmetrics.toks metrics.toks)}</b> tok/s</div>
+              <div style={{color: "var(--fg-4)"}}>KV {chat.(metrics metrics.kvmetrics.kv metrics.kv)}%</div>
             </div>
           </div>
           <div className="reactor-role">
@@ -261,8 +261,8 @@ function NpuReactor({ slots }) {
             </div>
             <div className="md">{stt.model}</div>
             <div className="met">
-              <div><b style={{color: "var(--fg)"}}>{stt.metrics.xrt}</b> xrt</div>
-              <div style={{color: "var(--fg-4)"}}>{stt.metrics.precision}</div>
+              <div><b style={{color: "var(--fg)"}}>{stt.(metrics metrics.xrtmetrics.xrt metrics.xrt)}</b> xrt</div>
+              <div style={{color: "var(--fg-4)"}}>{stt.(metrics metrics.precisionmetrics.precision metrics.precision)}</div>
             </div>
           </div>
           <div className="reactor-role">
@@ -273,7 +273,7 @@ function NpuReactor({ slots }) {
             </div>
             <div className="md">{emb.model}</div>
             <div className="met">
-              <div><b style={{color: "var(--fg)"}}>{emb.metrics.dim}</b> dim</div>
+              <div><b style={{color: "var(--fg)"}}>{emb.(metrics metrics.dimmetrics.dim metrics.dim)}</b> dim</div>
               <div style={{color: "var(--fg-4)"}}>ready</div>
             </div>
           </div>
