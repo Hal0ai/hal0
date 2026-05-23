@@ -36,6 +36,11 @@ console = Console()
 approvals_app = typer.Typer(help="Manage agent approval requests (gated destructives).")
 app.add_typer(approvals_app, name="approvals")
 
+# Bootstrap sub-sub-app — ``hal0 agent bootstrap hermes`` runs the
+# Hermes provisioning state machine (v0.3 Phase 10 stream).
+bootstrap_app = typer.Typer(help="Run bundled-agent bootstrap pipelines (Phase 10).")
+app.add_typer(bootstrap_app, name="bootstrap")
+
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -247,3 +252,39 @@ def approvals_deny(
         die(str(exc))
         return
     console.print(f"[bold]Denied[/bold] {approval_id}.")
+
+
+# ── Bootstrap (Hermes provisioning, Phase 10) ────────────────────────────────
+
+
+@bootstrap_app.command("hermes")
+def bootstrap_hermes(
+    repair: bool = typer.Option(
+        False,
+        "--repair",
+        help="Re-run every phase regardless of checkpoint state (forces full rerun).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Run phases but don't persist provision.json.",
+    ),
+    skip_phase: list[str] = typer.Option(
+        [],
+        "--skip-phase",
+        help="Skip the named phase (may be repeated).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
+) -> None:
+    """Run the Hermes-Agent bootstrap state machine."""
+    # Late import keeps the CLI startup snappy on hosts where the
+    # hermes_provision module's downstream slices grow heavier deps.
+    from hal0.agents.hermes_provision import bootstrap_cli
+
+    rc = bootstrap_cli(
+        repair=repair,
+        dry_run=dry_run,
+        skip_phases=tuple(skip_phase),
+        verbose=verbose,
+    )
+    raise typer.Exit(rc)
