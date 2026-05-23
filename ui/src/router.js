@@ -77,16 +77,13 @@ const routes = [
     meta: { title: 'Agent' },
   },
   {
-    // Slice #168 placeholder for the v0.3 Agents · MCP Servers row.
-    // The real surface ships in slice #14. The placeholder exists so
-    // the sidebar's gated row doesn't 404 when accidentally followed.
+    // Slice #14 / issue #180 — v0.3 MCP Servers surface. KPI strip +
+    // clients ribbon + live oscilloscope + Install / Config / Logs /
+    // Connect modals. Replaces the slice #168 ComingSoon placeholder.
     path: '/agents/mcp',
     name: 'agents-mcp',
-    component: () => import('./views/ComingSoon.vue'),
-    meta: {
-      title: 'MCP Servers',
-      detail: 'Coming soon — slice #14 lands this.',
-    },
+    component: () => import('./views/McpView.vue'),
+    meta: { title: 'MCP Servers' },
   },
   {
     // Slice #168 placeholder for the v0.3 Agents · Memory row.

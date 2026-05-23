@@ -66,7 +66,7 @@ const agentInstalled = computed(() => (agent.installed?.length ?? 0) > 0)
 
 const AGENT_GROUP = [
   { to: '/agent',          label: 'Agents',      icon: 'agent',  badge: 'pending' },
-  { to: '/agents/mcp',     label: 'MCP Servers', icon: 'mcp',    disabled: true, tip: 'Coming soon — slice #14' },
+  { to: '/agents/mcp',     label: 'MCP Servers', icon: 'mcp' },
   { to: '/agents/memory',  label: 'Memory',      icon: 'memory', disabled: true, tip: 'v0.3' },
 ]
 

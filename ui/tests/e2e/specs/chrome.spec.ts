@@ -225,8 +225,10 @@ test('Agents · v0.3 group shows when an agent is installed', async ({ page, moc
   await page.goto('/')
   const sidebar = page.locator('.sidebar')
   await expect(sidebar.locator('.sb-group-h')).toContainText('Agents · v0.3')
-  // The MCP and Memory rows render as disabled.
-  await expect(sidebar.locator('.sb-row.sb-sub.disabled')).toHaveCount(2)
+  // Slice #14 (#180) unblocked the MCP Servers row; only Memory
+  // remains gated until Phase 9.
+  await expect(sidebar.locator('.sb-row.sb-sub.disabled')).toHaveCount(1)
+  await expect(sidebar.locator('.sb-row.sb-sub.disabled')).toContainText('Memory')
 })
 
 test('Sidebar shows "Set up agent →" CTA when no agent installed', async ({ page }) => {
