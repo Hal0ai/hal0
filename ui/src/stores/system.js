@@ -5,6 +5,11 @@ import { useToastsStore } from './toasts.js'
 export const useSystemStore = defineStore('system', () => {
   const status = ref(null)    // raw /api/status response
   const hardware = ref(null)  // hardware section
+  // slots array — per slot the backend returns at least:
+  //   { name, kind, type, device, backend, provider, model, port,
+  //     status, lemonade_state?, coresident_group?, backend_url? }
+  // The ``device`` field (gpu-rocm / gpu-vulkan / cpu / npu) was added
+  // in PR-11 (#163) for the v2 dashboard's per-card device badge.
   const slots = ref([])       // slots array
   const loading = ref(false)
   const error = ref(null)

@@ -11,15 +11,26 @@
  * Mounted once at the App level; child views don't subscribe. The
  * EventSource auto-reconnects when lemond's log stream drops, so the
  * banner survives across daemon restarts.
+ *
+ * dash-v2-1b refactor (slice #165)
+ * --------------------------------
+ * Also kicks the new ``useLemonadeStore`` polling lifecycle so the
+ * dashboard's /v1/health snapshot stays fresh. The two surfaces are
+ * complementary: SSE delivers the rare nuclear-evict notification, the
+ * store's /v1/health polling keeps loadedModels[] honest. App.vue
+ * already calls useNuclearEvictBanner() exactly once, so wiring the
+ * store init here means there's still one subscription point.
  */
 import { onMounted, onUnmounted } from 'vue'
 import { useToastsStore } from '../stores/toasts.js'
+import { useLemonadeStore } from '../stores/lemonade.js'
 
 const EVENTS_URL = '/api/lemonade/events/stream'
 const TOAST_DURATION_MS = 8000
 
 export function useNuclearEvictBanner() {
   const toasts = useToastsStore()
+  const lemonade = useLemonadeStore()
   let es = null
 
   function connect() {
@@ -50,9 +61,13 @@ export function useNuclearEvictBanner() {
       try { es.close() } catch (_err) { /* noop */ }
       es = null
     }
+    lemonade.stop()
   }
 
-  onMounted(connect)
+  onMounted(() => {
+    connect()
+    lemonade.init()
+  })
   onUnmounted(disconnect)
 
   return { disconnect }
