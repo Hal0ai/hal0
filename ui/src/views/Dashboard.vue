@@ -13,19 +13,22 @@
  * Stats arrive from /api/stats/hardware (proxied from configured upstreams)
  * via useStats; per-slot metrics from /api/slots/metrics via useSlotMetrics.
  */
-import { computed, ref, nextTick } from 'vue'
+import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
 import { useStats, useSlotMetrics } from '../composables/useStats.js'
 import { useSlotStats } from '../composables/useSlotStats.js'
-import { api } from '../composables/useApi.js'
 import { useEvents } from '../composables/useEvents.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
-import EmptyState from '../components/EmptyState.vue'
 import SlotCard from '../components/SlotCard.vue'
 import NPUBackendCard from '../components/capabilities/NPUBackendCard.vue'
+// PR-18 (plan §11): persona + voice + image chat surface. Replaces the
+// legacy "Test chat" panel below — the OmniRouter opt-in toggle lives
+// inside ChatSurface so the dashboard view stays a thin compositional
+// shell.
+import ChatSurface from '../components/ChatSurface.vue'
 
 const router = useRouter()
 const system = useSystemStore()
@@ -256,121 +259,11 @@ function eventSevClass(s) {
   return 'sev-info'
 }
 
-// ── Chat panel ───────────────────────────────────────────────────────
-const chatModels = ref([])
-const chatModel = ref('')
-const chatPrompt = ref('')
-const chatOutput = ref('')
-const chatReasoning = ref('')
-const chatBusy = ref(false)
-const chatError = ref(null)
-const chatOutputEl = ref(null)
-
-async function loadChatModels() {
-  try {
-    // The Test chat panel POSTs to /v1/chat/completions, so we must show
-    // only chat-capable upstreams in the dropdown. /v1/models is a flat
-    // aggregation across every slot (embed, rerank, stt, tts included)
-    // with no capability tag — relying on its order put the embed model
-    // at the top of the list as default. We instead derive the set of
-    // chat-capable slots by joining /api/slots (slot → loaded model id)
-    // with /api/capabilities (model id → capabilities) and filter
-    // /v1/models' rows by owned_by ∈ chat-capable slots.
-    const [models, slots, cap] = await Promise.all([
-      api('/v1/models'),
-      api('/api/slots').catch(() => []),
-      api('/api/capabilities').catch(() => ({ catalogs: {} })),
-    ])
-    const chatModelIds = new Set(
-      (cap?.catalogs?.chat?.chat ?? []).map((m) => m.id),
-    )
-    const chatSlots = new Set(
-      (slots || []).filter((s) => chatModelIds.has(s.model_id)).map((s) => s.name),
-    )
-    chatModels.value = (models?.data || [])
-      .filter((m) => chatSlots.has(m.owned_by))
-      .map((m) => m.id)
-    if (!chatModel.value && chatModels.value.length) {
-      // Prefer a small fast model for the first interaction.
-      const preferred = chatModels.value.find((m) =>
-        ['gemma3:1b', 'qwen3:0.6b', 'llama3.2:1b', 'lfm2:1.2b'].includes(m),
-      )
-      chatModel.value = preferred || chatModels.value[0]
-    }
-  } catch (e) {
-    chatError.value = e?.message ?? String(e)
-  }
-}
-
-async function runChat() {
-  if (!chatPrompt.value.trim() || !chatModel.value) return
-  chatBusy.value = true
-  chatError.value = null
-  chatOutput.value = ''
-  chatReasoning.value = ''
-  try {
-    const resp = await fetch('/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: chatModel.value,
-        messages: [{ role: 'user', content: chatPrompt.value }],
-        stream: true,
-        max_tokens: 512,
-      }),
-    })
-    if (!resp.ok) {
-      const txt = await resp.text()
-      try {
-        const j = JSON.parse(txt)
-        throw new Error(j?.error?.message || `HTTP ${resp.status}`)
-      } catch {
-        throw new Error(`HTTP ${resp.status}: ${txt.slice(0, 200)}`)
-      }
-    }
-    const reader = resp.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      let idx
-      while ((idx = buffer.indexOf('\n\n')) !== -1) {
-        const event = buffer.slice(0, idx).trim()
-        buffer = buffer.slice(idx + 2)
-        if (!event.startsWith('data:')) continue
-        const data = event.slice(5).trim()
-        if (data === '[DONE]') continue
-        try {
-          const j = JSON.parse(data)
-          const d = j?.choices?.[0]?.delta
-          // Reasoning models (Qwen3-Reason, gpt-oss, deepseek-r1, …) emit
-          // `reasoning_content` for their <think> tokens and `content` for
-          // the user-visible answer. Dropping reasoning made the panel look
-          // frozen — small reasoning models can burn the whole token budget
-          // on thinking before any `content` arrives.
-          if (d?.reasoning_content) chatReasoning.value += d.reasoning_content
-          if (d?.content) chatOutput.value += d.content
-          if (d?.reasoning_content || d?.content) {
-            await nextTick()
-            if (chatOutputEl.value) {
-              chatOutputEl.value.scrollTop = chatOutputEl.value.scrollHeight
-            }
-          }
-        } catch {
-          /* ignore partial JSON */
-        }
-      }
-    }
-  } catch (e) {
-    chatError.value = e?.message ?? String(e)
-  } finally {
-    chatBusy.value = false
-  }
-}
-
-loadChatModels()
+// ── Chat surface ─────────────────────────────────────────────────────
+// PR-18: the chat panel is now its own component (ChatSurface.vue) so
+// the dashboard view stays focused on telemetry. The component owns
+// persona dropdown, OmniRouter opt-in, mic, image modal, and the
+// thread; nothing else on the dashboard needs to know about its state.
 </script>
 
 <template>
@@ -539,42 +432,11 @@ loadChatModels()
         </template>
       </section>
 
-      <!-- ── Chat panel ───────────────────────────────────────────── -->
+      <!-- ── Chat surface (PR-18) ─────────────────────────────────── -->
       <section aria-labelledby="chat-heading">
-        <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> /v1/chat</p>
-        <h2 id="chat-heading" class="section-title">Test chat</h2>
-        <Card class="chat-card">
-          <div class="chat-row">
-            <select v-model="chatModel" class="chat-model">
-              <option v-if="!chatModels.length" value="">No models</option>
-              <option v-for="m in chatModels" :key="m" :value="m">{{ m }}</option>
-            </select>
-            <input
-              v-model="chatPrompt"
-              class="chat-input"
-              placeholder="Ask the model anything…"
-              @keydown.enter="runChat"
-              :disabled="chatBusy"
-            />
-            <button
-              class="btn-primary chat-send"
-              type="button"
-              :disabled="chatBusy || !chatPrompt.trim() || !chatModel"
-              @click="runChat"
-            >
-              {{ chatBusy ? 'Streaming…' : 'Send' }}
-            </button>
-          </div>
-          <div ref="chatOutputEl" class="chat-output" :class="{ empty: !chatOutput && !chatReasoning && !chatError }">
-            <span v-if="chatError" class="text-danger">{{ chatError }}</span>
-            <template v-else-if="chatOutput || chatReasoning">
-              <span v-if="chatReasoning" class="chat-reasoning">{{ chatReasoning }}</span>
-              <span v-if="chatReasoning && chatOutput" class="chat-reasoning-sep">───</span>
-              <span v-if="chatOutput">{{ chatOutput }}</span>
-            </template>
-            <span v-else class="text-muted mono-text">Response appears here · streaming SSE from /v1/chat/completions</span>
-          </div>
-        </Card>
+        <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> Chat</p>
+        <h2 id="chat-heading" class="section-title">Chat surface</h2>
+        <ChatSurface />
       </section>
 
       <!-- ── Recent events ────────────────────────────────────────── -->
@@ -713,17 +575,7 @@ loadChatModels()
 .empty-slots a { color: var(--hal0-accent); text-decoration: none; }
 .empty-slots a:hover { text-decoration: underline; }
 
-/* ── Chat panel ─────────────────────────────────────────────────── */
-.chat-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-.chat-row { display: flex; gap: 8px; align-items: stretch; }
-.chat-model { padding: 6px 10px; font-size: 12px; font-family: var(--font-mono); background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius); color: var(--color-fg); min-width: 160px; }
-.chat-input { flex: 1; padding: 6px 12px; font-size: 13px; background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius); color: var(--color-fg); }
-.chat-input:focus, .chat-model:focus { outline: 2px solid var(--color-accent); outline-offset: 1px; }
-.chat-send { padding: 6px 16px; flex-shrink: 0; }
-.chat-output { min-height: 80px; max-height: 260px; overflow-y: auto; padding: 10px 12px; background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius); font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-.chat-output.empty { display: flex; align-items: center; min-height: 60px; }
-.chat-reasoning { color: var(--color-fg-faint); font-style: italic; font-size: 12px; }
-.chat-reasoning-sep { display: block; margin: 8px 0; color: var(--color-fg-faint); font-family: var(--font-mono); font-size: 11px; }
+/* ── Chat panel CSS moved to ChatSurface.vue (PR-18). ─────────── */
 
 /* ── Logs ───────────────────────────────────────────────────────── */
 .logs-empty { padding: 20px 16px; display: flex; align-items: center; }
