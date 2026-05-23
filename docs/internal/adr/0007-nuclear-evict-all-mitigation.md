@@ -1,6 +1,7 @@
 # ADR 0007 — Nuclear-evict-all mitigation (Lemonade)
 
-- **Status:** Draft
+- **Status:** Superseded by ADR-0008 (2026-05-22)
+- **Reason:** invalidated by spike #2 findings + grill session 2026-05-22. See ADR-0008.
 - **Date:** 2026-05-22
 - **Drivers:** Spike findings 2026-05-22; ADR-0006 §Operational risks
 - **Scope:** v0.2 Lemonade migration only — does not apply to v0.1.x toolbox era

@@ -1,6 +1,7 @@
 # ADR 0006 — Migrate inference to Lemonade Server (v0.2)
 
-- **Status:** Draft
+- **Status:** Superseded by ADR-0008 (2026-05-22)
+- **Reason:** invalidated by spike #2 findings + grill session 2026-05-22. See ADR-0008.
 - **Date:** 2026-05-22
 - **Drivers:** /grill-me + /grill-with-docs sessions 2026-05-22; spike findings (`docs/internal/lemonade-spike-findings-2026-05-22.md`); plan doc (`docs/internal/lemonade-migration-plan.md`)
 - **Supersedes:** Per-modality toolbox architecture from PLAN.md §2 (six Dockerfiles + Provider classes)
