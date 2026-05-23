@@ -26,9 +26,12 @@ const DEFAULTS = Object.freeze({
   slotCardVariant: 'a',       // 'a' | 'b' | 'c'
   npuVariant: 'rollup',       // 'rollup' | 'fan-out' | 'compact'
   heroStrip: 'sparkline',     // 'sparkline' | 'metrics' | 'minimal'
-  composerState: 'idle',      // 'idle' | 'typing' | 'error'
+  composerState: 'idle',      // 'idle' | 'sending' | 'streaming' | 'swap' | 'no-tools' | 'offline'
   firstrunLayout: 'tiers',    // 'tiers' | 'wizard'
   personaPlacement: 'topbar', // 'topbar' | 'inline' | 'drawer'
+  // Dashboard / view (slice #169)
+  chatVariant: 'active',      // 'active' | 'empty'
+  heroVariant: 'returning',   // 'returning' | 'post-install' | 'skip-path-empty'
 })
 
 function loadPersisted() {
@@ -61,6 +64,9 @@ export const useTweaksStore = defineStore('tweaks', () => {
   const composerState     = ref(initial.composerState)
   const firstrunLayout    = ref(initial.firstrunLayout)
   const personaPlacement  = ref(initial.personaPlacement)
+  // Slice #169 — dashboard variants (chat surface + hero strip flavour)
+  const chatVariant       = ref(initial.chatVariant)
+  const heroVariant       = ref(initial.heroVariant)
 
   function snapshot() {
     return {
@@ -70,12 +76,14 @@ export const useTweaksStore = defineStore('tweaks', () => {
       composerState: composerState.value,
       firstrunLayout: firstrunLayout.value,
       personaPlacement: personaPlacement.value,
+      chatVariant: chatVariant.value,
+      heroVariant: heroVariant.value,
     }
   }
 
   // Persist on any change — cheap enough for dev-only overlay.
   watch(
-    [slotCardVariant, npuVariant, heroStrip, composerState, firstrunLayout, personaPlacement],
+    [slotCardVariant, npuVariant, heroStrip, composerState, firstrunLayout, personaPlacement, chatVariant, heroVariant],
     () => persist(snapshot()),
   )
 
@@ -86,12 +94,15 @@ export const useTweaksStore = defineStore('tweaks', () => {
     composerState.value    = DEFAULTS.composerState
     firstrunLayout.value   = DEFAULTS.firstrunLayout
     personaPlacement.value = DEFAULTS.personaPlacement
+    chatVariant.value      = DEFAULTS.chatVariant
+    heroVariant.value      = DEFAULTS.heroVariant
   }
 
   return {
     // state
     slotCardVariant, npuVariant, heroStrip, composerState,
     firstrunLayout, personaPlacement,
+    chatVariant, heroVariant,
     // actions
     snapshot, reset,
     // constants
