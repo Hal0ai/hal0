@@ -137,8 +137,8 @@ be evicted out from under a streaming request.
 - **Image generation, day one** — `POST /v1/images/generations` via
   `sd-cpp` (Lemonade-bundled). Bundle manifests pre-pick SDXL Turbo /
   Flux-2-Klein-9B as fits the tier.
-- **First-run wizard + bundle picker** — password setup → bundle pick
-  (or "Skip — configure manually") → models download in background.
+- **First-run wizard + bundle picker** — bundle pick (or "Skip —
+  configure manually") → models download in background.
 - **Atomic self-update with rollback** — `hal0 update --channel
   stable|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts.
@@ -254,28 +254,17 @@ into the registry under the `user.*` namespace, and `hal0 uninstall
 
 ### Auth posture
 
-Per [ADR-0001](./docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md), all
-auth lives in FastAPI. A fresh install **starts locked** —
-the dashboard, `/v1/*`, and every admin route reject anonymous requests
-with `401 auth.required`. Only the first-run wizard claim paths
-(`/api/install/*` and `POST /api/auth/password`) stay reachable, and
-only while the installer's `.first-run.lock` file is present on disk.
+Per [ADR-0012](./docs/internal/adr/0012-remove-auth-and-caddy.md) (supersedes
+ADR-0001), hal0 ships with **no built-in auth and no bundled TLS**.
+`hal0-api` binds `0.0.0.0:8080` and treats every request as
+authenticated by virtue of network reachability — the right posture
+for a homelab appliance on a trusted LAN.
 
-The installer prints a one-time OTP in the post-install summary; the
-wizard's "Set a password" step asks for it before minting the owner
-credential. Once the password is set the lockfile is deleted and the
-claim window closes — from then on every request needs a session
-cookie (browser) or Bearer token (programmatic client).
-
-To opt back into the trusted-LAN open posture (single-user dev boxes
-only), set `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env` and restart
-`hal0-api`. The legacy `HAL0_AUTH_ENABLED=0` falsy form is still
-honoured for compatibility.
-
-TLS termination is upstream's job. `hal0-api` binds `0.0.0.0:8080`
-directly; front it with Traefik, nginx, Cloudflare Tunnel, or whatever
-edge proxy you already run. See [`installer/README.md`](./installer/README.md)
-for example reverse-proxy configs.
+If hal0 is reachable from anything you don't physically control,
+front it with an upstream reverse proxy that owns auth + TLS — Traefik,
+nginx, Cloudflare Tunnel, or your own preferred edge. See
+[`docs/operate/auth.mdx`](./docs/operate/auth.mdx) for example configs
+of each.
 
 ### Proxmox integration (optional)
 

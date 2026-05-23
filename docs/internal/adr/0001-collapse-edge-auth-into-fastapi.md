@@ -1,11 +1,18 @@
 # ADR 0001 — Collapse edge auth into FastAPI
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0012](0012-remove-auth-and-caddy.md) (2026-05-23)
 - **Date proposed:** 2026-05-17
 - **Date accepted:** 2026-05-21
+- **Date superseded:** 2026-05-23
 - **Implementing PRs:** Child A (#58 — FastAPI password auth), Child B (#59 — Caddyfile reduction + --no-tls), Child C (#60 — docs pass)
 - **Supersedes:** the dual-layer auth posture established by #28, #29, #36, #43, #49
 - **Closed on land:** #28, #43, #51
+- **Superseded by:** ADR-0012 removes the entire FastAPI auth surface
+  and the bundled Caddy reverse proxy. The "FastAPI owns auth" outcome
+  this ADR landed was a transitional state — operators in practice
+  already front hal0 with an upstream proxy that handles auth + TLS,
+  so the bundled surface was middleman. See ADR-0012 for the rationale
+  and PRs #254, #255, #256, #266 for the implementation.
 
 ## Context
 

@@ -114,11 +114,14 @@ def test_atomic_write_no_orphan_tmp(tmp_path: Path) -> None:
 # ── Auth-aware defaults (Team J / v0.2 auth POC) ─────────────────────────────
 
 
-def test_auth_disabled_keeps_webui_auth_false(
+def test_webui_auth_is_always_false_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without HAL0_AUTH_ENABLED, OpenWebUI keeps its no-login behaviour."""
+    """OpenWebUI prewires with WEBUI_AUTH=False — no login screen, no
+    trusted-email header. Auth is upstream's job (see ADR-0012)."""
+    # Auth env vars no longer exist; ensure their absence doesn't matter.
     monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("HAL0_AUTH_DISABLED", raising=False)
     target = tmp_path / "openwebui.env"
     write_openwebui_env(target)
     env = _parse_env(target.read_text())
@@ -126,34 +129,20 @@ def test_auth_disabled_keeps_webui_auth_false(
     assert "WEBUI_AUTH_TRUSTED_EMAIL_HEADER" not in env
 
 
-def test_auth_enabled_flips_webui_auth_true(
+def test_trusted_email_header_via_explicit_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """HAL0_AUTH_ENABLED=1 turns on SSO via the trusted-email header."""
-    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
+    """Operators fronting hal0 with a reverse proxy that injects a
+    trusted email header opt in via the `overrides` parameter — there
+    is no env-var auto-detect anymore."""
     target = tmp_path / "openwebui.env"
-    write_openwebui_env(target)
+    write_openwebui_env(
+        target,
+        overrides={
+            "WEBUI_AUTH": "True",
+            "WEBUI_AUTH_TRUSTED_EMAIL_HEADER": "X-Forwarded-Email",
+        },
+    )
     env = _parse_env(target.read_text())
     assert env["WEBUI_AUTH"] == "True"
     assert env["WEBUI_AUTH_TRUSTED_EMAIL_HEADER"] == "X-Forwarded-Email"
-
-
-@pytest.mark.parametrize("val", ["0", "false", "", "no"])
-def test_auth_falsy_values_keep_defaults(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, val: str
-) -> None:
-    monkeypatch.setenv("HAL0_AUTH_ENABLED", val)
-    target = tmp_path / "openwebui.env"
-    write_openwebui_env(target)
-    env = _parse_env(target.read_text())
-    assert env["WEBUI_AUTH"] == "False"
-
-
-def test_overrides_still_win_under_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Explicit overrides survive the auth-driven defaults."""
-    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
-    target = tmp_path / "openwebui.env"
-    write_openwebui_env(target, overrides={"WEBUI_AUTH": "False"})
-    env = _parse_env(target.read_text())
-    # Operator's override wins.
-    assert env["WEBUI_AUTH"] == "False"

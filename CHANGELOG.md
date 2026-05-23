@@ -10,6 +10,76 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.3.0-alpha.1] — 2026-05-23
+
+**Caddy and the auth surface are removed.** PLAN.md v0.3 stream 4
+("Admin / auth simplification") lands as a hard cut rather than the
+softer "reduce/keep simplified password auth" originally planned in
+ADR-0001. Architecture in [ADR-0012](docs/internal/adr/0012-remove-auth-and-caddy.md),
+which supersedes [ADR-0001](docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md).
+
+### Breaking
+
+- **Auth is gone.** A fresh install is open on `0.0.0.0:8080`. There is
+  no password, no Bearer-token store, no `/api/auth/*` router, no
+  first-run claim OTP, no session cookie. If hal0 is reachable from a
+  hostile network, you must front it with an upstream reverse proxy
+  that owns auth (Traefik / nginx / Cloudflare Tunnel; see
+  `docs/operate/auth.mdx`).
+- **Caddy is gone.** The installer no longer installs Caddy or renders
+  a Caddyfile. The `hal0-caddy.service` unit is no longer shipped.
+  `uninstall.sh` still tears down legacy `hal0-caddy.service` and
+  `/var/lib/hal0/.first-run.lock` artifacts from older installs.
+- **`--no-tls` install flag is gone** (now the only path).
+- **`HAL0_AUTH_ENABLED` / `HAL0_AUTH_DISABLED` env vars are no-ops.**
+  Both are unread by any hal0 process post-upgrade.
+- Bearer tokens minted under v0.2.x stop working — there's no token
+  store to validate them against. Programmatic clients that hit
+  `/v1/*` no longer need (or are even able to use) an Authorization
+  header.
+
+### New / improved
+
+- **v3 React dashboard on `main`** (#235), with the deferred
+  slot-metrics normalizer (#249) and the slot type/group inference +
+  hardware shape normalizer (#253) that took the sparse Lemonade
+  payloads to a rendered state.
+- **`/v1/*` reverse-proxy to Lemonade** (#248, closes #212). hal0-api
+  catches every un-routed `/v1/{path:path}` and forwards to
+  `127.0.0.1:13305`. Sidebar `lemond` status chip now updates from
+  `/v1/health` instead of permanently reading "down."
+- **Footer chips honor backend null** (#252, closes #221). `queued` /
+  `coresident` render as `—` when Lemonade hasn't surfaced them.
+- **Settings → default landing tab is now "Secrets"** (was "Auth"; the
+  panel is gone).
+
+### Removed code
+
+- `src/hal0/api/auth/` (4 files, 712 lines) — first-run lockfile,
+  password hash/verify, OTP rate-limiter
+- `src/hal0/auth/` (3 files, 646 lines) — token store, password
+  helpers, `auth_enabled()`
+- `src/hal0/api/middleware/auth.py` (508 lines) — `require_token`,
+  `require_writer`, `require_admin` deps + `AuthIdentity` resolver
+- `src/hal0/api/routes/auth.py` (33 KB) — `/api/auth/{status,login,
+  logout,password,me,tokens,tokens/{id}/rotate}`
+- `ui/src/api/hooks/useAuth.ts` (58 lines) — token reveal/rotate hooks
+- `ui/src/dash/settings.jsx::AuthSection` (~60 lines)
+- `tests/api/test_auth_*` + `tests/auth/` — ~2,500 lines of test
+  coverage for moot architecture
+- `packaging/caddy/Caddyfile.template` + `packaging/systemd/hal0-caddy.service`
+- ~135 lines of `install_caddy_tls()` + `--no-tls` handling in `install.sh`
+- ~110 lines of first-run-lockfile + OTP minting + password-claim
+  banner in `install.sh`
+
+### Upgrade notes
+
+- An existing v0.2.x install will lose its password + tokens on the next
+  install. `uninstall.sh` cleans up the legacy Caddy unit + lockfile if
+  you want a clean slate first.
+- If you were relying on `--no-tls`, drop the flag — the installer no
+  longer accepts it (and no longer needs it).
+
 ## [v0.2.0] — 2026-05-23
 
 **The Lemonade Server adoption release.** AMD's Lemonade Server
