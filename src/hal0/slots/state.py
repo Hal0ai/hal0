@@ -186,6 +186,19 @@ class SlotConfigError(SlotError):
     status = 400
 
 
+class NpuExclusivityViolation(SlotError):
+    """Two ``device=npu, type=llm, enabled=true`` slots cannot coexist.
+
+    The AMDXDNA hardware context admits exactly one NPU LLM at a time
+    (plan §5.3, ADR-0008 §5). Surfaced as 409 so the dashboard can
+    distinguish "you already have one — disable it first" from a 400
+    schema error.
+    """
+
+    code = "slot.npu_exclusivity_violation"
+    status = 409
+
+
 # ── Persistence ──────────────────────────────────────────────────────────────
 
 
@@ -313,6 +326,7 @@ __all__ = [
     "LEGAL_TRANSITIONS",
     "SELF_MANAGED_PROVIDERS",
     "IllegalSlotTransition",
+    "NpuExclusivityViolation",
     "SlotConfigError",
     "SlotError",
     "SlotHealthFailed",

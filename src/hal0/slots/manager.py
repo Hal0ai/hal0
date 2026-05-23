@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 from hal0.config import paths
 from hal0.slots.state import (
     IllegalSlotTransition,
+    NpuExclusivityViolation,
     SlotConfigError,
     SlotNotFound,
     SlotSpawnFailed,
@@ -1136,6 +1137,11 @@ class SlotManager:
         rendered — lemond owns process lifecycle. The TOML is the only
         on-disk artefact.
 
+        PR-11 (plan §5.3 + ADR-0008 §5): rejects a second ``device=npu,
+        type=llm, enabled=true`` slot — the AMDXDNA hardware context
+        admits exactly one NPU LLM at a time. Disabled NPU LLM slots
+        coexist; only the live anchor count is bounded.
+
         TOML serialisation depends on ``tomli_w`` (declared in
         pyproject.toml); kept inline so this module doesn't pull in
         ``config/loader.py``.
@@ -1148,6 +1154,7 @@ class SlotManager:
             ) from exc
 
         cfg_dict = _cfg_to_dict(slot_cfg)
+        await self._check_npu_exclusivity(slot_name, cfg_dict)
         cfg_path = self._config_file(slot_name)
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1221,6 +1228,12 @@ class SlotManager:
         # build the sub-dict on their side first.
         cfg_dict.update(updates)
 
+        # PR-11: re-run the NPU exclusivity guard whenever the merged
+        # config could land a second device=npu, type=llm anchor (plan
+        # §5.3). Cheap when no NPU LLM is involved — the helper short-
+        # circuits on the merged cfg's own device/type.
+        await self._check_npu_exclusivity(slot_name, cfg_dict)
+
         cfg_path = self._config_file(slot_name)
         try:
             cfg_path.write_bytes(tomli_w.dumps(cfg_dict).encode("utf-8"))
@@ -1230,6 +1243,72 @@ class SlotManager:
             ) from exc
 
         return await self.status(slot_name)
+
+    async def _check_npu_exclusivity(
+        self,
+        slot_name: str,
+        cfg_dict: dict[str, Any],
+    ) -> None:
+        """Reject a write that would land a second NPU LLM anchor.
+
+        Plan §5.3 + ADR-0008 §5: the AMDXDNA hardware context admits
+        ONE ``device=npu, type=llm`` slot at a time. Disabled NPU LLM
+        slots may coexist with another disabled (or enabled) one, but
+        two enabled anchors cannot be configured. This guard runs on
+        every ``create()`` and ``update_config()`` so the constraint
+        holds before any TOML hits disk.
+
+        Cheap fast paths:
+          - the slot being written is not ``device=npu, type=llm`` →
+            no possible violation, return.
+          - the slot being written is not ``enabled`` → at most one
+            enabled NPU LLM can survive (the OTHER one, if any),
+            return.
+
+        On the slow path we walk the other configured slots to see
+        whether any pre-existing NPU LLM is already enabled. Reading
+        the writer's own slot from disk is skipped — the in-memory
+        ``cfg_dict`` IS the authoritative new state.
+        """
+        device = cfg_dict.get("device")
+        type_ = cfg_dict.get("type")
+        if device != "npu" or type_ != "llm":
+            return
+        # The merged write is for an NPU LLM slot. If it isn't being
+        # enabled, no collision is possible — at most one OTHER slot
+        # could still be enabled, and that's the legal state we want.
+        if cfg_dict.get("enabled") is False:
+            return
+        # Walk peers. Use _all_configured_slot_names() so we see slots
+        # whose TOML exists but whose in-memory state hasn't been hit
+        # yet (e.g. installer-seeded slots before first poll).
+        peer_names = [n for n in self._all_configured_slot_names() if n != slot_name]
+        offenders: list[str] = []
+        for name in peer_names:
+            try:
+                peer = await self._load_slot_config(name)
+            except SlotConfigError:
+                # Malformed TOML doesn't block the user's legitimate
+                # write — surface the malformed-slot warning via the
+                # usual path instead of conflating it here.
+                continue
+            except SlotNotFound:
+                continue
+            if peer.get("device") != "npu" or peer.get("type") != "llm":
+                continue
+            if peer.get("enabled") is False:
+                continue
+            offenders.append(name)
+        if offenders:
+            raise NpuExclusivityViolation(
+                "only one NPU LLM slot may be enabled at a time "
+                f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
+                details={
+                    "slot": slot_name,
+                    "conflicting_slots": sorted(offenders),
+                    "hint": "disable the existing NPU LLM slot before enabling another",
+                },
+            )
 
     # ── idle / wake-on-request ───────────────────────────────────────────────
 

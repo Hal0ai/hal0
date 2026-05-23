@@ -262,7 +262,18 @@ async function submitCreate() {
     createErrors.value = {}
     await system.fetchStatus()
   } catch (e) {
-    toasts.error(e.message)
+    // PR-11: NPU exclusivity violations carry a typed envelope —
+    // surface the conflicting slot name inline so the operator knows
+    // what to disable first.
+    if (e?.code === 'slot.npu_exclusivity_violation') {
+      const conflicting = e?.details?.conflicting_slots?.[0] ?? 'another NPU LLM slot'
+      createErrors.value = {
+        backend: `NPU is already claimed by slot "${conflicting}"; disable it first.`,
+      }
+      toasts.error(e.message)
+    } else {
+      toasts.error(e.message)
+    }
   } finally {
     creating.value = false
   }

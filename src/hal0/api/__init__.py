@@ -58,6 +58,9 @@ from hal0.api.routes import (
     v1,
 )
 from hal0.api.routes import (
+    lemonade_logs as lemonade_logs_routes,
+)
+from hal0.api.routes import (
     proxmox as proxmox_routes,
 )
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
@@ -574,6 +577,16 @@ def create_app() -> FastAPI:
     )
     app.include_router(hardware.router, prefix="/api", tags=["hardware"], dependencies=_admin_auth)
     app.include_router(logs.router, prefix="/api/logs", tags=["logs"], dependencies=_admin_auth)
+    # PR-11: Lemonade log proxy — surfaces the /logs/stream WS as SSE
+    # streams the dashboard consumes for the journal panel (PR-14) and
+    # the nuclear-evict toast banner. Same admin auth as the rest of
+    # the slot surface.
+    app.include_router(
+        lemonade_logs_routes.router,
+        prefix="/api/lemonade",
+        tags=["lemonade", "logs"],
+        dependencies=_admin_auth,
+    )
     app.include_router(
         settings.router,
         prefix="/api/settings",

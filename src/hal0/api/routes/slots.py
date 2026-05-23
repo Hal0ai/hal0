@@ -12,6 +12,15 @@ stream is split by concern):
   for one slot (``starting → warming → ready → serving → idle …``).
 - ``GET /api/slots/{name}/logs/stream`` — line-by-line journal tail
   for the slot's systemd unit.
+
+PR-11 (plan §11 + ADR-0008 §5): list responses are enriched with
+Lemonade-derived state — each entry carries ``lemonade_state``
+(``loaded`` | ``idle`` | ``disabled`` | ``error``), an optional
+``backend_url`` lifted from ``/v1/health.loaded[]``, and a
+``coresident_group`` ID grouping slots that back the same FLM process
+(the NPU trio: ``agent`` + ``stt-npu`` + ``embed-npu``). This is
+backward-compatible — every legacy field is preserved; new keys are
+purely additive.
 """
 
 from __future__ import annotations
@@ -96,6 +105,122 @@ def _slot_to_dict(slot: Slot, request: Request | None = None) -> dict[str, Any]:
     return base
 
 
+#: Slot names that form the NPU FLM trio — chat (agent) + ASR (stt-npu)
+#: + embed (embed-npu) coresident in one FLM process (ADR-0008 §5,
+#: ADR-0009, plan §5.2). All three back the same FLM child process when
+#: the NPU LLM slot is loaded with ``--asr 1 --embed 1``. The dashboard
+#: surfaces them with a shared ``coresident_group`` so the UI can render
+#: them as a trio rather than three independent slots.
+_FLM_TRIO_SLOTS: frozenset[str] = frozenset({"agent", "stt-npu", "embed-npu"})
+
+#: Trigger substring for the nuclear-evict log line. lemond emits this
+#: on the lone ``/v1/load`` path where the error isn't a "not found"
+#: variant — the evict-all blast radius fires. Per ADR-0008 §3 we
+#: surface this verbatim to operators via the dashboard banner.
+NUCLEAR_EVICT_TRIGGER: str = (
+    "Load failed with non-file-not-found error, evicting all models and retrying"
+)
+
+
+async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, Any]]:
+    """Build per-slot Lemonade-derived state for list_slots.
+
+    Calls ``/v1/health`` once, then walks the slot configs to build a
+    ``{slot_name: {lemonade_state, backend_url?, coresident_group?}}``
+    map. Never raises — a down lemond returns an empty enrichment so
+    the dashboard degrades to the on-disk view rather than 500ing.
+
+    Coresident grouping (ADR-0008 §5, plan §5.2):
+      A slot of type=llm + device=npu serving as the chat anchor and
+      any sibling ``stt-npu`` / ``embed-npu`` slots that are enabled
+      share a ``coresident_group=npu-flm-trio`` marker. The dashboard
+      uses this to render a "trio" badge linking the three cards.
+    """
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return {}
+    try:
+        configs = await sm.iter_configs()
+    except Exception:
+        return {}
+
+    # Single /v1/health probe shared across every slot — calling once
+    # per slot would 5x lemond load for a 5-slot dashboard refresh.
+    from hal0.lemonade.errors import LemonadeError
+    from hal0.providers import lemonade_provider
+
+    health: dict[str, Any] = {}
+    try:
+        health = await lemonade_provider().client().health()
+    except LemonadeError:
+        health = {}
+    except Exception:
+        # Defensive: any error reading health degrades to "no enrichment"
+        # rather than tunnelling up as a 500 — the dashboard is the
+        # primary consumer and would render a broken card.
+        health = {}
+
+    loaded_by_model: dict[str, dict[str, Any]] = {}
+    if isinstance(health, dict):
+        for key in ("loaded", "all_models_loaded"):
+            entries = health.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("model_name")
+                if isinstance(name, str) and name:
+                    loaded_by_model[name] = entry
+
+    # First pass — pick out the NPU LLM slot(s) so we can decide if
+    # the trio is "active" (i.e. there IS an npu-llm slot enabled).
+    npu_llm_enabled: list[str] = [
+        str(cfg.get("name", ""))
+        for cfg in configs
+        if cfg.get("device") == "npu"
+        and cfg.get("type") == "llm"
+        and cfg.get("enabled") is not False
+    ]
+    trio_active = bool(npu_llm_enabled)
+
+    out: dict[str, dict[str, Any]] = {}
+    for cfg in configs:
+        name = str(cfg.get("name", ""))
+        if not name:
+            continue
+        enabled = cfg.get("enabled") is not False
+        model_default = ""
+        model_section = cfg.get("model")
+        if isinstance(model_section, dict):
+            model_default = str(model_section.get("default") or "")
+        entry: dict[str, Any] = {}
+        loaded_entry = loaded_by_model.get(model_default) if model_default else None
+        if not enabled:
+            entry["lemonade_state"] = "disabled"
+        elif loaded_entry is not None:
+            entry["lemonade_state"] = "loaded"
+            backend_url = loaded_entry.get("backend_url")
+            if isinstance(backend_url, str) and backend_url:
+                entry["backend_url"] = backend_url
+        else:
+            # Enabled but not in loaded[]: idle by default. Drift into
+            # error is surfaced via the regular slot state (see
+            # SlotManager.status reconciliation); the dashboard uses
+            # ``status`` for the dot, ``lemonade_state`` for the chip.
+            entry["lemonade_state"] = "idle"
+
+        # Coresident grouping — the FLM trio is hardcoded. A trio slot
+        # only gets the group marker when (a) the NPU LLM anchor is
+        # enabled and (b) THIS slot is enabled too — disabled siblings
+        # don't claim trio membership.
+        if name in _FLM_TRIO_SLOTS and trio_active and enabled:
+            entry["coresident_group"] = "npu-flm-trio"
+
+        out[name] = entry
+    return out
+
+
 def _synthesize_slots_from_upstreams(request: Request) -> list[dict[str, Any]]:
     """Build virtual slot entries from configured upstreams.
 
@@ -153,11 +278,23 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     Merges real SlotManager-backed entries with synthetic upstream-backed
     ones. Real slots win on name collision so the dashboard sees a single
     authoritative row per slot name once a local slot is installed.
+
+    PR-11: each real entry is enriched in-place with Lemonade-derived
+    fields (``lemonade_state``, optional ``backend_url`` +
+    ``coresident_group``). Synthetic upstream entries are untouched —
+    they aren't managed by lemond and have no health row to lift.
     """
     sm = _get_slot_manager(request)
     real_slots = await sm.list()
     real_entries: list[dict[str, Any]] = [_slot_to_dict(s, request) for s in real_slots]
     real_names = {entry["name"] for entry in real_entries}
+
+    enrichment = await _lemonade_state_enrichment(request)
+    for entry in real_entries:
+        extra = enrichment.get(str(entry["name"]))
+        if extra:
+            for k, v in extra.items():
+                entry.setdefault(k, v)
 
     synthetic = _synthesize_slots_from_upstreams(request)
     merged: list[dict[str, Any]] = list(real_entries)
@@ -639,11 +776,21 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
     Real slots come from the SlotManager; if the name isn't a configured
     local slot, fall through to the synthetic upstream-backed entry.
     SlotNotFound surfaces as the typed slot.not_found envelope.
+
+    PR-11: real-slot snapshots are enriched with Lemonade-derived state
+    so the dashboard's per-card refresh stays consistent with the list
+    endpoint.
     """
     sm = _get_slot_manager(request)
     try:
         snap = await sm.status(name)
-        return _slot_to_dict(snap, request)
+        out = _slot_to_dict(snap, request)
+        enrichment = await _lemonade_state_enrichment(request)
+        extra = enrichment.get(name)
+        if extra:
+            for k, v in extra.items():
+                out.setdefault(k, v)
+        return out
     except Exception:
         # Fall through to synthetic lookup before re-raising — a remote
         # upstream named ``haloai`` should be observable via this endpoint

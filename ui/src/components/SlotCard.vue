@@ -73,6 +73,28 @@ const dotState = computed(() => {
   return 'idle'
 })
 
+// PR-11: Lemonade /v1/health-derived hints. These come from the backend's
+// per-slot enrichment in `_lemonade_state_enrichment`:
+//   - coresident_group: 'npu-flm-trio' when this slot is one of the FLM
+//     trio (agent/stt-npu/embed-npu) backed by a single FLM process.
+//   - lemonade_state: 'loaded' | 'idle' | 'disabled' | 'error' — a
+//     more precise "is the model in lemond's loaded[]?" signal than the
+//     legacy status dot, which mixes lifecycle + reachability.
+// The badge is a thin visual hint, NOT actionable — clicking it doesn't
+// navigate; it's just there so the operator understands the trio backs
+// one FLM process at a glance.
+const coresidentGroup = computed(() => props.slot.coresident_group || null)
+const coresidentLabel = computed(() => {
+  if (coresidentGroup.value === 'npu-flm-trio') return 'TRIO'
+  return null
+})
+const coresidentTitle = computed(() => {
+  if (coresidentGroup.value === 'npu-flm-trio') {
+    return 'NPU FLM trio — chat, STT, and embed run coresident in one FLM process'
+  }
+  return ''
+})
+
 const modelLabel = computed(() => {
   const raw = props.slot.model_name || props.slot.model || props.slot.model_id || ''
   const s = typeof raw === 'string' ? raw : (raw?.default ?? '')
@@ -487,6 +509,16 @@ const sparkSvg = computed(() => {
     <div class="sc-head">
       <span class="sc-dot" />
       <span class="sc-name">{{ slot.name }}</span>
+      <!-- PR-11: coresident-group badge for the NPU FLM trio. Three slots
+           (agent + stt-npu + embed-npu) all back the same FLM process,
+           so a small static chip makes the relationship discoverable
+           without crowding the layout. Hidden when there's no group. -->
+      <span
+        v-if="coresidentLabel"
+        class="sc-chip coresident"
+        data-testid="coresident-badge"
+        :title="coresidentTitle"
+      >{{ coresidentLabel }}</span>
       <span class="sc-port mono">{{ slot.port ? `:${slot.port}` : '—' }}</span>
     </div>
 
@@ -866,6 +898,18 @@ const sparkSvg = computed(() => {
   letter-spacing: 0.04em;
 }
 .sc-chip.dim { opacity: 0.7; text-transform: lowercase; }
+
+/* PR-11: coresident-group badge. Slim, amber-tinted (matches NPU
+   wordmark hue) so the eye groups trio-slot cards without reading them
+   as warnings. */
+.sc-chip.coresident {
+  margin-left: 6px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--hal0-accent);
+  border-color: color-mix(in srgb, var(--hal0-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--hal0-accent) 12%, transparent);
+}
 
 /* Hardware target chip — colour-coded so the user can see at a glance
    which compute path the slot uses. NPU is amber (distinctive), GPU red,

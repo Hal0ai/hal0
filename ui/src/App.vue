@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from './stores/system.js'
 import { useFooterStore } from './stores/footer.js'
+import { useNuclearEvictBanner } from './composables/useNuclearEvictBanner.js'
 import Sidebar from './components/Sidebar.vue'
 import TopBar from './components/TopBar.vue'
 import ToastContainer from './components/ToastContainer.vue'
@@ -14,6 +15,10 @@ const system = useSystemStore()
 const footer = useFooterStore()
 const route  = useRoute()
 const router = useRouter()
+
+// PR-11: subscribe once at the app shell so the nuclear-evict toast
+// banner fires on every dashboard route. Disconnect happens on unmount.
+useNuclearEvictBanner()
 
 // ── Responsive sidebar ────────────────────────────────────────────
 // Desktop: sidebarOpen = expanded(true) / collapsed-icon-rail(false)

@@ -19,6 +19,7 @@ Endpoints covered (per ADR-0008 §1 + plan §2.2):
   ``GET  /internal/config``       full runtime config snapshot
   ``POST /internal/set``          atomic config setter
   ``POST /internal/cleanup-cache``  HF cache hygiene (weekly cron)
+  ``WS   /logs/stream``           server log entries (logs.subscribe / .entry)
 
 Bearer auth: hal0 ↔ lemond is loopback-only; the token is hal0's own
 ``LEMONADE_API_KEY`` (ADR-0008 §1 + ADR-0001), distinct from the
@@ -29,6 +30,7 @@ in addition to the Bearer check.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -316,6 +318,82 @@ class LemonadeClient:
         async with self._request("POST", "/internal/cleanup-cache") as resp:
             self._raise_for_status(resp)
             return resp.json()
+
+    # ── /logs/stream (WebSocket) ───────────────────────────────────
+
+    async def stream_logs(self) -> AsyncIterator[dict[str, Any]]:
+        """Async iterator yielding parsed JSON log entries from ``/logs/stream``.
+
+        Lemonade exposes server logs as a WebSocket frame stream (per the
+        ``hal0_lemonade_ws_protocol`` reference): the client subscribes
+        once with ``{"op": "logs.subscribe"}``, then receives
+        ``logs.snapshot`` (the in-memory ring buffer) followed by
+        ``logs.entry`` frames for each new line. This method yields the
+        parsed JSON message dicts as they arrive; the caller decides
+        how to filter / fan out.
+
+        Used by ``/api/lemonade/logs/stream`` (PR-11) which fans the
+        stream out to the dashboard and looks for the nuclear-evict
+        trigger line ("Load failed with non-file-not-found error,
+        evicting all models and retrying...") to emit a structured
+        ``nuclear_evict`` event. Per ADR-0008 §3 this is hal0's only
+        observability hook for the evict-all blast radius.
+
+        On any failure (lemond down, websockets lib missing, connection
+        drop) the iterator simply stops — callers treat that as "no
+        events for now" and reconnect on their own cadence.
+        """
+        # Lazy import: ``websockets`` ships transitively via
+        # ``uvicorn[standard]`` but isn't a hal0 direct dep, so keep
+        # the import scoped to this method.
+        try:
+            import websockets  # type: ignore[import-untyped]
+            from websockets.exceptions import (  # type: ignore[import-untyped]
+                ConnectionClosed,
+                InvalidHandshake,
+            )
+        except ImportError:
+            return
+
+        import json as _json
+
+        ws_url = self._base_url.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/logs/stream"
+        headers: dict[str, str] = {}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        try:
+            # ``additional_headers`` was renamed from ``extra_headers`` in
+            # websockets 13.x; try the new name first, fall back for
+            # older lib versions so this works across the supported range.
+            try:
+                ws = await websockets.connect(  # type: ignore[attr-defined]
+                    ws_url, additional_headers=headers, open_timeout=self._timeout_s
+                )
+            except TypeError:
+                ws = await websockets.connect(  # type: ignore[attr-defined]
+                    ws_url, extra_headers=headers, open_timeout=self._timeout_s
+                )
+        except (OSError, InvalidHandshake, TimeoutError):
+            return
+
+        try:
+            await ws.send(_json.dumps({"op": "logs.subscribe"}))
+            async for raw in ws:
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+                try:
+                    msg = _json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict):
+                    yield msg
+        except (ConnectionClosed, OSError):
+            return
+        finally:
+            with contextlib.suppress(OSError, ConnectionClosed):
+                await ws.close()
 
     # ── internal: HTTP request envelope ────────────────────────────
 
