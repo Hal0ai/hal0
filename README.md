@@ -216,7 +216,8 @@ hal0/
 ├── src/hal0/         # Python package (FastAPI API + capability layer + Lemonade client + CLI)
 │   ├── lemonade/     # HTTP client + catalog_sync + metrics_shim + log_proxy
 │   └── omni_router/  # client-side tool-calling loop + tool definitions
-├── ui/               # Vue 3 + Tailwind 4 dashboard
+├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard (v3, in flight)
+├── ui-vue.bak/       # v0.2.1 Vue 3 dashboard preserved verbatim for reference
 ├── installer/        # install.sh (writes /var/lib/hal0/lemonade/config.json + hal0-lemonade.service)
 ├── tests/            # pytest suite (α unit, β integration, γ release-gate)
 ├── docs/             # user docs (mirror of hal0.dev/docs); dev docs under docs/internal/
