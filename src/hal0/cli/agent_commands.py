@@ -124,36 +124,31 @@ def _uninstall_hermes_memory() -> None:
     import urllib.error
     import urllib.request
 
+    # #302: REST shims at /api/memory/{search,delete} instead of the
+    # broken /mcp/memory JSON-RPC POST. Same idempotent uninstall
+    # semantics: failure is tolerated (memory unreachable shouldn't
+    # strand the operator with a half-uninstalled agent).
     url = _api_base()
     search_body = _json.dumps(
         {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "memory_search",
-                "arguments": {
-                    "query": "hermes-agent",
-                    "tags": ["agent-identity"],
-                    "dataset": "agents",
-                    "limit": 50,
-                },
-            },
+            "query": "hermes-agent",
+            "tags": ["agent-identity"],
+            "dataset": "agents",
+            "limit": 50,
         }
     ).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-hal0-Agent": "hermes-agent"}
     req = urllib.request.Request(
-        f"{url}/mcp/memory", data=search_body, headers=headers, method="POST"
+        f"{url}/api/memory/search", data=search_body, headers=headers, method="POST"
     )
     try:
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             data = _json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, _json.JSONDecodeError):
         return
-    result = data.get("result") if isinstance(data, dict) else None
-    if not isinstance(result, dict):
+    if not isinstance(data, dict):
         return
-    items = result.get("items") or result.get("results") or []
+    items = data.get("items") or []
     ids: list[str] = []
     for it in items if isinstance(items, list) else []:
         if not isinstance(it, dict):
@@ -163,16 +158,9 @@ def _uninstall_hermes_memory() -> None:
             ids.append(it["id"])
     if not ids:
         return
-    del_body = _json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": "memory_delete", "arguments": {"ids": ids}},
-        }
-    ).encode("utf-8")
+    del_body = _json.dumps({"ids": ids}).encode("utf-8")
     req2 = urllib.request.Request(
-        f"{url}/mcp/memory", data=del_body, headers=headers, method="POST"
+        f"{url}/api/memory/delete", data=del_body, headers=headers, method="POST"
     )
     try:
         with urllib.request.urlopen(req2, timeout=5.0):
@@ -359,24 +347,20 @@ def agent_peers() -> None:
     if _api_unreachable(url):
         raise typer.Exit(1)
 
+    # #302: switched from the broken /mcp/memory JSON-RPC POST to the
+    # REST shim at /api/memory/search. The MCP server at /mcp/memory
+    # requires the FastMCP initialize handshake + session-tagged calls;
+    # one-shot POST returns 405. The shim is plain HTTP.
     body = _json.dumps(
         {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "memory_search",
-                "arguments": {
-                    "query": "agent identity",
-                    "tags": ["agent-identity"],
-                    "dataset": "agents",
-                    "limit": 50,
-                },
-            },
+            "query": "agent identity",
+            "tags": ["agent-identity"],
+            "dataset": "agents",
+            "limit": 50,
         }
     ).encode("utf-8")
     req = urllib.request.Request(
-        f"{url}/mcp/memory",
+        f"{url}/api/memory/search",
         data=body,
         headers={
             "Content-Type": "application/json",
@@ -388,13 +372,10 @@ def agent_peers() -> None:
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             data = _json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, _json.JSONDecodeError) as exc:
-        die(f"memory MCP unreachable: {exc}")
+        die(f"memory API unreachable: {exc}")
         return
 
-    items = []
-    result = data.get("result") if isinstance(data, dict) else None
-    if isinstance(result, dict):
-        items = result.get("items") or []
+    items = data.get("items") or [] if isinstance(data, dict) else []
     if not items:
         console.print("[dim]No agent identity cards published yet.[/dim]")
         return

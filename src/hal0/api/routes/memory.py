@@ -171,6 +171,115 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     return out
 
 
+# ── REST shims for /api/memory/{add,search,list,delete} (#302) ─────────────
+#
+# Plain-HTTP veneer over CogneeWrapper for callers that don't speak the
+# MCP protocol (Hermes bootstrap CLI, dashboard Agents > Peers tab,
+# in-process scripts). The MCP transport at /mcp/memory/mcp stays
+# available for proper MCP clients; these routes are a parallel path
+# for the much-larger HTTP-only audience.
+#
+# Why: #302 surfaced that the bootstrap + CLI + dashboard were all
+# POSTing to /mcp/memory as if it were one-shot JSON-RPC. Real FastMCP
+# transport needs initialize + session-tagged subsequent calls — that's
+# work for a future MCP-SDK-client refactor. Until then, REST shims are
+# the cheapest unblock so identity cards actually get written.
+
+
+@router.post("/add")
+async def memory_add(request: Request) -> dict[str, Any]:
+    """Add a memory item. Body: ``{text, dataset?, tags?, source?, metadata?}``.
+
+    Returns ``{id, timestamp}`` from :meth:`CogneeWrapper.add`. The
+    ``dataset`` defaults to ``"shared"``; tags + metadata are
+    free-form lists / dict respectively.
+    """
+    body = await _read_json_body(request)
+    text = body.get("text")
+    if not isinstance(text, str) or not text:
+        raise Hal0Error(
+            "memory_add requires 'text' (non-empty string)",
+            details={"path": "/api/memory/add"},
+        )
+    wrapper = _wrapper(request)
+    return await wrapper.add(
+        text=text,
+        dataset=body.get("dataset", "shared"),
+        tags=body.get("tags") or [],
+        source=body.get("source"),
+        metadata=body.get("metadata") or {},
+    )
+
+
+@router.post("/search")
+async def memory_search(request: Request) -> dict[str, Any]:
+    """Search memory. Body: ``{query, limit?, dataset?, tags?, before?, after?}``.
+
+    Returns ``{items: [MemoryRecord, ...]}`` — wrapped in an envelope so
+    we can add ``next_cursor`` / counters later without breaking clients.
+    """
+    body = await _read_json_body(request)
+    query = body.get("query")
+    if not isinstance(query, str) or not query:
+        raise Hal0Error(
+            "memory_search requires 'query' (non-empty string)",
+            details={"path": "/api/memory/search"},
+        )
+    wrapper = _wrapper(request)
+    items = await wrapper.search(
+        query=query,
+        limit=int(body.get("limit", 10)),
+        dataset=body.get("dataset", "shared"),
+        tags=body.get("tags") or [],
+        before=body.get("before"),
+        after=body.get("after"),
+    )
+    return {"items": items}
+
+
+@router.get("/list")
+async def memory_list(
+    request: Request,
+    dataset: str = "shared",
+    cursor: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Paginated list. Returns ``{items: [...], next_cursor: str | null}``."""
+    wrapper = _wrapper(request)
+    return await wrapper.list_items(dataset=dataset, cursor=cursor, limit=limit)
+
+
+@router.post("/delete")
+async def memory_delete(request: Request) -> dict[str, int]:
+    """Delete by id. Body: ``{ids: [...]}``. Returns ``{deleted: int}``."""
+    body = await _read_json_body(request)
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise Hal0Error(
+            "memory_delete requires 'ids' (non-empty list)",
+            details={"path": "/api/memory/delete"},
+        )
+    wrapper = _wrapper(request)
+    return await wrapper.delete(ids=ids)
+
+
+async def _read_json_body(request: Request) -> dict[str, Any]:
+    """Tolerant JSON body parser (mirrors v1.py:_read_json_body)."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error(
+            "request body must be valid JSON",
+            details={"error": str(exc)},
+        ) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("request body must be a JSON object")
+    return body
+
+
+# ── Helper exports for tests ────────────────────────────────────────────────
+
+
 __all__ = [
     "GraphUpstreamConfig",
     "MemoryGraphConfig",

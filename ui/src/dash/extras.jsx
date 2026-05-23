@@ -867,27 +867,22 @@ function AgentPeers() {
     let cancelled = false;
     (async () => {
       try {
-        const resp = await fetch("/mcp/memory", {
+        // #302: REST shim at /api/memory/search instead of /mcp/memory.
+        // The streamable-HTTP MCP transport at /mcp/memory/mcp requires
+        // the initialize handshake — not doable from a fetch() oneshot.
+        const resp = await fetch("/api/memory/search", {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-hal0-Agent": "hal0-dashboard" },
           body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/call",
-            params: {
-              name: "memory_search",
-              arguments: {
-                query: "agent identity",
-                tags: ["agent-identity"],
-                dataset: "agents",
-                limit: 50,
-              },
-            },
+            query: "agent identity",
+            tags: ["agent-identity"],
+            dataset: "agents",
+            limit: 50,
           }),
         });
         const data = await resp.json();
         if (cancelled) return;
-        const items = (data && data.result && data.result.items) || [];
+        const items = (data && data.items) || [];
         setCards(items);
         setLoading(false);
       } catch (e) {

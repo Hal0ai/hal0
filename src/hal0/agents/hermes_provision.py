@@ -1100,27 +1100,77 @@ def _mcp_memory_call(
     params: dict[str, Any],
     *,
     agent_id: str,
-    base_url: str = "http://127.0.0.1:8080/mcp/memory",
+    base_url: str = "http://127.0.0.1:8080",
     timeout: float = 5.0,
     private: bool = False,
 ) -> dict[str, Any]:
-    """JSON-RPC POST to the hal0-memory MCP server. Stdlib transport."""
-    from urllib.error import URLError
+    """Call the hal0-memory surface. Returns ``{ok, result?, error?}``.
+
+    **Was** a one-shot JSON-RPC POST to ``/mcp/memory`` — broken per
+    #302 because real FastMCP requires the initialize handshake at
+    ``/mcp/memory/mcp`` with session-tagged subsequent calls. That made
+    every call here silently fail with HTTP 405 + the failure-tolerant
+    path in :func:`_phase_namespace_register` swallowed the error,
+    meaning identity cards were never being written.
+
+    **Now** translates the MCP ``tools/call`` shape to the REST shims
+    at ``/api/memory/{add,search,delete}`` (added in #302). The method/
+    params shape is preserved so existing call sites don't change.
+
+    Supported method/tool combinations:
+      - ``method="tools/call"``, ``params.name="memory_search"`` → POST /api/memory/search
+      - ``method="tools/call"``, ``params.name="memory_add"`` → POST /api/memory/add
+      - ``method="tools/call"``, ``params.name="memory_delete"`` → POST /api/memory/delete
+
+    Anything else returns ``{"ok": False, "error": "unsupported method"}``
+    — proper MCP tool calls still need an MCP SDK client. That's tracked
+    as a v0.4 cleanup (see #302 comment).
+    """
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(
-        "utf-8"
-    )
+    base_url = base_url.rstrip("/")
+
+    # Translate MCP envelope → REST endpoint.
+    if method == "tools/call" and isinstance(params, dict):
+        tool = params.get("name")
+        arguments = params.get("arguments") or {}
+        route_map = {
+            "memory_search": "/api/memory/search",
+            "memory_add": "/api/memory/add",
+            "memory_delete": "/api/memory/delete",
+        }
+        path = route_map.get(tool)
+        if path is None:
+            return {"ok": False, "error": f"unsupported tool {tool!r}"}
+        body_bytes = json.dumps(arguments).encode("utf-8")
+        url = f"{base_url}{path}"
+    else:
+        return {"ok": False, "error": f"unsupported method {method!r}"}
+
     headers = {"Content-Type": "application/json", "X-hal0-Agent": agent_id}
     if private:
         headers["X-hal0-Private"] = "1"
-    req = Request(base_url, data=body, headers=headers, method="POST")
+    req = Request(url, data=body_bytes, headers=headers, method="POST")
     try:
         with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        # Surface the body if it's a hal0 error envelope so the warning
+        # message in the caller is operator-actionable.
+        try:
+            err_body = json.loads(exc.read().decode("utf-8"))
+            err_msg = (err_body.get("error") or {}).get("message") or str(exc)
+        except Exception:
+            err_msg = str(exc)
+        return {"ok": False, "error": err_msg}
     except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
         return {"ok": False, "error": str(exc)}
-    return {"ok": True, "result": data.get("result")}
+    # REST shims return the wrapper's dict directly (e.g.
+    # {"items": [...]} for search, {"id": ..., "timestamp": ...} for
+    # add). Preserve the old ``result`` envelope key for call-site
+    # compat — every reader does ``call["result"].get("items")`` etc.
+    return {"ok": True, "result": data}
 
 
 def _phase_namespace_register(state: BootstrapState) -> PhaseResult:
