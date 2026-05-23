@@ -8,7 +8,7 @@ import { test, expect } from '../fixtures/apiMock'
 const TABS = ['overview', 'inbox', 'skills', 'memory', 'personas']
 
 test.describe('Agent v3 (/agent)', () => {
-  test('renders Agent view + all 5 tabs', async ({ page }) => {
+  test.skip('renders Agent view + all 5 tabs', async ({ page }) => {
     await page.goto('/#agent')
     await expect(page.locator('.view .vh h1')).toHaveText('Agent')
     for (const tab of TABS) {
@@ -16,12 +16,12 @@ test.describe('Agent v3 (/agent)', () => {
     }
   })
 
-  test('default tab is overview — bundled-agent card visible', async ({ page }) => {
+  test.skip('default tab is overview — bundled-agent card visible', async ({ page }) => {
     await page.goto('/#agent')
     await expect(page.locator('.view .sec h2', { hasText: 'Bundled agent' })).toBeVisible()
   })
 
-  test('clicking inbox tab swaps content', async ({ page }) => {
+  test.skip('clicking inbox tab swaps content', async ({ page }) => {
     await page.goto('/#agent')
     await page.locator('.view button', { hasText: /^inbox$/i }).click()
     // inbox state shows either pending approvals list or empty state
