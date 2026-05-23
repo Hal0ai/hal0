@@ -1,4 +1,4 @@
-.PHONY: help install dev test test-unit test-integration release-test release-test-report \
+.PHONY: help install dev test test-unit release-test release-test-report \
         harness harness-report harness-clean \
         lint fmt typecheck ui-install ui-dev ui-build clean \
         proto-ttft proto-ttft-live
@@ -21,7 +21,6 @@ help:
 	@echo "    make install              Install python package in editable mode with dev extras"
 	@echo "    make dev                  Run hal0-api with --reload"
 	@echo "    make test                 Run unit tests (tier α, ~3s, every commit)"
-	@echo "    make test-integration     Run integration tests (tier β, needs systemd + template unit)"
 	@echo "    make lint                 Ruff check"
 	@echo "    make fmt                  Ruff format"
 	@echo "    make typecheck            Mypy"
@@ -47,13 +46,15 @@ dev:
 
 # ── Test tiers (PLAN §10) ────────────────────────────────────────────────────
 # α — unit. Pure pytest. No systemd, no docker. ~3s.
-# β — integration. Real hal0-slot@.service + container. ~10 min in CI.
+# β — integration. Retired in v0.2 — lemond is supervised by systemd
+#     directly; per-slot template + toolbox containers are gone (ADR-0008 §2).
+#     Replacement integration shape lands with PR-8 / PR-10.
 # γ — release-gate. NPU + ROCm + Vulkan on hal0-test LXC. Not per-commit.
 
 test: test-unit
 
 test-unit:
-	pytest tests/ -v -m "not integration"
+	pytest tests/ -v
 
 harness:
 	bash scripts/harness.sh
