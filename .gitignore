@@ -54,6 +54,14 @@ ui/.vite/
 ui/test-results/
 ui/playwright-report/
 ui/playwright/.cache/
+# Archived Vue dashboard (v0.2.1) preserved for reference during v0.3 React
+# rebuild — exclude its build artifacts the same way as the live ui/.
+ui-vue.bak/node_modules/
+ui-vue.bak/dist/
+ui-vue.bak/.vite/
+ui-vue.bak/test-results/
+ui-vue.bak/playwright-report/
+ui-vue.bak/playwright/.cache/
 *.log
 npm-debug.log*
 yarn-debug.log*
