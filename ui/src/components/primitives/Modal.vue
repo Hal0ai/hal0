@@ -31,6 +31,10 @@ const props = defineProps({
   eyebrow:     { type: String,  default: '' },
   width:       { type: Number,  default: 640 },
   dismissable: { type: Boolean, default: true },
+  // Optional id on the title H2 so callers can wire aria-labelledby
+  // from the dialog root to a stable selector (mirrors Drawer.vue's
+  // same prop — preserves a11y test intent across UI rewrites).
+  titleId:     { type: String,  default: '' },
 })
 
 const overlayRef = ref(null)
@@ -113,11 +117,12 @@ onBeforeUnmount(() => {
         aria-modal="true"
         tabindex="-1"
         :style="{ maxWidth: width + 'px' }"
+        :aria-labelledby="titleId || undefined"
         @mousedown.stop
       >
         <div v-if="title || eyebrow" class="modal-h">
           <div v-if="eyebrow" class="modal-h-eye mono">{{ eyebrow }}</div>
-          <h2 v-if="title" class="mono">{{ title }}</h2>
+          <h2 v-if="title" :id="titleId || undefined" class="mono">{{ title }}</h2>
           <button
             v-if="dismissable"
             type="button"

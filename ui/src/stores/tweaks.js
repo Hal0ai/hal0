@@ -24,7 +24,11 @@ const IS_DEV = !!(import.meta.env && import.meta.env.DEV)
 // segmented controls.
 const DEFAULTS = Object.freeze({
   slotCardVariant: 'a',       // 'a' | 'b' | 'c'
-  npuVariant: 'rollup',       // 'rollup' | 'fan-out' | 'compact'
+  // NPU trio render style. Defaults to 'block' — the single-card 3-row
+  // layout from slots.jsx::NpuBlock. 'reactor' = the central FLM disc
+  // + 3 spokes variant from slots.jsx::NpuReactor. Toggled from the
+  // dev tweaks panel; surfaced in Slots.vue's NPU section.
+  npuVariant: 'block',        // 'block' | 'reactor'
   heroStrip: 'sparkline',     // 'sparkline' | 'metrics' | 'minimal'
   composerState: 'idle',      // 'idle' | 'sending' | 'streaming' | 'swap' | 'no-tools' | 'offline'
   firstrunLayout: 'tiers',    // 'tiers' | 'wizard'

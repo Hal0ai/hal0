@@ -25,6 +25,10 @@ const props = defineProps({
   eyebrow: { type: String,  default: '' },
   width:   { type: Number,  default: 520 },
   side:    { type: String,  default: 'right' },
+  // Optional id on the title H2 so callers can wire aria-labelledby
+  // from the dialog root to a stable selector (preserves a11y spec
+  // intent across UI rewrites).
+  titleId: { type: String,  default: '' },
 })
 
 const drawerRef = ref(null)
@@ -90,10 +94,11 @@ onBeforeUnmount(() => {
       aria-modal="true"
       tabindex="-1"
       :aria-hidden="!open"
+      :aria-labelledby="titleId || undefined"
     >
       <div class="drawer-h">
         <div v-if="eyebrow" class="modal-h-eye mono">{{ eyebrow }}</div>
-        <h2 v-if="title" class="mono">{{ title }}</h2>
+        <h2 v-if="title" :id="titleId || undefined" class="mono">{{ title }}</h2>
         <button
           type="button"
           class="modal-close"
