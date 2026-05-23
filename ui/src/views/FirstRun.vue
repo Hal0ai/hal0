@@ -1,1177 +1,668 @@
 <script setup>
 /**
- * FirstRun.vue — Production wizard (8 steps, linear).
+ * FirstRun.vue — v2 bundle picker (slice #172).
  *
- * Replaces the legacy 5-step picker (FirstRunLegacy.vue, deleted) and the
- * three competing IA prototypes (components/firstrun-proto/, deleted).
- * The chosen flow is Variant A from the prototype round:
+ * Replaces the v1 8-step linear wizard with the v0.3 design's
+ * three-state machine (pick → confirm → progress).
  *
- *   1. Password (optional; auto-skip when /api/auth/status.password_set)
- *   2. Detected hardware + model storage directories
- *   3. Primary chat model (curated picker, hardware-aware)
- *   4. Capabilities (embed / voice.stt / voice.tts / img) with smart defaults
- *   5. HF token (conditional — only when at least one selected model is gated)
- *   6. License acceptance (aggregated across every selected model)
- *   7. Install — parallel pulls + capability registration with retry-per-row
- *   8. Done — links to dashboard, OpenWebUI chat, settings
+ * Source: /tmp/hal0-design/hal0-v2/project/dash/firstrun.jsx +
+ * v0.3 css at /tmp/hal0-design-v3/dashboard.css (.fr-*, .tier-*, .dl-*).
  *
- * Visual treatment lifted from FirstRunLegacy: aurora gradient, glow
- * header, mono eyebrow chip, hal0-amber accent, step-indicator row,
- * primary/ghost button styles, done-coda chrome. The new screens (2, 4,
- * 5) reuse the same wizard-body card structure so the visual rhythm
- * stays the same as the user clicks Next.
- *
- * State lives in the `useFirstRun` singleton (see
- * components/firstrun/useFirstRun.js). The view here only sequences
- * steps + calls the composable's actions.
+ * State + endpoint wiring lives in
+ *   components/firstrun/useFirstRun.js
+ * The view only sequences sub-components + wires the skip dialog +
+ * conditional banner triggers.
  */
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useToastsStore } from '../stores/toasts.js'
-import { useSystemStore } from '../stores/system.js'
-import { resetFirstRunGuard } from '../router.js'
 import { useFirstRun } from '../components/firstrun/useFirstRun.js'
-import CapabilityToggle from '../components/capabilities/CapabilityToggle.vue'
+import { useTweaksStore } from '../stores/tweaks.js'
+import { useBannerStore } from '../stores/banner.js'
+import { resetFirstRunGuard } from '../router.js'
 import Wordmark from '../components/Wordmark.vue'
+import BannerStack from '../components/primitives/BannerStack.vue'
+import BundleGrid from '../components/firstrun/BundleGrid.vue'
+import BundleTable from '../components/firstrun/BundleTable.vue'
+import InstallProgressRow from '../components/firstrun/InstallProgressRow.vue'
+import SkipBundleDialog from '../components/firstrun/SkipBundleDialog.vue'
 
 const router = useRouter()
-const toasts = useToastsStore()
-const system = useSystemStore()
+const s      = useFirstRun()
+const tweaks = useTweaksStore()
+const banner = useBannerStore()
 
-const s = useFirstRun()
+// Dialog state (local — does not belong in the composable since it
+// only matters when the picker is visible).
+const skipDialogOpen = ref(false)
 
-// Step labels for the indicator row. Phase 8 inserts an Agent picker
-// between the License acceptance and the Install kickoff so the agent
-// install is included in the parallel-pull pass; 9 steps total.
-const STEPS = [
-  { n: 1, label: 'Password' },
-  { n: 2, label: 'Hardware' },
-  { n: 3, label: 'Chat' },
-  { n: 4, label: 'Capabilities' },
-  { n: 5, label: 'HF token' },
-  { n: 6, label: 'License' },
-  { n: 7, label: 'Agent' },
-  { n: 8, label: 'Install' },
-  { n: 9, label: 'Done' },
-]
+// Layout: useTweaksStore.firstrunLayout ∈ { 'tiers' | 'wizard' }.
+// 'tiers' = BundleGrid (default); 'wizard' = BundleTable (capability matrix).
+const useMatrixLayout = computed(() => tweaks.firstrunLayout === 'wizard')
 
-// Start on step 2 when a password is already set (re-entering the wizard
-// after an upgrade or a manual /etc/hal0/auth.toml). Mirrors the legacy
-// auto-skip behaviour from the password step.
-const step = ref(s.passwordAlreadySet.value ? 2 : 1)
-watch(s.passwordAlreadySet, (set) => { if (set && step.value === 1) step.value = 2 })
-
-// Chat URL for the "Open chat" button on the done coda.
-const chatUrl = ref(null)
-
-// Inline error for the first-run token field. Surfaced when POST
-// /api/auth/password returns 401 with code auth.first_run_otp_required
-// or auth.first_run_otp_invalid (lockfile-OTP gate rejected the value).
-// Cleared on every keystroke so the operator gets immediate feedback.
-const tokenError = ref('')
-
-// Step 4 — rerank is a sub-disclosure inside the embed row, locked off-by-
-// default per the IA-grilling session. The disclosure is closed initially.
-const showRerank = ref(false)
-
-// Step 2 — disk-dir entry. Editing the first dir maps back to form.modelDirs[0].
-function addModelDir() {
-  s.form.modelDirs.push('')
-}
-function removeModelDir(i) {
-  if (s.form.modelDirs.length <= 1) return
-  s.form.modelDirs.splice(i, 1)
-}
-
-// Step transitions — Next skips conditional HF-token step (5) when no
-// gated models are selected. Back mirrors the skip so the user can
-// retreat to Capabilities (4) without snapping to HF token.
-async function goNext() {
-  if (step.value === 1) {
-    if (s.form.password) {
-      tokenError.value = ''
-      try {
-        await s.submitPassword()
-        toasts.info('Password set — you can change it later in Settings.')
-      } catch (e) {
-        // 401 with an OTP-flavoured code is a token problem, not a
-        // server fault. Surface it inline next to the OTP field instead
-        // of as a generic toast — the operator's fix is "go grab the
-        // right token", not "open the logs".
-        const code = e?.code || ''
-        if (code === 'auth.first_run_otp_required' || code === 'auth.first_run_otp_invalid') {
-          tokenError.value =
-            'Token rejected — check that you copied it exactly from the installer output.'
-          return
-        }
-        toasts.error(e?.message || 'Could not set password.')
-        return
-      }
-    }
-    step.value = 2
-    return
-  }
-  if (step.value === 2) {
-    try {
-      await s.persistModelDirs()
-    } catch (e) {
-      // Don't block — surfacing the error is enough.
-      toasts.warning(`Could not persist storage dirs: ${e?.message || e}. Continuing with defaults.`)
-    }
-    step.value = 3
-    return
-  }
-  if (step.value === 3) {
-    // No-primary is a valid install — a capabilities-only box (embed +
-    // voice + img) is a legitimate shape, and operators who plan to
-    // route chat to a remote provider via Settings → Providers don't
-    // need a local chat model at all. The wizard's enabledList already
-    // omits the primary row when null, so step 7 just kicks the
-    // capability pulls.
-    step.value = 4
-    return
-  }
-  if (step.value === 4) {
-    // Skip HF token step if no gated models are in the selection.
-    step.value = s.needsHfToken.value ? 5 : 6
-    return
-  }
-  if (step.value === 5) {
-    s.persistHfToken()
-    step.value = 6
-    return
-  }
-  if (step.value === 6) {
-    if (!s.fits.value) {
-      toasts.warning('Not enough disk space — free up storage or remove capabilities')
-      return
-    }
-    if (s.enabledList.value.length > 0 && !s.form.licenseAccepted) {
-      toasts.warning('Please accept the licenses first')
-      return
-    }
-    // Advance to the Agent picker (step 7). Install runs in step 8.
-    step.value = 7
-    return
-  }
-  if (step.value === 7) {
-    // Fire-and-forget the bundled-agent install. /api/agents/install
-    // shell-outs to the installer script; we don't block the wizard on
-    // that work — failures bubble to a toast so the user knows to
-    // recover from the /agent page.
-    if (s.form.agentChoice !== 'none') {
-      const r = await s.installAgent()
-      if (r && !r.ok) {
-        toasts.warning(
-          `Agent install failed: ${r.error?.message || 'unknown'}. Continue and retry from the Agent page.`,
-        )
-      }
-    }
-    step.value = 8
-    s.startAllPulls()
-    return
-  }
-}
-
-function goBack() {
-  if (step.value === 6) { step.value = s.needsHfToken.value ? 5 : 4; return }
-  if (step.value === 1) return
-  step.value = Math.max(1, step.value - 1)
-}
-
-async function skipPassword() {
-  s.form.password = ''
-  s.form.firstRunToken = ''
-  tokenError.value = ''
-  // Flip the box to trusted-LAN posture (HAL0_AUTH_DISABLED=1 +
-  // deferred restart). Without this the dashboard's Settings panels
-  // 401 on every writer route after the wizard finishes, because the
-  // skip path never establishes a credential. Fire-and-forget — the
-  // composable swallows errors and the wizard advances either way.
-  s.disableAuthForSkip()
-  toasts.info('Dashboard runs open on the trusted LAN. You can set a password later in Settings.')
-  step.value = 2
-}
-
-function skipPrimary() {
-  s.form.primaryId = null
-  step.value = 4
-}
-
-// Step 8 → 9 happens implicitly when every pull is terminal. The
-// useFirstRun composable flips `pull.done` once all items settled; we
-// advance the step on that signal (and refresh system store + chat URL).
+// ─── Banner triggers ─────────────────────────────────────────────
+// The catalog entries live in stores/banner.js — we only show/dismiss
+// them based on derived state. Don't ADD entries here.
 watch(
-  () => s.pull.done,
-  async (done) => {
-    if (!done) return
-    if (step.value !== 8) return
-    // Refresh dashboard state so the user lands on a hydrated screen if
-    // they pick "Go to dashboard" rather than chat.
-    try {
-      const urls = await import('../composables/useApi.js').then(({ api }) => api('/api/config/urls'))
-      chatUrl.value = urls?.openwebui ?? null
-    } catch { /* tolerable */ }
-    try { await system.fetchStatus() } catch { /* ignore */ }
-    step.value = 9
+  () => [s.isReEntered.value, s.ramTooLow.value, s.needsHfToken.value, s.view.value],
+  () => {
+    banner.toggle('fr-reentered', s.isReEntered.value && s.view.value === 'pick')
+    banner.toggle('fr-ram-low',   s.ramTooLow.value   && s.view.value === 'pick')
+    banner.toggle('hf-gated',     s.needsHfToken.value && s.view.value !== 'progress')
   },
+  { immediate: true },
 )
 
-async function openChat() {
-  await s.markComplete()
-  resetFirstRunGuard()
-  const target = chatUrl.value || `${window.location.protocol}//${window.location.hostname}:3001`
-  window.open(target, '_blank', 'noopener')
-}
-async function goToDashboard() {
+// ─── Skip flow ───────────────────────────────────────────────────
+function openSkipDialog() { skipDialogOpen.value = true }
+function cancelSkip()     { skipDialogOpen.value = false }
+async function confirmSkip() {
+  skipDialogOpen.value = false
+  // Skip = mark install complete and route to /. Per the design spec,
+  // the dashboard shows configure-buttons on the seeded slots.
   await s.markComplete()
   resetFirstRunGuard()
   router.push('/')
 }
-async function goToSettings() {
+
+// ─── Progress → completion ───────────────────────────────────────
+// When every row settles to terminal (done|failed) we don't auto-route
+// — the user clicks "Open dashboard". We DO mark install complete + flip
+// the post-install hero state once they navigate away.
+async function openDashboard() {
   await s.markComplete()
   resetFirstRunGuard()
-  router.push('/settings')
+  // Light flag the dashboard can pick up to render a one-shot
+  // "✓ Installed" hero. Cleared by /views/Dashboard.vue on first read.
+  try { window.sessionStorage.setItem('hal0:firstrun:just-installed', '1') } catch { /* private mode */ }
+  router.push('/')
 }
 
-onMounted(() => { /* state already loaded by the composable singleton */ })
-onUnmounted(() => { s.dispose() })
-
-// ── View helpers ──────────────────────────────────────────────────────
-function fmtSize(bytes) {
-  if (!bytes) return '0 B'
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']
-  let n = bytes
-  let i = 0
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
-  return `${n.toFixed(n >= 10 ? 0 : 1)} ${u[i]}`
-}
-function fmtGb(n) { return `${(n || 0).toFixed(1)} GB` }
-function selectKey(cap) { return cap.backend && cap.model ? `${cap.backend}::${cap.model}` : '' }
-
-// Step 6 — when the per-model license is identical across every selected
-// model (common for a chat-only install with no caps), dedupe the list
-// so the operator sees a single license card instead of N copies.
-const licenseList = computed(() => s.enabledList.value)
-
-const canAdvance = computed(() => {
-  if (step.value === 1) return s.form.password.length === 0 || s.form.password.length >= 8
-  if (step.value === 2) return s.form.modelDirs.some((d) => String(d).trim().length > 0)
-  if (step.value === 3) return true  // primary is optional — operators can run capabilities-only
-  if (step.value === 4) return true
-  if (step.value === 5) return true  // skip is allowed; empty token is permitted
-  if (step.value === 6) {
-    // Nothing selected ⇒ nothing to accept; let the operator pass straight through.
-    if (s.enabledList.value.length === 0) return s.fits.value
-    return s.form.licenseAccepted && s.fits.value
-  }
-  if (step.value === 7) {
-    // Hermes requires hal0-awareness on the upstream side. The picker
-    // disables the option when the server-side probe failed; this guard
-    // is a belt-and-braces in case the form state is hand-edited.
-    if (s.form.agentChoice === 'hermes' && !s.form.hermesHal0Aware) return false
-    return true
-  }
-  return false
+// Auto-dismiss firstrun banners on unmount so other views don't see
+// stale picker-scoped chrome.
+onMounted(() => { /* state machine already mounted by useFirstRun() */ })
+onUnmounted(() => {
+  banner.dismiss('fr-reentered')
+  banner.dismiss('fr-ram-low')
+  banner.dismiss('hf-gated')
+  s.dispose()
 })
+
+// ─── Detected-hardware copy ──────────────────────────────────────
+const detectLine = computed(() => {
+  const parts = []
+  if (s.ramGb.value > 0) parts.push(`${s.ramGb.value} GB RAM`)
+  if (s.gpuLabel.value && s.gpuLabel.value !== '—') parts.push(s.gpuLabel.value)
+  if (s.npuPresent.value) parts.push('NPU')
+  return parts.length ? `Detected: ${parts.join(' · ')}` : ''
+})
+
+// Toggle the NPU opt-in on the confirm card. v-model on a child
+// produces a deep-tree warning when the parent stores it; bind via
+// the composable's reactive ref directly.
+function toggleNpu(e) { s.withNpu.value = e.target.checked }
 </script>
 
 <template>
-  <div class="wizard-page">
-    <div class="wizard-card">
-      <!-- ── Header (lifted from FirstRunLegacy) ────────────────── -->
-      <div class="wizard-head">
-        <div class="wizard-glow" aria-hidden="true"></div>
-        <span class="wizard-eyebrow">
-          <span class="wizard-eyebrow-dot" aria-hidden="true"></span>
-          First run · v1 pre-alpha
-        </span>
-        <Wordmark size="text-5xl" class="wizard-mark" aria-hidden="true" />
-        <h1 class="wizard-title">Welcome to hal0</h1>
-        <p class="wizard-sub">Local AI for your home. Eight quick steps to your first model.</p>
-      </div>
+  <div class="fr">
+    <!-- Banner stack (scope=firstrun + global) -->
+    <div class="fr-banners">
+      <BannerStack scope="firstrun" />
+    </div>
 
-      <!-- ── Step indicator ─────────────────────────────────────── -->
-      <ol class="steps" aria-label="Setup progress">
-        <li
-          v-for="st in STEPS"
-          :key="st.n"
-          class="step"
-          :class="{ 'step-done': step > st.n, 'step-active': step === st.n }"
-        >
-          <span class="step-num" :aria-label="`Step ${st.n}: ${st.label}`">{{ step > st.n ? '✓' : st.n }}</span>
-          <span class="step-label">{{ st.label }}</span>
-        </li>
-      </ol>
-
-      <!-- ── Loading shell ──────────────────────────────────────── -->
-      <div v-if="s.loading.value && step !== 8 && step !== 9" class="wizard-body">
-        <div class="loading-state">Loading…</div>
-      </div>
-
-      <!-- ── 1. Password ────────────────────────────────────────── -->
-      <transition name="wizard-fade" mode="out-in">
-        <div v-if="!s.loading.value && step === 1" key="s1" class="wizard-body">
-          <p class="step-desc">
-            Set a password to protect the dashboard and the OpenAI-compatible API.
-            You can skip this and run hal0 open on your trusted LAN, then add a
-            password later from <strong>Settings → Authentication</strong>.
+    <div class="fr-inner">
+      <!-- ─── STATE: PICK ──────────────────────────────────────── -->
+      <template v-if="s.view.value === 'pick'">
+        <div class="fr-head">
+          <div class="fr-eyebrow">
+            <span class="blip" />FirstRun · install
+          </div>
+          <Wordmark size="text-5xl" class="fr-wordmark" aria-hidden="true" />
+          <h1 class="fr-title">Welcome to <span class="accent">hal0</span></h1>
+          <p class="fr-lede">
+            Pick a starting configuration. You can customise any slot later —
+            or skip and configure manually.
           </p>
-          <label class="field-label" for="firstrun-password">Password</label>
-          <input
-            id="firstrun-password"
-            v-model="s.form.password"
-            class="field-input"
-            type="password"
-            autocomplete="new-password"
-            placeholder="at least 8 characters"
-            @keydown.enter.prevent="goNext"
-          />
-          <p class="field-hint">
-            Recommended: at least 12 characters with a mix of letters and digits.
-            We hash the password with bcrypt (cost 12) before storing it.
-          </p>
-
-          <label class="field-label" for="firstrun-token">First-run token</label>
-          <input
-            id="firstrun-token"
-            v-model="s.form.firstRunToken"
-            class="field-input field-input-mono"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="32-char hex from install.sh"
-            :aria-invalid="tokenError ? 'true' : 'false'"
-            aria-describedby="firstrun-token-hint"
-            @input="tokenError = ''"
-            @keydown.enter.prevent="goNext"
-          />
-          <p v-if="tokenError" class="field-err">{{ tokenError }}</p>
-          <p id="firstrun-token-hint" class="field-hint">
-            The installer printed this token at the end of <code>install.sh</code>.
-            Find it in your terminal or with
-            <code>journalctl -u hal0-api -n 100 | grep first-run</code>.
-            If you're running this in a browser on the hal0 server itself
-            (localhost), the field is optional.
-          </p>
-
-          <div class="wizard-footer wizard-footer-2">
-            <button class="btn-ghost" type="button" @click="skipPassword">Skip — leave open</button>
-            <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">
-              {{ s.form.password ? 'Set password →' : 'Next →' }}
-            </button>
+          <div v-if="detectLine" class="fr-detect" data-testid="fr-detect">
+            <span class="seg" v-if="s.ramGb.value">
+              <span class="k">RAM</span><b>{{ s.ramGb.value }} GB</b>
+            </span>
+            <span class="seg" v-if="s.gpuLabel.value && s.gpuLabel.value !== '—'">
+              <span class="k">GPU</span><b>{{ s.gpuLabel.value }}</b>
+            </span>
+            <span class="seg" v-if="s.npuPresent.value">
+              <span class="k">NPU</span><b>detected</b><span class="ok">●</span>
+            </span>
+            <span class="seg" v-if="s.diskFreeGb.value">
+              <span class="k">disk</span><b>{{ s.diskFreeGb.value }} GB</b> free
+            </span>
           </div>
         </div>
 
-        <!-- ── 2. Detected hardware + model storage ──────────────── -->
-        <div v-else-if="!s.loading.value && step === 2" key="s2" class="wizard-body">
-          <p class="step-desc">We probed your hardware. Confirm where downloaded models live.</p>
+        <div v-if="s.loading.value" class="fr-loading mono">Probing hardware…</div>
 
-          <div class="hw-card">
-            <div class="hw-row" v-if="s.hardware.value?.platform_label">
-              <span class="hw-l">Platform</span>
-              <span class="hw-v">{{ s.hardware.value?.platform_label }}</span>
-            </div>
-            <div class="hw-row"><span class="hw-l">CPU</span><span class="hw-v">{{ s.hardware.value?.cpu_name || s.hardware.value?.cpu_model || '—' }}</span></div>
-            <div class="hw-row">
-              <span class="hw-l">Memory</span>
-              <span class="hw-v">
-                {{ Math.round((s.hardware.value?.unified_memory_mb || s.hardware.value?.ram_total_mb || 0) / 1024) }} GB<template v-if="s.hardware.value?.memory_kind === 'unified'"> unified</template>
-              </span>
-            </div>
-            <div class="hw-row"><span class="hw-l">GPU</span><span class="hw-v">{{ s.hardware.value?.gpu_name || '—' }}</span></div>
-            <div class="hw-row"><span class="hw-l">NPU</span><span class="hw-v">{{ s.hardware.value?.npu_present ? (s.hardware.value?.npu_name || 'detected') : 'none detected' }}</span></div>
-          </div>
+        <template v-else>
+          <!-- Layout variants — flipped via useTweaksStore.firstrunLayout -->
+          <BundleGrid
+            v-if="!useMatrixLayout"
+            :bundles="s.bundles.value"
+            @pick="s.pickBundle"
+          />
+          <BundleTable
+            v-else
+            :bundles="s.bundles.value"
+            :ram-gb="s.ramGb.value"
+            @pick="s.pickBundle"
+          />
 
-          <div class="dirs-block">
-            <label class="field-label">Model storage directories</label>
-            <div v-for="(dir, i) in s.form.modelDirs" :key="i" class="dir-row">
-              <input
-                v-model="s.form.modelDirs[i]"
-                class="field-input field-input-mono"
-                :placeholder="i === 0 ? '/var/lib/hal0/models' : '/mnt/extra-models'"
-                spellcheck="false"
-                autocomplete="off"
-              />
-              <button
-                v-if="s.form.modelDirs.length > 1"
-                type="button"
-                class="dir-remove"
-                :aria-label="`Remove ${dir}`"
-                @click="removeModelDir(i)"
-              >×</button>
-            </div>
-            <button type="button" class="dir-add" @click="addModelDir">+ add directory</button>
-            <p v-if="!s.modelsConfigWritable.value" class="field-err">
-              Could not persist directories last time — they'll be used in-memory only.
-            </p>
-          </div>
-
-          <div class="disk-row">
-            <span class="disk-l">Free on first directory</span>
-            <span class="disk-v">{{ fmtGb(s.diskFreeGb.value) }}</span>
-          </div>
-          <p class="field-hint">
-            Per-dir validation runs server-side; non-absolute paths are rejected.
-            You can add more later from <strong>Settings → Storage</strong>.
-          </p>
-
-          <div class="wizard-footer wizard-footer-2">
-            <button class="btn-ghost" type="button" @click="goBack">← Back</button>
-            <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">Next →</button>
-          </div>
-        </div>
-
-        <!-- ── 3. Primary chat ───────────────────────────────────── -->
-        <div v-else-if="!s.loading.value && step === 3" key="s3" class="wizard-body">
-          <p class="step-desc">
-            Pick the model that powers chat. You can add more from the Models page later, or
-            <strong>skip</strong> if you plan to route chat to a remote provider (Settings → Providers).
-          </p>
-
-          <div v-if="!s.curated.value.length" class="error-state">
-            Curated catalogue is empty — the API may be unavailable.
-          </div>
-
-          <div v-else class="model-list" role="radiogroup" aria-label="Chat model selection">
-            <label
-              v-for="m in s.curated.value"
-              :key="m.id"
-              class="model-option"
-              :class="{ selected: s.form.primaryId === m.id, dim: m.vram_gb_min > ((s.hardware.value?.unified_memory_mb || s.hardware.value?.ram_total_mb || 0) / 1024) }"
-            >
-              <input
-                type="radio"
-                class="sr-only"
-                name="firstrun-primary"
-                :value="m.id"
-                v-model="s.form.primaryId"
-              />
-              <div class="model-option-inner">
-                <div class="model-option-header">
-                  <span class="model-option-name">{{ m.display_name }}</span>
-                  <span class="model-size-chip">{{ fmtGb(m.size_gb) }}</span>
+          <!-- Pre-built kits (only when host ≥100 GB RAM) -->
+          <template v-if="s.ramGb.value >= 100">
+            <h3 class="fr-section-label">Pre-built kits</h3>
+            <div class="kit" data-testid="lmx-kit">
+              <div class="kit-main">
+                <div class="kit-eyebrow">AMD-curated · vendor-blessed</div>
+                <div class="kit-name">LMX-Omni-52B-Halo</div>
+                <div class="kit-spec">
+                  ≥ 100 GB unified RAM Strix Halo · NPU trio · 4 slots ready out of the box
                 </div>
-                <p class="model-option-desc">{{ m.description }}</p>
-                <div class="model-option-meta">
-                  <span class="meta-chip">{{ m.license }}</span>
-                  <span class="meta-chip">{{ fmtGb(m.vram_gb_min) }} VRAM</span>
-                  <span
-                    class="meta-chip"
-                    :class="m.vram_gb_min <= ((s.hardware.value?.unified_memory_mb || s.hardware.value?.ram_total_mb || 0) / 1024) ? 'meta-chip-ok' : 'meta-chip-tight'"
-                  >
-                    {{ m.vram_gb_min <= ((s.hardware.value?.unified_memory_mb || s.hardware.value?.ram_total_mb || 0) / 1024) ? 'fits' : 'tight' }}
-                  </span>
-                  <span v-for="t in m.tags" :key="t" class="meta-chip meta-chip-tag">{{ t }}</span>
+                <div class="kit-models">
+                  <span class="chip">Qwen3.6-35B</span>
+                  <span class="chip">Whisper-Large</span>
+                  <span class="chip">kokoro</span>
+                  <span class="chip">Flux-2-Klein-9B</span>
                 </div>
               </div>
+              <div class="kit-side">
+                <div class="sz mono">~75<span class="u">GB</span></div>
+                <button type="button" class="btn lg" @click="s.pickBundle('max')">Install LMX kit</button>
+              </div>
+            </div>
+          </template>
+
+          <div class="fr-skip-row">
+            <button
+              type="button"
+              class="fr-skip"
+              data-testid="fr-skip"
+              @click="openSkipDialog"
+            >Skip — configure manually</button>
+          </div>
+        </template>
+      </template>
+
+      <!-- ─── STATE: CONFIRM ──────────────────────────────────── -->
+      <template v-else-if="s.view.value === 'confirm' && s.currentBundle.value">
+        <span
+          class="fr-confirm-back mono"
+          role="button"
+          tabindex="0"
+          data-testid="fr-confirm-back"
+          @click="s.backToPicker"
+          @keydown.enter="s.backToPicker"
+        >← back to picker</span>
+
+        <div class="fr-confirm-h">
+          <h2>hal0-{{ s.currentBundle.value.name }}</h2>
+          <span class="sub">
+            {{ s.currentBundle.value.ram }} GB+ unified ·
+            ~{{ s.currentBundle.value.sizeGB }} GB download ·
+            est {{ Math.max(2, Math.round(s.currentBundle.value.sizeGB / 3)) }} min
+          </span>
+        </div>
+        <p class="fr-confirm-sub">{{ s.currentBundle.value.desc }} You can change any slot after install.</p>
+
+        <!-- Per-slot install list -->
+        <div class="fr-confirm-card" data-testid="fr-install-list">
+          <div class="fr-confirm-card-h mono">
+            <span>What gets installed</span>
+            <b>{{ s.currentDetails.value?.models.length || 0 }} slots</b>
+            <span style="color: var(--fg-4)">· ~{{ s.aggregateSizeGb.value.toFixed(1) }} GB total</span>
+            <span class="right">capabilities.toml</span>
+          </div>
+          <div
+            v-for="row in s.currentDetails.value?.models || []"
+            :key="row.slot"
+            class="fr-confirm-row"
+            :data-slot="row.slot"
+          >
+            <span class="nm">{{ row.slot }}</span>
+            <span class="ml">{{ row.model }}</span>
+            <span class="sz">{{ row.size }}</span>
+            <span class="tag">
+              <span
+                v-for="(t, i) in row.tag.split(' ')"
+                :key="i"
+                class="chip"
+                :class="{
+                  'chip-amber-outlined': t === 'default',
+                  'chip-cpu': t === 'cpu',
+                }"
+              >{{ t }}</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- Optional NPU trio toggle (only when NPU detected + tier has NPU rows) -->
+        <div
+          v-if="s.npuPresent.value && (s.currentDetails.value?.npu?.length || 0) > 0"
+          class="fr-confirm-card"
+          data-testid="fr-npu-card"
+        >
+          <div class="fr-confirm-card-h mono" style="justify-content: space-between">
+            <div style="display: flex; align-items: center; gap: 14px">
+              <span class="npu-chip">NPU</span>
+              <span>FLM trio</span>
+              <span style="color: var(--fg-4)">· optional</span>
+            </div>
+            <label class="npu-toggle mono">
+              <input
+                type="checkbox"
+                :checked="s.withNpu.value"
+                data-testid="fr-npu-toggle"
+                @change="toggleNpu"
+              />
+              <span>Enable on install</span>
             </label>
           </div>
-
-          <div class="wizard-footer wizard-footer-3">
-            <button class="btn-ghost" type="button" @click="goBack">← Back</button>
-            <button class="btn-ghost" type="button" @click="skipPrimary">Skip — no chat model</button>
-            <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">Next: capabilities →</button>
+          <div
+            v-for="row in s.currentDetails.value?.npu || []"
+            :key="row.slot"
+            class="fr-confirm-row"
+            :class="{ 'fr-confirm-row-faint': !s.withNpu.value }"
+            :data-npu-slot="row.slot"
+          >
+            <span class="nm npu">{{ row.slot }}</span>
+            <span class="ml">{{ row.model }}</span>
+            <span class="sz">{{ row.size }}</span>
+            <span class="tag">
+              <span v-for="(t, i) in row.tag.split(' ')" :key="i" class="chip">{{ t }}</span>
+            </span>
+          </div>
+          <div class="fr-confirm-foot">
+            <span>~2 GB NPU memory · ~14s swap penalty on chat-model change · stt-npu + embed-npu are passengers</span>
           </div>
         </div>
 
-        <!-- ── 4. Capabilities ───────────────────────────────────── -->
-        <div v-else-if="!s.loading.value && step === 4" key="s4" class="wizard-body">
-          <p class="step-desc">
-            Pick which capabilities run at startup. Off = configured but not loaded — flip on later in <strong>/slots</strong>.
-          </p>
-
-          <!-- embed -->
-          <section class="cap">
-            <header class="cap-head">
-              <div class="cap-l">
-                <span class="cap-name">embed</span>
-                <span class="cap-sub">text → vector · /v1/embeddings</span>
-              </div>
-              <CapabilityToggle v-model="s.form.caps.embed.enabled" label="enable embed" />
-            </header>
-            <select
-              class="cap-select"
-              :value="selectKey(s.form.caps.embed)"
-              @change="s.setCapModel('embed', 'embed', 'embed', $event.target.value)"
-            >
-              <option value="" disabled>pick model…</option>
-              <option
-                v-for="o in s.optionsFor('embed', 'embed')"
-                :key="`${o.backend}::${o.id}`"
-                :value="`${o.backend}::${o.id}`"
-              >{{ o.backend }} / {{ o.id }} — {{ fmtGb(o.size_gb) }}</option>
-            </select>
-            <button class="disclosure" type="button" @click="showRerank = !showRerank">
-              <span class="custom-chevron">{{ showRerank ? '▾' : '▸' }}</span>
-              Advanced: rerank
-            </button>
-            <div v-if="showRerank" class="cap-nested">
-              <header class="cap-head">
-                <div class="cap-l">
-                  <span class="cap-name cap-name-sm">rerank</span>
-                  <span class="cap-sub">query+doc → score · /v1/rerankings</span>
-                </div>
-                <CapabilityToggle v-model="s.form.caps.rerank.enabled" label="enable rerank" />
-              </header>
-              <select
-                class="cap-select"
-                :value="selectKey(s.form.caps.rerank)"
-                @change="s.setCapModel('rerank', 'embed', 'rerank', $event.target.value)"
-              >
-                <option value="" disabled>pick model…</option>
-                <option
-                  v-for="o in s.optionsFor('embed', 'rerank')"
-                  :key="`${o.backend}::${o.id}`"
-                  :value="`${o.backend}::${o.id}`"
-                >{{ o.backend }} / {{ o.id }} — {{ fmtGb(o.size_gb) }}</option>
-              </select>
-            </div>
-          </section>
-
-          <!-- voice -->
-          <section class="cap">
-            <header class="cap-head">
-              <div class="cap-l">
-                <span class="cap-name">voice</span>
-                <span class="cap-sub">speech in + out · stt + tts</span>
-              </div>
-            </header>
-            <div class="cap-sub-row">
-              <span class="cap-sub-name">stt · /v1/audio/transcriptions</span>
-              <CapabilityToggle v-model="s.form.caps.stt.enabled" label="enable stt" />
-            </div>
-            <select
-              class="cap-select"
-              :value="selectKey(s.form.caps.stt)"
-              @change="s.setCapModel('stt', 'voice', 'stt', $event.target.value)"
-            >
-              <option value="" disabled>pick model…</option>
-              <option
-                v-for="o in s.optionsFor('voice', 'stt')"
-                :key="`${o.backend}::${o.id}`"
-                :value="`${o.backend}::${o.id}`"
-              >{{ o.backend }} / {{ o.id }} — {{ fmtGb(o.size_gb) }}</option>
-            </select>
-            <div class="cap-sub-row">
-              <span class="cap-sub-name">tts · /v1/audio/speech</span>
-              <CapabilityToggle v-model="s.form.caps.tts.enabled" label="enable tts" />
-            </div>
-            <select
-              class="cap-select"
-              :value="selectKey(s.form.caps.tts)"
-              @change="s.setCapModel('tts', 'voice', 'tts', $event.target.value)"
-            >
-              <option value="" disabled>pick model…</option>
-              <option
-                v-for="o in s.optionsFor('voice', 'tts')"
-                :key="`${o.backend}::${o.id}`"
-                :value="`${o.backend}::${o.id}`"
-              >{{ o.backend }} / {{ o.id }} — {{ fmtGb(o.size_gb) }}</option>
-            </select>
-          </section>
-
-          <!-- img -->
-          <section class="cap">
-            <header class="cap-head">
-              <div class="cap-l">
-                <span class="cap-name">img</span>
-                <span class="cap-sub">text → image · /v1/images/generations</span>
-              </div>
-              <CapabilityToggle v-model="s.form.caps.img.enabled" label="enable img" />
-            </header>
-            <select
-              class="cap-select"
-              :value="selectKey(s.form.caps.img)"
-              @change="s.setCapModel('img', 'img', 'img', $event.target.value)"
-            >
-              <option value="" disabled>pick model…</option>
-              <option
-                v-for="o in s.optionsFor('img', 'img')"
-                :key="`${o.backend}::${o.id}`"
-                :value="`${o.backend}::${o.id}`"
-              >{{ o.backend }} / {{ o.id }} — {{ fmtGb(o.size_gb) }}</option>
-            </select>
-            <p v-if="s.form.caps.img.enabled" class="step-warn">Heavy: 7–12 GB pull + significant memory at runtime.</p>
-          </section>
-
-          <div class="wizard-footer wizard-footer-2">
-            <button class="btn-ghost" type="button" @click="goBack">← Back</button>
-            <button class="btn-primary" type="button" @click="goNext">Next →</button>
-          </div>
-        </div>
-
-        <!-- ── 5. HF token (conditional) ─────────────────────────── -->
-        <div v-else-if="!s.loading.value && step === 5" key="s5" class="wizard-body">
-          <p class="step-desc">
-            One or more selected models are gated on Hugging Face. Provide a read-only
-            token, or skip and remove the gated picks on the previous step.
-          </p>
-          <ul class="gated-list">
-            <li v-for="m in s.gatedModels.value" :key="m.id">
-              <span class="gated-name">{{ m.display_name }}</span>
-              <span class="gated-id">({{ m.id }})</span>
+        <!-- Notes — license + HF_TOKEN warning -->
+        <div class="card notes-card">
+          <div class="notes-h mono">Notes</div>
+          <ul class="notes-ul">
+            <li>By installing, you accept each model's upstream license. hal0 does not redistribute weights — files come straight from Hugging Face.</li>
+            <li v-if="s.needsHfToken.value" class="notes-warn">
+              One or more models are gated on Hugging Face. Set <span class="mono">HF_TOKEN</span> in
+              <strong>Settings → Storage</strong> before install, or this bundle will fail to pull.
+            </li>
+            <li v-else>HF_TOKEN is not required for this bundle. Configure later in Settings to enable gated repos.</li>
+            <li v-if="!s.fitsDisk.value" class="notes-err">
+              Not enough disk: needs ~{{ s.aggregateSizeGb.value.toFixed(1) }} GB,
+              only {{ s.diskFreeGb.value }} GB free on first model dir.
             </li>
           </ul>
-          <label class="field-label" for="firstrun-hf">Hugging Face access token</label>
-          <input
-            id="firstrun-hf"
-            v-model="s.form.hfToken"
-            class="field-input field-input-mono"
-            placeholder="hf_…"
-            autocomplete="off"
-            spellcheck="false"
+        </div>
+
+        <div class="fr-actions">
+          <button type="button" class="btn ghost lg" @click="s.backToPicker">Cancel</button>
+          <button
+            type="button"
+            class="btn lg"
+            data-testid="fr-install-btn"
+            :disabled="!s.fitsDisk.value"
+            @click="s.startInstall"
+          >Install hal0-{{ s.currentBundle.value.name }}</button>
+        </div>
+      </template>
+
+      <!-- ─── STATE: PROGRESS ─────────────────────────────────── -->
+      <template v-else-if="s.view.value === 'progress'">
+        <div class="fr-prog-h">
+          <h2>
+            <template v-if="s.pull.done && !s.pull.error">✓ Installed</template>
+            <template v-else>Installing hal0-{{ s.currentBundle.value?.name }}…</template>
+          </h2>
+          <span class="meta">
+            ~{{ s.aggregateSizeGb.value.toFixed(1) }} GB total · downloads continue in background
+          </span>
+        </div>
+
+        <div class="fr-prog-list" data-testid="fr-prog-list">
+          <InstallProgressRow
+            v-for="item in s.pull.items"
+            :key="item.key"
+            :item="item"
+            @retry="s.retryItem"
+            @skip="s.skipItem"
           />
-          <p class="field-hint">
-            Optional — only needed for gated models. The current pull task
-            reads <code>HF_TOKEN</code> from the API process env; for now,
-            export it on the host before starting hal0. The wizard caches
-            what you type here in your browser so a refresh keeps it.
-          </p>
-          <div class="wizard-footer wizard-footer-2">
-            <button class="btn-ghost" type="button" @click="goBack">← Back</button>
-            <button class="btn-primary" type="button" @click="goNext">{{ s.form.hfToken ? 'Save &amp; next →' : 'Skip token →' }}</button>
-          </div>
         </div>
 
-        <!-- ── 6. License acceptance (aggregated) ────────────────── -->
-        <div v-else-if="!s.loading.value && step === 6" key="s6" class="wizard-body">
-          <template v-if="licenseList.length > 0">
-            <p class="step-desc">
-              You're about to download these models. Confirm the licenses below.
-              hal0 does not modify or redistribute weights — files come straight
-              from Hugging Face. You're responsible for compliance in your jurisdiction.
-            </p>
+        <div v-if="s.pull.error" class="fr-prog-err mono">{{ s.pull.error }}</div>
 
-            <ul class="license-list">
-              <li v-for="row in licenseList" :key="row.kind + ':' + row.modelId" class="license-row">
-                <div class="license-row-l">
-                  <span class="license-row-name">{{ row.label }}</span>
-                  <span class="license-row-size">{{ fmtGb(row.sizeGb) }}</span>
-                </div>
-                <div class="license-row-r">
-                  <span class="meta-chip">{{ row.license || 'see repo' }}</span>
-                  <a
-                    v-if="row.license_url"
-                    class="license-link"
-                    :href="row.license_url"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >view ↗</a>
-                </div>
-              </li>
-            </ul>
-
-            <div class="totals">
-              <div><span class="totals-l">Total download</span><span class="totals-v">{{ fmtGb(s.totalDownloadGb.value) }}</span></div>
-              <div>
-                <span class="totals-l">Free on storage dir</span>
-                <span class="totals-v" :class="{ 'totals-bad': !s.fits.value }">{{ fmtGb(s.diskFreeGb.value) }}</span>
-              </div>
-            </div>
-            <p v-if="!s.fits.value" class="field-err">
-              Not enough disk space. Free up some, add a larger storage directory in step 2, or remove capabilities.
-            </p>
-
-            <label class="accept-label">
-              <input type="checkbox" v-model="s.form.licenseAccepted" />
-              I accept the licenses for each model shown above.
-            </label>
-          </template>
-          <template v-else>
-            <p class="step-desc">
-              Nothing to download — you skipped the chat model and didn't enable any capabilities.
-              You can install hal0 as-is and add models later from <strong>Models</strong> or
-              <strong>Capabilities</strong>, or go back and pick something now.
-            </p>
-          </template>
-
-          <div class="wizard-footer wizard-footer-2">
-            <button class="btn-ghost" type="button" @click="goBack">← Back</button>
-            <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">
-              {{ licenseList.length > 0 ? 'Accept &amp; install →' : 'Finish setup →' }}
-            </button>
-          </div>
+        <div class="fr-actions" style="justify-content: space-between">
+          <button
+            type="button"
+            class="btn ghost lg"
+            :disabled="s.pull.done"
+            data-testid="fr-pause-all"
+            @click="s.pauseAll"
+          >Pause all</button>
+          <button
+            type="button"
+            class="btn lg"
+            data-testid="fr-open-dashboard"
+            @click="openDashboard"
+          >Open dashboard</button>
         </div>
-
-        <!-- ── 7. Bundled agent picker (Phase 8 / ADR-0004) ──────── -->
-        <div v-else-if="!s.loading.value && step === 7" key="s7-agent" class="wizard-body">
-          <p class="step-desc">
-            Bundle a third-party agent on top of hal0. The agent uses
-            hal0 as its local AI provider and consumes hal0's MCP
-            servers. You can pick "no agent" now and install one later
-            from the <strong>Agent</strong> page.
-          </p>
-
-          <div class="agent-list" role="radiogroup" aria-label="Bundled agent selection">
-            <label
-              class="agent-option"
-              :class="{ selected: s.form.agentChoice === 'none' }"
-            >
-              <input
-                type="radio"
-                class="sr-only"
-                name="firstrun-agent"
-                value="none"
-                v-model="s.form.agentChoice"
-              />
-              <div class="agent-option-inner">
-                <div class="agent-option-head">
-                  <span class="agent-option-name">No agent</span>
-                  <span class="meta-chip">default</span>
-                </div>
-                <p class="agent-option-desc">
-                  Install hal0 without a bundled agent. The Agent page is still
-                  available; you can install pi-coder or Hermes-Agent later.
-                </p>
-              </div>
-            </label>
-
-            <label
-              class="agent-option"
-              :class="{ selected: s.form.agentChoice === 'pi-coder' }"
-            >
-              <input
-                type="radio"
-                class="sr-only"
-                name="firstrun-agent"
-                value="pi-coder"
-                v-model="s.form.agentChoice"
-              />
-              <div class="agent-option-inner">
-                <div class="agent-option-head">
-                  <span class="agent-option-name">pi-coder</span>
-                  <span class="meta-chip meta-chip-ok">CLI</span>
-                </div>
-                <p class="agent-option-desc">
-                  Terminal coding agent (badlogic/pi-mono). Installs the
-                  hal0 MCP adapter + leaves pi-memory-md in place. Minimal
-                  by design — read, write, edit, bash.
-                </p>
-              </div>
-            </label>
-
-            <label
-              class="agent-option"
-              :class="{ selected: s.form.agentChoice === 'hermes', dim: !s.form.hermesHal0Aware }"
-              :title="s.form.hermesHal0Aware ? '' : 'Hermes-Agent not yet hal0-aware — install via CLI later.'"
-            >
-              <input
-                type="radio"
-                class="sr-only"
-                name="firstrun-agent"
-                value="hermes"
-                v-model="s.form.agentChoice"
-                :disabled="!s.form.hermesHal0Aware"
-              />
-              <div class="agent-option-inner">
-                <div class="agent-option-head">
-                  <span class="agent-option-name">Hermes-Agent</span>
-                  <span class="meta-chip">service</span>
-                  <span v-if="!s.form.hermesHal0Aware" class="meta-chip meta-chip-tight">probe failed</span>
-                </div>
-                <p class="agent-option-desc">
-                  Long-running service agent with its own web surface.
-                  Wired into the sidebar OWUI-style. Integration lives in
-                  Hermes upstream — requires a hal0-aware Hermes build.
-                </p>
-              </div>
-            </label>
-          </div>
-
-          <div class="wizard-footer wizard-footer-2">
-            <button class="btn-ghost" type="button" @click="goBack">← Back</button>
-            <button class="btn-primary" type="button" :disabled="!canAdvance" @click="goNext">
-              {{ s.form.agentChoice === 'none' ? 'Skip — no agent →' : 'Install agent + models →' }}
-            </button>
-          </div>
-        </div>
-
-        <!-- ── 8. Install (parallel pulls + retry-per-row) ───────── -->
-        <div v-else-if="step === 8" key="s8-install" class="wizard-body">
-          <p class="step-desc">
-            Downloading {{ s.pull.items.length }} model{{ s.pull.items.length === 1 ? '' : 's' }} in parallel.
-            You can leave this tab open and come back — pulls keep running on the server.
-          </p>
-
-          <div v-for="it in s.pull.items" :key="it.key" class="pull-row" :class="{ 'pull-row-done': it.state === 'completed', 'pull-row-err': it.state === 'failed' || it.state === 'cancelled' }">
-            <div class="pull-head">
-              <span class="pull-name">{{ it.label }}</span>
-              <span class="pull-state">
-                <template v-if="it.state === 'completed'">✓ done</template>
-                <template v-else-if="it.state === 'failed' || it.state === 'cancelled'">! {{ it.state }}</template>
-                <template v-else>{{ it.pct }}%</template>
-              </span>
-            </div>
-            <div class="pull-bar"><div class="pull-fill" :style="{ width: it.pct + '%' }" /></div>
-            <div class="pull-meta">
-              <span>{{ fmtSize(it.bytesDownloaded) }} / {{ it.bytesTotal ? fmtSize(it.bytesTotal) : '—' }}</span>
-              <span v-if="it.error" class="pull-err">{{ it.error }}</span>
-              <button
-                v-if="it.state === 'failed' || it.state === 'cancelled'"
-                type="button"
-                class="btn-ghost btn-ghost-sm"
-                @click="s.retryItem(it.key)"
-              >Retry</button>
-            </div>
-          </div>
-
-          <p v-if="s.pull.error" class="field-err">{{ s.pull.error }}</p>
-          <p v-else-if="!s.pull.done" class="step-hint">Slots warm up automatically once each download completes.</p>
-        </div>
-
-        <!-- ── 9. Done ───────────────────────────────────────────── -->
-        <div v-else-if="step === 9" key="s9-done" class="wizard-body wizard-done">
-          <div class="done-icon" aria-hidden="true">✓</div>
-          <h2 class="done-title">You're all set!</h2>
-          <p class="done-desc">
-            {{ s.enabledList.value.length }} model{{ s.enabledList.value.length === 1 ? '' : 's' }} ready.
-            Capabilities are loading in the background.
-          </p>
-
-          <div class="done-actions">
-            <button class="btn-primary btn-wide" type="button" @click="openChat">Open chat →</button>
-            <button class="btn-ghost" type="button" @click="goToDashboard">Go to dashboard</button>
-            <button class="btn-ghost" type="button" @click="goToSettings">Open settings</button>
-          </div>
-        </div>
-      </transition>
+      </template>
     </div>
+
+    <!-- Skip confirm dialog (always present, opens on demand) -->
+    <SkipBundleDialog
+      :open="skipDialogOpen"
+      :on-cancel="cancelSkip"
+      :on-confirm="confirmSkip"
+    />
   </div>
 </template>
 
 <style scoped>
-/* ── Page chrome (lifted from FirstRunLegacy) ──────────────────────────── */
-.wizard-page {
-  position: relative;
+.fr {
+  min-height: calc(100vh - var(--topbar-h, 0px) - var(--footer-h, 0px));
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  min-height: 100%;
-  padding: 32px 16px;
-  background: var(--hal0-bg);
-  overflow: hidden;
+  padding: 56px 32px 80px;
+  background: var(--bg);
 }
-.wizard-page::before {
-  content: '';
-  position: absolute;
-  inset: -20% -10% auto -10%;
-  height: 60%;
-  pointer-events: none;
-  background: radial-gradient(ellipse at center, var(--hal0-accent-glow), transparent 70%);
-  z-index: 0;
-}
+.fr-banners { width: 100%; max-width: 1240px; }
+.fr-inner   { width: 100%; max-width: 1240px; }
+.fr-loading { padding: 48px; text-align: center; color: var(--fg-3); font-size: 13px; }
 
-.wizard-card {
-  position: relative;
-  z-index: 1;
-  background: var(--hal0-bg-elevated);
-  border: 1px solid var(--hal0-border);
-  border-radius: var(--radius-xl);
-  width: min(620px, 100%);
-  overflow: hidden;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
-}
-
-.wizard-head {
-  position: relative;
-  text-align: center;
-  padding: 36px 32px 24px;
-  border-bottom: 1px solid var(--hal0-border);
-}
-.wizard-glow {
-  position: absolute;
-  inset: auto 0 -32px 0;
-  height: 64px;
-  pointer-events: none;
-  background: radial-gradient(ellipse at center, var(--hal0-accent-glow), transparent 70%);
-}
-.wizard-eyebrow {
+/* ─── PICK state ─────────────────────────────────────────────── */
+.fr-head { text-align: center; margin-bottom: 48px; }
+.fr-eyebrow {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  margin-bottom: 18px;
-  padding: 4px 11px;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
   border-radius: 999px;
-  border: 1px solid var(--hal0-border);
-  background: var(--hal0-bg);
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--accent);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--hal0-fg-muted);
+  letter-spacing: 0.1em;
+  margin-bottom: 22px;
 }
-.wizard-eyebrow-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--hal0-accent);
-  box-shadow: 0 0 8px var(--hal0-accent);
+.fr-eyebrow .blip {
+  width: 5px; height: 5px; background: var(--accent); border-radius: 50%;
+  animation: fr-pulse 1.5s ease-in-out infinite;
 }
-.wizard-mark {
-  display: flex; justify-content: center; margin: 0 auto 18px;
-  filter: drop-shadow(0 0 24px color-mix(in srgb, var(--hal0-accent) 30%, transparent));
+@keyframes fr-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
 }
-.wizard-title { font-size: 28px; font-weight: 600; color: var(--hal0-fg); margin: 0 0 8px; letter-spacing: -0.02em; }
-.wizard-sub   { font-size: 14px; color: var(--hal0-fg-muted); margin: 0; line-height: 1.5; }
-
-/* ── Steps indicator ───────────────────────────────────────────────────── */
-.steps {
-  display: grid;
-  grid-template-columns: repeat(9, 1fr);
-  gap: 0;
-  padding: 16px 24px;
-  border-bottom: 1px solid var(--color-border);
-  margin: 0;
-  list-style: none;
+.fr-wordmark { display: flex; justify-content: center; margin: 0 auto 18px; }
+.fr-title {
+  font-family: var(--jbm);
+  font-weight: 500;
+  font-size: clamp(36px, 4vw, 52px);
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  margin: 0 0 16px;
 }
-.step {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  position: relative;
-}
-.step + .step::before {
-  content: '';
-  position: absolute; left: -50%; top: 10px;
-  width: 100%; height: 1px;
-  background: var(--color-border);
-}
-.step-done + .step::before { background: var(--hal0-accent); }
-.step-num {
-  width: 22px; height: 22px; border-radius: 50%;
-  background: var(--color-surface-2); border: 1px solid var(--color-border);
-  color: var(--color-fg-faint); font-size: 11px;
-  display: grid; place-items: center; font-family: var(--font-mono);
-  position: relative; z-index: 1;
-}
-.step-active .step-num { border-color: var(--hal0-accent); color: var(--hal0-accent); background: var(--color-accent-bg); box-shadow: 0 0 12px color-mix(in srgb, var(--hal0-accent) 35%, transparent); }
-.step-done .step-num   { background: var(--hal0-accent); color: #000; border-color: var(--hal0-accent); }
-.step-label { font-size: 10px; color: var(--color-fg-faint); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
-.step-active .step-label { color: var(--hal0-accent); }
-
-/* ── Body + shared field styling ───────────────────────────────────────── */
-.wizard-body { padding: 24px 32px; display: flex; flex-direction: column; gap: 16px; }
-
-.step-desc { font-size: 13.5px; color: var(--color-fg-muted); margin: 0; line-height: 1.6; }
-.step-hint { font-size: 12px; color: var(--color-fg-faint); margin: 0; }
-.step-warn { font-size: 11.5px; color: var(--color-warning, #f5b049); margin: 2px 0 0; }
-.loading-state, .error-state { padding: 24px; text-align: center; color: var(--color-fg-faint); font-size: 13px; }
-.error-state { color: var(--color-danger); }
-
-.field-label { font-size: 12.5px; font-weight: 600; color: var(--color-fg-muted); margin-top: 4px; }
-.field-input { padding: 8px 10px; border-radius: var(--radius); border: 1px solid var(--color-border); background: var(--color-surface-2); color: var(--color-fg); font-size: 13px; outline: none; transition: border-color 0.1s; box-sizing: border-box; width: 100%; }
-.field-input:focus { border-color: var(--color-border-hi); }
-.field-input-mono { font-family: var(--font-mono); font-size: 12.5px; }
-.field-err { font-size: 11.5px; color: var(--color-danger); margin: 0; }
-.field-hint { font-size: 11px; color: var(--color-fg-faint); margin: 4px 0 0; line-height: 1.55; }
-.field-hint code { font-family: var(--font-mono); font-size: 10.5px; background: var(--color-surface-2); padding: 1px 4px; border-radius: 3px; }
-
-/* Hardware probe card */
-.hw-card {
-  display: flex; flex-direction: column; gap: 6px;
-  padding: 12px 14px;
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-2);
-  border: 1px solid var(--color-border);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-.hw-row { display: flex; justify-content: space-between; gap: 12px; }
-.hw-l { color: var(--color-fg-faint); }
-.hw-v { color: var(--color-fg); text-align: right; }
-
-/* Model dir editor */
-.dirs-block { display: flex; flex-direction: column; gap: 6px; }
-.dir-row { display: flex; gap: 6px; align-items: center; }
-.dir-remove {
-  background: transparent; border: 1px solid var(--color-border);
-  border-radius: var(--radius); color: var(--color-fg-faint);
-  cursor: pointer; width: 28px; height: 28px; flex-shrink: 0;
-}
-.dir-remove:hover { color: var(--color-danger); border-color: var(--color-danger); }
-.dir-add {
-  align-self: flex-start;
-  background: transparent; border: 1px dashed var(--color-border);
-  border-radius: var(--radius); padding: 5px 12px;
-  color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 11.5px;
-  cursor: pointer;
-}
-.dir-add:hover { color: var(--hal0-accent); border-color: color-mix(in srgb, var(--hal0-accent) 45%, var(--color-border)); }
-
-.disk-row {
-  display: flex; justify-content: space-between;
-  font-family: var(--font-mono); font-size: 12px;
-  color: var(--color-fg-muted);
-  padding-top: 4px;
-}
-.disk-v { color: var(--color-fg); }
-
-/* ── Model list (chat picker, step 3) ──────────────────────────────────── */
-.model-list { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; padding-right: 4px; }
-.model-option {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
-  background: var(--color-surface);
-}
-.model-option:hover { border-color: var(--color-border-hi); }
-.model-option.selected {
-  border-color: color-mix(in srgb, var(--hal0-accent) 45%, var(--color-border));
-  box-shadow: inset 3px 0 0 var(--hal0-accent);
-}
-.model-option.dim .model-option-name { color: var(--color-fg-muted); }
-.model-option-inner { padding: 12px 14px; }
-.model-option-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-.model-option-name { font-family: var(--font-mono); font-weight: 600; color: var(--color-fg); font-size: 13.5px; }
-.model-size-chip { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--hal0-accent) 35%, transparent); color: var(--hal0-accent); text-transform: uppercase; letter-spacing: 0.04em; font-feature-settings: 'zero' 1, 'ss02' 1; }
-.model-option-desc { font-size: 12px; color: var(--color-fg-muted); margin: 0 0 8px; }
-.model-option-meta { display: flex; gap: 6px; flex-wrap: wrap; }
-.meta-chip { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 6px; border-radius: 4px; background: var(--color-surface-3); color: var(--color-fg-faint); border: 1px solid var(--color-border); }
-.meta-chip-tag { opacity: 0.75; }
-.meta-chip-ok { color: var(--hal0-accent); border-color: color-mix(in srgb, var(--hal0-accent) 45%, var(--color-border)); }
-.meta-chip-tight { color: var(--color-warning, #f5b049); }
-
-/* ── Capability cards (step 4) ─────────────────────────────────────────── */
-.cap {
-  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
-  padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
-  background: var(--color-surface);
-}
-.cap-head { display: flex; align-items: center; justify-content: space-between; }
-.cap-l { display: flex; flex-direction: column; }
-.cap-name { font-family: var(--font-mono); font-weight: 600; color: var(--color-fg); font-size: 13px; }
-.cap-name-sm { font-size: 12px; }
-.cap-sub { font-size: 11px; color: var(--color-fg-faint); font-family: var(--font-mono); }
-.cap-select { padding: 7px 10px; border-radius: var(--radius); border: 1px solid var(--color-border); background: var(--color-surface-2); color: var(--color-fg); font-family: var(--font-mono); font-size: 12px; }
-.cap-sub-row { display: flex; align-items: center; justify-content: space-between; padding-top: 6px; border-top: 1px dashed var(--color-border); }
-.cap-sub-name { font-family: var(--font-mono); font-size: 11.5px; color: var(--color-fg-muted); }
-.cap-nested { border-top: 1px dashed var(--color-border); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-.disclosure { background: transparent; border: 0; color: var(--color-fg-muted); cursor: pointer; font-size: 11.5px; text-align: left; padding: 2px 0; font-family: var(--font-mono); display: flex; gap: 6px; align-items: center; }
-.disclosure:hover { color: var(--color-fg); }
-.custom-chevron { font-family: var(--font-mono); width: 12px; }
-
-/* ── Agent picker (step 7) ─────────────────────────────────────────────── */
-.agent-list { display: flex; flex-direction: column; gap: 8px; }
-.agent-option {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
-  background: var(--color-surface);
-}
-.agent-option:hover { border-color: var(--color-border-hi); }
-.agent-option.selected {
-  border-color: color-mix(in srgb, var(--hal0-accent) 45%, var(--color-border));
-  box-shadow: inset 3px 0 0 var(--hal0-accent);
-}
-.agent-option.dim { opacity: 0.6; cursor: not-allowed; }
-.agent-option-inner { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
-.agent-option-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.agent-option-name {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  color: var(--color-fg);
-  font-size: 13.5px;
-}
-.agent-option-desc {
-  font-size: 12px;
-  color: var(--color-fg-muted);
-  margin: 0;
+.fr-title .accent { color: var(--accent); }
+.fr-lede {
+  font-size: 16px;
+  color: var(--fg-2);
+  max-width: 620px;
+  margin: 0 auto 22px;
   line-height: 1.55;
+  text-wrap: pretty;
 }
 
-/* ── HF gated list (step 5) ────────────────────────────────────────────── */
-.gated-list {
-  list-style: none; padding: 8px 12px; margin: 0;
-  background: var(--color-surface-2); border-radius: var(--radius);
-  border: 1px solid var(--color-border);
-  font-family: var(--font-mono); font-size: 12px;
-  display: flex; flex-direction: column; gap: 4px;
+.fr-detect {
+  display: inline-flex;
+  flex-wrap: wrap;
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg-1);
+  overflow: hidden;
 }
-.gated-list li { display: flex; justify-content: space-between; gap: 8px; }
-.gated-name { color: var(--color-fg); }
-.gated-id { color: var(--color-fg-faint); }
-
-/* ── License list + totals (step 6) ────────────────────────────────────── */
-.license-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
-.license-row {
-  display: flex; justify-content: space-between; align-items: center; gap: 12px;
-  padding: 8px 12px; border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg); background: var(--color-surface-2);
+.fr-detect .seg {
+  padding: 7px 14px;
+  border-right: 1px solid var(--line-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
-.license-row-l { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.license-row-name { font-family: var(--font-mono); font-size: 12.5px; color: var(--color-fg); overflow: hidden; text-overflow: ellipsis; }
-.license-row-size { font-family: var(--font-mono); font-size: 10.5px; color: var(--color-fg-faint); }
-.license-row-r { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
-.license-link { font-size: 11.5px; color: var(--hal0-accent); text-decoration: none; font-family: var(--font-mono); }
-.license-link:hover { text-decoration: underline; }
+.fr-detect .seg:last-child { border-right: none; }
+.fr-detect .seg .k { color: var(--fg-5); }
+.fr-detect .seg b  { color: var(--fg); font-weight: 500; }
+.fr-detect .ok     { color: var(--ok); }
 
-.totals {
-  display: flex; flex-direction: column; gap: 4px;
-  font-family: var(--font-mono); font-size: 12px;
-  padding: 8px 0;
+.fr-section-label {
+  font-family: var(--jbm);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-4);
+  margin: 28px 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
-.totals > div { display: flex; justify-content: space-between; }
-.totals-l { color: var(--color-fg-muted); }
-.totals-v { color: var(--color-fg); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
-.totals-bad { color: var(--color-danger); }
+.fr-section-label::after { content: ''; flex: 1; height: 1px; background: var(--line-soft); }
 
-.accept-label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--color-fg-muted); cursor: pointer; padding-top: 4px; }
-
-/* ── Pull rows (step 7) ────────────────────────────────────────────────── */
-.pull-row {
-  padding: 10px 12px; border: 1px solid var(--color-border); border-radius: var(--radius);
-  background: var(--color-surface-2); display: flex; flex-direction: column; gap: 6px;
-  transition: border-color 0.2s;
+/* LMX kit */
+.kit {
+  background: linear-gradient(135deg, var(--bg-1) 0%, color-mix(in oklab, var(--accent-soft) 30%, var(--bg-1)) 100%);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--rad-lg);
+  padding: 24px 28px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 24px;
+  align-items: center;
+  margin-bottom: 40px;
+  position: relative;
+  overflow: hidden;
 }
-.pull-row-done { border-color: color-mix(in srgb, var(--hal0-accent) 45%, var(--color-border)); }
-.pull-row-err  { border-color: color-mix(in srgb, var(--color-danger) 45%, var(--color-border)); }
-.pull-head { display: flex; justify-content: space-between; align-items: center; font-family: var(--font-mono); font-size: 12px; }
-.pull-name { color: var(--color-fg); overflow: hidden; text-overflow: ellipsis; }
-.pull-state { color: var(--hal0-accent); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
-.pull-row-err .pull-state { color: var(--color-danger); }
-.pull-bar { height: 6px; background: var(--color-surface-3); border-radius: 3px; overflow: hidden; }
-.pull-fill { height: 100%; background: var(--hal0-accent); border-radius: 3px; transition: width 0.3s ease; box-shadow: 0 0 10px color-mix(in srgb, var(--hal0-accent) 35%, transparent); }
-.pull-meta { display: flex; justify-content: space-between; gap: 12px; font-family: var(--font-mono); font-size: 10.5px; color: var(--color-fg-faint); align-items: center; }
-.pull-err { color: var(--color-danger); flex: 1; overflow: hidden; text-overflow: ellipsis; }
-
-/* ── Done coda (step 8) ────────────────────────────────────────────────── */
-.wizard-done { align-items: center; text-align: center; padding: 32px; }
-.done-icon {
-  width: 56px; height: 56px; border-radius: 50%;
-  background: color-mix(in srgb, var(--hal0-accent) 14%, var(--color-surface));
-  border: 2px solid var(--hal0-accent); color: var(--hal0-accent);
-  font-size: 24px; display: grid; place-items: center;
-  box-shadow: 0 0 32px color-mix(in srgb, var(--hal0-accent) 30%, transparent);
+.kit::before {
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(circle at 80% 50%, var(--accent-soft), transparent 60%);
+  pointer-events: none;
 }
-.done-title { font-size: 24px; font-weight: 600; color: var(--color-fg); margin: 0; letter-spacing: -0.02em; }
-.done-desc  { font-size: 13.5px; color: var(--color-fg-muted); margin: 0; line-height: 1.6; }
-.done-actions { display: flex; flex-direction: column; gap: 10px; width: 100%; align-items: center; }
+.kit-main { position: relative; }
+.kit-eyebrow { font-family: var(--jbm); font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+.kit-name { font-family: var(--jbm); font-size: 22px; font-weight: 500; letter-spacing: -0.02em; margin-bottom: 8px; }
+.kit-spec { font-family: var(--jbm); font-size: 12px; color: var(--fg-3); margin-bottom: 12px; }
+.kit-models { display: flex; flex-wrap: wrap; gap: 6px; }
+.kit-side { position: relative; text-align: right; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.kit-side .sz { font-family: var(--jbm); font-size: 24px; font-weight: 500; color: var(--fg); letter-spacing: -0.02em; }
+.kit-side .sz .u { color: var(--accent); font-size: 14px; margin-left: 2px; }
 
-/* ── Footers + buttons ─────────────────────────────────────────────────── */
-.wizard-footer { padding-top: 4px; }
-.wizard-footer-2 { display: flex; justify-content: space-between; align-items: center; }
-.wizard-footer-3 { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 4px; }
-.wizard-footer-3 .btn-ghost { flex-shrink: 0; }
-
-.btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 11px 22px; border-radius: var(--radius); background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-size: 13px; font-weight: 500; border: none; cursor: pointer; transition: background 0.15s, transform 0.05s; }
-.btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }
-.btn-primary:active:not(:disabled) { transform: translateY(1px); }
-.btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-wide { width: 100%; }
-
-.btn-ghost { padding: 9px 18px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
-.btn-ghost:hover { border-color: var(--color-border-hi); color: var(--color-fg); }
-.btn-ghost-sm { padding: 4px 10px; font-size: 11px; }
-
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-
-/* ── Step transitions ──────────────────────────────────────────────────── */
-.wizard-fade-enter-active, .wizard-fade-leave-active { transition: opacity 0.18s ease, transform 0.18s ease; }
-.wizard-fade-enter-from { opacity: 0; transform: translateY(4px); }
-.wizard-fade-leave-to   { opacity: 0; transform: translateY(-4px); }
-
-@media (prefers-reduced-motion: reduce) {
-  .wizard-fade-enter-active, .wizard-fade-leave-active { transition: none; }
+.fr-skip-row { display: flex; justify-content: center; gap: 24px; align-items: center; margin-top: 16px; }
+.fr-skip {
+  background: transparent;
+  border: none;
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg-3);
+  cursor: pointer;
+  padding: 6px 12px;
+  border-bottom: 1px dashed var(--line);
 }
+.fr-skip:hover { color: var(--accent); border-color: var(--accent-line); }
+
+/* ─── CONFIRM state ──────────────────────────────────────────── */
+.fr-confirm-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg-3);
+  cursor: pointer;
+  margin-bottom: 20px;
+  outline: none;
+}
+.fr-confirm-back:hover, .fr-confirm-back:focus-visible { color: var(--accent); }
+
+.fr-confirm-h { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+.fr-confirm-h h2 { font-family: var(--jbm); font-size: 32px; font-weight: 500; margin: 0; letter-spacing: -0.025em; }
+.fr-confirm-h .sub { font-family: var(--jbm); font-size: 13px; color: var(--fg-3); }
+.fr-confirm-sub { font-family: var(--jbm); font-size: 12px; color: var(--fg-3); margin-bottom: 28px; }
+
+.fr-confirm-card {
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.fr-confirm-card-h {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg-3);
+  background: var(--bg);
+}
+.fr-confirm-card-h b { color: var(--fg); font-weight: 500; }
+.fr-confirm-card-h .right { margin-left: auto; }
+
+.fr-confirm-row {
+  display: grid;
+  grid-template-columns: 100px 1fr 120px 120px;
+  gap: 14px;
+  align-items: center;
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  font-family: var(--jbm);
+  font-size: 12px;
+}
+.fr-confirm-row:last-child { border-bottom: none; }
+.fr-confirm-row .nm { color: var(--accent); }
+.fr-confirm-row .nm.npu { color: var(--dev-npu, #c896ff); }
+.fr-confirm-row .ml { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fr-confirm-row .sz { color: var(--fg-2); text-align: right; }
+.fr-confirm-row .tag { color: var(--fg-3); text-align: right; display: flex; gap: 5px; justify-content: flex-end; }
+.fr-confirm-row-faint { opacity: 0.55; }
+
+.fr-confirm-foot {
+  padding: 14px 18px;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-4);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.npu-chip {
+  width: 28px; height: 18px;
+  border-radius: 3px;
+  border: 1px solid rgba(200, 150, 255, 0.40);
+  background: rgba(200, 150, 255, 0.08);
+  color: var(--dev-npu, #c896ff);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+.npu-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--fg-2);
+}
+.npu-toggle input { accent-color: var(--accent); }
+
+.notes-card {
+  padding: 16px;
+  font-size: 12.5px;
+  color: var(--fg-3);
+  margin-bottom: 24px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+}
+.notes-h {
+  font-size: 10px;
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 8px;
+}
+.notes-ul { margin: 0; padding-left: 18px; line-height: 1.7; }
+.notes-warn { color: var(--warn); }
+.notes-err  { color: var(--err); }
+.notes-ul .mono { font-family: var(--jbm); color: var(--fg-2); }
+
+.fr-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
+/* ─── PROGRESS state ─────────────────────────────────────────── */
+.fr-prog-h {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 22px;
+}
+.fr-prog-h h2 {
+  font-family: var(--jbm);
+  font-size: 28px;
+  font-weight: 500;
+  margin: 0;
+  letter-spacing: -0.025em;
+}
+.fr-prog-h .meta { font-family: var(--jbm); font-size: 12px; color: var(--fg-3); }
+
+.fr-prog-list {
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+  overflow: hidden;
+  margin-bottom: 22px;
+}
+
+.fr-prog-err {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--err-line);
+  background: var(--err-soft);
+  border-radius: var(--rad);
+  color: var(--err);
+  font-size: 12px;
+}
+
+/* ─── Chip shim (until /primitives is reachable from this scope) ─── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line);
+}
+.chip-amber-outlined { color: var(--accent); border-color: var(--accent-line); background: transparent; }
+.chip-cpu { color: var(--fg-3); }
 </style>

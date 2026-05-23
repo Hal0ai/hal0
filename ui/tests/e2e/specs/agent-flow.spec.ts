@@ -51,7 +51,14 @@ test.describe('Phase 8 — agent surface', () => {
     )
   })
 
-  test('first-run wizard surfaces the agent step + picks pi-coder', async ({
+  // Slice #172 (v2 FirstRun rework) replaced the v1 8-step wizard with a
+  // 3-state bundle picker (pick → confirm → progress). The bundled-agent
+  // step was REMOVED from the firstrun flow per the v0.3 design — agent
+  // install lives behind the /agent route + ADR-0004's settings entry
+  // point. The original assertion (agent picker in firstrun) no longer
+  // applies. Re-target the agent install flow in slice #174's extras
+  // pass; until then we skip to keep the rest of agent-flow green.
+  test.skip('first-run wizard surfaces the agent step + picks pi-coder', async ({
     page,
     mockState,
     cleanState: _cleanState,
