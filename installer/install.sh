@@ -162,7 +162,7 @@ info "Pull destination: ${MODELS_DIR}"
 # Step total — base 8, +1 for the optional TLS / Caddy setup. Kept
 # here so editors who add or remove a ui_step bump the visible counter
 # in the same diff.
-UI_STEP_TOTAL=9
+UI_STEP_TOTAL=10                                    # +1 for "Lemonade daemon" (PR-5)
 if [[ "${NO_TLS}" -eq 0 ]]; then
     UI_STEP_TOTAL=$((UI_STEP_TOTAL + 1))           # "TLS (Caddy reverse proxy)"
 fi
@@ -185,6 +185,11 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
         "Hardware probe")
             warn "Recovery: rerun with HAL0_NO_PROBE=1 and file an issue with"
             warn "         /etc/hal0/hardware.json (if present) attached." ;;
+        "Lemonade daemon")
+            warn "Recovery: check /opt/lemonade/ ownership + free space under /opt"
+            warn "         (embeddable tarball is ~200 MB extracted)."
+            warn "         Set HAL0_SKIP_LEMONADE_SHA=1 if the placeholder SHA-256"
+            warn "         is blocking on a fresh upstream tarball." ;;
     esac
     exit 1' ERR
 
@@ -919,6 +924,284 @@ else
     fi
 fi
 
+# ── Lemonade daemon bootstrap (PR-5) ──────────────────────────────────────
+# Drops the lemond binary, baseline config.json with the mandatory
+# `--threads N` guard, and the hal0-lemonade.service systemd unit. After
+# PR-4 (system prereqs) and before PR-6 (server_models.json), so the
+# resources/ directory the next step writes into exists. Three pieces:
+#
+#   1. Embeddable tarball (lemond + lemonade CLI + resources/) extracted
+#      to /opt/lemonade/. AMD ships this from
+#      github.com/lemonade-sdk/lemonade/releases — version-pinned, sha256
+#      verified, --strip-components=1 so /opt/lemonade/{lemond,lemonade,
+#      resources}/ land flat. Idempotent via a marker file
+#      (/opt/lemonade/.installed-version) — re-running with the same
+#      LEMONADE_VERSION skips download + extract.
+#
+#   2. /var/lib/hal0/lemonade/config.json — written atomically every run
+#      (tempfile + mv), so a config bump propagates without a manual
+#      delete. Locked baseline from lemonade-adoption-plan-2026-05-22 §3:
+#      config_version=1, port 13305 loopback, max_loaded_models=4,
+#      rocm_channel=stable, llamacpp.args="--parallel 1 --threads N",
+#      flm.args="--asr 1 --embed 1", kokoro.cpu_bin=builtin. The
+#      --threads N value is the load-bearing guard against the multi-
+#      model CPU-oversubscription deadlock from spike #2 (memory
+#      `hal0_lemonade_threads_deadlock`): with 2+ concurrent child
+#      llama-servers each spawning all cores, Vulkan dispatch starves
+#      and inference hangs at 30 s timeouts / load avg 25. Formula:
+#      N = max(2, (nproc - 2) / 4). The "-2" leaves headroom for
+#      hal0-api + system; "/4" splits across the typical four-process
+#      capability rollup (primary + embed + rerank + voice).
+#
+#   3. /etc/systemd/system/hal0-lemonade.service — Type=simple, runs as
+#      a dedicated `hal0` system user (per ADR-0008 §1: loopback-only
+#      internal runtime). LimitMEMLOCK=infinity for FLM/NPU; CPUQuota=80%
+#      leaves 20% for hal0-api + system. Enabled here; the Service start
+#      block at the end of install.sh starts it alongside hal0-api.
+#
+# Refs: ADR-0008 §1 (single lemond, loopback), §3 (per-type LRU), §4
+#       (mandatory --threads N); lemonade-adoption-plan §3 (service
+#       topology + verbatim config.json + unit baseline), §11 PR-5,
+#       §12.2 (port 13305), §12.3 (version pinning); memory
+#       `hal0_lemonade_threads_deadlock` (non-negotiable operational
+#       constraint).
+ui_step "Lemonade daemon"
+
+# Pinned Lemonade embeddable tarball — bump in lockstep with hal0
+# releases. v10.6.0 is the build the v0.2 spike #2 validated against
+# on 2026-05-22.
+LEMONADE_VERSION="v10.6.0"
+LEMONADE_VERSION_BARE="${LEMONADE_VERSION#v}"
+LEMONADE_TARBALL="lemonade-embeddable-${LEMONADE_VERSION_BARE}-ubuntu-x64.tar.gz"
+LEMONADE_URL="https://github.com/lemonade-sdk/lemonade/releases/download/${LEMONADE_VERSION}/${LEMONADE_TARBALL}"
+# SHA-256 of the upstream artefact at v10.6.0. Placeholder pre-pin; gate
+# release on populating with the real checksum. HAL0_SKIP_LEMONADE_SHA=1
+# lets CI / dev installs proceed against the placeholder explicitly.
+LEMONADE_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+
+LEMONADE_PREFIX="/opt/lemonade"
+LEMONADE_CACHE_DIR="${VAR_DIR}/lemonade"
+LEMONADE_CONFIG_JSON="${LEMONADE_CACHE_DIR}/config.json"
+LEMONADE_UNIT="${UNIT_DIR}/hal0-lemonade.service"
+LEMONADE_MARKER="${LEMONADE_PREFIX}/.installed-version"
+
+# Compute --threads N at install time. See memory
+# `hal0_lemonade_threads_deadlock` + ADR-0008 §4: this flag is the
+# difference between the Vulkan deadlock spike and a happy 4-concurrent
+# Phase B.3 run. NEVER skip it.
+#
+# Formula: N = max(2, (nproc - 2) / 4). The "/4" assumes the typical
+# v0.2 capability rollup (primary + embed + rerank + voice = 4
+# concurrent child llama-servers). The "-2" leaves headroom for the
+# hal0-api process + system. The min-of-2 is a hard floor for hosts
+# small enough that the formula would otherwise underflow (a 4-core box
+# computes (4 - 2) / 4 = 0; we bump to 2 so llama-server has at least a
+# producer/consumer pair).
+#
+# If nproc is unavailable or returns a non-positive integer (broken
+# containers, exotic minimal hosts), we default to 2 + warn rather than
+# omit the flag entirely. Per the deadlock memory, an omitted --threads
+# is the failure mode we are guarding against.
+if command -v nproc >/dev/null 2>&1; then
+    LEMONADE_CORES="$(nproc 2>/dev/null || echo 0)"
+else
+    LEMONADE_CORES=0
+fi
+if ! [[ "${LEMONADE_CORES}" =~ ^[0-9]+$ ]] || (( LEMONADE_CORES < 1 )); then
+    warn "nproc unavailable or returned '${LEMONADE_CORES}' — defaulting --threads 2"
+    LEMONADE_THREADS=2
+else
+    LEMONADE_THREADS=$(( (LEMONADE_CORES - 2) / 4 ))
+    if (( LEMONADE_THREADS < 2 )); then
+        LEMONADE_THREADS=2
+    fi
+fi
+info "Lemonade --threads ${LEMONADE_THREADS} (nproc=${LEMONADE_CORES}, formula=max(2,(n-2)/4))"
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    # Dev installs don't touch /opt/lemonade, /var/lib/hal0/lemonade, or
+    # systemd. Surface what the production install would do so the dev
+    # knows the gap exists; the rest of v0.2 wiring (PR-6 server_models,
+    # capability dispatch) still exercises in dev mode against a manually
+    # started lemond.
+    info "dev mode — skipping Lemonade daemon bootstrap"
+    info "          would install: tarball ${LEMONADE_TARBALL} → ${LEMONADE_PREFIX}"
+    info "          would write:   ${LEMONADE_CONFIG_JSON} (threads ${LEMONADE_THREADS})"
+    info "          would enable:  ${LEMONADE_UNIT}"
+else
+    # 1. hal0 system user/group. The unit runs lemond as `hal0` (per
+    #    plan §3 + ADR-0008 §1 "internal runtime, never exposed
+    #    off-box"). The user owns /opt/lemonade and /var/lib/hal0/lemonade
+    #    so lemond can write runtime state (user_models.json, logs).
+    #    System user (UID < 1000), no login shell, home at ${VAR_DIR}
+    #    so any stray `~`-relative lemond writes land somewhere sane.
+    #    Idempotent via `getent passwd`.
+    if ! getent group hal0 >/dev/null 2>&1; then
+        groupadd --system hal0
+        info "created group hal0"
+    fi
+    if ! getent passwd hal0 >/dev/null 2>&1; then
+        useradd --system --gid hal0 --home-dir "${VAR_DIR}" \
+            --shell /usr/sbin/nologin \
+            --comment "hal0 Lemonade daemon" \
+            hal0
+        info "created user hal0 (system, no login)"
+    fi
+
+    # 2. Embeddable tarball. Idempotent: a marker file pinned to
+    #    LEMONADE_VERSION lets re-runs skip the multi-hundred-MB
+    #    download when the binary on disk already matches. Operators
+    #    who want to force a re-extract can `rm /opt/lemonade/.installed-version`.
+    NEED_LEMONADE_EXTRACT=1
+    if [[ -x "${LEMONADE_PREFIX}/lemond" && -f "${LEMONADE_MARKER}" ]]; then
+        INSTALLED_VERSION="$(cat "${LEMONADE_MARKER}" 2>/dev/null || true)"
+        if [[ "${INSTALLED_VERSION}" == "${LEMONADE_VERSION}" ]]; then
+            info "Lemonade ${LEMONADE_VERSION} already extracted at ${LEMONADE_PREFIX} — skipping download"
+            NEED_LEMONADE_EXTRACT=0
+        else
+            info "Lemonade marker reports ${INSTALLED_VERSION:-unknown}, target ${LEMONADE_VERSION} — re-extracting"
+        fi
+    fi
+
+    if [[ "${NEED_LEMONADE_EXTRACT}" -eq 1 ]]; then
+        LEMONADE_TARBALL_TMP="/tmp/${LEMONADE_TARBALL}"
+        # `curl -fsSL` — fail on HTTP error, silent, follow redirects.
+        # Tarball lands in /tmp so a re-run doesn't keep a stale copy in
+        # the install tree.
+        if ! curl -fsSL -o "${LEMONADE_TARBALL_TMP}" "${LEMONADE_URL}"; then
+            warn "Lemonade tarball download failed (${LEMONADE_URL})"
+            warn "  Lemonade-backed slots will be unavailable until ${LEMONADE_PREFIX}/lemond exists"
+            NEED_LEMONADE_EXTRACT=0
+        fi
+    fi
+
+    if [[ "${NEED_LEMONADE_EXTRACT}" -eq 1 ]]; then
+        # SHA-256 verify BEFORE extracting. Same shape as PR-4's FLM .deb
+        # check: placeholder all-zeroes pin is non-fatal when
+        # HAL0_SKIP_LEMONADE_SHA=1, otherwise refuse + skip. Real
+        # checksum mismatch is always fatal (refuse + skip — never
+        # extract a tarball we don't trust).
+        ACTUAL_SHA="$(sha256sum "${LEMONADE_TARBALL_TMP}" | awk '{print $1}')"
+        if [[ "${LEMONADE_SHA256}" == "0000000000000000000000000000000000000000000000000000000000000000" ]]; then
+            warn "LEMONADE_SHA256 is the placeholder — pin the real checksum in install.sh before v0.2 ships"
+            warn "  observed: ${ACTUAL_SHA}"
+            if [[ "${HAL0_SKIP_LEMONADE_SHA:-0}" != "1" ]]; then
+                warn "  skipping Lemonade install (set HAL0_SKIP_LEMONADE_SHA=1 to accept the placeholder)"
+                rm -f "${LEMONADE_TARBALL_TMP}"
+                NEED_LEMONADE_EXTRACT=0
+            fi
+        elif [[ "${ACTUAL_SHA}" != "${LEMONADE_SHA256}" ]]; then
+            warn "Lemonade tarball SHA-256 mismatch — refusing to extract"
+            warn "  expected: ${LEMONADE_SHA256}"
+            warn "  observed: ${ACTUAL_SHA}"
+            rm -f "${LEMONADE_TARBALL_TMP}"
+            NEED_LEMONADE_EXTRACT=0
+        fi
+    fi
+
+    if [[ "${NEED_LEMONADE_EXTRACT}" -eq 1 ]]; then
+        # The upstream tarball has a single top-level
+        # `lemonade-embeddable-<VER>/` directory; --strip-components=1
+        # lands {lemond, lemonade, LICENSE, resources}/ flat in
+        # /opt/lemonade/.
+        mkdir -p "${LEMONADE_PREFIX}"
+        if ui_spinner_run "Extracting ${LEMONADE_TARBALL} → ${LEMONADE_PREFIX}" \
+            tar -xzf "${LEMONADE_TARBALL_TMP}" -C "${LEMONADE_PREFIX}" --strip-components=1; then
+            rm -f "${LEMONADE_TARBALL_TMP}"
+            printf '%s\n' "${LEMONADE_VERSION}" > "${LEMONADE_MARKER}"
+            info "extracted Lemonade ${LEMONADE_VERSION} → ${LEMONADE_PREFIX}"
+        else
+            warn "tar extract failed — Lemonade-backed slots will be unavailable"
+            rm -f "${LEMONADE_TARBALL_TMP}"
+        fi
+    fi
+
+    # Ownership: lemond reads from /opt/lemonade/{resources,bin} and may
+    # update entries under resources/server_models.json on backend
+    # install. Owned by hal0:hal0 so the daemon can write its own state
+    # without escalating. Always runs (idempotent + cheap), so a
+    # download-skipped re-install still corrects perms after, e.g., an
+    # operator manually extracted as root.
+    if [[ -d "${LEMONADE_PREFIX}" ]]; then
+        chown -R hal0:hal0 "${LEMONADE_PREFIX}"
+    fi
+
+    # 3. Cache dir + config.json. Atomic write (tempfile in the same
+    #    directory + mv) so a crash mid-write doesn't leave lemond
+    #    parsing a half-written JSON file on next start. Overwrite on
+    #    every install run — a baseline bump (port move, new key, etc.)
+    #    should propagate without the operator having to delete the file.
+    mkdir -p "${LEMONADE_CACHE_DIR}"
+    chown hal0:hal0 "${LEMONADE_CACHE_DIR}"
+    LEMONADE_CONFIG_TMP="$(mktemp "${LEMONADE_CONFIG_JSON}.XXXXXX")"
+    cat > "${LEMONADE_CONFIG_TMP}" <<JSON
+{
+  "config_version": 1,
+  "host": "127.0.0.1",
+  "port": 13305,
+  "ctx_size": 4096,
+  "max_loaded_models": 4,
+  "extra_models_dir": "/var/lib/hal0/models",
+  "global_timeout": 900,
+  "no_broadcast": true,
+  "log_level": "info",
+  "rocm_channel": "stable",
+  "llamacpp": {
+    "args": "--parallel 1 --threads ${LEMONADE_THREADS}",
+    "backend": "rocm",
+    "prefer_system": false
+  },
+  "flm":        { "args": "--asr 1 --embed 1" },
+  "kokoro":     { "cpu_bin": "builtin" },
+  "whispercpp": { "backend": "vulkan" },
+  "sdcpp":      { "backend": "rocm", "steps": 20, "cfg_scale": 7.0, "width": 512, "height": 512 }
+}
+JSON
+    chown hal0:hal0 "${LEMONADE_CONFIG_TMP}"
+    chmod 0644 "${LEMONADE_CONFIG_TMP}"
+    mv "${LEMONADE_CONFIG_TMP}" "${LEMONADE_CONFIG_JSON}"
+    info "wrote ${LEMONADE_CONFIG_JSON} (threads=${LEMONADE_THREADS})"
+
+    # 4. Systemd unit — verbatim from lemonade-adoption-plan §3. Always
+    #    rewritten so a unit bump propagates without manual `rm`. The
+    #    ExecStop curl lets lemond drain in-flight requests cleanly;
+    #    on hosts where /usr/bin/curl doesn't exist systemd will log
+    #    the failure but `Restart=on-failure` still kicks in correctly.
+    cat > "${LEMONADE_UNIT}" <<UNIT
+[Unit]
+Description=hal0 Lemonade backend (lemond)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${LEMONADE_PREFIX}/lemond ${LEMONADE_CACHE_DIR}
+ExecStop=/usr/bin/curl -s -X POST http://127.0.0.1:13305/internal/shutdown
+Restart=on-failure
+RestartSec=5s
+User=hal0
+Group=hal0
+LimitMEMLOCK=infinity
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    info "wrote ${LEMONADE_UNIT}"
+
+    # daemon-reload is idempotent — always safe to call. enable (no
+    # --now) so the unit auto-starts on boot; the Service start block at
+    # the end of install.sh handles the first start in lockstep with
+    # hal0-api / hal0-openwebui / hal0-caddy.
+    systemctl daemon-reload
+    if [[ -x "${LEMONADE_PREFIX}/lemond" ]]; then
+        systemctl enable hal0-lemonade.service >/dev/null 2>&1 || \
+            warn "systemctl enable hal0-lemonade failed — check 'systemctl status hal0-lemonade'"
+    else
+        warn "${LEMONADE_PREFIX}/lemond missing — leaving hal0-lemonade.service disabled"
+    fi
+fi
+
 # ── Lemonade server_models.json generation (issue #141) ───────────────────
 # Convert hal0's registry.toml into the curated catalog Lemonade Server
 # loads from ``resources/server_models.json``. Must run BEFORE
@@ -960,6 +1243,20 @@ if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
     warn "  start manually: ${HAL0_BIN} serve --host ${API_BIND_HOST} --port ${HAL0_PORT}"
 else
+    # Lemonade FIRST — hal0-api may resolve capability state from
+    # /v1/health on its own boot, and the lemond start is the slowest
+    # of the three (ROCm/Vulkan backend init). Soft on failure: hal0-api
+    # still serves the dashboard and surfaces the dead-lemond banner
+    # rather than the installer aborting.
+    if [[ -f "${UNIT_DIR}/hal0-lemonade.service" ]]; then
+        systemctl enable --now hal0-lemonade
+        if wait_active hal0-lemonade 30; then
+            info "hal0-lemonade is running (loopback :13305)"
+        else
+            warn "hal0-lemonade not yet active; check 'journalctl -u hal0-lemonade -n 60'"
+        fi
+    fi
+
     systemctl enable --now hal0-api
     if wait_active hal0-api 15; then
         info "hal0-api is running"
