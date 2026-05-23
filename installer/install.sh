@@ -162,7 +162,7 @@ info "Pull destination: ${MODELS_DIR}"
 # Step total — base 8, +1 for the optional TLS / Caddy setup. Kept
 # here so editors who add or remove a ui_step bump the visible counter
 # in the same diff.
-UI_STEP_TOTAL=8
+UI_STEP_TOTAL=9
 if [[ "${NO_TLS}" -eq 0 ]]; then
     UI_STEP_TOTAL=$((UI_STEP_TOTAL + 1))           # "TLS (Caddy reverse proxy)"
 fi
@@ -762,6 +762,161 @@ else:
 PY
 else
     warn "skipping probe (HAL0_NO_PROBE=1)"
+fi
+
+# ── Lemonade system prerequisites (PR-4) ──────────────────────────────────
+# Install the system-level packages Lemonade + FLM need BEFORE PR-5 drops
+# the lemond binary, config.json, and systemd unit. Three pieces:
+#
+#   1. Lemonade PPA (ppa:lemonade-team/stable) — provides libxrt-npu2,
+#      the AMDXDNA NPU runtime FLM dlopen()s at start. Without it,
+#      `flm serve` fails with "cannot open shared object libxrt_coreutil.so.2"
+#      and the NPU stays unreachable. PPA add is an apt key + sources.list
+#      drop; idempotent via add-apt-repository's built-in dedup.
+#
+#   2. FLM transitive runtime libs (apt) —
+#        * libxrt-npu2                   NPU runtime (from PPA)
+#        * libavformat60/libavcodec60/   ffmpeg6 — FLM's audio transcribe
+#          libavutil58/libswscale7/        path (Whisper-V3-Turbo on NPU)
+#          libswresample4
+#        * libboost-program-options1.83.0  FLM CLI flag parsing
+#        * libfftw3-single3              FLM signal processing
+#
+#   3. FastFlowLM .deb v0.9.42 — pinned URL + SHA-256, fetched from upstream
+#      releases. Verified BEFORE dpkg install; fail-soft if unreachable
+#      (NPU-less hal0 still ships — FLM trio gates on `flm validate`).
+#
+# Refs: ADR-0008 (Lemonade adoption), ADR-0009 (FLM trio NPU packing),
+#       lemonade-adoption-plan §3 (service topology) + §11 (PR-4 scope),
+#       memory `hal0_lemonade_flm_npu_install` (the manual install recipe
+#       this section automates).
+ui_step "Lemonade system prerequisites"
+
+# Pinned FLM .deb — bump in lockstep with ADR-0009 / lemonade-adoption-plan
+# §5 ("flm.args = --asr 1 --embed 1"). v0.9.42 is what the trio was
+# validated against on 2026-05-22 (LXC 105, Strix Halo NPU passthrough).
+FLM_DEB_VERSION="0.9.42"
+FLM_DEB_URL="https://github.com/FastFlowLM/FastFlowLM/releases/download/v${FLM_DEB_VERSION}/fastflowlm_${FLM_DEB_VERSION}_ubuntu24.04_amd64.deb"
+# SHA-256 of the upstream artefact at v0.9.42. If the upstream file is
+# ever rebuilt under the same tag this will drift; bump in lockstep with
+# FLM_DEB_VERSION when bumping the pin.
+FLM_DEB_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    # Dev installs don't touch the host's apt or third-party package
+    # sources — devs install once manually (see installer/README.md).
+    # We still log what *would* have happened so the dev knows the gap
+    # exists for production installs.
+    info "dev mode — skipping Lemonade prereqs (apt PPA + libxrt-npu2 + ffmpeg6 + boost1.83 + fftw3 + FLM .deb v${FLM_DEB_VERSION})"
+    info "          install manually if exercising NPU paths: see installer/README.md"
+elif ! command -v apt-get >/dev/null 2>&1; then
+    # Non-Debian host (e.g., the maintainer's CachyOS dev box). FLM
+    # upstream only ships .deb + Windows .msi as of v0.9.42; we cannot
+    # auto-install on pacman/dnf/zypper. Surface the gap, keep going —
+    # GPU paths still work without FLM.
+    warn "apt-get not found — skipping Lemonade NPU prereqs (FLM .deb is Ubuntu-only upstream)"
+    warn "  GPU paths (Vulkan/ROCm) still work; NPU paths will be unavailable until FLM is installed manually"
+else
+    # 1. PPA. `add-apt-repository -y` is idempotent — re-adding an
+    #    existing PPA is a no-op + warning, not a failure. We DO surface
+    #    what's about to happen so the operator isn't surprised by a
+    #    third-party apt source landing on their host.
+    info "adding ppa:lemonade-team/stable (provides libxrt-npu2 — NPU runtime)"
+    if ! command -v add-apt-repository >/dev/null 2>&1; then
+        ui_spinner_run "Installing software-properties-common (for add-apt-repository)" \
+            apt-get install -y software-properties-common
+    fi
+    # `add-apt-repository -y` prints to stderr on re-add; wrap so a
+    # double-run looks clean. Failure here IS fatal — without the PPA
+    # libxrt-npu2 is unavailable and the NPU surface won't work.
+    ui_spinner_run "Adding ppa:lemonade-team/stable" \
+        add-apt-repository -y ppa:lemonade-team/stable
+    ui_spinner_run "apt-get update (refresh PPA index)" \
+        apt-get update -qq
+
+    # 2. Runtime libs. apt is naturally idempotent — already-installed
+    #    packages are a no-op. Listed explicitly (not via a metapackage)
+    #    so a future libavformat ABI bump is a visible single-line edit
+    #    rather than a silent metapackage drift.
+    ui_spinner_run "Installing FLM runtime libs (libxrt-npu2 + ffmpeg6 + boost1.83 + fftw3)" \
+        apt-get install -y \
+            libxrt-npu2 \
+            libavformat60 libavcodec60 libavutil58 libswscale7 libswresample4 \
+            libboost-program-options1.83.0 \
+            libfftw3-single3
+
+    # 3. FLM .deb. Fail-soft: if upstream is unreachable or the SHA-256
+    #    doesn't match, warn + skip. NPU paths gate on `flm validate`
+    #    succeeding later — GPU-only hal0 still ships fine.
+    FLM_DEB_TMP="/tmp/fastflowlm_${FLM_DEB_VERSION}.deb"
+    NEED_FLM_INSTALL=1
+    if command -v dpkg-query >/dev/null 2>&1 && \
+       dpkg-query -W -f='${Version}\n' fastflowlm 2>/dev/null | grep -qx "${FLM_DEB_VERSION}"; then
+        info "fastflowlm ${FLM_DEB_VERSION} already installed — skipping download"
+        NEED_FLM_INSTALL=0
+    fi
+
+    if [[ "${NEED_FLM_INSTALL}" -eq 1 ]]; then
+        # `curl -fsSL` — fail on HTTP error, silent, follow redirects.
+        # Download to /tmp so a re-run doesn't keep a stale copy in the
+        # install tree. -o to a deterministic path so the SHA-256 check
+        # below can find it.
+        if curl -fsSL -o "${FLM_DEB_TMP}" "${FLM_DEB_URL}"; then
+            # SHA-256 verify BEFORE dpkg installs it. A real pin is
+            # required here in a follow-up — for the POC the placeholder
+            # is all-zeroes and `--lemonade-skip-flm-sha` (env var
+            # HAL0_SKIP_FLM_SHA=1) bypasses the check so CI can land
+            # the section without blocking on the lookup. Operators
+            # who set the env explicitly accept the trust trade.
+            ACTUAL_SHA="$(sha256sum "${FLM_DEB_TMP}" | awk '{print $1}')"
+            if [[ "${FLM_DEB_SHA256}" == "0000000000000000000000000000000000000000000000000000000000000000" ]]; then
+                warn "FLM_DEB_SHA256 is the placeholder — pin the real checksum in install.sh before v0.2 ships"
+                warn "  observed: ${ACTUAL_SHA}"
+                if [[ "${HAL0_SKIP_FLM_SHA:-0}" != "1" ]]; then
+                    warn "  skipping FLM install (set HAL0_SKIP_FLM_SHA=1 to accept the placeholder)"
+                    rm -f "${FLM_DEB_TMP}"
+                    NEED_FLM_INSTALL=0
+                fi
+            elif [[ "${ACTUAL_SHA}" != "${FLM_DEB_SHA256}" ]]; then
+                warn "FLM .deb SHA-256 mismatch — refusing to install"
+                warn "  expected: ${FLM_DEB_SHA256}"
+                warn "  observed: ${ACTUAL_SHA}"
+                rm -f "${FLM_DEB_TMP}"
+                NEED_FLM_INSTALL=0
+            fi
+        else
+            warn "FLM .deb download failed (${FLM_DEB_URL})"
+            warn "  NPU paths will be unavailable until you install FastFlowLM ${FLM_DEB_VERSION} manually"
+            NEED_FLM_INSTALL=0
+        fi
+    fi
+
+    if [[ "${NEED_FLM_INSTALL}" -eq 1 ]]; then
+        # `apt-get install -y /path/to.deb` pulls transitive deps from
+        # apt (cleaner than `dpkg -i` + manual `apt-get -f install`).
+        if ui_spinner_run "Installing FastFlowLM ${FLM_DEB_VERSION}" \
+            apt-get install -y "${FLM_DEB_TMP}"; then
+            rm -f "${FLM_DEB_TMP}"
+            # Smoke-test the binary. `flm validate` returns 0 when the
+            # NPU runtime is reachable AND the binary is wired up — it's
+            # the upstream-recommended health check. Soft on failure:
+            # missing NPU hardware (e.g., installing on a non-Strix-Halo
+            # host) is a perfectly valid configuration.
+            if command -v flm >/dev/null 2>&1; then
+                if flm validate >/dev/null 2>&1; then
+                    info "flm validate ok — NPU runtime reachable"
+                else
+                    warn "flm validate failed — NPU hardware may be absent or libxrt-npu2 mismatched"
+                    warn "  GPU paths still work; NPU slots will stay disabled until 'flm validate' passes"
+                fi
+            else
+                warn "flm not on PATH after .deb install — check /var/log/apt/term.log"
+            fi
+        else
+            warn "FastFlowLM ${FLM_DEB_VERSION} install failed — NPU paths will be unavailable"
+            rm -f "${FLM_DEB_TMP}"
+        fi
+    fi
 fi
 
 # ── Lemonade server_models.json generation (issue #141) ───────────────────
