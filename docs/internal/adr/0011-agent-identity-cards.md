@@ -4,7 +4,16 @@
 - **Date:** 2026-05-23
 - **Drivers:** `/grill-me` session 2026-05-23 against `docs/internal/hermes-bootstrap-plan-2026-05-23.md`; bundled Hermes agent v0.3 needs to publish itself + discover peers
 - **Implementing PRs:** PR-1 (this ADR + new MCP admin tools) per the bootstrap plan §23
-- **Related:** ADR-0004 (Agents v0.2), ADR-0005 (Memory engine = Cognee)
+- **Related:** ADR-0004 (Agents v0.2), ADR-0005 (Memory engine = Cognee), **ADR-0012 (Remove auth and Caddy entirely)** — supersedes the bearer-token identity model assumed in Draft 2 of the bootstrap plan; identity now flows from an `X-hal0-Agent` header (no auth).
+
+## Identity sourcing update (post-ADR-0012)
+
+The `metadata.namespace` field in a card (`"private:<client_id>"`) is unchanged in shape but the **source of `client_id` changed**:
+
+- **Was (Draft 2 assumption):** `client_id` resolved from `Authorization: Bearer` token via `MCPAuthMiddleware`.
+- **Is (post-ADR-0012):** `client_id` is the value of the `X-hal0-Agent` request header, read by `MCPIdentityMiddleware` (renamed from `MCPAuthMiddleware`; rename + header swap are tracked as v0.3 stream-4 follow-up in ADR-0012).
+
+Schema v1 is otherwise unaffected — `agent_id` is still the canonical identifier, `namespace` is still `"private:<agent_id>"` by convention. Bootstrap configures the header in `mcp_servers.*.headers` (see bootstrap plan §8).
 
 ## Context
 

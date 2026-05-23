@@ -9,6 +9,23 @@
 
 ---
 
+## Draft 3 changelog (2026-05-23, post-ADR-0012)
+
+ADR-0012 (Remove auth and Caddy entirely) landed across PRs #254/#255/#256/#266
++ #267. The entire FastAPI auth surface was removed (no bearer, no password,
+no OTP, no token store); `MCPAuthMiddleware` survives as identity-stash and
+will be renamed `MCPIdentityMiddleware` reading an explicit `X-hal0-Agent`
+header. This invalidates Draft 2's Q3 (bearer token storage) resolution and
+the dependent install/config phases.
+
+| Was (Draft 2) | Is (Draft 3) | Source |
+|---|---|---|
+| Bearer token minted at `/var/lib/hal0/secrets/agents/hermes.env`, wrapper-sourced, + `hal0 agent rotate-token` CLI | **No bearer token.** Wrapper exports `HAL0_AGENT_ID=hermes-agent`; bootstrap configures `X-hal0-Agent: hermes-agent` header in mcp_servers; `rotate-token` CLI dropped entirely | ADR-0012 |
+| `mcp_servers.*.headers.Authorization: "Bearer ${HAL0_BEARER_TOKEN}"` | `mcp_servers.*.headers.X-hal0-Agent: "hermes-agent"` (memory keeps `X-hal0-Private: 1`) | ADR-0012 |
+| Preflight checks bearer availability + `/var/lib/hal0/secrets/` writable | Preflight drops both — no secrets file to provision | ADR-0012 |
+| `MCPAuthMiddleware` in code map | `MCPIdentityMiddleware` (rename + header swap is v0.3 stream-4 follow-up explicitly named in ADR-0012) | ADR-0012 |
+| Q3 banner in §21 | Marked SUPERSEDED by ADR-0012; original framing kept as historical | grilling |
+
 ## Draft 2 changelog (2026-05-23, post-grilling)
 
 | Was (Draft 1) | Is (Draft 2) | Source |
@@ -175,7 +192,7 @@ State lives at `/var/lib/hal0/state/agents/hermes/provision.json` —
   "hermes_version": "0.14.0",
   "hermes_home": "/var/lib/hal0/agents/hermes",
   "venv": "/var/lib/hal0/venvs/hermes",
-  "secrets_file": "/var/lib/hal0/secrets/agents/hermes.env",
+  "agent_id": "hermes-agent",
   "phases": {
     "preflight":          {"status":"ok","at":"...","hash":"abc..."},
     "install":            {"status":"ok","at":"...","hash":"..."},
@@ -201,7 +218,6 @@ State lives at `/var/lib/hal0/state/agents/hermes/provision.json` —
 **What it checks:**
 - Python 3.11+ available (`sys.version_info`).
 - `hal0` daemon reachable at `http://127.0.0.1:8080/api/status` (200 OK).
-- `HAL0_BEARER_TOKEN` available (from systemd creds or `/etc/hal0/auth.env`).
 - `/etc/hal0/` writable by the daemon user.
 - `/var/lib/hal0/agents/` writable.
 - Disk: ≥ 4 GiB free under `/var/lib/hal0/`.
@@ -227,9 +243,10 @@ agent broken" tickets. Detect early.
    (hard-pinned `hermes-agent==<pinned>`).
 3. Symlinks `/var/lib/hal0/venvs/hermes/bin/hermes` to `/usr/local/bin/hermes`.
 4. Copies the existing `installer/wrappers/hal0-hermes` wrapper to
-   `/usr/local/bin/hal0-hermes`. Wrapper sources
-   `/var/lib/hal0/secrets/agents/hermes.env` and exports
-   `HERMES_HOME=/var/lib/hal0/agents/hermes` before exec.
+   `/usr/local/bin/hal0-hermes`. Wrapper exports
+   `HERMES_HOME=/var/lib/hal0/agents/hermes` and
+   `HAL0_AGENT_ID=hermes-agent` before exec. (No secrets file
+   post-ADR-0012 — see §21 Q3 status.)
 5. Copies the two hal0-owned plugins from the hal0 wheel's package data
    into `$HERMES_HOME/plugins/`:
    - `plugins/memory/hal0-memory/__init__.py` → `Hal0MemoryProvider`
@@ -400,13 +417,13 @@ mcp_servers:
   hal0-admin:
     url: "http://127.0.0.1:8080/mcp/admin"
     headers:
-      Authorization: "Bearer ${HAL0_BEARER_TOKEN}"
+      X-hal0-Agent: "hermes-agent"
     timeout: 60
   hal0-memory:
     url: "http://127.0.0.1:8080/mcp/memory"
     headers:
-      Authorization: "Bearer ${HAL0_BEARER_TOKEN}"
-      X-hal0-Private: "1"           # opt into private:hermes-agent namespace
+      X-hal0-Agent: "hermes-agent"
+      X-hal0-Private: "1"           # opt into private:hermes-agent namespace (ADR-0011)
     timeout: 30
 
 skills:
@@ -450,10 +467,9 @@ hooks:
       timeout: 5
 ```
 
-`.env` (secrets only):
+`.env` (post-ADR-0012 — no auth secrets; only voice/optional):
 
 ```
-HAL0_BEARER_TOKEN={{ token }}                 # required for MCP auth
 {% if stt %}STT_OPENAI_BASE_URL={{ stt.backend_url }}
 VOICE_TOOLS_OPENAI_KEY=dummy{% endif %}
 GITHUB_TOKEN=                                  # optional; user-supplied
@@ -725,7 +741,6 @@ hal0 agent bootstrap hermes [--repair] [--dry-run] [--skip-phase NAME] [--offlin
 hal0 agent status hermes
 hal0 agent log hermes [--phase NAME]
 hal0 agent upgrade hermes [--to=<version>]
-hal0 agent rotate-token hermes
 hal0 agent uninstall hermes [--keep-memory]
 ```
 
@@ -740,13 +755,9 @@ hal0 agent uninstall hermes [--keep-memory]
 - `upgrade hermes` — bumps the Hermes pin in the venv, re-runs bootstrap
   in `--repair` mode against the new version. `--to=<version>` is the
   power-user escape hatch (and what we use for compat testing).
-- `rotate-token hermes` — mints a new bearer, writes
-  `/var/lib/hal0/secrets/agents/hermes.env`, restarts the wrapper. The
-  long-lived token policy in v0.3 makes this a manual operation; v1.0
-  hardening will add scheduled rotation.
 - `uninstall hermes` — removes venv, plugins, HERMES_HOME (unless
-  `--keep-memory`), the identity card in the `agents` dataset, the
-  systemd unit, and the bearer token file.
+  `--keep-memory`), the identity card in the `agents` dataset, and the
+  systemd unit. (No bearer token file to remove post-ADR-0012.)
 
 `hal0 agent install hermes` (existing) becomes a **thin wrapper** that
 calls `bootstrap hermes` after the existing install. No behavior split
@@ -785,9 +796,9 @@ provider plugin + tests added the delta).
 
 | Path | Change |
 |---|---|
-| `src/hal0/agents/hermes.py` | Existing `HermesDriver.install()` calls into `hermes_provision.run()` after the venv install. The 4-line env file moves to `/var/lib/hal0/secrets/agents/hermes.env`; non-secret config moves to `config.yaml` rendered by Phase E. |
+| `src/hal0/agents/hermes.py` | Existing `HermesDriver.install()` calls into `hermes_provision.run()` after the venv install. Non-secret config goes to `config.yaml` rendered by Phase E. (Post-ADR-0012: no secrets file; identity is the `HAL0_AGENT_ID` env var exported by the wrapper.) |
 | `installer/agents/hermes-agent.sh` | After upstream venv install, exec the new bootstrap shell hook. |
-| `installer/wrappers/hal0-hermes` | Source `/var/lib/hal0/secrets/agents/hermes.env`; export `HERMES_HOME=/var/lib/hal0/agents/hermes`; exec `/var/lib/hal0/venvs/hermes/bin/hermes`. |
+| `installer/wrappers/hal0-hermes` | Export `HERMES_HOME=/var/lib/hal0/agents/hermes` and `HAL0_AGENT_ID=hermes-agent`; exec `/var/lib/hal0/venvs/hermes/bin/hermes`. (No secrets file post-ADR-0012.) |
 | `src/hal0/mcp/admin.py` | Add reusable tools: `gpu_target_version`, `npu_status`, `model_store_probe`, `env_report` (per env-probe agent's recos). |
 | `src/hal0/api/routes/installer.py` | New `POST /api/agents/hermes/bootstrap` route (so dashboard's first-run wizard can trigger it). |
 | `docs/internal/adr/0004-agents.md` | Append §11 referencing this plan + the two hal0-owned plugin commitments. |
@@ -923,7 +934,8 @@ Original list (numbered for `/grill-me` to attack one at a time):
 13. **Cognee namespace migration when v0.4 federates.** Plan = ignore
     for now; ADR-0006 (pending) will handle.
 
-14. **Where does the bearer token come from on first install?** Plan =
+14. **[SUPERSEDED by ADR-0012]** Where does the bearer token come from on
+    first install? Original plan =
     hal0 daemon mints a long-lived bearer for the Hermes agent on first
     install, stores it in `/etc/hal0/agents/hermes/secrets.env` (mode
     0600). Lifecycle managed by hal0, not the user.

@@ -248,3 +248,35 @@ Notes:
 ## two-tier scope
 
 Access-control pattern for the admin MCP per ADR-0004. Routine ops (slot status, `model_swap`, `hardware_probe`, `memory_add`, etc.) = autonomous. Capital-D destructives (`model_pull`, `slot_delete`, `config_write`, `memory_delete` >1 record, etc.) = gated via the dashboard approval inbox. No per-agent trust toggle (destructives must always be approved).
+
+---
+
+# v0.3 vocabulary (added 2026-05-23)
+
+## agent identity card
+
+A memory item published by a bundled agent during its first-run bootstrap, recording who-it-is and how-to-reach-it. Lives in the dedicated `agents` Cognee dataset (NOT `shared`, NOT `private:*`), tagged `agent-identity`. Immutable — written once, cleaned on uninstall. Schema v1 pins required fields in `metadata`: `agent_id`, `display_name`, `namespace`, `hal0_state.{registered_at, bootstrap_version, hal0_version, hermes_version}`. The `text` field is a human-readable summary. See [ADR-0011](docs/internal/adr/0011-agent-identity-cards.md).
+
+## agents dataset
+
+Cognee dataset reserved for agent identity cards. Separate from `shared` (episodic memory) and `private:*` (per-agent working memory). Small forever (5-10 cards). Discoverable via `memory_search({dataset: "agents", tags: ["agent-identity"]})`. Foundation for multi-agent discovery in v0.3+.
+
+## Hal0Profile
+
+A hal0-owned Hermes plugin extending `providers.base.ProviderProfile`. Lives at `$HERMES_HOME/plugins/model-providers/hal0/`. Hardcodes the local Lemonade base URL, emits a hal0-distinct `User-Agent`, and is the extension point for Lemonade-specific request shaping (e.g., keep-alive injection). Packaged inside the hal0 wheel, copied into HERMES_HOME by bootstrap. v0.3.
+
+## Hal0MemoryProvider
+
+A hal0-owned Hermes plugin extending `agent.memory_provider.MemoryProvider`. Lives at `$HERMES_HOME/plugins/memory/hal0-memory/`. Native memory injection: implements `system_prompt_block`, `prefetch`, `sync_turn`, etc. — memory is part of the prompt, not a tool the agent has to remember to call. Talks to `hal0-memory` MCP at `/mcp/memory` over HTTP. v0.3.
+
+## hermes_provision
+
+The hal0 module at `src/hal0/agents/hermes_provision.py` that orchestrates the 12-phase Hermes bootstrap (preflight → install → env_probe → home_init → config_write → mcp_wire → context_link → namespace_register → model_automap → voice_wire → smoke_tests → self_report). Idempotent + checkpointed via `/var/lib/hal0/state/agents/hermes/provision.json`. CLI verb is `hal0 agent bootstrap hermes`. Renamed from `hermes_bootstrap.py` to avoid soft collision with upstream's Windows-UTF8 module of the same filename.
+
+## HERMES_HOME (v0.3)
+
+Pinned to `/var/lib/hal0/agents/hermes/` for hal0-bundled installs (not `~/.hermes`). Multi-agent-root-ready: pi-coder and future agents land at `/var/lib/hal0/agents/<name>/`. Wrapper `/usr/local/bin/hal0-hermes` sources `/var/lib/hal0/secrets/agents/hermes.env`, exports `HERMES_HOME`, and execs `/var/lib/hal0/venvs/hermes/bin/hermes`. Raw `/usr/local/bin/hermes` stays unwrapped so human SSH sessions get normal behavior.
+
+## v0.3
+
+The active milestone (2026-05-23 →). Five interlocking streams: (1) Hermes-Agent first-run bootstrap, (2) React dashboard v3 wired to live data, (3) Lemonade polish (preload+idle, GPU TTS, KV%, `/v1/*` proxy), (4) Admin/auth simplification (ADR-0001 close-out: FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced memory + MCP client side (Cognee graph + Memify + federation + per-agent external MCP allow-list). v0.3 ships when all five close. See PLAN.md §1 v0.3 + §15 Phase 10.
