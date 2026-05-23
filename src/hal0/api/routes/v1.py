@@ -234,7 +234,31 @@ async def _dispatch_and_forward(
 ) -> Response:
     if body is None:
         body = await _read_json_body(request)
-    call = await dispatcher.dispatch(request, body=body)
+    from hal0.dispatcher.router import NoRouteFound
+
+    try:
+        call = await dispatcher.dispatch(request, body=body)
+    except NoRouteFound:
+        # Lemonade proxy fall-through (#275 bug 5). The dispatcher only
+        # knows about models advertised by configured upstreams + the
+        # hal0 model registry. Models pulled via Lemonade `/v1/pull`
+        # land in lemond's loaded[] but never in hal0's registry, so
+        # the dispatcher's `dispatch_and_forward` would 404 on them
+        # even though they're perfectly serveable.
+        #
+        # Delegate to the catch-all `/v1/{path:path}` proxy (PR #248)
+        # which forwards verbatim to lemond. This preserves the
+        # specialized routes' value (OmniRouter tool-call loop, FLM
+        # trio detection, TTFT instrumentation) for the cases they
+        # actually handle, while letting bare Lemonade-loaded models
+        # round-trip through hal0-api without registry registration.
+        from hal0.api.routes.lemonade_proxy import _proxy
+
+        # `request.url.path` is e.g. `/v1/chat/completions`; `_proxy`
+        # expects the path AFTER `/v1/` as its second arg (FastAPI's
+        # path converter strips it before passing).
+        proxy_path = request.url.path.removeprefix("/v1/").lstrip("/")
+        return await _proxy(request, proxy_path)
     # Remember the most recent model we sent to this upstream so the
     # dashboard's synthetic slot reflects what's actually being used,
     # not the first-non-alias from the catalog.
