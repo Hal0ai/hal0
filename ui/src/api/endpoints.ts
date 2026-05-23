@@ -55,10 +55,6 @@ export const ENDPOINTS = {
   updateState: '/api/updates/state',
   updateCheck: '/api/updates/check',
   updateApply: '/api/updates/apply',
-  // Auth
-  authToken: '/api/auth/token',
-  authTokenRotate: '/api/auth/token/rotate',
-  authAllowedOrigins: '/api/auth/allowed-origins',
   // Secrets
   secrets: '/api/secrets',
   secret: (name: string) => `/api/secrets/${encodeURIComponent(name)}`,

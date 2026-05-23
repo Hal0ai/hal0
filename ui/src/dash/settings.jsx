@@ -1,12 +1,10 @@
-// hal0 dashboard — Settings view (auth, secrets, updates, lemond admin, omnirouter, memory, agent policy)
+// hal0 dashboard — Settings view (secrets, updates, lemond admin, omnirouter, memory, agent policy)
 //
-// Phase B1: Auth (token + allowed origins), Secrets, Updates, and the
-// Lemonade admin version readouts pull from live hooks; AgentPolicy +
-// Memory (Cognee) stay scripted (their backends live behind the Agent
-// surface, deferred to B2). Capabilities hook feeds the Lemonade admin
-// section's per-cap fields.
+// Phase B1: Secrets, Updates, and the Lemonade admin version readouts
+// pull from live hooks; AgentPolicy + Memory (Cognee) stay scripted
+// (their backends live behind the Agent surface, deferred to B2).
+// Capabilities hook feeds the Lemonade admin section's per-cap fields.
 
-import { useAuthToken, useAuthTokenReveal, useAuthTokenRotate, useAllowedOrigins } from '@/api/hooks/useAuth'
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
 import { useUpdateState, useUpdateCheck, useUpdateApply } from '@/api/hooks/useUpdates'
 import { useCapabilities, useCapabilityPatch } from '@/api/hooks/useCapabilities'
@@ -15,9 +13,8 @@ import { useLemondRollup, useLemonadeStats } from '@/api/hooks/useLemonade'
 const { useState: useStateSet } = React;
 
 function SettingsView() {
-  const [section, setSection] = useStateSet("auth");
+  const [section, setSection] = useStateSet("secrets");
   const sections = [
-    { id: "auth",      label: "Auth" },
     { id: "secrets",   label: "Secrets" },
     { id: "updates",   label: "Updates" },
     { id: "lemonade",  label: "Lemonade admin" },
@@ -51,7 +48,6 @@ function SettingsView() {
         </div>
 
         <div className="settings-content">
-          {section === "auth" && <AuthSection />}
           {section === "secrets" && <SecretsSection />}
           {section === "updates" && <UpdatesSection />}
           {section === "lemonade" && <LemonadeSection />}
@@ -77,68 +73,6 @@ const SRow = ({ k, sub, v, mono, children, actions }) => (
     {actions && <div className="ac">{actions}</div>}
   </div>
 );
-
-function AuthSection() {
-  const [showToken, setShowToken] = useStateSet(false);
-  const [rotateOpen, setRotateOpen] = useStateSet(false);
-  // Phase B1: live token info + reveal-on-demand + rotate mutation.
-  const tokenQuery = useAuthToken();
-  const reveal = useAuthTokenReveal();
-  const rotate = useAuthTokenRotate();
-  const originsQuery = useAllowedOrigins();
-  const tokenMasked = tokenQuery.data?.token_masked || 'hal0-•••••••••••••••••••••••••••••••••';
-  const tokenPlain = reveal.data?.token;
-  const issued = tokenQuery.data?.issued || '—';
-  const origins = originsQuery.data?.origins || [];
-  return (
-    <div className="s-section">
-      <h2>Auth</h2>
-      <p className="desc">hal0's Bearer-token boundary. The dashboard, CLI, and Open WebUI use this token. Lemonade itself runs loopback-only and never sees the token.</p>
-      <div className="s-panel">
-        <SRow
-          k="hal0 Bearer token"
-          sub="Required by hal0-api · ADR-0001"
-          mono
-          v={<span>{showToken && tokenPlain ? tokenPlain : tokenMasked}</span>}
-          actions={<>
-            <button className="btn ghost sm" onClick={() => {
-              if (!showToken) reveal.mutate();
-              setShowToken(s => !s);
-            }}>{showToken ? "Hide" : "Show"}</button>
-            <button className="btn ghost sm" onClick={() => setRotateOpen(true)}>{Icons.restart} Rotate</button>
-            <button className="btn ghost sm" onClick={() => {
-              if (tokenPlain) navigator.clipboard?.writeText(tokenPlain);
-              window.__hal0Toast && window.__hal0Toast("Token copied", "ok");
-            }}>Copy</button>
-          </>}
-        />
-        <SRow k="Issued" v={issued} mono />
-        <SRow
-          k="Allowed origins"
-          sub="CORS — UI hosts permitted to call hal0-api"
-          mono
-          v={<span>{origins.length > 0 ? origins.join(', ') : '—'}</span>}
-          actions={<button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Allowed-origins editor — stub", "info")}>{Icons.edit} Edit</button>}
-        />
-      </div>
-
-      <ConfirmDialog
-        open={rotateOpen}
-        onCancel={() => setRotateOpen(false)}
-        onConfirm={() => {
-          rotate.mutate(undefined, {
-            onSuccess: () => window.__hal0Toast && window.__hal0Toast("Token rotated — update CLI + agents", "warn"),
-            onError: (e) => window.__hal0Toast && window.__hal0Toast(`Rotate failed: ${e?.message || 'unknown'}`, "err"),
-          });
-          setRotateOpen(false);
-        }}
-        title="Rotate the hal0 Bearer token?"
-        message={<span>The current token is revoked immediately. Running scripts, agents, and CLI sessions using the old token will lose access and must be re-authorised. The new token is shown <b>once</b> after rotation — copy it before closing the dialog.</span>}
-        confirmLabel="Rotate token"
-      />
-    </div>
-  );
-}
 
 function SecretsSection() {
   const [addOpen, setAddOpen] = useStateSet(false);
