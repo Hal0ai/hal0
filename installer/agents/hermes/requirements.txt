@@ -1,0 +1,13 @@
+# hal0 — hard-pinned Hermes-Agent runtime requirements (v0.3, issue #240).
+#
+# The hal0 bootstrap creates a managed venv at /var/lib/hal0/venvs/hermes/
+# with explicit Python 3.11 and installs from this file. Bumping the pin
+# requires a hal0 release; the `hal0 agent upgrade hermes [--to=<version>]`
+# CLI exists for power users + compat-testing escape hatches.
+#
+# Why a hard pin: Hermes ships breaking config-schema changes between
+# minor releases. Pinning here means a hal0 upgrade is the single point
+# at which Hermes moves — operators don't get surprised by `hermes setup`
+# rewriting their config.yaml.
+
+hermes-agent==0.14.0

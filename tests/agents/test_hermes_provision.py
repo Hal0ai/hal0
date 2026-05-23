@@ -20,10 +20,39 @@ slice notices.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from hal0.agents import hermes_provision as hp
+
+
+@pytest.fixture
+def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
+    """Seed a :class:`BootstrapState` rooted in ``tmp_path`` with externals stubbed.
+
+    The real preflight + install phases reach for ``/var/lib/hal0/*``,
+    spawn ``python -m venv``, and HTTP-poke ``127.0.0.1:8080``. Every
+    pipeline-level test needs these dimmed out so the orchestrator's
+    behaviour is what's under test, not the LXC.
+    """
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    var_lib.mkdir(parents=True)
+    venv = var_lib / "venvs" / "hermes"
+    hermes_home = var_lib / "agents" / "hermes"
+    monkeypatch.setattr(hp, "_http_get", lambda *_a, **_kw: 200)
+    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)  # /tmp may be tmpfs with little headroom
+    monkeypatch.setattr(
+        hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
+    )
+
+    def _fake_install(v: Path, _req: Path, **_kwargs: Any) -> None:
+        (v / "bin").mkdir(parents=True, exist_ok=True)
+        (v / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
+        (v / "bin" / "hermes").chmod(0o755)
+
+    monkeypatch.setattr(hp, "_install_venv", _fake_install)
+    return hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
 
 def test_phase_names_in_planned_order() -> None:
@@ -50,8 +79,10 @@ def test_phase_names_in_planned_order() -> None:
     assert expected == hp.PHASE_NAMES
 
 
-def test_run_marks_every_phase_ok_on_fresh(tmp_path: Path) -> None:
-    result = hp.run(state_root=tmp_path)
+def test_run_marks_every_phase_ok_on_fresh(
+    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState
+) -> None:
+    result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
     for name in hp.PHASE_NAMES:
         assert result.phases[name]["status"] == hp.PhaseStatus.OK.value
     assert result.failed == []
@@ -59,8 +90,10 @@ def test_run_marks_every_phase_ok_on_fresh(tmp_path: Path) -> None:
     assert result.skipped == []
 
 
-def test_state_file_written_and_round_trips(tmp_path: Path) -> None:
-    hp.run(state_root=tmp_path)
+def test_state_file_written_and_round_trips(
+    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState
+) -> None:
+    hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
     state_file = tmp_path / "provision.json"
     assert state_file.exists()
     loaded = hp.BootstrapState.load(tmp_path)
@@ -70,25 +103,33 @@ def test_state_file_written_and_round_trips(tmp_path: Path) -> None:
     assert loaded.completed_at is not None
 
 
-def test_rerun_is_noop_when_all_phases_ok(tmp_path: Path) -> None:
-    hp.run(state_root=tmp_path)
-    second = hp.run(state_root=tmp_path)
+def test_rerun_is_noop_when_all_phases_ok(
+    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState
+) -> None:
+    hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
+    second = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
     # All phases skipped because their checkpoint is already ok.
     assert set(second.skipped) == set(hp.PHASE_NAMES)
     assert second.failed == []
 
 
-def test_repair_flag_forces_rerun(tmp_path: Path) -> None:
-    hp.run(state_root=tmp_path)
-    second = hp.run(state_root=tmp_path, repair=True)
+def test_repair_flag_forces_rerun(tmp_path: Path, state_with_tmp_paths: hp.BootstrapState) -> None:
+    hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
+    second = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, repair=True)
     # Repair re-runs everything → nothing was skipped via checkpoint.
     assert second.skipped == []
     for name in hp.PHASE_NAMES:
         assert second.phases[name]["status"] == hp.PhaseStatus.OK.value
 
 
-def test_skip_phase_records_skip_reason(tmp_path: Path) -> None:
-    result = hp.run(state_root=tmp_path, skip_phases=("voice_wire", "smoke_tests"))
+def test_skip_phase_records_skip_reason(
+    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState
+) -> None:
+    result = hp.run(
+        state_root=tmp_path,
+        initial_state=state_with_tmp_paths,
+        skip_phases=("voice_wire", "smoke_tests"),
+    )
     assert result.phases["voice_wire"]["status"] == hp.PhaseStatus.SKIP.value
     assert result.phases["voice_wire"]["reason"] == "--skip-phase"
     assert result.phases["smoke_tests"]["status"] == hp.PhaseStatus.SKIP.value
@@ -96,8 +137,10 @@ def test_skip_phase_records_skip_reason(tmp_path: Path) -> None:
     assert result.phases["preflight"]["status"] == hp.PhaseStatus.OK.value
 
 
-def test_dry_run_skips_state_persistence(tmp_path: Path) -> None:
-    hp.run(state_root=tmp_path, dry_run=True)
+def test_dry_run_skips_state_persistence(
+    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState
+) -> None:
+    hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, dry_run=True)
     assert not (tmp_path / "provision.json").exists()
 
 
@@ -136,22 +179,34 @@ def test_content_hash_is_stable_and_collision_free() -> None:
 
 
 def test_failed_phase_surfaces_in_result_and_blocks_completion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_with_tmp_paths: hp.BootstrapState,
 ) -> None:
     def _failing(_state: hp.BootstrapState) -> hp.PhaseResult:
         return hp.PhaseResult(status=hp.PhaseStatus.FAIL, reason="forced")
 
-    # Patch the env_probe stub for this test only.
     new_phases = [(name, _failing if name == "env_probe" else fn) for name, fn in hp.PHASES]
     monkeypatch.setattr(hp, "PHASES", new_phases)
 
-    result = hp.run(state_root=tmp_path)
+    result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
     assert "env_probe" in result.failed
     assert result.state.completed_at is None
     assert any("env_probe" in e for e in result.state.errors)
 
 
-def test_cli_entry_returns_zero_on_success(tmp_path: Path) -> None:
+def test_cli_entry_returns_zero_on_success(
+    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # bootstrap_cli doesn't take an initial_state kwarg directly — wrap
+    # `run` so the test still threads the tmp-rooted state through.
+    real_run = hp.run
+
+    def _wrapped(**kwargs: Any) -> hp.RunResult:
+        kwargs.setdefault("initial_state", state_with_tmp_paths)
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(hp, "run", _wrapped)
     rc = hp.bootstrap_cli(
         repair=False,
         dry_run=False,
@@ -162,12 +217,24 @@ def test_cli_entry_returns_zero_on_success(tmp_path: Path) -> None:
     assert rc == 0
 
 
-def test_cli_entry_returns_one_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_entry_returns_one_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_with_tmp_paths: hp.BootstrapState,
+) -> None:
     def _failing(_state: hp.BootstrapState) -> hp.PhaseResult:
         return hp.PhaseResult(status=hp.PhaseStatus.FAIL, reason="boom")
 
     new_phases = [(name, _failing if name == "preflight" else fn) for name, fn in hp.PHASES]
     monkeypatch.setattr(hp, "PHASES", new_phases)
+
+    real_run = hp.run
+
+    def _wrapped(**kwargs: Any) -> hp.RunResult:
+        kwargs.setdefault("initial_state", state_with_tmp_paths)
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(hp, "run", _wrapped)
     rc = hp.bootstrap_cli(
         repair=False,
         dry_run=False,
@@ -176,3 +243,136 @@ def test_cli_entry_returns_one_on_failure(tmp_path: Path, monkeypatch: pytest.Mo
         state_root=tmp_path,
     )
     assert rc == 1
+
+
+# ── #240 phase impls — preflight / install / home_init ──────────────────────
+
+
+def test_preflight_passes_when_inputs_meet_minimums(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    var_lib.mkdir(parents=True)
+    venv = var_lib / "venvs" / "hermes"
+    state = hp.BootstrapState(venv=str(venv))
+    monkeypatch.setattr(hp, "_http_get", lambda *_a, **_kw: 200)
+    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
+    out = hp._phase_preflight(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["python_version"]
+    assert out.details["daemon_http_status"] == 200
+
+
+def test_preflight_fails_on_unreachable_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    var_lib.mkdir(parents=True)
+    state = hp.BootstrapState(venv=str(var_lib / "venvs" / "hermes"))
+    monkeypatch.setattr(hp, "_http_get", lambda *_a, **_kw: 0)
+    out = hp._phase_preflight(state)
+    assert out.status == hp.PhaseStatus.FAIL
+    assert "daemon unreachable" in (out.reason or "")
+
+
+def test_preflight_fails_on_var_lib_not_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hp, "_http_get", lambda *_a, **_kw: 200)
+    state = hp.BootstrapState(venv=str(tmp_path / "nope" / "venvs" / "hermes"))
+    out = hp._phase_preflight(state)
+    assert out.status == hp.PhaseStatus.FAIL
+    assert "not writable" in (out.reason or "")
+
+
+def test_home_init_creates_layout_with_marker(tmp_path: Path) -> None:
+    hermes_home = tmp_path / "hermes_home"
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    out = hp._phase_home_init(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert hermes_home.is_dir()
+    assert (hermes_home / ".hal0-managed").is_file()
+    for sub in ("memories", "skills", "plugins/memory", "plugins/model-providers", "logs"):
+        assert (hermes_home / sub).is_dir()
+
+
+def test_home_init_idempotent_on_managed_dir(tmp_path: Path) -> None:
+    hermes_home = tmp_path / "hermes_home"
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    hp._phase_home_init(state)
+    marker_before = (hermes_home / ".hal0-managed").read_text()
+    out2 = hp._phase_home_init(state)
+    assert out2.status == hp.PhaseStatus.OK
+    assert (hermes_home / ".hal0-managed").read_text() == marker_before
+
+
+def test_home_init_refuses_to_clobber_non_managed_dir(tmp_path: Path) -> None:
+    hermes_home = tmp_path / "user_hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text("# user file")
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    out = hp._phase_home_init(state)
+    assert out.status == hp.PhaseStatus.FAIL
+    assert "not hal0-managed" in (out.reason or "")
+
+
+def test_install_phase_skips_venv_when_binary_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
+    (venv / "bin" / "hermes").chmod(0o755)
+
+    wrapper_dst = tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
+    monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", wrapper_dst)
+    hermes_home = tmp_path / "hermes_home"
+    state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
+
+    called: list[Any] = []
+
+    def _no_install(*args: Any, **kwargs: Any) -> None:
+        called.append(args)
+
+    monkeypatch.setattr(hp, "_install_venv", _no_install)
+
+    out = hp._phase_install(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert called == []
+    assert wrapper_dst.is_file()
+    assert (hermes_home / "plugins" / "model-providers" / "hal0" / "__init__.py").is_file()
+    assert (hermes_home / "plugins" / "memory" / "hal0-memory" / "__init__.py").is_file()
+
+
+def test_install_phase_runs_venv_install_when_binary_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv = tmp_path / "venv"
+    wrapper_dst = tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
+    monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", wrapper_dst)
+    hermes_home = tmp_path / "hermes_home"
+    state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
+
+    install_calls: list[Path] = []
+
+    def _fake_install(v: Path, _req: Path, **_kwargs: Any) -> None:
+        install_calls.append(v)
+        (v / "bin").mkdir(parents=True, exist_ok=True)
+        (v / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
+        (v / "bin" / "hermes").chmod(0o755)
+
+    monkeypatch.setattr(hp, "_install_venv", _fake_install)
+    out = hp._phase_install(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert install_calls == [venv]
+
+
+def test_resolve_python311_prefers_explicit_when_available() -> None:
+    out = hp._resolve_python311(prober=lambda _name: "/opt/python3.11/bin/python3.11")
+    assert out == "/opt/python3.11/bin/python3.11"
+
+
+def test_resolve_python311_falls_back_to_sys_executable() -> None:
+    out = hp._resolve_python311(prober=lambda _name: None)
+    # CI runs on >= 3.11 (pyproject pin); falls back to sys.executable.
+    assert out is not None
