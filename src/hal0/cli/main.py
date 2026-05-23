@@ -32,6 +32,7 @@ from hal0.cli.agent_commands import app as agent_app
 from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
+from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.migrate_commands import app as migrate_app
 from hal0.cli.model_commands import app as model_app
 from hal0.cli.registry_commands import app as registry_app
@@ -54,6 +55,10 @@ app = typer.Typer(
 # Mount sub-apps
 app.add_typer(slot_app, name="slot")
 app.add_typer(model_app, name="model")
+# Issue #258 — ``hal0 memory graph {status,enable,disable}`` ADR-0014 surface.
+# Mounted between ``model`` and ``config`` so it sits alongside the other
+# user-facing data subcommands rather than buried under operator surfaces.
+app.add_typer(memory_app, name="memory")
 app.add_typer(config_app, name="config")
 app.add_typer(doctor_app, name="doctor")
 app.add_typer(capabilities_app, name="capabilities")
