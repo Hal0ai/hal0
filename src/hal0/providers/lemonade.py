@@ -445,6 +445,15 @@ class LemonadeProvider(Provider):
         Returns Lemonade's parsed JSON response. When the slot has no
         ``model.default`` (never been loaded), returns ``{"ok": True,
         "noop": "no model to unload"}`` without hitting the network.
+
+        Also short-circuits when the slot's model exists in config but
+        isn't currently in Lemonade's ``/v1/health.loaded[]`` — calling
+        ``/v1/unload`` against a not-loaded model name 404s, which the
+        seed-vs-runtime distinction (see memory
+        ``hal0_primary_slot_seed_vs_runtime``) makes a routine
+        occurrence: the dashboard's Unload button on a slot whose
+        seed ``model.default`` has never been loaded would otherwise
+        surface as a 500 error to the user.
         """
         cfg = _to_dict(slot_cfg)
         model_name = _slot_model(cfg)
@@ -454,6 +463,23 @@ class LemonadeProvider(Provider):
                 extra={"slot": cfg.get("name")},
             )
             return {"ok": True, "noop": "no model to unload"}
+        # Probe loaded[] before issuing /v1/unload to avoid 404s on
+        # seed-but-never-loaded slots. status() never raises.
+        snap = await self.status(cfg)
+        if not snap.get("loaded"):
+            log.info(
+                "lemonade.provider.unload_noop_not_loaded",
+                extra={
+                    "slot": cfg.get("name"),
+                    "model_name": model_name,
+                    "reason": snap.get("reason"),
+                },
+            )
+            return {
+                "ok": True,
+                "noop": "model not currently loaded",
+                "model_name": model_name,
+            }
         log.info(
             "lemonade.provider.unload",
             extra={"slot": cfg.get("name"), "model_name": model_name},

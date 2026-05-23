@@ -194,6 +194,20 @@ async def test_unload_posts_model_name_to_v1_unload() -> None:
     captured: dict[str, Any] = {}
 
     def h(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/health":
+            # Model IS loaded — unload should proceed to /v1/unload.
+            return httpx.Response(
+                200,
+                json={
+                    "loaded": [
+                        {
+                            "model_name": "hermes-4-14b",
+                            "backend_url": "http://127.0.0.1:14000",
+                            "last_use": 1715000000.0,
+                        }
+                    ]
+                },
+            )
         assert req.url.path == "/v1/unload"
         captured["body"] = _json.loads(req.content.decode())
         return httpx.Response(200, json={"status": "unloaded"})
@@ -212,6 +226,29 @@ async def test_unload_is_noop_when_no_model_default() -> None:
     provider = LemonadeProvider(client=_mock_client(h))
     result = await provider.unload(_slot_cfg(model={"default": ""}))
     assert result == {"ok": True, "noop": "no model to unload"}
+
+
+@pytest.mark.asyncio
+async def test_unload_is_noop_when_model_not_in_loaded() -> None:
+    """Seed-but-never-loaded slots: avoid the Lemonade 404 by probing
+    /v1/health first. Regression for PR #270 follow-up."""
+    saw_unload = False
+
+    def h(req: httpx.Request) -> httpx.Response:
+        nonlocal saw_unload
+        if req.url.path == "/v1/health":
+            # Empty loaded[] — the slot's model_default has never been loaded.
+            return httpx.Response(200, json={"loaded": []})
+        if req.url.path == "/v1/unload":
+            saw_unload = True
+        raise AssertionError(f"unexpected path: {req.url.path}")
+
+    provider = LemonadeProvider(client=_mock_client(h))
+    result = await provider.unload(_slot_cfg())
+    assert result["ok"] is True
+    assert result["noop"] == "model not currently loaded"
+    assert result["model_name"] == "hermes-4-14b"
+    assert saw_unload is False
 
 
 # ── status() ─────────────────────────────────────────────────────────
