@@ -722,15 +722,22 @@ class SlotManager:
         # Reconcile with lemond reality.
         observed = rec.state
         if observed in (SlotState.READY, SlotState.SERVING, SlotState.IDLE) and not active:
-            # lemond says the model is not loaded; record reflects
-            # ready — drift, demote to ERROR.
+            # lemond says the model is not loaded; record reflects ready.
+            # This is drift but NOT a slot-config error — Lemonade evicts
+            # models on its own (LRU per-type budget, nuclear evict on a
+            # different model's load failure, idle-unload driver, etc.).
+            # Demoting to ERROR was the old "slot broken" semantics from
+            # the per-slot-systemd model; under Lemonade, an evicted model
+            # is a perfectly recoverable state — the dispatcher reloads on
+            # next request. Surface as OFFLINE so the card chip shows the
+            # neutral "not loaded" state rather than red ERROR.
             await self._transition(
                 slot_name,
-                SlotState.ERROR,
-                message="model not loaded in lemond",
+                SlotState.OFFLINE,
+                message="model evicted from lemond (auto-reloads on next request)",
                 force=True,
             )
-            observed = SlotState.ERROR
+            observed = SlotState.OFFLINE
         elif observed in (SlotState.OFFLINE, SlotState.ERROR) and active:
             # Inverse drift — state.json says we're not running, but
             # lemond holds the model. Adoption picks the slot up.

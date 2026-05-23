@@ -332,13 +332,21 @@ async def test_status_reconciles_drift(
     slot_root: Path,
     lemonade_loaded_stub: dict[str, Any],
 ) -> None:
-    """A persisted READY plus an empty lemond loaded[] must transition to ERROR."""
+    """A persisted READY plus an empty lemond loaded[] transitions to OFFLINE.
+
+    Was ERROR pre-issue-#275 (per-slot-systemd era treated drift as
+    slot-broken). Under Lemonade, eviction is normal (per-type LRU
+    budget + nuclear evict + idle-unload driver all evict without
+    breaking the slot config), so we demote to OFFLINE with a neutral
+    message that the dispatcher reloads on next request.
+    """
     sm = SlotManager()
     await sm.load("primary")
     # Mutate the stub state so lemond no longer reports the model loaded.
     lemonade_loaded_stub["loaded"] = []
     snap = await sm.status("primary")
-    assert snap.state == SlotState.ERROR
+    assert snap.state == SlotState.OFFLINE
+    assert "evicted" in (snap.metadata.get("message") or "").lower()
 
 
 async def test_status_adopts_running_slot_when_lemond_holds_model(
