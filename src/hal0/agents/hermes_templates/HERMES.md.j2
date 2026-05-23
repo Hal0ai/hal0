@@ -1,0 +1,52 @@
+{# Cwd-injected context file (drops into /etc/hal0/HERMES.md).
+   Hermes auto-injects this on every session because terminal.cwd =
+   /etc/hal0 (set by config_write phase per plan §8).
+
+   Parameters: env, primary (dict|None), chat_slots (list), peer_agents (list),
+   hal0_version, hermes_version.
+#}# Where you are
+
+- Host: {{ env.container.product_name | default("unknown") }}{% if env.container.kind %} ({{ env.container.kind }}){% endif %}
+- Platform: {{ env.cpu.model | default("unknown") }}
+- hal0 version: {{ hal0_version }} / hermes-agent: {{ hermes_version }}
+- Memory MCP: `hal0_memory` (auto-loaded; you have full read/write on `private:hermes-agent`)
+- Admin MCP: `hal0_admin` (auto-loaded; autonomous read on all status tools, gated on destructive)
+
+# Active capability slots
+{% if primary %}
+- **primary** (chat/{{ primary.alias | default("primary") }}): `{{ primary.model_id }}`
+  - Endpoint: {{ primary.backend_url }} (alias `model_aliases.primary`)
+{%- endif %}
+{%- if chat_slots %}
+{%- for slot in chat_slots %}
+- **{{ slot.alias }}** (chat): `{{ slot.model_id }}`
+  - {{ slot.backend_url }} → call via `model_aliases.{{ slot.alias }}`
+{%- endfor %}
+{%- endif %}
+{%- if not primary and not chat_slots %}
+- _no chat slots loaded — wire one via `hal0 slot create` then re-run bootstrap with `--repair`._
+{%- endif %}
+
+# Peer agents
+{% if peer_agents %}
+{%- for peer in peer_agents %}
+- **{{ peer.display_name | default(peer.agent_id) }}** (`{{ peer.agent_id }}`)
+  - Roles: {{ peer.roles | default([]) | join(", ") or "—" }}
+  - Endpoint: {{ peer.endpoint_url | default("(internal)") }}
+{%- endfor %}
+{%- else %}
+- _no peer agents registered yet (none have published an identity card)._
+{%- endif %}
+
+# Skills
+
+- Hal0-managed skills mirror at `/etc/hal0/agent-skills/` (read-only).
+- Your own skills land in `$HERMES_HOME/skills/` (you may write here).
+
+# Conventions
+
+- The dashboard at https://hal0.thinmint.dev shows live slot state.
+- Never edit slot TOMLs directly — use `hal0_admin:capability_set`.
+- Never run `hermes setup` — it will overwrite your model wiring.
+- Bootstrap is `hal0 agent bootstrap hermes`; `--repair` re-renders
+  this file + config.yaml from current state.

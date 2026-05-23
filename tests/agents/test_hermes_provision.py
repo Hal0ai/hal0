@@ -19,6 +19,7 @@ slice notices.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -683,3 +684,80 @@ def test_mcp_wire_phase_skips_server_not_in_allowlist(
     assert out.details["servers"]["hal0-memory"]["status"] == "skipped_by_allowlist"
     assert out.details["servers"]["hal0-admin"]["status"] == "ok"
     assert "hal0-memory" in out.details["warnings"][0]
+
+
+# ── #244 phase impl — context_link + templates ──────────────────────────────
+
+
+def test_context_link_renders_all_three_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    # Seed an env_probe snapshot the templates can consume.
+    snapshot = {
+        "env_report": {
+            "cpu": {"model": "AMD RYZEN AI MAX+ 395", "logical_online": 16},
+            "ram": {"total_bytes": 96 * 1024**3},
+            "npu": {"present": True, "xdna_gen": 2, "pci_id": "1022:17F0"},
+            "gpu": {"gfx": "gfx1151", "driver": "amdgpu", "pci_id": "1002:1586"},
+            "container": {"layer": "container", "kind": "lxc", "apparmor": "unconfined"},
+        }
+    }
+    (hermes_home / "env-20260523T120000Z.json").write_text(json.dumps(snapshot))
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+
+    # Redirect /etc/hal0 + bundled skills to tmp_path so we can run as
+    # non-root without touching the real system.
+    etc = tmp_path / "etc" / "hal0"
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
+    monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", etc / "agent-skills")
+    monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "no-such-skills")
+
+    out = hp._phase_context_link(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert (hermes_home / "SOUL.md").exists()
+    assert (etc / "HERMES.md").exists()
+    assert (etc / "AGENTS.md").exists()
+    soul = (hermes_home / "SOUL.md").read_text()
+    # Templates reference Strix Halo signals — confirm at least one
+    # variable substituted from snapshot.
+    assert "RYZEN AI MAX" in soul or "gfx1151" in soul or "XDNA" in soul
+
+
+def test_context_link_idempotent_symlink(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    link = tmp_path / "lnk"
+    assert hp._safe_symlink(src, link) is True
+    # Second call: no-op (target unchanged).
+    assert hp._safe_symlink(src, link) is False
+
+
+def test_context_link_skill_mirror_warns_when_src_missing(tmp_path: Path) -> None:
+    linked, warnings = hp._mirror_bundled_skills(tmp_path / "no-src", tmp_path / "dst")
+    assert linked == []
+    assert any("not present" in w for w in warnings)
+
+
+def test_context_link_falls_back_when_soul_render_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path / "etc" / "hal0")
+    monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", tmp_path / "etc" / "hal0" / "agent-skills")
+    monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "no-skills")
+
+    def _explode(name: str, **_: Any) -> str:
+        if name == "SOUL.md.j2":
+            raise RuntimeError("template boom")
+        return "ok"
+
+    monkeypatch.setattr(hp, "_render_template", _explode)
+    out = hp._phase_context_link(state)
+    assert out.status == hp.PhaseStatus.OK
+    soul = (hermes_home / "SOUL.md").read_text()
+    assert "hal0 admin agent" in soul
+    assert any("SOUL.md render" in w for w in out.details["warnings"])

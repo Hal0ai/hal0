@@ -835,7 +835,188 @@ def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
     )
 
 
-_phase_context_link = _stub("context_link")
+# ── Phase G: context_link ───────────────────────────────────────────────────
+#
+# Renders SOUL.md + HERMES.md + AGENTS.md from Jinja2 templates and
+# symlinks hal0-bundled skills into /etc/hal0/agent-skills/. The
+# templates live next to config.yaml.j2 in the wheel's package-data
+# (see pyproject.toml [tool.hatch.build.targets.wheel.force-include]
+# — if the package layout shifts, the template loader fails fast at
+# import-time which surfaces in CI before bootstrap ever runs).
+#
+# Per #244 sharpening: SOUL.md render failure falls back to upstream's
+# DEFAULT_SOUL_MD; HERMES.md / AGENTS.md render failures log + skip.
+# Symlink-create is idempotent (only relinks when target differs).
+
+
+CONTEXT_TEMPLATE_DIR = CONFIG_TEMPLATE_PATH.parent
+HAL0_BUNDLED_SKILLS = Path("/usr/share/hal0/skills")
+ETC_HAL0_DIR = Path("/etc/hal0")
+ETC_HAL0_AGENT_SKILLS = ETC_HAL0_DIR / "agent-skills"
+
+
+def _latest_env_snapshot(hermes_home: Path) -> dict[str, Any]:
+    """Load the most recent env-<ts>.json snapshot env_probe wrote.
+
+    Falls back to empty dict when no snapshot exists — templates use
+    Jinja2 ``default`` filters so partial data is OK.
+    """
+    candidates = sorted(hermes_home.glob("env-*.json"))
+    if not candidates:
+        return {}
+    try:
+        return json.loads(candidates[-1].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _render_template(name: str, **vars_: Any) -> str:
+    """Render a Jinja2 template from the hermes_templates dir."""
+    from jinja2 import Environment, FileSystemLoader
+
+    env = Environment(
+        loader=FileSystemLoader(str(CONTEXT_TEMPLATE_DIR)),
+        keep_trailing_newline=True,
+        autoescape=False,  # Markdown output; escaping would corrupt prose.
+    )
+    return env.get_template(name).render(**vars_)
+
+
+def _atomic_write(path: Path, content: str) -> str:
+    """Tmp-write + rename for atomicity. Returns the sha256 of content."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+    return content_hash(content)
+
+
+def _safe_symlink(target: Path, link: Path) -> bool:
+    """Create ``link`` -> ``target`` only when the link doesn't already
+    resolve there. Returns True when a (re)link happened."""
+    if link.is_symlink():
+        try:
+            if os.readlink(link) == str(target):
+                return False
+        except OSError:
+            pass
+        link.unlink()
+    elif link.exists():
+        # Existing non-symlink file at link path — leave alone (operator
+        # may have hand-managed it; we don't clobber).
+        return False
+    link.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(str(target), str(link))
+    return True
+
+
+def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> tuple[list[str], list[str]]:
+    """Symlink every immediate child of ``src_root`` into ``dst_root``.
+
+    Returns ``(linked, warnings)``. Missing src is a warning, not a
+    failure — bundled skills are optional in a dev install.
+    """
+    linked: list[str] = []
+    warnings: list[str] = []
+    if not src_root.exists():
+        warnings.append(f"hal0-bundled skills source {src_root} not present; nothing to mirror")
+        return linked, warnings
+    dst_root.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(src_root.iterdir()):
+        link = dst_root / entry.name
+        try:
+            if _safe_symlink(entry, link):
+                linked.append(entry.name)
+        except OSError as exc:
+            warnings.append(f"symlink {entry.name}: {exc}")
+    return linked, warnings
+
+
+def _phase_context_link(state: BootstrapState) -> PhaseResult:
+    """Render persona + context files; mirror bundled skills.
+
+    Files rendered (atomically):
+      - $HERMES_HOME/SOUL.md
+      - /etc/hal0/HERMES.md
+      - /etc/hal0/AGENTS.md
+      - $HERMES_HOME/memories/HOST.md (symlink -> /etc/hal0/HERMES.md)
+
+    SOUL.md render failure falls back to a minimal hal0-themed default
+    (we can't import upstream's DEFAULT_SOUL_MD from inside hal0; the
+    fallback is short + accurate). HERMES.md + AGENTS.md render
+    failures log + skip per #244 sharpening.
+    """
+    hermes_home = Path(state.hermes_home)
+    snapshot = _latest_env_snapshot(hermes_home)
+    env_report = snapshot.get("env_report", {}) if isinstance(snapshot, dict) else {}
+    vars_ = {
+        "env": env_report,
+        "hal0_version": _hal0_version_string(),
+        "hermes_version": _hermes_version_pin(),
+        "primary": None,
+        "chat_slots": [],
+        "peer_agents": [],
+    }
+
+    rendered: dict[str, str] = {}
+    warnings: list[str] = []
+    fallback_soul = (
+        "# Identity\n\n"
+        "You are the hal0 admin agent — the right-hand assistant for this "
+        "homelab inference platform. Use `hal0_admin` MCP tools to probe slot "
+        "state before changes; use `hal0_memory` for durable facts.\n"
+    )
+    try:
+        rendered["SOUL.md"] = _render_template("SOUL.md.j2", **vars_)
+    except Exception as exc:
+        warnings.append(f"SOUL.md render: {exc}; falling back to default")
+        rendered["SOUL.md"] = fallback_soul
+
+    for tpl_name, _out_name in (
+        ("HERMES.md.j2", "HERMES.md"),
+        ("AGENTS.md.j2", "AGENTS.md"),
+    ):
+        try:
+            rendered[_out_name] = _render_template(tpl_name, **vars_)
+        except Exception as exc:
+            warnings.append(f"{tpl_name} render: {exc}; skipping")
+
+    details: dict[str, Any] = {"warnings": warnings, "rendered": {}, "links": []}
+
+    soul_path = hermes_home / "SOUL.md"
+    h = _atomic_write(soul_path, rendered["SOUL.md"])
+    details["rendered"]["SOUL.md"] = {"path": str(soul_path), "sha256": h}
+
+    if "HERMES.md" in rendered:
+        try:
+            ETC_HAL0_DIR.mkdir(parents=True, exist_ok=True)
+            hpath = ETC_HAL0_DIR / "HERMES.md"
+            h = _atomic_write(hpath, rendered["HERMES.md"])
+            details["rendered"]["HERMES.md"] = {"path": str(hpath), "sha256": h}
+            # Mirror into HERMES_HOME/memories/HOST.md so context shows up in
+            # the memory tier as well as cwd auto-injection.
+            host_md = hermes_home / "memories" / "HOST.md"
+            if _safe_symlink(hpath, host_md):
+                details["links"].append(str(host_md))
+        except OSError as exc:
+            warnings.append(f"HERMES.md write to /etc/hal0: {exc}")
+
+    if "AGENTS.md" in rendered:
+        try:
+            ETC_HAL0_DIR.mkdir(parents=True, exist_ok=True)
+            apath = ETC_HAL0_DIR / "AGENTS.md"
+            h = _atomic_write(apath, rendered["AGENTS.md"])
+            details["rendered"]["AGENTS.md"] = {"path": str(apath), "sha256": h}
+        except OSError as exc:
+            warnings.append(f"AGENTS.md write to /etc/hal0: {exc}")
+
+    # Mirror bundled skills last so a failure here doesn't block context files.
+    linked, skill_warnings = _mirror_bundled_skills(HAL0_BUNDLED_SKILLS, ETC_HAL0_AGENT_SKILLS)
+    details["bundled_skills_linked"] = linked
+    warnings.extend(skill_warnings)
+    details["warnings"] = warnings
+
+    return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
 # ── Phase H: namespace_register ─────────────────────────────────────────────

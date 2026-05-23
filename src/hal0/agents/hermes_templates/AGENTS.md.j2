@@ -1,0 +1,61 @@
+{# Generic agent-context file (drops into /etc/hal0/AGENTS.md).
+   Read by any agent that lands in /etc/hal0/ — Claude Code, Cursor,
+   Codex, Hermes (via cwd auto-inject), future agents. Kept terse and
+   tool-agnostic on purpose.
+
+   Parameters: env, primary, chat_slots, hal0_version.
+#}# hal0 — agent context
+
+You are running on a hal0 host. hal0 is the open-source home-AI
+inference platform; the dashboard at https://hal0.thinmint.dev shows
+live state.
+
+## Host snapshot
+
+- Platform: {{ env.cpu.model | default("unknown") }}
+{%- if env.npu.present %}
+- NPU: AMD XDNA{% if env.npu.xdna_gen %}{{ env.npu.xdna_gen }}{% endif %}
+{%- endif %}
+{%- if env.gpu.gfx %}
+- GPU: {{ env.gpu.gfx }}
+{%- endif %}
+- Container: {{ env.container.layer | default("bare-metal") }}{% if env.container.kind %} ({{ env.container.kind }}){% endif %}
+- hal0 version: {{ hal0_version }}
+
+## Where to look
+
+- `/etc/hal0/capabilities.toml` — capability rollup (primary, embed,
+  rerank, stt, tts).
+- `/etc/hal0/slots/*.toml` — per-slot config (read-only for agents;
+  use `hal0_admin:capability_set` MCP tool to mutate).
+- `/var/lib/hal0/` — runtime state, model store, agent homes.
+- `/usr/local/bin/hal0` — CLI entrypoint.
+
+## Live slots
+
+{%- if primary %}
+- **primary**: `{{ primary.model_id }}` at {{ primary.backend_url }}
+{%- endif %}
+{%- if chat_slots %}
+{%- for slot in chat_slots %}
+- **{{ slot.alias }}**: `{{ slot.model_id }}` at {{ slot.backend_url }}
+{%- endfor %}
+{%- endif %}
+{%- if not primary and not chat_slots %}
+- _none ready — wire one via `hal0 slot create`._
+{%- endif %}
+
+## MCP surfaces
+
+- `hal0_admin` MCP — slots, models, capabilities, hardware probes.
+- `hal0_memory` MCP — Cognee-backed durable memory; agents own
+  `private:<agent_id>` namespaces; identity cards live in the
+  `agents` dataset (see ADR-0011).
+
+## Conventions
+
+- LAN-only by default. No outbound traffic without explicit user
+  instruction.
+- Don't edit slot TOMLs directly. Route through `hal0_admin`.
+- Long-running tasks belong in the systemd unit layer, not in an
+  agent's REPL turn.
