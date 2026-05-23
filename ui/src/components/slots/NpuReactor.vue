@@ -12,9 +12,20 @@ const props = defineProps({
   slots: { type: Array, required: true },
   flmVersion: { type: String, default: 'v0.9.42' },
   flmArgs: { type: String, default: '--asr 1 --embed 1' },
+  /**
+   * Optional NPU swap-in-progress signal — see NpuBlock.vue for the
+   * full contract. PR-20 / plan §5.3.
+   */
+  swapStatus: {
+    type: Object,
+    default: () => ({ in_progress: false, from_model: null, to_model: null }),
+  },
 })
 
 const emit = defineEmits(['swap-chat'])
+
+const swapInProgress = computed(() => !!props.swapStatus?.in_progress)
+const swapTargetModel = computed(() => props.swapStatus?.to_model || '')
 
 function deviceOf(s) { return s?.device || 'npu' }
 function typeOf(s) {
@@ -62,16 +73,25 @@ const dormant = computed(() => !chat.value || !modelOf(chat.value))
       </div>
 
       <div class="reactor-roles">
-        <div v-if="chat" class="reactor-role lead">
-          <span class="dot ready" />
+        <div v-if="chat" class="reactor-role lead" :class="{ 'reactor-role-swapping': swapInProgress }" data-testid="npu-chat-row">
+          <span class="dot" :class="swapInProgress ? 'loading' : 'ready'" />
           <div class="lbl">
             {{ chat.name }}
             <span class="sub">chat · llm · default</span>
           </div>
-          <div class="md">{{ modelOf(chat) || 'no model' }}</div>
+          <div v-if="swapInProgress" class="md md-swap">
+            <span class="spinner" aria-hidden="true" />
+            <span data-testid="npu-swap-progress">Loading {{ swapTargetModel || 'new model' }}…</span>
+          </div>
+          <div v-else class="md">{{ modelOf(chat) || 'no model' }}</div>
           <div class="met">
-            <div><b>{{ (metricsOf(chat).toks ?? metricsOf(chat).tokens_per_sec ?? 0).toFixed?.(0) ?? '0' }}</b> tok/s</div>
-            <div class="dim">KV {{ metricsOf(chat).kv ?? '—' }}%</div>
+            <template v-if="swapInProgress">
+              <div class="dim">awaiting trio reload</div>
+            </template>
+            <template v-else>
+              <div><b>{{ (metricsOf(chat).toks ?? metricsOf(chat).tokens_per_sec ?? 0).toFixed?.(0) ?? '0' }}</b> tok/s</div>
+              <div class="dim">KV {{ metricsOf(chat).kv ?? '—' }}%</div>
+            </template>
           </div>
         </div>
 
@@ -261,4 +281,26 @@ const dormant = computed(() => !chat.value || !modelOf(chat.value))
   width: 5px; height: 5px; border-radius: 50%;
   background: currentColor; box-shadow: 0 0 4px currentColor;
 }
+.dot.loading {
+  background: var(--color-warn, #f4b942);
+  box-shadow: 0 0 6px var(--color-warn, #f4b942);
+  animation: reactor-pulse 1.4s ease-in-out infinite;
+}
+@keyframes reactor-pulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1.0; }
+}
+.reactor-role.reactor-role-swapping {
+  border-color: color-mix(in oklch, var(--color-warn, #f4b942), transparent 60%);
+}
+.md.md-swap { display: flex; align-items: center; gap: 7px; color: var(--color-fg-muted); }
+.reactor-role .spinner {
+  width: 11px; height: 11px;
+  border: 2px solid color-mix(in oklch, var(--color-warn, #f4b942), transparent 60%);
+  border-top-color: var(--color-warn, #f4b942);
+  border-radius: 50%;
+  animation: reactor-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes reactor-spin { to { transform: rotate(360deg); } }
 </style>

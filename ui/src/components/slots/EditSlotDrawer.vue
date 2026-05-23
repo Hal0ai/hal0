@@ -17,6 +17,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import Drawer from '../primitives/Drawer.vue'
+import ConfirmDialog from '../ConfirmDialog.vue'
 import { api } from '../../composables/useApi.js'
 import { useToastsStore } from '../../stores/toasts.js'
 
@@ -82,6 +83,32 @@ const changedFields = computed(() => {
 
 const isLive = computed(() => !!(props.slot && RUNNING_STATES.has(props.slot.status)))
 
+// PR-20: NPU chat-model swap is destructive — the FLM trio tears down
+// the current process and rewarms for ~14s, pausing voice + embed
+// passengers in the same window. Detect that combination so save()
+// can route through a confirmation modal before kicking off the swap.
+const isNpuLlmSlot = computed(() => {
+  const s = props.slot
+  if (!s) return false
+  const device = String(s.device || '').toLowerCase()
+  const backend = String(s.backend || '').toLowerCase()
+  const isNpu = device === 'npu' || backend === 'flm' || backend === 'npu'
+  const type = String(s.type || s.kind || '').toLowerCase()
+  const isLlm = ['llm', 'llama-server', 'flm'].includes(type)
+  return isNpu && isLlm
+})
+
+const isNpuChatSwap = computed(() => {
+  if (!isNpuLlmSlot.value) return false
+  const ch = changedFields.value
+  // The trio swap penalty fires whenever the chat model changes; we
+  // surface the modal even if the user also tweaked secondary fields
+  // in the same save, since the trio still reboots.
+  return ch.has('model') && !!form.value.model
+})
+
+const confirmOpen = ref(false)
+
 // Effective flags preview — fully read-only, mirrors slot-modals.jsx's strip.
 const effectiveFlags = computed(() => {
   const baseline = '--parallel 1 --threads 8'
@@ -93,6 +120,28 @@ const effectiveFlags = computed(() => {
 })
 
 async function save() {
+  if (!props.slot) return
+  const ch = changedFields.value
+  if (ch.size === 0) {
+    emit('close')
+    return
+  }
+  // PR-20: NPU chat-model swap is destructive — pop the confirmation
+  // modal before letting the POST land. The modal's Confirm button
+  // calls doSave() directly.
+  if (isNpuChatSwap.value) {
+    confirmOpen.value = true
+    return
+  }
+  await doSave()
+}
+
+async function confirmNpuSwap() {
+  confirmOpen.value = false
+  await doSave()
+}
+
+async function doSave() {
   if (!props.slot) return
   saving.value = true
   try {
@@ -282,6 +331,22 @@ const canDelete = computed(() => props.slot && !BUILTIN_SLOTS.has(props.slot.nam
       </span>
     </template>
   </Drawer>
+
+  <!-- PR-20: NPU chat-model swap confirmation. The trio's ASR + embed
+       passengers go offline for ~14s while FLM rewarms, so we ask
+       before kicking the swap. -->
+  <ConfirmDialog
+    :open="confirmOpen"
+    title="Swap NPU chat model?"
+    :message="`Swapping the NPU chat model unloads the current FLM process. ASR (transcription) and embed slots backed by the same trio will briefly be unavailable while FLM rewarms (~14s).`"
+    confirm-label="Swap now"
+    :danger="false"
+    :loading="saving"
+    data-testid="npu-swap-confirm"
+    @update:open="(v) => (confirmOpen = v)"
+    @confirm="confirmNpuSwap"
+    @cancel="confirmOpen = false"
+  />
 </template>
 
 <style scoped>

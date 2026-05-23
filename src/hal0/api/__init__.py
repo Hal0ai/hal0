@@ -57,6 +57,7 @@ from hal0.api.routes import (
     installer,
     logs,
     models,
+    npu,
     providers,
     settings,
     slots,
@@ -785,6 +786,17 @@ def create_app() -> FastAPI:
         backends_routes.router,
         prefix="/api/backends",
         tags=["backends"],
+        dependencies=_admin_auth,
+    )
+
+    # NPU trio swap-status (PR-20). One read-only endpoint that merges
+    # the configured NPU LLM slot model with lemond's /v1/health.loaded[]
+    # so the dashboard's "Swap incoming" banner has a single source of
+    # truth. Admin-gated alongside the rest of the capability surface.
+    app.include_router(
+        npu.router,
+        prefix="/api/npu",
+        tags=["npu"],
         dependencies=_admin_auth,
     )
 

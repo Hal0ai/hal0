@@ -30,6 +30,7 @@ import { useTweaksStore } from '../stores/tweaks.js'
 import { useBannerStore } from '../stores/banner.js'
 import { useSlotMetrics } from '../composables/useStats.js'
 import { useEvents } from '../composables/useEvents.js'
+import { useNpuSwapStatus } from '../composables/useNpuSwapStatus.js'
 import { api } from '../composables/useApi.js'
 import BannerStack from '../components/primitives/BannerStack.vue'
 import SlotCard from '../components/SlotCard.vue'
@@ -180,6 +181,11 @@ function openCreateForSeed(seed) {
 // ── NPU variant from tweaks ───────────────────────────────────────────
 const npuVariant = computed(() => tweaks.npuVariant)
 
+// ── NPU trio swap-in-progress (PR-20) ─────────────────────────────────
+// Owns the `npu-swap` banner lifecycle + a `status` ref the NPU block
+// reads to render the spinner over the chat sub-row.
+const { status: npuSwapStatus, start: startNpuSwapPoll } = useNpuSwapStatus()
+
 // ── Lifecycle actions ─────────────────────────────────────────────────
 async function slotAction(slotName, action, body = null) {
   actionBusy.value[slotName] = action
@@ -242,6 +248,7 @@ onMounted(() => {
   window.addEventListener('keydown', handleKey)
   Promise.all([loadModels(), loadHardware()])
   if (system.slots.length === 0) system.fetchStatus()
+  startNpuSwapPoll()
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKey)
@@ -447,6 +454,7 @@ function errorFor(slot) {
         <component
           :is="npuVariant === 'reactor' ? NpuReactor : NpuBlock"
           :slots="grouped.npu"
+          :swap-status="npuSwapStatus"
           @swap-chat="(s) => openEdit(s)"
         />
       </section>

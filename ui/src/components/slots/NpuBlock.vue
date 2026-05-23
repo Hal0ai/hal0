@@ -17,9 +17,22 @@ import { computed } from 'vue'
 const props = defineProps({
   /** All NPU-backed slots, in trio order: chat (llm) first, then passengers. */
   slots: { type: Array, required: true },
+  /**
+   * Optional NPU swap-in-progress signal from /api/npu/swap-status.
+   * Shape: `{ in_progress, from_model, to_model }`. When `in_progress`
+   * is true, the chat sub-row swaps its static label for a spinner +
+   * "Loading <to_model>..." line. PR-20 / plan §5.3 / ADR-0009.
+   */
+  swapStatus: {
+    type: Object,
+    default: () => ({ in_progress: false, from_model: null, to_model: null }),
+  },
 })
 
 const emit = defineEmits(['swap-chat'])
+
+const swapInProgress = computed(() => !!props.swapStatus?.in_progress)
+const swapTargetModel = computed(() => props.swapStatus?.to_model || '')
 
 const chat = computed(() => props.slots.find((s) => deviceOf(s) === 'npu' && typeOf(s) === 'llm'))
 const stt  = computed(() => props.slots.find((s) => deviceOf(s) === 'npu' && typeOf(s) === 'transcription'))
@@ -68,25 +81,33 @@ const headerSub = computed(() => {
 
     <div class="npu-body">
       <!-- Chat (lead) -->
-      <div v-if="chat" class="npu-subrow lead">
-        <span class="dot ready" />
+      <div v-if="chat" class="npu-subrow lead" :class="{ 'npu-subrow-swapping': swapInProgress }" data-testid="npu-chat-row">
+        <span class="dot" :class="swapInProgress ? 'loading' : 'ready'" />
         <div class="role mono">
           {{ chat.name }}
           <span class="sub">llm · default</span>
         </div>
         <div class="model mono">
-          <span class="m-text">{{ modelOf(chat) || 'no model' }}</span>
-          <button class="chev-btn" type="button" @click="emit('swap-chat', chat)" title="Swap chat model">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/>
-            </svg>
-          </button>
+          <template v-if="swapInProgress">
+            <span class="spinner" aria-hidden="true" />
+            <span class="m-text" data-testid="npu-swap-progress">Loading {{ swapTargetModel || 'new model' }}…</span>
+          </template>
+          <template v-else>
+            <span class="m-text">{{ modelOf(chat) || 'no model' }}</span>
+            <button class="chev-btn" type="button" @click="emit('swap-chat', chat)" title="Swap chat model">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/>
+              </svg>
+            </button>
+          </template>
         </div>
         <div class="met mono">
-          <span><b>{{ (metricsOf(chat).toks ?? metricsOf(chat).tokens_per_sec ?? 0).toFixed?.(0) ?? '0' }}</b> tok/s · TTFT <b>{{ metricsOf(chat).ttft ?? '—' }}</b>ms · KV <b>{{ metricsOf(chat).kv ?? '—' }}</b>%</span>
+          <span v-if="swapInProgress" class="dim">awaiting trio reload</span>
+          <span v-else><b>{{ (metricsOf(chat).toks ?? metricsOf(chat).tokens_per_sec ?? 0).toFixed?.(0) ?? '0' }}</b> tok/s · TTFT <b>{{ metricsOf(chat).ttft ?? '—' }}</b>ms · KV <b>{{ metricsOf(chat).kv ?? '—' }}</b>%</span>
         </div>
         <div class="st">
-          <span class="chip chip-ok">ready · default</span>
+          <span v-if="swapInProgress" class="chip chip-warn">swapping</span>
+          <span v-else class="chip chip-ok">ready · default</span>
         </div>
       </div>
 
@@ -268,4 +289,29 @@ const headerSub = computed(() => {
   border-color: rgba(200, 150, 255, 0.30);
   background: rgba(200, 150, 255, 0.06);
 }
+.chip.chip-warn {
+  color: var(--color-warn, #f4b942);
+  border-color: color-mix(in oklch, var(--color-warn, #f4b942), transparent 60%);
+  background: color-mix(in oklch, var(--color-warn, #f4b942), transparent 88%);
+}
+.dot.loading {
+  background: var(--color-warn, #f4b942);
+  box-shadow: 0 0 6px var(--color-warn, #f4b942);
+  animation: npu-pulse 1.4s ease-in-out infinite;
+}
+@keyframes npu-pulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1.0; }
+}
+.npu-subrow-swapping { background: color-mix(in oklch, var(--color-warn, #f4b942), transparent 95%); }
+.npu-subrow .model .spinner {
+  width: 11px; height: 11px;
+  border: 2px solid color-mix(in oklch, var(--color-warn, #f4b942), transparent 60%);
+  border-top-color: var(--color-warn, #f4b942);
+  border-radius: 50%;
+  animation: npu-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes npu-spin { to { transform: rotate(360deg); } }
+.dim { color: var(--color-fg-faint); }
 </style>

@@ -1,0 +1,78 @@
+"""NPU-specific dashboard endpoints — PR-20.
+
+Mounted under ``/api/npu`` (see :mod:`hal0.api.__init__`):
+
+  - ``GET /api/npu/swap-status`` — returns whether the FLM trio's chat
+    model is currently mid-swap, plus the ``from_model`` / ``to_model``
+    pair when the swap is observable. Polled by the dashboard's NPU
+    block to surface a "Swap incoming" banner + spinner.
+
+Why a dedicated route (not the slot-state SSE stream): the swap-status
+signal needs to merge two unrelated sources (the slot TOML + lemond's
+``/v1/health``). Threading both into the SSE stream would couple the
+slot-state emitter to lemond's HTTP surface; a simple poll endpoint
+keeps the concerns separate and the dashboard's swap banner can re-poll
+every few seconds without holding a long-lived connection open.
+
+The endpoint is read-only and falls back to ``in_progress=false`` on
+every error path (lemond down, no SlotManager, etc.) — the dashboard
+ALREADY surfaces the ``lemond-offline`` banner in the global banner
+stack, so the swap banner re-rendering "no swap" during an outage is
+the correct degrade.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Request
+
+from hal0.dispatcher.npu_swap_status import (
+    NpuSwapStatus,
+    fetch_npu_swap_status,
+)
+
+router = APIRouter()
+
+
+@router.get("/swap-status")
+async def get_swap_status(request: Request) -> dict[str, Any]:
+    """Return the current NPU trio chat-model swap-in-progress snapshot.
+
+    Response shape::
+
+        {
+          "in_progress": bool,
+          "from_model": "gemma3:1b" | null,
+          "to_model":   "llama3.2-3b-npu" | null
+        }
+
+    Always 200. Returns ``in_progress=false`` whenever:
+
+      - No SlotManager / LemonadeClient is wired (test bypass).
+      - No NPU LLM slot is enabled.
+      - Lemonade ``/v1/health`` is unreachable (caught in the helper).
+      - The configured NPU LLM model already matches the loaded one.
+    """
+    sm = getattr(request.app.state, "slot_manager", None)
+    lemonade_client = getattr(request.app.state, "lemonade_client", None)
+
+    if sm is None:
+        # Pre-lifespan / test bypass. Return a stable empty payload so
+        # the dashboard poll never sees a 500 here.
+        return NpuSwapStatus(in_progress=False, from_model=None, to_model=None).to_dict()
+
+    try:
+        slot_configs = await sm.iter_configs()
+    except Exception:
+        # Defensive: a config read error should not propagate to the
+        # status endpoint. iter_configs already swallows individual
+        # malformed TOMLs (see :meth:`SlotManager.iter_configs`); this
+        # catch covers the (unlikely) directory-level failure.
+        slot_configs = []
+
+    status = await fetch_npu_swap_status(slot_configs, lemonade_client)
+    return status.to_dict()
+
+
+__all__ = ["router"]
