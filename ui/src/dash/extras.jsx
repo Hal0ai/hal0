@@ -484,6 +484,7 @@ function AgentView() {
     { id: "skills",   label: "Skills" },
     { id: "memory",   label: "Memory" },
     { id: "personas", label: "Personas" },
+    { id: "peers",    label: "Peers" },
   ];
   return (
     <div className="view">
@@ -519,6 +520,7 @@ function AgentView() {
       {tab === "skills"   && <AgentSkills />}
       {tab === "memory"   && <AgentMemory onResetNs={() => setResetOpen(true)} />}
       {tab === "personas" && <AgentPersonas onEdit={(p) => setEditPersona(p)} />}
+      {tab === "peers"    && <AgentPeers />}
 
       <PersonaEditModal
         open={!!editPersona}
@@ -848,4 +850,145 @@ function AgentPersonas({ onEdit }) {
   );
 }
 
-Object.assign(window, { HardwareView, BackendsView, LogsView, AgentView });
+// ── AgentPeers (#247) ───────────────────────────────────────────────────────
+//
+// Reads identity cards from the `agents` Cognee dataset (ADR-0011) via
+// the hal0-memory MCP. Renders one row per card with a TCP-ping
+// reachability dot (no persistent stored field — pinged on render).
+//
+// Cards are immutable per ADR-0011 §2; this panel is read-only.
+
+function AgentPeers() {
+  const [cards, setCards] = useStateX([]);
+  const [loading, setLoading] = useStateX(true);
+  const [err, setErr] = useStateX(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await fetch("/mcp/memory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-hal0-Agent": "hal0-dashboard" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: {
+              name: "memory_search",
+              arguments: {
+                query: "agent identity",
+                tags: ["agent-identity"],
+                dataset: "agents",
+                limit: 50,
+              },
+            },
+          }),
+        });
+        const data = await resp.json();
+        if (cancelled) return;
+        const items = (data && data.result && data.result.items) || [];
+        setCards(items);
+        setLoading(false);
+      } catch (e) {
+        if (!cancelled) {
+          setErr(String(e));
+          setLoading(false);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (loading) {
+    return <div className="card" style={{padding: 20, color: "var(--fg-3)"}}>Loading peers…</div>;
+  }
+  if (err) {
+    return <div className="card" style={{padding: 20, color: "var(--err)"}}>memory MCP unreachable: {err}</div>;
+  }
+  if (!cards.length) {
+    return (
+      <div className="card" style={{padding: 40, textAlign: "center", borderStyle: "dashed"}}>
+        <div className="mono" style={{fontSize: 14, color: "var(--fg-3)", marginBottom: 6}}>No agent identity cards published yet.</div>
+        <div className="mono" style={{fontSize: 11, color: "var(--fg-5)"}}>Cards appear here when a bundled agent finishes <code>hal0 agent bootstrap</code>.</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12}}>
+      {cards.map((c, i) => <PeerCard key={i} card={c} />)}
+    </div>
+  );
+}
+
+function PeerCard({ card }) {
+  const md = (card && card.metadata) || {};
+  const endpoint = md.endpoint || {};
+  const hs = md.hal0_state || {};
+  const roles = md.roles || [];
+  const [reach, setReach] = useStateX("checking");
+  const [expanded, setExpanded] = useStateX(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const url = endpoint.url;
+    if (!url) { setReach("none"); return; }
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 5000);
+    (async () => {
+      try {
+        await fetch(url, { method: "HEAD", signal: ctrl.signal, mode: "no-cors" });
+        if (!cancelled) setReach("ok");
+      } catch (e) {
+        if (cancelled) return;
+        setReach(e.name === "AbortError" ? "timeout" : "error");
+      } finally {
+        clearTimeout(tid);
+      }
+    })();
+    return () => { cancelled = true; ctrl.abort(); };
+  }, [endpoint.url]);
+
+  const dotColor = reach === "ok" ? "var(--ok)" : reach === "timeout" ? "var(--warn)" : reach === "error" ? "var(--err)" : "var(--fg-5)";
+
+  return (
+    <div className="card" style={{padding: 16, display: "flex", flexDirection: "column", gap: 8}}>
+      <div style={{display: "flex", alignItems: "center", gap: 10}}>
+        <span style={{width: 8, height: 8, borderRadius: "50%", background: dotColor}} aria-label={`endpoint ${reach}`} />
+        <div className="mono" style={{fontSize: 14, fontWeight: 500}}>{md.display_name || md.agent_id || "(unnamed)"}</div>
+      </div>
+      <div className="mono" style={{fontSize: 11, color: "var(--fg-3)"}}>{md.agent_id || "—"}</div>
+      {roles.length > 0 && (
+        <div style={{display: "flex", flexWrap: "wrap", gap: 4}}>
+          {roles.map((r, i) => <span key={i} className="chip">{r}</span>)}
+        </div>
+      )}
+      <div className="mono" style={{fontSize: 10.5, color: "var(--fg-4)"}}>
+        endpoint: {endpoint.url || "(none)"}<br />
+        registered: {hs.registered_at || "—"}
+      </div>
+      <button
+        onClick={() => setExpanded(e => !e)}
+        className="mono"
+        style={{
+          marginTop: 4,
+          padding: "4px 8px",
+          fontSize: 10,
+          background: "transparent",
+          border: "1px solid var(--line)",
+          borderRadius: 4,
+          color: "var(--fg-3)",
+          cursor: "pointer",
+          alignSelf: "flex-start",
+        }}
+      >{expanded ? "hide" : "show"} metadata</button>
+      {expanded && (
+        <pre className="mono" style={{fontSize: 10, color: "var(--fg-3)", overflow: "auto", maxHeight: 220, margin: 0, padding: 8, background: "var(--bg-2)", borderRadius: 4}}>
+          {JSON.stringify(md, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+Object.assign(window, { HardwareView, BackendsView, LogsView, AgentView, AgentPeers, PeerCard });
