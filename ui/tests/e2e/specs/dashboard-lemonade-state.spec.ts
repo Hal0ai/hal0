@@ -57,7 +57,7 @@ const FLM_TRIO_SLOTS = [
   },
 ]
 
-test('coresident TRIO badge appears on all three FLM trio slots', async ({
+test('coresident TRIO rollup card renders the FLM trio slots', async ({
   page,
   mockState,
   cleanState,
@@ -69,11 +69,14 @@ test('coresident TRIO badge appears on all three FLM trio slots', async ({
 
   await page.goto('/slots')
 
-  // The trio badge has data-testid="coresident-badge". Three slot cards,
-  // three badges — each one carrying the "TRIO" label.
-  const badges = page.getByTestId('coresident-badge')
-  await expect(badges).toHaveCount(3, { timeout: 5_000 })
-  await expect(badges.first()).toHaveText('TRIO')
+  // Slice #170 rolled the FLM trio out of the per-slot grid into a
+  // dedicated NpuBlock card under the NPU section. Assert the rollup
+  // renders + names all three trio members.
+  const npu = page.getByTestId('npu-block')
+  await expect(npu).toBeVisible({ timeout: 5_000 })
+  await expect(npu).toContainText('agent')
+  await expect(npu).toContainText('stt-npu')
+  await expect(npu).toContainText('embed-npu')
 })
 
 test('non-trio slot has no coresident badge', async ({ page, mockState, cleanState }) => {
@@ -96,8 +99,10 @@ test('non-trio slot has no coresident badge', async ({ page, mockState, cleanSta
   mockState.status.slots = slots
 
   await page.goto('/slots')
-  // The card renders; no coresident badge is attached.
-  await expect(page.locator('.sc-name', { hasText: 'primary' })).toBeVisible()
+  // The card renders; no coresident badge is attached. Slice #170
+  // renamed the SlotCard root + uses data-slot-name for stable
+  // selection.
+  await expect(page.locator('.slot[data-slot-name="primary"]')).toBeVisible()
   await expect(page.getByTestId('coresident-badge')).toHaveCount(0)
 })
 
@@ -188,18 +193,16 @@ test('NPU exclusivity violation surfaces a typed error toast', async ({
 
   await page.goto('/slots')
 
-  // Open create modal + fill in a name. Backend selection details
-  // depend on the actual modal form; we exercise the error path by
-  // posting whatever the form sends.
+  // Open create modal + fill in a name. Slice #170 namespaced the form
+  // input IDs to `create-slot-*`.
   await page.getByRole('button', { name: /New slot/i }).click()
   await expect(page.locator('#create-slot-title')).toBeVisible()
-  await page.locator('#slot-name').fill('agent-2')
+  await page.locator('#create-slot-name').fill('agent-2')
 
   // Submit. The mock returns 409 with the typed envelope; the toast
-  // must surface the conflicting-slot message. The modal-footer button
-  // toggles label between "Create slot" and "Creating…"; match either.
+  // must surface the conflicting-slot message.
   await page.getByRole('button', { name: /^Create slot$/ }).click()
 
-  const toast = page.locator('.toast', { hasText: /NPU LLM slot|conflict/i })
+  const toast = page.locator('.toast', { hasText: /NPU|conflict|already claimed/i })
   await expect(toast).toBeVisible({ timeout: 5_000 })
 })

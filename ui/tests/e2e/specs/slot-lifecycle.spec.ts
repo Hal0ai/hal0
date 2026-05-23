@@ -72,11 +72,13 @@ test('creates a slot, walks state transitions, restarts, unloads, deletes', asyn
   await page.getByRole('button', { name: /New slot/i }).click()
   await expect(page.locator('#create-slot-title')).toBeVisible()
 
-  // Fill the form (name, provider, backend, model)
-  await page.locator('#slot-name').fill('test-vulkan')
-  await page.locator('#slot-type').selectOption('llama-server')
-  await page.locator('#slot-backend').selectOption('vulkan')
-  await page.locator('#slot-model').selectOption('phi3-mini')
+  // Fill the form. Slice #170 renamed the IDs to namespaced
+  // `create-slot-*` selectors and moved `backend` into a unified
+  // `device` picker (gpu-vulkan / gpu-rocm / cpu / npu).
+  await page.locator('#create-slot-name').fill('test-vulkan')
+  await page.locator('#create-slot-type').selectOption('llama-server')
+  await page.locator('#create-slot-device').selectOption('gpu-vulkan')
+  await page.locator('#create-slot-model').selectOption('phi3-mini')
 
   // Scope to the modal: there's another "Create slot" button in the
   // EmptyState CTA on the page itself.
@@ -86,12 +88,11 @@ test('creates a slot, walks state transitions, restarts, unloads, deletes', asyn
   await expect(page.locator('#create-slot-title')).toBeHidden()
 
   // ── Walk state transitions ────────────────────────────────────
-  // The slot card is now present in the grid. The card itself
-  // doesn't render the state name as text — we observe the
-  // `sc-state-X` class on the card element, plus the running
-  // affordances (start vs restart/unload buttons) which switch
-  // when `running` is true (running/ready/serving/idle).
-  const slotCard = page.locator('.slot-card', { hasText: 'test-vulkan' })
+  // Slice #170 renamed the card root from `.slot-card` to `.slot` and
+  // exposes the slot name on `data-slot-name`. State is observable via
+  // the `sc-state-X` class on the card root + the running affordance
+  // switching (Start vs Restart/Unload buttons).
+  const slotCard = page.locator('.slot[data-slot-name="test-vulkan"]')
   await expect(slotCard).toBeVisible()
 
   const states = ['pulling', 'starting', 'warming', 'ready']
@@ -104,12 +105,12 @@ test('creates a slot, walks state transitions, restarts, unloads, deletes', asyn
       await m.useSystemStore().fetchStatus()
     })
     if (next === 'ready') {
-      // Running state: restart + unload (stop) buttons appear.
+      // Running state: Restart + Unload (Stop) buttons appear.
       await expect(slotCard.locator('button[title="Restart"]')).toBeVisible()
       await expect(slotCard.locator('button[title="Stop"]')).toBeVisible()
     } else {
-      // Non-running: start (play) button is visible.
-      await expect(slotCard.locator('button[title="Start"]')).toBeVisible()
+      // Non-running: Start button is visible.
+      await expect(slotCard.locator('button[title^="Start"], button[title^="Pick a model"]')).toBeVisible()
     }
   }
 
@@ -134,15 +135,17 @@ test('creates a slot, walks state transitions, restarts, unloads, deletes', asyn
     const m = await import('/src/stores/system.js')
     await m.useSystemStore().fetchStatus()
   })
-  await expect(slotCard.locator('button[title="Start"]')).toBeVisible()
+  await expect(slotCard.locator('button[title^="Start"], button[title^="Pick a model"]')).toBeVisible()
 
   // ── Delete ────────────────────────────────────────────────────
-  // The delete button is hidden for built-in slots; test-vulkan is
-  // custom so the trash icon is present.
+  // Slice #170 moved Delete into the SlotOverflowMenu (⋯) — open menu
+  // then pick the danger "Delete slot" item. test-vulkan is custom so
+  // the entry is enabled.
   const deleteReq = page.waitForRequest(
     (r) => r.url().endsWith('/api/slots/test-vulkan') && r.method() === 'DELETE',
   )
-  await slotCard.getByRole('button', { name: /Delete slot test-vulkan/i }).click()
+  await slotCard.locator('button[aria-label="More slot actions"]').click()
+  await page.locator('.hal0-menu [role="menuitem"]', { hasText: 'Delete slot' }).click()
   // ConfirmDialog: click the confirm button.
   await page.getByRole('button', { name: /^Delete slot$/ }).click()
   await deleteReq
@@ -150,7 +153,7 @@ test('creates a slot, walks state transitions, restarts, unloads, deletes', asyn
     const m = await import('/src/stores/system.js')
     await m.useSystemStore().fetchStatus()
   })
-  await expect(page.locator('.slot-card', { hasText: 'test-vulkan' })).toHaveCount(0)
+  await expect(page.locator('.slot[data-slot-name="test-vulkan"]')).toHaveCount(0)
 })
 
 /**
@@ -197,8 +200,8 @@ test('@agent-approval renders inline pending chip on a slot card', async ({
   await expect(page.locator('.bell .badge')).toHaveText('1')
 
   // Slot card chip — scoped to the .slot-pending sibling next to the
-  // matching SlotCard.
-  const cardCell = page.locator('.slot-card', { hasText: 'test-vulkan' }).locator('..')
+  // matching SlotCard. Slice #170 renamed `.slot-card` to `.slot`.
+  const cardCell = page.locator('.slot[data-slot-name="test-vulkan"]').locator('..')
   const chip = cardCell.locator('.pending-chip')
   await expect(chip).toHaveCount(1)
   await expect(chip).toContainText('slot_delete')
