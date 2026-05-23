@@ -674,14 +674,10 @@ WantedBy=multi-user.target
 EOF
 info "wrote ${API_UNIT}"
 
-SLOT_TEMPLATE_SRC="${REPO_ROOT}/packaging/systemd/hal0-slot@.service"
-SLOT_TEMPLATE_DST="${UNIT_DIR}/hal0-slot@.service"
-if [[ -f "${SLOT_TEMPLATE_SRC}" ]]; then
-    cp "${SLOT_TEMPLATE_SRC}" "${SLOT_TEMPLATE_DST}"
-    info "wrote ${SLOT_TEMPLATE_DST}"
-else
-    warn "${SLOT_TEMPLATE_SRC} not found — slot template not installed"
-fi
+# Note: hal0-slot@.service template removed in PR-9 (v0.2 retires per-modality
+# toolbox containers — see docs/internal/adr/0008-lemonade-adoption.md §2 and
+# docs/internal/lemonade-adoption-plan-2026-05-22.md §10.1). Lemonade owns the
+# process lifecycle in v0.2; the SlotManager dispatch rewrite lands in PR-10.
 
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
