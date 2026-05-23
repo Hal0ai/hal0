@@ -1233,6 +1233,34 @@ else
     info "skipping (Lemonade resources dir ${LEMONADE_RESOURCES} not present yet)"
 fi
 
+# ── Bundle picker manifests (ADR-0010 / PR-17) ────────────────────────────
+# Ship the five first-run bundle manifests (hal0-Lite / hal0-Default /
+# hal0-Pro / hal0-Max + LMX-Omni-52B-Halo) into the runtime collections
+# directory. The bundle picker UI on first dashboard load reads from
+# /var/lib/hal0/models/collections/omni/ — without this copy, the API
+# falls back to the in-tree dev manifests, which only exist on a source
+# checkout, not in a packaged install.
+#
+# Idempotent: re-running install.sh overwrites each manifest. Manifests
+# are tiny (a few KB) and the copy is fast, so we don't bother with
+# content hashing.
+ui_step "Bundle picker manifests"
+
+BUNDLES_SRC="${REPO_ROOT}/installer/manifests/omni"
+BUNDLES_DST="${VAR_DIR}/models/collections/omni"
+
+if [[ -d "${BUNDLES_SRC}" ]]; then
+    mkdir -p "${BUNDLES_DST}"
+    if cp -f "${BUNDLES_SRC}"/*.json "${BUNDLES_DST}/" 2>/dev/null; then
+        chown -R hal0:hal0 "${VAR_DIR}/models/collections" 2>/dev/null || true
+        info "installed bundle manifests → ${BUNDLES_DST}"
+    else
+        warn "failed to copy bundle manifests from ${BUNDLES_SRC}"
+    fi
+else
+    warn "bundle manifest source ${BUNDLES_SRC} not found; picker will fall back to in-tree defaults"
+fi
+
 ui_step "Service start"
 
 if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then

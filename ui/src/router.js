@@ -83,6 +83,21 @@ const routes = [
     meta: { title: 'Setup', skipFirstRunGuard: true },
   },
   {
+    // PR-17 first-run bundle picker (ADR-0010). Sits between the
+    // install wizard's complete-event and the dashboard's first render:
+    // when capabilities.toml is empty + the bundle-chosen marker is
+    // absent, the dashboard guard redirects here so the user picks a
+    // tier (or explicitly clicks Skip) before any model loads.
+    path: '/bundles',
+    name: 'bundle-picker',
+    component: () => import('./views/FirstRun/BundlePicker.vue'),
+    meta: {
+      title: 'Pick a starting bundle',
+      skipFirstRunGuard: true,
+      skipBundlePickerGuard: true,
+    },
+  },
+  {
     path: '/:catchAll(.*)',
     name: 'not-found',
     component: () => import('./views/NotFound.vue'),
@@ -122,15 +137,54 @@ async function _resolveFirstRun() {
   return _firstRunInflight
 }
 
+// ── Bundle picker guard (ADR-0010 / PR-17) ──────────────────────────────────
+// After the install wizard completes, the first dashboard load drops
+// the user into the bundle picker until they either pick a tier or
+// explicitly skip. Decision is cached per-session like the first-run
+// guard above.
+let _bundleDecision = null   // null = unknown, true = picker, false = clear
+let _bundleInflight = null
+
+async function _resolveBundlePicker() {
+  if (_bundleDecision !== null) return _bundleDecision
+  if (_bundleInflight) return _bundleInflight
+  _bundleInflight = (async () => {
+    try {
+      const r = await fetch('/api/bundles')
+      if (!r.ok) return false  // fail open
+      const body = await r.json()
+      _bundleDecision = !!body?.picker_pending
+      return _bundleDecision
+    } catch {
+      return false
+    } finally {
+      _bundleInflight = null
+    }
+  })()
+  return _bundleInflight
+}
+
 router.beforeEach(async (to) => {
-  if (to.meta?.skipFirstRunGuard) return true
+  if (to.meta?.skipFirstRunGuard) {
+    // Even on a skip-guard route we still want to honour the bundle
+    // picker reset path (e.g. navigating directly to /bundles after
+    // skip → re-pick later in v0.3). The bundle guard exits early on
+    // routes that ALSO declare skipBundlePickerGuard.
+    if (to.meta?.skipBundlePickerGuard) return true
+    return true
+  }
   const needsWizard = await _resolveFirstRun()
   if (needsWizard) return { name: 'firstrun' }
+  if (to.meta?.skipBundlePickerGuard) return true
+  const needsBundle = await _resolveBundlePicker()
+  if (needsBundle) return { name: 'bundle-picker' }
   return true
 })
 
-// Expose a reset so FirstRun.vue can clear the cache after POST /install/complete.
+// Expose resets so FirstRun.vue can clear the cache after
+// POST /install/complete, and BundlePicker.vue after pick/skip.
 export function resetFirstRunGuard() { _firstRunDecision = null }
+export function resetBundlePickerGuard() { _bundleDecision = null }
 
 router.afterEach((to) => {
   const base = 'hal0'

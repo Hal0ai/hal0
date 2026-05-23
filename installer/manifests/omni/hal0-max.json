@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "hal0": {
+    "name": "hal0-Max",
+    "min_ram_gb": 100,
+    "primary": {
+      "slot": "chat.primary",
+      "model_name": "Qwen3.6-35B-A3B-MTP",
+      "size_gb": 23.8,
+      "lru": false
+    },
+    "coder": {
+      "slot": "chat.coder",
+      "model_name": "Qwen3-Coder-Next-80B-A3B",
+      "size_gb": 48.0,
+      "lru": true
+    },
+    "aux": [
+      {
+        "slot": "embed",
+        "model_name": "nomic-v1.5",
+        "size_gb": 0.3,
+        "lru": false
+      },
+      {
+        "slot": "rerank",
+        "model_name": "bge-reranker-v2-m3",
+        "size_gb": 0.45,
+        "lru": false
+      },
+      {
+        "slot": "stt",
+        "model_name": "whisper-large-v3-turbo",
+        "size_gb": 1.6,
+        "lru": false
+      },
+      {
+        "slot": "tts",
+        "model_name": "kokoro:cpu",
+        "size_gb": 0.35,
+        "lru": false
+      },
+      {
+        "slot": "img",
+        "model_name": "flux-2-klein-9b",
+        "size_gb": 9.0,
+        "lru": true
+      }
+    ],
+    "npu_trio_shown": true,
+    "npu_trio_optin": false,
+    "display_label": "hal0-Max",
+    "display_subtitle": "Top-of-line chat + coder + voice + Flux image, 100 GB+ Strix Halo",
+    "vendor": "hal0"
+  },
+  "omni": {
+    "kind": "collection.omni",
+    "name": "hal0-Max",
+    "description": "Max bundle: largest chat + coder (LRU), Whisper Turbo, Flux 2 Klein.",
+    "members": [
+      { "model_name": "Qwen3.6-35B-A3B-MTP" },
+      { "model_name": "Qwen3-Coder-Next-80B-A3B" },
+      { "model_name": "nomic-v1.5" },
+      { "model_name": "bge-reranker-v2-m3" },
+      { "model_name": "whisper-large-v3-turbo" },
+      { "model_name": "kokoro:cpu" },
+      { "model_name": "flux-2-klein-9b" }
+    ]
+  }
+}

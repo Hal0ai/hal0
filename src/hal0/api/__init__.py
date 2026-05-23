@@ -39,6 +39,9 @@ from hal0.api.routes import (
     backends as backends_routes,
 )
 from hal0.api.routes import (
+    bundles as bundles_routes,
+)
+from hal0.api.routes import (
     capabilities as capabilities_routes,
 )
 from hal0.api.routes import (
@@ -722,6 +725,18 @@ def create_app() -> FastAPI:
         capabilities_routes.router,
         prefix="/api/capabilities",
         tags=["capabilities"],
+        dependencies=_admin_auth,
+    )
+
+    # First-run bundle picker (ADR-0010 / PR-17). Admin-gated for
+    # consistency with the rest of the capability surface; the picker
+    # writes capabilities.toml entries via the orchestrator and drops
+    # a marker file so the dashboard hides the picker on subsequent
+    # loads. Plan §8 + §11 PR-17 own the user-facing UX.
+    app.include_router(
+        bundles_routes.router,
+        prefix="/api/bundles",
+        tags=["bundles"],
         dependencies=_admin_auth,
     )
 

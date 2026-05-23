@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "hal0": {
+    "name": "hal0-Lite",
+    "min_ram_gb": 16,
+    "primary": {
+      "slot": "chat.primary",
+      "model_name": "qwen3.5-0.8b",
+      "size_gb": 1.0,
+      "lru": false
+    },
+    "coder": null,
+    "aux": [],
+    "npu_trio_shown": false,
+    "npu_trio_optin": false,
+    "display_label": "hal0-Lite",
+    "display_subtitle": "Minimal chat — fits any 16 GB+ box",
+    "vendor": "hal0"
+  },
+  "omni": {
+    "kind": "collection.omni",
+    "name": "hal0-Lite",
+    "description": "Lightweight chat-only bundle for entry-level hardware.",
+    "members": [
+      { "model_name": "qwen3.5-0.8b" }
+    ]
+  }
+}
