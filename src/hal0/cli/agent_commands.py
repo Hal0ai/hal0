@@ -142,11 +142,11 @@ def _uninstall_hermes_memory() -> None:
         }
     ).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-hal0-Agent": "hermes-agent"}
-    req = urllib.request.Request(  # noqa: S310 — LAN URL
+    req = urllib.request.Request(
         f"{url}/mcp/memory", data=search_body, headers=headers, method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=5.0) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
             data = _json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, _json.JSONDecodeError):
         return
@@ -171,11 +171,11 @@ def _uninstall_hermes_memory() -> None:
             "params": {"name": "memory_delete", "arguments": {"ids": ids}},
         }
     ).encode("utf-8")
-    req2 = urllib.request.Request(  # noqa: S310 — LAN URL
+    req2 = urllib.request.Request(
         f"{url}/mcp/memory", data=del_body, headers=headers, method="POST"
     )
     try:
-        with urllib.request.urlopen(req2, timeout=5.0):  # noqa: S310
+        with urllib.request.urlopen(req2, timeout=5.0):
             pass
     except (urllib.error.URLError, OSError):
         return

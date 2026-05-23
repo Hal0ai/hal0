@@ -255,6 +255,38 @@ else
         "${HAL0_BIN}" model rm "${TEST_MODEL_ID}" --force
 fi
 
+# ── Hermes-Agent bootstrap surface (Phase 10, #246) ─────────────────────────
+#
+# Drives the bootstrap dry-run path so the CLI surface is exercised
+# without requiring pypi + Python 3.11 on the harness host. Real
+# end-to-end install happens in the γ-tier (release-test.sh on the LXC).
+log_step "Hermes bootstrap surface"
+
+run_row "cli-agent-bootstrap-help" 0 "bootstrap --help" -- \
+    "${HAL0_BIN}" agent bootstrap hermes --help
+
+run_row "cli-agent-bootstrap-dry-run" 0 "bootstrap --dry-run --skip-phase" -- \
+    "${HAL0_BIN}" agent bootstrap hermes --dry-run \
+    --skip-phase install --skip-phase env_probe --skip-phase mcp_wire \
+    --skip-phase namespace_register --skip-phase context_link \
+    --skip-phase model_automap --skip-phase voice_wire \
+    --skip-phase smoke_tests --skip-phase self_report
+
+run_row "cli-agent-status-help" 0 "agent status --help" -- \
+    "${HAL0_BIN}" agent status --help
+
+run_row "cli-agent-log-help" 0 "agent log --help" -- \
+    "${HAL0_BIN}" agent log --help
+
+run_row "cli-agent-upgrade-help" 0 "agent upgrade --help" -- \
+    "${HAL0_BIN}" agent upgrade --help
+
+run_row "cli-agent-uninstall-help" 0 "agent uninstall --help (--keep-memory present)" -- \
+    "${HAL0_BIN}" agent uninstall --help
+
+run_row "cli-agent-peers-help" 0 "agent peers --help" -- \
+    "${HAL0_BIN}" agent peers --help
+
 # ── write + exit ────────────────────────────────────────────────────────────
 log_step "Write report"
 harness_write_report || true
