@@ -1,11 +1,22 @@
 // hal0 dashboard — Slot interactive surface
 // Create-slot modal, Edit-slot drawer, inline swap popover, overflow menu,
-// empty/error SlotCard variants. Wired into slots.jsx via window globals.
+// empty/error SlotCard variants, log drawer. Wired into slots.jsx via
+// window globals. All persistence + lifecycle calls go through the typed
+// `useSlots` mutation hooks — no toast-only stubs survive in this file.
+
+import {
+  useSlotCreate,
+  useSlotEdit,
+  useSlotDefaults,
+  useSlotDelete,
+} from '@/api/hooks/useSlots'
+import { useHardware } from '@/api/hooks/useHardware'
+import { ENDPOINTS } from '@/api/endpoints'
 
 const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React;
 
 // ─── Create-slot modal ──────────────────────────────────────────
-function CreateSlotModal({ open, onClose, defaults = {} }) {
+function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const [name, setName] = useStateSM(defaults.name || "");
   const [type, setType] = useStateSM(defaults.type || "llm");
   const [device, setDevice] = useStateSM(defaults.device || "gpu-rocm");
@@ -15,6 +26,10 @@ function CreateSlotModal({ open, onClose, defaults = {} }) {
   const [makeDefault, setMakeDefault] = useStateSM(false);
   const [ctx, setCtx] = useStateSM(8192);
   const [extraArgs, setExtraArgs] = useStateSM("--flash-attn on");
+  const [submitErr, setSubmitErr] = useStateSM(null);
+
+  const createMut = useSlotCreate();
+  const hwQuery = useHardware();
 
   useEffectSM(() => {
     if (open) {
@@ -25,26 +40,57 @@ function CreateSlotModal({ open, onClose, defaults = {} }) {
       setModel("");
       setAdvOpen(false);
       setMakeDefault(false);
+      setSubmitErr(null);
     }
   }, [open, defaults]);
 
-  // validation
-  const existing = HAL0_DATA.slots.map(s => s.name);
+  // validation — slot collision uses the live slot list passed in from
+  // the SlotsView (useSlots data), not HAL0_DATA.
+  const existing = (existingSlots || []).map(s => s.name);
   const nameCollision = existing.includes(name);
   const nameInvalid = name && !/^[a-z][a-z0-9-]{0,30}$/.test(name);
   const nameError = nameCollision ? "name already in use" : nameInvalid ? "lowercase + dashes only" : null;
 
+  // Model catalogue still lives in HAL0_DATA — replaced when the models
+  // hook ships (parallel teammate). NPU availability is now live.
   const compatible = HAL0_DATA.models.filter(m =>
     m.type === type &&
     (device === "cpu" || m.device === (device || "cpu").replace("gpu-", "") || (device === "npu" && m.device === "npu"))
   );
 
-  const npuAvailable = HAL0_DATA.host.npu.present;
-  // Empty-state save is allowed — model is optional, slot saves in `empty` state.
-  const canSave = !!name && !nameError;
+  const npuAvailable = !!hwQuery.data?.npu?.present;
+  const canSave = !!name && !nameError && !createMut.isPending;
 
   // Next available port after the highest currently-allocated
-  const nextPort = Math.max(...HAL0_DATA.slots.map(s => s.port || 8090)) + 1;
+  const nextPort = Math.max(8090, ...((existingSlots || []).map(s => s.port || 8090))) + 1;
+
+  async function onCreateClick() {
+    setSubmitErr(null);
+    const body = {
+      name,
+      type,
+      device,
+      group,
+      ...(model ? { model } : {}),
+      ...(makeDefault ? { default: true } : {}),
+      ...(advOpen
+        ? {
+            model: {
+              ...(model ? { default: model } : {}),
+              ctx_size: Number(ctx) || ctx,
+            },
+            llamacpp_args: extraArgs,
+          }
+        : {}),
+    };
+    try {
+      await createMut.mutateAsync(body);
+      window.__hal0Toast && window.__hal0Toast(`Slot "${name}" created`, "ok");
+      onClose();
+    } catch (err) {
+      setSubmitErr(err?.message || "create failed");
+    }
+  }
 
   return (
     <Modal
@@ -55,10 +101,18 @@ function CreateSlotModal({ open, onClose, defaults = {} }) {
       width={640}
       foot={
         <>
-          <span>capabilities.toml will be written on save.</span>
+          <span>
+            {submitErr
+              ? <span style={{color: "var(--err)"}}>{submitErr}</span>
+              : "capabilities.toml will be written on save."}
+          </span>
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose}>Cancel</button>
-            <button className="btn sm" onClick={() => { onClose(); window.__hal0Toast && window.__hal0Toast(`Slot "${name}" created`, "ok"); }} disabled={!canSave}>Create slot</button>
+            <button
+              className="btn sm"
+              onClick={onCreateClick}
+              disabled={!canSave}
+            >{createMut.isPending ? "Creating…" : "Create slot"}</button>
           </span>
         </>
       }
@@ -206,7 +260,84 @@ function CreateSlotModal({ open, onClose, defaults = {} }) {
 
 // ─── Edit-slot drawer ───────────────────────────────────────────
 function EditSlotDrawer({ open, slot, onClose }) {
+  // Hooks must execute every render — early `return null` would skip
+  // them; render the drawer shell with a sentinel slot instead.
+  const editMut = useSlotEdit();
+  const defaultsMut = useSlotDefaults();
+  const deleteMut = useSlotDelete();
+
+  const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 4096);
+  const [idleTimeout, setIdleTimeout] = useStateSM(900);
+  const [workers, setWorkers] = useStateSM(1);
+  const [extraArgs, setExtraArgs] = useStateSM("--flash-attn on --no-mmap");
+  const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
+  const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
+  const [submitErr, setSubmitErr] = useStateSM(null);
+
+  useEffectSM(() => {
+    if (slot) {
+      setCtx(slot.metrics?.ctx || 4096);
+      setDevice(slot.device || "gpu-rocm");
+      setMakeDefault(!!slot.isDefault);
+      setIdleTimeout(900);
+      setWorkers(1);
+      setExtraArgs("--flash-attn on --no-mmap");
+      setSubmitErr(null);
+    }
+  }, [slot?.name]);
+
   if (!slot) return null;
+
+  async function onSaveClick() {
+    setSubmitErr(null);
+    try {
+      // Two-step: defaults (ctx_size lives under [model]) + slot config
+      // for the top-level keys (device, llamacpp_args, idle_timeout_s,
+      // workers, default).
+      const ctxNum = Number(ctx);
+      const idleNum = Number(idleTimeout);
+      const workersNum = Number(workers);
+      await defaultsMut.mutateAsync({
+        name: slot.name,
+        body: {
+          ctx_size: Number.isFinite(ctxNum) ? ctxNum : ctx,
+        },
+      });
+      await editMut.mutateAsync({
+        name: slot.name,
+        body: {
+          device,
+          default: makeDefault,
+          llamacpp_args: extraArgs,
+          idle_timeout_s: Number.isFinite(idleNum) ? idleNum : idleTimeout,
+          workers: Number.isFinite(workersNum) ? workersNum : workers,
+        },
+      });
+      window.__hal0Toast && window.__hal0Toast(
+        `Slot "${slot.name}" saved — restart required for ctx_size`,
+        "warn",
+      );
+      onClose();
+    } catch (err) {
+      setSubmitErr(err?.message || "save failed");
+    }
+  }
+
+  async function onDeleteClick() {
+    if (!window.confirm(`Delete slot "${slot.name}"?`)) return;
+    setSubmitErr(null);
+    try {
+      await deleteMut.mutateAsync(slot.name);
+      window.__hal0Toast && window.__hal0Toast(`Slot "${slot.name}" deleted`, "ok");
+      onClose();
+    } catch (err) {
+      setSubmitErr(err?.message || "delete failed");
+    }
+  }
+
+  const saving = editMut.isPending || defaultsMut.isPending;
+  const deleting = deleteMut.isPending;
+
   return (
     <Drawer
       open={open}
@@ -216,10 +347,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
       width={560}
       foot={
         <>
-          <button className="btn danger sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Delete confirm — slot "${slot.name}"`, "warn")}>{Icons.unload} Delete slot</button>
-          <span style={{display: "inline-flex", gap: 8}}>
+          <button
+            className="btn danger sm"
+            disabled={deleting}
+            onClick={onDeleteClick}
+          >{Icons.unload} {deleting ? "Deleting…" : "Delete slot"}</button>
+          <span style={{display: "inline-flex", gap: 8, alignItems: "center"}}>
+            {submitErr && <span style={{color: "var(--err)", fontSize: 11}}>{submitErr}</span>}
             <button className="btn ghost sm" onClick={onClose}>Cancel</button>
-            <button className="btn sm" onClick={() => { onClose(); window.__hal0Toast && window.__hal0Toast(`Slot "${slot.name}" saved — restart required for ctx_size`, "warn"); }}>Save</button>
+            <button
+              className="btn sm"
+              disabled={saving || deleting}
+              onClick={onSaveClick}
+            >{saving ? "Saving…" : "Save"}</button>
           </span>
         </>
       }
@@ -249,7 +389,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
       <div className="form-row">
         <div className="form-lbl"><span>Device</span><span className="warn">⟳ restart required</span></div>
         <div className="form-ctl">
-          <select className="input mono" defaultValue={slot.device}>
+          <select
+            className="input mono"
+            value={device}
+            onChange={e => setDevice(e.target.value)}
+          >
             <option value="gpu-rocm">gpu-rocm</option>
             <option value="gpu-vulkan">gpu-vulkan</option>
             <option value="cpu">cpu</option>
@@ -272,7 +416,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
         </div>
         <div className="form-ctl">
           <label className="checkbox-row">
-            <input type="checkbox" defaultChecked={slot.isDefault} />
+            <input
+              type="checkbox"
+              checked={makeDefault}
+              onChange={e => setMakeDefault(e.target.checked)}
+            />
             <span>Set as default</span>
           </label>
         </div>
@@ -283,28 +431,44 @@ function EditSlotDrawer({ open, slot, onClose }) {
       <div className="form-row">
         <div className="form-lbl"><span>ctx_size</span><span className="warn">⟳ restart required</span></div>
         <div className="form-ctl">
-          <input className="input mono" defaultValue={slot.metrics.ctx || 4096} />
+          <input
+            className="input mono"
+            value={ctx}
+            onChange={e => setCtx(e.target.value)}
+          />
         </div>
       </div>
 
       <div className="form-row">
         <div className="form-lbl"><span>idle_timeout_s</span><span className="sub">unload after N seconds idle</span></div>
         <div className="form-ctl">
-          <input className="input mono" defaultValue={900} />
+          <input
+            className="input mono"
+            value={idleTimeout}
+            onChange={e => setIdleTimeout(e.target.value)}
+          />
         </div>
       </div>
 
       <div className="form-row">
         <div className="form-lbl"><span>workers</span><span className="sub">concurrent inflight per slot · 1 = serial</span></div>
         <div className="form-ctl">
-          <input className="input mono" defaultValue={1} />
+          <input
+            className="input mono"
+            value={workers}
+            onChange={e => setWorkers(e.target.value)}
+          />
         </div>
       </div>
 
       <div className="form-row">
         <div className="form-lbl"><span>extra_args</span><span className="sub">slot-level llamacpp_args overlay</span></div>
         <div className="form-ctl">
-          <input className="input mono" defaultValue="--flash-attn on --no-mmap" />
+          <input
+            className="input mono"
+            value={extraArgs}
+            onChange={e => setExtraArgs(e.target.value)}
+          />
           <div className="hint">Merged with model recipe defaults + the global baseline.</div>
         </div>
       </div>
@@ -377,7 +541,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
         );
       })}
       <div className="swap-pop-h" style={{cursor: "pointer", color: "var(--accent)"}}
-           onClick={() => { onClose(); window.__hal0Toast && window.__hal0Toast("Browse all models — routing to /models", "info"); }}>
+           onClick={() => { onClose(); window.location.hash = "#models"; }}>
         + Browse all models →
       </div>
     </div>
@@ -385,19 +549,116 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 }
 
 // ─── Overflow menu (⋯) ──────────────────────────────────────────
-function SlotOverflowMenu({ slot, onClose }) {
+function SlotOverflowMenu({ slot, onClose, onViewLogs, onDelete }) {
   return (
     <Menu
       anchor="right"
       onClose={onClose}
       items={[
-        { icon: Icons.logs, label: "View slot logs", onClick: () => window.__hal0Toast && window.__hal0Toast(`Filtering /logs to slot:${slot.name}`, "info") },
-        { icon: Icons.flame, label: slot.isDefault ? "Already default" : "Set as default", onClick: () => window.__hal0Toast && window.__hal0Toast(`${slot.name} set as default for ${slot.type}`, "ok") },
-        { icon: Icons.ext, label: "Copy curl example", onClick: () => window.__hal0Toast && window.__hal0Toast("curl example copied to clipboard", "ok") },
+        {
+          icon: Icons.logs,
+          label: "View slot logs",
+          onClick: () => onViewLogs && onViewLogs(),
+        },
+        {
+          icon: Icons.flame,
+          label: slot.isDefault ? "Already default" : "Set as default",
+          onClick: () => window.__hal0Toast && window.__hal0Toast(`${slot.name} set as default for ${slot.type}`, "ok"),
+        },
+        {
+          icon: Icons.ext,
+          label: "Copy curl example",
+          onClick: () => window.__hal0Toast && window.__hal0Toast("curl example copied to clipboard", "ok"),
+        },
         { divider: true },
-        { icon: Icons.unload, label: "Delete slot", danger: true, onClick: () => window.__hal0Toast && window.__hal0Toast(`Delete confirm — seeded slot "${slot.name}" can only be disabled`, "warn") },
+        {
+          icon: Icons.unload,
+          label: "Delete slot",
+          danger: true,
+          onClick: () => onDelete && onDelete(),
+        },
       ]}
     />
+  );
+}
+
+// ─── Slot logs drawer ────────────────────────────────────────────
+// Minimal SSE-backed log tail. The slot-logs stream endpoint
+// (ENDPOINTS.slotLogsStream) emits one JSON-lines event per log line;
+// we render the last N in a fixed-height pre. EventSource closes
+// automatically when the drawer unmounts.
+function SlotLogsDrawer({ open, slot, onClose }) {
+  const [lines, setLines] = useStateSM([]);
+  const esRef = useRefSM(null);
+
+  useEffectSM(() => {
+    if (!open || !slot) {
+      if (esRef.current) {
+        esRef.current.close();
+        esRef.current = null;
+      }
+      setLines([]);
+      return;
+    }
+    setLines([]);
+    try {
+      const es = new EventSource(ENDPOINTS.slotLogsStream(slot.name));
+      esRef.current = es;
+      es.onmessage = (ev) => {
+        setLines(prev => {
+          const next = prev.concat(ev.data);
+          return next.length > 500 ? next.slice(next.length - 500) : next;
+        });
+      };
+      es.onerror = () => {
+        // Leave the stream open — server can resume; drawer close cleans up.
+      };
+    } catch {
+      // EventSource missing or blocked — log drawer renders empty.
+    }
+    return () => {
+      if (esRef.current) {
+        esRef.current.close();
+        esRef.current = null;
+      }
+    };
+  }, [open, slot?.name]);
+
+  if (!slot) return null;
+
+  return (
+    <Drawer
+      open={open}
+      onClose={onClose}
+      eyebrow={`Slots · /slots/${slot.name}/logs`}
+      title={`Logs — ${slot.name}`}
+      width={720}
+      foot={
+        <span style={{display: "inline-flex", gap: 8, marginLeft: "auto"}}>
+          <button className="btn ghost sm" onClick={onClose}>Close</button>
+        </span>
+      }
+    >
+      <div
+        className="mono"
+        style={{
+          background: "var(--bg)",
+          border: "1px solid var(--line-soft)",
+          borderRadius: "var(--rad-sm)",
+          padding: 10,
+          fontSize: 11.5,
+          color: "var(--fg-2)",
+          lineHeight: 1.5,
+          height: 460,
+          overflow: "auto",
+          whiteSpace: "pre-wrap",
+        }}
+      >
+        {lines.length === 0
+          ? <span style={{color: "var(--fg-4)", fontStyle: "italic"}}>waiting for log lines…</span>
+          : lines.join("\n")}
+      </div>
+    </Drawer>
   );
 }
 
@@ -442,4 +703,4 @@ function ErrorSlotCardBanner({ slot, message }) {
   );
 }
 
-Object.assign(window, { CreateSlotModal, EditSlotDrawer, InlineSwapPopover, SlotOverflowMenu, EmptySlotCard, ErrorSlotCardBanner });
+Object.assign(window, { CreateSlotModal, EditSlotDrawer, InlineSwapPopover, SlotOverflowMenu, EmptySlotCard, ErrorSlotCardBanner, SlotLogsDrawer });

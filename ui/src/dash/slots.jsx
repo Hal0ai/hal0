@@ -1,10 +1,17 @@
 // hal0 dashboard — Slots view (SlotCard, NPU trio variants, group sections)
 //
-// Phase B1: live slot list via `useSlots`. The prototype JSX passes a
-// `slots` prop from main.jsx (HAL0_DATA.slots fallback); we union the
-// hook on top so first paint + mock-mode still works.
+// Phase B1 → slots wireup: live slot list + per-slot lifecycle mutations
+// via the typed `useSlots` family. The `slots` prop (HAL0_DATA fallback)
+// is no longer consulted — the hook is the single source of truth.
+// Mock-mode coverage is provided by the Playwright `apiMock` fixture
+// which fulfils /api/slots with HAL0_DATA-shaped JSON.
 
-import { useSlots } from '@/api/hooks/useSlots'
+import {
+  useSlots,
+  useSlotRestart,
+  useSlotUnload,
+  useSlotSwap,
+} from '@/api/hooks/useSlots'
 
 const { useState: useStateS } = React;
 
@@ -22,7 +29,23 @@ function Spark({ data, height = 18 }) {
 }
 
 // ─── SlotCard (instrument variant) ───
-function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, menuOpen, onCloseMenu, errorMsg }) {
+function SlotCard({
+  slot,
+  onSwap,
+  onEdit,
+  onOverflow,
+  onRestart,
+  onUnload,
+  onSwapPick,
+  onViewLogs,
+  onDelete,
+  swapOpen,
+  onCloseSwap,
+  menuOpen,
+  onCloseMenu,
+  errorMsg,
+  busy,
+}) {
   const { type, device, model, state, isDefault, coresident, cpuOnly, metrics } = slot;
   const isLlm = type === "llm";
 
@@ -77,7 +100,14 @@ function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, men
           {isDefault && <div className="default-badge">★ default</div>}
           {coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
           <button className="more" onClick={e => { e.stopPropagation(); onOverflow && onOverflow(); }}>{Icons.more}</button>
-          {menuOpen && <SlotOverflowMenu slot={slot} onClose={onCloseMenu} />}
+          {menuOpen && (
+            <SlotOverflowMenu
+              slot={slot}
+              onClose={onCloseMenu}
+              onViewLogs={onViewLogs}
+              onDelete={onDelete}
+            />
+          )}
         </div>
       </div>
       <div className="slot-model mono" onClick={onSwap} style={{position: "relative"}}>
@@ -88,7 +118,7 @@ function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, men
             slot={slot}
             open={swapOpen}
             onClose={onCloseSwap}
-            onPick={(m) => window.__hal0Toast && window.__hal0Toast(`Swapping ${slot.name} → ${m.longName}`, "info")}
+            onPick={onSwapPick}
           />
         )}
       </div>
@@ -112,8 +142,16 @@ function SlotCard({ slot, onSwap, onEdit, onOverflow, swapOpen, onCloseSwap, men
         ))}
       </div>
       <div className="slot-actions">
-        <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Restarting ${slot.name}`, "info")}>{Icons.restart} Restart</button>
-        <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Unloading ${slot.name}`, "info")}>{Icons.unload} Unload</button>
+        <button
+          className="btn ghost sm"
+          disabled={!!busy}
+          onClick={() => onRestart && onRestart()}
+        >{Icons.restart} Restart</button>
+        <button
+          className="btn ghost sm"
+          disabled={!!busy}
+          onClick={() => onUnload && onUnload()}
+        >{Icons.unload} Unload</button>
         <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit</button>
         <span className="spacer" />
       </div>
@@ -155,11 +193,45 @@ function SlotListRow({ slot, onEdit }) {
   );
 }
 
+// Helpers — pull live values off the enriched slot dicts the backend
+// returns (slots.py:_lemonade_state_enrichment). Missing field → em-dash
+// rather than an invented value (per brief: no fabricated metrics).
+function npuTrioGroupLabel(slots) {
+  for (const s of slots) {
+    if (typeof s.coresident_group === "string" && s.coresident_group) {
+      return s.coresident_group;
+    }
+  }
+  return null;
+}
+function npuTrioBackendUrl(slots) {
+  // Trio shares one process; any slot with backend_url reports it.
+  for (const s of slots) {
+    if (typeof s.backend_url === "string" && s.backend_url) return s.backend_url;
+  }
+  return null;
+}
+function npuTrioBackendBadge(slots) {
+  for (const s of slots) {
+    const b = s.backend || s.metadata?.backend || s.provider;
+    if (typeof b === "string" && b) return b;
+  }
+  return null;
+}
+function chatMetric(slot, key) {
+  const v = slot?.metrics?.[key];
+  return v === undefined || v === null || v === "" ? "—" : v;
+}
+
 // ─── NPU trio — Block variant (default per brief) ───
 function NpuBlock({ slots }) {
   const npuSlots = slots.filter(s => s.device === "npu");
+  if (!npuSlots.length) return null;
   const chat = npuSlots.find(s => s.type === "llm");
   const flm = chat || npuSlots[0];
+  const coresGroup = npuTrioGroupLabel(npuSlots);
+  const backendUrl = npuTrioBackendUrl(npuSlots);
+  const backendName = npuTrioBackendBadge(npuSlots);
   return (
     <div className="card npu-card live">
       <div className="npu-h">
@@ -168,42 +240,59 @@ function NpuBlock({ slots }) {
           FLM trio<span className="sub">one process · three roles · {chat ? chat.model : "no chat model"} active</span>
         </span>
         <div className="right">
-          <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.08)"}}>
-            <span className="dot" style={{width: 5, height: 5, background: "currentColor", boxShadow: "0 0 6px currentColor"}} />
-            coresident
+          {coresGroup && (
+            <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.08)"}}>
+              <span className="dot" style={{width: 5, height: 5, background: "currentColor", boxShadow: "0 0 6px currentColor"}} />
+              {coresGroup}
+            </span>
+          )}
+          <span className="pid mono">
+            pid {flm?.pid ?? "—"} · port :{flm?.port ?? "—"}
+            {backendUrl ? <> · <span title={backendUrl}>{backendUrl}</span></> : null}
           </span>
-          <span className="pid mono">pid {flm?.pid || "—"} · port :{flm?.port || "—"}</span>
         </div>
       </div>
       <div className="npu-body">
-        {npuSlots.map((s, i) => (
-          <div key={s.name} className={"npu-subrow" + (s.type === "llm" ? " lead" : "")}>
-            <span className={"dot " + (i === 0 ? "ready" : "coresident")} />
-            <div className="role mono">
-              {s.name}
-              <span className="sub">{s.type}</span>
+        {npuSlots.map((s, i) => {
+          const lemState = s.lemonade_state || s.state || "—";
+          const isLead = s.type === "llm";
+          return (
+            <div key={s.name} className={"npu-subrow" + (isLead ? " lead" : "")}>
+              <span className={"dot " + (i === 0 ? "ready" : "coresident")} />
+              <div className="role mono">
+                {s.name}
+                <span className="sub">{s.type}</span>
+              </div>
+              <div className="model mono">
+                {s.model}
+                {isLead && <span className="chev">{Icons.chev}</span>}
+              </div>
+              <div className="met mono">
+                {isLead && (
+                  <span>
+                    <b>{chatMetric(s, "toks")}</b> tok/s · TTFT <b>{chatMetric(s, "ttft")}</b>ms · KV <b>{chatMetric(s, "kv")}</b>%
+                  </span>
+                )}
+                {s.type === "transcription" && (
+                  <span><b>{chatMetric(s, "xrt")}</b> xrt · {s.metrics?.precision || "—"}</span>
+                )}
+                {s.type === "embedding" && (
+                  <span>{s.metrics?.dim || "—"}-dim · {lemState}</span>
+                )}
+              </div>
+              <div className="st">
+                <span className="chip" style={{color: isLead ? "var(--ok)" : "var(--dev-npu)", borderColor: isLead ? "var(--ok-line)" : "rgba(200,150,255,0.30)", background: isLead ? "var(--ok-soft)" : "rgba(200,150,255,0.06)"}}>
+                  {lemState}{isLead && s.isDefault ? " · default" : ""}
+                </span>
+              </div>
             </div>
-            <div className="model mono">
-              {s.model}
-              {s.type === "llm" && <span className="chev">{Icons.chev}</span>}
-            </div>
-            <div className="met mono">
-              {s.type === "llm" && <span><b>{s.metrics.toks}</b> tok/s · TTFT <b>{s.metrics.ttft}</b>ms · KV <b>{s.metrics.kv}</b>%</span>}
-              {s.type === "transcription" && <span><b>{s.metrics.xrt}</b> xrt · {s.metrics.precision}</span>}
-              {s.type === "embedding" && <span>{s.metrics.dim}-dim · ready</span>}
-            </div>
-            <div className="st">
-              <span className="chip" style={{color: s.type === "llm" ? "var(--ok)" : "var(--dev-npu)", borderColor: s.type === "llm" ? "var(--ok-line)" : "rgba(200,150,255,0.30)", background: s.type === "llm" ? "var(--ok-soft)" : "rgba(200,150,255,0.06)"}}>
-                {s.type === "llm" ? "ready · default" : "coresident"}
-              </span>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div className="npu-foot mono">
-        <span className="item"><b>~2 GB</b> NPU memory</span>
+        <span className="item">backend <b>{backendName || "—"}</b></span>
         <span style={{color: "var(--fg-5)"}}>·</span>
-        <span className="item"><b>~14s</b> swap penalty on chat-model change</span>
+        <span className="item">group <b>{coresGroup || "—"}</b></span>
         <span style={{color: "var(--fg-5)"}}>·</span>
         <span className="item">disabling stt-npu/embed-npu frees a role at next FLM restart</span>
       </div>
@@ -214,103 +303,142 @@ function NpuBlock({ slots }) {
 // ─── NPU trio — Reactor variant ───
 function NpuReactor({ slots }) {
   const npuSlots = slots.filter(s => s.device === "npu");
+  if (!npuSlots.length) return null;
   const chat = npuSlots.find(s => s.type === "llm");
   const stt = npuSlots.find(s => s.type === "transcription");
   const emb = npuSlots.find(s => s.type === "embedding");
+  const coresGroup = npuTrioGroupLabel(npuSlots);
+  const backendUrl = npuTrioBackendUrl(npuSlots);
+  const backendName = npuTrioBackendBadge(npuSlots);
   return (
     <div className="card npu-card live">
       <div className="npu-h">
         <span className="npu-glyph mono">NPU</span>
         <span className="title mono">FLM trio<span className="sub">reactor view · one process driving three roles</span></span>
         <div className="right">
-          <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.08)"}}>
-            <span className="dot" style={{width: 5, height: 5, background: "currentColor", boxShadow: "0 0 6px currentColor"}} />
-            coresident
-          </span>
-          <span className="pid mono">pid {chat?.pid || "—"}</span>
+          {coresGroup && (
+            <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.08)"}}>
+              <span className="dot" style={{width: 5, height: 5, background: "currentColor", boxShadow: "0 0 6px currentColor"}} />
+              {coresGroup}
+            </span>
+          )}
+          <span className="pid mono">pid {chat?.pid ?? "—"}</span>
         </div>
       </div>
       <div className="npu-reactor">
         <div className="reactor-core">
           <div className="reactor-disc">
             <div className="lbl">
-              FLM<b>v0.9.42</b>
-              <div style={{marginTop: 4, color: "var(--fg-4)"}}>--asr 1 --embed 1</div>
+              backend<b>{backendName || "—"}</b>
+              <div style={{marginTop: 4, color: "var(--fg-4)"}}>{backendUrl || "—"}</div>
             </div>
           </div>
-          <div className="reactor-meta">XDNA2 · 8 columns · 1 ctx</div>
+          <div className="reactor-meta">group {coresGroup || "—"}</div>
         </div>
         <div className="reactor-roles">
-          <div className="reactor-role lead">
-            <span className="dot ready" />
-            <div className="lbl">
-              {chat.name}
-              <span className="sub">chat · llm · default</span>
+          {chat && (
+            <div className="reactor-role lead">
+              <span className="dot ready" />
+              <div className="lbl">
+                {chat.name}
+                <span className="sub">chat · llm{chat.isDefault ? " · default" : ""}</span>
+              </div>
+              <div className="md">{chat.model}</div>
+              <div className="met">
+                <div><b style={{color: "var(--fg)"}}>{chatMetric(chat, "toks")}</b> tok/s</div>
+                <div style={{color: "var(--fg-4)"}}>KV {chatMetric(chat, "kv")}%</div>
+              </div>
             </div>
-            <div className="md">{chat.model}</div>
-            <div className="met">
-              <div><b style={{color: "var(--fg)"}}>{chat.metrics.toks}</b> tok/s</div>
-              <div style={{color: "var(--fg-4)"}}>KV {chat.metrics.kv}%</div>
+          )}
+          {stt && (
+            <div className="reactor-role">
+              <span className="dot coresident" />
+              <div className="lbl">
+                {stt.name}
+                <span className="sub">transcription · passenger</span>
+              </div>
+              <div className="md">{stt.model}</div>
+              <div className="met">
+                <div><b style={{color: "var(--fg)"}}>{chatMetric(stt, "xrt")}</b> xrt</div>
+                <div style={{color: "var(--fg-4)"}}>{stt.metrics?.precision || "—"}</div>
+              </div>
             </div>
-          </div>
-          <div className="reactor-role">
-            <span className="dot coresident" />
-            <div className="lbl">
-              {stt.name}
-              <span className="sub">transcription · passenger</span>
+          )}
+          {emb && (
+            <div className="reactor-role">
+              <span className="dot coresident" />
+              <div className="lbl">
+                {emb.name}
+                <span className="sub">embedding · passenger</span>
+              </div>
+              <div className="md">{emb.model}</div>
+              <div className="met">
+                <div><b style={{color: "var(--fg)"}}>{emb.metrics?.dim || "—"}</b> dim</div>
+                <div style={{color: "var(--fg-4)"}}>{emb.lemonade_state || emb.state || "—"}</div>
+              </div>
             </div>
-            <div className="md">{stt.model}</div>
-            <div className="met">
-              <div><b style={{color: "var(--fg)"}}>{stt.metrics.xrt}</b> xrt</div>
-              <div style={{color: "var(--fg-4)"}}>{stt.metrics.precision}</div>
-            </div>
-          </div>
-          <div className="reactor-role">
-            <span className="dot coresident" />
-            <div className="lbl">
-              {emb.name}
-              <span className="sub">embedding · passenger</span>
-            </div>
-            <div className="md">{emb.model}</div>
-            <div className="met">
-              <div><b style={{color: "var(--fg)"}}>{emb.metrics.dim}</b> dim</div>
-              <div style={{color: "var(--fg-4)"}}>ready</div>
-            </div>
-          </div>
+          )}
         </div>
       </div>
       <div className="npu-foot mono">
-        <span className="item"><b>~2 GB</b> NPU memory</span>
+        <span className="item">backend <b>{backendName || "—"}</b></span>
         <span style={{color: "var(--fg-5)"}}>·</span>
-        <span className="item">swap <b>{chat.name}</b> ▾ <span style={{color: "var(--accent)", cursor: "pointer"}}>change chat model →</span></span>
+        <span className="item">group <b>{coresGroup || "—"}</b></span>
         <span style={{color: "var(--fg-5)"}}>·</span>
-        <span className="item">pauses voice + embed ~14s on swap</span>
+        <span className="item">pauses voice + embed on chat-model swap</span>
       </div>
     </div>
   );
 }
 
 // ─── Slots view ───
-function SlotsView({ slots: slotsProp, slotVariant, npuVariant, slotParam }) {
+function SlotsView({ slotVariant, npuVariant, slotParam }) {
   const slotsQuery = useSlots();
-  const slots = (slotsQuery.data && slotsQuery.data.length > 0) ? slotsQuery.data : slotsProp;
+  // Single source of truth: the hook. The Playwright apiMock fixture
+  // fulfils /api/slots so mock-mode coverage is symmetric with live runs;
+  // we no longer fall back to HAL0_DATA.slots (per slots-wireup brief).
+  const slots = slotsQuery.data || [];
   const [createOpen, setCreateOpen] = useStateS(false);
   const [createDefaults, setCreateDefaults] = useStateS({});
   const [editName, setEditName] = useStateS(null);
   const [swapName, setSwapName] = useStateS(null);
   const [menuName, setMenuName] = useStateS(null);
+  const [logsForSlot, setLogsForSlot] = useStateS(null);
+  const [busyName, setBusyName] = useStateS(null);
   const { active: activeBanners } = useBanners();
   const skipPath = !!activeBanners["skip-path"];
+
+  const restartMut = useSlotRestart();
+  const unloadMut = useSlotUnload();
+  const swapMut = useSlotSwap();
+
+  const toast = (msg, kind = "info") =>
+    window.__hal0Toast && window.__hal0Toast(msg, kind);
+
+  const runMutation = async (name, mut, args, okMsg) => {
+    setBusyName(name);
+    try {
+      await mut.mutateAsync(args);
+      toast(okMsg, "ok");
+    } catch (err) {
+      toast(
+        err?.message ? `${name}: ${err.message}` : `${name}: action failed`,
+        "warn",
+      );
+    } finally {
+      setBusyName(null);
+    }
+  };
 
   // Open Edit drawer when route is #slots/:name
   React.useEffect(() => {
     if (slotParam) {
-      const exists = HAL0_DATA.slots.find(s => s.name === slotParam);
+      const exists = (slots || []).find(s => s.name === slotParam);
       if (exists) setEditName(slotParam);
     } else {
       setEditName(null);
     }
-  }, [slotParam]);
+  }, [slotParam, slots]);
 
   // Listen for the N hotkey via global event (wired by main.jsx)
   React.useEffect(() => {
@@ -338,7 +466,10 @@ function SlotsView({ slots: slotsProp, slotVariant, npuVariant, slotParam }) {
     npu:   slots.filter(s => s.group === "npu"),
   };
 
-  const editSlot = HAL0_DATA.slots.find(s => s.name === editName);
+  const editSlot = (slots || []).find(s => s.name === editName);
+  const logsSlot = logsForSlot
+    ? (slots || []).find(s => s.name === logsForSlot)
+    : null;
 
   // Seeded slot identities for the skip-path empty layout.
   const SEEDED = [
@@ -357,6 +488,7 @@ function SlotsView({ slots: slotsProp, slotVariant, npuVariant, slotParam }) {
       key={s.name}
       slot={s}
       errorMsg={errorMsg}
+      busy={busyName === s.name}
       swapOpen={swapName === s.name}
       onSwap={(e) => { e.stopPropagation(); setSwapName(swapName === s.name ? null : s.name); setMenuName(null); }}
       onCloseSwap={() => setSwapName(null)}
@@ -364,6 +496,22 @@ function SlotsView({ slots: slotsProp, slotVariant, npuVariant, slotParam }) {
       onOverflow={() => { setMenuName(menuName === s.name ? null : s.name); setSwapName(null); }}
       onCloseMenu={() => setMenuName(null)}
       onEdit={() => { window.location.hash = "#slots/" + s.name; }}
+      onRestart={() =>
+        runMutation(s.name, restartMut, s.name, `Restarting ${s.name}`)
+      }
+      onUnload={() =>
+        runMutation(s.name, unloadMut, s.name, `Unloaded ${s.name}`)
+      }
+      onSwapPick={(m) =>
+        runMutation(
+          s.name,
+          swapMut,
+          { name: s.name, model_id: m.id },
+          `Swapping ${s.name} → ${m.longName || m.id}`,
+        )
+      }
+      onViewLogs={() => { setLogsForSlot(s.name); setMenuName(null); }}
+      onDelete={() => { setEditName(s.name); setMenuName(null); }}
     />
   );
 
@@ -411,7 +559,12 @@ function SlotsView({ slots: slotsProp, slotVariant, npuVariant, slotParam }) {
           );
         })}
 
-        <CreateSlotModal open={createOpen} onClose={() => setCreateOpen(false)} defaults={createDefaults} />
+        <CreateSlotModal
+          open={createOpen}
+          onClose={() => setCreateOpen(false)}
+          defaults={createDefaults}
+          existingSlots={slots}
+        />
       </div>
     );
   }
@@ -493,11 +646,17 @@ function SlotsView({ slots: slotsProp, slotVariant, npuVariant, slotParam }) {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         defaults={createDefaults}
+        existingSlots={slots}
       />
       <EditSlotDrawer
         open={!!editSlot}
         slot={editSlot}
         onClose={() => { setEditName(null); window.location.hash = "#slots"; }}
+      />
+      <SlotLogsDrawer
+        open={!!logsSlot}
+        slot={logsSlot}
+        onClose={() => setLogsForSlot(null)}
       />
     </div>
   );

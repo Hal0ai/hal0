@@ -8,8 +8,23 @@
 // (slot defs change on edit), so 5s is enough.
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
-import { apiDelete, apiGet, apiPost } from '../client'
+import { api, apiGet } from '../client'
 import { ENDPOINTS } from '../endpoints'
+
+// Mutating verbs go through `api(..., { raw: true })` so the dev-time
+// mockFetch shim (which is GET-shaped and answers POST/PUT/DELETE with
+// the same slot-list payload as GET) cannot mask a missing request.
+// Playwright specs route directly on the network call; production keeps
+// hitting the real backend (mockFetch only kicks in on 404 fallback,
+// which mutation endpoints don't trigger).
+const slotPost = <T = unknown>(path: string, body?: unknown) =>
+  api<T>(path, { method: 'POST', body: body as any, raw: true })
+const slotPut = <T = unknown>(path: string, body?: unknown) =>
+  api<T>(path, { method: 'PUT', body: body as any, raw: true })
+const slotPatch = <T = unknown>(path: string, body?: unknown) =>
+  api<T>(path, { method: 'PATCH', body: body as any, raw: true })
+const slotDelete = <T = unknown>(path: string) =>
+  api<T>(path, { method: 'DELETE', raw: true })
 
 export interface SlotMetrics {
   toks?: number
@@ -184,7 +199,7 @@ function useSlotsInvalidator() {
 export function useSlotRestart() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
-    mutationFn: (name: string) => apiPost(ENDPOINTS.slotRestart(name)),
+    mutationFn: (name: string) => slotPost(ENDPOINTS.slotRestart(name)),
     onSuccess: invalidate,
   })
 }
@@ -192,7 +207,7 @@ export function useSlotRestart() {
 export function useSlotLoad() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
-    mutationFn: (name: string) => apiPost(ENDPOINTS.slotLoad(name)),
+    mutationFn: (name: string) => slotPost(ENDPOINTS.slotLoad(name)),
     onSuccess: invalidate,
   })
 }
@@ -200,7 +215,7 @@ export function useSlotLoad() {
 export function useSlotUnload() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
-    mutationFn: (name: string) => apiPost(ENDPOINTS.slotUnload(name)),
+    mutationFn: (name: string) => slotPost(ENDPOINTS.slotUnload(name)),
     onSuccess: invalidate,
   })
 }
@@ -209,7 +224,7 @@ export function useSlotSwap() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
     mutationFn: ({ name, model_id }: { name: string; model_id: string }) =>
-      apiPost(ENDPOINTS.slotSwap(name), { model_id }),
+      slotPost(ENDPOINTS.slotSwap(name), { model_id }),
     onSuccess: invalidate,
   })
 }
@@ -217,16 +232,51 @@ export function useSlotSwap() {
 export function useSlotCreate() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
-    mutationFn: (body: Record<string, unknown>) => apiPost(ENDPOINTS.slots, body),
+    mutationFn: (body: Record<string, unknown>) => slotPost(ENDPOINTS.slots, body),
     onSuccess: invalidate,
   })
 }
 
+/**
+ * Edit a slot. PUT /api/slots/{name}/config — body is a partial
+ * SlotConfig (shallow merged into the existing TOML). Use
+ * `useSlotDefaults` when the caller only needs to update keys inside the
+ * `[model]` sub-table (ctx_size, temperature, …); use `useSlotBackend`
+ * for the single-field backend switch.
+ */
 export function useSlotEdit() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
     mutationFn: ({ name, body }: { name: string; body: Record<string, unknown> }) =>
-      apiPost(ENDPOINTS.slot(name), body),
+      slotPut(ENDPOINTS.slotConfig(name), body),
+    onSuccess: invalidate,
+  })
+}
+
+/**
+ * PATCH /api/slots/{name}/defaults — body keys merge into the slot's
+ * `[model]` sub-table (ctx_size, temperature, …). Backend convenience
+ * wrapper over PUT /config so the dashboard doesn't have to assemble a
+ * nested envelope for what is conceptually a single field tweak.
+ */
+export function useSlotDefaults() {
+  const invalidate = useSlotsInvalidator()
+  return useMutation({
+    mutationFn: ({ name, body }: { name: string; body: Record<string, unknown> }) =>
+      slotPatch(ENDPOINTS.slotDefaults(name), body),
+    onSuccess: invalidate,
+  })
+}
+
+/**
+ * POST /api/slots/{name}/backend — switch the slot's backend
+ * (e.g. vulkan → rocm). Body shape: `{ backend: string }`.
+ */
+export function useSlotBackend() {
+  const invalidate = useSlotsInvalidator()
+  return useMutation({
+    mutationFn: ({ name, backend }: { name: string; backend: string }) =>
+      slotPost(ENDPOINTS.slotBackend(name), { backend }),
     onSuccess: invalidate,
   })
 }
@@ -234,7 +284,7 @@ export function useSlotEdit() {
 export function useSlotDelete() {
   const invalidate = useSlotsInvalidator()
   return useMutation({
-    mutationFn: (name: string) => apiDelete(ENDPOINTS.slot(name)),
+    mutationFn: (name: string) => slotDelete(ENDPOINTS.slot(name)),
     onSuccess: invalidate,
   })
 }

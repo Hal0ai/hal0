@@ -18,11 +18,19 @@ export const ENDPOINTS = {
   // ── Slots / status (hal0-api) ────────────────────────────────────
   status: '/api/status',
   slots: '/api/slots',
+  slotMetrics: '/api/slots/metrics',
   slot: (name: string) => `/api/slots/${encodeURIComponent(name)}`,
+  slotConfig: (name: string) => `/api/slots/${encodeURIComponent(name)}/config`,
+  slotDefaults: (name: string) => `/api/slots/${encodeURIComponent(name)}/defaults`,
+  slotBackend: (name: string) => `/api/slots/${encodeURIComponent(name)}/backend`,
   slotRestart: (name: string) => `/api/slots/${encodeURIComponent(name)}/restart`,
   slotLoad: (name: string) => `/api/slots/${encodeURIComponent(name)}/load`,
   slotUnload: (name: string) => `/api/slots/${encodeURIComponent(name)}/unload`,
   slotSwap: (name: string) => `/api/slots/${encodeURIComponent(name)}/swap`,
+  slotStateStream: (name: string) =>
+    `/api/slots/${encodeURIComponent(name)}/state/stream`,
+  slotLogsStream: (name: string) =>
+    `/api/slots/${encodeURIComponent(name)}/logs/stream`,
 
   // ── Models / pull lifecycle ──────────────────────────────────────
   models: '/api/models',
