@@ -1,4 +1,12 @@
 // hal0 dashboard — Models view (catalog + detail + downloads)
+//
+// Phase B1: catalog drives off `useModels()`. Mock fallback retains the
+// HAL0_DATA.models shape so dev + mock builds render. Downloads pane
+// keeps its local optimistic-state UI; per-row SSE wiring lands when
+// the prototype's DownloadRow swaps to `usePullJob(id)` (Phase B2).
+
+import { useModels } from '@/api/hooks/useModels'
+
 const { useState: useStateM } = React;
 
 function ModelsView() {
@@ -6,7 +14,13 @@ function ModelsView() {
   const [filters, setFilters] = useStateM({ type: null, device: null, ns: null });
   const [addOpen, setAddOpen] = useStateM(false);
   const [delModel, setDelModel] = useStateM(null);
-  const selected = HAL0_DATA.models.find(m => m.id === selId);
+
+  const modelsQuery = useModels();
+  const modelList = (modelsQuery.data && modelsQuery.data.length > 0)
+    ? modelsQuery.data
+    : HAL0_DATA.models;
+
+  const selected = modelList.find(m => m.id === selId) || modelList[0];
 
   const fil = m => {
     if (filters.type && m.type !== filters.type) return false;
@@ -14,9 +28,9 @@ function ModelsView() {
     if (filters.ns && m.ns !== filters.ns) return false;
     return true;
   };
-  const installed = HAL0_DATA.models.filter(m => m.installed && fil(m));
-  const blessed = HAL0_DATA.models.filter(m => !m.installed && m.ns === "blessed" && fil(m));
-  const userNs = HAL0_DATA.models.filter(m => m.ns === "pulled" && fil(m));
+  const installed = modelList.filter(m => m.installed && fil(m));
+  const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && fil(m));
+  const userNs = modelList.filter(m => m.ns === "pulled" && fil(m));
 
   const toggle = (k, v) => setFilters(f => ({ ...f, [k]: f[k] === v ? null : v }));
 
@@ -72,8 +86,8 @@ function ModelsView() {
             <input className="input mono" placeholder="qwen, embed, …" />
           </div>
           <div style={{borderTop: "1px solid var(--line-soft)", paddingTop: 10, fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", lineHeight: 1.7}}>
-            <div>{HAL0_DATA.models.length} total · {HAL0_DATA.models.filter(m => m.installed).length} on disk</div>
-            <div style={{color: "var(--fg-5)"}}>{HAL0_DATA.models.filter(m => m.ns === "blessed").length} blessed · {HAL0_DATA.models.filter(m => m.ns === "pulled").length} pulled</div>
+            <div>{modelList.length} total · {modelList.filter(m => m.installed).length} on disk</div>
+            <div style={{color: "var(--fg-5)"}}>{modelList.filter(m => m.ns === "blessed").length} blessed · {modelList.filter(m => m.ns === "pulled").length} pulled</div>
           </div>
         </div>
 

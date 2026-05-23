@@ -280,10 +280,18 @@ function App() {
   );
 }
 
+// Phase B1: wrap in TanStack QueryClientProvider installed by
+// globals-install.ts. The prototype's BannerProvider stays — it's still
+// the source of truth for in-progress demo banner toggles.
+const Hal0QueryClientProvider = window.Hal0QueryClientProvider;
+const hal0QueryClient = window.Hal0QueryClient;
+
 ReactDOM.createRoot(document.getElementById("root")).render(
-  <BannerProvider>
-    <App />
-  </BannerProvider>
+  <Hal0QueryClientProvider client={hal0QueryClient}>
+    <BannerProvider>
+      <App />
+    </BannerProvider>
+  </Hal0QueryClientProvider>
 );
 
 // ── tiny banner toggle for the Tweaks panel ──

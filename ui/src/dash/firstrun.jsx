@@ -1,11 +1,26 @@
 // hal0 dashboard — FirstRun (bundle picker, confirmation, progress)
+//
+// Phase B1: bundles + per-model downloads read from real hooks where
+// available. Hardware detection (RAM / NPU / disk) still uses
+// HAL0_DATA.host because /api/hardware lands separately; flip when
+// useHardware is universally cheap.
+
+import { useCuratedBundles, useFirstRunInstall, useFirstRunComplete } from '@/api/hooks/useFirstRun'
+import { useHardware } from '@/api/hooks/useHardware'
+
 const { useState: useStateF } = React;
 
 // ─── Bundle picker (state 1) ───
 function FirstRunPicker({ onPick, onSkip, layout }) {
-  const ramDetected = HAL0_DATA.host.ram.total;
+  // Phase B1: live curated bundles + hardware detection. Fall through
+  // to the static fixtures when either query hasn't returned yet, so
+  // FirstRun renders fully on a cold boot.
+  const bundlesQuery = useCuratedBundles();
+  const hwQuery = useHardware();
+  const bundles = bundlesQuery.data?.bundles ?? HAL0_DATA.bundles;
+  const ramDetected = hwQuery.data?.ram?.total ?? HAL0_DATA.host.ram.total;
   // Recommended = highest tier whose minimum ≤ detected
-  const fitTiers = HAL0_DATA.bundles.filter(b => b.ram <= ramDetected);
+  const fitTiers = bundles.filter(b => b.ram <= ramDetected);
   const recId = fitTiers.length ? fitTiers[fitTiers.length - 1].id : null;
 
   return (
@@ -23,9 +38,9 @@ function FirstRunPicker({ onPick, onSkip, layout }) {
       </div>
 
       {layout === "table" ? (
-        <BundleTable bundles={HAL0_DATA.bundles} recId={recId} onPick={onPick} ram={ramDetected} />
+        <BundleTable bundles={bundles} recId={recId} onPick={onPick} ram={ramDetected} />
       ) : (
-        <BundleGrid bundles={HAL0_DATA.bundles} recId={recId} onPick={onPick} ram={ramDetected} />
+        <BundleGrid bundles={bundles} recId={recId} onPick={onPick} ram={ramDetected} />
       )}
 
       <h3 className="fr-section-label" style={{marginTop: 28}}>Pre-built kits</h3>
@@ -159,8 +174,14 @@ function BundleTable({ bundles, recId, onPick, ram }) {
 // ─── Bundle confirmation (state 2) ───
 function FirstRunConfirm({ bundleId, onBack, onInstall }) {
   const [withNpu, setWithNpu] = useStateF(false);
-  const bundle = HAL0_DATA.bundles.find(b => b.id === bundleId);
-  const det = HAL0_DATA.bundleDetails.pro; // we only detail "pro" in mock; reuse
+  // Phase B1: bundles + install mutation. Pull the install trigger
+  // through the real hook; main.jsx's setFrStage('progress') still
+  // drives the progress view.
+  const bundlesQuery = useCuratedBundles();
+  const installM = useFirstRunInstall();
+  const bundles = bundlesQuery.data?.bundles ?? HAL0_DATA.bundles;
+  const bundle = bundles.find(b => b.id === bundleId) || HAL0_DATA.bundles.find(b => b.id === bundleId);
+  const det = HAL0_DATA.bundleDetails.pro; // detail-level data not yet over /api/firstrun
   return (
     <div className="fr-inner">
       <span className="fr-confirm-back mono" onClick={onBack}>← back to picker</span>
@@ -227,7 +248,12 @@ function FirstRunConfirm({ bundleId, onBack, onInstall }) {
 
       <div className="fr-actions">
         <button className="btn ghost lg" onClick={onBack}>Cancel</button>
-        <button className="btn lg" onClick={onInstall}>{Icons.download} Install hal0-{bundle.name}</button>
+        <button className="btn lg" onClick={() => {
+          // Best-effort backend kick; UI advances regardless so the
+          // mock build still shows the progress stage.
+          installM.mutate({ bundle: bundleId, withNpu });
+          onInstall();
+        }}>{Icons.download} Install hal0-{bundle.name}</button>
       </div>
     </div>
   );
@@ -235,6 +261,11 @@ function FirstRunConfirm({ bundleId, onBack, onInstall }) {
 
 // ─── Install progress (state 3) ───
 function FirstRunProgress({ onDone }) {
+  // Phase B1: complete-mutation flips the backend's firstrun.completed
+  // flag when the user clicks "Open dashboard". Downloads list is
+  // intentionally still HAL0_DATA — per-row SSE wiring via
+  // `usePullJob(id)` lands in B2 when DownloadRow swaps in the hook.
+  const completeM = useFirstRunComplete();
   return (
     <div className="fr-inner">
       <div className="fr-prog-h">
@@ -282,7 +313,10 @@ function FirstRunProgress({ onDone }) {
         <button className="btn ghost lg">Pause all</button>
         <div style={{display: "flex", gap: 12}}>
           <button className="btn ghost lg">View logs</button>
-          <button className="btn lg" onClick={onDone}>Open dashboard</button>
+          <button className="btn lg" onClick={() => {
+            completeM.mutate();
+            onDone();
+          }}>Open dashboard</button>
         </div>
       </div>
     </div>

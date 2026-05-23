@@ -52,5 +52,10 @@ export default defineConfig({
     timeout: 120_000,
     stdout: 'ignore',
     stderr: 'pipe',
+    env: {
+      // Force mock data so specs see steady-state markup, not real-fetch loading lag.
+      // Real API integration is exercised via separate manual smoke tests.
+      VITE_MOCK_LEMONADE: '1',
+    },
   },
 })

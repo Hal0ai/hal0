@@ -1,11 +1,22 @@
 // hal0 dashboard — secondary views: Hardware, Logs, Backends, Agent
+//
+// Phase B1: Hardware / Backends / Logs read from real hooks. AgentView
+// stays on HAL0_DATA mock (deferred; follow-up issue tracks Phase B2 +).
+
+import { useHardware } from '@/api/hooks/useHardware'
+import { useBackends } from '@/api/hooks/useBackends'
+import { useLogsHistorical, useLogsStream } from '@/api/hooks/useLogs'
+import { useLemondRollup } from '@/api/hooks/useLemonade'
+
 const { useState: useStateX } = React;
 
 // ════════════════════════════════════════════════════════════════════
 // HARDWARE
 // ════════════════════════════════════════════════════════════════════
 function HardwareView() {
-  const H = HAL0_DATA.host;
+  // Phase B1: live /api/hardware; mock fallback retains design fixture.
+  const hwQuery = useHardware();
+  const H = hwQuery.data || HAL0_DATA.host;
   return (
     <div className="view">
       <div className="vh">
@@ -114,6 +125,24 @@ function BackendsView() {
   const [installB, setInstallB] = useStateX(null);
   const [uninstallB, setUninstallB] = useStateX(null);
   const [flmOpen, setFlmOpen] = useStateX(false);
+  // Phase B1: live /api/backends; mock retains fixture shape. The v3
+  // hook returns rows shaped `{id, version, state, recommended, kind,
+  // device, note}` (envelope matches both legacy + new API).
+  const backendsQuery = useBackends();
+  const lemond = useLemondRollup();
+  const liveBackends = backendsQuery.data?.backends ?? [];
+  const backends = liveBackends.length > 0
+    ? liveBackends.map(b => ({
+        // Coerce v3 envelope onto the prototype's BackendRow shape.
+        name: b.id,
+        kind: b.kind || (b.id?.split(':')[0] ?? ''),
+        device: b.device || (b.id?.split(':')[1] ?? ''),
+        ver: b.version,
+        state: b.state,
+        recommended: b.recommended,
+        note: b.note,
+      }))
+    : HAL0_DATA.backends;
   return (
     <div className="view">
       <div className="vh">
@@ -127,7 +156,7 @@ function BackendsView() {
         <div style={{display: "flex", alignItems: "center", gap: 10, flex: 1}}>
           <span className="dot ready" />
           <div>
-            <div className="mono" style={{fontSize: 14, fontWeight: 500}}>lemonade <span style={{color: "var(--fg-3)"}}>· {HAL0_DATA.lemond.version}</span></div>
+            <div className="mono" style={{fontSize: 14, fontWeight: 500}}>lemonade <span style={{color: "var(--fg-3)"}}>· {lemond.version}</span></div>
             <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", marginTop: 2}}>pinned · sha-256 verified · channel stable</div>
           </div>
         </div>
@@ -138,7 +167,7 @@ function BackendsView() {
       </div>
 
       <div className="sec">
-        <h2>Backends<span className="ct mono">{HAL0_DATA.backends.length}</span></h2>
+        <h2>Backends<span className="ct mono">{backends.length}</span></h2>
         <div className="rule" />
       </div>
 
@@ -150,7 +179,7 @@ function BackendsView() {
           <span>used by</span>
           <span style={{textAlign: "right"}}>actions</span>
         </div>
-        {HAL0_DATA.backends.map(b => {
+        {backends.map(b => {
           const slotsUsing = HAL0_DATA.slots.filter(s => {
             if (b.kind === "llamacpp" && s.modelLong && s.modelLong.includes("GGUF") && s.device.includes(b.device)) return true;
             if (b.kind === "whispercpp" && s.type === "transcription" && s.device !== "npu") return true;
@@ -207,9 +236,17 @@ function LogsView() {
   const [pendingCount, setPendingCount] = useStateX(0);
   const scrollRef = React.useRef(null);
 
-  // Synthesize a larger log buffer for demo, with sample grouped-error block
-  const buf = [
-    ...HAL0_DATA.journal,
+  // Phase B1: historical fetch (one-shot) + SSE tail (live).
+  // includeLemondWs flips on when source=lemond is selected; that
+  // satisfies the design's "raw lemond /logs/stream" requirement
+  // without holding the WS open when not needed.
+  const historical = useLogsHistorical();
+  const live = useLogsStream({ follow: !paused, includeLemondWs: source === 'lemond' });
+
+  // Merge static demo lines + live SSE + historical fetch. Static lines
+  // keep the design's grouped-error block (request-id collapsing) visible
+  // when no backend yet ships /api/logs.
+  const demoLines = [
     { ts: "14:01:58.330", source: "lemond", level: "ok",   slot: "primary", msg: "POST /v1/load model=qwen3.6-27b-mtp-q4_k_m backend=llamacpp:rocm" },
     { ts: "14:01:58.341", source: "lemond", level: "info", slot: "primary", msg: "ggml_init_cublas: found 1 ROCm device gfx1151" },
     { ts: "14:02:00.812", source: "lemond", level: "info", slot: "primary", msg: "llm_load_tensors: offloaded 49/49 layers to GPU" },
@@ -218,7 +255,6 @@ function LogsView() {
     { ts: "14:02:15.443", source: "hal0",   level: "info", slot: "primary", msg: "session ftr-104 opened persona=primary" },
     { ts: "14:02:18.117", source: "lemond", level: "ok",   slot: "coder",   msg: "POST /v1/load model=qwen3-coder-30b backend=llamacpp:rocm (persona swap)" },
     { ts: "14:02:19.290", source: "hal0",   level: "ok",   slot: "coder",   msg: "tool_call read_file path=src/hal0/launchers/slot_manager.py" },
-    // Grouped error block — same request_id, within 200ms
     { ts: "14:02:20.812", source: "lemond", level: "warn", slot: "img",     msg: "sd-turbo · vae load · falling back to cpu", group: "req-7f3a" },
     { ts: "14:02:20.890", source: "lemond", level: "warn", slot: "img",     msg: "sd-turbo · UNet partial offload (ngl 28/32)", group: "req-7f3a" },
     { ts: "14:02:20.911", source: "lemond", level: "warn", slot: "img",     msg: "sd-turbo · sampler init: euler-a", group: "req-7f3a" },
@@ -227,7 +263,12 @@ function LogsView() {
     { ts: "14:02:28.117", source: "lemond", level: "ok",   slot: "img",     msg: "POST /v1/load model=sd-turbo backend=sdcpp:rocm (tool dispatch)" },
     { ts: "14:02:32.290", source: "hal0",   level: "ok",   slot: "img",     msg: "tool_call generate_image · 4.1s · 2.4 MB" },
     { ts: "14:02:36.117", source: "hal0",   level: "info", slot: "img",     msg: "slot:img state serving → idle" },
-  ].sort((a, b) => a.ts.localeCompare(b.ts));
+  ];
+  const sourceLines = (historical.data && historical.data.length > 0)
+    ? historical.data
+    : [...(HAL0_DATA.journal || []), ...demoLines];
+  const buf = [...sourceLines, ...(live.ring || [])]
+    .sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
 
   const fil = e => {
     if (source !== "merged" && e.source !== source) return false;
