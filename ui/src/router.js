@@ -73,6 +73,19 @@ const routes = [
     meta: { title: 'Setup', skipFirstRunGuard: true },
   },
   {
+    // Slice #167 — primitives test sandbox. Mounts each v2 primitive
+    // in isolation so Playwright can exercise their behaviour without
+    // any view-level dependencies. The route is registered in all
+    // builds (saves a Vite env-flag branch) but is invisible from the
+    // sidebar / TopBar. ``skipFirstRunGuard`` keeps the page reachable
+    // even on a fresh install where the FirstRun guard would otherwise
+    // redirect to /firstrun.
+    path: '/_primitives_test',
+    name: 'primitives-sandbox',
+    component: () => import('./components/primitives/_sandbox/PrimitivesSandbox.vue'),
+    meta: { title: 'Primitives sandbox', skipFirstRunGuard: true },
+  },
+  {
     path: '/:catchAll(.*)',
     name: 'not-found',
     component: () => import('./views/NotFound.vue'),
