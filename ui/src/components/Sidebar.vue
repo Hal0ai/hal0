@@ -1,258 +1,318 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { useSlotStats } from '../composables/useSlotStats.js'
+/**
+ * Sidebar.vue — v2 dash chrome (slice #168).
+ *
+ * Variants per breakpoint (driven from App.vue):
+ *   ≥1280    full width (232px, --sidebar-w)
+ *   1080–1279 icon collapse (56px, --sidebar-w-collapsed), label tooltip on hover
+ *   720–1079  overlay drawer (hamburger in TopBar opens it)
+ *   <720      hidden entirely; <BottomTabs> takes over
+ *
+ * Nav order (v0.3): Dashboard / Slots / Models / Hardware / Backends /
+ * Logs / **Agents · v0.3 group** / Settings.
+ *
+ * The Agents group renders inline. When `useAgentStore.installed`
+ * is empty the entire group collapses to a single "Set up agent →"
+ * link to /agent (matches the chrome.jsx pattern: no agent → no
+ * sub-tree, just a CTA row).
+ *
+ * Bottom: Lemonade status block (state dot + N/M loaded). Click
+ * routes to /logs?source=lemond — slice #176 owns the Logs source
+ * filter wiring; until then it lands at /logs which renders fine.
+ */
+import { computed, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAgentStore } from '../stores/agent.js'
-import { api } from '../composables/useApi.js'
+import { useLemonadeStore } from '../stores/lemonade.js'
 
 const props = defineProps({
+  /** Desktop: collapsed-icon-rail vs full. Mobile/drawer: open vs closed. */
   open: Boolean,
-  isMobile: Boolean,
+  /** True when viewport ≤ 1079 (App.vue resolves the breakpoint). */
+  isDrawer: Boolean,
+  /** True when viewport ≥ 720 and ≤ 1279 (icon-collapse rail). */
+  isCollapsed: Boolean,
 })
-const emit = defineEmits(['toggle', 'navigate'])
+const emit = defineEmits(['navigate', 'close'])
 
-const route  = useRoute()
-const agent  = useAgentStore()
-
-const { running, total } = useSlotStats()
-
-// ── Agent link (Phase 8) ───────────────────────────────────────────
-// When a service-shape agent is installed (Hermes) the sidebar link
-// goes OWUI-style — opens the agent's own web surface in a new tab.
-// CLI shape (pi-coder) and "no agent installed" both route to the
-// in-dashboard /agent page where the picker or transcript live.
-//
-// The hostname follows the same pattern as the OpenWebUI link below:
-// resolved at runtime from /api/config/urls so a remote LAN browser
-// gets the right hostname, not a hardcoded localhost.
-const hermesUrl = ref('')
-async function loadHermesUrl() {
-  try {
-    const r = await api('/api/config/urls')
-    hermesUrl.value = r?.hermes ?? ''
-  } catch { /* leave hermesUrl empty */ }
-}
-
-const agentItem = computed(() => {
-  if (agent.shape === 'service' && hermesUrl.value) {
-    return {
-      label: 'Agent',
-      external: true,
-      href: hermesUrl.value,
-      icon: 'M9 17H7A5 5 0 017 7h2m6 0h2a5 5 0 010 10h-2M8 12h8',
-    }
-  }
-  return {
-    to: '/agent',
-    label: 'Agent',
-    external: false,
-    icon: 'M9 17H7A5 5 0 017 7h2m6 0h2a5 5 0 010 10h-2M8 12h8',
-  }
-})
-
-// ── OpenWebUI chat link ────────────────────────────────────────────
-// /api/config/urls returns the live hostnames + a runtime flag for
-// whether hal0-openwebui.service is active. We refuse to render the
-// link until the API answers — a hardcoded localhost:3001 used to ship
-// here, which broke for anyone hitting the dashboard from another
-// machine on the LAN.
-const chatUrl = ref('')
-const chatEnabled = ref(false)
-
-async function loadChatUrl() {
-  try {
-    const r = await api('/api/config/urls')
-    chatUrl.value = r?.openwebui ?? ''
-    chatEnabled.value = !!r?.openwebui_enabled
-  } catch {
-    // Leave chatEnabled = false; the link stays hidden rather than
-    // dangling at a 404 if the API is down.
-  }
-}
+const route   = useRoute()
+const router  = useRouter()
+const agent   = useAgentStore()
+const lemonade = useLemonadeStore()
 
 onMounted(() => {
-  loadChatUrl()
-  loadHermesUrl()
-  // Pull initial agent state so the sidebar's link branches correctly
-  // on first render even if the bell hasn't mounted yet.
+  // Bell already calls ensureBootstrapped; we still nudge fetchInstalled
+  // so the agent group renders correctly even if the bell hasn't mounted
+  // (e.g. in tests that probe the sidebar in isolation).
   agent.fetchInstalled()
 })
 
-// ── Nav definition ─────────────────────────────────────────────────
-const NAV_ITEMS = [
-  {
-    to: '/',
-    label: 'Dashboard',
-    icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6',
-  },
-  {
-    to: '/slots',
-    label: 'Slots',
-    icon: 'M5 12h14M12 5l7 7-7 7',
-  },
-  {
-    to: '/models',
-    label: 'Models',
-    icon: 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4',
-  },
-  {
-    to: '/hardware',
-    label: 'Hardware',
-    icon: 'M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18',
-  },
-  {
-    to: '/logs',
-    label: 'Logs',
-    icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
-  },
-  {
-    to: '/providers',
-    label: 'Providers',
-    icon: 'M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9',
-  },
-  {
-    to: '/settings',
-    label: 'Settings',
-    icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
-  },
+// ── Primary nav (excluding agents group) ───────────────────────────
+const NAV = [
+  { to: '/',          name: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
+  { to: '/slots',     name: 'slots',     label: 'Slots',     icon: 'slots'     },
+  { to: '/models',    name: 'models',    label: 'Models',    icon: 'models'    },
+  { to: '/hardware',  name: 'hardware',  label: 'Hardware',  icon: 'hardware'  },
+  { to: '/providers', name: 'backends',  label: 'Backends',  icon: 'backends'  },
+  { to: '/logs',      name: 'logs',      label: 'Logs',      icon: 'logs'      },
 ]
 
-// "Agent" lives between Providers and Settings — group with the other
-// dashboard surfaces that touch installed surfaces, not with the inline
-// model/slot management above. Insert at runtime so the link can
-// switch between internal (router-link → /agent) and external
-// (href → hermes web UI) without splitting the markup into two loops.
-const NAV_AGENT_INDEX = NAV_ITEMS.findIndex((i) => i.to === '/settings')
-const navItems = computed(() => {
-  const items = [...NAV_ITEMS]
-  items.splice(NAV_AGENT_INDEX, 0, agentItem.value)
-  return items
-})
+const TRAILING_NAV = [
+  { to: '/settings', name: 'settings', label: 'Settings', icon: 'settings' },
+]
+
+// ── Agents · v0.3 group ────────────────────────────────────────────
+const agentInstalled = computed(() => (agent.installed?.length ?? 0) > 0)
+
+const AGENT_GROUP = [
+  { to: '/agent',          label: 'Agents',      icon: 'agent',  badge: 'pending' },
+  { to: '/agents/mcp',     label: 'MCP Servers', icon: 'mcp',    disabled: true, tip: 'Coming soon — slice #14' },
+  { to: '/agents/memory',  label: 'Memory',      icon: 'memory', disabled: true, tip: 'v0.3' },
+]
 
 function isActive(item) {
-  if (item.external) return false
+  if (!item?.to) return false
   if (item.to === '/') return route.path === '/'
-  return route.path.startsWith(item.to)
+  return route.path === item.to || route.path.startsWith(item.to + '/')
 }
 
-function onNavClick() {
+function onNavClick(item) {
+  if (item.disabled) return
   emit('navigate')
 }
+
+function onLemondClick() {
+  router.push({ path: '/logs', query: { source: 'lemond' } })
+  emit('navigate')
+}
+
+const lemondHealth = computed(() => lemonade.health)
+const loadedCount  = computed(() => lemonade.loadedModels?.length ?? 0)
+const maxModels    = computed(() => lemonade.maxModels ?? '—')
+const lemondDotClass = computed(() => ({
+  up:       lemondHealth.value === 'up',
+  warn:     lemondHealth.value === 'degraded',
+  err:      lemondHealth.value === 'down',
+}))
 </script>
 
 <template>
   <aside
     class="sidebar"
-    :class="{ collapsed: !open }"
+    :class="{
+      collapsed: isCollapsed && !isDrawer,
+      drawer:    isDrawer,
+      'drawer-open': isDrawer && open,
+    }"
     role="navigation"
     aria-label="Main navigation"
   >
-    <nav class="nav" aria-label="Primary">
-      <template v-for="item in navItems" :key="item.to || item.href">
-        <!-- External (Hermes service-shape link-out, OWUI-style) -->
-        <a
-          v-if="item.external"
-          :href="item.href"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="nav-item"
-          :title="item.label"
-          @click="onNavClick"
-        >
-          <svg
-            class="nav-icon"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            stroke-width="1.6"
-            aria-hidden="true"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
-          </svg>
-          <span v-if="open" class="nav-label">{{ item.label }}</span>
-          <svg v-if="open" class="ext-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-          </svg>
-        </a>
-        <!-- Internal router target -->
+    <div class="sb-section">Navigate</div>
+
+    <nav class="sb-list" aria-label="Primary">
+      <router-link
+        v-for="it in NAV"
+        :key="it.to"
+        :to="it.to"
+        class="sb-row"
+        :class="{ active: isActive(it) }"
+        :aria-current="isActive(it) ? 'page' : undefined"
+        :title="it.label"
+        @click="onNavClick(it)"
+      >
+        <component :is="`icon-${it.icon}`" />
+        <span class="lbl">{{ it.label }}</span>
+      </router-link>
+
+      <!-- Agents · v0.3 group ----------------------------------- -->
+      <div v-if="agentInstalled" class="sb-group">
+        <div class="sb-group-h mono">Agents · v0.3</div>
         <router-link
-          v-else
-          :to="item.to"
-          class="nav-item"
-          :class="{ active: isActive(item) }"
-          :aria-current="isActive(item) ? 'page' : undefined"
-          @click="onNavClick"
+          v-for="it in AGENT_GROUP"
+          :key="it.to"
+          :to="it.disabled ? '' : it.to"
+          class="sb-row sb-sub"
+          :class="{ active: !it.disabled && isActive(it), disabled: it.disabled }"
+          :event="it.disabled ? '' : 'click'"
+          :tabindex="it.disabled ? -1 : 0"
+          :title="it.tip || it.label"
+          :aria-disabled="it.disabled ? 'true' : undefined"
+          @click="onNavClick(it)"
         >
-          <svg
-            class="nav-icon"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            stroke-width="1.6"
-            aria-hidden="true"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
-          </svg>
-          <span v-if="open" class="nav-label">{{ item.label }}</span>
-          <!-- Pending-approval pill, only on the Agent item when there are
-               pending approvals queued. Mirrors the bell badge so an
-               operator scanning the sidebar sees the same count. -->
+          <component :is="`icon-${it.icon}`" />
+          <span class="lbl">{{ it.label }}</span>
           <span
-            v-if="open && item.to === '/agent' && agent.pendingCount > 0"
-            class="nav-badge"
-            :aria-label="`${agent.pendingCount} pending approval${agent.pendingCount === 1 ? '' : 's'}`"
+            v-if="it.badge === 'pending' && agent.pendingCount > 0"
+            class="cnt num"
+            :aria-label="`${agent.pendingCount} pending`"
           >{{ agent.pendingCount }}</span>
+          <span v-else-if="it.disabled" class="cnt dim mono">soon</span>
         </router-link>
-      </template>
+      </div>
+
+      <!-- "Set up agent" CTA when nothing installed yet ---------- -->
+      <router-link
+        v-else
+        to="/agent"
+        class="sb-row sb-cta"
+        :class="{ active: isActive({ to: '/agent' }) }"
+        @click="onNavClick({ to: '/agent' })"
+      >
+        <component :is="`icon-agent`" />
+        <span class="lbl">Set up agent →</span>
+      </router-link>
+
+      <router-link
+        v-for="it in TRAILING_NAV"
+        :key="it.to"
+        :to="it.to"
+        class="sb-row"
+        :class="{ active: isActive(it) }"
+        :aria-current="isActive(it) ? 'page' : undefined"
+        :title="it.label"
+        @click="onNavClick(it)"
+      >
+        <component :is="`icon-${it.icon}`" />
+        <span class="lbl">{{ it.label }}</span>
+      </router-link>
     </nav>
 
-    <!-- External link: OpenWebUI. Href is resolved from /api/config/urls -->
-    <!-- so the link points at the host the dashboard was loaded from,    -->
-    <!-- not a hardcoded localhost. Hidden when the unit isn't active.    -->
-    <div class="sidebar-footer-links" v-if="open && chatEnabled && chatUrl">
-      <a
-        :href="chatUrl"
-        target="_blank"
-        rel="noopener noreferrer"
-        class="nav-item external"
-        title="Open OpenWebUI chat interface"
-      >
-        <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-        </svg>
-        <span class="nav-label">Open Chat</span>
-        <svg class="ext-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-        </svg>
-      </a>
-    </div>
+    <div class="sb-spacer" />
 
-    <!-- Slot count badge (footer) -->
-    <div class="sidebar-status" :class="{ 'sidebar-status-collapsed': !open }">
-      <span class="status-dot" :class="running > 0 ? 'live' : 'idle'" aria-hidden="true" />
-      <span v-if="open" class="status-text" :class="{ live: running > 0 }">
-        {{ running }}/{{ total }} slot{{ total !== 1 ? 's' : '' }} running
-      </span>
+    <!-- Lemonade status block (bottom-of-sidebar) -->
+    <div
+      class="sb-status"
+      role="button"
+      tabindex="0"
+      :aria-label="`Lemonade ${lemondHealth} · ${loadedCount}/${maxModels} loaded. Click for runtime logs.`"
+      @click="onLemondClick"
+      @keydown.enter="onLemondClick"
+      @keydown.space.prevent="onLemondClick"
+    >
+      <div class="row">
+        <span class="k">lemond</span>
+        <span class="v" :class="lemondDotClass" data-testid="lemond-state">
+          <span class="dot" />{{ lemondHealth }}
+        </span>
+      </div>
+      <div v-if="lemonade.version" class="row">
+        <span class="k">version</span>
+        <span class="v">{{ lemonade.version }}</span>
+      </div>
+      <div class="ln" />
+      <div class="row">
+        <span class="k">loaded</span>
+        <span class="v num" data-testid="lemond-loaded"><b>{{ loadedCount }}</b>/{{ maxModels }}</span>
+      </div>
+      <div class="nudge">View runtime logs →</div>
     </div>
   </aside>
 </template>
+
+<script>
+/**
+ * Inline icon components — same vocabulary as chrome.jsx, registered
+ * locally so `<component :is="icon-foo">` keeps the template terse.
+ * Each renders a 16×16 line glyph with currentColor stroke.
+ */
+import { h } from 'vue'
+function svg(children) {
+  return () => h('svg', {
+    width: 16, height: 16, viewBox: '0 0 16 16',
+    fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5,
+    'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+    class: 'sb-ico', 'aria-hidden': 'true',
+  }, children())
+}
+export default {
+  components: {
+    'icon-dashboard': svg(() => [
+      h('rect', { x: 2, y: 2, width: 5, height: 5, rx: 1 }),
+      h('rect', { x: 9, y: 2, width: 5, height: 9, rx: 1 }),
+      h('rect', { x: 2, y: 9, width: 5, height: 5, rx: 1 }),
+    ]),
+    'icon-slots': svg(() => [
+      h('rect', { x: 2, y: 3, width: 12, height: 3, rx: 0.5 }),
+      h('rect', { x: 2, y: 7, width: 12, height: 3, rx: 0.5 }),
+      h('rect', { x: 2, y: 11, width: 12, height: 3, rx: 0.5 }),
+      h('circle', { cx: 4, cy: 4.5, r: 0.6, fill: 'currentColor', stroke: 'none' }),
+      h('circle', { cx: 4, cy: 8.5, r: 0.6, fill: 'currentColor', stroke: 'none' }),
+      h('circle', { cx: 4, cy: 12.5, r: 0.6, fill: 'currentColor', stroke: 'none' }),
+    ]),
+    'icon-models': svg(() => [
+      h('path', { d: 'M2 4l6-2 6 2-6 2-6-2z' }),
+      h('path', { d: 'M2 8l6 2 6-2' }),
+      h('path', { d: 'M2 12l6 2 6-2' }),
+    ]),
+    'icon-hardware': svg(() => [
+      h('rect', { x: 3, y: 3, width: 10, height: 10, rx: 1 }),
+      h('rect', { x: 5.5, y: 5.5, width: 5, height: 5, rx: 0.5 }),
+    ]),
+    'icon-backends': svg(() => [
+      h('circle', { cx: 4, cy: 4, r: 2 }),
+      h('circle', { cx: 12, cy: 4, r: 2 }),
+      h('circle', { cx: 4, cy: 12, r: 2 }),
+      h('circle', { cx: 12, cy: 12, r: 2 }),
+      h('path', { d: 'M6 4h4M4 6v4M12 6v4M6 12h4' }),
+    ]),
+    'icon-logs': svg(() => [
+      h('path', { d: 'M3 3h10M3 6h10M3 9h7M3 12h5' }),
+    ]),
+    'icon-agent': svg(() => [
+      h('circle', { cx: 8, cy: 6, r: 2.5 }),
+      h('path', { d: 'M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5' }),
+    ]),
+    'icon-mcp': svg(() => [
+      h('rect', { x: 2, y: 4, width: 5, height: 8, rx: 0.6 }),
+      h('rect', { x: 9, y: 4, width: 5, height: 8, rx: 0.6 }),
+      h('path', { d: 'M7 8h2' }),
+    ]),
+    'icon-memory': svg(() => [
+      h('path', { d: 'M3 6a3 3 0 0 1 6-1 3 3 0 0 1 6 1 3 3 0 0 1-2 3l2 3a3 3 0 0 1-3 2 3 3 0 0 1-3-1.5A3 3 0 0 1 6 14a3 3 0 0 1-3-2l2-3a3 3 0 0 1-2-3z' }),
+    ]),
+    'icon-settings': svg(() => [
+      h('circle', { cx: 8, cy: 8, r: 2 }),
+      h('path', { d: 'M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3' }),
+    ]),
+  },
+}
+</script>
 
 <style scoped>
 .sidebar {
   grid-column: 1;
   grid-row: 2;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg);
   display: flex;
   flex-direction: column;
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
   overflow: hidden;
-  transition: transform 0.2s ease;
+  font-size: 13px;
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Mobile off-canvas */
-:global(.app-shell.is-mobile .sidebar) {
+/* Icon-collapse rail (1080-1279) */
+.sidebar.collapsed .sb-section,
+.sidebar.collapsed .sb-group-h,
+.sidebar.collapsed .lbl,
+.sidebar.collapsed .cnt,
+.sidebar.collapsed .nudge,
+.sidebar.collapsed .sb-status .row .k,
+.sidebar.collapsed .sb-status .row .v:not(.up):not(.warn):not(.err) {
+  display: none;
+}
+.sidebar.collapsed .sb-row {
+  justify-content: center;
+  padding: 8px;
+}
+.sidebar.collapsed .sb-status {
+  padding: 8px;
+}
+
+/* Drawer (720-1079) */
+.sidebar.drawer {
   position: fixed;
-  top: 44px;
+  top: 52px;
   left: 0;
   bottom: 0;
   width: min(260px, 85vw);
@@ -260,178 +320,147 @@ function onNavClick() {
   box-shadow: 8px 0 32px -8px rgba(0, 0, 0, 0.7);
   transform: translateX(-100%);
 }
-:global(.app-shell.is-mobile.mobile-nav-open .sidebar) {
+.sidebar.drawer.drawer-open {
   transform: translateX(0);
 }
-:global(.app-shell.is-mobile .sidebar.collapsed) {
-  width: min(260px, 85vw);
+
+.sb-section {
+  padding: 14px 12px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-fg-faint);
 }
 
-/* ── Nav ──────────────────────────────────────────────────────── */
-.nav {
-  flex: 1;
-  padding: 8px;
+.sb-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  overflow-y: auto;
+  gap: 1px;
+  padding: 0 8px;
 }
 
-.nav-item {
+.sb-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: var(--radius);
+  gap: 11px;
+  padding: 7px 10px;
+  border-radius: var(--radius, 6px);
+  cursor: pointer;
   color: var(--color-fg-muted);
+  position: relative;
+  font-weight: 400;
   text-decoration: none;
-  /* Mono-typographic nav, matching the marketing site's .hal0-nav items. */
   font-family: var(--font-mono);
   font-size: 12px;
-  font-weight: 500;
-  font-feature-settings: 'zero' 1;
-  letter-spacing: -0.01em;
-  position: relative;
-  user-select: none;
-  transition: background 0.1s, color 0.1s;
-  white-space: nowrap;
 }
-
-.nav-item:hover {
+.sb-row:hover {
   background: var(--color-surface-2);
   color: var(--color-fg);
 }
-
-.nav-item.active {
+.sb-row.active {
   background: var(--color-accent-bg);
-  color: var(--color-accent);
+  color: var(--color-fg);
 }
-
-.nav-item.active::before {
+.sb-row.active::before {
   content: '';
   position: absolute;
-  left: 0;
+  left: -8px;
   top: 6px;
   bottom: 6px;
-  width: 3px;
-  border-radius: 0 2px 2px 0;
-  background: var(--color-accent);
-  /* Faint amber halo so the rail reads as a lit filament, not a stripe. */
-  box-shadow: 0 0 12px -2px var(--hal0-accent);
-}
-
-.nav-item.external {
-  color: var(--color-fg-faint);
-  font-size: 12px;
-}
-
-.nav-item.external:hover .nav-label {
-  border-bottom: 1px solid color-mix(in srgb, var(--hal0-accent) 60%, transparent);
-}
-
-.nav-icon {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-}
-
-.nav-label {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ext-icon {
-  width: 11px;
-  height: 11px;
-  opacity: 0.4;
-  flex-shrink: 0;
-}
-
-/* Pending-approval badge on the Agent nav item. Mirrors the topbar bell. */
-.nav-badge {
-  min-width: 16px;
-  height: 16px;
-  padding: 0 5px;
-  border-radius: 999px;
+  width: 1px;
   background: var(--hal0-accent);
-  color: #000;
+  border-radius: 1px;
+  box-shadow: 0 0 8px -1px var(--hal0-accent);
+}
+.sb-row.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.sb-row .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-row .sb-ico { flex-shrink: 0; }
+
+.cnt {
   font-family: var(--font-mono);
   font-size: 10px;
-  font-weight: 600;
-  font-feature-settings: 'zero' 1, 'tnum' 1;
-  display: grid;
-  place-items: center;
-  line-height: 1;
-  margin-left: auto;
-  flex-shrink: 0;
-}
-
-/* Collapsed rail: icon only */
-.sidebar.collapsed .nav-item {
-  justify-content: center;
-  padding: 8px;
-}
-.sidebar.collapsed .nav-label,
-.sidebar.collapsed .ext-icon {
-  display: none;
-}
-.sidebar.collapsed .nav-item.active::before {
-  display: none;
-}
-
-/* ── Footer links ─────────────────────────────────────────────── */
-.sidebar-footer-links {
-  padding: 4px 8px;
-  border-top: 1px solid var(--color-border);
-}
-
-/* ── Status ───────────────────────────────────────────────────── */
-.sidebar-status {
-  padding: 10px 14px;
-  border-top: 1px solid var(--color-border);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.sidebar-status-collapsed {
-  justify-content: center;
-  padding: 10px 8px;
-}
-
-.status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  transition: background 0.3s;
-}
-
-.status-dot.live {
-  background: var(--color-success);
-  /* Brighter halo when slots are running; pair with status-text.live. */
-  box-shadow: 0 0 10px 0 var(--color-success);
-}
-
-.status-dot.idle {
-  background: var(--color-fg-faint);
-}
-
-.status-text {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  /* Slashed zero so "0/3 slots running" reads in the wordmark's voice. */
-  font-feature-settings: 'zero' 1;
-  letter-spacing: 0.02em;
   color: var(--color-fg-faint);
-  white-space: nowrap;
-  transition: color 0.2s, text-shadow 0.2s;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--color-surface-2);
+}
+.sb-row.active .cnt {
+  background: color-mix(in srgb, var(--hal0-accent) 18%, transparent);
+  color: var(--hal0-accent);
+}
+.cnt.dim { background: transparent; }
+
+/* Agents v0.3 sub-group */
+.sb-group {
+  border-top: 1px dashed var(--color-border);
+  margin-top: 6px;
+  padding-top: 4px;
+}
+.sb-group-h {
+  padding: 8px 10px 4px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-fg-faint);
+}
+.sb-sub {
+  padding-left: 14px;
 }
 
-.status-text.live {
-  color: var(--color-fg-muted);
-  text-shadow: 0 0 8px var(--hal0-accent-glow);
+.sb-cta {
+  border-top: 1px dashed var(--color-border);
+  margin-top: 6px;
+  padding-top: 9px;
+  color: var(--hal0-accent);
 }
+
+.sb-spacer { flex: 1; }
+
+/* Lemonade status block */
+.sb-status {
+  margin: 12px 12px 14px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius, 6px);
+  background: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+.sb-status:hover { border-color: var(--color-border-hi); }
+.sb-status .row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+}
+.sb-status .row .k { color: var(--color-fg-faint); }
+.sb-status .row .v { color: var(--color-fg); display: inline-flex; align-items: center; gap: 6px; }
+.sb-status .row .v.up { color: var(--color-success); }
+.sb-status .row .v.warn { color: var(--color-warn, #e8b94e); }
+.sb-status .row .v.err { color: var(--color-danger); }
+.sb-status .row .v .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+.sb-status .ln {
+  height: 1px;
+  background: var(--color-border);
+  margin: 6px 0;
+}
+.sb-status .nudge {
+  color: var(--color-fg-faint);
+  font-size: 10px;
+  margin-top: 4px;
+}
+.sb-status:hover .nudge { color: var(--hal0-accent); }
 </style>

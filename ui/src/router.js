@@ -67,6 +67,31 @@ const routes = [
     meta: { title: 'Agent' },
   },
   {
+    // Slice #168 placeholder for the v0.3 Agents · MCP Servers row.
+    // The real surface ships in slice #14. The placeholder exists so
+    // the sidebar's gated row doesn't 404 when accidentally followed.
+    path: '/agents/mcp',
+    name: 'agents-mcp',
+    component: () => import('./views/ComingSoon.vue'),
+    meta: {
+      title: 'MCP Servers',
+      detail: 'Coming soon — slice #14 lands this.',
+    },
+  },
+  {
+    // Slice #168 placeholder for the v0.3 Agents · Memory row.
+    // Phase 9 owns the real surface; until then the link surfaces
+    // a clean "v0.3" placeholder rather than dropping the user on
+    // the NotFound view.
+    path: '/agents/memory',
+    name: 'agents-memory',
+    component: () => import('./views/ComingSoon.vue'),
+    meta: {
+      title: 'Memory',
+      detail: 'Coming soon — Phase 9 / v0.3 ships this surface.',
+    },
+  },
+  {
     path: '/welcome',
     name: 'welcome',
     component: () => import('./views/FirstRun.vue'),
