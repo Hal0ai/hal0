@@ -691,7 +691,150 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     )
 
 
-_phase_mcp_wire = _stub("mcp_wire")
+# ── Phase F: mcp_wire ───────────────────────────────────────────────────────
+#
+# Verifies hal0-admin + hal0-memory MCP servers respond to tools/list +
+# records the discovered tool surface in provision.json for downstream
+# phases (#243 namespace_register, #245 model_automap). Honors ADR-0013:
+# the per-agent allow-list at /etc/hal0/agents/hermes.toml gates which
+# servers the bootstrap will attempt to connect to.
+
+
+AGENT_ALLOWLIST_PATH = Path("/etc/hal0/agents/hermes.toml")
+
+
+def _load_agent_allowlist(
+    path: Path | None = None,
+) -> dict[str, dict[str, Any]] | None:
+    """Read ``[mcp.servers.*]`` blocks from the per-agent allow-list.
+
+    Returns ``None`` when the file is missing (the agent installer
+    drops it during install; absence means "allow everything that's
+    builtin" per ADR-0013's installer-managed convention). Returns
+    ``{server_name: section_dict}`` when present.
+    """
+    target = path or AGENT_ALLOWLIST_PATH
+    if not target.exists():
+        return None
+    try:
+        import tomllib
+    except ImportError:  # pragma: no cover — Python 3.11+ always has it
+        return None
+    try:
+        data = tomllib.loads(target.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    mcp = data.get("mcp") or {}
+    servers = mcp.get("servers") or {}
+    return servers if isinstance(servers, dict) else None
+
+
+def _probe_mcp_server(
+    url: str,
+    *,
+    agent_id: str,
+    timeout: float = 5.0,
+    private: bool = False,
+) -> dict[str, Any]:
+    """List the tools an MCP server advertises. Returns shape:
+    ``{"ok": bool, "tools": [...], "error": str | None}``.
+
+    Uses stdlib urllib because the bootstrap can't assume httpx is
+    installed in the hal0 daemon's venv (it usually is — but keeping
+    this stdlib-only means env_probe can run on a minimal install).
+    """
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "X-hal0-Agent": agent_id,
+    }
+    if private:
+        headers["X-hal0-Private"] = "1"
+    req = Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
+        return {"ok": False, "tools": [], "error": str(exc)}
+    tools = []
+    result = data.get("result") if isinstance(data, dict) else None
+    if isinstance(result, dict):
+        raw_tools = result.get("tools") or []
+        if isinstance(raw_tools, list):
+            tools = [t.get("name") for t in raw_tools if isinstance(t, dict)]
+    return {"ok": True, "tools": tools, "error": None}
+
+
+def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
+    """Verify the two hal0-bundled MCP servers respond + record their tool list.
+
+    ADR-0013 compliance: when an allow-list exists at
+    ``/etc/hal0/agents/hermes.toml``, the bootstrap only attempts
+    connection for servers listed under ``[mcp.servers.*]``. A
+    missing entry (or a missing allow-list file entirely) is a
+    warning, NOT a hard fail — bootstrap continues so the operator
+    can wire the missing piece by hand after install.
+    """
+    allowlist = _load_agent_allowlist()
+    base = "http://127.0.0.1:8080"
+    servers: list[dict[str, Any]] = [
+        {
+            "name": "hal0-admin",
+            "url": f"{base}/mcp/admin",
+            "private": False,
+        },
+        {
+            "name": "hal0-memory",
+            "url": f"{base}/mcp/memory",
+            "private": True,
+        },
+    ]
+
+    results: dict[str, Any] = {}
+    warnings: list[str] = []
+    for entry in servers:
+        name = entry["name"]
+        if allowlist is not None and name not in allowlist:
+            warnings.append(
+                f"{name}: not listed in /etc/hal0/agents/hermes.toml "
+                f"[mcp.servers.{name}] — skipping per ADR-0013"
+            )
+            results[name] = {"status": "skipped_by_allowlist"}
+            continue
+        probe = _probe_mcp_server(entry["url"], agent_id=state.agent_id, private=entry["private"])
+        if not probe["ok"]:
+            warnings.append(f"{name}: {probe['error']}")
+            results[name] = {"status": "degraded", "error": probe["error"]}
+            continue
+        results[name] = {
+            "status": "ok",
+            "tool_count": len(probe["tools"]),
+            "tools": probe["tools"],
+        }
+
+    # Even with warnings we return OK — degraded MCP connectivity is
+    # surfaced for smoke_tests + self_report to display, not a fatal
+    # bootstrap blocker (per ADR-0013 + the plan §9 contract).
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            "servers": results,
+            "allowlist_present": allowlist is not None,
+            "warnings": warnings,
+        },
+    )
+
+
 _phase_context_link = _stub("context_link")
 _phase_namespace_register = _stub("namespace_register")
 _phase_model_automap = _stub("model_automap")

@@ -501,3 +501,101 @@ def test_hal0_profile_plugin_file_present() -> None:
     assert "Hal0Profile" in body
     assert "register_provider" in body
     assert "hermes-on-hal0" in body  # User-Agent header marker
+
+
+# ── #242 phase impl — mcp_wire + Hal0MemoryProvider plugin ──────────────────
+
+
+def test_hal0_memory_provider_plugin_file_present() -> None:
+    repo_root = hp.REPO_ROOT_FOR_INSTALLER
+    src = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0-memory" / "__init__.py"
+    body = src.read_text()
+    assert "Hal0MemoryProvider" in body
+    assert "MemoryProvider" in body
+    # ADR-0014: graph defaults OFF; ADR-0013-aware namespace.
+    assert "graph" in body
+    assert "private:" in body or "private:hermes-agent" in body
+    # Lifecycle methods upstream calls.
+    for method in ("system_prompt_block", "prefetch", "sync_turn"):
+        assert method in body
+
+
+def test_load_agent_allowlist_returns_none_when_file_missing(tmp_path: Path) -> None:
+    assert hp._load_agent_allowlist(tmp_path / "no.toml") is None
+
+
+def test_load_agent_allowlist_parses_servers_section(tmp_path: Path) -> None:
+    path = tmp_path / "hermes.toml"
+    path.write_text(
+        """schema_version = 1
+[mcp.servers.hal0-admin]
+builtin = true
+
+[mcp.servers.hal0-memory]
+builtin = true
+
+[mcp.servers.filesystem]
+enabled = true
+""",
+        encoding="utf-8",
+    )
+    servers = hp._load_agent_allowlist(path)
+    assert servers is not None
+    assert set(servers.keys()) == {"hal0-admin", "hal0-memory", "filesystem"}
+
+
+def test_mcp_wire_phase_returns_ok_with_tools_when_servers_respond(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = hp.BootstrapState()
+    monkeypatch.setattr(
+        hp,
+        "_probe_mcp_server",
+        lambda url, **_kw: {"ok": True, "tools": ["t1", "t2"], "error": None},
+    )
+    monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
+    out = hp._phase_mcp_wire(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["servers"]["hal0-admin"]["status"] == "ok"
+    assert out.details["servers"]["hal0-admin"]["tool_count"] == 2
+    assert out.details["allowlist_present"] is False
+    assert out.details["warnings"] == []
+
+
+def test_mcp_wire_phase_degrades_not_fails_on_unreachable_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = hp.BootstrapState()
+    monkeypatch.setattr(
+        hp,
+        "_probe_mcp_server",
+        lambda url, **_kw: {"ok": False, "tools": [], "error": "connection refused"},
+    )
+    monkeypatch.setattr(hp, "_load_agent_allowlist", lambda *_a, **_kw: None)
+    out = hp._phase_mcp_wire(state)
+    # Still OK — degraded is a warning, not a phase-blocker per ADR-0013.
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["servers"]["hal0-admin"]["status"] == "degraded"
+    assert "connection refused" in out.details["warnings"][0]
+
+
+def test_mcp_wire_phase_skips_server_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = hp.BootstrapState()
+    # Allowlist has only hal0-admin; hal0-memory gets skipped + warned.
+    monkeypatch.setattr(
+        hp,
+        "_load_agent_allowlist",
+        lambda *_a, **_kw: {"hal0-admin": {"builtin": True}},
+    )
+    monkeypatch.setattr(
+        hp,
+        "_probe_mcp_server",
+        lambda url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
+    )
+    out = hp._phase_mcp_wire(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["servers"]["hal0-memory"]["status"] == "skipped_by_allowlist"
+    assert out.details["servers"]["hal0-admin"]["status"] == "ok"
+    assert "hal0-memory" in out.details["warnings"][0]
