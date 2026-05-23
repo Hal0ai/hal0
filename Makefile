@@ -55,15 +55,6 @@ test: test-unit
 test-unit:
 	pytest tests/ -v -m "not integration"
 
-test-integration:
-	@if ! systemctl list-unit-files hal0-slot@.service --no-legend >/dev/null 2>&1; then \
-	    echo "!  hal0-slot@.service template not installed."; \
-	    echo "   Run 'sudo bash installer/install.sh --no-start' or"; \
-	    echo "   'bash installer/install.sh --dev --no-start' first."; \
-	    exit 1; \
-	fi
-	pytest tests/slots/test_integration.py -v -m integration
-
 harness:
 	bash scripts/harness.sh
 
