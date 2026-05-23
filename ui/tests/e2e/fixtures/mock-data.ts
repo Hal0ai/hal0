@@ -62,6 +62,22 @@ export const MOCK_DATA = {
     input_tokens: 312,
   },
 
+  /**
+   * Subset of the model catalog needed by Models v2 specs (slice #171).
+   * Mirrors a subset of `useMock.js` MOCK_DATA.models — keep id +
+   * type + device + installed + runtime in sync.
+   */
+  models: [
+    { id: 'qwen3.6-27b-mtp', longName: 'Qwen3.6-27B-MTP', repo: 'unsloth/Qwen3.6-27B-A3B-MTP-GGUF:Q4_K_M', params: '27B', size: '18.8 GB', labels: ['chat', 'tool-calling'], type: 'llm', device: 'rocm', ns: 'blessed', installed: true, runtime: 'llamacpp' },
+    { id: 'qwen3-coder-30b', longName: 'Qwen3-Coder-30B-A3B', repo: 'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q4_K_M', params: '30B', size: '18.6 GB', labels: ['chat', 'coder', 'tool-calling'], type: 'llm', device: 'rocm', ns: 'blessed', installed: true, runtime: 'llamacpp' },
+    { id: 'qwen3.5-9b', longName: 'Qwen3.5-9B', repo: 'Qwen/Qwen3.5-9B-Instruct-GGUF:Q4_K_M', params: '9B', size: '5.4 GB', labels: ['chat', 'tool-calling', 'vision'], type: 'llm', device: 'rocm', ns: 'blessed', installed: false, runtime: 'llamacpp' },
+    { id: 'gemma3-1b-npu', longName: 'gemma3:1b (NPU)', repo: 'google/gemma-3-1b-it-flm', params: '1B', size: '1.0 GB', labels: ['chat', 'tool-calling'], type: 'llm', device: 'npu', ns: 'blessed', installed: true, runtime: 'flm' },
+    { id: 'nomic-v1.5', longName: 'nomic-embed-text-v1.5', repo: 'nomic-ai/nomic-embed-text-v1.5-GGUF', params: '350M', size: '350 MB', labels: ['embeddings'], type: 'embedding', device: 'rocm', ns: 'blessed', installed: true, runtime: 'llamacpp' },
+    { id: 'kokoro-v1', longName: 'kokoro-v1', repo: 'hexgrad/Kokoro-82M', params: '82M', size: '400 MB', labels: ['tts'], type: 'tts', device: 'cpu', ns: 'blessed', installed: true, runtime: 'kokoro' },
+    { id: 'sd-turbo', longName: 'sd-turbo', repo: 'stabilityai/sd-turbo', params: '1.2B', size: '1.2 GB', labels: ['image'], type: 'image', device: 'rocm', ns: 'blessed', installed: true, runtime: 'sdcpp' },
+    { id: 'user.phi-4-mini', longName: 'user.Phi-4-Mini', repo: 'microsoft/Phi-4-mini-instruct-GGUF', params: '3.8B', size: '2.3 GB', labels: ['chat', 'tool-calling'], type: 'llm', device: 'rocm', ns: 'pulled', installed: true, runtime: 'llamacpp' },
+  ],
+
   mcpServers: [
     { id: 'hal0-admin', name: 'hal0-admin', provider: 'hal0', bundled: true, state: 'running',
       transport: 'streamable-http', tools: 11, resources: 4, prompts: 2, version: '0.3.0',
