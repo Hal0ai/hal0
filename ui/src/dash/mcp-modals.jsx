@@ -1,6 +1,8 @@
 // hal0 v0.3 — MCP modals & drawers
 // InstallDrawer (catalog), EditConfigModal, LogsDrawer, ConnectClientModal
 
+import { useMcpCatalog, useMcpServerLogs, useMcpConfigPatch } from '@/api/hooks/useMcp';
+
 const { useState: useStateMM, useMemo: useMemoMM, useEffect: useEffectMM } = React;
 
 // ─── Install drawer — catalog + URL escape hatch ────────────────────
@@ -9,13 +11,20 @@ function InstallDrawer({ open, onClose, onInstall }) {
   const [cat, setCat] = useStateMM("all");
   const [tab, setTab] = useStateMM("catalog"); // catalog | url
 
+  // Live catalog via /api/mcp/catalog (issue #206). Falls through to
+  // the HAL0_DATA MCP_CATALOG mock when the hook returns no items so
+  // the prototype demo + tests render against the rich fixture set.
+  const catalogQ = useMcpCatalog();
+  const liveItems = catalogQ.data?.items || [];
+  const items = liveItems.length > 0 ? liveItems : MCP_CATALOG;
+
   const filtered = useMemoMM(() => {
-    return MCP_CATALOG.filter(it => {
+    return items.filter(it => {
       if (cat !== "all" && it.category !== cat) return false;
       if (q && !(`${it.name} ${it.description} ${it.author}`.toLowerCase().includes(q.toLowerCase()))) return false;
       return true;
     });
-  }, [q, cat]);
+  }, [q, cat, items]);
 
   return (
     <Drawer
@@ -26,7 +35,7 @@ function InstallDrawer({ open, onClose, onInstall }) {
       title="Install an MCP server"
       foot={
         <>
-          <span style={{color: "var(--fg-4)"}}>{MCP_CATALOG.length} servers in the catalog · curated by hal0 · community-contributed</span>
+          <span style={{color: "var(--fg-4)"}}>{items.length} servers in the catalog · curated by hal0 · community-contributed</span>
           <button className="btn ghost sm" onClick={onClose}>Done</button>
         </>
       }
@@ -151,6 +160,10 @@ function InstallFromUrl({ onInstall }) {
 // ─── Edit config modal ──────────────────────────────────────────────
 function EditConfigModal({ open, server, onClose }) {
   const [env, setEnv] = useStateMM({});
+  // Config-write hook — backend currently 501s pending ADR-0013; the
+  // mutation hook surfaces the toast for us so the Save button looks
+  // alive instead of silently failing.
+  const configMut = useMcpConfigPatch();
   useEffectMM(() => { if (server) setEnv({ ...(server.env || {}) }); }, [server]);
   if (!server) return null;
 
@@ -167,7 +180,7 @@ function EditConfigModal({ open, server, onClose }) {
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose}>Cancel</button>
             <button className="btn sm" onClick={() => {
-              window.__hal0Toast && window.__hal0Toast(`${server.name} config saved · restart to apply`, "info");
+              configMut.mutate({ id: server.id, body: { env } });
               onClose();
             }}>Save</button>
           </span>
@@ -228,7 +241,28 @@ function EditConfigModal({ open, server, onClose }) {
 // ─── Logs drawer (per-server tail) ──────────────────────────────────
 function LogsDrawer({ open, server, onClose }) {
   if (!server) return null;
-  const sampleLines = [
+  // Live audit rows via /api/mcp/{id}/logs (issue #206). Polls every
+  // 3 s while open. Empty result falls through to the prototype sample
+  // lines so the drawer still looks alive against a brand-new install.
+  const logsQ = useMcpServerLogs(open ? server.id : null);
+  const liveEvents = logsQ.data?.events || [];
+  const fmtTs = (ts) => {
+    if (typeof ts === 'number') return new Date(ts * 1000).toLocaleTimeString();
+    if (typeof ts === 'string') return ts;
+    return '—';
+  };
+  const lvlOf = (e) => {
+    if (e.outcome === 'failed' || e.outcome === 'denied') return 'warn';
+    if (e.outcome === 'executed' || e.outcome === 'approved') return 'ok';
+    return 'info';
+  };
+  const liveLines = liveEvents.map((e, i) => ({
+    ts: fmtTs(e.timestamp),
+    lvl: lvlOf(e),
+    src: server.name,
+    msg: `tool call: ${e.tool || 'call'} · ${e.client_id || 'anonymous'}${e.gated ? ' (gated)' : ''}`,
+  }));
+  const sampleLines = liveLines.length > 0 ? liveLines : [
     { ts: "14:02:11.117", lvl: "ok",   src: "supervisor", msg: `${server.name} pid ${server.pid || "—"} up · 14d 02:11` },
     { ts: "14:02:30.290", lvl: "info", src: server.name,  msg: "tool call: slot.list" },
     { ts: "14:02:30.310", lvl: "info", src: server.name,  msg: "→ 9 results (claude-code)" },

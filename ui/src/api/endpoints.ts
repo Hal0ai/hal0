@@ -58,6 +58,23 @@ export const ENDPOINTS = {
   agentMcpClient: (name: string) =>
     `/api/agents/mcp/clients/${encodeURIComponent(name)}`,
 
+  // ── MCP host introspection (issue #206) ──────────────────────────
+  // Read-only view of hosted MCP servers, connected clients, the
+  // installable catalog, and an SSE tail of mcp.tool.* events.
+  // Lifecycle mutations (install/uninstall/restart/config) stub 501
+  // pending ADR-0013 mcp_client.py work.
+  mcpServers: '/api/mcp/servers',
+  mcpClients: '/api/mcp/clients',
+  mcpCatalog: '/api/mcp/catalog',
+  mcpStream: '/api/mcp/stream',
+  mcpInstall: '/api/mcp/install',
+  mcpServer: (id: string) => `/api/mcp/${encodeURIComponent(id)}`,
+  mcpServerLogs: (id: string) => `/api/mcp/${encodeURIComponent(id)}/logs`,
+  mcpServerAction: (id: string, action: string) =>
+    `/api/mcp/${encodeURIComponent(id)}/${encodeURIComponent(action)}`,
+  mcpServerConfig: (id: string) =>
+    `/api/mcp/${encodeURIComponent(id)}/config`,
+
   // ── Memory (ADR-0014 graph-extraction gate) ──────────────────────
   memoryGraphStatus: '/api/memory/graph/status',
   memoryGraph: '/api/memory/graph',

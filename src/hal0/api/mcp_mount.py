@@ -142,6 +142,11 @@ def mount_mcp_servers(
     app.mount("/mcp/admin", admin_app, name="mcp-admin")
 
     session_managers = [admin_server.session_manager]
+    # Issue #206 — stash the live FastMCP instances on app.state so the
+    # /api/mcp/* introspection routes can read tool / resource / prompt
+    # counts via ``await server.list_tools()`` without re-importing the
+    # builders. Keyed by mount id (matches ``connect_url`` last segment).
+    mcp_servers: dict[str, object] = {"hal0-admin": admin_server}
 
     if memory_wrapper is not None:
         from hal0.mcp.memory import build_server as build_memory_server
@@ -155,8 +160,10 @@ def mount_mcp_servers(
         memory_app.add_middleware(MCPAuthMiddleware)
         app.mount("/mcp/memory", memory_app, name="mcp-memory")
         session_managers.append(memory_server.session_manager)
+        mcp_servers["hal0-memory"] = memory_server
 
     app.state.mcp_session_managers = session_managers
+    app.state.mcp_servers = mcp_servers
 
     log.info(
         "hal0.mcp.mounted",

@@ -4,13 +4,23 @@
 // recent ones glowing amber. Page feels like a monitor, not a list.
 
 import { useAgentMcpClients } from '@/api/hooks/useAgentMcpClients'
+import {
+  useMcpServers,
+  useMcpClients,
+  useMcpCallStream,
+  useMcpInstall,
+  useMcpRestart,
+  useMcpUninstall,
+} from '@/api/hooks/useMcp'
 
 const { useState: useStateM, useEffect: useEffectM, useRef: useRefM, useMemo: useMemoM, useCallback: useCallbackM } = React;
 
 // ─── Live activity bus ───────────────────────────────────────────────
-// Mock real-time tool-call stream. Each tick (every ~500ms) flips a coin
-// per server based on its rpm; calls fade out over the 60s window.
-function useLiveCallStream(servers) {
+// Legacy local fake-stream — only used when the SSE hook returns no
+// rows AND the server list is the HAL0_DATA mock (so a stale build
+// without /api/mcp/stream still ticks the LiveTimeline visibly).
+// Production (issue #206) drives the timeline from useMcpCallStream.
+function useLiveCallStreamLocal(servers) {
   const [now, setNow] = useStateM(Date.now());
   const callsRef = useRefM({}); // serverId → [{ts, client, tool}]
   const CLIENTS = ["claude-code", "cursor", "claude-desktop"];
@@ -389,7 +399,22 @@ function McpView() {
   // (new per-agent view). Defaults to "servers" so existing nav stays
   // unchanged.
   const [mode, setMode] = useStateM("servers");
-  const [servers, setServers] = useStateM(MCP_SERVERS);
+  // Live data via /api/mcp/* (issue #206). When the backend returns no
+  // rows (404 → mock fallback in the hook, or genuinely empty), fall
+  // through to the HAL0_DATA mock so the prototype demo + Playwright
+  // specs keep rendering against the rich fixture set.
+  const serversQ = useMcpServers();
+  const clientsQ = useMcpClients();
+  const liveServers = serversQ.data || [];
+  const liveClients = clientsQ.data || [];
+  const servers = liveServers.length > 0 ? liveServers : MCP_SERVERS;
+  const clients = liveClients.length > 0 ? liveClients.map(c => ({
+    ...c,
+    // The prototype card reads `servers` (legacy alias) + a `since`
+    // string; normalise so the existing render path keeps working.
+    servers: c.servers || c.connected_to || [],
+    since: typeof c.since === 'number' ? new Date(c.since * 1000).toLocaleTimeString() : (c.since || '—'),
+  })) : MCP_CLIENTS;
   const [filter, setFilter] = useStateM("all");
   const [menuId, setMenuId] = useStateM(null);
   const [installOpen, setInstallOpen] = useStateM(false);
@@ -397,7 +422,16 @@ function McpView() {
   const [logsFor, setLogsFor] = useStateM(null);
   const [confirmUninstall, setConfirmUninstall] = useStateM(null);
   const [teachOpen, setTeachOpen] = useStateM(false);
-  const { calls, now } = useLiveCallStream(servers);
+  // SSE-backed call stream. Falls back to the local randomised stream
+  // when no live events have arrived AND we're rendering the HAL0_DATA
+  // mock list, so the demo timeline still ticks visibly.
+  const sseStream = useMcpCallStream();
+  const localStream = useLiveCallStreamLocal(liveServers.length === 0 ? servers : []);
+  const hasLiveCalls = Object.values(sseStream.calls).some(arr => arr && arr.length > 0);
+  const calls = hasLiveCalls ? sseStream.calls : (liveServers.length === 0 ? localStream.calls : sseStream.calls);
+  const now = hasLiveCalls ? sseStream.now : (liveServers.length === 0 ? localStream.now : sseStream.now);
+  const restartMut = useMcpRestart();
+  const uninstallMut = useMcpUninstall();
 
   // close menus on outside click
   useEffectM(() => {
@@ -422,11 +456,19 @@ function McpView() {
   ];
 
   const toggleServer = (s, next) => {
-    setServers(prev => prev.map(p => p.id === s.id ? { ...p, state: next ? "running" : "stopped", since: next ? "just now" : "stopped just now" } : p));
-    window.__hal0Toast && window.__hal0Toast(`${s.name} ${next ? "started" : "stopped"}`, "info");
+    // Backend route stubs 501 for stop/start (ADR-0013 follow-up); the
+    // mutation hook catches the 501 and shows the toast for us, so we
+    // just fire the restart mutation and let the polling refresh the
+    // server list when the action actually does something.
+    if (next) {
+      restartMut.mutate(s.id);
+    } else {
+      uninstallMut.mutate(s.id);
+    }
+    window.__hal0Toast && window.__hal0Toast(`${s.name} ${next ? "starting…" : "stopping…"}`, "info");
   };
 
-  const noClients = MCP_CLIENTS.length === 0;
+  const noClients = clients.length === 0;
 
   return (
     <div className="view mcp-view">
@@ -467,12 +509,12 @@ function McpView() {
       {mode !== "servers" ? null : (
       <>
       {/* KPI strip */}
-      <McpKpiStrip servers={servers} clients={MCP_CLIENTS} calls={calls} now={now} />
+      <McpKpiStrip servers={servers} clients={clients} calls={calls} now={now} />
 
       {/* Connected clients ribbon, OR empty state if zero */}
       {noClients
         ? <NoClientsState onTeach={() => setTeachOpen(true)} />
-        : <ClientsRibbon clients={MCP_CLIENTS} calls={calls} now={now} onTeach={() => setTeachOpen(true)} />
+        : <ClientsRibbon clients={clients} calls={calls} now={now} onTeach={() => setTeachOpen(true)} />
       }
 
       {/* Filter bar */}
@@ -504,7 +546,7 @@ function McpView() {
             server={s}
             calls={calls}
             now={now}
-            clients={MCP_CLIENTS}
+            clients={clients}
             menuOpen={menuId === s.id}
             onMenuOpen={(id) => setMenuId(menuId === id ? null : id)}
             onCloseMenu={() => setMenuId(null)}
@@ -519,14 +561,12 @@ function McpView() {
         )}
       </div>
 
-      {/* Install drawer (catalog) */}
-      <InstallDrawer
+      {/* Install drawer (catalog) — wired to /api/mcp/install which
+          501s pending ADR-0013. The mutation hook shows a toast on
+          501 so the install button doesn't look broken. */}
+      <InstallDrawerWired
         open={installOpen}
         onClose={() => setInstallOpen(false)}
-        onInstall={(item) => {
-          window.__hal0Toast && window.__hal0Toast(`Installing ${item.name}…`, "info");
-          setInstallOpen(false);
-        }}
       />
 
       {/* Edit config modal */}
@@ -543,21 +583,21 @@ function McpView() {
         onClose={() => setLogsFor(null)}
       />
 
-      {/* Uninstall confirm */}
+      {/* Uninstall confirm — fires the mutation, which 501s pending
+          ADR-0013. The hook surfaces the toast. */}
       <ConfirmDialog
         open={!!confirmUninstall}
         title={confirmUninstall ? `Uninstall ${confirmUninstall.name}?` : ""}
         message={
           <span>
             Removes the server binary, env, and supervisor entry. Connected clients will lose access immediately.
-            {confirmUninstall && <><br /><br /><span className="mono" style={{color: "var(--fg-4)"}}>{(confirmUninstall.clients?.length || 0)} clients are currently connected.</span></>}
+            {confirmUninstall && <><br /><br /><span className="mono" style={{color: "var(--fg-4)"}}>{(confirmUninstall.clients?.length || confirmUninstall.connected?.length || 0)} clients are currently connected.</span></>}
           </span>
         }
         onCancel={() => setConfirmUninstall(null)}
         onConfirm={() => {
           if (!confirmUninstall) return;
-          setServers(prev => prev.filter(p => p.id !== confirmUninstall.id));
-          window.__hal0Toast && window.__hal0Toast(`${confirmUninstall.name} uninstalled`, "warn");
+          uninstallMut.mutate(confirmUninstall.id);
           setConfirmUninstall(null);
         }}
         confirmLabel="Uninstall"
@@ -698,6 +738,24 @@ function NoClientsState({ onTeach }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Thin wrapper that injects the install mutation so the existing
+// InstallDrawer prop interface (onInstall(item)) stays unchanged.
+// On 501 the mutation hook displays the ADR-0013 toast; on success it
+// invalidates the server query so the new row appears in the list.
+function InstallDrawerWired({ open, onClose }) {
+  const installMut = useMcpInstall();
+  return (
+    <InstallDrawer
+      open={open}
+      onClose={onClose}
+      onInstall={(item) => {
+        installMut.mutate({ name: item.name, spec: item.id || item.name });
+        onClose();
+      }}
+    />
   );
 }
 

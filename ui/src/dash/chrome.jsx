@@ -134,6 +134,11 @@ function Sidebar({ route, onGo }) {
     { id: "backends",  label: "Backends",  icon: Icons.backends },
     { id: "logs",      label: "Logs",      icon: Icons.logs },
     { id: "agent",     label: "Agent",     icon: Icons.agent },
+    // Issue #206 — MCP page wired to /api/mcp/*. Lives under "Agents"
+    // conceptually but kept as a sibling in the sidebar so the URL is
+    // discoverable. Icon reuses the agent glyph (no dedicated MCP icon
+    // in the design system yet).
+    { id: "mcp",       label: "MCP",       icon: Icons.agent },
     { id: "settings",  label: "Settings",  icon: Icons.settings },
   ];
   return (

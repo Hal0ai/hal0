@@ -68,6 +68,9 @@ from hal0.api.routes import (
     lemonade_proxy as lemonade_proxy_routes,
 )
 from hal0.api.routes import (
+    mcp as mcp_routes,
+)
+from hal0.api.routes import (
     memory as memory_routes,
 )
 from hal0.api.routes import (
@@ -793,6 +796,17 @@ def create_app() -> FastAPI:
         approvals_routes.router,
         prefix="/api/agent/approvals",
         tags=["approvals"],
+    )
+
+    # MCP introspection (issue #206). Read-only view of hosted MCP
+    # servers, connected clients (audit-derived), the installable
+    # catalog, and an SSE tail of ``mcp.tool.*`` events. The lifecycle
+    # mutations (install / uninstall / restart / config-write) stub at
+    # 501 — ADR-0013's ``mcp_client.py`` work owns those.
+    app.include_router(
+        mcp_routes.router,
+        prefix="/api/mcp",
+        tags=["mcp"],
     )
 
     # ── MCP servers (ADR-0004 §4 + ADR-0005 §2) ─────────────────────
