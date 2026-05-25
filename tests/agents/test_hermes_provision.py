@@ -407,22 +407,34 @@ def test_env_probe_writes_snapshot_to_hermes_home(tmp_path: Path) -> None:
         assert key in data
 
 
-def test_resolve_primary_slot_uses_loaded_entry() -> None:
-    fake = lambda: {  # noqa: E731
-        "loaded": [
-            {"model": "qwen3:8b", "backend_url": "http://127.0.0.1:8001", "context_length": 16384}
-        ]
-    }
-    out = hp._resolve_primary_slot(fetcher=fake)
+def test_resolve_primary_slot_picks_named_primary_slot() -> None:
+    fake = lambda: [  # noqa: E731
+        {
+            "name": "primary",
+            "type": "llm",
+            "state": "ready",
+            "model_id": "qwen3:8b",
+            "backend_url": "http://127.0.0.1:8001/v1",
+            "context_length": 16384,
+        }
+    ]
+    out = hp._resolve_primary_slot(slots_fetcher=fake)
     assert out["model"] == "qwen3:8b"
-    assert out["base_url"] == "http://127.0.0.1:8001"
+    # Slot's llama-server URL (8001) is rewritten to the hal0 OpenAI
+    # proxy so prompt-cache + dispatch stay in the loop. hal0-api
+    # exposes the OpenAI surface at `/v1` — Lemonade's native
+    # `/api/v1` prefix is dropped at the wrapper.
+    assert out["base_url"] == "http://127.0.0.1:8080/v1"
     assert out["context_length"] == 16384
 
 
-def test_resolve_primary_slot_fallback_when_no_loaded_slots() -> None:
-    out = hp._resolve_primary_slot(fetcher=lambda: {})
+def test_resolve_primary_slot_fallback_when_no_slots() -> None:
+    out = hp._resolve_primary_slot(slots_fetcher=lambda: [])
     assert out["model"] == "primary"
     assert out["context_length"] == 32768
+    # Placeholder points at hal0-api on 8080/v1, not the pre-Lemonade
+    # phantom on 8000.
+    assert out["base_url"] == "http://127.0.0.1:8080/v1"
 
 
 def test_render_config_yaml_includes_primary_block() -> None:
@@ -444,7 +456,11 @@ def test_render_config_yaml_includes_primary_block() -> None:
 def test_render_config_yaml_no_primary_emits_safe_placeholder() -> None:
     rendered = hp._render_config_yaml(primary=None, agent_id="hermes-agent")
     assert 'default: ""' in rendered
-    assert "127.0.0.1:8000/api/v1" in rendered
+    # Placeholder URL points at hal0-api (8080/v1) — pre-Lemonade this
+    # was a phantom 8000 with no daemon behind it; the wrong-prefix
+    # variant `/api/v1` exists on Lemonade but is dropped at hal0's
+    # wrapper.
+    assert "127.0.0.1:8080/v1" in rendered
 
 
 def test_render_config_yaml_chat_slots_become_aliases() -> None:
@@ -725,6 +741,9 @@ def test_context_link_renders_all_three_files(
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
     monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", etc / "agent-skills")
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "no-such-skills")
+    # Context-link consults /api/slots when wiring HERMES.md's primary
+    # block; stub it out so the test stays offline + deterministic.
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
 
     out = hp._phase_context_link(state)
     assert out.status == hp.PhaseStatus.OK
@@ -761,6 +780,7 @@ def test_context_link_falls_back_when_soul_render_fails(
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path / "etc" / "hal0")
     monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", tmp_path / "etc" / "hal0" / "agent-skills")
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "no-skills")
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
 
     def _explode(name: str, **_: Any) -> str:
         if name == "SOUL.md.j2":

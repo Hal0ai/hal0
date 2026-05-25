@@ -551,41 +551,60 @@ def _phase_env_probe(state: BootstrapState) -> PhaseResult:
 CONFIG_TEMPLATE_PATH = Path(__file__).resolve().parent / "hermes_templates" / "config.yaml.j2"
 
 
-def _resolve_primary_slot(*, fetcher: Callable[[], dict[str, Any]] | None = None) -> dict[str, Any]:
+def _resolve_primary_slot(
+    *,
+    slots_fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Pick the live primary chat slot from the local hal0 daemon.
 
-    Returns a dict with the keys the config template needs. Falls back
-    to a safe-but-unwired placeholder when no slot is loaded — the
-    self_report phase surfaces this in the bootstrap summary.
+    Reads ``/api/slots`` (canonical post-Lemonade source) and selects
+    the entry named ``primary`` (or the first ready ``type=='llm'``
+    slot when no name matches). Returns the keys the config template
+    needs. Falls back to a safe-but-unwired placeholder when no slot
+    is loaded — self_report surfaces that in the bootstrap summary.
+
+    Until v0.2 this read Lemonade's ``/v1/health`` and looked for
+    ``loaded``/``slots`` keys, which post-Lemonade-embed are absent
+    (the payload uses ``all_models_loaded``). The result was a silent
+    fall-through to a placeholder URL on port 8000 — a daemon-less
+    address that never wired Hermes to anything real.
     """
     fallback = {
         "model": "primary",
-        "base_url": "http://127.0.0.1:8000/api/v1",
+        "base_url": _DEFAULT_PRIMARY_BACKEND_URL,
         "context_length": 32768,
     }
-    if fetcher is None:
+    fetch = slots_fetcher or _fetch_slots
+    slots = fetch() or []
 
-        def _real() -> dict[str, Any]:
-            from urllib.error import URLError
-            from urllib.request import urlopen
+    def _chat(s: dict[str, Any]) -> bool:
+        # `type` is the post-Lemonade canonical key (llm/embedding/...);
+        # `kind` survives from the pre-Lemonade schema.
+        kind = str(s.get("type") or s.get("kind") or "").lower()
+        return kind in {"llm", "chat"}
 
-            try:
-                with urlopen("http://127.0.0.1:8080/v1/health", timeout=2.0) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
-            except (URLError, OSError, json.JSONDecodeError):
-                return {}
+    candidates = [s for s in slots if isinstance(s, dict) and _chat(s)]
+    primary = next((s for s in candidates if s.get("name") == "primary"), None)
+    if primary is None:
+        primary = next((s for s in candidates if _is_ready(s)), None)
+    if primary is None:
+        return fallback
 
-        fetcher = _real
-    data = fetcher() or {}
-    loaded = data.get("loaded") or data.get("slots") or []
-    if isinstance(loaded, list) and loaded:
-        first = loaded[0] if isinstance(loaded[0], dict) else {}
-        return {
-            "model": first.get("model") or first.get("model_id") or fallback["model"],
-            "base_url": first.get("backend_url") or fallback["base_url"],
-            "context_length": int(first.get("context_length") or fallback["context_length"]),
-        }
-    return fallback
+    model = _slot_model_id(primary) or fallback["model"]
+    base_url = _slot_backend_url(primary)
+    # The slot's `backend_url` points at the upstream llama-server
+    # (e.g. http://127.0.0.1:8001/v1). Hermes should talk to hal0's
+    # OpenAI-compat router instead so caching/dispatch stays intact.
+    # hal0-api mounts the OpenAI surface at `/v1` (NOT `/api/v1` —
+    # Lemonade's native prefix is dropped at the wrapper layer).
+    if not base_url or "127.0.0.1:8001" in base_url:
+        base_url = f"{HAL0_API_URL}/v1"
+    ctx = primary.get("context_length") or primary.get("ctx_size") or fallback["context_length"]
+    try:
+        ctx = int(ctx)
+    except (TypeError, ValueError):
+        ctx = fallback["context_length"]
+    return {"model": model, "base_url": base_url, "context_length": ctx}
 
 
 def _render_config_yaml(
@@ -746,39 +765,109 @@ def _probe_mcp_server(
     """List the tools an MCP server advertises. Returns shape:
     ``{"ok": bool, "tools": [...], "error": str | None}``.
 
+    Speaks FastMCP Streamable-HTTP transport: POST ``<url>/mcp`` with
+    an ``initialize`` request, capture the ``Mcp-Session-Id`` response
+    header, then POST ``tools/list`` with that session id. Accepts
+    both raw-JSON and ``text/event-stream`` framed responses (FastMCP
+    picks either depending on Accept).
+
     Uses stdlib urllib because the bootstrap can't assume httpx is
     installed in the hal0 daemon's venv (it usually is — but keeping
     this stdlib-only means env_probe can run on a minimal install).
     """
-    from urllib.error import URLError
+    import contextlib
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    body = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-            "params": {},
-        }
-    ).encode("utf-8")
-    headers = {
+    transport_url = url.rstrip("/") + "/mcp"
+    base_headers = {
         "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
         "X-hal0-Agent": agent_id,
     }
     if private:
-        headers["X-hal0-Private"] = "1"
-    req = Request(url, data=body, headers=headers, method="POST")
+        base_headers["X-hal0-Private"] = "1"
+
+    def _parse_jsonrpc(body: str) -> dict[str, Any]:
+        body = (body or "").strip()
+        if not body:
+            return {}
+        if body[0] == "{":
+            return json.loads(body)
+        # text/event-stream framing: `event: message\ndata: {...}\n\n`
+        for line in body.splitlines():
+            if line.startswith("data: "):
+                try:
+                    return json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+        return {}
+
+    def _post(payload: dict[str, Any], session_id: str | None) -> tuple[dict[str, Any], str | None]:
+        headers = dict(base_headers)
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+        req = Request(
+            transport_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8")
+                returned_sid = resp.headers.get("Mcp-Session-Id") or resp.headers.get(
+                    "mcp-session-id"
+                )
+        except HTTPError as exc:  # 4xx/5xx — still try to parse the body
+            body = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
+            returned_sid = exc.headers.get("Mcp-Session-Id") if exc.headers else None
+            parsed = _parse_jsonrpc(body)
+            if isinstance(parsed, dict) and parsed.get("error"):
+                return parsed, returned_sid
+            raise
+        return _parse_jsonrpc(body), returned_sid
+
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
+        init, sid = _post(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "hal0-bootstrap-probe", "version": "0.1"},
+                },
+            },
+            session_id=None,
+        )
+        if isinstance(init, dict) and init.get("error"):
+            return {"ok": False, "tools": [], "error": f"initialize: {init['error']}"}
+
+        # Fire-and-forget; some FastMCP versions gate tools/list on it.
+        with contextlib.suppress(URLError, HTTPError, OSError, TimeoutError):
+            _post(
+                {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+                session_id=sid,
+            )
+
+        tools_resp, _ = _post(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            session_id=sid,
+        )
+    except (URLError, HTTPError, OSError, json.JSONDecodeError, TimeoutError) as exc:
         return {"ok": False, "tools": [], "error": str(exc)}
-    tools = []
-    result = data.get("result") if isinstance(data, dict) else None
+
+    if isinstance(tools_resp, dict) and tools_resp.get("error"):
+        return {"ok": False, "tools": [], "error": f"tools/list: {tools_resp['error']}"}
+
+    tools: list[str] = []
+    result = tools_resp.get("result") if isinstance(tools_resp, dict) else None
     if isinstance(result, dict):
         raw_tools = result.get("tools") or []
         if isinstance(raw_tools, list):
-            tools = [t.get("name") for t in raw_tools if isinstance(t, dict)]
+            tools = [t.get("name") for t in raw_tools if isinstance(t, dict) and t.get("name")]
     return {"ok": True, "tools": tools, "error": None}
 
 
@@ -956,12 +1045,41 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     hermes_home = Path(state.hermes_home)
     snapshot = _latest_env_snapshot(hermes_home)
     env_report = snapshot.get("env_report", {}) if isinstance(snapshot, dict) else {}
+
+    # Resolve live slot state so HERMES.md actually advertises the
+    # active primary + chat slots (otherwise the dashboard "no chat
+    # slots loaded" branch always wins — surprising operators who
+    # have a working primary and trip the
+    # `hermes_md_contains_primary` smoke test).
+    slots_all: list[dict[str, Any]] = []
+    # _fetch_slots is already failure-tolerant (returns [] on transport
+    # error). No try/except needed here — it can't raise.
+    slots_all = _fetch_slots()
+    chat_slots = _collect_chat_slots(slots_all)
+    primary_raw = _resolve_primary_slot()
+    primary_for_template: dict[str, Any] | None = None
+    primary_alias = "primary"
+    primary_slot = next(
+        (s for s in slots_all if isinstance(s, dict) and s.get("name") == "primary"), None
+    )
+    if primary_slot:
+        primary_alias = _slot_alias(primary_slot)
+    # primary_raw["model"] is a real model_id when a slot is live, or
+    # the placeholder string "primary" when nothing is loaded — treat
+    # the placeholder as "no primary" for template purposes.
+    if primary_raw["model"] and primary_raw["model"] != "primary":
+        primary_for_template = {
+            "alias": primary_alias,
+            "model_id": primary_raw["model"],
+            "backend_url": primary_raw["base_url"],
+        }
+
     vars_ = {
         "env": env_report,
         "hal0_version": _hal0_version_string(),
         "hermes_version": _hermes_version_pin(),
-        "primary": None,
-        "chat_slots": [],
+        "primary": primary_for_template,
+        "chat_slots": chat_slots,
         "peer_agents": [],
     }
 
@@ -1317,7 +1435,7 @@ def _slot_backend_url(slot: dict[str, Any]) -> str:
     return _DEFAULT_PRIMARY_BACKEND_URL
 
 
-_DEFAULT_PRIMARY_BACKEND_URL = "http://127.0.0.1:8000/api/v1"
+_DEFAULT_PRIMARY_BACKEND_URL = f"{HAL0_API_URL}/v1"
 
 
 def _is_ready(slot: dict[str, Any]) -> bool:
@@ -1622,12 +1740,26 @@ def _smoke_chat_completions(state: BootstrapState) -> tuple[bool, str]:
         cfg = yaml.safe_load(config_path.read_text()) or {}
     except (OSError, yaml.YAMLError) as exc:
         return (False, f"config parse: {exc}")
-    base_url = (cfg.get("model") or {}).get("base_url", "")
+    model_cfg = cfg.get("model") or {}
+    base_url = model_cfg.get("base_url", "")
+    model_name = model_cfg.get("default", "")
     if not base_url:
         return (False, "model.base_url unset in config.yaml")
-    body = json.dumps({"messages": [{"role": "user", "content": "Reply with 'ready'"}]}).encode(
-        "utf-8"
-    )
+    if not model_name:
+        return (False, "model.default unset in config.yaml")
+    # Thinking-mode models (Qwen3, etc.) burn most of their token budget
+    # on a `<think>...</think>` reasoning block before emitting any
+    # visible content. A 16-token cap drains entirely into reasoning
+    # and the `content` field comes back empty — which falsely flags
+    # the wiring as broken. Give the model enough room to think + reply
+    # and accept matches in either field.
+    body = json.dumps(
+        {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "Reply with the single word 'ready'."}],
+            "max_tokens": 256,
+        }
+    ).encode("utf-8")
     from urllib.error import URLError
     from urllib.request import Request, urlopen
 
@@ -1637,16 +1769,22 @@ def _smoke_chat_completions(state: BootstrapState) -> tuple[bool, str]:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    # Thinking models can spend tens of seconds on the reasoning block
+    # before emitting visible content; 10s wasn't long enough.
     try:
-        with urlopen(req, timeout=10.0) as resp:
+        with urlopen(req, timeout=60.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
         return (False, f"chat/completions: {exc}")
     try:
-        msg = data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
     except (KeyError, IndexError, TypeError):
-        return (False, "response missing choices[0].message.content")
-    return ("ready" in msg.lower(), msg[:120])
+        return (False, "response missing choices[0].message")
+    content = message.get("content") or ""
+    reasoning = message.get("reasoning_content") or ""
+    haystack = f"{content}\n{reasoning}".lower()
+    detail = (content or reasoning).strip().replace("\n", " ")[:120] or "(empty)"
+    return ("ready" in haystack, detail)
 
 
 def _smoke_memory_roundtrip(state: BootstrapState) -> tuple[bool, str]:
