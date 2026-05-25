@@ -60,6 +60,12 @@ export interface Slot {
   pid?: number
   metrics: SlotMetrics
   spark?: number[]
+  /** Wall-clock epoch (seconds) of the most recent request served by
+   *  this slot. ``null``/undefined means hal0-api has not seen a request
+   *  for this slot since startup. Used by the slots view to render the
+   *  "recently live within 1h" green indicator vs "loaded but stale"
+   *  yellow indicator. See ui/src/dash/slots.jsx → ``slotIndicator``. */
+  last_used_at?: number | null
 }
 
 const SLOTS_POLL_MS = 5_000

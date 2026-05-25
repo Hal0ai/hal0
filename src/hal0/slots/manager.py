@@ -145,6 +145,7 @@ class Slot:
         model_id: str | None = None,
         backend: str | None = None,
         metadata: dict[str, Any] | None = None,
+        last_used_at: float | None = None,
     ) -> None:
         self.name = name
         self.state = state
@@ -152,6 +153,15 @@ class Slot:
         self.model_id = model_id
         self.backend = backend
         self.metadata: dict[str, Any] = metadata or {}
+        # Wall-clock epoch (seconds) of the most recent request served by
+        # this slot. ``None`` when the slot hasn't served since hal0-api
+        # started — surfaces on /api/slots so the dashboard can render the
+        # "recently live within 1h" indicator (see ui/src/dash/slots.jsx
+        # ``slotIndicator``). Persistence is intentionally process-local:
+        # on restart the dashboard renders the slot as "loaded but stale"
+        # (yellow) until the first request lands, which matches operator
+        # intuition — we don't actually know if it was hit during downtime.
+        self.last_used_at: float | None = last_used_at
 
     def as_dict(self) -> dict[str, Any]:
         """Serialise to a JSON-safe dict for API responses."""
@@ -162,6 +172,7 @@ class Slot:
             "model_id": self.model_id,
             "backend": self.backend,
             "metadata": self.metadata,
+            "last_used_at": self.last_used_at,
         }
 
 
@@ -768,6 +779,7 @@ class SlotManager:
                 **rec.extra,
                 **({"backend": backend} if backend and "backend" not in rec.extra else {}),
             },
+            last_used_at=self._last_used.get(slot_name),
         )
 
     async def _maybe_load_config(self, slot_name: str) -> dict[str, Any] | None:

@@ -530,6 +530,33 @@ def test_bump_last_used_records_timestamp() -> None:
     assert ts is not None and ts > 0
 
 
+async def test_status_surfaces_last_used_at(
+    slot_root: Path,
+    lemonade_loaded_stub: dict[str, Any],
+    tmp_hal0_home: str,
+) -> None:
+    """Slot snapshots expose last_used_at so /api/slots can render the
+
+    'recently live within 1h' indicator. None before any request lands;
+    bumps to the current wall clock after a request.
+    """
+    sm = SlotManager()
+    await sm.load("primary")
+    # Cold slot — clear any bumps internal load paths may have produced
+    # so we exercise the "no bumps yet" branch deterministically.
+    sm._last_used.pop("primary", None)
+    snap = await sm.status("primary")
+    assert snap.last_used_at is None
+    assert snap.as_dict()["last_used_at"] is None
+
+    sm.bump_last_used("primary")
+    snap2 = await sm.status("primary")
+    assert snap2.last_used_at is not None
+    assert snap2.last_used_at > 0
+    payload = snap2.as_dict()
+    assert payload["last_used_at"] == snap2.last_used_at
+
+
 # ── HAL0_BACKEND env var is a no-op (PR-10) ─────────────────────────────────
 
 

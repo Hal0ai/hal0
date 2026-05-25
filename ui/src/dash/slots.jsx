@@ -15,6 +15,122 @@ import {
 
 const { useState: useStateS } = React;
 
+// ─── Slot indicator dot ────────────────────────────────────────────────
+//
+// Maps a slot snapshot → ({ cls, label, tooltip }) for the status dot
+// rendered in SlotCard / SlotListRow. Single source of truth for the
+// "what colour does this slot deserve" question.
+//
+// Mapping (matches PR feat/slot-state-indicator-dots):
+//   ready + last_used_at within RECENTLY_LIVE_MS → "recent" (green)
+//   ready + older / never used                   → "stale"  (yellow)
+//   warming / starting / pulling / unloading     → "warming" (amber, pulses)
+//   serving                                      → "serving" (cyan, pulses — pre-existing)
+//   idle                                         → "stale"  (yellow — semantically "loaded, not serving")
+//   error                                        → "error"  (red)
+//   offline / anything else                      → "offline" (grey)
+//
+// The "1h recently live" window leans on the backend's in-memory
+// `last_used_at` (bumped by SlotManager.serving on every dispatched
+// request). When hal0-api restarts, `last_used_at` is null for every
+// slot until the first new request lands — we render that as "stale"
+// (yellow), which matches operator intuition: we don't know whether
+// the slot was hit during downtime.
+const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h window — kept as a named const
+
+function _formatAgo(deltaMs) {
+  if (deltaMs < 0) return "just now";
+  const s = Math.floor(deltaMs / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function slotIndicator(slot, now = Date.now()) {
+  const state = String(slot?.state || "offline");
+  const lastUsedSec = typeof slot?.last_used_at === "number" ? slot.last_used_at : null;
+  const lastUsedMs = lastUsedSec != null ? lastUsedSec * 1000 : null;
+  const deltaMs = lastUsedMs != null ? now - lastUsedMs : null;
+  const errorMsg = slot?.metadata?.message || slot?.message || "";
+  const model = slot?.model || slot?.model_id || slot?.model_default || "";
+
+  if (state === "error") {
+    return {
+      cls: "error",
+      label: "error",
+      tooltip: errorMsg ? `Error: ${errorMsg}` : "Error",
+    };
+  }
+  if (
+    state === "warming" ||
+    state === "starting" ||
+    state === "pulling" ||
+    state === "unloading"
+  ) {
+    const verb =
+      state === "pulling" ? "Pulling"
+        : state === "unloading" ? "Unloading"
+          : "Warming up";
+    return {
+      cls: "warming",
+      label: state,
+      tooltip: model ? `${verb} ${model}…` : `${verb}…`,
+    };
+  }
+  if (state === "serving") {
+    // Pre-existing serving dot behaviour: cyan + pulse (CSS unchanged).
+    return {
+      cls: "serving",
+      label: "serving",
+      tooltip: model ? `Serving ${model}` : "Serving",
+    };
+  }
+  if (state === "ready") {
+    if (deltaMs != null && deltaMs <= RECENTLY_LIVE_MS) {
+      return {
+        cls: "recent",
+        label: "ready",
+        tooltip: `Loaded, last used ${_formatAgo(deltaMs)}`,
+      };
+    }
+    return {
+      cls: "stale",
+      label: "ready",
+      tooltip: deltaMs != null
+        ? `Loaded, idle (${_formatAgo(deltaMs)})`
+        : "Loaded — no requests since hal0-api started",
+    };
+  }
+  if (state === "idle") {
+    return {
+      cls: "stale",
+      label: "idle",
+      tooltip: deltaMs != null
+        ? `Idle (${_formatAgo(deltaMs)})`
+        : "Idle",
+    };
+  }
+  // offline + anything unknown
+  return {
+    cls: "offline",
+    label: state,
+    tooltip: state === "offline" ? "Offline" : `State: ${state}`,
+  };
+}
+
+function IndicatorDot({ slot }) {
+  const ind = slotIndicator(slot);
+  return <span className={"dot " + ind.cls} title={ind.tooltip} />;
+}
+
+// Expose for window-scope JSX (legacy pattern in this codebase) + tests.
+if (typeof window !== "undefined") {
+  Object.assign(window, { slotIndicator, IndicatorDot, RECENTLY_LIVE_MS });
+}
+
 // ─── Mini sparkline for slot card ───
 function Spark({ data, height = 18 }) {
   if (!data || data.length === 0) return null;
@@ -92,7 +208,7 @@ function SlotCard({
   return (
     <div className={"slot" + (state === "serving" ? " serving" : "")}>
       <div className="slot-h">
-        <span className={"dot " + state} />
+        <IndicatorDot slot={slot} />
         <div className="slot-name">
           <span className="nm">{slot.name}</span>
         </div>
@@ -170,7 +286,7 @@ function SlotListRow({ slot, onEdit }) {
               `${metrics.rpm || 0} r/m`;
   return (
     <div className="slot-list-row" onClick={onEdit}>
-      <span className={"dot " + state} />
+      <IndicatorDot slot={slot} />
       <span className="nm">
         {slot.name}
         {isDefault && <span className="chip outlined amber" style={{fontSize: 9, padding: "1px 4px"}}>def</span>}
