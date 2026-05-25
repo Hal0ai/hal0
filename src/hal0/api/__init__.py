@@ -59,6 +59,9 @@ from hal0.api.routes import (
     v1,
 )
 from hal0.api.routes import (
+    journal as journal_routes,
+)
+from hal0.api.routes import (
     lemonade_admin as lemonade_admin_routes,
 )
 from hal0.api.routes import (
@@ -81,6 +84,7 @@ from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstream
 from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
+from hal0.journal import LemondLogRing, start_lemond_bridge
 from hal0.registry.discover import scan_and_register
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
@@ -437,6 +441,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # be wired with the same instance); published on app.state here so
     # request handlers can reach it via ``request.app.state.events``.
     app.state.events = event_bus
+    # Lemond log ring (issue #323 / epic #322 Phase 1). Mirrors the
+    # EventBus ring + fan-out for lemond log lines so the unified
+    # /api/journal endpoints can backfill + live-tail both sources via
+    # one envelope. The background bridge task is started below alongside
+    # the other lemonade-bound lifespan tasks.
+    lemond_log_ring = LemondLogRing()
+    app.state.lemond_log_ring = lemond_log_ring
     await event_bus.emit(
         "system.restart",
         "info",
@@ -517,6 +528,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         refresh_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await refresh_task
+
+    # Lemond log bridge (issue #323). Long-running task forwarding
+    # LemonadeClient.stream_logs() into the ring so the journal panel
+    # has backfill across reconnects. The task is resilient to lemond
+    # bouncing — it reconnects with exponential backoff internally.
+    lemond_bridge_task = start_lemond_bridge(lemond_log_ring)
+
+    async def _stop_lemond_bridge() -> None:
+        lemond_bridge_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await lemond_bridge_task
 
     # Lemonade idle-unload driver (ADR-0007 §Related, ADR-0008 §1). v0.2
     # makes Lemonade the sole backend, so this driver always starts —
@@ -604,6 +626,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             for mgr in managers:
                 await stack.enter_async_context(mgr.run())
             stack.push_async_callback(_stop_refresh_task)
+            stack.push_async_callback(_stop_lemond_bridge)
             yield
     finally:
         if lemonade_metrics_shim is not None:
@@ -773,6 +796,16 @@ def create_app() -> FastAPI:
     # reason as /api/status: the footer renders during first-run before
     # any credential exists. No mutating endpoints live on this router.
     app.include_router(events_routes.router, prefix="/api/events", tags=["events"])
+
+    # Unified journal panel (issue #323, epic #322 Phase 1). Merges
+    # /api/events + /api/lemonade/logs/stream into one shape for the
+    # dashboard's journal panel. Read-only; same first-run rationale
+    # as /api/events.
+    app.include_router(
+        journal_routes.router,
+        prefix="/api/journal",
+        tags=["journal"],
+    )
 
     # Image cache — generated PNGs from /v1/images/generations.  Admin
     # auth gate: cached PNGs live at predictable /api/images/cache/<uuid>
