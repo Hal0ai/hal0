@@ -6,6 +6,7 @@
 
 import { useSlots } from '@/api/hooks/useSlots'
 import { useLemondRollup } from '@/api/hooks/useLemonade'
+import { useHardware } from '@/api/hooks/useHardware'
 
 const { useState: useStateD, useRef: useRefD, useEffect: useEffectD } = React;
 
@@ -346,17 +347,33 @@ function ChatEmpty({ slots, persona, onPersona, placement, composerState }) {
 
 // ─── Memory / health side cards ───
 function MemoryMap({ slots }) {
-  const total = HAL0_DATA.host.ram.total;
+  // Live OS-level memory from /api/hardware (used / total). Per-slot
+  // segments stay informational — they sum the bookkeeping each slot
+  // reports in `metrics.mem`. The bar then splits into:
+  //   [per-slot segments] + [other used] + [free]
+  // so "used" tracks reality (e.g. shows the few GB the OS itself eats
+  // when zero slots are loaded) rather than the static 128 GB the
+  // HAL0_DATA fixture used to render.
+  const hw = useHardware();
+  const ram = hw.data?.ram;
+  const fallbackTotal = HAL0_DATA.host.ram.total;
+  const total = ram && ram.total > 0 ? ram.total : fallbackTotal;
   const loaded = slots.filter(s => s.state === "ready" || s.state === "serving" || s.state === "idle");
   const segs = loaded.map(s => ({ name: s.name, sz: s.metrics.mem || 0, color: s.device }));
-  const used = segs.reduce((a, s) => a + s.sz, 0);
-  const free = total - used;
+  const slotsUsed = segs.reduce((a, s) => a + s.sz, 0);
+  // Prefer the OS reading; fall back to the slot sum until /api/hardware
+  // has resolved (matches the H = hwQuery.data || HAL0_DATA.host pattern
+  // used by HardwareView in extras.jsx).
+  const used = ram ? ram.used : slotsUsed;
+  const free = Math.max(0, total - used);
+  const otherUsed = Math.max(0, used - slotsUsed);
+  const pct = n => total > 0 ? `${(n / total) * 100}%` : '0%';
   const colorFor = d => d === "npu" ? "var(--dev-npu)" : d === "cpu" ? "var(--dev-cpu)" : d === "gpu-vulkan" ? "var(--dev-vulkan)" : "var(--dev-rocm)";
   return (
     <div className="side-card">
       <div className="side-card-h">
         <span>Memory map</span>
-        <span className="right mono">{used.toFixed(1)} / {total} GB</span>
+        <span className="right mono">{used.toFixed(1)} / {total.toFixed(0)} GB</span>
       </div>
       <div className="side-card-b">
         <div className="memmap">
@@ -366,9 +383,12 @@ function MemoryMap({ slots }) {
           </div>
           <div className="memmap-bar">
             {segs.map((s, i) => (
-              <i key={i} style={{ width: `${(s.sz / total) * 100}%`, background: colorFor(s.color) }} />
+              <i key={i} style={{ width: pct(s.sz), background: colorFor(s.color) }} />
             ))}
-            <i style={{ width: `${(free / total) * 100}%`, background: "var(--bg-4)" }} />
+            {otherUsed > 0 && (
+              <i style={{ width: pct(otherUsed), background: "var(--fg-5)" }} />
+            )}
+            <i style={{ width: pct(free), background: "var(--bg-4)" }} />
           </div>
           <div className="memmap-legend">
             {segs.map((s, i) => (
@@ -378,6 +398,13 @@ function MemoryMap({ slots }) {
                 <span className="sz">{s.sz < 1 ? `${(s.sz * 1024).toFixed(0)} MB` : `${s.sz.toFixed(1)} GB`}</span>
               </div>
             ))}
+            {otherUsed > 0 && (
+              <div className="ln mono">
+                <span className="sw" style={{background: "var(--fg-5)"}} />
+                <span className="name">other</span>
+                <span className="sz">{otherUsed.toFixed(1)} GB</span>
+              </div>
+            )}
             <div className="ln mono">
               <span className="sw" style={{background: "var(--bg-4)"}} />
               <span className="name">free</span>
@@ -424,13 +451,41 @@ function HealthCard() {
 }
 
 function ThroughputCard() {
-  const ticks = [3, 5, 8, 12, 9, 11, 14, 18, 22, 19, 24, 28, 26, 31, 38, 42, 45, 41, 44, 47, 45];
-  const max = Math.max(...ticks);
+  // Live last-request tok/s from /v1/stats (via useLemondRollup).
+  // Lemonade does not expose a rolling-60s history — we build one
+  // client-side by appending each new sample to an in-component ring
+  // buffer (cap 21 entries to match the original spark width).
+  // When no sample has been observed yet, headline renders "—" and
+  // the spark is empty per the dashboard's "no data" convention.
+  const lemond = useLemondRollup();
+  const value = lemond.lastTokPerSec;
+  const historyRef = useRefD([]);
+  const lastRef = useRefD(null);
+  const [, force] = useStateD(0);
+  useEffectD(() => {
+    if (value == null) return;
+    // Dedupe identical back-to-back samples so the spark only advances
+    // when /v1/stats reports a new (or updated) measurement.
+    if (lastRef.current === value) return;
+    lastRef.current = value;
+    historyRef.current = [...historyRef.current, value].slice(-21);
+    force(n => n + 1);
+  }, [value]);
+
+  const ticks = historyRef.current;
+  const hasData = value != null;
+  const max = ticks.length > 0 ? Math.max(...ticks, 1) : 1;
+  const peak = ticks.length > 0 ? Math.max(...ticks) : null;
+
   return (
     <div className="side-card">
       <div className="side-card-h">
         <span>Throughput</span>
-        <span className="right mono"><b style={{color: "var(--accent)"}}>45</b> tok/s</span>
+        <span className="right mono">
+          <b style={{color: hasData ? "var(--accent)" : "var(--fg-4)"}}>
+            {hasData ? value.toFixed(1) : "—"}
+          </b> tok/s
+        </span>
       </div>
       <div className="side-card-b" style={{padding: "12px 16px"}}>
         <div className="spark">
@@ -439,8 +494,8 @@ function ThroughputCard() {
           ))}
         </div>
         <div className="mono" style={{display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--fg-4)", marginTop: 6}}>
-          <span>last 60s</span>
-          <span>peak 47 t/s</span>
+          <span>last request</span>
+          <span>{peak != null ? `peak ${peak.toFixed(1)} t/s` : "no samples yet"}</span>
         </div>
       </div>
     </div>
