@@ -8,6 +8,8 @@
 
 import { useLemondRollup } from '@/api/hooks/useLemonade'
 import { useLogsStream } from '@/api/hooks/useLogs'
+import { useSlots } from '@/api/hooks/useSlots'
+import { useModels } from '@/api/hooks/useModels'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -126,10 +128,14 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0
 
 // ─── Sidebar ───
 function Sidebar({ route, onGo }) {
+  const slotsQuery  = useSlots();
+  const modelsQuery = useModels();
+  const slotCount   = slotsQuery.data?.length  ?? 0;
+  const modelCount  = modelsQuery.data?.length ?? 0;
   const items = [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
-    { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: HAL0_DATA.slots.length },
-    { id: "models",    label: "Models",    icon: Icons.models, cnt: HAL0_DATA.models.length },
+    { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount },
+    { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
     { id: "hardware",  label: "Hardware",  icon: Icons.hardware },
     { id: "backends",  label: "Backends",  icon: Icons.backends },
     { id: "logs",      label: "Logs",      icon: Icons.logs },

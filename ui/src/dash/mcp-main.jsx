@@ -1,6 +1,10 @@
 // hal0 v0.3 — MCP page mount
 // Composes the existing dashboard chrome (TopBar/Sidebar/Footer) with the new McpView.
 
+import { useLemondRollup } from '@/api/hooks/useLemonade'
+import { useSlots } from '@/api/hooks/useSlots'
+import { useModels } from '@/api/hooks/useModels'
+
 const { useState: useStateMnt, useEffect: useEffectMnt } = React;
 
 const MCP_TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
@@ -12,10 +16,16 @@ const MCP_TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // under the Agents grouping. We use a route value of "mcp" so the existing
 // chrome highlights nothing for routes it doesn't know about.
 function McpSidebar({ active }) {
+  const slotsQuery  = useSlots();
+  const modelsQuery = useModels();
+  const L           = useLemondRollup();
+  const slotCount   = slotsQuery.data?.length  ?? 0;
+  const modelCount  = modelsQuery.data?.length ?? 0;
+  const lemondStatusClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
   const items = [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard, href: "hal0 v2 dashboard.html" },
-    { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: HAL0_DATA.slots.length, href: "hal0 v2 dashboard.html#slots" },
-    { id: "models",    label: "Models",    icon: Icons.models, cnt: HAL0_DATA.models.length, href: "hal0 v2 dashboard.html#models" },
+    { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount, href: "hal0 v2 dashboard.html#slots" },
+    { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount, href: "hal0 v2 dashboard.html#models" },
     { id: "hardware",  label: "Hardware",  icon: Icons.hardware, href: "hal0 v2 dashboard.html#hardware" },
     { id: "backends",  label: "Backends",  icon: Icons.backends, href: "hal0 v2 dashboard.html#backends" },
     { id: "logs",      label: "Logs",      icon: Icons.logs, href: "hal0 v2 dashboard.html#logs" },
@@ -63,11 +73,11 @@ function McpSidebar({ active }) {
       <div className="sb-status">
         <div className="row">
           <span className="k">lemond</span>
-          <span className="v up"><span className="dot" />{HAL0_DATA.lemond.status}</span>
+          <span className={"v " + lemondStatusClass}><span className="dot" />{L.status}</span>
         </div>
         <div className="row">
           <span className="k">version</span>
-          <span className="v">{HAL0_DATA.lemond.version}</span>
+          <span className="v">{L.version}</span>
         </div>
         <div className="ln" />
         <div className="row">
