@@ -168,8 +168,16 @@ function App() {
           </div>
           {renderView()}
         </div>
+        {/*
+          Phase 3 of #322: Footer is self-driven. The update chip reads
+          `useUpdateState()` directly (no more hardcoded "v0.2.2 available"),
+          and the journal pane streams /api/journal/stream. The legacy
+          `updateAvailable` prop linkage to the BannerStack dismiss state
+          is intentionally dropped — Phase 2's UpdateBanner owns its own
+          dismiss memory and the chip is allowed to keep nagging until
+          a new release is installed.
+        */}
         <Footer
-          updateAvailable={!activeBanners["update-available"]}
           expanded={footerOpen}
           onToggle={() => setFooterOpen(o => !o)}
         />

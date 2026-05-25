@@ -237,16 +237,28 @@ function LogsView() {
   const [pendingCount, setPendingCount] = useStateX(0);
   const scrollRef = React.useRef(null);
 
-  // Phase B1: historical fetch (one-shot) + SSE tail (live).
-  // includeLemondWs flips on when source=lemond is selected; that
-  // satisfies the design's "raw lemond /logs/stream" requirement
-  // without holding the WS open when not needed.
-  const historical = useLogsHistorical();
-  const live = useLogsStream({ follow: !paused, includeLemondWs: source === 'lemond' });
+  // Phase 3 of #322: historical fetch + SSE tail both hit /api/journal*.
+  // Server-side filter params (source / level / search) round-trip into
+  // the URL so the wire payload is already small; the client filter
+  // pass below stays for slot-name filtering (still client-only — the
+  // backend journal envelope doesn't carry slot yet) and for instant
+  // search feedback while the user types.
+  //
+  // includeLemondWs flips on when source=lemond is selected so the page
+  // can render raw lemond logs.entry frames alongside the projected
+  // journal envelope, satisfying the design's "native fidelity" mode.
+  const historical = useLogsHistorical({ source, level: level || null, q: search || null });
+  const live = useLogsStream({
+    follow: !paused,
+    source,
+    level: level || null,
+    q: search || null,
+    includeLemondWs: source === 'lemond',
+  });
 
-  // Merge static demo lines + live SSE + historical fetch. Static lines
-  // keep the design's grouped-error block (request-id collapsing) visible
-  // when no backend yet ships /api/logs.
+  // Demo lines preserve the design's grouped-error block (request-id
+  // collapsing) so the screenshot suite has something to point at even
+  // when the dev backend has no journal entries yet.
   const demoLines = [
     { ts: "14:01:58.330", source: "lemond", level: "ok",   slot: "primary", msg: "POST /v1/load model=qwen3.6-27b-mtp-q4_k_m backend=llamacpp:rocm" },
     { ts: "14:01:58.341", source: "lemond", level: "info", slot: "primary", msg: "ggml_init_cublas: found 1 ROCm device gfx1151" },
@@ -265,9 +277,12 @@ function LogsView() {
     { ts: "14:02:32.290", source: "hal0",   level: "ok",   slot: "img",     msg: "tool_call generate_image · 4.1s · 2.4 MB" },
     { ts: "14:02:36.117", source: "hal0",   level: "info", slot: "img",     msg: "slot:img state serving → idle" },
   ];
-  const sourceLines = (historical.data && historical.data.length > 0)
-    ? historical.data
-    : [...(HAL0_DATA.journal || []), ...demoLines];
+  // historical now returns `{entries, next_since}`. Fall back to the
+  // demoLines block when there's no journal data yet so the Logs page
+  // still demos the design's grouped-warn collapser before any real
+  // entries land — HAL0_DATA.journal is gone (#322 phase 3).
+  const histEntries = historical.data?.entries ?? [];
+  const sourceLines = histEntries.length > 0 ? histEntries : demoLines;
   const buf = [...sourceLines, ...(live.ring || [])]
     .sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
 

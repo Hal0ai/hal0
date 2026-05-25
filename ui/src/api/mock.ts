@@ -112,14 +112,35 @@ function buildHardware() {
   return data().host ?? {}
 }
 
-function buildLogs() {
-  const d = data()
-  return { entries: d.journal ?? [] }
+function buildJournal() {
+  // Phase 3 of #322: HAL0_DATA.journal is gone — the dashboard streams
+  // /api/journal/stream and renders an empty-state placeholder when the
+  // ring is empty. The forced-mock surface returns an empty envelope so
+  // dev runs honour the same "no synthetic copy" rule the live build
+  // does; tests that need to drive specific entries either use
+  // `page.route('/api/journal*')` or push frames via the SSE harness.
+  return { entries: [], next_since: null }
 }
 
 function buildUpdateState() {
+  // Tests (and dev) can override the forced-mock payload by setting
+  // `window.__hal0UpdateStateOverride` before any fetch fires. This is
+  // the seam used by Phase 2's update-banner-v3.spec.ts AND Phase 3's
+  // footer-update-chip-v3.spec.ts to exercise the "no available
+  // release" + "current === available" branches without ripping the
+  // forced-mock short-circuit out of mockFetch. A dedicated window key
+  // is used so that the override survives data.jsx replacing
+  // `window.HAL0_DATA` wholesale at mount.
+  if (typeof window !== 'undefined') {
+    const override = (window as any).__hal0UpdateStateOverride
+    if (override) return override
+  }
+  // Seed: realistic-looking pair so the dev demo's footer chip + banner
+  // render against current-ish release strings. Tests override via the
+  // window seam above; the literals here are only used in dev. Keep the
+  // pair in sync with pyproject.toml's version when bumping major.
   return {
-    hal0: { current: 'v0.2.1', available: 'v0.2.2', channel: 'stable' },
+    hal0: { current: '0.3.0-alpha.1', available: '0.3.0-alpha.2', channel: 'stable' },
     lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
     flm: { current: 'v0.9.42', source: 'manual-deb' },
     autoCheck: true,
@@ -168,7 +189,7 @@ export const MOCK_ALLOWLIST: ReadonlyArray<{ re: RegExp; build: Builder }> = Obj
   { re: /^\/api\/backends$/, build: buildBackends },
   { re: /^\/api\/capabilities$/, build: buildCapabilities },
   { re: /^\/api\/hardware$/, build: buildHardware },
-  { re: /^\/api\/logs$/, build: buildLogs },
+  { re: /^\/api\/journal$/, build: buildJournal },
   { re: /^\/api\/updates\/state$/, build: buildUpdateState },
   { re: /^\/api\/auth\/token$/, build: buildAuthToken },
   { re: /^\/api\/auth\/allowed-origins$/, build: buildAllowedOrigins },

@@ -10,6 +10,7 @@ import { useLemondRollup } from '@/api/hooks/useLemonade'
 import { useLogsStream } from '@/api/hooks/useLogs'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
+import { useUpdateState } from '@/api/hooks/useUpdates'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -201,28 +202,59 @@ function SidebarStatusBlock({ onGo }) {
 }
 
 // ─── Footer ───
-function Footer({ updateAvailable = true, expanded = false, onToggle, journal = HAL0_DATA.journal }) {
-  // Phase B1: footer chips and journal pane now run off live hooks.
+// Phase 3 of #322: the journal pane reads `useLogsStream` against
+// /api/journal/stream (no more HAL0_DATA.journal fallback) and the
+// update chip reads `useUpdateState` directly (no more `updateAvailable`
+// prop threaded from main.jsx — the chip is self-driven).
+//
+// The `updateAvailable` prop is kept as an OPTIONAL suppression gate
+// so existing callers (BannerStack dismiss state) can still hide the
+// chip without re-architecting. When omitted the chip defaults to
+// "show if there is a real update" — never the prototype's hardcoded
+// "v0.2.2 available" string.
+function Footer({ updateAvailable, expanded = false, onToggle }) {
   // Lemond rollup gives live status / loaded / throughput / queued.
-  // useLogsStream subscribes to /api/logs/stream when the pane is
+  // useLogsStream subscribes to /api/journal/stream when the pane is
   // expanded (saves opening an SSE we don't render).
   const L = useLemondRollup();
-  const live = useLogsStream({ follow: expanded });
   const [paneSrc, setPaneSrc] = useStateC("merged");
   const [paneQ, setPaneQ] = useStateC("");
-  // Phase B1: mux the live SSE ring on top of the static journal.
-  // When the pane is expanded the ring fills in; collapsed it's just
-  // the lookup from props, preserving the design's hero-feel even
-  // before SSE primes.
-  const extended = (live.ring && live.ring.length > 0)
-    ? [...live.ring].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''))
-    : [...journal].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  // Source filter rides the SSE URL so the backend pre-filters; search
+  // is client-only against `entry.msg` so the user sees instant feedback
+  // while typing (no reconnect per keystroke).
+  const live = useLogsStream({ follow: expanded, source: paneSrc });
 
-  const filtered = extended.filter(e => {
-    if (paneSrc !== "merged" && e.source !== paneSrc) return false;
-    if (paneQ && !e.msg.toLowerCase().includes(paneQ.toLowerCase())) return false;
-    return true;
+  // The ring is the SOLE source of truth — no HAL0_DATA fallback. When
+  // empty (cold load before SSE replays or a genuinely quiet system)
+  // the body renders an empty-state placeholder below.
+  const ringSorted = [...(live.ring || [])].sort((a, b) =>
+    (a.ts || '').localeCompare(b.ts || ''),
+  );
+
+  // Source filter is also applied client-side so entries that arrived
+  // on the previous (broader) SSE stream don't linger after the user
+  // narrows the chip. Server-side filtering on the new SSE prevents
+  // FUTURE entries from arriving; this catches the residual ring.
+  // Search filter is purely client-only (no SSE reconnect per keystroke).
+  const filtered = ringSorted.filter((e) => {
+    if (paneSrc !== 'merged' && e.source !== paneSrc) return false;
+    return !(paneQ && (!e.msg || !e.msg.toLowerCase().includes(paneQ.toLowerCase())));
   });
+
+  // Update chip — self-driven from useUpdateState. The prop can still
+  // suppress (banner-dismiss memory) but never resurrect.
+  const updates = useUpdateState();
+  const updateState = updates.data;
+  const hal0Channel = updateState && updateState.hal0;
+  const hasUpdate = !!(
+    hal0Channel &&
+    hal0Channel.available &&
+    hal0Channel.available !== hal0Channel.current
+  );
+  // Backwards-compat: when caller passes `updateAvailable={false}` the
+  // chip stays hidden even when a real update exists (used to honour
+  // the banner-stack dismiss). Default (undefined) is "no suppression".
+  const showUpdateChip = hasUpdate && updateAvailable !== false;
 
   return (
     <div className={"footer" + (expanded ? " expanded" : "")}>
@@ -230,7 +262,7 @@ function Footer({ updateAvailable = true, expanded = false, onToggle, journal = 
         <div className="foot-pane">
           <div className="foot-pane-h mono">
             <span>Live journal</span>
-            <span className="ct">· {filtered.length} / {extended.length}</span>
+            <span className="ct">· {filtered.length} / {ringSorted.length}</span>
             <div className="foot-pane-filter mono">
               {[["merged", "merged"], ["hal0", "hal0"], ["lemond", "lemond"]].map(([k, l]) => (
                 <button
@@ -247,19 +279,24 @@ function Footer({ updateAvailable = true, expanded = false, onToggle, journal = 
               placeholder="search…"
             />
             <span style={{display: "inline-flex", gap: 10, marginLeft: "auto"}}>
-              <span style={{color: "var(--ok)", display: "inline-flex", alignItems: "center", gap: 5}}>
-                <span className="dot ready" />follow tail
+              <span style={{color: live.disconnected ? "var(--warn)" : "var(--ok)", display: "inline-flex", alignItems: "center", gap: 5}}>
+                <span className={"dot" + (live.disconnected ? "" : " ready")} />
+                {live.disconnected ? "reconnecting…" : "follow tail"}
               </span>
               <a href="#logs" className="foot-pane-link">Open full logs →</a>
             </span>
           </div>
           <div className="foot-pane-body">
-            {filtered.length === 0 ? (
+            {ringSorted.length === 0 ? (
+              <div className="foot-pane-empty" style={{padding: 24, textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 11.5}}>
+                No events yet
+              </div>
+            ) : filtered.length === 0 ? (
               <div style={{padding: 24, textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 11.5}}>
                 No journal entries match. <span style={{color: "var(--accent)", cursor: "pointer"}} onClick={() => { setPaneSrc("merged"); setPaneQ(""); }}>Clear filters</span>
               </div>
             ) : filtered.map((e, i) => (
-              <div key={i} className={"foot-line " + e.level}>
+              <div key={e.id ?? i} className={"foot-line " + e.level}>
                 <span className="ts">{e.ts}</span>
                 <span className={"sl " + e.source}>[{e.source}]</span>
                 <span className="lvl">{e.level}</span>
@@ -305,10 +342,10 @@ function Footer({ updateAvailable = true, expanded = false, onToggle, journal = 
             <span className="v num">{L.queued}</span>
           </div>
         )}
-        {updateAvailable && (
+        {showUpdateChip && (
           <div className="foot-chip accent">
             <span className="k">●</span>
-            <span className="v">hal0 v0.2.2 available</span>
+            <span className="v">{`hal0 ${hal0Channel.available} available`}</span>
           </div>
         )}
         <button className="foot-toggle" onClick={onToggle} aria-expanded={expanded} aria-label="Toggle journal pane">
@@ -316,17 +353,24 @@ function Footer({ updateAvailable = true, expanded = false, onToggle, journal = 
           <span>journal</span>
         </button>
       </div>
-      <div className="foot-journal mono">
-        {journal.map((e, i) => (
-          <span key={i} className={"ent " + e.level}>
-            <span className="ts">{e.ts}</span>
-            <span className="sl">[{e.source}]</span>
-            <span className="ar">·</span>
-            <span>{e.msg}</span>
-            {i < journal.length - 1 && <span className="sep">  </span>}
-          </span>
-        ))}
-      </div>
+      {/*
+        Always-visible footer journal ribbon: a thin tail of the most
+        recent entries. Pulls from the same SSE ring; renders nothing
+        before the first frame arrives so we never hardcode mock copy.
+      */}
+      {ringSorted.length > 0 && (
+        <div className="foot-journal mono">
+          {ringSorted.slice(-6).map((e, i, arr) => (
+            <span key={e.id ?? i} className={"ent " + e.level}>
+              <span className="ts">{e.ts}</span>
+              <span className="sl">[{e.source}]</span>
+              <span className="ar">·</span>
+              <span>{e.msg}</span>
+              {i < arr.length - 1 && <span className="sep">  </span>}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

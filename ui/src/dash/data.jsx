@@ -273,14 +273,11 @@ const HAL0_DATA = {
     },
   },
 
-  journal: [
-    { ts: "14:02:11.117", source: "lemond", level: "ok",   msg: "loaded model 'qwen3.6-27b-mtp' via llamacpp:rocm" },
-    { ts: "14:02:11.514", source: "hal0",   level: "ok",   msg: "slot:primary state idle → ready" },
-    { ts: "14:02:14.230", source: "hal0",   level: "ok",   msg: "slot:agent coresident with stt-npu, embed-npu" },
-    { ts: "14:02:18.443", source: "lemond", level: "warn", msg: "nuclear evict-all candidate avoided (file-not-found)" },
-    { ts: "14:02:20.117", source: "lemond", level: "ok",   msg: "/v1/chat/completions primary 45 tok/s TTFT 220ms" },
-    { ts: "14:02:22.290", source: "hal0",   level: "ok",   msg: "omnirouter dispatched 'generate_image' → slot img" },
-  ],
+  // ── journal block removed (#322 phase 3) ─────────────────────────
+  // The dashboard now streams /api/journal/stream for the footer pane
+  // and the Logs page; both render an empty state when the SSE has no
+  // entries yet. No more "loaded model 'qwen3.6-27b-mtp'" mock prose
+  // leaking into prod screenshots before SSE primes.
 
   omnirouter: [
     { name: "generate_image",   active: true,  target: "img (sd-turbo)" },

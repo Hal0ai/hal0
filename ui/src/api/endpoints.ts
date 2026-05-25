@@ -82,9 +82,13 @@ export const ENDPOINTS = {
   memoryGraphStatus: '/api/memory/graph/status',
   memoryGraph: '/api/memory/graph',
 
-  // ── Logs (HTTP historical + SSE tail + WS lemond) ────────────────
-  logs: '/api/logs',
-  logsStream: '/api/logs/stream',
+  // ── Journal (HTTP backfill + SSE tail) — unified hal0 + lemond ───
+  // Per #322 Phase 1 (PR #330): the merged ``/api/journal`` surface
+  // supersedes ``/api/logs``. The old constants stay around for the
+  // raw lemond WS channel (used by the LogsView's source=lemond mode);
+  // historical + SSE consumers should prefer the journal endpoints.
+  journal: '/api/journal',
+  journalStream: '/api/journal/stream',
   lemondLogsWs: '/logs/stream',
 
   // ── Settings (hal0.toml read/write) ──────────────────────────────
