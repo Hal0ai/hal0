@@ -443,6 +443,159 @@ def _suggest_id_from_path(p: Path) -> str:
     return _normalise_id(p.stem)
 
 
+@router.post("/add-from-path", status_code=201)
+async def add_model_from_path(request: Request) -> dict[str, Any]:
+    """Register a single already-downloaded model file by absolute path.
+
+    Convenience wrapper around ``detect()`` + ``ModelRegistry.add()``
+    aimed at the dashboard's "Add by path" flow — the operator points at
+    one file, we read its header (or fall back to filename heuristic),
+    derive id + capabilities + backends, then write the entry. No
+    network, no copy — the file stays where it lives.
+
+    Body::
+
+        {
+          "path":      "/abs/path/to/model.gguf",  # required
+          "id":        "optional explicit registry id",
+          "name":      "optional display name",
+          "labels":    ["llm", "chat", ...],       # optional capabilities override
+          "overwrite": false                       # default false
+        }
+
+    Errors:
+      * ``400 validation.invalid`` — body shape wrong.
+      * ``400 model.path_missing`` — file does not exist or is not readable.
+      * ``400 model.unsupported_format`` — extension not in the registry's
+        ``[models].file_extensions`` allow-list.
+      * ``409 model.already_exists`` — id already registered and
+        ``overwrite=false``.
+
+    The file must be readable by the hal0-api process; we do **not**
+    `chown` or copy.  When the file lives under a scan root pinned in
+    ``[models].roots`` we trust the operator owns the path; when it's
+    elsewhere we still allow it (the operator can point anywhere they
+    have read access to).
+    """
+    from hal0.registry.detect import detect
+    from hal0.registry.discover import _normalise_id
+    from hal0.registry.model import Model
+    from hal0.registry.store import ModelAlreadyExists
+
+    registry = request.app.state.model_registry
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+
+    raw_path = body.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise BadRequest("'path' must be a non-empty absolute path string")
+
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        raise BadRequest(
+            f"'path' must be absolute (got {raw_path!r})",
+            code="model.path_relative",
+        )
+    if not path.exists() or not path.is_file():
+        raise BadRequest(
+            f"path {str(path)!r} is not a readable file",
+            code="model.path_missing",
+            details={"path": str(path)},
+        )
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+
+    # Enforce the same extension allow-list the scan walker uses so
+    # accidentally pointing at a tokenizer.json or a README.md fails
+    # loudly rather than landing in the registry.
+    cfg = load_hal0_config()
+    allowed_exts = {e.lower() for e in cfg.models.file_extensions}
+    if resolved.suffix.lower() not in allowed_exts:
+        raise BadRequest(
+            f"file extension {resolved.suffix!r} not in [models].file_extensions",
+            code="model.unsupported_format",
+            details={"path": str(resolved), "allowed": sorted(allowed_exts)},
+        )
+
+    detection = detect(resolved)
+    raw_labels = body.get("labels")
+    if isinstance(raw_labels, list) and raw_labels:
+        capabilities = [str(c) for c in raw_labels if isinstance(c, str) and c.strip()]
+    else:
+        capabilities = list(detection.suggested_capabilities) or ["chat"]
+
+    raw_id = body.get("id")
+    if isinstance(raw_id, str) and raw_id.strip():
+        model_id = raw_id.strip()
+    else:
+        # Prefer the detector's suggested_name (post-GGUF arch+param sniff)
+        # falling back to the slug of the stem so two paths to the same
+        # file land on the same id as the auto-scan would.
+        model_id = _normalise_id(detection.suggested_name or resolved.stem)
+
+    raw_name = body.get("name")
+    if isinstance(raw_name, str) and raw_name.strip():
+        display_name = raw_name.strip()
+    else:
+        display_name = detection.suggested_name or resolved.stem
+
+    overwrite = bool(body.get("overwrite", False))
+
+    try:
+        size_bytes = resolved.stat().st_size
+    except OSError:
+        size_bytes = 0
+
+    metadata: dict[str, Any] = {"discovered": True, "source": "add-from-path"}
+    if detection.context_length is not None:
+        metadata["context_length"] = detection.context_length
+
+    try:
+        model = Model(
+            id=model_id,
+            name=display_name,
+            path=str(resolved),
+            size_bytes=size_bytes,
+            capabilities=capabilities,
+            backends=list(detection.suggested_backends),
+            metadata=metadata,
+        )
+    except (TypeError, ValueError) as exc:
+        raise BadRequest(f"invalid Model payload: {exc}") from exc
+
+    if overwrite and registry.has(model_id):
+        registry.remove(model_id)
+
+    try:
+        registry.add(model)
+    except ModelAlreadyExists as exc:
+        # Convert to the structured envelope shape (409) so the UI can
+        # branch on the code rather than the message text.
+        raise exc
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.registered",
+            "info",
+            f"model:{model.id}",
+            f"{model.id}: registered (add-from-path)",
+            data={
+                "id": model.id,
+                "backends": list(model.backends),
+                "capabilities": list(model.capabilities),
+                "source": "add-from-path",
+            },
+        )
+    return _model_to_dict(model)
+
+
 @router.post("", status_code=201)
 async def create_model(request: Request) -> dict[str, Any]:
     """Register a new model in the local ModelRegistry.

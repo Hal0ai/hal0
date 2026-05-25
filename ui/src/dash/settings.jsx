@@ -9,13 +9,15 @@ import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecret
 import { useUpdateState, useUpdateCheck, useUpdateApply } from '@/api/hooks/useUpdates'
 import { useCapabilities, useCapabilityPatch } from '@/api/hooks/useCapabilities'
 import { useLemondRollup, useLemonadeStats } from '@/api/hooks/useLemonade'
+import { useSettings, useSettingsUpdate } from '@/api/hooks/useSettings'
 
-const { useState: useStateSet } = React;
+const { useState: useStateSet, useEffect: useEffectSet } = React;
 
 function SettingsView() {
   const [section, setSection] = useStateSet("secrets");
   const sections = [
     { id: "secrets",   label: "Secrets" },
+    { id: "models",    label: "Models" },
     { id: "updates",   label: "Updates" },
     { id: "lemonade",  label: "Lemonade admin" },
     { id: "omni",      label: "OmniRouter" },
@@ -49,6 +51,7 @@ function SettingsView() {
 
         <div className="settings-content">
           {section === "secrets" && <SecretsSection />}
+          {section === "models" && <ModelsSection />}
           {section === "updates" && <UpdatesSection />}
           {section === "lemonade" && <LemonadeSection />}
           {section === "omni" && <OmniRouterSection />}
@@ -73,6 +76,159 @@ const SRow = ({ k, sub, v, mono, children, actions }) => (
     {actions && <div className="ac">{actions}</div>}
   </div>
 );
+
+// ─── Models (PR feat/models-scan-and-add-by-path) ───────────────
+//
+// Edits [models].roots + [models].pull_root in hal0.toml so the
+// Scan-directory + Add-by-path flows in Models view default to the
+// operator's preferred location (e.g. /mnt/ai-models). Changes hit
+// /api/settings (deep-merge PUT) so the rest of the config rounds
+// through untouched.
+function ModelsSection() {
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const liveModels = settings.data?.models;
+  // Local edit buffers — we only PATCH when the operator clicks Save so
+  // they can revise multiple roots without each keystroke triggering an
+  // atomic write on disk.
+  const [rootsText, setRootsText] = useStateSet("");
+  const [pullRoot, setPullRoot] = useStateSet("");
+  const [autoScan, setAutoScan] = useStateSet(true);
+  // Re-seed buffers each time the upstream config changes (after Save
+  // the response payload supersedes our buffer).
+  useEffectSet(() => {
+    if (!liveModels) return;
+    setRootsText((liveModels.roots || []).join("\n"));
+    setPullRoot(liveModels.pull_root || "");
+    setAutoScan(liveModels.auto_scan_on_start !== false);
+  }, [liveModels]);
+
+  const dirty = !!liveModels && (
+    rootsText !== (liveModels.roots || []).join("\n") ||
+    pullRoot !== (liveModels.pull_root || "") ||
+    autoScan !== (liveModels.auto_scan_on_start !== false)
+  );
+
+  const onSave = async () => {
+    const roots = rootsText
+      .split("\n")
+      .map(s => s.trim())
+      .filter(Boolean);
+    try {
+      await update.mutateAsync({
+        models: {
+          roots,
+          pull_root: pullRoot.trim(),
+          auto_scan_on_start: autoScan,
+          // Preserve file_extensions verbatim — the Settings UI doesn't
+          // surface it yet, but we don't want a Save to drop the field.
+          file_extensions: liveModels?.file_extensions || [".gguf", ".safetensors"],
+        },
+      });
+      window.__hal0Toast && window.__hal0Toast("Models settings saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Save failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
+
+  return (
+    <div className="s-section">
+      <h2>Models</h2>
+      <p className="desc">
+        Where hal0 looks for already-downloaded model files (Scan) and where new HuggingFace pulls land. Each entry must be an absolute path readable by <span className="mono" style={{color: "var(--fg)"}}>hal0-api</span>.
+      </p>
+      {settings.isPending && <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading settings…</div>}
+      {settings.isError && (
+        <div className="err">{settings.error?.message || "Failed to load settings"}</div>
+      )}
+      {liveModels && (
+        <>
+          <div className="s-panel">
+            <SRow
+              k="Model directories (scan roots)"
+              sub="One absolute path per line · used by Scan + auto-scan"
+              v={
+                <textarea
+                  className="input mono"
+                  value={rootsText}
+                  onChange={e => setRootsText(e.target.value)}
+                  rows={Math.max(3, rootsText.split("\n").length)}
+                  placeholder={"/mnt/ai-models\n/var/lib/hal0/models"}
+                  style={{width: "100%", minWidth: 320, resize: "vertical"}}
+                />
+              }
+            />
+            <SRow
+              k="Pull root"
+              sub="Destination for HuggingFace downloads · finished files land at <pull_root>/<model_id>/"
+              mono
+              v={
+                <input
+                  className="input mono"
+                  value={pullRoot}
+                  onChange={e => setPullRoot(e.target.value)}
+                  placeholder="/mnt/ai-models"
+                  style={{minWidth: 320, width: "100%"}}
+                />
+              }
+            />
+            <SRow
+              k="Auto-scan on start"
+              sub="Walk the scan roots when hal0-api starts; new files get registered automatically"
+              v={
+                <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
+                  <input
+                    type="checkbox"
+                    checked={autoScan}
+                    onChange={e => setAutoScan(e.target.checked)}
+                    style={{accentColor: "var(--accent)"}}
+                  />
+                  <span>{autoScan ? "enabled" : "disabled"}</span>
+                </label>
+              }
+            />
+            <SRow
+              k="File extensions"
+              sub="Read-only · edit via hal0 config edit"
+              mono
+              v={(liveModels.file_extensions || []).join(" · ") || "—"}
+            />
+          </div>
+          <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
+            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+              Stored at <span style={{color: "var(--fg-3)"}}>/etc/hal0/hal0.toml</span>
+              {dirty && <span style={{marginLeft: 8, color: "var(--warn)"}}>· unsaved changes</span>}
+            </span>
+            <div style={{display: "inline-flex", gap: 8}}>
+              <button
+                className="btn ghost sm"
+                disabled={!dirty || update.isPending}
+                onClick={() => {
+                  if (!liveModels) return;
+                  setRootsText((liveModels.roots || []).join("\n"));
+                  setPullRoot(liveModels.pull_root || "");
+                  setAutoScan(liveModels.auto_scan_on_start !== false);
+                }}
+              >Reset</button>
+              <button
+                className="btn"
+                disabled={!dirty || update.isPending}
+                onClick={onSave}
+              >{update.isPending ? "Saving…" : "Save"}</button>
+            </div>
+          </div>
+          {update.isError && (
+            <div className="err" style={{marginTop: 10}}>
+              {update.error?.message || "Save failed"}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 function SecretsSection() {
   const [addOpen, setAddOpen] = useStateSet(false);

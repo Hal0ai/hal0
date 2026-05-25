@@ -40,6 +40,9 @@ export const ENDPOINTS = {
   modelPullStream: (id: string) => `/api/models/${encodeURIComponent(id)}/pull/stream`,
   modelPullCancel: (id: string) => `/api/models/${encodeURIComponent(id)}/pull/cancel`,
   modelInspect: '/api/models/inspect',
+  modelScanPreview: '/api/models/scan/preview',
+  modelScanCommit: '/api/models/scan',
+  modelAddFromPath: '/api/models/add-from-path',
 
   // ── Backends ─────────────────────────────────────────────────────
   backends: '/api/backends',
@@ -83,6 +86,11 @@ export const ENDPOINTS = {
   logs: '/api/logs',
   logsStream: '/api/logs/stream',
   lemondLogsWs: '/logs/stream',
+
+  // ── Settings (hal0.toml read/write) ──────────────────────────────
+  settings: '/api/settings',
+  settingsReload: '/api/settings/reload',
+  settingsSchema: '/api/settings/schema',
 
   // ── Settings ─────────────────────────────────────────────────────
   // Updates

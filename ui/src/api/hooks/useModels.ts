@@ -70,6 +70,61 @@ export interface ModelInspectResponse {
   }
 }
 
+// ─── Scan + add-from-path (PR feat/models-scan-and-add-by-path) ─────
+
+export interface ScanPreviewRow {
+  path: string
+  resolved_path: string
+  size_bytes: number
+  suggested_backends: string[]
+  suggested_capabilities: string[]
+  context_length: number | null
+  confidence: 'high' | 'medium' | 'low' | string
+  suggested_name: string
+  kind: string
+  raw_hints: Record<string, unknown>
+}
+
+export interface ScanPreviewResponse {
+  preview: ScanPreviewRow[]
+  count: number
+}
+
+export interface ScanPreviewRequest {
+  paths: string[]
+  recursive?: boolean
+}
+
+export function useScanPreview() {
+  // POST a path + optional recursive flag → list of detection rows.
+  // No registry mutation; the dashboard renders the list and the
+  // operator picks which ones to add via useAddModelFromPath.
+  return useMutation<ScanPreviewResponse, Hal0Error, ScanPreviewRequest>({
+    mutationFn: (body) =>
+      apiPost<ScanPreviewResponse>(ENDPOINTS.modelScanPreview, body as unknown as Record<string, unknown>),
+  })
+}
+
+export interface AddFromPathRequest {
+  path: string
+  id?: string
+  name?: string
+  labels?: string[]
+  overwrite?: boolean
+}
+
+export function useAddModelFromPath() {
+  // Single-file convenience register — POST {path,...} and the backend
+  // detects + writes a registry row. Invalidates models so the Models
+  // page reflects the new entry within a render.
+  const qc = useQueryClient()
+  return useMutation<Model, Hal0Error, AddFromPathRequest>({
+    mutationFn: (body) =>
+      apiPost<Model>(ENDPOINTS.modelAddFromPath, body as unknown as Record<string, unknown>),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['models'] }),
+  })
+}
+
 export function useModelInspect() {
   // POST a HF coord and get back the repo's pullable GGUF variants
   // plus tags + license + a short README excerpt. Accepts either an

@@ -15,6 +15,8 @@ function ModelsView() {
   const [selId, setSelId] = useStateM(null);
   const [filters, setFilters] = useStateM({ type: null, device: null, ns: null });
   const [addOpen, setAddOpen] = useStateM(false);
+  const [addByPathOpen, setAddByPathOpen] = useStateM(false);
+  const [scanOpen, setScanOpen] = useStateM(false);
   const [recipeOpen, setRecipeOpen] = useStateM(false);
   const [delModel, setDelModel] = useStateM(null);
   // Track which model_ids the user has launched a pull for this
@@ -69,6 +71,8 @@ function ModelsView() {
         <h1>Models</h1>
         <span className="vh-spacer" />
         <button className="btn ghost" onClick={() => window.__hal0Toast && window.__hal0Toast("HF search — stubbed", "info")}>{Icons.search} Search HF</button>
+        <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
+        <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
         <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add by HF coords</button>
       </div>
 
@@ -163,6 +167,8 @@ function ModelsView() {
       </div>
 
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} />
+      <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
+      <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />
       <RecipeEditorModal open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
       <DeleteModelDialog open={!!delModel} onClose={() => setDelModel(null)} model={delModel} />
     </div>

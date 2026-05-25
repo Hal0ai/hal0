@@ -10,8 +10,9 @@
 // the backend. The old HAL0_DATA fallbacks live on only as cosmetic
 // fixtures (host RAM, /var disk hint).
 
-import { useModelInspect, useModelUpdate, useModelDelete, usePullJob, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
+import { useModels, useModelInspect, useModelUpdate, useModelDelete, usePullJob, useScanPreview, useAddModelFromPath, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { useSlots } from '@/api/hooks/useSlots'
+import { useSettings } from '@/api/hooks/useSettings'
 
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
 
@@ -539,4 +540,381 @@ function DownloadRow({ modelId, onRemove }) {
   );
 }
 
-Object.assign(window, { AddByHfModal, RecipeEditorModal, DeleteModelDialog, UsedByPanel, OnDiskPanel, DownloadRow });
+// ─── Add model by absolute path ────────────────────────────────
+//
+// PR feat/models-scan-and-add-by-path: minimal modal around
+// /api/models/add-from-path. The operator types (or pastes) an
+// absolute file path; we POST and let the backend's detect() pass
+// derive capabilities/backends/size. The id + name + labels overrides
+// are surfaced for the cases where the auto-derived ones aren't what
+// the operator wants.
+function AddByPathModal({ open, onClose }) {
+  const [path, setPath] = useStateMM("");
+  const [id, setId] = useStateMM("");
+  const [name, setName] = useStateMM("");
+  const [labelSel, setLabelSel] = useStateMM({ chat: true });
+  const add = useAddModelFromPath();
+  const settings = useSettings();
+
+  useEffectMM(() => {
+    if (open) {
+      setPath("");
+      setId("");
+      setName("");
+      setLabelSel({ chat: true });
+      add.reset();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const scanRoot = settings.data?.models?.roots?.[0] || "";
+  const labels = Object.entries(labelSel).filter(([, v]) => v).map(([k]) => k);
+
+  const onSubmit = async () => {
+    if (!path.trim()) return;
+    try {
+      const body = { path: path.trim() };
+      if (id.trim()) body.id = id.trim();
+      if (name.trim()) body.name = name.trim();
+      if (labels.length) body.labels = labels;
+      const res = await add.mutateAsync(body);
+      window.__hal0Toast && window.__hal0Toast(
+        `Registered ${res?.name || res?.id || "model"}`, "ok",
+      );
+      onClose();
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Add failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
+
+  const canSubmit = !!path.trim() && !add.isPending;
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      eyebrow="Catalog · add model"
+      title="Add model by path"
+      width={640}
+      foot={
+        <>
+          <span>File must be readable by <span className="mono">hal0-api</span></span>
+          <span style={{display: "inline-flex", gap: 8}}>
+            <button className="btn ghost sm" onClick={onClose}>Cancel</button>
+            <button className="btn sm" disabled={!canSubmit} onClick={onSubmit}>
+              {add.isPending ? "Registering…" : "Register"}
+            </button>
+          </span>
+        </>
+      }
+    >
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>Absolute path <span className="req">*</span></span>
+          <span className="sub">
+            .gguf · .safetensors · etc{scanRoot ? <> · scan dir is <span className="mono" style={{color: "var(--fg-3)"}}>{scanRoot}</span></> : null}
+          </span>
+        </div>
+        <div className="form-ctl">
+          <input
+            className="input mono"
+            value={path}
+            onChange={e => setPath(e.target.value)}
+            placeholder={scanRoot ? `${scanRoot}/local/qwen3-4b-q4_k_m.gguf` : "/mnt/ai-models/local/qwen3-4b-q4_k_m.gguf"}
+            autoFocus
+          />
+        </div>
+      </div>
+
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>Registry id</span>
+          <span className="sub">empty → derived from filename</span>
+        </div>
+        <div className="form-ctl">
+          <input className="input mono" value={id} onChange={e => setId(e.target.value)} placeholder="user.my-model" />
+        </div>
+      </div>
+
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>Display name</span>
+          <span className="sub">empty → derived from filename</span>
+        </div>
+        <div className="form-ctl">
+          <input className="input mono" value={name} onChange={e => setName(e.target.value)} />
+        </div>
+      </div>
+
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>Labels</span>
+          <span className="sub">empty → auto-detect from header / filename</span>
+        </div>
+        <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
+          {["chat", "tool-calling", "vision", "embed", "rerank", "asr", "tts"].map(l => (
+            <label key={l} className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={!!labelSel[l]}
+                onChange={e => setLabelSel({ ...labelSel, [l]: e.target.checked })}
+              />
+              <span className="mono">{l}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {add.isError && (
+        <div className="err">
+          {add.error?.code === "model.path_missing"
+            ? `Path not found or unreadable: ${path}`
+            : add.error?.code === "model.unsupported_format"
+              ? `Unsupported file extension`
+              : add.error?.code === "model.already_exists"
+                ? `Already registered — set a different id or use overwrite`
+                : `Add failed: ${add.error?.message || "unreachable"}`}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// ─── Scan directory + bulk register ────────────────────────────
+//
+// PR feat/models-scan-and-add-by-path: walks an absolute path
+// (defaulting to [models].roots[0]) recursively via
+// /api/models/scan/preview, surfaces every candidate with an
+// already-registered badge, and registers the picked rows one at a
+// time through /api/models/add-from-path. No batch endpoint by design
+// — the per-row loop keeps the failure mode obvious (one bad path
+// doesn't poison the rest).
+function ScanDirectoryModal({ open, onClose }) {
+  const settings = useSettings();
+  const preview = useScanPreview();
+  const add = useAddModelFromPath();
+  const modelsHook = useModels();
+
+  const [scanPath, setScanPath] = useStateMM("");
+  const [picked, setPicked] = useStateMM(() => new Set());
+  const [progress, setProgress] = useStateMM(null); // { done, total } | null
+
+  useEffectMM(() => {
+    if (open) {
+      preview.reset();
+      add.reset();
+      setPicked(new Set());
+      setProgress(null);
+      // Seed the input with the configured scan root so the operator
+      // can hit Scan immediately after pinning /mnt/ai-models in Settings.
+      const root = settings.data?.models?.roots?.[0] || "";
+      setScanPath(root);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, settings.data]);
+
+  const knownPaths = useMemoMM(
+    () => new Set((modelsHook.data || []).map(m => m.path).filter(Boolean)),
+    [modelsHook.data],
+  );
+
+  const onScan = async () => {
+    if (!scanPath.trim()) return;
+    setPicked(new Set());
+    setProgress(null);
+    try {
+      await preview.mutateAsync({ paths: [scanPath.trim()], recursive: true });
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Scan failed — ${e?.message || "see logs"}`, "err",
+      );
+    }
+  };
+
+  const rows = preview.data?.preview ?? [];
+
+  const togglePick = (path) => {
+    setPicked(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  };
+
+  const togglePickAll = () => {
+    const allPickable = rows.filter(r => !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path));
+    if (picked.size === allPickable.length) {
+      setPicked(new Set());
+    } else {
+      setPicked(new Set(allPickable.map(r => r.path)));
+    }
+  };
+
+  const onRegisterPicked = async () => {
+    const toReg = rows.filter(r => picked.has(r.path));
+    if (!toReg.length) return;
+    setProgress({ done: 0, total: toReg.length, failed: 0 });
+    for (let i = 0; i < toReg.length; i++) {
+      const r = toReg[i];
+      try {
+        await add.mutateAsync({
+          path: r.path,
+          labels: r.suggested_capabilities && r.suggested_capabilities.length
+            ? r.suggested_capabilities
+            : undefined,
+        });
+        setProgress(p => ({ ...p, done: p.done + 1 }));
+      } catch (e) {
+        // Keep going — one bad row shouldn't stall the rest.
+        setProgress(p => ({ ...p, done: p.done + 1, failed: (p.failed || 0) + 1 }));
+      }
+    }
+    window.__hal0Toast && window.__hal0Toast(
+      `Registered ${toReg.length} model${toReg.length > 1 ? "s" : ""}`, "ok",
+    );
+    // Re-scan so the already-registered badges update without closing.
+    await onScan();
+  };
+
+  const scanRootMissing = !settings.data?.models?.roots?.[0];
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      eyebrow="Catalog · discover"
+      title="Scan directory for models"
+      width={780}
+      foot={
+        <>
+          <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+            {rows.length > 0 ? `${rows.length} found · ${picked.size} picked` : "—"}
+          </span>
+          <span style={{display: "inline-flex", gap: 8}}>
+            <button className="btn ghost sm" onClick={onClose}>Close</button>
+            <button
+              className="btn sm"
+              disabled={!picked.size || !!progress && progress.done < progress.total}
+              onClick={onRegisterPicked}
+            >
+              {progress && progress.done < progress.total
+                ? `Registering ${progress.done}/${progress.total}…`
+                : `Register ${picked.size || ""} picked`}
+            </button>
+          </span>
+        </>
+      }
+    >
+      {scanRootMissing && (
+        <div style={{padding: "10px 12px", marginBottom: 12, background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--warn)"}}>
+          No scan dir set. Type an absolute path below, or set <span className="mono">[models].roots</span> in <span className="mono">Settings → Models</span> to default it.
+        </div>
+      )}
+
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>Scan path <span className="req">*</span></span>
+          <span className="sub">recursive · absolute path</span>
+        </div>
+        <div className="form-ctl" style={{display: "flex", gap: 8}}>
+          <input
+            className="input mono"
+            value={scanPath}
+            onChange={e => setScanPath(e.target.value)}
+            placeholder="/mnt/ai-models"
+            style={{flex: 1}}
+          />
+          <button className="btn ghost sm" disabled={!scanPath.trim() || preview.isPending} onClick={onScan}>
+            {preview.isPending ? "Scanning…" : "Scan"}
+          </button>
+        </div>
+      </div>
+
+      {preview.isError && (
+        <div className="err" style={{marginBottom: 10}}>
+          {preview.error?.message || "Scan failed"}
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div style={{border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", marginTop: 10}}>
+          <div style={{display: "grid", gridTemplateColumns: "32px 1fr 90px 80px 110px", gap: 12, padding: "8px 12px", background: "var(--bg)", borderBottom: "1px solid var(--line-soft)", fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em", alignItems: "center"}}>
+            <span>
+              <input
+                type="checkbox"
+                onChange={togglePickAll}
+                checked={
+                  rows.length > 0 &&
+                  picked.size === rows.filter(r => !knownPaths.has(r.resolved_path) && !knownPaths.has(r.path)).length
+                }
+              />
+            </span>
+            <span>path</span>
+            <span style={{textAlign: "right"}}>size</span>
+            <span>kind</span>
+            <span>status</span>
+          </div>
+          <div style={{maxHeight: 320, overflow: "auto"}}>
+            {rows.map(r => {
+              const registered = knownPaths.has(r.resolved_path) || knownPaths.has(r.path);
+              return (
+                <div
+                  key={r.path}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "32px 1fr 90px 80px 110px",
+                    gap: 12,
+                    padding: "8px 12px",
+                    borderBottom: "1px solid var(--line-soft)",
+                    fontFamily: "var(--jbm)",
+                    fontSize: 11.5,
+                    color: registered ? "var(--fg-4)" : "var(--fg-2)",
+                    alignItems: "center",
+                  }}
+                >
+                  <span>
+                    <input
+                      type="checkbox"
+                      disabled={registered}
+                      checked={picked.has(r.path)}
+                      onChange={() => togglePick(r.path)}
+                    />
+                  </span>
+                  <span style={{wordBreak: "break-all", paddingRight: 8}}>
+                    {r.path}
+                    <div style={{fontSize: 10, color: "var(--fg-5)", marginTop: 2}}>
+                      {r.suggested_name || ""} · {(r.suggested_capabilities || []).join(", ") || "—"}
+                    </div>
+                  </span>
+                  <span style={{textAlign: "right", color: "var(--fg-3)"}}>{fmtBytes(r.size_bytes)}</span>
+                  <span style={{color: "var(--fg-3)"}}>{r.kind}</span>
+                  <span>
+                    {registered
+                      ? <span className="chip ok">registered</span>
+                      : <span className="chip" style={{color: "var(--accent)", borderColor: "var(--accent-line)", background: "var(--accent-soft)"}}>new</span>}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {preview.isSuccess && rows.length === 0 && (
+        <div style={{padding: "20px 12px", textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>
+          No candidate files under <span className="mono">{scanPath}</span>.
+        </div>
+      )}
+
+      {progress && progress.failed > 0 && (
+        <div className="err" style={{marginTop: 10}}>
+          {progress.failed} of {progress.total} failed to register — check the toast log.
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+Object.assign(window, { AddByHfModal, AddByPathModal, ScanDirectoryModal, RecipeEditorModal, DeleteModelDialog, UsedByPanel, OnDiskPanel, DownloadRow });
