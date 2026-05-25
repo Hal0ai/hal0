@@ -1,20 +1,20 @@
 /**
- * settings-v3 — `#settings` route renders the rail nav with all 8
- * sections (secrets, updates, lemonade, omni, agent, memory,
+ * settings-v3 — `#settings` route renders the rail nav with all 9
+ * sections (secrets, updates, lemonade, omni, agent, memory, models,
  * appearance, about) and swaps the right pane on click.
  *
  * Auth section removed per ADR-0012 (PRs #254-#267); default landing
- * is now Secrets.
+ * is now Secrets. Models section added in PR #313 (scan + add-by-path).
  */
 import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
   'Secrets', 'Updates', 'Lemonade admin', 'OmniRouter',
-  'Agent policy', 'Memory (Cognee)', 'Appearance', 'About',
+  'Agent policy', 'Memory (Cognee)', 'Models', 'Appearance', 'About',
 ]
 
 test.describe('Settings v3 (/settings)', () => {
-  test('renders rail nav with all 8 sections', async ({ page }) => {
+  test('renders rail nav with all 9 sections', async ({ page }) => {
     await page.goto('/#settings')
     await expect(page.locator('.view .vh h1')).toHaveText('Settings')
     const nav = page.locator('.settings-nav .nav-item')
