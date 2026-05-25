@@ -376,17 +376,13 @@ function SecretsSection() {
 }
 
 function UpdatesSection() {
-  // Phase B1: live state + check + apply mutations. Fallback shows the
-  // design's v0.2.2-available story when no backend.
+  // Phase B1: live state + check + apply mutations. While the query is
+  // in flight or 5xx'd we render an empty envelope and let the SRow
+  // fallbacks show '—' rather than fabricated versions.
   const stateQuery = useUpdateState();
   const checkM = useUpdateCheck();
   const applyM = useUpdateApply();
-  const u = stateQuery.data || {
-    hal0: { current: 'v0.2.1', available: 'v0.2.2', channel: 'stable' },
-    lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
-    flm: { current: 'v0.9.42', source: 'manual-deb' },
-    autoCheck: true,
-  };
+  const u = stateQuery.data || { hal0: {}, lemonade: {}, flm: {}, autoCheck: true };
   return (
     <div className="s-section">
       <h2>Updates</h2>
@@ -414,7 +410,7 @@ function UpdatesSection() {
           k="lemonade"
           sub="Pinned. SHA-256 verified."
           mono
-          v={`${u.lemonade?.current} · channel: ${u.lemonade?.channel || 'stable'}`}
+          v={u.lemonade?.current ? `${u.lemonade.current} · channel: ${u.lemonade.channel || 'stable'}` : '—'}
           actions={<button className="btn ghost sm" onClick={() => checkM.mutate('lemonade')}>Check</button>}
         />
         <SRow

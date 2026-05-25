@@ -59,6 +59,72 @@ def test_check_returns_well_formed_envelope_with_update_available(
     assert isinstance(body["manifest"], dict)
 
 
+def test_state_returns_shape_expected_by_dashboard(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /api/updates/state matches the UpdateState shape in useUpdates.ts.
+
+    Probes are stubbed so the test doesn't depend on lemonade/flm being
+    installed on the test host. Issue #233.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    monkeypatch.setattr(u_mod, "_probe_version", lambda _c: None)
+
+    r = isolated_client.get("/api/updates/state")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Top-level keys mirror UpdateState in ui/src/api/hooks/useUpdates.ts.
+    assert set(body.keys()) == {"hal0", "lemonade", "flm", "autoCheck"}
+    assert body["hal0"]["current"]  # __version__ is non-empty
+    assert body["hal0"]["available"] == "9.9.9"
+    assert body["hal0"]["channel"] == "stable"
+    # Probes returned None — UI should render '—' rather than fabricated versions.
+    assert body["lemonade"]["current"] is None
+    assert body["flm"]["current"] is None
+    assert body["autoCheck"] is True
+
+
+def test_state_parses_lemonade_and_flm_version_strings(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probe output ``lemonade version 10.6.0`` / ``FLM v0.9.42`` parses cleanly."""
+    from hal0.api.routes import updater as u_mod
+
+    def fake_probe(candidates: tuple[str, ...]) -> str | None:
+        # First candidate of the lemonade tuple is /opt/lemonade/lemonade.
+        if "lemonade" in candidates[0]:
+            return "lemonade version 10.6.0"
+        if candidates[0] == "flm":
+            return "FLM v0.9.42"
+        return None
+
+    monkeypatch.setattr(u_mod, "_probe_version", fake_probe)
+
+    r = isolated_client.get("/api/updates/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["lemonade"]["current"] == "v10.6.0"
+    assert body["flm"]["current"] == "v0.9.42"
+
+
+def test_state_survives_manifest_fetch_failure(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing release-manifest must NOT 5xx /state — degrade hal0.available to None."""
+    missing = tmp_path / "nope.json"
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(missing))
+    from hal0.api.routes import updater as u_mod
+
+    monkeypatch.setattr(u_mod, "_probe_version", lambda _c: None)
+
+    r = isolated_client.get("/api/updates/state")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["hal0"]["available"] is None
+    assert body["hal0"]["current"]  # still reports our version
+
+
 def test_check_no_update_when_versions_match(
     isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

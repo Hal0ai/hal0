@@ -27,6 +27,8 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 import time
 import uuid
 from typing import Any
@@ -130,6 +132,119 @@ async def _run_apply_job(
         job["state"] = "applied"
     finally:
         job["updated_at"] = time.time()
+
+
+# ── /state ─────────────────────────────────────────────────────────────────
+
+
+_LEMONADE_BIN_CANDIDATES = ("/opt/lemonade/lemonade", "lemonade")
+_FLM_BIN_CANDIDATES = ("flm",)
+
+
+def _probe_version(candidates: tuple[str, ...]) -> str | None:
+    """Run ``<bin> --version`` against the first resolvable candidate.
+
+    Returns the trimmed first line of stdout, or ``None`` if no candidate
+    resolves or the call fails. The 1s timeout is conservative — these
+    are local-process probes that should answer in well under that.
+    """
+    for cand in candidates:
+        binpath = cand if "/" in cand else shutil.which(cand)
+        if not binpath:
+            continue
+        try:
+            out = subprocess.run(
+                [binpath, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        text = (out.stdout or out.stderr or "").strip()
+        if not text:
+            return None
+        return text.splitlines()[0].strip()
+    return None
+
+
+def _parse_lemonade_version(raw: str | None) -> str | None:
+    """``lemonade version 10.6.0`` → ``v10.6.0``."""
+    if not raw:
+        return None
+    # Pull the last whitespace-delimited token; prepend ``v`` if numeric.
+    last = raw.split()[-1] if raw.split() else raw
+    return f"v{last}" if last and last[0].isdigit() else last
+
+
+def _parse_flm_version(raw: str | None) -> str | None:
+    """``FLM v0.9.42`` → ``v0.9.42``."""
+    if not raw:
+        return None
+    parts = raw.split()
+    return parts[-1] if parts else raw
+
+
+@router.get("/state")
+async def update_state(request: Request) -> dict[str, Any]:
+    """Aggregate update state for the Settings → Updates surface.
+
+    Combines the hal0 self-update channel + local probes of bundled
+    components (lemonade, flm) so the dashboard renders real versions
+    instead of hardcoded literals (issue #233).
+
+    Response shape (matches ``ui/src/api/hooks/useUpdates.ts``)::
+
+        {
+            "hal0": {
+                "current": "0.3.0-alpha.1",
+                "available": "0.3.0" | null,
+                "channel": "stable"
+            },
+            "lemonade": {"current": "v10.6.0", "pinned": true, "channel": "stable"},
+            "flm":      {"current": "v0.9.42", "source": "manual-deb"},
+            "autoCheck": true
+        }
+
+    Failures in any single probe degrade gracefully — the corresponding
+    field comes back as ``None`` rather than 5xx'ing the whole response.
+    """
+    channel = _current_channel(request)
+
+    # hal0 self-update: reuse ``check_updates`` semantics but tolerate
+    # a manifest fetch failure (dashboard shouldn't go blank just
+    # because GitHub is rate-limiting).
+    hal0_available: str | None = None
+    try:
+        manifest = await fetch_release_manifest(channel)
+        if isinstance(manifest, dict):
+            latest_raw = manifest.get("version") or manifest.get("latest_version") or ""
+            latest = str(latest_raw)
+            if latest and _version_tuple(latest) > _version_tuple(__version__):
+                hal0_available = latest
+    except (OSError, ValueError):
+        pass
+
+    lemonade_raw = await asyncio.to_thread(_probe_version, _LEMONADE_BIN_CANDIDATES)
+    flm_raw = await asyncio.to_thread(_probe_version, _FLM_BIN_CANDIDATES)
+
+    return {
+        "hal0": {
+            "current": __version__,
+            "available": hal0_available,
+            "channel": channel,
+        },
+        "lemonade": {
+            "current": _parse_lemonade_version(lemonade_raw),
+            "pinned": True,
+            "channel": channel,
+        },
+        "flm": {
+            "current": _parse_flm_version(flm_raw),
+            "source": "manual-deb",
+        },
+        "autoCheck": True,
+    }
 
 
 # ── /check ─────────────────────────────────────────────────────────────────
