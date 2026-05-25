@@ -107,7 +107,8 @@ export const ENDPOINTS = {
   // Secrets
   secrets: '/api/secrets',
   secret: (name: string) => `/api/secrets/${encodeURIComponent(name)}`,
-  // FirstRun
+  // Install / FirstRun
+  installState: '/api/install/state',
   firstrunState: '/api/firstrun/state',
   firstrunCuratedModels: '/api/firstrun/curated-models',
   firstrunPickDefault: '/api/firstrun/pick-default',

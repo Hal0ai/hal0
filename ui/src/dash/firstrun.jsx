@@ -389,16 +389,20 @@ function FirstRunConfirm({ bundleId, onBack, onInstall }) {
 }
 
 // ─── Install progress (state 3) ───
-function FirstRunProgress({ onDone }) {
+function FirstRunProgress({ onDone, bundleId }) {
   // Phase B1: complete-mutation flips the backend's firstrun.completed
   // flag when the user clicks "Open dashboard". Downloads list is
   // intentionally still HAL0_DATA — per-row SSE wiring via
   // `usePullJob(id)` lands in B2 when DownloadRow swaps in the hook.
   const completeM = useFirstRunComplete();
+  const bundlesQuery = useCuratedBundles();
+  const bundle = (bundlesQuery.data?.bundles ?? HAL0_DATA.bundles).find(b => b.id === bundleId)
+              || HAL0_DATA.bundles.find(b => b.id === bundleId);
+  const bundleName = bundle?.name ? `hal0-${bundle.name}` : 'hal0';
   return (
     <div className="fr-inner">
       <div className="fr-prog-h">
-        <h2>Installing hal0-Pro…</h2>
+        <h2>Installing {bundleName}…</h2>
         <span className="meta">~38 GB total · est 12 min · downloads continue in background</span>
       </div>
 
@@ -481,7 +485,7 @@ function FirstRunView({ frStage, setFrStage, frBundle, setFrBundle, onComplete, 
         />
       )}
       {frStage === "progress" && (
-        <FirstRunProgress onDone={() => onComplete()} />
+        <FirstRunProgress bundleId={frBundle} onDone={() => onComplete()} />
       )}
       <SkipBundleDialog
         open={skipOpen}

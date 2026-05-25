@@ -81,6 +81,43 @@ def test_install_state_has_default_slot_when_primary_toml_exists(
     assert r.json()["has_default_slot"] is True
 
 
+def test_install_state_bundle_null_before_pick(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """No bundle pick yet → ``bundle`` is null. Issue #214."""
+    r = isolated_client.get("/api/install/state")
+    assert r.status_code == 200
+    assert r.json()["bundle"] is None
+
+
+def test_install_state_bundle_echoes_chosen_tier(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """After ``mark_bundle_chosen``, state echoes the tier name. Issue #214."""
+    from hal0.bundles import store as bundle_store
+
+    bundle_store.mark_bundle_chosen("hal0-Pro", npu_opt_in=False)
+    r = isolated_client.get("/api/install/state")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bundle"] is not None
+    assert body["bundle"]["name"] == "hal0-Pro"
+    assert body["bundle"]["skipped"] is False
+
+
+def test_install_state_bundle_skipped_branch(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """Skip path: ``bundle.skipped=True`` and ``name`` is empty. Issue #214."""
+    from hal0.bundles import store as bundle_store
+
+    bundle_store.mark_skipped()
+    r = isolated_client.get("/api/install/state")
+    body = r.json()
+    assert body["bundle"]["skipped"] is True
+    assert body["bundle"]["name"] == ""
+
+
 def test_install_complete_writes_sentinel_atomically(
     isolated_client: TestClient, tmp_hal0_home: str
 ) -> None:

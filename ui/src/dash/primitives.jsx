@@ -2,6 +2,7 @@
 // Modal, Drawer, ConfirmDialog, Banner, BannerStack, Dropdown menu
 
 import { useUpdateState } from '@/api/hooks/useUpdates'
+import { useInstallState, bundleNameOr } from '@/api/hooks/useInstallState'
 
 const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, createContext: createContextP, useContext: useContextP } = React;
 
@@ -159,9 +160,23 @@ function useBanners() {
   return useContextP(BannerContext);
 }
 
+// ─── Banner template substitution ────────────────────────────────────────
+// Banner catalog entries embed `{bundleName}` (and similar `{key}` slots)
+// so the heading/body can carry live state without per-banner branching.
+// Substituted at render time from the install/firstrun stores so a fresh
+// `/api/install/state` keeps banner copy in sync (issue #214).
+function _interpolateBannerString(s, vars) {
+  if (typeof s !== "string") return s;
+  return s.replace(/\{(\w+)\}/g, (m, k) => (vars && vars[k] != null ? String(vars[k]) : m));
+}
+
 // ─── BannerStack — renders the active banners for a given view scope ─────
-function BannerStack({ scope = "global", route }) {
+function BannerStack({ scope = "global", route, vars: extraVars }) {
   const { active, toggle } = useBanners();
+  const installQuery = useInstallState();
+  // Merge install-derived defaults (bundleName) with caller-supplied vars so
+  // a specific view (FirstRun confirm) can override with an in-flight pick.
+  const vars = { bundleName: bundleNameOr(installQuery.data), ...(extraVars || {}) };
   const items = BANNER_CATALOG.filter(b =>
     active[b.id] && (
       b.scope === "global" ||
@@ -176,9 +191,9 @@ function BannerStack({ scope = "global", route }) {
         <Banner
           key={b.id}
           kind={b.kind}
-          eyebrow={b.eyebrow}
-          heading={b.heading}
-          body={b.body}
+          eyebrow={_interpolateBannerString(b.eyebrow, vars)}
+          heading={_interpolateBannerString(b.heading, vars)}
+          body={_interpolateBannerString(b.body, vars)}
           actions={b.actions && b.actions.map((a, i) => (
             <button
               key={i}
@@ -329,7 +344,7 @@ const BANNER_CATALOG = [
   {
     id: "fr-reentered", scope: "firstrun", kind: "warn",
     eyebrow: "Picker · post-install",
-    heading: "You currently have hal0-Pro installed",
+    heading: "You currently have {bundleName} installed",
     body: "Picking another tier will replace your slot selections. Models already on disk won't be re-downloaded.",
   },
   {
@@ -364,8 +379,8 @@ const BANNER_CATALOG = [
   {
     id: "post-install", scope: "dashboard", kind: "info",
     eyebrow: "FirstRun · just installed",
-    heading: "Welcome to hal0 — hal0-Pro is loaded",
-    body: <span>Try a message below. <span className="mono" style={{color: "var(--fg)"}}>primary</span> (Qwen3.6-27B-MTP) is your default chat persona. The persona dropdown lets you swap to <span className="mono">coder</span> or the NPU <span className="mono">agent</span>.</span>,
+    heading: "Welcome to hal0 — {bundleName} is loaded",
+    body: <span>Try a message below. <span className="mono" style={{color: "var(--fg)"}}>primary</span> is your default chat persona. The persona dropdown lets you swap to <span className="mono">coder</span> or the NPU <span className="mono">agent</span>.</span>,
     actions: [
       { label: "Take the tour", primary: true, onClick: () => window.dispatchEvent(new CustomEvent("hal0:tour-start")) },
       { label: "Dismiss" },

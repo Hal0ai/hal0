@@ -196,7 +196,7 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     scope: 'firstrun',
     kind: 'warn',
     eyebrow: 'Picker · post-install',
-    heading: 'You currently have hal0-Pro installed',
+    heading: 'You currently have {bundleName} installed',
     body: "Picking another tier will replace your slot selections. Models already on disk won't be re-downloaded.",
   },
   {
@@ -237,8 +237,8 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     scope: 'dashboard',
     kind: 'info',
     eyebrow: 'FirstRun · just installed',
-    heading: 'Welcome to hal0 — hal0-Pro is loaded',
-    body: 'Try a message below. primary (Qwen3.6-27B-MTP) is your default chat persona. The persona dropdown lets you swap to coder or the NPU agent.',
+    heading: 'Welcome to hal0 — {bundleName} is loaded',
+    body: 'Try a message below. primary is your default chat persona. The persona dropdown lets you swap to coder or the NPU agent.',
     actions: [
       { label: 'Take the tour', primary: true },
       { label: 'Dismiss' },

@@ -34,6 +34,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Request
 
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
+from hal0.bundles import store as bundle_store
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
 from hal0.registry.curated import CURATED_MODELS, get_curated
@@ -161,12 +162,21 @@ async def install_state(request: Request) -> dict[str, Any]:
             "has_models": false,
             "has_default_slot": false,
             "openwebui_running": false,
-            "sentinel_path": "/var/lib/hal0/.first_run_done"
+            "sentinel_path": "/var/lib/hal0/.first_run_done",
+            "bundle": {
+                "name": "hal0-Pro",
+                "skipped": false,
+                "npu_opt_in": false,
+                "chosen_at": "2026-05-25T18:00:00+00:00"
+            } | null
         }
 
     ``first_run`` is true when ``/var/lib/hal0/models/`` is empty AND the
     sentinel hasn't been written. Either condition flipping false hides
-    the FirstRun wizard.
+    the FirstRun wizard. ``bundle`` is the persisted bundle-picker
+    decision (or ``null`` before the picker runs) — the dashboard reads
+    this to render the actual tier name in the post-install hero and
+    "currently have …" banners (issue #214).
     """
     has_models = _models_dir_populated()
     sentinel = _first_run_sentinel()
@@ -174,12 +184,14 @@ async def install_state(request: Request) -> dict[str, Any]:
     has_default = _has_default_slot()
     openwebui = await _openwebui_running()
     first_run = (not has_models) and (not sentinel_present)
+    choice = bundle_store.read_choice()
     return {
         "first_run": first_run,
         "has_models": has_models,
         "has_default_slot": has_default,
         "openwebui_running": openwebui,
         "sentinel_path": str(sentinel),
+        "bundle": choice.to_dict() if choice is not None else None,
     }
 
 
