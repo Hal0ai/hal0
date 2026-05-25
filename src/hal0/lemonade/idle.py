@@ -11,9 +11,28 @@ lifespan. Once per tick (30s default — matches the existing hal0
 ``_IDLE_MONITOR_INTERVAL_S``) it:
 
   1. Polls ``GET /v1/health`` for ``all_models_loaded[].last_use``
-  2. For each loaded model with ``now - last_use > idle_timeout_s``,
-     calls ``POST /v1/unload``
-  3. Logs the eviction so dashboards can audit
+  2. Tracks each model's ``last_use`` value across ticks. When the
+     value stays unchanged for more than ``idle_timeout_s`` wall-clock
+     seconds (measured against our own injectable clock — NOT against
+     the ``last_use`` field directly), calls ``POST /v1/unload``.
+  3. Logs the eviction so dashboards can audit.
+
+Why we don't compute ``now - last_use`` directly: Lemonade 10.6 reports
+``last_use`` as an opaque monotonic counter, NOT a unix epoch float.
+Verified on hal0 LXC 2026-05-25:
+
+  * Fresh load: ``last_use = 1420647618``
+  * After one ``/v1/chat/completions``: ``last_use = 1420673741``
+    (+26,123 for ~25s wall — clearly not seconds)
+
+If we treated that as epoch seconds the model would always look ~11
+years stale and get evicted on the first sweep (which is exactly the
+regression that motivated this rewrite — see field-bug report from
+2026-05-25). Lemonade ships ~weekly and field semantics drift; the
+safe contract is "the value changes when the model is used" and
+nothing more. We bump a wall-clock idle clock locally each time the
+counter moves, so this driver is correct regardless of the field's
+units (or even sign).
 
 Resilience contract:
   * Transient lemond unavailability (``LemonadeUnavailableError`` /
@@ -24,6 +43,9 @@ Resilience contract:
     up the CancelledError, and exits without partial state.
   * Per-model unload failures don't abort the whole sweep; we log and
     move on to the next candidate.
+  * Models that disappear from the loaded list have their tracker
+    state dropped, so an unload + reload starts a fresh idle clock
+    (rather than evicting the reloaded model immediately).
 
 ADR cross-references:
   * ADR-0007 §Related — operational gap that motivated this driver
@@ -100,6 +122,13 @@ class IdleDriver:
         self._clock = clock
         self._task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
+        # Per-model idle-clock state:
+        #   model_name -> (last_observed_last_use, first_seen_at_wall_clock)
+        # We bump first_seen_at whenever last_observed_last_use moves,
+        # which is the only signal Lemonade gives us that the model was
+        # used. See the module docstring for why we can't trust the
+        # field's units.
+        self._seen: dict[str, tuple[float, float]] = {}
 
     # ── lifecycle ──────────────────────────────────────────────────
 
@@ -187,7 +216,20 @@ class IdleDriver:
             log.warning("lemonade.idle.health_error", extra={"error": str(exc)})
             return 0
 
-        loaded = _extract_loaded_models(health)
+        loaded = list(_extract_loaded_models(health))
+        # First: drop tracker state for any model that's no longer
+        # loaded. An unload + reload must start a fresh idle clock —
+        # otherwise a reloaded model would inherit its previous
+        # last_use snapshot and look stale immediately.
+        live_names = {
+            entry.get("model_name")
+            for entry in loaded
+            if isinstance(entry.get("model_name"), str) and entry.get("model_name")
+        }
+        stale_state = self._seen.keys() - live_names
+        for gone in stale_state:
+            self._seen.pop(gone, None)
+
         if not loaded:
             return 0
 
@@ -199,15 +241,41 @@ class IdleDriver:
                 continue
             last_use = _coerce_last_use(entry.get("last_use"))
             if last_use is None:
-                # No timestamp → can't decide; leave it alone. Better
+                # No counter → can't decide; leave it alone. Better
                 # to skip an eviction than evict a freshly-loaded
-                # model whose stats haven't populated yet.
+                # model whose stats haven't populated yet. We also
+                # don't seed tracker state in this case — the next
+                # tick with a real counter starts cleanly.
                 continue
-            age = now - last_use
+
+            prev = self._seen.get(name)
+            if prev is None:
+                # First sight of this model. Record its counter and
+                # the wall-clock moment we noticed it; skip eviction
+                # this tick so a freshly-loaded model gets at least
+                # one full idle_timeout_s window before it can be
+                # culled.
+                self._seen[name] = (last_use, now)
+                continue
+
+            prev_last_use, first_seen_at = prev
+            if last_use != prev_last_use:
+                # Counter moved → the model was used since our last
+                # observation. Reset the idle clock and skip eviction.
+                self._seen[name] = (last_use, now)
+                continue
+
+            # Counter unchanged since first_seen_at. Decide on
+            # wall-clock age, NOT on the opaque counter's value.
+            age = now - first_seen_at
             if age <= self._idle_timeout_s:
                 continue
             ok = await self._unload(name, age=age)
             if ok:
+                # Drop tracker state proactively so an immediate
+                # reload (before the next health poll observes the
+                # unload) won't reuse the stale entry.
+                self._seen.pop(name, None)
                 evicted += 1
         return evicted
 
@@ -267,14 +335,21 @@ def _extract_loaded_models(health: dict[str, Any]) -> Iterable[dict[str, Any]]:
 
 
 def _coerce_last_use(value: Any) -> float | None:
-    """Coerce a ``last_use`` payload field into a unix-epoch float.
+    """Coerce a ``last_use`` payload field into a comparable float.
 
-    Lemonade reports last_use as a unix timestamp (float seconds). We
-    accept int/float; anything else (None, str, missing) yields None
-    which the caller treats as "skip this entry this tick".
+    Lemonade 10.6 reports ``last_use`` as an opaque monotonic counter
+    (NOT a unix timestamp — verified on hal0 LXC 2026-05-25, see the
+    module docstring). The driver only uses this value for equality
+    comparison across ticks ("did the counter move?"), so the units
+    don't matter — we just need a value we can stash and compare.
+
+    We accept int/float; anything else (None, str, missing) yields
+    None which the caller treats as "skip this entry this tick" (no
+    tracker state seeded, no eviction).
+
+    bool is an int subclass and is excluded explicitly so True/False
+    don't masquerade as 1.0/0.0 counter values.
     """
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        # bool is an int subclass — exclude explicitly so True/False
-        # don't pass for "0 seconds since epoch".
         return float(value)
     return None
