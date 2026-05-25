@@ -46,6 +46,12 @@ function buildHealth() {
 }
 
 function buildStats() {
+  // /v1/stats fallback (Phase 4, #326). Lemonade's real /v1/stats does
+  // not include `throughput_mbps` — throughput is sourced exclusively
+  // from /v1/health (see useLemondRollup). DO NOT synthesize
+  // `throughput_mbps: 0.0` here as a "completeness" gesture — the
+  // footer chip is gated to hide when null/0 and a synthetic zero
+  // would re-introduce the misleading "0.0 MB/s" the chip is hiding.
   return {
     time_to_first_token: 0.22,
     tokens_per_second: 45.0,

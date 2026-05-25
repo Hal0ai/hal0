@@ -275,10 +275,19 @@ function Footer({ updateAvailable = true, expanded = false, onToggle, journal = 
           <span className="k">lemond:</span>
           <span className="v">{L.status}</span>
         </div>
-        <div className="foot-chip">
-          <span className="k">throughput</span>
-          <span className="v num">{L.throughput != null ? `${L.throughput} MB/s` : '—'}</span>
-        </div>
+        {/*
+          Throughput chip (#326): Lemonade does not yet surface
+          throughput_mbps on /v1/health for every backend. The rollup
+          coerces missing → null. Hide the chip entirely instead of
+          rendering "—" or "0.0 MB/s" — a value of 0 from a live system
+          actually serving traffic is just as meaningless as null.
+        */}
+        {L.throughput != null && L.throughput > 0 && (
+          <div className="foot-chip">
+            <span className="k">throughput</span>
+            <span className="v num">{`${L.throughput} MB/s`}</span>
+          </div>
+        )}
         <div className="foot-chip">
           <span className="k">loaded</span>
           <span className="v num">{L.loaded}/{L.budget}</span>
