@@ -334,10 +334,10 @@ def _next_free_slot_port(start: int = 8081, end: int = 8099) -> int:
     """
     import tomllib
 
-    from hal0.config.paths import hal0_etc_dir
+    from hal0.config.paths import slots_config_dir
 
     used: set[int] = set()
-    slots_dir = hal0_etc_dir() / "slots"
+    slots_dir = slots_config_dir()
     if slots_dir.is_dir():
         for f in slots_dir.glob("*.toml"):
             try:
