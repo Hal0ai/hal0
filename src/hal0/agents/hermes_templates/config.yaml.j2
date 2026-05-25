@@ -17,10 +17,20 @@
 # `hal0 agent bootstrap hermes`. Drop a file at
 # /etc/hal0/agents/hermes/overrides.yaml to merge on top.
 
+{# Hermes's auth/runtime layer keeps its own PROVIDER_REGISTRY (built-in
+   names like openai/anthropic/custom) — a name not in that registry
+   raises "Unknown provider '<x>'" at chat send time even when the
+   plugin profile at $HERMES_HOME/plugins/model-providers/hal0/ is
+   discovered cleanly. Upstream's `custom` provider is explicitly the
+   OpenAI-compatible-LAN-endpoint knob (Ollama, vLLM, llama.cpp). hal0
+   IS that endpoint, so we render `provider: custom` to satisfy the
+   registry while keeping the rendered `base_url` driving the actual
+   calls. The Hal0Profile plugin still loads (purely for branding in
+   `hermes model` discovery + future request-shape hooks). #}
 model:
 {%- if primary %}
   default: {{ primary.model_id | tojson }}
-  provider: "hal0"
+  provider: "custom"
   base_url: {{ primary.backend_url | tojson }}
 {%- if primary.context_length %}
   context_length: {{ primary.context_length }}
@@ -30,12 +40,16 @@ model:
   # before the agent can serve completions. Re-run bootstrap with
   # `--repair` once the primary slot is loaded to refresh this section.
   default: ""
-  provider: "hal0"
+  provider: "custom"
   base_url: "http://127.0.0.1:8080/v1"
 {%- endif %}
 
 providers:
-  hal0:
+  # `custom` is upstream Hermes's built-in profile for OpenAI-compatible
+  # LAN endpoints; hal0 sits in that bucket.
+  custom:
+    name: "hal0"
+    base_url: {{ (primary.backend_url if primary else "http://127.0.0.1:8080/v1") | tojson }}
     request_timeout_seconds: 300
     stale_timeout_seconds: 900
 
@@ -45,7 +59,7 @@ model_aliases:
 {%- for slot in chat_slots %}
   {{ slot.alias }}:
     model: {{ slot.model_id | tojson }}
-    provider: "hal0"
+    provider: "custom"
     base_url: {{ slot.backend_url | tojson }}
 {%- endfor %}
 {%- endif %}
