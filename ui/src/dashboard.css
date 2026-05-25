@@ -828,6 +828,67 @@ a { color: inherit; text-decoration: none; }
 .msg .meta b { color: var(--accent); font-weight: 500; }
 .msg.user .meta { text-align: right; }
 
+/* ── Reasoning block (thinking pane above the assistant's answer) ─────
+ * Greyed text + 3-line clamp by default. The `.toggle` button flips
+ * `.open` on the wrapper, which removes the clamp. Subtle border-left
+ * accent so it visually demarcates from the answer below without
+ * stealing focus. Color/border tokens are reused, no new palette.
+ */
+.bubble-reasoning {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px 9px;
+  margin-bottom: 4px;
+  border-left: 2px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.015);
+  border-radius: 0 var(--rad-sm) var(--rad-sm) 0;
+  color: var(--fg-4);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.bubble-reasoning .toggle {
+  align-self: flex-start;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-4);
+  cursor: pointer;
+  font-family: var(--jbm);
+}
+.bubble-reasoning .toggle:hover { color: var(--fg-2); }
+.bubble-reasoning .toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.bubble-reasoning .text {
+  white-space: pre-wrap;
+  color: var(--fg-4);
+  /* 3-line clamp by default; .open removes it. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.bubble-reasoning.open .text {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+/* Faint blinking caret for the empty answer bubble while reasoning streams. */
+.bubble-caret {
+  color: var(--fg-4);
+  animation: bubble-caret-blink 1s steps(2, end) infinite;
+}
+@keyframes bubble-caret-blink {
+  to { visibility: hidden; }
+}
+
 /* Tool call block */
 .toolblock {
   align-self: stretch;

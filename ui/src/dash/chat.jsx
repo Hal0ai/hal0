@@ -384,7 +384,7 @@ function useChat(slots, persona) {
             ? {
                 ...m,
                 content: final.content,
-                reasoning: final.reasoningOnly ? '' : m.reasoning,
+                reasoning: final.reasoning ?? m.reasoning ?? '',
                 model: final.model,
                 streaming: false,
                 reasoningOnly: final.reasoningOnly,
@@ -436,6 +436,47 @@ function fmtTime(ts) {
   return `${hh}:${mm}:${ss}`
 }
 
+// ─── ReasoningBlock ───
+//
+// Renders the model's chain-of-thought ABOVE the answer in a greyed,
+// 3-line-clamped box with a "thinking ▾ / ▴" toggle.
+//
+// Auto-collapse behaviour (per design brief):
+//   - If reasoning streams in but no answer yet → block is auto-EXPANDED so
+//     the user knows the model is alive.
+//   - Once the answer starts streaming (or finishes) → block auto-COLLAPSES.
+//   - The auto-collapse only fires ONCE per message; if the user toggles
+//     manually after that, their choice sticks even if more deltas land.
+function ReasoningBlock({ text, autoExpand }) {
+  const [expanded, setExpanded] = useStateC(autoExpand)
+  const [userTouched, setUserTouched] = useStateC(false)
+  // Drive auto-collapse from `autoExpand`. While streaming + no answer
+  // yet, `autoExpand` is true → block stays open. When the answer starts
+  // streaming, the parent sets `autoExpand=false` → we auto-collapse,
+  // unless the user already clicked the toggle (their choice wins).
+  useEffectC(() => {
+    if (userTouched) return
+    setExpanded(autoExpand)
+  }, [autoExpand, userTouched])
+  if (!text) return null
+  return (
+    <div className={'bubble-reasoning' + (expanded ? ' open' : '')}>
+      <button
+        type="button"
+        className="toggle mono"
+        aria-expanded={expanded}
+        onClick={() => {
+          setUserTouched(true)
+          setExpanded((v) => !v)
+        }}
+      >
+        thinking {expanded ? '▴' : '▾'}
+      </button>
+      <div className="text">{text}</div>
+    </div>
+  )
+}
+
 function MessageList({ messages }) {
   const scrollRef = useRefC(null)
   useEffectC(() => {
@@ -473,9 +514,16 @@ function MessageList({ messages }) {
             </div>
           )
         }
-        // assistant
-        const showReasoningOnly = !m.content && m.reasoning
-        const bubbleText = m.content || m.reasoning || (m.streaming ? '…' : '')
+        // assistant — reasoning (if any) renders ABOVE the answer, never inline.
+        const hasReasoning = !!(m.reasoning && m.reasoning.length > 0)
+        const hasAnswer = !!(m.content && m.content.length > 0)
+        // Auto-expand reasoning while the model is still thinking (streaming
+        // with no answer yet). Collapse as soon as the answer surface starts
+        // filling, or once the message is no longer streaming.
+        const autoExpand = !!(m.streaming && hasReasoning && !hasAnswer)
+        // Bubble placeholder: dim ellipsis while we wait for any content at
+        // all (no reasoning + no answer yet on a streaming message).
+        const showWaitingDots = m.streaming && !hasAnswer && !hasReasoning
         return (
           <div key={m.ts} className="msg">
             <div className="meta mono">
@@ -485,11 +533,26 @@ function MessageList({ messages }) {
               {m.streaming ? <> · streaming…</> : null}
               {m.aborted ? <> · stopped</> : null}
             </div>
-            <div
-              className="bubble"
-              style={showReasoningOnly ? { opacity: 0.7, fontStyle: 'italic' } : undefined}
-            >
-              {bubbleText}
+            {hasReasoning && (
+              <ReasoningBlock text={m.reasoning} autoExpand={autoExpand} />
+            )}
+            <div className="bubble">
+              {hasAnswer ? (
+                m.content
+              ) : showWaitingDots ? (
+                '…'
+              ) : m.streaming ? (
+                // Streaming + we already have reasoning above but the answer
+                // hasn't started — render a faint blinking caret so the
+                // bubble visibly exists.
+                <span className="bubble-caret" aria-hidden="true">▌</span>
+              ) : m.reasoningOnly ? (
+                <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>
+                  (no final answer — see thinking above)
+                </span>
+              ) : (
+                ''
+              )}
             </div>
           </div>
         )

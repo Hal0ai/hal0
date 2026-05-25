@@ -11,16 +11,17 @@
 //
 // Streaming semantics:
 //   - Each SSE event is `data: { ... }\n\n`, plus a final `data: [DONE]\n\n`.
-//   - The Qwen3.5 family emits a `reasoning_content` delta BEFORE the final
-//     `content` delta. We surface both into the same buffer (reasoning is
-//     dropped if content arrives — keeps the bubble looking like an answer,
-//     not a thought stream; the dedicated think/answer scaffold owns the
-//     proper split, this is just "don't look broken when the model thinks
-//     out loud").
+//   - Either `delta.content` or `delta.reasoning_content` may be present
+//     on any chunk (Qwen3 chat template emits all reasoning chunks first,
+//     then content chunks — but we don't depend on that order).
+//   - We surface BOTH buffers to the caller, distinct. The UI renders
+//     reasoning above the answer with its own collapse affordance
+//     (see ReasoningBlock in chat.jsx). The folding/“reasoningOnly” behaviour
+//     from #200 was removed: with a real reasoning surface in place, content
+//     and reasoning are first-class siblings.
 //
-// Out of scope for #200: tool calls, function calling, multimodal, abort,
-// retry, draft-model speculative decoding visualisation, persistence across
-// reload. v1 is "send a message, see a real response".
+// Out of scope: tool calls, function calling, multimodal, retry,
+// draft-model speculative decoding visualisation, persistence across reload.
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -41,11 +42,17 @@ export interface ChatRequestOptions {
 }
 
 export interface ChatResponse {
-  /** Full assistant message text (content preferred, reasoning_content as fallback). */
+  /** Final assistant answer (delta.content joined). May be empty if the
+   * model only produced reasoning (a non-finalized "thinking" reply). */
   content: string
+  /** Chain-of-thought / reasoning_content (delta.reasoning_content joined).
+   * Empty string when the model produced none — UI hides the block. */
+  reasoning: string
   /** The model the server actually replied as (may differ from request model). */
   model: string
-  /** True when the response is a fallback to reasoning_content (no real answer). */
+  /** True when the model produced reasoning but no content. The chat surface
+   * still renders the bubble + reasoning so the user can see the thought even
+   * if the answer was truncated/empty. */
   reasoningOnly: boolean
 }
 
@@ -82,8 +89,12 @@ export async function chatCompletion(opts: ChatRequestOptions): Promise<ChatResp
   const choice = json.choices?.[0]?.message ?? {}
   const content = (choice.content ?? '').toString()
   const reasoning = (choice.reasoning_content ?? '').toString()
-  if (content) return { content, model: json.model ?? opts.model, reasoningOnly: false }
-  return { content: reasoning, model: json.model ?? opts.model, reasoningOnly: !!reasoning }
+  return {
+    content,
+    reasoning,
+    model: json.model ?? opts.model,
+    reasoningOnly: !content && !!reasoning,
+  }
 }
 
 /**
@@ -91,12 +102,11 @@ export async function chatCompletion(opts: ChatRequestOptions): Promise<ChatResp
  * calls `onDelta` with the running buffers. Returns the final `ChatResponse`
  * once `[DONE]` arrives (or the stream closes).
  *
- * The stream may interleave `reasoning_content` and `content` deltas. We
- * accumulate both; the final response prefers `content` if non-empty so the
- * UI shows the answer rather than the thought. While streaming, the caller
- * sees both buffers and can choose how to render them (the composer's v1
- * shows reasoning faded while it's the only thing present, then swaps to
- * content once the model starts answering).
+ * The stream may interleave `reasoning_content` and `content` deltas. Both
+ * are accumulated independently and surfaced separately in the result + in
+ * each `onDelta` callback. The chat surface renders reasoning above the
+ * final answer with a collapsible 3-line affordance — there is no folding
+ * step here; this layer just deserialises.
  */
 export async function streamChatCompletion(opts: ChatRequestOptions): Promise<ChatResponse> {
   const res = await fetch(ENDPOINT, {
@@ -142,7 +152,8 @@ export async function streamChatCompletion(opts: ChatRequestOptions): Promise<Ch
       const payload = dataLine.slice(5).trim()
       if (payload === '[DONE]') {
         return {
-          content: content || reasoning,
+          content,
+          reasoning,
           model,
           reasoningOnly: !content && !!reasoning,
         }
@@ -169,7 +180,8 @@ export async function streamChatCompletion(opts: ChatRequestOptions): Promise<Ch
     }
   }
   return {
-    content: content || reasoning,
+    content,
+    reasoning,
     model,
     reasoningOnly: !content && !!reasoning,
   }
