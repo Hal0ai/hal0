@@ -164,6 +164,11 @@ function App() {
         {!isFirstrun && <Sidebar route={route} onGo={go} />}
         <div className="main">
           <div className="view-banners">
+            {/* Phase 2 of #322: UpdateBanner self-renders when the
+                `useUpdateState()` hook reports a newer hal0 release than
+                the current install. BannerStack continues to drive the
+                Tweaks-panel demo toggles for every other banner state. */}
+            <UpdateBanner />
             <BannerStack scope="global" route={route} />
           </div>
           {renderView()}

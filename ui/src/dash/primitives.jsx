@@ -1,6 +1,8 @@
 // hal0 dashboard — reusable primitives
 // Modal, Drawer, ConfirmDialog, Banner, BannerStack, Dropdown menu
 
+import { useUpdateState } from '@/api/hooks/useUpdates'
+
 const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, createContext: createContextP, useContext: useContextP } = React;
 
 // ─── Portal-less Modal ────────────────────────────────────────────────────
@@ -380,6 +382,50 @@ const BANNER_CATALOG = [
   },
 ];
 
+// ─── UpdateBanner — live-data wrapper around <Banner> ───────────────────
+// Phase 2 of epic #322: replaces the prototype's hardcoded
+// "hal0 v0.2.2 is available" catalog entry with a live read of
+// `useUpdateState()`. Self-hides when there's no newer release than the
+// current install, and tracks its own dismiss state so the banner stays
+// out until the next session even if the hook continues to report an
+// available upgrade.
+//
+// The catalog entry of the same id is kept around so the Tweaks panel
+// can still preview-toggle a static demo banner, but the source of truth
+// for the real surface is this component.
+function UpdateBanner() {
+  const { data: state } = useUpdateState();
+  const [dismissed, setDismissed] = useStateP(false);
+  const hal0 = state && state.hal0;
+  const current = hal0 && hal0.current;
+  const available = hal0 && hal0.available;
+  const hasUpdate = !!available && available !== current;
+  if (!hasUpdate || dismissed) return null;
+  const channel = (hal0 && hal0.channel) || "stable";
+  return (
+    <Banner
+      kind="info"
+      eyebrow="Update available"
+      heading={`hal0 ${available} available`}
+      body={
+        <span>
+          New release on the <span className="mono">{channel}</span> channel.
+          Update expects a brief outage during lemond + hal0-api restart.
+        </span>
+      }
+      actions={
+        <button
+          className="btn ghost sm"
+          onClick={() =>
+            window.__hal0Toast && window.__hal0Toast(`Opening hal0 ${available} release notes`, "info")
+          }
+        >Read release notes</button>
+      }
+      onDismiss={() => setDismissed(true)}
+    />
+  );
+}
+
 // ─── Dropdown menu ───────────────────────────────────────────────────────
 function Menu({ anchor = "right", items, onClose, style }) {
   return (
@@ -402,4 +448,4 @@ function Menu({ anchor = "right", items, onClose, style }) {
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu });
+Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner });
