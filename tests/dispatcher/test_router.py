@@ -400,6 +400,8 @@ async def test_decision_logging_runs_on_every_resolution() -> None:
     """
     import structlog
 
+    from hal0.dispatcher import router as router_module
+
     captured: list[tuple[str, dict[str, Any]]] = []
 
     def _capture(logger: Any, method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
@@ -409,7 +411,15 @@ async def test_decision_logging_runs_on_every_resolution() -> None:
         raise structlog.DropEvent
 
     old = structlog.get_config()
-    structlog.configure(processors=[_capture])
+    structlog.configure(processors=[_capture], cache_logger_on_first_use=False)
+    # If a previously-loaded module (Cognee in tests/memory) ran
+    # ``structlog.configure(cache_logger_on_first_use=True)``, the
+    # dispatcher's module-level BoundLoggerLazyProxy has cached its
+    # ``.bind`` to the *old* processor list — our re-configure above
+    # does NOT retroactively rebind cached proxies. Drop the cached
+    # bind so the next ``log.info`` call materializes a fresh
+    # BoundLogger that picks up our ``_capture`` processor.
+    cached_bind = router_module.log.__dict__.pop("bind", None)
     try:
         primary = make_slot("primary")
         upstreams = FakeUpstreamRegistry([primary])
@@ -417,6 +427,11 @@ async def test_decision_logging_runs_on_every_resolution() -> None:
         dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
         await dispatcher.dispatch(make_request(), body={"model": "anything"})
     finally:
+        # Restore the dispatcher's prior cached bind (if any) before
+        # restoring the global config, so subsequent tests see the
+        # same proxy state they would have seen without this test.
+        if cached_bind is not None:
+            router_module.log.bind = cached_bind  # type: ignore[method-assign]
         structlog.configure(**old)
 
     events = [e for e, _ in captured]
