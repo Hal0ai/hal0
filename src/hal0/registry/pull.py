@@ -150,16 +150,18 @@ def _sanitise_id(model_id: str) -> str:
 def _pull_root() -> Path:
     """Return the configured pull destination root.
 
-    Reads [models].pull_root from hal0.toml on each call so a Settings
-    save takes effect without an API restart. Falls back to
-    paths.models_dir() (the FHS default) if config load fails — keeps
-    pulls working during bootstrap before the config exists.
+    Reads ``[models].store`` (the v0.3 single-source-of-truth setting)
+    from hal0.toml on each call so a Settings save takes effect without
+    an API restart. Falls back to the legacy ``[models].pull_root`` when
+    ``store`` is empty (PR-#313 compatibility), and to
+    :func:`paths.models_dir` if config load fails — keeps pulls working
+    during bootstrap before the config exists.
     """
     try:
         from hal0.config.loader import load_hal0_config
 
         cfg = load_hal0_config()
-        return Path(cfg.models.pull_root)
+        return Path(cfg.models.effective_store())
     except Exception:
         return paths.models_dir()
 

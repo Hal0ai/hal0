@@ -1155,12 +1155,22 @@ class ModelsConfig(BaseModel):
     pull_root: str = Field(
         default_factory=lambda: str(paths.models_dir()),
         description=(
-            "Destination directory for HuggingFace pulls. Must be an absolute path. "
-            "Tempfiles stage under <pull_root>/.tmp/ and finished downloads land at "
-            "<pull_root>/<model_id>/<filename>. ComfyUI assets still route to "
-            "<var_lib>/comfyui/models/<subdir>/. This directory is auto-included "
-            "in the discovery scan so pulled files are immediately visible. "
-            "Default tracks HAL0_HOME for dev installs."
+            "DEPRECATED — superseded by ``[models].store``. Retained so PR #313 "
+            "installs round-trip without a manual edit. When ``store`` is set the "
+            "pull engine and Lemonade ignore this field; clearing ``store`` falls "
+            "back to ``pull_root`` so an operator who hand-edited their TOML pre-store "
+            "still works. Will be removed in a future release."
+        ),
+    )
+    store: str = Field(
+        default="",
+        description=(
+            "Single source of truth for where hal0 reads + writes model files. "
+            "When set (absolute path, e.g. ``/mnt/ai-models``), the pull engine "
+            "writes here AND Lemonade's ``extra_models_dir`` is propagated to "
+            "the same path on save (with a hal0-lemonade.service restart). "
+            "Empty falls back to ``pull_root`` for PR-#313 compatibility, "
+            "which itself defaults to ``paths.models_dir()``."
         ),
     )
 
@@ -1187,6 +1197,31 @@ class ModelsConfig(BaseModel):
         if not Path(s).is_absolute():
             raise ValueError(f"models.pull_root {s!r} must be an absolute path")
         return s
+
+    @field_validator("store")
+    @classmethod
+    def store_is_absolute_when_set(cls, v: str) -> str:
+        """Empty means "use pull_root"; non-empty must be absolute."""
+        s = str(v or "").strip()
+        if not s:
+            return ""
+        if not Path(s).is_absolute():
+            raise ValueError(
+                f"models.store {s!r} must be an absolute path (or empty to use pull_root fallback)"
+            )
+        return s
+
+    def effective_store(self) -> str:
+        """Return the resolved model-store path consumers should point at.
+
+        Precedence: ``store`` (the new single-source-of-truth field) wins
+        when set; otherwise we fall back to the deprecated ``pull_root``
+        so PR-#313 installs keep working without an edit. Both already
+        validate as absolute paths.
+        """
+        if self.store:
+            return self.store
+        return self.pull_root
 
 
 class Hal0Config(BaseModel):

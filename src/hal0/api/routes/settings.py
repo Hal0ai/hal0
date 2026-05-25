@@ -24,14 +24,28 @@ Validation failures return the structured error envelope with
 
 from __future__ import annotations
 
+import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
+from hal0.registry.model_store import (
+    MigrationPlan,
+    build_suggestions,
+    describe_store_state,
+    execute_migration,
+    plan_migration,
+    propagate_lemonade_config,
+    restart_lemonade_service,
+)
+
+log = logging.getLogger(__name__)
 
 # See slots.py for the writer-gate rationale.
 
@@ -175,3 +189,328 @@ async def settings_schema() -> dict[str, Any]:
     ``/api/openapi.json`` advertises but without the FastAPI envelope.
     """
     return Hal0Config.model_json_schema()
+
+
+# ── Model storage (Settings → Models · FirstRun "Storage" step) ────────────
+#
+# ONE setting that all model consumers point at. Replaces PR #313's roots
+# + pull_root with a single ``[models].store`` field; the legacy field is
+# retained for round-trip compat (see ModelsConfig.effective_store).
+#
+# Endpoints:
+#   GET  /api/settings/models/store              — current state + suggestions.
+#   POST /api/settings/models/store              — set + propagate; dry-run by
+#                                                  default when a move is
+#                                                  required. Pass migrate=true
+#                                                  (or hit /migrate) to commit.
+#   POST /api/settings/models/store/migrate      — explicit migrate-then-apply.
+
+
+def _store_state_payload(cfg: Hal0Config) -> dict[str, Any]:
+    """Bundle current store + per-path probe + suggestion chips.
+
+    The UI calls this on mount; firstrun calls it to render its preset
+    chips. Keeping it in one helper means the dry-run POST response
+    embeds the same shape so callers don't fork their render paths.
+    """
+    effective = cfg.models.effective_store()
+    state = describe_store_state(effective)
+    return {
+        "store": cfg.models.store or None,
+        "effective": effective,
+        "fallback_active": not bool(cfg.models.store),
+        "pull_root_legacy": cfg.models.pull_root,
+        "current_state": state.to_dict(),
+        "suggestions": build_suggestions(current=effective),
+    }
+
+
+@router.get("/models/store")
+async def get_model_store(request: Request) -> dict[str, Any]:
+    """Return the model-store setting + suggestions for the UI to render.
+
+    The response carries:
+      * ``store`` — the raw value of ``[models].store`` (``None`` when
+        unset and the legacy ``pull_root`` is being used).
+      * ``effective`` — the path the pull engine + Lemonade actually use.
+      * ``fallback_active`` — True when ``store`` is unset and we're
+        riding the PR-#313 ``pull_root`` for backward compatibility.
+      * ``current_state`` — probe of the effective path (exists / files
+        / size / free).
+      * ``suggestions`` — preset chips for firstrun + settings.
+    """
+    cfg = getattr(request.app.state, "hal0_config", None)
+    if cfg is None:
+        cfg = load_hal0_config()
+        request.app.state.hal0_config = cfg
+    return _store_state_payload(cfg)
+
+
+@router.post("/models/store")
+async def set_model_store(request: Request) -> dict[str, Any]:
+    """Set ``[models].store`` and propagate to every consumer.
+
+    Body::
+
+        {"path": "/mnt/ai-models", "migrate": false}
+
+    Validation:
+      * ``path`` must be a non-empty absolute string. Must exist, be a
+        directory, be readable + writable. Empty string is rejected — to
+        clear the override and fall back to the legacy ``pull_root``,
+        pass the literal ``pull_root`` value.
+      * If the effective store currently has files and they don't yet
+        live at ``path``, a migration is required.
+
+    Behaviour:
+      * **Dry-run** (default, ``migrate=false``): when a move is needed,
+        responds 200 with ``{status: "needs_migration", plan: {...}}``
+        and does NOT touch hal0.toml, Lemonade config, or files. The UI
+        renders a confirmation modal.
+      * **Apply** (``migrate=true`` OR no move needed):
+        1. Move files (if needed) atomically.
+        2. Overwrite ``extra_models_dir`` in Lemonade config.json.
+        3. Restart hal0-lemonade.service if its config changed.
+        4. Persist hal0.toml.
+
+      The order is move-first / persist-last so a failed move leaves
+      the prior config + bytes in place. Lemonade restart is best-
+      effort; failure surfaces in the response but the new value is
+      still persisted (a follow-up ``systemctl restart`` by the
+      operator picks it up).
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+
+    raw_path = body.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise BadRequest(
+            "'path' must be a non-empty absolute path string",
+            code="config.invalid",
+        )
+    path = raw_path.strip()
+    migrate = bool(body.get("migrate", False))
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        raise BadRequest(
+            f"store path {path!r} must be absolute",
+            code="config.invalid",
+            details={"path": path},
+        )
+    if not candidate.exists():
+        raise BadRequest(
+            f"store path {path!r} does not exist",
+            code="models.store_missing",
+            details={"path": path},
+        )
+    if not candidate.is_dir():
+        raise BadRequest(
+            f"store path {path!r} is not a directory",
+            code="models.store_not_directory",
+            details={"path": path},
+        )
+    if not os.access(candidate, os.R_OK):
+        raise BadRequest(
+            f"store path {path!r} is not readable",
+            code="models.store_unreadable",
+            details={"path": path},
+        )
+    if not os.access(candidate, os.W_OK):
+        raise BadRequest(
+            f"store path {path!r} is not writable",
+            code="models.store_unwritable",
+            details={"path": path},
+        )
+
+    current = getattr(request.app.state, "hal0_config", None)
+    if current is None:
+        current = load_hal0_config()
+    prev_effective = current.models.effective_store()
+
+    plan = plan_migration(current=prev_effective, target=path)
+
+    # Dry-run: confirm needed-migration before touching anything.
+    if plan.needed and not migrate:
+        return {
+            "status": "needs_migration",
+            "plan": {
+                "source": plan.source,
+                "target": plan.target,
+                "files_count": plan.files_count,
+                "size_bytes": plan.size_bytes,
+                "same_filesystem": plan.same_filesystem,
+            },
+            "state": _store_state_payload(current),
+        }
+
+    return await _apply_store_change(
+        request=request,
+        path=path,
+        current=current,
+        plan=plan,
+    )
+
+
+@router.post("/models/store/migrate")
+async def migrate_model_store(request: Request) -> dict[str, Any]:
+    """Explicit migrate-then-apply endpoint.
+
+    Body::
+
+        {"path": "/new/path"}
+
+    Equivalent to POST ``/models/store`` with ``migrate=true``. Exists
+    as a standalone route so the UI's confirmation modal has a clean
+    URL to fire at after the dry-run round-trip.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+    body["migrate"] = True
+    # Replay the body through the regular setter — the JSON parse +
+    # validation surface is single-sourced there.
+    request._json = body  # type: ignore[attr-defined]
+
+    async def _replayed_json() -> Any:
+        return body
+
+    request.json = _replayed_json  # type: ignore[assignment]
+    return await set_model_store(request)
+
+
+async def _apply_store_change(
+    *,
+    request: Request,
+    path: str,
+    current: Hal0Config,
+    plan: MigrationPlan,
+) -> dict[str, Any]:
+    """Move files (if any) → propagate Lemonade config → persist hal0.toml.
+
+    Failure semantics:
+      * Move fails → return 500-style envelope; hal0.toml + Lemonade
+        config untouched.
+      * Lemonade propagate fails → return 500-style envelope; hal0.toml
+        untouched. Files already moved are NOT rolled back — operator
+        can re-run with the new path as both source + target (no-op).
+      * Lemonade restart fails → response surfaces ``restart_failed``
+        but hal0.toml IS persisted (the next manual restart picks up
+        the new value).
+    """
+    migration_result_dict: dict[str, Any] | None = None
+    if plan.needed:
+        try:
+            mig = execute_migration(plan)
+        except OSError as exc:
+            raise Hal0Error(
+                f"migration failed: {exc}",
+                code="models.store_migration_failed",
+                details={
+                    "source": plan.source,
+                    "target": plan.target,
+                    "error": str(exc),
+                },
+            ) from exc
+        if mig.failed and not mig.moved:
+            raise Hal0Error(
+                f"migration moved no files; first failure: {mig.failed[0]}",
+                code="models.store_migration_failed",
+                details={
+                    "source": plan.source,
+                    "target": plan.target,
+                    "failed": mig.failed,
+                },
+            )
+        migration_result_dict = {
+            "source": mig.source,
+            "target": mig.target,
+            "moved": list(mig.moved),
+            "failed": list(mig.failed),
+        }
+
+    # Propagate to Lemonade config.json. A missing file (fresh install
+    # pre-installer) returns ``changed=False, prev=None`` and we skip
+    # the restart — the next install run will seed the right value.
+    try:
+        lemonade_changed, lemonade_prev = propagate_lemonade_config(path)
+    except RuntimeError as exc:
+        raise Hal0Error(
+            f"failed to propagate to Lemonade config: {exc}",
+            code="models.lemonade_propagate_failed",
+            details={"path": path, "error": str(exc)},
+        ) from exc
+    except OSError as exc:
+        raise Hal0Error(
+            f"failed to write Lemonade config: {exc}",
+            code="models.lemonade_propagate_failed",
+            details={"path": path, "error": str(exc)},
+        ) from exc
+
+    # Persist hal0.toml.
+    new_models_raw = dict(current.models.model_dump(mode="python"))
+    new_models_raw["store"] = path
+    try:
+        merged_models = current.models.__class__.model_validate(new_models_raw)
+    except ValidationError as exc:
+        raise ConfigInvalidError(
+            "models config failed schema validation",
+            details=_validation_error_details(exc),
+        ) from exc
+    merged = current.model_copy(update={"models": merged_models})
+    try:
+        save_hal0_config(merged)
+    except OSError as exc:
+        raise Hal0Error(
+            f"could not persist hal0 config: {exc}",
+            details={"error": str(exc), "errno": getattr(exc, "errno", None)},
+        ) from exc
+    request.app.state.hal0_config = merged
+
+    # Restart the lemond unit so it picks up the new extra_models_dir.
+    # Best-effort — surface the outcome in the response.
+    restart_outcome: str = "skipped"
+    if lemonade_changed:
+        rc = await restart_lemonade_service()
+        if rc is True:
+            restart_outcome = "ok"
+        elif rc is False:
+            restart_outcome = "failed"
+        else:
+            restart_outcome = "unavailable"
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "system.config_save",
+            "info",
+            "system",
+            f"models.store → {path}",
+            data={
+                "store": path,
+                "lemonade_changed": lemonade_changed,
+                "lemonade_restart": restart_outcome,
+                "migrated_files": len(migration_result_dict["moved"])
+                if migration_result_dict
+                else 0,
+            },
+        )
+
+    return {
+        "status": "ok",
+        "config": _config_to_dict(merged),
+        "state": _store_state_payload(merged),
+        "migration": migration_result_dict,
+        "lemonade": {
+            "changed": lemonade_changed,
+            "previous_extra_models_dir": lemonade_prev,
+            "restart": restart_outcome,
+        },
+    }

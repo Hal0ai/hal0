@@ -167,10 +167,20 @@ def test_get_config_attaches_locked_invariants(
     installed_lemonade_stub: dict[str, Any],
 ) -> None:
     """``_hal0.locked`` carries the canonical extra_models_dir pointer
-    so the UI's inline hint stays in sync with the backend validator."""
+    so the UI's inline hint stays in sync with the backend validator.
+
+    v0.3: the locked value is derived from
+    ``[models].effective_store()`` so an operator who sets the store via
+    POST /api/settings/models/store sees the admin panel hint follow.
+    Under tmp_hal0_home the effective value is the HAL0_HOME-rooted
+    models_dir; production installs without ``[models].store`` see the
+    legacy ``/var/lib/hal0/models`` literal.
+    """
+    from hal0.api.routes.lemonade_admin import _locked_extra_models_dir
+
     r = isolated_client.get("/api/lemonade/config")
     body = r.json()
-    assert body["_hal0"]["locked"]["extra_models_dir"] == LOCKED_EXTRA_MODELS_DIR
+    assert body["_hal0"]["locked"]["extra_models_dir"] == _locked_extra_models_dir()
 
 
 def test_immediate_and_deferred_partitions_are_disjoint() -> None:
@@ -399,16 +409,19 @@ def test_post_config_rejects_extra_models_dir_divergence(
     isolated_client: TestClient,
     installed_lemonade_stub: dict[str, Any],
 ) -> None:
-    """Flipping extra_models_dir off the symlink farm root would silently
-    desync the dashboard's catalog from what lemond can load (plan §3 +
-    §6.1). Refuse with the canonical path in the error message."""
+    """Flipping extra_models_dir off the hal0 store root would silently
+    desync the dashboard's catalog from what lemond can load. Refuse with
+    the canonical (currently-effective) path in the error message. To
+    change the path, use POST /api/settings/models/store."""
+    from hal0.api.routes.lemonade_admin import _locked_extra_models_dir
+
     r = isolated_client.post(
         "/api/lemonade/config",
-        json={"extra_models_dir": "/mnt/ai-models"},
+        json={"extra_models_dir": "/some/other/absolute/path"},
     )
     assert r.status_code == 400, r.text
     details = r.json()["error"]["details"]
-    assert LOCKED_EXTRA_MODELS_DIR in details["extra_models_dir"]
+    assert _locked_extra_models_dir() in details["extra_models_dir"]
 
 
 def test_post_config_accepts_canonical_extra_models_dir(
@@ -418,9 +431,11 @@ def test_post_config_accepts_canonical_extra_models_dir(
     """Setting extra_models_dir to its locked value is a no-op pass —
     operators rotating the config should not hit a 400 just because
     they re-sent the canonical value."""
+    from hal0.api.routes.lemonade_admin import _locked_extra_models_dir
+
     r = isolated_client.post(
         "/api/lemonade/config",
-        json={"extra_models_dir": LOCKED_EXTRA_MODELS_DIR},
+        json={"extra_models_dir": _locked_extra_models_dir()},
     )
     assert r.status_code == 200, r.text
 

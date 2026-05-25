@@ -9,7 +9,13 @@ import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecret
 import { useUpdateState, useUpdateCheck, useUpdateApply } from '@/api/hooks/useUpdates'
 import { useCapabilities, useCapabilityPatch } from '@/api/hooks/useCapabilities'
 import { useLemondRollup, useLemonadeStats } from '@/api/hooks/useLemonade'
-import { useSettings, useSettingsUpdate } from '@/api/hooks/useSettings'
+import {
+  useSettings,
+  useSettingsUpdate,
+  useModelStore,
+  useModelStoreSet,
+  useModelStoreMigrate,
+} from '@/api/hooks/useSettings'
 
 const { useState: useStateSet, useEffect: useEffectSet } = React;
 
@@ -77,59 +83,99 @@ const SRow = ({ k, sub, v, mono, children, actions }) => (
   </div>
 );
 
-// ─── Models (PR feat/models-scan-and-add-by-path) ───────────────
+// ─── Models (v0.3 single-source-of-truth `[models].store`) ───────────
 //
-// Edits [models].roots + [models].pull_root in hal0.toml so the
-// Scan-directory + Add-by-path flows in Models view default to the
-// operator's preferred location (e.g. /mnt/ai-models). Changes hit
-// /api/settings (deep-merge PUT) so the rest of the config rounds
-// through untouched.
+// Replaces the two-field roots + pull_root surface from PR #313 with
+// ONE Storage location field. Hal0 propagates the chosen path to both
+// the pull engine and Lemonade's extra_models_dir, with a confirmation
+// modal when the prior path has data ("Move N models from A to B?").
+//
+// The remaining toggles (auto_scan_on_start, file_extensions) keep
+// writing through the generic PUT /api/settings since they don't need
+// the propagation / migration plumbing.
+function _fmtBytes(n) {
+  if (!n || n < 0) return "—";
+  if (n < 1024) return n + " B";
+  if (n < 1024 ** 2) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + " MB";
+  return (n / 1024 ** 3).toFixed(2) + " GB";
+}
+
 function ModelsSection() {
   const settings = useSettings();
   const update = useSettingsUpdate();
+  const storeQuery = useModelStore();
+  const storeSet = useModelStoreSet();
+  const storeMigrate = useModelStoreMigrate();
   const liveModels = settings.data?.models;
-  // Local edit buffers — we only PATCH when the operator clicks Save so
-  // they can revise multiple roots without each keystroke triggering an
-  // atomic write on disk.
-  const [rootsText, setRootsText] = useStateSet("");
-  const [pullRoot, setPullRoot] = useStateSet("");
+  const storeState = storeQuery.data;
+
+  // Single edit buffer for the storage path. Auto-scan is a separate
+  // PATCH so a Save on storage doesn't accidentally toggle it.
+  const [storePath, setStorePath] = useStateSet("");
   const [autoScan, setAutoScan] = useStateSet(true);
-  // Re-seed buffers each time the upstream config changes (after Save
-  // the response payload supersedes our buffer).
+  // Migration confirmation dialog state. ``pendingPlan`` holds the
+  // dry-run response so the modal can render N files / M bytes without
+  // a second round-trip.
+  const [pendingPlan, setPendingPlan] = useStateSet(null);
+
   useEffectSet(() => {
-    if (!liveModels) return;
-    setRootsText((liveModels.roots || []).join("\n"));
-    setPullRoot(liveModels.pull_root || "");
-    setAutoScan(liveModels.auto_scan_on_start !== false);
-  }, [liveModels]);
+    if (storeState?.effective != null) setStorePath(storeState.effective);
+    if (liveModels) setAutoScan(liveModels.auto_scan_on_start !== false);
+  }, [storeState, liveModels]);
 
-  const dirty = !!liveModels && (
-    rootsText !== (liveModels.roots || []).join("\n") ||
-    pullRoot !== (liveModels.pull_root || "") ||
-    autoScan !== (liveModels.auto_scan_on_start !== false)
-  );
+  const storeDirty = !!storeState && storePath.trim() !== storeState.effective;
+  const autoScanDirty = !!liveModels && autoScan !== (liveModels.auto_scan_on_start !== false);
 
-  const onSave = async () => {
-    const roots = rootsText
-      .split("\n")
-      .map(s => s.trim())
-      .filter(Boolean);
+  const submitStore = async (path, { migrate = false } = {}) => {
     try {
-      await update.mutateAsync({
-        models: {
-          roots,
-          pull_root: pullRoot.trim(),
-          auto_scan_on_start: autoScan,
-          // Preserve file_extensions verbatim — the Settings UI doesn't
-          // surface it yet, but we don't want a Save to drop the field.
-          file_extensions: liveModels?.file_extensions || [".gguf", ".safetensors"],
-        },
-      });
-      window.__hal0Toast && window.__hal0Toast("Models settings saved", "ok");
-    } catch (e) {
+      const resp = await storeSet.mutateAsync({ path, migrate });
+      if (resp.status === "needs_migration") {
+        setPendingPlan({ ...resp.plan, path });
+        return;
+      }
+      const moved = resp.migration?.moved?.length || 0;
+      const lem = resp.lemonade?.restart;
+      const lemMsg = lem === "ok"
+        ? "Lemonade restarted"
+        : lem === "failed"
+          ? "Lemonade restart failed — run `systemctl restart hal0-lemonade.service` manually"
+          : lem === "unavailable"
+            ? "Lemonade not running here"
+            : "Lemonade config unchanged";
       window.__hal0Toast && window.__hal0Toast(
-        `Save failed — ${e?.message || "see logs"}`, "err",
+        `Storage set → ${path}${moved ? ` · moved ${moved} model(s)` : ""} · ${lemMsg}`,
+        lem === "failed" ? "warn" : "ok",
       );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const onSave = () => submitStore(storePath.trim(), { migrate: false });
+
+  const onAutoScanSave = async () => {
+    try {
+      await update.mutateAsync({ models: { auto_scan_on_start: autoScan } });
+      window.__hal0Toast && window.__hal0Toast("Auto-scan setting saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const onConfirmMigrate = async () => {
+    if (!pendingPlan) return;
+    const path = pendingPlan.path;
+    setPendingPlan(null);
+    try {
+      const resp = await storeMigrate.mutateAsync({ path });
+      const moved = resp.status === "ok" ? (resp.migration?.moved?.length || 0) : 0;
+      window.__hal0Toast && window.__hal0Toast(
+        `Moved ${moved} model(s) → ${path}`,
+        "ok",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Move failed — ${e?.message || "see logs"}`, "err");
     }
   };
 
@@ -137,46 +183,78 @@ function ModelsSection() {
     <div className="s-section">
       <h2>Models</h2>
       <p className="desc">
-        Where hal0 looks for already-downloaded model files (Scan) and where new HuggingFace pulls land. Each entry must be an absolute path readable by <span className="mono" style={{color: "var(--fg)"}}>hal0-api</span>.
+        Where hal0 reads and writes model files. One path drives both <span className="mono" style={{color: "var(--fg)"}}>hal0-api</span> and Lemonade — pick once, applies everywhere.
       </p>
-      {settings.isPending && <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading settings…</div>}
-      {settings.isError && (
-        <div className="err">{settings.error?.message || "Failed to load settings"}</div>
+
+      {storeQuery.isPending && <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading storage state…</div>}
+      {storeQuery.isError && (
+        <div className="err">{storeQuery.error?.message || "Failed to load storage state"}</div>
       )}
-      {liveModels && (
+
+      {storeState && (
         <>
+          {storeState.fallback_active && (
+            <div className="s-panel" style={{marginBottom: 12, padding: 12, fontFamily: "var(--jbm)", fontSize: 11.5, color: "var(--fg-3)", borderLeft: "2px solid var(--accent)"}}>
+              <b style={{color: "var(--accent)"}}>One field now drives storage.</b> We simplified storage settings — your current path is <span className="mono" style={{color: "var(--fg)"}}>{storeState.effective}</span>. Click Save to make it the new single source of truth.
+            </div>
+          )}
+
           <div className="s-panel">
             <SRow
-              k="Model directories (scan roots)"
-              sub="One absolute path per line · used by Scan + auto-scan"
-              v={
-                <textarea
-                  className="input mono"
-                  value={rootsText}
-                  onChange={e => setRootsText(e.target.value)}
-                  rows={Math.max(3, rootsText.split("\n").length)}
-                  placeholder={"/mnt/ai-models\n/var/lib/hal0/models"}
-                  style={{width: "100%", minWidth: 320, resize: "vertical"}}
-                />
-              }
-            />
-            <SRow
-              k="Pull root"
-              sub="Destination for HuggingFace downloads · finished files land at <pull_root>/<model_id>/"
+              k="Storage location"
+              sub="Absolute directory · pull engine + Lemonade both point here"
               mono
               v={
                 <input
                   className="input mono"
-                  value={pullRoot}
-                  onChange={e => setPullRoot(e.target.value)}
+                  value={storePath}
+                  onChange={e => setStorePath(e.target.value)}
                   placeholder="/mnt/ai-models"
                   style={{minWidth: 320, width: "100%"}}
                 />
               }
             />
             <SRow
+              k="Current state"
+              sub="Probe of the effective storage path"
+              mono
+              v={
+                storeState.current_state.exists
+                  ? <>
+                      <b style={{color: "var(--ok)"}}>exists</b>
+                      <span style={{color: "var(--fg-4)"}}> · {storeState.current_state.files_count} files · {_fmtBytes(storeState.current_state.size_bytes)} used · {_fmtBytes(storeState.current_state.free_bytes)} free</span>
+                      {!storeState.current_state.writable && <span style={{color: "var(--warn)", marginLeft: 6}}>· read-only</span>}
+                    </>
+                  : <span style={{color: "var(--warn)"}}>missing · create it before saving</span>
+              }
+            />
+            <SRow
+              k="Suggested locations"
+              sub="Click to fill — labels show current state"
+              v={
+                <div style={{display: "flex", gap: 6, flexWrap: "wrap"}}>
+                  {storeState.suggestions.map(s => (
+                    <button
+                      key={s.path}
+                      className={"chip" + (s.is_current ? " amber" : "")}
+                      style={{cursor: "pointer", fontFamily: "var(--jbm)"}}
+                      onClick={() => setStorePath(s.path)}
+                      title={s.exists ? `${s.files_count} files · ${_fmtBytes(s.size_bytes)} used · ${_fmtBytes(s.free_bytes)} free` : "does not exist yet"}
+                    >
+                      {s.path}
+                      <span style={{marginLeft: 6, color: "var(--fg-4)", fontSize: 10}}>
+                        {s.exists
+                          ? (s.files_count > 0 ? `${s.files_count} files` : "empty")
+                          : "missing"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              }
+            />
+            <SRow
               k="Auto-scan on start"
-              sub="Walk the scan roots when hal0-api starts; new files get registered automatically"
+              sub="Walk the storage path when hal0-api starts; new files get registered automatically"
               v={
                 <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
                   <input
@@ -188,42 +266,58 @@ function ModelsSection() {
                   <span>{autoScan ? "enabled" : "disabled"}</span>
                 </label>
               }
+              actions={autoScanDirty ? <button className="btn ghost sm" disabled={update.isPending} onClick={onAutoScanSave}>{update.isPending ? "Saving…" : "Save"}</button> : null}
             />
             <SRow
               k="File extensions"
               sub="Read-only · edit via hal0 config edit"
               mono
-              v={(liveModels.file_extensions || []).join(" · ") || "—"}
+              v={(liveModels?.file_extensions || []).join(" · ") || "—"}
             />
           </div>
+
           <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
             <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
-              Stored at <span style={{color: "var(--fg-3)"}}>/etc/hal0/hal0.toml</span>
-              {dirty && <span style={{marginLeft: 8, color: "var(--warn)"}}>· unsaved changes</span>}
+              Stored at <span style={{color: "var(--fg-3)"}}>/etc/hal0/hal0.toml</span> · propagates to Lemonade <span style={{color: "var(--fg-3)"}}>config.json</span>
+              {storeDirty && <span style={{marginLeft: 8, color: "var(--warn)"}}>· unsaved changes</span>}
             </span>
             <div style={{display: "inline-flex", gap: 8}}>
               <button
                 className="btn ghost sm"
-                disabled={!dirty || update.isPending}
-                onClick={() => {
-                  if (!liveModels) return;
-                  setRootsText((liveModels.roots || []).join("\n"));
-                  setPullRoot(liveModels.pull_root || "");
-                  setAutoScan(liveModels.auto_scan_on_start !== false);
-                }}
+                disabled={!storeDirty || storeSet.isPending}
+                onClick={() => storeState && setStorePath(storeState.effective)}
               >Reset</button>
               <button
                 className="btn"
-                disabled={!dirty || update.isPending}
+                disabled={!storeDirty || !storePath.trim() || storeSet.isPending}
                 onClick={onSave}
-              >{update.isPending ? "Saving…" : "Save"}</button>
+              >{storeSet.isPending ? "Saving…" : "Save"}</button>
             </div>
           </div>
-          {update.isError && (
+          {storeSet.isError && (
             <div className="err" style={{marginTop: 10}}>
-              {update.error?.message || "Save failed"}
+              {storeSet.error?.message || "Save failed"}
             </div>
           )}
+
+          <ConfirmDialog
+            open={!!pendingPlan}
+            onCancel={() => setPendingPlan(null)}
+            onConfirm={onConfirmMigrate}
+            title="Move existing models?"
+            message={
+              pendingPlan ? (
+                <span>
+                  Hal0 will move <b className="mono">{pendingPlan.files_count} file(s)</b> ({_fmtBytes(pendingPlan.size_bytes)}) from <span className="mono" style={{color: "var(--fg)"}}>{pendingPlan.source}</span> to <span className="mono" style={{color: "var(--accent)"}}>{pendingPlan.target}</span>.
+                  {pendingPlan.same_filesystem
+                    ? <> Same filesystem — should be instant.</>
+                    : <> Cross-filesystem copy — may take a while.</>}
+                  {" "}A failure leaves both paths intact, you can retry safely.
+                </span>
+              ) : null
+            }
+            confirmLabel={storeMigrate.isPending ? "Moving…" : "Move + apply"}
+          />
         </>
       )}
     </div>

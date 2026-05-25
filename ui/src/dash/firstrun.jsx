@@ -7,8 +7,137 @@
 
 import { useCuratedBundles, useFirstRunInstall, useFirstRunComplete } from '@/api/hooks/useFirstRun'
 import { useHardware } from '@/api/hooks/useHardware'
+import { useModelStore, useModelStoreSet, useModelStoreMigrate } from '@/api/hooks/useSettings'
 
-const { useState: useStateF } = React;
+const { useState: useStateF, useEffect: useEffectF } = React;
+
+function _frFmtBytes(n) {
+  if (!n || n < 0) return "—";
+  if (n < 1024) return n + " B";
+  if (n < 1024 ** 2) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + " MB";
+  return (n / 1024 ** 3).toFixed(2) + " GB";
+}
+
+// ─── Storage step (state 1.5 — between picker and confirm) ───
+//
+// Lets the operator decide WHERE models live before any pulls start.
+// Mirrors the Settings → Models surface (same hooks, same dry-run
+// migration plumbing) so the FirstRun choice and the Settings page
+// stay in lockstep.
+function FirstRunStorage({ onContinue, onBack }) {
+  const storeQuery = useModelStore();
+  const storeSet = useModelStoreSet();
+  const storeMigrate = useModelStoreMigrate();
+  const storeState = storeQuery.data;
+  const [path, setPath] = useStateF("");
+  const [pendingPlan, setPendingPlan] = useStateF(null);
+
+  useEffectF(() => {
+    if (storeState?.effective != null) setPath(storeState.effective);
+  }, [storeState]);
+
+  const apply = async (target, { migrate = false } = {}) => {
+    try {
+      const resp = await storeSet.mutateAsync({ path: target, migrate });
+      if (resp.status === "needs_migration") {
+        setPendingPlan({ ...resp.plan, path: target });
+        return;
+      }
+      window.__hal0Toast && window.__hal0Toast(`Storage set → ${target}`, "ok");
+      onContinue();
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Storage save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const confirmMigrate = async () => {
+    if (!pendingPlan) return;
+    const target = pendingPlan.path;
+    setPendingPlan(null);
+    try {
+      await storeMigrate.mutateAsync({ path: target });
+      window.__hal0Toast && window.__hal0Toast(`Moved + set → ${target}`, "ok");
+      onContinue();
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Move failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  return (
+    <div className="fr-inner">
+      <div className="fr-head">
+        <div className="fr-eyebrow"><span className="blip" />FirstRun · storage</div>
+        <h1 className="fr-title">Where should models live?</h1>
+        <p className="fr-lede">Hal0 reads + writes model files here. Both the pull engine and Lemonade point at the same path — pick once.</p>
+      </div>
+
+      {storeQuery.isPending && <div style={{padding: 20, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Probing storage candidates…</div>}
+
+      {storeState && (
+        <div className="card" style={{padding: 20, marginBottom: 24}}>
+          <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 14}}>Storage path</div>
+          <input
+            className="input mono"
+            value={path}
+            onChange={e => setPath(e.target.value)}
+            placeholder="/mnt/ai-models"
+            style={{width: "100%", padding: "10px 12px", fontSize: 14, marginBottom: 14}}
+          />
+          <div style={{display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16}}>
+            {storeState.suggestions.map(s => (
+              <button
+                key={s.path}
+                className={"chip" + (s.path === path ? " amber" : "")}
+                style={{cursor: "pointer", fontFamily: "var(--jbm)"}}
+                onClick={() => setPath(s.path)}
+                title={s.exists ? `${s.files_count} files · ${_frFmtBytes(s.size_bytes)} used · ${_frFmtBytes(s.free_bytes)} free` : "does not exist yet"}
+              >
+                {s.path}
+                <span style={{marginLeft: 6, color: "var(--fg-4)", fontSize: 10}}>
+                  {s.exists
+                    ? (s.files_count > 0 ? `${s.files_count} files · ${_frFmtBytes(s.free_bytes)} free` : `empty · ${_frFmtBytes(s.free_bytes)} free`)
+                    : "missing"}
+                </span>
+              </button>
+            ))}
+          </div>
+          <div style={{fontFamily: "var(--jbm)", fontSize: 11.5, color: "var(--fg-3)"}}>
+            {storeState.current_state.exists
+              ? <>Current effective: <span style={{color: "var(--fg)"}}>{storeState.effective}</span> · {storeState.current_state.files_count} files · {_frFmtBytes(storeState.current_state.free_bytes)} free here</>
+              : <>Current effective: <span style={{color: "var(--warn)"}}>{storeState.effective}</span> (missing)</>}
+          </div>
+        </div>
+      )}
+
+      <div className="fr-actions">
+        <button className="btn ghost lg" onClick={onBack}>← back</button>
+        <button
+          className="btn lg"
+          disabled={!path.trim() || storeSet.isPending}
+          onClick={() => apply(path.trim(), { migrate: false })}
+        >
+          {storeSet.isPending ? "Saving…" : "Continue"}
+        </button>
+      </div>
+
+      <ConfirmDialog
+        open={!!pendingPlan}
+        onCancel={() => setPendingPlan(null)}
+        onConfirm={confirmMigrate}
+        title="Move existing models?"
+        message={
+          pendingPlan ? (
+            <span>
+              We found <b>{pendingPlan.files_count} file(s)</b> ({_frFmtBytes(pendingPlan.size_bytes)}) at <span className="mono" style={{color: "var(--fg)"}}>{pendingPlan.source}</span>. Move them to <span className="mono" style={{color: "var(--accent)"}}>{pendingPlan.target}</span> and continue?
+            </span>
+          ) : null
+        }
+        confirmLabel={storeMigrate.isPending ? "Moving…" : "Move + continue"}
+      />
+    </div>
+  );
+}
 
 // ─── Bundle picker (state 1) ───
 function FirstRunPicker({ onPick, onSkip, layout }) {
@@ -330,15 +459,24 @@ function FirstRunView({ frStage, setFrStage, frBundle, setFrBundle, onComplete, 
     <div className="fr">
       {frStage === "pick" && (
         <FirstRunPicker
-          onPick={b => { setFrBundle(b); setFrStage("confirm"); }}
+          // Route through the new "storage" stage before confirming the
+          // bundle — the operator decides WHERE models live before any
+          // pulls start so the bundle's downloads land in the right place.
+          onPick={b => { setFrBundle(b); setFrStage("storage"); }}
           onSkip={() => setSkipOpen(true)}
           layout={layout}
+        />
+      )}
+      {frStage === "storage" && (
+        <FirstRunStorage
+          onBack={() => setFrStage("pick")}
+          onContinue={() => setFrStage("confirm")}
         />
       )}
       {frStage === "confirm" && (
         <FirstRunConfirm
           bundleId={frBundle}
-          onBack={() => setFrStage("pick")}
+          onBack={() => setFrStage("storage")}
           onInstall={() => setFrStage("progress")}
         />
       )}
@@ -354,4 +492,4 @@ function FirstRunView({ frStage, setFrStage, frBundle, setFrBundle, onComplete, 
   );
 }
 
-Object.assign(window, { FirstRunView, FirstRunPicker, FirstRunConfirm, FirstRunProgress, BundleGrid, BundleTable });
+Object.assign(window, { FirstRunView, FirstRunPicker, FirstRunStorage, FirstRunConfirm, FirstRunProgress, BundleGrid, BundleTable });

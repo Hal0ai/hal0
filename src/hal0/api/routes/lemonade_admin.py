@@ -101,7 +101,34 @@ ADMIN_KEYS: frozenset[str] = IMMEDIATE_KEYS | DEFERRED_KEYS
 # installer writes this path into the seeded config.json and the symlink
 # farm depends on it; flipping it from the admin panel would silently
 # desync the dashboard's model list from what lemond can actually load.
+#
+# v0.3 update: the locked value is now derived from
+# ``[models].store`` (or the legacy ``pull_root`` fallback) via
+# :func:`_locked_extra_models_dir`. The constant below is the
+# installer-default and the test fallback when no hal0.toml exists.
+# Settings → Models is the *one* place to change the store path; the
+# Lemonade admin panel still refuses any divergent value because the
+# whole point of /api/settings/models/store is to keep all consumers in
+# lockstep.
 LOCKED_EXTRA_MODELS_DIR: str = "/var/lib/hal0/models"
+
+
+def _locked_extra_models_dir() -> str:
+    """Return the path Lemonade's ``extra_models_dir`` must equal.
+
+    Resolves from ``[models].effective_store()`` so a user who set the
+    store via Settings → Models is allowed to edit Lemonade's config
+    coherently. Falls back to :data:`LOCKED_EXTRA_MODELS_DIR` when no
+    hal0.toml exists (fresh install / test environment), matching what
+    the installer writes.
+    """
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        cfg = load_hal0_config()
+        return cfg.models.effective_store()
+    except Exception:
+        return LOCKED_EXTRA_MODELS_DIR
 
 
 class LemonadeConfigInvalidError(Hal0Error):
@@ -191,14 +218,22 @@ def _validate_flm_args(value: object) -> str | None:
 
 def _validate_extra_models_dir(value: object) -> str | None:
     """Return an error message if ``extra_models_dir`` would diverge
-    from the symlink farm root, else None."""
+    from the hal0 store root, else None.
+
+    The locked value is derived from ``[models].effective_store()`` —
+    so an operator who set the store via Settings → Models can edit
+    Lemonade's config coherently. To change the store path itself, use
+    POST /api/settings/models/store; that endpoint propagates the new
+    value to Lemonade for you.
+    """
     if not isinstance(value, str):
         return "must be a string"
-    if value != LOCKED_EXTRA_MODELS_DIR:
+    locked = _locked_extra_models_dir()
+    if value != locked:
         return (
-            f"must equal {LOCKED_EXTRA_MODELS_DIR!r} "
-            "(plan §3 + §6.1 — the symlink farm root is the single "
-            "source of truth for the model catalog)"
+            f"must equal {locked!r} "
+            "(the hal0 model store is the single source of truth for the catalog; "
+            "use POST /api/settings/models/store to change the path)"
         )
     return None
 
@@ -278,7 +313,7 @@ async def get_lemonade_config(request: Request) -> dict[str, Any]:
                 "deferred": sorted(DEFERRED_KEYS),
             },
             "locked": {
-                "extra_models_dir": LOCKED_EXTRA_MODELS_DIR,
+                "extra_models_dir": _locked_extra_models_dir(),
             },
         },
     }
