@@ -923,6 +923,89 @@ def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
     )
 
 
+def _seed_registry_from_body(
+    request: Request,
+    model_id: str,
+    hf_repo: str,
+    hf_file: str,
+    labels: list[str] | None,
+) -> None:
+    """Upsert a registry row for ``model_id`` from body-supplied HF coords.
+
+    The AddByHfModal flow inspects a HF repo, picks a variant, and POSTs
+    the pull with the chosen ``hf_repo`` + ``hf_filename`` in the body
+    against a brand-new id (e.g. ``user.Qwen3.6-27B-MTP``). Seeding the
+    registry here gives ``_resolve_pull_source`` something to look up on
+    retries / reattach, and lets the dashboard's Models view surface the
+    in-flight pull against a real row instead of a phantom id.
+
+    Idempotent: if the row already exists, refresh its HF coordinates
+    so a retry with a different variant against the same id stays
+    intentional (rather than silently re-pulling the old variant).
+    """
+    from hal0.config import paths
+    from hal0.registry.model import Model
+    from hal0.registry.store import ModelAlreadyExists
+
+    registry = request.app.state.model_registry
+    provisional_path = str(paths.models_dir() / model_id / hf_file)
+    caps = [str(c).strip() for c in (labels or []) if str(c).strip()] or ["chat"]
+    try:
+        existing = registry.get(model_id)
+    except Exception:
+        existing = None
+    if existing is not None:
+        # Refresh HF coords so a retry with a different variant lands.
+        with contextlib.suppress(Exception):
+            registry.update(
+                model_id,
+                {"hf_repo": hf_repo, "hf_filename": hf_file},
+            )
+        return
+    entry = Model(
+        id=model_id,
+        name=model_id,
+        path=provisional_path,
+        size_bytes=0,
+        capabilities=caps,
+        hf_repo=hf_repo,
+        hf_filename=hf_file,
+        tags=["user-added"],
+        metadata={"source": "add-by-hf"},
+    )
+    # Race with another caller — the existing row already has coords.
+    with contextlib.suppress(ModelAlreadyExists):
+        registry.add(entry)
+
+
+def _resolve_pull_source_with_body(
+    request: Request,
+    model_id: str,
+    body: dict[str, Any] | None,
+) -> tuple[str, str, bool]:
+    """Resolve (hf_repo, hf_file) with an optional body override.
+
+    Returns ``(repo, file, from_body)`` where ``from_body=True`` means
+    the caller supplied both fields in the request payload — the pull
+    route uses that flag to decide whether to seed a registry row.
+
+    A partial body (only one of the two fields) is ignored to avoid
+    silently mixing a body coord with a stale registry coord; the
+    fallback path raises 422 with the existing message so the caller
+    gets the same hint they would on an empty body.
+    """
+    if isinstance(body, dict):
+        repo_raw = body.get("hf_repo")
+        file_raw = body.get("hf_filename") or body.get("hf_file")
+        if isinstance(repo_raw, str) and isinstance(file_raw, str):
+            repo = repo_raw.strip()
+            file = file_raw.strip()
+            if repo and file:
+                return repo, file, True
+    repo, file = _resolve_pull_source(request, model_id)
+    return repo, file, False
+
+
 async def _run_pull_with_events(
     job: PullJob,
     *,
@@ -1058,6 +1141,22 @@ async def pull_model(
 ) -> dict[str, object]:
     """Start a background HuggingFace pull and return a job handle.
 
+    Body (all fields optional)::
+
+        {
+          "hf_repo": "org/repo",          # add-by-HF-coords override
+          "hf_filename": "model.gguf",    # required iff hf_repo is set
+          "labels": ["chat", "vision"],   # seeded onto the registry row
+        }
+
+    Resolution order:
+      1. Body-supplied ``hf_repo`` + ``hf_filename`` (the Add-by-HF-coords
+         modal path — seeds a registry row for ``model_id`` so the
+         dashboard can show progress against a real entry, then pulls).
+      2. Existing registry row's ``hf_repo`` + ``hf_filename`` (the
+         ``pick-default`` path that ran already).
+      3. The curated catalogue entry for ``model_id``.
+
     Idempotent-ish: if a pull for this model_id is already in
     ``queued``/``running`` state, the existing job's handle is returned
     rather than spawning a duplicate. A completed/failed/cancelled job
@@ -1085,7 +1184,23 @@ async def pull_model(
     if is_flm_tag(model_id):
         return await _start_flm_pull(model_id, request, background, jobs)
 
-    hf_repo, hf_file = _resolve_pull_source(request, model_id)
+    # Body is optional — an empty / non-JSON request is the legacy
+    # "pull by id" path used by the wizard's Pull-against-curated row.
+    body: dict[str, Any] | None = None
+    try:
+        if int(request.headers.get("content-length") or 0) > 0:
+            body = await request.json()
+            if not isinstance(body, dict):
+                body = None
+    except Exception:
+        body = None
+
+    hf_repo, hf_file, from_body = _resolve_pull_source_with_body(request, model_id, body)
+    if from_body:
+        labels = body.get("labels") if isinstance(body, dict) else None
+        if not isinstance(labels, list):
+            labels = None
+        _seed_registry_from_body(request, model_id, hf_repo, hf_file, labels)
     job = make_job(model_id)
     jobs[model_id] = job
 

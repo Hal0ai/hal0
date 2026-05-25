@@ -98,6 +98,92 @@ def test_pull_unknown_model_returns_invalid_source(
     assert fake_run_pull == []
 
 
+def test_pull_body_hf_coords_used_when_id_not_registered(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+) -> None:
+    """Add-by-HF-coords flow — POST a body with hf_repo + hf_filename and
+    the pull starts even when the id is brand new (not in registry, not
+    curated). A registry row is seeded so the dashboard can show progress
+    against a real entry. Regression for issue: the AddByHfModal sent
+    those fields, the backend ignored them, and a freshly-inspected
+    ``user.<NewName>`` always 422'd.
+    """
+    new_id = "user.Qwen3.6-27B-MTP"
+    r = client_isolated.post(
+        f"/api/models/{new_id}/pull",
+        json={
+            "hf_repo": "unsloth/Qwen3.6-27B-A3B-MTP-GGUF",
+            "hf_filename": "Qwen3.6-27B-A3B-MTP-Q4_K_M.gguf",
+            "labels": ["chat", "tool-calling"],
+        },
+    )
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["model_id"] == new_id
+    assert body["hf_repo"] == "unsloth/Qwen3.6-27B-A3B-MTP-GGUF"
+    assert body["hf_file"] == "Qwen3.6-27B-A3B-MTP-Q4_K_M.gguf"
+    # Registry row seeded so subsequent loads find HF coordinates.
+    entry = app_isolated.state.model_registry.get(new_id)
+    assert entry.hf_repo == "unsloth/Qwen3.6-27B-A3B-MTP-GGUF"
+    assert entry.hf_filename == "Qwen3.6-27B-A3B-MTP-Q4_K_M.gguf"
+    assert "chat" in entry.capabilities
+    # Background task ran with the body-supplied coords.
+    assert len(fake_run_pull) == 1
+    assert fake_run_pull[0]["hf_repo"] == "unsloth/Qwen3.6-27B-A3B-MTP-GGUF"
+
+
+def test_pull_body_hf_coords_override_registry_entry(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+) -> None:
+    """If the body supplies hf_repo + hf_filename, they win over an
+    existing registry row's coords — operator retry of a different
+    variant against the same id stays intentional.
+    """
+    from hal0.registry.model import Model
+
+    app_isolated.state.model_registry.add(
+        Model(
+            id="user.SomeModel",
+            name="user.SomeModel",
+            path="/tmp/stub.gguf",
+            hf_repo="stub/old-repo",
+            hf_filename="old.gguf",
+        )
+    )
+    r = client_isolated.post(
+        "/api/models/user.SomeModel/pull",
+        json={"hf_repo": "stub/new-repo", "hf_filename": "new.gguf"},
+    )
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["hf_repo"] == "stub/new-repo"
+    assert body["hf_file"] == "new.gguf"
+    # Registry row updated to reflect the new pick.
+    entry = app_isolated.state.model_registry.get("user.SomeModel")
+    assert entry.hf_repo == "stub/new-repo"
+    assert entry.hf_filename == "new.gguf"
+
+
+def test_pull_body_partial_hf_coords_falls_back_to_resolver(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    """An incomplete body (only hf_repo, no hf_filename) is treated as
+    "no override" and falls back to the registry/curated resolver. A
+    brand-new id still 422s instead of silently using a half-set coord.
+    """
+    r = client_isolated.post(
+        "/api/models/user.Nope/pull",
+        json={"hf_repo": "stub/half-set"},
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "model.invalid_source"
+    assert fake_run_pull == []
+
+
 def test_pull_idempotent_when_already_running(
     client_isolated: TestClient,
     app_isolated: FastAPI,
