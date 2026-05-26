@@ -2595,7 +2595,7 @@ a { color: inherit; text-decoration: none; }
 }
 .swap-pop-item {
   display: grid;
-  grid-template-columns: 1fr 60px 70px;
+  grid-template-columns: 1fr 60px 70px 16px;
   gap: 10px;
   padding: 9px 12px;
   border-bottom: 1px solid var(--line-soft);
@@ -2610,6 +2610,9 @@ a { color: inherit; text-decoration: none; }
 .swap-pop-item .sz { color: var(--fg-3); font-size: 11px; }
 .swap-pop-item .fit { color: var(--ok); font-size: 10px; text-align: right; }
 .swap-pop-item .fit.no { color: var(--warn); }
+.swap-pop-item .swap-arrow { display: inline-flex; color: var(--fg-3); transition: color 0.12s ease; }
+.swap-pop-item:hover .swap-arrow { color: var(--ok); }
+.swap-pop-item.cur .swap-arrow { color: var(--ok); }
 
 /* ─── Variant filter chips (HF coords modal) ────────────────────── */
 .variant-row {

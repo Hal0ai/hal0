@@ -537,6 +537,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
             </div>
             <div className="sz num">{m.size}</div>
             <div className={"fit" + (fits ? "" : " no")}>{m.installed ? (fits ? "fits ✓" : "tight") : "will pull"}</div>
+            <span className="swap-arrow" aria-hidden="true">{Icons.chevR}</span>
           </div>
         );
       })}
