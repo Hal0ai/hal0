@@ -209,6 +209,10 @@ See §15 Phase 9 below for the per-PR map.
   - Sensible defaults, non-interactive (`curl -fsSL hal0.dev/install.sh | bash`)
   - Pre-flight checks, hardware probe, lay down `/etc/hal0/slots/{primary,embed,stt,tts}.toml`
   - Pulls toolbox images in background
+  - **Proxmox VE wrapper** (`scripts/proxmox-ve/hal0.sh`) — one line on a
+    pve host creates an unprivileged Debian 13 LXC and runs the bootstrap
+    inside it. Hardware-agnostic; Strix Halo passthrough still requires
+    the privileged-LXC recipe.
   - First-run wizard in dashboard for default-model pick.
     **As of v0.1.1**: writer calls authenticate via a session cookie
     minted on first password set; the claim allowlist covers the wizard's

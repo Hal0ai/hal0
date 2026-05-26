@@ -150,6 +150,13 @@ be evicted out from under a streaming request.
   [`installer/install.sh`](./installer/install.sh). v0.1.x installs
   are detected and refused with explicit backup/wipe instructions
   (see [`docs/v0.2-upgrade.md`](./docs/v0.2-upgrade.md)).
+- **One-line Proxmox VE install** — on a Proxmox host, `bash -c "$(curl
+  -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"`
+  creates an unprivileged Debian 13 LXC and runs the standard bootstrap
+  inside it. `--advanced` opens whiptail prompts; every parameter has
+  an env-var override (`CTID`, `RAM_MB`, `STORAGE`, …). Hardware-agnostic
+  — Strix Halo passthrough still requires the privileged-LXC recipe.
+  See [`scripts/proxmox-ve/README.md`](./scripts/proxmox-ve/README.md).
 
 ### Bundled agents (v0.2)
 
