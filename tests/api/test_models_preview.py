@@ -87,6 +87,30 @@ def test_preview_walks_recursive_when_flag_set(
     assert deep["preview"][0]["path"].endswith("embed-bge-small.gguf")
 
 
+def test_preview_defaults_to_recursive(
+    preview_client: tuple[TestClient, Path],
+) -> None:
+    """Omitting the recursive flag must walk subdirectories.
+
+    The operator-facing flows (dashboard scan modal, CLI) almost always
+    point at a model store root whose .gguf files live under per-repo
+    subdirs; a shallow default produces zero rows and looks broken.
+    """
+    client, root = preview_client
+    nested = root / "huggingface" / "Qwen3.5-4B"
+    nested.mkdir(parents=True)
+    (nested / "Qwen3.5-4B-Q4_K_M.gguf").write_bytes(b"\x00" * 64)
+
+    r = client.post(
+        "/api/models/scan/preview",
+        json={"paths": [str(root)]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 1
+    assert body["preview"][0]["path"].endswith("Qwen3.5-4B-Q4_K_M.gguf")
+
+
 def test_preview_single_file_path(
     preview_client: tuple[TestClient, Path],
 ) -> None:

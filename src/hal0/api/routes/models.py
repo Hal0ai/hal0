@@ -163,12 +163,19 @@ async def scan_preview(request: Request) -> dict[str, Any]:
 
         {
           "paths":     ["/abs/dir/or/file", ...],   # required
-          "recursive": bool                          # default False
+          "recursive": bool                          # default True
         }
 
     Files matching the configured ``[models].file_extensions`` are
     selected when walking directories. A path that is a file is detected
     directly regardless of extension.
+
+    ``recursive`` defaults to True because the operator-facing flow
+    (dashboard "Scan directory", CLI) almost always points at a model
+    store root (e.g. ``/mnt/ai-models``) whose .gguf files live under
+    per-repo subdirs; a flat ``iterdir()`` returns zero rows there and
+    looks broken. Callers that want a shallow walk pass ``recursive:
+    false`` explicitly.
     """
     try:
         body = await request.json()
@@ -180,7 +187,7 @@ async def scan_preview(request: Request) -> dict[str, Any]:
     raw_paths = body.get("paths") or []
     if not isinstance(raw_paths, list) or not raw_paths:
         raise BadRequest("'paths' must be a non-empty list of absolute paths")
-    recursive = bool(body.get("recursive", False))
+    recursive = bool(body.get("recursive", True))
 
     cfg = load_hal0_config()
     extensions = {e.lower() for e in cfg.models.file_extensions}

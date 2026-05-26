@@ -698,6 +698,7 @@ function ScanDirectoryModal({ open, onClose }) {
   const modelsHook = useModels();
 
   const [scanPath, setScanPath] = useStateMM("");
+  const [recursive, setRecursive] = useStateMM(true);
   const [picked, setPicked] = useStateMM(() => new Set());
   const [progress, setProgress] = useStateMM(null); // { done, total } | null
 
@@ -707,6 +708,7 @@ function ScanDirectoryModal({ open, onClose }) {
       add.reset();
       setPicked(new Set());
       setProgress(null);
+      setRecursive(true);
       // Seed the input with the configured scan root so the operator
       // can hit Scan immediately after pinning /mnt/ai-models in Settings.
       const root = settings.data?.models?.roots?.[0] || "";
@@ -725,7 +727,7 @@ function ScanDirectoryModal({ open, onClose }) {
     setPicked(new Set());
     setProgress(null);
     try {
-      await preview.mutateAsync({ paths: [scanPath.trim()], recursive: true });
+      await preview.mutateAsync({ paths: [scanPath.trim()], recursive });
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(
         `Scan failed — ${e?.message || "see logs"}`, "err",
@@ -816,7 +818,7 @@ function ScanDirectoryModal({ open, onClose }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>Scan path <span className="req">*</span></span>
-          <span className="sub">recursive · absolute path</span>
+          <span className="sub">absolute path</span>
         </div>
         <div className="form-ctl" style={{display: "flex", gap: 8}}>
           <input
@@ -829,6 +831,23 @@ function ScanDirectoryModal({ open, onClose }) {
           <button className="btn ghost sm" disabled={!scanPath.trim() || preview.isPending} onClick={onScan}>
             {preview.isPending ? "Scanning…" : "Scan"}
           </button>
+        </div>
+      </div>
+
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>Walk</span>
+          <span className="sub">off → top-level files only</span>
+        </div>
+        <div className="form-ctl">
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={recursive}
+              onChange={e => setRecursive(e.target.checked)}
+            />
+            <span className="mono">Recurse into subdirectories</span>
+          </label>
         </div>
       </div>
 
