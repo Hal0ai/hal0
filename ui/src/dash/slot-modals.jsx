@@ -526,18 +526,14 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
         const isCur = slot.model_id === m.id;
         const fits = HAL0_DATA.host.ram.free > parseSizeGB(m.size);
         return (
+          // The whole row is a mouse-click target (convenience) but the
+          // nested chevron button is the single keyboard/AT-accessible
+          // affordance — making the row also a role=button creates a
+          // double-announce for screen readers (a11y review 2026-05-27).
           <div
             key={m.id}
             className={"swap-pop-item" + (isCur ? " cur" : "")}
             onClick={() => { onPick(m); onClose(); }}
-            role="button"
-            tabIndex={0}
-            onKeyDown={e => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onPick(m); onClose();
-              }
-            }}
           >
             <div className="nm">
               {m.longName}

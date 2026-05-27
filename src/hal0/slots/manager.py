@@ -374,6 +374,24 @@ class SlotManager:
         log.info(
             "slot.transition", extra={"slot": name, "from": current.value, "to": to_state.value}
         )
+        # Structured ERROR audit trail (separate from the info-level
+        # transition log) so operators can `journalctl -u hal0-api |
+        # grep slot.error` to see every red-dot transition with its
+        # cause. Pairs with the event_bus emit below; the bus is
+        # transient SSE, this is durable journald.
+        if to_state == SlotState.ERROR and current != to_state:
+            # NOTE: ``extra=`` MUST NOT use "message" as a key — that's
+            # a reserved LogRecord attribute and stdlib logging raises
+            # KeyError when it collides. Use ``reason`` instead.
+            log.error(
+                "slot.error",
+                extra={
+                    "slot": name,
+                    "from": current.value,
+                    "reason": message or "(no message)",
+                    "model_id": record.model_id or "",
+                },
+            )
         await self._broadcast(record)
         # Footer event bus — best-effort emit. Skip when current == to_state
         # (idempotent refresh, no real transition) so the footer doesn't
