@@ -1,19 +1,19 @@
 /**
  * dashboard-v3 — root `#dashboard` route renders the topbar, sidebar,
- * snapshot strip, and composer. Smoke-level: enough to catch a bundle
- * regression that would blank the view.
+ * hardware section, and snapshot strip. Chat now lives at `#chat`; the
+ * dashboard is the system-overview page.
  */
 import { test, expect } from '../fixtures/apiMock'
 
 test.describe('Dashboard v3 (/)', () => {
-  test('renders chrome + snapshot + composer', async ({ page }) => {
+  test('renders chrome + hardware section + snapshot', async ({ page }) => {
     await page.goto('/')
     // wait for React mount (Sidebar is route-aware, only renders after App)
     await expect(page.locator('.topbar')).toBeVisible()
     await expect(page.locator('.sidebar')).toBeVisible()
     await expect(page.locator('.main .view')).toBeVisible()
-    // composer (empty or active) renders inside dash-main
-    await expect(page.locator('.composer').first()).toBeVisible()
+    // hardware section is the main column on /dashboard
+    await expect(page.locator('.hw-section')).toBeVisible()
     // snapshot strip renders in dash-side
     await expect(page.locator('.snap')).toBeVisible()
     // sidebar active row should be Dashboard

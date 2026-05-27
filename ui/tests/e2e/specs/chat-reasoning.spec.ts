@@ -58,6 +58,19 @@ async function sendPrompt(page: any, text: string) {
 }
 
 test.describe('chat reasoning surface', () => {
+  // Chat moved to its own `#chat` route, and the reasoning toggle now
+  // defaults OFF (localStorage `hal0.chat.showReasoning`). Pre-seed the
+  // flag so `ReasoningBlock` renders for assertions in this file.
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      try {
+        window.localStorage.setItem('hal0.chat.showReasoning', '1')
+      } catch {
+        // ignore
+      }
+    })
+  })
+
   test('reasoning block renders when reasoning_content arrives', async ({ page }) => {
     await stubChat(
       page,
@@ -67,7 +80,7 @@ test.describe('chat reasoning surface', () => {
         { kind: 'content', text: 'The sky is blue because of Rayleigh scattering.' },
       ]),
     )
-    await page.goto('/')
+    await page.goto('/#chat')
     await sendPrompt(page, 'why is the sky blue?')
     // Final state: reasoning block is present, contains both reasoning chunks,
     // and the answer bubble holds the content text.
@@ -89,7 +102,7 @@ test.describe('chat reasoning surface', () => {
         { kind: 'content', text: 'OK' },
       ]),
     )
-    await page.goto('/')
+    await page.goto('/#chat')
     await sendPrompt(page, 'reply with the exact word OK')
     // Answer bubble is present…
     await expect(
@@ -113,7 +126,7 @@ test.describe('chat reasoning surface', () => {
         { kind: 'content', text: 'final answer here' },
       ]),
     )
-    await page.goto('/')
+    await page.goto('/#chat')
     await sendPrompt(page, 'q')
     const reasoning = page.locator('.bubble-reasoning')
     await expect(reasoning).toBeVisible()
@@ -136,7 +149,7 @@ test.describe('chat reasoning surface', () => {
         { kind: 'content', text: 'done' },
       ]),
     )
-    await page.goto('/')
+    await page.goto('/#chat')
     await sendPrompt(page, 'q')
     const reasoning = page.locator('.bubble-reasoning')
     await expect(reasoning).toBeVisible()
