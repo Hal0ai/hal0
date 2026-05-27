@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import { normalizeApiModel } from '@/lib/normalizeApiModel'
 
 export interface Model {
   id: string
@@ -36,9 +37,8 @@ export function useModels() {
     queryKey: ['models'],
     queryFn: async () => {
       const body = await apiGet<any>(ENDPOINTS.models)
-      if (Array.isArray(body)) return body as Model[]
-      if (Array.isArray(body?.models)) return body.models as Model[]
-      return []
+      const rows = Array.isArray(body) ? body : Array.isArray(body?.models) ? body.models : []
+      return rows.map(normalizeApiModel) as unknown as Model[]
     },
     refetchInterval: MODELS_POLL_MS,
   })
