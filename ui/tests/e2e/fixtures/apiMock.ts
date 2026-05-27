@@ -25,6 +25,7 @@ export type MockState = {
   host: typeof MOCK_DATA.host
   lemond: typeof MOCK_DATA.lemond
   slots: typeof MOCK_DATA.slots
+  models: typeof MOCK_DATA.models
   backends: typeof MOCK_DATA.backends
   approvals: any[]
 }
@@ -66,6 +67,9 @@ export async function installDefaultMocks(page: Page, state: MockState) {
     }),
   )
   await page.route('**/api/hardware', (route) => json(route, state.host))
+  await page.route('**/api/models', (route) =>
+    json(route, { models: state.models, count: state.models.length }),
+  )
   await page.route('**/api/slots', (route) => json(route, { slots: state.slots }))
   await page.route('**/api/slots/metrics', (route) => json(route, {}))
   await page.route('**/api/backends', (route) => json(route, { backends: state.backends }))

@@ -62,6 +62,57 @@ export const MOCK_DATA = {
     },
   ],
 
+  /** Subset of /api/models rows the swap popover + create-slot modal
+   *  now consume (PR fix(dash): slot swap popover reads live /api/models).
+   *  Shape matches the registry serializer: capabilities + backends drive
+   *  the JSX-side normalizer's type + device derivation. */
+  models: [
+    {
+      id: 'qwen3.6-27b-q5kxl',
+      name: 'Qwen3.6-27B UD-Q5_K_XL',
+      path: '/mnt/ai-models/qwen3.6-27b-q5kxl/Qwen3.6-27B-UD-Q5_K_XL.gguf',
+      size_bytes: 19_000_000_000,
+      capabilities: ['chat'],
+      backends: ['vulkan', 'rocm', 'cpu'],
+      hf_repo: 'unsloth/Qwen3.6-27B-GGUF',
+      installed: true,
+      ns: 'pulled',
+    },
+    {
+      id: 'qwen3-coder-next-q4kxl',
+      name: 'Qwen3-Coder-Next UD-Q4_K_XL',
+      path: '/mnt/ai-models/qwen3-coder-next-q4kxl/Qwen3-Coder-Next-UD-Q4_K_XL.gguf',
+      size_bytes: 19_000_000_000,
+      capabilities: ['chat', 'coding'],
+      backends: ['vulkan', 'rocm', 'cpu'],
+      hf_repo: 'unsloth/Qwen3-Coder-Next-GGUF',
+      installed: true,
+      ns: 'pulled',
+    },
+    {
+      id: 'nomic-embed-text-v1.5-q8',
+      name: 'nomic-embed-text-v1.5 Q8',
+      path: '/mnt/ai-models/nomic-embed-text-v1.5-q8/nomic-embed-text-v1.5.Q8_0.gguf',
+      size_bytes: 350_000_000,
+      capabilities: ['embed'],
+      backends: ['vulkan', 'rocm', 'cpu'],
+      hf_repo: 'nomic-ai/nomic-embed-text-v1.5-GGUF',
+      installed: true,
+      ns: 'blessed',
+    },
+    {
+      id: 'bge-reranker-v2-m3-q4_k_m',
+      name: 'BGE Reranker v2 M3 (Q4_K_M)',
+      path: '/mnt/ai-models/local/bge-reranker-v2-m3-q4_k_m/bge-reranker-v2-m3-Q4_K_M.gguf',
+      size_bytes: 438_376_864,
+      capabilities: ['rerank'],
+      backends: ['vulkan', 'rocm', 'cpu'],
+      hf_repo: 'gpustack/bge-reranker-v2-m3-GGUF',
+      installed: true,
+      ns: 'pulled',
+    },
+  ],
+
   backends: [
     { id: 'llamacpp:rocm', name: 'llamacpp:rocm', ver: 'v1.0 (b9253)', state: 'installed', recommended: true },
     { id: 'llamacpp:vulkan', name: 'llamacpp:vulkan', ver: 'v1.0 (b9253)', state: 'installed' },
