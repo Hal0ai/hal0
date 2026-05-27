@@ -1364,7 +1364,7 @@ wheels = [
 
 [[package]]
 name = "hal0"
-version = "0.2.0a1"
+version = "0.3.0a1"
 source = { editable = "." }
 dependencies = [
     { name = "argon2-cffi" },
@@ -1373,10 +1373,12 @@ dependencies = [
     { name = "fastapi" },
     { name = "fastembed" },
     { name = "httpx" },
+    { name = "jinja2" },
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyjwt" },
+    { name = "pyyaml" },
     { name = "rich" },
     { name = "sse-starlette" },
     { name = "structlog" },
@@ -1407,6 +1409,7 @@ requires-dist = [
     { name = "fastembed", specifier = ">=0.8,<1.0" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "mcp", specifier = "==1.27.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=2.0" },
@@ -1417,6 +1420,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "python-multipart", marker = "extra == 'dev'", specifier = ">=0.0.9" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "soundfile", marker = "extra == 'dev'", specifier = ">=0.12" },

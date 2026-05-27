@@ -411,6 +411,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         slot_manager=slot_manager,
     )
 
+    # One-shot reconciliation: clear pre-fix stuck ERROR on slots whose
+    # only problem was an empty model.default. After fix(slots): empty
+    # default is OFFLINE+CTA, not ERROR; this pass migrates existing
+    # state.json snapshots forward so the dashboard doesn't render red
+    # until the operator clicks each slot.
+    await slot_manager.reconcile_unconfigured_slots()
+
     # Idle monitor — demotes READY → IDLE after the configured timeout
     # so the dashboard distinguishes "warm but quiet" from "warm and
     # actively serving" without operator help.  Defaults to 300s; the

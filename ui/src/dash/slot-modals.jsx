@@ -530,6 +530,14 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
             key={m.id}
             className={"swap-pop-item" + (isCur ? " cur" : "")}
             onClick={() => { onPick(m); onClose(); }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={e => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onPick(m); onClose();
+              }
+            }}
           >
             <div className="nm">
               {m.longName}
@@ -537,7 +545,12 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
             </div>
             <div className="sz num">{m.size}</div>
             <div className={"fit" + (fits ? "" : " no")}>{m.installed ? (fits ? "fits ✓" : "tight") : "will pull"}</div>
-            <span className="swap-arrow" aria-hidden="true">{Icons.chevR}</span>
+            <button
+              type="button"
+              className="swap-arrow"
+              aria-label={`Load ${m.longName || m.id}`}
+              onClick={e => { e.stopPropagation(); onPick(m); onClose(); }}
+            >{Icons.chevR}</button>
           </div>
         );
       })}

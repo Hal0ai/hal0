@@ -46,12 +46,20 @@ async def _wait_for_state(
     return rec.state if rec is not None else SlotState.OFFLINE
 
 
-async def test_fail_watcher_pushes_error_when_model_drops_from_lemond(
+async def test_fail_watcher_pushes_offline_when_model_drops_from_lemond(
     slot_root: Any,
     lemonade_loaded_stub: dict[str, Any],
     fast_fail_watch: None,
 ) -> None:
-    """Model leaving lemond's loaded[] while slot is READY must trigger ERROR."""
+    """Model leaving lemond's loaded[] while slot is READY transitions to OFFLINE.
+
+    Lemonade routinely evicts loaded models (idle-TTL, nuclear-evict on
+    a sibling load failure, max_models pressure). From the slot's
+    perspective this is a clean unload — the next inference request
+    hot-reloads the model. Reflected as OFFLINE (grey dot) per the
+    dot-state spec, reserving ERROR (red dot, "investigate") for real
+    spawn/health/load failures.
+    """
     sm = SlotManager()
     snap = await sm.load("primary")
     assert snap.state == SlotState.READY
@@ -63,14 +71,14 @@ async def test_fail_watcher_pushes_error_when_model_drops_from_lemond(
     # No call to status() — the push-driven watcher is what should react.
     lemonade_loaded_stub["loaded"] = []
 
-    observed = await _wait_for_state(sm, "primary", SlotState.ERROR, timeout_s=5.0)
-    assert observed == SlotState.ERROR, (
-        f"watcher failed to push ERROR within 5s; final state={observed}"
+    observed = await _wait_for_state(sm, "primary", SlotState.OFFLINE, timeout_s=5.0)
+    assert observed == SlotState.OFFLINE, (
+        f"watcher failed to push OFFLINE within 5s; final state={observed}"
     )
 
     rec = sm._states["primary"]
-    assert "lemond" in rec.message.lower() or "dropped" in rec.message.lower(), (
-        f"ERROR record should carry an explanatory message (got {rec.message!r})"
+    assert "evict" in rec.message.lower() or "auto-reload" in rec.message.lower(), (
+        f"OFFLINE record should carry an eviction explanation (got {rec.message!r})"
     )
     # Watcher is one-shot — it should have exited after firing.
     watcher = sm._fail_watchers.get("primary")
@@ -82,12 +90,12 @@ async def test_fail_watcher_pushes_error_when_model_drops_from_lemond(
         assert watcher.done()
 
 
-async def test_fail_watcher_emits_sse_frame_for_pushed_error(
+async def test_fail_watcher_emits_sse_frame_for_pushed_eviction(
     slot_root: Any,
     lemonade_loaded_stub: dict[str, Any],
     fast_fail_watch: None,
 ) -> None:
-    """The watcher-triggered ERROR transition must broadcast to SSE subscribers."""
+    """The watcher-triggered OFFLINE transition must broadcast to SSE subscribers."""
     sm = SlotManager()
     await sm.load("primary")
 
@@ -96,17 +104,17 @@ async def test_fail_watcher_emits_sse_frame_for_pushed_error(
     # Trigger failure.
     lemonade_loaded_stub["loaded"] = []
 
-    async def _next_error() -> str:
+    async def _next_offline() -> str:
         async for rec in stream:
-            if rec.state == SlotState.ERROR:
+            if rec.state == SlotState.OFFLINE:
                 return rec.message
         return ""
 
     try:
-        msg = await asyncio.wait_for(_next_error(), timeout=5.0)
+        msg = await asyncio.wait_for(_next_offline(), timeout=5.0)
     except TimeoutError:
-        pytest.fail("watcher did not emit an ERROR SSE frame within 5s")
-    assert "lemond" in msg.lower() or "dropped" in msg.lower()
+        pytest.fail("watcher did not emit an OFFLINE SSE frame within 5s")
+    assert "evict" in msg.lower() or "auto-reload" in msg.lower()
 
 
 async def test_fail_watcher_does_not_fire_when_slot_unloads_cleanly(

@@ -18,25 +18,26 @@ const { useState: useStateS } = React;
 // ─── Slot indicator dot ────────────────────────────────────────────────
 //
 // Maps a slot snapshot → ({ cls, label, tooltip }) for the status dot
-// rendered in SlotCard / SlotListRow. Single source of truth for the
-// "what colour does this slot deserve" question.
+// and the matching status chip. Single source of truth for the
+// user-visible colour vocabulary (per dot-state spec, 2026-05-27):
 //
-// Mapping (matches PR feat/slot-state-indicator-dots):
-//   ready + last_used_at within RECENTLY_LIVE_MS → "recent" (green)
-//   ready + older / never used                   → "stale"  (yellow)
-//   warming / starting / pulling / unloading     → "warming" (amber, pulses)
-//   serving                                      → "serving" (cyan, pulses — pre-existing)
-//   idle                                         → "stale"  (yellow — semantically "loaded, not serving")
-//   error                                        → "error"  (red)
-//   offline / anything else                      → "offline" (grey)
+//   error                                → "error"   (red)    — load/spawn failure; investigate
+//   !enabled || lemo=disabled            → "offline" (grey)   — operator-disabled
+//   warming / starting / pulling …       → "warming" (amber pulse)
+//   serving + last_used_at fresh         → "serving" (green pulse) — actively processing
+//   serving + last_used_at > 1h          → "stale"   (yellow) — possibly stuck request
+//   loaded in VRAM (lemo=loaded|ready)   → "stale"   (yellow) — ready, awaiting prompt
+//   evicted / idle (lemo=idle|idle)      → "stale"   (yellow) — auto-reloads on next request
+//   offline (clean unload/swap/evict)    → "offline" (grey)
 //
-// The "1h recently live" window leans on the backend's in-memory
-// `last_used_at` (bumped by SlotManager.serving on every dispatched
-// request). When hal0-api restarts, `last_used_at` is null for every
-// slot until the first new request lands — we render that as "stale"
-// (yellow), which matches operator intuition: we don't know whether
-// the slot was hit during downtime.
-const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h window — kept as a named const
+// GREEN fires ONLY during an active in-flight request. Yellow covers
+// the entire "loaded and waiting" surface — in-VRAM and evicted both —
+// because operators don't need a colour to tell those apart (the
+// tooltip does). After a serving context manager exits, the slot
+// transitions back to READY (yellow); 1h later the idle monitor demotes
+// to IDLE (also yellow). The 1h timer in this file catches stuck-in-
+// SERVING slots where a request never finished.
+const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h hung-request threshold for serving slots
 
 function _formatAgo(deltaMs) {
   if (deltaMs < 0) return "just now";
@@ -51,6 +52,8 @@ function _formatAgo(deltaMs) {
 
 function slotIndicator(slot, now = Date.now()) {
   const state = String(slot?.state || "offline");
+  const lemo = String(slot?.lemonade_state || "");
+  const enabled = slot?.enabled !== false;
   const lastUsedSec = typeof slot?.last_used_at === "number" ? slot.last_used_at : null;
   const lastUsedMs = lastUsedSec != null ? lastUsedSec * 1000 : null;
   const deltaMs = lastUsedMs != null ? now - lastUsedMs : null;
@@ -62,6 +65,13 @@ function slotIndicator(slot, now = Date.now()) {
       cls: "error",
       label: "error",
       tooltip: errorMsg ? `Error: ${errorMsg}` : "Error",
+    };
+  }
+  if (!enabled || lemo === "disabled") {
+    return {
+      cls: "offline",
+      label: "off",
+      tooltip: "Disabled",
     };
   }
   if (
@@ -81,39 +91,49 @@ function slotIndicator(slot, now = Date.now()) {
     };
   }
   if (state === "serving") {
-    // Pre-existing serving dot behaviour: cyan + pulse (CSS unchanged).
+    // Hung-request guard: if a slot has been in SERVING for longer
+    // than RECENTLY_LIVE_MS without a fresh last_used_at bump, it's
+    // almost certainly stuck on a request that will never finish.
+    // Revert to yellow with a "possibly stuck" tooltip — keeps green
+    // honest as "actively processing right now", not "lit since
+    // last week".
+    const stuck = deltaMs != null && deltaMs > RECENTLY_LIVE_MS;
+    if (stuck) {
+      return {
+        cls: "stale",
+        label: "stuck?",
+        tooltip: `Serving since ${_formatAgo(deltaMs)} — request may be stuck`,
+      };
+    }
     return {
       cls: "serving",
       label: "serving",
       tooltip: model ? `Serving ${model}` : "Serving",
     };
   }
-  if (state === "ready") {
-    if (deltaMs != null && deltaMs <= RECENTLY_LIVE_MS) {
-      return {
-        cls: "recent",
-        label: "ready",
-        tooltip: `Loaded, last used ${_formatAgo(deltaMs)}`,
-      };
-    }
+  // Slot is loaded and waiting for a prompt — YELLOW per the dot-state
+  // spec ("active + available to receive prompts → yellow; green only
+  // while actively processing"). In-VRAM vs evicted is a tooltip-only
+  // distinction; the colour is the same so operators don't need to
+  // squint to tell "ready" from "idle".
+  if (lemo === "loaded" || state === "ready") {
     return {
       cls: "stale",
       label: "ready",
       tooltip: deltaMs != null
-        ? `Loaded, idle (${_formatAgo(deltaMs)})`
-        : "Loaded — no requests since hal0-api started",
+        ? `Loaded — last used ${_formatAgo(deltaMs)}`
+        : (model ? `Loaded — ${model} in VRAM` : "Loaded — model in VRAM"),
     };
   }
-  if (state === "idle") {
+  // Lemonade-evicted slots arrive here as state=offline lemonade_state=idle:
+  // the model is available but not in VRAM, lemonade hot-reloads on next request.
+  if (lemo === "idle" || state === "idle") {
     return {
       cls: "stale",
       label: "idle",
-      tooltip: deltaMs != null
-        ? `Idle (${_formatAgo(deltaMs)})`
-        : "Idle",
+      tooltip: "Idle — model not in VRAM, will hot-reload on next request",
     };
   }
-  // offline + anything unknown
   return {
     cls: "offline",
     label: state,
@@ -242,9 +262,15 @@ function SlotCard({
         <span className="chip">{type}</span>
         <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
         {cpuOnly && <span className="chip">[CPU]</span>}
-        <span className="chip" style={{color: state === "serving" ? "var(--accent)" : state === "ready" ? "var(--ok)" : state === "idle" ? "var(--fg-3)" : "var(--fg-3)"}}>
-          {state}
-        </span>
+        {(() => {
+          const ind = slotIndicator(slot);
+          const chipColor = ind.cls === "recent" ? "var(--ok)"
+            : ind.cls === "serving" ? "var(--accent)"
+            : ind.cls === "stale" || ind.cls === "warming" ? "var(--warn)"
+            : ind.cls === "error" ? "var(--err)"
+            : "var(--fg-3)";
+          return <span className="chip" style={{color: chipColor}}>{ind.label}</span>;
+        })()}
       </div>
       <div className="slot-metrics">
         {metricsRow.map((m, i) => (

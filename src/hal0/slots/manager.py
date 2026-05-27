@@ -518,11 +518,19 @@ class SlotManager:
                 current = self._current_state(slot_name)
                 if current not in _FAIL_WATCH_LIVE_STATES:
                     return
+                # Lemonade routinely evicts loaded models (idle-TTL,
+                # nuclear-evict on a sibling load failure, max_models
+                # pressure). From the slot's perspective this is a clean
+                # unload — the next inference request hot-reloads the
+                # model. Reflect that as OFFLINE (grey dot, "evicted —
+                # auto-reloads on next request") rather than ERROR (red
+                # dot, operator-investigation cue), reserving ERROR for
+                # the real failures: spawn/health/load exceptions.
                 try:
                     await self._transition(
                         slot_name,
-                        SlotState.ERROR,
-                        message="model dropped from lemond unexpectedly",
+                        SlotState.OFFLINE,
+                        message="model evicted from lemond (auto-reloads on next request)",
                         force=True,
                     )
                 except Exception as exc:
@@ -579,6 +587,24 @@ class SlotManager:
                 # Already loaded — return snapshot without restarting.
                 return await self.status(slot_name)
 
+            # Configuration check: a slot with no resolvable model is
+            # NOT an ERROR (which would render red and flag for operator
+            # investigation). It's an unconfigured slot — render grey
+            # with a CTA. Bail before calling lemonade.load(), whose
+            # ValueError would otherwise stamp the slot ERROR every
+            # tick the reconciler runs. The user fixes it by picking a
+            # model in the dashboard dropdown; Fix #1 persists the
+            # choice to TOML so the slot never re-enters this branch.
+            if not resolved_model:
+                await self._transition(
+                    slot_name,
+                    SlotState.OFFLINE,
+                    port=_cfg_port(cfg),
+                    message="no default model — pick one from the dropdown",
+                    force=True,
+                )
+                return await self.status(slot_name)
+
             try:
                 # PULLING — gate the model download behind an explicit
                 # state so dashboards can show "downloading model"
@@ -623,6 +649,25 @@ class SlotManager:
                     model_id=resolved_model,
                     port=_cfg_port(cfg),
                 )
+                # Persist explicit model_id to TOML so reconciliation
+                # after a Lemonade restart doesn't drift back to "no
+                # model.default" ERROR. Only fires when caller passed
+                # model_id (i.e. swap() / explicit /load body), not on
+                # plain reload of the existing default. Best-effort:
+                # a write failure is logged but doesn't fail the load —
+                # the slot is already running with the right model.
+                if model_id and model_id != _model_default(cfg):
+                    try:
+                        await self._persist_model_default(slot_name, model_id)
+                    except Exception as exc:
+                        log.warning(
+                            "slot.persist_model_default_failed",
+                            extra={
+                                "slot": slot_name,
+                                "model_id": model_id,
+                                "error": str(exc),
+                            },
+                        )
             except Exception as exc:
                 # TIER1: never swallow — record ERROR with details, re-raise.
                 await self._transition(
@@ -1262,6 +1307,115 @@ class SlotManager:
             ) from exc
 
         return await self.status(slot_name)
+
+    async def reconcile_unconfigured_slots(self) -> None:
+        """One-shot startup pass: clear stuck ERROR on unconfigured slots.
+
+        Before the empty-default short-circuit in :meth:`load`, slots
+        with no ``model.default`` would get stamped ERROR every time
+        the reconciler called lemonade.load() with an empty model name.
+        Existing state.json snapshots from that era persist the red
+        dot even after this fix lands. This pass rewrites them to
+        OFFLINE with a "pick a model" message so the dashboard
+        re-renders correctly without requiring the operator to click
+        each slot.
+
+        Best-effort — failures are logged and don't block startup.
+
+        Reads in-memory state + state.json directly. Deliberately
+        avoids :meth:`list` (which would trigger Lemonade adoption
+        probes) and :meth:`_maybe_adopt_running_slot` (which would
+        flip slots to READY without calling /v1/load) — this pass is
+        a state-machine cleanup, not a fresh status check.
+        """
+        # Walk slot configs on disk. Hydrate state.json into _states
+        # the same way _current_state does, but without going through
+        # status() (no adoption probes).
+        try:
+            slot_dir = paths.slots_config_dir()
+            cfg_files = sorted(slot_dir.glob("*.toml")) if slot_dir.exists() else []
+        except OSError as exc:
+            log.warning(
+                "slot.reconcile_unconfigured_dir_failed",
+                extra={"error": str(exc)},
+            )
+            return
+        for cfg_path in cfg_files:
+            slot_name = cfg_path.stem
+            try:
+                rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
+                if rec is None or rec.state != SlotState.ERROR:
+                    continue
+                msg = (rec.message or "").lower()
+                # Cache the hydrated record so _transition compares
+                # against the right baseline.
+                self._states[slot_name] = rec
+                # Pre-fix "no model.default set" ERRORs → OFFLINE+CTA.
+                if "no model.default set" in msg:
+                    cfg = await self._maybe_load_config(slot_name)
+                    if cfg is not None and _model_default(cfg):
+                        # TOML now has a default — leave the ERROR
+                        # alone so the operator sees that something
+                        # else went wrong.
+                        continue
+                    await self._transition(
+                        slot_name,
+                        SlotState.OFFLINE,
+                        message="no default model — pick one from the dropdown",
+                        force=True,
+                    )
+                    continue
+                # Pre-fix "model dropped from lemond unexpectedly"
+                # ERRORs → OFFLINE+evicted. The fail-watcher now
+                # treats eviction as a clean unload (Fix #3); existing
+                # state.json snapshots from before that change
+                # persist the red dot until cleared.
+                if "model dropped from lemond" in msg:
+                    await self._transition(
+                        slot_name,
+                        SlotState.OFFLINE,
+                        message="model evicted from lemond (auto-reloads on next request)",
+                        force=True,
+                    )
+                    continue
+            except Exception as exc:
+                log.warning(
+                    "slot.reconcile_unconfigured_failed",
+                    extra={"slot": slot_name, "error": str(exc)},
+                )
+
+    async def _persist_model_default(self, slot_name: str, model_id: str) -> None:
+        """Write ``[model] default = <model_id>`` into the slot's TOML.
+
+        Preserves every other key — only the ``model.default`` field is
+        rewritten. Used by :meth:`load` after a successful explicit-
+        model load (i.e. swap path) so the next reconciliation pass
+        reads the right default instead of drifting back to the empty
+        seed value that produced the "no model.default set" ERROR.
+
+        Atomic via the same ``write_bytes`` pattern as :meth:`update_config`.
+        Failures bubble up so the caller can log + soft-fail without
+        affecting the live load state.
+        """
+        try:
+            import tomli_w
+        except ImportError as exc:  # pragma: no cover
+            raise SlotConfigError("tomli_w not installed") from exc
+
+        cfg = await self._load_slot_config(slot_name)
+        cfg_dict = _cfg_to_dict(cfg)
+        existing_model = cfg_dict.get("model")
+        base_model = existing_model if isinstance(existing_model, dict) else {}
+        cfg_dict = {**cfg_dict, "model": {**base_model, "default": model_id}}
+
+        cfg_path = self._config_file(slot_name)
+        try:
+            cfg_path.write_bytes(tomli_w.dumps(cfg_dict).encode("utf-8"))
+        except OSError as exc:
+            raise SlotConfigError(
+                f"failed to persist model.default to {cfg_path}: {exc}",
+                details={"slot": slot_name, "model_id": model_id},
+            ) from exc
 
     async def _check_npu_exclusivity(
         self,

@@ -8,6 +8,7 @@
 // per-row usePullJob() instances tracked by model_id.
 
 import { useModels, usePullJob, fmtBytes } from '@/api/hooks/useModels'
+import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
@@ -196,6 +197,8 @@ function ModelRow({ model, selected, onSelect }) {
 
 function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
   const pull = usePullJob();
+  const slotsQuery = useSlots();
+  const swap = useSlotSwap();
   if (!model) {
     return (
       <div className="mdl-detail">
@@ -276,7 +279,47 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
       <div className="mdl-detail-actions">
         {model.installed ? (
           <>
-            <button className="btn" onClick={() => window.__hal0Toast && window.__hal0Toast(`Loading ${model.longName || model.id}…`, "info")}>Load now</button>
+            <button
+              className="btn"
+              disabled={swap.isPending}
+              onClick={async () => {
+                const slots = slotsQuery.data ?? [];
+                const compatible = slots.filter(s => s.type === model.type);
+                if (compatible.length === 0) {
+                  window.__hal0Toast && window.__hal0Toast(
+                    `No slot accepts type=${model.type || "?"} — create one in Slots`,
+                    "err",
+                  );
+                  return;
+                }
+                // Prefer a slot that already runs this model (re-load),
+                // otherwise the first compatible slot. Multiple compatible
+                // slots without a current owner: user picks via slot card.
+                const owning = compatible.find(
+                  s => (s.model_id || s.model?.default) === model.id,
+                );
+                if (!owning && compatible.length > 1) {
+                  window.__hal0Toast && window.__hal0Toast(
+                    `Multiple compatible slots — use the slot card swap dropdown to pick one`,
+                    "warn",
+                  );
+                  return;
+                }
+                const target = owning || compatible[0];
+                try {
+                  await swap.mutateAsync({ name: target.name, model_id: model.id });
+                  window.__hal0Toast && window.__hal0Toast(
+                    `Loading ${model.longName || model.id} → slot ${target.name}`,
+                    "info",
+                  );
+                } catch (e) {
+                  window.__hal0Toast && window.__hal0Toast(
+                    `Load failed — ${e?.message || "see logs"}`,
+                    "err",
+                  );
+                }
+              }}
+            >{swap.isPending ? "Loading…" : "Load now"}</button>
             <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit options</button>
             <button className="btn danger sm" onClick={onDelete}>{Icons.unload} Delete</button>
           </>

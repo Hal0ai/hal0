@@ -586,7 +586,7 @@ a { color: inherit; text-decoration: none; }
   background: var(--fg-4);
 }
 .dot.ready { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-.dot.serving { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.5s ease-in-out infinite; }
+.dot.serving { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 1.2s ease-in-out infinite; }
 .dot.idle { background: var(--ok); opacity: 0.45; }
 .dot.loading { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
 .dot.error { background: var(--err); }
@@ -2610,9 +2610,26 @@ a { color: inherit; text-decoration: none; }
 .swap-pop-item .sz { color: var(--fg-3); font-size: 11px; }
 .swap-pop-item .fit { color: var(--ok); font-size: 10px; text-align: right; }
 .swap-pop-item .fit.no { color: var(--warn); }
-.swap-pop-item .swap-arrow { display: inline-flex; color: var(--fg-3); transition: color 0.12s ease; }
+.swap-pop-item .swap-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  padding: 2px;
+  margin: -2px;
+  color: var(--fg-3);
+  cursor: pointer;
+  border-radius: 3px;
+  transition: color 0.12s ease, background 0.12s ease;
+}
 .swap-pop-item:hover .swap-arrow { color: var(--ok); }
 .swap-pop-item.cur .swap-arrow { color: var(--ok); }
+.swap-pop-item .swap-arrow:hover { background: var(--ok-soft); color: var(--ok); }
+.swap-pop-item .swap-arrow:focus-visible {
+  outline: 2px solid var(--ok);
+  outline-offset: 1px;
+}
 
 /* ─── Variant filter chips (HF coords modal) ────────────────────── */
 .variant-row {
