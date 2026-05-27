@@ -14,10 +14,11 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "firstrun", "slots", "models", "hardware", "backends", "logs", "agent", "settings", "mcp"];
+const ROUTES = ["dashboard", "chat", "firstrun", "slots", "models", "backends", "logs", "agent", "settings", "mcp"];
 function parseRoute() {
-  const h = (window.location.hash || "#dashboard").replace(/^#/, "").split("?")[0];
-  const parts = h.split("/");
+  const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
+  const [path, qs] = raw.split("?");
+  const parts = path.split("/");
   let head = parts[0];
   let rest = parts.slice(1);
   // alias: #agents/mcp → mcp (keeps the prototype's flat route map intact)
@@ -26,13 +27,21 @@ function parseRoute() {
     rest = rest.slice(1);
   }
   const route = ROUTES.includes(head) ? head : "dashboard";
-  return { route, param: rest.join("/") || null };
+  const query = {};
+  if (qs) {
+    for (const kv of qs.split("&")) {
+      if (!kv) continue;
+      const [k, v = ""] = kv.split("=");
+      query[decodeURIComponent(k)] = decodeURIComponent(v);
+    }
+  }
+  return { route, param: rest.join("/") || null, query };
 }
 
 function App() {
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const { active: activeBanners } = useBanners();
-  const [{ route, param }, setRouteState] = useStateA(parseRoute());
+  const [{ route, param, query }, setRouteState] = useStateA(parseRoute());
   const [chatState, setChatState] = useStateA("active");
   const [persona, setPersona] = useStateA("primary");
   const [bellOpen, setBellOpen] = useStateA(false);
@@ -110,11 +119,17 @@ function App() {
             chatState={chatState}
             setChatState={setChatState}
             slots={HAL0_DATA.slots}
-            persona={persona}
-            setPersona={setPersona}
             onGo={go}
             showHero={tweaks.showHero && !heroDismissed}
             onDismissHero={() => setHeroDismissed(true)}
+          />
+        );
+      case "chat":
+        return (
+          <ChatView
+            slots={HAL0_DATA.slots}
+            persona={persona}
+            setPersona={setPersona}
             personaPlacement={tweaks.personaPlacement}
             composerState={composerState}
           />
@@ -140,7 +155,6 @@ function App() {
           />
         );
       case "models":   return <ModelsView />;
-      case "hardware": return <HardwareView />;
       case "backends": return <BackendsView />;
       case "logs":     return <LogsView />;
       case "agent":    return <AgentView />;
@@ -151,6 +165,26 @@ function App() {
   };
 
   const isFirstrun = route === "firstrun";
+  const isPopout = route === "chat" && query.popout === "1";
+
+  // Popout chat window: render only the ChatView, no chrome. Same origin
+  // + same hash routing so reload still works.
+  if (isPopout) {
+    return (
+      <div className="app popout">
+        <div className="main popout-main">
+          <ChatView
+            slots={HAL0_DATA.slots}
+            persona={persona}
+            setPersona={setPersona}
+            personaPlacement={tweaks.personaPlacement}
+            composerState={composerState}
+            popout
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>

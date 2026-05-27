@@ -4,35 +4,46 @@
 //   1. Replace the prototype's scripted bubbles + no-op `onSend` with a real
 //      round-trip against `/v1/chat/completions` (Lemonade-backed).
 //   2. Isolate the chat surface from the sibling-agent edits that touch
-//      MemoryMap / ThroughputCard / HealthCard. Two agents editing the same
-//      .jsx with `git add <file>` would sweep each other's hunks (see
-//      project memory `feedback_multi_agent_one_file`).
+//      MemoryMap / ThroughputCard / HealthCard.
 //
-// Phase B2 scope (locked to brief):
-//   - Send button posts the typed message + the conversation history with
-//     `model = persona slot's model_id` and renders the stream/response.
-//   - State persists across sends within the page session (`useState` here).
-//   - Errors render visibly as an error row.
-//   - All hardcoded dummy bubbles deleted from the production path.
+// Chat-page-overhaul: the chat surface now lives on its own `#chat` route.
+// `ChatView` is the page-level shell; `ChatActive` / `ChatEmpty` remain
+// available for the dashboard demo composer-state toggles (legacy, kept
+// so the Tweaks panel composer-state preview still has somewhere to live).
 //
-// Out of scope (deferred):
-//   - Tool calls / function-calling visualisation (the toolblock surface
-//     from the prototype is gone for now; the renderer handles assistant +
-//     user messages only).
-//   - Multimodal attachments, voice input (composer icons stay as toasts).
-//   - Persistence across reload (no localStorage yet).
-//   - Model picker in the composer (defer; persona pick still routes).
-//   - Streaming reasoning split (think/answer surface — separate scaffold).
-//
-// The dummy "scripted demo" was a prototype shell; the project memory
-// `hal0_dashboard_v2_rework_in_flight` flags this as the open follow-up
-// item (PR #200). The new ChatActive renders only the messages the user
-// has actually sent + received.
+// New affordances on this page:
+//   - Reasoning toggle (header pill) — gates `ReasoningBlock` rendering;
+//     persisted to localStorage `hal0.chat.showReasoning`, default OFF.
+//   - New chat — clears the conversation in-place via useChat().clear()
+//     instead of reloading the window.
+//   - Popout — opens a lean chat-only window at `#chat?popout=1`.
 
 import { streamChatCompletion } from '@/api/hooks/useChatCompletions'
 import { useSlots } from '@/api/hooks/useSlots'
 
 const { useState: useStateC, useRef: useRefC, useEffect: useEffectC, useMemo: useMemoC } = React
+
+const SHOW_REASONING_KEY = 'hal0.chat.showReasoning'
+
+function readShowReasoning() {
+  try {
+    return window.localStorage.getItem(SHOW_REASONING_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function useShowReasoning() {
+  const [on, setOn] = useStateC(() => readShowReasoning())
+  useEffectC(() => {
+    try {
+      window.localStorage.setItem(SHOW_REASONING_KEY, on ? '1' : '0')
+    } catch {
+      // ignore (Safari private mode etc.)
+    }
+  }, [on])
+  return [on, setOn]
+}
 
 // ─── Persona dropdown ───
 function PersonaPicker({ slots, current, onPick, open, onToggle, noTools }) {
@@ -110,9 +121,10 @@ function PersonaPicker({ slots, current, onPick, open, onToggle, noTools }) {
 
 // ─── Composer ───
 //
-// `state` is now derived from the live send/stream state when present,
-// falling back to the prop (for the Tweaks-panel demo states). When the
-// composer is actively sending we ignore the prop and use the real state.
+// Wrapped in a `.composer-input-card` so the typing surface has an
+// explicit border + focus-within accent ring. The persona row (when
+// `placement === 'above'`) and any state banner sit OUTSIDE the card so
+// they read as page chrome, not part of the input.
 function Composer({
   slots,
   persona,
@@ -190,8 +202,6 @@ function Composer({
     />
   )
 
-  // Submit on Enter (no shift). Empty drafts no-op (the button is also
-  // disabled, but the keybinding should match).
   const onKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -213,64 +223,66 @@ function Composer({
           </span>
         </div>
       )}
-      <div className="composer-bar" onClick={(e) => e.stopPropagation()}>
-        {placement !== 'above' && personaCtl}
-        <div
-          className={'composer-ic' + (noTools ? ' disabled' : '')}
-          title="Attach"
-          onClick={() =>
-            !noTools &&
-            window.__hal0Toast &&
-            window.__hal0Toast('Attachment picker — coming in next batch', 'info')
-          }
-        >
-          {Icons.attach}
-        </div>
-        <div
-          className={'composer-ic' + (noTools ? ' disabled' : '')}
-          title="Voice input"
-          onClick={() =>
-            !noTools &&
-            window.__hal0Toast &&
-            window.__hal0Toast('Voice input — coming in next batch', 'info')
-          }
-        >
-          {Icons.mic}
-        </div>
-        <div className="composer-input-wrap">
-          <textarea
-            className="composer-input"
-            placeholder={
-              isOffline ? 'lemond is offline — cannot send' : placeholder || `Ask ${cur?.name || 'hal0'}…`
+      <div className="composer-input-card" onClick={(e) => e.stopPropagation()}>
+        <div className="composer-bar">
+          {placement !== 'above' && personaCtl}
+          <div
+            className={'composer-ic' + (noTools ? ' disabled' : '')}
+            title="Attach"
+            onClick={() =>
+              !noTools &&
+              window.__hal0Toast &&
+              window.__hal0Toast('Attachment picker — coming in next batch', 'info')
             }
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={onKeyDown}
-            rows={1}
-            disabled={isOffline || isSending}
-          />
+          >
+            {Icons.attach}
+          </div>
+          <div
+            className={'composer-ic' + (noTools ? ' disabled' : '')}
+            title="Voice input"
+            onClick={() =>
+              !noTools &&
+              window.__hal0Toast &&
+              window.__hal0Toast('Voice input — coming in next batch', 'info')
+            }
+          >
+            {Icons.mic}
+          </div>
+          <div className="composer-input-wrap">
+            <textarea
+              className="composer-input"
+              placeholder={
+                isOffline ? 'lemond is offline — cannot send' : placeholder || `Ask ${cur?.name || 'hal0'}…`
+              }
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={onKeyDown}
+              rows={1}
+              disabled={isOffline || isSending}
+            />
+          </div>
+          {isStreaming ? (
+            <button
+              className="composer-stop"
+              onClick={() => {
+                if (onStop) onStop()
+                else window.__hal0Toast && window.__hal0Toast('Stopped stream', 'info')
+              }}
+            >
+              <span className="stop-sq" />
+              Stop
+            </button>
+          ) : (
+            <button
+              className="composer-send"
+              onClick={onSend}
+              disabled={isOffline || isSending || !draft.trim()}
+              aria-label="Send"
+            >
+              {isSending ? <span className="spinner-sm" /> : Icons.send}
+            </button>
+          )}
         </div>
-        {isStreaming ? (
-          <button
-            className="composer-stop"
-            onClick={() => {
-              if (onStop) onStop()
-              else window.__hal0Toast && window.__hal0Toast('Stopped stream', 'info')
-            }}
-          >
-            <span className="stop-sq" />
-            Stop
-          </button>
-        ) : (
-          <button
-            className="composer-send"
-            onClick={onSend}
-            disabled={isOffline || isSending || !draft.trim()}
-            aria-label="Send"
-          >
-            {isSending ? <span className="spinner-sm" /> : Icons.send}
-          </button>
-        )}
       </div>
       <div className="composer-meta mono">
         <span>
@@ -295,19 +307,6 @@ function Composer({
 }
 
 // ─── Shared chat hook ───
-//
-// Owns the conversation array + the in-flight send/stream lifecycle. Lifted
-// to a hook so ChatActive and ChatEmpty can share the same state machine
-// (the surface only differs in what it renders when `messages.length === 0`).
-//
-// On `send(text)`:
-//   1. Resolve the persona's slot → `model_id` (or `model`). If neither is
-//      present we surface an error message instead of hitting the wire.
-//   2. Append a user message and an empty assistant placeholder.
-//   3. Stream tokens into the placeholder's `content` (or, for short
-//      reasoning-only replies, into `reasoning`).
-//   4. On completion: replace the placeholder with the final assistant
-//      message. On error: replace the placeholder with an error row.
 function useChat(slots, persona) {
   const [messages, setMessages] = useStateC(() => [])
   const [pending, setPending] = useStateC(null) // 'sending' | 'streaming' | null
@@ -337,8 +336,6 @@ function useChat(slots, persona) {
       return
     }
 
-    // Build the request history from the current messages + the new user
-    // turn, filtering out any prior error rows (those are UI-only).
     const history = [
       ...messages
         .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -394,7 +391,6 @@ function useChat(slots, persona) {
       )
     } catch (err) {
       if (ac.signal.aborted) {
-        // User pressed Stop — keep whatever we streamed, mark non-streaming.
         setMessages((prev) =>
           prev.map((m) =>
             m.ts === placeholderTs ? { ...m, streaming: false, aborted: true } : m,
@@ -423,7 +419,13 @@ function useChat(slots, persona) {
     if (abortRef.current) abortRef.current.abort()
   }
 
-  return { messages, send, stop, pending, personaSlot }
+  const clear = () => {
+    if (abortRef.current) abortRef.current.abort()
+    setMessages([])
+    setPending(null)
+  }
+
+  return { messages, send, stop, clear, pending, personaSlot }
 }
 
 // ─── Message rendering ───
@@ -437,23 +439,9 @@ function fmtTime(ts) {
 }
 
 // ─── ReasoningBlock ───
-//
-// Renders the model's chain-of-thought ABOVE the answer in a greyed,
-// 3-line-clamped box with a "thinking ▾ / ▴" toggle.
-//
-// Auto-collapse behaviour (per design brief):
-//   - If reasoning streams in but no answer yet → block is auto-EXPANDED so
-//     the user knows the model is alive.
-//   - Once the answer starts streaming (or finishes) → block auto-COLLAPSES.
-//   - The auto-collapse only fires ONCE per message; if the user toggles
-//     manually after that, their choice sticks even if more deltas land.
 function ReasoningBlock({ text, autoExpand }) {
   const [expanded, setExpanded] = useStateC(autoExpand)
   const [userTouched, setUserTouched] = useStateC(false)
-  // Drive auto-collapse from `autoExpand`. While streaming + no answer
-  // yet, `autoExpand` is true → block stays open. When the answer starts
-  // streaming, the parent sets `autoExpand=false` → we auto-collapse,
-  // unless the user already clicked the toggle (their choice wins).
   useEffectC(() => {
     if (userTouched) return
     setExpanded(autoExpand)
@@ -477,10 +465,9 @@ function ReasoningBlock({ text, autoExpand }) {
   )
 }
 
-function MessageList({ messages }) {
+function MessageList({ messages, showReasoning }) {
   const scrollRef = useRefC(null)
   useEffectC(() => {
-    // Pin to bottom on new content. Cheap; ok for short sessions.
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
@@ -514,15 +501,9 @@ function MessageList({ messages }) {
             </div>
           )
         }
-        // assistant — reasoning (if any) renders ABOVE the answer, never inline.
         const hasReasoning = !!(m.reasoning && m.reasoning.length > 0)
         const hasAnswer = !!(m.content && m.content.length > 0)
-        // Auto-expand reasoning while the model is still thinking (streaming
-        // with no answer yet). Collapse as soon as the answer surface starts
-        // filling, or once the message is no longer streaming.
         const autoExpand = !!(m.streaming && hasReasoning && !hasAnswer)
-        // Bubble placeholder: dim ellipsis while we wait for any content at
-        // all (no reasoning + no answer yet on a streaming message).
         const showWaitingDots = m.streaming && !hasAnswer && !hasReasoning
         return (
           <div key={m.ts} className="msg">
@@ -533,7 +514,7 @@ function MessageList({ messages }) {
               {m.streaming ? <> · streaming…</> : null}
               {m.aborted ? <> · stopped</> : null}
             </div>
-            {hasReasoning && (
+            {showReasoning && hasReasoning && (
               <ReasoningBlock text={m.reasoning} autoExpand={autoExpand} />
             )}
             <div className="bubble">
@@ -542,9 +523,6 @@ function MessageList({ messages }) {
               ) : showWaitingDots ? (
                 '…'
               ) : m.streaming ? (
-                // Streaming + we already have reasoning above but the answer
-                // hasn't started — render a faint blinking caret so the
-                // bubble visibly exists.
                 <span className="bubble-caret" aria-hidden="true">▌</span>
               ) : m.reasoningOnly ? (
                 <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>
@@ -562,10 +540,6 @@ function MessageList({ messages }) {
 }
 
 // ─── Live composer-state derivation ───
-//
-// The Tweaks panel still drives a demo composer state for QA; merge it with
-// the live send/stream state so the real flow wins when the user is actually
-// sending.
 function derivedComposerState({ tweakState, pending, lemondOffline }) {
   if (lemondOffline) return 'offline'
   if (pending === 'streaming') return 'streaming'
@@ -573,69 +547,95 @@ function derivedComposerState({ tweakState, pending, lemondOffline }) {
   return tweakState || 'idle'
 }
 
-// ─── Chat view (active conversation) ───
-function ChatActive({ slots, persona, onPersona, placement, composerState }) {
+// ─── Reasoning toggle pill ───
+function ReasoningToggle({ on, onToggle }) {
+  return (
+    <button
+      type="button"
+      className={'reasoning-toggle' + (on ? ' on' : '')}
+      onClick={onToggle}
+      title={on ? 'Hide model reasoning' : 'Show model reasoning'}
+      aria-pressed={on}
+    >
+      <span>reasoning</span>
+      <span className="bullet">{on ? '●' : '○'}</span>
+    </button>
+  )
+}
+
+// ─── Chat header ───
+//
+// Shared header for the page-level ChatView and the legacy ChatActive /
+// ChatEmpty dashboard demo surfaces. `popout` hides the popout-window
+// button (you don't pop out of a popout) and the side-card chrome is
+// already absent in the popout shell.
+function ChatHeader({ title, pending, messageCount, showReasoning, onToggleReasoning, onNewChat, onPopout, popout }) {
+  return (
+    <div className="chat-head mono">
+      <span>{title}</span>
+      <span
+        className="state-pill"
+        style={
+          messageCount === 0
+            ? { background: 'var(--accent-soft)', color: 'var(--accent)', borderColor: 'var(--accent-line)' }
+            : undefined
+        }
+      >
+        <span className="dot" style={{ background: 'currentColor' }} />
+        {pending === 'streaming' ? 'streaming' : pending === 'sending' ? 'sending' : 'ready'}
+      </span>
+      {messageCount > 0 && (
+        <span className="ct" style={{ marginLeft: 8, color: 'var(--fg-5)' }}>
+          · {messageCount} message{messageCount === 1 ? '' : 's'}
+        </span>
+      )}
+      <ReasoningToggle on={showReasoning} onToggle={onToggleReasoning} />
+      <div className="right">
+        <span className="ic" title="New chat" onClick={onNewChat}>
+          {Icons.plus}
+        </span>
+        {!popout && onPopout && (
+          <span className="ic" title="Open in new window" onClick={onPopout}>
+            {Icons.ext}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── ChatPanel ───
+//
+// Source of truth for the chat surface. Picks between starter prompts
+// (when the conversation is empty) and the message list. Used by the
+// page-level ChatView; the legacy ChatActive / ChatEmpty wrappers
+// reuse it with their own header styling for the Tweaks-panel demo.
+function ChatPanel({
+  slots,
+  persona,
+  onPersona,
+  placement,
+  composerState,
+  popout,
+}) {
   const [draft, setDraft] = useStateC('')
-  const { messages, send, stop, pending } = useChat(slots, persona)
+  const [showReasoning, setShowReasoning] = useShowReasoning()
+  const { messages, send, stop, clear, pending } = useChat(slots, persona)
   const liveState = derivedComposerState({
     tweakState: composerState,
     pending,
     lemondOffline: composerState === 'offline',
   })
+  const hasMessages = messages.length > 0
   const onSend = async () => {
     const text = draft
     setDraft('')
     await send(text)
   }
-  return (
-    <div className="chat">
-      <div className="chat-head mono">
-        <span>Conversation</span>
-        <span className="state-pill">
-          <span className="dot" style={{ background: 'currentColor' }} />
-          {pending === 'streaming' ? 'streaming' : pending === 'sending' ? 'sending' : 'ready'}
-        </span>
-        <span className="ct" style={{ marginLeft: 8, color: 'var(--fg-5)' }}>
-          · {messages.length} message{messages.length === 1 ? '' : 's'}
-        </span>
-        <div className="right">
-          <span className="ic" title="New chat" onClick={() => window.location.reload()}>
-            {Icons.plus}
-          </span>
-          <span className="ic" title="Export (coming soon)">
-            {Icons.ext}
-          </span>
-        </div>
-      </div>
-      <MessageList messages={messages} />
-      <Composer
-        slots={slots}
-        persona={persona}
-        onPersona={onPersona}
-        draft={draft}
-        setDraft={setDraft}
-        onSend={onSend}
-        onStop={stop}
-        placement={placement}
-        state={liveState}
-      />
-    </div>
-  )
-}
-
-// ─── Empty chat ───
-//
-// "Empty" is now the actual zero-state — no scripted welcome bubbles. When
-// the user sends the first message we keep using this hook but the view
-// flips to showing the message list, then back to prompts if cleared.
-function ChatEmpty({ slots, persona, onPersona, placement, composerState }) {
-  const [draft, setDraft] = useStateC('')
-  const { messages, send, stop, pending } = useChat(slots, persona)
-  const liveState = derivedComposerState({
-    tweakState: composerState,
-    pending,
-    lemondOffline: composerState === 'offline',
-  })
+  const openPopout = () => {
+    const url = window.location.origin + window.location.pathname + '#chat?popout=1'
+    window.open(url, 'hal0-chat-popout', 'popup=yes,width=480,height=760')
+  }
   const prompts = [
     'Refactor a file in this repo',
     'Generate a hero image',
@@ -643,35 +643,20 @@ function ChatEmpty({ slots, persona, onPersona, placement, composerState }) {
     'Embed and rerank this passage',
     'What can you do?',
   ]
-  const hasMessages = messages.length > 0
-  const onSend = async () => {
-    const text = draft
-    setDraft('')
-    await send(text)
-  }
   return (
-    <div className="chat">
-      <div className="chat-head mono">
-        <span>{hasMessages ? 'Conversation' : 'New conversation'}</span>
-        <span
-          className="state-pill"
-          style={{
-            background: 'var(--accent-soft)',
-            color: 'var(--accent)',
-            borderColor: 'var(--accent-line)',
-          }}
-        >
-          <span className="dot" style={{ background: 'currentColor' }} />
-          {pending === 'streaming' ? 'streaming' : pending === 'sending' ? 'sending' : 'ready'}
-        </span>
-        <div className="right">
-          <span className="ic" title="History (coming soon)">
-            {Icons.logs}
-          </span>
-        </div>
-      </div>
+    <div className={'chat' + (popout ? ' chat-popout' : '')}>
+      <ChatHeader
+        title={hasMessages ? 'Conversation' : 'New conversation'}
+        pending={pending}
+        messageCount={messages.length}
+        showReasoning={showReasoning}
+        onToggleReasoning={() => setShowReasoning((v) => !v)}
+        onNewChat={clear}
+        onPopout={openPopout}
+        popout={popout}
+      />
       {hasMessages ? (
-        <MessageList messages={messages} />
+        <MessageList messages={messages} showReasoning={showReasoning} />
       ) : (
         <div className="empty-chat">
           <div className="glyph mono">
@@ -706,7 +691,7 @@ function ChatEmpty({ slots, persona, onPersona, placement, composerState }) {
         setDraft={setDraft}
         onSend={onSend}
         onStop={stop}
-        placeholder="Type a message…"
+        placeholder={hasMessages ? undefined : 'Type a message…'}
         placement={placement}
         state={liveState}
       />
@@ -714,4 +699,53 @@ function ChatEmpty({ slots, persona, onPersona, placement, composerState }) {
   )
 }
 
-Object.assign(window, { ChatActive, ChatEmpty, Composer, PersonaPicker })
+// ─── Page-level chat view ───
+function ChatView({ slots: slotsProp, persona, setPersona, personaPlacement, composerState, popout }) {
+  const slotsQuery = useSlots()
+  const slots = (slotsQuery.data && slotsQuery.data.length > 0) ? slotsQuery.data : slotsProp
+  return (
+    <div className={'view chat-view' + (popout ? ' chat-view-popout' : '')}>
+      <ChatPanel
+        slots={slots}
+        persona={persona}
+        onPersona={setPersona}
+        placement={personaPlacement}
+        composerState={composerState}
+        popout={popout}
+      />
+    </div>
+  )
+}
+
+// ─── Legacy ChatActive / ChatEmpty (Tweaks-panel composer-state preview) ───
+//
+// The dashboard previously hosted the chat surface and exposed three
+// states (empty / active / skip) through the Tweaks panel. Chat now
+// lives at /chat; these wrappers stay so anything still wired to
+// ChatActive / ChatEmpty (e.g. external demos, screenshot harnesses)
+// keeps rendering. New code should use `<ChatView />`.
+function ChatActive({ slots, persona, onPersona, placement, composerState }) {
+  return (
+    <ChatPanel
+      slots={slots}
+      persona={persona}
+      onPersona={onPersona}
+      placement={placement}
+      composerState={composerState}
+    />
+  )
+}
+
+function ChatEmpty({ slots, persona, onPersona, placement, composerState }) {
+  return (
+    <ChatPanel
+      slots={slots}
+      persona={persona}
+      onPersona={onPersona}
+      placement={placement}
+      composerState={composerState}
+    />
+  )
+}
+
+Object.assign(window, { ChatView, ChatPanel, ChatActive, ChatEmpty, Composer, PersonaPicker })

@@ -80,16 +80,17 @@ const Icons = {
   more:      <Icon><circle cx="3" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="13" cy="8" r="1" fill="currentColor" stroke="none"/></Icon>,
   cpu:       <Icon><rect x="4" y="4" width="8" height="8" rx="0.5"/><path d="M4 6h-1M4 10h-1M13 6h-1M13 10h-1M6 4v-1M10 4v-1M6 13v-1M10 13v-1"/><rect x="6.5" y="6.5" width="3" height="3"/></Icon>,
   flame:     <Icon d="M8 13c-3 0-4-2-4-4 0-2 2-3 2-5 1 2 5 2 5 6 0 2-1 3-3 3z"/>,
+  chat:      <Icon><path d="M2.5 4.5a1.5 1.5 0 0 1 1.5-1.5h8a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.5V11H4a1.5 1.5 0 0 1-1.5-1.5z"/></Icon>,
 };
 
 // ─── TopBar ───
 function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0 }) {
   const labels = {
     dashboard: ["Overview", "Dashboard"],
+    chat:      ["Workspace", "Chat"],
     firstrun:  ["Setup",   "FirstRun"],
     slots:     ["Lifecycle", "Slots"],
     models:    ["Catalog", "Models"],
-    hardware:  ["System", "Hardware"],
     backends:  ["Runtime", "Backends"],
     logs:      ["Runtime", "Logs"],
     agent:     ["Tools",  "Agent"],
@@ -135,9 +136,9 @@ function Sidebar({ route, onGo }) {
   const modelCount  = modelsQuery.data?.length ?? 0;
   const items = [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
+    { id: "chat",      label: "Chat",      icon: Icons.chat },
     { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount },
     { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
-    { id: "hardware",  label: "Hardware",  icon: Icons.hardware },
     { id: "backends",  label: "Backends",  icon: Icons.backends },
     { id: "logs",      label: "Logs",      icon: Icons.logs },
     { id: "agent",     label: "Agent",     icon: Icons.agent },
@@ -500,9 +501,9 @@ if (typeof document !== "undefined" && !document.getElementById("hal0-modal-css"
 function BottomTabs({ route, onGo }) {
   const tabs = [
     { id: "dashboard", label: "Home",   icon: Icons.dashboard },
+    { id: "chat",      label: "Chat",   icon: Icons.chat },
     { id: "slots",     label: "Slots",  icon: Icons.slots },
     { id: "models",    label: "Models", icon: Icons.models },
-    { id: "logs",      label: "Logs",   icon: Icons.logs },
     { id: "settings",  label: "More",   icon: Icons.settings },
   ];
   return (
