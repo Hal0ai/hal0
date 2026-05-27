@@ -2,8 +2,21 @@
  * slot-indicator — exercises the `slotIndicator` mapping helper exported
  * from ui/src/dash/slots.jsx onto window. Single source of truth for the
  * status-dot colour/tooltip; this spec pins the state → dot.cls table
- * so future tweaks can't silently regress (e.g. flipping idle to green
- * or dropping the 1h "recently live" threshold).
+ * so future tweaks can't silently regress.
+ *
+ * Contract (2026-05-27 user spec):
+ *   error                  → red
+ *   serving + fresh        → green pulse (GREEN ONLY during in-flight)
+ *   serving + last>1h      → yellow (stuck-request guard)
+ *   ready / lemo=loaded    → yellow (loaded, awaiting prompt)
+ *   idle / lemo=idle       → yellow (evicted, hot-reload on next request)
+ *   warming/starting/…     → amber pulse
+ *   !enabled / disabled    → grey "off"
+ *   offline                → grey
+ *
+ * The pre-2026-05-27 "recent (green) vs stale (yellow)" distinction
+ * for READY slots is gone: GREEN now signals only active serving.
+ * RECENTLY_LIVE_MS is repurposed as the hung-SERVING threshold.
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -19,15 +32,17 @@ test.describe('slotIndicator helper', () => {
     await page.waitForFunction(() => typeof (window as any).slotIndicator === 'function')
   })
 
-  test('ready + last_used within 1h → recent (green)', async ({ page }) => {
+  test('ready + last_used within 1h → stale (yellow, "ready")', async ({ page }) => {
+    // Per 2026-05-27 spec: READY is "loaded and waiting" → yellow, not
+    // green. Green is reserved for state=serving (in-flight only).
     const ind = await page.evaluate<Indicator>(() => {
       const now = Date.now()
       const slot = { state: 'ready', last_used_at: (now - 12 * 60 * 1000) / 1000, model: 'foo' }
       return (window as any).slotIndicator(slot, now)
     })
-    expect(ind.cls).toBe('recent')
+    expect(ind.cls).toBe('stale')
     expect(ind.label).toBe('ready')
-    expect(ind.tooltip).toMatch(/Loaded, last used 12 min ago/)
+    expect(ind.tooltip).toMatch(/Loaded — last used 12 min ago/)
   })
 
   test('ready + last_used >1h ago → stale (yellow)', async ({ page }) => {
@@ -38,16 +53,16 @@ test.describe('slotIndicator helper', () => {
       return (window as any).slotIndicator(slot, now)
     })
     expect(ind.cls).toBe('stale')
-    expect(ind.tooltip).toMatch(/Loaded, idle \(1h ago\)/)
+    expect(ind.tooltip).toMatch(/Loaded — last used 1h ago/)
   })
 
-  test('ready + last_used null → stale (yellow), tooltip notes no requests', async ({ page }) => {
+  test('ready + last_used null → stale (yellow), tooltip notes model in VRAM', async ({ page }) => {
     const ind = await page.evaluate<Indicator>(() => {
       const slot = { state: 'ready', last_used_at: null }
       return (window as any).slotIndicator(slot, Date.now())
     })
     expect(ind.cls).toBe('stale')
-    expect(ind.tooltip).toMatch(/no requests since hal0-api started/)
+    expect(ind.tooltip).toMatch(/Loaded — model in VRAM/)
   })
 
   test('warming → warming (pulsing amber)', async ({ page }) => {
@@ -99,21 +114,89 @@ test.describe('slotIndicator helper', () => {
     expect(ms).toBe(RECENTLY_LIVE_MS)
   })
 
-  test('boundary: exactly 1h ago is still recent (≤, not <)', async ({ page }) => {
+  // READY → yellow regardless of last_used_at (the 1h threshold no longer
+  // gates a colour transition for READY; it gates the in-flight stuck
+  // guard for SERVING only). Both boundaries below map to 'stale'.
+  test('boundary: exactly 1h ago READY is stale (yellow)', async ({ page }) => {
     const cls = await page.evaluate(() => {
       const now = Date.now()
       const slot = { state: 'ready', last_used_at: (now - 60 * 60 * 1000) / 1000 }
       return (window as any).slotIndicator(slot, now).cls
     })
-    expect(cls).toBe('recent')
+    expect(cls).toBe('stale')
   })
 
-  test('boundary: 1h + 1s ago becomes stale', async ({ page }) => {
+  test('boundary: 1h + 1s ago READY is still stale (yellow)', async ({ page }) => {
     const cls = await page.evaluate(() => {
       const now = Date.now()
       const slot = { state: 'ready', last_used_at: (now - 60 * 60 * 1000 - 1000) / 1000 }
       return (window as any).slotIndicator(slot, now).cls
     })
     expect(cls).toBe('stale')
+  })
+
+  test('serving + fresh last_used → serving (green pulse)', async ({ page }) => {
+    const ind = await page.evaluate<Indicator>(() => {
+      const now = Date.now()
+      const slot = {
+        state: 'serving',
+        last_used_at: (now - 5 * 1000) / 1000,
+        model: 'qwen3.5-4b-q4kxl',
+      }
+      return (window as any).slotIndicator(slot, now)
+    })
+    expect(ind.cls).toBe('serving')
+    expect(ind.label).toBe('serving')
+    expect(ind.tooltip).toMatch(/Serving qwen3.5-4b-q4kxl/)
+  })
+
+  test('serving + last_used >1h ago → stale (stuck-request guard)', async ({ page }) => {
+    const ind = await page.evaluate<Indicator>(() => {
+      const now = Date.now()
+      const slot = {
+        state: 'serving',
+        last_used_at: (now - 90 * 60 * 1000) / 1000,
+        model: 'qwen3.5-4b-q4kxl',
+      }
+      return (window as any).slotIndicator(slot, now)
+    })
+    expect(ind.cls).toBe('stale')
+    expect(ind.label).toBe('stuck?')
+    expect(ind.tooltip).toMatch(/may be stuck/)
+  })
+
+  test('!enabled → offline (grey "off")', async ({ page }) => {
+    const ind = await page.evaluate<Indicator>(() => {
+      return (window as any).slotIndicator({ state: 'ready', enabled: false })
+    })
+    expect(ind.cls).toBe('offline')
+    expect(ind.label).toBe('off')
+  })
+
+  test('lemonade_state=loaded → stale (yellow)', async ({ page }) => {
+    // Lemonade enrichment override: even if slot.state is offline,
+    // lemo=loaded means the model is in VRAM → yellow.
+    const ind = await page.evaluate<Indicator>(() => {
+      return (window as any).slotIndicator({
+        state: 'offline',
+        lemonade_state: 'loaded',
+        model: 'foo',
+      })
+    })
+    expect(ind.cls).toBe('stale')
+    expect(ind.label).toBe('ready')
+  })
+
+  test('lemonade_state=idle → stale (yellow, evicted)', async ({ page }) => {
+    const ind = await page.evaluate<Indicator>(() => {
+      return (window as any).slotIndicator({
+        state: 'offline',
+        lemonade_state: 'idle',
+        model: 'foo',
+      })
+    })
+    expect(ind.cls).toBe('stale')
+    expect(ind.label).toBe('idle')
+    expect(ind.tooltip).toMatch(/hot-reload on next request/)
   })
 })
