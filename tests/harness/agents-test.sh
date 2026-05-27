@@ -36,11 +36,25 @@
 #       context_link phase records HERMES.md + AGENTS.md under
 #       $HAL0_HOME/etc/hal0/ → assert both files are gone.
 #
-# Driver mocking: scenarios #346 patch the manager's _driver_for() to
-# return a stub so we don't need the Hermes upstream installed on the
-# harness host. The #348 + #349 scenarios DO NOT stub — they instantiate
-# HermesDriver directly because the cleanup paths under test live in
-# that driver, not the manager.
+#   agents-memory-teardown-clean (#350)
+#       Spins up an in-process HTTP stub that mimics
+#       /api/memory/{search,delete} + the lifecycle DELETE; primes the
+#       search to return one hermes-agent row and the delete to wipe
+#       it; runs the CLI's _uninstall_hermes_memory + verifies the
+#       structured outcome reports ``deleted`` with no stderr warning.
+#
+#   agents-memory-teardown-unreachable (#350)
+#       Points HAL0_API_URL at a closed port → CLI's
+#       _uninstall_hermes_memory returns ``unreachable`` and the
+#       wrapper writes a yellow warning to stderr while the typer
+#       command still exits 0 (idempotent CLI contract).
+#
+# Driver mocking: the #346 scenarios patch the manager's _driver_for()
+# to return a stub so we don't need the Hermes upstream installed on
+# the harness host. The #348 + #349 scenarios DO NOT stub — they
+# instantiate HermesDriver directly because the cleanup paths under
+# test live in that driver, not the manager. The #350 scenarios stub
+# the memory HTTP API in-process and exercise the real CLI helpers.
 #
 # Exit: 0 if both rows pass, non-zero (count of fails) otherwise.
 
@@ -83,6 +97,10 @@ if ! "${PY_BIN}" -c 'import hal0.agents.manager' >/dev/null 2>&1; then
         "hal0 package not importable from ${PY_BIN}; unit tests in tests/agents/test_manager.py cover the same contract"
     add_row "agents-roundtrip-no-orphans" "deferred" "0" \
         "hal0 package not importable from ${PY_BIN}; unit tests cover the same contract"
+    add_row "agents-memory-teardown-clean" "deferred" "0" \
+        "hal0 package not importable from ${PY_BIN}; unit tests in tests/cli/test_agent_uninstall_memory.py cover the same contract"
+    add_row "agents-memory-teardown-unreachable" "deferred" "0" \
+        "hal0 package not importable from ${PY_BIN}; unit tests cover the same contract"
     harness_write_report || true
     exit 0
 fi
@@ -94,7 +112,7 @@ log_step "Agent uninstall regression rows (#346) — python=${PY_BIN}"
 # failure (the row's detail captures the diagnostic).
 DRIVER="${SCRIPT_DIR}/reports/agents-driver.py"
 cat >"${DRIVER}" <<'PY'
-"""δ-harness driver for #346 + #348 + #349. See tests/harness/agents-test.sh."""
+"""δ-harness driver for #346 + #348 + #349 + #350. See tests/harness/agents-test.sh."""
 
 from __future__ import annotations
 
@@ -323,6 +341,165 @@ def scenario_hermes_context_link_teardown(prefix: Path) -> None:
         )
 
 
+def _start_stub_memory_server(state: dict) -> tuple[object, str]:
+    """Spin up an in-process HTTP server stubbing /api/memory/{search,delete}.
+
+    Returns (server, base_url). ``state`` is a mutable dict whose
+    ``items`` list models the dataset. The handler also serves a HEAD
+    on /api/status so _api_unreachable() doesn't bail before the CLI
+    even hits memory.
+    """
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):  # noqa: D401 — silence noisy log
+            return
+
+        def do_HEAD(self):  # noqa: N802 — http.server contract
+            if self.path == "/api/status":
+                self.send_response(200)
+                self.end_headers()
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):  # noqa: N802 — http.server contract
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length else b"{}"
+            try:
+                payload = _json.loads(body.decode("utf-8") or "{}")
+            except _json.JSONDecodeError:
+                payload = {}
+            if self.path == "/api/memory/search":
+                rsp = {"items": list(state["items"])}
+                self._json(200, rsp)
+            elif self.path == "/api/memory/delete":
+                ids = set(payload.get("ids") or [])
+                before = len(state["items"])
+                state["items"] = [
+                    it for it in state["items"] if it.get("id") not in ids
+                ]
+                self._json(200, {"deleted": before - len(state["items"])})
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_DELETE(self):  # noqa: N802 — lifecycle DELETE
+            if self.path.startswith("/api/agents/"):
+                self._json(200, {"status": "uninstalled"})
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def _json(self, status: int, body: dict) -> None:
+            data = _json.dumps(body).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[0], server.server_address[1]
+    return server, f"http://{host}:{port}"
+
+
+def scenario_memory_teardown_clean(prefix: Path) -> None:
+    """Stub the memory API with one hermes row → CLI should report deleted, silent."""
+    import os as _os
+
+    state = {
+        "items": [
+            {
+                "id": "card-001",
+                "metadata": {"agent_id": "hermes-agent"},
+            }
+        ]
+    }
+    server, base = _start_stub_memory_server(state)
+    try:
+        _os.environ["HAL0_API_URL"] = base
+        # Late import so the env var is picked up by _api_base().
+        from hal0.cli import agent_commands
+
+        outcome = agent_commands._uninstall_hermes_memory()
+        if outcome.outcome != "deleted":
+            raise AssertionError(
+                f"expected outcome=deleted, got {outcome.outcome!r} "
+                f"(deleted={outcome.deleted_count}, leftover={outcome.leftover_count})"
+            )
+        if state["items"]:
+            raise AssertionError(
+                f"stub dataset still has {len(state['items'])} row(s) "
+                f"matching agent_id=hermes-agent after teardown"
+            )
+        # The wrapper must NOT print a warning for the deleted outcome.
+        import io
+        from contextlib import redirect_stderr
+
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            agent_commands._warn_memory_outcome(outcome)
+        stderr_text = buf.getvalue()
+        if "warning" in stderr_text.lower():
+            raise AssertionError(
+                f"deleted outcome produced an unexpected warning: {stderr_text!r}"
+            )
+    finally:
+        server.shutdown()
+        _os.environ.pop("HAL0_API_URL", None)
+
+
+def scenario_memory_teardown_unreachable(prefix: Path) -> None:
+    """Point at a closed port → outcome=unreachable, warning hits stderr, exit-0 semantics intact."""
+    import os as _os
+    import socket as _socket
+
+    # Pick an ephemeral free port, then close it so the next connect attempt
+    # is guaranteed to fail (refused) without races against other harness rows.
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    closed_port = sock.getsockname()[1]
+    sock.close()
+
+    _os.environ["HAL0_API_URL"] = f"http://127.0.0.1:{closed_port}"
+    try:
+        from hal0.cli import agent_commands
+
+        outcome = agent_commands._uninstall_hermes_memory()
+        if outcome.outcome != "unreachable":
+            raise AssertionError(
+                f"expected outcome=unreachable, got {outcome.outcome!r}"
+            )
+        if outcome.leftover_count is not None:
+            raise AssertionError(
+                f"unreachable outcome must report leftover_count=None, got {outcome.leftover_count!r}"
+            )
+
+        # The wrapper must emit a yellow warning naming the URL.
+        import io
+        from contextlib import redirect_stderr
+
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            agent_commands._warn_memory_outcome(outcome)
+        stderr_text = buf.getvalue()
+        if "warning" not in stderr_text.lower():
+            raise AssertionError(
+                f"unreachable outcome failed to surface a warning to stderr: {stderr_text!r}"
+            )
+        if f"127.0.0.1:{closed_port}" not in stderr_text:
+            raise AssertionError(
+                f"warning text missing target URL ({closed_port}): {stderr_text!r}"
+            )
+    finally:
+        _os.environ.pop("HAL0_API_URL", None)
+
+
 def main(argv: list[str]) -> int:
     scenario_name = argv[1]
     prefix = Path(argv[2])
@@ -339,6 +516,10 @@ def main(argv: list[str]) -> int:
             scenario_hermes_venv_teardown(prefix)
         elif scenario_name == "hermes-context-link-teardown":
             scenario_hermes_context_link_teardown(prefix)
+        elif scenario_name == "memory-teardown-clean":
+            scenario_memory_teardown_clean(prefix)
+        elif scenario_name == "memory-teardown-unreachable":
+            scenario_memory_teardown_unreachable(prefix)
         else:
             print(f"unknown scenario: {scenario_name}", file=sys.stderr)
             return 2
@@ -371,10 +552,12 @@ run_scenario() {
     fi
 }
 
-run_scenario "agents-install-corrupt-uninstall"   "install-corrupt-uninstall"
-run_scenario "agents-roundtrip-no-orphans"        "roundtrip-no-orphans"
-run_scenario "agents-hermes-venv-teardown"        "hermes-venv-teardown"
+run_scenario "agents-install-corrupt-uninstall"    "install-corrupt-uninstall"
+run_scenario "agents-roundtrip-no-orphans"         "roundtrip-no-orphans"
+run_scenario "agents-hermes-venv-teardown"         "hermes-venv-teardown"
 run_scenario "agents-hermes-context-link-teardown" "hermes-context-link-teardown"
+run_scenario "agents-memory-teardown-clean"        "memory-teardown-clean"
+run_scenario "agents-memory-teardown-unreachable"  "memory-teardown-unreachable"
 
 log_step "Write report"
 harness_write_report || true

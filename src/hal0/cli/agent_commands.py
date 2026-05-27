@@ -9,8 +9,9 @@ ADR-0004 §5 "Pending items").
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import typer
 from rich.console import Console
@@ -26,6 +27,7 @@ from hal0.cli._shared import (
     api_post,
     die,
 )
+from hal0.cli._shared import _console as _stderr_console
 from hal0.mcp.approval_queue import _PRIMARY_TARGET_ARG
 
 app = typer.Typer(help="Manage bundled agents (Phase 8 — pi-coder / Hermes-Agent).")
@@ -97,7 +99,8 @@ def agent_uninstall(
     # memory call doesn't leave half-state. Skipped on --keep-memory
     # (per #246 + ADR-0011 §6 — re-install reuses the existing card).
     if name == "hermes" and not keep_memory:
-        _uninstall_hermes_memory()
+        outcome = _uninstall_hermes_memory()
+        _warn_memory_outcome(outcome)
 
     try:
         result = api_delete(f"/api/agents/{name}")
@@ -113,12 +116,55 @@ def agent_uninstall(
             console.print("[dim](memory preserved — re-install will reuse it)[/dim]")
 
 
-def _uninstall_hermes_memory() -> None:
+# Outcomes of ``_uninstall_hermes_memory``. See #350 — the bare-swallowed
+# exception used to mask cases where the delete reported OK but the dataset
+# still held leftover rows (observed 2026-05-26: 9 hermes-agent identity
+# cards survived a default uninstall, operator got no signal). The four
+# cases below let the CLI distinguish "all clear" from "memory was down"
+# from "delete lied" without changing the idempotent exit-0 contract.
+MemoryOutcomeStatus = Literal["deleted", "not_found", "unreachable", "leftover"]
+
+
+@dataclass(frozen=True)
+class MemoryUninstallOutcome:
+    """Structured result from ``_uninstall_hermes_memory``.
+
+    Attributes
+    ----------
+    outcome
+        One of ``deleted`` / ``not_found`` / ``unreachable`` / ``leftover``.
+        ``deleted`` = delete request succeeded AND the post-verify search
+        found zero surviving rows. ``not_found`` = the pre-delete search
+        already saw zero matching rows (true no-op). ``unreachable`` =
+        the memory API couldn't be reached on either the search or the
+        delete call. ``leftover`` = delete returned OK but a post-delete
+        verify search still saw matching rows (the bug observed in #350).
+    deleted_count
+        Number of rows the delete call was issued against. Zero for
+        ``not_found`` / ``unreachable`` (we never got to the delete).
+    leftover_count
+        Rows the post-delete verify search saw matching
+        ``agent_id=hermes-agent``. ``None`` when the verify call itself
+        couldn't run (transport error, unparseable response, etc.) —
+        distinct from a confirmed zero.
+    url
+        The hal0 API base we tried (handy in stderr warnings so the
+        operator knows what endpoint to check).
+    """
+
+    outcome: MemoryOutcomeStatus
+    deleted_count: int
+    leftover_count: int | None
+    url: str
+
+
+def _uninstall_hermes_memory() -> MemoryUninstallOutcome:
     """Best-effort: delete the hermes identity card from the `agents` dataset.
 
-    Failure is silent — the agent surface tear-down proceeds regardless
-    (memory unreachable shouldn't strand the operator with a half-uninstalled
-    agent).
+    Failure is tolerated (memory unreachable shouldn't strand the operator
+    with a half-uninstalled agent — same contract as before #350), but
+    surfaces the outcome to the caller so the CLI can warn on unreachable
+    or leftover-row cases. The CLI always exits 0 regardless of outcome.
     """
     import json as _json
     import urllib.error
@@ -129,35 +175,50 @@ def _uninstall_hermes_memory() -> None:
     # semantics: failure is tolerated (memory unreachable shouldn't
     # strand the operator with a half-uninstalled agent).
     url = _api_base()
-    search_body = _json.dumps(
-        {
-            "query": "hermes-agent",
-            "tags": ["agent-identity"],
-            "dataset": "agents",
-            "limit": 50,
-        }
-    ).encode("utf-8")
     headers = {"Content-Type": "application/json", "X-hal0-Agent": "hermes-agent"}
-    req = urllib.request.Request(
-        f"{url}/api/memory/search", data=search_body, headers=headers, method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, _json.JSONDecodeError):
-        return
-    if not isinstance(data, dict):
-        return
-    items = data.get("items") or []
-    ids: list[str] = []
-    for it in items if isinstance(items, list) else []:
-        if not isinstance(it, dict):
-            continue
-        md = it.get("metadata") or {}
-        if md.get("agent_id") == "hermes-agent" and it.get("id"):
-            ids.append(it["id"])
+
+    def _search_ids() -> list[str] | None:
+        """Return matching ids, or ``None`` if the search couldn't run."""
+        search_body = _json.dumps(
+            {
+                "query": "hermes-agent",
+                "tags": ["agent-identity"],
+                "dataset": "agents",
+                "limit": 50,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{url}/api/memory/search", data=search_body, headers=headers, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, _json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        items = data.get("items") or []
+        ids: list[str] = []
+        for it in items if isinstance(items, list) else []:
+            if not isinstance(it, dict):
+                continue
+            md = it.get("metadata") or {}
+            if md.get("agent_id") == "hermes-agent" and it.get("id"):
+                ids.append(it["id"])
+        return ids
+
+    ids = _search_ids()
+    if ids is None:
+        return MemoryUninstallOutcome(
+            outcome="unreachable", deleted_count=0, leftover_count=None, url=url
+        )
     if not ids:
-        return
+        # Pre-delete search saw zero — true no-op. Skip the verify
+        # round-trip since there's nothing to verify.
+        return MemoryUninstallOutcome(
+            outcome="not_found", deleted_count=0, leftover_count=0, url=url
+        )
+
     del_body = _json.dumps({"ids": ids}).encode("utf-8")
     req2 = urllib.request.Request(
         f"{url}/api/memory/delete", data=del_body, headers=headers, method="POST"
@@ -166,7 +227,57 @@ def _uninstall_hermes_memory() -> None:
         with urllib.request.urlopen(req2, timeout=5.0):
             pass
     except (urllib.error.URLError, OSError):
-        return
+        return MemoryUninstallOutcome(
+            outcome="unreachable", deleted_count=len(ids), leftover_count=None, url=url
+        )
+
+    # Post-delete verify: the 2026-05-26 incident logged in #350 had the
+    # delete return 200 but leave 9 rows in place. Re-run the search and
+    # surface the gap if rows survive.
+    verify_ids = _search_ids()
+    if verify_ids is None:
+        # Delete returned OK but verify couldn't run. Don't escalate to
+        # ``leftover`` — we have no evidence either way; treat as silent
+        # success (best-effort contract preserved).
+        return MemoryUninstallOutcome(
+            outcome="deleted", deleted_count=len(ids), leftover_count=None, url=url
+        )
+    if verify_ids:
+        return MemoryUninstallOutcome(
+            outcome="leftover",
+            deleted_count=len(ids),
+            leftover_count=len(verify_ids),
+            url=url,
+        )
+    return MemoryUninstallOutcome(
+        outcome="deleted", deleted_count=len(ids), leftover_count=0, url=url
+    )
+
+
+def _warn_memory_outcome(outcome: MemoryUninstallOutcome) -> None:
+    """Surface the two failure-ish outcomes as yellow stderr warnings.
+
+    ``deleted`` / ``not_found`` stay silent (the happy path); only the
+    two cases that mean "memory teardown didn't complete cleanly" warn.
+    The CLI's exit code is unaffected — operator-facing signal only.
+    """
+    if outcome.outcome == "unreachable":
+        _stderr_console.print(
+            f"[yellow]warning[/yellow]: memory teardown skipped — "
+            f"hal0 memory API unreachable at {outcome.url}. "
+            "Re-run uninstall once the daemon is back, or use "
+            "[bold]hal0 agent uninstall hermes --keep-memory[/bold] "
+            "if this is intentional."
+        )
+    elif outcome.outcome == "leftover":
+        leftover = outcome.leftover_count if outcome.leftover_count is not None else "?"
+        _stderr_console.print(
+            f"[yellow]warning[/yellow]: memory teardown incomplete — "
+            f"{leftover} hermes-agent row(s) still in the [bold]agents[/bold] "
+            "dataset after delete. Inspect with "
+            "[bold]hal0 agent peers[/bold] and clean up by id via "
+            "[bold]/api/memory/delete[/bold]."
+        )
 
 
 @app.command("list")
