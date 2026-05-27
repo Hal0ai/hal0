@@ -137,6 +137,7 @@ function App() {
             slotVariant={tweaks.slotVariant}
             npuVariant={tweaks.npuVariant}
             slotParam={param}
+            onGo={go}
           />
         );
       case "models":   return <ModelsView />;

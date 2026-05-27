@@ -534,7 +534,7 @@ function NpuReactor({ slots }) {
 }
 
 // ─── Slots view ───
-function SlotsView({ slotVariant, npuVariant, slotParam }) {
+function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
   const slotsQuery = useSlots();
   // Single source of truth: the hook. The Playwright apiMock fixture
   // fulfils /api/slots so mock-mode coverage is symmetric with live runs;
@@ -657,6 +657,11 @@ function SlotsView({ slotVariant, npuVariant, slotParam }) {
     />
   );
 
+  // `onGo` may be omitted (some legacy call sites); fall through to hash
+  // routing so the snapshot row clicks still navigate. Keeps the sidebar
+  // working in tests/storybook-y harnesses that mount SlotsView directly.
+  const goTo = onGo || ((r) => { window.location.hash = "#" + r; });
+
   // Skip-path layout: render six seeded empty cards under their default groups.
   if (skipPath) {
     const seededByGroup = {
@@ -676,30 +681,39 @@ function SlotsView({ slotVariant, npuVariant, slotParam }) {
           <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
         </div>
 
-        {["chat", "embed", "voice", "img"].map(g => {
-          const cards = seededByGroup[g];
-          if (!cards.length) return null;
-          return (
-            <section key={g} style={{marginBottom: 24}}>
-              <div className="sec">
-                <h2>{g[0].toUpperCase() + g.slice(1)}<span className="ct mono">{cards.length}</span></h2>
-                <div className="rule" />
-              </div>
-              <div className="slots-grid">
-                {cards.map(c => (
-                  <EmptySlotCard
-                    key={c.name}
-                    name={c.name}
-                    type={c.type}
-                    device={c.device}
-                    group={c.group}
-                    onConfigure={() => openCreatePrefilled({ name: c.name, type: c.type, device: c.device, group: c.group })}
-                  />
-                ))}
-              </div>
-            </section>
-          );
-        })}
+        <div className="dash">
+          <div className="dash-main">
+            {["chat", "embed", "voice", "img"].map(g => {
+              const cards = seededByGroup[g];
+              if (!cards.length) return null;
+              return (
+                <section key={g} style={{marginBottom: 24}}>
+                  <div className="sec">
+                    <h2>{g[0].toUpperCase() + g.slice(1)}<span className="ct mono">{cards.length}</span></h2>
+                    <div className="rule" />
+                  </div>
+                  <div className="slots-grid">
+                    {cards.map(c => (
+                      <EmptySlotCard
+                        key={c.name}
+                        name={c.name}
+                        type={c.type}
+                        device={c.device}
+                        group={c.group}
+                        onConfigure={() => openCreatePrefilled({ name: c.name, type: c.type, device: c.device, group: c.group })}
+                      />
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+          <div className="dash-side">
+            <SnapshotStrip slots={slots} onGo={goTo} />
+            <MemoryMap slots={slots} />
+            <ThroughputCard />
+          </div>
+        </div>
 
         <CreateSlotModal
           open={createOpen}
@@ -769,20 +783,29 @@ function SlotsView({ slotVariant, npuVariant, slotParam }) {
         <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
       </div>
 
-      {renderGroup("Chat",  groups.chat)}
-      {renderGroup("Embed", groups.embed)}
-      {renderGroup("Voice", groups.voice)}
-      {renderGroup("Image", groups.img)}
+      <div className="dash">
+        <div className="dash-main">
+          {renderGroup("Chat",  groups.chat)}
+          {renderGroup("Embed", groups.embed)}
+          {renderGroup("Voice", groups.voice)}
+          {renderGroup("Image", groups.img)}
 
-      {groups.npu.length > 0 && (
-        <section style={{marginBottom: 24}}>
-          <div className="sec">
-            <h2>NPU<span className="ct mono">trio · 1 process · 3 roles</span></h2>
-            <div className="rule" />
-          </div>
-          {npuVariant === "reactor" ? <NpuReactor slots={slots} /> : <NpuBlock slots={slots} />}
-        </section>
-      )}
+          {groups.npu.length > 0 && (
+            <section style={{marginBottom: 24}}>
+              <div className="sec">
+                <h2>NPU<span className="ct mono">trio · 1 process · 3 roles</span></h2>
+                <div className="rule" />
+              </div>
+              {npuVariant === "reactor" ? <NpuReactor slots={slots} /> : <NpuBlock slots={slots} />}
+            </section>
+          )}
+        </div>
+        <div className="dash-side">
+          <SnapshotStrip slots={slots} onGo={goTo} />
+          <MemoryMap slots={slots} />
+          <ThroughputCard />
+        </div>
+      </div>
 
       <CreateSlotModal
         open={createOpen}

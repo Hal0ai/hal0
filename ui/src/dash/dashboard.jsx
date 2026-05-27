@@ -18,31 +18,45 @@ import { useHardware } from '@/api/hooks/useHardware'
 const { useState: useStateD, useRef: useRefD, useEffect: useEffectD } = React;
 
 // ─── Snapshot strip ───
+// `slotIndicator` is the single source of truth for the dot vocabulary
+// (defined in slots.jsx, published on window). Mirroring it here keeps
+// the snapshot row's dot colour + status label aligned with each
+// SlotCard — so a slot that reads "idle · yellow" on the slots page
+// reads the same way in the sidebar.
 function SnapshotStrip({ slots, onGo }) {
+  const rows = slots.map(s => ({ slot: s, ind: slotIndicator(s) }));
+  const readyCount = rows.filter(r => r.ind.cls === "serving" || r.ind.cls === "stale").length;
   return (
     <div className="snap">
       <div className="snap-head">
         <span>Slot snapshot</span>
-        <span className="ct mono">{slots.filter(s => s.state === "ready" || s.state === "serving" || s.state === "idle").length}/{slots.length} ready</span>
+        <span className="ct mono">{readyCount}/{slots.length} ready</span>
         <span className="right mono" onClick={() => onGo("slots")}>Manage slots →</span>
       </div>
       <div className="snap-rows">
-        {slots.map(s => (
-          <div key={s.name} className="snap-row" onClick={() => onGo("slots/" + s.name)}>
-            <span className={"dot " + s.state} />
-            <span className="name mono">{s.name}</span>
-            <span className="model mono">{s.model}</span>
-            <span className={"chip dev-" + (s.device || "cpu").replace("gpu-", "")}>{s.device}</span>
-            <span className="badge">
-              {s.isDefault && <span className="chip outlined amber">default</span>}
-              {s.coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
-              {s.cpuOnly && <span className="chip">[CPU]</span>}
-            </span>
-            <span className="num mono" style={{color: "var(--fg-3)", fontSize: 11, textAlign: "right"}}>
-              {s.state === "serving" ? `${s.metrics.toks} tok/s` : s.state}
-            </span>
-          </div>
-        ))}
+        {rows.map(({ slot: s, ind }) => {
+          const labelColor = ind.cls === "serving" ? "var(--accent)"
+            : ind.cls === "stale" || ind.cls === "warming" ? "var(--warn)"
+            : ind.cls === "error" ? "var(--err)"
+            : "var(--fg-3)";
+          const serving = ind.cls === "serving" && s.metrics?.toks != null;
+          return (
+            <div key={s.name} className="snap-row" onClick={() => onGo("slots/" + s.name)} title={ind.tooltip}>
+              <span className={"dot " + ind.cls} />
+              <span className="name mono">{s.name}</span>
+              <span className="model mono">{s.model}</span>
+              <span className={"chip dev-" + (s.device || "cpu").replace("gpu-", "")}>{s.device}</span>
+              <span className="badge">
+                {s.isDefault && <span className="chip outlined amber">default</span>}
+                {s.coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
+                {s.cpuOnly && <span className="chip">[CPU]</span>}
+              </span>
+              <span className="num mono" style={{color: labelColor, fontSize: 11, textAlign: "right"}}>
+                {serving ? `${s.metrics.toks} tok/s` : ind.label}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
