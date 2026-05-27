@@ -23,34 +23,46 @@ const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React
 // ids to the backend — they're fictional (`qwen3.6-27b-mtp` etc.) and
 // the slot orchestrator correctly rejects them against the real registry.
 function normalizeApiModel(m) {
-  const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
-  const type =
-    caps.includes('chat') || caps.includes('coding') ? 'llm'
-    : caps.includes('rerank') ? 'reranking'
-    : caps.includes('embed') || caps.includes('embeddings') ? 'embedding'
-    : caps.includes('transcription') || caps.includes('asr') ? 'transcription'
-    : caps.includes('tts') ? 'tts'
-    : caps.includes('image') ? 'image'
+  // Accept both shapes: the registry/API shape (capabilities + backends +
+  // size_bytes + name + hf_repo) and the legacy HAL0_DATA seed shape
+  // (labels + device + size + longName + repo + type). Local dev without
+  // a backend falls back via src/api/mock.ts to HAL0_DATA.models, and the
+  // γ-suite hits that fallback when fetch fails before page.route catches
+  // (race + connection-refused on the Vite proxy target). Tolerating both
+  // shapes keeps the popover non-empty in every mock path.
+  const sourceCaps = Array.isArray(m.capabilities)
+    ? m.capabilities
+    : Array.isArray(m.labels) ? m.labels : [];
+  const derivedType =
+    sourceCaps.includes('chat') || sourceCaps.includes('coding') ? 'llm'
+    : sourceCaps.includes('rerank') || sourceCaps.includes('reranking') ? 'reranking'
+    : sourceCaps.includes('embed') || sourceCaps.includes('embeddings') ? 'embedding'
+    : sourceCaps.includes('transcription') || sourceCaps.includes('asr') ? 'transcription'
+    : sourceCaps.includes('tts') ? 'tts'
+    : sourceCaps.includes('image') ? 'image'
     : '';
+  const type = typeof m.type === 'string' && m.type ? m.type : derivedType;
   const backends = Array.isArray(m.backends) ? m.backends : [];
-  const device =
+  const derivedDevice =
     backends.includes('rocm') ? 'rocm'
     : backends.includes('vulkan') ? 'vulkan'
     : backends.includes('cpu') ? 'cpu'
     : backends[0] || '';
+  const device = typeof m.device === 'string' && m.device ? m.device : derivedDevice;
   const b = m.size_bytes || 0;
-  const size = !b
+  const derivedSize = !b
     ? '—'
     : b < 1024 ** 2 ? `${(b / 1024).toFixed(1)} KB`
     : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(1)} MB`
     : `${(b / 1024 ** 3).toFixed(2)} GB`;
+  const size = typeof m.size === 'string' && m.size ? m.size : derivedSize;
   return {
     ...m,
     type,
     device,
-    longName: m.name || m.id,
+    longName: m.longName || m.name || m.id,
     size,
-    repo: m.hf_repo || m.path || '',
+    repo: m.repo || m.hf_repo || m.path || '',
   };
 }
 
