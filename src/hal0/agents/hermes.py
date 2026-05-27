@@ -25,10 +25,12 @@ level so a curl|bash invocation also short-circuits cleanly.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess  # nosec B404 — required for shim
 from pathlib import Path
+from typing import Any
 
 from hal0.agents.manager import (
     AgentDriver,
@@ -165,6 +167,32 @@ class HermesDriver(AgentDriver):
         self._write_env_file(bearer_token=bearer_token)
 
     def uninstall(self) -> None:
+        # Order matters (#348 + #349): we MUST read provision.json
+        # BEFORE the manager strips the state dir. The manager calls
+        # ``driver.uninstall()`` first specifically so the driver can
+        # consume bookkeeping that is about to be deleted.
+        #
+        # Two driver-specific artifacts live OUTSIDE the manager's
+        # seed + data + state triad and so will leak if we don't
+        # clean them here:
+        #
+        #   * the dedicated Python venv at ``/var/lib/hal0/venvs/<name>/``
+        #     (built by ``hermes_provision._install_venv``) — full
+        #     interpreter + site-packages, ~hundreds of MiB.
+        #   * the operator-facing docs the ``context_link`` phase
+        #     renders into ``/etc/hal0/`` (HERMES.md + AGENTS.md).
+        #
+        # Both gaps are recorded in ``provision.json`` so we don't
+        # hardcode paths — if a future phase adds another file the
+        # inverse stays correct as long as it stamps a ``"path"``
+        # entry. Each removal is idempotent: a missing path is a
+        # no-op, never an error, so a re-run / partial-uninstall is
+        # safe.
+        provision = self._load_provision()
+        if provision is not None:
+            self._remove_context_link_outputs(provision)
+            self._remove_venv(provision)
+
         env_file = self._env_file_path()
         if env_file.exists():
             env_file.unlink()
@@ -183,6 +211,121 @@ class HermesDriver(AgentDriver):
         # /var/lib state, same posture as openwebui.env. The wrapper
         # sources this file on every hermes invocation.
         return _paths.etc() / "agents" / "hermes.env"
+
+    def _provision_state_path(self) -> Path:
+        """Return the path to ``provision.json`` for this agent.
+
+        Mirrors :meth:`AgentManager._state_dir` so test harnesses that
+        route ``$HAL0_HOME`` through ``_paths.var_lib()`` see the same
+        state file the manager would clean up. Production
+        ``hermes_provision`` hardcodes ``/var/lib/hal0/state/agents/hermes``
+        (see ``_DEFAULT_STATE_ROOT``); under HAL0_HOME both resolutions
+        agree because ``_paths.var_lib()`` returns ``/var/lib/hal0``
+        when HAL0_HOME is unset.
+        """
+        return _paths.var_lib() / "state" / "agents" / self.name / "provision.json"
+
+    def _load_provision(self) -> dict[str, Any] | None:
+        """Best-effort load of the bootstrap checkpoint.
+
+        Returns ``None`` on any failure (missing file, unreadable JSON,
+        unexpected shape) — the driver's uninstall remains a no-op
+        rather than failing the whole teardown over bookkeeping we
+        can't parse. The manager will still strip the state dir after
+        we return, so a half-loaded provision.json doesn't strand
+        artifacts indefinitely.
+        """
+        path = self._provision_state_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def _remove_context_link_outputs(self, provision: dict[str, Any]) -> None:
+        """Unlink every file the ``context_link`` phase rendered (#349).
+
+        Reads ``phases.context_link.details.rendered.<name>.path`` —
+        currently HERMES.md + AGENTS.md (written to /etc/hal0/) plus
+        SOUL.md (written under HERMES_HOME, which the manager will
+        rmtree anyway, but removing it here first is harmless and
+        keeps the inverse symmetrical to the install).
+
+        Idempotent: a missing path or a non-file (e.g. directory)
+        produces no error, just a skip. Symlinks created in
+        ``details.links`` aren't tracked here — those all live under
+        HERMES_HOME (data_dir) and get cleaned by the manager's
+        ``shutil.rmtree``.
+        """
+        phases = provision.get("phases")
+        if not isinstance(phases, dict):
+            return
+        context_link = phases.get("context_link")
+        if not isinstance(context_link, dict):
+            return
+        details = context_link.get("details")
+        if not isinstance(details, dict):
+            return
+        rendered = details.get("rendered")
+        if not isinstance(rendered, dict):
+            return
+        for entry in rendered.values():
+            if not isinstance(entry, dict):
+                continue
+            raw_path = entry.get("path")
+            if not isinstance(raw_path, str) or not raw_path:
+                continue
+            target = Path(raw_path)
+            try:
+                # ``missing_ok=True`` covers the "already gone" branch
+                # without a separate exists() check. OSError catches
+                # the "exists but is a directory" branch (unlink would
+                # raise IsADirectoryError) — we skip rather than
+                # rmtree because the manager owns directory teardown
+                # and we don't want this driver hook to delete a tree
+                # an operator hand-placed at a recorded path.
+                target.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+    def _remove_venv(self, provision: dict[str, Any]) -> None:
+        """Remove the per-agent Python venv recorded in provision.json (#348).
+
+        Reads top-level ``venv`` from the checkpoint — that field is
+        the canonical record of where ``hermes_provision._install_venv``
+        actually built the venv on this host, including any operator
+        override. Production default is
+        ``/var/lib/hal0/venvs/<name>/``.
+
+        Idempotent: a missing venv directory is a no-op. We require
+        the recorded path to be a directory before recursing — a
+        symlink-to-elsewhere or a stale file at the recorded location
+        is left alone (the operator can investigate; we don't want
+        an aggressive rmtree following an unexpected target).
+        """
+        raw_venv = provision.get("venv")
+        if not isinstance(raw_venv, str) or not raw_venv:
+            return
+        venv = Path(raw_venv)
+        # Resolve through symlinks via ``is_dir()`` which follows
+        # them; if the recorded path is a symlink-to-dir we still
+        # want to rmtree the target tree (it's our venv, just a
+        # weird mount layout). ``shutil.rmtree`` against a non-dir
+        # raises; the explicit guard turns that into the no-op
+        # contract the issue requires.
+        if not venv.is_dir():
+            return
+        try:
+            shutil.rmtree(venv)
+        except OSError:
+            # Best-effort. A permissions failure or a concurrent
+            # writer won't abort the rest of the uninstall — the
+            # manager's seed + data + state cleanup still runs.
+            return
 
     def _write_env_file(self, *, bearer_token: str | None) -> None:
         api_base = os.environ.get("HAL0_API_URL", "http://127.0.0.1:8080").rstrip("/")

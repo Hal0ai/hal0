@@ -26,10 +26,21 @@
 #       uninstall every witness is gone (no orphan data_dir,
 #       state dir, or seed left behind).
 #
-# Driver mocking: the manager's _driver_for() is monkey-patched to
+#   agents-hermes-venv-teardown (#348)
+#       Drive HermesDriver.uninstall() directly against a stamped
+#       provision.json that records a venv path → assert the venv
+#       directory is gone.
+#
+#   agents-hermes-context-link-teardown (#349)
+#       Drive HermesDriver.uninstall() against a provision.json whose
+#       context_link phase records HERMES.md + AGENTS.md under
+#       $HAL0_HOME/etc/hal0/ → assert both files are gone.
+#
+# Driver mocking: scenarios #346 patch the manager's _driver_for() to
 # return a stub so we don't need the Hermes upstream installed on the
-# harness host. The unit on test is the manager's cleanup contract +
-# the disk-truth predicate.
+# harness host. The #348 + #349 scenarios DO NOT stub — they instantiate
+# HermesDriver directly because the cleanup paths under test live in
+# that driver, not the manager.
 #
 # Exit: 0 if both rows pass, non-zero (count of fails) otherwise.
 
@@ -83,10 +94,12 @@ log_step "Agent uninstall regression rows (#346) — python=${PY_BIN}"
 # failure (the row's detail captures the diagnostic).
 DRIVER="${SCRIPT_DIR}/reports/agents-driver.py"
 cat >"${DRIVER}" <<'PY'
-"""δ-harness driver for #346. See tests/harness/agents-test.sh."""
+"""δ-harness driver for #346 + #348 + #349. See tests/harness/agents-test.sh."""
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import sys
 import tomllib
@@ -223,6 +236,93 @@ def scenario_roundtrip_no_orphans(prefix: Path) -> None:
             )
 
 
+def _stamp_provision_json(
+    state_dir: Path,
+    *,
+    venv: Path | None = None,
+    rendered_paths: list[Path] | None = None,
+) -> None:
+    """Mirror what hermes_provision writes — minimal shape sufficient for the
+    HermesDriver uninstall reader."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "agent_id": "hermes-agent",
+        "phases": {},
+    }
+    if venv is not None:
+        payload["venv"] = str(venv)
+    if rendered_paths is not None:
+        payload["phases"]["context_link"] = {
+            "status": "ok",
+            "details": {
+                "rendered": {
+                    p.name: {"path": str(p), "sha256": "0" * 64} for p in rendered_paths
+                },
+                "links": [],
+                "warnings": [],
+            },
+        }
+    (state_dir / "provision.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def scenario_hermes_venv_teardown(prefix: Path) -> None:
+    """#348: HermesDriver.uninstall() removes the recorded venv directory."""
+    os.environ["HAL0_HOME"] = str(prefix)
+    # Late import so HAL0_HOME is in effect when paths resolve.
+    from hal0.agents.hermes import HermesDriver
+    from hal0.config import paths as _paths
+
+    venv = _paths.var_lib() / "venvs" / "hermes"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("#!/usr/bin/env python\n")
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    state_dir = _paths.var_lib() / "state" / "agents" / "hermes"
+    _stamp_provision_json(state_dir, venv=venv)
+
+    if not venv.exists():
+        raise AssertionError(f"pre-condition: venv must exist at {venv}")
+
+    drv = HermesDriver(prober=lambda: True)
+    drv.uninstall()
+
+    if venv.exists():
+        raise AssertionError(
+            f"#348 unmet: venv survived HermesDriver.uninstall() at {venv}"
+        )
+
+
+def scenario_hermes_context_link_teardown(prefix: Path) -> None:
+    """#349: HermesDriver.uninstall() removes /etc/hal0/AGENTS.md + HERMES.md."""
+    os.environ["HAL0_HOME"] = str(prefix)
+    from hal0.agents.hermes import HermesDriver
+    from hal0.config import paths as _paths
+
+    etc_hal0 = _paths.etc()
+    etc_hal0.mkdir(parents=True, exist_ok=True)
+    agents_md = etc_hal0 / "AGENTS.md"
+    hermes_md = etc_hal0 / "HERMES.md"
+    agents_md.write_text("# Agents\n", encoding="utf-8")
+    hermes_md.write_text("# Hermes\n", encoding="utf-8")
+    state_dir = _paths.var_lib() / "state" / "agents" / "hermes"
+    _stamp_provision_json(state_dir, rendered_paths=[agents_md, hermes_md])
+
+    if not (agents_md.exists() and hermes_md.exists()):
+        raise AssertionError("pre-condition: AGENTS.md + HERMES.md must exist")
+
+    drv = HermesDriver(prober=lambda: True)
+    drv.uninstall()
+
+    survivors = [p for p in (agents_md, hermes_md) if p.exists()]
+    if survivors:
+        raise AssertionError(
+            f"#349 unmet: context_link docs survived uninstall: {survivors}"
+        )
+
+
 def main(argv: list[str]) -> int:
     scenario_name = argv[1]
     prefix = Path(argv[2])
@@ -235,6 +335,10 @@ def main(argv: list[str]) -> int:
             scenario_install_corrupt_uninstall(prefix)
         elif scenario_name == "roundtrip-no-orphans":
             scenario_roundtrip_no_orphans(prefix)
+        elif scenario_name == "hermes-venv-teardown":
+            scenario_hermes_venv_teardown(prefix)
+        elif scenario_name == "hermes-context-link-teardown":
+            scenario_hermes_context_link_teardown(prefix)
         else:
             print(f"unknown scenario: {scenario_name}", file=sys.stderr)
             return 2
@@ -267,8 +371,10 @@ run_scenario() {
     fi
 }
 
-run_scenario "agents-install-corrupt-uninstall" "install-corrupt-uninstall"
-run_scenario "agents-roundtrip-no-orphans"      "roundtrip-no-orphans"
+run_scenario "agents-install-corrupt-uninstall"   "install-corrupt-uninstall"
+run_scenario "agents-roundtrip-no-orphans"        "roundtrip-no-orphans"
+run_scenario "agents-hermes-venv-teardown"        "hermes-venv-teardown"
+run_scenario "agents-hermes-context-link-teardown" "hermes-context-link-teardown"
 
 log_step "Write report"
 harness_write_report || true
