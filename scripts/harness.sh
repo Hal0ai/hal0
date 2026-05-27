@@ -3,13 +3,14 @@
 #
 # hal0 end-to-end test harness orchestrator.
 #
-# Runs the four tiers in order and merges per-tier JSON reports into
+# Runs the five tiers in order and merges per-tier JSON reports into
 # one tests/harness/reports/harness.json:
 #
 #   1. installer-test.sh    # --dev install + assert filesystem + serve
 #   2. cli-test.sh          # every CLI subcommand against the live API
 #   3. runtime-test.sh      # one real slot + chat round-trip
-#   4. harness-cleanup.sh   # tear down dev install, opt-in prod uninstall
+#   4. agents-test.sh       # bundled-agent lifecycle regression (#346)
+#   5. harness-cleanup.sh   # tear down dev install, opt-in prod uninstall
 #
 # Env knobs (passed straight to children):
 #   HAL0_HARNESS_PROD=1     enable prod-mode rows (sudo + real /etc paths)
@@ -51,10 +52,11 @@ run_tier() {
 # Always run installer + cli + runtime + cleanup. We tolerate FAIL rows
 # inside a tier (they go in the JSON); only abort the pipeline if a
 # tier script itself can't complete.
-INSTALLER_RC=0; CLI_RC=0; RUNTIME_RC=0; CLEANUP_RC=0
+INSTALLER_RC=0; CLI_RC=0; RUNTIME_RC=0; AGENTS_RC=0; CLEANUP_RC=0
 run_tier "installer" "${HARNESS_DIR}/installer-test.sh"    || INSTALLER_RC=$?
 run_tier "cli"       "${HARNESS_DIR}/cli-test.sh"          || CLI_RC=$?
 run_tier "runtime"   "${HARNESS_DIR}/runtime-test.sh"      || RUNTIME_RC=$?
+run_tier "agents"    "${HARNESS_DIR}/agents-test.sh"       || AGENTS_RC=$?
 run_tier "cleanup"   "${HARNESS_DIR}/harness-cleanup.sh"   || CLEANUP_RC=$?
 
 # Optional remote leg: scripts/release-test.sh produces its own JSON
@@ -77,7 +79,7 @@ tiers = []
 all_rows = []
 
 # Per-tier JSON files written by each tier script.
-for tier_name in ("installer", "cli", "runtime", "cleanup"):
+for tier_name in ("installer", "cli", "runtime", "agents", "cleanup"):
     p = reports_dir / f"{tier_name}.json"
     if not p.exists():
         tiers.append({"name": tier_name, "status": "missing", "summary": {}, "report": None})

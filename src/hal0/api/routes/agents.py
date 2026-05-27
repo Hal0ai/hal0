@@ -267,14 +267,19 @@ async def uninstall_agent(name: str) -> dict[str, str]:
     with ``status="not_installed"`` rather than 404. Aligns with the
     slot-delete posture — operators running uninstall from a script
     shouldn't have to special-case the "already gone" branch.
+
+    Status derives from whether ``mgr.uninstall()`` actually removed
+    anything (#346) — the old code consulted ``installed_names()``
+    BEFORE the uninstall call and that view only saw the seed TOML, so a
+    half-uninstalled agent whose seed was already gone reported
+    ``not_installed`` even while ``rm -rf``'ing its data + state dirs.
     """
     mgr = _manager()
     try:
-        installed = name in mgr.installed_names()
-        mgr.uninstall(name)
+        removed = mgr.uninstall(name)
     except AgentNotFoundError as exc:
         raise NotFound(str(exc), code="agent.unknown") from exc
     return {
         "name": name,
-        "status": "uninstalled" if installed else "not_installed",
+        "status": "uninstalled" if removed else "not_installed",
     }

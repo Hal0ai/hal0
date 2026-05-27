@@ -2,12 +2,27 @@
 
 State on disk:
 
-    /etc/hal0/agents/<name>.toml      — install-time seed config (NOT a
-                                        live default; mirrors the
-                                        primary.toml seed-vs-runtime
-                                        pattern, MEMORY.md
-                                        :hal0_primary_slot_seed_vs_runtime)
-    /var/lib/hal0/agents/<name>/      — per-agent runtime data dir
+    /etc/hal0/agents/<name>.toml          — install-time seed config (NOT a
+                                            live default; mirrors the
+                                            primary.toml seed-vs-runtime
+                                            pattern, MEMORY.md
+                                            :hal0_primary_slot_seed_vs_runtime)
+    /var/lib/hal0/agents/<name>/          — per-agent runtime data dir
+    /var/lib/hal0/state/agents/<name>/    — bootstrap state (provision.json,
+                                            provision-logs/). Written by
+                                            :mod:`hal0.agents.hermes_provision`
+                                            (and any future per-agent
+                                            bootstrap driver). Lives outside
+                                            the data dir so a ``hermes
+                                            reset`` upstream subcommand
+                                            can't trample hal0's
+                                            bookkeeping (#346).
+
+``uninstall()`` removes ALL THREE — seed, data dir, state dir — and the
+``installed`` predicate derives from disk truth (any of the three present)
+rather than seed-TOML existence alone. That single-witness model used to
+let the API + CLI report ``not_installed`` for an agent whose data dir
+was still on disk (#346).
 
 Single-pick is enforced here, not in the API or CLI. ``install()``
 refuses to add a second agent unless ``switch=True``, in which case it
@@ -154,32 +169,56 @@ class AgentManager:
     (consistent with the slot manager's hot-reload posture).
     """
 
-    def __init__(self, *, etc_root: Path | None = None, var_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        etc_root: Path | None = None,
+        var_root: Path | None = None,
+        state_root: Path | None = None,
+    ) -> None:
         # Roots are injectable so tests can point at tmp_path without
         # setting HAL0_HOME. Production callers pass nothing and we
         # resolve via :mod:`hal0.config.paths`.
+        #
+        # ``state_root`` is the parent of per-agent provision state dirs
+        # (``<state_root>/<name>/provision.json`` + ``provision-logs/``).
+        # Layout matches what :mod:`hal0.agents.hermes_provision` writes
+        # at runtime (``/var/lib/hal0/state/agents``); injectable here so
+        # the unit tests for #346 can assert the state-dir teardown
+        # without touching the real /var/lib.
         self._etc_root = etc_root if etc_root is not None else _paths.etc() / "agents"
         self._var_root = var_root if var_root is not None else _paths.var_lib() / "agents"
+        self._state_root = (
+            state_root if state_root is not None else _paths.var_lib() / "state" / "agents"
+        )
 
     # ── Public surface ──────────────────────────────────────────────────
 
     def list(self) -> list[AgentRecord]:
-        """Return all installed agents (zero or one for v0.2)."""
-        if not self._etc_root.exists():
-            return []
+        """Return all installed agents (zero or one for v0.2).
+
+        Derives from disk truth (#346): any bundled agent with a seed
+        TOML, data dir, OR state dir present is listed. An agent with
+        on-disk artifacts but a missing/corrupt seed gets a synthesised
+        ``"broken"`` record so the dashboard surfaces the half-state and
+        the operator can recover via ``uninstall``.
+        """
         out: list[AgentRecord] = []
-        for toml_path in sorted(self._etc_root.glob("*.toml")):
-            name = toml_path.stem
-            if name not in BUNDLED_AGENTS:
-                # Stray TOML — skip. We do not raise here because the
-                # caller might be doing a "soft list" during recovery.
+        for name in BUNDLED_AGENTS:
+            if not self.is_present_on_disk(name):
                 continue
-            rec = self._read_record(name)
-            out.append(rec)
-        return out
+            out.append(self._read_record(name))
+        return sorted(out, key=lambda r: r.name)
 
     def installed_names(self) -> list[str]:
-        return [r.name for r in self.list()]
+        """Return every bundled-agent name with on-disk artifacts (#346).
+
+        Disk truth — seed OR data_dir OR state dir. Used by ``install()``
+        for single-pick enforcement; the old behaviour (seed-only) let
+        ``install hermes`` succeed against a half-uninstalled pi-coder
+        whose seed was gone but whose data dir survived.
+        """
+        return [name for name in BUNDLED_AGENTS if self.is_present_on_disk(name)]
 
     def install(
         self, name: str, *, switch: bool = False, bearer_token: str | None = None
@@ -225,15 +264,39 @@ class AgentManager:
         rec = self._write_seed(name)
         return rec
 
-    def uninstall(self, name: str) -> None:
-        """Tear down ``name``: driver's uninstall + remove data dir + seed."""
+    def uninstall(self, name: str) -> bool:
+        """Tear down ``name`` — driver uninstall + seed + data dir + state dir.
+
+        Returns ``True`` iff at least one on-disk artifact existed
+        before teardown (seed, data dir, or state dir). The API DELETE
+        handler uses this to render an honest ``uninstalled`` /
+        ``not_installed`` status (#346) rather than consulting a
+        pre-uninstall ``installed_names()`` snapshot whose seed-only
+        view lied when a partial uninstall had previously eaten the
+        TOML.
+
+        The three on-disk artifacts are removed best-effort + in
+        order — driver first (so it can flush its own caches against a
+        still-populated tree), then seed, then data dir, then state
+        dir. A failure in one step doesn't abort the rest; the operator
+        gets the most-thorough teardown the manager can deliver.
+        """
         if name not in BUNDLED_AGENTS:
             raise AgentNotFoundError(
                 f"unknown bundled agent {name!r}. Known: {', '.join(BUNDLED_AGENTS)}",
             )
+
+        # Snapshot the disk witnesses BEFORE we touch anything so the
+        # return-value is the honest "did this call do work?" predicate.
+        # Driver work is opaque (the protocol returns None and the
+        # production drivers may unlink-if-exists), so we treat disk
+        # truth as the canonical signal.
+        had_artifacts = self.is_present_on_disk(name)
+
         # Driver lookup is best-effort — if the driver module fails to
         # import for some reason, we still want to clean up the on-disk
-        # seed + data dir so the operator can reinstall cleanly.
+        # seed + data dir + state dir so the operator can reinstall
+        # cleanly.
         try:
             driver = _driver_for(name)
             driver.uninstall()
@@ -251,6 +314,15 @@ class AgentManager:
         if data_dir.exists():
             shutil.rmtree(data_dir)
 
+        # State dir last — see #346. Removed atomically with the seed +
+        # data dir so ``hal0 agent status hermes`` doesn't keep
+        # rendering a green provision.json table after uninstall.
+        state_dir = self._state_dir(name)
+        if state_dir.exists():
+            shutil.rmtree(state_dir)
+
+        return had_artifacts
+
     def switch(self, name: str, *, bearer_token: str | None = None) -> AgentRecord:
         """Convenience: :meth:`install` with ``switch=True``."""
         return self.install(name, switch=True, bearer_token=bearer_token)
@@ -262,6 +334,43 @@ class AgentManager:
 
     def _data_dir(self, name: str) -> Path:
         return self._var_root / name
+
+    def _state_dir(self, name: str) -> Path:
+        """Per-agent bootstrap state dir (provision.json + logs).
+
+        Mirrors ``hal0.agents.hermes_provision._DEFAULT_STATE_ROOT`` at
+        the production path. The manager owns teardown of this tree
+        because the bootstrap driver writes it but has no uninstall
+        contract of its own (#346).
+        """
+        return self._state_root / name
+
+    def is_present_on_disk(self, name: str) -> bool:
+        """Return True iff ANY install-time artifact for ``name`` is on disk.
+
+        Disk truth, not seed-TOML truth. Used by ``uninstall()`` (to
+        decide whether the call actually removed anything) and by the
+        API DELETE handler (to choose between ``uninstalled`` /
+        ``not_installed`` status, post-#346).
+
+        Three witnesses, any one of which is sufficient:
+
+        * seed TOML at ``/etc/hal0/agents/<name>.toml``
+        * data dir at ``/var/lib/hal0/agents/<name>/``
+        * state dir at ``/var/lib/hal0/state/agents/<name>/``
+
+        A partial uninstall that lost one witness (e.g. a crashed
+        previous run that removed the seed but not the data dir) still
+        reports ``True`` here — the API + CLI then correctly tell the
+        operator "uninstalled" when the remaining cleanup runs.
+        """
+        if name not in BUNDLED_AGENTS:
+            return False
+        return (
+            self._config_path(name).exists()
+            or self._data_dir(name).exists()
+            or self._state_dir(name).exists()
+        )
 
     # ── Seed-TOML I/O ───────────────────────────────────────────────────
 
@@ -309,19 +418,32 @@ class AgentManager:
     def _read_record(self, name: str) -> AgentRecord:
         """Build an :class:`AgentRecord` from on-disk state.
 
-        Tolerates a missing/corrupt TOML — we report a "broken" status
-        rather than raising, so :meth:`list` can show the operator that
-        something is wedged and offer ``uninstall`` to recover.
+        Tolerates a missing/corrupt TOML — we report a ``"broken"``
+        status rather than raising, so :meth:`list` can show the operator
+        that something is wedged and offer ``uninstall`` to recover. A
+        record may exist without a seed at all (e.g. data_dir + state dir
+        survived a half-uninstall); that case maps to ``"broken"`` with
+        an empty ``installed_at`` so the dashboard's repair affordance
+        is reachable (#346).
         """
         import tomllib
 
         toml_path = self._config_path(name)
         installed_at = ""
-        try:
-            with toml_path.open("rb") as fh:
-                data = tomllib.load(fh)
-            installed_at = str(data.get("agent", {}).get("installed_at", ""))
-        except (OSError, tomllib.TOMLDecodeError):
+        seed_readable = False
+        if toml_path.exists():
+            try:
+                with toml_path.open("rb") as fh:
+                    data = tomllib.load(fh)
+                installed_at = str(data.get("agent", {}).get("installed_at", ""))
+                seed_readable = True
+            except (OSError, tomllib.TOMLDecodeError):
+                seed_readable = False
+
+        if not seed_readable:
+            # No seed (or unreadable) but is_present_on_disk says
+            # something else is here — synthesise a broken record so the
+            # dashboard surfaces it.
             return AgentRecord(
                 name=name,
                 installed_at="",
