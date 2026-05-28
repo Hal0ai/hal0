@@ -737,14 +737,31 @@ hal0 update [--channel=stable|nightly] [--check] [--rollback]
 - If `version > current`:
   - Download tarball + sig to `/var/lib/hal0/cache/`
   - Verify cosign signature against `hal0ai/hal0` GitHub OIDC identity
-  - Extract to `/usr/lib/hal0-<new>/`
+  - Extract to `/usr/lib/hal0-<new>/`. If a prior hal0 extraction is
+    already at that path (e.g. a half-failed earlier apply), it is
+    quarantined to `<dest>.stale-<unix-ts>` rather than blocking the
+    retry. Foreign non-empty dirs are still refused — the heuristic
+    recognises hal0 installs by `VERSION` file or `pyproject.toml`
+    `name="hal0"`.
   - Run any pending config migrations (`hal0 config migrate` if `schema_version` advanced)
   - Atomic-swap `/usr/lib/hal0/current` symlink
   - `systemctl restart hal0-api` (slots untouched unless `--restart-slots`)
   - Old version retained at `/usr/lib/hal0-<old>/` for rollback
 - Rollback: swap symlink back, restart API
-- Dashboard polls `/api/updates/check` on a 24h interval, shows
-  `RestartBanner.vue` when an update is available
+- Dashboard polls `/api/updates/check` on a 24h interval, shows the
+  **Updates** section in Settings when an update is available
+
+### Async-job API contract
+
+`POST /api/updates/apply` returns **202 Accepted** with a job snapshot
+`{id, state: "queued", channel, version, error}`. The actual work runs
+in a background task that transitions the entry through
+`queued → running → applied | failed`. Clients (the dashboard, CLI,
+anything else) **must** poll `GET /api/updates/status/{id}` until
+terminal state — a 202 ack alone says nothing about success. Transient
+errors during the poll are expected (hal0-api is restarting); the UI
+keeps polling until the entry resolves. Same contract applies to the
+other 202-returning endpoints listed in §4 (e.g. `/api/models/{id}/pull`).
 
 Channels:
 - `stable` — tagged releases, signed, default

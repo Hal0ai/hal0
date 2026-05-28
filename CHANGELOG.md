@@ -55,6 +55,28 @@ servers and the dashboard v3 surfaces that consume them. Landed
   Registry files at `/etc/hal0/mcp-servers/<id>.toml` written
   0o600 inside a 0o700 directory.
 
+### Fixed
+
+- **Settings → Updates: Install update silently no-op'd** (#386).
+  The dashboard's Install button hit `POST /api/updates/apply`,
+  received 202 with a `job_id`, toasted "Update started", and never
+  polled the job — so when the background apply hit
+  `UpdateExtractError` from a leftover `/usr/lib/hal0/hal0-<v>/`
+  the user saw nothing. Three fixes:
+  - UI: `useUpdateApply` signature corrected (`version?`, not
+    misnamed `channel`); `useUpdateCheck` GETs `/api/updates/check`
+    (was POSTing to a GET-only route → silent 405); new
+    `useUpdateJob(jobId)` poller surfaces `running` / `applied` /
+    `failed` to inline progress + toasts.
+  - Backend: `Updater._extract_tarball` now quarantines a prior
+    hal0 extraction at the same path to `<dest>.stale-<unix-ts>`
+    instead of refusing, so a retry after a half-failed apply
+    isn't permanently wedged. Foreign non-empty dirs are still
+    refused — heuristic recognises hal0 installs by `VERSION`
+    file or `pyproject.toml` `name="hal0"`.
+  - Deduped the non-empty check in `Updater.apply()`; the extract
+    step is the single source of truth.
+
 ### Deferred
 
 - MCP-installed-server supervisor: start / stop / restart still
