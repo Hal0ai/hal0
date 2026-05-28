@@ -447,11 +447,21 @@ function Menu({ anchor = "right", items, onClose, style }) {
     <div className={"hal0-menu " + anchor} style={style} onClick={e => e.stopPropagation()}>
       {items.map((it, i) => {
         if (it.divider) return <div key={i} className="hal0-menu-divider" />;
+        const isDisabled = !!it.disabled;
         return (
           <div
             key={i}
-            className={"hal0-menu-item" + (it.danger ? " danger" : "")}
-            onClick={() => { it.onClick && it.onClick(); onClose && onClose(); }}
+            className={"hal0-menu-item"
+              + (it.danger ? " danger" : "")
+              + (isDisabled ? " disabled" : "")}
+            title={it.hint || undefined}
+            aria-disabled={isDisabled || undefined}
+            style={isDisabled ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
+            onClick={() => {
+              if (isDisabled) return;
+              it.onClick && it.onClick();
+              onClose && onClose();
+            }}
           >
             {it.icon && <span className="hal0-menu-ic">{it.icon}</span>}
             <span className="hal0-menu-lbl">{it.label}</span>

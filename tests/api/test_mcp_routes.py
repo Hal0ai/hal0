@@ -510,3 +510,65 @@ def test_action_returns_501(client: TestClient) -> None:
     response = client.post("/api/mcp/hal0-admin/restart")
     assert response.status_code == 501
     assert response.json()["error"]["code"] == "mcp.not_implemented"
+
+
+# ── Security hardening (#368 review) ────────────────────────────────────────
+
+
+def test_resolve_route_blocks_lan_ssrf(client: TestClient) -> None:
+    """``GET /api/mcp/resolve?url=http://10.x/...`` must 400 with ssrf code.
+
+    Demonstrates that the previously-exploitable SSRF probe is now blocked
+    at the route layer — unauth caller on the LAN can no longer bounce
+    arbitrary GETs through hal0-api.
+    """
+    response = client.get(
+        "/api/mcp/resolve",
+        params={"url": "http://10.0.1.142:8080/api/slots"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "mcp.ssrf_blocked"
+
+
+def test_oversized_manifest_body_rejected(
+    app: FastAPI,
+    client: TestClient,
+) -> None:
+    """A fetcher returning a >256 KiB body must surface mcp.manifest_fetch_failed.
+
+    The body cap (``_MAX_MANIFEST_BYTES``) lives inside ``_default_fetcher``;
+    we exercise it by injecting a fetcher that mimics the size check by
+    raising the same httpx.HTTPError the production path raises when the
+    cap is tripped.
+    """
+    import httpx
+
+    async def _too_big(url: str) -> Any:
+        raise httpx.HTTPError("manifest body too large (300000 > 262144)")
+
+    app.state.mcp_manifest_fetcher = _too_big
+    response = client.get(
+        "/api/mcp/resolve",
+        params={"url": "https://example.com/mcp.json"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "mcp.manifest_fetch_failed"
+
+
+def test_validate_id_rejects_path_traversal(client: TestClient) -> None:
+    """An install body with an id like ``../evil`` must 400 (or 404), never traverse.
+
+    The pre-resolved-manifest path lets a caller pin the id; the registry
+    guard must reject any id outside the [a-z0-9_-] charset before the
+    write touches disk.
+    """
+    payload = _filesystem_manifest_dict() | {"id": "../evil", "name": "evil"}
+    response = client.post("/api/mcp/install", json={"manifest": payload})
+    # The id is rejected by the ResolvedManifest model_validator (slug shape)
+    # before the registry sees it — that surfaces as mcp.manifest_invalid.
+    # Either is acceptable as long as no file lands outside the registry dir.
+    assert response.status_code == 400
+    code = response.json()["error"]["code"]
+    assert code in {"mcp.id_invalid", "mcp.manifest_invalid"}, (
+        f"path traversal must be rejected at validation, got {code}"
+    )

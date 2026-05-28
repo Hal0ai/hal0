@@ -33,9 +33,12 @@ render *something* for any plausibly-shaped paste.
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
@@ -60,6 +63,105 @@ _HTTP_RE = re.compile(r"^https?://[^\s]+$")
 # unbounded download via a content-length lie.
 _MAX_MANIFEST_BYTES = 256 * 1024
 _FETCH_TIMEOUT = httpx.Timeout(connect=4.0, read=6.0, write=2.0, pool=6.0)
+
+
+# ── SSRF guard ──────────────────────────────────────────────────────────────
+#
+# The manifest fetcher is reachable through ``GET /api/mcp/resolve?url=…``
+# with no auth on the LAN (ADR-0012). Without a guard, an unauthenticated
+# caller can use hal0 as a blind probe against the LAN, IMDS, and loopback.
+# We enforce a deny-list at the URL/IP layer and refuse to follow redirects
+# (a 30x to a private host would otherwise bypass the pre-flight check).
+
+
+class SsrfBlockedError(BadRequest):
+    """The manifest URL resolves to a non-public address — refuse to fetch."""
+
+    code = "mcp.ssrf_blocked"
+    status = 400
+
+
+def _ip_is_safe(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Reject loopback, private, link-local, unspecified, and CGNAT space.
+
+    Mirrors the standard library's ``is_*`` classifiers plus an explicit
+    carrier-grade NAT (100.64.0.0/10) reject — Python's ``is_private``
+    already covers RFC 1918 + ULA + loopback + link-local on both
+    families, but CGNAT only landed in 3.13's ``is_global`` semantics,
+    so we check it explicitly to stay compatible across versions.
+    """
+    if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
+        return False
+    if ip.is_multicast or ip.is_reserved:
+        return False
+    # Carrier-grade NAT (RFC 6598). is_private in newer Python versions
+    # includes this, but be explicit for portability.
+    return not (
+        isinstance(ip, ipaddress.IPv4Address) and ip in ipaddress.IPv4Network("100.64.0.0/10")
+    )
+
+
+def _is_safe_url(url: str) -> bool:
+    """Return True only when ``url`` resolves entirely to public addresses.
+
+    Steps:
+
+    1. Parse the URL. Reject anything without an http(s) scheme + host.
+    2. Reject ``*.local`` mDNS hostnames before DNS lookup — most
+       resolvers happily answer them from the LAN.
+    3. Resolve the hostname via ``socket.getaddrinfo`` and reject if
+       *any* resolved address is in deny space (avoids DNS-rebinding
+       single-A-record tricks where one of N IPs is private).
+    4. If the host is already a literal IP, classify it directly.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    scheme = (parts.scheme or "").lower()
+    if scheme not in {"http", "https"}:
+        return False
+    host = parts.hostname
+    if not host:
+        return False
+    low = host.lower()
+    # mDNS / multicast DNS hostnames — never let these through.
+    if low == "localhost" or low.endswith(".local"):
+        return False
+
+    # If the host parsed as an IP literal, classify it directly. urlsplit
+    # exposes the unbracketed form for IPv6 via .hostname.
+    try:
+        literal = ipaddress.ip_address(low)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        return _ip_is_safe(literal)
+
+    # DNS lookup. Any resolved address in deny space → reject.
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        sockaddr = info[4]
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except (ValueError, IndexError):
+            return False
+        if not _ip_is_safe(ip):
+            return False
+    return True
+
+
+def _enforce_safe_url(url: str) -> None:
+    """Raise :class:`SsrfBlockedError` when the URL fails the SSRF guard."""
+    if not _is_safe_url(url):
+        raise SsrfBlockedError(
+            "refusing to fetch a non-public URL",
+            code="mcp.ssrf_blocked",
+            details={"url": url},
+        )
 
 
 # ── Schema ──────────────────────────────────────────────────────────────────
@@ -115,7 +217,9 @@ def _slug(text: str) -> str:
 
 def _resolve_oci(url: str) -> ResolvedManifest:
     m = _OCI_RE.match(url)
-    assert m is not None  # caller has already matched
+    if m is None:  # defensive — caller has already matched, but assert
+        # was stripped under ``python -O`` so we raise a typed error.
+        raise BadRequest(f"invalid oci spec: {url}", code="mcp.spec_unsupported")
     rest = m.group("rest")
     # Take the last path segment, drop the tag for the name.
     last = rest.rsplit("/", 1)[-1]
@@ -133,7 +237,8 @@ def _resolve_oci(url: str) -> ResolvedManifest:
 
 def _resolve_npm(url: str) -> ResolvedManifest:
     m = _NPM_RE.match(url)
-    assert m is not None
+    if m is None:
+        raise BadRequest(f"invalid npm spec: {url}", code="mcp.spec_unsupported")
     pkg = m.group("pkg")
     # Drop the scope (@foo/) for the visible name.
     visible = pkg.split("/", 1)[-1] if pkg.startswith("@") else pkg
@@ -149,7 +254,8 @@ def _resolve_npm(url: str) -> ResolvedManifest:
 
 def _resolve_uvx(url: str) -> ResolvedManifest:
     m = _UV_RE.match(url)
-    assert m is not None
+    if m is None:
+        raise BadRequest(f"invalid uvx spec: {url}", code="mcp.spec_unsupported")
     pkg = m.group("pkg")
     return ResolvedManifest(
         id=_slug(pkg),
@@ -163,7 +269,8 @@ def _resolve_uvx(url: str) -> ResolvedManifest:
 
 def _resolve_git(url: str) -> ResolvedManifest:
     m = _GIT_RE.match(url)
-    assert m is not None
+    if m is None:
+        raise BadRequest(f"invalid git spec: {url}", code="mcp.spec_unsupported")
     repo_url = m.group("url")
     # Last path segment as the visible name.
     last = repo_url.rstrip("/").rsplit("/", 1)[-1]
@@ -255,7 +362,9 @@ def _coerce_int(value: Any) -> int:
         except ValueError:
             return 0
     if isinstance(value, list):
-        return len(value)
+        # Cap at the schema's pydantic upper bound (le=4096) so a manifest
+        # with a runaway tool list doesn't trip a 500 in validation.
+        return min(len(value), 4096)
     return 0
 
 
@@ -263,8 +372,15 @@ def _coerce_int(value: Any) -> int:
 
 
 async def _default_fetcher(url: str) -> Any:
-    """Production fetcher — bounded body size + JSON decode."""
-    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True) as client:
+    """Production fetcher — SSRF-guarded, bounded body, JSON decoded.
+
+    Redirects are intentionally NOT followed: a 30x to a private host
+    would bypass the pre-flight :func:`_enforce_safe_url` check. If a
+    legitimate manifest sits behind a redirect, the caller can paste the
+    final URL directly.
+    """
+    _enforce_safe_url(url)
+    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=False) as client:
         resp = await client.get(url, headers={"Accept": "application/json"})
         resp.raise_for_status()
         # Bound body size so a misbehaving server can't stuff us.
@@ -310,6 +426,12 @@ async def resolve(url: str, *, fetcher: HttpFetcher | None = None) -> ResolvedMa
     if _GIT_RE.match(url):
         return _resolve_git(url)
     if _HTTP_RE.match(url):
+        # SSRF guard: enforce here as well as inside _default_fetcher so a
+        # test-injected fetcher (or any future caller path) still gets the
+        # pre-flight check. Skipped when the caller injects a fetcher — the
+        # test surface relies on synthesised hosts like example.com.
+        if fetcher is None:
+            _enforce_safe_url(url)
         return await _resolve_http(url, fetcher)
 
     raise BadRequest(
@@ -322,5 +444,6 @@ async def resolve(url: str, *, fetcher: HttpFetcher | None = None) -> ResolvedMa
 __all__ = [
     "HttpFetcher",
     "ResolvedManifest",
+    "SsrfBlockedError",
     "resolve",
 ]

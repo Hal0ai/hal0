@@ -27,6 +27,7 @@ what the operator chose to install + their per-server env overrides.
 from __future__ import annotations
 
 import contextlib
+import os
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -103,6 +104,31 @@ def _registry_dir() -> Path:
 
 def _registry_path(server_id: str) -> Path:
     return _registry_dir() / f"{server_id}.toml"
+
+
+# Restrictive perms: TOML files contain the per-server ``env`` block, which
+# is the canonical home for API keys for community MCP servers. Default
+# umask (022) would leave them world-readable; we narrow both the directory
+# and individual files explicitly after write.
+_REGISTRY_DIR_MODE = 0o700
+_REGISTRY_FILE_MODE = 0o600
+
+
+def _harden_registry_perms(path: Path) -> None:
+    """Tighten perms on the registry dir + a single record file.
+
+    Called immediately after :func:`write_toml_atomic` so a record's env
+    block (API keys) isn't world-readable even briefly. Uses chmod rather
+    than passing a mode to mkdir because write_toml_atomic also creates
+    the directory under default umask.
+    """
+    parent = path.parent
+    with contextlib.suppress(OSError):
+        parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(parent, _REGISTRY_DIR_MODE)
+    with contextlib.suppress(OSError):
+        os.chmod(path, _REGISTRY_FILE_MODE)
 
 
 _ID_OK = set("abcdefghijklmnopqrstuvwxyz0123456789-_")
@@ -199,6 +225,7 @@ def install(record: InstalledServer) -> InstalledServer:
     if not record.installed_at:
         record = record.model_copy(update={"installed_at": datetime.now(tz=UTC).isoformat()})
     write_toml_atomic(path, record.to_toml_dict())
+    _harden_registry_perms(path)
     log.info(
         "hal0.mcp.installed.added",
         server_id=record.id,
@@ -253,7 +280,9 @@ def patch_config(
     if not updates:
         return record
     next_record = record.model_copy(update=updates)
-    write_toml_atomic(_registry_path(server_id), next_record.to_toml_dict())
+    target_path = _registry_path(server_id)
+    write_toml_atomic(target_path, next_record.to_toml_dict())
+    _harden_registry_perms(target_path)
     log.info(
         "hal0.mcp.installed.patched",
         server_id=server_id,

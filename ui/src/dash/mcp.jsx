@@ -167,10 +167,24 @@ function CopyField({ value, monoClass = "mono" }) {
 }
 
 // ─── Server row card ────────────────────────────────────────────────
+//
+// Supervisor capability flag — v0.3 alpha ships the registry layer
+// (#305) but not yet the process supervisor: ``POST /api/mcp/{id}/{action}``
+// returns 501 ``mcp.not_implemented``. Until the supervisor lands, the
+// row's Start / Restart buttons must be disabled with a "pending"
+// tooltip so the operator isn't surprised by a no-op click.
+const SUPERVISOR_AVAILABLE = false;
+const SUPERVISOR_PENDING_HINT = "Supervisor not yet implemented — pending #305 follow-up";
+
 function McpServerRow({ server, calls, now, clients, onMenuOpen, menuOpen, onCloseMenu, onConfig, onLogs, onConfirmUninstall, onToggle }) {
   const isBundled = server.bundled;
   const state = server.state;
   const callsLast60 = (calls[server.id] || []).length;
+  // Bundled servers run in-process (FastMCP mount) — they don't need a
+  // supervisor. The pending gate applies only to user-installed servers.
+  const supervisorRequired = !isBundled;
+  const canRunSupervisorAction = !supervisorRequired || SUPERVISOR_AVAILABLE;
+  const supervisorTitle = canRunSupervisorAction ? undefined : SUPERVISOR_PENDING_HINT;
 
   // visible client chips (only the clients connected to this server)
   const connectedClients = clients.filter(c => c.servers.includes(server.id));
@@ -200,13 +214,23 @@ function McpServerRow({ server, calls, now, clients, onMenuOpen, menuOpen, onClo
           {state === "running" && (
             <>
               <button className="btn ghost sm" onClick={() => onLogs(server)} title="View logs">{Icons.logs}</button>
-              <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Restarting ${server.name}…`, "info")} title="Restart">{Icons.restart}</button>
+              <button
+                className="btn ghost sm"
+                onClick={() => window.__hal0Toast && window.__hal0Toast(`Restarting ${server.name}…`, "info")}
+                title={supervisorTitle || "Restart"}
+                disabled={!canRunSupervisorAction}
+              >{Icons.restart}</button>
               <button className="btn ghost sm" onClick={() => onConfig(server)} title="Edit config">{Icons.edit}</button>
             </>
           )}
           {state === "stopped" && (
             <>
-              <button className="btn sm" onClick={() => onToggle(server, true)}>Start</button>
+              <button
+                className="btn sm"
+                onClick={() => onToggle(server, true)}
+                title={supervisorTitle}
+                disabled={!canRunSupervisorAction}
+              >Start</button>
               <button className="btn ghost sm" onClick={() => onConfig(server)} title="Edit config">{Icons.edit}</button>
             </>
           )}
@@ -227,9 +251,21 @@ function McpServerRow({ server, calls, now, clients, onMenuOpen, menuOpen, onClo
                 onClose={onCloseMenu}
                 style={{ top: "calc(100% + 4px)", right: 0 }}
                 items={[
-                  { label: state === "running" ? "Disable server" : "Enable server", icon: <PwrIcon />, onClick: () => onToggle(server, state !== "running") },
+                  {
+                    label: state === "running" ? "Disable server" : "Enable server",
+                    icon: <PwrIcon />,
+                    onClick: () => onToggle(server, state !== "running"),
+                    disabled: !canRunSupervisorAction,
+                    hint: supervisorTitle,
+                  },
                   { label: "Open in browser", icon: Icons.ext, onClick: () => window.__hal0Toast && window.__hal0Toast(`Opening ${server.url}…`, "info") },
-                  { label: "Restart", icon: Icons.restart, onClick: () => window.__hal0Toast && window.__hal0Toast(`Restarting ${server.name}…`, "info") },
+                  {
+                    label: "Restart",
+                    icon: Icons.restart,
+                    onClick: () => window.__hal0Toast && window.__hal0Toast(`Restarting ${server.name}…`, "info"),
+                    disabled: !canRunSupervisorAction,
+                    hint: supervisorTitle,
+                  },
                   { label: "Edit config", icon: Icons.edit, onClick: () => onConfig(server) },
                   { label: "View logs", icon: Icons.logs, onClick: () => onLogs(server) },
                   { divider: true },

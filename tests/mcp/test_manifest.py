@@ -124,3 +124,86 @@ async def test_resolve_propagates_fetch_failure_as_bad_request() -> None:
     with pytest.raises(BadRequest) as exc:
         await manifest.resolve("https://example.com/mcp.json", fetcher=_fetch)
     assert exc.value.code == "mcp.manifest_fetch_failed"
+
+
+# ── SSRF guard ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_resolve_blocks_localhost_url() -> None:
+    """Loopback hostnames + 127.0.0.1 literals must short-circuit pre-fetch."""
+    for url in (
+        "http://localhost/manifest.json",
+        "http://127.0.0.1/manifest.json",
+        "http://127.0.0.1:9000/v1/load",
+        "http://[::1]/manifest.json",
+    ):
+        with pytest.raises(BadRequest) as exc:
+            await manifest.resolve(url)
+        assert exc.value.code == "mcp.ssrf_blocked", f"missed SSRF guard for {url}"
+
+
+@pytest.mark.asyncio
+async def test_resolve_blocks_private_lan_url() -> None:
+    """RFC 1918 ranges (10/8, 172.16/12, 192.168/16) must reject pre-fetch."""
+    for url in (
+        "http://10.0.1.142:8080/api/slots",
+        "http://172.16.0.5/manifest.json",
+        "http://192.168.1.1/manifest.json",
+    ):
+        with pytest.raises(BadRequest) as exc:
+            await manifest.resolve(url)
+        assert exc.value.code == "mcp.ssrf_blocked", f"missed SSRF guard for {url}"
+
+
+@pytest.mark.asyncio
+async def test_resolve_blocks_link_local_url() -> None:
+    """Link-local (incl. AWS/GCP IMDS at 169.254.169.254) must reject."""
+    for url in (
+        "http://169.254.169.254/latest/meta-data/",  # AWS / GCP IMDS
+        "http://169.254.1.1/",
+    ):
+        with pytest.raises(BadRequest) as exc:
+            await manifest.resolve(url)
+        assert exc.value.code == "mcp.ssrf_blocked", f"missed SSRF guard for {url}"
+
+
+@pytest.mark.asyncio
+async def test_resolve_blocks_mdns_local_hostname() -> None:
+    """``*.local`` mDNS hostnames are rejected without a DNS lookup."""
+    with pytest.raises(BadRequest) as exc:
+        await manifest.resolve("http://hal0.local/manifest.json")
+    assert exc.value.code == "mcp.ssrf_blocked"
+
+
+@pytest.mark.asyncio
+async def test_resolve_does_not_follow_redirect() -> None:
+    """The default fetcher must run with ``follow_redirects=False``.
+
+    A 30x to an internal host would otherwise bypass the pre-flight
+    SSRF check. We assert the AsyncClient kwarg at construction time so
+    a regression is caught without spinning up an HTTP server.
+    """
+    import inspect
+
+    src = inspect.getsource(manifest._default_fetcher)
+    assert "follow_redirects=False" in src, (
+        "_default_fetcher must construct httpx.AsyncClient with follow_redirects=False"
+    )
+
+
+# ── Tools-count cap ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_resolve_caps_tools_count_at_4096() -> None:
+    """A manifest with a runaway tools list must not 500 on Pydantic ``le``."""
+
+    async def _fetch(url: str) -> dict[str, Any]:
+        return {
+            "name": "huge",
+            "tools": ["t"] * 5000,
+        }
+
+    r = await manifest.resolve("https://example.com/m.json", fetcher=_fetch)
+    assert r.tools == 4096
