@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hal0.hardware.pve as pve_mod
-from hal0.api.routes.hardware import _flatten_for_ui, _platform_label
+from hal0.api.routes.hardware import _PVE_CONFIGURE_HINT, _flatten_for_ui, _platform_label
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 
 
@@ -120,7 +120,7 @@ class TestHostDetectionInStatsHardware:
             "configured": False,
             "detected": True,
             "detection": "detected",
-            "hint": ("Configure /etc/hal0/proxmox.json to see host pressure."),
+            "hint": _PVE_CONFIGURE_HINT,
         }
 
     def test_unconfigured_not_detected_stays_silent(
@@ -193,24 +193,32 @@ class TestHostDetectionInStatsHardware:
         assert resp.status_code == 200
         host = resp.json()["host"]
 
-        # Configured-case path passes through project_slim() (which strips
-        # tenants[], host_cpu_count, host_uptime_s, tenants_allocated_mb).
-        # The remaining keys must all flow through unchanged.
-        assert host["configured"] is True
-        assert host["ok"] is True
-        assert host["node"] == "pve"
-        assert host["host_mem_total_mb"] == 131072.0
-        assert host["host_mem_used_mb"] == 24576.0
-        assert host["host_mem_free_mb"] == 106496.0
-        assert host["host_cpu_pct"] == 5.2
-        assert host["tenants_running"] == 1
-        assert host["tenants_total"] == 1
         # The new detection keys MUST NOT appear when configured=true.
-        assert "detected" not in host
-        assert "detection" not in host
-        assert "hint" not in host
-        # And the slim drop-keys MUST be absent (project_slim strips them).
-        assert "tenants" not in host
-        assert "host_cpu_count" not in host
-        assert "host_uptime_s" not in host
-        assert "tenants_allocated_mb" not in host
+        # The configured-case path is project_slim(full) — assert equality
+        # so an additive regression on the dict shape is caught.
+        from hal0.hardware.pve import project_slim
+
+        assert host == project_slim(configured_full)
+
+    def test_unconfigured_uncertain_also_nudges(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """UNCERTAIN — one weak signal — must still surface the nudge.
+        The pve.py docstring says the UI nudges on both DETECTED and
+        UNCERTAIN. Only the detection field distinguishes them."""
+        monkeypatch.setattr(pve_mod, "_load_pve_config", lambda: None)
+        monkeypatch.setattr(
+            pve_mod,
+            "detect_proxmox_host",
+            lambda: pve_mod.PveDetectionState.UNCERTAIN,
+        )
+        pve_mod.invalidate_pve_cache()
+        resp = client.get("/api/stats/hardware")
+        assert resp.status_code == 200
+        host = resp.json()["host"]
+        assert host == {
+            "configured": False,
+            "detected": True,
+            "detection": "uncertain",
+            "hint": _PVE_CONFIGURE_HINT,
+        }
