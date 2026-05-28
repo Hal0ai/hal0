@@ -112,13 +112,19 @@ export function useMemoryMapModel() {
     const othersGb = Math.max(0, round1(hostUsedGb - selfShareGb))
     // Tenants come from the FULL-shape /api/settings/proxmox response,
     // not the slim stats response (project_slim strips tenants[]).
-    const tenants = (settingsStatus?.tenants || []).map((t) => ({
-      vmid: t.vmid,
-      name: t.name,
-      type: t.type,
-      memGb: mbToGb(t.mem_mb || 0),
-      maxGb: mbToGb(t.maxmem_mb || 0),
-    }))
+    // Filter out the LXC running hal0 itself — it's already represented
+    // as 'this hal0 LXC' via selfShareGb. The static probe exposes our
+    // hostname; tenants whose `name` matches are dropped.
+    const selfHostname = (rawHw.name || '').toLowerCase().trim()
+    const tenants = (settingsStatus?.tenants || [])
+      .filter((t) => !selfHostname || (t.name || '').toLowerCase().trim() !== selfHostname)
+      .map((t) => ({
+        vmid: t.vmid,
+        name: t.name,
+        type: t.type,
+        memGb: mbToGb(t.mem_mb || 0),
+        maxGb: mbToGb(t.maxmem_mb || 0),
+      }))
     host = {
       mode: 'configured',
       totalGb: hostTotalGb,
@@ -203,23 +209,10 @@ function HeadroomLabel({ availableGb, limitedBy }) {
 
 function PveNudge({ hint, onConfigure }) {
   return (
-    <div
-      className="memmap-pve-nudge mono"
-      role="status"
-      style={{
-        color: 'var(--warn)',
-        borderTop: '1px solid rgba(255,180,60,0.22)',
-        padding: '6px 8px',
-        marginTop: 6,
-        fontSize: 11,
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-      }}
-    >
+    <div className="memmap-pve-nudge mono" role="status">
       <span>⚠ Hosted on Proxmox — host pressure unknown.</span>
       <a
-        href="#settings/proxmox"
+        href="#settings"
         onClick={(e) => {
           if (onConfigure) {
             e.preventDefault()
@@ -298,7 +291,7 @@ function LegendRow({ swatch, name, sub, sz }) {
     <div className="ln mono">
       <span className="sw" style={{ background: swatch }} />
       <span className="name">{name}</span>
-      {sub && <span className="dim" style={{ marginLeft: 6 }}>{sub}</span>}
+      {sub && <span className="dim memmap-legend-sub">{sub}</span>}
       <span className="sz">{fmtGb(sz)}</span>
     </div>
   )
@@ -374,7 +367,7 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
 
   // ── sidebar variant ──
   return (
-    <div className="side-card memmap-sidebar">
+    <div className="side-card memmap-sidebar" data-loading={loading || undefined}>
       <div className="side-card-h">
         <span>Memory map</span>
         <span className="right mono">
