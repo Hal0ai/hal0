@@ -218,7 +218,7 @@ surface proxy. Runtime is whatever the bundled upstream does natively.
   Per-agent private namespace = `private:<agent_id>` per ADR-0005 §3.
 * **Skills catalog** — `GET /api/agents/skills` returns the static
   catalog (`HERMES_TOOL_CATALOG` + `HAL0_MCP_TOOL_CATALOG`) the
-  dashboard sidebar renders. Bumps ride ADR-0015's weekly drift PRs.
+  dashboard sidebar renders. Bumps ride ADR-0018's weekly drift PRs.
 * **Identity** — agent identity card published once into the `agents`
   Cognee dataset per ADR-0011. `X-hal0-Agent` is the header the proxy
   injects on every outbound hop.
@@ -247,7 +247,7 @@ surface proxy. Runtime is whatever the bundled upstream does natively.
 
 The Hermes-Agent upstream commit hal0 v0.3 is vendored / shimmed
 against lives in `pyproject.toml [tool.hal0.upstream-hermes]`. The
-weekly `hermes-sdk-diff` GitHub Action (ADR-0015) opens a drift issue
+weekly `hermes-sdk-diff` GitHub Action (ADR-0018) opens a drift issue
 when one of the tracked files changes between the pin and upstream
 HEAD. Bump process: review issue, edit shim adapters if needed, run
 `scripts/hermes-sdk-diff.sh --bump <sha>`, δ-harness + γ-suite, open

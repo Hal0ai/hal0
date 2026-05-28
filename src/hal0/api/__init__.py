@@ -986,7 +986,7 @@ def create_app() -> FastAPI:
 
     # Agent skills catalog (v0.3 PR-11). GET /api/agents/skills returns
     # the static catalog mirroring the upstream Hermes tool registry +
-    # hal0 MCP servers. Bumps ride ADR-0015's weekly drift PRs. The
+    # hal0 MCP servers. Bumps ride ADR-0018's weekly drift PRs. The
     # ``/skills`` path is NOT parameterised by agent id — the catalog
     # is the same across agents in v0.3.
     app.include_router(

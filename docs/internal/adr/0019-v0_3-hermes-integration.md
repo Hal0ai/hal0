@@ -1,4 +1,4 @@
-# ADR 0016 — v0.3 Hermes integration: composer over xterm, plugin host, persona TOML, composite upstream
+# ADR 0019 — v0.3 Hermes integration: composer over xterm, plugin host, persona TOML, composite upstream
 
 - **Status:** Accepted
 - **Date:** 2026-05-28
@@ -7,7 +7,7 @@
   DA-arch / DA-sec-ops / DA-ux review findings
 - **Related:** ADR-0004 (agents v0.2 bundling), ADR-0005 (memory
   engine — Cognee), ADR-0011 (agent identity card), ADR-0012 (auth +
-  Caddy removal), ADR-0013 (MCP client allow-list), ADR-0015 (upstream
+  Caddy removal), ADR-0013 (MCP client allow-list), ADR-0018 (upstream
   Hermes pin + weekly drift detection)
 
 ## Context
@@ -75,7 +75,7 @@ inheriting their CSS or globals) + DA-arch #1 (upstream is hot;
 isolate so a renamed export doesn't break the dashboard).
 
 **Where it lives.** `src/hal0/api/plugins/`, vendored SDK shape pinned
-by ADR-0015 + the `pyproject.toml [tool.hal0.upstream-hermes]` table.
+by ADR-0018 + the `pyproject.toml [tool.hal0.upstream-hermes]` table.
 
 ### 4. Persona TOML store + hot-reload nudge
 
@@ -147,7 +147,7 @@ PR-8 + PR-10 flagged:
   unit-not-found / timeout / spawn-failed cases.
 * `GET /api/agents/skills` — static catalog mirroring the upstream
   Hermes `tools/registry.py` shape + the two hal0-bundled MCP
-  servers. Bumps ride ADR-0015's weekly drift PRs.
+  servers. Bumps ride ADR-0018's weekly drift PRs.
 * `GET /api/agents/{id}/memory/stats` — per-agent memory chip data
   (`writes`, `reads`, `last_write`, `available`). Pulls from the
   in-process `CogneeWrapper`; falls back to `available=false` when
@@ -161,7 +161,7 @@ query (or `tools/list` MCP call). Rationale:
   view (different).
 * Live tools/list requires a session + the chat-proxy auth path —
   too much coupling for a catalog read.
-* Bumps are coalesced with ADR-0015's weekly drift cadence so the
+* Bumps are coalesced with ADR-0018's weekly drift cadence so the
   catalog stays in sync with the pin.
 
 ### 8. Vendor / proxy / shim policy
@@ -177,7 +177,7 @@ query (or `tools/list` MCP call). Rationale:
 
 **Why.** Vendored surfaces let hal0 own the integration contract;
 proxied surfaces let upstream churn without breaking hal0; shimmed
-surfaces are explicit drift candidates (ADR-0015 watches them).
+surfaces are explicit drift candidates (ADR-0018 watches them).
 
 ## Status of master plan
 
@@ -205,14 +205,14 @@ The 12-PR master plan landed in this sequence on
   no longer needs hal0-specific patches — every hal0-specific surface
   is in a plugin (memory_cognee), a config table
   (`[tool.hal0.upstream-hermes]`), or a proxy (chat-proxy / plugin
-  host). Upstream bumps go through ADR-0015's weekly job.
+  host). Upstream bumps go through ADR-0018's weekly job.
 * **One single-pick agent.** v0.3 ships hermes only (ADR-0004). The
   v0.4 pi-coder swap is additive thanks to §6's route shape.
 * **No xterm anywhere.** The composer + transcript will outlive the
   v0.3 milestone; a future "let me drop into a real tty" power-user
   feature has to come back through the auth gate, not through the
   default chat surface.
-* **One ADR per future drift event.** When ADR-0015's weekly job
+* **One ADR per future drift event.** When ADR-0018's weekly job
   opens a drift issue, the bump PR records the change in CHANGELOG +
   bumps the pin — no new ADR unless the upstream surface change is
   structural (a renamed event taxonomy field, a shifted plugin SDK

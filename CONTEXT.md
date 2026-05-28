@@ -285,7 +285,7 @@ The active milestone (2026-05-23 →). Five interlocking streams: (1) Hermes-Age
 
 # v0.3 integration vocabulary (added 2026-05-28)
 
-The terms below land with the v0.3 Hermes integration sweep (PRs #393–#404 + #PR-11). Pinned by [ADR-0016](docs/internal/adr/0016-v0_3-hermes-integration.md).
+The terms below land with the v0.3 Hermes integration sweep (PRs #393–#404 + #PR-11). Pinned by [ADR-0019](docs/internal/adr/0019-v0_3-hermes-integration.md).
 
 ## composer
 
@@ -297,7 +297,7 @@ The rolling chat history rendered above the composer. Built by zustand store `us
 
 ## plugin host
 
-The hal0-api surface (`/api/dashboard/plugins/*` + `/dashboard-plugins/{name}/*`) that proxies upstream Hermes plugin manifests + static assets so the v3 dashboard can mount plugin bundles (the kanban plugin in v0.3) inside an `<AgentView>` tab. Each plugin renders inside a shadow-DOM iframe with the `__HERMES_PLUGIN_SDK__` global shimmed from `src/hal0/api/plugins/sdk-shim.js`. v0.3 vendors the SDK shape; ADR-0015's drift detection alerts on upstream registry.ts changes that would break the shim. See PR-7.
+The hal0-api surface (`/api/dashboard/plugins/*` + `/dashboard-plugins/{name}/*`) that proxies upstream Hermes plugin manifests + static assets so the v3 dashboard can mount plugin bundles (the kanban plugin in v0.3) inside an `<AgentView>` tab. Each plugin renders inside a shadow-DOM iframe with the `__HERMES_PLUGIN_SDK__` global shimmed from `src/hal0/api/plugins/sdk-shim.js`. v0.3 vendors the SDK shape; ADR-0018's drift detection alerts on upstream registry.ts changes that would break the shim. See PR-7.
 
 ## sidecar agent block
 
@@ -313,7 +313,7 @@ The hal0-owned `MemoryProvider` plugin at `src/hal0/agents/hermes/plugins/memory
 
 ## hermes-sdk-diff
 
-The weekly GitHub Action + local script (`scripts/hermes-sdk-diff.sh`) that diffs hal0's pinned Hermes upstream commit (`pyproject.toml [tool.hal0.upstream-hermes]`) against upstream HEAD for the tracked files (`web/src/plugins/registry.ts`, `web/src/plugins/slots.ts`, `hermes_cli/web_server.py`, `agent/memory_provider.py`, `tools/registry.py`, `agent/events.py`). When any tracked file changes, the workflow opens an issue with the upstream commit range so the bump is human-gated. Bump process documented in [ADR-0015](docs/internal/adr/0015-upstream-hermes-pin-and-upgrade.md) §4.
+The weekly GitHub Action + local script (`scripts/hermes-sdk-diff.sh`) that diffs hal0's pinned Hermes upstream commit (`pyproject.toml [tool.hal0.upstream-hermes]`) against upstream HEAD for the tracked files (`web/src/plugins/registry.ts`, `web/src/plugins/slots.ts`, `hermes_cli/web_server.py`, `agent/memory_provider.py`, `tools/registry.py`, `agent/events.py`). When any tracked file changes, the workflow opens an issue with the upstream commit range so the bump is human-gated. Bump process documented in [ADR-0018](docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md) §4.
 
 ## HMAC session cookie
 

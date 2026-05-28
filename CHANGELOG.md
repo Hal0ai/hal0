@@ -22,9 +22,9 @@ composer/transcript, the missing endpoints (`restart`, `skills`,
 drift CI job.
 
 Decision record consolidated in
-[ADR-0016](docs/internal/adr/0016-v0_3-hermes-integration.md);
+[ADR-0019](docs/internal/adr/0019-v0_3-hermes-integration.md);
 upstream pin process in
-[ADR-0015](docs/internal/adr/0015-upstream-hermes-pin-and-upgrade.md).
+[ADR-0018](docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md).
 
 ### New / improved
 
@@ -68,7 +68,7 @@ upstream pin process in
   (Enter submits, Shift+Enter newline); zustand transcript with
   WebSocket reconnect (250ms → 4s jittered backoff); inline tool-call
   cards.
-- **ADR-0015 upstream Hermes pin + weekly hermes-sdk-diff CI (#403)**
+- **ADR-0018 upstream Hermes pin + weekly hermes-sdk-diff CI (#403)**
   — `pyproject.toml [tool.hal0.upstream-hermes]` is the
   machine-readable pin; `.github/workflows/hermes-sdk-diff.yml` opens
   a drift issue weekly when any tracked file changes between pin and
@@ -81,7 +81,7 @@ upstream pin process in
   - `GET /api/agents/skills` — replaces the static catalog the
     SidebarAgentBlock used during build-out. Returns the v0.3
     catalog (`hermes-core` + `hal0-admin` + `hal0-memory`). Bumps
-    ride ADR-0015 drift PRs.
+    ride ADR-0018 drift PRs.
   - `GET /api/agents/{id}/memory/stats` — per-agent counts the
     sidebar memory chip renders; pulls from the in-process Cognee
     wrapper. Graceful `available=false` fallback when memory isn't
@@ -93,7 +93,7 @@ upstream pin process in
     (composer, transcript, plugin host, sidecar agent block, persona
     TOML, hal0-cognee, hermes-sdk-diff, HMAC session cookie,
     X-hal0-Agent, composite hal0 upstream).
-  - ADR-0016 consolidates the master-plan decisions.
+  - ADR-0019 consolidates the master-plan decisions.
 
 ### Internal contracts
 

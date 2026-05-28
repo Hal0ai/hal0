@@ -33,10 +33,10 @@ hermes" is a drop-in replacement (the JSON shape is stable).
 
 Catalog source of truth
 -----------------------
-The catalog lives in ``HERMES_TOOL_CATALOG`` below. When ADR-0015's
+The catalog lives in ``HERMES_TOOL_CATALOG`` below. When ADR-0018's
 weekly ``hermes-sdk-diff`` job flags drift in ``tools/registry.py``,
 the resolver bumps this list as part of the upstream pin bump (process
-documented in ADR-0015 §4). One file to edit, one PR per drift event.
+documented in ADR-0018 §4). One file to edit, one PR per drift event.
 
 The hal0 MCP catalog (``HAL0_MCP_TOOL_CATALOG``) is hal0-owned and
 tracks ``src/hal0/mcp/admin/*`` + ``src/hal0/mcp/memory/*``. Updates
@@ -56,14 +56,14 @@ router = APIRouter()
 
 # ── Upstream Hermes tool catalog ────────────────────────────────────────────
 # Mirror of ``tools/registry.py`` shape from the Hermes upstream pinned in
-# ``pyproject.toml [tool.hal0.upstream-hermes]`` (ADR-0015). Each entry
+# ``pyproject.toml [tool.hal0.upstream-hermes]`` (ADR-0018). Each entry
 # is exactly what ``hermes tools list --json`` emits for the corresponding
 # tool: ``name``, ``description``, ``category``, ``source``, ``schema_ref``.
 # The schema_ref is intentionally a reference (not the JSON Schema body)
 # so this file stays small — the schema body lives in upstream's
 # registry and the sidebar shows the description only.
 #
-# When ADR-0015's weekly drift job opens an issue, bump these entries +
+# When ADR-0018's weekly drift job opens an issue, bump these entries +
 # the pinned commit in one PR.
 
 HERMES_TOOL_CATALOG: Final[tuple[dict[str, str], ...]] = (
@@ -237,7 +237,7 @@ def _build_catalog() -> dict[str, Any]:
         "source": "static",
         "note": (
             "Skills catalog is mirrored from upstream tools/registry.py + "
-            "hal0 MCP servers. Bumps ride ADR-0015 weekly drift PRs."
+            "hal0 MCP servers. Bumps ride ADR-0018 weekly drift PRs."
         ),
     }
 

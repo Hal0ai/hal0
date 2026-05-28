@@ -108,8 +108,8 @@ Single-context. `CONTEXT.md` at root; ADRs at `docs/internal/adr/`. See `docs/ag
   — agent identity card schema.
 * [`docs/internal/adr/0013-mcp-client-allow-list.md`](docs/internal/adr/0013-mcp-client-allow-list.md)
   — server-axis + tool-axis default-deny.
-* [`docs/internal/adr/0015-upstream-hermes-pin-and-upgrade.md`](docs/internal/adr/0015-upstream-hermes-pin-and-upgrade.md)
+* [`docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md`](docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md)
   — upstream pin + weekly drift detection.
-* [`docs/internal/adr/0016-v0_3-hermes-integration.md`](docs/internal/adr/0016-v0_3-hermes-integration.md)
+* [`docs/internal/adr/0019-v0_3-hermes-integration.md`](docs/internal/adr/0019-v0_3-hermes-integration.md)
   — v0.3 integration roll-up (composer over xterm, plugin host,
   persona TOML, composite upstream).

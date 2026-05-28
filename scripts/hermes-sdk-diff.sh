@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hal0 v0.3 — Upstream Hermes drift detector (ADR-0015).
+# hal0 v0.3 — Upstream Hermes drift detector (ADR-0018).
 #
 # Owner: v0.3 integration team.
 # Triggered by: .github/workflows/hermes-sdk-diff.yml (weekly + dispatch),

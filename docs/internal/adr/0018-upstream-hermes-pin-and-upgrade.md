@@ -1,4 +1,4 @@
-# ADR 0015 — Upstream Hermes pin + weekly drift detection (v0.3)
+# ADR 0018 — Upstream Hermes pin + weekly drift detection (v0.3)
 
 - **Status:** Accepted
 - **Date:** 2026-05-28
@@ -62,7 +62,7 @@ plus the list of upstream files hal0 depends on. Schema:
 ```toml
 [tool.hal0.upstream-hermes]
 # Hermes-Agent upstream commit hash hal0 v0.3 is vendored/shimmed against.
-# Bump process: ADR-0015 §4. Do not edit by hand outside the bump PR.
+# Bump process: ADR-0018 §4. Do not edit by hand outside the bump PR.
 repo   = "https://github.com/earendil-works/hermes-agent"
 commit = "0554ef1aa3a2e5818f292f76a676110239a5d34b"
 date   = "2026-05-28"

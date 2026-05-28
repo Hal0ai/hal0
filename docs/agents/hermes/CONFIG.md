@@ -279,7 +279,7 @@ sandbox.
 ### Security baseline
 
 * WS upgrades require both a permitted `Origin` header AND a valid
-  HMAC session cookie (see ADR-0016 §2).
+  HMAC session cookie (see ADR-0019 §2).
 * Embed token in `Authorization: Bearer …` on the outbound hop to
   hermes; never the query string.
 * uvicorn access log scrubs query strings.
@@ -303,4 +303,4 @@ sandbox.
 - [MCP client](./mcp-client.md) — what `mcp_wire` validates
 - [`SERVICE.md`](./SERVICE.md) — `hal0-agent@.service` unit + restart endpoint
 - ADR-0013 — agent-installer-managed MCP allowlist contract
-- ADR-0016 — v0.3 integration roll-up
+- ADR-0019 — v0.3 integration roll-up
