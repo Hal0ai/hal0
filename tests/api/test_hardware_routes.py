@@ -141,3 +141,76 @@ class TestHostDetectionInStatsHardware:
         # so the UI's shape-discriminator branch (configured vs detected vs
         # off) stays consistent.
         assert host == {"configured": False, "detected": False}
+
+    def test_configured_pass_through_unchanged(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When pve_status() returns configured=true, the detection block
+        must not modify it — the slim projection from project_slim() flows
+        through to the response untouched."""
+        configured_full = {
+            "configured": True,
+            "ok": True,
+            "node": "pve",
+            "host_mem_total_mb": 131072.0,
+            "host_mem_used_mb": 24576.0,
+            "host_mem_free_mb": 106496.0,
+            "host_cpu_pct": 5.2,
+            "host_cpu_count": 32,
+            "host_uptime_s": 1_089_410,
+            "tenants_running": 1,
+            "tenants_total": 1,
+            "tenants_allocated_mb": 8192.0,
+            "tenants": [
+                {
+                    "type": "lxc",
+                    "vmid": 105,
+                    "name": "hal0",
+                    "status": "running",
+                    "maxmem_mb": 98304.0,
+                    "mem_mb": 9216.0,
+                    "maxcpu": 16,
+                    "cpu_pct": 2.3,
+                    "node": "pve",
+                }
+            ],
+        }
+
+        async def fake_pve_status() -> dict[str, object]:
+            return configured_full
+
+        monkeypatch.setattr(pve_mod, "pve_status", fake_pve_status)
+
+        # detect_proxmox_host MUST NOT be consulted in the configured path —
+        # patch it to a sentinel that would fail the assertion if it ran.
+        def _should_not_run() -> pve_mod.PveDetectionState:
+            raise AssertionError("detect_proxmox_host called on configured host")
+
+        monkeypatch.setattr(pve_mod, "detect_proxmox_host", _should_not_run)
+        pve_mod.invalidate_pve_cache()
+
+        resp = client.get("/api/stats/hardware")
+        assert resp.status_code == 200
+        host = resp.json()["host"]
+
+        # Configured-case path passes through project_slim() (which strips
+        # tenants[], host_cpu_count, host_uptime_s, tenants_allocated_mb).
+        # The remaining keys must all flow through unchanged.
+        assert host["configured"] is True
+        assert host["ok"] is True
+        assert host["node"] == "pve"
+        assert host["host_mem_total_mb"] == 131072.0
+        assert host["host_mem_used_mb"] == 24576.0
+        assert host["host_mem_free_mb"] == 106496.0
+        assert host["host_cpu_pct"] == 5.2
+        assert host["tenants_running"] == 1
+        assert host["tenants_total"] == 1
+        # The new detection keys MUST NOT appear when configured=true.
+        assert "detected" not in host
+        assert "detection" not in host
+        assert "hint" not in host
+        # And the slim drop-keys MUST be absent (project_slim strips them).
+        assert "tenants" not in host
+        assert "host_cpu_count" not in host
+        assert "host_uptime_s" not in host
+        assert "tenants_allocated_mb" not in host
