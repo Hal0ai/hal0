@@ -66,6 +66,14 @@ from typing import Any
 
 import structlog
 
+from hal0.memory.namespace import (
+    DEFAULT_DATASET as _DEFAULT_DATASET,
+)
+from hal0.memory.namespace import (
+    MemoryNamespaceError,
+    resolve_write_dataset,
+)
+
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
     from mcp.types import ToolAnnotations  # type: ignore[import-not-found]
@@ -126,9 +134,11 @@ def _normalise_tags(value: Any) -> list[str]:
 
 
 # ── Namespace resolution (ADR-0005 §3) ───────────────────────────────────────
-
-
-_DEFAULT_DATASET = "shared"
+#
+# The actual rule lives in :mod:`hal0.memory.namespace` so the REST shims
+# in ``hal0.api.routes.memory`` apply the same logic (issue #317). This
+# wrapper preserves the MCP-side error type so dispatcher-level catches
+# don't have to learn a second exception class.
 
 
 def _resolve_dataset(
@@ -137,20 +147,13 @@ def _resolve_dataset(
     private: bool,
     client_id: str | None,
 ) -> str:
-    """Apply the namespace rule: default ``shared``; ``private`` promotes
-    the caller's writes to ``private:<client_id>``.
-
-    A caller may pass an explicit ``dataset=`` to override the default,
-    but the ``--private`` toggle wins: requesting ``private`` without a
-    client_id is an error (we can't promote without an identity).
-    """
-    if private:
-        if not client_id:
-            raise MemorySchemaError("private namespace requires an authenticated client_id")
-        return f"private:{client_id}"
-    if requested is None or not requested.strip():
-        return _DEFAULT_DATASET
-    return requested
+    """Thin shim around :func:`hal0.memory.namespace.resolve_write_dataset`
+    that re-raises ``MemoryNamespaceError`` as ``MemorySchemaError`` for
+    compatibility with existing MCP dispatcher error envelopes."""
+    try:
+        return resolve_write_dataset(requested, private=private, client_id=client_id)
+    except MemoryNamespaceError as exc:
+        raise MemorySchemaError(str(exc)) from exc
 
 
 def _iso_now() -> str:
