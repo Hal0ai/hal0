@@ -875,6 +875,10 @@ def create_app() -> FastAPI:
             _embed_model = str(_embed_cfg.model)
             _rerank_enabled = bool(_embed_cfg.rerank_enabled)
             _rerank_url = str(_embed_cfg.rerank_url)
+            _rerank_over_fetch_factor = int(_embed_cfg.rerank_over_fetch_factor)
+            _rerank_max_candidates = int(_embed_cfg.rerank_max_candidates)
+            _rerank_connect_timeout_s = float(_embed_cfg.rerank_connect_timeout_s)
+            _rerank_read_timeout_s = float(_embed_cfg.rerank_read_timeout_s)
         except Exception as exc:  # pragma: no cover — defensive
             log.warning("hal0.memory.cfg_load_failed", error=str(exc))
             _graph_enabled = False
@@ -882,6 +886,10 @@ def create_app() -> FastAPI:
             _embed_model = "BAAI/bge-small-en-v1.5"
             _rerank_enabled = False
             _rerank_url = "http://127.0.0.1:8086"
+            _rerank_over_fetch_factor = 5
+            _rerank_max_candidates = 500
+            _rerank_connect_timeout_s = 1.0
+            _rerank_read_timeout_s = 8.0
 
         memory_wrapper = CogneeWrapper(
             embedding_model=_embed_model,
@@ -889,6 +897,10 @@ def create_app() -> FastAPI:
             graph_route=_graph_route,
             rerank_enabled=_rerank_enabled,
             rerank_url=_rerank_url,
+            rerank_over_fetch_factor=_rerank_over_fetch_factor,
+            rerank_max_candidates=_rerank_max_candidates,
+            rerank_connect_timeout_s=_rerank_connect_timeout_s,
+            rerank_read_timeout_s=_rerank_read_timeout_s,
         )
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("hal0.memory.init_failed", error=str(exc))

@@ -386,3 +386,311 @@ async def test_set_rerank_enabled_flips_at_runtime(
     w.set_rerank_enabled(True)
     await w.search(query="q", limit=3)
     assert len(posted) == 1
+
+
+# ── Candidate cap + timeout config (reviewer findings, PR #365) ───────────
+
+
+def test_memory_embedding_config_rerank_tunables_defaults() -> None:
+    """New ``rerank_*`` tunables ship with the documented defaults."""
+    from hal0.config.schema import MemoryEmbeddingConfig
+
+    cfg = MemoryEmbeddingConfig()
+    assert cfg.rerank_over_fetch_factor == 5
+    assert cfg.rerank_max_candidates == 500
+    assert cfg.rerank_connect_timeout_s == pytest.approx(1.0)
+    assert cfg.rerank_read_timeout_s == pytest.approx(8.0)
+
+
+def test_memory_embedding_config_rerank_tunables_bounds() -> None:
+    """Bounds enforced by pydantic ``Field(ge/le)``."""
+    from hal0.config.schema import MemoryEmbeddingConfig
+
+    with pytest.raises(ValueError):
+        MemoryEmbeddingConfig(rerank_over_fetch_factor=0)
+    with pytest.raises(ValueError):
+        MemoryEmbeddingConfig(rerank_over_fetch_factor=21)
+    with pytest.raises(ValueError):
+        MemoryEmbeddingConfig(rerank_max_candidates=5)
+    with pytest.raises(ValueError):
+        MemoryEmbeddingConfig(rerank_max_candidates=5000)
+    with pytest.raises(ValueError):
+        MemoryEmbeddingConfig(rerank_connect_timeout_s=0.0)
+    with pytest.raises(ValueError):
+        MemoryEmbeddingConfig(rerank_read_timeout_s=120.0)
+
+
+# Shared candidate-cap stub. Replaces cognee.search with N synthetic chunks
+# AND seeds matching sidecar rows so the wrapper's text-match path keeps
+# all of them. The wrapper's pre-rerank candidate accumulator is the
+# observable: we assert how many candidates it kept.
+
+
+def _seed_n_candidates(monkeypatch: pytest.MonkeyPatch, wrapper: Any, n: int) -> None:
+    """Stub cognee + sidecar with ``n`` candidates, one per chunk."""
+    import json
+    import uuid
+    from datetime import UTC, datetime
+
+    import cognee
+
+    texts = [f"doc {i}" for i in range(n)]
+    chunks: list[Any] = []
+    for i, text in enumerate(texts):
+        ch = MagicMock()
+        ch.text = text
+        # Strictly descending vector score so the unranked order matches
+        # insertion order.
+        ch.score = 1.0 - (i / max(1, n))
+        chunks.append(ch)
+
+    async def fake_search(**kwargs: Any) -> list[Any]:
+        return chunks
+
+    monkeypatch.setattr(cognee, "search", fake_search)
+
+    now = datetime.now(UTC).isoformat()
+    with wrapper._sidecar_conn() as conn:
+        for text in texts:
+            conn.execute(
+                """
+                INSERT INTO hal0_memory_items
+                    (id, text, timestamp, dataset, tags, source, metadata,
+                     cognee_data_id, cognee_dataset_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    text,
+                    now,
+                    "shared",
+                    json.dumps([]),
+                    "test",
+                    json.dumps({}),
+                    None,
+                    None,
+                ),
+            )
+        conn.commit()
+
+
+async def test_candidate_cap_respects_over_fetch_factor(
+    wrapper_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``limit=25`` with default factor=5 → cap=125, well below the 500
+    absolute cap, so the rerank pass should receive 125 candidates (or
+    all available, whichever is smaller).
+
+    We stage 200 cognee chunks and inspect the document list the rerank
+    slot receives — that's the candidate set in candidate order.
+    """
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            # Identity rerank — keep input order.
+            return {
+                "results": [
+                    {"index": i, "relevance_score": 1.0 - (i / 1000)}
+                    for i in range(len(captured.get("payload", {}).get("documents", [])))
+                ]
+            }
+
+    class _FakeClient:
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClient:
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, Any]) -> _Resp:
+            captured["url"] = url
+            captured["payload"] = json
+            return _Resp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    w = wrapper_factory(rerank_enabled=True)
+    _seed_n_candidates(monkeypatch, w, 200)
+
+    await w.search(query="q", limit=25)
+    # 25 * 5 = 125, < max_candidates (500), and < seeded 200 → exactly 125.
+    assert len(captured["payload"]["documents"]) == 125
+
+
+async def test_candidate_cap_respects_max_candidates(
+    wrapper_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``max_candidates=50`` clamps below ``limit * factor``.
+
+    limit=20, factor=5 → naive cap would be 100; with max=50 the cap is 50.
+    """
+    captured: dict[str, Any] = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "results": [
+                    {"index": i, "relevance_score": 1.0 - (i / 1000)}
+                    for i in range(len(captured.get("payload", {}).get("documents", [])))
+                ]
+            }
+
+    class _FakeClient:
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClient:
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, Any]) -> _Resp:
+            captured["payload"] = json
+            return _Resp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    w = wrapper_factory(rerank_enabled=True, rerank_max_candidates=50)
+    _seed_n_candidates(monkeypatch, w, 200)
+
+    await w.search(query="q", limit=20)
+    assert len(captured["payload"]["documents"]) == 50
+
+
+async def test_rerank_handles_read_timeout(
+    wrapper_factory,
+    stub_cognee_search,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``httpx.ReadTimeout`` raised by the rerank client must fall
+    through silently — vector ordering preserved, no exception escapes,
+    audit tail records reranked=False."""
+    import httpx
+
+    class _SlowClient:
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            # The constructor must accept the split-timeout we now pass.
+            assert isinstance(kw.get("timeout"), httpx.Timeout)
+
+        async def __aenter__(self) -> _SlowClient:
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            raise httpx.ReadTimeout("rerank slot slow")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _SlowClient)
+
+    w = wrapper_factory(rerank_enabled=True)
+    stub_cognee_search(w)
+
+    out = await w.search(query="q", limit=3)
+    assert [r["text"] for r in out] == [
+        "alpha document",
+        "beta document",
+        "gamma document",
+    ]
+    search_events = [e for e in w.audit_tail if e["op"] == "search"]
+    assert search_events[-1]["reranked"] is False
+
+
+async def test_rerank_handles_duplicate_index_in_response(
+    wrapper_factory,
+    stub_cognee_search,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed rerank slot that returns the same index twice must
+    not double-emit the candidate. seen_idx dedup keeps the first hit;
+    later duplicates are skipped."""
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            # idx=0 listed twice with different scores. After sort DESC
+            # the first entry is the 0.9 one (idx 0). The 0.8 idx=0
+            # entry must be skipped.
+            return {
+                "results": [
+                    {"index": 0, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.8},
+                    {"index": 1, "relevance_score": 0.7},
+                ]
+            }
+
+    class _FakeClient:
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClient:
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            return None
+
+        async def post(self, *a: Any, **kw: Any) -> _Resp:
+            return _Resp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    w = wrapper_factory(rerank_enabled=True)
+    stub_cognee_search(w)
+
+    out = await w.search(query="q", limit=3)
+    # No duplicates: alpha (idx 0) appears exactly once.
+    texts = [r["text"] for r in out]
+    assert texts.count("alpha document") == 1
+    # The 3-text candidate set should be fully represented (the unranked
+    # tail re-appends idx=2 after the dedup'd ranked pass).
+    assert set(texts) == {"alpha document", "beta document", "gamma document"}
+
+
+async def test_rerank_skipped_when_single_candidate(
+    wrapper_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``limit=1`` and a single candidate → the rerank pass is skipped
+    entirely (``len(candidates) > 1`` is the guard). No HTTP call,
+    audit tail records reranked=False."""
+    import httpx
+
+    def _explode(*a: Any, **kw: Any) -> Any:
+        raise AssertionError("rerank must be skipped for single-candidate searches")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _explode)
+
+    w = wrapper_factory(rerank_enabled=True)
+    _seed_n_candidates(monkeypatch, w, 1)
+
+    out = await w.search(query="q", limit=1)
+    assert len(out) == 1
+    search_events = [e for e in w.audit_tail if e["op"] == "search"]
+    assert search_events[-1]["reranked"] is False

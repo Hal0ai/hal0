@@ -1169,6 +1169,55 @@ class MemoryEmbeddingConfig(BaseModel):
             "protocol. Defaults to hal0's bundled embed-rerank slot."
         ),
     )
+    rerank_over_fetch_factor: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description=(
+            "Multiplier on ``limit`` used to determine the vector-search "
+            "candidate count fed into the rerank pass. With the default of "
+            "5, a ``limit=10`` search rerank-scores up to 50 candidates "
+            "before clipping back to the top 10. Bumping this trades "
+            "rerank latency for recall; dropping it toward 1 makes the "
+            "rerank pass increasingly pointless."
+        ),
+    )
+    rerank_max_candidates: int = Field(
+        default=500,
+        ge=10,
+        le=2000,
+        description=(
+            "Absolute cap on candidates per rerank call, applied AFTER "
+            "``rerank_over_fetch_factor`` so memory + latency stay bounded "
+            "regardless of the requested ``limit``. The pre-PR hard-coded "
+            "100 silently collapsed the over-fetch ratio at ``limit >= 20`` "
+            "and made rerank a no-op at ``limit >= 100``."
+        ),
+    )
+    rerank_connect_timeout_s: float = Field(
+        default=1.0,
+        ge=0.05,
+        le=10.0,
+        description=(
+            "TCP connect timeout for the rerank HTTP call. Kept short so "
+            "a wedged rerank slot can't stall memory_search; the read "
+            "budget is the larger of the two knobs."
+        ),
+    )
+    rerank_read_timeout_s: float = Field(
+        default=8.0,
+        ge=0.05,
+        le=60.0,
+        description=(
+            "Read budget for the rerank slot. Default raised from the "
+            "previous shared 2.0s scalar because GPU rerank under "
+            "concurrent load (see auto-memory "
+            "``hal0-lemonade-threads-deadlock``) regularly breaches a "
+            "tight total budget, which silently falls through to vector "
+            "ordering. Failures still fall through — this just stops "
+            "spurious timeouts under healthy-but-loaded conditions."
+        ),
+    )
 
     @field_validator("model")
     @classmethod

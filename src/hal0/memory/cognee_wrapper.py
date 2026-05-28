@@ -172,7 +172,10 @@ class CogneeWrapper:
         rerank_enabled: bool = False,
         rerank_url: str = "http://127.0.0.1:8086",
         rerank_model: str = "bge-reranker-v2-m3-q4_k_m",
-        rerank_timeout_s: float = 2.0,
+        rerank_over_fetch_factor: int = 5,
+        rerank_max_candidates: int = 500,
+        rerank_connect_timeout_s: float = 1.0,
+        rerank_read_timeout_s: float = 8.0,
     ) -> None:
         """Configure Cognee + the sidecar SQLite index.
 
@@ -209,9 +212,23 @@ class CogneeWrapper:
         :param rerank_model: Model id sent in the rerank request body.
             llama.cpp's reranker echoes the field but accepts any
             string; the default matches hal0's bundled slot.
-        :param rerank_timeout_s: Per-request timeout for the rerank
-            HTTP call. Failures fall through to vector ordering — a
-            slow rerank slot must NOT block memory_search.
+        :param rerank_over_fetch_factor: Multiplier applied to ``limit``
+            to size the candidate set fed into the rerank pass. Higher
+            values trade rerank latency for recall; the pre-PR hard-
+            coded 5 collapsed at ``limit >= 20`` once the absolute cap
+            kicked in. See :class:`hal0.config.schema.MemoryEmbeddingConfig`.
+        :param rerank_max_candidates: Absolute cap on candidates per
+            rerank call so memory + latency stay bounded regardless of
+            the requested ``limit``. Applied AFTER ``rerank_over_fetch_
+            factor``.
+        :param rerank_connect_timeout_s: TCP connect timeout for the
+            rerank HTTP call. Kept short — a wedged rerank slot must not
+            stall memory_search.
+        :param rerank_read_timeout_s: Read budget for the rerank slot.
+            Default 8.0s; raised from the previous shared 2.0s scalar
+            because GPU rerank under concurrent load regularly breached
+            a tight total budget and silently fell through to vector
+            ordering. Failures still fall through.
         """
         self._cognee_dir = Path(cognee_dir)
         self._cognee_dir.mkdir(parents=True, exist_ok=True)
@@ -262,7 +279,14 @@ class CogneeWrapper:
         # Strip trailing slash so the search path doesn't double up.
         self._rerank_url = str(rerank_url or "").rstrip("/")
         self._rerank_model = str(rerank_model or "")
-        self._rerank_timeout_s = float(rerank_timeout_s)
+        # Over-fetch factor + absolute cap drive candidate_cap on the
+        # search path. The pre-PR ``min(100, max(limit*5, limit))``
+        # hard-coded BOTH knobs and made rerank a no-op at limit >= 100.
+        self._rerank_over_fetch_factor = max(1, int(rerank_over_fetch_factor))
+        self._rerank_max_candidates = max(1, int(rerank_max_candidates))
+        # Split connect vs read budgets — see __init__ docstring.
+        self._rerank_connect_timeout_s = float(rerank_connect_timeout_s)
+        self._rerank_read_timeout_s = float(rerank_read_timeout_s)
 
         # Tail buffer of audit events emitted by this instance. The
         # structlog channel is the production audit-log surface
@@ -742,7 +766,14 @@ class CogneeWrapper:
         # filtered candidate set (up to over-fetched top_k) before
         # reordering, then clip to ``limit``. Pre-rerank slicing would
         # throw away the candidates the reranker is supposed to promote.
-        candidate_cap = min(100, max(limit * 5, limit)) if self._rerank_enabled else limit
+        candidate_cap = (
+            min(
+                self._rerank_max_candidates,
+                max(limit * self._rerank_over_fetch_factor, limit),
+            )
+            if self._rerank_enabled
+            else limit
+        )
         candidates: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         with self._sidecar_conn() as conn:
@@ -955,8 +986,19 @@ class CogneeWrapper:
             "documents": documents,
         }
         url = f"{self._rerank_url}/rerank"
+        # Split connect vs read budget so a healthy-but-slow GPU rerank
+        # (concurrent load → see auto-memory
+        # ``hal0-lemonade-threads-deadlock``) doesn't burn the connect
+        # phase's share and silently fall through. Connect stays tight
+        # so a wedged port still bails fast.
+        timeout = httpx.Timeout(
+            connect=self._rerank_connect_timeout_s,
+            read=self._rerank_read_timeout_s,
+            write=2.0,
+            pool=None,
+        )
         try:
-            async with httpx.AsyncClient(timeout=self._rerank_timeout_s) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
                 body = resp.json()
