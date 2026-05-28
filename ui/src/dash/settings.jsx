@@ -6,7 +6,7 @@
 // Capabilities hook feeds the Lemonade admin section's per-cap fields.
 
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
-import { useUpdateState, useUpdateCheck, useUpdateApply } from '@/api/hooks/useUpdates'
+import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob } from '@/api/hooks/useUpdates'
 import { useCapabilities, useCapabilityPatch } from '@/api/hooks/useCapabilities'
 import { useLemondRollup, useLemonadeStats } from '@/api/hooks/useLemonade'
 import {
@@ -17,7 +17,7 @@ import {
   useModelStoreMigrate,
 } from '@/api/hooks/useSettings'
 
-const { useState: useStateSet, useEffect: useEffectSet } = React;
+const { useState: useStateSet, useEffect: useEffectSet, useRef: useRefSet } = React;
 
 function SettingsView() {
   const [section, setSection] = useStateSet("secrets");
@@ -383,6 +383,28 @@ function UpdatesSection() {
   const checkM = useUpdateCheck();
   const applyM = useUpdateApply();
   const u = stateQuery.data || { hal0: {}, lemonade: {}, flm: {}, autoCheck: true };
+
+  // Track the most recent apply job so the user sees the backend's
+  // verdict, not just the 202 ack. Toasts fire once on terminal state.
+  const [jobId, setJobId] = useStateSet(null);
+  const lastTerminalJob = useRefSet(null);
+  const { job, terminal } = useUpdateJob(jobId);
+  useEffectSet(() => {
+    if (!terminal || !job || lastTerminalJob.current === job.id) return;
+    lastTerminalJob.current = job.id;
+    if (job.state === 'applied') {
+      window.__hal0Toast && window.__hal0Toast(`Updated to ${job.version || 'latest'} — services restarted`, "ok");
+    } else {
+      const detail = job.error || job.error_code || 'unknown';
+      window.__hal0Toast && window.__hal0Toast(`Update failed: ${detail}`, "err");
+    }
+  }, [terminal, job]);
+
+  const jobBusy = job && (job.state === 'queued' || job.state === 'running');
+  const jobLabel = jobBusy
+    ? (job.state === 'queued' ? 'queued…' : 'installing…')
+    : null;
+
   return (
     <div className="s-section">
       <h2>Updates</h2>
@@ -396,13 +418,25 @@ function UpdatesSection() {
             {u.hal0?.available
               ? <><span style={{color: "var(--accent)"}}>{u.hal0.available} available</span> <span style={{color: "var(--fg-4)"}}>· current {u.hal0.current}</span></>
               : <span>current {u.hal0?.current}</span>}
+            {jobLabel && <span style={{marginLeft: 8, color: "var(--warn)", fontFamily: "var(--jbm)", fontSize: 11}}>· {jobLabel}</span>}
           </>}
           actions={<>
-            <button className="btn sm" disabled={!u.hal0?.available} onClick={() => {
-              applyM.mutate('hal0', {
-                onSuccess: () => window.__hal0Toast && window.__hal0Toast("Update started — brief outage during restart", "warn"),
-              });
-            }}>Install update</button>
+            <button
+              className="btn sm"
+              disabled={!u.hal0?.available || applyM.isPending || !!jobBusy}
+              onClick={() => {
+                applyM.mutate(undefined, {
+                  onSuccess: (snap) => {
+                    setJobId(snap?.id || null);
+                    window.__hal0Toast && window.__hal0Toast("Update started — brief outage during restart", "warn");
+                  },
+                  onError: (err) => {
+                    const msg = (err && err.message) || "could not start update";
+                    window.__hal0Toast && window.__hal0Toast(`Update failed: ${msg}`, "err");
+                  },
+                });
+              }}
+            >{applyM.isPending ? "Starting…" : (jobBusy ? "Installing…" : "Install update")}</button>
             <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Opening hal0.dev/changelog", "info")}>Changelog →</button>
           </>}
         />
@@ -411,7 +445,16 @@ function UpdatesSection() {
           sub="Pinned. SHA-256 verified."
           mono
           v={u.lemonade?.current ? `${u.lemonade.current} · channel: ${u.lemonade.channel || 'stable'}` : '—'}
-          actions={<button className="btn ghost sm" onClick={() => checkM.mutate('lemonade')}>Check</button>}
+          actions={<button
+            className="btn ghost sm"
+            disabled={checkM.isPending}
+            onClick={() => checkM.mutate(undefined, {
+              onError: (err) => {
+                const msg = (err && err.message) || "check failed";
+                window.__hal0Toast && window.__hal0Toast(`Check failed: ${msg}`, "err");
+              },
+            })}
+          >{checkM.isPending ? "Checking…" : "Check"}</button>}
         />
         <SRow
           k="flm"

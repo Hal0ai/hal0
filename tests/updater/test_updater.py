@@ -379,16 +379,43 @@ def test_apply_sha_mismatch_raises_typed_error(
     assert exc_info.value.code == "system.update_verify_failed"
 
 
-def test_apply_refuses_when_install_dir_exists_nonempty(
+def test_apply_refuses_when_install_dir_exists_with_foreign_content(
     synthetic_release: dict[str, Any], cosign_skip: None
 ) -> None:
-    """If /usr/lib/hal0-<version>/ already exists and is non-empty, refuse."""
+    """If /usr/lib/hal0-<version>/ exists with foreign content, refuse.
+
+    Foreign = no VERSION file and no hal0 pyproject.toml. We will not
+    silently destroy whatever the operator parked there.
+    """
     install = _versioned_install_dir("0.0.1")
     install.mkdir(parents=True, exist_ok=True)
     (install / "stale-marker").write_text("leftover")
 
     with pytest.raises(UpdateExtractError):
         asyncio.run(Updater().apply())
+
+
+def test_apply_quarantines_stale_hal0_install_and_retries(
+    synthetic_release: dict[str, Any], cosign_skip: None
+) -> None:
+    """A prior half-finished hal0 extract should be moved aside, not block."""
+    install = _versioned_install_dir("0.0.1")
+    install.mkdir(parents=True, exist_ok=True)
+    # Marker that _looks_like_hal0_install() recognises.
+    (install / "VERSION").write_text("0.0.1\n")
+    (install / "leftover.txt").write_text("from prior failed apply")
+
+    asyncio.run(Updater().apply())
+
+    # Fresh extract landed.
+    assert (install / "VERSION").read_text().strip() == "0.0.1"
+    assert not (install / "leftover.txt").exists()
+    # Old contents are recoverable next to it.
+    siblings = [p for p in install.parent.iterdir() if p.name.startswith(f"{install.name}.stale-")]
+    assert siblings, (
+        f"expected one quarantine dir alongside {install}, got {list(install.parent.iterdir())}"
+    )
+    assert (siblings[0] / "leftover.txt").read_text() == "from prior failed apply"
 
 
 def test_apply_download_failure_surfaces_typed_error(

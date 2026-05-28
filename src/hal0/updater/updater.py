@@ -561,27 +561,68 @@ def _verify_cosign(
 # ── Extraction + migration helpers ─────────────────────────────────────────────
 
 
+def _looks_like_hal0_install(path: Path) -> bool:
+    """Heuristic: does ``path`` look like a prior hal0 tarball extraction?
+
+    A safe quarantine candidate has either a top-level ``VERSION`` file
+    or a ``pyproject.toml`` whose ``name`` is ``hal0``. We deliberately
+    refuse to touch unrelated non-empty directories.
+    """
+    if (path / "VERSION").is_file():
+        return True
+    pp = path / "pyproject.toml"
+    if pp.is_file():
+        try:
+            head = pp.read_text(encoding="utf-8", errors="replace")[:512]
+        except OSError:
+            return False
+        return 'name = "hal0"' in head or "name = 'hal0'" in head
+    return False
+
+
 def _extract_tarball(tarball: Path, dest: Path, *, job_id: str | None = None) -> None:
-    """Extract ``tarball`` to ``dest``. Refuses non-empty destinations.
+    """Extract ``tarball`` to ``dest``.
 
     The tarball is expected to contain a top-level directory matching
     ``hal0-<version>/``; we strip that prefix to land files directly under
     ``dest`` (which the caller names ``/usr/lib/hal0-<version>/``).
+
+    If ``dest`` already exists and looks like a prior hal0 extraction
+    (has ``VERSION`` or a hal0 ``pyproject.toml``), it is renamed aside
+    to ``dest.with_suffix(.stale-<unix-ts>)`` so a retry after a half-
+    failed apply isn't permanently wedged. Unrelated non-empty dirs are
+    still refused — we will not silently destroy whatever the operator
+    parked there.
 
     Raises ``UpdateExtractError`` on filesystem issues, malformed
     tarballs, or unsafe paths.
     """
     dest = Path(dest)
     if dest.exists():
-        if dest.is_dir() and any(dest.iterdir()):
-            raise UpdateExtractError(
-                f"refusing to extract over non-empty directory {dest}",
-                details={"path": str(dest)},
-            )
         if not dest.is_dir():
             raise UpdateExtractError(
                 f"refusing to extract: {dest} exists and is not a directory",
                 details={"path": str(dest)},
+            )
+        if any(dest.iterdir()):
+            if not _looks_like_hal0_install(dest):
+                raise UpdateExtractError(
+                    f"refusing to extract over non-empty directory {dest}",
+                    details={"path": str(dest)},
+                )
+            stale = dest.with_name(f"{dest.name}.stale-{int(time.time())}")
+            try:
+                dest.rename(stale)
+            except OSError as exc:
+                raise UpdateExtractError(
+                    f"could not quarantine stale install dir {dest}: {exc}",
+                    details={"path": str(dest), "quarantine": str(stale), "error": str(exc)},
+                ) from exc
+            log.warning(
+                "updater.extract_quarantined_stale",
+                job_id=job_id,
+                original=str(dest),
+                quarantine=str(stale),
             )
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -902,15 +943,10 @@ class Updater:
             job_id=self.job_id,
         )
 
-        # Step 6: extract.
+        # Step 6: extract. `_extract_tarball` quarantines a prior hal0
+        # extraction at the same path (see its docstring) so a retry
+        # after a half-failed apply isn't permanently wedged.
         install_dir = _versioned_install_dir(target_version)
-        if install_dir.exists() and any(install_dir.iterdir()):
-            # Idempotent: if the exact version is already extracted to a
-            # non-empty path, refuse rather than silently overwriting.
-            raise UpdateExtractError(
-                f"install dir already exists and is non-empty: {install_dir}",
-                details={"install_dir": str(install_dir), "version": target_version},
-            )
         await asyncio.to_thread(_extract_tarball, tarball_path, install_dir, job_id=self.job_id)
 
         # Step 7: config migrations.

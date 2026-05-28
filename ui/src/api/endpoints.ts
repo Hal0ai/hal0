@@ -118,6 +118,7 @@ export const ENDPOINTS = {
   updateState: '/api/updates/state',
   updateCheck: '/api/updates/check',
   updateApply: '/api/updates/apply',
+  updateStatus: (jobId: string) => `/api/updates/status/${encodeURIComponent(jobId)}`,
   // Secrets
   secrets: '/api/secrets',
   secret: (name: string) => `/api/secrets/${encodeURIComponent(name)}`,
