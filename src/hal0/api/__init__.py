@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from hal0.lemonade.metrics_shim import MetricsShim
 
 from hal0 import __version__
+from hal0.api.agents import (
+    personas as agents_personas_routes,
+)
 from hal0.api.middleware import error_codes, request_id
 from hal0.api.routes import (
     agents as agents_routes,
@@ -942,6 +945,16 @@ def create_app() -> FastAPI:
         agents_routes.router,
         prefix="/api/agents",
         tags=["agents"],
+    )
+
+    # Agent personas (v0.3 PR-4). Per-agent persona TOML browse + activate
+    # under the SAME ``/api/agents`` prefix so the dashboard's agent view
+    # nests personas under the agent it belongs to. Routes are
+    # parameterized by agent id; v0.3 only resolves ``"hermes"``.
+    app.include_router(
+        agents_personas_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "personas"],
     )
 
     # Approval inbox (ADR-0004 §5). The dashboard bell, the MCP admin
