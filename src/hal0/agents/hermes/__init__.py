@@ -9,3 +9,7 @@ See ``installer/agents/hermes/plugins/`` for the legacy mirror location
 that the bootstrap copies from today. PR-3 (hermes_provision overhaul)
 will switch the copy source to this tree.
 """
+
+from hal0.agents.hermes.driver import HermesDriver
+
+__all__ = ["HermesDriver"]
