@@ -26,6 +26,20 @@ function parseRoute() {
     head = "mcp";
     rest = rest.slice(1);
   }
+  // v0.3 PR-8: legacy #peers route redirects to the Peer memory
+  // subsection inside the Memory tab on the agent route. We mutate
+  // the hash here so deep links from older docs / bookmarks land on
+  // the new shape.
+  if (head === "peers") {
+    if (typeof window !== "undefined") {
+      const next = "#agent/memory?subsection=peer";
+      if (window.location.hash !== next) {
+        window.location.hash = next;
+      }
+    }
+    head = "agent";
+    rest = ["memory"];
+  }
   const route = ROUTES.includes(head) ? head : "dashboard";
   const query = {};
   if (qs) {
@@ -187,11 +201,16 @@ function App() {
   return (
     <>
       <div className={"app" + (isFirstrun ? " firstrun" : "")}>
+        {/* v0.3 PR-8: approvals are now sourced from the sidebar agent
+            rollup (PR-6 SidebarAgentBlock + live /api/agent/approvals
+            poll). The topbar bell stays as a launcher for the modal
+            view; its badge counter is suppressed until the live hook is
+            bridged here in PR-10 (it's already alive in the sidebar). */}
         <TopBar
           route={route}
           onBell={() => setBellOpen(true)}
           onCmdK={() => setPaletteOpen(true)}
-          approvals={HAL0_DATA.approvals.length}
+          approvals={0}
         />
         {!isFirstrun && <Sidebar route={route} onGo={go} />}
         <div className="main">
@@ -222,10 +241,14 @@ function App() {
 
       {!isFirstrun && <BottomTabs route={route} onGo={go} />}
 
+      {/* v0.3 PR-8: ApprovalModal stays mounted but its content is
+          backed by the live agent approvals queue in PR-10. Today the
+          fixture list is empty — the sidebar pip is the operative
+          surface (PR-6). */}
       <ApprovalModal
         open={bellOpen}
         onClose={() => setBellOpen(false)}
-        items={HAL0_DATA.approvals}
+        items={[]}
       />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
@@ -318,7 +341,6 @@ function App() {
         <TweakSection title="Demo navigation">
           <TweakButton onClick={() => go("firstrun")}>Jump to FirstRun</TweakButton>
           <TweakButton onClick={() => go("dashboard")}>Jump to Dashboard</TweakButton>
-          <TweakButton onClick={() => setBellOpen(true)}>Open approval inbox</TweakButton>
         </TweakSection>
       </TweaksPanel>
     </>

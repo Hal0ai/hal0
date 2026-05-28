@@ -63,6 +63,25 @@ import './dash/agents/plugin-host.jsx'
 
 import './dash/extras.jsx'
 
+// v0.3 PR-8: AgentView is now split into per-tab files under
+// ui/src/dash/agents/. Bridges install the TanStack-Query hooks onto
+// `window.__hal0Use*` BEFORE the .jsx tab modules evaluate, so each
+// tab can read them without violating the no-ES-imports contract.
+// Load order matters: AgentView (the shell) reads window.{HermesChatTab,
+// PersonasTab, SkillsTab, MemoryTab, PluginsTab} at render time, so the
+// tabs must register on window before AgentView mounts. AgentView itself
+// must register AFTER extras.jsx so its definition wins over any stale
+// symbol the old monolith would have left behind (defence-in-depth —
+// the old monolith is already removed).
+import './dash/agents/personas-tab-hook-bridge'
+import './dash/agents/memory-tab-hook-bridge'
+import './dash/agents/hermes-chat-tab.jsx'
+import './dash/agents/personas-tab.jsx'
+import './dash/agents/skills-tab.jsx'
+import './dash/agents/memory-tab.jsx'
+import './dash/agents/plugins-tab.jsx'
+import './dash/agents/agent-view.jsx'
+
 // v0.3 MCP additions — see `hal0 v3 mcp.html` for the original entry. We
 // pull them into the main SPA so `#mcp` (and the equivalent `#agents/mcp`)
 // renders the McpView inside the shared chrome rather than a separate page.
