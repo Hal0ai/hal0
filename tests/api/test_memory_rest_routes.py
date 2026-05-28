@@ -292,3 +292,135 @@ def test_delete_passes_ids_unchanged(client: TestClient, stub_wrapper: StubWrapp
     assert r.status_code == 200, r.text
     assert stub_wrapper.delete_calls == [{"ids": ["a", "b"]}]
     assert r.json() == {"deleted": 2}
+
+
+# ── PR #366 review hardening (closes #317 + #367) ──────────────────────────
+#
+# Six new contract pins surfaced by the request-changes review. The
+# first cluster (path traversal, ``private:`` prefix in the agent
+# header) covers the ADR-0005 §5 identity-shape audit findings; the
+# second (body ``dataset="private:other"`` with ``private=False``)
+# covers the namespace-resolver hardening; the third (list endpoint
+# without an agent header) mirrors the existing ``/add`` contract on
+# the read surface.
+
+
+def test_add_agent_header_path_traversal_rejected(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """``X-hal0-Agent: ../etc/passwd`` is rejected at 400 — the agent
+    id feeds the Cognee dataset name + the audit log's ``source`` field,
+    so path-traversal candidates must never reach the wrapper."""
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "x"},
+        headers={"X-hal0-Agent": "../etc/passwd"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "memory.agent_id_invalid"
+    assert stub_wrapper.add_calls == []
+
+
+def test_add_agent_header_private_prefix_rejected(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """``X-hal0-Agent: private:bob`` is rejected — would otherwise
+    manufacture a ``private:private:bob`` dataset when X-hal0-Private
+    is set. The private namespace is reachable only via the toggle."""
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "x"},
+        headers={"X-hal0-Agent": "private:bob"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "memory.agent_id_invalid"
+    assert stub_wrapper.add_calls == []
+
+
+def test_add_agent_header_with_colon_variant_rejected(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """Colon in agent id (e.g. ``hermes-agent:1``) is rejected by the
+    ``[a-zA-Z0-9_-]{1,64}`` regex — even non-``private:`` colons cannot
+    flow through because they'd corrupt the dataset string."""
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "x"},
+        headers={"X-hal0-Agent": "hermes-agent:1"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "memory.agent_id_invalid"
+    assert stub_wrapper.add_calls == []
+
+
+def test_add_body_private_dataset_without_private_header_rejected(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """Body ``dataset=private:other`` with no ``X-hal0-Private`` is
+    rejected — non-private callers cannot address the private namespace
+    by name. The toggle is the only path to ``private:<x>``."""
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "x", "dataset": "private:other"},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "memory.namespace_invalid"
+    assert stub_wrapper.add_calls == []
+
+
+def test_list_private_without_agent_header_rejected(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """``X-hal0-Private: 1`` on ``/list`` without an agent header is
+    rejected — mirrors :func:`test_add_private_without_agent_header_rejected`
+    on the read surface so callers get a consistent 400 across CRUD."""
+    r = client.get(
+        "/api/memory/list",
+        headers={"X-hal0-Private": "1"},
+    )
+    assert r.status_code >= 400, r.text
+    assert stub_wrapper.list_calls == []
+
+
+def test_cross_client_private_writes_not_visible_to_other_agents(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """Agent A writes private; Agent B reads without private headers and
+    does NOT see A's private rows.
+
+    Two layers of containment under test:
+      1. The REST handler does not forward A's ``private:A`` dataset to
+         B's default read (B's resolved dataset is ``"shared"``).
+      2. The wrapper search call captured for B contains only ``shared``
+         — no leakage of A's namespace through the route surface.
+
+    The wrapper-level enforcement (own-private intersection) is covered
+    in ``tests/memory/test_cognee_wrapper.py``. This test pins that the
+    REST veneer doesn't undo it.
+    """
+    # Agent A writes private.
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "A's secret"},
+        headers={"X-hal0-Agent": "agent-a", "X-hal0-Private": "1"},
+    )
+    assert r.status_code == 200, r.text
+    assert stub_wrapper.add_calls[0]["dataset"] == "private:agent-a"
+
+    # Agent B searches without the private header.
+    r2 = client.post(
+        "/api/memory/search",
+        json={"query": "secret"},
+        headers={"X-hal0-Agent": "agent-b"},
+    )
+    assert r2.status_code == 200, r2.text
+    # Agent B's resolved read scope is just ``shared`` — the route does
+    # not unilaterally union in any other agent's private namespace.
+    search_call = stub_wrapper.search_calls[-1]
+    assert search_call["dataset"] == "shared"
+    assert "private:agent-a" not in (
+        search_call["dataset"]
+        if isinstance(search_call["dataset"], list)
+        else [search_call["dataset"]]
+    )

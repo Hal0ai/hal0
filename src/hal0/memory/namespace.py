@@ -52,6 +52,12 @@ def resolve_write_dataset(
       - ``private=True`` → ``private:<client_id>`` (raises if no
         ``client_id`` is available).
       - ``requested`` is ``None`` / empty → :data:`DEFAULT_DATASET`.
+      - ``requested`` starts with ``private:`` and ``private=False``
+        → ``MemoryNamespaceError``. PR #366 review hardening: a
+        non-private caller must not be able to address the private
+        namespace by passing the prefix in the body — the toggle is
+        the only path in. Surfaces as 400 at the transport layer
+        instead of silently being forwarded to the wrapper.
       - Otherwise the requested string is passed through verbatim.
     """
     if private:
@@ -60,6 +66,11 @@ def resolve_write_dataset(
         return f"{PRIVATE_PREFIX}{client_id}"
     if requested is None or not requested.strip():
         return DEFAULT_DATASET
+    if requested.startswith(PRIVATE_PREFIX):
+        raise MemoryNamespaceError(
+            "non-private callers cannot address the private namespace by name; "
+            "send X-hal0-Private: 1 (REST) or private=true (MCP) instead"
+        )
     return requested
 
 

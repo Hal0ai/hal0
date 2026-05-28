@@ -17,6 +17,7 @@ this module is the thin HTTP veneer that:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -48,6 +49,14 @@ _AGENT_HEADER = "x-hal0-agent"
 _PRIVATE_HEADER = "x-hal0-private"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
+# ADR-0005 §5 security hardening: agent identity feeds the
+# ``private:<agent>`` dataset name AND the audit log's ``source``
+# field. We allow alnum + ``-`` + ``_`` only, up to 64 chars — keeps
+# the resolved namespace path-traversal-free, sql-quotable, and
+# bounded. Matches the convention used by other hal0 identity headers
+# (slot names, capability ids).
+_AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
+
 
 class MemoryNamespaceInvalid(Hal0Error):
     """The caller's headers + body produced an unresolvable namespace.
@@ -61,17 +70,59 @@ class MemoryNamespaceInvalid(Hal0Error):
     status = 400
 
 
+class MemoryAgentIdInvalid(Hal0Error):
+    """The ``X-hal0-Agent`` header value failed the ADR-0005 §5
+    identity-shape check.
+
+    Distinct from :class:`MemoryNamespaceInvalid` so the dashboard
+    can render a focused message ("agent id must be alnum/-/_, ≤64
+    chars, no ``private:`` prefix") rather than a generic namespace
+    error.
+    """
+
+    code = "memory.agent_id_invalid"
+    status = 400
+
+
 def _agent_id(request: Request) -> str:
-    """Return the ``X-hal0-Agent`` value, or ``"anonymous"`` if absent.
+    """Return the validated ``X-hal0-Agent`` value or ``"anonymous"``.
 
     Mirrors :func:`hal0.api.mcp_mount.client_id_resolver` for the REST
     surface — both translate the absence of an identity header into the
     same sentinel so audit + dataset resolution stay consistent.
+
+    Validation (ADR-0005 §5 hardening, surfaced by PR #366 review):
+
+      - Empty / whitespace → ``"anonymous"`` (back-compat with
+        unauthenticated callers).
+      - Values starting with ``private:`` are REJECTED so a caller
+        cannot manufacture ``private:private:bob`` by smuggling the
+        prefix through the header. The ``private`` toggle is the
+        only path to the namespace.
+      - Values must match ``^[a-zA-Z0-9_\\-]{1,64}$`` — agent ids
+        flow into the Cognee dataset name + the audit log's
+        ``source`` field. Path-traversal candidates (``../etc``),
+        control chars, and over-long values are all rejected here.
     """
     raw = request.headers.get(_AGENT_HEADER)
-    if not raw:
+    if raw is None:
         return "anonymous"
-    return raw.strip() or "anonymous"
+    candidate = raw.strip()
+    if not candidate:
+        return "anonymous"
+    if candidate.startswith("private:"):
+        raise MemoryAgentIdInvalid(
+            "X-hal0-Agent must not be prefixed with 'private:' — the "
+            "private namespace is reached via X-hal0-Private: 1, not by "
+            "embedding the prefix in the identity header",
+            details={"header": "X-hal0-Agent"},
+        )
+    if not _AGENT_ID_PATTERN.match(candidate):
+        raise MemoryAgentIdInvalid(
+            "X-hal0-Agent must match [a-zA-Z0-9_-]{1,64}",
+            details={"header": "X-hal0-Agent"},
+        )
+    return candidate
 
 
 def _is_private(request: Request) -> bool:
@@ -405,6 +456,7 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 __all__ = [
     "DEFAULT_DATASET",
     "GraphUpstreamConfig",
+    "MemoryAgentIdInvalid",
     "MemoryGraphConfig",
     "MemoryGraphConfigInvalid",
     "MemoryNamespaceInvalid",

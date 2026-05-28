@@ -869,25 +869,33 @@ class CogneeWrapper:
     def _effective_write_dataset(self, requested: str) -> str:
         """Apply the §3 namespace rule to a write.
 
-        ``private_mode`` instances always promote to their own private
-        dataset, regardless of what the caller asks for — clients can't
-        smuggle private data into ``shared`` from a private instance,
-        and can't escape into ``shared`` either (the toggle is a
-        per-client posture, not a per-call switch).
+        Two postures:
 
-        Non-private instances accept ``shared`` (the default) or a
-        passthrough custom dataset; passing ``private:<other>`` from a
-        non-private instance is treated as a typo and quietly folded to
-        ``shared`` rather than letting a client write into another
-        client's namespace.
+          1. ``private_mode=True`` (per-client wrapper, the legacy
+             shape used by `tests/memory/`): the constructor pins the
+             effective dataset to ``private:<client_id>``; ANY
+             ``requested`` value here is promoted to it. Clients can't
+             smuggle private data into ``shared`` from a private
+             instance, and can't escape into ``shared`` either.
+
+          2. ``private_mode=False`` (singleton wrapper, the
+             production shape used by ``app.state.memory_wrapper`` —
+             see issue #367): identity already resolved by the
+             transport layer (REST / MCP) and stamped onto the
+             ``dataset`` string. If the caller passes
+             ``private:<x>``, persist VERBATIM — the REST/MCP layer
+             owns the cross-client guard (regex on agent id +
+             rejection of body ``private:*`` when the private toggle
+             is off). The wrapper used to collapse this to ``shared``,
+             which silently leaked every agent's "private" write into
+             the global bucket. ``shared`` + custom datasets still
+             pass through unchanged.
         """
         if self._private_mode:
             return self._write_dataset
-        if requested.startswith(PRIVATE_PREFIX):
-            # Non-private instance trying to address a private namespace
-            # by name. ADR-0005 §3 doesn't expose that path — collapse
-            # to shared.
-            return SHARED_DATASET
+        # Non-private wrapper: trust the resolved dataset string from
+        # the caller — REST + MCP enforce identity + reject hostile
+        # private:* values before this point (issue #367).
         return requested or SHARED_DATASET
 
     def _allowed_read_datasets(self, requested: str | list[str]) -> list[str]:
