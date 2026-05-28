@@ -10,6 +10,84 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.3.1-alpha.1] — 2026-05-27
+
+Hermes-and-Cognee + dashboard v3 polish release. v0.3 stream work that
+landed on `main` between 2026-05-23 and 2026-05-27 — 64 PRs — packaged
+into the first patch tag after the v0.3.0-alpha.1 auth/Caddy cut.
+
+### Added
+
+- **Hermes-Agent bootstrap pipeline** (PRs #279, #284, #286, #289, #291,
+  #292, #295, #296, #298, #316). 12-phase pipeline (`preflight`,
+  `install`, `home_init`, `env_probe`, `config_write`, `mcp_wire`,
+  `namespace_register`, `context_link`, `model_automap`, `voice_wire`,
+  `smoke_tests`, `self_report`). Plugin model (`Hal0Profile`,
+  `Hal0MemoryProvider`). `hal0 agent {status,log,upgrade}` CLI.
+- **MCP host: per-agent client allow-list** (ADR-0013 — PRs #278, #293,
+  #295, #300, #304). `mcp_client.py`, host-introspection probe tools
+  for `hal0-admin`, per-agent MCP-clients view in the dashboard, full
+  read-only introspection + audit-log SSE on the MCP page.
+- **Memory graph extraction** (ADR-0014 — PRs #287, #290, #294, #297,
+  #303). `[memory.graph]` schema + cognify gate on Cognee. New
+  `/api/memory/{add,search,list,delete}` REST shims (closes #302).
+  `hal0 memory graph {status,enable,disable}` CLI. Graph-extraction
+  panel in dashboard Memory tab.
+- **Agents > Peers tab** (PR #299) — identity cards from agents
+  dataset.
+- **Models surface** (PRs #313, #319, #343, #353) — scan +
+  add-by-path + model-dir setting, single `[models].store` setting
+  with firstrun + migration, default scan/preview recursive with UI
+  toggle, model.type derived at the `useModels` hook.
+- **Chat surface in dashboard** (PRs #309, #314, #315, #356, #357,
+  #358) — real chat against the primary slot, slot indicator dots +
+  warming pulse, collapsible reasoning above the answer, chat moves
+  to its own `/chat` route, snapshot/memmap/throughput sidebar
+  mirrored onto `/slots`.
+- **Footer journal + update banner** (Epic #322 — PRs #321, #328,
+  #329, #330, #332). `/api/journal` + `/api/journal/stream` merged
+  log surface; Settings → Updates wired to the real backend.
+- **Slot UX bundle** (PRs #281, #282, #283, #342, #344, #351) — POST
+  normalizes Lemonade-shape model + auto-assigns port, `hal0 slot
+  create --type` derives Lemonade device, max_loaded_models 4→8,
+  swap-arrow affordance, zero-red-dots bundle, swap popover reads
+  live `/api/models`.
+- **One-line Proxmox VE LXC installer** (PR #341).
+
+### Fixed
+
+- **Slot backend update now invalidates state.json** (PR #360, issue
+  #359). Previously `POST /api/slots/{name}/backend` rewrote the TOML
+  but `extra.backend` in state.json stuck at the boot-time adoption
+  value forever, so the snapshot lied even though inference itself ran
+  on the new backend.
+- **Dispatcher fall-through to Lemonade proxy** (PR #277) and **drift
+  to OFFLINE not ERROR when lemond evicts a model** (PR #276).
+- **Hermes uninstall** — registry coherence + state-dir cleanup
+  (#352), venv + context_link teardown (#354), memory teardown failure
+  surfacing (#355).
+- **`/v1/health.last_use`** treated as an opaque counter (PR #307);
+  removes spurious "idle since the unix epoch" rendering.
+- **Live sidebars + memory map + throughput** (PRs #306, #308, #328)
+  finally read the real backend instead of HAL0_DATA seed fixtures.
+
+### Changed
+
+- **Bundle name** rendered from manifest instead of placeholder text
+  across install banners + progress (#214 / #331).
+- **MCP page** moved from mock to real backend introspection (#304).
+- **Settings → Updates** moved from mock to real backend (#321).
+- **UpdateBanner** wired to live update state (#324 / #329).
+- **HAL0_DATA fixtures** further retired — multiple dash surfaces now
+  read `/api/models` (#345 / #351).
+
+### Notes
+
+This is a patch-level tag (`0.3.0 → 0.3.1`) by SemVer convention, but
+the scope is closer to a minor release — Hermes, memory graph, and the
+MCP host surface are all new user-facing systems. Future patch tags
+inside v0.3.x will hold the line at fixes-only.
+
 ## [v0.3.0-alpha.1] — 2026-05-23
 
 **Caddy and the auth surface are removed.** PLAN.md v0.3 stream 4
