@@ -302,11 +302,18 @@ jobs:
             # to a real prerelease check on the v1.0.0 cut. See the
             # hal0_v0.1.0-alpha-launch + hal0_release_prerelease_flag
             # memories.
+            # `--latest` is also explicit. The "automatic based on date
+            # and version" default did NOT flip the Latest badge from
+            # v0.3.0-alpha.1 → v0.3.1-alpha.1 on the 2026-05-28 cut,
+            # so /releases/latest stayed stuck at the prior tag until
+            # a manual `gh release edit --latest`. Hard-code it for
+            # the same v1.0.0 horizon as --prerelease=false above.
             gh release create "${TAG}" \
               --title "hal0 ${TAG}" \
               --notes "Automated release. See docs/internal/release-manifest.md for the verify path." \
               --draft=false \
-              --prerelease=false
+              --prerelease=false \
+              --latest
           fi
 
           gh release upload "${TAG}" "${TARBALL}" "${SIG}" "${CRT}" "${MANIFEST}" --clobber
