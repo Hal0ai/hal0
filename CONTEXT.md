@@ -280,3 +280,49 @@ Pinned to `/var/lib/hal0/agents/hermes/` for hal0-bundled installs (not `~/.herm
 ## v0.3
 
 The active milestone (2026-05-23 →). Five interlocking streams: (1) Hermes-Agent first-run bootstrap, (2) React dashboard v3 wired to live data, (3) Lemonade polish (preload+idle, GPU TTS, KV%, `/v1/*` proxy), (4) Admin/auth simplification (ADR-0001 close-out: FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced memory + MCP client side (Cognee graph + Memify + federation + per-agent external MCP allow-list). v0.3 ships when all five close. See PLAN.md §1 v0.3 + §15 Phase 10.
+
+---
+
+# v0.3 integration vocabulary (added 2026-05-28)
+
+The terms below land with the v0.3 Hermes integration sweep (PRs #393–#404 + #PR-11). Pinned by [ADR-0019](docs/internal/adr/0019-v0_3-hermes-integration.md).
+
+## composer
+
+The browser-side input surface in the v3 dashboard's `<HermesChat>` tab. A React `<textarea>` + send button — NOT an xterm / PTY. Enter submits the current text as a `prompt.submit` JSON-RPC frame; Shift+Enter inserts a newline. Replaces the earlier "xterm-over-PTY" design (MASTER-PLAN §1 pivot #1) — the PTY route was cut after DA-sec-ops flagged it as a LAN-RCE class problem. Lives in `ui/src/dash/agents/chat/Composer.jsx`.
+
+## transcript
+
+The rolling chat history rendered above the composer. Built by zustand store `useTranscript` from `message.delta` + `message.complete` events streamed off `/api/agents/{id}/events`. Tool-call deltas appear as inline collapsed cards. The store dedupes by `(session_id, message_id)` so the WS reconnect path (250ms → 4s backoff, owned by `use-hermes-session.js`) doesn't duplicate frames.
+
+## plugin host
+
+The hal0-api surface (`/api/dashboard/plugins/*` + `/dashboard-plugins/{name}/*`) that proxies upstream Hermes plugin manifests + static assets so the v3 dashboard can mount plugin bundles (the kanban plugin in v0.3) inside an `<AgentView>` tab. Each plugin renders inside a shadow-DOM iframe with the `__HERMES_PLUGIN_SDK__` global shimmed from `src/hal0/api/plugins/sdk-shim.js`. v0.3 vendors the SDK shape; ADR-0018's drift detection alerts on upstream registry.ts changes that would break the shim. See PR-7.
+
+## sidecar agent block
+
+The compact agent panel rendered in the v3 dashboard sidebar — service-status chip, persona picker, memory chip, skills list, approvals bell, [Open chat] button. Lives at `ui/src/dash/agents/SidebarAgentBlock.jsx`. Parameterised by `agent_id` so v0.4 pi-coder lights up by adding a row. The service chip wires `POST /api/agents/{id}/restart` (PR-11); the memory chip reads `GET /api/agents/{id}/memory/stats` (PR-11); the skills list reads `GET /api/agents/skills` (PR-11).
+
+## persona TOML
+
+A file under `/var/lib/hal0/agents/hermes/personas/{id}.toml` declaring `[persona]` (`id`, `display_name`, `summary`, `system_prompt`, `tools_allowed`, `memory_namespace`, `preferred_upstream`, `preferred_model`) and `[persona.approval]` (`default_policy`, `auto_approve`, `require_approval`). The filename stem MUST match `[persona].id` — `load_persona` raises `PersonaError` on a mismatch to prevent silent renames. Seeded by `hermes_provision` Phase 8 with two personas (`hermes`, `coder`); operator-edited via `hal0 agent personas` or the dashboard persona editor. The active persona is the contents of `active.txt` next to the personas dir; switching swaps the system-prompt scope on the next turn without restart.
+
+## hal0-cognee
+
+The hal0-owned `MemoryProvider` plugin at `src/hal0/agents/hermes/plugins/memory_cognee/`, mounted into `$HERMES_HOME/plugins/memory/hal0-memory/` by the provisioner. Wraps hal0-memory's REST surface (`/api/memory/{add,search,list,delete}`) so memory injection happens inside Hermes's prompt pipeline (`system_prompt_block`) rather than as an explicit tool call. Per-persona namespace via persona TOML `memory_namespace`; omitted dataset on writes resolves to `private:<agent_id>` server-side per ADR-0005 §3 (#317 fix once it lands). v0.3 supersedes Hal0MemoryProvider above as the canonical name.
+
+## hermes-sdk-diff
+
+The weekly GitHub Action + local script (`scripts/hermes-sdk-diff.sh`) that diffs hal0's pinned Hermes upstream commit (`pyproject.toml [tool.hal0.upstream-hermes]`) against upstream HEAD for the tracked files (`web/src/plugins/registry.ts`, `web/src/plugins/slots.ts`, `hermes_cli/web_server.py`, `agent/memory_provider.py`, `tools/registry.py`, `agent/events.py`). When any tracked file changes, the workflow opens an issue with the upstream commit range so the bump is human-gated. Bump process documented in [ADR-0018](docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md) §4.
+
+## HMAC session cookie
+
+The browser-facing authn seam on hal0-api's chat-proxy surface (`/api/agents/{id}/{events,submit,session/*}`). Minted on first GET `/api/agents/{id}/session/handshake`, payload `{session_id, expires_at}`, signature `HMAC-SHA256(<secret>, base64url(payload))`. Secret lives at `/var/lib/hal0/agents/secret.bin` (chmod 0600, generated on first use). `HttpOnly` + `SameSite=Lax` + 8h TTL. Belongs to the chat-proxy specifically — ADR-0012 removed Bearer-token auth from the rest of the API. See `src/hal0/api/agents/_auth.py`.
+
+## X-hal0-Agent
+
+The HTTP header hal0-api sets on outbound hops to hermes (and that bundled agents set on inbound hops to hal0-api). Carries the agent's stable id (e.g. `hermes`, `pi-coder`). Per ADR-0012 it's the identity claim on hal0-api (NOT Bearer); per MASTER-PLAN §1 security-baseline the chat-proxy injects it, the browser never sees or sets it. The hal0-memory MCP resolver derives the per-agent private namespace from this header.
+
+## composite hal0 upstream
+
+A single `Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)` registered automatically in the upstream registry (`src/hal0/api/__init__.py::_autoregister_slot_upstreams`). Replaces per-slot autoregistration: Lemonade serialises chat loading on a single port (R4 H2 from MASTER-PLAN), so registering one Upstream per chat slot produced duplicate entries pointing at the same URL. The composite aggregates every chat-capable slot's model id through one `/v1/models` response (5s TTL cache). Explicit `upstreams.toml` entries claiming the name `hal0` win — autoregistration is skipped when overridden.

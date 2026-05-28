@@ -11,22 +11,24 @@
      stt              — dict or None ({provider, backend_url, model})
      tts              — dict or None ({provider, backend_url, model})
      agent_id         — str          (default "hermes-agent")
-     mcp_admin_url    — str
-     mcp_memory_url   — str
+     mcp_servers      — list[dict]   ({name, url, private, timeout, usage_hint})
+                        Phase 6 builds this from the allowlist; Phase 7
+                        renders the usage_hint into the system prompt.
+     system_prompt    — str          (persona-rendered prelude; PR-3 Phase 7)
+     personality_name — str          (display name of active persona; PR-3 Phase 8)
 #}# Managed by hal0 (issue #241). Edits MAY be overwritten by
 # `hal0 agent bootstrap hermes`. Drop a file at
 # /etc/hal0/agents/hermes/overrides.yaml to merge on top.
 
 {# Hermes's auth/runtime layer keeps its own PROVIDER_REGISTRY (built-in
    names like openai/anthropic/custom) — a name not in that registry
-   raises "Unknown provider '<x>'" at chat send time even when the
-   plugin profile at $HERMES_HOME/plugins/model-providers/hal0/ is
-   discovered cleanly. Upstream's `custom` provider is explicitly the
-   OpenAI-compatible-LAN-endpoint knob (Ollama, vLLM, llama.cpp). hal0
-   IS that endpoint, so we render `provider: custom` to satisfy the
-   registry while keeping the rendered `base_url` driving the actual
-   calls. The Hal0Profile plugin still loads (purely for branding in
-   `hermes model` discovery + future request-shape hooks). #}
+   raises "Unknown provider '<x>'" at chat send time. Upstream's
+   ``custom`` provider is explicitly the OpenAI-compatible-LAN-endpoint
+   knob (Ollama, vLLM, llama.cpp). hal0 IS that endpoint, so we render
+   ``provider: custom`` to satisfy the registry while keeping the
+   rendered ``base_url`` driving the actual calls. The legacy
+   ``Hal0Profile`` plugin was removed in PR-1-bundle (R4 H4) — it
+   hardcoded an :8000 base_url that has no listener. #}
 model:
 {%- if primary %}
   default: {{ primary.model_id | tojson }}
@@ -77,21 +79,22 @@ memory:
     enabled: false
     route: "upstream"
 
+{# Phase 6 (PR-3): MCP servers come from the allowlist + probe results.
+   Each entry is rendered identically so PR-7's plugin host can mount any
+   number of servers without re-templating. ADR-0012: no Bearer; agent
+   identity flows via X-hal0-Agent which MCPIdentityMiddleware treats as
+   the client_id for private:<client_id> namespacing. #}
 mcp_servers:
-  hal0-admin:
-    url: {{ mcp_admin_url | tojson }}
-    headers:
-      # ADR-0012: no Bearer; agent identity flows via X-hal0-Agent
-      # which MCPIdentityMiddleware (renamed from MCPAuthMiddleware)
-      # treats as the client_id for private:<client_id> namespacing.
-      X-hal0-Agent: {{ agent_id | tojson }}
-    timeout: 60
-  hal0-memory:
-    url: {{ mcp_memory_url | tojson }}
+{%- for srv in mcp_servers %}
+  {{ srv.name }}:
+    url: {{ srv.url | tojson }}
     headers:
       X-hal0-Agent: {{ agent_id | tojson }}
+{%- if srv.private %}
       X-hal0-Private: "1"
-    timeout: 30
+{%- endif %}
+    timeout: {{ srv.timeout | default(60) }}
+{%- endfor %}
 
 skills:
   external_dirs:
@@ -106,10 +109,25 @@ terminal:
 agent:
   max_turns: 60
   reasoning_effort: "medium"
+{%- if system_prompt %}
+  # Phase 7 (PR-3): persona-rendered system prompt prelude. Includes the
+  # hal0 MCP usage block + approval-policy summary. Drops in front of
+  # Hermes's own system prompt; the SOUL.md "identity" still loads on
+  # top per upstream's contract. Hot-swap on persona switch via
+  # `hal0 agents personas activate <id>` (PR-3 helper).
+  system_prompt_prelude: |
+{{ system_prompt | indent(4, true) }}
+{%- endif %}
 
 display:
   bell_on_complete: false
   show_reasoning: false
+{%- if personality_name %}
+  # Phase 8 (PR-3): UI-facing label for the active persona; surfaces in
+  # `hermes` itself when the operator runs the CLI directly. The
+  # personality content is wired via system_prompt_prelude above.
+  personality: {{ personality_name | tojson }}
+{%- endif %}
 
 auxiliary:
   vision: { provider: "main", model: "" }

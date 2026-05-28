@@ -165,7 +165,105 @@ into the first patch tag after the v0.3.0-alpha.1 auth/Caddy cut.
 This is a patch-level tag (`0.3.0 → 0.3.1`) by SemVer convention, but
 the scope is closer to a minor release — Hermes, memory graph, and the
 MCP host surface are all new user-facing systems. Future patch tags
-inside v0.3.x will hold the line at fixes-only.
+## [v0.3.0-alpha.2] — 2026-05-28 (Hermes integration sweep)
+
+End-to-end Hermes-Agent integration lands. The 12-PR master-plan
+(`docs/internal/scratch/hermes-research-2026-05-28/MASTER-PLAN.md`)
+ships as one mergeable surface: provisioner overhaul, persona TOML,
+hal0-cognee memory plugin, hal0-agent@.service template, chat WS
+proxy, plugin host, SidebarAgentBlock, v3 dashboard refactor, HermesChat
+composer/transcript, the missing endpoints (`restart`, `skills`,
+`memory/stats`), tests + docs sweep, and the upstream pin / weekly
+drift CI job.
+
+Decision record consolidated in
+[ADR-0019](docs/internal/adr/0019-v0_3-hermes-integration.md);
+upstream pin process in
+[ADR-0018](docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md).
+
+### New / improved
+
+- **`hermes_provision` overhaul (#393, #396)** — 12-phase orchestrator
+  (preflight → install → env_probe → home_init → config_write →
+  mcp_wire → context_link → namespace_register → model_automap →
+  voice_wire → smoke_tests → self_report). Idempotent + checkpointed.
+  Composite `hal0` upstream + MCP registration + system-prompt
+  addendum + persona seed all happen during bootstrap.
+- **hal0-cognee MemoryProvider (#394)** — `src/hal0/agents/hermes/plugins/memory_cognee/`
+  wraps `/api/memory/*` so memory is part of the prompt
+  (`system_prompt_block`), not a tool the agent has to remember to
+  call. Locks the #317 dataset-namespace contract.
+- **`hal0-agent@.service` template (#395)** — sandboxed systemd
+  instance template (`NoNewPrivileges`, `ProtectSystem=strict`,
+  `ProtectHome=yes`, `Type=notify`, `WatchdogSec=60`). Soft-link to
+  lemonade (`Wants=`, not `Requires=`/`BindsTo=`) so the agent
+  survives a lemonade GPU-cleanup hang. CLI shim at
+  `/usr/local/bin/hal0-agent`.
+- **Persona TOML store + endpoints (#399)** — `GET/POST
+  /api/agents/{id}/personas[/{pid}/activate]`. Hot-reload nudge over
+  JSON-RPC swaps system-prompt scope on the next turn without restart.
+  Seeded personas: `hermes`, `coder`.
+- **Plugin host (#397)** — manifest proxy at
+  `/api/dashboard/plugins`; per-plugin static-asset surface at
+  `/dashboard-plugins/{name}/...`; shadow-DOM SDK shim. Lets the v3
+  dashboard mount upstream Hermes plugin bundles (kanban today)
+  inside an `<AgentView>` tab.
+- **Chat WS proxy + session REST shim (#398)** — `/api/agents/{id}/{events,
+  submit,session/*}`. Origin allowlist + HMAC session cookie on every
+  WS upgrade; embed token in `Authorization: Bearer` (never the query
+  string). `tool.progress` server-side coalesced at 100ms; ordering
+  invariant (progress before complete) preserved.
+- **SidebarAgentBlock (#400)** — service/persona/approvals/skills/
+  memory chips + `[Open chat]` button. Parameterised by `agent_id` so
+  v0.4 pi-coder lights up by adding a row.
+- **Dashboard v3 agents refactor (#401)** — `<AgentView>` monolith
+  split into Composer, Transcript, Sidecar; Inbox tab dropped; Peers
+  tab folded into Memory.
+- **HermesChat composer + transcript (#404)** — React composer
+  (Enter submits, Shift+Enter newline); zustand transcript with
+  WebSocket reconnect (250ms → 4s jittered backoff); inline tool-call
+  cards.
+- **ADR-0018 upstream Hermes pin + weekly hermes-sdk-diff CI (#403)**
+  — `pyproject.toml [tool.hal0.upstream-hermes]` is the
+  machine-readable pin; `.github/workflows/hermes-sdk-diff.yml` opens
+  a drift issue weekly when any tracked file changes between pin and
+  upstream HEAD.
+- **PR-11 sweep — tests + docs + final missing endpoints**:
+  - `POST /api/agents/{id}/restart` — systemctl restart wrapper for
+    the SidebarAgentBlock service chip. Audit-logged via
+    `hal0.agents.audit`. Subprocess-level timeout + spawn-failure
+    envelopes.
+  - `GET /api/agents/skills` — replaces the static catalog the
+    SidebarAgentBlock used during build-out. Returns the v0.3
+    catalog (`hermes-core` + `hal0-admin` + `hal0-memory`). Bumps
+    ride ADR-0018 drift PRs.
+  - `GET /api/agents/{id}/memory/stats` — per-agent counts the
+    sidebar memory chip renders; pulls from the in-process Cognee
+    wrapper. Graceful `available=false` fallback when memory isn't
+    configured.
+  - δ-harness `tests/harness/integration/` — full chat round-trip +
+    persona activate round-trip against a `FakeWsServer` mock hermes
+    (no GGUF download required).
+  - `AGENTS.md`, `ARCHITECTURE.md`, `CONTEXT.md` glossary refresh
+    (composer, transcript, plugin host, sidecar agent block, persona
+    TOML, hal0-cognee, hermes-sdk-diff, HMAC session cookie,
+    X-hal0-Agent, composite hal0 upstream).
+  - ADR-0019 consolidates the master-plan decisions.
+
+### Internal contracts
+
+- `X-hal0-Agent` (NOT Bearer) is the identity claim on hal0-api per
+  ADR-0012; the chat-proxy injects it on outbound hops, the browser
+  never sees it.
+- `/api/agents/{id}/*` is the v0.4-ready shape — every endpoint is
+  parameterised by agent id; v0.3 only resolves `"hermes"`.
+- Bundled agents follow single-pick (ADR-0004): installing one
+  uninstalls any other.
+
+### Known follow-up
+
+- hal0-web `public/CONTENT_BRIEF.md` + `src/pages/agents.astro`
+  update lands in a sibling PR on the `Hal0ai/hal0-web` repo.
 
 ## [v0.3.0-alpha.1] — 2026-05-23
 

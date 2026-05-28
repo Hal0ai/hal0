@@ -37,6 +37,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import structlog
+
+log = structlog.get_logger(__name__)
+
 # Schema version embedded in every provision.json. Bump when the on-disk
 # shape changes in a way that can't be migrated by ignoring unknown
 # keys. Currently v1 — the layout in `BootstrapState.to_dict()`.
@@ -350,11 +354,12 @@ def _copy_plugin_tree(src: Path, dst: Path) -> None:
 def _phase_install(state: BootstrapState) -> PhaseResult:
     """Provision the managed Hermes venv + wrapper + plugin stubs.
 
-    The plugin stubs at ``installer/agents/hermes/plugins/{hal0,hal0-memory}/``
-    are copied verbatim into ``$HERMES_HOME/plugins/{model-providers/hal0,memory/hal0-memory}/``.
-    Real plugin bodies arrive in #241 + #242; this phase just stages
-    the directory layout so re-runs after those slices land are a
-    file-by-file overlay, not a structural change.
+    The plugin stub at ``installer/agents/hermes/plugins/hal0-memory/``
+    is copied verbatim into ``$HERMES_HOME/plugins/memory/hal0-memory/``.
+    The legacy ``hal0`` model-provider plugin was removed (R4 H4): it
+    hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
+    listener, and the composite ``hal0`` upstream in :mod:`hal0.api`
+    now supersedes it.
 
     Skips heavy work when the venv binary already exists at the
     expected version — re-runs of ``hal0 agent bootstrap hermes`` are
@@ -410,9 +415,21 @@ def _phase_install(state: BootstrapState) -> PhaseResult:
     if not claimed:
         return PhaseResult(status=PhaseStatus.FAIL, reason=reason)
     plugin_targets = {
-        "hal0": hermes_home / "plugins" / "model-providers" / "hal0",
         "hal0-memory": hermes_home / "plugins" / "memory" / "hal0-memory",
     }
+    # Remove the legacy broken ``hal0`` model-provider plugin if a
+    # previous bootstrap left it behind. Idempotent — silently no-op if
+    # already gone.
+    legacy_hal0_plugin = hermes_home / "plugins" / "model-providers" / "hal0"
+    if legacy_hal0_plugin.exists():
+        try:
+            shutil.rmtree(legacy_hal0_plugin)
+        except OSError as exc:
+            log.warning(
+                "hermes_provision.legacy_plugin_cleanup_failed",
+                path=str(legacy_hal0_plugin),
+                error=str(exc),
+            )
     for src_name, dst in plugin_targets.items():
         src = plugin_src_root / src_name
         if not src.exists():
@@ -607,6 +624,37 @@ def _resolve_primary_slot(
     return {"model": model, "base_url": base_url, "context_length": ctx}
 
 
+def _default_mcp_servers() -> list[dict[str, Any]]:
+    """Builtin MCP server inventory (matches PR-1's allowlist + auto-register).
+
+    Phase 6 (PR-3): the template loops over this list rather than
+    hard-coding two entries. Adding a server is now an installer-side
+    edit to the allowlist + a probe — no template change required.
+    """
+    return [
+        {
+            "name": "hal0-admin",
+            "url": "http://127.0.0.1:8080/mcp/admin",
+            "private": False,
+            "timeout": 60,
+            "usage_hint": (
+                "query/manage hal0 platform state (slots, services, models, hardware). "
+                "Use when the operator asks about system state or wants to inspect a slot."
+            ),
+        },
+        {
+            "name": "hal0-memory",
+            "url": "http://127.0.0.1:8080/mcp/memory",
+            "private": True,
+            "timeout": 30,
+            "usage_hint": (
+                "read/write persistent context across sessions. Use when the operator "
+                "references prior conversations or asks you to remember a fact."
+            ),
+        },
+    ]
+
+
 def _render_config_yaml(
     *,
     primary: dict[str, Any] | None,
@@ -614,8 +662,9 @@ def _render_config_yaml(
     stt: dict[str, Any] | None = None,
     tts: dict[str, Any] | None = None,
     agent_id: str = "hermes-agent",
-    mcp_admin_url: str = "http://127.0.0.1:8080/mcp/admin",
-    mcp_memory_url: str = "http://127.0.0.1:8080/mcp/memory",
+    mcp_servers: list[dict[str, Any]] | None = None,
+    system_prompt: str = "",
+    personality_name: str = "",
 ) -> str:
     """Render the Hermes config.yaml via Jinja2.
 
@@ -623,6 +672,18 @@ def _render_config_yaml(
     ``src/hal0/agents/hermes_templates/config.yaml.j2``). Jinja2 is
     pinned in pyproject so the dep is always present in production
     bootstraps — no fallback needed.
+
+    Phase 6/7/8 inputs:
+      mcp_servers      — list of {name, url, private, timeout, usage_hint}
+                         from Phase 6's allowlist+probe. Defaults to the
+                         builtin pair when caller omits (preserves
+                         pre-PR-3 behavior for tests that haven't been
+                         updated).
+      system_prompt    — persona-rendered prelude (Phase 7); empty string
+                         falls back to upstream's default prompt.
+      personality_name — display name for upstream's CLI personality
+                         picker (Phase 8 cosmetic; the system prompt
+                         already carries the persona's prelude).
     """
     from jinja2 import Environment, FileSystemLoader
 
@@ -638,8 +699,9 @@ def _render_config_yaml(
         stt=stt,
         tts=tts,
         agent_id=agent_id,
-        mcp_admin_url=mcp_admin_url,
-        mcp_memory_url=mcp_memory_url,
+        mcp_servers=mcp_servers if mcp_servers is not None else _default_mcp_servers(),
+        system_prompt=system_prompt,
+        personality_name=personality_name,
     )
 
 
@@ -675,8 +737,66 @@ def _apply_overrides(rendered_yaml: str, overrides_path: Path) -> str:
 OVERRIDES_PATH = Path("/etc/hal0/agents/hermes/overrides.yaml")
 
 
+def _personas_root_for(state: BootstrapState) -> Path:
+    """Resolve the personas dir for a given BootstrapState.
+
+    Defaults to ``$HERMES_HOME/personas`` so tests (which point
+    ``hermes_home`` at ``tmp_path``) get a writeable location without
+    monkey-patching the personas module's constant. Operators on the
+    canonical install path get the same ``/var/lib/hal0/agents/hermes/
+    personas/`` location they'd see from the personas-module default.
+    """
+    return Path(state.hermes_home) / "personas"
+
+
+def _active_persona_render(
+    state: BootstrapState,
+    *,
+    mcp_servers: list[dict[str, Any]] | None = None,
+    personas_root: Path | None = None,
+) -> tuple[str, str]:
+    """Look up the active persona + compose the system-prompt prelude.
+
+    Returns ``(system_prompt, personality_name)``. When no personas have
+    been seeded yet (very first config_write before persona_seed runs),
+    falls back to ``("", "")`` so the render still succeeds — the
+    second pass after persona_seed lands the real prelude. The persona
+    layer is intentionally optional so an operator who never seeds one
+    can still get a functional config; the dashboard surfaces the
+    "no persona" state via the empty system_prompt.
+    """
+    from hal0.agents import personas as _personas
+
+    if personas_root is not None:
+        root = personas_root
+    else:
+        root = _personas_root_for(state)
+        # Back-compat: if nothing's been seeded under hermes_home and the
+        # legacy /var/lib path still has the active pointer, fall back to
+        # it. New installs always use the hermes_home-scoped path.
+        if not root.exists() and _personas.PERSONAS_ROOT.exists():
+            root = _personas.PERSONAS_ROOT
+    active_id = _personas.get_active(root=root)
+    if active_id is None:
+        return ("", "")
+    try:
+        persona = _personas.load_persona(active_id, root=root)
+    except (_personas.PersonaError, FileNotFoundError) as exc:
+        log.warning("hermes_provision.persona_load_failed", id=active_id, error=str(exc))
+        return ("", "")
+    chat_slots_summary = mcp_servers or _default_mcp_servers()
+    prompt = _personas.build_prompt_addendum(persona, mcp_servers=chat_slots_summary)
+    return (prompt, persona.display_name)
+
+
 def _phase_config_write(state: BootstrapState) -> PhaseResult:
     """Atomically render ``$HERMES_HOME/config.yaml`` from the template.
+
+    PR-3 overhaul: passes chat_slots + persona-rendered system_prompt +
+    probed mcp_servers list so a single-shot bootstrap renders the full
+    aliases block, the persona prelude, AND the MCP registration block
+    on the first pass. Pre-PR-3, Phase 9 (model_automap) re-rendered
+    half of these post-hoc; that's now demoted to an idempotency check.
 
     Idempotent: hash-equal output skips the write. Overrides at
     ``/etc/hal0/agents/hermes/overrides.yaml`` deep-merge on top.
@@ -692,9 +812,25 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
         "backend_url": primary_raw["base_url"],
         "context_length": primary_raw["context_length"],
     }
+    # PR-3 Phase 5: pull chat_slots into the first render so the
+    # ``model_aliases:`` block lands on the first config_write pass
+    # (Phase 9 used to be the only place this worked).
+    slots_all = _fetch_slots()
+    chat_slots = _collect_chat_slots(slots_all)
+    # PR-3 Phase 6: probe-driven mcp_servers list. For the very first
+    # config_write (before mcp_wire runs the live probe) we fall back to
+    # the default inventory; mcp_wire then captures the probed shape and
+    # config gets re-rendered idempotently on Phase 9 / next bootstrap.
+    cached_servers = (state.phases.get("mcp_wire") or {}).get("details", {}).get("rendered_servers")
+    mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
+    system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
     rendered = _render_config_yaml(
         primary=primary,
+        chat_slots=chat_slots,
         agent_id=state.agent_id,
+        mcp_servers=mcp_servers,
+        system_prompt=system_prompt,
+        personality_name=personality_name,
     )
     rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     new_hash = content_hash(rendered)
@@ -703,7 +839,13 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
         return PhaseResult(
             status=PhaseStatus.OK,
             hash=new_hash,
-            details={"config_path": str(config_path), "unchanged": True},
+            details={
+                "config_path": str(config_path),
+                "unchanged": True,
+                "chat_slot_count": len(chat_slots),
+                "persona": personality_name or None,
+                "mcp_server_count": len(mcp_servers) if mcp_servers else 0,
+            },
         )
 
     hermes_home.mkdir(parents=True, exist_ok=True)
@@ -713,7 +855,13 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     return PhaseResult(
         status=PhaseStatus.OK,
         hash=new_hash,
-        details={"config_path": str(config_path), "primary_model": primary["model_id"]},
+        details={
+            "config_path": str(config_path),
+            "primary_model": primary["model_id"],
+            "chat_slot_count": len(chat_slots),
+            "persona": personality_name or None,
+            "mcp_server_count": len(mcp_servers) if mcp_servers else 0,
+        },
     )
 
 
@@ -882,22 +1030,14 @@ def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
     can wire the missing piece by hand after install.
     """
     allowlist = _load_agent_allowlist()
-    base = "http://127.0.0.1:8080"
-    servers: list[dict[str, Any]] = [
-        {
-            "name": "hal0-admin",
-            "url": f"{base}/mcp/admin",
-            "private": False,
-        },
-        {
-            "name": "hal0-memory",
-            "url": f"{base}/mcp/memory",
-            "private": True,
-        },
-    ]
+    # PR-3 Phase 6: source the canonical inventory from
+    # ``_default_mcp_servers()`` so the probe loop and the template loop
+    # see identical entries. Allowlist trims this; probe drops failures.
+    servers: list[dict[str, Any]] = list(_default_mcp_servers())
 
     results: dict[str, Any] = {}
     warnings: list[str] = []
+    rendered_servers: list[dict[str, Any]] = []
     for entry in servers:
         name = entry["name"]
         if allowlist is not None and name not in allowlist:
@@ -911,22 +1051,81 @@ def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
         if not probe["ok"]:
             warnings.append(f"{name}: {probe['error']}")
             results[name] = {"status": "degraded", "error": probe["error"]}
+            # Still render the server entry so the agent can retry on a
+            # later turn — degraded probe is usually just "MCP server
+            # warming up", not a permanent failure. The system prompt
+            # already tells the agent to retry on connection errors.
+            rendered_servers.append(entry)
             continue
         results[name] = {
             "status": "ok",
             "tool_count": len(probe["tools"]),
             "tools": probe["tools"],
         }
+        rendered_servers.append(entry)
 
     # Even with warnings we return OK — degraded MCP connectivity is
     # surfaced for smoke_tests + self_report to display, not a fatal
     # bootstrap blocker (per ADR-0013 + the plan §9 contract).
+    #
+    # ``rendered_servers`` is consumed by Phase 5 (config_write) on the
+    # next bootstrap run — it's how Phase 6 hands the template the live
+    # probe result. The list survives via the persisted ``provision.json``
+    # checkpoint so re-runs use the same shape.
     return PhaseResult(
         status=PhaseStatus.OK,
         details={
             "servers": results,
             "allowlist_present": allowlist is not None,
             "warnings": warnings,
+            "rendered_servers": rendered_servers,
+        },
+    )
+
+
+# ── Phase H.5: persona_seed (PR-3) ──────────────────────────────────────────
+#
+# Seeds the operator-visible personas hal0 manages on top of Hermes's own
+# personality slot. Two personas land on first install — ``hermes``
+# (default, helpful) and ``coder`` (software focus, narrower auto-approve).
+# Operator edits survive re-runs; ``--repair`` re-writes the seeds back to
+# their canonical content. The active pointer flips to ``hermes`` only
+# when missing or dangling — an operator-chosen active persona survives
+# re-seed.
+
+
+def _phase_persona_seed(state: BootstrapState) -> PhaseResult:
+    """Seed the default personas + ``active.txt`` pointer.
+
+    Phase 8 (PR-3): idempotent persona file write. The next config_write
+    pass picks up the active persona's system_prompt and renders it into
+    the prelude block.
+
+    Personas land under ``$HERMES_HOME/personas`` (NOT the personas
+    module's default ``/var/lib/hal0/agents/hermes/personas``) so the
+    seed phase honours the state's ``hermes_home`` field — tests get a
+    writeable location for free, and on the canonical install path the
+    two resolve to the same directory.
+    """
+    from hal0.agents import personas as _personas
+
+    root = _personas_root_for(state)
+    # Honor ``--repair`` by forcing seed overwrite. Operator edits stand
+    # in the steady-state case; repair explicitly resets to known-good.
+    overwrite = bool(state.phases.get("_repair_flag"))
+    written = _personas.seed_default_personas(
+        agent_id=state.agent_id,
+        root=root,
+        overwrite=overwrite,
+    )
+    active = _personas.get_active(root=root)
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            "personas_root": str(root),
+            "active": active,
+            "seeded": [p.id for p in written],
+            "all_personas": [p.id for p in _personas.list_personas(root=root)],
         },
     )
 
@@ -1445,10 +1644,23 @@ def _is_ready(slot: dict[str, Any]) -> bool:
 
 
 def _collect_chat_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Filter `slots` down to chat-capable entries with a usable model_id."""
+    """Filter ``slots`` to chat-capable entries (``type=="llm"``) with a model_id.
+
+    The real ``/api/slots`` payload sets ``type=="llm"`` for chat slots and
+    ``kind=="local"`` for the deployment shape. The previous ``_slot_kind``
+    check looked at ``kind`` first and rejected 100% of real slots (R4 H1)
+    — the rendered ``model_aliases`` block never appeared, so Hermes only
+    ever saw the primary upstream's single model in ``/v1/models``.
+
+    Only slots reporting a live/ready state are advertised so we don't tell
+    the agent about a model that isn't actually loaded — matches the
+    dashboard chat-filter at ``src/hal0/api/routes/slots.py``.
+    """
     out: list[dict[str, Any]] = []
     for s in slots:
-        if _slot_kind(s) != "chat":
+        if (s.get("type") or "").lower() != "llm":
+            continue
+        if not _is_ready(s):
             continue
         model_id = _slot_model_id(s)
         if not model_id:
@@ -1489,12 +1701,22 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
         "backend_url": primary_raw["base_url"],
         "context_length": primary_raw["context_length"],
     }
+    # PR-3 Phase 9 (demoted): re-render uses the SAME inputs as Phase 5
+    # so a no-drift run produces a byte-identical config. Mismatch means
+    # something changed (slot churn, persona swap, MCP servers came up)
+    # and we want the new config; match → no-op (hash check below).
+    cached_servers = (state.phases.get("mcp_wire") or {}).get("details", {}).get("rendered_servers")
+    mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
+    system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
 
     try:
         rendered = _render_config_yaml(
             primary=primary,
             chat_slots=chat_slots,
             agent_id=state.agent_id,
+            mcp_servers=mcp_servers,
+            system_prompt=system_prompt,
+            personality_name=personality_name,
         )
         rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     except Exception as exc:
@@ -1657,6 +1879,13 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
             "backend_url": primary_raw["base_url"],
             "context_length": primary_raw["context_length"],
         }
+        cached_servers = (
+            (state.phases.get("mcp_wire") or {}).get("details", {}).get("rendered_servers")
+        )
+        mcp_servers = (
+            cached_servers if isinstance(cached_servers, list) and cached_servers else None
+        )
+        system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
         rendered = _render_config_yaml(
             primary=primary,
             chat_slots=_collect_chat_slots(slots),
@@ -1675,6 +1904,9 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
             if details["tts"]
             else None,
             agent_id=state.agent_id,
+            mcp_servers=mcp_servers,
+            system_prompt=system_prompt,
+            personality_name=personality_name,
         )
         rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     except Exception as exc:
@@ -1986,6 +2218,12 @@ PHASES: list[tuple[str, Callable[[BootstrapState], PhaseResult]]] = [
     ("install", _phase_install),
     ("env_probe", _phase_env_probe),
     ("home_init", _phase_home_init),
+    # PR-3 Phase 8: seed personas BEFORE config_write so the first
+    # config render gets the active persona's system_prompt prelude.
+    # mcp_wire runs after config_write to probe the live MCP surface;
+    # the probe results feed Phase 9 (model_automap)'s re-render so a
+    # post-bootstrap config still picks up the validated server list.
+    ("persona_seed", _phase_persona_seed),
     ("config_write", _phase_config_write),
     ("mcp_wire", _phase_mcp_wire),
     ("context_link", _phase_context_link),
@@ -2069,6 +2307,12 @@ def run(
 
     skipped: list[str] = []
     failed: list[str] = []
+    # Surface ``--repair`` to phase bodies that change behavior under it
+    # (persona_seed re-writes its seeds on repair). Stash a sentinel on
+    # ``state.phases`` so the runtime doesn't need a new signature. The
+    # entry is stripped before save so it never appears in provision.json.
+    if repair:
+        state.phases["_repair_flag"] = {"status": "stub", "details": {}}
 
     for name, phase in PHASES:
         if name in skip_phases:
@@ -2100,6 +2344,10 @@ def run(
         if result.status == PhaseStatus.FAIL:
             failed.append(name)
             state.errors.append(f"{name}: {result.reason or 'unspecified failure'}")
+
+    # Strip the repair sentinel before persistence — operator never sees
+    # it in provision.json, and the next run computes it from CLI flags.
+    state.phases.pop("_repair_flag", None)
 
     if not failed:
         state.completed_at = _utcnow()

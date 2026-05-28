@@ -32,13 +32,28 @@ a model in its own memory.
 ```
 src/hal0/
 ├── api/             # FastAPI app + routers + middleware
-│   ├── routes/      # one APIRouter per concern (18 modules incl.
-│   │                #   capabilities, backends, images, events, auth)
-│   └── middleware/  # error envelope, request id, cors
+│   ├── routes/      # one APIRouter per concern (capabilities,
+│   │                #   backends, images, events, agents lifecycle,
+│   │                #   approvals, mcp, memory, …)
+│   ├── agents/      # v0.3 agent surface — personas, chat-proxy,
+│   │                #   restart, skills catalog, memory stats
+│   ├── plugins/     # v0.3 dashboard plugin host (manifest proxy +
+│   │                #   shadow-DOM SDK shim for upstream Hermes plugins)
+│   ├── mcp_mount.py # mounts hal0-admin + hal0-memory MCP servers
+│   └── middleware/  # error envelope, request id, log scrub
+├── agents/          # bundled-agent provisioner + driver
+│   ├── hermes_provision.py    # 12-phase Hermes bootstrap
+│   ├── hermes/                # hal0-bundled Hermes plugins
+│   │   └── plugins/memory_cognee/  # hal0-cognee MemoryProvider
+│   ├── personas.py            # persona TOML store + hot-reload nudge
+│   ├── manager.py             # single-pick install / uninstall
+│   └── mcp_client.py          # MCP client allow-list (ADR-0013)
+├── cli/agent_shim.py# /usr/local/bin/hal0-agent for hal0-agent@.service
 ├── slots/           # slot lifecycle (state machine, unit rendering)
 ├── dispatcher/      # routing, single-flight, decision logging
 ├── providers/       # backend abstraction (llama_server, flm, moonshine,
 │                    #   kokoro, comfyui)
+├── lemonade/        # idle driver + metrics shim + log bridge
 ├── capabilities/    # UX overlay grouping flat slots into capability
 │                    #   cards (catalog + config + orchestrator);
 │                    #   persists selections in capabilities.toml and
@@ -46,16 +61,23 @@ src/hal0/
 ├── registry/        # model registry (atomic TOML, mtime cache, GGUF
 │                    #   magic-byte detect, HF-cache repo-name fallback)
 ├── hardware/        # probe + stats (GPU, NPU, RAM, disk)
-├── upstreams/       # external LLM providers (OpenRouter, etc.)
+├── upstreams/       # external LLM providers + composite hal0 upstream
 ├── config/          # pydantic schemas, TOML loader, migrations
-├── auth/            # password + Bearer token storage (per ADR-0001)
 ├── events/          # in-process pub/sub for SSE streams
+├── journal/         # lemond log ring + unified /api/journal feed
+├── memory/          # CogneeWrapper + MemoryRecord
+├── mcp/             # hal0-admin + hal0-memory FastMCP servers
+├── omni_router/     # client-side OpenAI tool-calling loop
 ├── updater/         # self-update (cosign-verified, atomic swap)
 ├── installer/       # first-run wizard backend, hardware probe writer
 ├── voice/           # Moonshine + Kokoro provider glue
 ├── openwebui/       # companion service env file writer
 └── cli/             # `hal0` Typer CLI (incl. `capabilities migrate`)
 ```
+
+ADR-0012 removed `auth/` + `api/auth/` + `api/middleware/auth.py` —
+hal0-api binds `0.0.0.0:8080` open; LAN trust + an upstream reverse
+proxy own authentication.
 
 The capabilities layer is a **thin overlay** on the flat slot layer,
 not a replacement. Slot configs under `/etc/hal0/slots/*.toml` remain
@@ -146,6 +168,90 @@ offline → pulling → starting → warming → ready ←──┐
 
 Routers MUST treat `idle` distinctly from `ready`: an idle slot has no
 model advertised and will 4xx on inference attempts (issue #31).
+
+## v0.3 agents subsystem
+
+A bundled agent in v0.3 is a third-party agent runtime (Hermes-Agent
+today, pi-coder in v0.4) running as a sibling systemd unit with hal0
+wired in as its local AI provider. The boundary is intentionally
+narrow: hal0 owns provisioning, identity, MCP wiring, and the chat-
+surface proxy. Runtime is whatever the bundled upstream does natively.
+
+### Process model
+
+```
+        ┌────────────────────┐         ┌──────────────────────┐
+        │  hal0-api          │  proxy  │  hal0-agent@hermes   │
+        │  :8080             │ ──────▶ │  127.0.0.1:9119      │
+        │                    │  WS/REST│  (hermes dashboard)  │
+        └─────────┬──────────┘         └──────────┬───────────┘
+                  │                                │
+       MCP /mcp/* │                                │ HTTP / config.yaml
+                  ▼                                ▼
+        ┌────────────────────┐         ┌──────────────────────┐
+        │  hal0-memory       │ ◀────── │  composite "hal0"    │
+        │  hal0-admin        │  Cognee │  upstream → /v1/*    │
+        └────────────────────┘         └──────────────────────┘
+```
+
+### Surfaces
+
+* **Provision** — `hal0 agent provision hermes` → 12-phase orchestrator
+  in `src/hal0/agents/hermes_provision.py`. Idempotent + checkpointed
+  via `/var/lib/hal0/state/agents/hermes/provision.json`.
+* **Service** — `hal0-agent@<id>.service` (template; v0.3 instances:
+  `hermes` only). Sandboxed (`NoNewPrivileges`, `ProtectSystem=strict`,
+  `ProtectHome=yes`). Type=notify + `WatchdogSec=60`. Soft-link to
+  lemonade (`Wants=`, NOT `Requires=`/`BindsTo=`) so the agent survives
+  a lemonade GPU-cleanup hang.
+* **Chat proxy** — `src/hal0/api/agents/chat_proxy.py`. WS upgrades
+  gated by Origin allowlist + HMAC session cookie; outbound carries
+  the runtime.json embed token in `Authorization: Bearer …`. Browser
+  never sees the embed token.
+* **Plugin host** — `src/hal0/api/plugins/`. Proxies upstream Hermes
+  plugin manifests + serves plugin static assets so dashboard can
+  mount them in shadow-DOM iframes.
+* **Personas** — `src/hal0/agents/personas.py` owns the TOML store;
+  `src/hal0/api/agents/personas.py` is the REST shim. Hot-reload nudges
+  hermes via JSON-RPC; system-prompt scope swaps on the next turn.
+* **Memory** — `hal0-memory` MCP wraps `src/hal0/memory/cognee_wrapper.py`.
+  Per-agent private namespace = `private:<agent_id>` per ADR-0005 §3.
+* **Skills catalog** — `GET /api/agents/skills` returns the static
+  catalog (`HERMES_TOOL_CATALOG` + `HAL0_MCP_TOOL_CATALOG`) the
+  dashboard sidebar renders. Bumps ride ADR-0018's weekly drift PRs.
+* **Identity** — agent identity card published once into the `agents`
+  Cognee dataset per ADR-0011. `X-hal0-Agent` is the header the proxy
+  injects on every outbound hop.
+
+### Module map
+
+| Module                                         | Owns                                         |
+|------------------------------------------------|----------------------------------------------|
+| `src/hal0/agents/manager.py`                   | single-pick install / uninstall              |
+| `src/hal0/agents/hermes_provision.py`          | 12-phase Hermes bootstrap orchestrator       |
+| `src/hal0/agents/personas.py`                  | persona TOML store + hot-reload helper       |
+| `src/hal0/agents/mcp_client.py`                | MCP server-axis + tool-axis classifier       |
+| `src/hal0/agents/hermes/plugins/memory_cognee/`| hal0-cognee MemoryProvider plugin            |
+| `src/hal0/api/agents/personas.py`              | `/api/agents/{id}/personas[/{pid}/activate]` |
+| `src/hal0/api/agents/chat_proxy.py`            | WS proxy + session REST shim                 |
+| `src/hal0/api/agents/restart.py`               | `POST /api/agents/{id}/restart`              |
+| `src/hal0/api/agents/skills.py`                | `GET /api/agents/skills`                     |
+| `src/hal0/api/agents/memory_stats.py`          | `GET /api/agents/{id}/memory/stats`          |
+| `src/hal0/api/routes/agents.py`                | install / uninstall / activity               |
+| `src/hal0/api/routes/approvals.py`             | approval inbox                               |
+| `src/hal0/api/plugins/`                        | plugin host (manifest + static assets)       |
+| `src/hal0/cli/agent_shim.py`                   | `/usr/local/bin/hal0-agent` (unit ExecStart) |
+| `ui/src/dash/agents/`                          | v3 dashboard `<AgentView>` + Composer        |
+
+### Upstream pin
+
+The Hermes-Agent upstream commit hal0 v0.3 is vendored / shimmed
+against lives in `pyproject.toml [tool.hal0.upstream-hermes]`. The
+weekly `hermes-sdk-diff` GitHub Action (ADR-0018) opens a drift issue
+when one of the tracked files changes between the pin and upstream
+HEAD. Bump process: review issue, edit shim adapters if needed, run
+`scripts/hermes-sdk-diff.sh --bump <sha>`, δ-harness + γ-suite, open
+`chore(hermes): bump upstream pin to <short-sha>` PR.
 
 ## See also
 

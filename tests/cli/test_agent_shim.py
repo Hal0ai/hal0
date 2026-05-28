@@ -1,0 +1,387 @@
+"""Tests for ``hal0-agent`` — the systemd-unit shim.
+
+Most coverage is at the unit level: argv parsing, config resolution,
+the Hermes argv builder, and the readiness-poll edges. ``cmd_serve``
+isn't exercised end-to-end (it would block on a real subprocess and
+HTTP poll); instead we test the building blocks it composes from.
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+
+from hal0.cli import agent_shim
+
+# ---------------------------------------------------------------------------
+# Argv parsing
+# ---------------------------------------------------------------------------
+
+
+class TestArgvParsing:
+    def test_serve_subcommand(self) -> None:
+        parser = agent_shim._build_parser()
+        ns = parser.parse_args(["hermes", "serve"])
+        assert ns.agent_id == "hermes"
+        assert ns.subcommand == "serve"
+
+    @pytest.mark.parametrize("sub", ["serve", "stop", "status", "reprovision"])
+    def test_all_subcommands_accepted(self, sub: str) -> None:
+        parser = agent_shim._build_parser()
+        ns = parser.parse_args(["hermes", sub])
+        assert ns.subcommand == sub
+
+    def test_unknown_subcommand_rejected(self) -> None:
+        parser = agent_shim._build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["hermes", "bogus"])
+
+    def test_missing_args_rejected(self) -> None:
+        parser = agent_shim._build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["hermes"])
+
+
+# ---------------------------------------------------------------------------
+# Config resolution
+# ---------------------------------------------------------------------------
+
+
+class TestAgentConfig:
+    def test_builtin_hermes_no_toml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Empty conf dir → falls through to _BUILTIN_AGENT_TYPES["hermes"].
+        monkeypatch.setattr(agent_shim, "_AGENTS_CONF_DIR", tmp_path)
+        cfg = agent_shim._load_agent_config("hermes")
+        assert cfg.agent_id == "hermes"
+        assert cfg.agent_type == "hermes"
+        assert cfg.home == Path("/var/lib/hal0/agents/hermes")
+        assert cfg.venv == Path("/var/lib/hal0/venvs/hermes")
+        assert cfg.host == "127.0.0.1"
+        assert cfg.port == 9119
+
+    def test_toml_overrides_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(agent_shim, "_AGENTS_CONF_DIR", tmp_path)
+        (tmp_path / "hermes.toml").write_text(
+            """
+            type = "hermes"
+            home = "/tmp/custom-home"
+            venv = "/tmp/custom-venv"
+            host = "0.0.0.0"
+            port = 9999
+            """
+        )
+        cfg = agent_shim._load_agent_config("hermes")
+        assert cfg.home == Path("/tmp/custom-home")
+        assert cfg.venv == Path("/tmp/custom-venv")
+        assert cfg.host == "0.0.0.0"
+        assert cfg.port == 9999
+
+    def test_unknown_id_without_toml_dies(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(agent_shim, "_AGENTS_CONF_DIR", tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            agent_shim._load_agent_config("piccoder")
+        assert exc.value.code == 1
+
+    def test_custom_id_with_toml_works(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The whole point of `type=...` in the toml is that the operator
+        # can ship a new instance without code changes.
+        monkeypatch.setattr(agent_shim, "_AGENTS_CONF_DIR", tmp_path)
+        (tmp_path / "piccoder.toml").write_text('type = "hermes"\n')
+        cfg = agent_shim._load_agent_config("piccoder")
+        assert cfg.agent_id == "piccoder"
+        assert cfg.agent_type == "hermes"
+        # Defaults derive from the id, not the type.
+        assert cfg.home == Path("/var/lib/hal0/agents/piccoder")
+        assert cfg.venv == Path("/var/lib/hal0/venvs/piccoder")
+
+    def test_malformed_toml_dies(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(agent_shim, "_AGENTS_CONF_DIR", tmp_path)
+        (tmp_path / "hermes.toml").write_text("not = valid = toml = at all\n")
+        with pytest.raises(SystemExit):
+            agent_shim._load_agent_config("hermes")
+
+    def test_status_url_uses_host_port(self) -> None:
+        cfg = agent_shim.AgentConfig(
+            agent_id="hermes",
+            agent_type="hermes",
+            home=Path("/x"),
+            venv=Path("/y"),
+            host="10.0.0.1",
+            port=4242,
+        )
+        assert cfg.status_url == "http://10.0.0.1:4242/api/health"
+
+    def test_hermes_bin_resolves_under_venv(self) -> None:
+        cfg = agent_shim.AgentConfig(
+            agent_id="hermes",
+            agent_type="hermes",
+            home=Path("/x"),
+            venv=Path("/var/lib/hal0/venvs/hermes"),
+            host="127.0.0.1",
+            port=9119,
+        )
+        assert cfg.hermes_bin == Path("/var/lib/hal0/venvs/hermes/bin/hermes")
+
+
+# ---------------------------------------------------------------------------
+# Hermes argv + env builders
+# ---------------------------------------------------------------------------
+
+
+def _cfg(**kw: Any) -> agent_shim.AgentConfig:
+    defaults: dict[str, Any] = dict(
+        agent_id="hermes",
+        agent_type="hermes",
+        home=Path("/var/lib/hal0/agents/hermes"),
+        venv=Path("/var/lib/hal0/venvs/hermes"),
+        host="127.0.0.1",
+        port=9119,
+    )
+    defaults.update(kw)
+    return agent_shim.AgentConfig(**defaults)
+
+
+class TestHermesArgv:
+    def test_chooses_dashboard_subcommand(self) -> None:
+        # This is THE most important assertion in the file.
+        # Picking the wrong subcommand here = dead chat day-1
+        # (DA-sec-ops MUST-FIX #1).
+        argv = agent_shim._build_hermes_argv(_cfg())
+        assert "dashboard" in argv
+        assert "mcp" not in argv
+        assert "serve" not in argv  # `serve` is a subcommand of `mcp`
+
+    def test_includes_tui_flag(self) -> None:
+        # Without --tui the dashboard runs but /api/pty refuses upgrades
+        # and the chat tab is hidden. Verified against
+        # hermes_cli/main.py:14069-14076.
+        argv = agent_shim._build_hermes_argv(_cfg())
+        assert "--tui" in argv
+
+    def test_skip_build_to_avoid_npm_on_runtime_box(self) -> None:
+        argv = agent_shim._build_hermes_argv(_cfg())
+        assert "--skip-build" in argv
+
+    def test_binds_loopback_only(self) -> None:
+        # Default cfg → 127.0.0.1. Binding to 0.0.0.0 would let any LAN
+        # host reach /api/pty without hal0-api's Origin/HMAC checks
+        # (DA-sec-ops #2).
+        argv = agent_shim._build_hermes_argv(_cfg())
+        host_idx = argv.index("--host")
+        assert argv[host_idx + 1] == "127.0.0.1"
+
+    def test_no_open_browser(self) -> None:
+        argv = agent_shim._build_hermes_argv(_cfg())
+        assert "--no-open" in argv
+
+    def test_uses_venv_hermes_binary(self) -> None:
+        argv = agent_shim._build_hermes_argv(_cfg())
+        assert argv[0] == "/var/lib/hal0/venvs/hermes/bin/hermes"
+
+    def test_port_overridable(self) -> None:
+        argv = agent_shim._build_hermes_argv(_cfg(port=9999))
+        port_idx = argv.index("--port")
+        assert argv[port_idx + 1] == "9999"
+
+
+class TestHermesEnv:
+    def test_agent_id_passed_through(self) -> None:
+        env = agent_shim._build_hermes_env(_cfg(agent_id="hermes"))
+        assert env["HAL0_AGENT_ID"] == "hermes"
+
+    def test_custom_agent_id_passed_through(self) -> None:
+        # Future-proofing for v0.4 piccoder.
+        env = agent_shim._build_hermes_env(_cfg(agent_id="piccoder"))
+        assert env["HAL0_AGENT_ID"] == "piccoder"
+
+    def test_hermes_home_passed_through(self) -> None:
+        env = agent_shim._build_hermes_env(_cfg(home=Path("/custom/home")))
+        assert env["HERMES_HOME"] == "/custom/home"
+
+    def test_dashboard_tui_set(self) -> None:
+        # Belt-and-braces with the --tui flag in argv.
+        env = agent_shim._build_hermes_env(_cfg())
+        assert env["HERMES_DASHBOARD_TUI"] == "1"
+
+    def test_notify_socket_stripped(self) -> None:
+        # The shim owns sd_notify; child shouldn't be able to send
+        # READY=1 / STOPPING=1 on our behalf.
+        with patch.dict(os.environ, {"NOTIFY_SOCKET": "/run/systemd/notify"}):
+            env = agent_shim._build_hermes_env(_cfg())
+        assert "NOTIFY_SOCKET" not in env
+
+
+# ---------------------------------------------------------------------------
+# sd_notify
+# ---------------------------------------------------------------------------
+
+
+class TestSdNotify:
+    def test_no_notify_socket_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("NOTIFY_SOCKET", raising=False)
+        assert agent_shim._sd_notify("READY=1") is False
+
+    @pytest.mark.skipif(
+        sys.platform != "linux",
+        reason="AF_UNIX datagram + abstract namespace is Linux-only",
+    )
+    def test_sends_to_unix_socket(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        sock_path = tmp_path / "notify.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        listener.bind(str(sock_path))
+        listener.settimeout(1.0)
+        try:
+            monkeypatch.setenv("NOTIFY_SOCKET", str(sock_path))
+            assert agent_shim._sd_notify("READY=1\n") is True
+            received, _ = listener.recvfrom(64)
+            assert received == b"READY=1\n"
+        finally:
+            listener.close()
+
+
+# ---------------------------------------------------------------------------
+# _find_child_pids — keys on cmdline + HAL0_AGENT_ID env
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="/proc scan is Linux-only")
+class TestFindChildPids:
+    """Spawn a sleeping subprocess with controlled env + cmdline so we can
+    assert against a known PID. ``monkeypatch.setenv`` doesn't rewrite
+    ``/proc/$pid/environ`` (that's frozen at exec time) so we can't use
+    the test process itself.
+    """
+
+    @pytest.fixture
+    def sleeper(self) -> Any:
+        """Yield a (pid, cmdline_needle) for a long-running child with
+        ``HAL0_AGENT_ID=hermes`` in its env and ``hal0-agent-needle`` in
+        its cmdline.
+        """
+
+        # `sh -c "exec -a <name> sleep 30"` would be cleanest but `exec
+        # -a` is bash-only and CI may run with dash as /bin/sh. Use a
+        # python -c child whose argv contains the needle string directly.
+        needle = "hal0-agent-needle-marker"
+        env = {**os.environ, "HAL0_AGENT_ID": "hermes"}
+        proc = subprocess.Popen(
+            [sys.executable, "-c", f"# {needle}\nimport time; time.sleep(30)"],
+            env=env,
+        )
+        try:
+            # Give the kernel a moment to flush /proc/$pid/cmdline.
+            import time as _t
+
+            _t.sleep(0.1)
+            yield proc.pid, needle
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def test_matches_when_needle_AND_agent_id_match(self, sleeper: Any) -> None:
+        pid, needle = sleeper
+        matches = agent_shim._find_child_pids(needle=needle, agent_id="hermes")
+        assert pid in matches
+
+    def test_excludes_when_needle_missing(self, sleeper: Any) -> None:
+        pid, _needle = sleeper
+        # Cmdline-needle doesn't match → no match even with right agent id.
+        matches = agent_shim._find_child_pids(
+            needle="/definitely/not/in/cmdline", agent_id="hermes"
+        )
+        assert pid not in matches
+
+    def test_excludes_when_agent_id_wrong(self, sleeper: Any) -> None:
+        pid, needle = sleeper
+        # Cmdline matches BUT agent id doesn't → no match (proves AND-gate).
+        matches = agent_shim._find_child_pids(needle=needle, agent_id="piccoder")
+        assert pid not in matches
+
+
+# ---------------------------------------------------------------------------
+# cmd_status / cmd_stop / cmd_reprovision integration points
+# ---------------------------------------------------------------------------
+
+
+class TestCmdStatus:
+    def test_returns_0_when_ready(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(agent_shim, "_is_ready", lambda cfg: True)
+        rc = agent_shim.cmd_status(_cfg())
+        assert rc == 0
+
+    def test_returns_nonzero_when_unreachable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(agent_shim, "_is_ready", lambda cfg: False)
+        rc = agent_shim.cmd_status(_cfg())
+        assert rc == 1
+
+
+class TestCmdStop:
+    def test_idempotent_when_no_match(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(agent_shim, "_find_child_pids", lambda *_a, **_k: [])
+        assert agent_shim.cmd_stop(_cfg()) == 0
+
+
+class TestCmdReprovision:
+    def test_shells_out_to_hal0_agent_bootstrap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        recorded: dict[str, list[str]] = {}
+
+        def fake_call(argv: list[str], *_a: Any, **_kw: Any) -> int:
+            recorded["argv"] = argv
+            return 0
+
+        monkeypatch.setattr(subprocess, "call", fake_call)
+        rc = agent_shim.cmd_reprovision(_cfg())
+        assert rc == 0
+        assert recorded["argv"][-3:] == ["bootstrap", "hermes", "--repair"]
+
+
+# ---------------------------------------------------------------------------
+# main() dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestMain:
+    def test_main_dispatches_to_status(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(agent_shim, "_AGENTS_CONF_DIR", tmp_path)
+        called: dict[str, agent_shim.AgentConfig] = {}
+
+        def fake_status(cfg: agent_shim.AgentConfig) -> int:
+            called["cfg"] = cfg
+            return 7
+
+        monkeypatch.setattr(agent_shim, "_DISPATCH", {"status": fake_status})
+        # Rebuild the parser with only `status` allowed for this test —
+        # but parse_args is what gates the choices, so we patch around it.
+        monkeypatch.setattr(
+            agent_shim,
+            "_build_parser",
+            _make_parser_allowing_only_status,
+        )
+        rc = agent_shim.main(["hermes", "status"])
+        assert rc == 7
+        assert called["cfg"].agent_id == "hermes"
+
+
+def _make_parser_allowing_only_status() -> Any:
+    import argparse
+
+    p = argparse.ArgumentParser(prog="hal0-agent")
+    p.add_argument("agent_id")
+    p.add_argument("subcommand", choices=["status"])
+    return p

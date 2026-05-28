@@ -290,11 +290,10 @@ const HAL0_DATA = {
     { name: "route_to_chat",    active: true,  target: "agent, primary" },
   ],
 
-  approvals: [
-    { ts: "14:02:09", agent: "pi-coder", tool: "model_pull", arg: "user.Phi-4-Mini" },
-    { ts: "14:01:42", agent: "pi-coder", tool: "fs_write",   arg: "/scratch/notes/draft.md" },
-    { ts: "14:00:18", agent: "pi-coder", tool: "shell_exec", arg: "rg \"TODO\" src/" },
-  ],
+  // v0.3 PR-8: HAL0_DATA.approvals removed. The dashboard reads
+  // approvals from the live /api/agent/approvals queue (via
+  // useAgentApprovalsCount in SidebarAgentBlock — PR-6) and renders
+  // inline cards in the HermesChat composer (PR-10).
 
   backends: [
     { name: "llamacpp:rocm",   kind: "llamacpp", device: "rocm",  ver: "v1.0 (b9253)", state: "installed", recommended: true },

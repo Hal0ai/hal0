@@ -71,6 +71,25 @@ export const ENDPOINTS = {
   agentMcpClient: (name: string) =>
     `/api/agents/mcp/clients/${encodeURIComponent(name)}`,
 
+  // ── Agents — bundled lifecycle + sidebar rollup (v0.3 PR-6) ──────
+  // `agents` lists installed bundled agents (ADR-0004 §2). The
+  // remaining endpoints under this block are surfaces the SidebarAgentBlock
+  // calls — most are NEW in v0.3 and may 404 against an older hal0-api;
+  // the consuming hooks fall back to "—" and console.warn once when a
+  // particular path returns 404 / network error so the sidebar
+  // degrades gracefully on partial deployments.
+  agents: '/api/agents',
+  agentPersonas: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/personas`,
+  agentActivity: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/activity`,
+  agentApprovals: '/api/agent/approvals',
+  // The two paths below DO NOT exist yet in any merged backend PR (the
+  // sidebar component degrades gracefully with "—" + warn). Recorded
+  // here so the wiring is single-place when the routes land.
+  agentSkills: '/api/agents/skills',
+  agentMemoryStats: '/api/agents/hermes/memory/stats',
+
   // ── MCP host introspection (issue #206) ──────────────────────────
   // Read-only view of hosted MCP servers, connected clients, the
   // installable catalog, and an SSE tail of mcp.tool.* events.

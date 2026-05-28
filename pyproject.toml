@@ -90,6 +90,14 @@ dev = [
 
 [project.scripts]
 hal0 = "hal0.cli.main:app"
+# hal0-agent is the small subprocess wrapper invoked by the systemd
+# template ``hal0-agent@<id>.service`` (installer/systemd/). Kept as a
+# separate console script (not a ``hal0 agent shim`` subcommand) so the
+# unit's ExecStart points at a stable PATH binary instead of the full
+# typer-loaded ``hal0`` CLI surface. See ``src/hal0/cli/agent_shim.py``
+# for rationale and ``installer/systemd/hal0-agent@.service`` for the
+# unit that drives it.
+hal0-agent = "hal0.cli.agent_shim:main"
 
 [project.urls]
 Homepage = "https://hal0.dev"
@@ -126,3 +134,27 @@ python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+# ADR-0018: machine-readable record of the Hermes-Agent upstream commit
+# hal0 v0.3 is vendored/shimmed against. Single source of truth — the
+# weekly hermes-sdk-diff workflow + scripts/hermes-sdk-diff.sh read this
+# table and nothing else. Bumps go through the process documented in
+# ADR-0018 §4 (review drift issue, edit shim adapter if needed, run
+# `scripts/hermes-sdk-diff.sh --bump <sha>`, δ-harness + γ-suite, open
+# `chore(hermes): bump upstream pin to <short-sha>` PR).
+[tool.hal0.upstream-hermes]
+repo   = "https://github.com/earendil-works/hermes-agent"
+commit = "0554ef1aa3a2e5818f292f76a676110239a5d34b"
+date   = "2026-05-28"
+
+# Surfaces hal0 vendors, shims, or proxies. The diff job only opens an
+# issue when one of these paths changes between the pinned commit and
+# upstream HEAD; commits that don't touch this list are ignored.
+tracked_files = [
+    "web/src/plugins/registry.ts",
+    "web/src/plugins/slots.ts",
+    "hermes_cli/web_server.py",
+    "agent/memory_provider.py",
+    "tools/registry.py",
+    "agent/events.py",
+]

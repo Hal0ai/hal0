@@ -32,6 +32,14 @@ import './mcp.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'
+// v0.3 PR-6: bridge the SidebarAgentBlock TanStack Query hook onto
+// window BEFORE chrome.jsx + sidebar-agent-block.jsx evaluate. The
+// component (.jsx, prototype window-globals style) reads
+// `window.__hal0UseSidebarAgentRollup` instead of importing the hook
+// directly — preserves the no-ES-imports contract for the dash/*.jsx
+// pile (see main.tsx top comment).
+import './dash/agents/sidebar-agent-hook-bridge'
+import './dash/agents/sidebar-agent-block.jsx'
 import './dash/chrome.jsx'
 import './dash/primitives.jsx'
 import './dash/command-palette.jsx'
@@ -45,7 +53,54 @@ import './dash/slot-modals.jsx'
 import './dash/models.jsx'
 import './dash/model-modals.jsx'
 import './dash/settings.jsx'
+// v0.3 PR-7: install the plugin SDK shim BEFORE extras.jsx mounts the
+// PluginTabHost. The shim publishes window.__HAL0_PLUGINS__ +
+// window.__HAL0_PLUGIN_SDK__ (plus the __HERMES_* aliases) so plugin
+// bundles loaded via PluginTabHost find the registry the moment their
+// IIFE evaluates.
+import './dash/agents/plugin-sdk-shim.js'
+import './dash/agents/plugin-host.jsx'
+
 import './dash/extras.jsx'
+
+// v0.3 PR-8: AgentView is now split into per-tab files under
+// ui/src/dash/agents/. Bridges install the TanStack-Query hooks onto
+// `window.__hal0Use*` BEFORE the .jsx tab modules evaluate, so each
+// tab can read them without violating the no-ES-imports contract.
+// Load order matters: AgentView (the shell) reads window.{HermesChatTab,
+// PersonasTab, SkillsTab, MemoryTab, PluginsTab} at render time, so the
+// tabs must register on window before AgentView mounts. AgentView itself
+// must register AFTER extras.jsx so its definition wins over any stale
+// symbol the old monolith would have left behind (defence-in-depth —
+// the old monolith is already removed).
+import './dash/agents/personas-tab-hook-bridge'
+import './dash/agents/memory-tab-hook-bridge'
+// v0.3 PR-10: HermesChat surface — composer + transcript + sidecar over
+// the WS proxy from PR-9 (master plan §4 PR-10). The session store
+// + connection manager publishes on window via use-hermes-session.js;
+// markdown/bubble/tool/approval/thinking/transcript/composer/sidecar
+// each register on window via Object.assign at file bottom. Load order
+// matters: session store FIRST so the sidecar can read it, then the
+// leaf components, then transcript (which composes them), then composer
+// + sidecar, then hermes-chat-tab.jsx (which composes the whole grid).
+// Sidecar's TanStack-Query bridge publishes useMcpStatusPip onto window
+// BEFORE the sidecar evaluates.
+import './dash/agents/chat/sidecar-hook-bridge'
+import './dash/agents/chat/use-hermes-session.js'
+import './dash/agents/chat/markdown.jsx'
+import './dash/agents/chat/message-bubble.jsx'
+import './dash/agents/chat/tool-call-card.jsx'
+import './dash/agents/chat/approval-card.jsx'
+import './dash/agents/chat/thinking-indicator.jsx'
+import './dash/agents/chat/transcript.jsx'
+import './dash/agents/chat/composer.jsx'
+import './dash/agents/chat/hermes-sidecar.jsx'
+import './dash/agents/hermes-chat-tab.jsx'
+import './dash/agents/personas-tab.jsx'
+import './dash/agents/skills-tab.jsx'
+import './dash/agents/memory-tab.jsx'
+import './dash/agents/plugins-tab.jsx'
+import './dash/agents/agent-view.jsx'
 
 // v0.3 MCP additions — see `hal0 v3 mcp.html` for the original entry. We
 // pull them into the main SPA so `#mcp` (and the equivalent `#agents/mcp`)

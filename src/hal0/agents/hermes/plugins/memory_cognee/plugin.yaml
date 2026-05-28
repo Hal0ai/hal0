@@ -1,0 +1,17 @@
+# hal0-cognee — Hermes MemoryProvider plugin (PR-2, issue #240/#242).
+#
+# Wraps hal0-memory REST surface (``/api/memory/*``) and slots into
+# Hermes's MemoryManager via the upstream ABC.  Identity flows through
+# ``X-hal0-Agent`` (sourced from ``HAL0_AGENT_ID``); the server resolves
+# the per-agent dataset, the client never sends one — closes issue #317
+# from the client side (server side fixed in PR #366).
+name: hal0-cognee
+kind: exclusive
+version: 0.1.0
+description: >-
+  hal0-cognee — Cognee-backed memory provider via hal0-memory REST.
+  Per-agent namespace resolved server-side from X-hal0-Agent.
+author: hal0 contributors
+provides_hooks:
+  - on_memory_write
+requires_env: []

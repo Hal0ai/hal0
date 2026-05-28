@@ -53,21 +53,40 @@ def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.
         (v / "bin" / "hermes").chmod(0o755)
 
     monkeypatch.setattr(hp, "_install_venv", _fake_install)
+    # PR-3: config_write + model_automap + voice_wire all call
+    # _fetch_slots; without a stub each call would block 3s on a real
+    # urlopen timeout. Keep the integration tests offline-fast.
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    monkeypatch.setattr(
+        hp,
+        "_probe_mcp_server",
+        lambda _url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
+    )
+    monkeypatch.setattr(
+        hp,
+        "_mcp_memory_call",
+        lambda *_a, **_kw: {"ok": True, "result": {"items": [], "id": "x"}},
+    )
     return hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
 
 def test_phase_names_in_planned_order() -> None:
-    """The planned 12 phases stay in the documented order.
+    """The planned phases stay in the documented order.
 
-    Mirrors `docs/internal/hermes-bootstrap-plan-2026-05-23.md` §3 —
-    if a slice re-orders or drops a phase, this guard catches it
-    before the integration scenario notices.
+    Mirrors `docs/internal/hermes-bootstrap-plan-2026-05-23.md` §3 +
+    PR-3's persona_seed insertion — if a slice re-orders or drops a
+    phase, this guard catches it before the integration scenario
+    notices.
     """
     expected = (
         "preflight",
         "install",
         "env_probe",
         "home_init",
+        # PR-3 (v0.3): persona_seed inserted before config_write so the
+        # first render carries the active persona's system_prompt
+        # prelude (Phase 7) on the same pass that lands chat_slots.
+        "persona_seed",
         "config_write",
         "mcp_wire",
         "context_link",
@@ -353,7 +372,10 @@ def test_install_phase_skips_venv_when_binary_exists(
     assert out.status == hp.PhaseStatus.OK
     assert called == []
     assert wrapper_dst.is_file()
-    assert (hermes_home / "plugins" / "model-providers" / "hal0" / "__init__.py").is_file()
+    # PR-1-bundle: the legacy hal0 model-provider plugin is no longer
+    # copied — it hardcoded an :8000 base_url that has no listener and
+    # the composite ``hal0`` upstream in hal0.api supersedes it.
+    assert not (hermes_home / "plugins" / "model-providers" / "hal0").exists()
     assert (hermes_home / "plugins" / "memory" / "hal0-memory" / "__init__.py").is_file()
 
 
@@ -486,6 +508,12 @@ def test_config_write_phase_writes_yaml_idempotently(
         lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
     )
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-such-overrides.yaml")
+    # PR-3: _phase_config_write now also calls _fetch_slots + persona
+    # render. Stub both so the test stays offline.
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
     out1 = hp._phase_config_write(state)
     assert out1.status == hp.PhaseStatus.OK
     cfg = Path(out1.details["config_path"])
@@ -509,6 +537,10 @@ def test_config_write_phase_applies_overrides(
         lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
     )
     monkeypatch.setattr(hp, "OVERRIDES_PATH", overrides)
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
     out = hp._phase_config_write(state)
     assert out.status == hp.PhaseStatus.OK
     cfg = Path(out.details["config_path"]).read_text()
@@ -522,14 +554,16 @@ def test_deep_merge_recurses() -> None:
     assert merged == {"a": {"b": 1, "c": 99, "e": 4}, "d": 3}
 
 
-def test_hal0_profile_plugin_file_present() -> None:
-    """The plugin source file ships in the wheel + has the required hooks."""
+def test_legacy_hal0_profile_plugin_removed() -> None:
+    """The legacy ``hal0`` model-provider plugin is gone (PR-1-bundle R4 H4).
+
+    It hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
+    listener on a real install; the composite ``hal0`` upstream in
+    :mod:`hal0.api` supersedes it.
+    """
     repo_root = hp.REPO_ROOT_FOR_INSTALLER
-    src = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0" / "__init__.py"
-    body = src.read_text()
-    assert "Hal0Profile" in body
-    assert "register_provider" in body
-    assert "hermes-on-hal0" in body  # User-Agent header marker
+    legacy = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0"
+    assert not legacy.exists(), f"Legacy broken plugin still on disk at {legacy}"
 
 
 # ── #242 phase impl — mcp_wire + Hal0MemoryProvider plugin ──────────────────
@@ -813,20 +847,24 @@ def test_model_automap_writes_aliases_from_chat_slots(
         encoding="utf-8",
     )
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    # PR-1-bundle: real ``/api/slots`` payload uses ``type=="llm"`` for
+    # chat slots, NOT ``capability=="chat"``. The pre-fix filter looked
+    # at ``kind`` first and let the synthetic ``capability`` field through;
+    # the post-fix filter is type-first to match the live shape.
     monkeypatch.setattr(
         hp,
         "_fetch_slots",
         lambda: [
             {
                 "name": "primary",
-                "capability": "chat",
+                "type": "llm",
                 "model_id": "qwen3:8b",
                 "backend_url": "http://127.0.0.1:8001/v1",
                 "state": "ready",
             },
             {
                 "name": "coder",
-                "capability": "chat",
+                "type": "llm",
                 "model_id": "qwen-coder",
                 "backend_url": "http://127.0.0.1:8002/v1",
                 "state": "ready",

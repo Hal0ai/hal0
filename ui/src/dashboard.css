@@ -313,6 +313,12 @@ a { color: inherit; text-decoration: none; }
   cursor: pointer;
 }
 .sb-status .nudge:hover { color: var(--accent); }
+/* v0.3 PR-6 — variant for SidebarAgentBlock. Keeps base .sb-status
+   layout but tightens vertical margin so the sidebar can host both
+   blocks without scrolling on a 720-tall viewport. */
+.sb-status-agent { margin: 6px 12px 6px; }
+.sb-status-agent + .sb-status { margin-top: 4px; }
+.sb-status-empty { opacity: 0.85; }
 
 /* ─── Footer ────────────────────────────────────────────────────── */
 .footer {

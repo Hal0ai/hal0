@@ -311,14 +311,23 @@ async def list_models(
     ADR-0001 Child B.
     """
     upstreams = request.app.state.upstreams
+    model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {}) or {}
     seen: set[str] = set()
     data: list[dict[str, Any]] = []
     now = int(time.time())
     for u in upstreams.list():
-        try:
-            advertised = await upstreams.fetch_models(u.name)
-        except Exception:
-            advertised = []
+        # The composite ``hal0`` upstream's URL is hal0-api itself —
+        # going over HTTP here would re-enter this handler and loop. Its
+        # model list lives in ``upstream_models["hal0"]``, refreshed by
+        # ``_fetch_hal0_composite_models`` on startup, slot-state events,
+        # and the dispatcher passthrough path.
+        if u.kind == "slot" and u.slot_name is None and u.name == "hal0":
+            advertised = list(model_cache.get("hal0", []))
+        else:
+            try:
+                advertised = await upstreams.fetch_models(u.name)
+            except Exception:
+                advertised = []
         for mid in advertised:
             if mid in seen:
                 continue

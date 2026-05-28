@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -22,7 +23,21 @@ if TYPE_CHECKING:
     from hal0.lemonade.metrics_shim import MetricsShim
 
 from hal0 import __version__
-from hal0.api.middleware import error_codes, request_id
+from hal0.api.agents import (
+    memory_stats as agents_memory_stats_routes,
+)
+from hal0.api.agents import (
+    personas as agents_personas_routes,
+)
+from hal0.api.agents import (
+    restart as agents_restart_routes,
+)
+from hal0.api.agents import (
+    skills as agents_skills_routes,
+)
+from hal0.api.agents.chat_proxy import router as chat_proxy_router
+from hal0.api.middleware import error_codes, log_scrub, request_id
+from hal0.api.plugins import router as plugin_manifest_router
 from hal0.api.routes import (
     agents as agents_routes,
 )
@@ -93,48 +108,139 @@ from hal0.upstreams.registry import Upstream, UpstreamRegistry
 log = structlog.get_logger(__name__)
 
 
+# Module-level cache for the composite ``hal0`` upstream's aggregated
+# /v1/models response. Keyed by the upstream name; value is a tuple of
+# (expires_monotonic, model_ids). The TTL (default 5s) keeps repeated
+# ``/v1/models`` fans-out cheap during the cold-start race window
+# (R4 H3) without making the catalogue stale enough that a freshly
+# loaded slot stays invisible to Hermes for long. Use
+# ``time.monotonic()`` rather than ``functools.lru_cache`` because the
+# stdlib LRU has no time-based expiry.
+_HAL0_MODEL_CACHE: dict[str, tuple[float, list[str]]] = {}
+_HAL0_MODEL_CACHE_TTL_SECONDS = 5.0
+
+
+def _hal0_model_cache_clear() -> None:
+    """Punch the composite upstream's cached model list.
+
+    Exposed so slot-swap / slot-restart paths can invalidate the cache
+    when they know the next call will see a different model. Tests
+    also call this to keep state isolated between cases.
+    """
+    _HAL0_MODEL_CACHE.clear()
+
+
+async def _fetch_hal0_composite_models(
+    upstream: Upstream,
+    slot_manager: SlotManager,
+    *,
+    now: Callable[[], float] = time.monotonic,
+    ttl_seconds: float = _HAL0_MODEL_CACHE_TTL_SECONDS,
+) -> list[str]:
+    """Aggregate every ready chat-capable slot's model id under one upstream.
+
+    The composite ``hal0`` upstream replaces the previous per-slot
+    autoregistration (R4 H2): Lemonade serialises chat loading on a
+    single port, so ``primary`` and ``agent-hermes`` both produced
+    ``Upstream(url="http://127.0.0.1:8001/v1")`` and ``/v1/models``
+    deduplication credited whichever entry iterated first, leaving the
+    other looking empty in the dashboard.
+
+    The returned list is sorted + deduplicated and cached for
+    ``ttl_seconds`` to keep the cold-start fan-out cheap while still
+    picking up new slots within a handful of seconds.
+    """
+    cached = _HAL0_MODEL_CACHE.get(upstream.name)
+    monotonic_now = now()
+    if cached is not None and cached[0] > monotonic_now:
+        return list(cached[1])
+
+    try:
+        cfgs = await slot_manager.iter_configs()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("upstream.hal0_composite_iter_failed", error=str(exc))
+        cfgs = []
+
+    seen: set[str] = set()
+    models: list[str] = []
+    for cfg in cfgs:
+        if (cfg.get("type") or "").lower() != "llm":
+            continue
+        # Slot TOML conventions vary: real on-disk TOMLs put the model id
+        # under nested ``[model] default``; live /api/slots payloads
+        # expose it as ``model_default``; test fixtures sometimes pass
+        # ``model_id`` directly. Check every shape so the composite
+        # listing works regardless of the entry's origin.
+        model_section = cfg.get("model") or {}
+        defaults = cfg.get("defaults") or {}
+        model_id = (
+            cfg.get("model_default")
+            or cfg.get("model_id")
+            or (model_section.get("default") if isinstance(model_section, dict) else None)
+            or defaults.get("model")
+            or ""
+        )
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append(model_id)
+
+    models.sort()
+    _HAL0_MODEL_CACHE[upstream.name] = (monotonic_now + ttl_seconds, list(models))
+    return models
+
+
 async def _autoregister_slot_upstreams(
     registry: UpstreamRegistry,
     slot_manager: SlotManager,
 ) -> None:
-    """Register an Upstream for every locally-configured slot.
+    """Register a single composite ``hal0`` upstream.
 
-    Without this, a fresh install with only a slot TOML on disk has no
-    way to route ``model: "primary"`` to the local llama-server: the
-    dispatcher resolves through the upstream registry, and SlotManager
-    doesn't auto-mirror its slots there.  This hook closes that gap so
-    users only need to write the slot TOML — no separate upstreams.toml
-    entry is required for the local-slot case.
+    Replaces the previous per-slot autoregistration: Lemonade serialises
+    chat loading on a single port (typically 8001), so registering one
+    Upstream per chat slot produced multiple registry entries pointing
+    at the same URL. ``/v1/models`` deduped on id and credited whichever
+    upstream iterated first, leaving the dashboard showing a duplicate
+    provider that looked empty (R4 H2).
 
-    Skips slot names that are already registered (so an explicit
-    upstreams.toml entry can override the auto-registered URL, e.g. for
-    a reverse-proxy in front of the slot or a different port).
+    The composite upstream:
+
+    * Points at hal0-api's own ``/v1`` surface (``127.0.0.1:8080/v1``)
+      so the dispatcher's prompt-cache + dispatch path stays in the
+      loop instead of every consumer talking directly to the
+      slot-local llama-server.
+    * Advertises ALL chat-capable slot models through one
+      ``/v1/models`` response (aggregated by
+      :func:`_fetch_hal0_composite_models`).
+    * Has its model cache invalidated whenever a slot swaps or
+      restarts — see ``/api/slots/{name}/{swap,restart}``.
+
+    Skipped if an explicit ``upstreams.toml`` entry already claims the
+    name ``hal0`` so operator overrides win.
     """
-    try:
-        cfgs = await slot_manager.iter_configs()
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning("slots.autoregister_failed", error=str(exc))
+    if registry.get("hal0") is not None:
+        log.info("slots.autoregister_skipped", upstream="hal0", reason="already_registered")
         return
-    for cfg in cfgs:
-        name = cfg.get("name", "")
-        port = cfg.get("port") or cfg.get("slot", {}).get("port")
-        if not name or not port:
-            continue
-        if registry.get(name) is not None:
-            log.info("slots.autoregister_skipped", slot=name, reason="already_registered")
-            continue
-        registry.upsert(
-            Upstream(
-                name=str(name),
-                kind="slot",
-                url=f"http://127.0.0.1:{int(port)}/v1",
-                slot_name=str(name),
-                auth_style="none",
-                warmup_strategy="lazy",
-                advertise_models=True,
-            )
+    registry.upsert(
+        Upstream(
+            name="hal0",
+            kind="slot",
+            url="http://127.0.0.1:8080/v1",
+            slot_name=None,
+            auth_style="none",
+            warmup_strategy="none",
+            advertise_models=True,
         )
-        log.info("slots.autoregistered", slot=name, port=int(port))
+    )
+    log.info("slots.autoregistered_composite", upstream="hal0")
+    # Prime the model cache so the first request after startup doesn't
+    # have to pay the slot-iteration cost. Best-effort — failures are
+    # already logged inside the fetch helper.
+    upstream = registry.get("hal0")
+    if upstream is not None:
+        await _fetch_hal0_composite_models(upstream, slot_manager)
 
 
 # ── FLM multiplex model seeding ────────────────────────────────────────────
@@ -173,7 +279,15 @@ async def _refresh_model_cache_on_ready(
             slot_name = data.get("slot")
             if not isinstance(slot_name, str) or not slot_name:
                 continue
-            upstream = upstreams.get(slot_name)
+            # Per-slot upstreams used to exist; now a single composite
+            # ``hal0`` entry aggregates every chat-capable slot. When any
+            # slot flips ready, punch the composite TTL cache so the
+            # next /v1/models call rediscovers the new lineup. Fall back
+            # to a slot-named lookup for backwards compatibility (tests
+            # or operator-managed upstreams.toml that still mirror the
+            # legacy layout).
+            _hal0_model_cache_clear()
+            upstream = upstreams.get(slot_name) or upstreams.get("hal0")
             if upstream is None:
                 continue
             try:
@@ -192,26 +306,26 @@ async def _seed_multiplex_models(
     model_cache: dict[str, list[str]],
 ) -> None:
     """Add FLM multiplex tags (embed-gemma, whisper-v3:turbo) to the model
-    cache for any slot whose config opts into the matching multiplex.
+    cache for slots whose config opts into the matching multiplex.
 
     Idempotent — appends only when missing. Runs after
-    ``_autoregister_slot_upstreams`` so every slot already has an upstream
-    entry by the time we touch its cache key.
+    ``_autoregister_slot_upstreams``. Since the composite ``hal0``
+    upstream replaces per-slot registrations (R4 H2), the multiplex
+    tags are merged into the ``hal0`` cache bucket so the dispatcher's
+    passthrough match still picks them up.
     """
     try:
         cfgs = await slot_manager.iter_configs()
     except Exception as exc:
         log.warning("slots.multiplex_seed_failed", error=str(exc))
         return
+    bucket = model_cache.setdefault("hal0", [])
     for cfg in cfgs:
         name = cfg.get("name", "")
         provider = cfg.get("provider", "")
         if provider != "flm" or not name:
             continue
-        if registry.get(name) is None:
-            continue
         defaults = cfg.get("defaults") or {}
-        bucket = model_cache.setdefault(name, [])
         if defaults.get("load_embed") and _FLM_EMBED_TAG not in bucket:
             bucket.append(_FLM_EMBED_TAG)
             log.info("slots.multiplex_seeded", slot=name, model=_FLM_EMBED_TAG)
@@ -383,7 +497,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     model_cache: dict[str, list[str]] = {}
 
     async def _fetch_and_cache(u: Upstream) -> list[str]:
-        models = await upstreams.fetch_models(u.name)
+        # The composite ``hal0`` upstream aggregates its model list from
+        # the slot catalogue rather than hitting its own URL — that URL
+        # is hal0-api itself, so going over HTTP would re-enter the same
+        # /v1/models handler and infinite-recurse. The helper applies a
+        # 5s TTL keyed on the upstream name.
+        if u.kind == "slot" and u.slot_name is None and u.name == "hal0":
+            models = await _fetch_hal0_composite_models(u, slot_manager)
+        else:
+            models = await upstreams.fetch_models(u.name)
         # Preserve multiplex tags seeded at startup (e.g. embed-gemma /
         # whisper-v3:turbo on FLM slots). Without this, the dispatcher's
         # cold-cache prefetch overwrites the seeded entries and embed /
@@ -424,12 +546,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # constructor accepts overrides for tests.
     await slot_manager.start_idle_monitor()
 
-    # Auto-register local slots as upstreams so the dispatcher can route
-    # ``model: <slot_name>`` requests without requiring the user to write
-    # both a slot TOML AND a matching upstreams.toml entry.  Explicit
-    # upstreams.toml entries (hydrated above) win — autoregister skips
-    # names that already exist in the registry.
+    # Auto-register one composite ``hal0`` upstream so the dispatcher can
+    # route ``model: <slot_name>`` requests without requiring the user to
+    # write both a slot TOML AND a matching upstreams.toml entry.
+    # Explicit upstreams.toml entries (hydrated above) win — autoregister
+    # skips when the ``hal0`` name is already taken.
     await _autoregister_slot_upstreams(upstreams, slot_manager)
+    # Prime the shared model_cache for the composite upstream so the
+    # dispatcher's cold-cache prefetch and /v1/models handler can read it
+    # synchronously immediately after startup.
+    hal0_upstream = upstreams.get("hal0")
+    if hal0_upstream is not None:
+        try:
+            await _fetch_and_cache(hal0_upstream)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("upstream.hal0_prime_failed", error=str(exc))
     await _seed_multiplex_models(upstreams, slot_manager, model_cache)
 
     from hal0.hardware import HardwareStats
@@ -662,6 +793,10 @@ def create_app() -> FastAPI:
 
     request_id.install(app)
     error_codes.install(app)
+    # PR-9 (DA-sec-ops MUST-FIX #3): strip query strings from the
+    # uvicorn access log so a future sensitive parameter never lands
+    # in journald.
+    log_scrub.install(app)
 
     # /v1 is split into a public probe (GET /v1/models + /v1/models/{id})
     # and a writer surface that requires auth. The split lives in v1.py
@@ -827,6 +962,61 @@ def create_app() -> FastAPI:
         tags=["agents"],
     )
 
+    # Agent personas (v0.3 PR-4). Per-agent persona TOML browse + activate
+    # under the SAME ``/api/agents`` prefix so the dashboard's agent view
+    # nests personas under the agent it belongs to. Routes are
+    # parameterized by agent id; v0.3 only resolves ``"hermes"``.
+    app.include_router(
+        agents_personas_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "personas"],
+    )
+
+    # Agent service restart (v0.3 PR-11). Wraps systemctl restart of the
+    # hal0-agent@<id>.service template unit. Flagged as missing during
+    # PR-6/PR-8/PR-10 integration: the sidecar agent block + the
+    # service-status chip both want a one-click restart action. Audit
+    # log emitted on every invocation via the ``hal0.agents.audit``
+    # logger; matches the slot-restart pattern.
+    app.include_router(
+        agents_restart_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "restart"],
+    )
+
+    # Agent skills catalog (v0.3 PR-11). GET /api/agents/skills returns
+    # the static catalog mirroring the upstream Hermes tool registry +
+    # hal0 MCP servers. Bumps ride ADR-0018's weekly drift PRs. The
+    # ``/skills`` path is NOT parameterised by agent id — the catalog
+    # is the same across agents in v0.3.
+    app.include_router(
+        agents_skills_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "skills"],
+    )
+
+    # Agent memory stats (v0.3 PR-11). GET /api/agents/{id}/memory/stats
+    # returns the counts the dashboard sidecar memory chip renders.
+    # Fallback to ``available=false`` when the wrapper isn't initialised,
+    # so a hal0 install without Cognee still renders sensibly.
+    app.include_router(
+        agents_memory_stats_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "memory"],
+    )
+
+    # PR-9: chat WS proxy + session REST shim. Bridges the browser to
+    # the hermes dashboard process bound to 127.0.0.1:9119 (per PR-5's
+    # systemd ExecStart). Origin allowlist + HMAC session cookie
+    # enforced on every WS upgrade (DA-sec-ops MUST-FIX #2). Embed
+    # token rides outbound in Authorization: Bearer, never in a query
+    # string (MUST-FIX #3).
+    app.include_router(
+        chat_proxy_router,
+        prefix="/api/agents",
+        tags=["agents", "chat-proxy"],
+    )
+
     # Approval inbox (ADR-0004 §5). The dashboard bell, the MCP admin
     # server's gated-tool enqueue, and the ``hal0 agent approvals``
     # CLI all read from the same lifespan-scoped ApprovalQueue. GETs
@@ -847,6 +1037,19 @@ def create_app() -> FastAPI:
         mcp_routes.router,
         prefix="/api/mcp",
         tags=["mcp"],
+    )
+
+    # Hermes dashboard plugin host (v0.3 PR-7). hal0-api proxies the
+    # upstream manifest list + the per-plugin static-asset surface so
+    # the v3 dashboard can mount upstream's plugin bundles (kanban
+    # today) inside an ``<AgentView>`` tab without crossing the
+    # loopback boundary directly. The router declares its own absolute
+    # paths (``/api/dashboard/plugins`` + ``/dashboard-plugins/...``);
+    # mounted BEFORE ``_mount_dashboard`` so the SPA fallback doesn't
+    # shadow them.
+    app.include_router(
+        plugin_manifest_router,
+        tags=["plugins"],
     )
 
     # ── MCP servers (ADR-0004 §4 + ADR-0005 §2) ─────────────────────

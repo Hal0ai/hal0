@@ -157,7 +157,7 @@ function buildCommandItems() {
     { id: "r-hardware",  route: "hardware",  label: "Hardware",   icon: Icons.hardware,  sub: "cpu, gpu, npu, memory" },
     { id: "r-backends",  route: "backends",  label: "Backends",   icon: Icons.backends,  sub: "llamacpp, flm, sdcpp, kokoro" },
     { id: "r-logs",      route: "logs",      label: "Logs",       icon: Icons.logs,      sub: "hal0 + lemond stream", keywords: "tail console output" },
-    { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "overview, inbox, skills, memory, personas" },
+    { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "chat, personas, skills, memory, plugins" },
     { id: "r-settings",  route: "settings",  label: "Settings",   icon: Icons.settings,  sub: "auth, secrets, updates, lemond admin" },
     { id: "r-firstrun",  route: "firstrun",  label: "FirstRun picker", icon: Icons.flame, sub: "re-run the bundle picker", keywords: "setup install bundle" },
   ];
@@ -228,13 +228,10 @@ function buildCommandItems() {
   action("a-toggle-tour", "Replay onboarding tour", "the 3-step intro",
     () => window.dispatchEvent(new CustomEvent("hal0:tour-start")));
 
-  // Approval shortcut
-  if ((HAL0_DATA.approvals || []).length > 0) {
-    action("a-approvals", `Review ${HAL0_DATA.approvals.length} pending approval${HAL0_DATA.approvals.length === 1 ? "" : "s"}`,
-      "agent calls gated awaiting decision",
-      () => window.dispatchEvent(new CustomEvent("hal0:open-approvals")),
-      Icons.bell);
-  }
+  // v0.3 PR-8: dropped the "Review N pending approvals" shortcut. The
+  // approvals surface lives in the sidebar pip (PR-6) and inline in the
+  // chat composer (PR-10). The command palette item used the dead
+  // HAL0_DATA.approvals fixture.
 
   return items;
 }

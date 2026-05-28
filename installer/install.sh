@@ -515,6 +515,29 @@ else
     warn "${OPENWEBUI_UNIT_SRC} not found — OpenWebUI unit not installed"
 fi
 
+# hal0-agent@ template + hermes drop-in (v0.3 PR-5). The template is the
+# generic per-agent runner; the drop-in pins hermes-specific env.
+# Lay them down whether or not bootstrap has been run — the shim's
+# `cmd_serve` bails cleanly when the venv isn't there yet, and the
+# `systemctl enable --now` for the hermes instance is gated on the
+# venv existing (see "Service start" block below).
+AGENT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hal0-agent@.service"
+AGENT_UNIT_DST="${UNIT_DIR}/hal0-agent@.service"
+if [[ -f "${AGENT_UNIT_SRC}" ]]; then
+    cp "${AGENT_UNIT_SRC}" "${AGENT_UNIT_DST}"
+    info "wrote ${AGENT_UNIT_DST}"
+
+    AGENT_OVERRIDE_SRC="${REPO_ROOT}/installer/systemd/hal0-agent@hermes.service.d/override.conf"
+    AGENT_OVERRIDE_DST_DIR="${UNIT_DIR}/hal0-agent@hermes.service.d"
+    if [[ -f "${AGENT_OVERRIDE_SRC}" ]]; then
+        mkdir -p "${AGENT_OVERRIDE_DST_DIR}"
+        cp "${AGENT_OVERRIDE_SRC}" "${AGENT_OVERRIDE_DST_DIR}/override.conf"
+        info "wrote ${AGENT_OVERRIDE_DST_DIR}/override.conf"
+    fi
+else
+    warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
+fi
+
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     systemctl daemon-reload
     info "systemctl daemon-reload"
@@ -1136,6 +1159,23 @@ else
         else
             warn "hal0-openwebui not yet active; check 'journalctl -u hal0-openwebui -n 40'"
         fi
+    fi
+
+    # hal0-agent@hermes — gated on the hermes venv existing. PR-3 owns the
+    # actual `hal0 agent bootstrap hermes` invocation; until that lands,
+    # this branch is a no-op on fresh installs (correct — there's no
+    # agent to run yet). On upgrade installs where the venv is already
+    # present from a previous bootstrap, this enables the unit so the
+    # agent comes back up after the upgrade.
+    if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
+        systemctl enable --now hal0-agent@hermes.service
+        if wait_active hal0-agent@hermes.service 20; then
+            info "hal0-agent@hermes is running (chat at 127.0.0.1:9119, proxied by hal0-api)"
+        else
+            warn "hal0-agent@hermes not yet active; check 'journalctl -u hal0-agent@hermes -n 40'"
+        fi
+    elif [[ -f "${AGENT_UNIT_DST}" ]]; then
+        info "hal0-agent@hermes not enabled — run 'hal0 agent bootstrap hermes' first"
     fi
 
 fi

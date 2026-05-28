@@ -1211,3 +1211,70 @@ HAL0_HARNESS_TLS=1 HAL0_HARNESS_PROD=1 bash scripts/harness.sh
 The aggregate JSON lands at `tests/harness/reports/harness.json` and
 the pretty-printed table is dumped to stdout at the end of every
 run.
+
+---
+
+# v0.3 Hermes integration δ-harness (2026-05-28)
+
+The δ-tier grew a Python `tests/harness/integration/` subdir in PR-11
+to drive the v0.3 chat + persona round-trip through the hal0-api WS
+proxy against a `FakeWsServer` mock hermes. Rows are in pytest rather
+than the shell harness because the surface needs live WebSocket frames
++ JSON-RPC envelopes; the existing `agents-test.sh` rows still cover
+the systemd unit + installer plumbing.
+
+| Row                                                                   | Tier | Outcome  | Notes |
+|-----------------------------------------------------------------------|------|----------|-------|
+| `v0_3_chat_roundtrip / emits_delta_and_complete`                       | δ    | pass     | message.delta + message.complete arrive byte-identical |
+| `v0_3_chat_roundtrip / origin_allowlist_rejects_unknown_origin`        | δ    | pass     | DA-sec-ops MUST-FIX #2 pinned end-to-end |
+| `v0_3_chat_roundtrip / unauthenticated_ws_is_rejected`                 | δ    | pass     | HMAC cookie required even with allowlisted Origin |
+| `v0_3_chat_roundtrip / progress_then_complete_ordering_preserved`      | δ    | pass     | coalescer flushes pending progress before complete |
+| `v0_3_persona_activate / list_reflects_seeded_personas`                | δ    | pass     | hermes + coder + active=hermes |
+| `v0_3_persona_activate / writes_active_txt`                            | δ    | pass     | activate persists active.txt on disk |
+| `v0_3_persona_activate / with_reload_calls_hermes`                     | δ    | pass     | reload nudge fires upstream (best-effort, may be a no-op when fake hermes proto differs) |
+| `v0_3_persona_activate / unknown_persona_returns_404`                  | δ    | pass     | typed envelope `persona.not_found` |
+| `v0_3_persona_activate / unknown_agent_returns_404`                    | δ    | pass     | typed envelope `agent.unknown` |
+| `v0_3_persona_activate / detail_after_activate_shows_new_active`       | δ    | pass     | swap + lookup round-trip |
+
+Drive via:
+
+```
+.venv/bin/pytest tests/harness/integration/ --no-cov
+```
+
+Findings catalogued below as section §43 forward.
+
+## 43. v0.3 chat WS round-trip pinned — **info / regression-guard**
+
+The new δ row covers the full PR-9 chat-proxy → mock hermes →
+PR-10 composer envelope path. Any change to the WS upgrade gate
+(Origin allowlist + HMAC session cookie) OR the JSON-RPC frame shape
+fails this test in CI before reaching the dashboard.
+
+- **Cite:** `tests/harness/integration/test_v0_3_chat_roundtrip.py`,
+  `src/hal0/api/agents/chat_proxy.py`.
+- **Status:** ✅ landed in PR-11 (2026-05-28).
+
+## 44. v0.3 persona-activate round-trip pinned — **info / regression-guard**
+
+The new δ row covers the PR-4 persona endpoints over a real FastAPI
+mount + a mock hermes for the hot-reload nudge. Catches regressions
+where the activate handler writes `active.txt` but skips the JSON-RPC
+helper (or vice versa).
+
+- **Cite:** `tests/harness/integration/test_v0_3_persona_activate.py`,
+  `src/hal0/api/agents/personas.py`, `src/hal0/agents/personas.py`.
+- **Status:** ✅ landed in PR-11 (2026-05-28).
+
+## 45. Three new v0.3 backend endpoints pinned (`restart` / `skills` / `memory/stats`) — **info / regression-guard**
+
+PR-11 added unit-test coverage for the three missing endpoints
+flagged during PR-6 / PR-8 / PR-10 integration. Each maps to a
+dashboard surface (SidebarAgentBlock service chip, skills sidebar,
+memory chip) that previously rendered stale static data.
+
+- **Cite:** `tests/agents/test_agent_restart_endpoint.py`,
+  `tests/agents/test_agent_skills_endpoint.py`,
+  `tests/agents/test_agent_memory_stats_endpoint.py`.
+- **Status:** ✅ landed in PR-11 (2026-05-28).
+
