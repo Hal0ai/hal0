@@ -12,6 +12,7 @@
 import { useSlots } from '@/api/hooks/useSlots'
 import { useLemondRollup } from '@/api/hooks/useLemonade'
 import { useHardware } from '@/api/hooks/useHardware'
+import { MemoryMap } from './memory-map'
 
 const { useState: useStateD, useRef: useRefD, useEffect: useEffectD } = React;
 
@@ -62,76 +63,6 @@ function SnapshotStrip({ slots, onGo }) {
 
 
 // ─── Memory / health side cards ───
-function MemoryMap({ slots }) {
-  // Live OS-level memory from /api/hardware (used / total). Per-slot
-  // segments stay informational — they sum the bookkeeping each slot
-  // reports in `metrics.mem`. The bar then splits into:
-  //   [per-slot segments] + [other used] + [free]
-  // so "used" tracks reality (e.g. shows the few GB the OS itself eats
-  // when zero slots are loaded) rather than the static 128 GB the
-  // HAL0_DATA fixture used to render.
-  const hw = useHardware();
-  const ram = hw.data?.ram;
-  const fallbackTotal = HAL0_DATA.host.ram.total;
-  const total = ram && ram.total > 0 ? ram.total : fallbackTotal;
-  const loaded = slots.filter(s => s.state === "ready" || s.state === "serving" || s.state === "idle");
-  const segs = loaded.map(s => ({ name: s.name, sz: s.metrics.mem || 0, color: s.device }));
-  const slotsUsed = segs.reduce((a, s) => a + s.sz, 0);
-  // Prefer the OS reading; fall back to the slot sum until /api/hardware
-  // has resolved.
-  const used = ram ? ram.used : slotsUsed;
-  const free = Math.max(0, total - used);
-  const otherUsed = Math.max(0, used - slotsUsed);
-  const pct = n => total > 0 ? `${(n / total) * 100}%` : '0%';
-  const colorFor = d => d === "npu" ? "var(--dev-npu)" : d === "cpu" ? "var(--dev-cpu)" : d === "gpu-vulkan" ? "var(--dev-vulkan)" : "var(--dev-rocm)";
-  return (
-    <div className="side-card">
-      <div className="side-card-h">
-        <span>Memory map</span>
-        <span className="right mono">{used.toFixed(1)} / {total.toFixed(0)} GB</span>
-      </div>
-      <div className="side-card-b">
-        <div className="memmap">
-          <div className="memmap-h mono">
-            <span>unified ram</span>
-            <span><b>{free.toFixed(1)} GB</b> free</span>
-          </div>
-          <div className="memmap-bar">
-            {segs.map((s, i) => (
-              <i key={i} style={{ width: pct(s.sz), background: colorFor(s.color) }} />
-            ))}
-            {otherUsed > 0 && (
-              <i style={{ width: pct(otherUsed), background: "var(--fg-5)" }} />
-            )}
-            <i style={{ width: pct(free), background: "var(--bg-4)" }} />
-          </div>
-          <div className="memmap-legend">
-            {segs.map((s, i) => (
-              <div key={i} className="ln mono">
-                <span className="sw" style={{background: colorFor(s.color)}} />
-                <span className="name">{s.name}</span>
-                <span className="sz">{s.sz < 1 ? `${(s.sz * 1024).toFixed(0)} MB` : `${s.sz.toFixed(1)} GB`}</span>
-              </div>
-            ))}
-            {otherUsed > 0 && (
-              <div className="ln mono">
-                <span className="sw" style={{background: "var(--fg-5)"}} />
-                <span className="name">other</span>
-                <span className="sz">{otherUsed.toFixed(1)} GB</span>
-              </div>
-            )}
-            <div className="ln mono">
-              <span className="sw" style={{background: "var(--bg-4)"}} />
-              <span className="name">free</span>
-              <span className="sz">{free.toFixed(1)} GB</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function HealthCard() {
   return (
     <div className="side-card">
@@ -377,7 +308,7 @@ function DashboardView({ slots: slotsProp, onGo, showHero, onDismissHero }) {
         </div>
         <div className="dash-side">
           <SnapshotStrip slots={slots} onGo={onGo} />
-          <MemoryMap slots={slots} />
+          <MemoryMap variant="sidebar" />
           <ThroughputCard />
           <HealthCard />
         </div>
@@ -386,4 +317,4 @@ function DashboardView({ slots: slotsProp, onGo, showHero, onDismissHero }) {
   );
 }
 
-Object.assign(window, { DashboardView, SnapshotStrip, MemoryMap, HealthCard, ThroughputCard, HardwareSection });
+Object.assign(window, { DashboardView, SnapshotStrip, HealthCard, ThroughputCard, HardwareSection });
