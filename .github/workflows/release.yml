@@ -293,11 +293,20 @@ jobs:
           # rebuild path) — otherwise just upload the assets, replacing
           # any prior copies with --clobber.
           if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            # NOTE: every pre-v1.0 release is a SemVer prerelease by tag
+            # convention (vX.Y.Z-alpha.N / -beta.N / -rcN), but we
+            # publish them with --prerelease=false on purpose: GitHub's
+            # /releases/latest endpoint and "Latest" badge filter out
+            # prereleases, and the install + update path relies on a
+            # working /latest while we're still pre-stable. Flip back
+            # to a real prerelease check on the v1.0.0 cut. See the
+            # hal0_v0.1.0-alpha-launch + hal0_release_prerelease_flag
+            # memories.
             gh release create "${TAG}" \
               --title "hal0 ${TAG}" \
               --notes "Automated release. See docs/internal/release-manifest.md for the verify path." \
               --draft=false \
-              --prerelease="$([[ "${TAG}" == *-* ]] && echo true || echo false)"
+              --prerelease=false
           fi
 
           gh release upload "${TAG}" "${TARBALL}" "${SIG}" "${CRT}" "${MANIFEST}" --clobber
