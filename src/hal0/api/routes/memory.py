@@ -25,8 +25,59 @@ from pydantic import ValidationError
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import GraphUpstreamConfig, MemoryGraphConfig
+from hal0.memory.namespace import (
+    DEFAULT_DATASET,
+    MemoryNamespaceError,
+    resolve_read_datasets,
+    resolve_write_dataset,
+)
 
 router = APIRouter()
+
+
+# ── ADR-0012 identity + ADR-0005 §3 namespace helpers ─────────────────────
+#
+# Post-ADR-0012 hal0-api is open on 0.0.0.0:8080; agent identity flows on
+# the ``X-hal0-Agent`` header (NOT Bearer — auth surface was removed).
+# Private-mode opt-in flows on ``X-hal0-Private`` to match the MCP mount
+# (:mod:`hal0.api.mcp_mount`); the same toggle gates the same namespace
+# promotion rule across both surfaces (issue #317).
+
+
+_AGENT_HEADER = "x-hal0-agent"
+_PRIVATE_HEADER = "x-hal0-private"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+class MemoryNamespaceInvalid(Hal0Error):
+    """The caller's headers + body produced an unresolvable namespace.
+
+    Distinct from a body-shape error so the dashboard can paint a
+    different toast ("you asked for private without an agent identity")
+    vs a generic 400.
+    """
+
+    code = "memory.namespace_invalid"
+    status = 400
+
+
+def _agent_id(request: Request) -> str:
+    """Return the ``X-hal0-Agent`` value, or ``"anonymous"`` if absent.
+
+    Mirrors :func:`hal0.api.mcp_mount.client_id_resolver` for the REST
+    surface — both translate the absence of an identity header into the
+    same sentinel so audit + dataset resolution stay consistent.
+    """
+    raw = request.headers.get(_AGENT_HEADER)
+    if not raw:
+        return "anonymous"
+    return raw.strip() or "anonymous"
+
+
+def _is_private(request: Request) -> bool:
+    """Return whether the caller opted into ``--private`` mode."""
+    raw = request.headers.get(_PRIVATE_HEADER, "")
+    return raw.strip().lower() in _TRUTHY
 
 
 class MemoryGraphConfigInvalid(Hal0Error):
@@ -188,11 +239,22 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
-    """Add a memory item. Body: ``{text, dataset?, tags?, source?, metadata?}``.
+    """Add a memory item. Body: ``{text, dataset?, tags?, metadata?}``.
 
-    Returns ``{id, timestamp}`` from :meth:`CogneeWrapper.add`. The
-    ``dataset`` defaults to ``"shared"``; tags + metadata are
-    free-form lists / dict respectively.
+    Identity headers (issue #317):
+
+      - ``X-hal0-Agent``: post-ADR-0012 agent identity. Stamped onto
+        the wrapper's ``source`` field — server-injected so callers
+        cannot lie (ADR-0005 §5). Absent header → ``"anonymous"``.
+      - ``X-hal0-Private: 1``: opt into the private namespace.
+        Promotes ``dataset`` to ``private:<agent>`` regardless of the
+        body value (ADR-0005 §3).
+
+    The body's ``source`` field is REJECTED — clients supplying it is
+    treated as an attempt to impersonate, matching the MCP rule. Use
+    the ``X-hal0-Agent`` header to claim identity.
+
+    Returns ``{id, timestamp}`` from :meth:`CogneeWrapper.add`.
     """
     body = await _read_json_body(request)
     text = body.get("text")
@@ -201,12 +263,32 @@ async def memory_add(request: Request) -> dict[str, Any]:
             "memory_add requires 'text' (non-empty string)",
             details={"path": "/api/memory/add"},
         )
+    if "source" in body:
+        # ADR-0005 §5 — source is server-injected from the X-hal0-Agent
+        # header so callers cannot impersonate another agent in the
+        # audit log.
+        raise Hal0Error(
+            "memory_add 'source' is server-injected from X-hal0-Agent and cannot be supplied",
+            details={"path": "/api/memory/add"},
+        )
+
+    agent_id = _agent_id(request)
+    private = _is_private(request)
+    try:
+        dataset = resolve_write_dataset(
+            body.get("dataset"),
+            private=private,
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
+    except MemoryNamespaceError as exc:
+        raise MemoryNamespaceInvalid(str(exc)) from exc
+
     wrapper = _wrapper(request)
     return await wrapper.add(
         text=text,
-        dataset=body.get("dataset", "shared"),
+        dataset=dataset,
         tags=body.get("tags") or [],
-        source=body.get("source"),
+        source=agent_id,
         metadata=body.get("metadata") or {},
     )
 
@@ -214,6 +296,11 @@ async def memory_add(request: Request) -> dict[str, Any]:
 @router.post("/search")
 async def memory_search(request: Request) -> dict[str, Any]:
     """Search memory. Body: ``{query, limit?, dataset?, tags?, before?, after?}``.
+
+    Identity headers behave like ``/add`` — ``X-hal0-Private: 1``
+    expands a default-empty ``dataset`` to ``[shared, private:<agent>]``
+    per ADR-0005 §3 so a private-mode caller sees both their own scoped
+    items + the shared bucket without per-call opt-in.
 
     Returns ``{items: [MemoryRecord, ...]}`` — wrapped in an envelope so
     we can add ``next_cursor`` / counters later without breaking clients.
@@ -225,11 +312,23 @@ async def memory_search(request: Request) -> dict[str, Any]:
             "memory_search requires 'query' (non-empty string)",
             details={"path": "/api/memory/search"},
         )
+
+    agent_id = _agent_id(request)
+    private = _is_private(request)
+    try:
+        dataset = resolve_read_datasets(
+            body.get("dataset"),
+            private=private,
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
+    except MemoryNamespaceError as exc:
+        raise MemoryNamespaceInvalid(str(exc)) from exc
+
     wrapper = _wrapper(request)
     items = await wrapper.search(
         query=query,
         limit=int(body.get("limit", 10)),
-        dataset=body.get("dataset", "shared"),
+        dataset=dataset,
         tags=body.get("tags") or [],
         before=body.get("before"),
         after=body.get("after"),
@@ -240,18 +339,41 @@ async def memory_search(request: Request) -> dict[str, Any]:
 @router.get("/list")
 async def memory_list(
     request: Request,
-    dataset: str = "shared",
+    dataset: str | None = None,
     cursor: str | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
-    """Paginated list. Returns ``{items: [...], next_cursor: str | null}``."""
+    """Paginated list. Returns ``{items: [...], next_cursor: str | null}``.
+
+    Identity rules mirror ``/search``: ``X-hal0-Private: 1`` with no
+    explicit ``?dataset=`` resolves to the caller's own private bucket
+    so the ``hal0 agent memory list`` CLI subcommand can enumerate
+    per-agent items without the operator passing the namespace by hand.
+    """
+    agent_id = _agent_id(request)
+    private = _is_private(request)
+    try:
+        resolved = resolve_write_dataset(
+            dataset,
+            private=private,
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
+    except MemoryNamespaceError as exc:
+        raise MemoryNamespaceInvalid(str(exc)) from exc
+
     wrapper = _wrapper(request)
-    return await wrapper.list_items(dataset=dataset, cursor=cursor, limit=limit)
+    return await wrapper.list_items(dataset=resolved, cursor=cursor, limit=limit)
 
 
 @router.post("/delete")
 async def memory_delete(request: Request) -> dict[str, int]:
-    """Delete by id. Body: ``{ids: [...]}``. Returns ``{deleted: int}``."""
+    """Delete by id. Body: ``{ids: [...]}``. Returns ``{deleted: int}``.
+
+    Identity headers are not consulted: id-scoped delete bypasses the
+    namespace surface entirely (the wrapper's audit log still stamps
+    the call with the agent identity for forensics — see
+    :meth:`CogneeWrapper._audit`).
+    """
     body = await _read_json_body(request)
     ids = body.get("ids")
     if not isinstance(ids, list) or not ids:
@@ -281,9 +403,11 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 
 
 __all__ = [
+    "DEFAULT_DATASET",
     "GraphUpstreamConfig",
     "MemoryGraphConfig",
     "MemoryGraphConfigInvalid",
+    "MemoryNamespaceInvalid",
     "MemoryUnavailable",
     "router",
 ]
