@@ -45,6 +45,14 @@ import './dash/slot-modals.jsx'
 import './dash/models.jsx'
 import './dash/model-modals.jsx'
 import './dash/settings.jsx'
+// v0.3 PR-7: install the plugin SDK shim BEFORE extras.jsx mounts the
+// PluginTabHost. The shim publishes window.__HAL0_PLUGINS__ +
+// window.__HAL0_PLUGIN_SDK__ (plus the __HERMES_* aliases) so plugin
+// bundles loaded via PluginTabHost find the registry the moment their
+// IIFE evaluates.
+import './dash/agents/plugin-sdk-shim.js'
+import './dash/agents/plugin-host.jsx'
+
 import './dash/extras.jsx'
 
 // v0.3 MCP additions — see `hal0 v3 mcp.html` for the original entry. We

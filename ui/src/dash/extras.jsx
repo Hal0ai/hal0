@@ -392,6 +392,10 @@ function AgentView() {
     { id: "memory",   label: "Memory" },
     { id: "personas", label: "Personas" },
     { id: "peers",    label: "Peers" },
+    // v0.3 PR-7: plugin host mounts upstream Hermes plugin tabs
+    // (kanban today, future plugins free) under a single nav entry.
+    // PR-8 splits AgentView; this is the minimal edit until then.
+    { id: "plugins",  label: "Plugins" },
   ];
   return (
     <div className="view">
@@ -428,6 +432,7 @@ function AgentView() {
       {tab === "memory"   && <AgentMemory onResetNs={() => setResetOpen(true)} />}
       {tab === "personas" && <AgentPersonas onEdit={(p) => setEditPersona(p)} />}
       {tab === "peers"    && <AgentPeers />}
+      {tab === "plugins"  && window.PluginTabHost && <window.PluginTabHost agentId="hermes" />}
 
       <PersonaEditModal
         open={!!editPersona}

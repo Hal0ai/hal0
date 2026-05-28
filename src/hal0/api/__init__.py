@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 from hal0 import __version__
 from hal0.api.middleware import error_codes, request_id
+from hal0.api.plugins import router as plugin_manifest_router
 from hal0.api.routes import (
     agents as agents_routes,
 )
@@ -964,6 +965,19 @@ def create_app() -> FastAPI:
         mcp_routes.router,
         prefix="/api/mcp",
         tags=["mcp"],
+    )
+
+    # Hermes dashboard plugin host (v0.3 PR-7). hal0-api proxies the
+    # upstream manifest list + the per-plugin static-asset surface so
+    # the v3 dashboard can mount upstream's plugin bundles (kanban
+    # today) inside an ``<AgentView>`` tab without crossing the
+    # loopback boundary directly. The router declares its own absolute
+    # paths (``/api/dashboard/plugins`` + ``/dashboard-plugins/...``);
+    # mounted BEFORE ``_mount_dashboard`` so the SPA fallback doesn't
+    # shadow them.
+    app.include_router(
+        plugin_manifest_router,
+        tags=["plugins"],
     )
 
     # ── MCP servers (ADR-0004 §4 + ADR-0005 §2) ─────────────────────
