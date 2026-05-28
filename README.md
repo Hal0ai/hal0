@@ -23,7 +23,7 @@ Server as the unified inference runtime** behind a thin hal0 capability
 layer. Every workload — chat, embed, rerank, STT, TTS, image gen —
 runs as a real, named slot in `capabilities.toml`; the API surface
 covers the full OpenAI-compatible matrix; the dashboard is for
-operating the box, not chatting with it.
+operating the box, with a built-in chat page for smoke-tests.
 
 ```sh
 curl -fsSL https://hal0.dev/install.sh | bash
@@ -123,11 +123,12 @@ be evicted out from under a streaming request.
 - **Dispatcher** — registry-aware routing, cold-cache prefetch,
   upstream fallback (OpenRouter, Anthropic, OpenAI, custom OpenAI-shaped
   endpoints). Mix local + remote per-model in one config.
-- **Dashboard** — Vue 3 + Tailwind 4 UI for slot/model management,
-  hardware-aware configuration, live logs, and system health. SSE-backed
-  status + log tail. Lemonade `/logs/stream` folded into the Journal
-  panel. Settings → Lemonade admin panel surfaces the daemon's
-  `/internal/config` for inspection. Dark by default.
+- **Dashboard** — React 18 + Vite UI for slot/model management,
+  hardware-aware configuration, live logs, system health, and a
+  built-in chat page (with popout window + reasoning toggle).
+  SSE-backed status + log tail. Lemonade `/logs/stream` folded into
+  the Journal panel. Settings → Lemonade admin panel surfaces the
+  daemon's `/internal/config` for inspection. Dark by default.
 - **OpenWebUI prewired** — chat at `:3001`, zero config. The installer
   writes `openwebui.env` pointing at the local hal0 API.
 - **OmniRouter (8 tools)** — `generate_image`, `edit_image`,

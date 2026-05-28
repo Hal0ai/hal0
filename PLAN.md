@@ -187,9 +187,12 @@ See §15 Phase 9 below for the per-PR map.
     (Traefik / nginx / Cloudflare Tunnel / etc.).
   - `hal0.local` reachable on the LAN (mDNS via avahi); HTTPS via
     Caddy's internal CA or Let's Encrypt when a public hostname is set.
-- **Dashboard UI** (Vue 3 + Pinia + Tailwind 4)
-  - 9 views: Dashboard, Slots, Models, Hardware, Logs, Settings,
-    Providers, FirstRun, plus a not-found / error shell
+- **Dashboard UI** (React 18 + Vite + TanStack Query)
+  - Views: Dashboard (system overview + hardware spread), Chat,
+    Slots, Models, Backends, Logs, Agent, MCP, Settings, FirstRun
+  - The standalone `#hardware` page retired in 0.3 — its content
+    now lives on `#dashboard` alongside the slot snapshot, memory
+    map, throughput card, and health card
   - Dark mode only; mobile-responsive on read-only paths
   - SSE for slot status + log tail
   - Hardware-aware slot config form (VRAM fit warnings inline)

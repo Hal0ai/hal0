@@ -526,7 +526,9 @@ function MessageList({ messages, showReasoning }) {
                 <span className="bubble-caret" aria-hidden="true">▌</span>
               ) : m.reasoningOnly ? (
                 <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>
-                  (no final answer — see thinking above)
+                  {showReasoning
+                    ? '(no final answer — see thinking above)'
+                    : "(no final answer — enable reasoning to see the model's thinking)"}
                 </span>
               ) : (
                 ''

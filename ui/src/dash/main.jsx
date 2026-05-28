@@ -42,7 +42,6 @@ function App() {
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const { active: activeBanners } = useBanners();
   const [{ route, param, query }, setRouteState] = useStateA(parseRoute());
-  const [chatState, setChatState] = useStateA("active");
   const [persona, setPersona] = useStateA("primary");
   const [bellOpen, setBellOpen] = useStateA(false);
   const [frStage, setFrStage] = useStateA("pick");
@@ -116,8 +115,6 @@ function App() {
       case "dashboard":
         return (
           <DashboardView
-            chatState={chatState}
-            setChatState={setChatState}
             slots={HAL0_DATA.slots}
             onGo={go}
             showHero={tweaks.showHero && !heroDismissed}

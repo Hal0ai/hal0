@@ -271,12 +271,6 @@ function HardwareSection() {
           </div>
         </HwCard>
 
-        <HwCard title="Storage" eyebrow="model cache" full>
-          <HwRow k="model dir" v="/var/lib/hal0/models" mono />
-          <HwRow k="size" v="46.2 GB · 9 models" />
-          <HwRow k="free on /var" v="412 GB" />
-          <HwRow k="hf cache" v="/root/.cache/huggingface — 8.4 GB" mono />
-        </HwCard>
       </div>
     </div>
   );
@@ -312,15 +306,19 @@ function HwRow({ k, v, mono, sub }) {
 
 // ─── Dashboard view shell ───
 //
-// Chat-page-overhaul: chat surface moved to /chat. The dashboard is now
-// the system-overview page — hardware spread + slot snapshot + memory
-// map + throughput + health. The `chatState === "skip"` branch still
-// stands as the zero-slots empty fallback.
-function DashboardView({ chatState, slots: slotsProp, onGo, showHero, onDismissHero }) {
+// /dashboard is the system-overview page — hardware spread + slot snapshot
+// + memory map + throughput + health. When /api/slots returns an empty
+// list (fresh install, no bundle picked), we render a zero-slots empty
+// state pointing at FirstRun instead.
+function DashboardView({ slots: slotsProp, onGo, showHero, onDismissHero }) {
   const slotsQuery = useSlots();
   const slots = (slotsQuery.data && slotsQuery.data.length > 0) ? slotsQuery.data : slotsProp;
   const lemond = useLemondRollup();
-  if (chatState === "skip") {
+  // Real zero-slots detection: only when /api/slots has resolved to a
+  // confirmed empty array. Still-loading (undefined) keeps showing the
+  // normal dashboard against fixtures.
+  const noSlotsConfigured = Array.isArray(slotsQuery.data) && slotsQuery.data.length === 0;
+  if (noSlotsConfigured) {
     return (
       <div className="view">
         <div className="dash-empty">
