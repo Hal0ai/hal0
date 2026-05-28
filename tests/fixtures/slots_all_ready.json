@@ -1,0 +1,143 @@
+[
+  {
+    "name": "agent-hermes",
+    "state": "ready",
+    "port": 8001,
+    "model_id": "qwen3-coder-reap-25b-a3b-q5km",
+    "backend": "vulkan",
+    "metadata": {
+      "updated_at": 1779951430.9554963,
+      "message": "model evicted from lemond (auto-reloads on next request)",
+      "adopted": true,
+      "backend": "vulkan",
+      "provider": "lemonade"
+    },
+    "last_used_at": null,
+    "kind": "local",
+    "status": "ready",
+    "provider": "lemonade",
+    "models": [],
+    "type": "llm",
+    "model_default": "qwen3-coder-reap-25b-a3b-q5km",
+    "enabled": true,
+    "lemonade_state": "loaded"
+  },
+  {
+    "name": "embed",
+    "state": "offline",
+    "port": 0,
+    "model_id": "Qwen3-Embedding-0.6B-GGUF",
+    "backend": "vulkan",
+    "metadata": {
+      "updated_at": 1779788962.874966,
+      "message": "model evicted from lemond (auto-reloads on next request)",
+      "adopted": true,
+      "backend": "vulkan",
+      "provider": "lemonade"
+    },
+    "last_used_at": null,
+    "kind": "local",
+    "status": "offline",
+    "provider": "lemonade",
+    "models": [],
+    "type": "embedding",
+    "model_default": "Qwen3-Embedding-0.6B-GGUF",
+    "enabled": true,
+    "lemonade_state": "idle"
+  },
+  {
+    "name": "primary",
+    "state": "ready",
+    "port": 8001,
+    "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+    "backend": "vulkan",
+    "metadata": {
+      "updated_at": 1779984765.10327,
+      "message": "",
+      "adopted": true,
+      "backend": "vulkan",
+      "provider": "lemonade"
+    },
+    "last_used_at": 1779984765.2025433,
+    "kind": "local",
+    "status": "ready",
+    "provider": "lemonade",
+    "models": [
+      "Qwen3-Coder-Next-REAP-40B-A3B-Q4_K_XL.gguf"
+    ],
+    "type": "llm",
+    "model_default": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+    "enabled": true,
+    "lemonade_state": "loaded",
+    "backend_url": "http://127.0.0.1:8002/v1"
+  },
+  {
+    "name": "rerank",
+    "state": "offline",
+    "port": 0,
+    "model_id": "jina-reranker-v1-tiny-en-GGUF",
+    "backend": "vulkan",
+    "metadata": {
+      "updated_at": 1779847924.6008441,
+      "message": "model evicted from lemond (auto-reloads on next request)",
+      "adopted": true,
+      "backend": "vulkan",
+      "provider": "lemonade"
+    },
+    "last_used_at": null,
+    "kind": "local",
+    "status": "offline",
+    "provider": "lemonade",
+    "models": [],
+    "type": "reranking",
+    "model_default": "jina-reranker-v1-tiny-en-GGUF",
+    "enabled": true,
+    "lemonade_state": "idle"
+  },
+  {
+    "name": "stt",
+    "state": "offline",
+    "port": 8085,
+    "model_id": "whisper-tiny",
+    "backend": "cpu",
+    "metadata": {
+      "updated_at": 1779932208.2593424,
+      "message": "model evicted from lemond (auto-reloads on next request)",
+      "adopted": true,
+      "backend": "cpu",
+      "provider": "lemonade"
+    },
+    "last_used_at": null,
+    "kind": "local",
+    "status": "offline",
+    "provider": "lemonade",
+    "models": [],
+    "type": "transcription",
+    "model_default": "whisper-tiny",
+    "enabled": false,
+    "lemonade_state": "idle"
+  },
+  {
+    "name": "tts",
+    "state": "offline",
+    "port": 0,
+    "model_id": "kokoro-v1",
+    "backend": "cpu",
+    "metadata": {
+      "updated_at": 1779855132.1664457,
+      "message": "model evicted from lemond (auto-reloads on next request)",
+      "adopted": true,
+      "backend": "cpu",
+      "provider": "lemonade"
+    },
+    "last_used_at": null,
+    "kind": "local",
+    "status": "offline",
+    "provider": "lemonade",
+    "models": [],
+    "type": "tts",
+    "model_default": "kokoro-v1",
+    "enabled": true,
+    "lemonade_state": "idle"
+  }
+]

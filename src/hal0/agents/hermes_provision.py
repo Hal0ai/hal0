@@ -37,6 +37,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import structlog
+
+log = structlog.get_logger(__name__)
+
 # Schema version embedded in every provision.json. Bump when the on-disk
 # shape changes in a way that can't be migrated by ignoring unknown
 # keys. Currently v1 — the layout in `BootstrapState.to_dict()`.
@@ -350,11 +354,12 @@ def _copy_plugin_tree(src: Path, dst: Path) -> None:
 def _phase_install(state: BootstrapState) -> PhaseResult:
     """Provision the managed Hermes venv + wrapper + plugin stubs.
 
-    The plugin stubs at ``installer/agents/hermes/plugins/{hal0,hal0-memory}/``
-    are copied verbatim into ``$HERMES_HOME/plugins/{model-providers/hal0,memory/hal0-memory}/``.
-    Real plugin bodies arrive in #241 + #242; this phase just stages
-    the directory layout so re-runs after those slices land are a
-    file-by-file overlay, not a structural change.
+    The plugin stub at ``installer/agents/hermes/plugins/hal0-memory/``
+    is copied verbatim into ``$HERMES_HOME/plugins/memory/hal0-memory/``.
+    The legacy ``hal0`` model-provider plugin was removed (R4 H4): it
+    hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
+    listener, and the composite ``hal0`` upstream in :mod:`hal0.api`
+    now supersedes it.
 
     Skips heavy work when the venv binary already exists at the
     expected version — re-runs of ``hal0 agent bootstrap hermes`` are
@@ -410,9 +415,21 @@ def _phase_install(state: BootstrapState) -> PhaseResult:
     if not claimed:
         return PhaseResult(status=PhaseStatus.FAIL, reason=reason)
     plugin_targets = {
-        "hal0": hermes_home / "plugins" / "model-providers" / "hal0",
         "hal0-memory": hermes_home / "plugins" / "memory" / "hal0-memory",
     }
+    # Remove the legacy broken ``hal0`` model-provider plugin if a
+    # previous bootstrap left it behind. Idempotent — silently no-op if
+    # already gone.
+    legacy_hal0_plugin = hermes_home / "plugins" / "model-providers" / "hal0"
+    if legacy_hal0_plugin.exists():
+        try:
+            shutil.rmtree(legacy_hal0_plugin)
+        except OSError as exc:
+            log.warning(
+                "hermes_provision.legacy_plugin_cleanup_failed",
+                path=str(legacy_hal0_plugin),
+                error=str(exc),
+            )
     for src_name, dst in plugin_targets.items():
         src = plugin_src_root / src_name
         if not src.exists():
@@ -1445,10 +1462,23 @@ def _is_ready(slot: dict[str, Any]) -> bool:
 
 
 def _collect_chat_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Filter `slots` down to chat-capable entries with a usable model_id."""
+    """Filter ``slots`` to chat-capable entries (``type=="llm"``) with a model_id.
+
+    The real ``/api/slots`` payload sets ``type=="llm"`` for chat slots and
+    ``kind=="local"`` for the deployment shape. The previous ``_slot_kind``
+    check looked at ``kind`` first and rejected 100% of real slots (R4 H1)
+    — the rendered ``model_aliases`` block never appeared, so Hermes only
+    ever saw the primary upstream's single model in ``/v1/models``.
+
+    Only slots reporting a live/ready state are advertised so we don't tell
+    the agent about a model that isn't actually loaded — matches the
+    dashboard chat-filter at ``src/hal0/api/routes/slots.py``.
+    """
     out: list[dict[str, Any]] = []
     for s in slots:
-        if _slot_kind(s) != "chat":
+        if (s.get("type") or "").lower() != "llm":
+            continue
+        if not _is_ready(s):
             continue
         model_id = _slot_model_id(s)
         if not model_id:

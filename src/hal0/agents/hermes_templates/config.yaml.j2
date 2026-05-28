@@ -19,14 +19,13 @@
 
 {# Hermes's auth/runtime layer keeps its own PROVIDER_REGISTRY (built-in
    names like openai/anthropic/custom) — a name not in that registry
-   raises "Unknown provider '<x>'" at chat send time even when the
-   plugin profile at $HERMES_HOME/plugins/model-providers/hal0/ is
-   discovered cleanly. Upstream's `custom` provider is explicitly the
-   OpenAI-compatible-LAN-endpoint knob (Ollama, vLLM, llama.cpp). hal0
-   IS that endpoint, so we render `provider: custom` to satisfy the
-   registry while keeping the rendered `base_url` driving the actual
-   calls. The Hal0Profile plugin still loads (purely for branding in
-   `hermes model` discovery + future request-shape hooks). #}
+   raises "Unknown provider '<x>'" at chat send time. Upstream's
+   ``custom`` provider is explicitly the OpenAI-compatible-LAN-endpoint
+   knob (Ollama, vLLM, llama.cpp). hal0 IS that endpoint, so we render
+   ``provider: custom`` to satisfy the registry while keeping the
+   rendered ``base_url`` driving the actual calls. The legacy
+   ``Hal0Profile`` plugin was removed in PR-1-bundle (R4 H4) — it
+   hardcoded an :8000 base_url that has no listener. #}
 model:
 {%- if primary %}
   default: {{ primary.model_id | tojson }}

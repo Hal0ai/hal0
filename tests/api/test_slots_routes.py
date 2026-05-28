@@ -227,49 +227,52 @@ def test_list_real_wins_on_name_collision(
 # ── lifespan auto-register ─────────────────────────────────────────────────
 
 
-def test_lifespan_autoregisters_local_slot_as_upstream(
+def test_lifespan_autoregisters_composite_hal0_upstream(
     slot_root: Path,
     isolated_client: TestClient,
     isolated_app: FastAPI,
 ) -> None:
-    """A slot TOML on disk produces a matching ``kind=slot`` upstream entry.
+    """PR-1-bundle (R4 H2): one composite ``hal0`` upstream replaces the
+    previous per-slot autoregistration.
 
-    Without this, a fresh install with only a slot TOML can't route
-    ``model: <slot_name>`` requests — the dispatcher resolves via the
-    upstream registry, and SlotManager doesn't auto-mirror its slots
-    there.  The lifespan hook closes that gap.
+    Lemonade serialises chat loading on a single port; registering one
+    Upstream per slot produced duplicate registry entries pointing at
+    the same URL, and ``/v1/models`` dedup credited whichever iterated
+    first. The composite entry points at hal0-api itself and aggregates
+    every chat-capable slot through ``_fetch_hal0_composite_models``.
     """
     # ``slot_root`` writes /etc/hal0/slots/primary.toml with port=8081.
-    upstream = isolated_app.state.upstreams.get("primary")
-    assert upstream is not None, "primary slot should be auto-registered as an upstream"
+    upstream = isolated_app.state.upstreams.get("hal0")
+    assert upstream is not None, "composite ``hal0`` upstream should be auto-registered"
     assert upstream.kind == "slot"
-    assert upstream.slot_name == "primary"
-    assert upstream.url == "http://127.0.0.1:8081/v1"
-    assert upstream.warmup_strategy == "lazy"
+    # Composite — no single slot_name.
+    assert upstream.slot_name is None
+    # Points at hal0-api's own /v1, NOT directly at the slot llama-server.
+    assert upstream.url == "http://127.0.0.1:8080/v1"
+
+    # No legacy per-slot duplicate.
+    assert isolated_app.state.upstreams.get("primary") is None
 
 
-def test_lifespan_autoregister_skips_when_explicit_upstream_exists(
+def test_lifespan_autoregister_skips_when_explicit_hal0_upstream_exists(
     slot_root: Path,
     tmp_hal0_home: str,
 ) -> None:
-    """An explicit upstreams.toml entry beats auto-register on name collision.
+    """An explicit upstreams.toml entry for ``hal0`` beats autoregister.
 
     Operator-supplied URLs (e.g. pointing at a reverse-proxy in front of
-    the slot) must survive lifespan startup unchanged.
+    hal0-api) must survive lifespan startup unchanged.
     """
-    # Write upstreams.toml claiming a different URL for the 'primary' slot.
     cfg_dir = Path(tmp_hal0_home) / "etc" / "hal0"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     (cfg_dir / "upstreams.toml").write_text(
         "\n".join(
             [
                 "[[upstream]]",
-                'name = "primary"',
-                'kind = "slot"',
-                'url = "http://10.0.0.2:9000/v1"',
-                'slot_name = "primary"',
+                'name = "hal0"',
+                'kind = "remote"',
+                'url = "https://hal0.thinmint.dev/v1"',
                 'auth_style = "none"',
-                'warmup_strategy = "eager"',
                 "",
             ]
         ),
@@ -277,11 +280,11 @@ def test_lifespan_autoregister_skips_when_explicit_upstream_exists(
     )
     app = create_app()
     with TestClient(app) as _client:
-        upstream = app.state.upstreams.get("primary")
+        upstream = app.state.upstreams.get("hal0")
         assert upstream is not None
         # Explicit URL survives — auto-register must have skipped this name.
-        assert upstream.url == "http://10.0.0.2:9000/v1"
-        assert upstream.warmup_strategy == "eager"
+        assert upstream.url == "https://hal0.thinmint.dev/v1"
+        assert upstream.kind == "remote"
 
 
 # ── load-success-path ──────────────────────────────────────────────────────

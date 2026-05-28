@@ -353,7 +353,10 @@ def test_install_phase_skips_venv_when_binary_exists(
     assert out.status == hp.PhaseStatus.OK
     assert called == []
     assert wrapper_dst.is_file()
-    assert (hermes_home / "plugins" / "model-providers" / "hal0" / "__init__.py").is_file()
+    # PR-1-bundle: the legacy hal0 model-provider plugin is no longer
+    # copied — it hardcoded an :8000 base_url that has no listener and
+    # the composite ``hal0`` upstream in hal0.api supersedes it.
+    assert not (hermes_home / "plugins" / "model-providers" / "hal0").exists()
     assert (hermes_home / "plugins" / "memory" / "hal0-memory" / "__init__.py").is_file()
 
 
@@ -522,14 +525,16 @@ def test_deep_merge_recurses() -> None:
     assert merged == {"a": {"b": 1, "c": 99, "e": 4}, "d": 3}
 
 
-def test_hal0_profile_plugin_file_present() -> None:
-    """The plugin source file ships in the wheel + has the required hooks."""
+def test_legacy_hal0_profile_plugin_removed() -> None:
+    """The legacy ``hal0`` model-provider plugin is gone (PR-1-bundle R4 H4).
+
+    It hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
+    listener on a real install; the composite ``hal0`` upstream in
+    :mod:`hal0.api` supersedes it.
+    """
     repo_root = hp.REPO_ROOT_FOR_INSTALLER
-    src = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0" / "__init__.py"
-    body = src.read_text()
-    assert "Hal0Profile" in body
-    assert "register_provider" in body
-    assert "hermes-on-hal0" in body  # User-Agent header marker
+    legacy = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0"
+    assert not legacy.exists(), f"Legacy broken plugin still on disk at {legacy}"
 
 
 # ── #242 phase impl — mcp_wire + Hal0MemoryProvider plugin ──────────────────
@@ -813,20 +818,24 @@ def test_model_automap_writes_aliases_from_chat_slots(
         encoding="utf-8",
     )
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    # PR-1-bundle: real ``/api/slots`` payload uses ``type=="llm"`` for
+    # chat slots, NOT ``capability=="chat"``. The pre-fix filter looked
+    # at ``kind`` first and let the synthetic ``capability`` field through;
+    # the post-fix filter is type-first to match the live shape.
     monkeypatch.setattr(
         hp,
         "_fetch_slots",
         lambda: [
             {
                 "name": "primary",
-                "capability": "chat",
+                "type": "llm",
                 "model_id": "qwen3:8b",
                 "backend_url": "http://127.0.0.1:8001/v1",
                 "state": "ready",
             },
             {
                 "name": "coder",
-                "capability": "chat",
+                "type": "llm",
                 "model_id": "qwen-coder",
                 "backend_url": "http://127.0.0.1:8002/v1",
                 "state": "ready",
