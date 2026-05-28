@@ -32,9 +32,6 @@ from hal0.api.agents import (
 from hal0.api.agents import (
     restart as agents_restart_routes,
 )
-from hal0.api.agents import (
-    skills as agents_skills_routes,
-)
 from hal0.api.agents.chat_proxy import router as chat_proxy_router
 from hal0.api.middleware import error_codes, log_scrub, request_id
 from hal0.api.plugins import router as plugin_manifest_router
@@ -982,17 +979,6 @@ def create_app() -> FastAPI:
         agents_restart_routes.router,
         prefix="/api/agents",
         tags=["agents", "restart"],
-    )
-
-    # Agent skills catalog (v0.3 PR-11). GET /api/agents/skills returns
-    # the static catalog mirroring the upstream Hermes tool registry +
-    # hal0 MCP servers. Bumps ride ADR-0018's weekly drift PRs. The
-    # ``/skills`` path is NOT parameterised by agent id — the catalog
-    # is the same across agents in v0.3.
-    app.include_router(
-        agents_skills_routes.router,
-        prefix="/api/agents",
-        tags=["agents", "skills"],
     )
 
     # Agent memory stats (v0.3 PR-11). GET /api/agents/{id}/memory/stats
