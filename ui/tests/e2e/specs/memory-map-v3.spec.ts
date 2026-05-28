@@ -41,7 +41,7 @@ function mockProxmoxSettings(page: Page, status: object) {
   )
 }
 
-test.describe.skip('Memory map — sidebar (skipped until Tasks 9-11 wire-up)', () => {
+test.describe('Memory map — sidebar (skipped until Tasks 9-11 wire-up)', () => {
   test('off — single-tier bar, no PVE band', async ({ page }) => {
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
@@ -101,7 +101,8 @@ test.describe.skip('Memory map — sidebar (skipped until Tasks 9-11 wire-up)', 
   test('headroom labelled "pool" on bare-metal', async ({ page }) => {
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    await expect(page.locator('.memmap-headroom')).toContainText('limited by pool')
+    // Scope to sidebar — expanded variant also renders .memmap-headroom
+    await expect(page.locator('.memmap-sidebar .memmap-headroom')).toContainText('limited by pool')
   })
 
   test('headroom labelled "host" when host free is the binding constraint', async ({ page }) => {
@@ -125,11 +126,12 @@ test.describe.skip('Memory map — sidebar (skipped until Tasks 9-11 wire-up)', 
       tenants: [],
     })
     await page.goto('/#dashboard')
-    await expect(page.locator('.memmap-headroom')).toContainText('limited by host')
+    // Scope to sidebar — expanded variant also renders .memmap-headroom
+    await expect(page.locator('.memmap-sidebar .memmap-headroom')).toContainText('limited by host')
   })
 })
 
-test.describe.skip('Memory map — expanded (skipped until Task 11 wires HardwareMemorySection)', () => {
+test.describe('Memory map — expanded (skipped until Task 11 wires HardwareMemorySection)', () => {
   test('expanded variant renders host pool + inside-LXC + legend', async ({ page }) => {
     await mockStatsHardware(page, {
       configured: true,

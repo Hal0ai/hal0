@@ -221,6 +221,14 @@ function HardwareSection() {
   );
 }
 
+function HardwareMemorySection() {
+  return (
+    <section className="hardware-mem">
+      <MemoryMap variant="expanded" />
+    </section>
+  );
+}
+
 function HwCard({ title, eyebrow, children, full, purple }) {
   return (
     <div className="card" style={{
@@ -305,6 +313,7 @@ function DashboardView({ slots: slotsProp, onGo, showHero, onDismissHero }) {
       <div className="dash">
         <div className="dash-main">
           <HardwareSection />
+          <HardwareMemorySection />
         </div>
         <div className="dash-side">
           <SnapshotStrip slots={slots} onGo={onGo} />
@@ -317,4 +326,4 @@ function DashboardView({ slots: slotsProp, onGo, showHero, onDismissHero }) {
   );
 }
 
-Object.assign(window, { DashboardView, SnapshotStrip, HealthCard, ThroughputCard, HardwareSection });
+Object.assign(window, { DashboardView, SnapshotStrip, HealthCard, ThroughputCard, HardwareSection, HardwareMemorySection });
