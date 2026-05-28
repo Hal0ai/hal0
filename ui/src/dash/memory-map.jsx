@@ -71,9 +71,12 @@ export function useMemoryMapModel() {
   // advertises it (Strix Halo), else ram_mb. Fall back to live ram_used_mb
   // only as a last resort.
   const rawHw = hw.data || {}
-  const ramTotalGb = mbToGb(rawHw.ram?.total ? rawHw.ram.total * MB_PER_GB : null)
+  const ramTotalGb = rawHw.ram?.total ?? 0
   const unifiedFromProbe = mbToGb(rawHw.unified_memory_mb || 0)
-  const unifiedGb = unifiedFromProbe || ramTotalGb || mbToGb(stats.data?.ram_used_mb || 0)
+  const unifiedGb =
+    unifiedFromProbe ||
+    ramTotalGb ||
+    mbToGb(stats.data?.ram_total_mb || 0)
   const platformLabel = rawHw.platform_label || rawHw.platform || ''
   const memoryKind = rawHw.memory_kind === 'unified' ? 'unified' : 'system'
 
@@ -95,6 +98,10 @@ export function useMemoryMapModel() {
   // ── Host block ──
   // Stats endpoint host: { configured, [detected], [hint], ok?, host_mem_*, ... }
   // Settings endpoint full: { status: { tenants[], host_cpu_count, ... } }
+  // Cadence note: stats refresh at 2.5s, settings at 10s. selfShareGb
+  // (from stats) and tenants[] (from settings) can be briefly out of
+  // sync (<7.5s window) — accepted because tenant allocations change
+  // slowly. Don't unify the cadences; the slim/full split is by design.
   const statsHost = stats.data?.host || { configured: false }
   const settingsStatus = pveSettings.data?.status
   let host
@@ -160,6 +167,6 @@ export function useMemoryMapModel() {
       })),
     },
     headroom: { availableGb, limitedBy },
-    loading: hw.isLoading || stats.isLoading || slotsQ.isLoading,
+    loading: hw.isLoading || stats.isLoading || slotsQ.isLoading || pveSettings.isLoading,
   }
 }

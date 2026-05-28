@@ -9,20 +9,6 @@ import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
-/**
- * Per-tenant shape — emitted by GET /api/settings/proxmox (full shape).
- * NOT present on GET /api/stats/hardware (project_slim strips it; see
- * src/hal0/hardware/pve.py:_SLIM_DROP_KEYS). Exported here for reuse
- * by the future settings-shape hook.
- */
-export interface StatsHardwareTenant {
-  vmid: number
-  name: string
-  type: 'lxc' | 'qemu'
-  status: string
-  mem_mb: number
-  maxmem_mb: number
-}
 
 export interface StatsHardwareHost {
   configured: boolean
@@ -39,6 +25,7 @@ export interface StatsHardwareHost {
 }
 
 export interface StatsHardware {
+  ram_total_mb?: number
   ram_used_mb?: number
   ram_used_gb?: number
   ram_available_gb?: number
