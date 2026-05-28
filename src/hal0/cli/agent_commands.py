@@ -43,6 +43,13 @@ app.add_typer(approvals_app, name="approvals")
 bootstrap_app = typer.Typer(help="Run bundled-agent bootstrap pipelines (Phase 10).")
 app.add_typer(bootstrap_app, name="bootstrap")
 
+# Personas sub-sub-app (PR-3, v0.3) — manages the persona TOML store at
+# /var/lib/hal0/agents/hermes/personas/. Activate writes active.txt and
+# triggers a best-effort hot-reload nudge; the API endpoint added in PR-4
+# wraps the same persona.activate() helper.
+personas_app = typer.Typer(help="Manage Hermes personas (system prompt + tool gating).")
+app.add_typer(personas_app, name="personas")
+
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -630,3 +637,144 @@ def agent_upgrade(
 # daemon has no auth; agent identity flows via the X-hal0-Agent header
 # the wrapper exports from $HAL0_AGENT_ID. See #246 sharpening's second
 # correction comment for the supersede.
+
+
+# ── Reprovision (PR-3, v0.3) ────────────────────────────────────────────────
+
+
+@app.command("reprovision")
+def agent_reprovision(
+    name: str = typer.Argument("hermes", help="Bundled agent name."),
+    repair: bool = typer.Option(
+        False,
+        "--repair",
+        help="Force re-run of every phase (re-writes persona seeds, re-renders config).",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Re-run the bootstrap state machine idempotently.
+
+    Wrapper over ``hal0 agent bootstrap hermes`` that's name-stable
+    across v0.4 agents (only flag the difference: this is the
+    "re-converge" verb, not the "first install" verb). Phases that
+    already produced their on-disk artefacts are skipped; phases whose
+    inputs drifted re-run.
+    """
+    if name != "hermes":
+        die(f"reprovision currently only supports `hermes`; got {name!r}.")
+        return
+    from hal0.agents.hermes_provision import bootstrap_cli
+
+    rc = bootstrap_cli(
+        repair=repair,
+        dry_run=False,
+        skip_phases=(),
+        verbose=verbose,
+    )
+    raise typer.Exit(rc)
+
+
+# ── Personas (PR-3, v0.3) ───────────────────────────────────────────────────
+
+
+@personas_app.command("list")
+def personas_list() -> None:
+    """List personas + mark the active one.
+
+    Reads ``/var/lib/hal0/agents/hermes/personas/*.toml`` directly so the
+    CLI works without a running hal0-api (mirrors ``hal0 agent status``
+    which also reads disk state).
+    """
+    from hal0.agents import personas as _personas
+
+    items = _personas.list_personas()
+    if not items:
+        console.print(
+            "[dim]No personas seeded yet. Run "
+            "[bold]hal0 agent reprovision hermes[/bold] to seed the defaults.[/dim]"
+        )
+        return
+    active = _personas.get_active()
+    table = Table(title=f"Hermes personas ({len(items)})")
+    table.add_column("ID", style="bold")
+    table.add_column("Display name")
+    table.add_column("Summary")
+    table.add_column("Active")
+    for persona in items:
+        is_active = persona.id == active
+        table.add_row(
+            persona.id,
+            persona.display_name,
+            (persona.summary or "—")[:60],
+            "[bold green]yes[/bold green]" if is_active else "—",
+        )
+    console.print(table)
+
+
+@personas_app.command("show")
+def personas_show(
+    persona_id: str = typer.Argument(..., help="Persona id (filename stem)."),
+) -> None:
+    """Print a persona's TOML body.
+
+    Useful for grabbing a starting template before hand-editing a new
+    persona — copy the output, change ``[persona].id``, save under
+    ``/var/lib/hal0/agents/hermes/personas/<new-id>.toml``.
+    """
+    import tomli_w
+
+    from hal0.agents import personas as _personas
+
+    try:
+        persona = _personas.load_persona(persona_id)
+    except FileNotFoundError as exc:
+        die(str(exc))
+        return
+    except _personas.PersonaError as exc:
+        die(f"persona {persona_id!r} is malformed: {exc}")
+        return
+    body = tomli_w.dumps(persona.to_dict())
+    console.print(Panel(body, title=f"persona: {persona.id}", border_style="cyan"))
+
+
+@personas_app.command("activate")
+def personas_activate(
+    persona_id: str = typer.Argument(..., help="Persona id to make active."),
+    reload_url: str | None = typer.Option(
+        None,
+        "--reload-url",
+        help="Override Hermes JSON-RPC URL for the hot-reload nudge.",
+    ),
+) -> None:
+    """Switch the active persona + nudge running Hermes to hot-reload.
+
+    Writes ``active.txt`` atomically; the nudge is best-effort. If
+    Hermes isn't running, the next service start (or next reprovision)
+    picks up the new active persona via the system_prompt prelude
+    render. PR-4 wraps this in
+    ``POST /api/agents/{id}/personas/{pid}/activate``.
+    """
+    from hal0.agents import personas as _personas
+
+    try:
+        result = _personas.activate(persona_id, reload_url=reload_url)
+    except FileNotFoundError as exc:
+        die(str(exc))
+        return
+    except _personas.PersonaError as exc:
+        die(f"persona {persona_id!r} is malformed: {exc}")
+        return
+    panel_body = (
+        f"[bold green]Activated[/bold green] {result['display_name']} "
+        f"([dim]{result['persona_id']}[/dim])\n"
+        f"active pointer: {result['active_path']}"
+    )
+    hot = result["hot_reload"]
+    if hot["ok"]:
+        panel_body += "\n[dim]Hot-reload nudge: ok[/dim]"
+    else:
+        panel_body += (
+            "\n[yellow]Hot-reload nudge skipped[/yellow] — "
+            f"{hot['error']}. The next Hermes restart will pick up the new persona."
+        )
+    console.print(Panel(panel_body, border_style="green"))
