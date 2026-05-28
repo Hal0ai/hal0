@@ -1,0 +1,216 @@
+name: Hermes SDK drift (weekly)
+
+# Weekly diff of the hal0-tracked Hermes-Agent upstream surfaces
+# against the pin recorded in pyproject.toml's
+# [tool.hal0.upstream-hermes] table.
+#
+# Why this exists:
+#   ADR-0015 + MASTER-PLAN §5 ("Upstream upgrade cadence") + DA-arch
+#   must-fix #1 ("Hermes is HOT upstream"). Hermes ships ~40 commits/day
+#   on main; without a process the vendored slice + plugin SDK shim
+#   drift silently. This job is the safety net.
+#
+# Failure handling:
+#   On drift, open (or update) a single tracking issue tagged
+#   `upstream-drift` + `triage`. One issue per drift state — we refuse
+#   to spam a fresh ticket every Monday while the same surface change
+#   is unresolved. Mirrors agent-shim-smoke.yml's `notify` shape.
+
+on:
+  schedule:
+    # Mondays 12:00 UTC — Monday morning in the Americas, Monday lunch
+    # in EU, Monday late-night in Asia. Catches a full week of upstream
+    # churn before the next review.
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: hermes-sdk-diff
+  # Latest weekly run wins. Operators triggering workflow_dispatch
+  # supersede a scheduled run in flight.
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write   # required for the notify job below
+
+jobs:
+  diff:
+    name: Diff tracked Hermes surfaces against pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      drift: ${{ steps.diff.outputs.drift }}
+      pinned: ${{ steps.diff.outputs.pinned }}
+      head: ${{ steps.diff.outputs.head }}
+
+    steps:
+      - name: Checkout hal0
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read upstream pin from pyproject.toml
+        id: pin
+        run: |
+          set -euo pipefail
+          # Sanity check — the script reads pyproject directly, but we
+          # surface the pin in the workflow log too so a glance at the
+          # run page tells you what was compared.
+          python3 - <<'PY'
+          import os, tomllib
+          with open("pyproject.toml", "rb") as fh:
+              data = tomllib.load(fh)
+          pin = data["tool"]["hal0"]["upstream-hermes"]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"repo={pin['repo']}\n")
+              fh.write(f"commit={pin['commit']}\n")
+              fh.write(f"date={pin['date']}\n")
+          PY
+
+      - name: Run hermes-sdk-diff
+        id: diff
+        # The script is the contract. Exit 0 = no drift, exit 1 = drift,
+        # exit 2 = operational error. We treat exit 1 as a successful
+        # run that surfaced drift — the notify job picks it up.
+        run: |
+          set -euo pipefail
+          # Capture stdout (the markdown report) into a file the notify
+          # job can lift into an issue body.
+          set +e
+          bash scripts/hermes-sdk-diff.sh > hermes-sdk-diff.md
+          rc=$?
+          set -e
+          case "$rc" in
+              0)
+                  echo "drift=false" >> "$GITHUB_OUTPUT"
+                  ;;
+              1)
+                  echo "drift=true" >> "$GITHUB_OUTPUT"
+                  ;;
+              *)
+                  echo "::error::hermes-sdk-diff.sh exited with operational error ($rc)"
+                  cat hermes-sdk-diff.md || true
+                  exit "$rc"
+                  ;;
+          esac
+          # Resolve shorts for the title in the notify job.
+          python3 - <<'PY'
+          import os, subprocess, tomllib
+          with open("pyproject.toml", "rb") as fh:
+              data = tomllib.load(fh)
+          pinned = data["tool"]["hal0"]["upstream-hermes"]["commit"]
+          head = subprocess.check_output(
+              ["git", "ls-remote", data["tool"]["hal0"]["upstream-hermes"]["repo"], "HEAD"],
+              text=True,
+          ).split()[0]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"pinned={pinned[:8]}\n")
+              fh.write(f"head={head[:8]}\n")
+          PY
+
+      - name: Upload diff report
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-sdk-diff
+          path: hermes-sdk-diff.md
+          if-no-files-found: ignore
+
+  # ── failure-issue handling ───────────────────────────────────────────
+  # Runs only when drift was detected. Opens a fresh issue tagged
+  # `upstream-drift` + `triage` if none is open, or comments on the
+  # existing one with the new run's URL + the new HEAD short sha.
+  # Mirrors agent-shim-smoke.yml's `notify` job shape (ADR-0015 §2).
+  notify:
+    name: Open/update upstream-drift issue
+    needs: diff
+    if: needs.diff.outputs.drift == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Download diff report
+        uses: actions/download-artifact@v4
+        with:
+          name: hermes-sdk-diff
+          path: .
+
+      - name: Find or create tracking issue
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PINNED_SHORT: ${{ needs.diff.outputs.pinned }}
+          HEAD_SHORT: ${{ needs.diff.outputs.head }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const labels = ['upstream-drift', 'triage'];
+            const primary = labels[0];
+            const runUrl = process.env.RUN_URL;
+            const pinned = process.env.PINNED_SHORT;
+            const head = process.env.HEAD_SHORT;
+            const today = new Date().toISOString().slice(0, 10);
+
+            let report = '';
+            try {
+              report = fs.readFileSync('hermes-sdk-diff.md', 'utf8');
+            } catch (_) {
+              report = '_(diff report missing from artifact — see run log.)_';
+            }
+
+            // One open tracking issue per drift state. We attach to the
+            // first match and never open duplicates.
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: primary,
+              per_page: 100,
+            });
+
+            const body = [
+              `Upstream Hermes drift detected on ${today}.`,
+              ``,
+              `- Pinned: \`${pinned}\``,
+              `- Upstream HEAD: \`${head}\``,
+              `- Run: ${runUrl}`,
+              ``,
+              `Bump process: see ADR-0015 §4. TL;DR — review the diff`,
+              `below, update any shim adapters in the same PR, then run`,
+              `\`scripts/hermes-sdk-diff.sh --bump <new-sha>\` locally.`,
+              ``,
+              report,
+            ].join('\n');
+
+            if (open.length === 0) {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                title: `chore(hermes): upstream drift detected (${pinned} → ${head})`,
+                body,
+                labels,
+              });
+              core.info(`opened issue #${created.data.number}`);
+            } else {
+              const issue = open[0];
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: issue.number,
+                body: [
+                  `Still drifting on ${today}.`,
+                  ``,
+                  `- Upstream HEAD: \`${head}\``,
+                  `- Run: ${runUrl}`,
+                  ``,
+                  report,
+                ].join('\n'),
+              });
+              core.info(`updated issue #${issue.number}`);
+            }
