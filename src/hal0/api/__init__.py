@@ -865,19 +865,30 @@ def create_app() -> FastAPI:
         # ADR-0014: pull [memory.graph] gate + route at boot so a
         # process restart preserves the user's pick. Defaults match
         # the v0.3 ship matrix (enabled=False, route="upstream").
+        # Issue #116: same goes for [memory.embedding].
         try:
             _hal0_cfg = load_hal0_config()
             _graph_cfg = _hal0_cfg.memory.graph
             _graph_enabled = bool(_graph_cfg.enabled)
             _graph_route = str(_graph_cfg.route)
+            _embed_cfg = _hal0_cfg.memory.embedding
+            _embed_model = str(_embed_cfg.model)
+            _rerank_enabled = bool(_embed_cfg.rerank_enabled)
+            _rerank_url = str(_embed_cfg.rerank_url)
         except Exception as exc:  # pragma: no cover — defensive
-            log.warning("hal0.memory.graph_cfg_load_failed", error=str(exc))
+            log.warning("hal0.memory.cfg_load_failed", error=str(exc))
             _graph_enabled = False
             _graph_route = "upstream"
+            _embed_model = "BAAI/bge-small-en-v1.5"
+            _rerank_enabled = False
+            _rerank_url = "http://127.0.0.1:8086"
 
         memory_wrapper = CogneeWrapper(
+            embedding_model=_embed_model,
             graph_enabled=_graph_enabled,
             graph_route=_graph_route,
+            rerank_enabled=_rerank_enabled,
+            rerank_url=_rerank_url,
         )
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("hal0.memory.init_failed", error=str(exc))

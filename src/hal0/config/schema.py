@@ -1115,18 +1115,90 @@ class AgentConfig(BaseModel):
         return v
 
 
+class MemoryEmbeddingConfig(BaseModel):
+    """[memory.embedding] section of hal0.toml (issue #116 G3 + G4).
+
+    Pins the embedding model Cognee uses for memory vector retrieval and
+    (optionally) wires a second-pass rerank slot in front of
+    :meth:`hal0.memory.cognee_wrapper.CogneeWrapper.search`.
+
+    Defaults are zero-config preserving:
+
+      - ``model`` keeps Cognee's stock pick (``BAAI/bge-small-en-v1.5``,
+        384-dim) so an upgrade does NOT silently re-embed an existing
+        LanceDB index (dimension mismatch corrupts the store).
+      - ``rerank_enabled`` is OFF by default; when flipped on, the
+        wrapper calls ``rerank_url`` after vector retrieval and reorders
+        candidates by relevance score. Failures fall through to the
+        original vector ordering — never block memory_search.
+      - ``rerank_url`` points at hal0's built-in rerank slot (port 8086
+        per auto-memory ``hal0-rerank-slot-wiring``).
+
+    G3 (pin embedding model) deliberately ships the *existing* default
+    so users who do not flip the toggle see no behavioral change. Future
+    work (audit doc §G3) may bump the default to ``bge-large-en-v1.5``
+    once a migration story for the LanceDB index exists.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    model: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        description=(
+            "Embedding model the Cognee wrapper pins (issue #116 G3). "
+            "Defaults to the existing Cognee stock value so the install "
+            "default is byte-identical to v0.3.0 behavior — bumping this "
+            "without a re-embed migration corrupts the LanceDB index."
+        ),
+    )
+    rerank_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, memory_search posts the vector top-N candidates "
+            "to ``rerank_url`` and reorders by ``relevance_score`` before "
+            "returning the top-K (issue #116 G4). When False (default), "
+            "vector ordering is returned unchanged."
+        ),
+    )
+    rerank_url: str = Field(
+        default="http://127.0.0.1:8086",
+        description=(
+            "Base URL of the llama.cpp rerank endpoint. The wrapper "
+            "POSTs to ``{rerank_url}/rerank`` with "
+            "``{model, query, documents}`` per llama.cpp's reranking "
+            "protocol. Defaults to hal0's bundled embed-rerank slot."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def model_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("memory.embedding.model must not be empty")
+        return v
+
+    @field_validator("rerank_url")
+    @classmethod
+    def rerank_url_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("memory.embedding.rerank_url must not be empty")
+        return v
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
-    Container for the per-subsystem memory tunables; today only
-    ``[memory.graph]`` lives here (ADR-0014) but the section exists so
-    future memory features (retention, prune-policy, archival) land
-    under a single namespace rather than scattering top-level tables.
+    Container for the per-subsystem memory tunables. Today carries
+    ``[memory.graph]`` (ADR-0014) and ``[memory.embedding]`` (issue
+    #116). Future memory features (retention, prune-policy, archival)
+    land under a single namespace rather than scattering top-level
+    tables.
     """
 
     model_config = {"populate_by_name": True, "extra": "allow"}
 
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
+    embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
 
 
 class ModelsConfig(BaseModel):
@@ -1266,6 +1338,7 @@ __all__ = [
     "HardwareInfo",
     "MCPServerConfig",
     "MemoryConfig",
+    "MemoryEmbeddingConfig",
     "MemoryGraphConfig",
     "MetaConfig",
     "ModelConfig",

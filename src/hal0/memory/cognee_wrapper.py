@@ -34,6 +34,7 @@ tag AND-match, date range). Phase 9 will revisit this when Cognee's
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import sqlite3
@@ -168,6 +169,10 @@ class CogneeWrapper:
         embedding_dimensions: int = 384,
         graph_enabled: bool = False,
         graph_route: str = "upstream",
+        rerank_enabled: bool = False,
+        rerank_url: str = "http://127.0.0.1:8086",
+        rerank_model: str = "bge-reranker-v2-m3-q4_k_m",
+        rerank_timeout_s: float = 2.0,
     ) -> None:
         """Configure Cognee + the sidecar SQLite index.
 
@@ -194,6 +199,19 @@ class CogneeWrapper:
             "agent". Stored for dashboard/CLI introspection (``status``);
             the LLM-routing implementation itself lands in v0.4 with the
             eval suite. v0.3 ships the gate + the introspection surface.
+        :param rerank_enabled: Issue #116 G4 — when True, ``search``
+            posts the vector top-N candidates to ``rerank_url`` and
+            reorders by ``relevance_score`` before clipping to ``limit``.
+            When False (default), vector ordering is returned unchanged.
+        :param rerank_url: Base URL of the llama.cpp rerank endpoint.
+            The wrapper POSTs to ``{rerank_url}/rerank``. Defaults to
+            hal0's bundled embed-rerank slot (port 8086).
+        :param rerank_model: Model id sent in the rerank request body.
+            llama.cpp's reranker echoes the field but accepts any
+            string; the default matches hal0's bundled slot.
+        :param rerank_timeout_s: Per-request timeout for the rerank
+            HTTP call. Failures fall through to vector ordering — a
+            slow rerank slot must NOT block memory_search.
         """
         self._cognee_dir = Path(cognee_dir)
         self._cognee_dir.mkdir(parents=True, exist_ok=True)
@@ -235,6 +253,16 @@ class CogneeWrapper:
         # (False)`` (ADR-0014 §6 cancel-in-flight) can cooperatively
         # cancel without leaving zombie tasks attached to the loop.
         self._graph_tasks: set[asyncio.Task[Any]] = set()
+
+        # Issue #116 G4 — rerank slot config. The wrapper consults these
+        # only on the search path; ``add`` is unaffected. Stored on the
+        # instance so ``set_rerank_enabled`` can flip them at runtime
+        # without rebuilding Cognee.
+        self._rerank_enabled = bool(rerank_enabled)
+        # Strip trailing slash so the search path doesn't double up.
+        self._rerank_url = str(rerank_url or "").rstrip("/")
+        self._rerank_model = str(rerank_model or "")
+        self._rerank_timeout_s = float(rerank_timeout_s)
 
         # Tail buffer of audit events emitted by this instance. The
         # structlog channel is the production audit-log surface
@@ -710,7 +738,12 @@ class CogneeWrapper:
         # ingest text is the canonical form.
         texts_in_order = [_chunk_text(r) for r in raw]
         scores_in_order = [_chunk_score(r) for r in raw]
-        out: list[dict[str, Any]] = []
+        # Issue #116 G4 — when rerank is on we want to keep the FULL
+        # filtered candidate set (up to over-fetched top_k) before
+        # reordering, then clip to ``limit``. Pre-rerank slicing would
+        # throw away the candidates the reranker is supposed to promote.
+        candidate_cap = min(100, max(limit * 5, limit)) if self._rerank_enabled else limit
+        candidates: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         with self._sidecar_conn() as conn:
             for text, score in zip(texts_in_order, scores_in_order, strict=True):
@@ -730,18 +763,33 @@ class CogneeWrapper:
                     record = _row_to_record(row, score=score)
                     if not _passes_filters(record, tags, before, after):
                         continue
-                    out.append(record.to_dict())
+                    candidates.append(record.to_dict())
                     seen_ids.add(row["id"])
-                    if len(out) >= limit:
+                    if len(candidates) >= candidate_cap:
                         break
-                if len(out) >= limit:
+                if len(candidates) >= candidate_cap:
                     break
+
+        # Issue #116 G4 — second-pass rerank. Off by default; when on,
+        # post to the rerank slot and re-order candidates by
+        # ``relevance_score``. Failures fall through to the vector
+        # ordering: a flaky or unreachable rerank slot must never block
+        # memory_search.
+        reranked = False
+        if self._rerank_enabled and len(candidates) > 1:
+            reordered = await self._maybe_rerank(query, candidates)
+            if reordered is not None:
+                candidates = reordered
+                reranked = True
+
+        out = candidates[:limit]
 
         self._audit(
             "search",
             ",".join(allowed_datasets),
             query=query,
             results=len(out),
+            reranked=reranked,
         )
         return out
 
@@ -863,6 +911,118 @@ class CogneeWrapper:
             deleted=deleted,
         )
         return {"deleted": deleted}
+
+    # ── Rerank (issue #116 G4) ─────────────────────────────────────────
+
+    def set_rerank_enabled(self, enabled: bool) -> None:
+        """Flip the rerank gate at runtime.
+
+        Companion to the runtime ``set_graph_enabled`` flip. The
+        dashboard's memory pane uses this so the user can A/B the
+        rerank surface without restarting hal0.
+        """
+        self._rerank_enabled = bool(enabled)
+
+    async def _maybe_rerank(
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
+        """Post candidate texts to the rerank slot and return reordered records.
+
+        Returns ``None`` (signalling fall-through) on ANY failure: the
+        slot is down, the response shape is wrong, the HTTP call times
+        out, etc. ``search`` then keeps the vector ordering and the
+        caller never sees a rerank-induced failure.
+
+        Side effect: each returned record's ``score`` is overwritten
+        with the rerank ``relevance_score`` so callers (and the
+        dashboard) see the post-rerank scoring rather than the original
+        vector cosine. The original vector order is recoverable by
+        flipping ``rerank_enabled = False`` and re-running.
+        """
+        # llama.cpp's /rerank handler accepts ``query`` + ``documents``;
+        # we send the candidate text in document-index order so we can
+        # map results.index back to our list.
+        documents = [c.get("text", "") for c in candidates]
+        # httpx import is local — keeps the wrapper import-cheap for
+        # callers (CLI tooling, tests) that never touch search.
+        import httpx
+
+        payload = {
+            "model": self._rerank_model,
+            "query": query,
+            "documents": documents,
+        }
+        url = f"{self._rerank_url}/rerank"
+        try:
+            async with httpx.AsyncClient(timeout=self._rerank_timeout_s) as client:
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                body = resp.json()
+        except Exception as exc:
+            _audit_logger().warning(
+                "hal0.memory.rerank.unreachable",
+                client_id=self._client_id,
+                url=url,
+                error=f"{type(exc).__name__}: {exc}"[:200],
+            )
+            return None
+
+        # llama.cpp shape: {"results": [{"index": int,
+        # "relevance_score": float}, ...]}.
+        results = body.get("results") if isinstance(body, dict) else None
+        if not isinstance(results, list) or not results:
+            _audit_logger().warning(
+                "hal0.memory.rerank.bad_response",
+                client_id=self._client_id,
+                url=url,
+            )
+            return None
+
+        # Sort by relevance_score DESC, then map back to our candidate
+        # list. Drop entries whose index is out of range (defensive
+        # against a misconfigured slot).
+        try:
+            ranked = sorted(
+                results,
+                key=lambda r: float(r.get("relevance_score", 0.0)),
+                reverse=True,
+            )
+        except (TypeError, ValueError):
+            _audit_logger().warning(
+                "hal0.memory.rerank.bad_score",
+                client_id=self._client_id,
+                url=url,
+            )
+            return None
+
+        reordered: list[dict[str, Any]] = []
+        seen_idx: set[int] = set()
+        for entry in ranked:
+            idx = entry.get("index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(candidates):
+                continue
+            if idx in seen_idx:
+                continue
+            seen_idx.add(idx)
+            record = dict(candidates[idx])
+            # Keep the original score if the new one is malformed —
+            # defensive against a slot that returns string-typed scores.
+            with contextlib.suppress(TypeError, ValueError):
+                record["score"] = float(entry.get("relevance_score", 0.0))
+            reordered.append(record)
+
+        # If the rerank response was incomplete (rare; we still got
+        # *some* results), append the un-ranked tail in their original
+        # order so the caller sees the full candidate set.
+        if len(reordered) < len(candidates):
+            for i, record in enumerate(candidates):
+                if i in seen_idx:
+                    continue
+                reordered.append(record)
+
+        return reordered
 
     # ── Internal helpers ───────────────────────────────────────────────
 
