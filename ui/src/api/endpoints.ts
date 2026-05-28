@@ -55,6 +55,7 @@ export const ENDPOINTS = {
 
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',
+  statsHardware: '/api/stats/hardware',
 
   // ── Agents — list + dashboard catalogues ─────────────────────────
   // ``agents`` is the installed-bundled list (#207). ``agentSkills`` +
