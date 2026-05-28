@@ -41,7 +41,7 @@ function mockProxmoxSettings(page: Page, status: object) {
   )
 }
 
-test.describe('Memory map — sidebar (skipped until Tasks 9-11 wire-up)', () => {
+test.describe('Memory map — sidebar', () => {
   test('off — single-tier bar, no PVE band', async ({ page }) => {
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
@@ -131,7 +131,7 @@ test.describe('Memory map — sidebar (skipped until Tasks 9-11 wire-up)', () =>
   })
 })
 
-test.describe('Memory map — expanded (skipped until Task 11 wires HardwareMemorySection)', () => {
+test.describe('Memory map — expanded', () => {
   test('expanded variant renders host pool + inside-LXC + legend', async ({ page }) => {
     await mockStatsHardware(page, {
       configured: true,
