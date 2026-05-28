@@ -12,6 +12,7 @@ import {
   useSlotUnload,
   useSlotSwap,
 } from '@/api/hooks/useSlots'
+import { MemoryMap } from './memory-map'
 
 const { useState: useStateS } = React;
 
@@ -710,7 +711,7 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
           </div>
           <div className="dash-side">
             <SnapshotStrip slots={slots} onGo={goTo} />
-            <MemoryMap slots={slots} />
+            <MemoryMap variant="sidebar" />
             <ThroughputCard />
           </div>
         </div>
@@ -802,7 +803,7 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
         </div>
         <div className="dash-side">
           <SnapshotStrip slots={slots} onGo={goTo} />
-          <MemoryMap slots={slots} />
+          <MemoryMap variant="sidebar" />
           <ThroughputCard />
         </div>
       </div>
