@@ -89,100 +89,21 @@ Example:
 HAL0_PORT=9090 sudo bash installer/install.sh
 ```
 
-## Authentication
+## Authentication & TLS
 
-All auth lives in FastAPI. There is no edge-auth layer — the installer
-does not ship a reverse proxy. If you need TLS or edge auth, front
-hal0 with Traefik, nginx, Cloudflare Tunnel, or your own preferred
-upstream (see [TLS](#tls) below).
+As of **v0.3.0-alpha.1** (ADR-0012), authentication is no longer
+hal0's concern. The installer ships no Caddy, no Bearer-token store,
+no first-run OTP, no password claim wizard, no `--no-tls` flag, and
+no `HAL0_AUTH_*` env vars. `hal0-api` binds `0.0.0.0:8080` open; if
+you need a gate, put a reverse proxy (Caddy, Traefik, nginx,
+Cloudflare Tunnel — whatever you already run) in front of it and
+own auth + TLS at the edge. A recipe lives at
+[`docs/operate/auth.mdx`](../docs/operate/auth.mdx).
 
-As of v0.1.0-alpha (security review §36, 2026-05-21), a fresh install **starts
-locked**. The API rejects anonymous requests on every admin route and
-on `/v1/*` with `401 auth.required`. Only the first-run wizard claim
-paths (`/api/install/*`, `POST /api/auth/password`) stay reachable —
-and only while the installer's one-time-OTP lockfile
-(`/var/lib/hal0/.first-run.lock`, mode 0600) is present on disk.
-
-The installer prints the OTP in the post-install summary; the wizard's
-"Set a password" step asks for it before minting the owner password.
-Once the password is set, the wizard's success path deletes the
-lockfile and the claim window closes — from then on every request
-needs a session cookie (browser) or Bearer token (programmatic
-client).
-
-To opt back into the trusted-LAN open posture (single-user dev
-boxes only), uncomment `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env`
-and restart `hal0-api`. The dashboard and `/v1/*` will be reachable
-without credentials. **Do not use this on a multi-tenant network.**
-
-Once a password is set:
-
-- Browsers authenticate via `POST /api/auth/login`, which issues a signed
-  `hal0_session` cookie (HttpOnly, SameSite=Lax, Secure-when-TLS).
-  `POST /api/auth/logout` clears it.
-- Programmatic clients keep using Bearer tokens (`Authorization: Bearer hal0_...`)
-  unchanged — the FastAPI middleware accepts both the session cookie and
-  Bearer tokens against the same `require_token` / `require_writer` deps.
-
-Mint a Bearer token via the Settings UI (Authentication panel → Create token)
-or directly:
-
-```sh
-curl -H 'Authorization: Bearer hal0_<admin-token>' \
-  http://hal0.local:8080/api/auth/tokens \
-  -H 'Content-Type: application/json' \
-  -d '{"label": "openwebui-bridge", "scope": "all"}'
-```
-
-The raw token is in the response **once** — copy it immediately. To revoke:
-
-```sh
-curl -H 'Authorization: Bearer hal0_<admin-token>' -X DELETE \
-  http://hal0.local:8080/api/auth/tokens/<token-id>
-```
-
-### TLS
-
-hal0 does not ship an edge proxy or TLS terminator. The API binds
-`0.0.0.0:8080`; put TLS in front with whatever you already run —
-Traefik, nginx, Cloudflare Tunnel, Caddy as a standalone service, an
-LXC's upstream reverse proxy, etc. Two common patterns:
-
-- **Traefik / nginx upstream** — point a router/server at
-  `http://<hal0-host>:8080/` and terminate TLS at the edge. Pass
-  through `/`, `/api/*`, `/v1/*`, `/mcp/*` — hal0 is a single
-  monolithic FastAPI app, no path splits needed.
-- **mDNS-friendly local dev** — run avahi on the host and add a
-  static `<hal0-ip>  hal0.local` entry on each client. The dashboard
-  works fine over plain HTTP on a trusted LAN.
-
-Examples for each upstream live in `docs/operate/tls.md`.
-
-### Upgrade notes
-
-Existing installs that used the old `--auth=basic` path lost **edge
-auth** when ADR-0001 collapsed the Caddyfile in v0.1.0-alpha. As of
-this release the installer no longer ships any edge proxy at all —
-the prior Caddy unit is left untouched on existing hosts but
-`install.sh` neither manages it nor depends on it. To recover:
-
-- **Set a password in the dashboard wizard.** On first load after upgrade,
-  the wizard's password-setup step calls `POST /api/auth/password` and
-  writes the bcrypt hash into the FastAPI auth store. The installer
-  also prints a one-time OTP that the wizard requires for first-run
-  claim; copy it out of the installer transcript or read it directly
-  from `/var/lib/hal0/.first-run.lock`.
-- **Front hal0 with your own reverse proxy** (Traefik, nginx, Caddy you
-  manage outside hal0, Cloudflare Tunnel, etc.) and let the edge own
-  auth. Setting `HAL0_AUTH_DISABLED=1` in `/etc/hal0/api.env` collapses
-  hal0's own gate back to pass-through; do this only when the outer
-  proxy is the trust boundary.
-
-Bearer tokens minted under the prior install continue to work — token storage
-moved with the rest of auth into the FastAPI store (no migration required).
-Legacy `basicauth` credentials from the long-retired `--auth=basic` path
-are not migrated; re-entry via the wizard's password-setup step is the
-supported path.
+Identity at the application layer is the `X-hal0-Agent` request
+header; see [`docs/agents/identity.md`](../docs/agents/identity.md)
+for the agent-identity model and how to set the header from a
+programmatic client.
 
 ## Dev mode (`--dev`)
 
