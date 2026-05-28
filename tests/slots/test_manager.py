@@ -490,6 +490,60 @@ async def test_update_config_rewrites_toml(slot_root: Path) -> None:
     assert "workers = 4" in cfg_text
 
 
+async def test_update_config_backend_invalidates_state_extras(
+    slot_root: Path,
+    tmp_hal0_home: str,
+    lemonade_loaded_stub: dict[str, Any],
+) -> None:
+    """Issue #359: changing ``backend`` via update_config() must clear
+    the stale ``extra.backend`` mirror in state.json.
+
+    Before the fix, ``status()`` short-circuited to the persisted record
+    while the model was in lemond's ``loaded[]`` and reported the old
+    backend forever. The adoption probe never re-ran because ``rec``
+    already existed.
+    """
+    from hal0.slots.state import SlotStateRecord, read_state, write_state_atomic
+
+    # Seed an adopted-style state.json: primary is READY with
+    # extra.backend=rocm (the boot-time adopted value).
+    state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
+    write_state_atomic(
+        state_path,
+        SlotStateRecord(
+            name="primary",
+            state=SlotState.READY,
+            model_id="qwen3-4b-q4_k_m",
+            port=8081,
+            extra={"backend": "rocm", "provider": "lemonade", "adopted": True},
+        ),
+    )
+
+    sm = SlotManager()
+    snap_before = await sm.status("primary")
+    assert snap_before.backend == "rocm"
+
+    snap_after = await sm.update_config("primary", {"backend": "vulkan"})
+    # The snapshot returned from update_config() must reflect the new
+    # backend (this is what the API handler returns to the client).
+    assert snap_after.backend == "vulkan"
+    assert snap_after.metadata.get("backend") == "vulkan"
+
+    # And a fresh status() call (after the in-memory cache) reads the
+    # same value — the persisted state.json was rewritten.
+    snap_via_status = await sm.status("primary")
+    assert snap_via_status.backend == "vulkan"
+
+    # state.json on disk reflects the new backend too.
+    rec = read_state(state_path)
+    assert rec is not None
+    assert rec.extra.get("backend") == "vulkan"
+    # Unrelated extras (adoption marker) are preserved — we only
+    # invalidate the keys the operator actually changed.
+    assert rec.extra.get("adopted") is True
+    assert rec.extra.get("provider") == "lemonade"
+
+
 # ── SSE state stream ────────────────────────────────────────────────────────
 
 

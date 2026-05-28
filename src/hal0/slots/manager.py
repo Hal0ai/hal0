@@ -1324,6 +1324,38 @@ class SlotManager:
                 f"failed to rewrite {cfg_path}: {exc}",
             ) from exc
 
+        # Issue #359: invalidate stale top-level metadata in state.json
+        # whenever the operator's update changes a field that's also
+        # carried in ``extra``. ``_transition()`` shallow-merges extras
+        # (intentional — provider/backend stamped at create-time survive
+        # start→warm→ready), so without an explicit fix here the persisted
+        # ``extra.backend`` survives a ``POST /api/slots/{name}/backend``
+        # forever. ``status()`` short-circuits to this stale value as long
+        # as the model is still in lemond's ``loaded[]`` (the adoption
+        # probe never re-runs once ``rec`` exists).
+        #
+        # Only touch keys the caller actually changed — leave the rest of
+        # ``extra`` (adopted flag, modelless_ready_blocked, etc.) alone.
+        rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
+        if rec is not None:
+            mirrored = {"backend", "provider"}
+            dirty = mirrored & updates.keys()
+            if dirty:
+                new_extra = dict(rec.extra)
+                for key in dirty:
+                    new_extra[key] = cfg_dict.get(key)
+                refreshed = SlotStateRecord(
+                    name=rec.name,
+                    state=rec.state,
+                    model_id=rec.model_id,
+                    port=rec.port,
+                    updated_at=time.time(),
+                    message=rec.message,
+                    extra=new_extra,
+                )
+                write_state_atomic(self._state_file(slot_name), refreshed)
+                self._states[slot_name] = refreshed
+
         return await self.status(slot_name)
 
     async def reconcile_unconfigured_slots(self) -> None:
