@@ -53,21 +53,40 @@ def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.
         (v / "bin" / "hermes").chmod(0o755)
 
     monkeypatch.setattr(hp, "_install_venv", _fake_install)
+    # PR-3: config_write + model_automap + voice_wire all call
+    # _fetch_slots; without a stub each call would block 3s on a real
+    # urlopen timeout. Keep the integration tests offline-fast.
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    monkeypatch.setattr(
+        hp,
+        "_probe_mcp_server",
+        lambda _url, **_kw: {"ok": True, "tools": ["t1"], "error": None},
+    )
+    monkeypatch.setattr(
+        hp,
+        "_mcp_memory_call",
+        lambda *_a, **_kw: {"ok": True, "result": {"items": [], "id": "x"}},
+    )
     return hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
 
 def test_phase_names_in_planned_order() -> None:
-    """The planned 12 phases stay in the documented order.
+    """The planned phases stay in the documented order.
 
-    Mirrors `docs/internal/hermes-bootstrap-plan-2026-05-23.md` §3 —
-    if a slice re-orders or drops a phase, this guard catches it
-    before the integration scenario notices.
+    Mirrors `docs/internal/hermes-bootstrap-plan-2026-05-23.md` §3 +
+    PR-3's persona_seed insertion — if a slice re-orders or drops a
+    phase, this guard catches it before the integration scenario
+    notices.
     """
     expected = (
         "preflight",
         "install",
         "env_probe",
         "home_init",
+        # PR-3 (v0.3): persona_seed inserted before config_write so the
+        # first render carries the active persona's system_prompt
+        # prelude (Phase 7) on the same pass that lands chat_slots.
+        "persona_seed",
         "config_write",
         "mcp_wire",
         "context_link",
@@ -489,6 +508,12 @@ def test_config_write_phase_writes_yaml_idempotently(
         lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
     )
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-such-overrides.yaml")
+    # PR-3: _phase_config_write now also calls _fetch_slots + persona
+    # render. Stub both so the test stays offline.
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
     out1 = hp._phase_config_write(state)
     assert out1.status == hp.PhaseStatus.OK
     cfg = Path(out1.details["config_path"])
@@ -512,6 +537,10 @@ def test_config_write_phase_applies_overrides(
         lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
     )
     monkeypatch.setattr(hp, "OVERRIDES_PATH", overrides)
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
     out = hp._phase_config_write(state)
     assert out.status == hp.PhaseStatus.OK
     cfg = Path(out.details["config_path"]).read_text()
