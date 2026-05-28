@@ -18,7 +18,7 @@ unified memory — into a polished, OpenAI-compatible inference appliance.
 A unified runtime, hardware-aware slots, prewired chat UI, signed
 self-update. One command installs the lot.
 
-It is not another llama-server wrapper. v0.2 ships **AMD's Lemonade
+It is not another llama-server wrapper. hal0 ships **AMD's Lemonade
 Server as the unified inference runtime** behind a thin hal0 capability
 layer. Every workload — chat, embed, rerank, STT, TTS, image gen —
 runs as a real, named slot in `capabilities.toml`; the API surface
@@ -29,20 +29,23 @@ operating the box, not chatting with it.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.2.0** — first release on the Lemonade runtime.
-> Six per-modality toolbox containers, the `hal0-slot@.service` template,
-> and the legacy Provider stack all retired in favour of one
-> `hal0-lemonade.service` supervising a single `lemond` daemon. v0.1.x
-> installs do **not** auto-upgrade — see
-> [`docs/v0.2-upgrade.md`](./docs/v0.2-upgrade.md) for the back-up + wipe
-> + reinstall procedure and the `hal0 registry import` recovery path.
-> First run lands a **bundle picker** (`hal0-Lite` / `Default` / `Pro` /
-> `Max` + `LMX-Omni-52B-Halo`) — `capabilities.toml` ships empty by
-> design, no silent default. Expect rough edges: APIs may shift, KV%
-> for GPU slots reads `—` in v0.2 (see [ADR-0008
-> §Costs](./docs/internal/adr/0008-lemonade-adoption.md)), and we don't
-> promise upgrade compatibility across `0.2.x` tags. See
-> [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
+> **Status:** **v0.3.0-alpha.1** (2026-05-24) — the auth-removal +
+> dashboard-v3 cut. `hal0-api` now binds `0.0.0.0:8080` open with no
+> built-in auth, no Bearer-token store, no Caddy, no TLS termination
+> ([ADR-0012](./docs/internal/adr/0012-remove-auth-and-caddy.md)
+> supersedes ADR-0001). Front hal0 with an upstream reverse proxy if
+> it's reachable off-LAN — see [`docs/operate/auth.mdx`](./docs/operate/auth.mdx)
+> for Traefik / nginx / Cloudflare Tunnel recipes. The React dashboard
+> v3 lands wired against live data for slots, chat, models, journal,
+> and agents; remaining mock-fallback panels are tracked under the
+> `dashboard-v3` label. First run still lands the v0.2 **bundle picker**
+> (`hal0-Lite` / `Default` / `Pro` / `Max` + `LMX-Omni-52B-Halo`) —
+> `capabilities.toml` ships empty by design, no silent default.
+> Expect rough edges: APIs may still shift, KV% for GPU slots reads
+> `—` (see [ADR-0008 §Costs](./docs/internal/adr/0008-lemonade-adoption.md)),
+> and we don't promise upgrade compatibility across `0.3.x` tags.
+> See [`CHANGELOG.md`](./CHANGELOG.md) for the full v0.3.0-alpha.1
+> change list and [`PLAN.md`](./PLAN.md) §1 for the path to v1.0.
 
 ## Why hal0
 
@@ -105,11 +108,12 @@ be evicted out from under a streaming request.
   (`primary`, `embed`, `rerank`, `stt`, `tts`, `img`) plus three NPU
   slots (`agent`, `stt-npu`, `embed-npu`) when FastFlowLM is installed.
   User-added slots via `hal0 slot add NAME --type TYPE --model MODEL`.
-- **Lemonade as the unified runtime** — one `lemond` process,
-  loopback-only on `:13305`, supervised by `hal0-lemonade.service`.
-  Cache + config at `/var/lib/hal0/lemonade/`. The hal0 capability
-  layer is the only user-facing inference surface; Lemonade is
-  treated as an internal runtime, never exposed off-box.
+- **Lemonade as the unified runtime** — one `lemond` daemon,
+  loopback-only on `127.0.0.1:13305` (the canonical proxy target;
+  `hal0-api` reverse-proxies `/v1/*` to it). Supervised by
+  `hal0-lemonade.service`. Cache + config at `/var/lib/hal0/lemonade/`.
+  The hal0 capability layer is the only user-facing inference surface;
+  Lemonade is treated as an internal runtime, never exposed off-box.
 - **Bundle picker on first run** — `capabilities.toml` ships empty by
   design. The dashboard's first load surfaces four hardware-anchored
   tiers (`hal0-Lite` ≥16 GB / `Default` ≥32 GB / `Pro` ≥64 GB / `Max`
@@ -123,10 +127,11 @@ be evicted out from under a streaming request.
 - **Dispatcher** — registry-aware routing, cold-cache prefetch,
   upstream fallback (OpenRouter, Anthropic, OpenAI, custom OpenAI-shaped
   endpoints). Mix local + remote per-model in one config.
-- **Dashboard** — Vue 3 + Tailwind 4 UI for slot/model management,
-  hardware-aware configuration, live logs, and system health. SSE-backed
-  status + log tail. Lemonade `/logs/stream` folded into the Journal
-  panel. Settings → Lemonade admin panel surfaces the daemon's
+- **Dashboard** — React 18 + TypeScript + Vite + Tailwind 4 UI (v3,
+  landed via PR #235) for slot/model management, hardware-aware
+  configuration, live logs, and system health. SSE-backed status + log
+  tail. Lemonade `/logs/stream` folded into the Journal panel.
+  Settings → Lemonade admin panel surfaces the daemon's
   `/internal/config` for inspection. Dark by default.
 - **OpenWebUI prewired** — chat at `:3001`, zero config. The installer
   writes `openwebui.env` pointing at the local hal0 API.
@@ -148,8 +153,9 @@ be evicted out from under a streaming request.
   manifest, sha256-verifies the tarball, cosign-verifies the signature
   against the workflow OIDC identity, then hands off to
   [`installer/install.sh`](./installer/install.sh). v0.1.x installs
-  are detected and refused with explicit backup/wipe instructions
-  (see [`docs/v0.2-upgrade.md`](./docs/v0.2-upgrade.md)).
+  are detected and refused with explicit backup/wipe instructions;
+  see [`CHANGELOG.md`](./CHANGELOG.md) for the v0.2 + v0.3 upgrade
+  notes and the `hal0 registry import` recovery path.
 - **One-line Proxmox VE install** — on a Proxmox host, `bash -c "$(curl
   -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"`
   creates an unprivileged Debian 13 LXC and runs the standard bootstrap
@@ -158,27 +164,46 @@ be evicted out from under a streaming request.
   — Strix Halo passthrough still requires the privileged-LXC recipe.
   See [`scripts/proxmox-ve/README.md`](./scripts/proxmox-ve/README.md).
 
-### Bundled agents (v0.2)
+### Bundled agents (v0.3)
 
 hal0 ships **two MCP servers** and **one bundled agent app**. The MCP
 servers (`/mcp/admin` for slot / model / capability / config / hardware
 / log admin and `/mcp/memory` for Cognee-backed long-term memory) are
-reachable by any MCP-speaking client — Claude Code, future RAG
-services, external scripts. The bundled agent is single-pick at install:
-`pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
-`@earendil-works/pi-coding-agent` on npm) or `Hermes-Agent` (service
-shape, installed via the hal0-owned `hal0-hermes` wrapper around
-upstream `hermes`). Pick one via the first-run wizard or `hal0 agent install
-<name>`; swap atomically with `--switch`. Capital-D destructive MCP
-calls (`model_pull`, `slot_delete`, `config_write`, etc.) gate through
-a header bell + inbox modal in the dashboard, with CLI parity via
-`hal0 agent approvals {list,approve,deny}`. See
+mounted as FastMCP Streamable-HTTP apps at `/mcp/admin` and
+`/mcp/memory`, reachable by any MCP-speaking client — Claude Code,
+future RAG services, external scripts. The bundled agent for v0.3 is
+**Hermes-Agent** (service shape, installed via the hal0-owned
+`hal0-hermes` wrapper around upstream `hermes`). Install via the
+first-run wizard or `hal0 agent install hermes`. Capital-D destructive
+MCP calls (`model_pull`, `slot_delete`, `config_write`, etc.) gate
+through a header bell + inbox modal in the dashboard, with CLI parity
+via `hal0 agent approvals {list,approve,deny}`. See
 [docs/api/mcp.md](./docs/api/mcp.md) and
 [docs/api/agents.md](./docs/api/agents.md).
 
+Clients identify themselves to hal0 via the `X-hal0-Agent` request
+header, sourced from the `HAL0_AGENT_ID` env var in the wrapper
+script. The CLI, the Hermes provisioner, and the bundled agent
+templates all set this header today.
+
+> **🚧 Coming in v0.3.0-alpha.2** — *the FastAPI side still reads
+> legacy `Authorization: Bearer` and falls back to `"anonymous"`;
+> server-side `X-hal0-Agent` adoption + the `MCPAuthMiddleware →
+> Identity` rename land as post-alpha.1 follow-ups, tracked under the
+> auth-removal close-out.*
+
+> **🚧 Coming in v0.3.0-alpha.2** — *Per-agent private memory
+> namespacing is gated on issue #317: `/api/memory/add` currently
+> forces `dataset` to `shared` regardless of the incoming
+> `private:*` scope.*
+
+The `pi-coder` agent path remains in the repository for v0.3.x
+reactivation after the Lemonade UX polish but is not promoted in the
+v0.3 dashboard or first-run wizard.
+
 ## Backends
 
-v0.2 routes every inference workload through Lemonade Server. The
+hal0 routes every inference workload through Lemonade Server. The
 table below lists the Lemonade recipe each capability uses, plus the
 hardware device it targets.
 
@@ -187,20 +212,21 @@ hardware device it targets.
 | chat + embed + rerank | `llamacpp`     | Vulkan / ROCm / CPU     | `--parallel 1 --threads N` mandatory in `lemond` config     |
 | chat + STT + embed (NPU) | `flm:npu`   | AMD XDNA (opt-in)       | FLM trio: one process, `--asr 1 --embed 1`, ~2 GB NPU mem  |
 | transcription | `whisper.cpp`          | Vulkan / CPU            | Replaces v0.1 Moonshine for the CPU/GPU path                |
-| TTS           | `kokoro:cpu`           | CPU                     | `[CPU]` chip + tooltip in dashboard; GPU TTS deferred to v0.3 |
+| TTS           | `kokoro:cpu`           | CPU                     | `[CPU]` chip + tooltip in dashboard; GPU TTS is a v0.3 stream |
 | image         | `sd-cpp`               | ROCm / Vulkan           | SD Turbo / Flux-2-Klein-9B selectable per bundle tier       |
 
 The NPU path is opt-in: a FastFlowLM `.deb` install (manual on Linux —
-the Lemonade auto-installer is Windows-only as of v0.2) unlocks the
-three FLM slots. With FLM present, the bundle picker's Pro and Max
-tiers surface the trio as a toggle; the trio only auto-enables when a
+the Lemonade auto-installer is Windows-only) unlocks the three FLM
+slots. With FLM present, the bundle picker's Pro and Max tiers
+surface the trio as a toggle; the trio only auto-enables when a
 bundled agent is being installed in the same first-run flow.
 
-The hal0 toolbox containers (`hal0-toolbox-vulkan` / `rocm` / `flm` /
-`moonshine` / `kokoro` / `comfyui`) and the `hal0-slot@.service`
-template that supervised them are retired. v0.2's `lemond` daemon
-takes their place. See [ADR-0008](./docs/internal/adr/0008-lemonade-adoption.md)
-for the migration rationale.
+The legacy hal0 toolbox containers (`hal0-toolbox-vulkan` / `rocm` /
+`flm` / `moonshine` / `kokoro` / `comfyui`) and the `hal0-slot@.service`
+template that supervised them were retired in v0.2; v0.3 keeps the
+single `lemond` daemon as the inference floor. See
+[ADR-0008](./docs/internal/adr/0008-lemonade-adoption.md) for the
+migration rationale.
 
 ## Hardware
 
@@ -221,14 +247,16 @@ are not in scope for v1.
 ```
 hal0/
 ├── src/hal0/         # Python package (FastAPI API + capability layer + Lemonade client + CLI)
+│   ├── agents/      # Hermes bootstrap + agent install / approvals / identity
 │   ├── lemonade/     # HTTP client + catalog_sync + metrics_shim + log_proxy
+│   ├── mcp/          # bundled MCP servers (hal0-admin, hal0-memory)
+│   ├── memory/       # Cognee adapter for hal0-memory
 │   └── omni_router/  # client-side tool-calling loop + tool definitions
-├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard (v3, in flight)
-├── ui-vue.bak/       # v0.2.1 Vue 3 dashboard preserved verbatim for reference
+├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard (v3)
 ├── installer/        # install.sh (writes /var/lib/hal0/lemonade/config.json + hal0-lemonade.service)
 ├── tests/            # pytest suite (α unit, β integration, γ release-gate)
 ├── docs/             # user docs (mirror of hal0.dev/docs); dev docs under docs/internal/
-└── PLAN.md           # roadmap (current cut: v0.2; path to v1.0)
+└── PLAN.md           # roadmap (current cut: v0.3; path to v1.0)
 ```
 
 Models live under `/var/lib/hal0/models/<recipe>/<capability>/` — the
@@ -291,49 +319,55 @@ VM installs leave the panel off and the dashboard stays quiet.
 No dates — items are direction. The closer to the left, the closer to
 running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap).
 
-### Shipped (v0.2)
+### Shipped (v0.3.0-alpha.1, 2026-05-24)
 
-- **Lemonade Server unified inference runtime** — six per-modality
-  toolbox containers + the `hal0-slot@.service` template retire;
-  `hal0-lemonade.service` supervises one `lemond` daemon
-- **FLM trio NPU packing** — chat + ASR + embed coresident on one
-  AMDXDNA hardware context via `--asr 1 --embed 1`
-- **OmniRouter client-side tool-calling** — 8 tools, dynamic
-  per-request filtering, `route_to_chat` cross-slot delegation
-- **First-run bundle picker** — `hal0-Lite` / `Default` / `Pro` /
-  `Max` + `LMX-Omni-52B-Halo`, hardware-anchored, no silent default
-- **Per-type LRU concurrency** — six type budgets (LLM, embedding,
-  reranking, transcription, tts, image), nuclear-evict only on
-  unrecognised load errors
-- **Settings → Lemonade admin panel** — `/internal/config` snapshot +
-  `/internal/set` atomic config writes
-- **Journal panel** — Lemonade `/logs/stream` folded into Logs tab
-- **Metrics shim** — per-slot TTFT + tok/s + prompt_tokens via
-  `/v1/stats`; FLM-native KV% on NPU slots
-- **`hal0 registry import`** — one-shot v0.1.x → v0.2 registry
-  recovery from the backup tarball
-- Carried forward from v0.1.x: OpenAI-compatible `/v1/*`, portable
-  hardware probe, capability slots overlay + orchestrator, dispatcher
-  with single-flight + cold-cache prefetch, bundled OpenWebUI on
-  `:3001`, auth (password + tokens) in FastAPI, cosign-keyless
-  self-update with rollback, bundled agents (pi-coder / Hermes-Agent)
-  + MCP admin + Cognee memory MCP
+- **Auth + Caddy removed** — `hal0-api` binds `0.0.0.0:8080` open;
+  no Bearer-token store, no first-run claim OTP, no bundled TLS.
+  ~6,000 lines deleted across backend, frontend, tests, installer,
+  packaging. Front with an upstream reverse proxy (Traefik / nginx /
+  Cloudflare Tunnel) for non-LAN deployments — see
+  [ADR-0012](./docs/internal/adr/0012-remove-auth-and-caddy.md) and
+  [`docs/operate/auth.mdx`](./docs/operate/auth.mdx).
+- **Dashboard v3** — React 18 + TypeScript + Vite + Tailwind 4
+  (PR #235). `/chat` and `/dashboard` split out; slots overview
+  mirrors snapshot/memmap/throughput sidebars onto `/slots`.
+- **Hermes-Agent first-run bootstrap** — bundled service-shape agent
+  with env probe, model auto-wiring, MCP-memory connection, and
+  identity-card publishing to the dedicated `agents` Cognee dataset
+  ([ADR-0011](./docs/internal/adr/0011-agent-identity-cards.md)).
+  Install via `hal0 agent install hermes`.
+- **Carried forward from v0.2:** Lemonade unified runtime, FLM trio
+  NPU packing, OmniRouter client-side tool-calling, first-run bundle
+  picker, per-type LRU concurrency, Lemonade admin panel, Journal
+  panel, metrics shim, `hal0 registry import`, MCP admin + Cognee
+  memory MCP.
 
-### Soon (v0.3)
+### In flight / soon (v0.3.0-alpha.2 and v0.3.x)
 
+- **Dashboard v3 mock-fallback close-out** — remaining panels still
+  pull from the seed `HAL0_DATA.*` blob (issues #213–#340).
+- **Identity rename + server-side `X-hal0-Agent` read** —
+  `MCPAuthMiddleware → Identity` rename and the FastAPI-side switch
+  away from legacy `Authorization: Bearer`. Today the client wiring
+  ships; the server still falls back to `"anonymous"`.
+- **Per-agent private memory** — `/api/memory/add` currently forces
+  `dataset = "shared"` regardless of incoming `private:*` (issue
+  #317).
 - **GPU-accelerated TTS** — kokoro-vulkan or successor; closes the
-  `[CPU]` chip on the voice slot card
-- **KV% for GPU slots** — Lemonade upstream or hal0-built llama-server
-  swap-in; v0.2 ships `—`
-- **Phase 8 polish + advanced memory** — Cognee graph + Memify pipeline
-  enabled, MCP client side of hal0 (agents reach external MCP servers),
-  federated memory across local + remote sources
+  `[CPU]` chip on the voice slot card.
+- **KV% for GPU slots** — Lemonade upstream or hal0-built
+  llama-server swap-in; v0.3.0-alpha.1 still ships `—`.
+- **Advanced memory + MCP client side** — Cognee graph extraction
+  + Memify pipeline ([ADR-0014](./docs/internal/adr/0014-cognee-graph-extraction-model-gate.md)),
+  per-agent allow-listed external MCP clients
+  ([ADR-0013](./docs/internal/adr/0013-mcp-client-allow-list.md)),
+  federated memory across local + remote sources.
 - **Benchmarks & presets UI** — in-dashboard tok/s + latency runs,
-  plus curated loadout presets you can flash onto a fresh install
+  plus curated loadout presets you can flash onto a fresh install.
 - **AUR PKGBUILD & Ubuntu PPA** — native distro packages on top of
-  the install script; pacman and apt as first-class install paths
-- `hal0.local` mDNS auto-discovery polish
-- Light mode toggle
+  the install script; pacman and apt as first-class install paths.
+- `hal0.local` mDNS auto-discovery polish.
+- Light mode toggle.
 
 ### Exploring (v1.x +)
 

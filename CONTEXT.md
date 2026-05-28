@@ -19,7 +19,7 @@ When in doubt, ask which sense applies before writing the word.
 
 ## bundled agent
 
-Phase 8 product feature. A third-party agent application installed alongside hal0, prewired to use hal0 as its local AI provider and to consume hal0's MCP servers. v0.2 supports `pi-coder` (CLI shape) and `Hermes-Agent` (service shape). Single-pick at install. See ADR-0004.
+Phase 8 product feature. A third-party agent application installed alongside hal0, prewired to use hal0 as its local AI provider and to consume hal0's MCP servers. v0.2 supported `pi-coder` (CLI shape) and `Hermes-Agent` (service shape). v0.3 narrows the promoted set to `Hermes-Agent` only; `pi-coder` code remains in the repo for v0.3.x reactivation but is dropped from the v0.3 first-run wizard, dashboard, and install promo. Single-pick at install. See ADR-0004 (background) and ADR-0011 (Hermes identity cards).
 
 ## Cognee
 
@@ -29,13 +29,17 @@ The embedded memory engine adopted from v0.2 (Apache 2.0). Defaults: SQLite + La
 
 Cognee's namespace primitive. hal0's namespace rule (v0.2): default `shared` for all clients; per-client `--private` toggle promotes that client's writes to `private:<client_id>`. Multi-user revisits the rule in Phase 9 (future ADR pending — ADR-0006 was reassigned to Lemonade migration). See ADR-0005 §3.
 
+> **🚧 Coming in v0.3.0-alpha.2** — *per-agent private memory namespacing is gated on issue #317: `/api/memory/add` currently forces `dataset = "shared"` regardless of the incoming `private:*` scope, so `--private` is a no-op on the write path today.*
+
+v0.3 also adds a dedicated `agents` dataset (separate from `shared` and `private:*`) for agent-identity cards — see "agents dataset" below.
+
 ## MCP server (hal0-exposed)
 
-hal0 exposes two MCP servers (Phase 8, v0.2):
+hal0 exposes two MCP servers (Phase 8, v0.2; carried forward in v0.3):
 - `/mcp/admin` — wraps existing `/api/*` routes (slot/model/hardware/log admin). Tool catalog rule: ships iff it maps to an existing route. See ADR-0004 §4.
 - `/mcp/memory` — wraps Cognee's Python API. See ADR-0005 §2.
 
-Both reachable by any MCP-speaking client: bundled agents, Claude Code, future RAG services. Auth via existing Bearer token (ADR-0001).
+Both mounted as FastMCP Streamable-HTTP apps and reachable by any MCP-speaking client: the bundled Hermes-Agent, Claude Code, future RAG services. **No Bearer auth** as of v0.3 ([ADR-0012](docs/internal/adr/0012-remove-auth-and-caddy.md) supersedes ADR-0001) — `hal0-api` binds open on `0.0.0.0:8080`; client identity rides on the `X-hal0-Agent` header (target state, see "agent identity" below). Front with an upstream reverse proxy for off-LAN deployments.
 
 ## memory
 
@@ -74,10 +78,10 @@ A named, configured serving target — e.g. `primary`, `embed`, `stt`, `tts`, `i
 
 Two sub-senses depending on release:
 
-1. **v0.1.x slot (current)** — `hal0-slot@.service` systemd template unit, parameterized by slot name. Owns a process + port + container under a Provider class (PLAN.md §2).
-2. **v0.2 slot (with Lemonade)** — a logical mapping from slot name to ONE Lemonade-loaded model. The per-slot systemd template retires; `lemond` is the single shared process. Slot state (`ready`/`idle`/`serving`) is derived from `/v1/health.loaded[]` by model_name lookup. User-facing UX unchanged. See ADR-0006 (pending).
+1. **v0.1.x slot (HISTORICAL — removed in v0.2)** — `hal0-slot@.service` systemd template unit, parameterized by slot name. Owned a process + port + container under a Provider class (PLAN.md §2). Retired in v0.2 alongside the per-modality toolbox containers.
+2. **v0.2 / v0.3 slot (current)** — a logical mapping from slot name to ONE Lemonade-loaded model. `lemond` is the single shared process; the per-slot systemd template is gone. Slot state (`ready`/`idle`/`serving`) is derived from `/v1/health.loaded[]` by model_name lookup. User-facing UX unchanged. See ADR-0008.
 
-`SlotManager.start(slot)` in v0.2 calls Lemonade load semantics rather than starting a systemd unit. Slot identity persists in `capabilities.toml` and the user-facing surface; the runtime layer is the Lemonade pool.
+`SlotManager.start(slot)` in v0.2+ calls Lemonade load semantics rather than starting a systemd unit. Slot identity persists in `capabilities.toml` and the user-facing surface; the runtime layer is the Lemonade pool.
 
 ### slot inventory (v0.2)
 
@@ -279,4 +283,12 @@ Pinned to `/var/lib/hal0/agents/hermes/` for hal0-bundled installs (not `~/.herm
 
 ## v0.3
 
-The active milestone (2026-05-23 →). Five interlocking streams: (1) Hermes-Agent first-run bootstrap, (2) React dashboard v3 wired to live data, (3) Lemonade polish (preload+idle, GPU TTS, KV%, `/v1/*` proxy), (4) Admin/auth simplification (ADR-0001 close-out: FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced memory + MCP client side (Cognee graph + Memify + federation + per-agent external MCP allow-list). v0.3 ships when all five close. See PLAN.md §1 v0.3 + §15 Phase 10.
+The active milestone (2026-05-23 →). Five interlocking streams: (1) Hermes-Agent first-run bootstrap, (2) React dashboard v3 wired to live data, (3) Lemonade polish (preload+idle, GPU TTS, KV%, `/v1/*` proxy), (4) Admin/auth simplification — landed as a hard cut in v0.3.0-alpha.1 ([ADR-0012](docs/internal/adr/0012-remove-auth-and-caddy.md) supersedes [ADR-0001](docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md); auth + Caddy both removed entirely, ~6,000 lines deleted), (5) Advanced memory + MCP client side (Cognee graph + Memify + federation + per-agent external MCP allow-list). v0.3 ships when all five close. See PLAN.md §1 v0.3 + §15 Phase 10.
+
+v0.3.0-alpha.1 shipped 2026-05-24 — see [CHANGELOG.md](CHANGELOG.md) for the full change list.
+
+## X-hal0-Agent
+
+The request header bundled agents and the hal0 CLI use to declare their identity to `hal0-api` (replaces the v0.1/v0.2 `Authorization: Bearer` token surface — removed in v0.3 per ADR-0012). Set from the `HAL0_AGENT_ID` env var by `/usr/local/bin/hal0-hermes` and the CLI wrapper.
+
+> **🚧 Coming in v0.3.0-alpha.2** — *client-side wiring shipped in v0.3.0-alpha.1 (CLI, Hermes provisioner, agent templates all emit the header). Server-side read is the post-alpha.1 follow-up: today the FastAPI side still reads `Authorization: Bearer` and falls back to `"anonymous"` for unknown principals (see `MCPAuthMiddleware` in `src/hal0/api/mcp_mount.py`). The `MCPAuthMiddleware → Identity` rename + read switch are tracked under the v0.3 auth-removal close-out.*

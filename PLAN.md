@@ -7,9 +7,22 @@ one-line install) and re-architected around the things that make hal0
 different from "a wrapper around llama-server": hardware-aware slots,
 clean lifecycle, and a real reliability bar.
 
-**Status (2026-05-23):** **v0.2.0 SHIPPED** (Lemonade migration + Agents
-v0.2 + MCP/memory + bundle picker, 22-PR adoption sequence closed).
-**v0.3 is the active milestone** — five interlocking work streams:
+**Status (2026-05-27):** **v0.3.0-alpha.1 SHIPPED** 2026-05-24 — auth
++ Caddy removed entirely ([ADR-0012](docs/internal/adr/0012-remove-auth-and-caddy.md)
+supersedes ADR-0001, ~6,000 lines deleted), React dashboard v3 landed
+on `main` (PR #235), Hermes-Agent first-run bootstrap online
+([ADR-0011](docs/internal/adr/0011-agent-identity-cards.md)). See
+[CHANGELOG.md](CHANGELOG.md) for the full change list. Ship-criteria
+status: streams (1) Hermes bootstrap, (3) Lemonade polish, and (4)
+auth simplification are effectively closed; streams (2) dashboard v3
+wiring (~70%, mock-fallback panels under the `dashboard-v3` label) and
+(5) advanced memory + MCP client side ([ADR-0013](docs/internal/adr/0013-mcp-client-allow-list.md)
++ [ADR-0014](docs/internal/adr/0014-cognee-graph-extraction-model-gate.md))
+roll forward into v0.3.0-alpha.2 and the rest of the v0.3.x line.
+Earlier baseline at 2026-05-23: **v0.2.0 SHIPPED** (Lemonade migration
++ Agents v0.2 + MCP/memory + bundle picker, 22-PR adoption sequence
+closed). **v0.3 is the active milestone** — five interlocking work
+streams:
 
 1. **Hermes-Agent bootstrap** — bundled agent becomes hal0-aware on
    first run: env probe, model auto-wiring, MCP memory connection,

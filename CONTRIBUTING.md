@@ -1,9 +1,9 @@
 # Contributing to hal0
 
-hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.2.0** — the
-Lemonade Server adoption release. The contribution model is still
-being decided (see [`PLAN.md`](./PLAN.md) §16). External PRs aren't
-being merged yet; please open issues for discussion.
+hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.3.0-alpha.1** —
+the auth-removal + dashboard-v3 release. The contribution model is
+still being decided (see [`PLAN.md`](./PLAN.md) §16). External PRs
+aren't being merged yet; please open issues for discussion.
 
 When the model opens up, the shape will be:
 
