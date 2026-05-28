@@ -76,6 +76,20 @@ _HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
 # this logger automatically carries {request_id} on every emitted line.
 log = structlog.get_logger("hal0-dispatch")
 
+# Transport-layer errors that indicate the upstream's child process is gone
+# rather than a request-level failure.  These are the recoverable triggers
+# for ``_recover_evicted_slot``:
+#   - ConnectError: TCP connect refused (port closed before the request).
+#   - RemoteProtocolError: peer dropped the connection mid-request (the
+#     classic "lemonade evicted while we were dialing" race).
+#
+# Read/Write timeouts are intentionally excluded — those usually mean the
+# child is alive but overloaded, and re-spawning would lose user work.
+_RECOVERABLE_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.RemoteProtocolError,
+)
+
 # Path defaults used only for routing — never written back into the body.
 # Mirrors haloai lib/dispatcher.py:_DEFAULT_MODEL etc.
 _DEFAULT_MODEL = "primary"
@@ -566,6 +580,50 @@ class Dispatcher:
             details=self._build_loading_response(call, current),
         )
 
+    async def _recover_evicted_slot(self, call: UpstreamCall) -> bool:
+        """Attempt to resync a slot whose upstream port went dead unexpectedly.
+
+        Called from ``_forward_direct`` / ``_forward_streaming`` when an
+        :class:`httpx.ConnectError` lands on a slot upstream.  hal0's
+        in-memory state said the slot was READY/SERVING/IDLE (the gate
+        let us through), but the upstream port was dead — the usual
+        cause is a Lemonade idle/OOM eviction that hal0 didn't observe.
+
+        Delegates to ``SlotManager.recover_evicted_slot`` which forces
+        the slot OFFLINE and re-runs the normal load lifecycle (per-slot
+        lock serializes concurrent requests).
+
+        Returns:
+          ``True``  — slot recovered, caller should retry the forward once.
+          ``False`` — recovery is not applicable (remote upstream, no slot
+            manager wired) or the recover call itself raised.  Caller
+            should surface the original :class:`UpstreamUnavailable`.
+        """
+        if not (call.slot_name and self._slot_manager is not None):
+            return False
+        log.warning(
+            "dispatch.upstream_dead_attempting_recover",
+            upstream=call.upstream_name,
+            slot=call.slot_name,
+            target=call.target_url,
+        )
+        try:
+            await self._slot_manager.recover_evicted_slot(call.slot_name)
+        except Exception as exc:
+            log.warning(
+                "dispatch.recover_evicted_slot_failed",
+                slot=call.slot_name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return False
+        log.info(
+            "dispatch.upstream_recovered",
+            upstream=call.upstream_name,
+            slot=call.slot_name,
+        )
+        return True
+
     def _build_loading_response(
         self,
         call: UpstreamCall,
@@ -654,30 +712,53 @@ class Dispatcher:
         client: httpx.AsyncClient,
         call: UpstreamCall,
     ) -> Response:
-        try:
-            resp = await client.request(
-                call.method,
-                call.target_url,
-                content=call.body or None,
-                headers=call.headers,
-            )
-        except (httpx.HTTPError, OSError) as exc:
-            log.warning(
-                "dispatch.forward_failed",
-                upstream=call.upstream_name,
-                method=call.method,
-                target=call.target_url,
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            raise UpstreamUnavailable(
-                f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
-                details={
-                    "upstream": call.upstream_name,
-                    "target": call.target_url,
-                    "error": str(exc),
-                },
-            ) from exc
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = await client.request(
+                    call.method,
+                    call.target_url,
+                    content=call.body or None,
+                    headers=call.headers,
+                )
+                break
+            except _RECOVERABLE_TRANSPORT_ERRORS as exc:
+                if attempt == 1 and await self._recover_evicted_slot(call):
+                    continue
+                log.warning(
+                    "dispatch.forward_failed",
+                    upstream=call.upstream_name,
+                    method=call.method,
+                    target=call.target_url,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                raise UpstreamUnavailable(
+                    f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                    details={
+                        "upstream": call.upstream_name,
+                        "target": call.target_url,
+                        "error": str(exc),
+                    },
+                ) from exc
+            except (httpx.HTTPError, OSError) as exc:
+                log.warning(
+                    "dispatch.forward_failed",
+                    upstream=call.upstream_name,
+                    method=call.method,
+                    target=call.target_url,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                raise UpstreamUnavailable(
+                    f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                    details={
+                        "upstream": call.upstream_name,
+                        "target": call.target_url,
+                        "error": str(exc),
+                    },
+                ) from exc
 
         return Response(
             content=resp.content,
@@ -694,31 +775,54 @@ class Dispatcher:
         # We open the stream eagerly so connect errors surface as
         # UpstreamUnavailable instead of leaking through StreamingResponse
         # as a generator-time exception that confuses the error middleware.
-        try:
-            req = client.build_request(
-                call.method,
-                call.target_url,
-                content=call.body or None,
-                headers=call.headers,
-            )
-            resp = await client.send(req, stream=True)
-        except (httpx.HTTPError, OSError) as exc:
-            log.warning(
-                "dispatch.forward_stream_open_failed",
-                upstream=call.upstream_name,
-                method=call.method,
-                target=call.target_url,
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            raise UpstreamUnavailable(
-                f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
-                details={
-                    "upstream": call.upstream_name,
-                    "target": call.target_url,
-                    "error": str(exc),
-                },
-            ) from exc
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                req = client.build_request(
+                    call.method,
+                    call.target_url,
+                    content=call.body or None,
+                    headers=call.headers,
+                )
+                resp = await client.send(req, stream=True)
+                break
+            except _RECOVERABLE_TRANSPORT_ERRORS as exc:
+                if attempt == 1 and await self._recover_evicted_slot(call):
+                    continue
+                log.warning(
+                    "dispatch.forward_stream_open_failed",
+                    upstream=call.upstream_name,
+                    method=call.method,
+                    target=call.target_url,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                raise UpstreamUnavailable(
+                    f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                    details={
+                        "upstream": call.upstream_name,
+                        "target": call.target_url,
+                        "error": str(exc),
+                    },
+                ) from exc
+            except (httpx.HTTPError, OSError) as exc:
+                log.warning(
+                    "dispatch.forward_stream_open_failed",
+                    upstream=call.upstream_name,
+                    method=call.method,
+                    target=call.target_url,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                raise UpstreamUnavailable(
+                    f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                    details={
+                        "upstream": call.upstream_name,
+                        "target": call.target_url,
+                        "error": str(exc),
+                    },
+                ) from exc
 
         async def _iter() -> AsyncIterator[bytes]:
             try:

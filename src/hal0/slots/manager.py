@@ -727,6 +727,51 @@ class SlotManager:
         await self.unload(slot_name)
         return await self.load(slot_name)
 
+    async def recover_evicted_slot(self, slot_name: str) -> Slot:
+        """Resync a slot whose child died unexpectedly (Lemonade silent eviction).
+
+        The dispatcher calls this when ``_forward_direct`` hits a
+        ConnectError on a slot upstream — hal0's state.json said the
+        slot was READY but the upstream port is dead.  Two common cases
+        both land here:
+
+          - **Lemonade-initiated eviction** (idle/OOM/auto-evict-all):
+            lemond's ``loaded[]`` table no longer contains the model.
+            A bare ``/v1/load`` actually re-spawns the child.
+          - **Orphan process** (lemond's supervisor missed the death):
+            ``loaded[]`` still claims the model is loaded on a now-dead
+            PID/port.  A bare ``/v1/load`` is a no-op — lemond returns
+            success without re-spawning.  The slot stays dead.
+
+        To cover both, we drive a full unload + load cycle: ``/v1/unload``
+        forces lemond to drop its ``loaded[]`` claim (and is a no-op
+        when the model is genuinely gone, per the LemonadeProvider
+        contract), then ``/v1/load`` actually re-spawns on the slot's
+        configured port.  The slot's per-method locks serialize concurrent
+        recoveries.
+
+        Best-effort: if ``unload()`` itself raises (rare — usually means
+        lemond is hard-down), we still try ``load()`` to give recovery
+        the best shot at succeeding.  A subsequent retry-time
+        ConnectError will surface as ``UpstreamUnavailable`` as before.
+        """
+        self._ensure_known(slot_name)
+        log.info("slot.recover_evicted_dispatched", extra={"slot": slot_name})
+        try:
+            await self.unload(slot_name)
+        except Exception as exc:
+            # Log but don't bail — load() may still succeed if lemond
+            # was just confused about state, not actually broken.
+            log.warning(
+                "slot.recover_unload_failed",
+                extra={
+                    "slot": slot_name,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+        return await self.load(slot_name)
+
     async def start(self, slot_name: str) -> Slot:
         """Idempotent start.  Equivalent to load() when slot is offline.
 
