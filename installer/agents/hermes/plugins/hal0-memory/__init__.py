@@ -111,10 +111,15 @@ class Hal0MemoryProvider(MemoryProvider):
         return None
 
     def sync_turn(self, user: str, assistant: str, **_: Any) -> None:
+        # PR-1-bundle: do NOT send ``dataset=private:<agent>``. The MCP
+        # server-side ``_resolve_dataset`` rejects ``private:`` prefixes
+        # via ``_AGENT_ID_PATTERN`` and now resolves the dataset itself
+        # from ``X-hal0-Agent`` + ``X-hal0-Private: 1`` (server fix
+        # landed in PR #366). Sending the bogus dataset turned every
+        # ``sync_turn`` into a silent 4xx that lost durable memory.
         payload: dict[str, Any] = {
             "text": f"User: {user}\nAssistant: {assistant}",
             "tags": ["chat", "hermes"],
-            "dataset": f"private:{self._agent_id}",
         }
         if self._graph_cfg.get("enabled"):
             payload["graph"] = self._graph_cfg
