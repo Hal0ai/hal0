@@ -75,6 +75,26 @@ import './dash/extras.jsx'
 // the old monolith is already removed).
 import './dash/agents/personas-tab-hook-bridge'
 import './dash/agents/memory-tab-hook-bridge'
+// v0.3 PR-10: HermesChat surface — composer + transcript + sidecar over
+// the WS proxy from PR-9 (master plan §4 PR-10). The session store
+// + connection manager publishes on window via use-hermes-session.js;
+// markdown/bubble/tool/approval/thinking/transcript/composer/sidecar
+// each register on window via Object.assign at file bottom. Load order
+// matters: session store FIRST so the sidecar can read it, then the
+// leaf components, then transcript (which composes them), then composer
+// + sidecar, then hermes-chat-tab.jsx (which composes the whole grid).
+// Sidecar's TanStack-Query bridge publishes useMcpStatusPip onto window
+// BEFORE the sidecar evaluates.
+import './dash/agents/chat/sidecar-hook-bridge'
+import './dash/agents/chat/use-hermes-session.js'
+import './dash/agents/chat/markdown.jsx'
+import './dash/agents/chat/message-bubble.jsx'
+import './dash/agents/chat/tool-call-card.jsx'
+import './dash/agents/chat/approval-card.jsx'
+import './dash/agents/chat/thinking-indicator.jsx'
+import './dash/agents/chat/transcript.jsx'
+import './dash/agents/chat/composer.jsx'
+import './dash/agents/chat/hermes-sidecar.jsx'
 import './dash/agents/hermes-chat-tab.jsx'
 import './dash/agents/personas-tab.jsx'
 import './dash/agents/skills-tab.jsx'
