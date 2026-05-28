@@ -90,6 +90,14 @@ dev = [
 
 [project.scripts]
 hal0 = "hal0.cli.main:app"
+# hal0-agent is the small subprocess wrapper invoked by the systemd
+# template ``hal0-agent@<id>.service`` (installer/systemd/). Kept as a
+# separate console script (not a ``hal0 agent shim`` subcommand) so the
+# unit's ExecStart points at a stable PATH binary instead of the full
+# typer-loaded ``hal0`` CLI surface. See ``src/hal0/cli/agent_shim.py``
+# for rationale and ``installer/systemd/hal0-agent@.service`` for the
+# unit that drives it.
+hal0-agent = "hal0.cli.agent_shim:main"
 
 [project.urls]
 Homepage = "https://hal0.dev"

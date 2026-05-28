@@ -1,0 +1,99 @@
+[Unit]
+# hal0 bundled-agent template — instance `%i` is the agent id
+# (e.g. `systemctl start hal0-agent@hermes.service` → agent id "hermes").
+#
+# v0.4-ready: a future `hal0-agent@piccoder.service` is a drop-in with
+# a per-instance override under hal0-agent@piccoder.service.d/.
+Description=hal0 agent (%i)
+Documentation=https://github.com/Hal0ai/hal0/blob/main/docs/agents/hermes/SERVICE.md
+
+# Soft-link to lemonade — `Wants=` not `Requires=` / `BindsTo=` per
+# DA-sec-ops MUST-FIX #5 in docs/internal/hermes-research-2026-05-28.
+# Lemonade has a known GPU-cleanup-after-unload deadlock (see
+# auto-memory `hal0_lemonade_unload_gpu_cleanup_hang`): NRestarts=0,
+# port stays open, /api/v1/health times out forever.
+#
+# With `BindsTo=` the agent would stay "active (running)" forever even
+# though chat is dead. With `Wants=` we still START with lemonade but
+# survive its later death — and our own `WatchdogSec=` below lets
+# systemd notice when the AGENT process is the one that's hung.
+Wants=hal0-lemonade.service
+After=hal0-lemonade.service network-online.target
+
+# Throttle the restart loop. 5 starts in 120s = a real persistent
+# failure; back off rather than burn cycles.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+# Type=notify + WatchdogSec=60 means the shim MUST emit
+# `READY=1` once `/api/health` responds, then `WATCHDOG=1` at least
+# every 60s thereafter. If either drops, systemd restarts us.
+# See `src/hal0/cli/agent_shim.py` `cmd_serve` for the impl.
+Type=notify
+
+# Same posture as hal0-api / hal0-lemonade — run as the hal0 user
+# created by the installer. `User=` is overridable via drop-in for
+# agents that need different privileges (none today).
+User=hal0
+Group=hal0
+
+# `HAL0_AGENT_ID=%i` lets the shim resolve which agent toml to read
+# without parsing argv twice (argv carries it too, but env is what
+# our `_find_child_pids` scan keys off when finding stuck children).
+Environment="HAL0_AGENT_ID=%i"
+# Per-instance env — drop-in scripts may write
+# `/etc/hal0/agents/%i.env` to override HERMES_HOME / model defaults
+# / etc. Leading `-` so a missing file isn't fatal on first boot
+# (the shim has builtin fallbacks).
+EnvironmentFile=-/etc/hal0/agents/%i.env
+
+# ExecStart uses `hal0-agent`, which translates `serve` into
+# `hermes dashboard --tui --skip-build --no-open --host 127.0.0.1`.
+#
+# We DELIBERATELY do NOT call `hermes mcp serve`. That subcommand
+# starts a query-only MCP server with no `/api/events`, `/api/pty`,
+# or `/api/ws` and no JSON-RPC event stream — the hal0 chat surface
+# (PR-9 / PR-10) would render nothing.
+#
+# Rationale + line refs are in `src/hal0/cli/agent_shim.py`
+# `_build_hermes_argv` and DA-sec-ops MUST-FIX #1 in
+# `docs/internal/hermes-research-2026-05-28/plans/da-sec-ops.md`.
+ExecStart=/usr/local/bin/hal0-agent %i serve
+ExecStop=/usr/local/bin/hal0-agent %i stop
+
+# `on-failure` — don't restart on a clean SIGTERM (manual stop),
+# DO restart on a crash or watchdog timeout.
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=15
+WatchdogSec=60
+
+# Sandboxing. Together these block ~all the privilege-escalation
+# vectors a buggy/compromised agent plugin could try without
+# breaking Hermes's legitimate writes to its HOME, run dir, and log.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+
+# Carve out the exact paths Hermes + hal0 need to write to under the
+# `ProtectSystem=strict` lockdown. /run/hal0 is for sockets, lock
+# files, and the agent's NOTIFY_SOCKET helpers.
+ReadWritePaths=/var/lib/hal0 /var/log/hal0 /run/hal0
+
+# Stream stdout/stderr into journald with a per-instance identifier
+# so `journalctl -u hal0-agent@hermes` / `-t hal0-agent@hermes` both
+# work and the dashboard footer-journal can filter by tag.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hal0-agent@%i
+
+[Install]
+WantedBy=multi-user.target
