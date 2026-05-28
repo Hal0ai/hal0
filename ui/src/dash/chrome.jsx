@@ -166,6 +166,20 @@ function Sidebar({ route, onGo }) {
         ))}
       </div>
       <div className="sb-spacer" />
+      {/*
+        v0.3 PR-6 — SidebarAgentBlock lives ABOVE the lemond status block
+        per master-plan §4 PR-6 + p4-dashboard-refactor PR-A. The agent
+        rollup gets first vertical real-estate (operators care about
+        approvals/personas at a glance more than lemond version) and
+        lemond stays as the runtime anchor below it.
+
+        Component lives in ui/src/dash/agents/sidebar-agent-block.jsx
+        and publishes itself on window via Object.assign — main.tsx
+        imports it BEFORE chrome.jsx so the reference here resolves.
+      */}
+      {typeof window !== "undefined" && window.SidebarAgentBlock && (
+        <window.SidebarAgentBlock onGo={onGo} />
+      )}
       <SidebarStatusBlock onGo={onGo} />
     </div>
   );
