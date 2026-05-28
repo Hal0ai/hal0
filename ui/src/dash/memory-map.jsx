@@ -170,3 +170,256 @@ export function useMemoryMapModel() {
     loading: hw.isLoading || stats.isLoading || slotsQ.isLoading || pveSettings.isLoading,
   }
 }
+
+// ── Render helpers ─────────────────────────────────────────────────────
+
+function colorForDevice(device) {
+  if (device === 'npu') return 'var(--dev-npu)'
+  if (device === 'cpu') return 'var(--dev-cpu)'
+  if (device === 'vulkan') return 'var(--dev-vulkan)'
+  return 'var(--dev-rocm)'
+}
+
+function fmtGb(n) {
+  if (n == null) return '—'
+  if (n < 1) return `${(n * 1024).toFixed(0)} MB`
+  return `${n.toFixed(1)} GB`
+}
+
+function PctSeg({ widthPct, color, title }) {
+  if (widthPct <= 0) return null
+  return <i style={{ width: `${widthPct}%`, background: color }} title={title} />
+}
+
+function HeadroomLabel({ availableGb, limitedBy }) {
+  return (
+    <div className="memmap-headroom mono">
+      Headroom for new models:&nbsp;
+      <b>{fmtGb(availableGb)}</b>
+      <span className="dim">&nbsp;— limited by {limitedBy}</span>
+    </div>
+  )
+}
+
+function PveNudge({ hint, onConfigure }) {
+  return (
+    <div
+      className="memmap-pve-nudge mono"
+      role="status"
+      style={{
+        color: 'var(--warn)',
+        borderTop: '1px solid rgba(255,180,60,0.22)',
+        padding: '6px 8px',
+        marginTop: 6,
+        fontSize: 11,
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+      }}
+    >
+      <span>⚠ Hosted on Proxmox — host pressure unknown.</span>
+      <a
+        href="#settings/proxmox"
+        onClick={(e) => {
+          if (onConfigure) {
+            e.preventDefault()
+            onConfigure()
+          }
+        }}
+      >
+        Configure →
+      </a>
+    </div>
+  )
+}
+
+function SidebarBar({ model }) {
+  const { pool, self } = model
+  const total = pool.totalGb || 1
+  const pct = (gb) => (gb / total) * 100
+  const segs = self.slots.filter((s) => s.bytesGb > 0)
+  return (
+    <div className="memmap-bar">
+      {segs.map((s) => (
+        <PctSeg
+          key={s.name}
+          widthPct={pct(s.bytesGb)}
+          color={colorForDevice(s.device)}
+          title={`${s.name} · ${fmtGb(s.bytesGb)}`}
+        />
+      ))}
+      {self.otherRamGb > 0 && (
+        <PctSeg
+          widthPct={pct(self.otherRamGb)}
+          color="var(--fg-5)"
+          title={`other RAM · ${fmtGb(self.otherRamGb)}`}
+        />
+      )}
+      <PctSeg
+        widthPct={Math.max(
+          0,
+          100 - pct(self.gttUsedGb + self.ramUsedGb + self.npuModelGb),
+        )}
+        color="var(--bg-4)"
+        title="free"
+      />
+    </div>
+  )
+}
+
+function HostBar({ model }) {
+  const { host, self } = model
+  if (host.mode !== 'configured') return null
+  const total = host.totalGb || 1
+  const pct = (gb) => (gb / total) * 100
+  return (
+    <div className="memmap-bar memmap-bar-host">
+      <PctSeg
+        widthPct={pct(self.selfShareGb)}
+        color="var(--accent)"
+        title={`this hal0 LXC · ${fmtGb(self.selfShareGb)}`}
+      />
+      <PctSeg
+        widthPct={pct(host.othersGb)}
+        color="var(--mem-tenant-1, var(--fg-5))"
+        title={`other tenants · ${fmtGb(host.othersGb)}`}
+      />
+      <PctSeg
+        widthPct={Math.max(0, 100 - pct(self.selfShareGb + host.othersGb))}
+        color="var(--bg-4)"
+        title="host free"
+      />
+    </div>
+  )
+}
+
+function LegendRow({ swatch, name, sub, sz }) {
+  return (
+    <div className="ln mono">
+      <span className="sw" style={{ background: swatch }} />
+      <span className="name">{name}</span>
+      {sub && <span className="dim" style={{ marginLeft: 6 }}>{sub}</span>}
+      <span className="sz">{fmtGb(sz)}</span>
+    </div>
+  )
+}
+
+export function MemoryMap({ variant = 'sidebar', onConfigure }) {
+  const model = useMemoryMapModel()
+  const { pool, host, self, headroom, loading } = model
+  const total = pool.totalGb
+  const usedSelf = round1(self.ramUsedGb + self.gttUsedGb + self.npuModelGb)
+  const free = Math.max(0, round1(total - usedSelf))
+
+  if (variant === 'expanded') {
+    return (
+      <div className="card memmap-expanded" data-loading={loading || undefined}>
+        <div className="vh">
+          <h2>Memory map</h2>
+          <span className="mono dim">
+            {pool.kind} {fmtGb(total)} · {pool.platformLabel}
+            {host.mode === 'configured' && host.totalGb && ` · host ${fmtGb(host.totalGb)}`}
+          </span>
+        </div>
+
+        {host.mode === 'configured' && (
+          <>
+            <div className="memmap-h mono">
+              <span>host pool</span>
+              <span><b>{fmtGb(host.freeGb)}</b> free on host</span>
+            </div>
+            <HostBar model={model} />
+          </>
+        )}
+
+        <div className="memmap-h mono">
+          <span>inside this hal0</span>
+          <span><b>{fmtGb(free)}</b> free in pool</span>
+        </div>
+        <SidebarBar model={model} />
+
+        <div className="memmap-legend memmap-legend-expanded">
+          {self.slots.map((s) => (
+            <LegendRow
+              key={s.name}
+              swatch={colorForDevice(s.device)}
+              name={s.name}
+              sub={`${s.device}${s.approx ? ' · ≈' : ''}${s.modelId ? ' · ' + s.modelId : ''}`}
+              sz={s.bytesGb}
+            />
+          ))}
+          {self.otherRamGb > 0 && (
+            <LegendRow swatch="var(--fg-5)" name="other RAM" sz={self.otherRamGb} />
+          )}
+          <LegendRow swatch="var(--bg-4)" name="free" sz={free} />
+          {host.mode === 'configured' &&
+            (host.tenants || []).map((t) => (
+              <LegendRow
+                key={`t-${t.vmid}`}
+                swatch="var(--mem-tenant-1, var(--fg-5))"
+                name={`${t.name} (${t.type})`}
+                sub={`vmid ${t.vmid}`}
+                sz={t.memGb}
+              />
+            ))}
+        </div>
+
+        <HeadroomLabel availableGb={headroom.availableGb} limitedBy={headroom.limitedBy} />
+        {host.mode === 'detected_unconfigured' && (
+          <PveNudge hint={host.hint} onConfigure={onConfigure} />
+        )}
+      </div>
+    )
+  }
+
+  // ── sidebar variant ──
+  return (
+    <div className="side-card memmap-sidebar">
+      <div className="side-card-h">
+        <span>Memory map</span>
+        <span className="right mono">
+          {fmtGb(usedSelf)} / {fmtGb(total)}
+        </span>
+      </div>
+      <div className="side-card-b">
+        <div className="memmap">
+          {host.mode === 'configured' && (
+            <div className="memmap-h mono">
+              <span>host {host.tenants?.length ?? 0} tenants</span>
+              <span><b>{fmtGb(host.freeGb)}</b> host free</span>
+            </div>
+          )}
+          <div className="memmap-h mono">
+            <span>{pool.kind} ram</span>
+            <span><b>{fmtGb(free)}</b> free</span>
+          </div>
+          <SidebarBar model={model} />
+          <div className="memmap-legend">
+            {self.slots.map((s) => (
+              <LegendRow
+                key={s.name}
+                swatch={colorForDevice(s.device)}
+                name={s.name}
+                sz={s.bytesGb}
+              />
+            ))}
+            {self.otherRamGb > 0 && (
+              <LegendRow swatch="var(--fg-5)" name="other" sz={self.otherRamGb} />
+            )}
+            <LegendRow swatch="var(--bg-4)" name="free" sz={free} />
+          </div>
+          <HeadroomLabel
+            availableGb={headroom.availableGb}
+            limitedBy={headroom.limitedBy}
+          />
+          {host.mode === 'detected_unconfigured' && (
+            <PveNudge hint={host.hint} onConfigure={onConfigure} />
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Window export keeps parity with dashboard.jsx's debug exports.
+Object.assign(window, { MemoryMap, useMemoryMapModel })
