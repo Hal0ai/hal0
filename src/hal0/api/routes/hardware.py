@@ -352,7 +352,17 @@ async def stats_hardware(request: Request) -> dict[str, Any]:
                         f"Proxmox host integration recovered ({full.get('node', '?')})",
                         data={"node": full.get("node")},
                     )
-        primary["host"] = pve.project_slim(full)
+        slim = pve.project_slim(full)
+        # When unconfigured, also fold in best-effort detection so the
+        # dashboard can render a "Configure Proxmox →" nudge.
+        if not slim.get("configured"):
+            state = pve.detect_proxmox_host()
+            detected = state == pve.PveDetectionState.DETECTED
+            slim = {"configured": False, "detected": detected}
+            if detected:
+                slim["detection"] = state.value
+                slim["hint"] = "Configure /etc/hal0/proxmox.json to see host pressure."
+        primary["host"] = slim
 
     primary["per_upstream"] = per_upstream
     primary["upstream_names"] = list(per_upstream.keys())

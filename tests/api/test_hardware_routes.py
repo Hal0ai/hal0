@@ -7,6 +7,10 @@ silently regress the dashboard.
 
 from __future__ import annotations
 
+import pytest
+from fastapi.testclient import TestClient
+
+import hal0.hardware.pve as pve_mod
 from hal0.api.routes.hardware import _flatten_for_ui, _platform_label
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 
@@ -91,3 +95,49 @@ def test_platform_label_for_known_strings() -> None:
     assert _platform_label("proxmox-kvm", {}) == "Proxmox VM (KVM)"
     assert _platform_label("lxc", {}) == "Linux container (LXC)"
     assert _platform_label("nonsense-value", {}) == "Unknown platform"
+
+
+class TestHostDetectionInStatsHardware:
+    """When proxmox.json is missing, /api/stats/hardware surfaces detection
+    state so the dashboard's MemoryMap can render a Configure → nudge."""
+
+    def test_unconfigured_detected_includes_detection_hint(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No proxmox.json → _load_pve_config returns None.
+        monkeypatch.setattr(pve_mod, "_load_pve_config", lambda: None)
+        monkeypatch.setattr(
+            pve_mod,
+            "detect_proxmox_host",
+            lambda: pve_mod.PveDetectionState.DETECTED,
+        )
+        # Avoid pve_status cache flake across tests.
+        pve_mod.invalidate_pve_cache()
+        resp = client.get("/api/stats/hardware")
+        assert resp.status_code == 200
+        host = resp.json()["host"]
+        assert host == {
+            "configured": False,
+            "detected": True,
+            "detection": "detected",
+            "hint": ("Configure /etc/hal0/proxmox.json to see host pressure."),
+        }
+
+    def test_unconfigured_not_detected_stays_silent(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(pve_mod, "_load_pve_config", lambda: None)
+        monkeypatch.setattr(
+            pve_mod,
+            "detect_proxmox_host",
+            lambda: pve_mod.PveDetectionState.NOT_DETECTED,
+        )
+        pve_mod.invalidate_pve_cache()
+        resp = client.get("/api/stats/hardware")
+        assert resp.status_code == 200
+        host = resp.json()["host"]
+        # Bare-metal — keep the legacy single-key shape so older code that
+        # checks `host.configured` still works, but add `detected: false`
+        # so the UI's shape-discriminator branch (configured vs detected vs
+        # off) stays consistent.
+        assert host == {"configured": False, "detected": False}
