@@ -93,6 +93,27 @@ export interface McpCallEvent {
   server?: string
 }
 
+// ── Manifest resolve (#224) ─────────────────────────────────────────
+//
+// Shape mirrors `hal0.mcp.manifest.ResolvedManifest`. The InstallDrawer
+// reads `name`, `description`, `tools`, `transport`, and the truthiness
+// of `env_required` to render the preview card.
+export interface ResolvedMcpManifest {
+  id: string
+  name: string
+  description: string
+  spec: string
+  transport: string
+  tools: number
+  resources: number
+  prompts: number
+  env_required: string[]
+  source_kind: string
+  source_url?: string | null
+  author: string
+  verified: boolean
+}
+
 // ─── Mock fallbacks ─────────────────────────────────────────────────
 //
 // Shapes mirror what the backend returns (post-normalisation) so a
@@ -343,31 +364,16 @@ export function useMcpCallStream(): CallStreamState {
   return state
 }
 
-// ─── Mutations (501-stub aware) ─────────────────────────────────────
+// ─── Mutations ──────────────────────────────────────────────────────
+//
+// install / uninstall / config-patch are real as of #305. The action
+// stub (start/stop/restart) still 501s pending the supervisor
+// follow-up; useMcpRestart catches that case + surfaces a toast so the
+// button doesn't look broken.
 
-function _toastNotImplemented(verb: string): void {
+function _toast(verb: string, tone: 'info' | 'warn' | 'err' = 'info'): void {
   if (typeof window !== 'undefined' && (window as any).__hal0Toast) {
-    ;(window as any).__hal0Toast(
-      `MCP ${verb} pending ADR-0013 client-side work (#206)`,
-      'warn',
-    )
-  }
-}
-
-function _wrapMutation<TArgs>(
-  fn: (args: TArgs) => Promise<unknown>,
-  verb: string,
-) {
-  return async (args: TArgs) => {
-    try {
-      return await fn(args)
-    } catch (err) {
-      if (err instanceof Hal0Error && err.status === 501) {
-        _toastNotImplemented(verb)
-        return null
-      }
-      throw err
-    }
+    ;(window as any).__hal0Toast(verb, tone)
   }
 }
 
@@ -378,14 +384,33 @@ function _invalidator(queryClient: ReturnType<typeof useQueryClient>) {
   }
 }
 
+export interface McpInstallBody {
+  /** Original URL/spec the operator pasted. */
+  url?: string
+  /** Pre-resolved manifest (round-tripped from `useMcpResolve`). */
+  manifest?: ResolvedMcpManifest
+}
+
 export function useMcpInstall() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: _wrapMutation(
-      (body: Record<string, unknown>) =>
-        api(ENDPOINTS.mcpInstall, { method: 'POST', body, raw: true }),
-      'install',
-    ),
+    mutationFn: async (body: McpInstallBody) => {
+      try {
+        const resp = await api(ENDPOINTS.mcpInstall, {
+          method: 'POST',
+          body: body as unknown as Record<string, unknown>,
+          raw: true,
+        })
+        const name = body.manifest?.name || body.url || 'server'
+        _toast(`Installed ${name}`, 'info')
+        return resp
+      } catch (err) {
+        if (err instanceof Hal0Error) {
+          _toast(`Install failed — ${err.message}`, 'warn')
+        }
+        throw err
+      }
+    },
     onSuccess: _invalidator(qc),
   })
 }
@@ -393,11 +418,21 @@ export function useMcpInstall() {
 export function useMcpUninstall() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: _wrapMutation(
-      (id: string) =>
-        api(ENDPOINTS.mcpServer(id), { method: 'DELETE', raw: true }),
-      'uninstall',
-    ),
+    mutationFn: async (id: string) => {
+      try {
+        const resp = await api(ENDPOINTS.mcpServer(id), {
+          method: 'DELETE',
+          raw: true,
+        })
+        _toast(`Uninstalled ${id}`, 'info')
+        return resp
+      } catch (err) {
+        if (err instanceof Hal0Error) {
+          _toast(`Uninstall failed — ${err.message}`, 'warn')
+        }
+        throw err
+      }
+    },
     onSuccess: _invalidator(qc),
   })
 }
@@ -405,14 +440,23 @@ export function useMcpUninstall() {
 export function useMcpRestart() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: _wrapMutation(
-      (id: string) =>
-        api(ENDPOINTS.mcpServerAction(id, 'restart'), {
+    mutationFn: async (id: string) => {
+      try {
+        return await api(ENDPOINTS.mcpServerAction(id, 'restart'), {
           method: 'POST',
           raw: true,
-        }),
-      'restart',
-    ),
+        })
+      } catch (err) {
+        if (err instanceof Hal0Error && err.status === 501) {
+          _toast(
+            'MCP restart pending supervisor follow-up to #305',
+            'warn',
+          )
+          return null
+        }
+        throw err
+      }
+    },
     onSuccess: _invalidator(qc),
   })
 }
@@ -420,16 +464,47 @@ export function useMcpRestart() {
 export function useMcpConfigPatch() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: _wrapMutation(
-      ({ id, body }: { id: string; body: Record<string, unknown> }) =>
-        api(ENDPOINTS.mcpServerConfig(id), {
+    mutationFn: async ({ id, body }: { id: string; body: Record<string, unknown> }) => {
+      try {
+        const resp = await api(ENDPOINTS.mcpServerConfig(id), {
           method: 'PATCH',
           body,
           raw: true,
-        }),
-      'config write',
-    ),
+        })
+        _toast(`Saved ${id} config`, 'info')
+        return resp
+      } catch (err) {
+        if (err instanceof Hal0Error) {
+          _toast(`Config save failed — ${err.message}`, 'warn')
+        }
+        throw err
+      }
+    },
     onSuccess: _invalidator(qc),
+  })
+}
+
+// ── Manifest resolver (#224) ────────────────────────────────────────
+//
+// Query the live `/api/mcp/resolve?url=…` endpoint and surface the
+// resolved manifest preview to the InstallDrawer's URL tab. Disabled
+// when `url` is empty so the operator only triggers a network call
+// once they've pasted something. 30 s cache keeps multiple toggles
+// of the same paste cheap.
+
+export function useMcpResolve(url: string | null | undefined) {
+  return useQuery({
+    queryKey: ['mcp', 'resolve', url || ''],
+    queryFn: async (): Promise<ResolvedMcpManifest> => {
+      const q = String(url || '').trim()
+      if (!q) throw new Error('url is required')
+      return await apiGet<ResolvedMcpManifest>(
+        `${ENDPOINTS.mcpResolve}?url=${encodeURIComponent(q)}`,
+      )
+    },
+    enabled: !!url && String(url).trim().length > 0,
+    retry: false,
+    staleTime: 30_000,
   })
 }
 

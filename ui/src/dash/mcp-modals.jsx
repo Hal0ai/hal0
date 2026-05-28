@@ -1,7 +1,7 @@
 // hal0 v0.3 — MCP modals & drawers
 // InstallDrawer (catalog), EditConfigModal, LogsDrawer, ConnectClientModal
 
-import { useMcpCatalog, useMcpServerLogs, useMcpConfigPatch } from '@/api/hooks/useMcp';
+import { useMcpCatalog, useMcpServerLogs, useMcpConfigPatch, useMcpResolve } from '@/api/hooks/useMcp';
 
 const { useState: useStateMM, useMemo: useMemoMM, useEffect: useEffectMM } = React;
 
@@ -106,6 +106,16 @@ function InstallDrawer({ open, onClose, onInstall }) {
 function InstallFromUrl({ onInstall }) {
   const [url, setUrl] = useStateMM("");
   const [pasted, setPasted] = useStateMM(false);
+  // Debounce the resolve query — typing a URL char-by-char would
+  // otherwise hammer /api/mcp/resolve. 350 ms feels live but spares the
+  // backend the unfinished-paste storm.
+  const [debouncedUrl, setDebouncedUrl] = useStateMM("");
+  useEffectMM(() => {
+    const id = setTimeout(() => setDebouncedUrl(url.trim()), 350);
+    return () => clearTimeout(id);
+  }, [url]);
+  const resolveQ = useMcpResolve(pasted ? debouncedUrl : "");
+  const resolved = resolveQ.data;
 
   const examples = [
     { label: "OCI image",   v: "oci://ghcr.io/example/mcp-something:latest" },
@@ -114,6 +124,20 @@ function InstallFromUrl({ onInstall }) {
     { label: "git repo",    v: "git+https://github.com/example/mcp-things" },
     { label: "manifest",    v: "https://example.com/mcp.json" },
   ];
+
+  const transportLine = resolved
+    ? `${resolved.transport} · via ${resolved.source_kind}`
+    : "—";
+  const toolsLine = resolved
+    ? `${resolved.tools} tool${resolved.tools === 1 ? "" : "s"}, ` +
+      `${resolved.resources} resource${resolved.resources === 1 ? "" : "s"}, ` +
+      `${resolved.prompts} prompt${resolved.prompts === 1 ? "" : "s"}.`
+    : "";
+  const envLine = resolved
+    ? (resolved.env_required && resolved.env_required.length > 0
+        ? `Requires env: ${resolved.env_required.join(", ")}.`
+        : "No env vars required.")
+    : "";
 
   return (
     <div className="mcp-install-url">
@@ -135,21 +159,40 @@ function InstallFromUrl({ onInstall }) {
       </div>
 
       {pasted && url && (
-        <div className="mcp-install-url-preview">
+        <div className="mcp-install-url-preview" data-testid="mcp-install-url-preview">
           <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.08em"}}>resolved manifest</div>
           <div className="mcp-install-url-card">
-            <div style={{display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4}}>
-              <span className="mono" style={{fontSize: 14, color: "var(--fg)", fontWeight: 500}}>mcp-things</span>
-              <span className="mono" style={{fontSize: 10, color: "var(--fg-4)"}}>v0.1.0 · stdio</span>
-            </div>
-            <div style={{fontSize: 12, color: "var(--fg-3)", marginBottom: 10}}>Manifest fetched. 5 tools, 0 resources, 0 prompts. No env vars required.</div>
-            <div className="mono" style={{fontSize: 10.5, color: "var(--fg-4)", padding: 8, background: "var(--bg)", borderRadius: "var(--rad-sm)", border: "1px solid var(--line)"}}>
-              hal0 will spawn this server under its supervisor and add it to the list below.
-            </div>
+            {resolveQ.isLoading || resolveQ.isFetching ? (
+              <div className="mono" style={{fontSize: 12, color: "var(--fg-4)"}}>Resolving manifest…</div>
+            ) : resolveQ.isError ? (
+              <div className="mono" style={{fontSize: 12, color: "var(--err, #c66)"}}>
+                Could not resolve: {String(resolveQ.error?.message || "unknown error")}
+              </div>
+            ) : resolved ? (
+              <>
+                <div style={{display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4}}>
+                  <span className="mono" data-testid="mcp-install-resolved-name" style={{fontSize: 14, color: "var(--fg)", fontWeight: 500}}>{resolved.name}</span>
+                  <span className="mono" style={{fontSize: 10, color: "var(--fg-4)"}}>{transportLine}</span>
+                </div>
+                {resolved.description && (
+                  <div style={{fontSize: 12, color: "var(--fg-2)", marginBottom: 6}} data-testid="mcp-install-resolved-desc">{resolved.description}</div>
+                )}
+                <div style={{fontSize: 12, color: "var(--fg-3)", marginBottom: 10}} data-testid="mcp-install-resolved-tools">{toolsLine} {envLine}</div>
+                <div className="mono" style={{fontSize: 10.5, color: "var(--fg-4)", padding: 8, background: "var(--bg)", borderRadius: "var(--rad-sm)", border: "1px solid var(--line)"}}>
+                  hal0 will add <span style={{color: "var(--fg-2)"}}>{resolved.id}</span> to its installed servers. The supervisor follow-up will spawn it; until then it lists as stopped.
+                </div>
+              </>
+            ) : (
+              <div className="mono" style={{fontSize: 12, color: "var(--fg-4)"}}>Paste a URL to see the resolved manifest.</div>
+            )}
           </div>
           <div style={{display: "flex", gap: 8, marginTop: 12, justifyContent: "flex-end"}}>
             <button className="btn ghost sm" onClick={() => { setUrl(""); setPasted(false); }}>Cancel</button>
-            <button className="btn sm" onClick={() => onInstall({ name: "mcp-things" })}>Install</button>
+            <button
+              className="btn sm"
+              disabled={!resolved || resolveQ.isLoading || resolveQ.isFetching}
+              onClick={() => resolved && onInstall({ manifest: resolved })}
+            >Install</button>
           </div>
         </div>
       )}

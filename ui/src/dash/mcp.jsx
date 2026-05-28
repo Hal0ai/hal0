@@ -13,66 +13,13 @@ import {
   useMcpUninstall,
 } from '@/api/hooks/useMcp'
 
-const { useState: useStateM, useEffect: useEffectM, useRef: useRefM, useMemo: useMemoM, useCallback: useCallbackM } = React;
+const { useState: useStateM, useEffect: useEffectM, useMemo: useMemoM } = React;
 
-// ─── Live activity bus ───────────────────────────────────────────────
-// Legacy local fake-stream — only used when the SSE hook returns no
-// rows AND the server list is the HAL0_DATA mock (so a stale build
-// without /api/mcp/stream still ticks the LiveTimeline visibly).
-// Production (issue #206) drives the timeline from useMcpCallStream.
-function useLiveCallStreamLocal(servers) {
-  const [now, setNow] = useStateM(Date.now());
-  const callsRef = useRefM({}); // serverId → [{ts, client, tool}]
-  const CLIENTS = ["claude-code", "cursor", "claude-desktop"];
-  const TOOLS = {
-    "hal0-admin":      ["slot.list", "slot.restart", "model.search", "journal.tail", "lemond.status"],
-    "hal0-memory":     ["recall", "write", "ns.list", "graph.query", "doc.add"],
-    "filesystem":      ["read_file", "write_file", "list_directory", "grep", "stat"],
-    "github":          ["repo.read", "search.code", "issue.list", "pr.diff", "actions.run"],
-    "postgres":        ["query", "schema.tables", "explain", "describe"],
-    "obsidian-vault":  [],
-    "brave-search":    [],
-    "timed-reminders": [],
-  };
-
-  useEffectM(() => {
-    let raf;
-    let alive = true;
-    const tick = () => {
-      if (!alive) return;
-      const t = Date.now();
-      const next = { ...callsRef.current };
-      servers.forEach(s => {
-        if (s.state !== "running") return;
-        const rpm = s.activity?.rpm || 0;
-        // probability per 500ms tick: rpm / 60 / 2
-        const p = rpm / 120;
-        if (Math.random() < p) {
-          const tools = TOOLS[s.id] || ["call"];
-          const clients = s.clients?.length ? s.clients : CLIENTS;
-          const arr = next[s.id] ? [...next[s.id]] : [];
-          arr.push({
-            ts: t,
-            client: clients[Math.floor(Math.random() * clients.length)],
-            tool: tools[Math.floor(Math.random() * tools.length)] || "call",
-          });
-          next[s.id] = arr;
-        }
-      });
-      // garbage-collect calls older than 60s
-      Object.keys(next).forEach(id => {
-        next[id] = next[id].filter(c => t - c.ts < 60000);
-      });
-      callsRef.current = next;
-      setNow(t);
-      raf = setTimeout(tick, 500);
-    };
-    raf = setTimeout(tick, 500);
-    return () => { alive = false; clearTimeout(raf); };
-  }, [servers]);
-
-  return { calls: callsRef.current, now };
-}
+// Live MCP call activity is driven entirely by the backend SSE stream
+// at ``/api/mcp/stream`` (issue #222). No synthetic event generator
+// runs on the client — the LiveTimeline renders blank when no audit
+// rows have arrived, which is the truthful "no recent activity" state
+// against a freshly-started host.
 
 // ─── KPI strip — aggregate state across all servers ─────────────────
 function McpKpiStrip({ servers, clients, calls, now }) {
@@ -422,14 +369,13 @@ function McpView() {
   const [logsFor, setLogsFor] = useStateM(null);
   const [confirmUninstall, setConfirmUninstall] = useStateM(null);
   const [teachOpen, setTeachOpen] = useStateM(false);
-  // SSE-backed call stream. Falls back to the local randomised stream
-  // when no live events have arrived AND we're rendering the HAL0_DATA
-  // mock list, so the demo timeline still ticks visibly.
+  // SSE-backed call stream. The hook maintains a 60-second sliding
+  // buffer keyed by server id; the LiveTimeline renders ticks straight
+  // from that buffer. No synthetic fallback — when the backend audit
+  // log is silent, the timeline stays blank.
   const sseStream = useMcpCallStream();
-  const localStream = useLiveCallStreamLocal(liveServers.length === 0 ? servers : []);
-  const hasLiveCalls = Object.values(sseStream.calls).some(arr => arr && arr.length > 0);
-  const calls = hasLiveCalls ? sseStream.calls : (liveServers.length === 0 ? localStream.calls : sseStream.calls);
-  const now = hasLiveCalls ? sseStream.now : (liveServers.length === 0 ? localStream.now : sseStream.now);
+  const calls = sseStream.calls;
+  const now = sseStream.now;
   const restartMut = useMcpRestart();
   const uninstallMut = useMcpUninstall();
 
@@ -752,7 +698,14 @@ function InstallDrawerWired({ open, onClose }) {
       open={open}
       onClose={onClose}
       onInstall={(item) => {
-        installMut.mutate({ name: item.name, spec: item.id || item.name });
+        // The drawer hands us either a catalog row (with `spec`) or a
+        // resolved-manifest payload (with `manifest`). The install hook
+        // tolerates both shapes — backend re-resolves a bare `url`,
+        // or trusts the `manifest` round-trip when supplied.
+        const body = item.manifest
+          ? { manifest: item.manifest }
+          : { url: item.spec || item.id || item.name };
+        installMut.mutate(body);
         onClose();
       }}
     />

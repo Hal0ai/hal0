@@ -79,6 +79,7 @@ export const ENDPOINTS = {
   mcpClients: '/api/mcp/clients',
   mcpCatalog: '/api/mcp/catalog',
   mcpStream: '/api/mcp/stream',
+  mcpResolve: '/api/mcp/resolve',
   mcpInstall: '/api/mcp/install',
   mcpServer: (id: string) => `/api/mcp/${encodeURIComponent(id)}`,
   mcpServerLogs: (id: string) => `/api/mcp/${encodeURIComponent(id)}/logs`,

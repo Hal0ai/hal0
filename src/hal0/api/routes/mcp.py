@@ -1,31 +1,30 @@
-"""MCP introspection routes (mounted under ``/api/mcp``).
+"""MCP introspection + lifecycle routes (mounted under ``/api/mcp``).
 
-Issue #206 — wires the v3 dashboard's ``/agents/mcp`` page to the live
-backend. Surfaces a read-only view of the MCP servers hal0 hosts (the
-two bundled servers built by :mod:`hal0.mcp.admin` + :mod:`hal0.mcp.memory`),
-the clients currently using them (derived from the ``hal0.mcp.audit``
-journald stream), a static catalog of installable MCPs, and a Server-
-Sent-Events tail of tool invocations.
-
-Out of scope (ADR-0013 ``mcp_client.py`` work):
-  - install / uninstall / restart / config-write — these stub with 501
-    so the dashboard can render the toast hint without the routes being
-    absent. The actual lifecycle work owns a separate follow-up PR.
+Issue #206 wired the v3 dashboard's ``/agents/mcp`` page to the live
+backend; issue #305 swaps the 501 stubs for real install / uninstall /
+config-patch handlers backed by :mod:`hal0.mcp.installed` + the
+manifest resolver in :mod:`hal0.mcp.manifest`.
 
 Endpoints
 ---------
 
 ::
 
-    GET  /api/mcp/servers            — list hosted MCP servers
-    GET  /api/mcp/clients            — connected clients (audit-derived)
-    GET  /api/mcp/catalog            — installable MCPs (static)
-    GET  /api/mcp/stream             — SSE of mcp.tool.* events
-    GET  /api/mcp/{id}/logs          — recent audit rows for one server
-    POST /api/mcp/install            — 501 (ADR-0013 follow-up)
-    DELETE /api/mcp/{id}             — 501 (ADR-0013 follow-up)
-    POST /api/mcp/{id}/{action}      — 501 (ADR-0013 follow-up)
-    PATCH /api/mcp/{id}/config       — 501 (ADR-0013 follow-up)
+    GET    /api/mcp/servers            — list hosted MCP servers (bundled + installed)
+    GET    /api/mcp/clients            — connected clients (audit-derived)
+    GET    /api/mcp/catalog            — installable MCPs (static)
+    GET    /api/mcp/resolve            — manifest preview from a URL/spec (#224)
+    GET    /api/mcp/stream             — SSE of mcp.tool.* events
+    GET    /api/mcp/{id}/logs          — recent audit rows for one server
+    POST   /api/mcp/install            — install from a resolved spec/URL (#305)
+    DELETE /api/mcp/{id}               — uninstall a user-installed server (#305)
+    PATCH  /api/mcp/{id}/config        — write env / enabled overrides (#305)
+    POST   /api/mcp/{id}/{action}      — start/stop/restart — stubs 501
+                                          pending the supervisor follow-up.
+
+Bundled servers (``hal0-admin``, ``hal0-memory``) are uninstall-protected;
+the route returns ``409 mcp.bundled`` rather than letting the registry
+file system shadow the in-process FastMCP mount.
 """
 
 from __future__ import annotations
@@ -42,20 +41,23 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
 from hal0 import __version__
-from hal0.errors import Hal0Error
+from hal0.errors import BadRequest, Conflict, Hal0Error
+from hal0.mcp import installed as installed_registry
+from hal0.mcp import manifest as manifest_resolver
 
 router = APIRouter()
 
 
-# ── 501 sentinel ─────────────────────────────────────────────────────────────
+# ── Action-stub sentinel ─────────────────────────────────────────────────────
 
 
 class McpNotImplemented(Hal0Error):
-    """Lifecycle mutations stub here until ADR-0013 lands.
+    """``POST /{id}/{action}`` still stubs here.
 
-    The dashboard surfaces a toast when these endpoints reply 501 — see
-    ``ui/src/api/hooks/useMcp.ts``. The error code is stable so the
-    toast text can branch on it instead of the (more brittle) message.
+    Install / uninstall / config-patch landed in #305; start / stop /
+    restart need the still-pending process-supervisor layer. The
+    dashboard surfaces a distinct toast on this code so operators can
+    tell ``install`` (works) from ``restart`` (not yet) apart.
     """
 
     code = "mcp.not_implemented"
@@ -80,6 +82,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 9,
         "stars": 2840,
         "category": "browser",
+        "spec": "npm:@modelcontextprotocol/server-puppeteer",
     },
     {
         "id": "sqlite",
@@ -90,6 +93,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 4,
         "stars": 1820,
         "category": "data",
+        "spec": "npm:@modelcontextprotocol/server-sqlite",
     },
     {
         "id": "gdrive",
@@ -100,6 +104,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 6,
         "stars": 1410,
         "category": "files",
+        "spec": "npm:@modelcontextprotocol/server-gdrive",
     },
     {
         "id": "slack",
@@ -110,6 +115,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 8,
         "stars": 990,
         "category": "comms",
+        "spec": "npm:@modelcontextprotocol/server-slack",
     },
     {
         "id": "linear",
@@ -120,6 +126,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 14,
         "stars": 720,
         "category": "issues",
+        "spec": "npm:@linear/mcp-server",
     },
     {
         "id": "exa-search",
@@ -130,6 +137,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 3,
         "stars": 540,
         "category": "search",
+        "spec": "npm:exa-mcp-server",
     },
     {
         "id": "homeassistant",
@@ -140,6 +148,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 11,
         "stars": 480,
         "category": "iot",
+        "spec": "npm:homeassistant-mcp",
     },
     {
         "id": "kubernetes",
@@ -150,6 +159,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 16,
         "stars": 920,
         "category": "ops",
+        "spec": "npm:mcp-server-kubernetes",
     },
     {
         "id": "todoist",
@@ -160,6 +170,7 @@ _CATALOG: list[dict[str, Any]] = [
         "tools": 6,
         "stars": 240,
         "category": "productivity",
+        "spec": "npm:todoist-mcp",
     },
 ]
 
@@ -338,6 +349,7 @@ async def list_servers(request: Request) -> dict[str, Any]:
     audit = await _read_audit_events(limit=500)
 
     items: list[dict[str, Any]] = []
+    # ── Bundled servers (live FastMCP introspection) ─────────────────────────
     for sid, server in servers_state.items():
         # SDK contract: ``list_tools/resources/prompts`` are async on
         # FastMCP. Wrap each in a try-block so a misbehaving server
@@ -387,6 +399,48 @@ async def list_servers(request: Request) -> dict[str, Any]:
                 "connected": connected,
                 "description": f"hal0 bundled {sid} MCP server (FastMCP, streamable-http).",
                 "provider": "hal0",
+            }
+        )
+
+    # ── User-installed servers (registry-derived) ────────────────────────────
+    #
+    # No supervisor yet (#305 ships the registry; supervision follows in a
+    # tracked issue). The route reports each installed server as
+    # ``state="stopped"`` so the dashboard renders it in the list +
+    # offers the config / uninstall affordances; the Start button is the
+    # action-stub 501 path that surfaces the "pending supervisor" toast.
+    for record in installed_registry.list_installed():
+        items.append(
+            {
+                "id": record.id,
+                "name": record.name,
+                "bundled": False,
+                # No supervisor yet → installed servers always start stopped;
+                # ``enabled`` is the operator's intent for when the supervisor
+                # arrives, not the current process state.
+                "state": "stopped",
+                "transport": record.transport,
+                "connect_url": _connect_url(request, record.id),
+                "pid": None,
+                "version": "0.0.0",
+                "tools": record.tools,
+                "resources": record.resources,
+                "prompts": record.prompts,
+                "activity": {"rpm": _activity_rpm(audit, record.id)},
+                "connected": sorted(
+                    {
+                        e["client_id"]
+                        for e in audit
+                        if e["client_id"] and e.get("server") == record.id
+                    }
+                ),
+                "description": record.description,
+                "provider": record.author,
+                "spec": record.spec,
+                "source_url": record.source_url,
+                "env": record.env,
+                "enabled": record.enabled,
+                "installed_at": record.installed_at,
             }
         )
 
@@ -584,40 +638,155 @@ async def server_logs(
     return {"server": server_id, "events": events, "count": len(events)}
 
 
-# ── 501 stubs (ADR-0013 follow-up) ──────────────────────────────────────────
+# ── Manifest resolve (#224) ─────────────────────────────────────────────────
 
 
-@router.post("/install")
-async def install_server(body: dict[str, Any]) -> dict[str, Any]:
-    """Stub — install/uninstall lifecycle lives in ADR-0013's mcp_client.py work."""
-    raise McpNotImplemented(
-        "MCP install pending ADR-0013 follow-up (#206)",
-        details={"requested": body},
+@router.get("/resolve")
+async def resolve_manifest(
+    request: Request,
+    url: str = Query(..., min_length=1, max_length=2048),
+) -> dict[str, Any]:
+    """Resolve a paste-box URL/spec to a manifest preview.
+
+    The InstallDrawer calls this once on paste to fill its preview card;
+    if the user clicks Install, the same URL/spec is replayed against
+    ``POST /api/mcp/install`` which re-resolves (so a manifest that
+    changed between paste + install still gets the latest data).
+
+    A test-only fetcher can be injected via
+    ``request.app.state.mcp_manifest_fetcher`` — production leaves that
+    attribute unset and the resolver builds its own httpx client.
+    """
+    fetcher = getattr(request.app.state, "mcp_manifest_fetcher", None)
+    resolved = await manifest_resolver.resolve(url, fetcher=fetcher)
+    return resolved.model_dump(mode="python")
+
+
+# ── Install / uninstall / patch (#305) ──────────────────────────────────────
+
+
+@router.post("/install", status_code=201)
+async def install_server(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """Install a user MCP server from a URL / spec.
+
+    Body shape (one of)::
+
+        {"url": "oci://…", ...}      — re-resolve via the manifest layer
+        {"manifest": {...}}          — pre-resolved manifest (round-tripped
+                                       from /api/mcp/resolve)
+
+    Either path produces an :class:`InstalledServer` record on disk;
+    bundled-id collisions return 409 ``mcp.id_reserved``; an already-
+    installed id returns 409 ``mcp.already_installed``.
+
+    The dashboard normally pastes the URL, gets a preview, and on
+    Install posts ``{"url": "<spec>"}``. The ``manifest`` form covers
+    the case where the operator edited the preview before installing.
+    """
+    if not isinstance(body, dict):
+        raise BadRequest("install body must be a JSON object", code="mcp.body_invalid")
+
+    manifest_dict = body.get("manifest")
+    if isinstance(manifest_dict, dict):
+        try:
+            resolved = manifest_resolver.ResolvedManifest.model_validate(manifest_dict)
+        except Exception as exc:
+            raise BadRequest(
+                "invalid manifest body",
+                code="mcp.manifest_invalid",
+                details={"reason": str(exc)},
+            ) from exc
+    else:
+        url = body.get("url") or body.get("spec")
+        if not isinstance(url, str) or not url.strip():
+            raise BadRequest(
+                "install body must include 'url' (or 'manifest')",
+                code="mcp.url_required",
+            )
+        fetcher = getattr(request.app.state, "mcp_manifest_fetcher", None)
+        resolved = await manifest_resolver.resolve(url, fetcher=fetcher)
+
+    record = installed_registry.InstalledServer(
+        id=resolved.id,
+        name=resolved.name,
+        description=resolved.description,
+        spec=resolved.spec,
+        transport=resolved.transport,
+        tools=resolved.tools,
+        resources=resolved.resources,
+        prompts=resolved.prompts,
+        env={k: "" for k in resolved.env_required},
+        enabled=True,
+        source_url=resolved.source_url,
+        author=resolved.author,
+        verified=resolved.verified,
     )
+    stored = installed_registry.install(record)
+    return {"installed": stored.model_dump(mode="python")}
 
 
 @router.delete("/{server_id}")
 async def uninstall_server(server_id: str) -> dict[str, Any]:
-    """Stub — uninstall ships with ADR-0013."""
-    raise McpNotImplemented(
-        "MCP uninstall pending ADR-0013 follow-up (#206)",
-        details={"server_id": server_id},
-    )
+    """Remove a user-installed MCP server. Bundled servers reject 409.
 
-
-@router.post("/{server_id}/{action}")
-async def server_action(server_id: str, action: str) -> dict[str, Any]:
-    """Stub — restart / start / stop ship with ADR-0013."""
-    raise McpNotImplemented(
-        f"MCP {action!r} pending ADR-0013 follow-up (#206)",
-        details={"server_id": server_id, "action": action},
-    )
+    The route validates the id charset before the bundled check so a
+    request with garbage doesn't leak ``mcp.id_reserved`` for inputs
+    that wouldn't have matched anything.
+    """
+    if server_id in installed_registry.BUNDLED_SERVER_IDS:
+        raise Conflict(
+            f"server {server_id!r} is bundled — cannot uninstall",
+            code="mcp.bundled",
+            details={"server_id": server_id},
+        )
+    installed_registry.uninstall(server_id)
+    return {"uninstalled": server_id}
 
 
 @router.patch("/{server_id}/config")
 async def patch_server_config(server_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    """Stub — config write lands with ADR-0013."""
+    """Patch the env / enabled fields of an installed server.
+
+    The InstallDrawer's EditConfigModal posts ``{"env": {...}}`` (full
+    intended env block — the route replaces, not deltas) and optionally
+    ``{"enabled": bool}``. Bundled servers reject 409.
+    """
+    if server_id in installed_registry.BUNDLED_SERVER_IDS:
+        raise Conflict(
+            f"server {server_id!r} is bundled — config is read-only here",
+            code="mcp.bundled",
+            details={"server_id": server_id},
+        )
+    if not isinstance(body, dict):
+        raise BadRequest("patch body must be a JSON object", code="mcp.body_invalid")
+    env_block: dict[str, str] | None = None
+    raw_env = body.get("env")
+    if raw_env is not None:
+        if not isinstance(raw_env, dict):
+            raise BadRequest(
+                "'env' must be an object mapping name → value",
+                code="mcp.env_invalid",
+            )
+        env_block = {str(k): str(v) for k, v in raw_env.items()}
+    enabled = body.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise BadRequest("'enabled' must be a boolean", code="mcp.enabled_invalid")
+    updated = installed_registry.patch_config(server_id, env=env_block, enabled=enabled)
+    return {"server": updated.model_dump(mode="python")}
+
+
+# ── Action stub (start/stop/restart — supervisor follow-up) ─────────────────
+
+
+@router.post("/{server_id}/{action}")
+async def server_action(server_id: str, action: str) -> dict[str, Any]:
+    """Start / stop / restart — stubbed pending the process supervisor.
+
+    The installed-server registry (#305) doesn't yet drive a supervisor;
+    that's a tracked follow-up. The dashboard surfaces a distinct toast
+    for this 501 vs the (now-real) install/uninstall path.
+    """
     raise McpNotImplemented(
-        "MCP config patch pending ADR-0013 follow-up (#206)",
-        details={"server_id": server_id, "patch": body},
+        f"MCP {action!r} pending the process-supervisor follow-up to #305",
+        details={"server_id": server_id, "action": action},
     )

@@ -145,7 +145,7 @@ test.describe('MCP v3 wired (#206)', () => {
     await expect(page.locator('.mcp-install-name', { hasText: 'github' })).toBeVisible()
   })
 
-  test('install button surfaces 501 toast (ADR-0013 stub)', async ({ page }) => {
+  test('catalog install fires real POST and surfaces success toast (#305)', async ({ page }) => {
     // Capture toast calls. The dashboard installs its own
     // window.__hal0Toast inside a useEffect at mount, so an
     // addInitScript override gets clobbered. Instead define a property
@@ -167,18 +167,22 @@ test.describe('MCP v3 wired (#206)', () => {
       })
     })
 
-    // Override the install POST to return the actual 501 envelope. The
-    // override registers AFTER the beforeEach so Playwright (reverse
-    // registration order) matches this one first.
+    // Install POST returns a real 201 envelope per #305 — covers the
+    // happy path the (now-deleted) 501 stub test used to live on.
     await page.route('**/api/mcp/install', (route) =>
       route.fulfill({
-        status: 501,
+        status: 201,
         contentType: 'application/json',
         body: JSON.stringify({
-          error: {
-            code: 'mcp.not_implemented',
-            message: 'MCP install pending ADR-0013 follow-up (#206)',
-            details: {},
+          installed: {
+            id: 'filesystem',
+            name: 'filesystem',
+            spec: 'npm:@modelcontextprotocol/server-filesystem',
+            transport: 'stdio',
+            tools: 5,
+            env: {},
+            enabled: true,
+            installed_at: new Date().toISOString(),
           },
         }),
       }),
@@ -187,20 +191,15 @@ test.describe('MCP v3 wired (#206)', () => {
     const installRequest = page.waitForRequest('**/api/mcp/install', { timeout: 8_000 })
 
     await page.goto('/#mcp')
-    // Wait for the page's "Install" header button (opens the drawer).
     await page.locator('.vh button', { hasText: 'Install' }).first().click()
-    // Wait for catalog to populate then click the per-item Install.
     await expect(page.locator('.mcp-install-name', { hasText: 'filesystem' })).toBeVisible()
     await page
       .locator('.mcp-install-item', { has: page.locator('.mcp-install-name', { hasText: 'filesystem' }) })
       .locator('button', { hasText: 'Install' })
       .click()
 
-    // Confirm the install POST actually fires (proves the wiring).
     await installRequest
 
-    // Mutation hook fires; the toast lands asynchronously after the
-    // 501 response, so poll the captured array.
     await expect
       .poll(
         async () => {
@@ -210,8 +209,48 @@ test.describe('MCP v3 wired (#206)', () => {
       )
       .toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ msg: expect.stringContaining('ADR-0013') }),
+          expect.objectContaining({ msg: expect.stringContaining('Installed') }),
         ]),
       )
+  })
+
+  test('install-from-URL preview renders resolved manifest (#224)', async ({ page }) => {
+    // Stub the /api/mcp/resolve endpoint so the drawer's URL tab gets
+    // a deterministic manifest preview. The drawer's preview card reads
+    // name + description + tools from the response — none of those
+    // should be the legacy "mcp-things" placeholder anymore.
+    await page.route('**/api/mcp/resolve*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'filesystem',
+          name: 'filesystem',
+          description: 'Read, write, and search files inside an allowlisted root.',
+          spec: 'uvx:mcp-server-filesystem',
+          transport: 'stdio',
+          tools: 5,
+          resources: 0,
+          prompts: 0,
+          env_required: ['MCP_WORKSPACE'],
+          source_kind: 'uvx',
+          author: 'modelcontextprotocol',
+          verified: true,
+        }),
+      }),
+    )
+
+    await page.goto('/#mcp')
+    await page.locator('.vh button', { hasText: 'Install' }).first().click()
+    await page.locator('button.mcp-install-tab', { hasText: 'From URL' }).click()
+    await page.locator('.mcp-install-url input').fill('uvx:mcp-server-filesystem')
+
+    const preview = page.locator('[data-testid="mcp-install-url-preview"]')
+    await expect(preview).toBeVisible()
+    await expect(preview.locator('[data-testid="mcp-install-resolved-name"]')).toHaveText('filesystem')
+    await expect(preview.locator('[data-testid="mcp-install-resolved-desc"]')).toContainText('allowlisted root')
+    await expect(preview.locator('[data-testid="mcp-install-resolved-tools"]')).toContainText('5 tools')
+    // Verify the deprecated placeholder is GONE.
+    await expect(preview).not.toContainText('mcp-things')
   })
 })

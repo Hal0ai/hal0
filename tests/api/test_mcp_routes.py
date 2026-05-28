@@ -1,4 +1,4 @@
-"""Integration tests for the ``/api/mcp/*`` REST surface (issue #206).
+"""Integration tests for the ``/api/mcp/*`` REST surface (#206 + #305).
 
 The orchestrator's full ``create_app()`` mounts the FastMCP sub-apps,
 which we don't want to spin up for a route-shape test. Instead we mount
@@ -8,6 +8,11 @@ with a tiny fake (for the introspection happy path) or leave it absent
 
 We also stub the journald audit reader via ``monkeypatch.setattr`` so
 the tests don't depend on ``journalctl`` being present on the host.
+
+The install / uninstall / patch tests rely on the autouse ``tmp_hal0_home``
+fixture from ``tests/conftest.py`` to point ``HAL0_HOME`` at a tempdir,
+so the registry writes land under ``$tmp/etc/hal0/mcp-servers/`` rather
+than the host's ``/etc/hal0``.
 """
 
 from __future__ import annotations
@@ -61,7 +66,7 @@ def _build_app(*, with_servers: bool = True) -> FastAPI:
 
 
 @pytest.fixture
-def app() -> FastAPI:
+def app(tmp_hal0_home: str) -> FastAPI:
     return _build_app()
 
 
@@ -105,7 +110,7 @@ def test_servers_returns_introspected_counts(client: TestClient) -> None:
     assert by_id["hal0-memory"]["tools"] == 4
 
 
-def test_servers_empty_when_state_absent() -> None:
+def test_servers_empty_when_state_absent(tmp_hal0_home: str) -> None:
     app = _build_app(with_servers=False)
     with TestClient(app) as client:
         response = client.get("/api/mcp/servers")
@@ -137,6 +142,24 @@ def test_servers_surfaces_recent_rpm(
     by_id = {s["id"]: s for s in response.json()["servers"]}
     assert by_id["hal0-admin"]["activity"]["rpm"] == 3
     assert "claude-code" in by_id["hal0-admin"]["connected"]
+
+
+def test_servers_lists_installed_alongside_bundled(client: TestClient) -> None:
+    """#305 — registry-backed user-installed servers join the response."""
+    install_resp = client.post(
+        "/api/mcp/install",
+        json={"manifest": _filesystem_manifest_dict()},
+    )
+    assert install_resp.status_code == 201, install_resp.text
+
+    list_resp = client.get("/api/mcp/servers")
+    body = list_resp.json()
+    by_id = {s["id"]: s for s in body["servers"]}
+    assert body["count"] == 3
+    assert by_id["filesystem"]["bundled"] is False
+    assert by_id["filesystem"]["state"] == "stopped"
+    assert by_id["filesystem"]["spec"] == "uvx:mcp-server-filesystem"
+    assert by_id["filesystem"]["tools"] == 5
 
 
 # ── GET /api/mcp/clients ─────────────────────────────────────────────────────
@@ -265,35 +288,225 @@ def test_server_logs_filters_by_server(
     assert body["events"][0]["tool"] == "slot_list"
 
 
-# ── 501 stubs ────────────────────────────────────────────────────────────────
+# ── GET /api/mcp/resolve (#224) ──────────────────────────────────────────────
 
 
-def test_install_returns_501(client: TestClient) -> None:
-    response = client.post("/api/mcp/install", json={"name": "filesystem"})
-    assert response.status_code == 501
+def _filesystem_manifest_dict() -> dict[str, Any]:
+    """Sample manifest returned by a fake fetcher / passed to install."""
+    return {
+        "id": "filesystem",
+        "name": "filesystem",
+        "description": "Filesystem MCP — read/write files under a workspace.",
+        "spec": "uvx:mcp-server-filesystem",
+        "transport": "stdio",
+        "tools": 5,
+        "resources": 0,
+        "prompts": 0,
+        "env_required": ["MCP_WORKSPACE"],
+        "source_kind": "uvx",
+        "author": "modelcontextprotocol",
+    }
+
+
+def test_resolve_returns_preview_for_uvx_spec(client: TestClient) -> None:
+    response = client.get("/api/mcp/resolve", params={"url": "uvx:mcp-server-filesystem"})
+    assert response.status_code == 200, response.text
     body = response.json()
-    assert body["error"]["code"] == "mcp.not_implemented"
-    assert "ADR-0013" in body["error"]["message"]
+    assert body["id"] == "mcp-server-filesystem"
+    assert body["name"] == "mcp-server-filesystem"
+    assert body["source_kind"] == "uvx"
+    assert body["transport"] == "stdio"
 
 
-def test_uninstall_returns_501(client: TestClient) -> None:
+def test_resolve_returns_preview_for_oci_spec(client: TestClient) -> None:
+    response = client.get(
+        "/api/mcp/resolve",
+        params={"url": "oci://ghcr.io/example/mcp-tools:latest"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "mcp-tools"
+    assert body["transport"] == "streamable-http"
+    assert body["source_kind"] == "oci"
+
+
+def test_resolve_fetches_http_manifest(
+    app: FastAPI,
+    client: TestClient,
+) -> None:
+    """HTTP manifests are fetched via the app.state-injected fake fetcher."""
+
+    async def _fake_fetcher(url: str) -> dict[str, Any]:
+        return {
+            "name": "example-mcp",
+            "description": "demo manifest",
+            "tools": 7,
+            "transport": "streamable-http",
+            "env": {"FOO": "bar"},
+        }
+
+    app.state.mcp_manifest_fetcher = _fake_fetcher
+    response = client.get(
+        "/api/mcp/resolve",
+        params={"url": "https://example.com/mcp.json"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "example-mcp"
+    assert body["tools"] == 7
+    assert body["transport"] == "streamable-http"
+    assert body["env_required"] == ["FOO"]
+    assert body["source_kind"] == "manifest"
+
+
+def test_resolve_rejects_garbage(client: TestClient) -> None:
+    response = client.get("/api/mcp/resolve", params={"url": "ftp://not-supported"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "mcp.spec_unsupported"
+
+
+def test_resolve_requires_url(client: TestClient) -> None:
+    response = client.get("/api/mcp/resolve")
+    # FastAPI's automatic validation rejects the missing query param.
+    assert response.status_code in (400, 422)
+
+
+# ── POST /api/mcp/install (#305) ────────────────────────────────────────────
+
+
+def test_install_from_url_succeeds(client: TestClient) -> None:
+    response = client.post(
+        "/api/mcp/install",
+        json={"url": "uvx:mcp-server-filesystem"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    record = body["installed"]
+    assert record["id"] == "mcp-server-filesystem"
+    assert record["spec"] == "uvx:mcp-server-filesystem"
+    assert record["enabled"] is True
+    assert record["installed_at"]  # ISO timestamp populated
+
+
+def test_install_from_pre_resolved_manifest(client: TestClient) -> None:
+    response = client.post(
+        "/api/mcp/install",
+        json={"manifest": _filesystem_manifest_dict()},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["installed"]["id"] == "filesystem"
+    assert body["installed"]["tools"] == 5
+    # env_required → empty env block keys present
+    assert body["installed"]["env"] == {"MCP_WORKSPACE": ""}
+
+
+def test_install_rejects_duplicate(client: TestClient) -> None:
+    first = client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
+    assert first.status_code == 201
+    second = client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "mcp.already_installed"
+
+
+def test_install_rejects_bundled_id(client: TestClient) -> None:
+    payload = _filesystem_manifest_dict() | {"id": "hal0-admin", "name": "hal0-admin"}
+    response = client.post("/api/mcp/install", json={"manifest": payload})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "mcp.id_reserved"
+
+
+def test_install_rejects_missing_body(client: TestClient) -> None:
+    response = client.post("/api/mcp/install", json={})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "mcp.url_required"
+
+
+def test_install_rejects_bad_manifest(client: TestClient) -> None:
+    response = client.post(
+        "/api/mcp/install",
+        json={"manifest": {"id": "x"}},  # missing required name + spec
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "mcp.manifest_invalid"
+
+
+# ── DELETE /api/mcp/{id} (#305) ─────────────────────────────────────────────
+
+
+def test_uninstall_removes_installed_server(client: TestClient) -> None:
+    client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
     response = client.delete("/api/mcp/filesystem")
-    assert response.status_code == 501
-    assert response.json()["error"]["code"] == "mcp.not_implemented"
+    assert response.status_code == 200, response.text
+    assert response.json() == {"uninstalled": "filesystem"}
+    # Second uninstall is 404.
+    again = client.delete("/api/mcp/filesystem")
+    assert again.status_code == 404
+    assert again.json()["error"]["code"] == "mcp.not_found"
+
+
+def test_uninstall_bundled_rejected(client: TestClient) -> None:
+    response = client.delete("/api/mcp/hal0-admin")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "mcp.bundled"
+
+
+def test_uninstall_invalid_id_rejected(client: TestClient) -> None:
+    response = client.delete("/api/mcp/foo%20bar")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "mcp.id_invalid"
+
+
+# ── PATCH /api/mcp/{id}/config (#305) ───────────────────────────────────────
+
+
+def test_patch_config_updates_env(client: TestClient) -> None:
+    client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
+    response = client.patch(
+        "/api/mcp/filesystem/config",
+        json={"env": {"MCP_WORKSPACE": "/tmp/ws"}},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["server"]["env"] == {"MCP_WORKSPACE": "/tmp/ws"}
+
+
+def test_patch_config_toggles_enabled(client: TestClient) -> None:
+    client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
+    response = client.patch("/api/mcp/filesystem/config", json={"enabled": False})
+    assert response.status_code == 200
+    assert response.json()["server"]["enabled"] is False
+
+
+def test_patch_config_bundled_rejected(client: TestClient) -> None:
+    response = client.patch(
+        "/api/mcp/hal0-admin/config",
+        json={"env": {"FOO": "bar"}},
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "mcp.bundled"
+
+
+def test_patch_config_missing_record_404(client: TestClient) -> None:
+    response = client.patch("/api/mcp/nope/config", json={"env": {"X": "1"}})
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "mcp.not_found"
+
+
+def test_patch_config_rejects_bad_env(client: TestClient) -> None:
+    client.post("/api/mcp/install", json={"manifest": _filesystem_manifest_dict()})
+    response = client.patch(
+        "/api/mcp/filesystem/config",
+        json={"env": "not-an-object"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "mcp.env_invalid"
+
+
+# ── Action stub (supervisor follow-up) ──────────────────────────────────────
 
 
 def test_action_returns_501(client: TestClient) -> None:
     response = client.post("/api/mcp/hal0-admin/restart")
     assert response.status_code == 501
     assert response.json()["error"]["code"] == "mcp.not_implemented"
-
-
-def test_config_patch_returns_501(client: TestClient) -> None:
-    response = client.patch(
-        "/api/mcp/hal0-admin/config",
-        json={"env": {"FOO": "bar"}},
-    )
-    assert response.status_code == 501
-    body = response.json()
-    assert body["error"]["code"] == "mcp.not_implemented"
-    assert body["error"]["details"]["patch"] == {"env": {"FOO": "bar"}}
