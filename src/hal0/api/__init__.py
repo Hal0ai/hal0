@@ -26,7 +26,8 @@ from hal0 import __version__
 from hal0.api.agents import (
     personas as agents_personas_routes,
 )
-from hal0.api.middleware import error_codes, request_id
+from hal0.api.agents.chat_proxy import router as chat_proxy_router
+from hal0.api.middleware import error_codes, log_scrub, request_id
 from hal0.api.plugins import router as plugin_manifest_router
 from hal0.api.routes import (
     agents as agents_routes,
@@ -783,6 +784,10 @@ def create_app() -> FastAPI:
 
     request_id.install(app)
     error_codes.install(app)
+    # PR-9 (DA-sec-ops MUST-FIX #3): strip query strings from the
+    # uvicorn access log so a future sensitive parameter never lands
+    # in journald.
+    log_scrub.install(app)
 
     # /v1 is split into a public probe (GET /v1/models + /v1/models/{id})
     # and a writer surface that requires auth. The split lives in v1.py
@@ -956,6 +961,18 @@ def create_app() -> FastAPI:
         agents_personas_routes.router,
         prefix="/api/agents",
         tags=["agents", "personas"],
+    )
+
+    # PR-9: chat WS proxy + session REST shim. Bridges the browser to
+    # the hermes dashboard process bound to 127.0.0.1:9119 (per PR-5's
+    # systemd ExecStart). Origin allowlist + HMAC session cookie
+    # enforced on every WS upgrade (DA-sec-ops MUST-FIX #2). Embed
+    # token rides outbound in Authorization: Bearer, never in a query
+    # string (MUST-FIX #3).
+    app.include_router(
+        chat_proxy_router,
+        prefix="/api/agents",
+        tags=["agents", "chat-proxy"],
     )
 
     # Approval inbox (ADR-0004 §5). The dashboard bell, the MCP admin
