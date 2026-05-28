@@ -7,6 +7,7 @@ import { useBackends } from '@/api/hooks/useBackends'
 import { useLogsHistorical, useLogsStream } from '@/api/hooks/useLogs'
 import { useLemondRollup } from '@/api/hooks/useLemonade'
 import { useMemoryGraphStatus, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
+import { useAgents, useAgentSkills } from '@/api/hooks/useAgents'
 
 const { useState: useStateX } = React;
 
@@ -384,7 +385,16 @@ function AgentView() {
   const [tab, setTab] = useStateX("overview");
   const [editPersona, setEditPersona] = useStateX(null);
   const [resetOpen, setResetOpen] = useStateX(false);
-  const noAgent = window.__hal0Banners && window.__hal0Banners.get && window.__hal0Banners.get()["no-agent"];
+  // #207: drive overview/inbox empty-state from /api/agents instead of
+  // the legacy banner mock. ``noAgent`` is true when the query has
+  // resolved and reports zero installed agents; loading + error paths
+  // fall through to the views which render their own placeholders.
+  const agentsQuery = useAgents();
+  const agentCount = agentsQuery.data?.count ?? null;
+  const noAgent =
+    agentsQuery.isSuccess
+      ? agentCount === 0
+      : !!(window.__hal0Banners && window.__hal0Banners.get && window.__hal0Banners.get()["no-agent"]);
   const tabs = [
     { id: "overview", label: "Overview" },
     { id: "inbox",    label: "Inbox" },
@@ -422,6 +432,19 @@ function AgentView() {
         ))}
       </div>
 
+      {agentsQuery.isLoading && (
+        <div className="card" style={{padding: 18, marginBottom: 14}}>
+          <div className="mono" style={{fontSize: 12, color: "var(--fg-4)"}}>Loading agents…</div>
+        </div>
+      )}
+      {agentsQuery.isError && (
+        <div className="card" style={{padding: 18, marginBottom: 14, borderColor: "var(--err-line, var(--line))"}}>
+          <div className="mono" style={{fontSize: 12, color: "var(--err, #c66)"}}>
+            Agent surface unavailable: {String(agentsQuery.error?.message || "unknown")}
+          </div>
+        </div>
+      )}
+
       {tab === "overview" && (noAgent ? <NoBundledAgentCard /> : <AgentOverview />)}
       {tab === "inbox"    && (noAgent ? <EmptyInbox /> : <AgentInbox />)}
       {tab === "skills"   && <AgentSkills />}
@@ -437,9 +460,9 @@ function AgentView() {
       <ConfirmDialog
         open={resetOpen}
         onCancel={() => setResetOpen(false)}
-        onConfirm={() => { setResetOpen(false); window.__hal0Toast && window.__hal0Toast("Cognee namespace 'shared' reset — 2,847 records deleted", "warn"); }}
+        onConfirm={() => { setResetOpen(false); window.__hal0Toast && window.__hal0Toast("Cognee namespace 'shared' reset", "warn"); }}
         title="Reset memory namespace 'shared'?"
-        message={<span>This permanently deletes <span className="mono" style={{color: "var(--fg)"}}>2,847</span> Cognee records across SQLite + LanceDB + Kuzu. Cannot be undone.</span>}
+        message={<span>This permanently deletes all Cognee records in the <span className="mono" style={{color: "var(--fg)"}}>shared</span> namespace across SQLite + LanceDB + Kuzu. Cannot be undone.</span>}
         confirmLabel="Reset namespace"
         destructive
         typeToConfirm="shared"
@@ -592,33 +615,44 @@ function AgentInbox() {
 }
 
 function AgentSkills() {
-  const skills = [
-    { name: "read_file",       cap: "fs-read",      policy: "remember", calls: 247, src: "builtin" },
-    { name: "write_file",      cap: "fs-write",     policy: "always",   calls: 38,  src: "builtin" },
-    { name: "edit_file",       cap: "fs-write",     policy: "always",   calls: 14,  src: "builtin" },
-    { name: "list_dir",        cap: "fs-read",      policy: "remember", calls: 41,  src: "builtin" },
-    { name: "shell_exec",      cap: "shell-exec",   policy: "always",   calls: 9,   src: "builtin" },
-    { name: "model_pull",      cap: "registry-write", policy: "always", calls: 3,   src: "hal0-router" },
-    { name: "restart_slot",    cap: "slot-control", policy: "always",   calls: 1,   src: "hal0-router" },
-    { name: "generate_image",  cap: "tool-call",    policy: "auto",     calls: 18,  src: "omnirouter" },
-    { name: "transcribe_audio",cap: "tool-call",    policy: "auto",     calls: 7,   src: "omnirouter" },
-    { name: "text_to_speech",  cap: "tool-call",    policy: "auto",     calls: 22,  src: "omnirouter" },
-    { name: "embed_text",      cap: "tool-call",    policy: "auto",     calls: 184, src: "omnirouter" },
-    { name: "rerank_documents",cap: "tool-call",    policy: "auto",     calls: 41,  src: "omnirouter" },
-  ];
+  // #227: catalogue fetched from /api/agents/skills. Static for v0.3;
+  // the journal-derived calls column lands in a follow-up.
+  const skillsQuery = useAgentSkills();
+  const skills = skillsQuery.data?.skills ?? [];
+
+  if (skillsQuery.isLoading) {
+    return (
+      <div className="card" style={{padding: 18}}>
+        <div className="mono" style={{fontSize: 12, color: "var(--fg-4)"}}>Loading skills…</div>
+      </div>
+    );
+  }
+  if (skillsQuery.isError) {
+    return (
+      <div className="card" style={{padding: 18, borderColor: "var(--err-line, var(--line))"}}>
+        <div className="mono" style={{fontSize: 12, color: "var(--err, #c66)"}}>
+          Skills unavailable: {String(skillsQuery.error?.message || "unknown")}
+        </div>
+      </div>
+    );
+  }
+
+  const gated = skills.filter(s => s.policy === "always" || s.policy === "remember").length;
+  const auto = skills.filter(s => s.policy === "auto").length;
+  const sources = Array.from(new Set(skills.map(s => s.src))).join(", ");
+
   return (
     <div>
       <div className="card" style={{overflow: "hidden"}}>
-        <div style={{padding: "10px 18px", background: "var(--bg)", borderBottom: "1px solid var(--line)", display: "grid", gridTemplateColumns: "200px 160px 1fr 120px 80px auto", gap: 16, fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em"}}>
+        <div style={{padding: "10px 18px", background: "var(--bg)", borderBottom: "1px solid var(--line)", display: "grid", gridTemplateColumns: "200px 160px 1fr 120px auto", gap: 16, fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em"}}>
           <span>skill</span>
           <span>capability</span>
           <span>source</span>
           <span>policy</span>
-          <span style={{textAlign: "right"}}>calls</span>
           <span></span>
         </div>
         {skills.map(s => (
-          <div key={s.name} style={{padding: "11px 18px", borderBottom: "1px solid var(--line-soft)", display: "grid", gridTemplateColumns: "200px 160px 1fr 120px 80px auto", gap: 16, alignItems: "center", fontFamily: "var(--jbm)", fontSize: 12}}>
+          <div key={s.name} style={{padding: "11px 18px", borderBottom: "1px solid var(--line-soft)", display: "grid", gridTemplateColumns: "200px 160px 1fr 120px auto", gap: 16, alignItems: "center", fontFamily: "var(--jbm)", fontSize: 12}}>
             <span style={{color: "var(--fg)", fontWeight: 500}}>{s.name}</span>
             <span style={{color: "var(--fg-3)"}}>{s.cap}</span>
             <span style={{color: "var(--fg-4)"}}>{s.src}</span>
@@ -628,19 +662,30 @@ function AgentSkills() {
               {s.policy === "auto"     && <span className="chip">auto</span>}
               {s.policy === "deny"     && <span className="chip err">deny</span>}
             </span>
-            <span style={{textAlign: "right", color: "var(--fg-2)"}} className="num">{s.calls}</span>
             <button className="btn ghost sm">{Icons.edit}</button>
           </div>
         ))}
       </div>
       <div style={{marginTop: 14, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)"}}>
-        12 skills wired · 8 require approval · 4 auto via OmniRouter · skill source includes builtin, hal0-router, omnirouter, and any user-added MCP servers (none configured).
+        {skills.length} skills wired · {gated} require approval · {auto} auto · sources: {sources || "—"}.
       </div>
     </div>
   );
 }
 
 function AgentMemory({ onResetNs }) {
+  // #228: counters sourced from /api/memory/graph/status. The original
+  // SQLite / LanceDB / Kuzu per-store breakdown isn't exposed by the
+  // status endpoint — those rows render "—" until the wrapper grows a
+  // per-backend counter (tracked in follow-up). Top-level record count
+  // == ``builds_ok`` (one record per successful build) and the engine
+  // health chip flips based on the error counter.
+  const memStatus = useMemoryGraphStatus();
+  const memData = memStatus.data;
+  const builds = memData?.builds_ok ?? null;
+  const errors = memData?.errors ?? null;
+  const healthy = memStatus.isSuccess && (errors ?? 0) === 0;
+
   return (
     <div style={{display: "grid", gridTemplateColumns: "1fr 320px", gap: 16}}>
       <div>
@@ -648,15 +693,23 @@ function AgentMemory({ onResetNs }) {
         <div className="card" style={{padding: 18, marginBottom: 14}}>
           <div style={{display: "flex", alignItems: "center", gap: 12, marginBottom: 14}}>
             <span className="mono" style={{fontSize: 10, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.1em"}}>Cognee · shared</span>
-            <span className="mono num" style={{fontSize: 24, color: "var(--fg)", letterSpacing: "-0.02em"}}>2,847</span>
-            <span className="mono" style={{fontSize: 12, color: "var(--fg-3)"}}>records · 184 MB</span>
-            <span style={{marginLeft: "auto"}} className="chip ok">healthy</span>
+            <span className="mono num" style={{fontSize: 24, color: "var(--fg)", letterSpacing: "-0.02em"}}>
+              {memStatus.isLoading ? "…" : builds != null ? builds.toLocaleString() : "—"}
+            </span>
+            <span className="mono" style={{fontSize: 12, color: "var(--fg-3)"}}>
+              records{errors != null && errors > 0 ? ` · ${errors} errors` : ""}
+            </span>
+            <span style={{marginLeft: "auto"}}>
+              {memStatus.isLoading && <span className="chip">loading</span>}
+              {memStatus.isError && <span className="chip err">unavailable</span>}
+              {memStatus.isSuccess && (healthy ? <span className="chip ok">healthy</span> : <span className="chip warn">degraded</span>)}
+            </span>
           </div>
           <div style={{display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, border: "1px solid var(--line)", borderRadius: "var(--rad)", overflow: "hidden"}}>
             {[
-              { l: "SQLite", v: "847", sub: "indexed text" },
-              { l: "LanceDB", v: "2,140", sub: "vectors · 768d" },
-              { l: "Kuzu",   v: "412", sub: "graph edges" },
+              { l: "Builds OK", v: builds != null ? String(builds) : "—", sub: "lifetime" },
+              { l: "Errors", v: errors != null ? String(errors) : "—", sub: errors ? "see logs" : "—" },
+              { l: "In flight", v: memData?.in_flight != null ? String(memData.in_flight) : "—", sub: "pending" },
             ].map((s, i) => (
               <div key={i} style={{padding: 14, borderRight: i < 2 ? "1px solid var(--line)" : "none"}}>
                 <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em"}}>{s.l}</div>

@@ -56,6 +56,15 @@ export const ENDPOINTS = {
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',
 
+  // ── Agents — list + dashboard catalogues ─────────────────────────
+  // ``agents`` is the installed-bundled list (#207). ``agentSkills`` +
+  // ``agentPersonaEnums`` back the Skills tab (#227) + the
+  // PersonaEditModal selects (#226). Static catalogues sourced from
+  // ``hal0.agents.persona`` server-side.
+  agents: '/api/agents',
+  agentSkills: '/api/agents/skills',
+  agentPersonaEnums: '/api/agents/persona-enums',
+
   // ── Agents — MCP-client allow-list (ADR-0013) ────────────────────
   agentMcpClients: '/api/agents/mcp/clients',
   agentMcpClient: (name: string) =>

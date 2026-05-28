@@ -1,6 +1,8 @@
 // hal0 dashboard — FirstRun + Backends + Agent flow modals
 // Skip confirm, post-install hero, backend install/uninstall, FLM .deb guide, persona edit, namespace reset
 
+import { useAgentPersonaEnums } from '@/api/hooks/useAgents'
+
 const { useState: useStateFM, useEffect: useEffectFM } = React;
 
 // ────────────────────────────────────────────────────────────────
@@ -178,6 +180,12 @@ function PersonaEditModal({ open, onClose, persona }) {
   const [tone, setTone] = useStateFM(persona?.tone || "operator");
   const [slot, setSlot] = useStateFM(persona?.slot || "primary");
 
+  // #226: tone + tool catalogues come from /api/agents/persona-enums
+  // so the picker tracks the server-side enum without UI patches.
+  const enums = useAgentPersonaEnums();
+  const tones = enums.data?.tones ?? [];
+  const tools = enums.data?.tools ?? [];
+
   useEffectFM(() => {
     if (open && persona) {
       setSlot(persona.slot || "primary");
@@ -234,12 +242,12 @@ function PersonaEditModal({ open, onClose, persona }) {
           <span className="sub">descriptive label · doesn't affect routing</span>
         </div>
         <div className="form-ctl">
-          <select className="input mono" value={tone} onChange={e => setTone(e.target.value)}>
-            <option value="operator">operator — terse + technical</option>
-            <option value="code-focused">code-focused — refactors, reviews</option>
-            <option value="low-latency">low-latency — NPU coresident</option>
-            <option value="vision">vision-first — image-aware</option>
-            <option value="conversational">conversational — slower, fuller</option>
+          <select className="input mono" value={tone} onChange={e => setTone(e.target.value)} disabled={enums.isLoading}>
+            {enums.isLoading && <option value={tone}>loading…</option>}
+            {enums.isError && <option value={tone}>{tone} (enums unavailable)</option>}
+            {tones.map(t => (
+              <option key={t.id} value={t.id}>{t.label}{t.desc ? ` — ${t.desc}` : ""}</option>
+            ))}
           </select>
         </div>
       </div>
@@ -268,10 +276,16 @@ function PersonaEditModal({ open, onClose, persona }) {
           <span className="sub">subset of OmniRouter tools this persona can call</span>
         </div>
         <div className="form-ctl" style={{display: "flex", flexWrap: "wrap", gap: 8}}>
-          {["read_file", "write_file", "edit_file", "shell_exec", "generate_image", "transcribe_audio", "text_to_speech", "embed_text"].map(t => (
-            <label key={t} className="checkbox-row">
-              <input type="checkbox" defaultChecked={["read_file", "edit_file", "embed_text"].includes(t)} />
-              <span className="mono">{t}</span>
+          {enums.isLoading && (
+            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>Loading tools…</span>
+          )}
+          {enums.isError && (
+            <span className="mono" style={{fontSize: 11, color: "var(--err, #c66)"}}>Tools unavailable</span>
+          )}
+          {tools.map(t => (
+            <label key={t.id} className="checkbox-row">
+              <input type="checkbox" defaultChecked={["read_file", "edit_file", "embed_text"].includes(t.id)} />
+              <span className="mono">{t.label}</span>
             </label>
           ))}
         </div>

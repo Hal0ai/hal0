@@ -32,6 +32,7 @@ from hal0.agents import (
     HermesNotHal0AwareError,
 )
 from hal0.agents.manager import BUNDLED_AGENTS
+from hal0.agents.persona import AGENT_SKILLS, PERSONA_TONES, PERSONA_TOOLS
 from hal0.errors import BadRequest, Conflict, Hal0Error, NotFound
 
 router = APIRouter()
@@ -53,6 +54,41 @@ async def list_agents() -> dict[str, object]:
     mgr = _manager()
     items = [rec.as_dict() for rec in mgr.list()]
     return {"agents": items, "count": len(items)}
+
+
+# ── GET /api/agents/persona-enums ────────────────────────────────────────────
+
+
+@router.get("/persona-enums")
+async def persona_enums() -> dict[str, object]:
+    """Enum payload for PersonaEditModal (#226).
+
+    Returns the canonical tone presets + the allowed-tools catalogue
+    the modal renders. Tones + tools live in
+    :mod:`hal0.agents.persona`; adding new entries lands there.
+    """
+    return {
+        "tones": list(PERSONA_TONES),
+        "tools": list(PERSONA_TOOLS),
+    }
+
+
+# ── GET /api/agents/skills ───────────────────────────────────────────────────
+
+
+@router.get("/skills")
+async def list_skills() -> dict[str, object]:
+    """Catalogue for the dashboard's Agent → Skills tab (#227).
+
+    Static for v0.3 — sources from :data:`hal0.agents.persona.AGENT_SKILLS`.
+    The ``calls`` column is omitted at the API layer; the dashboard
+    shows zero counts until #227's follow-up wires the journal-derived
+    counters.
+    """
+    return {
+        "skills": list(AGENT_SKILLS),
+        "count": len(AGENT_SKILLS),
+    }
 
 
 # ── POST /api/agents/install ──────────────────────────────────────────────────
