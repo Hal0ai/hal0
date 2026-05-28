@@ -33,12 +33,13 @@ test.describe('AgentView v3 (#agent — PR-8 refactor)', () => {
     )
   })
 
-  test('default tab is chat — placeholder visible, no Inbox or Peers in nav', async ({ page }) => {
+  test('default tab is chat — surface visible, no Inbox or Peers in nav', async ({ page }) => {
     await page.goto('/#agent')
     await expect(page.locator('[data-testid="agent-tab-nav"]')).toBeVisible({ timeout: FIVE_S })
 
-    // Default tab content is the HermesChat placeholder.
-    await expect(page.locator('[data-testid="hermes-chat-placeholder"]')).toBeVisible()
+    // Default tab content is the HermesChat surface (PR-10 replaced
+    // PR-8's placeholder with the composer/transcript/sidecar grid).
+    await expect(page.locator('[data-testid="hermes-chat-surface"]')).toBeVisible()
 
     // Nav contains the new 5-tab set, and ONLY that set.
     for (const id of ['chat', 'personas', 'skills', 'memory', 'plugins']) {
@@ -89,6 +90,6 @@ test.describe('AgentView v3 (#agent — PR-8 refactor)', () => {
 
   test('#agent/chat hash routes to the chat tab', async ({ page }) => {
     await page.goto('/#agent/chat')
-    await expect(page.locator('[data-testid="hermes-chat-placeholder"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="hermes-chat-surface"]')).toBeVisible({ timeout: FIVE_S })
   })
 })
