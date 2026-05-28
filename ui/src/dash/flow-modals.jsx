@@ -182,7 +182,9 @@ function PersonaEditModal({ open, onClose, persona }) {
 
   // #226: tone + tool catalogues come from /api/agents/persona-enums
   // so the picker tracks the server-side enum without UI patches.
-  const enums = useAgentPersonaEnums();
+  // Gate the fetch on `open` so closed modals don't pre-warm the
+  // catalogue on every parent render (review: PR #364 medium).
+  const enums = useAgentPersonaEnums({ enabled: open });
   const tones = enums.data?.tones ?? [];
   const tools = enums.data?.tools ?? [];
 
@@ -245,6 +247,9 @@ function PersonaEditModal({ open, onClose, persona }) {
           <select className="input mono" value={tone} onChange={e => setTone(e.target.value)} disabled={enums.isLoading}>
             {enums.isLoading && <option value={tone}>loading…</option>}
             {enums.isError && <option value={tone}>{tone} (enums unavailable)</option>}
+            {!enums.isLoading && !enums.isError && tones.length === 0 && (
+              <option value={tone}>{tone}</option>
+            )}
             {tones.map(t => (
               <option key={t.id} value={t.id}>{t.label}{t.desc ? ` — ${t.desc}` : ""}</option>
             ))}

@@ -85,10 +85,11 @@ export interface PersonaEnumsResponse {
   tools: PersonaTool[]
 }
 
-export function useAgentPersonaEnums() {
+export function useAgentPersonaEnums(options?: { enabled?: boolean }) {
   return useQuery<PersonaEnumsResponse>({
     queryKey: ['agents', 'persona-enums'],
     queryFn: () => apiGet<PersonaEnumsResponse>(ENDPOINTS.agentPersonaEnums),
     staleTime: 5 * 60_000,
+    enabled: options?.enabled ?? true,
   })
 }
