@@ -169,3 +169,83 @@ async def test_add_forwards_resolved_private_dataset_to_cognee(tmp_path: Any) ->
     # resolved string, NOT "shared".
     assert captured["dataset_name"] == "private:hermes-agent"
     assert captured["embed_datasets"] == ["private:hermes-agent"]
+
+
+# ── Read-side namespace tests (Phase D regression — read side mirror of #367) ──
+#
+# PR #366 fixed the write path (_effective_write_dataset) but the read path
+# (_allowed_read_datasets) still gated on the SINGLETON wrapper's pinned
+# client_id (= "anonymous"). Agents could write to their private bucket but
+# search returned 0 — hermes_provision memory_roundtrip smoke failed.
+#
+# These tests pin that _allowed_read_datasets + the public search/list_items
+# / delete surfaces honor a per-call client_id when transport-layer callers
+# (REST/MCP) thread their resolved identity through.
+
+
+def test_allowed_read_uses_resolved_client_id_not_singleton() -> None:
+    """Singleton wrapper (client_id=anonymous), per-call client_id="agent-a"
+    → caller sees their own private:agent-a alongside shared, NOT
+    private:anonymous.
+    """
+    w = _bare_wrapper(client_id="anonymous", private_mode=False)
+    allowed = w._allowed_read_datasets(SHARED_DATASET, client_id="agent-a")
+    assert SHARED_DATASET in allowed
+    assert "private:agent-a" in allowed
+    assert "private:anonymous" not in allowed
+
+
+def test_allowed_read_drops_other_agents_private() -> None:
+    """Agent-a explicitly requests agent-b's private namespace → silently
+    dropped (read-attempts on another client's bucket don't error to avoid
+    leaking existence, but they NEVER return data).
+    """
+    w = _bare_wrapper(client_id="anonymous", private_mode=False)
+    allowed = w._allowed_read_datasets("private:agent-b", client_id="agent-a")
+    # agent-b's namespace dropped silently — only own private survives if
+    # requested via shared default; since we asked specifically for b's,
+    # nothing returns.
+    assert "private:agent-b" not in allowed
+
+
+def test_allowed_read_own_private_when_explicit() -> None:
+    """Asking for OWN private namespace by full name keeps it."""
+    w = _bare_wrapper(client_id="anonymous", private_mode=False)
+    allowed = w._allowed_read_datasets("private:agent-a", client_id="agent-a")
+    assert allowed == ["private:agent-a"]
+
+
+def test_allowed_read_falls_back_to_singleton_when_no_call_id() -> None:
+    """Backwards-compat: existing callers that don't pass client_id keep
+    the legacy behavior (intersect against the wrapper's constructor id).
+    """
+    w = _bare_wrapper(client_id="alice", private_mode=False)
+    allowed = w._allowed_read_datasets(SHARED_DATASET)  # no client_id kwarg
+    assert "private:alice" in allowed
+    assert SHARED_DATASET in allowed
+
+
+def test_audit_stamps_resolved_client_id() -> None:
+    """Audit row uses the per-call client_id, not the singleton's
+    "anonymous". Without this, forensic log-driven trace per agent is
+    impossible on the production singleton wrapper.
+    """
+    w = _bare_wrapper(client_id="anonymous", private_mode=False)
+    # Initialise the audit-tail attributes that __init__ would normally set.
+    w.audit_tail = []  # type: ignore[attr-defined]
+    w._audit_tail_max = 1024  # type: ignore[attr-defined]
+    w._audit("add", "private:agent-a", client_id="agent-a", item_id="x")
+    assert len(w.audit_tail) == 1
+    assert w.audit_tail[0]["client_id"] == "agent-a"
+    assert w.audit_tail[0]["dataset"] == "private:agent-a"
+
+
+def test_audit_falls_back_to_singleton_when_no_call_id() -> None:
+    """Backwards-compat: callers that don't pass client_id get the
+    constructor value, same as pre-fix behavior.
+    """
+    w = _bare_wrapper(client_id="alice", private_mode=False)
+    w.audit_tail = []  # type: ignore[attr-defined]
+    w._audit_tail_max = 1024  # type: ignore[attr-defined]
+    w._audit("add", "shared", item_id="x")
+    assert w.audit_tail[0]["client_id"] == "alice"

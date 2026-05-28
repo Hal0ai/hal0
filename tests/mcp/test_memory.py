@@ -34,6 +34,7 @@ class _FakeWrapper:
         tags: list[str],
         source: str,
         metadata: dict[str, Any],
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         self.add_calls.append(
             {
@@ -42,6 +43,7 @@ class _FakeWrapper:
                 "tags": tags,
                 "source": source,
                 "metadata": metadata,
+                "client_id": client_id,
             }
         )
         self._counter += 1
@@ -55,8 +57,8 @@ class _FakeWrapper:
         self.list_calls.append(kwargs)
         return {"items": [{"id": "id-1"}], "next_cursor": None}
 
-    async def delete(self, *, ids: list[str]) -> dict[str, Any]:
-        self.delete_calls.append({"ids": ids})
+    async def delete(self, *, ids: list[str], client_id: str | None = None) -> dict[str, Any]:
+        self.delete_calls.append({"ids": ids, "client_id": client_id})
         return {"deleted": len(ids)}
 
 

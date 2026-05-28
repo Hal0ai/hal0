@@ -341,6 +341,7 @@ async def memory_add(request: Request) -> dict[str, Any]:
         tags=body.get("tags") or [],
         source=agent_id,
         metadata=body.get("metadata") or {},
+        client_id=agent_id if agent_id != "anonymous" else None,
     )
 
 
@@ -383,6 +384,7 @@ async def memory_search(request: Request) -> dict[str, Any]:
         tags=body.get("tags") or [],
         before=body.get("before"),
         after=body.get("after"),
+        client_id=agent_id if agent_id != "anonymous" else None,
     )
     return {"items": items}
 
@@ -413,7 +415,12 @@ async def memory_list(
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
-    return await wrapper.list_items(dataset=resolved, cursor=cursor, limit=limit)
+    return await wrapper.list_items(
+        dataset=resolved,
+        cursor=cursor,
+        limit=limit,
+        client_id=agent_id if agent_id != "anonymous" else None,
+    )
 
 
 @router.post("/delete")
@@ -432,8 +439,12 @@ async def memory_delete(request: Request) -> dict[str, int]:
             "memory_delete requires 'ids' (non-empty list)",
             details={"path": "/api/memory/delete"},
         )
+    agent_id = _agent_id(request)
     wrapper = _wrapper(request)
-    return await wrapper.delete(ids=ids)
+    return await wrapper.delete(
+        ids=ids,
+        client_id=agent_id if agent_id != "anonymous" else None,
+    )
 
 
 async def _read_json_body(request: Request) -> dict[str, Any]:

@@ -57,6 +57,7 @@ class StubWrapper:
         tags: list[str],
         source: str | None,
         metadata: dict[str, Any],
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         self.add_calls.append(
             {
@@ -65,6 +66,7 @@ class StubWrapper:
                 "tags": tags,
                 "source": source,
                 "metadata": metadata,
+                "client_id": client_id,
             }
         )
         self._counter += 1
@@ -78,8 +80,8 @@ class StubWrapper:
         self.list_calls.append(kwargs)
         return {"items": [{"id": "id-1"}], "next_cursor": None}
 
-    async def delete(self, *, ids: list[str]) -> dict[str, Any]:
-        self.delete_calls.append({"ids": list(ids)})
+    async def delete(self, *, ids: list[str], client_id: str | None = None) -> dict[str, Any]:
+        self.delete_calls.append({"ids": list(ids), "client_id": client_id})
         return {"deleted": len(ids)}
 
 
@@ -290,7 +292,7 @@ def test_delete_passes_ids_unchanged(client: TestClient, stub_wrapper: StubWrapp
         headers={"X-hal0-Agent": "hermes-agent", "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
-    assert stub_wrapper.delete_calls == [{"ids": ["a", "b"]}]
+    assert stub_wrapper.delete_calls == [{"ids": ["a", "b"], "client_id": "hermes-agent"}]
     assert r.json() == {"deleted": 2}
 
 
@@ -424,3 +426,69 @@ def test_cross_client_private_writes_not_visible_to_other_agents(
         if isinstance(search_call["dataset"], list)
         else [search_call["dataset"]]
     )
+
+
+# ── Read-side namespace plumbing (Phase D regression fix) ──────────────────
+
+
+def test_search_route_passes_resolved_client_id_to_wrapper(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """REST search route must thread X-hal0-Agent through as client_id so
+    the wrapper's _allowed_read_datasets honors per-call identity.
+    Without this, hermes-agent writes to private:hermes-agent but
+    memory_search returns 0 because the singleton wrapper drops
+    private:hermes-agent as "another client's private".
+    """
+    r = client.post(
+        "/api/memory/search",
+        json={"query": "hi"},
+        headers={"X-hal0-Agent": "hermes-agent", "X-hal0-Private": "1"},
+    )
+    assert r.status_code == 200, r.text
+    sc = stub_wrapper.search_calls[-1]
+    assert sc["client_id"] == "hermes-agent"
+
+
+def test_list_route_passes_resolved_client_id_to_wrapper(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """REST list route mirrors search — must thread client_id."""
+    r = client.get(
+        "/api/memory/list",
+        headers={"X-hal0-Agent": "hermes-agent", "X-hal0-Private": "1"},
+    )
+    assert r.status_code == 200, r.text
+    lc = stub_wrapper.list_calls[-1]
+    assert lc["client_id"] == "hermes-agent"
+
+
+def test_add_route_passes_resolved_client_id_to_wrapper(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """REST add route threads client_id so audit log stamps the
+    per-call identity instead of the singleton's "anonymous".
+    """
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "secret"},
+        headers={"X-hal0-Agent": "agent-a", "X-hal0-Private": "1"},
+    )
+    assert r.status_code == 200, r.text
+    ac = stub_wrapper.add_calls[-1]
+    assert ac["client_id"] == "agent-a"
+    assert ac["source"] == "agent-a"
+    assert ac["dataset"] == "private:agent-a"
+
+
+def test_anonymous_call_passes_no_client_id(client: TestClient, stub_wrapper: StubWrapper) -> None:
+    """No X-hal0-Agent header → client_id=None passed to wrapper so the
+    wrapper falls back to its constructor value (legacy behavior).
+    """
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "anon"},
+    )
+    assert r.status_code == 200, r.text
+    ac = stub_wrapper.add_calls[-1]
+    assert ac["client_id"] is None

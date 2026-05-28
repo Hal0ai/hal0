@@ -446,17 +446,24 @@ class CogneeWrapper:
 
     # ── Audit log ──────────────────────────────────────────────────────
 
-    def _audit(self, op: str, dataset: str, **extra: Any) -> None:
+    def _audit(self, op: str, dataset: str, *, client_id: str | None = None, **extra: Any) -> None:
         """Emit a structured audit event (ADR-0005 §5).
 
         Every call surface logs ``hal0.memory.audit`` with at minimum
         ``client_id, op, dataset, timestamp`` so journald / log
         aggregators can build per-client memory access traces. ``extra``
         carries op-specific context (e.g. ``count`` for delete).
+
+        ``client_id`` lets transport-layer callers (REST + MCP) stamp
+        the resolved per-call identity onto the audit row instead of
+        the singleton wrapper's constructor value (which is
+        ``"anonymous"`` on the production wrapper). Without this
+        override, every audit row on the singleton wrapper looked
+        identical and forensics had to cross-reference HTTP logs.
         """
         event = {
             "event": AUDIT_EVENT,
-            "client_id": self._client_id,
+            "client_id": client_id or self._client_id,
             "op": op,
             "dataset": dataset,
             "timestamp": _now_iso(),
@@ -481,6 +488,7 @@ class CogneeWrapper:
         tags: list[str] | None = None,
         source: str | None = None,
         metadata: dict[str, Any] | None = None,
+        client_id: str | None = None,
     ) -> dict[str, str]:
         """Add a memory item. Returns ``{id, timestamp}``.
 
@@ -490,18 +498,24 @@ class CogneeWrapper:
         cannot escape their own private bucket by passing
         ``dataset="shared"``.
 
-        ``source`` defaults to the constructor's ``client_id``. Callers
-        may pass an override (e.g. a sub-agent identifier) but the
-        ``client_id`` from the Bearer token is what shows up in the
-        audit log either way — clients can annotate but cannot
-        impersonate.
+        ``source`` defaults to ``client_id`` (resolved per-call) or the
+        constructor's value. Callers may pass an override (e.g. a
+        sub-agent identifier) but the resolved identity is what shows
+        up in the audit log either way — clients can annotate but
+        cannot impersonate.
+
+        ``client_id`` lets the REST + MCP transport layers stamp the
+        per-call resolved identity onto audit rows and ``source``.
+        Without it, the singleton wrapper's constructor-pinned
+        ``"anonymous"`` masked every per-agent caller.
         """
         if tags is None:
             tags = []
         if metadata is None:
             metadata = {}
+        effective_client_id = client_id or self._client_id
         effective_dataset = self._effective_write_dataset(dataset)
-        effective_source = source or self._client_id
+        effective_source = source or effective_client_id
         item_id = str(uuid.uuid4())
         timestamp = _now_iso()
 
@@ -543,7 +557,13 @@ class CogneeWrapper:
             )
             conn.commit()
 
-        self._audit("add", effective_dataset, item_id=item_id, tags=list(tags))
+        self._audit(
+            "add",
+            effective_dataset,
+            client_id=effective_client_id,
+            item_id=item_id,
+            tags=list(tags),
+        )
 
         # ADR-0014 §1+§6 — when graph extraction is on, enqueue a
         # background cognify pass after the foreground add returns. The
@@ -665,6 +685,7 @@ class CogneeWrapper:
         before: str | None = None,
         after: str | None = None,
         mode: str = "vector",
+        client_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Vector + filter search. Returns list of dicts (MemoryRecord shape).
 
@@ -694,15 +715,16 @@ class CogneeWrapper:
             raise ValueError(
                 f"search mode {mode!r} is not valid; choose from 'vector' | 'graph' | 'hybrid'"
             )
+        effective_client_id = client_id or self._client_id
         if mode != "vector" and not self._graph_enabled:
             _audit_logger().info(
                 "hal0.memory.search.mode_fallback",
-                client_id=self._client_id,
+                client_id=effective_client_id,
                 requested_mode=mode,
                 resolved_mode="vector",
                 reason="graph_extraction_disabled",
             )
-        allowed_datasets = self._allowed_read_datasets(dataset)
+        allowed_datasets = self._allowed_read_datasets(dataset, client_id=client_id)
 
         cognee = _cognee()
         # Local import: SearchType is part of Cognee's deep module tree;
@@ -751,7 +773,13 @@ class CogneeWrapper:
                 or "DatabaseNotCreatedError" in exc_str
             )
             if is_first_run:
-                self._audit("search", ",".join(allowed_datasets), query=query, results=0)
+                self._audit(
+                    "search",
+                    ",".join(allowed_datasets),
+                    client_id=effective_client_id,
+                    query=query,
+                    results=0,
+                )
                 return []
             raise
 
@@ -818,6 +846,7 @@ class CogneeWrapper:
         self._audit(
             "search",
             ",".join(allowed_datasets),
+            client_id=effective_client_id,
             query=query,
             results=len(out),
             reranked=reranked,
@@ -829,6 +858,7 @@ class CogneeWrapper:
         dataset: str = SHARED_DATASET,
         cursor: str | None = None,
         limit: int = 50,
+        client_id: str | None = None,
     ) -> dict[str, Any]:
         """Paginated list. Cursor is the last-seen item id.
 
@@ -843,7 +873,8 @@ class CogneeWrapper:
         ``private:bob`` from ``alice`` yields an empty list, not an
         error (ADR-0005 §3 leans toward fail-open-empty for reads).
         """
-        allowed_datasets = self._allowed_read_datasets(dataset)
+        effective_client_id = client_id or self._client_id
+        allowed_datasets = self._allowed_read_datasets(dataset, client_id=client_id)
         with self._sidecar_conn() as conn:
             params: list[Any] = list(allowed_datasets)
             placeholders = ",".join("?" * len(allowed_datasets))
@@ -871,10 +902,15 @@ class CogneeWrapper:
             rows = rows[:limit]
             next_cursor = rows[-1]["id"]
         items = [_row_to_record(r, score=None).to_dict() for r in rows]
-        self._audit("list_items", ",".join(allowed_datasets), count=len(items))
+        self._audit(
+            "list_items",
+            ",".join(allowed_datasets),
+            client_id=effective_client_id,
+            count=len(items),
+        )
         return {"items": items, "next_cursor": next_cursor}
 
-    async def delete(self, ids: list[str]) -> dict[str, int]:
+    async def delete(self, ids: list[str], *, client_id: str | None = None) -> dict[str, int]:
         """Delete by sidecar id. Returns ``{deleted: int}``.
 
         We delete from BOTH the sidecar AND Cognee's own dataset rows
@@ -887,8 +923,15 @@ class CogneeWrapper:
         Empty list is a no-op (``{"deleted": 0}``) — defensive against
         callers handing us ``ids=[]`` rather than guarding upstream.
         """
+        effective_client_id = client_id or self._client_id
         if not ids:
-            self._audit("delete", "-", requested=0, deleted=0)
+            self._audit(
+                "delete",
+                "-",
+                client_id=effective_client_id,
+                requested=0,
+                deleted=0,
+            )
             return {"deleted": 0}
 
         cognee = _cognee()
@@ -910,7 +953,9 @@ class CogneeWrapper:
                 # against a leaked id being used to reach into a different
                 # client's private namespace. (v0.2 single-user => moot
                 # in practice, but the check is cheap + Phase-9-ready.)
-                if row["dataset"] not in self._allowed_read_datasets(SHARED_DATASET):
+                if row["dataset"] not in self._allowed_read_datasets(
+                    SHARED_DATASET, client_id=client_id
+                ):
                     continue
                 if row["cognee_data_id"] and row["cognee_dataset_id"]:
                     try:
@@ -924,7 +969,7 @@ class CogneeWrapper:
                         # the count.
                         _audit_logger().warning(
                             "hal0.memory.delete.cognee_miss",
-                            client_id=self._client_id,
+                            client_id=effective_client_id,
                             item_id=item_id,
                         )
                 conn.execute(
@@ -938,6 +983,7 @@ class CogneeWrapper:
         self._audit(
             "delete",
             ",".join(sorted(wipes_by_dataset)) or "-",
+            client_id=effective_client_id,
             requested=len(ids),
             deleted=deleted,
         )
@@ -1100,7 +1146,9 @@ class CogneeWrapper:
         # private:* values before this point (issue #367).
         return requested or SHARED_DATASET
 
-    def _allowed_read_datasets(self, requested: str | list[str]) -> list[str]:
+    def _allowed_read_datasets(
+        self, requested: str | list[str], *, client_id: str | None = None
+    ) -> list[str]:
         """Intersect requested datasets with the caller's read scope.
 
         Always includes ``shared`` plus the caller's own
@@ -1108,13 +1156,22 @@ class CogneeWrapper:
         different private namespace, it's dropped silently — read
         attempts on another client's private bucket don't error
         (avoid leaking existence) but never return data.
+
+        ``client_id`` lets transport-layer callers pass the resolved
+        per-call identity so reads honor the same ADR-0005 §3 scoping
+        the write path does (PR #366). Without this override, the
+        singleton wrapper's constructor-pinned ``"anonymous"`` drops
+        every per-agent ``private:<id>`` as "another client's private"
+        — agents could write to their private bucket but never search
+        it back.
         """
         if isinstance(requested, str):
             requested_list = [requested]
         else:
             requested_list = list(requested) if requested else [SHARED_DATASET]
         out: list[str] = []
-        own_private = f"{PRIVATE_PREFIX}{self._client_id}"
+        effective_id = client_id or self._client_id
+        own_private = f"{PRIVATE_PREFIX}{effective_id}"
         for ds in requested_list:
             if ds == SHARED_DATASET:
                 out.append(SHARED_DATASET)

@@ -213,6 +213,7 @@ async def _memory_add(
         tags=tags,
         source=source,
         metadata=metadata_raw,
+        client_id=client_id,
     )
     return {
         "id": result["id"],
@@ -265,6 +266,7 @@ async def _memory_search(
         tags=tags,
         before=before,
         after=after,
+        client_id=client_id,
     )
     return {"results": list(results)}
 
@@ -285,7 +287,9 @@ async def _memory_list(
     limit_raw = args.get("limit", 50)
     if not isinstance(limit_raw, int) or limit_raw < 1 or limit_raw > 200:
         raise MemorySchemaError("limit must be 1..200")
-    page = await wrapper.list_items(dataset=dataset, cursor=cursor, limit=limit_raw)
+    page = await wrapper.list_items(
+        dataset=dataset, cursor=cursor, limit=limit_raw, client_id=client_id
+    )
     return {
         "items": list(page.get("items", [])),
         "next_cursor": page.get("next_cursor"),
@@ -310,7 +314,7 @@ async def _memory_delete(
     if not isinstance(ids_raw, list) or not ids_raw:
         raise MemorySchemaError("ids must be a non-empty list[str]")
     ids = [str(i) for i in ids_raw]
-    result = await wrapper.delete(ids=ids)
+    result = await wrapper.delete(ids=ids, client_id=client_id)
     deleted_raw = result.get("deleted", len(ids))
     # Accept either a count or the list of deleted ids from the wrapper
     # so we're forgiving of either contract while still returning the
