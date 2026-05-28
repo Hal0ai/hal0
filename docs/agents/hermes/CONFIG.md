@@ -244,9 +244,63 @@ When `_phase_mcp_wire`'s probe surfaces a newly-reachable server:
 3. Hermes JSON-RPC `reload.env` (next agent turn) picks up the
    addition — no Hermes process restart needed.
 
+## Chat surface (v0.3 PR-9 + PR-10)
+
+The dashboard chat composer talks to Hermes through hal0-api's chat
+proxy, not directly. The proxy is the only browser-facing seam — Hermes
+itself binds 127.0.0.1:9119 inside the `hal0-agent@hermes.service`
+sandbox.
+
+### WebSocket endpoints (browser → hal0-api → hermes)
+
+| Endpoint | Direction | Purpose |
+|---|---|---|
+| `WS /api/agents/{id}/events` | server → client | mirror of `hermes /api/events` JSON-RPC bus (`message.delta`, `message.complete`, `tool.progress`, `tool.complete`, `persona.switched`, …). `tool.progress` is coalesced server-side at 100ms; non-progress frames pass through unchanged so the progress-before-complete ordering invariant holds. |
+| `WS /api/agents/{id}/submit` | bidi | browser sends JSON-RPC `prompt.submit`, `approval.respond`, `clarify.respond`; proxy forwards verbatim, returns the hermes ack frame. |
+
+### REST shims (browser → hal0-api → hermes)
+
+| Endpoint | Maps to |
+|---|---|
+| `GET  /api/agents/{id}/session/handshake` | mints the HMAC session cookie + returns the embed token shape the browser needs to render the composer |
+| `POST /api/agents/{id}/session/create`    | hermes `session.create` |
+| `POST /api/agents/{id}/session/resume`    | hermes `session.resume` |
+| `GET  /api/agents/{id}/session/history`   | hermes `session.history` |
+
+### Composer keybindings
+
+* **Enter** — submits the current text as a `prompt.submit` JSON-RPC
+  frame. The text input clears on send; the transcript appends the
+  user message immediately and renders streaming deltas as they arrive.
+* **Shift+Enter** — inserts a newline in the textarea without
+  submitting.
+* **Ctrl/Cmd+K** — focuses the composer (any pane).
+
+### Security baseline
+
+* WS upgrades require both a permitted `Origin` header AND a valid
+  HMAC session cookie (see ADR-0016 §2).
+* Embed token in `Authorization: Bearer …` on the outbound hop to
+  hermes; never the query string.
+* uvicorn access log scrubs query strings.
+
+### Hot-reload semantics
+
+* **Persona swap** — `POST /api/agents/{id}/personas/{pid}/activate`
+  writes `active.txt` AND POSTs a JSON-RPC `reload.env` to hermes.
+  System-prompt scope swaps on the next user turn; in-flight turn
+  continues with the old persona.
+* **Service restart** — `POST /api/agents/{id}/restart` (PR-11)
+  invokes `systemctl restart hal0-agent@{id}.service`. Used by the
+  SidebarAgentBlock service chip when a hot reload isn't enough
+  (e.g. the persona changes the tool allowlist and hermes needs a
+  fresh plugin load).
+
 ## See also
 
 - [Hermes-Agent bootstrap](./hermes-bootstrap.md) — the 12-phase pipeline that touches surfaces #1-#7
 - [Identity model](./identity.md) — how `X-hal0-Agent` flows through `mcp_servers.*.headers`
 - [MCP client](./mcp-client.md) — what `mcp_wire` validates
+- [`SERVICE.md`](./SERVICE.md) — `hal0-agent@.service` unit + restart endpoint
 - ADR-0013 — agent-installer-managed MCP allowlist contract
+- ADR-0016 — v0.3 integration roll-up

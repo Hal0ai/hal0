@@ -191,10 +191,37 @@ or whatever ships next. Wiring a second instance is just:
 The shim resolves the agent type from `[type]` in the toml; builtin ids
 (`hermes` today) work without a toml.
 
+## Restarting from the dashboard (v0.3 PR-11)
+
+The SidebarAgentBlock service chip wires `POST /api/agents/{id}/restart`,
+which is a thin wrapper around `systemctl restart
+hal0-agent@{id}.service`. Behaviour:
+
+* Returns `{status: "restarted", detail: "..."}` when systemctl exits
+  0 and the unit went through a clean stop-then-start cycle.
+* Returns `{status: "restarting", detail: "..."}` when systemctl
+  reports the unit is still `activating` (Type=notify hasn't sent
+  READY=1 yet). The dashboard's service chip polls after this to
+  converge.
+* Returns the standard hal0 error envelope when systemctl is missing
+  on the host (`agent.systemctl_unavailable`), the subprocess fails
+  to spawn (`agent.restart_failed`), or the call exceeds 30s
+  (`agent.restart_timeout`).
+* Emits an audit row on the `hal0.agents.audit` logger
+  (`agent.restart.invoked` → `agent.restart.ok` or
+  `agent.restart.failed`). Actor identity comes from `X-hal0-Agent`;
+  defaults to `hal0-dashboard` for browser-initiated restarts.
+
+The endpoint is the surface that lets operators trigger a restart
+without dropping to SSH. SSH `systemctl restart` still works fine —
+this is just the dashboard-friendly path.
+
 ## See also
 
 * [`hermes-bootstrap.md`](../hermes-bootstrap.md) — provisioning state machine
 * [`identity.md`](../identity.md) — `X-hal0-Agent` header and auth model
 * [`mcp-client.md`](../mcp-client.md) — how Hermes talks to hal0-memory + hal0-admin
+* [`CONFIG.md`](./CONFIG.md) — chat surface + hot-reload semantics
 * `installer/systemd/hal0-agent@.service` — the unit itself
 * `src/hal0/cli/agent_shim.py` — the shim source
+* `src/hal0/api/agents/restart.py` — the restart endpoint implementation

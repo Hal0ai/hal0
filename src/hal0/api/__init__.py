@@ -24,7 +24,16 @@ if TYPE_CHECKING:
 
 from hal0 import __version__
 from hal0.api.agents import (
+    memory_stats as agents_memory_stats_routes,
+)
+from hal0.api.agents import (
     personas as agents_personas_routes,
+)
+from hal0.api.agents import (
+    restart as agents_restart_routes,
+)
+from hal0.api.agents import (
+    skills as agents_skills_routes,
 )
 from hal0.api.agents.chat_proxy import router as chat_proxy_router
 from hal0.api.middleware import error_codes, log_scrub, request_id
@@ -961,6 +970,39 @@ def create_app() -> FastAPI:
         agents_personas_routes.router,
         prefix="/api/agents",
         tags=["agents", "personas"],
+    )
+
+    # Agent service restart (v0.3 PR-11). Wraps systemctl restart of the
+    # hal0-agent@<id>.service template unit. Flagged as missing during
+    # PR-6/PR-8/PR-10 integration: the sidecar agent block + the
+    # service-status chip both want a one-click restart action. Audit
+    # log emitted on every invocation via the ``hal0.agents.audit``
+    # logger; matches the slot-restart pattern.
+    app.include_router(
+        agents_restart_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "restart"],
+    )
+
+    # Agent skills catalog (v0.3 PR-11). GET /api/agents/skills returns
+    # the static catalog mirroring the upstream Hermes tool registry +
+    # hal0 MCP servers. Bumps ride ADR-0015's weekly drift PRs. The
+    # ``/skills`` path is NOT parameterised by agent id — the catalog
+    # is the same across agents in v0.3.
+    app.include_router(
+        agents_skills_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "skills"],
+    )
+
+    # Agent memory stats (v0.3 PR-11). GET /api/agents/{id}/memory/stats
+    # returns the counts the dashboard sidecar memory chip renders.
+    # Fallback to ``available=false`` when the wrapper isn't initialised,
+    # so a hal0 install without Cognee still renders sensibly.
+    app.include_router(
+        agents_memory_stats_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "memory"],
     )
 
     # PR-9: chat WS proxy + session REST shim. Bridges the browser to

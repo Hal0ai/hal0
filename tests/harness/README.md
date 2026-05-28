@@ -107,6 +107,10 @@ tests/harness/
   runtime-test.sh         # δ.3 — one real /v1/chat/completions round-trip
   agents-test.sh          # δ.4 — bundled-agent lifecycle regression (#346)
   harness-cleanup.sh      # δ.5 — kill API, rm prefix, opt-in prod uninstall
+  integration/            # δ.6 — Python integration suite (PR-11, v0.3)
+    conftest.py           #         FakeWsServer fixture + harness_client
+    test_v0_3_chat_roundtrip.py    # WS proxy → mock hermes round-trip
+    test_v0_3_persona_activate.py  # persona swap + hot-reload nudge round-trip
   reports/
     .api-handoff          # ephemeral handoff between tiers (HAL0_API_URL, HAL0_HOME, HAL0_SERVE_PID)
     installer.json        # per-tier reports, hal0.harness-report.v1
