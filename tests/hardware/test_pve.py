@@ -337,3 +337,60 @@ def test_pve_status_fetch_error_recorded(
     assert out["ok"] is False
     assert "TimeoutError" in out["error"]
     assert "upstream down" in out["error"]
+
+
+# ── detect_proxmox_host ────────────────────────────────────────────────────
+
+
+class TestDetectProxmoxHost:
+    """detect_proxmox_host() is best-effort, signal-driven, and never raises."""
+
+    def test_returns_detected_when_pve_kernel_and_lxc_cgroup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        version = tmp_path / "version"
+        version.write_text("Linux version 7.0.0-8-pve (root@…)\n")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/lxc.payload.105/init.scope\n")
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.DETECTED
+
+    def test_returns_uncertain_when_only_pve_kernel(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        version = tmp_path / "version"
+        version.write_text("Linux version 7.0.0-8-pve\n")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/\n")  # not lxc-shaped
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.UNCERTAIN
+
+    def test_returns_not_detected_on_bare_metal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        version = tmp_path / "version"
+        version.write_text("Linux version 6.10.5-arch1-1\n")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/\n")
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.NOT_DETECTED
+
+    def test_missing_files_return_not_detected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(pve, "_PROC_VERSION", tmp_path / "missing-1")
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", tmp_path / "missing-2")
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.NOT_DETECTED
+
+    def test_never_raises_on_unreadable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # PermissionError, EncodingError, etc. all collapse to NOT_DETECTED.
+        bad = tmp_path / "bad"
+        bad.write_bytes(b"\xff\xfe\x00invalid")
+        monkeypatch.setattr(pve, "_PROC_VERSION", bad)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", bad)
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.NOT_DETECTED
