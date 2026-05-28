@@ -32,6 +32,14 @@ import './mcp.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'
+// v0.3 PR-6: bridge the SidebarAgentBlock TanStack Query hook onto
+// window BEFORE chrome.jsx + sidebar-agent-block.jsx evaluate. The
+// component (.jsx, prototype window-globals style) reads
+// `window.__hal0UseSidebarAgentRollup` instead of importing the hook
+// directly — preserves the no-ES-imports contract for the dash/*.jsx
+// pile (see main.tsx top comment).
+import './dash/agents/sidebar-agent-hook-bridge'
+import './dash/agents/sidebar-agent-block.jsx'
 import './dash/chrome.jsx'
 import './dash/primitives.jsx'
 import './dash/command-palette.jsx'
