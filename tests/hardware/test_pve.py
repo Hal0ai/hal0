@@ -394,3 +394,12 @@ class TestDetectProxmoxHost:
         monkeypatch.setattr(pve, "_PROC_VERSION", bad)
         monkeypatch.setattr(pve, "_PROC_1_CGROUP", bad)
         assert pve.detect_proxmox_host() == pve.PveDetectionState.NOT_DETECTED
+
+    def test_never_raises_on_permission_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Real OSError from read_text() must also collapse to NOT_DETECTED."""
+        from unittest.mock import patch
+
+        # Patch read_text on the Path class so both _PROC_VERSION and
+        # _PROC_1_CGROUP raise when the helpers try to read them.
+        with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+            assert pve.detect_proxmox_host() == pve.PveDetectionState.NOT_DETECTED

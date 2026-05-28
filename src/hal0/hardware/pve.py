@@ -246,7 +246,7 @@ def detect_proxmox_host() -> PveDetectionState:
       - /proc/version contains '-pve'   (strong)
       - /proc/1/cgroup is lxc-shaped    (medium)
 
-    Two strong signals → DETECTED. One signal → UNCERTAIN. None → NOT_DETECTED.
+    Both signals present → DETECTED. Either signal alone → UNCERTAIN. Neither → NOT_DETECTED.
     Never raises; unreadable inputs collapse to NOT_DETECTED.
     """
     pve_kernel = _has_pve_kernel()
@@ -409,7 +409,9 @@ async def pve_test(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "PveDetectionState",
     "delete_pve_config",
+    "detect_proxmox_host",
     "invalidate_pve_cache",
     "pve_config_path",
     "pve_status",
