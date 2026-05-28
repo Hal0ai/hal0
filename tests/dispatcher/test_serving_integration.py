@@ -21,7 +21,8 @@ from typing import Any
 import httpx
 import pytest
 
-from hal0.dispatcher.router import Dispatcher, UpstreamCall, UpstreamUnavailable
+from hal0.dispatcher.router import Dispatcher, SlotLoading, UpstreamCall, UpstreamUnavailable
+from hal0.slots.state import SlotState
 
 # ── tiny SlotManager stand-in ────────────────────────────────────────────────
 
@@ -33,15 +34,23 @@ class _RecordingSlotManager:
     up a real SlotManager (which would need a slot TOML + systemctl stubs).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, state: SlotState = SlotState.READY) -> None:
         self.events: list[tuple[str, str]] = []  # (op, slot_name)
         self._counts: dict[str, int] = {}
+        self._state = state
 
     def serving(self, slot_name: str) -> _RecordingCtx:
         return _RecordingCtx(self, slot_name)
 
     def in_flight_count(self, slot_name: str) -> int:
         return self._counts.get(slot_name, 0)
+
+    def _current_state(self, _slot_name: str) -> SlotState:
+        # Mirrors SlotManager._current_state — Dispatcher's swap-window
+        # gate calls this before forwarding.  Default READY so the
+        # existing serving-integration tests pass; tests for the gate
+        # construct the mock with the state they want to assert against.
+        return self._state
 
 
 class _RecordingCtx:
@@ -210,3 +219,92 @@ async def test_single_flight_prefetch_does_not_enter_serving() -> None:
     await dispatcher.aclose()
 
     assert sm.events == [], "prefetch must never enter serving()"
+
+
+# ── swap-window gate (SlotLoading) ───────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        SlotState.OFFLINE,
+        SlotState.PULLING,
+        SlotState.STARTING,
+        SlotState.WARMING,
+        SlotState.UNLOADING,
+        SlotState.ERROR,
+    ],
+)
+@pytest.mark.asyncio
+async def test_forward_gates_slot_in_loading_state(state: SlotState) -> None:
+    """Every non-ready slot state must raise SlotLoading before the HTTP forward.
+
+    Without the gate, requests in the swap window hit a dead port (502)
+    or a still-loading llama-server (raw 503).  The gate raises a
+    structured envelope with retry_after_s instead, which the error
+    middleware promotes to a Retry-After header.
+    """
+    sm = _RecordingSlotManager(state=state)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError("forward must not reach upstream when slot is loading")
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
+    try:
+        with pytest.raises(SlotLoading) as ei:
+            await dispatcher.forward(_slot_call())
+        exc = ei.value
+        assert exc.code == "slot.loading"
+        assert exc.status == 503
+        assert exc.details["slot"] == "primary"
+        assert exc.details["state"] == state.value
+        assert exc.details["retry_after_s"] == 15
+        progress = exc.details["progress"]
+        assert progress["phase"] == state.value
+        assert progress["upstream"] == "primary"
+        # No serving counter movement — the gate fires before _forward_with_serving.
+        assert sm.events == []
+        assert sm.in_flight_count("primary") == 0
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [SlotState.READY, SlotState.SERVING, SlotState.IDLE],
+)
+@pytest.mark.asyncio
+async def test_forward_passes_through_ready_states(state: SlotState) -> None:
+    """READY / SERVING / IDLE must all be treated as 'ready to serve'."""
+    sm = _RecordingSlotManager(state=state)
+    dispatcher = _make_dispatcher(
+        httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True})),
+        sm=sm,
+    )
+    try:
+        resp = await dispatcher.forward(_slot_call())
+        assert resp.status_code == 200
+        assert sm.events == [("enter", "primary"), ("exit", "primary")]
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remote_upstream_skips_gate_even_when_slot_state_lookup_would_fail() -> None:
+    """Remote upstreams have no slot_name — the gate must not fire.
+
+    Defends against a regression where the gate is moved before the
+    slot_name + slot_manager check, which would crash on remote calls
+    that don't carry a slot identity.
+    """
+    sm = _RecordingSlotManager(state=SlotState.OFFLINE)  # would trip the gate
+    dispatcher = _make_dispatcher(
+        httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True})),
+        sm=sm,
+    )
+    try:
+        resp = await dispatcher.forward(_remote_call())
+        assert resp.status_code == 200
+        assert sm.events == []
+    finally:
+        await dispatcher.aclose()

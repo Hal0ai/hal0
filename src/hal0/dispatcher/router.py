@@ -136,6 +136,25 @@ class UpstreamUnavailable(DispatchError):
     status = 502
 
 
+class SlotLoading(DispatchError):
+    """The target slot is mid-swap — model is starting/loading/unloading.
+
+    Raised by ``Dispatcher.forward`` before attempting the HTTP forward
+    when the slot is in any non-ready state.  Without this gate, requests
+    in the swap window either ConnectError (port not bound) → 502, or the
+    inner llama-server returns its own raw 503 ("still loading the
+    model"), leaving clients with a 5xx and no Retry-After hint.
+
+    The envelope carries a ``progress`` block under ``details`` so the
+    dashboard can render a "model loading…" chip instead of a generic
+    error, and ``retry_after_s`` so OpenAI-compatible SDKs back off
+    correctly (the error middleware promotes it to a real HTTP header).
+    """
+
+    code = "slot.loading"
+    status = 503
+
+
 # ── UpstreamCall ──────────────────────────────────────────────────────────────
 
 
@@ -518,8 +537,61 @@ class Dispatcher:
         ``_forward_streaming`` (PLAN.md §3).
         """
         if call.slot_name and self._slot_manager is not None:
+            # Swap-window gate: refuse to forward if the slot is loading.
+            # Without this, requests hit a dead port (502) or a still-
+            # loading llama-server (raw 503 with no Retry-After).
+            self._check_slot_ready_for_dispatch(call)
             return await self._forward_with_serving(call)
         return await self._forward_plain(call)
+
+    def _check_slot_ready_for_dispatch(self, call: UpstreamCall) -> None:
+        """Raise :class:`SlotLoading` if the target slot isn't ready to serve.
+
+        Ready set: ``READY``, ``SERVING``, ``IDLE``.  Any other state means
+        the slot is mid-lifecycle (``OFFLINE``, ``PULLING``, ``STARTING``,
+        ``WARMING``, ``UNLOADING``, ``ERROR``) and forwarding would either
+        ConnectError or get a raw 503 from llama-server's "still loading"
+        gate.  We raise a typed error here so the middleware can emit a
+        structured envelope plus a ``Retry-After`` header.
+        """
+        from hal0.slots.state import SlotState
+
+        assert self._slot_manager is not None  # narrowed by caller
+        current = self._slot_manager._current_state(call.slot_name)
+        if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+            return
+
+        raise SlotLoading(
+            f"slot {call.slot_name!r} is {current.value} — not ready to serve",
+            details=self._build_loading_response(call, current),
+        )
+
+    def _build_loading_response(
+        self,
+        call: UpstreamCall,
+        state: Any,  # SlotState; typed loosely to avoid an import cycle
+    ) -> dict[str, Any]:
+        """Shape the ``details`` block on the :class:`SlotLoading` envelope.
+
+        Option B (UX-aware): the response includes a ``progress`` block so
+        the dashboard renders a "model loading…" chip with the slot + the
+        model the user asked for, while still being a clean 503 that
+        OpenAI-style SDKs treat as retryable via ``Retry-After``.
+
+        Retry cadence: Strix Halo iGPU loads typically take 15-60s
+        depending on model size.  We hint 15s — enough to avoid hammering
+        the API, short enough that an active user doesn't give up.
+        """
+        return {
+            "slot": call.slot_name,
+            "state": state.value,
+            "retry_after_s": 15,
+            "progress": {
+                "phase": state.value,
+                "requested_model": call.requested_model,
+                "upstream": call.upstream_name,
+            },
+        }
 
     async def _forward_plain(self, call: UpstreamCall) -> Response:
         client = self._get_http_client()

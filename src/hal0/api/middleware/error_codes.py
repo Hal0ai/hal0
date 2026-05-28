@@ -74,9 +74,17 @@ def install(app: FastAPI) -> None:
     @app.exception_handler(Hal0Error)
     async def _hal0_handler(_: Request, exc: Hal0Error) -> JSONResponse:
         log.warning("hal0.error", code=exc.code, message=exc.message, **exc.details)
+        # Honor a ``retry_after_s`` hint in details by promoting it to the
+        # ``Retry-After`` HTTP header so OpenAI-compatible SDKs back off
+        # correctly.  Only applied on 503 responses (RFC 7231 §7.1.3).
+        headers: dict[str, str] | None = None
+        retry_after = exc.details.get("retry_after_s") if exc.status == 503 else None
+        if isinstance(retry_after, (int, float)) and retry_after > 0:
+            headers = {"Retry-After": str(int(retry_after))}
         return JSONResponse(
             status_code=exc.status,
             content=_envelope(exc.code, exc.message, exc.details),
+            headers=headers,
         )
 
     @app.exception_handler(RequestValidationError)

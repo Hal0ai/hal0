@@ -28,6 +28,31 @@ from hal0.upstreams.registry import Upstream
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+def _pin_slot_ready(client: TestClient, slot_name: str = "primary") -> None:
+    """Force ``slot_name`` to READY in the SlotManager state map.
+
+    The dispatcher's swap-window gate (PR-379) refuses to forward when the
+    slot is in any non-ready state.  Audio tests stub the HTTP transport
+    rather than starting a real slot, so the slot is OFFLINE on disk and
+    the gate would 503 every request.  Pinning the in-memory state to
+    READY bypasses the gate for the duration of the test.
+    """
+    import time as _time
+
+    from hal0.slots.state import SlotState, SlotStateRecord
+
+    sm = client.app.state.dispatcher._slot_manager
+    sm._states[slot_name] = SlotStateRecord(
+        name=slot_name,
+        state=SlotState.READY,
+        model_id="test-model",
+        port=0,
+        updated_at=_time.time(),
+        message="pinned by test fixture",
+        extra={},
+    )
+
+
 def _seed_stt_upstream(client: TestClient, port: int = 8089) -> None:
     """Register a fake STT slot the dispatcher's legacy fallback will land on.
 
@@ -46,6 +71,7 @@ def _seed_stt_upstream(client: TestClient, port: int = 8089) -> None:
             auth_style="none",
         )
     )
+    _pin_slot_ready(client)
 
 
 def _seed_tts_upstream(client: TestClient, port: int = 8090) -> None:
@@ -63,6 +89,7 @@ def _seed_tts_upstream(client: TestClient, port: int = 8090) -> None:
             auth_style="none",
         )
     )
+    _pin_slot_ready(client)
 
 
 def _install_mock_transport(client: TestClient, handler: httpx.MockTransport | object) -> None:
@@ -285,6 +312,7 @@ def test_scrubber_does_not_touch_non_audio_routes(
             auth_style="none",
         )
     )
+    _pin_slot_ready(client)
 
     leaky_body = b'{"detail":"trace mentions ffmpeg somewhere"}'
 
