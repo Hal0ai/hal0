@@ -98,29 +98,35 @@ malformed body:
 
 ### 401 — unauthorized
 
-`/api/*` and `/v1/*` (hal0 envelope — auth runs before forwarding):
+**Post-ADR-0012 status:** there is **no built-in 401 path** on the
+FastAPI surface. `hal0-api` binds open; auth is the operator's reverse
+proxy. The `auth.required` envelope below is documented for two
+reasons: (a) the upstream cosign-verified release endpoints and
+`/mcp/*` mounts still resolve a `client_id` from request headers
+(`X-hal0-Agent` post-rename — see `v0.3-state.md` §3) and may surface
+identity-related errors using this envelope shape, and (b) any
+reverse-proxy auth layer in front of hal0 will surface its own 401
+through the proxy, not through this envelope.
+
+When an identity-required surface does raise, the shape is:
 
 ```json
 {
   "error": {
     "code": "auth.required",
-    "message": "no bearer token presented",
+    "message": "no agent identity presented",
     "details": {}
   }
 }
 ```
 
-Same status, hal0 envelope on both surfaces, because the auth
-middleware refuses the request before it can reach an upstream.
-
-Per [ADR-0001](./adr/0001-collapse-edge-auth-into-fastapi.md) (PR #58),
-the auth surface is a single FastAPI layer — `POST /api/auth/login`
-issues a `hal0_session` cookie, `POST /api/auth/logout` clears it, and
-`POST /api/auth/password` sets or rotates the owner password (public
-when no password is yet set; writer-scoped otherwise). The middleware
-accepts either the session cookie or a Bearer token against the same
-`require_token` / `require_writer` deps, so 401 envelopes are identical
-across both auth paths.
+History: ADR-0001 (PR #58) introduced a FastAPI-layer auth surface
+(`POST /api/auth/login` cookie, `POST /api/auth/password`, Bearer
+tokens). ADR-0012 (PRs #254 / #255 / #256 / #266 / #267, v0.3.0-alpha.1)
+removed that surface entirely — ~6,000 lines deleted across backend,
+frontend, tests, installer, and packaging. The `auth.*` envelope
+code namespace is retained for any future re-introduced auth and for
+the MCP identity middleware.
 
 ### 404 — not found
 
