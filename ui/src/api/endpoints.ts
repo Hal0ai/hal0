@@ -109,6 +109,9 @@ export const ENDPOINTS = {
   // Single-source-of-truth model storage (Settings → Models + Firstrun → Storage).
   settingsModelsStore: '/api/settings/models/store',
   settingsModelsStoreMigrate: '/api/settings/models/store/migrate',
+  // Full-shape Proxmox status — includes tenants[] stripped by the
+  // /api/stats/hardware slim projection (see pve.py:_SLIM_DROP_KEYS).
+  proxmoxSettings: '/api/settings/proxmox',
 
   // ── Settings ─────────────────────────────────────────────────────
   // Updates
