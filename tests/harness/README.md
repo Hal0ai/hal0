@@ -111,6 +111,12 @@ tests/harness/
     conftest.py           #         FakeWsServer fixture + harness_client
     test_v0_3_chat_roundtrip.py    # WS proxy → mock hermes round-trip
     test_v0_3_persona_activate.py  # persona swap + hot-reload nudge round-trip
+    _delegate_fakes.py             # Hermes execution-backend ABC + 3 fakes
+    _delegate_runner.py            # in-process delegate_task dispatch harness
+    test_delegate_task_local.py    # local-backend round-trip + error paths
+    test_delegate_task_docker.py   # docker-backend round-trip + degrade
+    test_delegate_task_modal.py    # modal-backend round-trip + cold-start
+    test_delegate_task_dispatch_matrix.py  # 3-backend fan-out + ABC drift gate
   reports/
     .api-handoff          # ephemeral handoff between tiers (HAL0_API_URL, HAL0_HOME, HAL0_SERVE_PID)
     installer.json        # per-tier reports, hal0.harness-report.v1
@@ -438,3 +444,63 @@ When picking where a new test lives, the rule:
 - A tier's `status` values expand (we currently use ok / missing).
 
 Additive optional fields don't require a bump.
+
+---
+
+## 14. δ-harness: `delegate_task` coverage
+
+Upstream Hermes-Agent's `delegate_task` tool spawns one or more child
+`AIAgent` threads.  Each child's tool loop runs shell commands through
+one of upstream's **execution-environment backends** declared in
+`tools/environments/` and selected by the `TERMINAL_ENV` env var.
+
+Three of those backends — local, docker, and modal — have δ-tier
+coverage at `tests/harness/integration/test_delegate_task_*.py`.  The
+matrix test (`test_delegate_task_dispatch_matrix.py`) gates the
+"fan-out across N backends in one call" shape upstream batch mode
+exposes.
+
+### Testing philosophy
+
+These tests run **mocked backends + real orchestration**: a hand-rolled
+`FakeDelegateRunner` (`_delegate_runner.py`) mirrors the dispatch
+loop upstream's `delegate_task` runs, and the three fake backends
+(`_delegate_fakes.py`) implement the same `BaseEnvironment` ABC
+upstream uses.  No real subprocess, no docker daemon, no Modal credit
+spend.  The tests prove **the dispatch hop works** end-to-end; the
+γ-tier suite on hal0-test LXC (`scripts/release-test.sh`) covers
+"does the real backend actually launch a real container".
+
+The trade: contributors can run these on any laptop in <1 second; CI
+never burns Modal credits; the upstream-contract drift gate
+(`test_upstream_base_environment_still_has_expected_methods`) catches
+upstream renames the moment a contributor with `~/src/hermes-agent`
+checked out re-runs the suite.
+
+### Adding a fourth backend (e.g. daytona, ssh, vercel)
+
+1. **Audit upstream first.**  Confirm the backend actually exists in
+   the upstream pin (`pyproject.toml [tool.hal0.upstream-hermes]
+   commit`).  `tools/environments/<name>.py` should have a concrete
+   `BaseEnvironment` subclass.  If it doesn't, the test is testing a
+   feature that doesn't ship — surface that as a finding in
+   `FINDINGS.md` before writing fakes.
+
+2. **Add the fake to `_delegate_fakes.py`.**  Subclass
+   `_BackendContract`, capture the backend-specific kwargs in
+   `backend_context` so tests can assert provisioning intent
+   (image / sandbox kwargs / connection config), and add a "feature
+   missing" knob (e.g. `unavailable: bool` or `token_missing: bool`)
+   for the degraded-path test.
+
+3. **Add a `test_delegate_task_<name>.py`.**  Mirror the existing
+   layout: round-trip + payload-shape + degraded-path + at-least-one
+   backend-unique edge case (e.g. cold-start latency for modal,
+   non-zero exit code for docker).
+
+4. **Extend `test_delegate_task_dispatch_matrix.py`.**  Add the
+   backend to the parametrised dispatch matrix + the fan-out test so
+   the "all backends round-trip uniformly" gate covers it.
+
+5. **Append to `FINDINGS.md` §46.**  One row per test added; cite
+   upstream backend name + the file:line that confirmed it exists.

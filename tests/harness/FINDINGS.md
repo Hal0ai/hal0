@@ -1278,3 +1278,88 @@ memory chip) that previously rendered stale static data.
   `tests/agents/test_agent_memory_stats_endpoint.py`.
 - **Status:** ✅ landed in PR-11 (2026-05-28).
 
+## 46. δ-harness `delegate_task` 3-backend dispatch coverage — **gap / regression-guard + DA finding**
+
+DA must-fix #2 from the OpenRouter integration analysis
+(`openrouter-research-2026-05-28/notes/da-or.md` line 39 + PLANNING.md
+§4 #2) flagged that R7's "Hermes already ships 7 spawn backends"
+claim was unverified marketing.  The Phase 0 delegate harness
+addresses that with one parametrised dispatch test plus four
+per-backend test files exercising local / docker / modal at the
+δ-tier.  Coverage uses mocked backends so CI never spends Modal
+credits or pulls docker images.
+
+Findings from the upstream audit (pin `0554ef1a`):
+
+- **R7's "7 backends" is partial marketing.** Upstream actually ships
+  **6 execution-environment backends**: local, docker, singularity,
+  modal, daytona, ssh.  Vercel Sandbox does NOT exist in upstream as
+  a `BaseEnvironment` subclass.  Cite:
+  `~/src/hermes-agent/tools/terminal_tool.py:1039-1178`
+  (`_create_environment` factory),
+  `~/src/hermes-agent/tools/environments/__init__.py:1-12`
+  (docstring enumerates the six).
+- **Modal has two sub-modes** (`direct` + `managed`) selected via
+  `terminal.modal_mode`, plus an "auto" fallback.  Our fake covers
+  the direct mode + the credentials-missing degraded path.
+- **`BaseEnvironment` is the actual ABC**, not a per-backend "spawn
+  adapter" — every concrete backend subclasses it.  The DA framing
+  "delegate_task w/ Modal/Daytona path is not exercised in
+  tests/agents/" is accurate: upstream tests cover individual
+  environments in isolation but nothing exercises the
+  `delegate_task → backend dispatch` hop.
+
+The drift gate
+(`test_upstream_base_environment_still_has_expected_methods`) skips
+on machines without `~/src/hermes-agent` (CI, fresh laptops) and
+asserts the four-method contract on machines where the checkout is
+present.  When the weekly `hermes-sdk-diff` workflow (ADR-0018)
+bumps the pin, that gate fires first if upstream renamed a method.
+
+| Row                                                                         | Tier | Outcome | Notes |
+|-----------------------------------------------------------------------------|------|---------|-------|
+| `test_delegate_task_local / round_trips_simple_echo`                         | δ    | pass    | happy path; output reaches assistant response |
+| `test_delegate_task_local / records_invocation_count_and_payload`            | δ    | pass    | command + cwd captured verbatim |
+| `test_delegate_task_local / error_envelope_does_not_crash_parent`            | δ    | pass    | RuntimeError surfaces as per-task error |
+| `test_delegate_task_local / empty_goal_rejected_before_dispatch`             | δ    | pass    | mirrors upstream `tools/delegate_tool.py:2034` |
+| `test_delegate_task_docker / round_trips_with_image_kwargs`                  | δ    | pass    | image kwarg reaches the fake; output round-trips |
+| `test_delegate_task_docker / unavailable_degrades_gracefully`                | δ    | pass    | init_session raise → per-task error, parent intact |
+| `test_delegate_task_docker / payload_includes_container_kwargs`              | δ    | pass    | image / cpu / memory / disk / volumes / env captured |
+| `test_delegate_task_docker / nonzero_returncode_surfaces_as_error`           | δ    | pass    | exit 127 surfaces as inline error; output preserved |
+| `test_delegate_task_modal / round_trips_with_sandbox_kwargs`                 | δ    | pass    | sandbox_kwargs (cpu/memory/ephemeral_disk) captured |
+| `test_delegate_task_modal / token_missing_degrades_gracefully`               | δ    | pass    | MODAL_TOKEN missing → per-task error |
+| `test_delegate_task_modal / cold_start_latency_visible_in_duration`          | δ    | pass    | 200 ms simulated cold-start shows up in duration_ms |
+| `test_delegate_task_modal / multiple_commands_share_one_sandbox`             | δ    | pass    | init_session called once, execute called twice |
+| `test_delegate_task_dispatch_matrix / per_backend_round_trips[local]`        | δ    | pass    | dispatch matrix L1 |
+| `test_delegate_task_dispatch_matrix / per_backend_round_trips[docker]`       | δ    | pass    | dispatch matrix L2 |
+| `test_delegate_task_dispatch_matrix / per_backend_round_trips[modal]`        | δ    | pass    | dispatch matrix L3 |
+| `test_delegate_task_dispatch_matrix / fans_out_to_three_backends_in_one_call`| δ    | pass    | upstream batch-mode shape — three backends, one call |
+| `test_delegate_task_dispatch_matrix / unknown_backend_raises_keyerror`       | δ    | pass    | unregistered backend name fails loud, no silent local fallback |
+| `test_delegate_task_dispatch_matrix / upstream_base_environment_methods`     | δ    | skipped on CI / passes on dev | drift gate against `tools.environments.base.BaseEnvironment` |
+| `test_delegate_task_dispatch_matrix / all_fakes_implement_backend_contract`  | δ    | pass    | every fake implements `_BackendContract` (`init_session`/`execute`/`cleanup`) |
+
+- **Cite:** `tests/harness/integration/_delegate_fakes.py`,
+  `tests/harness/integration/_delegate_runner.py`,
+  `tests/harness/integration/test_delegate_task_local.py`,
+  `tests/harness/integration/test_delegate_task_docker.py`,
+  `tests/harness/integration/test_delegate_task_modal.py`,
+  `tests/harness/integration/test_delegate_task_dispatch_matrix.py`,
+  upstream `tools/environments/base.py:288` + `terminal_tool.py:1039`.
+- **Status:** ✅ landed in the Phase 0 delegate-harness PR (2026-05-29).
+  Gates V3a Hermes-observability per
+  `openrouter-research-2026-05-28/PLANNING.md` §3 Phase 0.
+
+### V3a observability scope decision
+
+Three backends (local + docker + modal) round-trip cleanly through
+the dispatch hop — V3a Hermes-observability survives intact.  The
+three remaining upstream backends (singularity / daytona / ssh) are
+out of Phase 0 scope but can be added incrementally without
+rescoping V3a: §14 of the README walks through the per-backend
+add procedure.
+
+If the upstream-drift gate fires in a future
+`scripts/hermes-sdk-diff.sh --bump` run, the appropriate response is
+to re-shape `_delegate_fakes.py::_BackendContract` to match (or, if
+upstream rolls back to a smaller surface, scope down V3a's display).
+

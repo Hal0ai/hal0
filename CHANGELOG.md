@@ -77,6 +77,23 @@ servers and the dashboard v3 surfaces that consume them. Landed
   - Deduped the non-empty check in `Updater.apply()`; the extract
     step is the single source of truth.
 
+### Tests
+
+- **δ-harness coverage of Hermes `delegate_task` for 3 backends**
+  (Phase 0 OpenRouter prereq — DA must-fix #2). New δ-tier
+  pytest suite at `tests/harness/integration/test_delegate_task_*.py`
+  proves the `delegate_task → execution-backend` dispatch hop works
+  end-to-end for local + docker + modal with mocked
+  `BaseEnvironment` subclasses (no Modal credits, no docker pulls in
+  CI). The matrix test fans out one call across all three backends
+  and asserts each was invoked exactly once with a per-backend-shaped
+  payload. Findings catalogued at `tests/harness/FINDINGS.md` §46
+  including the upstream audit (R7's "7 backends" claim corrected
+  to 6 — local/docker/singularity/modal/daytona/ssh; Vercel Sandbox
+  not present in upstream pin `0554ef1a`). Gates V3a Hermes
+  observability per
+  `openrouter-research-2026-05-28/PLANNING.md` §3 Phase 0.
+
 ### Deferred
 
 - MCP-installed-server supervisor: start / stop / restart still
