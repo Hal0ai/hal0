@@ -10,60 +10,44 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
-## Unreleased — Phase 0 OpenRouter prereq + v0.3 MCP completion
+## [v0.3.2-alpha.1] — 2026-05-29
+
+End-of-stream cut for v0.3. Bundles MCP-completion, memory-map redesign,
+the Settings → Updates fix, the silent-eviction dispatcher recovery,
+ADR-0020 OpenRouter callback skeleton, the persona spending-cap primitive,
+and the docs/internal pin + dashboard-v3 walkthrough.
+
+After this tag, active scope rolls to v0.4 (install-mode reconciliation,
+UI polish, fully-implemented Agents/UI/Install bootstrapped) and v0.5
+(MCP admin + memory wiring across UI and agents).
 
 ### Added
 
-- **Per-persona spending-cap primitive (Phase 0 OpenRouter prereq)**.
-  Lands the `[persona.budget]` TOML sub-table + a pure-Python budget
-  enforcement layer BEFORE the V1 OpenRouter upstream provider and V2
-  `hal0-fusion` MCP server. DA review of the OpenRouter integration
-  plan flagged this as P0 must-fix #3 — without a spending-cap
-  envelope, fusion (4.4x cost vs single-model) plus a recursing
-  Hermes loop could drain a $200/credit pool overnight.
-  - New `src/hal0/agents/budget.py` — `Budget` dataclass, append-only
-    `BudgetLedger`, pure `check_budget` / `record_charge` functions,
-    daily / monthly / lifetime aggregation windows + per-call max.
-  - New REST surface (mounted under `/api/agents/{id}/personas/{pid}`):
-    - `GET    .../budget` — current caps + running spend stats +
-      per-window remaining headroom.
-    - `PUT    .../budget` — replace the budget block; preserves every
-      other persona field on round-trip.
-    - `POST   .../budget/check` — dry-run pre-call gate; takes
-      `{"estimated_cost_usd": float}`, returns `allowed` + `reason` +
-      `remaining_usd`. V1 OpenRouter provider calls this BEFORE
-      issuing the upstream request.
-    - `POST   .../budget/charge` — post-response recorder; appends
-      `{ts, persona_id, surface, model, cost_usd, request_id}` to the
-      ledger.
-  - Ledger location:
-    `/var/lib/hal0/agents/{agent_id}/personas/{persona_id}/spend.jsonl`.
-    Append-only JSON-lines (no SQLite dependency); fsync after every
-    write; operator-inspectable via `tail -f` + `jq`.
-  - New dashboard editor — `PersonaBudgetPanel` mounts under the
-    Personas tab beneath the persona cards. Empty-state CTA reads
-    "no budget set — set caps to enable cloud providers".
-  - Persona seed (hermes + coder) keeps an empty budget block by
-    default; operators opt in by editing the TOML or PUT-ing through
-    the API. `hal0 agent reprovision hermes` preserves operator-set
-    budgets (idempotent persona seed with `overwrite=False`).
-  - **Scope decision (PLANNING.md §5 Q2):** per-persona only for v0.3.
-    Per-agent + platform-wide containing scopes are deferred to v0.4.
-  - **PREREQ — no provider charges to this primitive yet.** V1
-    (OpenRouter as a Hermes upstream) wires it in as a pre-call gate
-    + post-response record.
-
-## Unreleased — v0.3 MCP completion + memory-map redesign
-
-End-to-end completion of the `hal0-admin` + `hal0-memory` bundled MCP
-servers and the dashboard v3 surfaces that consume them. Landed
-2026-05-28 across PRs #364, #365, #366, #368, #369, and (in parallel)
-#370 for the GTT-aware memory-map widget.
-
-### Added
-
-- **ADR-0020 + OpenRouter callback skeleton + loopback guard**
-  (Phase 0 OpenRouter prereq). Documents why the future OAuth PKCE
+- **Per-persona spending-cap primitive** (#411 — Phase 0 OpenRouter
+  prereq). `[persona.budget]` TOML sub-table + pure-Python budget
+  enforcement layer landing BEFORE the V1 OpenRouter upstream provider
+  and V2 `hal0-fusion` MCP server. DA review of the OpenRouter
+  integration plan flagged this as P0 must-fix #3 — without a
+  spending-cap envelope, fusion (4.4× cost vs single-model) plus a
+  recursing Hermes loop could drain a $200/credit pool overnight.
+  - `src/hal0/agents/budget.py` — `Budget` dataclass, append-only
+    `BudgetLedger`, pure `check_budget` / `record_charge`, daily /
+    monthly / lifetime aggregation + per-call max.
+  - REST surface under `/api/agents/{id}/personas/{pid}/budget` —
+    `GET` (caps + spend + headroom), `PUT` (replace; round-trip
+    preserves), `POST /check` (dry-run pre-call gate), `POST /charge`
+    (post-response recorder).
+  - Ledger at `/var/lib/hal0/agents/{agent_id}/personas/{persona_id}/spend.jsonl`
+    — append-only JSON-lines, fsync per write, `tail -f | jq` friendly.
+  - `PersonaBudgetPanel` dashboard editor under Personas tab.
+  - Persona seed (hermes + coder) ships with empty budget block;
+    operators opt in. `hal0 agent reprovision hermes` preserves
+    operator-set budgets (idempotent seed, `overwrite=False`).
+  - **Scope:** per-persona only in v0.3.2; per-agent and platform-wide
+    scopes deferred to v0.4. No provider charges this primitive yet —
+    V1 OpenRouter wires the pre-call gate and post-response record.
+- **ADR-0020 + OpenRouter callback skeleton + loopback guard** (#409,
+  Phase 0 OpenRouter prereq). Documents why the future OAuth PKCE
   callback URL is constrained to `127.0.0.1` so ADR-0012's LAN-trust
   posture survives the V1 OpenRouter integration. Ships a registered
   `GET /api/openrouter/auth/callback` route returning HTTP 501 with a
@@ -126,6 +110,10 @@ servers and the dashboard v3 surfaces that consume them. Landed
     file or `pyproject.toml` `name="hal0"`.
   - Deduped the non-empty check in `Updater.apply()`; the extract
     step is the single source of truth.
+- **Dispatcher silent-eviction recovery** (#392). When Lemonade
+  silently evicts a model mid-stream the dispatcher now catches the
+  upstream 502, refreshes slot state, and retries once before
+  surfacing — turning a user-visible 502 into a transparent recovery.
 
 ### Tests
 
@@ -144,6 +132,16 @@ servers and the dashboard v3 surfaces that consume them. Landed
   observability per
   `openrouter-research-2026-05-28/PLANNING.md` §3 Phase 0.
 
+### Docs
+
+- **Internal docs pin + ADR-0017 + release-manifest refresh** (#389).
+- **Operate + dashboard + installer sweep** (#390): Lemonade reference
+  page, dashboard v3 walkthrough, installer auth section gutted to
+  match the ADR-0012 post-Caddy reality.
+- **PLAN §9 async-job polling contract** (#387). Codifies that any
+  202+job_id endpoint requires UI polling of `GET /status/{id}` until
+  terminal state — the underlying pattern behind the #386 fix.
+
 ### Deferred
 
 - MCP-installed-server supervisor: start / stop / restart still
@@ -155,6 +153,8 @@ servers and the dashboard v3 surfaces that consume them. Landed
 - Manifest fetcher streaming + size guard, patch_config R-M-W lock,
   bundled-id shadow defense, dev-host worktree disk footprint
   (filed as #381-#384).
+- **Install-mode reconciliation** (#406, HITL→AFK) and **hal0-test-template
+  CT 200 + clone harness** (#407, AFK) — both filed against v0.4 scope.
 
 ## [v0.3.1-alpha.1] — 2026-05-27
 
