@@ -19,6 +19,13 @@ servers and the dashboard v3 surfaces that consume them. Landed
 
 ### Added
 
+- **ADR-0020 + OpenRouter callback skeleton + loopback guard**
+  (Phase 0 OpenRouter prereq). Documents why the future OAuth PKCE
+  callback URL is constrained to `127.0.0.1` so ADR-0012's LAN-trust
+  posture survives the V1 OpenRouter integration. Ships a registered
+  `GET /api/openrouter/auth/callback` route returning HTTP 501 with a
+  per-route loopback guard so V1 inherits a baseline that respects
+  the constraint from day 1. No live behaviour change.
 - **Dashboard v3 `/agent` real-backend wiring** (#364, closes #207
   #228 #227 #226). `useAgents()` hook against `/api/agents`; live
   Memory tab against `/api/memory/graph/status`; live Skills tab

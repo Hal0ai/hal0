@@ -296,6 +296,33 @@ sandbox.
   (e.g. the persona changes the tool allowlist and hermes needs a
   fresh plugin load).
 
+## OpenRouter OAuth (deferred to V1)
+
+Wiring the bundled Hermes agent to use OpenRouter as a registered
+upstream is gated behind the V1 (Phase 1) OpenRouter integration PR.
+Phase 0 ships only the architectural scaffold:
+
+- **ADR-0020** (`docs/internal/adr/0020-localhost-callback-only-oauth-pkce.md`)
+  documents why the OAuth PKCE callback URL is constrained to
+  `http://127.0.0.1:<port>/api/openrouter/auth/callback`. ADR-0012
+  removed every other auth surface; the callback is the one credential
+  surface we re-introduce, and we keep it off the LAN so the
+  trust-the-LAN posture still holds.
+- **Operator note** — when V1 lands, completing the OAuth handshake
+  requires either a browser tab running on the hal0 host itself or an
+  SSH tunnel forwarding the laptop's `127.0.0.1:8080` to hal0's
+  `127.0.0.1:8080`. Plan for this in onboarding flows that assume a
+  remote browser (e.g. `hal0.thinmint.dev`).
+- **Storage shape** — V1 will persist the OR refresh token + access
+  token to
+  `/var/lib/hal0/agents/{id}/personas/{pid}/openrouter.toml` (chmod
+  `0600`), matching the protections on the existing `runtime.json`.
+
+The route skeleton at `/api/openrouter/auth/callback` is registered as
+of Phase 0 and returns HTTP 501 with a pointer to ADR-0020 so V1's PR
+can fill in the exchange flow against a baseline that already enforces
+the loopback guard.
+
 ## See also
 
 - [Hermes-Agent bootstrap](./hermes-bootstrap.md) — the 12-phase pipeline that touches surfaces #1-#7
@@ -304,3 +331,4 @@ sandbox.
 - [`SERVICE.md`](./SERVICE.md) — `hal0-agent@.service` unit + restart endpoint
 - ADR-0013 — agent-installer-managed MCP allowlist contract
 - ADR-0019 — v0.3 integration roll-up
+- ADR-0020 — localhost-callback-only OAuth PKCE (OpenRouter prereq)

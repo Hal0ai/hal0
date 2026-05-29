@@ -34,6 +34,7 @@ from hal0.api.agents import (
 )
 from hal0.api.agents.chat_proxy import router as chat_proxy_router
 from hal0.api.middleware import error_codes, log_scrub, request_id
+from hal0.api.openrouter import router as openrouter_auth_router
 from hal0.api.plugins import router as plugin_manifest_router
 from hal0.api.routes import (
     agents as agents_routes,
@@ -1023,6 +1024,16 @@ def create_app() -> FastAPI:
         mcp_routes.router,
         prefix="/api/mcp",
         tags=["mcp"],
+    )
+
+    # OpenRouter OAuth callback scaffold (ADR-0020, Phase 0). The route
+    # is registered so V1 (the OpenRouter-as-Hermes-upstream PR) inherits
+    # the loopback guard from day 1; the handler currently returns 501
+    # with a pointer to ADR-0020. Router declares absolute paths so no
+    # prefix is needed here.
+    app.include_router(
+        openrouter_auth_router,
+        tags=["openrouter", "auth"],
     )
 
     # Hermes dashboard plugin host (v0.3 PR-7). hal0-api proxies the

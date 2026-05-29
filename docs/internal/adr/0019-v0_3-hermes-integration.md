@@ -8,7 +8,8 @@
 - **Related:** ADR-0004 (agents v0.2 bundling), ADR-0005 (memory
   engine — Cognee), ADR-0011 (agent identity card), ADR-0012 (auth +
   Caddy removal), ADR-0013 (MCP client allow-list), ADR-0018 (upstream
-  Hermes pin + weekly drift detection)
+  Hermes pin + weekly drift detection), ADR-0020 (localhost-callback-only
+  OAuth PKCE — OpenRouter Phase 0 prereq)
 
 ## Context
 
