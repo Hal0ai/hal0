@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 
 from hal0 import __version__
 from hal0.api.agents import (
+    budget as agents_budget_routes,
+)
+from hal0.api.agents import (
     memory_stats as agents_memory_stats_routes,
 )
 from hal0.api.agents import (
@@ -967,6 +970,17 @@ def create_app() -> FastAPI:
         agents_personas_routes.router,
         prefix="/api/agents",
         tags=["agents", "personas"],
+    )
+
+    # Per-persona spending-cap primitive (Phase 0 OpenRouter prereq).
+    # GET/PUT the budget block + check/charge endpoints so the V1
+    # OpenRouter provider has a gate from day 1. Same /api/agents
+    # prefix as the personas router so the dashboard's persona editor
+    # can call both without juggling base URLs.
+    app.include_router(
+        agents_budget_routes.router,
+        prefix="/api/agents",
+        tags=["agents", "personas", "budget"],
     )
 
     # Agent service restart (v0.3 PR-11). Wraps systemctl restart of the

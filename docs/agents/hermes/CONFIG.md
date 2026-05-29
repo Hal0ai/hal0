@@ -74,7 +74,57 @@ require_approval = ["files.*", "shell.*"]    # glob list
 [persona.model]
 preferred_upstream = "hal0"
 preferred_model = ""                         # empty = first available
+
+[persona.budget]
+# Per-persona spending caps (Phase 0 OpenRouter prereq). Each USD cap is
+# optional; the omitted ones leave that window uncapped. An explicit
+# ``0.0`` blocks every paid request. ``hard_cap`` enforces (default);
+# set to ``false`` for warn-only mode (allowed=true, reason logged).
+daily_usd = 5.0                              # rolls over at 00:00 UTC
+monthly_usd = 50.0                           # rolls over on the 1st UTC
+lifetime_usd = 500.0                         # never resets
+per_call_max_usd = 0.10                      # rejects any single request over this
+hard_cap = true                              # block (true) vs warn-only (false)
 ```
+
+**Budget block (Phase 0 OpenRouter prereq):**
+
+The `[persona.budget]` sub-table arms the per-persona spending-cap
+primitive. Every paid surface (V1 OpenRouter as a Hermes upstream, V2
+the `hal0-fusion` MCP) consults this block via two endpoints:
+
+| Endpoint | Direction | Effect |
+|---|---|---|
+| `POST /api/agents/{id}/personas/{pid}/budget/check` | Caller → hal0 | Dry-run pre-call gate; returns `allowed=false` with a `reason` if the estimated cost would breach a cap. |
+| `POST /api/agents/{id}/personas/{pid}/budget/charge` | Caller → hal0 | Records a real charge into the append-only ledger after the upstream response lands. |
+
+The ledger lives at
+`/var/lib/hal0/agents/{agent_id}/personas/{persona_id}/spend.jsonl`
+(one JSON object per line, append-only, fsync after every write).
+Operator-inspectable with `tail -f` + `jq`. Hard-cap semantics:
+
+- `hard_cap = true` (default) — `check` returns `allowed=false` when
+  the estimate would push spend past any configured cap; the caller is
+  expected to short-circuit the request.
+- `hard_cap = false` — `check` always returns `allowed=true`, but
+  `reason` is populated so the caller can log a warning. Useful for
+  audit-only deployments where the operator wants visibility without
+  enforcement.
+
+**Race tolerance:** the check-then-record pattern is NOT serialised.
+Two concurrent paid requests from the same persona can both pass
+`check` (they read the same ledger state) before either records a
+charge — periodic over-spend within a single window is tolerated. A
+real lock + daemon-side enforcer is v0.4+ work; the JSONL layout
+migrates cleanly.
+
+**Idempotency:** running `hal0 agent reprovision hermes` after the
+operator PUTs a budget preserves the caps. `_phase_persona_seed`
+calls `seed_default_personas(overwrite=False)` which skips existing
+files; only `--repair` re-writes the seeds back to canonical empty.
+
+**Scope:** per-persona only for v0.3. Per-agent + platform-wide
+containing scopes are deferred to v0.4 (PLANNING.md §5 Q2 default).
 
 **Change effect:** The next bootstrap render (or `hal0 agent
 reprovision hermes`) picks up the new prompt. `hal0 agent personas

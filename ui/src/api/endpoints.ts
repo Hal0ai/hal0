@@ -72,22 +72,30 @@ export const ENDPOINTS = {
     `/api/agents/mcp/clients/${encodeURIComponent(name)}`,
 
   // ── Agents — bundled lifecycle + sidebar rollup (v0.3 PR-6) ──────
-  // `agents` lists installed bundled agents (ADR-0004 §2). The
-  // remaining endpoints under this block are surfaces the SidebarAgentBlock
-  // calls — most are NEW in v0.3 and may 404 against an older hal0-api;
-  // the consuming hooks fall back to "—" and console.warn once when a
-  // particular path returns 404 / network error so the sidebar
-  // degrades gracefully on partial deployments.
-  agents: '/api/agents',
+  // `agents` lives in the catalogue block above (one entry, used by
+  // both the bundled-list and sidebar surfaces). The remaining
+  // endpoints under this block are surfaces the SidebarAgentBlock
+  // calls — most are NEW in v0.3 and may 404 against an older
+  // hal0-api; the consuming hooks fall back to "—" and console.warn
+  // once when a particular path returns 404 / network error so the
+  // sidebar degrades gracefully on partial deployments.
   agentPersonas: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/personas`,
+  // Per-persona spending-cap primitive (Phase 0 OpenRouter prereq).
+  // GET/PUT/check/charge — the V1 OpenRouter upstream + V2 fusion MCP
+  // both call ``check`` pre-flight and ``charge`` post-response.
+  agentPersonaBudget: (id: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/budget`,
+  agentPersonaBudgetCheck: (id: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/budget/check`,
+  agentPersonaBudgetCharge: (id: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/budget/charge`,
   agentActivity: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/activity`,
   agentApprovals: '/api/agent/approvals',
-  // The two paths below DO NOT exist yet in any merged backend PR (the
+  // The path below DOES NOT exist yet in any merged backend PR (the
   // sidebar component degrades gracefully with "—" + warn). Recorded
-  // here so the wiring is single-place when the routes land.
-  agentSkills: '/api/agents/skills',
+  // here so the wiring is single-place when the route lands.
   agentMemoryStats: '/api/agents/hermes/memory/stats',
 
   // ── MCP host introspection (issue #206) ──────────────────────────

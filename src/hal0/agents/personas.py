@@ -28,6 +28,8 @@ from typing import Any
 
 import structlog
 
+from hal0.agents.budget import Budget, parse_budget
+
 log = structlog.get_logger(__name__)
 
 # Canonical on-disk store. State-dir, not config-dir, so a fresh install
@@ -83,6 +85,11 @@ class Persona:
     approval: PersonaApproval = field(default_factory=PersonaApproval)
     preferred_upstream: str = "hal0"
     preferred_model: str = ""
+    # Phase 0 OpenRouter prereq: per-persona spending caps. Empty Budget
+    # means "no caps configured" — the round-trip preserves explicit
+    # zeros (which translate to "block every paid request"). See
+    # :mod:`hal0.agents.budget` for the dataclass shape + semantics.
+    budget: Budget = field(default_factory=Budget)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Persona:
@@ -111,6 +118,7 @@ class Persona:
         memory = persona.get("memory") or {}
         approval_raw = persona.get("approval") or {}
         model = persona.get("model") or {}
+        budget_raw = persona.get("budget")
 
         allowed = tools.get("allowed", ["*"])
         if isinstance(allowed, str):
@@ -134,6 +142,11 @@ class Persona:
                 f"ask/auto-approve/never; got {default_policy!r}"
             )
 
+        try:
+            budget = parse_budget(budget_raw)
+        except ValueError as exc:
+            raise PersonaError(str(exc)) from exc
+
         return cls(
             id=pid.strip(),
             display_name=str(persona.get("display_name") or pid).strip(),
@@ -148,6 +161,7 @@ class Persona:
             ),
             preferred_upstream=str(model.get("preferred_upstream") or "hal0").strip(),
             preferred_model=str(model.get("preferred_model") or "").strip(),
+            budget=budget,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -174,6 +188,11 @@ class Persona:
                     "preferred_upstream": self.preferred_upstream,
                     "preferred_model": self.preferred_model,
                 },
+                # Always emit the budget table — round-trip preserves
+                # operator-set caps + the explicit hard_cap toggle. An
+                # empty budget renders as just ``hard_cap = true`` so
+                # the seed persona file still documents the knob.
+                "budget": self.budget.to_dict(),
             }
         }
 

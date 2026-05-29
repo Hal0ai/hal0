@@ -82,6 +82,20 @@ function PersonasTab({ onEdit } = {}) {
           /api/agents/hermes/personas unreachable — showing fallback list.
         </div>
       )}
+      {/* Phase 0 OpenRouter prereq — per-persona spending caps.
+          Mounted full-width beneath the persona cards; resolves the
+          active persona id from the live `/api/agents/{id}/personas`
+          response so the operator-set budget tracks whichever persona
+          the dashboard currently shows as active. Falls back to the
+          first card's id when the active pointer hasn't seeded yet. */}
+      {window.PersonaBudgetPanel && (
+        <div style={{gridColumn: "1 / -1"}}>
+          <PersonaBudgetPanel
+            agentId="hermes"
+            personaId={activeId || (cards[0] && cards[0].id) || null}
+          />
+        </div>
+      )}
     </div>
   );
 }

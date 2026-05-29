@@ -10,6 +10,49 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## Unreleased — Phase 0 OpenRouter prereq + v0.3 MCP completion
+
+### Added
+
+- **Per-persona spending-cap primitive (Phase 0 OpenRouter prereq)**.
+  Lands the `[persona.budget]` TOML sub-table + a pure-Python budget
+  enforcement layer BEFORE the V1 OpenRouter upstream provider and V2
+  `hal0-fusion` MCP server. DA review of the OpenRouter integration
+  plan flagged this as P0 must-fix #3 — without a spending-cap
+  envelope, fusion (4.4x cost vs single-model) plus a recursing
+  Hermes loop could drain a $200/credit pool overnight.
+  - New `src/hal0/agents/budget.py` — `Budget` dataclass, append-only
+    `BudgetLedger`, pure `check_budget` / `record_charge` functions,
+    daily / monthly / lifetime aggregation windows + per-call max.
+  - New REST surface (mounted under `/api/agents/{id}/personas/{pid}`):
+    - `GET    .../budget` — current caps + running spend stats +
+      per-window remaining headroom.
+    - `PUT    .../budget` — replace the budget block; preserves every
+      other persona field on round-trip.
+    - `POST   .../budget/check` — dry-run pre-call gate; takes
+      `{"estimated_cost_usd": float}`, returns `allowed` + `reason` +
+      `remaining_usd`. V1 OpenRouter provider calls this BEFORE
+      issuing the upstream request.
+    - `POST   .../budget/charge` — post-response recorder; appends
+      `{ts, persona_id, surface, model, cost_usd, request_id}` to the
+      ledger.
+  - Ledger location:
+    `/var/lib/hal0/agents/{agent_id}/personas/{persona_id}/spend.jsonl`.
+    Append-only JSON-lines (no SQLite dependency); fsync after every
+    write; operator-inspectable via `tail -f` + `jq`.
+  - New dashboard editor — `PersonaBudgetPanel` mounts under the
+    Personas tab beneath the persona cards. Empty-state CTA reads
+    "no budget set — set caps to enable cloud providers".
+  - Persona seed (hermes + coder) keeps an empty budget block by
+    default; operators opt in by editing the TOML or PUT-ing through
+    the API. `hal0 agent reprovision hermes` preserves operator-set
+    budgets (idempotent persona seed with `overwrite=False`).
+  - **Scope decision (PLANNING.md §5 Q2):** per-persona only for v0.3.
+    Per-agent + platform-wide containing scopes are deferred to v0.4.
+  - **PREREQ — no provider charges to this primitive yet.** V1
+    (OpenRouter as a Hermes upstream) wires it in as a pre-call gate
+    + post-response record.
+
 ## Unreleased — v0.3 MCP completion + memory-map redesign
 
 End-to-end completion of the `hal0-admin` + `hal0-memory` bundled MCP

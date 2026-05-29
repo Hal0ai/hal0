@@ -74,6 +74,7 @@ import './dash/extras.jsx'
 // symbol the old monolith would have left behind (defence-in-depth —
 // the old monolith is already removed).
 import './dash/agents/personas-tab-hook-bridge'
+import './dash/agents/persona-budget-hook-bridge'
 import './dash/agents/memory-tab-hook-bridge'
 // v0.3 PR-10: HermesChat surface — composer + transcript + sidecar over
 // the WS proxy from PR-9 (master plan §4 PR-10). The session store
@@ -96,6 +97,12 @@ import './dash/agents/chat/transcript.jsx'
 import './dash/agents/chat/composer.jsx'
 import './dash/agents/chat/hermes-sidecar.jsx'
 import './dash/agents/hermes-chat-tab.jsx'
+// Phase 0 OpenRouter prereq: PersonaBudgetPanel publishes itself on
+// window via Object.assign + is read by personas-tab.jsx at render
+// time. Load order: bridge already imported above, panel here BEFORE
+// personas-tab.jsx so the symbol is registered before the tab's JSX
+// references it.
+import './dash/agents/persona-budget-panel.jsx'
 import './dash/agents/personas-tab.jsx'
 import './dash/agents/skills-tab.jsx'
 import './dash/agents/memory-tab.jsx'
