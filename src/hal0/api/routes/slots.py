@@ -1086,8 +1086,7 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
         )
     if backend not in _BACKEND_TO_DEVICE:
         raise BadRequest(
-            f"backend {backend!r} is not recognised; "
-            "choose from rocm|vulkan|cpu|auto",
+            f"backend {backend!r} is not recognised; choose from rocm|vulkan|cpu|auto",
             code="backend.not_selectable",
         )
 
@@ -1125,13 +1124,11 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
 
     # Idempotency: the requested backend already equals the declared device,
     # AND (when loaded) the actual backend already matches → no-op.
-    requested_declared = (
-        device_to_backend(target_device)[1]
-        if target_device
-        else None
-    )
+    requested_declared = device_to_backend(target_device)[1] if target_device else None
     already_declared = current_device == (target_device or "")
-    already_actual = (not is_loaded) or (actual_backend is None) or (actual_backend == requested_declared)
+    already_actual = (
+        (not is_loaded) or (actual_backend is None) or (actual_backend == requested_declared)
+    )
     if already_declared and already_actual:
         snap = await sm.status(name)
         out = _slot_to_dict(snap, request)

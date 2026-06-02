@@ -351,9 +351,7 @@ def _patch_actual_backend_chain(
     we only stub the listener lookup + exe resolution so the test doesn't
     depend on a live llama-server.
     """
-    monkeypatch.setattr(
-        lemonade_mod, "_pid_listening_on_port", lambda _port: pid
-    )
+    monkeypatch.setattr(lemonade_mod, "_pid_listening_on_port", lambda _port: pid)
     monkeypatch.setattr(lemonade_mod, "_exe_path_for_pid", lambda _pid: exe)
 
 

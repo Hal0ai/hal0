@@ -523,9 +523,7 @@ async def test_forward_already_loaded_skips_load_and_forwards(
 
         return Response(content=b"ok", status_code=200)
 
-    monkeypatch.setattr(
-        router_mod.Dispatcher, "_forward_with_serving", _fake_forward_with_serving
-    )
+    monkeypatch.setattr(router_mod.Dispatcher, "_forward_with_serving", _fake_forward_with_serving)
     resp = await dispatcher.forward(call)
     assert resp.status_code == 200
     # No load on the warm path.

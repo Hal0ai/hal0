@@ -58,7 +58,10 @@ def lemonade_stub(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
             body = json.loads(req.content.decode() or "{}")
             state["load_calls"].append(body)
             state["loaded"] = [
-                {"model_name": body.get("model_name", ""), "backend_url": "http://127.0.0.1:14002/v1"}
+                {
+                    "model_name": body.get("model_name", ""),
+                    "backend_url": "http://127.0.0.1:14002/v1",
+                }
             ]
             return httpx.Response(200, json={"status": "loaded"})
         if req.url.path == "/v1/unload":
@@ -177,9 +180,7 @@ def test_rocm_build_missing_returns_409(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # rocm build absent, vulkan present.
-    monkeypatch.setattr(
-        slots_mod, "_backend_build_present", lambda b: b != "rocm"
-    )
+    monkeypatch.setattr(slots_mod, "_backend_build_present", lambda b: b != "rocm")
     r = isolated_client.post("/api/slots/primary/backend", json={"backend": "rocm"})
     assert r.status_code == 409, r.text
     assert r.json()["error"]["code"] == "backend.build_missing"

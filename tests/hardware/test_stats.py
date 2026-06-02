@@ -71,14 +71,11 @@ def test_amd_gpu_metrics_make_zero_nvidia_smi_calls(
         s.snapshot()
 
     assert spy.nvidia_calls == [], (
-        "nvidia-smi was execed on the AMD path; expected zero calls, "
-        f"got {spy.nvidia_calls}"
+        f"nvidia-smi was execed on the AMD path; expected zero calls, got {spy.nvidia_calls}"
     )
 
 
-def test_amd_gpu_values_from_sysfs(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_amd_gpu_values_from_sysfs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The AMD path returns sysfs-derived values with the expected shape."""
     drm = _mk_amd_drm(tmp_path)
     spy = _RunSpy()
@@ -94,9 +91,7 @@ def test_amd_gpu_values_from_sysfs(
     assert spy.nvidia_calls == []
 
 
-def test_vendor_cached_once(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_vendor_cached_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Vendor detection probes _amd_drm_device exactly once and memoises."""
     drm = _mk_amd_drm(tmp_path)
     probe_calls = {"n": 0}
@@ -119,9 +114,6 @@ def test_nvidia_path_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
     """On a host with no AMD DRM device, nvidia-smi is used and the
     nvidia code path still parses output correctly; vendor caches to
     'nvidia'."""
-    table = {
-        "nvidia-smi": None,  # placeholder; resolved per-query below
-    }
 
     def fake_run(cmd: list[str], timeout: float = 4.0) -> tuple[int, str, str]:
         if not cmd or cmd[0] != "nvidia-smi":

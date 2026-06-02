@@ -178,7 +178,10 @@ class LemonadeClient:
             return self._health_cache
         async with self._health_lock:
             now = time.monotonic()
-            if self._health_cache is not None and (now - self._health_cache_at) < _HEALTH_CACHE_TTL_S:
+            if (
+                self._health_cache is not None
+                and (now - self._health_cache_at) < _HEALTH_CACHE_TTL_S
+            ):
                 return self._health_cache
             async with self._request("GET", "/v1/health") as resp:
                 self._raise_for_status(resp)
