@@ -174,6 +174,12 @@ class LemonadeClient:
         makes one upstream call instead of one per slot. Errors are NOT
         cached — a failed probe falls straight through to the caller's
         existing degrade-to-empty handling and the next call retries.
+
+        Only callers that derive slot/loaded state go through this cache.
+        Background consumers that just need a field from health (the
+        log-stream ws-port resolver) use :meth:`_health_uncached` so they
+        never pre-populate this cache with a snapshot the foreground
+        introspection would then read stale within the TTL window.
         """
         now = time.monotonic()
         if self._health_cache is not None and (now - self._health_cache_at) < _HEALTH_CACHE_TTL_S:
@@ -185,12 +191,17 @@ class LemonadeClient:
                 and (now - self._health_cache_at) < _HEALTH_CACHE_TTL_S
             ):
                 return self._health_cache
-            async with self._request("GET", "/v1/health") as resp:
-                self._raise_for_status(resp)
-                body = resp.json()
+            body = await self._health_uncached()
             self._health_cache = body
             self._health_cache_at = time.monotonic()
             return body
+
+    async def _health_uncached(self) -> dict[str, Any]:
+        """Raw ``GET /v1/health`` with no caching. Raises the usual
+        ``LemonadeError`` subclasses on transport/HTTP failure."""
+        async with self._request("GET", "/v1/health") as resp:
+            self._raise_for_status(resp)
+            return resp.json()
 
     # ── /v1/stats ──────────────────────────────────────────────────
 
@@ -462,7 +473,10 @@ class LemonadeClient:
         skip the connection entirely (see issue #421).
         """
         try:
-            health = await self.health()
+            # Uncached: the journal bridge calls this on every (re)connect;
+            # routing it through the cached health() would poison the
+            # slot-introspection cache with a stale loaded[] snapshot.
+            health = await self._health_uncached()
         except LemonadeError:
             return None
         ws_port = health.get("websocket_port") if isinstance(health, dict) else None
