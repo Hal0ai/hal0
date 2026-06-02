@@ -120,7 +120,7 @@ class TestAgentConfig:
             host="10.0.0.1",
             port=4242,
         )
-        assert cfg.status_url == "http://10.0.0.1:4242/api/health"
+        assert cfg.status_url == "http://10.0.0.1:4242/api/status"
 
     def test_hermes_bin_resolves_under_venv(self) -> None:
         cfg = agent_shim.AgentConfig(

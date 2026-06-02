@@ -96,3 +96,6 @@ tests/release-gate-report.json
 # OS
 Thumbs.db
 .claude/worktrees/
+
+# Serena MCP project tooling (local index/cache, not source)
+.serena/

@@ -93,11 +93,17 @@ class AgentConfig:
     def status_url(self) -> str:
         """URL the shim polls to confirm the agent's HTTP surface is up."""
 
-        # ``/api/health`` is upstream-stable across hermes ≥ 0.10 and is the
-        # cheapest endpoint we can hit to determine "ready". The Hermes
-        # dashboard route doesn't expose ``/healthz`` — verified against
-        # ``~/src/hermes-agent/hermes_cli/web_server.py``.
-        return f"http://{self.host}:{self.port}/api/health"
+        # ``/api/status`` is the cheapest endpoint we can hit to determine
+        # "ready", AND — critically — it is one of the few routes hermes
+        # leaves unauthenticated. As of hermes 0.14.0 the dashboard's
+        # ``auth_middleware`` gates every ``/api/`` route behind an ephemeral
+        # per-process session token EXCEPT the ``_PUBLIC_API_PATHS`` allowlist
+        # (``hermes_cli/web_server.py``). ``/api/health`` is NOT on that list,
+        # so probing it returns 401 → the shim never sees 2xx → never emits
+        # READY=1 → systemd start-timeout → restart loop. ``/api/status`` IS
+        # on the allowlist and returns 200 with the version/home/config-state
+        # body, which is exactly the liveness signal we need.
+        return f"http://{self.host}:{self.port}/api/status"
 
 
 def _load_agent_config(agent_id: str) -> AgentConfig:
@@ -309,7 +315,7 @@ def cmd_serve(cfg: AgentConfig) -> int:
     # overrides.yaml on SIGHUP. Pass through unchanged.
     signal.signal(signal.SIGHUP, _forward_signal)
 
-    # Block until /api/health responds OR the child exits OR we time out.
+    # Block until /api/status responds OR the child exits OR we time out.
     ready = _wait_for_ready(child, cfg, _READY_TIMEOUT_S)
     if not ready:
         # Child either crashed or never opened the socket. Don't sd_notify
