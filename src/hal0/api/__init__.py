@@ -12,7 +12,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -193,18 +193,289 @@ async def _fetch_hal0_composite_models(
     return models
 
 
+def _slot_model_id(cfg: dict[str, Any]) -> str:
+    """Extract a chat slot's configured model id from a raw config dict.
+
+    Slot TOML conventions vary: real on-disk TOMLs put the model id under
+    nested ``[model] default``; live /api/slots payloads expose it as
+    ``model_default``; test fixtures sometimes pass ``model_id`` directly.
+    Check every shape so callers work regardless of the entry's origin.
+    Mirrors the lookup inlined in :func:`_fetch_hal0_composite_models`.
+    """
+    model_section = cfg.get("model") or {}
+    defaults = cfg.get("defaults") or {}
+    model_id = (
+        cfg.get("model_default")
+        or cfg.get("model_id")
+        or (model_section.get("default") if isinstance(model_section, dict) else None)
+        or defaults.get("model")
+        or ""
+    )
+    return model_id if isinstance(model_id, str) else ""
+
+
+def _coerce_ctx(raw: Any) -> int | None:
+    """Coerce a context-size value to a positive int, or ``None``."""
+    if raw is None:
+        return None
+    try:
+        ctx = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return ctx if ctx > 0 else None
+
+
+def _slot_ctx_size(
+    cfg: dict[str, Any],
+    model_registry: ModelRegistry | None = None,
+    model_id: str = "",
+) -> int | None:
+    """Resolve a slot's context length.
+
+    The on-disk slot TOMLs are inconsistent about the key name:
+    ``agent-hermes.toml`` uses ``[model] ctx_size`` while ``utility.toml``
+    uses ``[model] context_size`` and ``primary.toml`` pins neither. Read
+    BOTH keys (plus a couple of flat shapes seen in live /api/slots
+    payloads), then fall back to the model registry entry's
+    ``defaults.context_size`` so a slot that doesn't pin a ctx still
+    advertises the model's native window. Returns ``None`` only when no
+    source yields a positive value.
+    """
+    model_section = cfg.get("model") or {}
+    defaults = cfg.get("defaults") or {}
+
+    # Probe order: nested [model] ctx_size / context_size, then flat keys,
+    # then a nested defaults table (live payload shape).
+    for source, keys in (
+        (model_section, ("ctx_size", "context_size")),
+        (cfg, ("ctx_size", "context_size")),
+        (defaults, ("ctx_size", "context_size")),
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            ctx = _coerce_ctx(source.get(key))
+            if ctx is not None:
+                return ctx
+
+    # Registry fallback — the model's declared default context window.
+    if model_registry is not None and model_id:
+        try:
+            entry = model_registry.get(model_id)
+        except Exception:
+            entry = None
+        if entry is not None:
+            entry_defaults = getattr(entry, "defaults", None)
+            ctx = _coerce_ctx(getattr(entry_defaults, "context_size", None))
+            if ctx is not None:
+                return ctx
+    return None
+
+
+async def _loaded_model_ids(slot_manager: SlotManager) -> set[str] | None:
+    """Return the set of model ids lemond currently reports as loaded.
+
+    Probes lemond's ``/v1/health`` once (mirrors
+    ``api.routes.slots._lemonade_state_enrichment``) and collects every
+    ``model_name`` under ``loaded`` / ``all_models_loaded``. Returns
+    ``None`` when the health probe can't be performed at all (no lemonade
+    provider / unexpected error) so callers can decide how to degrade —
+    distinct from an empty set, which means "lemond is up and nothing is
+    loaded".
+    """
+    _ = slot_manager  # signature symmetry with the other slot helpers
+    try:
+        from hal0.lemonade.errors import LemonadeError
+        from hal0.providers import lemonade_provider
+
+        try:
+            health = await lemonade_provider().client().health()
+        except LemonadeError:
+            return None
+    except Exception:  # pragma: no cover — defensive (import/provider wiring)
+        return None
+    if not isinstance(health, dict):
+        return None
+    loaded: set[str] = set()
+    for key in ("loaded", "all_models_loaded"):
+        entries = health.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                name = entry.get("model_name")
+                if isinstance(name, str) and name:
+                    loaded.add(name)
+    return loaded
+
+
+async def hal0_slot_alias_models(
+    slot_manager: SlotManager,
+    model_registry: ModelRegistry,
+    *,
+    now: int | None = None,
+) -> list[dict[str, Any]]:
+    """Build OpenAI ``model`` objects for every LOADED chat slot, alias-addressed.
+
+    Each enabled chat slot (``type == "llm"``) whose configured model is
+    currently loaded in lemond surfaces as one model object whose ``id``
+    is the slot **alias = slot name** (e.g. ``primary``, ``agent-hermes``,
+    ``utility``). The alias is the stable handle: it does not change when
+    the underlying model is swapped, so callers can pin a co-resident slot
+    without tracking the GGUF filename.
+
+    Fields:
+
+    * ``id`` — slot name (the stable alias).
+    * ``name`` — ``"<slot> · <model display name>"``; the display name is
+      pulled from the model registry when the slot's model id is
+      registered, falling back to the bare model id otherwise.
+    * ``context_length`` — the slot's configured context window (reading
+      either ``ctx_size`` or ``context_size`` from the slot TOML), falling
+      back to the model registry entry's ``defaults.context_size``.
+    * ``owned_by`` — ``"hal0"``.
+
+    Slots that are disabled, lack a configured model, or whose model is
+    not currently loaded in lemond are omitted. If the lemond health probe
+    can't run at all, no alias entries are emitted (we refuse to advertise
+    a slot we can't confirm is serving) — the composite ``hal0`` model
+    list still carries the raw model ids for direct addressing.
+    """
+    created = int(time.time()) if now is None else now
+    try:
+        cfgs = await slot_manager.iter_configs()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("v1.slot_alias_iter_failed", error=str(exc))
+        return []
+
+    loaded = await _loaded_model_ids(slot_manager)
+    if loaded is None:
+        # Can't confirm what's loaded → emit nothing rather than advertise
+        # slots that may be cold. The composite still lists raw model ids.
+        return []
+
+    out: list[dict[str, Any]] = []
+    for cfg in cfgs:
+        if (cfg.get("type") or "").lower() != "llm":
+            continue
+        if cfg.get("enabled") is False:
+            continue
+        slot_name = str(cfg.get("name") or "").strip()
+        if not slot_name:
+            continue
+        model_id = _slot_model_id(cfg)
+        if not model_id:
+            continue
+        if model_id not in loaded:
+            continue
+
+        display = model_id
+        try:
+            entry = model_registry.get(model_id)
+            registry_name = getattr(entry, "name", "")
+            if isinstance(registry_name, str) and registry_name.strip():
+                display = registry_name.strip()
+        except Exception:
+            # Model not in the registry (pulled via lemond, hand-loaded,
+            # …) — fall back to the bare model id for the display label.
+            display = model_id
+
+        obj: dict[str, Any] = {
+            "id": slot_name,
+            "object": "model",
+            "created": created,
+            "owned_by": "hal0",
+            "name": f"{slot_name} · {display}",
+        }
+        ctx = _slot_ctx_size(cfg, model_registry, model_id)
+        if ctx is not None:
+            obj["context_length"] = ctx
+        out.append(obj)
+    return out
+
+
+async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
+    """Return ``{slot_alias: model_id}`` for enabled chat slots.
+
+    The slot **alias** is the slot name (``primary`` / ``agent-hermes`` /
+    ``utility``). Used by the ``/v1`` route layer to translate an
+    alias-addressed request into the slot's configured model id before
+    routing, so the request reaches lemond (which serves chat models by
+    name) with the correct distinct model. This is a thin translation map,
+    not a routing target — the chat slots are NOT independently addressable
+    on their TOML ports.
+
+    Best-effort: returns ``{}`` on any failure so the route layer forwards
+    the request untranslated rather than 500ing. Disabled slots and slots
+    with no configured model are skipped.
+    """
+    try:
+        cfgs = await slot_manager.iter_configs()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("v1.chat_slot_alias_map_iter_failed", error=str(exc))
+        return {}
+    out: dict[str, str] = {}
+    for cfg in cfgs:
+        if (cfg.get("type") or "").lower() != "llm":
+            continue
+        if cfg.get("enabled") is False:
+            continue
+        slot_name = str(cfg.get("name") or "").strip()
+        if not slot_name:
+            continue
+        model_id = _slot_model_id(cfg)
+        if model_id:
+            out.setdefault(slot_name, model_id)
+    return out
+
+
+async def hal0_chat_slot_model_ids(slot_manager: SlotManager) -> set[str]:
+    """Return the configured model ids of every enabled chat slot.
+
+    Used by ``GET /v1/models`` to suppress raw chat model-id rows from the
+    composite ``hal0`` upstream so each chat slot is represented exactly
+    once — by its alias entry (see :func:`hal0_slot_alias_models`). Unlike
+    the alias builder this does NOT filter on loaded state: a chat model
+    that the composite advertises must be deduped regardless of whether
+    it's currently warm, so the catalog never shows both an alias and a
+    bare ``id=<model_id>`` row for the same slot.
+
+    Best-effort: returns an empty set on any failure so the catalog
+    degrades to "no dedup" rather than 500ing.
+    """
+    try:
+        cfgs = await slot_manager.iter_configs()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("v1.chat_slot_model_ids_iter_failed", error=str(exc))
+        return set()
+    out: set[str] = set()
+    for cfg in cfgs:
+        if (cfg.get("type") or "").lower() != "llm":
+            continue
+        if cfg.get("enabled") is False:
+            continue
+        model_id = _slot_model_id(cfg)
+        if model_id:
+            out.add(model_id)
+    return out
+
+
 async def _autoregister_slot_upstreams(
     registry: UpstreamRegistry,
     slot_manager: SlotManager,
 ) -> None:
     """Register a single composite ``hal0`` upstream.
 
-    Replaces the previous per-slot autoregistration: Lemonade serialises
-    chat loading on a single port (typically 8001), so registering one
-    Upstream per chat slot produced multiple registry entries pointing
-    at the same URL. ``/v1/models`` deduped on id and credited whichever
-    upstream iterated first, leaving the dashboard showing a duplicate
-    provider that looked empty (R4 H2).
+    Lemonade serialises chat loading and serves EVERY chat model by name
+    from one process (``127.0.0.1:13305``) with co-residency
+    (``max_loaded_models``). The chat slots are therefore NOT independently
+    addressable on their TOML ports — registering one ``kind="slot"``
+    upstream per chat slot (pointed at those ports) produces dead targets
+    and collisions (``primary`` + ``agent-hermes`` both pin ``port=8001``).
+    So we register exactly ONE composite ``hal0`` upstream and let the
+    existing lemonade fall-through serve chat models by name; per-slot
+    addressing is handled by an alias → model-id rewrite in the dispatch
+    path (see :meth:`Dispatcher.dispatch`), not by separate upstreams.
 
     The composite upstream:
 
@@ -219,7 +490,8 @@ async def _autoregister_slot_upstreams(
       restarts — see ``/api/slots/{name}/{swap,restart}``.
 
     Skipped if an explicit ``upstreams.toml`` entry already claims the
-    name ``hal0`` so operator overrides win.
+    name ``hal0`` so operator overrides win. Operator-defined real slot
+    upstreams (any other names) are left untouched.
     """
     if registry.get("hal0") is not None:
         log.info("slots.autoregister_skipped", upstream="hal0", reason="already_registered")

@@ -134,6 +134,48 @@ def _redact_log_line(line: str) -> str:
     return _LOG_SECRET_RE.sub(_sub, line)
 
 
+# ── List-shaped REST responses → top-level dict ──────────────────────────────
+#
+# FastMCP derives a structured-output result model from each tool's
+# ``-> dict[str, Any]`` return annotation, and the MCP SDK validates the
+# tool's return value against it. A bare top-level JSON *array* fails
+# that DictModel validation with
+# ``Input should be a valid dictionary [type=dict_type, ...]``.
+#
+# Most admin tools are fine because their REST route already returns an
+# object (``model_list`` → ``/api/models`` → ``{"object": "list",
+# "data": [...]}``). But two read routes return a bare list:
+#
+#   slot_list     → GET /api/slots     → list[dict]
+#   provider_list → GET /api/providers → list[dict]
+#
+# so those two tools raised the DictModel error at the wrapper boundary.
+# We wrap the list in a top-level object here — mirroring model_list's
+# ``{<key>: [...], "count": N}`` style — keeping the per-item dicts the
+# REST layer produced untouched. Maps tool name → the list's container
+# key in the wrapped object.
+_LIST_TOOL_WRAP_KEY: dict[str, str] = {
+    "slot_list": "slots",
+    "provider_list": "providers",
+}
+
+
+def _wrap_list_payload(tool: str, payload: Any) -> Any:
+    """Wrap a bare-list REST response in a top-level dict for ``tool``.
+
+    ``slot_list`` / ``provider_list`` hit REST routes that return a bare
+    JSON array; the MCP result model requires a top-level object. We wrap
+    the list as ``{<key>: [...], "count": len(list)}`` mirroring
+    ``model_list``'s shape. Non-list payloads (e.g. the ``_call_rest``
+    error envelope, which is already a dict) round-trip unchanged so we
+    never mask a transport error.
+    """
+    key = _LIST_TOOL_WRAP_KEY.get(tool)
+    if key is None or not isinstance(payload, list):
+        return payload
+    return {key: payload, "count": len(payload)}
+
+
 def _redact_logs_payload(payload: Any) -> Any:
     """Walk the GET /api/logs response and redact every line in ``lines``.
 
@@ -530,6 +572,10 @@ async def _execute_tool(
     # review MED-1).
     if tool == "logs_tail":
         result = _redact_logs_payload(result)
+    # Wrap bare-list REST responses (slot_list / provider_list) into a
+    # top-level dict so the FastMCP result model validates. No-op for
+    # every other tool and for the already-dict error envelope.
+    result = _wrap_list_payload(tool, result)
     return result
 
 

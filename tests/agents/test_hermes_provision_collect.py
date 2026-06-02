@@ -54,6 +54,27 @@ def test_collect_chat_slots_against_real_lxc_payload(
         assert entry["backend_url"], f"{fixture}: empty backend_url in {entry}"
 
 
+def test_collect_chat_slots_aliases_use_stable_gateway_base_url() -> None:
+    """Alias base_url must be the STABLE hal0 gateway, NOT the slot's raw
+    per-slot upstream port.
+
+    lemond reassigns the slot's backend_url port (:8001/:8002/…) on every
+    model reload, so a baked-in alias port goes stale and could point at a
+    port now serving a different co-resident model. The gateway resolves
+    the model_id to the right slot, so model_id + :8080/v1 is stable.
+    """
+    slots = _load("slots_all_ready.json")
+    collected = hp._collect_chat_slots(slots)
+    assert collected, "fixture should yield at least one chat slot"
+    for entry in collected:
+        assert entry["backend_url"] == hp._DEFAULT_PRIMARY_BACKEND_URL
+        assert entry["backend_url"] == "http://127.0.0.1:8080/v1"
+        # Never a raw per-slot upstream port.
+        assert ":8001" not in entry["backend_url"]
+        assert ":8002" not in entry["backend_url"]
+        assert ":8003" not in entry["backend_url"]
+
+
 def test_collect_chat_slots_skips_non_llm_capabilities() -> None:
     """Embed/rerank/stt/tts slots must never appear in chat aliases even
     when ready. Real /api/slots flips ``state=ready`` for every loaded

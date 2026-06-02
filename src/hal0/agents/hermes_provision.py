@@ -667,6 +667,8 @@ def _render_config_yaml(
     mcp_servers: list[dict[str, Any]] | None = None,
     system_prompt: str = "",
     personality_name: str = "",
+    delegation: dict[str, Any] | None = None,
+    auxiliary_tasks: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """Render the Hermes config.yaml via Jinja2.
 
@@ -686,6 +688,17 @@ def _render_config_yaml(
       personality_name — display name for upstream's CLI personality
                          picker (Phase 8 cosmetic; the system prompt
                          already carries the persona's prelude).
+
+    Role-slot inputs (feat/hermes-role-slots):
+      delegation       — dict {model, base_url, provider} or None. When
+                         set, renders the ``delegation:`` block so
+                         subagents run on the ``agent-hermes`` slot's
+                         model. None → block omitted → subagents inherit
+                         the chat model.
+      auxiliary_tasks  — dict task→{provider, model, base_url} driving the
+                         ``auxiliary:`` block. Defaults (when omitted) to
+                         the all-provider:"main" inventory so callers that
+                         predate role-slots keep the original behavior.
     """
     from jinja2 import Environment, FileSystemLoader
 
@@ -704,7 +717,25 @@ def _render_config_yaml(
         mcp_servers=mcp_servers if mcp_servers is not None else _default_mcp_servers(),
         system_prompt=system_prompt,
         personality_name=personality_name,
+        delegation=delegation,
+        auxiliary_tasks=(
+            auxiliary_tasks if auxiliary_tasks is not None else _default_auxiliary_tasks()
+        ),
     )
+
+
+def _default_auxiliary_tasks() -> dict[str, dict[str, Any]]:
+    """All-``provider:"main"`` auxiliary inventory.
+
+    Used when a caller renders without resolving live slots. Matches the
+    pre-role-slots hard-coded template block (vision / web_extract /
+    session_search) plus the rest of the confirmed task keys so the
+    rendered ``auxiliary:`` block is always fully populated.
+    """
+    tasks: dict[str, dict[str, Any]] = {}
+    for task in (*_MAIN_AUX_TASKS, *_UTILITY_AUX_TASKS):
+        tasks[task] = {"provider": "main", "model": "", "base_url": ""}
+    return tasks
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -819,6 +850,13 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     # (Phase 9 used to be the only place this worked).
     slots_all = _fetch_slots()
     chat_slots = _collect_chat_slots(slots_all)
+    # feat/hermes-role-slots: resolve per-role models from live slot NAMES.
+    # delegation ← `agent-hermes` slot; auxiliary ← `utility` slot. Both
+    # talk to hal0's /v1 endpoint (same base_url as the main model), so a
+    # missing slot degrades safely (delegation omitted / aux → "main").
+    hal0_v1_base = primary["backend_url"]
+    delegation = _resolve_delegation(slots_all, hal0_base_url=hal0_v1_base)
+    auxiliary_tasks = _resolve_auxiliary_tasks(slots_all, hal0_base_url=hal0_v1_base)
     # PR-3 Phase 6: probe-driven mcp_servers list. For the very first
     # config_write (before mcp_wire runs the live probe) we fall back to
     # the default inventory; mcp_wire then captures the probed shape and
@@ -833,6 +871,8 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
         mcp_servers=mcp_servers,
         system_prompt=system_prompt,
         personality_name=personality_name,
+        delegation=delegation,
+        auxiliary_tasks=auxiliary_tasks,
     )
     rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     new_hash = content_hash(rendered)
@@ -863,8 +903,23 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
             "chat_slot_count": len(chat_slots),
             "persona": personality_name or None,
             "mcp_server_count": len(mcp_servers) if mcp_servers else 0,
+            "delegation_model": (delegation or {}).get("model"),
+            "auxiliary_utility_model": _utility_aux_model(auxiliary_tasks),
         },
     )
+
+
+def _utility_aux_model(auxiliary_tasks: dict[str, dict[str, Any]] | None) -> str | None:
+    """Surface the utility-slot model used by the aux compaction group.
+
+    Returns the ``compression`` task's model (representative of the whole
+    utility group) for self_report visibility, or ``None`` when the group
+    degraded to provider:"main".
+    """
+    if not auxiliary_tasks:
+        return None
+    comp = auxiliary_tasks.get("compression") or {}
+    return comp.get("model") or None
 
 
 # ── Phase F: mcp_wire ───────────────────────────────────────────────────────
@@ -1667,6 +1722,16 @@ def _collect_chat_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     Only slots reporting a live/ready state are advertised so we don't tell
     the agent about a model that isn't actually loaded — matches the
     dashboard chat-filter at ``src/hal0/api/routes/slots.py``.
+
+    Each alias's ``backend_url`` is the STABLE hal0 gateway (`:8080/v1`),
+    NOT the slot's raw ``backend_url``. lemond reassigns the per-slot
+    upstream port (`:8001/:8002/…`) on every model reload, so a baked-in
+    alias port goes stale immediately — and could then point at a port
+    now serving a DIFFERENT co-resident model. The gateway resolves both
+    the alias name and the model_id to the correct co-resident slot, so
+    `model_id` + `:8080/v1` stays correct across reloads (the same source
+    the ``model:`` / ``delegation:`` / ``auxiliary:`` blocks use). This is
+    what lets the in-agent model switcher pick a slot up after a restart.
     """
     out: list[dict[str, Any]] = []
     for s in slots:
@@ -1681,10 +1746,129 @@ def _collect_chat_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "alias": _slot_alias(s),
                 "model_id": model_id,
-                "backend_url": _slot_backend_url(s),
+                "backend_url": _DEFAULT_PRIMARY_BACKEND_URL,
             }
         )
     return out
+
+
+# ── Role→slot resolution (delegation + auxiliary) ───────────────────────────
+#
+# hermes-agent supports per-ROLE models beyond the main chat block:
+#   * subagents  → the `delegation:` block (delegate_tool.py
+#     `_resolve_delegation_credentials` reads delegation.{model,provider,
+#     base_url}; a `base_url` forces provider → "custom").
+#   * side-tasks → `auxiliary.<task>.{provider,model,base_url}` read by
+#     auxiliary_client.py `_resolve_task_provider_model` (a base_url +
+#     non-"auto" provider routes the task to that direct endpoint).
+#
+# We resolve these from LIVE slot NAMES, not hardcoded model ids, so
+# swapping a slot's model flows through on the next `--repair`:
+#   chat       → slot `primary`      (the existing model: block)
+#   subagents  → slot `agent-hermes` (delegation: block)
+#   side-tasks → slot `utility`      (auxiliary.* compaction/search/title)
+#
+# Vision + web_extract have no dedicated slot — they stay provider:"main".
+
+# The hal0-routed side-tasks (everything that should run on the cheap
+# `utility` slot). vision/web_extract are intentionally excluded — they
+# keep provider:"main" so they inherit the chat model (which may carry a
+# vision label) rather than the tiny utility model.
+_UTILITY_AUX_TASKS: tuple[str, ...] = (
+    "compression",
+    "session_search",
+    "title_generation",
+    "skills_hub",
+    "mcp",
+)
+
+# Tasks that always stay on the main chat provider regardless of slot
+# state. Rendered verbatim so the auxiliary: block is fully parameterized
+# (no hard-coded entries left in the template).
+_MAIN_AUX_TASKS: tuple[str, ...] = ("vision", "web_extract")
+
+# Canonical role→slot names. Kept here (not in the template) so the
+# resolution stays data-driven and a future slot rename is a one-line edit.
+_DELEGATION_SLOT_NAME = "agent-hermes"
+_UTILITY_SLOT_NAME = "utility"
+
+
+def _find_named_ready_slot(slots: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    """Return the ready ``type=='llm'`` slot whose name matches ``name``.
+
+    Degrade-safe: returns ``None`` when the slot is absent OR present but
+    not ready/loaded OR carries no model_id, so callers can fall back
+    gracefully (delegation omitted; aux tasks revert to provider:"main").
+    """
+    for s in slots:
+        if not isinstance(s, dict):
+            continue
+        if _slot_alias(s) != name:
+            continue
+        if (s.get("type") or "").lower() != "llm":
+            continue
+        if not _is_ready(s):
+            continue
+        if not _slot_model_id(s):
+            continue
+        return s
+    return None
+
+
+def _resolve_delegation(
+    slots: list[dict[str, Any]],
+    *,
+    hal0_base_url: str,
+) -> dict[str, Any] | None:
+    """Build the ``delegation`` template dict from the ``agent-hermes`` slot.
+
+    Returns ``{model, base_url, provider}`` when the slot is live, else
+    ``None`` so the template omits the block and subagents inherit the
+    parent (chat) model. ``base_url`` is the hal0 /v1 endpoint already
+    used for the main model — setting it makes upstream auto-resolve the
+    provider to "custom".
+    """
+    slot = _find_named_ready_slot(slots, _DELEGATION_SLOT_NAME)
+    if slot is None:
+        return None
+    return {
+        "model": _slot_model_id(slot),
+        "base_url": hal0_base_url,
+        "provider": "custom",
+    }
+
+
+def _resolve_auxiliary_tasks(
+    slots: list[dict[str, Any]],
+    *,
+    hal0_base_url: str,
+) -> dict[str, dict[str, Any]]:
+    """Build the ``auxiliary_tasks`` template dict (task → {provider, model, base_url}).
+
+    vision/web_extract always render as provider:"main" (no dedicated
+    slot). The compaction/search/title group routes to the ``utility``
+    slot when it's live; if that slot is missing the group degrades to
+    provider:"main" so side-tasks fall back to the chat model rather than
+    breaking. Resolution keys off the slot NAME (``utility``) and sends
+    the slot's model_id — swapping the slot's model flows through on the
+    next ``--repair``.
+    """
+    tasks: dict[str, dict[str, Any]] = {}
+    for task in _MAIN_AUX_TASKS:
+        tasks[task] = {"provider": "main", "model": "", "base_url": ""}
+
+    utility = _find_named_ready_slot(slots, _UTILITY_SLOT_NAME)
+    for task in _UTILITY_AUX_TASKS:
+        if utility is not None:
+            tasks[task] = {
+                "provider": "custom",
+                "model": _slot_model_id(utility),
+                "base_url": hal0_base_url,
+            }
+        else:
+            # Degrade safely: no utility slot → inherit the chat model.
+            tasks[task] = {"provider": "main", "model": "", "base_url": ""}
+    return tasks
 
 
 def _phase_model_automap(state: BootstrapState) -> PhaseResult:
@@ -1720,6 +1904,11 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
     cached_servers = (state.phases.get("mcp_wire") or {}).get("details", {}).get("rendered_servers")
     mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
     system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
+    # feat/hermes-role-slots: identical role-slot resolution to config_write
+    # so a no-drift re-render stays byte-identical (#245 idempotency).
+    hal0_v1_base = primary["backend_url"]
+    delegation = _resolve_delegation(slots, hal0_base_url=hal0_v1_base)
+    auxiliary_tasks = _resolve_auxiliary_tasks(slots, hal0_base_url=hal0_v1_base)
 
     try:
         rendered = _render_config_yaml(
@@ -1729,6 +1918,8 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
             mcp_servers=mcp_servers,
             system_prompt=system_prompt,
             personality_name=personality_name,
+            delegation=delegation,
+            auxiliary_tasks=auxiliary_tasks,
         )
         rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     except Exception as exc:
@@ -1898,6 +2089,11 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
             cached_servers if isinstance(cached_servers, list) and cached_servers else None
         )
         system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
+        # feat/hermes-role-slots: keep role-slot blocks consistent with the
+        # other render call sites so re-render stays idempotent.
+        hal0_v1_base = primary["backend_url"]
+        delegation = _resolve_delegation(slots, hal0_base_url=hal0_v1_base)
+        auxiliary_tasks = _resolve_auxiliary_tasks(slots, hal0_base_url=hal0_v1_base)
         rendered = _render_config_yaml(
             primary=primary,
             chat_slots=_collect_chat_slots(slots),
@@ -1919,6 +2115,8 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
             mcp_servers=mcp_servers,
             system_prompt=system_prompt,
             personality_name=personality_name,
+            delegation=delegation,
+            auxiliary_tasks=auxiliary_tasks,
         )
         rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     except Exception as exc:

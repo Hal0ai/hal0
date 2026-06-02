@@ -433,6 +433,15 @@ class Dispatcher:
 
         # ── Step 2: passthrough on warm caches ───────────────────────────
         for upstream in self._upstreams_in_priority_order():
+            if _is_self_composite(upstream):
+                # The composite ``hal0`` upstream's URL is hal0-api itself,
+                # and its cache lists EVERY chat slot's model id purely for
+                # ``GET /v1/models`` advertisement. Routing a chat request
+                # there would forward back into hal0-api (loop / wrong
+                # co-resident model). Chat models must instead fall through
+                # to the lemonade proxy, which serves them by name on
+                # lemond — so skip the composite in passthrough matching.
+                continue
             if model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -458,6 +467,8 @@ class Dispatcher:
         if cold_remotes:
             await self._cold_prefetch(cold_remotes)  # TIER2 + TIER3
             for upstream in self._upstreams_in_priority_order():
+                if _is_self_composite(upstream):
+                    continue
                 if model_id in self._cached_models(upstream.name):
                     call = UpstreamCall(
                         upstream_name=upstream.name,
@@ -986,6 +997,20 @@ def _remap_model(body: dict[str, Any], new_model: str) -> bytes:
     if new_model:
         body = {**body, "model": new_model}
     return json.dumps(body).encode("utf-8")
+
+
+def _is_self_composite(upstream: Upstream) -> bool:
+    """True for the self-referential composite ``hal0`` upstream.
+
+    The composite is a ``kind="slot"`` entry named ``hal0`` with
+    ``slot_name is None`` whose URL points back at hal0-api's own ``/v1``
+    surface. It aggregates every chat slot's model id for
+    ``GET /v1/models`` only — it must NOT be a dispatch target, or a chat
+    request would forward back into hal0-api (loop / wrong co-resident
+    model) instead of falling through to the lemonade proxy that serves
+    chat models by name on lemond. The passthrough steps skip it.
+    """
+    return upstream.kind == "slot" and upstream.slot_name is None and upstream.name == "hal0"
 
 
 def _slot_name_of(upstream: Upstream) -> str:

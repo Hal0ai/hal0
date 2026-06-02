@@ -498,6 +498,167 @@ def test_render_config_yaml_chat_slots_become_aliases() -> None:
     assert '"qwen-coder"' in rendered
 
 
+# ── feat/hermes-role-slots: delegation + auxiliary role→slot wiring ──────────
+
+_ROLE_SLOTS = [
+    {
+        "name": "primary",
+        "type": "llm",
+        "state": "ready",
+        "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+        "backend_url": "http://127.0.0.1:8001/v1",
+        "context_length": 32768,
+    },
+    {
+        "name": "agent-hermes",
+        "type": "llm",
+        "state": "ready",
+        "model_id": "hermes-4-14b-q5km",
+        "backend_url": "http://127.0.0.1:8001/v1",
+    },
+    {
+        "name": "utility",
+        "type": "llm",
+        "state": "ready",
+        "model_id": "qwen3-zero-coder-v2-0.8b-f16",
+        "backend_url": "http://127.0.0.1:8001/v1",
+    },
+]
+_HAL0_V1 = "http://127.0.0.1:8080/v1"
+
+
+def test_resolve_delegation_picks_agent_hermes_slot() -> None:
+    deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    assert deleg == {
+        "model": "hermes-4-14b-q5km",
+        "provider": "custom",
+        "base_url": _HAL0_V1,
+    }
+
+
+def test_resolve_delegation_none_when_slot_absent() -> None:
+    # Only primary present → no subagent slot → degrade to inherit-chat.
+    assert hp._resolve_delegation(_ROLE_SLOTS[:1], hal0_base_url=_HAL0_V1) is None
+
+
+def test_resolve_delegation_none_when_slot_not_ready() -> None:
+    slots = [
+        *_ROLE_SLOTS[:1],
+        {"name": "agent-hermes", "type": "llm", "state": "idle", "model_id": "x"},
+    ]
+    assert hp._resolve_delegation(slots, hal0_base_url=_HAL0_V1) is None
+
+
+def test_resolve_auxiliary_tasks_routes_utility_group_to_utility_slot() -> None:
+    aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    # Utility group → custom provider on the utility slot's model.
+    for task in ("compression", "session_search", "title_generation", "skills_hub", "mcp"):
+        assert aux[task] == {
+            "provider": "custom",
+            "model": "qwen3-zero-coder-v2-0.8b-f16",
+            "base_url": _HAL0_V1,
+        }
+    # vision/web_extract always stay on the main chat provider.
+    for task in ("vision", "web_extract"):
+        assert aux[task] == {"provider": "main", "model": "", "base_url": ""}
+
+
+def test_resolve_auxiliary_tasks_degrades_to_main_without_utility_slot() -> None:
+    aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS[:1], hal0_base_url=_HAL0_V1)
+    for task in ("compression", "session_search", "title_generation"):
+        assert aux[task]["provider"] == "main"
+        assert aux[task]["model"] == ""
+
+
+def test_render_config_yaml_emits_delegation_and_auxiliary_blocks() -> None:
+    yaml = pytest.importorskip("yaml")
+    deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    rendered = hp._render_config_yaml(
+        primary={
+            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+            "backend_url": _HAL0_V1,
+            "context_length": 32768,
+        },
+        chat_slots=hp._collect_chat_slots(_ROLE_SLOTS),
+        agent_id="hermes-agent",
+        delegation=deleg,
+        auxiliary_tasks=aux,
+    )
+    cfg = yaml.safe_load(rendered)
+    # delegation block → agent-hermes model at the hal0 /v1 endpoint.
+    assert cfg["delegation"] == {
+        "model": "hermes-4-14b-q5km",
+        "provider": "custom",
+        "base_url": _HAL0_V1,
+    }
+    # auxiliary compaction/search/title → utility model at hal0 /v1.
+    assert cfg["auxiliary"]["compression"] == {
+        "provider": "custom",
+        "model": "qwen3-zero-coder-v2-0.8b-f16",
+        "base_url": _HAL0_V1,
+    }
+    assert cfg["auxiliary"]["session_search"]["model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    assert cfg["auxiliary"]["title_generation"]["base_url"] == _HAL0_V1
+    assert cfg["auxiliary"]["vision"]["provider"] == "main"
+
+
+def test_render_config_yaml_omits_delegation_when_slot_missing() -> None:
+    yaml = pytest.importorskip("yaml")
+    aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS[:1], hal0_base_url=_HAL0_V1)
+    rendered = hp._render_config_yaml(
+        primary={"model_id": "p", "backend_url": _HAL0_V1, "context_length": 8000},
+        delegation=None,
+        auxiliary_tasks=aux,
+        agent_id="hermes-agent",
+    )
+    assert "delegation:" not in rendered
+    cfg = yaml.safe_load(rendered)
+    # No utility slot → aux compaction group falls back to provider:"main".
+    assert cfg["auxiliary"]["compression"]["provider"] == "main"
+
+
+def test_render_config_yaml_default_auxiliary_is_all_main() -> None:
+    # Callers that don't pass auxiliary_tasks keep the pre-role-slots shape:
+    # every task on provider:"main", no delegation block.
+    yaml = pytest.importorskip("yaml")
+    rendered = hp._render_config_yaml(primary=None, agent_id="hermes-agent")
+    cfg = yaml.safe_load(rendered)
+    assert "delegation" not in cfg
+    assert {"vision", "web_extract", "compression", "session_search"} <= set(cfg["auxiliary"])
+    for task_cfg in cfg["auxiliary"].values():
+        assert task_cfg["provider"] == "main"
+
+
+def test_config_write_renders_role_slots_from_live_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = pytest.importorskip("yaml")
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_k: {
+            "model": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+            "base_url": _HAL0_V1,
+            "context_length": 32768,
+        },
+    )
+    monkeypatch.setattr(hp, "_fetch_slots", lambda: list(_ROLE_SLOTS))
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-overrides.yaml")
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    out = hp._phase_config_write(state)
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["delegation_model"] == "hermes-4-14b-q5km"
+    assert out.details["auxiliary_utility_model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    cfg = yaml.safe_load(Path(out.details["config_path"]).read_text())
+    assert cfg["delegation"]["model"] == "hermes-4-14b-q5km"
+    assert cfg["delegation"]["base_url"] == _HAL0_V1
+    assert cfg["auxiliary"]["compression"]["model"] == "qwen3-zero-coder-v2-0.8b-f16"
+
+
 def test_config_write_phase_writes_yaml_idempotently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

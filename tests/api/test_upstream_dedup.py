@@ -79,8 +79,15 @@ def _reset_module_cache() -> None:
 @pytest.mark.asyncio
 async def test_autoregister_creates_single_hal0_upstream() -> None:
     """Exactly one upstream named ``hal0`` lands in the registry — no
-    duplicate ``primary`` / ``agent-hermes`` entries pointing at the
-    same Lemonade port."""
+    per-chat-slot upstreams pointed at the (shared / dead) TOML ports.
+
+    hermes-role-slots: Lemonade-managed chat slots are NOT independently
+    addressable on their TOML ports (``primary`` + ``agent-hermes`` both
+    pin ``port=8001``; ``utility`` pins a dead ``:8081``). They are served
+    by name on lemond, so we register only the composite ``hal0`` upstream
+    and translate slot aliases → model ids in the dispatch path. No
+    per-slot routing upstreams are auto-registered.
+    """
     registry = UpstreamRegistry()
     slot_mgr = _FakeSlotManager(_two_chat_slots())
 
@@ -99,6 +106,7 @@ async def test_autoregister_creates_single_hal0_upstream() -> None:
     assert hal0.url == "http://127.0.0.1:8080/v1"
     assert hal0.kind == "slot"
     assert hal0.slot_name is None  # composite — not a single slot
+    assert hal0.advertise_models is True
 
 
 @pytest.mark.asyncio

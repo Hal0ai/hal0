@@ -227,6 +227,57 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """Translate a chat-slot ALIAS in ``body["model"]`` to its model id.
+
+    hermes-role-slots: a request may address a co-resident chat slot by
+    its **alias** (slot name: ``primary`` / ``agent-hermes`` / ``utility``)
+    instead of the underlying model id. Lemonade serves chat models by
+    name on lemond, so we rewrite the alias to the slot's configured model
+    id HERE, at the route layer, before either the dispatcher routes it or
+    the lemonade fall-through forwards it. After the rewrite, both
+    ``model==alias`` and ``model==model_id`` carry the correct distinct
+    model name down the existing path and hit the right co-resident model.
+
+    The rewrite is applied to BOTH:
+      * the returned ``body`` dict (handed to ``dispatcher.dispatch``), and
+      * the request's cached body bytes (``request._body``) — so the
+        ``NoRouteFound`` → ``lemonade_proxy._proxy`` fall-through, which
+        re-reads ``request.body()`` verbatim, forwards the rewritten model
+        name rather than the bare alias.
+
+    No-op when: the model isn't a known chat-slot alias, equals its own
+    model id already, the slot manager is absent, or the config read
+    raises (best-effort — never blocks the request).
+    """
+    raw_model = body.get("model")
+    if not isinstance(raw_model, str) or not raw_model:
+        return body
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if slot_manager is None:
+        return body
+    from hal0.api import hal0_chat_slot_alias_map
+
+    try:
+        alias_to_model = await hal0_chat_slot_alias_map(slot_manager)
+    except Exception:
+        return body
+    mapped = alias_to_model.get(raw_model)
+    if not mapped or mapped == raw_model:
+        return body
+
+    new_body = {**body, "model": mapped}
+    # Overwrite the cached request body so the lemonade proxy fall-through
+    # (which reads request.body()) forwards the rewritten model name. If we
+    # can't (unexpected request shape), still return the rewritten dict —
+    # the dispatcher path benefits even if the proxy path can't.
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        request._body = json.dumps(new_body).encode("utf-8")  # type: ignore[attr-defined]
+    return new_body
+
+
 async def _dispatch_and_forward(
     request: Request,
     dispatcher: DispatcherDep,
@@ -234,6 +285,10 @@ async def _dispatch_and_forward(
 ) -> Response:
     if body is None:
         body = await _read_json_body(request)
+    # Translate a chat-slot alias (primary/agent-hermes/utility) → model id
+    # before routing so both the dispatcher and the lemonade fall-through
+    # see the real model name.
+    body = await _rewrite_chat_slot_alias(request, body)
     from hal0.dispatcher.router import NoRouteFound
 
     try:
@@ -306,16 +361,65 @@ async def list_models(
     Fetches each upstream's catalog on demand (no caching yet — a TTL
     cache lands when the dispatcher gets one).
 
+    Two classes of entries are emitted:
+
+    * **Per-slot alias entries** (``hermes-role-slots``). Every enabled
+      chat slot (``type == "llm"``) that is currently loaded in lemond
+      surfaces as one model object whose ``id`` is the slot **alias =
+      slot name** (``primary``, ``agent-hermes``, ``utility``), carrying a
+      human ``name`` (``"<slot> · <model display name>"``) and the slot's
+      ``context_length``. Built by :func:`hal0.api.hal0_slot_alias_models`.
+      Unloaded / disabled slots are omitted. The alias is stable across
+      model swaps so callers can pin a co-resident slot.
+    * **Upstream catalog entries** — the raw model ids each
+      ``advertise_models`` upstream reports, so non-chat models (embed /
+      rerank / image / …) keep their direct-addressing entries. The
+      composite ``hal0`` upstream's CHAT model ids are suppressed here so
+      they don't duplicate the alias entries above — a chat slot is
+      represented exactly once, by its alias.
+
     PUBLIC — mounted on ``public_router`` so OpenAI SDKs that probe the
     catalog before sending Authorization headers continue to work after
     ADR-0001 Child B.
     """
+    from hal0.api import hal0_chat_slot_model_ids, hal0_slot_alias_models
+
     upstreams = request.app.state.upstreams
     model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {}) or {}
     seen: set[str] = set()
     data: list[dict[str, Any]] = []
     now = int(time.time())
+
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    model_registry = getattr(request.app.state, "model_registry", None)
+
+    # Per-slot alias entries first so a slot alias (e.g. "primary") wins
+    # the id over any same-named raw model id an upstream might advertise.
+    if slot_manager is not None and model_registry is not None:
+        try:
+            alias_entries = await hal0_slot_alias_models(slot_manager, model_registry, now=now)
+        except Exception:
+            alias_entries = []
+        for entry in alias_entries:
+            mid = entry.get("id")
+            if not isinstance(mid, str) or mid in seen:
+                continue
+            seen.add(mid)
+            data.append(entry)
+
+    # Chat-slot model ids are represented by their aliases above; suppress
+    # them from the raw upstream catalog so the composite ``hal0`` upstream
+    # doesn't emit duplicate ``id=<model_id>`` rows for the same chat slots.
+    chat_model_ids: set[str] = set()
+    if slot_manager is not None:
+        try:
+            chat_model_ids = await hal0_chat_slot_model_ids(slot_manager)
+        except Exception:
+            chat_model_ids = set()
+
     for u in upstreams.list():
+        if not getattr(u, "advertise_models", True):
+            continue
         # The composite ``hal0`` upstream's URL is hal0-api itself —
         # going over HTTP here would re-enter this handler and loop. Its
         # model list lives in ``upstream_models["hal0"]``, refreshed by
@@ -330,6 +434,10 @@ async def list_models(
                 advertised = []
         for mid in advertised:
             if mid in seen:
+                continue
+            # A chat slot's raw model id is already covered by its alias
+            # entry — don't list it twice.
+            if mid in chat_model_ids:
                 continue
             seen.add(mid)
             data.append(
@@ -388,6 +496,11 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     # client, or the request doesn't match a chat slot we own) we
     # fall back to the standard dispatch path.
     body = await _read_json_body(request)
+    # Translate a chat-slot alias → model id up front so the OmniRouter
+    # caller-slot match (keyed on the model id) and the dispatch path both
+    # see the real model name. Also rewrites the cached request body for
+    # the lemonade fall-through.
+    body = await _rewrite_chat_slot_alias(request, body)
     if body.get("omni") is True:
         looped = await _maybe_run_omni_loop(request, body)
         if looped is not None:

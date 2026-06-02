@@ -16,6 +16,13 @@
                         renders the usage_hint into the system prompt.
      system_prompt    — str          (persona-rendered prelude; PR-3 Phase 7)
      personality_name — str          (display name of active persona; PR-3 Phase 8)
+     delegation       — dict or None ({model, base_url, provider}) — subagent
+                        role model from the `agent-hermes` slot. None → block
+                        omitted → subagents inherit the chat model.
+     auxiliary_tasks  — dict          task → {provider, model, base_url}.
+                        Drives the auxiliary: block. utility-slot tasks render
+                        provider:"custom"+base_url; vision/web_extract stay
+                        provider:"main". (feat/hermes-role-slots)
 #}# Managed by hal0 (issue #241). Edits MAY be overwritten by
 # `hal0 agent bootstrap hermes`. Drop a file at
 # /etc/hal0/agents/hermes/overrides.yaml to merge on top.
@@ -64,6 +71,19 @@ model_aliases:
     provider: "custom"
     base_url: {{ slot.backend_url | tojson }}
 {%- endfor %}
+{%- endif %}
+{%- if delegation %}
+
+{# feat/hermes-role-slots: subagents run on a dedicated slot
+   (`agent-hermes`). delegate_tool.py `_resolve_delegation_credentials`
+   reads delegation.{model,provider,base_url}; setting base_url forces
+   provider → "custom" so subagents hit hal0's OpenAI surface. Omitted
+   entirely when the slot isn't live, in which case subagents inherit the
+   parent (chat) model. #}
+delegation:
+  model: {{ delegation.model | tojson }}
+  provider: {{ delegation.provider | default("custom") | tojson }}
+  base_url: {{ delegation.base_url | tojson }}
 {%- endif %}
 
 memory:
@@ -130,10 +150,22 @@ display:
   personality: {{ personality_name | tojson }}
 {%- endif %}
 
+{# feat/hermes-role-slots: per-task side-job routing. Each task is read by
+   auxiliary_client.py `_resolve_task_provider_model` as
+   auxiliary.<task>.{provider,model,base_url}. utility-slot tasks render
+   provider:"custom"+base_url (cheap compaction/search/title model);
+   vision/web_extract stay provider:"main" so they inherit the chat model.
+   A base_url is only emitted when set, so provider:"main" rows stay
+   minimal. #}
 auxiliary:
-  vision: { provider: "main", model: "" }
-  web_extract: { provider: "main", model: "" }
-  session_search: { provider: "main", model: "" }
+{%- for task, cfg in auxiliary_tasks.items() %}
+  {{ task }}:
+    provider: {{ cfg.provider | default("main") | tojson }}
+    model: {{ cfg.model | default("") | tojson }}
+{%- if cfg.base_url %}
+    base_url: {{ cfg.base_url | tojson }}
+{%- endif %}
+{%- endfor %}
 
 {%- if stt %}
 

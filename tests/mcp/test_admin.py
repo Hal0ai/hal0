@@ -338,3 +338,104 @@ async def test_missing_path_arg_returns_typed_error(queue: ApprovalQueue) -> Non
     )
     assert result["status"] == "error"
     assert result["error"]["code"] == "mcp.missing_arg"
+
+
+@pytest.fixture
+def list_transport(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Patch httpx.AsyncClient so GET returns a bare JSON *list*.
+
+    Mirrors the real /api/slots and /api/providers routes, which return
+    ``list[dict]`` rather than a top-level object. Used to prove the MCP
+    wrapper wraps the list into a dict (the DictModel-validation fix).
+    """
+    captured: dict[str, Any] = {"payload": [{"name": "primary"}, {"name": "embed"}]}
+
+    class _MockResponse:
+        status_code = 200
+
+        def __init__(self, payload: Any) -> None:
+            self._payload = payload
+            self.text = ""
+
+        def json(self) -> Any:
+            return self._payload
+
+    class _MockClient:
+        def __init__(self, *, base_url: str, timeout: float) -> None:
+            pass
+
+        async def __aenter__(self) -> _MockClient:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None:
+            return None
+
+        async def get(self, url: str, params: Any = None, headers: Any = None) -> _MockResponse:
+            return _MockResponse(captured["payload"])
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_slot_list_wraps_bare_list_into_dict(
+    queue: ApprovalQueue, list_transport: dict[str, Any]
+) -> None:
+    """slot_list's REST route returns a bare list; the MCP tool must
+    return a top-level dict (FastMCP's result model rejects lists with
+    'Input should be a valid dictionary')."""
+    result = await admin.dispatch(
+        tool="slot_list",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert isinstance(result, dict)
+    assert result == {"slots": [{"name": "primary"}, {"name": "embed"}], "count": 2}
+
+
+@pytest.mark.asyncio
+async def test_provider_list_wraps_bare_list_into_dict(
+    queue: ApprovalQueue, list_transport: dict[str, Any]
+) -> None:
+    """provider_list's REST route returns a bare list; same dict-wrap
+    requirement as slot_list."""
+    list_transport["payload"] = [{"name": "openrouter"}]
+    result = await admin.dispatch(
+        tool="provider_list",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert isinstance(result, dict)
+    assert result == {"providers": [{"name": "openrouter"}], "count": 1}
+
+
+@pytest.mark.asyncio
+async def test_list_wrap_does_not_touch_dict_payloads(
+    queue: ApprovalQueue, list_transport: dict[str, Any]
+) -> None:
+    """A non-list REST payload (e.g. an error envelope) for slot_list
+    round-trips unchanged — the wrapper never masks a dict response."""
+    list_transport["payload"] = {"status": "error", "http_status": 503}
+    result = await admin.dispatch(
+        tool="slot_list",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result == {"status": "error", "http_status": 503}
+
+
+def test_wrap_list_payload_noop_for_other_tools() -> None:
+    """Only slot_list / provider_list get wrapped; other tools (e.g.
+    model_list, whose REST route already returns a dict) pass through."""
+    data = [{"id": "x"}]
+    assert admin._wrap_list_payload("model_list", data) is data
+    assert admin._wrap_list_payload("hardware_probe", {"ok": 1}) == {"ok": 1}
