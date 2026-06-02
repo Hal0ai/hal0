@@ -62,7 +62,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 from hal0.lemonade.client import LemonadeClient
 from hal0.providers.base import ContainerSpec, Provider
@@ -118,6 +120,186 @@ def device_to_backend(device: str | None) -> tuple[str | None, str | None]:
         extra={"device": device},
     )
     return (None, None)
+
+
+# ── actual-backend introspection (B2) ────────────────────────────────────────
+#
+# DECLARED backend (``device_to_backend``) is the slot's *intent*. ACTUAL
+# backend is the build directory of the live ``llama-server`` child that
+# lemond spawned for the loaded model. They can diverge when a model is
+# loaded outside the normal slot-load path (e.g. name-based lazy-load with
+# no explicit ``llamacpp_backend`` in the /v1/load body → lemond's global
+# config.json default wins). Surfacing both lets the dashboard render a
+# drift warning instead of silently lying about which backend ran.
+#
+# Resolution path (per ADR-0022 sourceOfTruth):
+#   loaded_entry.backend_url → port → child PID listening on that port →
+#   /proc/<pid>/exe (fallback /proc/<pid>/cmdline) → classify the path:
+#     ``/vulkan/``      → "vulkan"
+#     ``/rocm-stable/`` → "rocm"
+#     a cpu binary / no GPU marker → "cpu"
+# Returns None on ANY failure (lemond down, not loaded, race, unreadable
+# /proc). Never raises — this runs on the dashboard hot path.
+
+# Map a substring in the resolved binary path to the actual backend token.
+# Order matters: the GPU build dirs are checked before the generic cpu
+# fallback so a rocm-stable/llama-server doesn't get mis-tagged.
+_BACKEND_PATH_MARKERS: tuple[tuple[str, str], ...] = (
+    ("/vulkan/", "vulkan"),
+    ("/rocm-stable/", "rocm"),
+)
+
+
+def _classify_backend_path(path: str) -> str | None:
+    """Classify a llama-server binary path into a backend token.
+
+    Returns ``"vulkan"`` / ``"rocm"`` when the path sits under the
+    corresponding install build dir, ``"cpu"`` for a recognisable
+    llama-server binary with no GPU marker, else ``None``.
+    """
+    if not path:
+        return None
+    p = path.lower()
+    for marker, backend in _BACKEND_PATH_MARKERS:
+        if marker in p:
+            return backend
+    # No GPU build-dir marker. If this is clearly a llama-server binary we
+    # can attribute it to a CPU build; otherwise we don't know.
+    if "llama-server" in p or "llama_server" in p:
+        return "cpu"
+    return None
+
+
+def _port_from_backend_url(backend_url: str | None) -> int | None:
+    """Extract the TCP port from a lemond loaded[] backend_url. None on miss."""
+    if not backend_url or not isinstance(backend_url, str):
+        return None
+    try:
+        parsed = urlparse(backend_url if "://" in backend_url else f"http://{backend_url}")
+        if parsed.port:
+            return int(parsed.port)
+    except (ValueError, TypeError):
+        return None
+    # Fall back to a bare ``host:port`` regex if urlparse didn't find one.
+    m = re.search(r":(\d{2,5})(?:/|$)", backend_url)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _pid_listening_on_port(port: int) -> int | None:
+    """Find the PID of the process listening on 127.0.0.1:<port>.
+
+    Tries psutil first (fast, no subprocess); falls back to ``ss`` then
+    ``lsof``. Returns None when nothing is found or the lookup fails.
+    Never raises.
+    """
+    # Preferred: psutil.net_connections (no subprocess spawn).
+    try:
+        import psutil  # type: ignore
+
+        for conn in psutil.net_connections(kind="inet"):
+            laddr = getattr(conn, "laddr", None)
+            if not laddr:
+                continue
+            lport = getattr(laddr, "port", None)
+            status = getattr(conn, "status", "")
+            if lport == port and status == psutil.CONN_LISTEN and conn.pid:
+                return int(conn.pid)
+    except Exception:
+        pass
+
+    # Fallback: ``ss -ltnp`` — parse the "pid=NNN" out of the LISTEN row.
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["ss", "-ltnp"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        ).stdout
+        for line in out.splitlines():
+            # Match the local-address column ending in :<port> (handles both
+            # space- and tab-delimited ss output across versions).
+            if not re.search(rf":{port}\b", line):
+                continue
+            m = re.search(r"pid=(\d+)", line)
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
+
+    # Last resort: ``lsof -ti tcp:<port> -s TCP:LISTEN``.
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-s", "TCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        ).stdout
+        for tok in out.split():
+            if tok.strip().isdigit():
+                return int(tok.strip())
+    except Exception:
+        pass
+    return None
+
+
+def _exe_path_for_pid(pid: int) -> str | None:
+    """Resolve a PID's executable path via /proc/<pid>/exe, then cmdline."""
+    try:
+        return os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        pass
+    # Fallback: argv[0] from cmdline (NUL-separated).
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read()
+        if raw:
+            argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+            if argv0:
+                return argv0
+    except OSError:
+        pass
+    return None
+
+
+def resolve_actual_backend(loaded_entry: dict[str, Any] | None) -> str | None:
+    """Resolve the runtime backend of a loaded model's llama-server child.
+
+    Takes a single ``/v1/health.loaded[]`` entry (shape
+    ``{model_name, backend_url, ...}`` — note there is NO ``backend``
+    field, per ADR-0022) and introspects the listening child process to
+    determine which llama.cpp build is actually serving it.
+
+    Returns one of ``"vulkan"`` / ``"rocm"`` / ``"cpu"``, or ``None`` when
+    the backend can't be determined (lemond down, model not loaded, no
+    listener on the port, unreadable /proc, or a race where the child has
+    just exited). Never raises — this is on the dashboard hot path.
+    """
+    if not isinstance(loaded_entry, dict):
+        return None
+    try:
+        port = _port_from_backend_url(loaded_entry.get("backend_url"))
+        if port is None:
+            return None
+        pid = _pid_listening_on_port(port)
+        if pid is None:
+            return None
+        exe = _exe_path_for_pid(pid)
+        if exe is None:
+            return None
+        return _classify_backend_path(exe)
+    except Exception:
+        # Defensive catch-all: introspection must never raise into the
+        # status/enrichment hot path.
+        return None
 
 
 # ── slot config helpers (provider-side) ──────────────────────────────────────
@@ -516,6 +698,12 @@ class LemonadeProvider(Provider):
                 "error": str(exc),
                 "error_type": type(exc).__name__,
             }
+        # DECLARED backend: the slot's intent, normalized to the backend
+        # token (rocm|vulkan|cpu|flm). Always known for a configured slot.
+        device = _slot_device(cfg)
+        recipe, declared_llamacpp = device_to_backend(device)
+        # NPU → recipe="flm" with no llamacpp_backend; surface "flm".
+        declared_backend = declared_llamacpp or (recipe if recipe == "flm" else None)
         for key in ("loaded", "all_models_loaded"):
             value = health.get(key) if isinstance(health, dict) else None
             if not isinstance(value, list):
@@ -524,13 +712,25 @@ class LemonadeProvider(Provider):
                 if not isinstance(entry, dict):
                     continue
                 if entry.get("model_name") == model_name:
-                    return {
+                    out: dict[str, Any] = {
                         "loaded": True,
                         "model_name": model_name,
                         "backend_url": entry.get("backend_url"),
                         "last_use": entry.get("last_use"),
                         "raw": entry,
                     }
+                    if declared_backend:
+                        out["declared_backend"] = declared_backend
+                    # ACTUAL backend: introspect the live child process.
+                    # Omit the key (don't set null) when undeterminable —
+                    # the client treats absence as "unknown, no badge".
+                    actual_backend = resolve_actual_backend(entry)
+                    if actual_backend:
+                        out["actual_backend"] = actual_backend
+                        # backend_mismatch only when BOTH are known.
+                        if declared_backend:
+                            out["backend_mismatch"] = actual_backend != declared_backend
+                    return out
         return {
             "loaded": False,
             "model_name": model_name,
@@ -541,4 +741,5 @@ class LemonadeProvider(Provider):
 __all__ = [
     "LemonadeProvider",
     "device_to_backend",
+    "resolve_actual_backend",
 ]

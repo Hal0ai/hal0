@@ -61,11 +61,23 @@ function slotIndicator(slot, now = Date.now()) {
   const errorMsg = slot?.metadata?.message || slot?.message || "";
   const model = slot?.model || slot?.model_id || slot?.model_default || "";
 
+  // Backend mismatch (ADR-0022): rely solely on the backend-computed flag.
+  // The backend only sets backend_mismatch=true when BOTH declared_backend
+  // and actual_backend are known and differ; we never recompute from the
+  // device string (which is the gpu- form, not the bare backend token).
+  const loaded = lemo === "loaded" || lemo === "ready" || state === "serving" || state === "ready";
+  const backendMismatch = !!slot?.backend_mismatch;
+  const declaredBackend = slot?.declared_backend || "";
+  const actualBackend = slot?.actual_backend || "";
+
   if (state === "error") {
+    const extraMsg = backendMismatch && declaredBackend && actualBackend
+      ? ` — declared ${declaredBackend} but running ${actualBackend}`
+      : "";
     return {
       cls: "error",
       label: "error",
-      tooltip: errorMsg ? `Error: ${errorMsg}` : "Error",
+      tooltip: errorMsg ? `Error: ${errorMsg}${extraMsg}` : `Error${extraMsg}`,
     };
   }
   if (!enabled || lemo === "disabled") {
@@ -106,6 +118,13 @@ function slotIndicator(slot, now = Date.now()) {
         tooltip: `Serving since ${_formatAgo(deltaMs)} — request may be stuck`,
       };
     }
+    if (backendMismatch) {
+      return {
+        cls: "warning",
+        label: "mismatch",
+        tooltip: `Declared ${declaredBackend} but running ${actualBackend} — switch backend to reload`,
+      };
+    }
     return {
       cls: "serving",
       label: "serving",
@@ -118,6 +137,13 @@ function slotIndicator(slot, now = Date.now()) {
   // distinction; the colour is the same so operators don't need to
   // squint to tell "ready" from "idle".
   if (lemo === "loaded" || state === "ready") {
+    if (backendMismatch) {
+      return {
+        cls: "warning",
+        label: "mismatch",
+        tooltip: `Declared ${declaredBackend} but running ${actualBackend} — switch backend to reload`,
+      };
+    }
     return {
       cls: "stale",
       label: "ready",
@@ -263,9 +289,22 @@ function SlotCard({
         <span className="chip">{type}</span>
         <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
         {cpuOnly && <span className="chip">[CPU]</span>}
+        {/* Backend mismatch (ADR-0022): amber chip surfaces the ACTUAL
+            runtime backend when it differs from the declared one. Render
+            only on the backend-computed flag + a present actual_backend. */}
+        {slot.backend_mismatch && slot.actual_backend && (
+          <span
+            className={"chip dev-" + String(slot.actual_backend)}
+            style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)"}}
+            title={`Declared ${slot.declared_backend || device} but running ${slot.actual_backend} — switch backend to reload`}
+          >
+            {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
+          </span>
+        )}
         {(() => {
           const ind = slotIndicator(slot);
-          const chipColor = ind.cls === "recent" ? "var(--ok)"
+          const chipColor = ind.cls === "warning" ? "var(--warn)"
+            : ind.cls === "recent" ? "var(--ok)"
             : ind.cls === "serving" ? "var(--accent)"
             : ind.cls === "stale" || ind.cls === "warming" ? "var(--warn)"
             : ind.cls === "error" ? "var(--err)"

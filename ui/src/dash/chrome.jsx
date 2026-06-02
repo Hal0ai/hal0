@@ -8,7 +8,7 @@
 
 import { useLemondRollup } from '@/api/hooks/useLemonade'
 import { useLogsStream } from '@/api/hooks/useLogs'
-import { useSlots } from '@/api/hooks/useSlots'
+import { useSlots, useEndpoints } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 
@@ -180,7 +180,53 @@ function Sidebar({ route, onGo }) {
       {typeof window !== "undefined" && window.SidebarAgentBlock && (
         <window.SidebarAgentBlock onGo={onGo} />
       )}
+      <SidebarEndpointBlock onGo={onGo} />
       <SidebarStatusBlock onGo={onGo} />
+    </div>
+  );
+}
+
+// ─── Endpoint / connection block ───
+//
+// /api/slots returns the composite ``hal0`` upstream as a *synthetic*
+// entry (``_synthetic: true``; slots.py → _synthesize_slots_from_upstreams).
+// It's the aggregate /v1 endpoint that fronts every chat model — NOT a
+// lifecycle-managed slot, so it can't be loaded, unloaded, or deleted.
+// Rendering it in the slot grid (where its disabled controls and dead
+// delete button confuse operators) was wrong; `useSlots()` now filters
+// it out and we render it here as a read-only connection instead.
+// `useEndpoints()` shares the `['slots']` query cache, so no extra poll.
+function SidebarEndpointBlock() {
+  const endpoints = useEndpoints().data || [];
+  if (endpoints.length === 0) return null;
+  return (
+    <div className="sb-status sb-endpoints">
+      <div className="sb-section" style={{ padding: 0, marginBottom: 8 }}>Endpoint</div>
+      {endpoints.map((ep) => {
+        const serving = ep.status === "serving";
+        const url = String(ep.url || "").replace(/^https?:\/\//, "");
+        return (
+          <div key={ep.name} className="sb-endpoint" style={{ marginBottom: 6 }}>
+            <div className="row">
+              <span className="k">{ep.name}</span>
+              <span className={"v " + (serving ? "up" : "down")} title={ep._synthetic_reason || ""}>
+                <span className="dot" />{serving ? "serving" : "offline"}
+              </span>
+            </div>
+            {url && (
+              <div className="row">
+                <span className="k">url</span>
+                <span className="v mono" title={ep.url}>{url}</span>
+              </div>
+            )}
+            <div className="row">
+              <span className="k">models</span>
+              <span className="v"><b>{ep.advertised_models ?? 0}</b></span>
+            </div>
+          </div>
+        );
+      })}
+      <div className="ln" />
     </div>
   );
 }

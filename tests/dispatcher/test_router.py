@@ -436,3 +436,100 @@ async def test_decision_logging_runs_on_every_resolution() -> None:
 
     events = [e for e, _ in captured]
     assert "dispatch.decision" in events
+
+
+# ── B1: backend-aware lazy-load on forward() (ADR-0022) ────────────────────────
+
+
+class _FakeSlotManager:
+    """Minimal SlotManager surface for the forward() lazy-load gate.
+
+    Tracks whether ``load`` was called and reports a fixed slot state via
+    ``_current_state`` so we can drive both the cold-miss and already-loaded
+    branches of ``_ensure_slot_loaded_backend_aware``.
+    """
+
+    def __init__(self, state: Any) -> None:
+        self._state = state
+        self.load_calls: list[str] = []
+
+    def _current_state(self, name: str) -> Any:
+        return self._state
+
+    async def load(self, slot_name: str, model_id: str | None = None) -> None:
+        self.load_calls.append(slot_name)
+        # Stays in the same (non-ready) state — emulates a load still in
+        # flight so the subsequent ready-check raises SlotLoading.
+
+    def serving(self, slot_name: str):
+        manager = self
+
+        class _Ctx:
+            async def __aenter__(self) -> None:
+                return None
+
+            async def __aexit__(self, *a: Any) -> None:
+                return None
+
+        _ = manager
+        return _Ctx()
+
+
+@pytest.mark.asyncio
+async def test_forward_cold_miss_kicks_backend_aware_load_then_raises_loading() -> None:
+    """Slot resolved + model NOT loaded → SlotManager.load called, SlotLoading raised."""
+    from hal0.dispatcher.router import SlotLoading
+    from hal0.slots.state import SlotState
+
+    sm = _FakeSlotManager(state=SlotState.OFFLINE)
+    dispatcher = Dispatcher(slot_manager=sm)  # type: ignore[arg-type]
+    call = UpstreamCall(
+        upstream_name="primary",
+        target_url="http://127.0.0.1:8081/v1/chat/completions",
+        body=json.dumps({"model": "primary"}).encode(),
+        slot_name="primary",
+    )
+    with pytest.raises(SlotLoading):
+        await dispatcher.forward(call)
+    # The backend-aware load was kicked on the cold miss.
+    assert sm.load_calls == ["primary"]
+    # And the body was NOT mutated (no llamacpp_backend injection).
+    assert json.loads(call.body) == {"model": "primary"}
+
+
+@pytest.mark.asyncio
+async def test_forward_already_loaded_skips_load_and_forwards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model already loaded (slot READY) → no load call, normal forward."""
+    from hal0.dispatcher import router as router_mod
+    from hal0.slots.state import SlotState
+
+    sm = _FakeSlotManager(state=SlotState.READY)
+    dispatcher = Dispatcher(slot_manager=sm)  # type: ignore[arg-type]
+    call = UpstreamCall(
+        upstream_name="primary",
+        target_url="http://127.0.0.1:8081/v1/chat/completions",
+        body=json.dumps({"model": "primary"}).encode(),
+        slot_name="primary",
+    )
+
+    forwarded: dict[str, Any] = {}
+
+    async def _fake_forward_with_serving(self: Any, c: UpstreamCall):
+        forwarded["called"] = True
+        forwarded["body"] = c.body
+        from fastapi.responses import Response
+
+        return Response(content=b"ok", status_code=200)
+
+    monkeypatch.setattr(
+        router_mod.Dispatcher, "_forward_with_serving", _fake_forward_with_serving
+    )
+    resp = await dispatcher.forward(call)
+    assert resp.status_code == 200
+    # No load on the warm path.
+    assert sm.load_calls == []
+    assert forwarded.get("called") is True
+    # Body never carries an injected llamacpp_backend.
+    assert json.loads(forwarded["body"]) == {"model": "primary"}

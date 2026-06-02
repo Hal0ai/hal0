@@ -66,6 +66,42 @@ export interface Slot {
    *  "recently live within 1h" green indicator vs "loaded but stale"
    *  yellow indicator. See ui/src/dash/slots.jsx → ``slotIndicator``. */
   last_used_at?: number | null
+
+  // ── Backend selection (ADR-0022) ────────────────────────────────────
+  /** DECLARED backend — the normalized backend token (rocm|vulkan|cpu|flm)
+   *  derived from the slot TOML `device` field via device_to_backend().
+   *  ALWAYS present for a configured slot. Compare like-for-like against
+   *  `actual_backend` (both are the bare token, NOT the gpu- device form). */
+  declared_backend?: string | null
+  /** ACTUAL runtime backend — the build directory of the live llama-server
+   *  child (rocm|vulkan|cpu|flm). Omitted/null when the slot is not loaded
+   *  or the child cannot be introspected. Treat absence as "unknown — show
+   *  no actual badge". */
+  actual_backend?: string | null
+  /** True iff declared_backend and actual_backend are both known AND differ.
+   *  Backend-computed; the UI renders the mismatch warning ONLY when this is
+   *  true and never recomputes it from device strings. */
+  backend_mismatch?: boolean
+
+  // ── Synthetic upstream-backed entries ───────────────────────────────
+  // /api/slots merges real lifecycle-managed slots with synthetic
+  // entries (slots.py → _synthesize_slots_from_upstreams) that represent
+  // composite /v1 upstreams — e.g. the auto-registered ``hal0`` endpoint
+  // that fronts every chat model. These are NOT loadable/unloadable/
+  // deletable slots, so `useSlots()` filters them out of the slot grid
+  // and `useEndpoints()` surfaces them in the sidebar instead.
+  /** True for synthetic upstream-backed entries (composite endpoints). */
+  _synthetic?: boolean
+  /** Operator-facing explanation of why this entry isn't a real slot. */
+  _synthetic_reason?: string
+  /** Upstream base URL (synthetic entries only). */
+  url?: string
+  /** Coarse liveness for synthetic entries: "serving" | "offline". */
+  status?: string
+  /** Count of models this composite upstream advertises via /v1/models. */
+  advertised_models?: number
+  /** Most recently dispatched model id for this upstream, if any. */
+  last_used_model?: string | null
 }
 
 const SLOTS_POLL_MS = 5_000
@@ -144,6 +180,13 @@ function normalizeSlot(s: any): Slot {
     metrics: { ...DEFAULT_METRICS, ...(s?.metrics ?? {}) },
     spark: Array.isArray(s?.spark) ? s.spark : [],
     model: s?.model ?? s?.model_id ?? s?.model_default ?? '',
+    // Backend selection (ADR-0022) — pass through verbatim. The backend
+    // emits declared_backend always (when configured) and actual_backend/
+    // backend_mismatch only when the child is introspectable; we surface
+    // null for the absent keys and coerce the flag to a strict boolean.
+    declared_backend: s?.declared_backend ?? null,
+    actual_backend: s?.actual_backend ?? null,
+    backend_mismatch: !!s?.backend_mismatch,
   }
 }
 
@@ -171,11 +214,37 @@ async function fetchSlotsUnion(): Promise<Slot[]> {
   return [...byName.values()].map(normalizeSlot)
 }
 
+/**
+ * Real, lifecycle-managed slots only. Synthetic upstream-backed entries
+ * (composite /v1 endpoints like ``hal0``) are filtered out — they can't
+ * be loaded/unloaded/deleted, so showing them in the slot grid is
+ * misleading. The sidebar renders them via `useEndpoints()` instead.
+ *
+ * `useEndpoints` shares this query's cache (same `queryKey`) so the
+ * single 5s poll backs both views; only the `select` projection differs.
+ */
 export function useSlots(): UseQueryResult<Slot[]> {
   return useQuery({
     queryKey: ['slots'],
     queryFn: fetchSlotsUnion,
     refetchInterval: SLOTS_POLL_MS,
+    select: (all) => all.filter((s) => !s._synthetic),
+  })
+}
+
+/**
+ * Synthetic upstream-backed entries (composite /v1 endpoints) — the
+ * complement of `useSlots()`. These represent aggregate connections
+ * (e.g. the auto-registered ``hal0`` endpoint that fronts every chat
+ * model), not real slots, and render in the sidebar as read-only
+ * endpoint/connection rows. Shares the `['slots']` query cache.
+ */
+export function useEndpoints(): UseQueryResult<Slot[]> {
+  return useQuery({
+    queryKey: ['slots'],
+    queryFn: fetchSlotsUnion,
+    refetchInterval: SLOTS_POLL_MS,
+    select: (all) => all.filter((s) => !!s._synthetic),
   })
 }
 

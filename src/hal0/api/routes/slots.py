@@ -32,7 +32,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from hal0.api.middleware.error_codes import BadRequest, Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
 from hal0.slots.manager import Slot, SlotManager
 
 # Reusable writer-scope gate applied per-route on every POST/PUT/PATCH/DELETE.
@@ -223,6 +223,29 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
             backend_url = loaded_entry.get("backend_url")
             if isinstance(backend_url, str) and backend_url:
                 entry["backend_url"] = backend_url
+            # B2: surface declared vs actual backend so the dashboard can
+            # render a drift warning. declared_backend is ALWAYS present for
+            # a configured slot (normalized token rocm|vulkan|cpu|flm, NOT
+            # the gpu- device form, so the UI compares like-for-like).
+            # actual_backend + backend_mismatch are OMITTED (not null) when
+            # the child can't be introspected. Do NOT read
+            # loaded_entry.get("backend") — that field does not exist.
+            from hal0.providers.lemonade import (
+                device_to_backend as _device_to_backend,
+            )
+            from hal0.providers.lemonade import (
+                resolve_actual_backend as _resolve_actual_backend,
+            )
+
+            _recipe, _llamacpp = _device_to_backend(cfg.get("device"))
+            declared_backend = _llamacpp or (_recipe if _recipe == "flm" else None)
+            if declared_backend:
+                entry["declared_backend"] = declared_backend
+            actual_backend = _resolve_actual_backend(loaded_entry)
+            if actual_backend:
+                entry["actual_backend"] = actual_backend
+                if declared_backend:
+                    entry["backend_mismatch"] = actual_backend != declared_backend
         else:
             # Enabled but not in loaded[]: idle by default. Drift into
             # error is surfaced via the regular slot state (see
@@ -954,9 +977,82 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
     return _slot_to_dict(snap, request)
 
 
+# Map a normalized runtime-backend token to the SlotConfig ``device`` enum
+# the TOML persists. ``auto`` clears the device so lemond falls back to its
+# own default. flm/npu are not selectable through this control (they require
+# a recipe switch, not a llamacpp_backend flip).
+_BACKEND_TO_DEVICE: dict[str, str | None] = {
+    "rocm": "gpu-rocm",
+    "vulkan": "gpu-vulkan",
+    "cpu": "cpu",
+    "auto": None,
+}
+
+# Build-dir → llama-server binary that must exist for a gpu backend to be
+# selectable. cpu/auto don't require a specific GPU build.
+_BACKEND_BUILD_BIN: dict[str, str] = {
+    "rocm": "/var/lib/hal0/lemonade/bin/llamacpp/rocm-stable/llama-server",
+    "vulkan": "/var/lib/hal0/lemonade/bin/llamacpp/vulkan/llama-server",
+}
+
+
+def _backend_build_present(backend: str) -> bool:
+    """True if the build's ``llama-server`` binary is installed on disk.
+
+    Backends with no entry in ``_BACKEND_BUILD_BIN`` (cpu / auto) are always
+    considered present. Module-level so tests can monkeypatch it without
+    reaching into the local ``import os`` inside the route handler.
+    """
+    import os
+
+    bin_path = _BACKEND_BUILD_BIN.get(backend)
+    if bin_path is None:
+        return True
+    return os.path.exists(bin_path)
+
+
+def _normalize_backend_token(raw: str) -> str:
+    """Normalize a backend/device request token to rocm|vulkan|cpu|auto|flm|npu.
+
+    Accepts the gpu- device forms and folds them onto the backend token so
+    the endpoint accepts both ``{"backend":"vulkan"}`` and
+    ``{"device":"gpu-vulkan"}``.
+    """
+    t = raw.strip().lower()
+    if t == "gpu-rocm":
+        return "rocm"
+    if t == "gpu-vulkan":
+        return "vulkan"
+    return t
+
+
 @router.post("/{name}/backend")
 async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
-    """Switch a slot's backend (e.g., vulkan → rocm)."""
+    """Switch a slot's runtime backend (ADR-0022 control endpoint).
+
+    Body: ``{"backend": "rocm"|"vulkan"|"cpu"|"auto"}``. The alias key
+    ``device`` is also accepted and ``gpu-rocm``/``gpu-vulkan`` normalize to
+    ``rocm``/``vulkan``.
+
+    Effect: writes the slot's ``device`` field to TOML via
+    ``update_config`` (which auto-refreshes the mirrored ``extra.backend``);
+    if the slot is currently loaded it is restarted so the model reloads
+    under the new backend. Idempotent — when the requested backend already
+    equals the declared device (and, when loaded, the actual backend) it is
+    a no-op with ``reloaded: false``.
+
+    Validation:
+      - ``rocm``/``vulkan`` → 409 ``backend.build_missing`` when the build's
+        ``llama-server`` binary is absent.
+      - ``cpu`` and ``auto`` are always valid.
+      - ``flm``/``npu`` → 400 ``backend.not_selectable``.
+
+    Response 200: the standard ``_slot_to_dict`` payload plus
+    ``requested_backend`` / ``declared_backend`` / ``actual_backend`` /
+    ``reloaded``.
+    """
+    from hal0.providers.lemonade import device_to_backend
+
     sm = _get_slot_manager(request)
     try:
         body = await request.json()
@@ -966,14 +1062,114 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
             details={"error": str(exc)},
             code="request.invalid_json",
         ) from exc
-    backend = body.get("backend") if isinstance(body, dict) else None
-    if not isinstance(backend, str) or not backend.strip():
+    if not isinstance(body, dict):
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
+    # Accept either ``backend`` or the alias ``device``.
+    raw = body.get("backend")
+    if not isinstance(raw, str) or not raw.strip():
+        raw = body.get("device")
+    if not isinstance(raw, str) or not raw.strip():
         raise BadRequest(
-            "'backend' is required in request body",
+            "'backend' (or 'device') is required in request body",
             code="backend.missing",
         )
-    snap = await sm.update_config(name, {"backend": backend})
-    return _slot_to_dict(snap, request)
+
+    backend = _normalize_backend_token(raw)
+
+    # flm/npu are not selectable via this control — they need a recipe
+    # switch, not a llamacpp_backend flip.
+    if backend in ("flm", "npu"):
+        raise BadRequest(
+            f"backend {backend!r} is not selectable via this endpoint "
+            "(NPU/FLM requires a recipe change, not a backend flip)",
+            code="backend.not_selectable",
+        )
+    if backend not in _BACKEND_TO_DEVICE:
+        raise BadRequest(
+            f"backend {backend!r} is not recognised; "
+            "choose from rocm|vulkan|cpu|auto",
+            code="backend.not_selectable",
+        )
+
+    # Build-presence validation for the GPU backends.
+    if not _backend_build_present(backend):
+        bin_path = _BACKEND_BUILD_BIN.get(backend)
+        raise Conflict(
+            f"backend {backend!r} build is not installed ({bin_path} missing)",
+            details={"backend": backend, "expected_binary": bin_path},
+            code="backend.build_missing",
+        )
+
+    target_device = _BACKEND_TO_DEVICE[backend]
+
+    # Determine current declared device + whether the slot is loaded, so we
+    # can short-circuit an idempotent no-op and decide whether to restart.
+    cfg = await sm.get_config(name)
+    current_device = (cfg.get("device") if isinstance(cfg, dict) else None) or ""
+    # Normalized declared backend for the CURRENT device (for the response +
+    # the idempotency comparison).
+    _recipe, _llamacpp = device_to_backend(current_device)
+    current_declared = _llamacpp or (_recipe if _recipe == "flm" else None)
+
+    # Is the slot currently loaded? Reuse the provider status snapshot so we
+    # can also read the actual backend for the idempotency check + response.
+    from hal0.providers import lemonade_provider
+
+    status_snap: dict[str, Any] = {}
+    try:
+        status_snap = await lemonade_provider().status(cfg)
+    except Exception:
+        status_snap = {}
+    is_loaded = bool(status_snap.get("loaded"))
+    actual_backend = status_snap.get("actual_backend")
+
+    # Idempotency: the requested backend already equals the declared device,
+    # AND (when loaded) the actual backend already matches → no-op.
+    requested_declared = (
+        device_to_backend(target_device)[1]
+        if target_device
+        else None
+    )
+    already_declared = current_device == (target_device or "")
+    already_actual = (not is_loaded) or (actual_backend is None) or (actual_backend == requested_declared)
+    if already_declared and already_actual:
+        snap = await sm.status(name)
+        out = _slot_to_dict(snap, request)
+        out["requested_backend"] = backend
+        out["declared_backend"] = current_declared
+        out["actual_backend"] = actual_backend if actual_backend else None
+        out["reloaded"] = False
+        return out
+
+    # Persist the new device. ``auto`` clears the device field entirely so
+    # lemond falls back to its own default on the next load.
+    await sm.update_config(name, {"device": target_device or ""})
+
+    reloaded = False
+    if is_loaded:
+        # Restart so the model reloads under the new backend (the device-
+        # derived llamacpp_backend flows through LemonadeProvider.load).
+        await sm.restart(name)
+        reloaded = True
+
+    snap = await sm.status(name)
+    out = _slot_to_dict(snap, request)
+    # Recompute declared/actual from the post-change state.
+    new_cfg = await sm.get_config(name)
+    new_device = (new_cfg.get("device") if isinstance(new_cfg, dict) else None) or ""
+    _nrecipe, _nllamacpp = device_to_backend(new_device)
+    new_declared = _nllamacpp or (_nrecipe if _nrecipe == "flm" else None)
+    new_actual = None
+    try:
+        new_status = await lemonade_provider().status(new_cfg)
+        new_actual = new_status.get("actual_backend")
+    except Exception:
+        new_actual = None
+    out["requested_backend"] = backend
+    out["declared_backend"] = new_declared
+    out["actual_backend"] = new_actual if new_actual else None
+    out["reloaded"] = reloaded
+    return out
 
 
 # ── lifecycle ──────────────────────────────────────────────────────────────

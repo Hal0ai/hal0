@@ -482,6 +482,107 @@ def test_list_route_handles_alternate_health_key(
         providers_mod._PROVIDERS["lemonade"] = original
 
 
+# ── B2: declared / actual backend enrichment (ADR-0022) ────────────────────
+
+
+def test_list_slots_emits_declared_backend_when_loaded(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """A loaded slot carries declared_backend (normalized token), even when
+    the actual backend can't be introspected (no live child under test)."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3-4b"',
+        ],
+    )
+    installed_lemonade_stub["loaded"] = [
+        {"model_name": "qwen3-4b", "backend_url": "http://127.0.0.1:14002/v1"},
+    ]
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["lemonade_state"] == "loaded"
+    assert primary["declared_backend"] == "vulkan"
+    # No live child → actual_backend + backend_mismatch are absent (not null).
+    assert "actual_backend" not in primary
+    assert "backend_mismatch" not in primary
+
+
+def test_list_slots_surfaces_actual_backend_and_mismatch(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With resolve_actual_backend monkeypatched to a divergent backend, the
+    enrichment surfaces actual_backend + backend_mismatch=True."""
+    import hal0.providers.lemonade as lemonade_mod
+
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3-4b"',
+        ],
+    )
+    installed_lemonade_stub["loaded"] = [
+        {"model_name": "qwen3-4b", "backend_url": "http://127.0.0.1:14002/v1"},
+    ]
+    # Declared vulkan but the child is actually running rocm → mismatch.
+    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: "rocm")
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["declared_backend"] == "vulkan"
+    assert primary["actual_backend"] == "rocm"
+    assert primary["backend_mismatch"] is True
+
+
+def test_list_slots_omits_backend_fields_when_not_loaded(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """A not-loaded (idle) slot carries no declared/actual backend keys."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3-4b"',
+        ],
+    )
+    installed_lemonade_stub["loaded"] = []
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["lemonade_state"] == "idle"
+    assert "declared_backend" not in primary
+    assert "actual_backend" not in primary
+    assert "backend_mismatch" not in primary
+
+
 def test_json_serialisation_roundtrips(
     npu_trio_slot_root: Path,
     installed_lemonade_stub: dict[str, Any],

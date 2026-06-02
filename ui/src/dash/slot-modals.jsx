@@ -9,6 +9,7 @@ import {
   useSlotEdit,
   useSlotDefaults,
   useSlotDelete,
+  useSlotBackend,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModels } from '@/api/hooks/useModels'
@@ -323,6 +324,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const editMut = useSlotEdit();
   const defaultsMut = useSlotDefaults();
   const deleteMut = useSlotDelete();
+  const backendMut = useSlotBackend();
 
   const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 4096);
   const [idleTimeout, setIdleTimeout] = useStateSM(900);
@@ -331,6 +333,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
   const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
   const [submitErr, setSubmitErr] = useStateSM(null);
+  // Runtime Backend selector (ADR-0022). Seeded from the DECLARED backend
+  // token (bare rocm|vulkan|cpu|flm), falling back to the gpu-stripped
+  // device. The selector itself only offers the selectable backends.
+  const [selectedBackend, setSelectedBackend] = useStateSM(
+    slot?.declared_backend || (slot?.device || "gpu-rocm").replace("gpu-", "") || "rocm"
+  );
+  const [backendSwitchPending, setBackendSwitchPending] = useStateSM(false);
 
   useEffectSM(() => {
     if (slot) {
@@ -341,6 +350,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setWorkers(1);
       setExtraArgs("--flash-attn on --no-mmap");
       setSubmitErr(null);
+      setSelectedBackend(
+        slot.declared_backend || (slot.device || "gpu-rocm").replace("gpu-", "") || "rocm"
+      );
+      setBackendSwitchPending(false);
     }
   }, [slot?.name]);
 
@@ -429,6 +442,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
         <ReadOnlyStrip k="state" v={<span className="chip ok">{slot.state}</span>} />
       </div>
 
+      {/* Declared vs actual backend (ADR-0022). DECLARED = the normalized
+          TOML token; ACTUAL = the live llama-server build (em-dash when the
+          slot is not loaded / the child can't be introspected). */}
+      <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
+        <ReadOnlyStrip k="declared backend" v={slot.declared_backend || device.replace("gpu-", "") || "—"} />
+        <ReadOnlyStrip k="actual backend" v={slot.actual_backend || "—"} />
+      </div>
+
+      {/* Mismatch banner — rendered ONLY on the backend-computed flag. */}
+      {slot.backend_mismatch && (
+        <div style={{padding: 10, background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: "var(--rad-sm)", marginBottom: 12, fontSize: 11, color: "var(--fg-2)"}}>
+          ⚠ Backend mismatch: declared <b>{slot.declared_backend || device.replace("gpu-", "")}</b> but running <b>{slot.actual_backend}</b>. Pick a backend below and Apply to reload under the declared backend.
+        </div>
+      )}
+
       <div className="form-row">
         <div className="form-lbl"><span>Name</span><span className="sub">seeded slots can't be renamed</span></div>
         <div className="form-ctl"><input className="input mono" value={slot.name} disabled /></div>
@@ -459,6 +487,63 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </select>
         </div>
       </div>
+
+      {/* Runtime Backend (ADR-0022) — its own mutation (POST
+          /api/slots/{name}/backend). Disabled for cpu/npu devices, where
+          the backend is not selectable. Apply writes `device` to the TOML
+          and reloads the slot when loaded. Distinct from the Save button,
+          which never touches backend. */}
+      {(() => {
+        const dev = device.replace("gpu-", "");
+        const selectable = dev === "rocm" || dev === "vulkan";
+        const declaredToken = slot.declared_backend || dev || "rocm";
+        const unchanged = selectedBackend === declaredToken;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Runtime Backend</span>
+              <span className="sub">{selectable ? "select + apply to reload under a different llama.cpp build" : "not selectable for this device"}</span>
+            </div>
+            <div className="form-ctl">
+              <div style={{display: "flex", gap: 8, alignItems: "center"}}>
+                <select
+                  className="input mono"
+                  value={selectedBackend}
+                  onChange={e => setSelectedBackend(e.target.value)}
+                  disabled={!selectable || backendSwitchPending}
+                >
+                  <option value="rocm">rocm</option>
+                  <option value="vulkan">vulkan</option>
+                  <option value="auto">auto (global default)</option>
+                </select>
+                <button
+                  className="btn ghost sm"
+                  disabled={!selectable || backendSwitchPending || unchanged}
+                  onClick={async () => {
+                    setBackendSwitchPending(true);
+                    setSubmitErr(null);
+                    try {
+                      await backendMut.mutateAsync({
+                        name: slot.name,
+                        backend: selectedBackend,
+                      });
+                      window.__hal0Toast && window.__hal0Toast(
+                        `${slot.name} backend → ${selectedBackend}${slot.actual_backend ? " — reloading" : ""}`,
+                        "ok",
+                      );
+                    } catch (err) {
+                      setSubmitErr(err?.message || "backend switch failed");
+                    } finally {
+                      setBackendSwitchPending(false);
+                    }
+                  }}
+                >{backendSwitchPending ? "Applying…" : "Apply"}</button>
+              </div>
+              <div className="hint">If the slot is loaded, applying reloads it under the new backend. The current backend stays in VRAM until the reload completes.</div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="form-row">
         <div className="form-lbl"><span>Model</span><span className="sub">use inline swap from the card for live changes</span></div>

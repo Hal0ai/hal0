@@ -562,12 +562,72 @@ class Dispatcher:
         ``_forward_streaming`` (PLAN.md §3).
         """
         if call.slot_name and self._slot_manager is not None:
+            # B1 (ADR-0022): backend-aware lazy-load. lemond auto-loads a
+            # model the dispatcher forwards by name using its GLOBAL
+            # config.json default backend — ignoring the slot's declared
+            # device. On a cold miss we kick SlotManager.load(slot_name)
+            # FIRST, which routes through LemonadeProvider.load(cfg) and
+            # sends the device-derived llamacpp_backend, so the per-model
+            # backend sticks. We do NOT inject llamacpp_backend into the
+            # chat-completions body — lemond's chat endpoint ignores it.
+            await self._ensure_slot_loaded_backend_aware(call)
             # Swap-window gate: refuse to forward if the slot is loading.
             # Without this, requests hit a dead port (502) or a still-
             # loading llama-server (raw 503 with no Retry-After).
             self._check_slot_ready_for_dispatch(call)
             return await self._forward_with_serving(call)
         return await self._forward_plain(call)
+
+    async def _ensure_slot_loaded_backend_aware(self, call: UpstreamCall) -> None:
+        """Kick a backend-aware load on a cold miss before forwarding.
+
+        B1 (ADR-0022) — the name-based lazy-load gap. When a request
+        resolves to a slot whose model is NOT currently in lemond's
+        ``/v1/health.loaded[]``, lemond would auto-load it on the first
+        forward using its global default backend (rocm) regardless of the
+        slot's declared ``device``. To make the per-model backend stick we
+        instead drive ``SlotManager.load(slot_name)`` here, which sends the
+        device-derived ``llamacpp_backend`` through ``LemonadeProvider.load``.
+
+        Behaviour:
+          - Slot already READY/SERVING/IDLE → no-op (model is loaded, fast
+            path; no load call).
+          - Otherwise → kick ``SlotManager.load(slot_name)`` (awaited so the
+            load actually starts and the slot transitions out of OFFLINE).
+            Control then returns to ``forward()`` whose
+            ``_check_slot_ready_for_dispatch`` raises the typed
+            ``SlotLoading`` 503 (with Retry-After) the client retries into —
+            by which point the model is loading under the correct backend.
+
+        Never injects into the request body. Load errors are logged and
+        swallowed so the subsequent ready-check, not this helper, decides
+        the client-facing outcome.
+        """
+        from hal0.slots.state import SlotState
+
+        assert self._slot_manager is not None  # narrowed by forward()
+        slot_name = call.slot_name
+        current = self._slot_manager._current_state(slot_name)
+        if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+            # Model is already loaded under whatever backend it loaded with;
+            # nothing to do. (A declared≠actual drift is surfaced by the
+            # status enrichment, not corrected mid-request.)
+            return
+        # Cold miss — drive the backend-aware load. SlotManager.load is
+        # idempotent (it returns early when already loaded) and routes the
+        # device→llamacpp_backend through LemonadeProvider.load(cfg), so the
+        # per-model backend sticks instead of falling back to lemond's
+        # global default.
+        try:
+            await self._slot_manager.load(slot_name)
+        except Exception as exc:
+            log.warning(
+                "dispatch.backend_aware_load_failed",
+                slot=slot_name,
+                upstream=call.upstream_name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
 
     def _check_slot_ready_for_dispatch(self, call: UpstreamCall) -> None:
         """Raise :class:`SlotLoading` if the target slot isn't ready to serve.

@@ -27,11 +27,13 @@ from typing import Any
 import httpx
 import pytest
 
+import hal0.providers.lemonade as lemonade_mod
 from hal0.lemonade.client import LemonadeClient
 from hal0.lemonade.errors import LemonadeHTTPError, LemonadeLoadError
 from hal0.providers.lemonade import (
     LemonadeProvider,
     device_to_backend,
+    resolve_actual_backend,
 )
 
 
@@ -332,6 +334,179 @@ async def test_status_never_raises_on_lemond_unavailable() -> None:
     assert snap["loaded"] is False
     assert snap["reason"] == "lemonade unavailable"
     assert "error" in snap
+
+
+# ── resolve_actual_backend() (B2 — ADR-0022) ─────────────────────────
+
+
+def _patch_actual_backend_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pid: int | None,
+    exe: str | None,
+) -> None:
+    """Stub the port→PID→exe chain so resolve_actual_backend is deterministic.
+
+    The backend_url's port is parsed by the real ``_port_from_backend_url``;
+    we only stub the listener lookup + exe resolution so the test doesn't
+    depend on a live llama-server.
+    """
+    monkeypatch.setattr(
+        lemonade_mod, "_pid_listening_on_port", lambda _port: pid
+    )
+    monkeypatch.setattr(lemonade_mod, "_exe_path_for_pid", lambda _pid: exe)
+
+
+def test_resolve_actual_backend_vulkan(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_actual_backend_chain(
+        monkeypatch,
+        pid=4242,
+        exe="/var/lib/hal0/lemonade/bin/llamacpp/vulkan/llama-server",
+    )
+    entry = {"model_name": "m", "backend_url": "http://127.0.0.1:14002/v1"}
+    assert resolve_actual_backend(entry) == "vulkan"
+
+
+def test_resolve_actual_backend_rocm(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_actual_backend_chain(
+        monkeypatch,
+        pid=4243,
+        exe="/var/lib/hal0/lemonade/bin/llamacpp/rocm-stable/llama-server",
+    )
+    entry = {"model_name": "m", "backend_url": "http://127.0.0.1:14003/v1"}
+    assert resolve_actual_backend(entry) == "rocm"
+
+
+def test_resolve_actual_backend_cpu_when_no_gpu_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_actual_backend_chain(
+        monkeypatch,
+        pid=4244,
+        exe="/usr/local/bin/llama-server",
+    )
+    entry = {"model_name": "m", "backend_url": "http://127.0.0.1:14004"}
+    assert resolve_actual_backend(entry) == "cpu"
+
+
+def test_resolve_actual_backend_none_when_no_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_actual_backend_chain(monkeypatch, pid=None, exe=None)
+    entry = {"model_name": "m", "backend_url": "http://127.0.0.1:14005/v1"}
+    assert resolve_actual_backend(entry) is None
+
+
+def test_resolve_actual_backend_none_when_exe_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_actual_backend_chain(monkeypatch, pid=4246, exe=None)
+    entry = {"model_name": "m", "backend_url": "http://127.0.0.1:14006/v1"}
+    assert resolve_actual_backend(entry) is None
+
+
+def test_resolve_actual_backend_none_when_no_backend_url() -> None:
+    assert resolve_actual_backend({"model_name": "m"}) is None
+    assert resolve_actual_backend({"model_name": "m", "backend_url": ""}) is None
+
+
+def test_resolve_actual_backend_none_on_non_dict() -> None:
+    assert resolve_actual_backend(None) is None
+    assert resolve_actual_backend("not-a-dict") is None  # type: ignore[arg-type]
+
+
+def test_resolve_actual_backend_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any exception in the introspection chain returns None, not a raise."""
+
+    def _boom(_port: int):
+        raise RuntimeError("listener lookup exploded")
+
+    monkeypatch.setattr(lemonade_mod, "_pid_listening_on_port", _boom)
+    entry = {"model_name": "m", "backend_url": "http://127.0.0.1:14007/v1"}
+    assert resolve_actual_backend(entry) is None
+
+
+# ── status() backend fields (B2 — ADR-0022) ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_status_adds_declared_backend_always_when_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def h(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "loaded": [
+                    {"model_name": "hermes-4-14b", "backend_url": "http://127.0.0.1:14000/v1"}
+                ]
+            },
+        )
+
+    # Undeterminable actual backend → declared present, actual/mismatch absent.
+    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: None)
+    provider = LemonadeProvider(client=_mock_client(h))
+    snap = await provider.status(_slot_cfg(device="gpu-vulkan"))
+    assert snap["loaded"] is True
+    assert snap["declared_backend"] == "vulkan"
+    assert "actual_backend" not in snap
+    assert "backend_mismatch" not in snap
+
+
+@pytest.mark.asyncio
+async def test_status_reports_mismatch_when_declared_vulkan_actual_rocm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def h(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "loaded": [
+                    {"model_name": "hermes-4-14b", "backend_url": "http://127.0.0.1:14000/v1"}
+                ]
+            },
+        )
+
+    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: "rocm")
+    provider = LemonadeProvider(client=_mock_client(h))
+    snap = await provider.status(_slot_cfg(device="gpu-vulkan"))
+    assert snap["declared_backend"] == "vulkan"
+    assert snap["actual_backend"] == "rocm"
+    assert snap["backend_mismatch"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_no_mismatch_when_declared_equals_actual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def h(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "loaded": [
+                    {"model_name": "hermes-4-14b", "backend_url": "http://127.0.0.1:14000/v1"}
+                ]
+            },
+        )
+
+    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: "vulkan")
+    provider = LemonadeProvider(client=_mock_client(h))
+    snap = await provider.status(_slot_cfg(device="gpu-vulkan"))
+    assert snap["actual_backend"] == "vulkan"
+    assert snap["backend_mismatch"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_omits_backend_fields_when_not_loaded() -> None:
+    def h(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"loaded": []})
+
+    provider = LemonadeProvider(client=_mock_client(h))
+    snap = await provider.status(_slot_cfg(device="gpu-vulkan"))
+    assert snap["loaded"] is False
+    assert "declared_backend" not in snap
+    assert "actual_backend" not in snap
+    assert "backend_mismatch" not in snap
 
 
 # ── health() (Provider ABC implementation) ────────────────────────────
