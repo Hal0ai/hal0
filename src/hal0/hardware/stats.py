@@ -56,34 +56,71 @@ def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
 class HardwareStats:
     """Live hardware metrics reader.
 
-    Reads from sysfs, /proc/meminfo, and (via subprocess) nvidia-smi.
+    Reads from sysfs and /proc/meminfo; nvidia-smi only on NVIDIA hosts
+    (vendor cached).
     All methods are synchronous; wrap in asyncio.to_thread() for async callers.
     """
+
+    def __init__(self) -> None:
+        # GPU vendor is detected once and cached. None = not yet probed.
+        # Values: "nvidia", "amd", "unknown".
+        self._gpu_vendor: str | None = None
+        # Cached AMD DRM device sysfs dir (the .../cardN/device path), or None.
+        self._amd_drm: Path | None = None
+
+    def _vendor(self) -> str:
+        """Detect GPU vendor exactly once and cache it.
+
+        On an AMD box (DRM sysfs present) this never execs nvidia-smi. We
+        only probe nvidia-smi when no AMD DRM device is found, so real
+        nvidia hosts still resolve correctly while AMD hosts do zero
+        subprocess work. Result is memoised on the instance.
+        """
+        if self._gpu_vendor is not None:
+            return self._gpu_vendor
+        drm = _amd_drm_device()
+        if drm is not None:
+            self._amd_drm = drm
+            self._gpu_vendor = "amd"
+            return self._gpu_vendor
+        # No AMD DRM card — probe nvidia-smi once (cheap on real nvidia hosts,
+        # a single failing exec at most on others, then cached forever).
+        rc, out, _ = _run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name",
+                "--format=csv,noheader,nounits",
+            ]
+        )
+        self._gpu_vendor = "nvidia" if (rc == 0 and out.strip()) else "unknown"
+        return self._gpu_vendor
 
     def gpu_util(self) -> float | None:
         """Return current GPU compute utilisation as a fraction [0.0, 1.0].
 
-        Tries nvidia-smi first, then AMD sysfs (gpu_busy_percent). Returns
-        None if no utilisation counter is exposed.
+        AMD: reads sysfs gpu_busy_percent directly (no subprocess). NVIDIA:
+        nvidia-smi. Returns None if no utilisation counter is exposed.
         """
-        rc, out, _ = _run(
-            [
-                "nvidia-smi",
-                "--query-gpu=utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ]
-        )
-        if rc == 0 and out.strip():
-            try:
-                return round(float(out.strip().splitlines()[0]) / 100.0, 3)
-            except ValueError:
-                pass
-        drm = _amd_drm_device()
-        if drm is not None:
-            txt = self._read_text(drm / "gpu_busy_percent")
+        vendor = self._vendor()
+        if vendor == "amd" and self._amd_drm is not None:
+            txt = self._read_text(self._amd_drm / "gpu_busy_percent")
             if txt is not None:
                 try:
                     return round(float(txt.strip()) / 100.0, 3)
+                except ValueError:
+                    pass
+            return None
+        if vendor == "nvidia":
+            rc, out, _ = _run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu",
+                    "--format=csv,noheader,nounits",
+                ]
+            )
+            if rc == 0 and out.strip():
+                try:
+                    return round(float(out.strip().splitlines()[0]) / 100.0, 3)
                 except ValueError:
                     pass
         return None
@@ -91,50 +128,51 @@ class HardwareStats:
     def gpu_vram_used_mb(self) -> float | None:
         """Return current GPU VRAM usage in MiB.
 
-        On AMD UMA (Strix Halo), returns GTT used. On NVIDIA, parses nvidia-smi.
+        On AMD UMA (Strix Halo) returns max(vram_used, gtt_used) via sysfs
+        (no subprocess). On NVIDIA, parses nvidia-smi.
         """
-        rc, out, _ = _run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.used",
-                "--format=csv,noheader,nounits",
-            ]
-        )
-        if rc == 0 and out.strip():
-            try:
-                return round(float(out.strip().splitlines()[0]), 1)
-            except ValueError:
-                pass
-        drm = _amd_drm_device()
-        if drm is not None:
-            vram = _read_sysfs_mb(drm / "mem_info_vram_used")
-            gtt = _read_sysfs_mb(drm / "mem_info_gtt_used")
-            # Prefer the larger of the two — Strix Halo reports model bytes in GTT,
-            # discrete cards report in VRAM.
+        vendor = self._vendor()
+        if vendor == "amd" and self._amd_drm is not None:
+            vram = _read_sysfs_mb(self._amd_drm / "mem_info_vram_used")
+            gtt = _read_sysfs_mb(self._amd_drm / "mem_info_gtt_used")
             candidates = [v for v in (vram, gtt) if v is not None]
             return max(candidates) if candidates else None
+        if vendor == "nvidia":
+            rc, out, _ = _run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.used",
+                    "--format=csv,noheader,nounits",
+                ]
+            )
+            if rc == 0 and out.strip():
+                try:
+                    return round(float(out.strip().splitlines()[0]), 1)
+                except ValueError:
+                    pass
         return None
 
     def gpu_vram_total_mb(self) -> float | None:
         """Return total GPU VRAM in MiB (or GTT pool on UMA)."""
-        rc, out, _ = _run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total",
-                "--format=csv,noheader,nounits",
-            ]
-        )
-        if rc == 0 and out.strip():
-            try:
-                return round(float(out.strip().splitlines()[0]), 1)
-            except ValueError:
-                pass
-        drm = _amd_drm_device()
-        if drm is not None:
-            vram = _read_sysfs_mb(drm / "mem_info_vram_total")
-            gtt = _read_sysfs_mb(drm / "mem_info_gtt_total")
+        vendor = self._vendor()
+        if vendor == "amd" and self._amd_drm is not None:
+            vram = _read_sysfs_mb(self._amd_drm / "mem_info_vram_total")
+            gtt = _read_sysfs_mb(self._amd_drm / "mem_info_gtt_total")
             candidates = [v for v in (vram, gtt) if v is not None]
             return max(candidates) if candidates else None
+        if vendor == "nvidia":
+            rc, out, _ = _run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.total",
+                    "--format=csv,noheader,nounits",
+                ]
+            )
+            if rc == 0 and out.strip():
+                try:
+                    return round(float(out.strip().splitlines()[0]), 1)
+                except ValueError:
+                    pass
         return None
 
     def ram_used_gb(self) -> float:

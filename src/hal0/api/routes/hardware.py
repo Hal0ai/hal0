@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -12,6 +14,12 @@ from hal0.config.loader import load_hardware_info
 # See slots.py for the writer-gate rationale.
 
 router = APIRouter()
+
+# TTL (seconds) for the coalesced HardwareStats.snapshot() probe. The
+# dashboard's ~4 concurrent clients poll /api/stats/hardware every 2.5s;
+# a short shared cache collapses their bursts onto one probe and keeps
+# the synchronous snapshot() off the event loop's critical path.
+_SNAPSHOT_TTL_S = 1.5
 
 _PVE_CONFIGURE_HINT = "Configure /etc/hal0/proxmox.json to see host pressure."
 
@@ -235,6 +243,45 @@ async def _npu_status(request: Request) -> dict[str, Any] | None:
     return {"ok": True, "model_mb": round(model_mb, 1)}
 
 
+async def _cached_snapshot(request: Request) -> dict[str, Any]:
+    """Return HardwareStats.snapshot() via a thread + short TTL cache.
+
+    snapshot() is synchronous and (pre-FIX-A) shells out, so it must not
+    run on the event loop. We memoise the result on the shared
+    HardwareStats singleton (app.state.hardware_stats) for _SNAPSHOT_TTL_S
+    seconds so concurrent dashboard polls coalesce onto a single probe.
+    An asyncio.Lock guards the refresh so N simultaneous misses trigger
+    exactly one to_thread call rather than N.
+    """
+    stats = getattr(request.app.state, "hardware_stats", None)
+    if stats is None:
+        return {}
+    now = time.monotonic()
+    cached = getattr(stats, "_snapshot_cache", None)
+    cached_at = getattr(stats, "_snapshot_cache_at", 0.0)
+    if cached is not None and (now - cached_at) < _SNAPSHOT_TTL_S:
+        return cached
+    lock = getattr(stats, "_snapshot_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        stats._snapshot_lock = lock
+    async with lock:
+        # Re-check under the lock — another coroutine may have refreshed
+        # while we awaited it.
+        now = time.monotonic()
+        cached = getattr(stats, "_snapshot_cache", None)
+        cached_at = getattr(stats, "_snapshot_cache_at", 0.0)
+        if cached is not None and (now - cached_at) < _SNAPSHOT_TTL_S:
+            return cached
+        try:
+            snap = await asyncio.to_thread(stats.snapshot)
+        except Exception:
+            snap = {}
+        stats._snapshot_cache = snap
+        stats._snapshot_cache_at = time.monotonic()
+        return snap
+
+
 async def _local_live_stats(request: Request) -> dict[str, Any]:
     """Read live counters from this process's HardwareStats.
 
@@ -248,12 +295,11 @@ async def _local_live_stats(request: Request) -> dict[str, Any]:
     stats = getattr(request.app.state, "hardware_stats", None)
     if stats is None:
         return {}
-    # snapshot() is synchronous but hits subprocess + sysfs — kick to a
-    # thread so the API event loop stays responsive.
-    snap = {}
-    try:
-        snap = stats.snapshot()
-    except Exception:  # defensive — never let stats errors take out the page
+    # snapshot() is synchronous and (pre-FIX-A) shells out — run it in a
+    # thread behind a short TTL cache so concurrent dashboard polls
+    # coalesce onto one probe and the event loop never blocks on it.
+    snap = await _cached_snapshot(request)
+    if not snap:
         return {}
 
     # gpu_vram_used_mb is the *single* GPU memory counter the probe knows;

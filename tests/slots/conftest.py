@@ -30,6 +30,24 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _disable_health_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the FIX-C /v1/health coalescing cache for slot tests.
+
+    SlotManager reconcile tests drive distinct logical phases in a tight
+    loop (e.g. load() then mutate the lemond stub's loaded[] then
+    status()), all within the 0.5s TTL window. The cache would serve the
+    pre-mutation body and mask the transition. In production each
+    reconcile pass / idle tick is spaced far beyond the TTL, so disabling
+    coalescing here restores the per-call freshness those tests assert
+    without weakening the production optimisation (exercised directly in
+    tests/lemonade/test_client.py).
+    """
+    import hal0.lemonade.client as client_mod
+
+    monkeypatch.setattr(client_mod, "_HEALTH_CACHE_TTL_S", 0.0)
+
+
 # ── shared fixtures ─────────────────────────────────────────────────────────
 
 

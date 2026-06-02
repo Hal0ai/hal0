@@ -37,6 +37,24 @@ from hal0.lemonade.idle import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_health_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the FIX-C /v1/health coalescing cache for idle-driver tests.
+
+    The idle driver polls /v1/health once per tick; these tests drive
+    many ticks in a tight loop (logical time advanced via the injected
+    ``_Clock``, but real wall-clock well inside the 0.5s TTL), expecting
+    each tick to observe the next scripted health body. In production the
+    poll interval (30s default) far exceeds the TTL, so the cache never
+    suppresses a real tick — disabling it here keeps the test honest
+    without changing production behaviour. The coalescing itself is
+    covered in tests/lemonade/test_client.py.
+    """
+    import hal0.lemonade.client as client_mod
+
+    monkeypatch.setattr(client_mod, "_HEALTH_CACHE_TTL_S", 0.0)
+
+
 def _mock_transport(handler):
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://test")
 

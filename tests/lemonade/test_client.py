@@ -16,6 +16,7 @@ the same ``_request`` chokepoint, so the test surface is:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -530,3 +531,78 @@ async def test_internal_endpoints_raise_lemonade_http_error_on_non_2xx() -> None
             with pytest.raises(LemonadeHTTPError) as exc:
                 await coro
             assert exc.value.status_code == 403
+
+
+# ── /v1/health coalescing cache (FIX-C) ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_health_coalesces_concurrent_burst() -> None:
+    """SlotManager.list() fires N concurrent health() probes into an
+    empty cache; the lock + double-checked TTL must collapse them to a
+    single upstream /v1/health call and hand every caller the same body."""
+    calls = {"n": 0}
+    payload = {"loaded": [], "ready": True}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/v1/health"
+        calls["n"] += 1
+        return httpx.Response(200, json=payload)
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport)
+        results = await asyncio.gather(*(client.health() for _ in range(8)))
+
+    assert calls["n"] == 1
+    assert all(r == payload for r in results)
+
+
+@pytest.mark.asyncio
+async def test_health_refreshes_after_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the TTL window elapses, the next health() hits upstream again."""
+    import hal0.lemonade.client as client_mod
+
+    calls = {"n": 0}
+
+    def h(_: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"loaded": [], "n": calls["n"]})
+
+    # Drive the clock deterministically rather than sleeping.
+    fake_now = {"t": 1000.0}
+    monkeypatch.setattr(client_mod.time, "monotonic", lambda: fake_now["t"])
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport)
+        first = await client.health()
+        # Within TTL -> cached, no new upstream call.
+        again = await client.health()
+        assert again == first
+        assert calls["n"] == 1
+        # Advance past the TTL -> fresh upstream call.
+        fake_now["t"] += client_mod._HEALTH_CACHE_TTL_S + 0.01
+        third = await client.health()
+        assert calls["n"] == 2
+        assert third != first
+
+
+@pytest.mark.asyncio
+async def test_health_error_not_cached() -> None:
+    """A failed probe must NOT poison the cache — the next call retries
+    and can succeed."""
+    state = {"n": 0}
+
+    def h(_: httpx.Request) -> httpx.Response:
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(500, json={"detail": "boom"})
+        return httpx.Response(200, json={"loaded": [], "ready": True})
+
+    async with _mock_transport(h) as transport:
+        client = LemonadeClient(http_client=transport)
+        with pytest.raises(LemonadeHTTPError):
+            await client.health()
+        # Cache was not filled by the error; retry hits upstream and wins.
+        body = await client.health()
+        assert body == {"loaded": [], "ready": True}
+        assert state["n"] == 2

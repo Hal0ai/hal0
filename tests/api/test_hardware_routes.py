@@ -7,11 +7,22 @@ silently regress the dashboard.
 
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
+import types
+
 import pytest
 from fastapi.testclient import TestClient
 
+import hal0.api.routes.hardware as hw_mod
 import hal0.hardware.pve as pve_mod
-from hal0.api.routes.hardware import _PVE_CONFIGURE_HINT, _flatten_for_ui, _platform_label
+from hal0.api.routes.hardware import (
+    _PVE_CONFIGURE_HINT,
+    _cached_snapshot,
+    _flatten_for_ui,
+    _platform_label,
+)
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 
 
@@ -222,3 +233,72 @@ class TestHostDetectionInStatsHardware:
             "detection": "uncertain",
             "hint": _PVE_CONFIGURE_HINT,
         }
+
+
+# ── _cached_snapshot coalescing + thread-offload (FIX-B) ─────────────
+
+
+class _SnapStub:
+    """Stand-in for the HardwareStats singleton on app.state. Records how
+    many times snapshot() ran and which thread it ran on."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.threads: set[int] = set()
+
+    def snapshot(self) -> dict:
+        self.calls += 1
+        self.threads.add(threading.get_ident())
+        # Simulate a slow synchronous probe so concurrent callers overlap.
+        time.sleep(0.05)
+        return {"ram_used_gb": 1.0, "gpu_util": 0.5}
+
+
+def _fake_request(stats: object) -> object:
+    """Minimal object exposing the .app.state.hardware_stats chain that
+    _cached_snapshot reads."""
+    state = types.SimpleNamespace(hardware_stats=stats)
+    app = types.SimpleNamespace(state=state)
+    return types.SimpleNamespace(app=app)
+
+
+@pytest.mark.asyncio
+async def test_cached_snapshot_coalesces_concurrent_polls() -> None:
+    """~4 concurrent dashboard polls into a cold cache must trigger
+    exactly one snapshot() probe (lock + double-checked TTL)."""
+    stub = _SnapStub()
+    req = _fake_request(stub)
+
+    results = await asyncio.gather(*(_cached_snapshot(req) for _ in range(4)))
+
+    assert stub.calls == 1
+    assert all(r == {"ram_used_gb": 1.0, "gpu_util": 0.5} for r in results)
+    # snapshot() ran off the event loop (in a worker thread, not the main one).
+    assert stub.threads and threading.get_ident() not in stub.threads
+
+
+@pytest.mark.asyncio
+async def test_cached_snapshot_refreshes_after_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the TTL window, a fresh snapshot() is taken."""
+    stub = _SnapStub()
+    req = _fake_request(stub)
+
+    fake_now = {"t": 500.0}
+    monkeypatch.setattr(hw_mod.time, "monotonic", lambda: fake_now["t"])
+
+    await _cached_snapshot(req)
+    await _cached_snapshot(req)  # within TTL -> cached
+    assert stub.calls == 1
+
+    fake_now["t"] += hw_mod._SNAPSHOT_TTL_S + 0.01
+    await _cached_snapshot(req)
+    assert stub.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cached_snapshot_no_stats_returns_empty() -> None:
+    """Missing hardware_stats singleton degrades to an empty dict."""
+    req = _fake_request(None)
+    assert await _cached_snapshot(req) == {}
