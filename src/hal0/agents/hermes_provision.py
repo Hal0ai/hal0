@@ -634,7 +634,8 @@ def _default_mcp_servers() -> list[dict[str, Any]]:
     return [
         {
             "name": "hal0-admin",
-            "url": "http://127.0.0.1:8080/mcp/admin",
+            "url": "http://127.0.0.1:8080/mcp/admin/mcp",
+            "type": "http",
             "private": False,
             "timeout": 60,
             "usage_hint": (
@@ -644,7 +645,8 @@ def _default_mcp_servers() -> list[dict[str, Any]]:
         },
         {
             "name": "hal0-memory",
-            "url": "http://127.0.0.1:8080/mcp/memory",
+            "url": "http://127.0.0.1:8080/mcp/memory/mcp",
+            "type": "http",
             "private": True,
             "timeout": 30,
             "usage_hint": (
@@ -1299,6 +1301,7 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     for tpl_name, _out_name in (
         ("HERMES.md.j2", "HERMES.md"),
         ("AGENTS.md.j2", "AGENTS.md"),
+        ("MCP-CLIENTS.md.j2", "MCP-CLIENTS.md"),
     ):
         try:
             rendered[_out_name] = _render_template(tpl_name, **vars_)
@@ -1333,6 +1336,15 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
             details["rendered"]["AGENTS.md"] = {"path": str(apath), "sha256": h}
         except OSError as exc:
             warnings.append(f"AGENTS.md write to /etc/hal0: {exc}")
+
+    if "MCP-CLIENTS.md" in rendered:
+        try:
+            ETC_HAL0_DIR.mkdir(parents=True, exist_ok=True)
+            mcppath = ETC_HAL0_DIR / "MCP-CLIENTS.md"
+            h = _atomic_write(mcppath, rendered["MCP-CLIENTS.md"])
+            details["rendered"]["MCP-CLIENTS.md"] = {"path": str(mcppath), "sha256": h}
+        except OSError as exc:
+            warnings.append(f"MCP-CLIENTS.md write to /etc/hal0: {exc}")
 
     # Mirror bundled skills last so a failure here doesn't block context files.
     linked, skill_warnings = _mirror_bundled_skills(HAL0_BUNDLED_SKILLS, ETC_HAL0_AGENT_SKILLS)

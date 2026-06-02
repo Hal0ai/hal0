@@ -87,6 +87,7 @@ memory:
 mcp_servers:
 {%- for srv in mcp_servers %}
   {{ srv.name }}:
+    type: {{ srv.type | default("http") | tojson }}
     url: {{ srv.url | tojson }}
     headers:
       X-hal0-Agent: {{ agent_id | tojson }}
