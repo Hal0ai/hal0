@@ -36,6 +36,13 @@ def _mock_transport(handler):
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://test")
 
 
+def _mock_transport_base(handler, base_url: str):
+    """Like :func:`_mock_transport` but pins an explicit ``base_url`` so
+    relative paths resolve against the same host the client was built
+    with (needed by the ``stream_logs`` WS-port-discovery tests)."""
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=base_url)
+
+
 # ── /live ────────────────────────────────────────────────────────────
 
 
@@ -530,3 +537,137 @@ async def test_internal_endpoints_raise_lemonade_http_error_on_non_2xx() -> None
             with pytest.raises(LemonadeHTTPError) as exc:
                 await coro
             assert exc.value.status_code == 403
+
+
+# ── /logs/stream WebSocket (issue #421) ──────────────────────────────
+
+
+class _FakeWS:
+    """Minimal async websocket double for ``stream_logs`` tests.
+
+    Records messages sent via :meth:`send` and yields the scripted
+    ``frames`` when iterated, then stops (mimicking a closed stream).
+    """
+
+    def __init__(self, frames: list[str]) -> None:
+        self._frames = frames
+        self.sent: list[str] = []
+        self.closed = False
+
+    async def send(self, msg: str) -> None:
+        self.sent.append(msg)
+
+    def __aiter__(self) -> _FakeWS:
+        self._it = iter(self._frames)
+        return self
+
+    async def __anext__(self) -> str:
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _install_fake_websockets(monkeypatch, *, ws, record: dict) -> None:
+    """Inject a fake ``websockets`` module so the lazy import inside
+    ``stream_logs`` resolves to our double. ``record["url"]`` captures the
+    URL ``connect`` was called with; ``ws=None`` makes connect raise so we
+    can exercise the handshake-failure path."""
+    import sys
+    import types
+
+    fake = types.ModuleType("websockets")
+    exc_mod = types.ModuleType("websockets.exceptions")
+
+    class _ConnectionClosed(Exception):
+        pass
+
+    class _InvalidHandshake(Exception):
+        pass
+
+    exc_mod.ConnectionClosed = _ConnectionClosed
+    exc_mod.InvalidHandshake = _InvalidHandshake
+
+    async def _connect(url, **kwargs):
+        record["url"] = url
+        record["kwargs"] = kwargs
+        if ws is None:
+            raise _InvalidHandshake("404")
+        return ws
+
+    fake.connect = _connect
+    fake.exceptions = exc_mod
+    monkeypatch.setitem(sys.modules, "websockets", fake)
+    monkeypatch.setitem(sys.modules, "websockets.exceptions", exc_mod)
+
+
+@pytest.mark.asyncio
+async def test_stream_logs_connects_to_advertised_websocket_port(monkeypatch) -> None:
+    """The WS log stream lives on the port reported by ``/v1/health`` as
+    ``websocket_port`` (9000 on hal0), NOT the OpenAI gateway base port
+    (13305). Connecting to the gateway port 404s once per reconnect and
+    spammed lemond at ~1 Hz (issue #421)."""
+    import json as _json
+
+    frames = [
+        _json.dumps({"type": "logs.snapshot", "entries": [{"line": "boot", "seq": 1}]}),
+        _json.dumps({"type": "logs.entry", "entry": {"line": "loaded", "seq": 2}}),
+    ]
+    ws = _FakeWS(frames)
+    record: dict = {}
+    _install_fake_websockets(monkeypatch, ws=ws, record=record)
+
+    def h(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/v1/health"
+        return httpx.Response(200, json={"status": "ok", "websocket_port": 9000})
+
+    async with _mock_transport_base(h, "http://127.0.0.1:13305") as transport:
+        client = LemonadeClient(base_url="http://127.0.0.1:13305", http_client=transport)
+        out = [frame async for frame in client.stream_logs()]
+
+    # Connected to the advertised WS port, not the 13305 gateway port.
+    assert record["url"] == "ws://127.0.0.1:9000/logs/stream"
+    # Subscribed with the documented frame shape (type, not op).
+    assert _json.loads(ws.sent[0]) == {"type": "logs.subscribe", "after_seq": None}
+    assert ws.closed is True
+    assert [f.get("type") for f in out] == ["logs.snapshot", "logs.entry"]
+
+
+@pytest.mark.asyncio
+async def test_stream_logs_yields_nothing_when_websocket_port_absent(monkeypatch) -> None:
+    """When ``/v1/health`` omits ``websocket_port`` (no WS server running)
+    the client must NOT attempt a connection — a 404 handshake at the
+    bridge's reconnect cadence is exactly the spam #421 fixes."""
+    record: dict = {}
+    _install_fake_websockets(monkeypatch, ws=_FakeWS([]), record=record)
+
+    def h(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "ok"})  # no websocket_port
+
+    async with _mock_transport_base(h, "http://127.0.0.1:13305") as transport:
+        client = LemonadeClient(base_url="http://127.0.0.1:13305", http_client=transport)
+        out = [frame async for frame in client.stream_logs()]
+
+    assert out == []
+    assert "url" not in record  # connect() never called
+
+
+@pytest.mark.asyncio
+async def test_stream_logs_yields_nothing_when_health_unreachable(monkeypatch) -> None:
+    """If health itself fails (lemond down), resolving the WS port returns
+    None and the stream yields nothing instead of raising."""
+    record: dict = {}
+    _install_fake_websockets(monkeypatch, ws=_FakeWS([]), record=record)
+
+    def h(_: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    async with _mock_transport_base(h, "http://127.0.0.1:13305") as transport:
+        client = LemonadeClient(base_url="http://127.0.0.1:13305", http_client=transport)
+        out = [frame async for frame in client.stream_logs()]
+
+    assert out == []
+    assert "url" not in record

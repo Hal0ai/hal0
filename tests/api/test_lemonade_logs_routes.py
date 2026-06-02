@@ -107,16 +107,33 @@ def test_iter_entries_drops_missing_payloads() -> None:
 # ── route integration ──────────────────────────────────────────────────────
 
 
-def test_routes_mounted_under_api_lemonade_prefix() -> None:
+def test_routes_mounted_under_api_lemonade_prefix(monkeypatch) -> None:
     """The router is wired under /api/lemonade so the dashboard URLs match.
 
     Smoke test rather than functional — full SSE timing is covered by
     the gamma-suite Playwright spec which can drive the stream against
     mocked EventSource.
+
+    ``stream_logs`` is stubbed to an empty async iterator so the SSE
+    body terminates immediately. Without the stub this test makes a real
+    network call: when a lemond daemon is actually reachable (e.g. on the
+    hal0 LXC) the WS log stream is now genuinely connectable and the
+    response would never finish (issue #421 fix), hanging the test. The
+    stub keeps the assertion purely about route registration.
     """
+    from collections.abc import AsyncIterator
+    from typing import Any
+
     from fastapi.testclient import TestClient
 
     from hal0.api import create_app
+    from hal0.lemonade.client import LemonadeClient
+
+    async def _no_logs(self: LemonadeClient) -> AsyncIterator[dict[str, Any]]:
+        return
+        yield  # pragma: no cover — makes this an async generator
+
+    monkeypatch.setattr(LemonadeClient, "stream_logs", _no_logs)
 
     app = create_app()
     with TestClient(app) as client:

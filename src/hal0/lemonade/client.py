@@ -35,10 +35,12 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from hal0.lemonade.errors import (
+    LemonadeError,
     LemonadeHTTPError,
     LemonadeLoadError,
     LemonadeTimeoutError,
@@ -326,11 +328,22 @@ class LemonadeClient:
 
         Lemonade exposes server logs as a WebSocket frame stream (per the
         ``hal0_lemonade_ws_protocol`` reference): the client subscribes
-        once with ``{"op": "logs.subscribe"}``, then receives
-        ``logs.snapshot`` (the in-memory ring buffer) followed by
+        once with ``{"type": "logs.subscribe", "after_seq": null}``, then
+        receives ``logs.snapshot`` (the in-memory ring buffer) followed by
         ``logs.entry`` frames for each new line. This method yields the
         parsed JSON message dicts as they arrive; the caller decides
         how to filter / fan out.
+
+        The WebSocket server does NOT live on the OpenAI gateway port
+        (``self._base_url``, 13305 on hal0). lemond binds it on a
+        separate, OS-assigned port reported by ``GET /v1/health`` as
+        ``websocket_port``. Connecting to the gateway port returns 404
+        for every upgrade attempt — which, paired with the journal
+        bridge's reconnect loop, produced the ~1 Hz ``Error 404: GET
+        /logs/stream`` storm (issue #421). We resolve the real WS port
+        from ``/v1/health`` before connecting; if the field is absent
+        (no WS server running) we yield nothing rather than hammering a
+        dead path.
 
         Used by ``/api/lemonade/logs/stream`` (PR-11) which fans the
         stream out to the dashboard and looks for the nuclear-evict
@@ -357,8 +370,13 @@ class LemonadeClient:
 
         import json as _json
 
-        ws_url = self._base_url.replace("http://", "ws://").replace("https://", "wss://")
-        ws_url = f"{ws_url}/logs/stream"
+        ws_url = await self._resolve_logs_ws_url()
+        if ws_url is None:
+            # No websocket_port advertised (WS server not running, or
+            # lemond unreachable) — don't connect; a failed handshake
+            # would otherwise spam lemond's log with 404s at the
+            # caller's reconnect cadence (issue #421).
+            return
         headers: dict[str, str] = {}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -379,7 +397,7 @@ class LemonadeClient:
             return
 
         try:
-            await ws.send(_json.dumps({"op": "logs.subscribe"}))
+            await ws.send(_json.dumps({"type": "logs.subscribe", "after_seq": None}))
             async for raw in ws:
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8", errors="replace")
@@ -394,6 +412,32 @@ class LemonadeClient:
         finally:
             with contextlib.suppress(OSError, ConnectionClosed):
                 await ws.close()
+
+    async def _resolve_logs_ws_url(self) -> str | None:
+        """Build the ``ws://…/logs/stream`` URL using lemond's real WS port.
+
+        lemond serves the log-stream WebSocket on a port distinct from the
+        OpenAI gateway port (``self._base_url``). It advertises that port
+        via ``GET /v1/health`` → ``websocket_port`` (only present when the
+        WS server is running). We reuse the gateway host but swap in the
+        advertised port. Returns ``None`` when health is unreachable or
+        ``websocket_port`` is missing/invalid, signalling the caller to
+        skip the connection entirely (see issue #421).
+        """
+        try:
+            health = await self.health()
+        except LemonadeError:
+            return None
+        ws_port = health.get("websocket_port") if isinstance(health, dict) else None
+        if not isinstance(ws_port, int) or ws_port <= 0:
+            return None
+
+        base = self._base_url.replace("http://", "ws://").replace("https://", "wss://")
+        parsed = urlsplit(base)
+        host = parsed.hostname or "127.0.0.1"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{parsed.scheme}://{host}:{ws_port}/logs/stream"
 
     # ── internal: HTTP request envelope ────────────────────────────
 
