@@ -281,32 +281,36 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
     return new_body
 
 
-async def _ensure_backend_for_proxied_model(request: Request, body: dict[str, Any]) -> None:
-    """#430: load a slot-backed model under its DECLARED backend before the
-    lemonade-proxy fall-through forwards it.
+async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> None:
+    """#430: load a slot-backed model under its DECLARED backend before routing.
 
-    The catch-all proxy reverse-proxies a by-name request verbatim to lemond,
-    which auto-loads an unknown-by-name model under its GLOBAL ``config.json``
+    A by-name request reaches lemond by one of several paths depending on
+    cache/registry state — the composite ``hal0`` passthrough → lemond
+    gateway (PR #424), a real per-slot upstream → ``forward()`` (B1), or the
+    no-route → lemonade-proxy catch-all. On every one of them lemond, given a
+    model it hasn't loaded, auto-loads it under its GLOBAL ``config.json``
     default backend (``rocm``) — ignoring a slot that declares
-    ``device=gpu-vulkan``. B1 (``dispatcher.forward`` →
-    ``_ensure_slot_loaded_backend_aware``) closes this gap, but ``forward()``
-    is never reached on this path: a by-name request misses the registry /
-    passthrough and fails legacy ``resolve_slot`` (only the composite ``hal0``
-    upstream is registered, no per-slot upstreams), landing on the proxy
-    catch-all instead.
+    ``device=gpu-vulkan``. B1 only covers the real-slot path, which in the
+    current deployment has no registered per-slot upstreams, so it never
+    fires.
 
-    So we resolve ``model_id`` → owning chat slot and drive
-    ``SlotManager.load(slot)`` FIRST — idempotent, and it routes the
-    device-derived ``llamacpp_backend`` through ``LemonadeProvider.load`` —
-    then let the proxy forward to the now-correctly-loaded child. ``load``
-    blocks to READY, preserving the catch-all's existing single-request
-    synchronous-load UX (just under the right backend).
+    Rather than patch each path, we resolve ``model_id`` → owning chat slot
+    and drive ``SlotManager.load(slot)`` HERE, before ``dispatcher.dispatch``
+    — idempotent, and it routes the device-derived ``llamacpp_backend``
+    through ``LemonadeProvider.load``. Whichever path dispatch then takes, the
+    model is already loaded under the right backend, so lemond serves the
+    existing child instead of auto-loading under its global default. ``load``
+    blocks to READY, preserving the existing single-request synchronous-load
+    UX (just under the right backend).
 
     Scope: chat (``type=llm``) slots, matching the alias map and B1's focus;
     a model with no backing chat slot is left to lemond's global default
-    (acceptance criterion: unbacked models unaffected).
+    (acceptance criterion: unbacked models unaffected). A slot already loaded
+    under the wrong backend is NOT corrected mid-request (``load`` is a no-op
+    on a ready slot) — that drift is surfaced by status and corrected via the
+    manual ``/api/slots/{name}/backend`` control (B3).
 
-    Best-effort: any failure is logged and swallowed so the proxy still runs
+    Best-effort: any failure is logged and swallowed so routing still proceeds
     (lemond auto-loads as before) rather than 500ing on this new code path.
     """
     model_id = body.get("model")
@@ -330,7 +334,7 @@ async def _ensure_backend_for_proxied_model(request: Request, body: dict[str, An
         await slot_manager.load(slot_name)
     except Exception as exc:
         log.warning(
-            "v1.proxy_backend_aware_load_failed",
+            "v1.backend_aware_load_failed",
             slot=slot_name,
             model=model_id,
             error=str(exc),
@@ -349,6 +353,10 @@ async def _dispatch_and_forward(
     # before routing so both the dispatcher and the lemonade fall-through
     # see the real model name.
     body = await _rewrite_chat_slot_alias(request, body)
+    # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
+    # loaded under its declared backend whichever routing path dispatch then
+    # takes (composite→gateway, real slot, or proxy fall-through).
+    await _ensure_backend_for_model(request, body)
     from hal0.dispatcher.router import NoRouteFound
 
     try:
@@ -373,12 +381,9 @@ async def _dispatch_and_forward(
         # expects the path AFTER `/v1/` as its second arg (FastAPI's
         # path converter strips it before passing).
         proxy_path = request.url.path.removeprefix("/v1/").lstrip("/")
-        # #430: forward() (and B1's backend-aware load) is never reached on
-        # this catch-all path. If the by-name model belongs to a slot with a
-        # declared device backend, load it under that backend FIRST so lemond
-        # serves the correctly-loaded child instead of auto-loading under its
-        # global rocm default.
-        await _ensure_backend_for_proxied_model(request, body)
+        # #430 backend-aware load already ran pre-dispatch (see
+        # _ensure_backend_for_model above), so the model reaching lemond here
+        # is already loaded under its slot's declared backend.
         return await _proxy(request, proxy_path)
     # Remember the most recent model we sent to this upstream so the
     # dashboard's synthetic slot reflects what's actually being used,

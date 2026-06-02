@@ -70,8 +70,11 @@ def _iter_entries(frame: dict[str, Any]) -> list[dict[str, Any]]:
     ``logs.snapshot`` carries a list under ``entries``; ``logs.entry``
     carries a single dict under ``entry``. Returns the entries verbatim
     so callers preserve any provider-specific metadata (level, ts).
+
+    lemond keys these frames on ``type``; we read ``type`` first and fall
+    back to ``op`` so a protocol shift doesn't silently drop entries.
     """
-    op = frame.get("op")
+    op = frame.get("type") or frame.get("op")
     if op == "logs.snapshot":
         entries = frame.get("entries")
         if isinstance(entries, list):

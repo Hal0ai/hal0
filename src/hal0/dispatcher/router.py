@@ -76,6 +76,69 @@ _HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
 # this logger automatically carries {request_id} on every emitted line.
 log = structlog.get_logger("hal0-dispatch")
 
+# ── Composite ``hal0`` upstream ───────────────────────────────────────────────
+#
+# ``_autoregister_slot_upstreams`` (hal0.api.__init__) registers ONE synthetic
+# upstream named ``hal0`` that aggregates every chat-capable slot's model id
+# under a single ``/v1/models`` listing (issue #422 / R4 H2). It is special in
+# two ways that the dispatch path must respect:
+#
+#   1. It is NOT a real slot. ``SlotManager`` has no ``hal0`` entry, so the
+#      readiness gate (``_check_slot_ready_for_dispatch``) and the SERVING wrap
+#      must be skipped for it — otherwise a populated model cache would route a
+#      chat request to the composite and immediately 503 with
+#      ``slot 'hal0' is offline`` (the gate calls ``_current_state('hal0')``
+#      which finds no slot and returns OFFLINE).
+#   2. Its registered ``url`` is hal0-api's OWN ``/v1`` surface
+#      (``127.0.0.1:8080/v1``). That value is deliberate so the ``/v1/models``
+#      aggregator can short-circuit it instead of recursing over HTTP. But it
+#      is the WRONG target to *forward* a chat request to — forwarding to
+#      ``:8080`` would re-enter ``/v1/chat/completions`` and loop forever. The
+#      real inference backend is the Lemonade gateway, so composite forwards
+#      are redirected there.
+_HAL0_COMPOSITE_NAME = "hal0"
+
+# Lemonade's OpenAI-compatible gateway (ADR-0008 §1: lemond binds
+# 127.0.0.1:13305). Overridable via ``LEMONADE_BASE_URL`` to match
+# ``hal0.api.routes.lemonade_proxy._lemonade_base_url``.
+_LEMONADE_DEFAULT_BASE_URL = "http://127.0.0.1:13305"
+
+
+def _is_hal0_composite(upstream: Upstream) -> bool:
+    """True for the synthetic composite ``hal0`` upstream.
+
+    The composite is the single ``kind="slot"`` entry with no backing
+    ``slot_name`` whose name is ``hal0`` (see
+    ``hal0.api._autoregister_slot_upstreams``). Real per-slot upstreams
+    always carry a ``slot_name``; remote providers are ``kind="remote"``.
+    """
+    return (
+        upstream.kind == "slot"
+        and upstream.slot_name is None
+        and upstream.name == _HAL0_COMPOSITE_NAME
+    )
+
+
+def _lemonade_gateway_base() -> str:
+    """Return the Lemonade OpenAI-compat gateway base URL (no trailing slash)."""
+    import os
+
+    return os.environ.get("LEMONADE_BASE_URL", _LEMONADE_DEFAULT_BASE_URL).rstrip("/")
+
+
+def _resolve_target_url(upstream: Upstream, request_path: str) -> str:
+    """Build the forward URL for ``upstream`` given the incoming request path.
+
+    For the composite ``hal0`` upstream the forward must NOT go to the
+    registered ``:8080`` URL (that re-enters hal0-api and loops); it is
+    redirected to the Lemonade gateway. Every other upstream forwards to
+    its own ``url`` via :func:`_join_url`.
+    """
+    if _is_hal0_composite(upstream):
+        return _join_url(_lemonade_gateway_base() + "/v1", request_path)
+    return _join_url(upstream.url, request_path)
+
+
 # Transport-layer errors that indicate the upstream's child process is gone
 # rather than a request-level failure.  These are the recoverable triggers
 # for ``_recover_evicted_slot``:
@@ -412,7 +475,7 @@ class Dispatcher:
                     resolved = actual
                 call = UpstreamCall(
                     upstream_name=upstream.name,
-                    target_url=_join_url(upstream.url, path),
+                    target_url=_resolve_target_url(upstream, path),
                     headers=self._build_headers(request, upstream),
                     body=json.dumps(effective_body).encode("utf-8"),
                     streaming=streaming,
@@ -432,20 +495,18 @@ class Dispatcher:
             )
 
         # ── Step 2: passthrough on warm caches ───────────────────────────
+        # The composite ``hal0`` upstream participates here (PR #424): a
+        # cache hit yields a call whose ``_slot_name_of`` is "" (no readiness
+        # gate / SERVING wrap) and whose ``_resolve_target_url`` redirects to
+        # the lemond gateway instead of hal0-api's own :8080 (avoids the
+        # self-recursion loop). Backend-aware loading for slot-backed models
+        # is handled at the route layer before dispatch (#430), independent
+        # of which upstream wins here.
         for upstream in self._upstreams_in_priority_order():
-            if _is_self_composite(upstream):
-                # The composite ``hal0`` upstream's URL is hal0-api itself,
-                # and its cache lists EVERY chat slot's model id purely for
-                # ``GET /v1/models`` advertisement. Routing a chat request
-                # there would forward back into hal0-api (loop / wrong
-                # co-resident model). Chat models must instead fall through
-                # to the lemonade proxy, which serves them by name on
-                # lemond — so skip the composite in passthrough matching.
-                continue
             if model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
-                    target_url=_join_url(upstream.url, path),
+                    target_url=_resolve_target_url(upstream, path),
                     headers=self._build_headers(request, upstream),
                     body=_remap_model(body, model_id),
                     streaming=streaming,
@@ -467,12 +528,10 @@ class Dispatcher:
         if cold_remotes:
             await self._cold_prefetch(cold_remotes)  # TIER2 + TIER3
             for upstream in self._upstreams_in_priority_order():
-                if _is_self_composite(upstream):
-                    continue
                 if model_id in self._cached_models(upstream.name):
                     call = UpstreamCall(
                         upstream_name=upstream.name,
-                        target_url=_join_url(upstream.url, path),
+                        target_url=_resolve_target_url(upstream, path),
                         headers=self._build_headers(request, upstream),
                         body=_remap_model(body, model_id),
                         streaming=streaming,
@@ -1059,20 +1118,6 @@ def _remap_model(body: dict[str, Any], new_model: str) -> bytes:
     return json.dumps(body).encode("utf-8")
 
 
-def _is_self_composite(upstream: Upstream) -> bool:
-    """True for the self-referential composite ``hal0`` upstream.
-
-    The composite is a ``kind="slot"`` entry named ``hal0`` with
-    ``slot_name is None`` whose URL points back at hal0-api's own ``/v1``
-    surface. It aggregates every chat slot's model id for
-    ``GET /v1/models`` only — it must NOT be a dispatch target, or a chat
-    request would forward back into hal0-api (loop / wrong co-resident
-    model) instead of falling through to the lemonade proxy that serves
-    chat models by name on lemond. The passthrough steps skip it.
-    """
-    return upstream.kind == "slot" and upstream.slot_name is None and upstream.name == "hal0"
-
-
 def _slot_name_of(upstream: Upstream) -> str:
     """Return the local slot name for ``upstream`` (empty for remotes).
 
@@ -1081,8 +1126,18 @@ def _slot_name_of(upstream: Upstream) -> str:
     ``upstream.name`` when ``slot_name`` is unset — autoregistered slots
     use the same value for both, but explicit upstreams.toml entries can
     override.
+
+    The composite ``hal0`` upstream is exempt: it has no backing slot, so
+    returning ``"hal0"`` here would make ``forward()`` run the readiness
+    gate against a non-existent slot (always OFFLINE → spurious 503) and
+    wrap the call in a ``SlotManager.serving("hal0")`` context that can
+    never settle. Returning ``""`` routes it through ``_forward_plain``,
+    which is correct because the actual slot lifecycle is enforced on the
+    Lemonade gateway hop the composite forwards to.
     """
     if upstream.kind != "slot":
+        return ""
+    if _is_hal0_composite(upstream):
         return ""
     return upstream.slot_name or upstream.name
 

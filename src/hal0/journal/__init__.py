@@ -96,8 +96,11 @@ class LemondLogRing:
         dict so callers (and tests) can inspect the assigned id.
         """
         message = _pick_message(entry)
-        level = _normalise_level(entry.get("level"))
-        ts_raw = entry.get("ts")
+        # lemond log entries carry the level under ``severity`` (Info /
+        # Warning / Error / Fatal / …); older/synthetic frames may use
+        # ``level``. Prefer ``severity`` and fall back to ``level``.
+        level = _normalise_level(entry.get("severity") or entry.get("level"))
+        ts_raw = entry.get("ts") or entry.get("timestamp")
         ts = ts_raw if isinstance(ts_raw, str) and ts_raw else now_iso()
         stored = {
             "id": next(self._next_id),
@@ -215,8 +218,12 @@ async def _flatten_frame(frame: dict[str, Any]) -> list[dict[str, Any]]:
     Inline duplicate of :func:`hal0.api.routes.lemonade_logs._iter_entries`
     so this module stays import-free of the route layer. Tolerates the
     same ``logs.snapshot`` / ``logs.entry`` / unknown-op shapes.
+
+    lemond keys frames on ``type`` (``logs.snapshot`` / ``logs.entry``);
+    we read ``type`` first and fall back to ``op`` for resilience to a
+    protocol shift.
     """
-    op = frame.get("op")
+    op = frame.get("type") or frame.get("op")
     if op == "logs.snapshot":
         entries = frame.get("entries")
         if isinstance(entries, list):
@@ -230,34 +237,53 @@ async def _flatten_frame(frame: dict[str, Any]) -> list[dict[str, Any]]:
     return [frame]
 
 
-async def _consume_once(ring: LemondLogRing) -> None:
+async def _consume_once(ring: LemondLogRing) -> bool:
     """One pass through lemond's log stream. Returns when the stream ends.
 
     Imports the provider lazily so unit tests can monkeypatch it on the
     way in without dragging the full provider singleton into scope.
+
+    Returns ``True`` if at least one entry was appended (a genuinely live
+    connection), ``False`` if the stream yielded nothing — e.g. lemond is
+    down or the log-stream WebSocket isn't available. The caller uses this
+    to decide whether to reset the reconnect backoff: an empty pass should
+    keep backing off rather than retry at the floor cadence (issue #421).
     """
     from hal0.providers import lemonade_provider
 
     client = lemonade_provider().client()
+    produced = False
     async for frame in client.stream_logs():
         for entry in await _flatten_frame(frame):
             ring.append(entry)
+            produced = True
+    return produced
 
 
 async def _bridge_loop(ring: LemondLogRing) -> None:
     """Long-running task that keeps the lemond log ring fed.
 
-    Reconnects with exponential backoff (1s → 30s) on any failure so the
-    journal panel keeps working across lemond restarts. Cancellation
-    (FastAPI shutdown) propagates cleanly via :class:`asyncio.CancelledError`.
+    Reconnects with exponential backoff (1s → 30s) so the journal panel
+    keeps working across lemond restarts. Cancellation (FastAPI shutdown)
+    propagates cleanly via :class:`asyncio.CancelledError`.
+
+    The backoff is only reset to the floor after a pass that produced at
+    least one entry (a real, working stream). A pass that returns
+    immediately with nothing — lemond down, or no log-stream WS port
+    advertised — keeps backing off. Without this guard, an instantly
+    empty stream paired with a floor reset would reconnect at ~1 Hz,
+    which is exactly what spammed lemond with ``Error 404: GET
+    /logs/stream`` (issue #421).
     """
     backoff = _RECONNECT_INITIAL_S
     while True:
         try:
-            await _consume_once(ring)
-            # Stream returned cleanly — reset backoff so the next reconnect
-            # is fast (typically lemond restart, not a permanent outage).
-            backoff = _RECONNECT_INITIAL_S
+            produced = await _consume_once(ring)
+            # A working stream that ended (typically a lemond restart) resets
+            # backoff to the floor for a fast reconnect. An empty pass (lemond
+            # down / no WS log stream) keeps backing off so we don't hammer a
+            # dead path at ~1 Hz (issue #421).
+            backoff = _RECONNECT_INITIAL_S if produced else min(backoff * 2, _RECONNECT_MAX_S)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # pragma: no cover — defensive
@@ -267,14 +293,14 @@ async def _bridge_loop(ring: LemondLogRing) -> None:
                 error_type=type(exc).__name__,
                 backoff_s=backoff,
             )
-        # Sleep before reconnecting. A clean stream return still backs off
-        # by the initial 1s — without it, a lemond that immediately closes
-        # the WS would spin the event loop.
+            backoff = min(backoff * 2, _RECONNECT_MAX_S)
+        # Sleep before reconnecting. Even a successful pass backs off by
+        # the initial 1s so a lemond that immediately closes the WS can't
+        # spin the event loop.
         try:
             await asyncio.sleep(backoff)
         except asyncio.CancelledError:
             raise
-        backoff = min(backoff * 2, _RECONNECT_MAX_S)
 
 
 def start_lemond_bridge(ring: LemondLogRing) -> asyncio.Task[None]:
