@@ -669,6 +669,7 @@ def _render_config_yaml(
     personality_name: str = "",
     delegation: dict[str, Any] | None = None,
     auxiliary_tasks: dict[str, dict[str, Any]] | None = None,
+    custom_providers: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render the Hermes config.yaml via Jinja2.
 
@@ -699,6 +700,13 @@ def _render_config_yaml(
                          ``auxiliary:`` block. Defaults (when omitted) to
                          the all-provider:"main" inventory so callers that
                          predate role-slots keep the original behavior.
+      custom_providers — list[dict] ({name, base_url, models}) or None.
+                         Per-model context_length lookup keyed by model_id
+                         under the hal0 base_url. None → block omitted.
+                         NOTE: ``model.context_length`` is intentionally
+                         NOT rendered — hermes treats it as a global
+                         override that bleeds onto cloud models; per-model
+                         context lives here instead.
     """
     from jinja2 import Environment, FileSystemLoader
 
@@ -721,6 +729,7 @@ def _render_config_yaml(
         auxiliary_tasks=(
             auxiliary_tasks if auxiliary_tasks is not None else _default_auxiliary_tasks()
         ),
+        custom_providers=custom_providers,
     )
 
 
@@ -849,7 +858,7 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     # ``model_aliases:`` block lands on the first config_write pass
     # (Phase 9 used to be the only place this worked).
     slots_all = _fetch_slots()
-    chat_slots = _collect_chat_slots(slots_all)
+    chat_slots = _collect_chat_slots(slots_all, contexts=_fetch_model_contexts())
     # feat/hermes-role-slots: resolve per-role models from live slot NAMES.
     # delegation ← `agent-hermes` slot; auxiliary ← `utility` slot. Both
     # talk to hal0's /v1 endpoint (same base_url as the main model), so a
@@ -857,6 +866,9 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     hal0_v1_base = primary["backend_url"]
     delegation = _resolve_delegation(slots_all, hal0_base_url=hal0_v1_base)
     auxiliary_tasks = _resolve_auxiliary_tasks(slots_all, hal0_base_url=hal0_v1_base)
+    # Per-model context_length lives in custom_providers (NOT the global
+    # model.context_length override) so cloud models keep their own ctx.
+    custom_providers = _resolve_custom_providers(chat_slots, hal0_base_url=hal0_v1_base)
     # PR-3 Phase 6: probe-driven mcp_servers list. For the very first
     # config_write (before mcp_wire runs the live probe) we fall back to
     # the default inventory; mcp_wire then captures the probed shape and
@@ -873,6 +885,7 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
         personality_name=personality_name,
         delegation=delegation,
         auxiliary_tasks=auxiliary_tasks,
+        custom_providers=custom_providers,
     )
     rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     new_hash = content_hash(rendered)
@@ -1311,7 +1324,7 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     # _fetch_slots is already failure-tolerant (returns [] on transport
     # error). No try/except needed here — it can't raise.
     slots_all = _fetch_slots()
-    chat_slots = _collect_chat_slots(slots_all)
+    chat_slots = _collect_chat_slots(slots_all, contexts=_fetch_model_contexts())
     primary_raw = _resolve_primary_slot()
     primary_for_template: dict[str, Any] | None = None
     primary_alias = "primary"
@@ -1668,6 +1681,33 @@ def _fetch_slots() -> list[dict[str, Any]]:
     return list(data) if isinstance(data, list) else []
 
 
+def _fetch_model_contexts() -> dict[str, int]:
+    """Map gateway model id -> context_length from ``/v1/models``.
+
+    ``/api/slots`` carries no context field, so the slot dict can't supply
+    one. The gateway's ``/v1/models`` is the authoritative source (it
+    resolves ctx_size/context_size + the model-registry ``defaults``), keyed
+    by the slot ALIAS (== the ``/v1/models`` ``id``). Returns ``{}`` when the
+    daemon is unreachable or no chat slot is loaded.
+    """
+    from urllib.error import URLError
+    from urllib.request import Request, urlopen
+
+    req = Request(f"{HAL0_API_URL}/v1/models", headers={"Accept": "application/json"})
+    try:
+        with urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError, TimeoutError):
+        return {}
+    out: dict[str, int] = {}
+    for entry in (data or {}).get("data") or []:
+        mid = entry.get("id")
+        ctx = entry.get("context_length")
+        if mid and isinstance(ctx, int) and ctx > 0:
+            out[str(mid)] = ctx
+    return out
+
+
 def _slot_kind(slot: dict[str, Any]) -> str:
     """Best-effort capability classifier — handles a few schema variants."""
     for key in ("capability", "kind", "type"):
@@ -1710,8 +1750,34 @@ def _is_ready(slot: dict[str, Any]) -> bool:
     return str(state).lower() in {"ready", "running", "loaded", "ok", "online"}
 
 
-def _collect_chat_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _slot_context_length(slot: dict[str, Any]) -> int | None:
+    """Resolve a slot's effective context length (the value /v1/models
+    advertises), or ``None`` when the slot reports none.
+
+    Reads ``context_length`` then ``ctx_size`` — the same precedence
+    :func:`_resolve_primary_slot` uses — so the per-model entry in
+    ``custom_providers`` matches what the gateway serves.
+    """
+    raw = slot.get("context_length") or slot.get("ctx_size")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_chat_slots(
+    slots: list[dict[str, Any]],
+    contexts: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
     """Filter ``slots`` to chat-capable entries (``type=="llm"``) with a model_id.
+
+    ``contexts`` is an optional ``{alias: context_length}`` map (from
+    :func:`_fetch_model_contexts`); callers pass it so the per-model context
+    comes from the gateway's ``/v1/models`` rather than the context-less
+    ``/api/slots`` state. When omitted (e.g. unit tests) no network call is
+    made and the per-slot fallback (:func:`_slot_context_length`) is used.
 
     The real ``/api/slots`` payload sets ``type=="llm"`` for chat slots and
     ``kind=="local"`` for the deployment shape. The previous ``_slot_kind``
@@ -1733,6 +1799,10 @@ def _collect_chat_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     the ``model:`` / ``delegation:`` / ``auxiliary:`` blocks use). This is
     what lets the in-agent model switcher pick a slot up after a restart.
     """
+    # Context lives on the gateway's /v1/models (keyed by alias), NOT on the
+    # /api/slots state dict — callers pass it in; fall back to any context the
+    # slot dict happens to carry.
+    ctx_map = contexts or {}
     out: list[dict[str, Any]] = []
     for s in slots:
         if (s.get("type") or "").lower() != "llm":
@@ -1742,14 +1812,53 @@ def _collect_chat_slots(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
         model_id = _slot_model_id(s)
         if not model_id:
             continue
+        alias = _slot_alias(s)
         out.append(
             {
-                "alias": _slot_alias(s),
+                "alias": alias,
                 "model_id": model_id,
                 "backend_url": _DEFAULT_PRIMARY_BACKEND_URL,
+                "context_length": ctx_map.get(alias) or _slot_context_length(s),
             }
         )
     return out
+
+
+def _resolve_custom_providers(
+    chat_slots: list[dict[str, Any]],
+    *,
+    hal0_base_url: str,
+) -> list[dict[str, Any]] | None:
+    """Build the ``custom_providers`` block from live chat slots.
+
+    hermes 0.14.0 `agent/model_metadata.py:get_model_context_length`
+    treats the top-level ``model.context_length`` as a GLOBAL override
+    applied to EVERY model — switching to a cloud model (deepseek/
+    openrouter) then wrongly inherits our local value. The supported
+    per-model mechanism is ``custom_providers[].models.<model_id>.
+    context_length``, matched by base_url + model in `hermes_cli/config.py:
+    get_custom_provider_context_length` (used by startup, /model switch and
+    /info) and merged into the picker via `get_compatible_custom_providers`.
+    It does NOT bleed across base_urls/providers.
+
+    Returns a single-element list ``[{name, base_url, models}]`` where the
+    ``models`` KEYS are model_ids (what hermes looks up at runtime), not
+    slot aliases. Degrade-safe: only slots that resolve a context_length
+    contribute an entry; returns ``None`` when none do so the template
+    omits the block entirely.
+    """
+    models: dict[str, dict[str, Any]] = {}
+    for slot in chat_slots:
+        model_id = slot.get("model_id")
+        ctx = slot.get("context_length")
+        if not model_id or not ctx:
+            continue
+        # First writer wins on a model_id collision (declaration order
+        # mirrors _collect_chat_slots / /api/slots ordering).
+        models.setdefault(model_id, {"context_length": int(ctx)})
+    if not models:
+        return None
+    return [{"name": "hal0", "base_url": hal0_base_url, "models": models}]
 
 
 # ── Role→slot resolution (delegation + auxiliary) ───────────────────────────
@@ -1890,7 +1999,7 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
         )
 
     slots = _fetch_slots()
-    chat_slots = _collect_chat_slots(slots)
+    chat_slots = _collect_chat_slots(slots, contexts=_fetch_model_contexts())
     primary_raw = _resolve_primary_slot()
     primary = {
         "model_id": primary_raw["model"],
@@ -1909,6 +2018,7 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
     hal0_v1_base = primary["backend_url"]
     delegation = _resolve_delegation(slots, hal0_base_url=hal0_v1_base)
     auxiliary_tasks = _resolve_auxiliary_tasks(slots, hal0_base_url=hal0_v1_base)
+    custom_providers = _resolve_custom_providers(chat_slots, hal0_base_url=hal0_v1_base)
 
     try:
         rendered = _render_config_yaml(
@@ -1919,6 +2029,7 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
             system_prompt=system_prompt,
             personality_name=personality_name,
             delegation=delegation,
+            custom_providers=custom_providers,
             auxiliary_tasks=auxiliary_tasks,
         )
         rendered = _apply_overrides(rendered, OVERRIDES_PATH)
@@ -2092,11 +2203,13 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
         # feat/hermes-role-slots: keep role-slot blocks consistent with the
         # other render call sites so re-render stays idempotent.
         hal0_v1_base = primary["backend_url"]
+        chat_slots = _collect_chat_slots(slots, contexts=_fetch_model_contexts())
         delegation = _resolve_delegation(slots, hal0_base_url=hal0_v1_base)
         auxiliary_tasks = _resolve_auxiliary_tasks(slots, hal0_base_url=hal0_v1_base)
+        custom_providers = _resolve_custom_providers(chat_slots, hal0_base_url=hal0_v1_base)
         rendered = _render_config_yaml(
             primary=primary,
-            chat_slots=_collect_chat_slots(slots),
+            chat_slots=chat_slots,
             stt={
                 "provider": "openai",
                 "backend_url": details["stt"]["backend_url"] if details["stt"] else None,
@@ -2117,6 +2230,7 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
             personality_name=personality_name,
             delegation=delegation,
             auxiliary_tasks=auxiliary_tasks,
+            custom_providers=custom_providers,
         )
         rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     except Exception as exc:

@@ -28,6 +28,17 @@ import pytest
 from hal0.agents import hermes_provision as hp
 
 
+@pytest.fixture(autouse=True)
+def _offline_model_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never hit the live daemon's /v1/models during unit tests.
+
+    ``_collect_chat_slots`` callers pass the result of ``_fetch_model_contexts``;
+    left un-stubbed each phase test would block on a real urlopen. Stub to empty
+    so per-model context falls back to each fixture slot's own context_length.
+    """
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
+
+
 @pytest.fixture
 def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
     """Seed a :class:`BootstrapState` rooted in ``tmp_path`` with externals stubbed.
@@ -57,6 +68,9 @@ def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.
     # _fetch_slots; without a stub each call would block 3s on a real
     # urlopen timeout. Keep the integration tests offline-fast.
     monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
+    # Same for the /v1/models context fetch — stub to empty so per-model
+    # context falls back to each slot's own context_length (set on fixtures).
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
     monkeypatch.setattr(
         hp,
         "_probe_mcp_server",
@@ -473,6 +487,10 @@ def test_render_config_yaml_includes_primary_block() -> None:
     assert 'X-hal0-Agent: "hermes-agent"' in rendered
     # ADR-0014: graph extraction defaults OFF.
     assert "enabled: false" in rendered
+    # model.context_length must NOT be emitted — hermes treats it as a
+    # GLOBAL override that bleeds onto cloud models. Per-model context
+    # lives in custom_providers instead.
+    assert "context_length" not in rendered.split("providers:")[0]
 
 
 def test_render_config_yaml_no_primary_emits_safe_placeholder() -> None:
@@ -498,6 +516,125 @@ def test_render_config_yaml_chat_slots_become_aliases() -> None:
     assert '"qwen-coder"' in rendered
 
 
+# ── feat/hermes-role-slots: per-model context via custom_providers ───────────
+
+
+def test_collect_chat_slots_carries_context_length() -> None:
+    slots = [
+        {
+            "name": "primary",
+            "type": "llm",
+            "state": "ready",
+            "model_id": "m1",
+            "backend_url": "http://127.0.0.1:8001/v1",
+            "context_length": 65536,
+        },
+        # ctx_size is the alternate key — must still resolve.
+        {
+            "name": "utility",
+            "type": "llm",
+            "state": "ready",
+            "model_id": "m2",
+            "backend_url": "http://127.0.0.1:8002/v1",
+            "ctx_size": 8192,
+        },
+        # No context at all → None (degrade-safe).
+        {
+            "name": "agent-hermes",
+            "type": "llm",
+            "state": "ready",
+            "model_id": "m3",
+            "backend_url": "http://127.0.0.1:8003/v1",
+        },
+    ]
+    collected = hp._collect_chat_slots(slots)
+    by_model = {s["model_id"]: s["context_length"] for s in collected}
+    assert by_model == {"m1": 65536, "m2": 8192, "m3": None}
+
+
+def test_resolve_custom_providers_keys_by_model_id() -> None:
+    chat_slots = [
+        {"alias": "primary", "model_id": "qwen3-coder", "context_length": 65536},
+        {"alias": "agent-hermes", "model_id": "hermes-4-14b", "context_length": 65536},
+        {"alias": "utility", "model_id": "qwen3-zero", "context_length": 32768},
+    ]
+    cp = hp._resolve_custom_providers(chat_slots, hal0_base_url="http://127.0.0.1:8080/v1")
+    assert cp == [
+        {
+            "name": "hal0",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "models": {
+                "qwen3-coder": {"context_length": 65536},
+                "hermes-4-14b": {"context_length": 65536},
+                "qwen3-zero": {"context_length": 32768},
+            },
+        }
+    ]
+
+
+def test_resolve_custom_providers_omits_slots_without_context() -> None:
+    chat_slots = [
+        {"alias": "primary", "model_id": "m1", "context_length": 40000},
+        {"alias": "utility", "model_id": "m2", "context_length": None},
+    ]
+    cp = hp._resolve_custom_providers(chat_slots, hal0_base_url="http://127.0.0.1:8080/v1")
+    assert list(cp[0]["models"]) == ["m1"]
+
+
+def test_resolve_custom_providers_none_when_nothing_resolves() -> None:
+    assert hp._resolve_custom_providers([], hal0_base_url="http://127.0.0.1:8080/v1") is None
+    chat_slots = [{"alias": "primary", "model_id": "m1", "context_length": None}]
+    assert hp._resolve_custom_providers(chat_slots, hal0_base_url="http://x/v1") is None
+
+
+def test_render_config_yaml_emits_custom_providers_block() -> None:
+    yaml = pytest.importorskip("yaml")
+    chat_slots = [
+        {
+            "alias": "primary",
+            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+            "backend_url": "http://127.0.0.1:8080/v1",
+            "context_length": 65536,
+        },
+        {
+            "alias": "agent-hermes",
+            "model_id": "hermes-4-14b-q5km",
+            "backend_url": "http://127.0.0.1:8080/v1",
+            "context_length": 65536,
+        },
+    ]
+    cp = hp._resolve_custom_providers(chat_slots, hal0_base_url="http://127.0.0.1:8080/v1")
+    rendered = hp._render_config_yaml(
+        primary={
+            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+            "backend_url": "http://127.0.0.1:8080/v1",
+            "context_length": 65536,
+        },
+        chat_slots=chat_slots,
+        agent_id="hermes-agent",
+        custom_providers=cp,
+    )
+    cfg = yaml.safe_load(rendered)
+    # No global model.context_length override.
+    assert "context_length" not in cfg["model"]
+    # Per-model context, keyed by MODEL ID (not alias), under the gateway.
+    assert cfg["custom_providers"] == [
+        {
+            "name": "hal0",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "models": {
+                "qwen3-coder-next-reap-40b-a3b-q4kxl": {"context_length": 65536},
+                "hermes-4-14b-q5km": {"context_length": 65536},
+            },
+        }
+    ]
+
+
+def test_render_config_yaml_omits_custom_providers_when_none() -> None:
+    rendered = hp._render_config_yaml(primary=None, agent_id="hermes-agent")
+    assert "custom_providers:" not in rendered
+
+
 # ── feat/hermes-role-slots: delegation + auxiliary role→slot wiring ──────────
 
 _ROLE_SLOTS = [
@@ -515,6 +652,7 @@ _ROLE_SLOTS = [
         "state": "ready",
         "model_id": "hermes-4-14b-q5km",
         "backend_url": "http://127.0.0.1:8001/v1",
+        "context_length": 65536,
     },
     {
         "name": "utility",
@@ -522,6 +660,7 @@ _ROLE_SLOTS = [
         "state": "ready",
         "model_id": "qwen3-zero-coder-v2-0.8b-f16",
         "backend_url": "http://127.0.0.1:8001/v1",
+        "context_length": 16384,
     },
 ]
 _HAL0_V1 = "http://127.0.0.1:8080/v1"
@@ -657,6 +796,20 @@ def test_config_write_renders_role_slots_from_live_state(
     assert cfg["delegation"]["model"] == "hermes-4-14b-q5km"
     assert cfg["delegation"]["base_url"] == _HAL0_V1
     assert cfg["auxiliary"]["compression"]["model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    # No global model.context_length override; per-model context comes via
+    # custom_providers keyed by model_id under the gateway.
+    assert "context_length" not in cfg["model"]
+    assert cfg["custom_providers"] == [
+        {
+            "name": "hal0",
+            "base_url": _HAL0_V1,
+            "models": {
+                "qwen3-coder-next-reap-40b-a3b-q4kxl": {"context_length": 32768},
+                "hermes-4-14b-q5km": {"context_length": 65536},
+                "qwen3-zero-coder-v2-0.8b-f16": {"context_length": 16384},
+            },
+        }
+    ]
 
 
 def test_config_write_phase_writes_yaml_idempotently(

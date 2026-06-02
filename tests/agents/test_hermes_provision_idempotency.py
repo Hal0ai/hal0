@@ -23,6 +23,12 @@ from hal0.agents import hermes_provision as hp
 from hal0.agents import personas as P
 
 
+@pytest.fixture(autouse=True)
+def _offline_model_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never hit the live daemon's /v1/models during unit tests."""
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
+
+
 @pytest.fixture
 def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
     """A BootstrapState rooted entirely in ``tmp_path`` with externals stubbed."""
@@ -95,6 +101,9 @@ def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
         ]
 
     monkeypatch.setattr(hp, "_fetch_slots", _fake_slots)
+    # /v1/models context fetch → empty so per-model context falls back to each
+    # slot's own context_length (set on the fixture), keeping renders offline.
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
 
     # MCP probes succeed deterministically with a fixed tool list so the
     # provision.json `mcp_wire.details` hash matches across runs.
@@ -312,6 +321,22 @@ def test_config_yaml_contains_role_slot_blocks(
         assert cfg["auxiliary"][task]["base_url"] == "http://127.0.0.1:8080/v1"
     # vision/web_extract still inherit the chat model.
     assert cfg["auxiliary"]["vision"]["provider"] == "main"
+    # Per-model context_length via custom_providers (keyed by model_id),
+    # NOT a global model.context_length override (the deepseek-bleed bug).
+    assert "context_length" not in cfg["model"]
+    assert cfg["custom_providers"] == [
+        {
+            "name": "hal0",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "models": {
+                "qwen3-test": {"context_length": 32768},
+                "qwen3-coder-test": {"context_length": 16384},
+                "qwen3-utility-test": {"context_length": 8192},
+            },
+        }
+    ]
+    # The embed slot must not leak into custom_providers either.
+    assert "bge-test" not in cfg["custom_providers"][0]["models"]
 
 
 def test_persona_seed_appears_in_phase_order_before_config_write(tmp_path: Path) -> None:
