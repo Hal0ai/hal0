@@ -894,6 +894,23 @@ else
         info "created user hal0 (system, no login)"
     fi
 
+    # GPU device access (issue #420). lemond's ROCm/Vulkan backends need
+    # the `hal0` user in `render` (for /dev/kfd + /dev/dri/renderD*) and
+    # `video` (for /dev/dri/card*/amdgpu). Without it ROCm reports "no
+    # ROCm-capable device is detected" and silently falls back to CPU.
+    # Idempotent; only adds groups that actually exist on the host (a
+    # non-GPU box / CI runner simply has neither).
+    KFD_GROUPS=""
+    for _g in render video; do
+        if getent group "${_g}" >/dev/null 2>&1; then
+            KFD_GROUPS="${KFD_GROUPS:+${KFD_GROUPS},}${_g}"
+        fi
+    done
+    if [[ -n "${KFD_GROUPS}" ]]; then
+        usermod -aG "${KFD_GROUPS}" hal0
+        info "added hal0 to groups: ${KFD_GROUPS}"
+    fi
+
     # 2. Embeddable tarball. Idempotent: a marker file pinned to
     #    LEMONADE_VERSION lets re-runs skip the multi-hundred-MB
     #    download when the binary on disk already matches. Operators
@@ -1045,6 +1062,26 @@ CPUQuota=80%
 WantedBy=multi-user.target
 UNIT
     info "wrote ${LEMONADE_UNIT}"
+
+    # 4b. /dev/kfd group-access drop-in (issue #420). The GPU compute
+    #     node resets to root:root 0660 on every boot — no udev rule
+    #     fires for the host-passed node inside the LXC — so the `hal0`
+    #     user loses access after a reboot even though it's in `render`.
+    #     ROCm then can't see the iGPU and lemond silently runs on CPU
+    #     (a 40B load blows past the hal0-api proxy 120s read timeout →
+    #     chat 502s). This ExecStartPre re-chgrp's the node to `render`
+    #     before lemond starts, every boot. The leading `+` runs it as
+    #     root despite User=hal0; the `-` makes it non-fatal so non-GPU
+    #     hosts (no /dev/kfd) still start lemond. Mirrors the
+    #     whisper-patchelf drop-in. Always rewritten so a bump propagates.
+    LEMONADE_DROPIN_DIR="${UNIT_DIR}/hal0-lemonade.service.d"
+    mkdir -p "${LEMONADE_DROPIN_DIR}"
+    cat > "${LEMONADE_DROPIN_DIR}/kfd-perms.conf" <<'DROPIN'
+[Service]
+ExecStartPre=+-/usr/bin/chgrp render /dev/kfd
+ExecStartPre=+-/usr/bin/chmod 0660 /dev/kfd
+DROPIN
+    info "wrote ${LEMONADE_DROPIN_DIR}/kfd-perms.conf"
 
     # daemon-reload is idempotent — always safe to call. enable (no
     # --now) so the unit auto-starts on boot; the Service start block at
