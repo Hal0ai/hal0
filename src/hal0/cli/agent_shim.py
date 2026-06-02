@@ -93,11 +93,13 @@ class AgentConfig:
     def status_url(self) -> str:
         """URL the shim polls to confirm the agent's HTTP surface is up."""
 
-        # ``/api/health`` is upstream-stable across hermes ≥ 0.10 and is the
-        # cheapest endpoint we can hit to determine "ready". The Hermes
-        # dashboard route doesn't expose ``/healthz`` — verified against
-        # ``~/src/hermes-agent/hermes_cli/web_server.py``.
-        return f"http://{self.host}:{self.port}/api/health"
+        # Use the UNAUTHENTICATED ``/health`` liveness route. The Hermes
+        # dashboard auth-gates every ``/api/*`` endpoint (it exposes API
+        # keys), so ``/api/health`` returns 401 — which the old poll treated
+        # as "not ready", so the Type=notify start never got READY=1 and the
+        # service crash-looped on the 120s start timeout. ``/health`` (and
+        # ``/healthz``) return 200 without auth — verified live (hermes 0.14.0).
+        return f"http://{self.host}:{self.port}/health"
 
 
 def _load_agent_config(agent_id: str) -> AgentConfig:
@@ -181,12 +183,21 @@ def _sd_notify(state: str) -> bool:
 
 
 def _is_ready(cfg: AgentConfig, *, timeout: float = 1.0) -> bool:
-    """Cheap GET of the agent's health URL — True iff 2xx."""
+    """True iff the agent's HTTP surface is up.
+
+    A 2xx from the unauthenticated health route is the happy path. We also
+    treat an auth challenge (401/403) as "up": an HTTP error response proves
+    the socket is open and serving, so the shim should sd_notify READY rather
+    than time out if a future hermes release auth-gates the health route too.
+    """
 
     try:
         with urllib.request.urlopen(cfg.status_url, timeout=timeout) as resp:
             status: int = resp.status
             return 200 <= status < 300
+    except urllib.error.HTTPError as exc:
+        # Server responded (gated/errored) → it IS reachable.
+        return exc.code in (401, 403)
     except (urllib.error.URLError, OSError):
         return False
 

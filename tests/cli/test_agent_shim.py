@@ -120,7 +120,9 @@ class TestAgentConfig:
             host="10.0.0.1",
             port=4242,
         )
-        assert cfg.status_url == "http://10.0.0.1:4242/api/health"
+        # Unauthenticated /health liveness route (the /api/* surface is
+        # auth-gated and returns 401, which would stall the notify start).
+        assert cfg.status_url == "http://10.0.0.1:4242/health"
 
     def test_hermes_bin_resolves_under_venv(self) -> None:
         cfg = agent_shim.AgentConfig(
@@ -385,3 +387,47 @@ def _make_parser_allowing_only_status() -> Any:
     p.add_argument("agent_id")
     p.add_argument("subcommand", choices=["status"])
     return p
+
+
+class TestIsReady:
+    """``_is_ready`` accepts 2xx AND auth-challenges (401/403) as 'reachable'.
+
+    The hermes dashboard auth-gates ``/api/*``; an auth response still proves
+    the socket is open, so the shim must sd_notify READY rather than loop.
+    """
+
+    @staticmethod
+    def _cfg() -> agent_shim.AgentConfig:
+        return agent_shim.AgentConfig(
+            agent_id="hermes",
+            agent_type="hermes",
+            home=Path("/x"),
+            venv=Path("/y"),
+            host="127.0.0.1",
+            port=9119,
+        )
+
+    def test_2xx_is_ready(self) -> None:
+        with patch("hal0.cli.agent_shim.urllib.request.urlopen") as m:
+            m.return_value.__enter__.return_value.status = 200
+            assert agent_shim._is_ready(self._cfg()) is True
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [(401, True), (403, True), (404, False), (500, False)],
+    )
+    def test_http_error_codes(self, code: int, expected: bool) -> None:
+        import urllib.error
+
+        err = urllib.error.HTTPError("http://x", code, "msg", {}, None)  # type: ignore[arg-type]
+        with patch("hal0.cli.agent_shim.urllib.request.urlopen", side_effect=err):
+            assert agent_shim._is_ready(self._cfg()) is expected
+
+    def test_connection_error_not_ready(self) -> None:
+        import urllib.error
+
+        with patch(
+            "hal0.cli.agent_shim.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("boom"),
+        ):
+            assert agent_shim._is_ready(self._cfg()) is False
