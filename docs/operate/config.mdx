@@ -123,6 +123,38 @@ file deliberately stays stale. If you edit `default` on a running box
 and nothing changes, this is why. Use `hal0 slot swap <name> --model
 <ref>` (or the dashboard's model picker) to swap.
 
+## Remote MCP access (`HAL0_MCP_ALLOWED_HOSTS`)
+
+The bundled MCP servers (`/mcp/admin`, `/mcp/memory`) ship with the MCP
+SDK's DNS-rebinding protection, which **only accepts a `localhost` Host
+header by default**. On a single box that's invisible — but the moment
+another node, or a reverse-proxy vhost, reaches the mount by IP or domain
+it gets a bare `421 Invalid Host header` with no other hint.
+
+Since hal0 binds `0.0.0.0` on the trusted LAN (network auth was removed in
+[ADR-0012](/internal/adr/0012-remove-auth-and-caddy/)), widen the
+allowlist with two env vars on the `hal0-api` service:
+
+| Env var | Example | Effect |
+| --- | --- | --- |
+| `HAL0_MCP_ALLOWED_HOSTS` | `hal0.lan:8080,hal0.example.com` | Adds these `Host` values to the localhost allowlist. A `host:*` entry matches any port. |
+| `HAL0_MCP_ALLOWED_HOSTS` | `*` | Disables DNS-rebinding protection entirely — the fully-open posture for trusted LAN-only deployments. |
+| `HAL0_MCP_ALLOWED_ORIGINS` | `https://hal0.example.com` | Browser `Origin` allowlist. When unset, `http`+`https` origins are derived from each added host. |
+
+The localhost defaults are always preserved, so local clients keep
+working regardless. CLI clients (e.g. Claude Code) send only a `Host`
+header, so `HAL0_MCP_ALLOWED_HOSTS` is the one that matters for
+node-to-node access; `HAL0_MCP_ALLOWED_ORIGINS` is only for browser-based
+MCP clients.
+
+Apply it with a systemd drop-in, then restart:
+
+```ini
+# /etc/systemd/system/hal0-api.service.d/mcp-hosts.conf
+[Service]
+Environment=HAL0_MCP_ALLOWED_HOSTS=hal0.lan:8080,hal0.example.com
+```
+
 ## Coming soon — outline
 
 - Hot-reload of selected fields (changing an idle timeout without

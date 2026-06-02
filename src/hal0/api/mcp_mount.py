@@ -16,6 +16,7 @@ functions accept.
 
 from __future__ import annotations
 
+import os
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -25,6 +26,12 @@ from starlette.requests import Request
 from starlette.types import ASGIApp
 
 log = structlog.get_logger("hal0.api.mcp_mount")
+
+# Localhost values FastMCP itself uses when it auto-enables DNS-rebinding
+# protection for a 127.0.0.1 server. We keep them as the secure floor so
+# the default posture is unchanged even when an operator widens the set.
+_LOCALHOST_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
+_LOCALHOST_ORIGINS = ("http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*")
 
 
 def _resolve_bearer(request: Request) -> str | None:
@@ -36,6 +43,61 @@ def _resolve_bearer(request: Request) -> str | None:
     if len(parts) != 2 or parts[0].lower() != "bearer":
         return None
     return parts[1].strip() or None
+
+
+def _mcp_transport_security():
+    """Build the MCP transport's DNS-rebinding allowlist from the env.
+
+    FastMCP auto-enables a *localhost-only* ``TransportSecuritySettings``
+    whenever a server is built with the default ``127.0.0.1`` host (see
+    ``mcp.server.fastmcp.FastMCP.__init__``). That lockdown is invisible
+    until a non-localhost client hits the mount and gets a bare
+    ``421 Invalid Host header`` — exactly what happens the moment another
+    homelab node, or the Traefik vhost, tries to reach ``/mcp/*``.
+
+    hal0 removed network auth entirely (ADR-0012) and binds ``0.0.0.0`` on
+    the trusted LAN, so the mount has to be reachable by its real host
+    name. We keep the secure localhost default but let operators widen it,
+    mirroring the ``HAL0_ALLOWED_ORIGINS`` knob in ``api/agents/_auth``:
+
+    * ``HAL0_MCP_ALLOWED_HOSTS`` — comma-separated ``host`` / ``host:port``
+      / ``host:*`` values added to the localhost allowlist. The single
+      value ``*`` disables DNS-rebinding protection altogether (the
+      fully-open posture some LAN-only deployments want).
+    * ``HAL0_MCP_ALLOWED_ORIGINS`` — comma-separated browser origins.
+      When unset, ``http``+``https`` origins are derived from each added
+      host so the dashboard and Traefik vhost work without a second knob.
+
+    Returns a ``TransportSecuritySettings``. Imported lazily to keep the
+    ``mcp`` dependency out of this module's import path until a mount
+    actually happens.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    raw_hosts = os.environ.get("HAL0_MCP_ALLOWED_HOSTS", "").strip()
+    if raw_hosts == "*":
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    extra_hosts = [h.strip() for h in raw_hosts.split(",") if h.strip()]
+    hosts = [*_LOCALHOST_HOSTS, *extra_hosts]
+
+    raw_origins = os.environ.get("HAL0_MCP_ALLOWED_ORIGINS", "").strip()
+    extra_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+    if not extra_origins:
+        # Derive http+https origins from each operator host so browser
+        # clients (dashboard, Traefik vhost) work without a second env var.
+        for host in extra_hosts:
+            base = host[:-2] if host.endswith(":*") else host
+            extra_origins.extend((f"http://{base}", f"https://{base}"))
+
+    # dict.fromkeys de-dupes while preserving order.
+    origins = list(dict.fromkeys((*_LOCALHOST_ORIGINS, *extra_origins)))
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
 
 
 @dataclass
@@ -124,12 +186,20 @@ def mount_mcp_servers(
     """
     from hal0.mcp.admin import build_server as build_admin_server
 
+    # DNS-rebinding allowlist for every mounted FastMCP sub-app. Set on
+    # the server's settings *before* ``streamable_http_app()`` builds the
+    # session manager — that's when ``self.settings.transport_security``
+    # is read. Without this each server inherits FastMCP's localhost-only
+    # default and rejects LAN / Traefik clients with a bare 421.
+    transport_security = _mcp_transport_security()
+
     admin_server = build_admin_server(
         approval_queue=approval_queue,
         base_url=base_url,
         memory_dispatcher=memory_dispatcher,
         bearer_resolver=bearer_resolver,
     )
+    admin_server.settings.transport_security = transport_security
     # ``streamable_http_app()`` must be called BEFORE
     # ``session_manager`` is accessible — FastMCP creates the manager
     # lazily on the first app build. The lifespan reads
@@ -156,6 +226,7 @@ def mount_mcp_servers(
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
         )
+        memory_server.settings.transport_security = transport_security
         memory_app: ASGIApp = memory_server.streamable_http_app()
         memory_app.add_middleware(MCPAuthMiddleware)
         app.mount("/mcp/memory", memory_app, name="mcp-memory")
@@ -169,6 +240,8 @@ def mount_mcp_servers(
         "hal0.mcp.mounted",
         admin=True,
         memory=memory_wrapper is not None,
+        dns_rebinding_protection=transport_security.enable_dns_rebinding_protection,
+        allowed_hosts=len(transport_security.allowed_hosts),
     )
 
 
