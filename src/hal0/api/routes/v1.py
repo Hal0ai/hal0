@@ -29,11 +29,14 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
+import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
 from hal0.api import image_cache
 from hal0.api.deps import DispatcherDep
+
+log = structlog.get_logger("hal0-v1")
 
 # Inference router — auth-required. Mounted by hal0.api.create_app() with
 # Depends(require_token) so /v1/chat/completions, /v1/embeddings, the
@@ -278,6 +281,63 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
     return new_body
 
 
+async def _ensure_backend_for_proxied_model(request: Request, body: dict[str, Any]) -> None:
+    """#430: load a slot-backed model under its DECLARED backend before the
+    lemonade-proxy fall-through forwards it.
+
+    The catch-all proxy reverse-proxies a by-name request verbatim to lemond,
+    which auto-loads an unknown-by-name model under its GLOBAL ``config.json``
+    default backend (``rocm``) — ignoring a slot that declares
+    ``device=gpu-vulkan``. B1 (``dispatcher.forward`` →
+    ``_ensure_slot_loaded_backend_aware``) closes this gap, but ``forward()``
+    is never reached on this path: a by-name request misses the registry /
+    passthrough and fails legacy ``resolve_slot`` (only the composite ``hal0``
+    upstream is registered, no per-slot upstreams), landing on the proxy
+    catch-all instead.
+
+    So we resolve ``model_id`` → owning chat slot and drive
+    ``SlotManager.load(slot)`` FIRST — idempotent, and it routes the
+    device-derived ``llamacpp_backend`` through ``LemonadeProvider.load`` —
+    then let the proxy forward to the now-correctly-loaded child. ``load``
+    blocks to READY, preserving the catch-all's existing single-request
+    synchronous-load UX (just under the right backend).
+
+    Scope: chat (``type=llm``) slots, matching the alias map and B1's focus;
+    a model with no backing chat slot is left to lemond's global default
+    (acceptance criterion: unbacked models unaffected).
+
+    Best-effort: any failure is logged and swallowed so the proxy still runs
+    (lemond auto-loads as before) rather than 500ing on this new code path.
+    """
+    model_id = body.get("model")
+    if not isinstance(model_id, str) or not model_id:
+        return
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if slot_manager is None:
+        return
+    from hal0.api import hal0_chat_slot_alias_map
+
+    try:
+        alias_to_model = await hal0_chat_slot_alias_map(slot_manager)
+    except Exception:
+        return
+    # Reverse the alias→model_id map: find the chat slot that owns this model.
+    slot_name = next((slot for slot, mid in alias_to_model.items() if mid == model_id), None)
+    if slot_name is None:
+        # No backing chat slot — nothing to honor; lemond's global default applies.
+        return
+    try:
+        await slot_manager.load(slot_name)
+    except Exception as exc:
+        log.warning(
+            "v1.proxy_backend_aware_load_failed",
+            slot=slot_name,
+            model=model_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
 async def _dispatch_and_forward(
     request: Request,
     dispatcher: DispatcherDep,
@@ -313,6 +373,12 @@ async def _dispatch_and_forward(
         # expects the path AFTER `/v1/` as its second arg (FastAPI's
         # path converter strips it before passing).
         proxy_path = request.url.path.removeprefix("/v1/").lstrip("/")
+        # #430: forward() (and B1's backend-aware load) is never reached on
+        # this catch-all path. If the by-name model belongs to a slot with a
+        # declared device backend, load it under that backend FIRST so lemond
+        # serves the correctly-loaded child instead of auto-loading under its
+        # global rocm default.
+        await _ensure_backend_for_proxied_model(request, body)
         return await _proxy(request, proxy_path)
     # Remember the most recent model we sent to this upstream so the
     # dashboard's synthetic slot reflects what's actually being used,
