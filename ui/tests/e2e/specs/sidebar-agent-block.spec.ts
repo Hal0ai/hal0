@@ -1,19 +1,22 @@
 /**
- * sidebar-agent-block-v3 — v0.3 PR-6 (master plan §4 PR-6).
+ * sidebar-agent-block-v3 — v0.4 W9 honest-minimal rewrite.
  *
  * Pins the SidebarAgentBlock UI contract: a compact agent rollup mounted
- * in the left sidebar above the lemond status block. Replaces the
- * stats card that used to live on the Agents page Overview tab.
+ * in the left sidebar above the lemond status block.
  *
- * The block reads from /api/agents (+ /personas + approvals + skills +
- * mcp servers + memory stats) via useSidebarAgentRollup. We mock each
- * endpoint here so the spec is hermetic, then exercise:
+ * W9 simplification (wave-1): the widget no longer renders approvals /
+ * skills / memory-writes / MCP-pip rows. Those leaned on endpoints that
+ * frequently 404 and surfaced misleading "—" placeholders. The widget is
+ * now an honest health indicator only:
  *
- *   - populated state: every metric renders + Open chat navigates
- *   - empty state: no agent installed → "Install Hermes →" CTA
- *   - approvals badge: hides when 0, shows red badge when > 0
- *   - missing endpoints: skills + memory render "—" without crashing
- *   - MCP pip: green/yellow/red colour matches /api/mcp/servers state
+ *   - health dot + status label, keyed off /api/agents `status`
+ *     (installed→running/up, broken→down, else unknown→warn)
+ *   - an OPTIONAL active-profile row, only when a persona name exists
+ *   - an "Open chat →" button → onGo("agent")
+ *   - empty state when no agent installed → "Install Hermes →" CTA
+ *
+ * Tests below assert the new minimal surface; removed-row testids
+ * (sidebar-agent-approvals/skills/memory/mcp) MUST be absent.
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
@@ -53,44 +56,32 @@ const MOCK_MCP_GREEN = {
   count: 2,
 }
 
-const MOCK_MCP_DEGRADED = {
-  servers: [
-    { id: 'hal0-admin', name: 'hal0-admin', bundled: true, state: 'running' },
-    { id: 'hal0-memory', name: 'hal0-memory', bundled: true, state: 'stopped' },
-  ],
-  count: 2,
-}
-
-const MOCK_MCP_DOWN = {
-  servers: [
-    { id: 'hal0-admin', name: 'hal0-admin', bundled: true, state: 'failed' },
-    { id: 'hal0-memory', name: 'hal0-memory', bundled: true, state: 'running' },
-  ],
-  count: 2,
-}
-
 test.describe('SidebarAgentBlock — populated', () => {
   test.beforeEach(async ({ page }) => {
     await page.route('**/api/agents', (route) => json(route, MOCK_AGENTS_INSTALLED))
     await page.route('**/api/agents/hermes/personas', (route) => json(route, MOCK_PERSONAS))
+    // The W9 widget no longer reads approvals/skills/memory/mcp, but other
+    // sidebar surfaces may still poll these — keep harmless stubs so no
+    // request hits the live proxy and slows the spec.
     await page.route('**/api/agent/approvals', (route) => json(route, MOCK_APPROVALS_PENDING))
-    await page.route('**/api/agents/skills', (route) =>
-      json(route, { skills: new Array(12).fill({ name: 'skill', cap: 'read' }), count: 12 }),
-    )
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      json(route, { writes: 847 }),
-    )
     await page.route('**/api/mcp/servers', (route) => json(route, MOCK_MCP_GREEN))
   })
 
-  test('renders agent status row with running dot', async ({ page }) => {
+  test('renders agent status row with running dot (keyed off /api/agents status)', async ({
+    page,
+  }) => {
     await page.goto('/')
     const block = page.locator('[data-testid="sidebar-agent-block"]')
     await expect(block).toBeVisible({ timeout: FIVE_S })
-    // First row labelled "agent" with running state.
-    const agentRow = block.locator('.row').filter({ hasText: 'agent' }).first()
-    await expect(agentRow.locator('.v')).toContainText('running')
-    await expect(agentRow.locator('.v')).toHaveClass(/up/)
+    // First row: key = agent id ("hermes"), value = "running" with the
+    // "up" (green dot) class. status:'installed' maps to running per
+    // useSidebarAgentRollup.
+    const statusRow = block.locator('.row').first()
+    await expect(statusRow.locator('.k')).toHaveText('hermes')
+    await expect(statusRow.locator('.v')).toContainText('running')
+    await expect(statusRow.locator('.v')).toHaveClass(/up/)
+    // Health dot is present.
+    await expect(statusRow.locator('.v .dot')).toBeVisible()
   })
 
   test('renders active persona display name', async ({ page }) => {
@@ -100,32 +91,16 @@ test.describe('SidebarAgentBlock — populated', () => {
     await expect(persona).toHaveText('Hermes')
   })
 
-  test('renders approvals badge with pending count', async ({ page }) => {
+  test('does NOT render removed approvals/skills/memory/mcp rows', async ({ page }) => {
     await page.goto('/')
-    const approvals = page.locator('[data-testid="sidebar-agent-approvals"]')
-    await expect(approvals).toBeVisible({ timeout: FIVE_S })
-    await expect(approvals.locator('.badge')).toHaveText('3')
-  })
-
-  test('renders skills count', async ({ page }) => {
-    await page.goto('/')
-    const skills = page.locator('[data-testid="sidebar-agent-skills"]')
-    await expect(skills).toBeVisible({ timeout: FIVE_S })
-    await expect(skills).toContainText('12')
-  })
-
-  test('renders memory writes count', async ({ page }) => {
-    await page.goto('/')
-    const memory = page.locator('[data-testid="sidebar-agent-memory"]')
-    await expect(memory).toBeVisible({ timeout: FIVE_S })
-    await expect(memory).toContainText('847')
-  })
-
-  test('renders MCP pip green when bundled servers running', async ({ page }) => {
-    await page.goto('/')
-    const mcp = page.locator('[data-testid="sidebar-agent-mcp"]')
-    await expect(mcp).toBeVisible({ timeout: FIVE_S })
-    await expect(mcp).toContainText('ok')
+    await expect(page.locator('[data-testid="sidebar-agent-block"]')).toBeVisible({
+      timeout: FIVE_S,
+    })
+    // W9 removed these rows entirely — they must be absent from the DOM.
+    await expect(page.locator('[data-testid="sidebar-agent-approvals"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="sidebar-agent-skills"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="sidebar-agent-memory"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="sidebar-agent-mcp"]')).toHaveCount(0)
   })
 
   test('Open chat button navigates to #agent', async ({ page }) => {
@@ -157,114 +132,49 @@ test.describe('SidebarAgentBlock — empty state', () => {
   })
 })
 
-test.describe('SidebarAgentBlock — degraded MCP states', () => {
-  async function _seedCommon(page: import('@playwright/test').Page) {
-    await page.route('**/api/agents', (route) => json(route, MOCK_AGENTS_INSTALLED))
+test.describe('SidebarAgentBlock — status tone mapping', () => {
+  test('broken agent renders down (red) dot', async ({ page }) => {
+    await page.route('**/api/agents', (route) =>
+      json(route, {
+        agents: [{ name: 'hermes', installed_at: '2026-05-25T12:00:00Z', status: 'broken' }],
+        count: 1,
+      }),
+    )
     await page.route('**/api/agents/hermes/personas', (route) => json(route, MOCK_PERSONAS))
-    await page.route('**/api/agent/approvals', (route) => json(route, MOCK_APPROVALS_EMPTY))
-    await page.route('**/api/agents/skills', (route) =>
-      json(route, { skills: [], count: 0 }),
-    )
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      json(route, { writes: 0 }),
-    )
-  }
-
-  test('MCP pip shows degraded when one bundled server stopped', async ({ page }) => {
-    await _seedCommon(page)
-    await page.route('**/api/mcp/servers', (route) => json(route, MOCK_MCP_DEGRADED))
     await page.goto('/')
-    const mcp = page.locator('[data-testid="sidebar-agent-mcp"]')
-    await expect(mcp).toContainText('degraded', { timeout: FIVE_S })
+    const statusRow = page.locator('[data-testid="sidebar-agent-block"] .row').first()
+    await expect(statusRow.locator('.v')).toHaveClass(/down/)
+    await expect(statusRow.locator('.v')).toContainText('broken')
   })
 
-  test('MCP pip shows down when bundled server failed', async ({ page }) => {
-    await _seedCommon(page)
-    await page.route('**/api/mcp/servers', (route) => json(route, MOCK_MCP_DOWN))
+  test('unknown status renders warn (amber) dot with em-dash label', async ({ page }) => {
+    await page.route('**/api/agents', (route) =>
+      json(route, {
+        agents: [{ name: 'hermes', installed_at: '2026-05-25T12:00:00Z', status: 'starting' }],
+        count: 1,
+      }),
+    )
+    await page.route('**/api/agents/hermes/personas', (route) => json(route, MOCK_PERSONAS))
     await page.goto('/')
-    const mcp = page.locator('[data-testid="sidebar-agent-mcp"]')
-    await expect(mcp).toContainText('down', { timeout: FIVE_S })
+    const statusRow = page.locator('[data-testid="sidebar-agent-block"] .row').first()
+    await expect(statusRow.locator('.v')).toHaveClass(/warn/)
+    await expect(statusRow.locator('.v')).toHaveText('—')
   })
 })
 
-test.describe('SidebarAgentBlock — missing endpoints degrade gracefully', () => {
-  test('renders em-dash for skills + memory when endpoints 404', async ({ page }) => {
+test.describe('SidebarAgentBlock — profile row is conditional', () => {
+  test('omits the profile row when no active persona', async ({ page }) => {
     await page.route('**/api/agents', (route) => json(route, MOCK_AGENTS_INSTALLED))
-    await page.route('**/api/agents/hermes/personas', (route) => json(route, MOCK_PERSONAS))
-    await page.route('**/api/agent/approvals', (route) => json(route, MOCK_APPROVALS_EMPTY))
-    // Skills + memory 404 — sidebar must NOT crash; renders "—".
-    await page.route('**/api/agents/skills', (route) =>
-      route.fulfill({
-        status: 404,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          error: { code: 'route.not_found', message: 'unknown route', details: {} },
-        }),
-      }),
+    // active=null and no matching persona → personaName resolves to null,
+    // so the profile row must NOT render.
+    await page.route('**/api/agents/hermes/personas', (route) =>
+      json(route, { agent_id: 'hermes', active: null, personas: [] }),
     )
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      route.fulfill({
-        status: 404,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          error: { code: 'route.not_found', message: 'unknown route', details: {} },
-        }),
-      }),
-    )
-    await page.route('**/api/memory/list*', (route) =>
-      route.fulfill({
-        status: 404,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          error: { code: 'route.not_found', message: 'unknown route', details: {} },
-        }),
-      }),
-    )
-    await page.route('**/api/mcp/servers', (route) => json(route, MOCK_MCP_GREEN))
-
-    // Capture console warns so we can assert the one-shot
-    // hal0.sidebar.endpoint_missing fires.
-    const warnings: string[] = []
-    page.on('console', (msg) => {
-      if (msg.type() === 'warning') warnings.push(msg.text())
-    })
-
     await page.goto('/')
     const block = page.locator('[data-testid="sidebar-agent-block"]')
     await expect(block).toBeVisible({ timeout: FIVE_S })
-
-    // Skills + memory rows render the em-dash sentinel, NOT a number.
-    await expect(page.locator('[data-testid="sidebar-agent-skills"]')).toHaveText('—')
-    await expect(page.locator('[data-testid="sidebar-agent-memory"]')).toHaveText('—')
-
-    // At least one endpoint_missing warning emitted. (We don't check
-    // exact count because retries + first-call timing varies; the
-    // important thing is that SOMETHING surfaces in the console.)
-    await page.waitForTimeout(500)
-    expect(warnings.some((w) => w.includes('hal0.sidebar.endpoint_missing'))).toBe(true)
-  })
-})
-
-test.describe('SidebarAgentBlock — approvals badge zero-suppression', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.route('**/api/agents', (route) => json(route, MOCK_AGENTS_INSTALLED))
-    await page.route('**/api/agents/hermes/personas', (route) => json(route, MOCK_PERSONAS))
-    await page.route('**/api/agent/approvals', (route) => json(route, MOCK_APPROVALS_EMPTY))
-    await page.route('**/api/agents/skills', (route) =>
-      json(route, { skills: new Array(4).fill({ name: 's' }), count: 4 }),
-    )
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      json(route, { writes: 12 }),
-    )
-    await page.route('**/api/mcp/servers', (route) => json(route, MOCK_MCP_GREEN))
-  })
-
-  test('renders bare "0" without red badge when no approvals pending', async ({ page }) => {
-    await page.goto('/')
-    const approvals = page.locator('[data-testid="sidebar-agent-approvals"]')
-    await expect(approvals).toBeVisible({ timeout: FIVE_S })
-    // No `.badge` chip when count is 0; just a plain "0".
-    await expect(approvals.locator('.badge')).toHaveCount(0)
-    await expect(approvals).toHaveText('0')
+    // Status row + Open-chat button still render; profile row absent.
+    await expect(page.locator('[data-testid="sidebar-agent-persona"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="sidebar-agent-open-chat"]')).toBeVisible()
   })
 })

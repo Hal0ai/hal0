@@ -38,27 +38,37 @@ export const MOCK_DATA = {
   },
 
   /** Subset of slots the v3 dash seeds — enough to drive `/slots` group
-   *  rendering (chat / embed / voice / img + NPU rollup). */
+   *  rendering (chat / embed / voice / img + NPU rollup).
+   *
+   *  `mem_mb` is the BE-METRICS contract field (real per-slot resident
+   *  model + KV memory) the memory-map now attributes per slot; `type`
+   *  + `group` drive grouped rendering + the endpoint-widget modality
+   *  breakdown. Kept on every mock slot so apiMock-driven specs exercise
+   *  the same code paths as the in-bundle seed. */
   slots: [
     {
       name: 'primary', type: 'llm', device: 'gpu-rocm',
       model: 'qwen3.6-27b-mtp-q4_k_m', model_id: 'qwen3.6-27b-mtp',
       group: 'chat', state: 'serving', port: 8092, isDefault: true,
+      mem_mb: 18_400,
     },
     {
       name: 'agent', type: 'llm', device: 'npu',
       model: 'gemma3:1b', model_id: 'gemma3-1b-npu',
       group: 'npu', state: 'ready', port: 8093, isDefault: true,
+      mem_mb: 1_100,
     },
     {
       name: 'coder', type: 'llm', device: 'gpu-rocm',
       model: 'qwen3-coder-30b-a3b', model_id: 'qwen3-coder-30b',
       group: 'chat', state: 'idle', port: 8094,
+      mem_mb: 17_900,
     },
     {
       name: 'embed', type: 'embedding', device: 'gpu-rocm',
       model: 'nomic-embed-text-v1.5', model_id: 'nomic-v1.5',
       group: 'embed', state: 'ready', port: 8095, isDefault: true,
+      mem_mb: 540,
     },
   ],
 

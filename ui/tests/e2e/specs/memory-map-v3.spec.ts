@@ -64,7 +64,11 @@ test.describe('Memory map — sidebar', () => {
     await expect(card.locator('a', { hasText: 'Configure' })).toBeVisible()
   })
 
-  test('configured — host teaser line above the bar', async ({ page }) => {
+  test('configured — sidebar shows MODEL memory only, no host section', async ({ page }) => {
+    // wave-1: host/Proxmox pressure moved OUT of the sidebar variant and
+    // into the EXPANDED variant's separate .memmap-host-section. The
+    // sidebar now renders model memory vs the unified pool only — no host
+    // teaser, no tenant bar, no "host free".
     await mockStatsHardware(page, {
       configured: true,
       ok: true,
@@ -92,10 +96,16 @@ test.describe('Memory map — sidebar', () => {
     })
     await page.goto('/#dashboard')
     const card = page.locator('.memmap-sidebar')
-    await expect(card).toContainText('host')
-    await expect(card).toContainText('tenants')
-    await expect(card).toContainText('host free')
+    await expect(card).toBeVisible()
+    // Primary model-memory framing is present.
+    await expect(card).toContainText('model memory')
+    // Configured-but-not-detected: the amber nudge must NOT appear.
     await expect(card).not.toContainText('Hosted on Proxmox')
+    // Host pressure surface is EXPANDED-only — absent from the sidebar.
+    await expect(card.locator('.memmap-host-section')).toHaveCount(0)
+    await expect(card.locator('.memmap-bar-host')).toHaveCount(0)
+    await expect(card).not.toContainText('host pressure')
+    await expect(card).not.toContainText('free on host')
   })
 
   test('headroom labelled "pool" on bare-metal', async ({ page }) => {
@@ -159,8 +169,15 @@ test.describe('Memory map — expanded', () => {
     await page.goto('/#dashboard')
     const card = page.locator('.memmap-expanded')
     await expect(card).toBeVisible()
-    await expect(card).toContainText('host pool')
-    await expect(card).toContainText('inside this hal0')
-    await expect(card).toContainText('halodev')
+    // wave-1: expanded variant has TWO sections — primary "model memory"
+    // (vs the unified pool) and a separate ".memmap-host-section" for
+    // host/Proxmox pressure ("host pressure" / "free on host").
+    await expect(card).toContainText('model memory')
+    const hostSection = card.locator('.memmap-host-section')
+    await expect(hostSection).toBeVisible()
+    await expect(hostSection).toContainText('host pressure')
+    await expect(hostSection).toContainText('free on host')
+    // Tenant legend (excluding self) lists halodev.
+    await expect(hostSection).toContainText('halodev')
   })
 })
