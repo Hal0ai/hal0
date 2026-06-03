@@ -103,10 +103,15 @@ test.describe('SidebarAgentBlock — populated', () => {
     await expect(page.locator('[data-testid="sidebar-agent-mcp"]')).toHaveCount(0)
   })
 
-  test('Open chat button navigates to #agent', async ({ page }) => {
+  test('Memory CTA navigates to #agent + inline TUI hint present', async ({ page }) => {
+    // v0.4: web chat is gone — the CTA is now "Memory →" (still onGo("agent"))
+    // and an inline `hal0 chat` terminal hint sits below it.
     await page.goto('/')
-    const cta = page.locator('[data-testid="sidebar-agent-open-chat"]')
+    const cta = page.locator('[data-testid="sidebar-agent-open-memory"]')
     await expect(cta).toBeVisible({ timeout: FIVE_S })
+    await expect(cta).toContainText('Memory')
+    const hint = page.locator('[data-testid="sidebar-agent-tui-hint"]')
+    await expect(hint).toContainText('hal0 chat')
     await cta.click()
     await expect(page).toHaveURL(/#agent/)
   })
@@ -173,8 +178,8 @@ test.describe('SidebarAgentBlock — profile row is conditional', () => {
     await page.goto('/')
     const block = page.locator('[data-testid="sidebar-agent-block"]')
     await expect(block).toBeVisible({ timeout: FIVE_S })
-    // Status row + Open-chat button still render; profile row absent.
+    // Status row + Memory CTA still render; profile row absent.
     await expect(page.locator('[data-testid="sidebar-agent-persona"]')).toHaveCount(0)
-    await expect(page.locator('[data-testid="sidebar-agent-open-chat"]')).toBeVisible()
+    await expect(page.locator('[data-testid="sidebar-agent-open-memory"]')).toBeVisible()
   })
 })

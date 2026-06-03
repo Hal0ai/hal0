@@ -1,7 +1,8 @@
 /**
  * dashboard-v3 — root `#dashboard` route renders the topbar, sidebar,
- * hardware section, and snapshot strip. Chat now lives at `#chat`; the
- * dashboard is the system-overview page.
+ * hardware section, and snapshot strip. The dashboard is the
+ * system-overview page. (v0.4: the standalone web-chat `#chat` route was
+ * removed — chat lives in the `hal0 chat` TUI.)
  */
 import { test, expect } from '../fixtures/apiMock'
 
