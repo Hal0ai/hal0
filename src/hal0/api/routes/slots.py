@@ -339,6 +339,21 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
             for k, v in extra.items():
                 entry.setdefault(k, v)
 
+    # Stamp per-slot resident memory (model weights + KV-cache estimate) so the
+    # dashboard memory map (W4) attributes a real footprint per slot. Only
+    # resident slots get a non-zero row; everything else reads 0. Never let a
+    # memory-probe failure break the slots list.
+    try:
+        from hal0.slots.capacity import build_per_slot
+
+        registry = getattr(request.app.state, "model_registry", None)
+        per_slot_mem = await build_per_slot(real_slots, registry=registry)
+    except Exception:
+        per_slot_mem = {}
+    for entry in real_entries:
+        row = per_slot_mem.get(str(entry["name"]))
+        entry["mem_mb"] = round(float(row.get("mem_mb", 0) or 0), 1) if row else 0
+
     synthetic = _synthesize_slots_from_upstreams(request)
     merged: list[dict[str, Any]] = list(real_entries)
     for entry in synthetic:
@@ -877,8 +892,19 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
 
 
 @router.get("/capacity")
-async def slot_capacity() -> dict[str, object]:
-    raise NotImplementedYet("slot_capacity: Phase 1")
+async def slot_capacity(request: Request) -> dict[str, object]:
+    """Per-slot resident memory for the dashboard memory map.
+
+    Returns ``{"per_slot": {slot_name: {vram_mb, ram_mb, mem_mb, state,
+    model_id}}}`` for slots in a resident state. Mirrors the ``per_slot``
+    block also stamped onto ``GET /api/stats/hardware``.
+    """
+    from hal0.slots.capacity import build_per_slot
+
+    sm = _get_slot_manager(request)
+    slots = await sm.list()
+    registry = getattr(request.app.state, "model_registry", None)
+    return {"per_slot": await build_per_slot(slots, registry=registry)}
 
 
 # ── per-slot ───────────────────────────────────────────────────────────────

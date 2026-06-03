@@ -1281,6 +1281,40 @@ a { color: inherit; text-decoration: none; }
   margin-left: 6px;
 }
 
+/* memory map: host-pressure section (expanded variant only) — clearly
+   separated from the model-memory map so the two aren't conflated. */
+.memmap-host-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--bg-4);
+}
+.memmap-host-section > .memmap-h:first-child {
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
+/* loading skeletons — replace stub-on-load placeholders with a neutral
+   shimmer so no fake data ever flashes before the real hooks resolve. */
+.slot-skeleton {
+  border: 1px solid var(--bg-4);
+  border-radius: 8px;
+  min-height: 96px;
+  background: linear-gradient(
+    100deg,
+    var(--bg-3) 30%,
+    var(--bg-4) 50%,
+    var(--bg-3) 70%
+  );
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.3s ease-in-out infinite;
+}
+@keyframes skel-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 /* health */
 .health-row {
   display: flex;

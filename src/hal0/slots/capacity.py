@@ -83,6 +83,138 @@ def _read_meminfo() -> tuple[float, float]:
     return total_kib / 1024.0, avail_kib / 1024.0
 
 
+# States in which a slot's weights are genuinely resident in GTT/VRAM.
+# PULLING/STARTING haven't loaded; OFFLINE/UNLOADING/ERROR don't hold weights.
+_RESIDENT_STATES = frozenset({"warming", "ready", "serving", "idle"})
+
+# Default context window assumed when neither the model nor the slot config
+# pins one. Matches the hal0 lemond ctx_size baseline (memory
+# ``hal0_lemonade_ctx_size_lives_in_config_json``).
+_DEFAULT_CTX_TOKENS = 65536
+
+# Coarse KV-cache footprint estimate: bytes per context token, summed across
+# K and V. Real KV size depends on n_layers * n_kv_heads * head_dim * dtype,
+# which we don't have without parsing GGUF metadata per slot. 0.5 MiB / 1k
+# tokens is a deliberately conservative midpoint for a quantised mid-size
+# model (e.g. ~14-25B at Q4/Q5) -- it keeps the reported resident figure in
+# the right order of magnitude (tens of GB for a 25B model at 64k ctx)
+# without claiming false precision. The model file size dominates the total.
+_KV_MIB_PER_1K_TOKENS = 0.5
+
+
+def _kv_estimate_mb(ctx_tokens: int) -> float:
+    """Best-effort KV-cache size in MiB for a given context window."""
+    if ctx_tokens <= 0:
+        return 0.0
+    return (ctx_tokens / 1000.0) * _KV_MIB_PER_1K_TOKENS
+
+
+def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
+    """Resolve the effective context window (tokens) for a model.
+
+    Reads, in priority order: ``defaults.context_size`` (the launcher's
+    pinned n_ctx), ``metadata.context_length`` (GGUF arch max), falling
+    back to :data:`_DEFAULT_CTX_TOKENS`.
+    """
+    if not isinstance(model_meta, dict):
+        return _DEFAULT_CTX_TOKENS
+    defaults = model_meta.get("defaults")
+    if isinstance(defaults, dict):
+        cs = defaults.get("context_size")
+        if isinstance(cs, (int, float)) and cs > 0:
+            return int(cs)
+    meta = model_meta.get("metadata")
+    if isinstance(meta, dict):
+        cl = meta.get("context_length")
+        if isinstance(cl, (int, float)) and cl > 0:
+            return int(cl)
+    return _DEFAULT_CTX_TOKENS
+
+
+async def build_per_slot(
+    slots: list[Any],
+    *,
+    registry: Any | None = None,
+    flm_catalog: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Build the ``per_slot`` memory map for loaded slots.
+
+    For every slot in a resident state (:data:`_RESIDENT_STATES`) with a
+    model assigned, returns a row::
+
+        {slot_name: {"vram_mb", "ram_mb", "mem_mb", "state", "model_id"}}
+
+    where ``mem_mb`` (== ``vram_mb`` on UMA) is the best-estimate resident
+    footprint: model file size (from the registry, or the FLM footprint
+    for NPU tags) plus a coarse KV-cache estimate scaled by the model's
+    context window. A loaded 25B Q5 model therefore reports ~tens of GB
+    rather than 0 — the number the dashboard memory map needs.
+
+    Non-resident slots are omitted so the caller can render them as
+    holding no memory. Never raises: a registry miss yields a 0-size row
+    (still keyed, so the slot shows as loaded-but-unsized rather than
+    vanishing).
+
+    ``flm_catalog`` (``{tag: entry}``) may be supplied by the caller to
+    avoid re-probing FLM; when omitted it is built lazily on first NPU
+    slot encountered.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for s in slots:
+        state = str(getattr(s, "state", "") or "").lower()
+        if state not in _RESIDENT_STATES:
+            continue
+        model_id = getattr(s, "model_id", None)
+        if not model_id:
+            continue
+        meta = getattr(s, "metadata", None) or {}
+        provider = str(meta.get("provider") or "").lower()
+        backend = str(getattr(s, "backend", None) or meta.get("backend") or "").lower()
+        is_npu = provider == "flm" or backend in ("flm", "npu")
+
+        model_mb = 0.0
+        ctx_meta: dict[str, Any] | None = None
+        if is_npu:
+            if flm_catalog is None:
+                try:
+                    from hal0.providers.flm import flm_served_models
+
+                    flm_catalog = {e["tag"]: e for e in flm_served_models()}
+                except Exception:
+                    flm_catalog = {}
+            entry = flm_catalog.get(model_id)
+            if entry:
+                footprint_gb = entry.get("footprint_gb") or 0.0
+                if footprint_gb > 0:
+                    # FLM footprint already includes runtime + KV; use as-is.
+                    out[s.name] = {
+                        "vram_mb": round(footprint_gb * 1024, 1),
+                        "ram_mb": 0.0,
+                        "mem_mb": round(footprint_gb * 1024, 1),
+                        "state": state,
+                        "model_id": model_id,
+                    }
+                    continue
+                model_mb = (entry.get("size_bytes") or 0) / (1024 * 1024)
+        if model_mb <= 0 and registry is not None:
+            try:
+                m = registry.get(model_id)
+                model_mb = (getattr(m, "size_bytes", 0) or 0) / (1024 * 1024)
+                ctx_meta = m.model_dump() if hasattr(m, "model_dump") else None
+            except Exception:
+                model_mb = 0.0
+        kv_mb = _kv_estimate_mb(_ctx_tokens_for(ctx_meta))
+        resident_mb = round(model_mb + kv_mb, 1)
+        out[s.name] = {
+            "vram_mb": resident_mb,
+            "ram_mb": 0.0,
+            "mem_mb": resident_mb,
+            "state": state,
+            "model_id": model_id,
+        }
+    return out
+
+
 @dataclass
 class CapacitySnapshot:
     """Point-in-time view of system and slot capacity.
@@ -221,4 +353,5 @@ class CapacitySnapshot:
 __all__ = [
     "CapacityProbeError",
     "CapacitySnapshot",
+    "build_per_slot",
 ]

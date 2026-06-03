@@ -63,33 +63,27 @@ function SnapshotStrip({ slots, onGo }) {
 
 
 // ─── Memory / health side cards ───
+//
+// Health rows are driven by real hooks only — no HAL0_DATA seeds. Each
+// service that lacks a live data source has been removed rather than
+// rendered with a fabricated "up · vX" line. Today the only wired signal
+// is lemond (via useLemondRollup); add real rows here as hooks land.
 function HealthCard() {
+  const lemond = useLemondRollup();
+  const upCls = lemond.status === "up" ? "up" : lemond.status === "down" ? "down" : "";
+  const verb = lemond.status === "up" ? "up" : lemond.status === "down" ? "down" : "connecting";
   return (
     <div className="side-card">
       <div className="side-card-h">
         <span>Health</span>
-        <span className="right mono">poll 287ms</span>
       </div>
       <div className="side-card-b" style={{paddingTop: 4, paddingBottom: 4}}>
         <div className="health-row">
           <span className="k">lemond</span>
-          <span className="v up"><span className="dot" />up · {HAL0_DATA.lemond.version}</span>
-        </div>
-        <div className="health-row">
-          <span className="k">hal0-api</span>
-          <span className="v up"><span className="dot" />up · v0.2.1</span>
-        </div>
-        <div className="health-row">
-          <span className="k">flm:npu</span>
-          <span className="v up"><span className="dot" />trio · 0.9.42</span>
-        </div>
-        <div className="health-row">
-          <span className="k">cognee</span>
-          <span className="v up"><span className="dot" />2,847 records</span>
-        </div>
-        <div className="health-row">
-          <span className="k">disk</span>
-          <span className="v">412 GB free</span>
+          <span className={"v " + upCls}>
+            <span className="dot" />
+            {verb}{lemond.status === "up" && lemond.version !== "—" ? ` · ${lemond.version}` : ""}
+          </span>
         </div>
       </div>
     </div>
@@ -263,14 +257,43 @@ function HwRow({ k, v, mono, sub }) {
 // + memory map + throughput + health. When /api/slots returns an empty
 // list (fresh install, no bundle picked), we render a zero-slots empty
 // state pointing at FirstRun instead.
-function DashboardView({ slots: slotsProp, onGo, showHero, onDismissHero }) {
+function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
   const slotsQuery = useSlots();
-  const slots = (slotsQuery.data && slotsQuery.data.length > 0) ? slotsQuery.data : slotsProp;
+  // Single source of truth: the hook. The `slots` prop (HAL0_DATA seed
+  // from main.jsx) is intentionally ignored so no fake slots flash on
+  // load — we render a loading skeleton until the query resolves, then
+  // either the real list or a confirmed-empty state.
+  const slots = slotsQuery.data || [];
   const lemond = useLemondRollup();
+  const slotsLoading = slotsQuery.isLoading && !slotsQuery.data;
   // Real zero-slots detection: only when /api/slots has resolved to a
-  // confirmed empty array. Still-loading (undefined) keeps showing the
-  // normal dashboard against fixtures.
+  // confirmed empty array. Still-loading (undefined) shows the skeleton.
   const noSlotsConfigured = Array.isArray(slotsQuery.data) && slotsQuery.data.length === 0;
+
+  // Loading skeleton — no stub-on-load slot seeds; wait for real data.
+  if (slotsLoading) {
+    return (
+      <div className="view">
+        <div className="dash">
+          <div className="dash-main">
+            <HardwareSection />
+            <HardwareMemorySection />
+          </div>
+          <div className="dash-side">
+            <div className="snap" aria-busy="true">
+              <div className="snap-head">
+                <span>Slot snapshot</span>
+                <span className="ct mono dim">loading…</span>
+              </div>
+            </div>
+            <MemoryMap variant="sidebar" />
+            <ThroughputCard />
+            <HealthCard />
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (noSlotsConfigured) {
     return (
       <div className="view">

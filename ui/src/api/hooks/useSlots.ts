@@ -60,6 +60,11 @@ export interface Slot {
   pid?: number
   metrics: SlotMetrics
   spark?: number[]
+  /** Resident model + KV-cache memory in MiB while the slot is loaded
+   *  (state ready/serving/idle/warming). 0/absent when the slot holds no
+   *  model in memory. Source of truth for the memory-map attribution
+   *  (BE-METRICS contract). Prefer this over equal-split GTT division. */
+  mem_mb?: number
   /** Wall-clock epoch (seconds) of the most recent request served by
    *  this slot. ``null``/undefined means hal0-api has not seen a request
    *  for this slot since startup. Used by the slots view to render the

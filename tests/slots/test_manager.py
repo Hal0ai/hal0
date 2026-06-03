@@ -521,7 +521,12 @@ async def test_update_config_backend_invalidates_state_extras(
 
     sm = SlotManager()
     snap_before = await sm.status("primary")
-    assert snap_before.backend == "rocm"
+    # W3: the base ``backend`` field is now derived from the authoritative
+    # TOML ``device`` (what the next /v1/load will actually request), not the
+    # stale adopted ``extra.backend`` mirror — the primary fixture's device is
+    # gpu-vulkan. The adopted/runtime value remains visible via the separate
+    # ``actual_backend`` lemonade enrichment.
+    assert snap_before.backend == "vulkan"
 
     snap_after = await sm.update_config("primary", {"backend": "vulkan"})
     # The snapshot returned from update_config() must reflect the new

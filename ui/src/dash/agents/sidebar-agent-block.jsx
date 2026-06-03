@@ -5,21 +5,28 @@
 // the Agents page Overview tab — the chat surface (PR-10) will take
 // over the main pane.
 //
-// Render contract (master plan §4 PR-6):
-//   - service status dot (green / amber / red)
-//   - active persona name (click no-op for v0.3 — picker lands in PR-8)
-//   - approvals pending count (red badge if > 0)
-//   - skills count
-//   - memory writes count
-//   - MCP server status pip (rolls up hal0-memory + hal0-admin)
-//   - [Open chat] → onGo("agent") (the dashboard's agent route)
+// Render contract (W9 — honest minimal surface):
+//   - service health dot (green when running, amber when unknown, red
+//     when genuinely broken/down)
+//   - agent name + status label
+//   - active persona/profile name (from /api/agents/<id>/personas)
+//   - [Open chat] → onGo("agent") (the dashboard's agent route), tooltip
+//     notes the `hal0 chat` TUI command as a terminal fallback
 //   - empty state when no agent installed: "Install Hermes" CTA → docs
+//
+// W9 simplification: the prior version rendered approvals / skills /
+// memory-writes / MCP-pip rows. Several leaned on endpoints that often
+// 404 and rendered as misleading "—" placeholders — and they sat next
+// to a "broken" dot that was itself a false negative (driver.status()
+// keyed off an env-file that may never exist even while the agent is
+// up; fixed in J1). This widget is now a compact, honest health
+// indicator only — it binds ONLY to fields the payload actually carries.
 //
 // Data:
 //   useSidebarAgentRollup() (ui/src/api/hooks/useAgents.ts) — TanStack
-//   Query, 5s refetch + revalidate-on-focus. Missing endpoints render
-//   as "—" with a one-shot console.warn ("hal0.sidebar.endpoint_missing")
-//   so the operator sees the gap on the network tab without console spam.
+//   Query, 5s refetch + revalidate-on-focus. Fields used: agentStatus
+//   (from /api/agents `status`, truthful post-J1), agentId, personaName
+//   (from /api/agents/<id>/personas). No invented fields.
 //
 // Mount point:
 //   chrome.jsx Sidebar() — between `<div className="sb-spacer" />` and
@@ -44,14 +51,13 @@ const _useSidebarAgentRollup = () => {
     agentId: null,
     agentStatus: "not_installed",
     personaName: null,
-    approvalsPending: 0,
-    skillsCount: null,
-    memoryWrites: null,
-    mcpPip: { state: "unknown", servers: [] },
     loading: true,
   };
 };
 
+// W9: dot tone is honest — green only when the agent is actually running
+// (driver.status() now probes systemd + the agent port, post-J1), amber
+// for an indeterminate "unknown", red for a genuine "broken".
 const STATUS_LABEL = {
   running: "running",
   broken: "broken",
@@ -59,39 +65,13 @@ const STATUS_LABEL = {
   not_installed: "not installed",
 };
 
-const MCP_PIP_LABEL = {
-  green: "ok",
-  yellow: "degraded",
-  red: "down",
-  unknown: "—",
-};
-
-const MCP_PIP_COLOR = {
-  green: "var(--ok)",
-  yellow: "var(--warn)",
-  red: "var(--err)",
-  unknown: "var(--fg-4)",
-};
-
-function _fmtCount(n) {
-  if (n == null) return "—";
-  if (typeof n !== "number") return String(n);
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-}
+// Terminal fallback shown in the Open-chat tooltip when there's no
+// in-app deep link beyond the dashboard's own agent route.
+const TUI_HINT = "Open the agent pane — or run `hal0 chat` in a terminal";
 
 function SidebarAgentBlock({ onGo }) {
   const rollup = _useSidebarAgentRollup();
-  const {
-    installed,
-    agentStatus,
-    personaName,
-    approvalsPending,
-    skillsCount,
-    memoryWrites,
-    mcpPip,
-    loading,
-  } = rollup;
+  const { installed, agentId, agentStatus, personaName, loading } = rollup;
 
   // Loading state: keep skeleton minimal — sidebar must NOT layout-shift
   // when the first 5s tick lands. Render the same row stack with em-dashes
@@ -133,14 +113,14 @@ function SidebarAgentBlock({ onGo }) {
     );
   }
 
+  // Honest dot tone: green up only for a truly running agent, red down
+  // for a genuine broken state. "unknown" gets the amber neutral class.
   const statusClass =
     agentStatus === "running"
       ? "up"
       : agentStatus === "broken"
         ? "down"
-        : "";
-
-  const approvalsBadgeClass = approvalsPending > 0 ? "v warn" : "v";
+        : "warn";
 
   return (
     <div
@@ -148,65 +128,32 @@ function SidebarAgentBlock({ onGo }) {
       data-testid="sidebar-agent-block"
     >
       <div className="row">
-        <span className="k">agent</span>
-        <span className={"v " + statusClass}>
+        <span className="k">{agentId ?? "agent"}</span>
+        <span
+          className={"v " + statusClass}
+          title={`agent ${agentId ?? ""} — ${STATUS_LABEL[agentStatus] ?? "unknown"}`}
+        >
           <span className="dot" />
           {STATUS_LABEL[agentStatus] ?? "—"}
         </span>
       </div>
-      <div className="row">
-        <span className="k">persona</span>
-        <span
-          className="v"
-          title={personaName ?? "no persona active"}
-          data-testid="sidebar-agent-persona"
-        >
-          {personaName ?? "—"}
-        </span>
-      </div>
-      <div className="ln" />
-      <div className="row">
-        <span className="k">approvals</span>
-        <span
-          className={approvalsBadgeClass}
-          data-testid="sidebar-agent-approvals"
-        >
-          {approvalsPending > 0 && <span className="badge num">{approvalsPending}</span>}
-          {approvalsPending === 0 && <b>0</b>}
-        </span>
-      </div>
-      <div className="row">
-        <span className="k">skills</span>
-        <span className="v" data-testid="sidebar-agent-skills">
-          {skillsCount != null ? <b>{_fmtCount(skillsCount)}</b> : "—"}
-        </span>
-      </div>
-      <div className="row">
-        <span className="k">memory</span>
-        <span className="v" data-testid="sidebar-agent-memory">
-          {memoryWrites != null ? <b>{_fmtCount(memoryWrites)}</b> : "—"}
-        </span>
-      </div>
-      <div className="row">
-        <span className="k">mcp</span>
-        <span
-          className="v"
-          style={{ color: MCP_PIP_COLOR[mcpPip.state] ?? "var(--fg-4)" }}
-          title={
-            mcpPip.servers.length
-              ? mcpPip.servers.map((s) => `${s.name}: ${s.state}`).join(" · ")
-              : "no MCP servers registered"
-          }
-          data-testid="sidebar-agent-mcp"
-        >
-          <span className="dot" />
-          {MCP_PIP_LABEL[mcpPip.state] ?? "—"}
-        </span>
-      </div>
+      {personaName && (
+        <div className="row">
+          <span className="k">profile</span>
+          <span
+            className="v"
+            title={`active profile: ${personaName}`}
+            data-testid="sidebar-agent-persona"
+          >
+            {personaName}
+          </span>
+        </div>
+      )}
       <div className="ln" />
       <button
         className="nudge sb-status-cta"
         onClick={() => onGo && onGo("agent")}
+        title={TUI_HINT}
         data-testid="sidebar-agent-open-chat"
       >
         Open chat →
@@ -222,19 +169,6 @@ function SidebarAgentBlock({ onGo }) {
 //     the component while still respecting the design-token palette.
 const _sidebarAgentBlockCss = `
 .sb-status-agent .row .v.warn { color: var(--warn); }
-.sb-status-agent .row .v .badge {
-  background: var(--err-soft, var(--warn-soft));
-  color: var(--err, var(--warn));
-  padding: 1px 7px;
-  border-radius: 9999px;
-  font-family: var(--jbm);
-  font-size: 10.5px;
-  font-weight: 500;
-}
-.sb-status-agent .row .v.warn .badge {
-  background: var(--err, var(--warn));
-  color: var(--bg);
-}
 .sb-status-empty .empty-cta {
   display: flex;
   justify-content: center;

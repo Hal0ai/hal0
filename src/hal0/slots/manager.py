@@ -826,14 +826,18 @@ class SlotManager:
                 adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
                 if adopted is not None:
                     return adopted
+            # W3: surface the EFFECTIVE backend (derived from ``device``),
+            # not the stale legacy ``backend`` TOML field — see
+            # ``_cfg_effective_backend``.
+            eff_backend = _cfg_effective_backend(cfg) if cfg else None
             return Slot(
                 name=slot_name,
                 state=SlotState.OFFLINE,
                 port=int(cfg.get("port") or 0) if cfg else 0,
-                backend=cfg.get("backend") if cfg else None,
+                backend=eff_backend,
                 metadata={
                     "provider": cfg.get("provider"),
-                    "backend": cfg.get("backend"),
+                    "backend": eff_backend,
                 }
                 if cfg
                 else {},
@@ -865,28 +869,39 @@ class SlotManager:
                 adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
                 if adopted is not None:
                     return adopted
-        # Re-hydrate the top-level backend from the slot's TOML when the
-        # state.json record predates the extras-carry change (older state
-        # files were written without ``extra.backend``). The dashboard's
-        # SlotCard chips key off ``slot.backend`` directly — without this
-        # they'd show 'slot' (unknown) until the user re-loaded the slot.
-        backend = rec.extra.get("backend")
+        # W3 truth fix: the displayed ``backend`` must equal the EFFECTIVE
+        # backend that will actually run — i.e. the token derived from the
+        # slot's authoritative ``device`` field (which flows through to
+        # Lemonade's per-load ``llamacpp_backend`` override). We deliberately
+        # do NOT trust ``rec.extra.get("backend")`` here: that mirror is
+        # seeded at create-time and drifts the instant a user flips backend
+        # via POST /api/slots/{name}/backend (which rewrites ``device`` only)
+        # or whenever it predates the device migration. Deriving from the
+        # live TOML ``device`` means declared-vs-actual can never silently
+        # thrash to a stale seeded default. Fall back to the carried extra
+        # only when the TOML is unreadable, so the chip degrades gracefully
+        # rather than showing 'unknown'.
+        cfg = await self._maybe_load_config(slot_name)
+        backend = _cfg_effective_backend(cfg) if cfg else None
         if backend is None:
-            cfg = await self._maybe_load_config(slot_name)
-            if cfg:
-                backend = cfg.get("backend")
+            backend = rec.extra.get("backend")
+        # Surface the truthful value in both the top-level field and the
+        # metadata mirror; override any stale ``extra.backend`` so the
+        # dashboard never reads the seeded token out of metadata.
+        meta = {
+            "updated_at": rec.updated_at,
+            "message": rec.message,
+            **rec.extra,
+        }
+        if backend:
+            meta["backend"] = backend
         return Slot(
             name=slot_name,
             state=observed,
             port=rec.port,
             model_id=rec.model_id,
             backend=backend,
-            metadata={
-                "updated_at": rec.updated_at,
-                "message": rec.message,
-                **rec.extra,
-                **({"backend": backend} if backend and "backend" not in rec.extra else {}),
-            },
+            metadata=meta,
             last_used_at=self._last_used.get(slot_name),
         )
 
@@ -1299,7 +1314,12 @@ class SlotManager:
             port=_cfg_port(cfg_dict),
             model_id=_model_default(cfg_dict) or None,
             extra={
-                "backend": cfg_dict.get("backend", "vulkan"),
+                # W3: seed the device-derived effective backend, not a
+                # hardcoded "vulkan" default — the slot's ``device`` is what
+                # will actually run. ``status()`` re-derives from the TOML on
+                # every read, so this is only a fallback, but keeping it
+                # honest avoids a transient lie before the first status call.
+                "backend": _cfg_effective_backend(cfg_dict) or "vulkan",
                 "provider": cfg_dict.get("provider", "lemonade"),
             },
             force=True,
@@ -1385,10 +1405,21 @@ class SlotManager:
         if rec is not None:
             mirrored = {"backend", "provider"}
             dirty = mirrored & updates.keys()
+            new_extra = dict(rec.extra)
+            for key in dirty:
+                new_extra[key] = cfg_dict.get(key)
+            # W3: a ``device`` change (the canonical path —
+            # POST /api/slots/{name}/backend rewrites ``device`` only, never
+            # ``backend``) must re-derive the mirrored ``extra.backend`` token
+            # too, or state.json keeps advertising the stale seeded backend
+            # forever. Without this the chip thrashes back to the old value
+            # on the next status read that trusts the mirror.
+            if "device" in updates:
+                eff = _cfg_effective_backend(cfg_dict)
+                if eff is not None:
+                    new_extra["backend"] = eff
+                    dirty = dirty | {"backend"}
             if dirty:
-                new_extra = dict(rec.extra)
-                for key in dirty:
-                    new_extra[key] = cfg_dict.get(key)
                 refreshed = SlotStateRecord(
                     name=rec.name,
                     state=rec.state,
@@ -2056,6 +2087,44 @@ def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
     if isinstance(model, dict):
         return str(model.get("default") or "")
     return ""
+
+
+def _cfg_effective_backend(cfg: SlotConfig | dict[str, Any]) -> str | None:
+    """Derive the EFFECTIVE runtime backend token from a slot config.
+
+    W3 truth fix: ``device`` is the v0.2 authoritative hardware-intent
+    field; ``LemonadeProvider.load`` maps it to the per-load
+    ``llamacpp_backend`` that Lemonade actually honors (overriding
+    config.json's global ``llamacpp.backend`` for that model). The
+    dashboard's SlotCard backend chip must therefore reflect what
+    ``device`` will run — NOT the legacy, never-resynced ``backend``
+    TOML field which drifts the moment a user flips backend (which only
+    rewrites ``device``).
+
+    Returns the normalized token ``rocm`` | ``vulkan`` | ``cpu`` |
+    ``flm`` (NPU → ``flm``), or ``None`` when neither ``device`` nor a
+    legacy ``backend`` is set so callers can fall through to "unknown".
+    Pure/synchronous — safe on the status hot path.
+    """
+    d = _cfg_to_dict(cfg)
+    device = d.get("device")
+    if not device:
+        # Legacy TOMLs may carry only ``backend``; promote it the same way
+        # SlotConfig._promote_backend_to_device would, so we still emit the
+        # device-derived token rather than the raw legacy string.
+        legacy = d.get("backend")
+        if not legacy:
+            return None
+        from hal0.config.schema import map_backend_to_device
+
+        device = map_backend_to_device(str(legacy))
+    # Reuse the single device→(recipe, llamacpp_backend) mapping so the
+    # displayed token can never diverge from what gets sent on /v1/load.
+    from hal0.providers.lemonade import device_to_backend
+
+    recipe, llamacpp_backend = device_to_backend(str(device))
+    # NPU → recipe="flm" with no llamacpp_backend; surface "flm".
+    return llamacpp_backend or (recipe if recipe == "flm" else None)
 
 
 __all__ = [

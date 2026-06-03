@@ -196,8 +196,22 @@ function Sidebar({ route, onGo }) {
 // delete button confuse operators) was wrong; `useSlots()` now filters
 // it out and we render it here as a read-only connection instead.
 // `useEndpoints()` shares the `['slots']` query cache, so no extra poll.
+//
+// W7: model count now accounts for ALL modalities, not just chat.
+// `advertised_models` on the synthetic endpoint only counts OpenAI-style
+// chat models served via /v1. Non-chat slots (embed/rerank/voice/img) are
+// counted from `useSlots()` by group. The primary figure is the OpenAI
+// chat count; a modality breakdown tooltip/subline shows the rest.
 function SidebarEndpointBlock() {
   const endpoints = useEndpoints().data || [];
+  const slots     = useSlots().data   || [];
+
+  // Count non-chat slots by modality group from the real slot list.
+  // Groups defined by inferSlotShape in useSlots.ts: chat/embed/voice/img.
+  const embedCount = slots.filter(s => s.group === "embed").length;
+  const voiceCount = slots.filter(s => s.group === "voice").length;
+  const imgCount   = slots.filter(s => s.group === "img").length;
+
   if (endpoints.length === 0) return null;
   return (
     <div className="sb-status sb-endpoints">
@@ -205,6 +219,17 @@ function SidebarEndpointBlock() {
       {endpoints.map((ep) => {
         const serving = ep.status === "serving";
         const url = String(ep.url || "").replace(/^https?:\/\//, "");
+        const chatCount = ep.advertised_models ?? 0;
+
+        // Build modality breakdown parts for non-chat slots.
+        const parts = [];
+        if (embedCount > 0) parts.push(`${embedCount} embed`);
+        if (voiceCount > 0) parts.push(`${voiceCount} voice`);
+        if (imgCount   > 0) parts.push(`${imgCount} img`);
+
+        // Tooltip: full breakdown including chat.
+        const breakdownTitle = [`${chatCount} chat`, ...parts].join(" · ");
+
         return (
           <div key={ep.name} className="sb-endpoint" style={{ marginBottom: 6 }}>
             <div className="row">
@@ -219,9 +244,16 @@ function SidebarEndpointBlock() {
                 <span className="v mono" title={ep.url}>{url}</span>
               </div>
             )}
-            <div className="row">
+            <div className="row" title={breakdownTitle}>
               <span className="k">models</span>
-              <span className="v"><b>{ep.advertised_models ?? 0}</b></span>
+              <span className="v">
+                <b>{chatCount}</b>
+                {parts.length > 0 && (
+                  <span style={{ color: "var(--fg-4)", fontSize: "0.85em", marginLeft: 4 }}>
+                    + {parts.join(" · ")}
+                  </span>
+                )}
+              </span>
             </div>
           </div>
         );
@@ -247,8 +279,8 @@ function SidebarStatusBlock({ onGo }) {
         <span className="v">{L.version}</span>
       </div>
       <div className="ln" />
-      <div className="row">
-        <span className="k">loaded</span>
+      <div className="row" title={`${L.loaded} model${L.loaded === 1 ? "" : "s"} resident in Lemonade / ${L.budget} max_loaded_models cap`}>
+        <span className="k">models loaded</span>
         <span className="v"><b>{L.loaded}</b>/{L.budget}</span>
       </div>
       {L.coresident && (
@@ -386,8 +418,8 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
             <span className="v num">{`${L.throughput} MB/s`}</span>
           </div>
         )}
-        <div className="foot-chip">
-          <span className="k">loaded</span>
+        <div className="foot-chip" title={`${L.loaded} model${L.loaded === 1 ? "" : "s"} resident in Lemonade / ${L.budget} max_loaded_models cap`}>
+          <span className="k">models loaded</span>
           <span className="v num">{L.loaded}/{L.budget}</span>
         </div>
         {L.coresident && (

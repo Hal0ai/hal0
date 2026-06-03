@@ -212,42 +212,49 @@ function SlotCard({
   const { type, device, model, state, isDefault, coresident, cpuOnly, metrics } = slot;
   const isLlm = type === "llm";
 
+  // Only render chips backed by a real slot-payload field. Dead chips
+  // (req/min, xrt, prec, p50/lat, sec/min, avg, res, maxDocs, voice) were
+  // never populated by the backend and always rendered blank/0 — dropped
+  // (W6). When a real metric is momentarily absent (slot offline) show
+  // an em-dash, never a fabricated 0.
+  //
+  // `size` is derived from metrics.mem (GB). Until BE-METRICS lands a
+  // real resident-size field per modality, only show it when mem > 0;
+  // otherwise em-dash rather than "0 MB".
+  const sizeChip = () => {
+    const memGb = typeof metrics.mem === "number" ? metrics.mem : 0;
+    if (!memGb || memGb <= 0) return { l: "size", v: "—", u: "" };
+    return memGb * 1024 < 1000
+      ? { l: "size", v: (memGb * 1024).toFixed(0), u: "MB" }
+      : { l: "size", v: memGb.toFixed(1), u: "GB" };
+  };
+  const num = (v, fallback = "—") =>
+    v === null || v === undefined || v === "" ? fallback : v;
+
   const metricsRow = (() => {
     if (type === "llm") return [
-      { l: "tok/s",  v: metrics.toks, u: "", spark: slot.spark },
+      { l: "tok/s",  v: num(metrics.toks, 0), u: "", spark: slot.spark },
       { l: "ttft",   v: metrics.ttft ? metrics.ttft : "—", u: metrics.ttft ? "ms" : "" },
-      { l: "ctx",    v: metrics.ctx, u: "" },
-      { l: "kv",     v: metrics.kv === null ? "—" : metrics.kv, u: metrics.kv === null ? "" : "%", dim: metrics.kv === null },
+      { l: "ctx",    v: num(metrics.ctx, "—"), u: "" },
+      { l: "kv",     v: metrics.kv === null || metrics.kv === undefined ? "—" : metrics.kv, u: metrics.kv === null || metrics.kv === undefined ? "" : "%", dim: metrics.kv === null || metrics.kv === undefined },
     ];
     if (type === "embedding") return [
-      { l: "req/min", v: metrics.rpm, u: "" },
-      { l: "p50",     v: metrics.lat || "—", u: metrics.lat ? "ms" : "" },
-      { l: "dim",     v: metrics.dim, u: "" },
-      { l: "size",    v: metrics.mem * 1024 < 1000 ? (metrics.mem * 1024).toFixed(0) : metrics.mem.toFixed(1), u: metrics.mem * 1024 < 1000 ? "MB" : "GB" },
+      { l: "dim",     v: num(metrics.dim, "—"), u: "" },
+      sizeChip(),
     ];
     if (type === "reranking") return [
-      { l: "req/min", v: metrics.rpm, u: "" },
-      { l: "p50",     v: metrics.lat, u: "ms" },
-      { l: "max/req", v: metrics.maxDocs, u: "" },
-      { l: "size",    v: (metrics.mem * 1024).toFixed(0), u: "MB" },
+      { l: "max/req", v: num(metrics.maxDocs, "—"), u: "" },
+      sizeChip(),
     ];
     if (type === "transcription") return [
-      { l: "req/min", v: metrics.rpm, u: "" },
-      { l: "xrt",     v: metrics.xrt, u: "" },
-      { l: "prec",    v: metrics.precision, u: "" },
-      { l: "size",    v: (metrics.mem * 1024).toFixed(0), u: "MB" },
+      sizeChip(),
     ];
     if (type === "tts") return [
-      { l: "req/min", v: metrics.rpm, u: "" },
-      { l: "sec/min", v: metrics.secs, u: "" },
-      { l: "voice",   v: metrics.voice, u: "" },
-      { l: "size",    v: (metrics.mem * 1024).toFixed(0), u: "MB" },
+      sizeChip(),
     ];
     if (type === "image") return [
-      { l: "req/min", v: metrics.rpm, u: "" },
-      { l: "avg",     v: metrics.avg, u: "s" },
-      { l: "res",     v: metrics.res, u: "" },
-      { l: "size",    v: metrics.mem.toFixed(1), u: "GB" },
+      { l: "res",     v: num(metrics.res, "—"), u: "" },
+      sizeChip(),
     ];
     return [];
   })();
@@ -579,7 +586,12 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
   // Single source of truth: the hook. The Playwright apiMock fixture
   // fulfils /api/slots so mock-mode coverage is symmetric with live runs;
   // we no longer fall back to HAL0_DATA.slots (per slots-wireup brief).
+  // No stub-on-load seeds: while the query is still resolving we show a
+  // loading skeleton (below); a confirmed empty array shows a real
+  // empty state — fake slots must never flash in.
   const slots = slotsQuery.data || [];
+  const slotsLoading = slotsQuery.isLoading && !slotsQuery.data;
+  const slotsEmpty = Array.isArray(slotsQuery.data) && slotsQuery.data.length === 0;
   const [createOpen, setCreateOpen] = useStateS(false);
   const [createDefaults, setCreateDefaults] = useStateS({});
   const [editName, setEditName] = useStateS(null);
@@ -755,6 +767,69 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
           </div>
         </div>
 
+        <CreateSlotModal
+          open={createOpen}
+          onClose={() => setCreateOpen(false)}
+          defaults={createDefaults}
+          existingSlots={slots}
+        />
+      </div>
+    );
+  }
+
+  // Loading skeleton — shown while /api/slots is still resolving so no
+  // fake/stub slot cards flash before real data arrives.
+  if (slotsLoading) {
+    return (
+      <div className="view">
+        <div className="vh">
+          <span className="vh-eye mono">Lifecycle</span>
+          <h1>Slots</h1>
+          <span className="vh-spacer" />
+          <span className="hint mono dim">Loading slots…</span>
+        </div>
+        <div className="dash">
+          <div className="dash-main">
+            <div className="slots-grid" aria-busy="true">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="slot slot-skeleton" aria-hidden="true" />
+              ))}
+            </div>
+          </div>
+          <div className="dash-side">
+            <MemoryMap variant="sidebar" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Real zero-slots empty state — only when the query has resolved to a
+  // confirmed empty array (not still-loading).
+  if (slotsEmpty) {
+    return (
+      <div className="view">
+        <div className="vh">
+          <span className="vh-eye mono">Lifecycle</span>
+          <h1>Slots</h1>
+          <span className="vh-spacer" />
+          <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
+        </div>
+        <div className="dash">
+          <div className="dash-main">
+            <div className="dash-empty">
+              <h2 className="mono">No slots configured</h2>
+              <p>No slot has a model loaded yet. Pick a bundle to get started, or create a slot one at a time.</p>
+              <div className="dash-empty-cta">
+                <button className="btn lg" onClick={() => window.location.hash = "#firstrun"}>Pick a bundle</button>
+                <button className="btn ghost lg" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
+              </div>
+            </div>
+          </div>
+          <div className="dash-side">
+            <MemoryMap variant="sidebar" />
+          </div>
+        </div>
         <CreateSlotModal
           open={createOpen}
           onClose={() => setCreateOpen(false)}

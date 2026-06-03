@@ -32,7 +32,34 @@ function deviceFor(slot) {
   return 'cpu'
 }
 
-function attributeSlotShares({ liveSlots, gttUsedGb, npuModelGb }) {
+// True iff at least one live slot carries the BE-METRICS `mem_mb`
+// contract field. When present we attribute REAL per-slot resident
+// model + KV memory; when wholly absent (backend not yet deployed) we
+// fall back to the legacy GTT-split / NPU-divide attribution so the map
+// keeps rendering instead of crashing.
+function hasMemMb(liveSlots) {
+  return liveSlots.some(
+    (s) => typeof s.mem_mb === 'number' && Number.isFinite(s.mem_mb),
+  )
+}
+
+// Preferred path: each slot gets its OWN reported resident memory
+// (model weights + KV cache). No equal-splitting, no host RAM folding —
+// just the real bytes the loaded model holds, per slot, as its own
+// colored segment.
+function attributeByMemMb({ liveSlots }) {
+  return liveSlots.map((s) => {
+    const device = deviceFor(s)
+    const mb = typeof s.mem_mb === 'number' && Number.isFinite(s.mem_mb) ? s.mem_mb : 0
+    return { slot: s, device, bytesGb: mbToGb(mb), approx: false }
+  })
+}
+
+// Legacy fallback (used ONLY when no slot reports mem_mb). Divides the
+// live GTT pool across GPU slots by a fake equal weight and splits NPU
+// model memory evenly. Marked `approx` because the per-slot figure is
+// estimated, not measured.
+function attributeFallback({ liveSlots, gttUsedGb, npuModelGb }) {
   const npuLive = liveSlots.filter((s) => deviceFor(s) === 'npu')
   const gpuLive = liveSlots.filter((s) => {
     const d = deviceFor(s)
@@ -87,13 +114,28 @@ export function useMemoryMapModel() {
   const npuModelGb = mbToGb(stats.data?.npu_status?.model_mb || 0)
 
   const liveSlots = slots.filter((s) => LIVE_STATES.has((s.state || '').toLowerCase()))
-  const attributed = attributeSlotShares({ liveSlots, gttUsedGb, npuModelGb })
 
-  const cpuUsedGb = attributed
-    .filter((a) => a.device === 'cpu')
-    .reduce((acc, a) => acc + a.bytesGb, 0)
-  const otherRamGb = Math.max(0, round1(ramUsedGb - cpuUsedGb))
-  const selfShareGb = round1(ramUsedGb + gttUsedGb + npuModelGb)
+  // Prefer the BE-METRICS `mem_mb` contract (real per-slot resident
+  // model + KV memory). Fall back to the legacy GTT-split / NPU-divide
+  // attribution only when NO slot reports mem_mb, so the map never
+  // crashes against a pre-deploy backend.
+  const usingMemMb = hasMemMb(liveSlots)
+  const attributed = usingMemMb
+    ? attributeByMemMb({ liveSlots })
+    : attributeFallback({ liveSlots, gttUsedGb, npuModelGb })
+
+  // Model memory = sum of each loaded model's resident bytes. This is the
+  // figure the map's primary "used" reflects — NOT host system RAM.
+  const modelUsedGb = round1(
+    attributed.reduce((acc, a) => acc + (a.bytesGb || 0), 0),
+  )
+
+  // Host-pressure share for the Proxmox block only. With real per-slot
+  // mem_mb we report the measured model footprint; in the legacy fallback
+  // we keep the old ram+gtt+npu sum so the host bar stays populated.
+  const selfShareGb = usingMemMb
+    ? modelUsedGb
+    : round1(ramUsedGb + gttUsedGb + npuModelGb)
 
   // ── Host block ──
   // Stats endpoint host: { configured, [detected], [hint], ok?, host_mem_*, ... }
@@ -144,7 +186,9 @@ export function useMemoryMapModel() {
   }
 
   // ── Headroom ──
-  const poolHeadroom = unifiedGb - (gttUsedGb + ramUsedGb + npuModelGb)
+  // Pool free = unified cap minus model memory actually held. Host free
+  // can be the tighter constraint when running on Proxmox.
+  const poolHeadroom = unifiedGb - modelUsedGb
   let limitedBy = 'pool'
   let candidate = poolHeadroom
   if (host.mode === 'configured' && host.freeGb < candidate) {
@@ -159,11 +203,14 @@ export function useMemoryMapModel() {
     pool: { totalGb: unifiedGb, kind: memoryKind, platformLabel },
     host,
     self: {
+      // Model memory the map renders against the pool. `modelUsedGb` is
+      // the headline "used" figure; host system RAM lives in `host` only.
+      modelUsedGb,
+      selfShareGb,
+      // Retained for the host bar (selfShareGb) + legacy diagnostics.
       ramUsedGb,
       gttUsedGb,
       npuModelGb,
-      otherRamGb,
-      selfShareGb,
       slots: attributed.map((a) => ({
         name: a.slot.name,
         device: a.device,
@@ -226,6 +273,9 @@ function PveNudge({ hint, onConfigure }) {
   )
 }
 
+// Model-memory bar: one colored segment per loaded model (real bytes),
+// then the remaining pool free. Host system RAM is intentionally NOT
+// folded in here — this bar is about model memory vs the unified pool.
 function SidebarBar({ model }) {
   const { pool, self } = model
   const total = pool.totalGb || 1
@@ -241,18 +291,8 @@ function SidebarBar({ model }) {
           title={`${s.name} · ${fmtGb(s.bytesGb)}`}
         />
       ))}
-      {self.otherRamGb > 0 && (
-        <PctSeg
-          widthPct={pct(self.otherRamGb)}
-          color="var(--fg-5)"
-          title={`other RAM · ${fmtGb(self.otherRamGb)}`}
-        />
-      )}
       <PctSeg
-        widthPct={Math.max(
-          0,
-          100 - pct(self.gttUsedGb + self.ramUsedGb + self.npuModelGb),
-        )}
+        widthPct={Math.max(0, 100 - pct(self.modelUsedGb))}
         color="var(--bg-4)"
         title="free"
       />
@@ -301,8 +341,10 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
   const model = useMemoryMapModel()
   const { pool, host, self, headroom, loading } = model
   const total = pool.totalGb
-  const usedSelf = round1(self.ramUsedGb + self.gttUsedGb + self.npuModelGb)
-  const free = Math.max(0, round1(total - usedSelf))
+  // Headline "used" = model memory held by loaded models (+ KV), NOT host
+  // system RAM. Host pressure is a separate secondary block (expanded).
+  const usedModel = self.modelUsedGb
+  const free = Math.max(0, round1(total - usedModel))
 
   if (variant === 'expanded') {
     return (
@@ -315,18 +357,9 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
           </span>
         </div>
 
-        {host.mode === 'configured' && (
-          <>
-            <div className="memmap-h mono">
-              <span>host pool</span>
-              <span><b>{fmtGb(host.freeGb)}</b> free on host</span>
-            </div>
-            <HostBar model={model} />
-          </>
-        )}
-
+        {/* Primary section: MODEL memory vs the unified pool. */}
         <div className="memmap-h mono">
-          <span>inside this hal0</span>
+          <span>model memory</span>
           <span><b>{fmtGb(free)}</b> free in pool</span>
         </div>
         <SidebarBar model={model} />
@@ -341,23 +374,33 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
               sz={s.bytesGb}
             />
           ))}
-          {self.otherRamGb > 0 && (
-            <LegendRow swatch="var(--fg-5)" name="other RAM" sz={self.otherRamGb} />
-          )}
           <LegendRow swatch="var(--bg-4)" name="free" sz={free} />
-          {host.mode === 'configured' &&
-            (host.tenants || []).map((t) => (
-              <LegendRow
-                key={`t-${t.vmid}`}
-                swatch="var(--mem-tenant-1, var(--fg-5))"
-                name={`${t.name} (${t.type})`}
-                sub={`vmid ${t.vmid}`}
-                sz={t.memGb}
-              />
-            ))}
         </div>
 
         <HeadroomLabel availableGb={headroom.availableGb} limitedBy={headroom.limitedBy} />
+
+        {/* Secondary section: HOST pressure (Proxmox). Clearly separate —
+            this is about system RAM across all LXCs/VMs, not model memory. */}
+        {host.mode === 'configured' && (
+          <div className="memmap-host-section">
+            <div className="memmap-h mono">
+              <span>host pressure</span>
+              <span><b>{fmtGb(host.freeGb)}</b> free on host</span>
+            </div>
+            <HostBar model={model} />
+            <div className="memmap-legend memmap-legend-expanded">
+              {(host.tenants || []).map((t) => (
+                <LegendRow
+                  key={`t-${t.vmid}`}
+                  swatch="var(--mem-tenant-1, var(--fg-5))"
+                  name={`${t.name} (${t.type})`}
+                  sub={`vmid ${t.vmid}`}
+                  sz={t.memGb}
+                />
+              ))}
+            </div>
+          </div>
+        )}
         {host.mode === 'detected_unconfigured' && (
           <PveNudge hint={host.hint} onConfigure={onConfigure} />
         )}
@@ -371,19 +414,15 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
       <div className="side-card-h">
         <span>Memory map</span>
         <span className="right mono">
-          {fmtGb(usedSelf)} / {fmtGb(total)}
+          {fmtGb(usedModel)} / {fmtGb(total)}
         </span>
       </div>
       <div className="side-card-b">
         <div className="memmap">
-          {host.mode === 'configured' && (
-            <div className="memmap-h mono">
-              <span>host {host.tenants?.length ?? 0} tenants</span>
-              <span><b>{fmtGb(host.freeGb)}</b> host free</span>
-            </div>
-          )}
+          {/* Sidebar = MODEL memory only. Host pressure lives in the
+              expanded (hardware-page) variant, not here. */}
           <div className="memmap-h mono">
-            <span>{pool.kind} ram</span>
+            <span>model memory</span>
             <span><b>{fmtGb(free)}</b> free</span>
           </div>
           <SidebarBar model={model} />
@@ -396,9 +435,6 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
                 sz={s.bytesGb}
               />
             ))}
-            {self.otherRamGb > 0 && (
-              <LegendRow swatch="var(--fg-5)" name="other" sz={self.otherRamGb} />
-            )}
             <LegendRow swatch="var(--bg-4)" name="free" sz={free} />
           </div>
           <HeadroomLabel

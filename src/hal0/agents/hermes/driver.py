@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess  # nosec B404 — required for shim
 from pathlib import Path
 from typing import Any
@@ -107,6 +108,36 @@ def _probe_wrapper_installed() -> bool:
         return False
 
     return result.returncode == 0
+
+
+def _probe_systemd_unit_active(unit: str) -> bool:
+    """Return True iff ``systemctl is-active <unit>`` exits 0.
+
+    Non-blocking: uses a 2-second subprocess timeout. Returns False on any
+    error (no systemctl on PATH, timeout, permission denied) so callers
+    fall through to the next probe rather than raising.
+    """
+    if shutil.which("systemctl") is None:
+        return False
+    try:
+        result = subprocess.run(  # nosec B603 — known-safe argv
+            ["systemctl", "is-active", unit],
+            check=False,
+            capture_output=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _probe_tcp_port(host: str, port: int, *, timeout: float = 1.0) -> bool:
+    """Return True iff a TCP connection to ``host:port`` succeeds within ``timeout`` seconds."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 class HermesDriver(AgentDriver):
@@ -200,7 +231,35 @@ class HermesDriver(AgentDriver):
             env_file.unlink()
 
     def status(self) -> str:
-        return "installed" if self._env_file_path().exists() else "broken"
+        """Return ``"installed"`` when Hermes is running/reachable, ``"broken"`` otherwise.
+
+        Priority order (cheapest first):
+
+        1. ``systemctl is-active hal0-agent@hermes.service`` — a single
+           dbus round-trip, ~0 ms when the unit is active.
+        2. TCP connect to ``127.0.0.1:9119`` (1 s timeout) — catches the
+           case where the agent runs outside systemd (e.g. dev mode).
+        3. Env-file presence — the "installed but not yet started" case.
+
+        Only returns ``"broken"`` when all three signals say the agent is not
+        reachable *and* the env file (our install-time artefact) is absent.
+        This avoids the false-negative where the unit is active/running but
+        ``/etc/hal0/agents/hermes.env`` was never written (e.g. the wrapper
+        installed without going through :meth:`install`).
+        """
+        # 1. systemctl probe — fast, no network.
+        if _probe_systemd_unit_active("hal0-agent@hermes.service"):
+            return "installed"
+
+        # 2. Socket probe — catches out-of-systemd invocations.
+        if _probe_tcp_port("127.0.0.1", 9119, timeout=1.0):
+            return "installed"
+
+        # 3. Env-file fallback — installed but service hasn't started yet.
+        if self._env_file_path().exists():
+            return "installed"
+
+        return "broken"
 
     # ── Internals ───────────────────────────────────────────────────────
 

@@ -133,13 +133,25 @@ async def reprobe_hardware(request: Request) -> dict[str, Any]:
 async def _proxy_upstream_endpoint(
     request: Request, suffix: str, timeout_s: float = 3.0
 ) -> dict[str, dict[str, Any]]:
-    """Fan out ``suffix`` (e.g. ``/api/stats/hardware``) to every upstream's
-    base host and return ``{upstream_name: payload}``.
+    """Fan out ``suffix`` (e.g. ``/api/stats/hardware``) to every *remote*
+    upstream's base host and return ``{upstream_name: payload}``.
 
     Upstream base URLs end in ``/v1`` by convention; we strip that to hit
     the upstream's internal API surface (haloai exposes its dashboard
     endpoints at the bare ``/api/...`` path on the same host:port).
     Failures are recorded as ``None`` so callers can render "offline" tiles.
+
+    Only ``kind == "remote"`` upstreams are proxied. ``kind == "slot"``
+    upstreams are local slots whose base URL points back at *this*
+    hal0-api host:port (e.g. the bundled ``hal0`` upstream at
+    ``http://127.0.0.1:8080/v1``). Stripping ``/v1`` and appending
+    ``suffix`` would make the endpoint call itself — under the
+    single-worker async server this recurses until every request in the
+    chain hits its timeout, hanging ``/api/stats/hardware`` and
+    ``/api/slots/metrics`` for tens of seconds and returning an empty
+    body. Slot upstreams have no separate dashboard API anyway — the
+    local probe + ``_local_slot_metrics`` already cover them — so we
+    skip them outright.
     """
     import httpx
 
@@ -147,6 +159,11 @@ async def _proxy_upstream_endpoint(
     out: dict[str, dict[str, Any]] = {}
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         for u in upstreams.list():
+            # Skip slot-kind upstreams — they resolve to this same
+            # hal0-api host:port; proxying ``suffix`` to them is a
+            # self-call that deadlocks the worker (see docstring).
+            if getattr(u, "kind", "remote") == "slot":
+                continue
             base = u.url.rstrip("/")
             if base.endswith("/v1"):
                 base = base[: -len("/v1")]
@@ -332,6 +349,33 @@ async def _local_live_stats(request: Request) -> dict[str, Any]:
     return out
 
 
+async def _per_slot_memory(request: Request) -> dict[str, dict[str, Any]]:
+    """Per-loaded-slot resident memory map for the dashboard memory bar.
+
+    Delegates to :func:`hal0.slots.capacity.build_per_slot`, which returns
+    ``{slot_name: {vram_mb, ram_mb, mem_mb, state, model_id}}`` for every
+    slot whose weights are resident (model file size + KV-cache estimate).
+    Returns ``{}`` when no slot manager is wired or no slot is loaded so
+    the caller can omit the block cleanly.
+    """
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if slot_manager is None:
+        return {}
+    try:
+        slots = await slot_manager.list()
+    except Exception:
+        return {}
+    if not slots:
+        return {}
+    registry = getattr(request.app.state, "model_registry", None)
+    from hal0.slots.capacity import build_per_slot
+
+    try:
+        return await build_per_slot(slots, registry=registry)
+    except Exception:
+        return {}
+
+
 @router.get("/stats/hardware")
 async def stats_hardware(request: Request) -> dict[str, Any]:
     """Aggregate runtime hardware stats across upstreams + local probe.
@@ -419,6 +463,11 @@ async def stats_hardware(request: Request) -> dict[str, Any]:
 
     primary["per_upstream"] = per_upstream
     primary["upstream_names"] = list(per_upstream.keys())
+
+    # Per-loaded-slot resident memory (model bytes + KV estimate) so the
+    # dashboard memory map can attribute GTT to individual slots. FE-MEM
+    # reads ``per_slot[<slot>].mem_mb``. Empty when no slot is loaded.
+    primary["per_slot"] = await _per_slot_memory(request)
     return primary
 
 
