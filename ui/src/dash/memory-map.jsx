@@ -94,13 +94,18 @@ export function useMemoryMapModel() {
   const pveSettings = useProxmoxSettings()
   const slots = slotsQ.data || []
 
-  // Pool total from the static probe — unified_memory_mb when the platform
-  // advertises it (Strix Halo), else ram_mb. Fall back to live ram_used_mb
-  // only as a last resort.
+  // Pool total = the real ceiling for GPU model loads. On UMA (Strix Halo)
+  // that is the GTT cap (amdgpu.gttsize, ~80 GiB — live as
+  // stats.gpu_vram_total_mb), NOT the full unified RAM (128 GiB): models can't
+  // actually allocate past the GTT window, so headroom must be measured
+  // against it. Prefer the live GTT cap; fall back to the static unified/ram
+  // probe when the live value is unavailable (keeps non-UMA + test mocks sane).
   const rawHw = hw.data || {}
   const ramTotalGb = rawHw.ram?.total ?? 0
+  const gttCapGb = mbToGb(stats.data?.gpu_vram_total_mb || stats.data?.gtt_total_mb || 0)
   const unifiedFromProbe = mbToGb(rawHw.unified_memory_mb || 0)
   const unifiedGb =
+    gttCapGb ||
     unifiedFromProbe ||
     ramTotalGb ||
     mbToGb(stats.data?.ram_total_mb || 0)
