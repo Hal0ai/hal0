@@ -1,4 +1,4 @@
-# ADR 0023 — Vendor a fresh llama.cpp Vulkan build for the qwen3next perf path
+# ADR 0023 — Bump Lemonade's llama.cpp Vulkan pin (b9253 → b9484) for the qwen3next perf path
 
 - **Status:** Accepted (implemented 2026-06-03)
 - **Supersedes/relates:** [[0022-backend-selection-display-control]] (per-slot backend honoring)
@@ -34,20 +34,18 @@ Findings:
 
 ## Decision
 
-Vendor a fresh llama.cpp build for the lemonade **Vulkan** path:
+Use Lemonade's **own backend-version pin** to pull a fresh official build — the
+lemonade-native, persistent path. (A from-source build + `patchelf $ORIGIN` swap into
+`bin/llamacpp/vulkan/` was the first attempt; it FAILS because lemond *restores the
+binary that matches the pin* on every model load — see Consequences. Pinning is the
+correct fix.)
 
-1. **Build on the LXC** (CT 105, Debian 13) for glibc/mesa compatibility — *not* on the
-   Arch hal0-dev VM (newer glibc → `GLIBC_2.xx not found`). Recipe:
-   ```
-   git clone --depth 1 https://github.com/ggml-org/llama.cpp /root/llama.cpp-build
-   cmake -B build -DGGML_VULKAN=ON -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release
-   cmake --build build -j$(nproc) --target llama-server
-   ```
-   (built commit `63e66fd`, ggml 0.13.1, GNU 13.3.0)
-2. **Install relocatable** into `/var/lib/hal0/lemonade/bin/llamacpp/vulkan/`: copy
-   `llama-server` + all `*.so*`, then `patchelf --set-rpath '$ORIGIN'` on every ELF so
-   transitive ggml libs resolve to the install dir (not the build tree). Verified via
-   `ldd` (all `$ORIGIN`, no build-dir refs, no "not found"). Owned `hal0:hal0`.
+1. **Bump the pin** in `/opt/lemonade/resources/backend_versions.json`:
+   `llamacpp.vulkan: "b9253" → "b9484"` (latest `ggml-org/llama.cpp`, 2026-06-02 — commit
+   `63e66fd`, which has the post-b9253 qwen3next Vulkan kernels).
+2. Restart lemond, then `POST /api/v1/install {"recipe":"llamacpp","backend":"vulkan"}` —
+   lemond downloads `llama-b9484-bin-ubuntu-vulkan-x64.tar.gz` from the official release
+   and installs it to `bin/llamacpp/vulkan/`.
 3. **Pin RADV** (≫ AMDVLK on gfx1151): systemd drop-in
    `/etc/systemd/system/hal0-lemonade.service.d/20-vulkan-radv.conf` →
    `Environment=AMD_VULKAN_ICD=RADV`.
@@ -56,31 +54,33 @@ Vendor a fresh llama.cpp build for the lemonade **Vulkan** path:
 
 ## Result
 
-`qwen3-coder-next` Vulkan: **8.9 → ~35 tok/s (3.9×)**, verified standalone *and* through
-the live lemond load path. `ctx_size=65536` kept; a single MoE still occupies ~48 GiB
-GTT (KV cache) — accounted for in the dashboard memory map (now anchored to the 80 GiB
-GTT cap).
+`qwen3-coder-next` Vulkan: **8.9 → ~35 tok/s (3.9×)** (commit `63e66fd`, benchmarked
+standalone). **Persistent** — the binary stays `b9484` across model loads because it now
+matches the pin (verified). Loads + generates through the live lemond path. `ctx_size=65536`
+kept; a single MoE still occupies ~48 GiB GTT (KV cache) — accounted for in the dashboard
+memory map (now anchored to the 80 GiB GTT cap).
 
 ## Reversibility
 
-Original binary preserved at `vulkan.b9253-bak` and `vulkan.b9253-prev`. Revert:
-```
-cd /var/lib/hal0/lemonade/bin/llamacpp && rm -rf vulkan && mv vulkan.b9253-prev vulkan
-rm /etc/systemd/system/hal0-lemonade.service.d/20-vulkan-radv.conf
-# restore config.json llamacpp.args to "--parallel 1"
-systemctl daemon-reload && systemctl restart hal0-lemonade
-```
+Restore the pin: set `llamacpp.vulkan` back to `b9253` in `backend_versions.json`
+(backup at `backend_versions.json.pre-b9484-bak`), restart lemond, re-install. The
+original binaries are also at `vulkan.b9253-bak` / `vulkan.b9253-prev`.
 
 ## Consequences / follow-ups
 
-- **A lemonade bundle upgrade will clobber the swapped binary.** This swap is a runtime
-  override, not yet persistent. Follow-up: re-apply via installer step or an
-  `ExecStartPre` hook keyed on lemonade version (tracked separately).
-- **The ROCm binary is still `b9253`-vintage** (lacks `rocWMMA-FA`). Since backends tie
-  and our slots are `gpu-vulkan`, this is deferred; a `-DGGML_HIP_ROCWMMA_FATTN=ON` ROCm
-  build is the future path for high-ctx ROCm slots.
-- **`--threads 8`** is a concurrency-safety choice (avoids the documented multi
-  llama-server oversubscription deadlock under `max_loaded_models=4`); a single-model
-  load could push threads higher toward the ~45 tok/s ceiling. Tuning follow-up.
+- **Persistent across loads** (pin matches binary) — but the pin lives in
+  `/opt/lemonade/resources/backend_versions.json`, which a lemonade **reinstall/upgrade**
+  resets. hal0's installer should set this pin post-lemonade-install (#438). Bump the pin
+  as ggml-org advances and re-trigger install.
+- **35 → ~45 tok/s headroom:** b9484 is the *generic* official Vulkan build. kyuz0's
+  gfx1151-tuned RADV build (`ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv`) reportedly
+  hits ~45. To use it without leaving the lemonade-native path, point
+  `llamacpp.vulkan_bin` at a bins dir holding that binary (instead of `"builtin"`).
+- **ROCm path deferred:** fresh gfx1151 ROCm builds live in `lemonade-sdk/llamacpp-rocm`
+  (`rocm-nightly` pin, latest b1287) but (a) gfx1151 ROCm needs kernel **≥6.18.4** (pve on
+  6.17.13) and (b) `rocm-nightly` has a 64 GB allocation cap (TheRock #4645). Backends tie
+  + slots are vulkan, so Vulkan is the right near-term path.
+- **`--threads 8`** is concurrency-safety (avoids the multi llama-server oversubscription
+  deadlock under `max_loaded_models=4`); a single-model load could push threads higher.
 - **Model load latency** (~minutes for a 47 GB MoE) is CPU param-fit bound, not disk;
-  separate optimization (e.g. `--no-mmap`, keep-resident policy) tracked separately.
+  separate optimization (`--no-mmap`, keep-resident) tracked separately.
