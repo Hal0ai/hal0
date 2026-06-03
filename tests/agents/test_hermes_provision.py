@@ -67,9 +67,7 @@ def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.
     # when the test runner is root.
     _dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
     monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", _dropin_dir)
-    monkeypatch.setattr(
-        hp, "GATEWAY_SYSTEMD_DROPIN_FILE", _dropin_dir / "10-hal0-secrets.conf"
-    )
+    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", _dropin_dir / "10-hal0-secrets.conf")
 
     # Intercept ONLY `systemctl daemon-reload` (the live-systemd action the
     # gateway phase would run). Everything else — env_probe's
@@ -1433,9 +1431,7 @@ def test_gateway_secrets_wire_writes_dropin(
     assert out.details["content_hash"]
 
 
-def test_gateway_secrets_wire_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gateway_secrets_wire_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dropin_file, fake = _patch_dropin_to_tmp(tmp_path, monkeypatch)
     state = hp.BootstrapState()
 
