@@ -87,11 +87,9 @@ const Icons = {
 function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0 }) {
   const labels = {
     dashboard: ["Overview", "Dashboard"],
-    chat:      ["Workspace", "Chat"],
     firstrun:  ["Setup",   "FirstRun"],
     slots:     ["Lifecycle", "Slots"],
     models:    ["Catalog", "Models"],
-    backends:  ["Runtime", "Backends"],
     logs:      ["Runtime", "Logs"],
     agent:     ["Tools",  "Agent"],
     settings:  ["Configure", "Settings"],
@@ -136,10 +134,8 @@ function Sidebar({ route, onGo }) {
   const modelCount  = modelsQuery.data?.length ?? 0;
   const items = [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
-    { id: "chat",      label: "Chat",      icon: Icons.chat },
     { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount },
     { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
-    { id: "backends",  label: "Backends",  icon: Icons.backends },
     { id: "logs",      label: "Logs",      icon: Icons.logs },
     { id: "agent",     label: "Agent",     icon: Icons.agent },
     // Issue #206 — MCP page wired to /api/mcp/*. Lives under "Agents"
@@ -593,7 +589,7 @@ if (typeof document !== "undefined" && !document.getElementById("hal0-modal-css"
 function BottomTabs({ route, onGo }) {
   const tabs = [
     { id: "dashboard", label: "Home",   icon: Icons.dashboard },
-    { id: "chat",      label: "Chat",   icon: Icons.chat },
+    { id: "agent",     label: "Agent",  icon: Icons.agent },
     { id: "slots",     label: "Slots",  icon: Icons.slots },
     { id: "models",    label: "Models", icon: Icons.models },
     { id: "settings",  label: "More",   icon: Icons.settings },

@@ -14,7 +14,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "chat", "firstrun", "slots", "models", "backends", "logs", "agent", "settings", "mcp"];
+const ROUTES = ["dashboard", "firstrun", "slots", "models", "logs", "agent", "settings", "mcp"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -55,8 +55,7 @@ function parseRoute() {
 function App() {
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const { active: activeBanners } = useBanners();
-  const [{ route, param, query }, setRouteState] = useStateA(parseRoute());
-  const [persona, setPersona] = useStateA("primary");
+  const [{ route, param }, setRouteState] = useStateA(parseRoute());
   const [bellOpen, setBellOpen] = useStateA(false);
   const [frStage, setFrStage] = useStateA("pick");
   const [frBundle, setFrBundle] = useStateA(null);
@@ -135,16 +134,6 @@ function App() {
             onDismissHero={() => setHeroDismissed(true)}
           />
         );
-      case "chat":
-        return (
-          <ChatView
-            slots={HAL0_DATA.slots}
-            persona={persona}
-            setPersona={setPersona}
-            personaPlacement={tweaks.personaPlacement}
-            composerState={composerState}
-          />
-        );
       case "firstrun":
         return (
           <FirstRunView
@@ -167,7 +156,6 @@ function App() {
           />
         );
       case "models":   return <ModelsView />;
-      case "backends": return <BackendsView />;
       case "logs":     return <LogsView />;
       case "agent":    return <AgentView />;
       case "mcp":      return <McpView />;
@@ -177,26 +165,6 @@ function App() {
   };
 
   const isFirstrun = route === "firstrun";
-  const isPopout = route === "chat" && query.popout === "1";
-
-  // Popout chat window: render only the ChatView, no chrome. Same origin
-  // + same hash routing so reload still works.
-  if (isPopout) {
-    return (
-      <div className="app popout">
-        <div className="main popout-main">
-          <ChatView
-            slots={HAL0_DATA.slots}
-            persona={persona}
-            setPersona={setPersona}
-            personaPlacement={tweaks.personaPlacement}
-            composerState={composerState}
-            popout
-          />
-        </div>
-      </div>
-    );
-  }
 
   return (
     <>

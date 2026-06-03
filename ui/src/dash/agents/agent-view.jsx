@@ -1,33 +1,19 @@
-// hal0 v0.3 PR-8 — AgentView shell.
+// hal0 — AgentView shell.
 //
-// AgentView is the `#agent` route. PR-8 split the original 974-LOC
-// monolith (extras.jsx) into one file per tab; this shell is the tab
-// nav + tab-content switch.
+// AgentView is the `#agent` route. v0.4 reduced it to the Memory
+// capability only. The web-chat surface (HermesChatTab) was abandoned in
+// favour of the `hal0 chat` TUI, and the Personas / Skills / Plugins tabs
+// were removed (they showed fixtures rather than live data). The single-
+// tab nav is kept so the route + deep-link shape stay stable.
 //
-// Tab inventory (master plan §4 PR-8):
-//   - HermesChatTab  (default, placeholder; PR-10 fills the composer)
-//   - PersonasTab    (reads /api/agents/{id}/personas — PR-4 live)
-//   - SkillsTab      (static skill catalog for v0.3)
+// Tab inventory:
 //   - MemoryTab      (Cognee stats + "Peer memory" subsection folded
 //                     in from the old Peers tab)
-//   - PluginsTab     (wraps PluginTabHost from PR-7)
-//
-// Dropped vs v0.2.1:
-//   - Inbox tab — approvals UX moved to the sidebar pip (PR-6) and
-//     future inline approval cards in HermesChat (PR-10).
-//   - Peers standalone tab — folded into MemoryTab as the "Peer memory"
-//     subsection (the live MCP search Peers used is preserved).
-//   - Overview tab — content moved to SidebarAgentBlock (PR-6); the
-//     main pane now lands on HermesChatTab by default.
 //
 // Hash routes supported (parsed by main.jsx parseRoute):
-//   #agent              → chat tab (default)
-//   #agent/chat         → chat tab
-//   #agent/personas     → personas tab
-//   #agent/skills       → skills tab
+//   #agent              → memory tab (default)
 //   #agent/memory       → memory tab
 //   #agent/memory?subsection=peer → memory tab scrolled to Peer memory
-//   #agent/plugins      → plugins tab
 //   #peers (legacy)     → redirected to #agent/memory?subsection=peer
 //
 // Window-globals build shim: components register on `window` and read
@@ -36,12 +22,13 @@
 
 const { useState: useStateAV, useEffect: useEffectAV } = React;
 
+// v0.4: the Agent view is reduced to the Memory capability only. Web
+// chat (HermesChatTab) plus the Personas / Skills / Plugins tabs were
+// removed — web chat is abandoned in favour of the `hal0 chat` TUI, and
+// the other tabs surfaced fixtures rather than live data. The tab nav is
+// kept (single tab) so the route + deep-link shape stay stable.
 const AGENT_TABS = [
-  { id: "chat",     label: "Chat" },
-  { id: "personas", label: "Personas" },
-  { id: "skills",   label: "Skills" },
   { id: "memory",   label: "Memory" },
-  { id: "plugins",  label: "Plugins" },
 ];
 
 function _parseAgentSubroute() {
@@ -53,9 +40,9 @@ function _parseAgentSubroute() {
   }
   const [path, qs] = raw.split("?");
   const parts = path.split("/");
-  if (parts[0] !== "agent") return { tab: "chat", subsection: null };
-  const sub = parts[1] || "chat";
-  const tab = AGENT_TABS.find(t => t.id === sub) ? sub : "chat";
+  if (parts[0] !== "agent") return { tab: "memory", subsection: null };
+  const sub = parts[1] || "memory";
+  const tab = AGENT_TABS.find(t => t.id === sub) ? sub : "memory";
   let subsection = null;
   if (qs) {
     for (const kv of qs.split("&")) {
@@ -70,7 +57,6 @@ function AgentView() {
   const initial = _parseAgentSubroute();
   const [tab, setTab] = useStateAV(initial.tab);
   const [subsection, setSubsection] = useStateAV(initial.subsection);
-  const [editPersona, setEditPersona] = useStateAV(null);
   const [resetOpen, setResetOpen] = useStateAV(false);
   const noAgent = window.__hal0Banners && window.__hal0Banners.get && window.__hal0Banners.get()["no-agent"];
 
@@ -96,7 +82,7 @@ function AgentView() {
         <span className="vh-eye mono">Tools</span>
         <h1>Agent</h1>
         <span className="vh-spacer" />
-        <span className="hint mono">v0.3 · chat composer lands in PR-10</span>
+        <span className="hint mono">Chat in terminal: <code>hal0 chat</code></span>
       </div>
 
       <div
@@ -123,17 +109,8 @@ function AgentView() {
         ))}
       </div>
 
-      {tab === "chat"     && window.HermesChatTab && <window.HermesChatTab noAgent={noAgent} />}
-      {tab === "personas" && window.PersonasTab   && <window.PersonasTab onEdit={(p) => setEditPersona(p)} />}
-      {tab === "skills"   && window.SkillsTab     && <window.SkillsTab />}
       {tab === "memory"   && window.MemoryTab     && <window.MemoryTab subsection={subsection} onResetNs={() => setResetOpen(true)} />}
-      {tab === "plugins"  && window.PluginsTab    && <window.PluginsTab agentId="hermes" />}
 
-      <PersonaEditModal
-        open={!!editPersona}
-        persona={editPersona}
-        onClose={() => setEditPersona(null)}
-      />
       <ConfirmDialog
         open={resetOpen}
         onCancel={() => setResetOpen(false)}

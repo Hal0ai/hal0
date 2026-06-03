@@ -1,120 +1,14 @@
-// hal0 dashboard — secondary views: Backends, Logs.
+// hal0 dashboard — secondary views: Logs.
 //
-// Phase B1: Backends + Logs read from real hooks. v0.3 PR-8 split the
+// Phase B1: Logs reads from real hooks. v0.3 PR-8 split the
 // AgentView monolith out of this file into ui/src/dash/agents/* — see
 // agent-view.jsx, hermes-chat-tab.jsx, personas-tab.jsx, skills-tab.jsx,
-// memory-tab.jsx, plugins-tab.jsx.
+// memory-tab.jsx, plugins-tab.jsx. v0.4: BackendsView removed (the page
+// duplicated Settings → Lemonade-admin + config.json).
 
-import { useBackends } from '@/api/hooks/useBackends'
 import { useLogsHistorical, useLogsStream } from '@/api/hooks/useLogs'
-import { useLemondRollup } from '@/api/hooks/useLemonade'
 
 const { useState: useStateX } = React;
-
-// ════════════════════════════════════════════════════════════════════
-// BACKENDS
-// ════════════════════════════════════════════════════════════════════
-function BackendsView() {
-  const [installB, setInstallB] = useStateX(null);
-  const [uninstallB, setUninstallB] = useStateX(null);
-  const [flmOpen, setFlmOpen] = useStateX(false);
-  // Phase B1: live /api/backends; mock retains fixture shape. The v3
-  // hook returns rows shaped `{id, version, state, recommended, kind,
-  // device, note}` (envelope matches both legacy + new API).
-  const backendsQuery = useBackends();
-  const lemond = useLemondRollup();
-  const liveBackends = backendsQuery.data?.backends ?? [];
-  const backends = liveBackends.length > 0
-    ? liveBackends.map(b => ({
-        // Coerce v3 envelope onto the prototype's BackendRow shape.
-        name: b.id,
-        kind: b.kind || (b.id?.split(':')[0] ?? ''),
-        device: b.device || (b.id?.split(':')[1] ?? ''),
-        ver: b.version,
-        state: b.state,
-        recommended: b.recommended,
-        note: b.note,
-      }))
-    : HAL0_DATA.backends;
-  return (
-    <div className="view">
-      <div className="vh">
-        <span className="vh-eye mono">Runtime</span>
-        <h1>Backends</h1>
-        <span className="vh-spacer" />
-        <button className="btn ghost">{Icons.search} Discover</button>
-      </div>
-
-      <div className="card" style={{padding: 16, marginBottom: 18, display: "flex", alignItems: "center", gap: 14}}>
-        <div style={{display: "flex", alignItems: "center", gap: 10, flex: 1}}>
-          <span className="dot ready" />
-          <div>
-            <div className="mono" style={{fontSize: 14, fontWeight: 500}}>lemonade <span style={{color: "var(--fg-3)"}}>· {lemond.version}</span></div>
-            <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", marginTop: 2}}>pinned · sha-256 verified · channel stable</div>
-          </div>
-        </div>
-        <div className="mono" style={{fontSize: 11, color: "var(--fg-3)", marginRight: 12}}>uptime 14d</div>
-        <button className="btn ghost sm" onClick={() => { window.location.hash = "#logs"; }}>{Icons.logs} Logs</button>
-        <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Restarting lemond — brief outage", "warn")}>{Icons.restart} Restart</button>
-        <button className="btn sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Checking for lemonade update…", "info")}>{Icons.download} Update</button>
-      </div>
-
-      <div className="sec">
-        <h2>Backends<span className="ct mono">{backends.length}</span></h2>
-        <div className="rule" />
-      </div>
-
-      <div className="card" style={{overflow: "hidden"}}>
-        <div style={{padding: "10px 18px", borderBottom: "1px solid var(--line)", background: "var(--bg)", display: "grid", gridTemplateColumns: "1fr 220px 140px 1fr auto", gap: 16, fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em"}}>
-          <span>backend</span>
-          <span>version</span>
-          <span>state</span>
-          <span>used by</span>
-          <span style={{textAlign: "right"}}>actions</span>
-        </div>
-        {backends.map(b => {
-          const slotsUsing = HAL0_DATA.slots.filter(s => {
-            if (b.kind === "llamacpp" && s.modelLong && s.modelLong.includes("GGUF") && s.device.includes(b.device)) return true;
-            if (b.kind === "whispercpp" && s.type === "transcription" && s.device !== "npu") return true;
-            if (b.kind === "sdcpp" && s.type === "image") return true;
-            if (b.kind === "kokoro" && s.type === "tts") return true;
-            if (b.kind === "flm" && s.device === "npu") return true;
-            return false;
-          });
-          return (
-            <div key={b.name} style={{padding: "12px 18px", borderBottom: "1px solid var(--line-soft)", display: "grid", gridTemplateColumns: "1fr 220px 140px 1fr auto", gap: 16, alignItems: "center", fontFamily: "var(--jbm)", fontSize: 12, opacity: b.state === "unavailable" ? 0.55 : 1}}>
-              <span style={{color: "var(--fg)", fontWeight: 500, display: "flex", alignItems: "center", gap: 8}}>
-                {b.name}
-                {b.recommended && <span className="chip amber">★ recommended</span>}
-              </span>
-              <span style={{color: "var(--fg-3)"}}>{b.ver}{b.note && <span style={{color: "var(--fg-5)", marginLeft: 6}}>· {b.note}</span>}</span>
-              <span>
-                {b.state === "installed" ? <span className="chip ok">installed</span> : <span className="chip">unavailable</span>}
-              </span>
-              <span style={{color: "var(--fg-3)", fontSize: 11}}>
-                {slotsUsing.length > 0 ? slotsUsing.map(s => s.name).join(", ") : <span style={{color: "var(--fg-5)"}}>—</span>}
-              </span>
-              <span style={{display: "flex", gap: 4, justifyContent: "flex-end"}}>
-                {b.state === "installed" ? (
-                  <>
-                    <button className="btn ghost sm" onClick={() => b.kind === "flm" ? setFlmOpen(true) : setInstallB(b)}>{Icons.restart} Reinstall</button>
-                    <button className="btn ghost sm" onClick={() => setUninstallB(b)}>{Icons.unload}</button>
-                  </>
-                ) : (
-                  <button className="btn ghost sm" disabled>Install</button>
-                )}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-
-      <BackendInstallModal open={!!installB} onClose={() => setInstallB(null)} backend={installB} />
-      <BackendUninstallModal open={!!uninstallB} onClose={() => setUninstallB(null)} backend={uninstallB} />
-      <FlmDebGuideModal open={flmOpen} onClose={() => setFlmOpen(false)} backend={HAL0_DATA.backends.find(b => b.kind === "flm")} />
-    </div>
-  );
-}
 
 // ════════════════════════════════════════════════════════════════════
 // LOGS
@@ -378,4 +272,4 @@ function highlightSearch(text, q) {
   );
 }
 
-Object.assign(window, { BackendsView, LogsView });
+Object.assign(window, { LogsView });

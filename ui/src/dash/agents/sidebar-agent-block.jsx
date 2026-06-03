@@ -10,8 +10,9 @@
 //     when genuinely broken/down)
 //   - agent name + status label
 //   - active persona/profile name (from /api/agents/<id>/personas)
-//   - [Open chat] → onGo("agent") (the dashboard's agent route), tooltip
-//     notes the `hal0 chat` TUI command as a terminal fallback
+//   - [Memory →] → onGo("agent") (the dashboard's agent route, now the
+//     Memory capability) plus an inline `hal0 chat` TUI hint. v0.4 dropped
+//     the web chat surface, so the affordance no longer opens a dead chat.
 //   - empty state when no agent installed: "Install Hermes" CTA → docs
 //
 // W9 simplification: the prior version rendered approvals / skills /
@@ -154,10 +155,17 @@ function SidebarAgentBlock({ onGo }) {
         className="nudge sb-status-cta"
         onClick={() => onGo && onGo("agent")}
         title={TUI_HINT}
-        data-testid="sidebar-agent-open-chat"
+        data-testid="sidebar-agent-open-memory"
       >
-        Open chat →
+        Memory →
       </button>
+      <div
+        className="sb-status-tui mono"
+        title="Run the agent chat in your terminal"
+        data-testid="sidebar-agent-tui-hint"
+      >
+        Chat in terminal: <code>hal0 chat</code>
+      </div>
     </div>
   );
 }
@@ -187,6 +195,17 @@ button.sb-status-cta {
 button.sb-status-cta:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
+}
+.sb-status-tui {
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--fg-4);
+}
+.sb-status-tui code {
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 0 4px;
+  border-radius: 3px;
 }
 @media (max-width: 1024px) {
   .sb-status-agent .row { padding: 2px 0; }
