@@ -1211,6 +1211,23 @@ else
         else
             warn "hal0-agent@hermes not yet active; check 'journalctl -u hal0-agent@hermes -n 40'"
         fi
+        # Gateway (Telegram/Discord) also runs as a SYSTEM service under
+        # the hal0 user — same posture as the dashboard above. The
+        # bootstrap provisioner has already written the secrets drop-in
+        # (/etc/systemd/system/hermes-gateway.service.d/10-hal0-secrets.conf);
+        # hermes_cli lays down the main unit here. daemon-reload picks up
+        # the drop-in BEFORE first start so platforms connect on boot.
+        # HERMES_HOME is unset so the generator bakes the hal0 default
+        # (~/.hermes), not a value inherited from the installer env.
+        info "installing system-scope hermes gateway (User=hal0)"
+        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0
+        systemctl daemon-reload
+        systemctl enable --now hermes-gateway.service
+        if wait_active hermes-gateway.service 20; then
+            info "hermes-gateway is running (Telegram/Discord)"
+        else
+            warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
+        fi
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
         info "hal0-agent@hermes not enabled — run 'hal0 agent bootstrap hermes' first"
     fi

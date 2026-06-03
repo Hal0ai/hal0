@@ -281,3 +281,21 @@ class TestHermesGatewaySecretsDropin:
         body = hp._gateway_dropin_body()
         assert "/var/lib/hal0/agents/hermes" not in body
         assert "/var/lib/hal0/agents/hermes" not in str(hp.GATEWAY_SYSTEMD_DROPIN_FILE)
+
+
+class TestInstallerGatewayWiring:
+    """install.sh must create AND enable the system-scope hermes gateway.
+
+    The provisioner only writes the secrets drop-in; the main unit comes
+    from ``hermes gateway install --system --run-as-user hal0``. Without
+    this the gateway (Telegram/Discord) never starts on a fresh install.
+    """
+
+    def _install_sh(self) -> str:
+        return (_REPO_ROOT / "installer" / "install.sh").read_text(encoding="utf-8")
+
+    def test_installs_system_gateway_unit(self) -> None:
+        assert "gateway install --system --run-as-user hal0" in self._install_sh()
+
+    def test_enables_gateway_service(self) -> None:
+        assert "enable --now hermes-gateway.service" in self._install_sh()
