@@ -40,7 +40,7 @@ schema_version = 1
 name        = "hermes"
 display     = "Hermes-Agent"
 # Filesystem sandbox. Agent process sees only this path as its workspace.
-workspace   = "/var/lib/hal0/agents/hermes/workspace"
+workspace   = "/var/lib/hal0/.hermes/workspace"
 
 # ---------------------------------------------------------------
 # MCP servers the agent may connect to.

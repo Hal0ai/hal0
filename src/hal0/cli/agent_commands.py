@@ -44,7 +44,7 @@ bootstrap_app = typer.Typer(help="Run bundled-agent bootstrap pipelines (Phase 1
 app.add_typer(bootstrap_app, name="bootstrap")
 
 # Personas sub-sub-app (PR-3, v0.3) — manages the persona TOML store at
-# /var/lib/hal0/agents/hermes/personas/. Activate writes active.txt and
+# /var/lib/hal0/.hermes/personas/. Activate writes active.txt and
 # triggers a best-effort hot-reload nudge; the API endpoint added in PR-4
 # wraps the same persona.activate() helper.
 personas_app = typer.Typer(help="Manage Hermes personas (system prompt + tool gating).")
@@ -681,7 +681,7 @@ def agent_reprovision(
 def personas_list() -> None:
     """List personas + mark the active one.
 
-    Reads ``/var/lib/hal0/agents/hermes/personas/*.toml`` directly so the
+    Reads ``/var/lib/hal0/.hermes/personas/*.toml`` directly so the
     CLI works without a running hal0-api (mirrors ``hal0 agent status``
     which also reads disk state).
     """
@@ -719,7 +719,7 @@ def personas_show(
 
     Useful for grabbing a starting template before hand-editing a new
     persona — copy the output, change ``[persona].id``, save under
-    ``/var/lib/hal0/agents/hermes/personas/<new-id>.toml``.
+    ``/var/lib/hal0/.hermes/personas/<new-id>.toml``.
     """
     import tomli_w
 

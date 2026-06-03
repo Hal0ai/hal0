@@ -1,7 +1,7 @@
 """CLI tests for ``hal0 agent personas {list,show,activate}`` (PR-3, v0.3).
 
 These commands read + mutate the persona store under
-``/var/lib/hal0/agents/hermes/personas/``. We point the personas module
+``/var/lib/hal0/.hermes/personas/``. We point the personas module
 at a temp dir per test so the CLI hits an isolated store.
 """
 

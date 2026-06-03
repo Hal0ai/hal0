@@ -126,7 +126,7 @@ def _load_agent_config(agent_id: str) -> AgentConfig:
             f"({', '.join(sorted(_BUILTIN_AGENT_TYPES))})"
         )
 
-    home = Path(str(data.get("home") or f"/var/lib/hal0/agents/{agent_id}"))
+    home = Path(str(data.get("home") or f"/var/lib/hal0/.{agent_id}"))
     venv = Path(str(data.get("venv") or f"/var/lib/hal0/venvs/{agent_id}"))
     host = str(data.get("host") or "127.0.0.1")
     # tomllib parses integers as int already; coerce via str→int to satisfy

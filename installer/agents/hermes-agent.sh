@@ -20,7 +20,7 @@
 #
 # Inputs (set by the Python driver; safe to override for manual runs):
 #   HAL0_AGENT_DATA_DIR  per-agent data dir (default:
-#                         /var/lib/hal0/agents/hermes)
+#                         /var/lib/hal0/.hermes)
 #   HAL0_API_URL         hal0 API base URL (default: http://127.0.0.1:8080)
 #   HAL0_BEARER_TOKEN    Bearer token (default: pulled from
 #                         /etc/hal0/tokens.toml, like pi-coder.sh)
@@ -33,7 +33,7 @@ warn()  { printf '[hermes] WARN: %s\n' "$*" >&2; }
 die()   { printf '[hermes] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-HAL0_AGENT_DATA_DIR="${HAL0_AGENT_DATA_DIR:-/var/lib/hal0/agents/hermes}"
+HAL0_AGENT_DATA_DIR="${HAL0_AGENT_DATA_DIR:-/var/lib/hal0/.hermes}"
 HAL0_API_URL="${HAL0_API_URL:-http://127.0.0.1:8080}"
 HAL0_BEARER_TOKEN="${HAL0_BEARER_TOKEN:-}"
 

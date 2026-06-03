@@ -2,7 +2,7 @@
 
 Personas are hal0's user-facing concept layered on top of Hermes's
 ``system_prompt_prelude`` + tool gating + memory namespacing. Each
-persona is a TOML file at ``/var/lib/hal0/agents/hermes/personas/<id>.toml``
+persona is a TOML file at ``/var/lib/hal0/.hermes/personas/<id>.toml``
 plus a single-line pointer at ``personas/active.txt`` naming the active
 one. The provisioner reads the active persona during Phase 7 (system
 prompt injection) and Phase 8 (seed) so the rendered config.yaml
@@ -36,7 +36,7 @@ log = structlog.get_logger(__name__)
 # can seed without manual ``/etc/hal0/...`` placement; operators wanting
 # to back up customised personas should snapshot this tree alongside
 # ``/var/lib/hal0/state``.
-PERSONAS_ROOT = Path("/var/lib/hal0/agents/hermes/personas")
+PERSONAS_ROOT = Path("/var/lib/hal0/.hermes/personas")
 ACTIVE_POINTER = "active.txt"
 
 # Default tool patterns. Conservative — the persona file can opt into

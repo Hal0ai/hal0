@@ -75,7 +75,7 @@ DEFAULT_HERMES_PORT: Final[int] = 9119
 # runtime.json lives where PR-3's ``hermes_provision`` writes it. The
 # bootstrap chmods it 0600 — we re-tighten on every read to belt-and-
 # braces against permission drift.
-RUNTIME_JSON_DEFAULT: Final[str] = "/var/lib/hal0/agents/hermes/runtime.json"
+RUNTIME_JSON_DEFAULT: Final[str] = "/var/lib/hal0/.hermes/runtime.json"
 
 # tool.progress coalescing window. 100ms matches the rate at which the
 # UI rAF batches anyway.

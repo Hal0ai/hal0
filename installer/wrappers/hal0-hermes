@@ -26,7 +26,7 @@
 
 set -eu
 
-HERMES_HOME="${HERMES_HOME:-/var/lib/hal0/agents/hermes}"
+HERMES_HOME="${HERMES_HOME:-/var/lib/hal0/.hermes}"
 HAL0_AGENT_ID="${HAL0_AGENT_ID:-hermes-agent}"
 HAL0_HERMES_BIN="${HAL0_HERMES_BIN:-/var/lib/hal0/venvs/hermes/bin/hermes}"
 HAL0_HERMES_SECRETS="${HAL0_HERMES_SECRETS:-/var/lib/hal0/secrets/agents/hermes.env}"

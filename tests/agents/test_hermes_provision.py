@@ -20,6 +20,7 @@ slice notices.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,36 @@ def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.
     monkeypatch.setattr(
         hp, "WRAPPER_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
     )
+    monkeypatch.setattr(
+        hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
+    )
+    # #437 gateway_secrets_wire: redirect the SYSTEM drop-in dir under
+    # tmp_path and stub `systemctl daemon-reload` so a pipeline run never
+    # touches the live /etc/systemd/system or the live systemd bus — even
+    # when the test runner is root.
+    _dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
+    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", _dropin_dir)
+    monkeypatch.setattr(
+        hp, "GATEWAY_SYSTEMD_DROPIN_FILE", _dropin_dir / "10-hal0-secrets.conf"
+    )
+
+    # Intercept ONLY `systemctl daemon-reload` (the live-systemd action the
+    # gateway phase would run). Everything else — env_probe's
+    # `systemd-detect-virt`, smoke-test exec — passes through to the real
+    # subprocess so those phases behave as before.
+    _real_run = hp.subprocess.run
+
+    class _NoopCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _guarded_run(argv: Any, *a: Any, **kw: Any) -> Any:
+        if isinstance(argv, (list, tuple)) and list(argv[:2]) == ["systemctl", "daemon-reload"]:
+            return _NoopCompleted()
+        return _real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(hp.subprocess, "run", _guarded_run)
 
     def _fake_install(v: Path, _req: Path, **_kwargs: Any) -> None:
         (v / "bin").mkdir(parents=True, exist_ok=True)
@@ -107,6 +138,10 @@ def test_phase_names_in_planned_order() -> None:
         "namespace_register",
         "model_automap",
         "voice_wire",
+        # #437 (SYSTEM scope): the gateway secrets drop-in lands after
+        # voice_wire (which may write the vault it references) and before
+        # smoke_tests.
+        "gateway_secrets_wire",
         "smoke_tests",
         "self_report",
     )
@@ -118,8 +153,10 @@ def test_run_marks_every_phase_ok_on_fresh(
 ) -> None:
     result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
     # voice_wire legitimately returns SKIP when no STT/TTS slots are
-    # configured (most CI envs); accept both OK and SKIP for that phase.
-    skip_ok = {"voice_wire"}
+    # configured (most CI envs); gateway_secrets_wire SKIPs when the test
+    # runner is non-root (can't write /etc/systemd/system). Accept both
+    # OK and SKIP for those phases.
+    skip_ok = {"voice_wire", "gateway_secrets_wire"}
     for name in hp.PHASE_NAMES:
         status = result.phases[name]["status"]
         allowed = {hp.PhaseStatus.OK.value} | (
@@ -371,7 +408,9 @@ def test_install_phase_skips_venv_when_binary_exists(
     (venv / "bin" / "hermes").chmod(0o755)
 
     wrapper_dst = tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
+    hermes_cli_dst = tmp_path / "usr" / "local" / "bin" / "hermes"
     monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", wrapper_dst)
+    monkeypatch.setattr(hp, "HERMES_CLI_INSTALL_PATH", hermes_cli_dst)
     hermes_home = tmp_path / "hermes_home"
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
@@ -385,7 +424,11 @@ def test_install_phase_skips_venv_when_binary_exists(
     out = hp._phase_install(state)
     assert out.status == hp.PhaseStatus.OK
     assert called == []
-    assert wrapper_dst.is_file()
+    # Canonical `hermes` is a real file; `hal0-hermes` is a back-compat
+    # symlink to it (#437 wrapper consolidation).
+    assert hermes_cli_dst.is_file()
+    assert wrapper_dst.is_symlink()
+    assert wrapper_dst.resolve() == hermes_cli_dst.resolve()
     # PR-1-bundle: the legacy hal0 model-provider plugin is no longer
     # copied — it hardcoded an :8000 base_url that has no listener and
     # the composite ``hal0`` upstream in hal0.api supersedes it.
@@ -398,7 +441,9 @@ def test_install_phase_runs_venv_install_when_binary_missing(
 ) -> None:
     venv = tmp_path / "venv"
     wrapper_dst = tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
+    hermes_cli_dst = tmp_path / "usr" / "local" / "bin" / "hermes"
     monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", wrapper_dst)
+    monkeypatch.setattr(hp, "HERMES_CLI_INSTALL_PATH", hermes_cli_dst)
     hermes_home = tmp_path / "hermes_home"
     state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
 
@@ -1322,3 +1367,160 @@ def test_self_report_continues_when_memory_unreachable(
     assert out.status == hp.PhaseStatus.OK
     assert out.details["published"] is False
     assert "refused" in out.details["warning"]
+
+
+# ── #437 — gateway_secrets_wire (SYSTEM scope) ──────────────────────────────
+#
+# The provisioner idempotently writes the gateway secrets drop-in at
+# /etc/systemd/system/hermes-gateway.service.d/10-hal0-secrets.conf and
+# runs `systemctl daemon-reload` ONLY when the file changed. These tests
+# mirror the _merge_env_file atomic+posture test: monkeypatch the drop-in
+# dir to tmp_path + capture subprocess argv. End-to-end EnvironmentFile
+# loading is NOT unit-testable without a live systemd — we assert file
+# presence + content + mode + the daemon-reload call, not inherited env.
+
+
+class _FakeSystemctl:
+    """Capture subprocess.run argv so tests can assert daemon-reload calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def run(self, argv: list[str], **_kwargs: Any) -> Any:
+        self.calls.append(list(argv))
+
+        class _Completed:
+            returncode = 0
+
+        return _Completed()
+
+
+def _patch_dropin_to_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, _FakeSystemctl]:
+    """Point the gateway drop-in dir at tmp_path + stub subprocess + root euid."""
+    dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
+    dropin_file = dropin_dir / "10-hal0-secrets.conf"
+    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", dropin_dir)
+    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", dropin_file)
+    # Pretend we're root so the phase doesn't SKIP on the non-root guard.
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+    fake = _FakeSystemctl()
+    monkeypatch.setattr(hp.subprocess, "run", fake.run)
+    return dropin_file, fake
+
+
+def test_gateway_secrets_wire_writes_dropin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dropin_file, fake = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+    state = hp.BootstrapState()
+
+    out = hp._phase_gateway_secrets_wire(state)
+
+    assert out.status == hp.PhaseStatus.OK
+    assert dropin_file.exists()
+    body = dropin_file.read_text(encoding="utf-8")
+    assert "EnvironmentFile=/var/lib/hal0/secrets/agents/hermes.env" in body
+    assert "[Service]" in body
+    # Mode 0o644 — NOT 0o600, which would block systemd from reading the
+    # unit fragment. The secrets themselves are in the 0600 vault.
+    assert (dropin_file.stat().st_mode & 0o777) == 0o644
+    # daemon-reload fired exactly once on first write.
+    assert fake.calls == [["systemctl", "daemon-reload"]]
+    assert out.details["daemon_reload"] is True
+    assert out.details["dropin_path"] == str(dropin_file)
+    assert out.details["content_hash"]
+
+
+def test_gateway_secrets_wire_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dropin_file, fake = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+    state = hp.BootstrapState()
+
+    first = hp._phase_gateway_secrets_wire(state)
+    assert first.status == hp.PhaseStatus.OK
+    mtime_after_first = dropin_file.stat().st_mtime_ns
+    body_after_first = dropin_file.read_text(encoding="utf-8")
+    assert fake.calls == [["systemctl", "daemon-reload"]]
+
+    second = hp._phase_gateway_secrets_wire(state)
+    assert second.status == hp.PhaseStatus.OK
+    # Identical hash, file untouched, NO second daemon-reload (hash-skip).
+    assert second.hash == first.hash
+    assert dropin_file.read_text(encoding="utf-8") == body_after_first
+    assert dropin_file.stat().st_mtime_ns == mtime_after_first
+    assert fake.calls == [["systemctl", "daemon-reload"]]  # still only one
+    assert second.details.get("daemon_reload") is False
+    assert second.details.get("unchanged") is True
+
+
+def test_gateway_secrets_wire_skips_non_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dropin_file, fake = _patch_dropin_to_tmp(tmp_path, monkeypatch)
+    # Override the root euid the helper set — emulate a non-root provision.
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 1000)
+    state = hp.BootstrapState()
+
+    out = hp._phase_gateway_secrets_wire(state)
+
+    assert out.status == hp.PhaseStatus.SKIP
+    assert out.reason is not None
+    assert "root" in out.reason.lower() or "euid" in out.reason.lower()
+    # No write, no daemon-reload.
+    assert not dropin_file.exists()
+    assert fake.calls == []
+
+
+# ── #437 — canonical home / wrapper consolidation ───────────────────────────
+
+
+def test_bootstrap_default_home_is_dot_hermes() -> None:
+    # The default the fresh bootstrap + provision.json checkpoints embed
+    # must be the NORMAL hermes default `/var/lib/hal0/.hermes`, not the
+    # legacy `agents/hermes` location (otherwise --repair re-claims the
+    # old path via _claim_hermes_home).
+    assert hp.BootstrapState().hermes_home == "/var/lib/hal0/.hermes"
+
+
+def test_fresh_run_stamps_marker_under_dot_hermes_home(
+    tmp_path: Path, state_with_tmp_paths: hp.BootstrapState
+) -> None:
+    # state_with_tmp_paths roots hermes_home under tmp; assert the
+    # .hal0-managed marker lands under the configured (dot-shaped) home.
+    result = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths)
+    assert result.failed == []
+    marker = Path(state_with_tmp_paths.hermes_home) / ".hal0-managed"
+    assert marker.is_file()
+
+
+def test_install_phase_installs_both_wrappers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "hermes").write_text("#!/bin/sh\nexit 0\n")
+    (venv / "bin" / "hermes").chmod(0o755)
+
+    hermes_cli_dst = tmp_path / "usr" / "local" / "bin" / "hermes"
+    wrapper_dst = tmp_path / "usr" / "local" / "bin" / "hal0-hermes"
+    monkeypatch.setattr(hp, "HERMES_CLI_INSTALL_PATH", hermes_cli_dst)
+    monkeypatch.setattr(hp, "WRAPPER_INSTALL_PATH", wrapper_dst)
+    monkeypatch.setattr(hp, "_install_venv", lambda *a, **kw: None)
+
+    state = hp.BootstrapState(venv=str(venv), hermes_home=str(tmp_path / "hh"))
+    out = hp._phase_install(state)
+
+    assert out.status == hp.PhaseStatus.OK
+    # Canonical `hermes` on PATH is a real executable file.
+    assert hermes_cli_dst.is_file()
+    assert os.access(hermes_cli_dst, os.X_OK)
+    # `hal0-hermes` is a back-compat symlink to it (executable via target).
+    assert wrapper_dst.is_symlink()
+    assert wrapper_dst.resolve() == hermes_cli_dst.resolve()
+    assert os.access(wrapper_dst, os.X_OK)
+    # Details record both entry points.
+    assert out.details["hermes_cli"] == str(hermes_cli_dst)
+    assert out.details["wrapper"] == str(wrapper_dst)

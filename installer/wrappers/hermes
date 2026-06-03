@@ -1,0 +1,64 @@
+#!/bin/sh
+# hermes — canonical hal0 CLI entry point on PATH (locked decision #3).
+#
+# This is the env-injecting wrapper around the hal0-managed Hermes venv.
+# Unlike the legacy `hal0-hermes` wrapper, it DOES NOT pin HERMES_HOME:
+# the hermes binary's own default (`~/.hermes`) resolves to
+# /var/lib/hal0/.hermes for the hal0 service account, which is now the
+# canonical Hermes home. Dropping the pin keeps a single source of truth
+# (the hermes default) and lets `hermes` Just Work for any invoking user
+# whose `~/.hermes` is the intended tree.
+#
+# Its sole job is to set:
+#
+#   HAL0_AGENT_ID  — read by `MCPIdentityMiddleware` via the
+#                    `X-hal0-Agent` header, then echoed back as the
+#                    `client_id` for Cognee's `private:<client_id>`
+#                    namespace. Defaults to `hermes-agent`.
+#
+# It then execs the hal0-managed venv's `hermes` binary. The venv lives
+# at /var/lib/hal0/venvs/hermes/ (hard-pinned in
+# installer/agents/hermes/requirements.txt). HAL0_HERMES_BIN overrides
+# when the venv lives elsewhere.
+#
+# `--hal0-ready` is the smoke-test sentinel the installer pings to verify
+# the wrapper is on PATH WITHOUT spawning upstream `hermes`.
+#
+# An optional outbound-credentials env file at
+# /var/lib/hal0/secrets/agents/hermes.env (mode 0600) is sourced when
+# present. Post-ADR-0012 this holds HF token + external MCP tokens only —
+# never a hal0 Bearer.
+#
+# `hal0-hermes` is a back-compat symlink to this wrapper.
+
+set -eu
+
+HAL0_AGENT_ID="${HAL0_AGENT_ID:-hermes-agent}"
+HAL0_HERMES_BIN="${HAL0_HERMES_BIN:-/var/lib/hal0/venvs/hermes/bin/hermes}"
+HAL0_HERMES_SECRETS="${HAL0_HERMES_SECRETS:-/var/lib/hal0/secrets/agents/hermes.env}"
+
+# Deliberately NOT exporting HERMES_HOME — the hermes default ~/.hermes
+# (== /var/lib/hal0/.hermes for the hal0 user) is now canonical.
+export HAL0_AGENT_ID
+
+# Source the outbound-credentials file when present (HF / external MCP
+# tokens per ADR-0013). Optional — bootstrap may run without one.
+if [ -r "$HAL0_HERMES_SECRETS" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    # (path is operator-controlled by design)
+    . "$HAL0_HERMES_SECRETS"
+    set +a
+fi
+
+case "${1:-}" in
+    --hal0-ready) exit 0 ;;
+esac
+
+if [ ! -x "$HAL0_HERMES_BIN" ]; then
+    printf 'hermes: venv binary missing at %s\n' "$HAL0_HERMES_BIN" >&2
+    printf '  Run `hal0 agent bootstrap hermes` to provision.\n' >&2
+    exit 127
+fi
+
+exec "$HAL0_HERMES_BIN" "$@"

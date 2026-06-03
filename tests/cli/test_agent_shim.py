@@ -61,7 +61,9 @@ class TestAgentConfig:
         cfg = agent_shim._load_agent_config("hermes")
         assert cfg.agent_id == "hermes"
         assert cfg.agent_type == "hermes"
-        assert cfg.home == Path("/var/lib/hal0/agents/hermes")
+        # Canonical home is the dot-prefixed `.<agent_id>` convention
+        # (== the hermes default `~/.hermes` for the hal0 user).
+        assert cfg.home == Path("/var/lib/hal0/.hermes")
         assert cfg.venv == Path("/var/lib/hal0/venvs/hermes")
         assert cfg.host == "127.0.0.1"
         assert cfg.port == 9119
@@ -101,8 +103,9 @@ class TestAgentConfig:
         cfg = agent_shim._load_agent_config("piccoder")
         assert cfg.agent_id == "piccoder"
         assert cfg.agent_type == "hermes"
-        # Defaults derive from the id, not the type.
-        assert cfg.home == Path("/var/lib/hal0/agents/piccoder")
+        # Defaults derive from the id, not the type. The home follows the
+        # `.<agent_id>` convention (#437 home normalization).
+        assert cfg.home == Path("/var/lib/hal0/.piccoder")
         assert cfg.venv == Path("/var/lib/hal0/venvs/piccoder")
 
     def test_malformed_toml_dies(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,7 +148,7 @@ def _cfg(**kw: Any) -> agent_shim.AgentConfig:
     defaults: dict[str, Any] = dict(
         agent_id="hermes",
         agent_type="hermes",
-        home=Path("/var/lib/hal0/agents/hermes"),
+        home=Path("/var/lib/hal0/.hermes"),
         venv=Path("/var/lib/hal0/venvs/hermes"),
         host="127.0.0.1",
         port=9119,

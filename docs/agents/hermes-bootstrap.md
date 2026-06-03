@@ -31,7 +31,7 @@ Source: `src/hal0/agents/hermes_provision.py:1984` (the `PHASES` list).
 | 1 | `preflight`          | Python ≥ 3.11, free disk ≥ 4 GiB, hal0 API health, upstream `hermes` on PATH (unless `--offline`). | `hermes_provision.py:225` |
 | 2 | `install`            | Create hal0-managed venv at `/var/lib/hal0/venvs/hermes/`, install pinned `hermes-agent` wheel, copy hal0 plugin tree (`Hal0Profile`, `Hal0MemoryProvider`) into `$HERMES_HOME/plugins/`. | `:350` |
 | 3 | `env_probe`          | Snapshot hardware (iGPU, NPU, UMA size), container (LXC + apparmor), tooling — feeds downstream phases. | `:524` |
-| 4 | `home_init`          | Claim `HERMES_HOME=/var/lib/hal0/agents/hermes/` with a marker file; idempotent re-runs validate the claim. | `:465` |
+| 4 | `home_init`          | Claim `HERMES_HOME=/var/lib/hal0/.hermes/` with a marker file; idempotent re-runs validate the claim. | `:465` |
 | 5 | `config_write`       | Render `config.yaml` from the env probe + the live `/api/capabilities` snapshot; apply operator overrides from `/etc/hal0/agents/hermes/overrides.yaml`. | `:678` |
 | 6 | `mcp_wire`           | Register `hal0-admin` + `hal0-memory` MCPs in Hermes's `mcp_servers` map; round-trip each one via JSON-RPC `tools/list`. Reads the per-agent allow-list at `/etc/hal0/agents/hermes.toml` (ADR-0013). | `:874` |
 | 7 | `context_link`       | Symlink `/etc/hal0/HERMES.md` + `/etc/hal0/agent-skills/` into HERMES_HOME so Hermes injects them on every session start. | `:1031` |
@@ -63,7 +63,7 @@ modifications, no patches.
 | Path | Owner | Purpose |
 |------|-------|---------|
 | `/var/lib/hal0/venvs/hermes/` | hal0 installer | Pinned hermes-agent Python venv. |
-| `/var/lib/hal0/agents/hermes/` (= `HERMES_HOME`) | Hermes upstream | Hermes's own tree — config.yaml, plugins, session state. |
+| `/var/lib/hal0/.hermes/` (= `HERMES_HOME`) | Hermes upstream | Hermes's own tree — config.yaml, plugins, session state. |
 | `/var/lib/hal0/state/agents/hermes/provision.json` | hal0 bootstrap | Checkpoint state machine; idempotency anchor. |
 | `/var/lib/hal0/state/agents/hermes/provision-logs/` | hal0 bootstrap | Per-phase logs (`{phase}.log`, plus `self_report.json`). |
 | `/etc/hal0/agents/hermes.toml` | Installer (editable) | Per-agent MCP allow-list (ADR-0013). |

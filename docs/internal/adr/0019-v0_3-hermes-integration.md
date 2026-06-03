@@ -81,7 +81,7 @@ by ADR-0018 + the `pyproject.toml [tool.hal0.upstream-hermes]` table.
 ### 4. Persona TOML store + hot-reload nudge
 
 **Decision.** Personas are TOML files under
-`/var/lib/hal0/agents/hermes/personas/`. The active persona is the
+`/var/lib/hal0/.hermes/personas/`. The active persona is the
 contents of `active.txt`. Switching personas writes `active.txt` and
 POSTs a JSON-RPC reload nudge to hermes; the system-prompt scope
 swaps on the next turn. No restart unless the persona changes the

@@ -1,0 +1,93 @@
+{# /etc/hal0/MCP-CLIENTS.md — hal0 MCP wiring reference for external clients.
+   Rendered by context_link phase per ADR-0021 post-provision hook.
+   This file documents the MCP connection contract for tools like
+   Claude Code, OpenWebUI, and other external MCP consumers.
+   hal0 does not manage these tools — it documents how to wire them. #}
+# MCP Client Wiring — hal0
+
+Connect external tools (Claude Code, OpenWebUI, etc.) to hal0's MCP servers.
+
+## Available MCP Servers
+
+| Server | URL | Transport | Description |
+|--------|-----|-----------|-------------|
+| hal0-admin | `http://127.0.0.1:8080/mcp/admin/mcp` | `http` (POST-only) | Slot/model management, system admin, hardware probes |
+| hal0-memory | `http://127.0.0.1:8080/mcp/memory/mcp` | `http` (POST-only) | Cognee vector/graph memory, agent identity cards |
+
+**Important:** hal0 MCP servers only support plain HTTP POST transport. Do NOT use `streamable-http` or SSE — these will fail with HTTP 406 or 405.
+
+## Quick Start
+
+```bash
+hal0 connect claude-code
+```
+
+This auto-discovers MCP servers and wires them into your client. Supports `--dry-run` to preview, `--repair` to fix misconfigurations.
+
+## Manual Configuration
+
+### Claude Code (`~/.claude/settings.json`)
+
+```json
+{
+  "mcpServers": {
+    "hal0-admin": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp/admin/mcp"
+    },
+    "hal0-memory": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp/memory/mcp"
+    }
+  }
+}
+```
+
+Add permissions in the same file:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__hal0-admin__*",
+      "mcp__hal0-memory__*"
+    ]
+  }
+}
+```
+
+### Other MCP Clients
+
+Any MCP-compatible client with HTTP transport support. Key requirements:
+
+- **Transport:** `http` (plain POST, NOT streamable-http or SSE)
+- **URL suffix:** Always ends with `/mcp` (e.g. `/mcp/admin/mcp`, not `/mcp/admin`)
+- **Headers:** Set `X-hal0-Agent: <your-agent-id>` for identity routing
+- **Memory namespace:** Set `X-hal0-Private: 1` to access private memory namespaces
+
+## Verification
+
+Test a connection manually:
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/mcp/admin/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}' | jq '.result.tools | length'
+```
+
+Should return the tool count (typically 25+ for admin, 4 for memory).
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| HTTP 405 Method Not Allowed | URL missing `/mcp` suffix (e.g. `/mcp/admin`) | Use full path: `/mcp/admin/mcp` |
+| HTTP 406 Not Acceptable | Using `streamable-http` transport (sends GET + POST) | Use `http` transport (POST-only) |
+| Connection refused | hal0 API not running | `systemctl status hal0-api` |
+| Unknown tool | MCP server not connected | Run `hal0 connect <client>` |
+
+## See Also
+
+- `/etc/hal0/AGENTS.md` — agent-facing project context
+- `/root/.dexto/agents/hal0-services/agent.yml` — working reference config
+- `hal0 connect --list` — list all supported connectors and their status

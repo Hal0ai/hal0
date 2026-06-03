@@ -53,7 +53,7 @@ would render blank with no errors.
 | `/etc/hal0/agents/hermes.env` (optional) | operator overrides (HERMES_HOME, port, …) |
 | `/etc/hal0/agents/hermes.toml` (optional) | shim config (overrides builtin defaults) |
 | `/var/lib/hal0/venvs/hermes/` | the agent's venv — `hermes` binary lives in `bin/` |
-| `/var/lib/hal0/agents/hermes/` | `$HERMES_HOME` (config, personas, plugins) |
+| `/var/lib/hal0/.hermes/` | `$HERMES_HOME` (config, personas, plugins) |
 | `/run/hal0/` | sockets, lock files |
 | `/var/log/hal0/` | hal0-side log overflow (most logs go to journald) |
 
@@ -216,8 +216,24 @@ The endpoint is the surface that lets operators trigger a restart
 without dropping to SSH. SSH `systemctl restart` still works fine —
 this is just the dashboard-friendly path.
 
+## Platform tokens and messaging adapters
+
+The `hal0-agent@hermes.service` unit above is the **dashboard** surface.
+The Telegram + Discord **gateway** (the bot that talks to chat apps) runs
+as a separate SYSTEM-scope unit, `hermes-gateway.service`, and gets its
+platform tokens from a systemd drop-in — NOT a main-unit edit, so the
+wiring survives `hermes gateway install` regenerating the main unit.
+
+See [`hermes-gateway-platform-tokens.md`](./hermes-gateway-platform-tokens.md)
+for the secrets vault layout, the drop-in at
+`/etc/systemd/system/hermes-gateway.service.d/10-hal0-secrets.conf`, the
+full key list, and the verification + re-apply runbook. The hal0
+provisioner writes that drop-in idempotently in its
+`gateway_secrets_wire` phase (issue #437).
+
 ## See also
 
+* [`hermes-gateway-platform-tokens.md`](./hermes-gateway-platform-tokens.md) — gateway secrets drop-in (#437)
 * [`hermes-bootstrap.md`](../hermes-bootstrap.md) — provisioning state machine
 * [`identity.md`](../identity.md) — `X-hal0-Agent` header and auth model
 * [`mcp-client.md`](../mcp-client.md) — how Hermes talks to hal0-memory + hal0-admin

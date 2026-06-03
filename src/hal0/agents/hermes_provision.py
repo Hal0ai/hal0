@@ -117,7 +117,7 @@ class BootstrapState:
     completed_at: str | None = None
     hal0_version: str | None = None
     hermes_version: str | None = None
-    hermes_home: str = "/var/lib/hal0/agents/hermes"
+    hermes_home: str = "/var/lib/hal0/.hermes"
     venv: str = "/var/lib/hal0/venvs/hermes"
     agent_id: str = "hermes-agent"
     phases: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -202,6 +202,12 @@ PYTHON_MIN = (3, 11)
 MIN_FREE_GIB = 4
 DAEMON_HEALTH_URL = "http://127.0.0.1:8080/api/status"
 WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
+# Canonical CLI entry point on PATH (locked decision #3). The thin
+# ``hermes`` wrapper injects HAL0_AGENT_ID and execs the venv hermes
+# WITHOUT pinning HERMES_HOME (the hermes default ~/.hermes resolves to
+# /var/lib/hal0/.hermes for the hal0 user). ``hal0-hermes`` stays as a
+# back-compat symlink to this.
+HERMES_CLI_INSTALL_PATH = Path("/usr/local/bin/hermes")
 REPO_ROOT_FOR_INSTALLER = Path(__file__).resolve().parents[3]
 
 
@@ -344,6 +350,23 @@ def _copy_wrapper(wrapper_src: Path, wrapper_dst: Path) -> None:
     wrapper_dst.chmod(0o755)
 
 
+def _install_backcompat_symlink(target: Path, link: Path) -> None:
+    """Point ``link`` -> ``target`` (idempotent), replacing any prior file.
+
+    Used to make the legacy ``hal0-hermes`` entry point a symlink to the
+    canonical ``hermes`` wrapper. A pre-existing regular file (an older
+    install's copied wrapper) is replaced so the two never drift.
+    """
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink():
+        if os.readlink(link) == str(target):
+            return
+        link.unlink()
+    elif link.exists():
+        link.unlink()
+    os.symlink(str(target), str(link))
+
+
 def _copy_plugin_tree(src: Path, dst: Path) -> None:
     """Mirror a plugin directory (idempotent)."""
     if dst.exists():
@@ -368,7 +391,9 @@ def _phase_install(state: BootstrapState) -> PhaseResult:
     details: dict[str, Any] = {}
     venv = Path(state.venv)
     requirements = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
-    wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hal0-hermes"
+    # Canonical CLI source is ``installer/wrappers/hermes`` (no HERMES_HOME
+    # pin); ``hal0-hermes`` becomes a back-compat symlink to it.
+    hermes_wrapper_src = REPO_ROOT_FOR_INSTALLER / "installer" / "wrappers" / "hermes"
     plugin_src_root = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
 
     if not requirements.is_file():
@@ -376,10 +401,10 @@ def _phase_install(state: BootstrapState) -> PhaseResult:
             status=PhaseStatus.FAIL,
             reason=f"requirements.txt missing at {requirements}",
         )
-    if not wrapper_src.is_file():
+    if not hermes_wrapper_src.is_file():
         return PhaseResult(
             status=PhaseStatus.FAIL,
-            reason=f"wrapper source missing at {wrapper_src}",
+            reason=f"wrapper source missing at {hermes_wrapper_src}",
         )
 
     hermes_bin = _venv_python(venv).parent / "hermes"
@@ -396,13 +421,19 @@ def _phase_install(state: BootstrapState) -> PhaseResult:
     details["hermes_bin"] = str(hermes_bin)
 
     try:
-        _copy_wrapper(wrapper_src, WRAPPER_INSTALL_PATH)
+        # Canonical entry point: /usr/local/bin/hermes (no HERMES_HOME pin).
+        _copy_wrapper(hermes_wrapper_src, HERMES_CLI_INSTALL_PATH)
+        details["hermes_cli"] = str(HERMES_CLI_INSTALL_PATH)
+        # Back-compat: hal0-hermes -> hermes symlink so any caller still
+        # invoking the old name resolves to the canonical wrapper. The
+        # symlink, not a stale copy, keeps the two in lockstep forever.
+        _install_backcompat_symlink(HERMES_CLI_INSTALL_PATH, WRAPPER_INSTALL_PATH)
         details["wrapper"] = str(WRAPPER_INSTALL_PATH)
     except OSError as exc:
         # Non-root operators land here — surface so the user can sudo.
         return PhaseResult(
             status=PhaseStatus.FAIL,
-            reason=f"wrapper install to {WRAPPER_INSTALL_PATH} failed: {exc}",
+            reason=f"wrapper install to {HERMES_CLI_INSTALL_PATH} failed: {exc}",
             details=details,
         )
 
@@ -785,7 +816,7 @@ def _personas_root_for(state: BootstrapState) -> Path:
     Defaults to ``$HERMES_HOME/personas`` so tests (which point
     ``hermes_home`` at ``tmp_path``) get a writeable location without
     monkey-patching the personas module's constant. Operators on the
-    canonical install path get the same ``/var/lib/hal0/agents/hermes/
+    canonical install path get the same ``/var/lib/hal0/.hermes/
     personas/`` location they'd see from the personas-module default.
     """
     return Path(state.hermes_home) / "personas"
@@ -1172,7 +1203,7 @@ def _phase_persona_seed(state: BootstrapState) -> PhaseResult:
     the prelude block.
 
     Personas land under ``$HERMES_HOME/personas`` (NOT the personas
-    module's default ``/var/lib/hal0/agents/hermes/personas``) so the
+    module's default ``/var/lib/hal0/.hermes/personas``) so the
     seed phase honours the state's ``hermes_home`` field — tests get a
     writeable location for free, and on the canonical install path the
     two resolve to the same directory.
@@ -2093,6 +2124,149 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
 
 HERMES_SECRETS_ENV = Path("/var/lib/hal0/secrets/agents/hermes.env")
 
+# ── Gateway secrets drop-in (#437, SYSTEM scope) ─────────────────────────────
+#
+# The Hermes gateway runs as a SYSTEM-scope unit
+# (/etc/systemd/system/hermes-gateway.service, User=hal0). Its platform
+# tokens (Telegram + Discord bot tokens, allowed-user lists, FAL_KEY,
+# OPENROUTER_API_KEY) live in the root:root 0600 vault at
+# HERMES_SECRETS_ENV and are wired into the unit via a systemd drop-in —
+# NOT a main-unit edit. A drop-in survives ``hermes gateway install``
+# regenerating the main .service (hermes_cli rewrites the .service body
+# but never touches the .d/ tree), so platform connectivity persists
+# across main-unit regeneration. Under a system unit, pid1 (root) reads
+# the EnvironmentFile, so the vault can stay 0600 root:root while the
+# drop-in itself is world-readable 0644 like any normal unit fragment.
+GATEWAY_SYSTEMD_DROPIN_DIR = Path("/etc/systemd/system/hermes-gateway.service.d")
+GATEWAY_SYSTEMD_DROPIN_FILE = GATEWAY_SYSTEMD_DROPIN_DIR / "10-hal0-secrets.conf"
+
+
+def _gateway_dropin_body() -> str:
+    """Render the gateway secrets drop-in body.
+
+    Mirrors the live drop-in: a why-comment header plus a ``[Service]``
+    ``EnvironmentFile=`` pointing at the secrets vault. The path is
+    absolute + stable, so the body is deterministic — the content hash
+    only changes if HERMES_SECRETS_ENV or this header changes, which is
+    what makes the idempotent hash-skip below correct.
+    """
+    return (
+        "# hal0-managed (issue #437) — DO NOT EDIT BY HAND.\n"
+        "#\n"
+        "# Wires the Hermes gateway's platform tokens (Telegram + Discord\n"
+        "# bot tokens, allowed-user lists, OPENROUTER_API_KEY, FAL_KEY) into\n"
+        "# the SYSTEM-scope hermes-gateway.service. Lives in a drop-in (not a\n"
+        "# main-unit edit) so it survives `hermes gateway install` rewriting\n"
+        "# the main .service body. pid1 (root) reads the 0600 vault below.\n"
+        "#\n"
+        "# Re-apply: `systemctl daemon-reload && systemctl restart hermes-gateway`.\n"
+        "[Service]\n"
+        f"EnvironmentFile={HERMES_SECRETS_ENV}\n"
+    )
+
+
+def _phase_gateway_secrets_wire(state: BootstrapState) -> PhaseResult:
+    """Idempotently write the gateway secrets drop-in + daemon-reload (#437).
+
+    Owns ONLY the drop-in ``10-hal0-secrets.conf`` under
+    ``/etc/systemd/system/hermes-gateway.service.d/`` — NOT the main
+    ``hermes-gateway.service`` unit. The main unit is generated by
+    ``hermes gateway install --system --run-as-user hal0`` (run by the
+    orchestrator during cutover); keeping unit generation out of this
+    phase avoids the hermes_cli generator's custom-HERMES_HOME trap
+    (a root ``.bashrc`` pin would leak the old agents/hermes path into
+    the emitted unit). The drop-in survives every main-unit regeneration
+    because ``refresh_systemd_unit_if_needed`` rewrites the ``.service``
+    but never the ``.d/`` tree.
+
+    Posture mirrors :func:`_merge_env_file` / config_write:
+
+    * Hash-skip — when the on-disk drop-in already matches the rendered
+      body, skip both the write AND the ``systemctl daemon-reload`` so a
+      bootstrap re-run doesn't churn systemd needlessly.
+    * Atomic write — tmpfile + ``os.replace``.
+    * Mode 0644 (NOT 0600): systemd unit fragments must be world-readable;
+      the *secrets* live in the 0600 vault the drop-in references, not in
+      the drop-in itself.
+    * daemon-reload only fires when the file actually changed.
+
+    Non-root guard: writing under ``/etc/systemd/system`` and invoking
+    ``systemctl`` both require root, so a non-root provision SKIPs with a
+    clear reason rather than failing the whole bootstrap.
+    """
+    if os.geteuid() != 0:
+        return PhaseResult(
+            status=PhaseStatus.SKIP,
+            reason=(
+                "not root (euid != 0) — cannot write /etc/systemd/system "
+                "or run `systemctl daemon-reload`; re-run gateway wiring as root"
+            ),
+            details={"dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE)},
+        )
+
+    body = _gateway_dropin_body()
+    content_sha = content_hash(body)
+
+    # Hash-skip: an unchanged drop-in needs neither a rewrite nor a
+    # daemon-reload (#437 idempotency criterion, mirroring config_write).
+    if GATEWAY_SYSTEMD_DROPIN_FILE.exists():
+        try:
+            current = GATEWAY_SYSTEMD_DROPIN_FILE.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current is not None and content_hash(current) == content_sha:
+            return PhaseResult(
+                status=PhaseStatus.OK,
+                hash=content_sha,
+                details={
+                    "dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE),
+                    "content_hash": content_sha,
+                    "daemon_reload": False,
+                    "unchanged": True,
+                },
+            )
+
+    try:
+        GATEWAY_SYSTEMD_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+        GATEWAY_SYSTEMD_DROPIN_DIR.chmod(0o755)
+        tmp = GATEWAY_SYSTEMD_DROPIN_FILE.with_suffix(".conf.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, GATEWAY_SYSTEMD_DROPIN_FILE)
+        GATEWAY_SYSTEMD_DROPIN_FILE.chmod(0o644)
+    except OSError as exc:
+        return PhaseResult(
+            status=PhaseStatus.FAIL,
+            reason=f"gateway drop-in write to {GATEWAY_SYSTEMD_DROPIN_FILE} failed: {exc}",
+            details={"dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE)},
+        )
+
+    try:
+        subprocess.run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
+    except (subprocess.SubprocessError, OSError) as exc:
+        # The drop-in is on disk; the operator can daemon-reload by hand.
+        # Surface as a non-fatal warning rather than failing bootstrap —
+        # the wiring lands on the next `systemctl daemon-reload`.
+        return PhaseResult(
+            status=PhaseStatus.OK,
+            hash=content_sha,
+            reason=f"drop-in written but `systemctl daemon-reload` failed: {exc}",
+            details={
+                "dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE),
+                "content_hash": content_sha,
+                "daemon_reload": False,
+            },
+        )
+
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        hash=content_sha,
+        details={
+            "dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE),
+            "content_hash": content_sha,
+            "daemon_reload": True,
+        },
+    )
+
 
 def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
     for s in slots:
@@ -2554,6 +2728,14 @@ PHASES: list[tuple[str, Callable[[BootstrapState], PhaseResult]]] = [
     ("namespace_register", _phase_namespace_register),
     ("model_automap", _phase_model_automap),
     ("voice_wire", _phase_voice_wire),
+    # #437 (SYSTEM scope): wire the gateway secrets drop-in so fresh
+    # provisions/reinstalls come up with Telegram + Discord connected,
+    # surviving hermes_cli main-unit regeneration. Runs after voice_wire
+    # (which may write the secrets vault this drop-in references) and
+    # before smoke_tests. The orchestrator runs `hermes gateway install`
+    # separately to lay down the main unit; this phase only owns the
+    # drop-in + daemon-reload.
+    ("gateway_secrets_wire", _phase_gateway_secrets_wire),
     ("smoke_tests", _phase_smoke_tests),
     ("self_report", _phase_self_report),
 ]

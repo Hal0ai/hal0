@@ -23,8 +23,8 @@ bootstrap pass blow your changes away. This page prevents that.
 
 | # | Surface | Path | Written by | Read by | Change effect |
 |---|---|---|---|---|---|
-| 1 | Persona TOML | `/var/lib/hal0/agents/hermes/personas/<id>.toml` | Operator or `hal0 agent reprovision` | `_phase_config_write` → `system_prompt_prelude` | Next bootstrap render OR `hal0 agent personas activate` |
-| 2 | Personas active pointer | `/var/lib/hal0/agents/hermes/personas/active.txt` | `hal0 agent personas activate` | `_phase_config_write` | Best-effort hot-reload + next render |
+| 1 | Persona TOML | `/var/lib/hal0/.hermes/personas/<id>.toml` | Operator or `hal0 agent reprovision` | `_phase_config_write` → `system_prompt_prelude` | Next bootstrap render OR `hal0 agent personas activate` |
+| 2 | Personas active pointer | `/var/lib/hal0/.hermes/personas/active.txt` | `hal0 agent personas activate` | `_phase_config_write` | Best-effort hot-reload + next render |
 | 3 | Operator overrides | `/etc/hal0/agents/hermes/overrides.yaml` | Operator | `_phase_config_write` post-render deep-merge | Next bootstrap |
 | 4 | Hermes config | `$HERMES_HOME/config.yaml` | `_phase_config_write` (managed; do not hand-edit) | Hermes agent loop on startup | Hermes restart |
 | 5 | MCP allowlist | `/etc/hal0/agents/hermes.toml` | Operator (installer-seeded) | `_phase_mcp_wire` | Next bootstrap |
@@ -42,7 +42,7 @@ Precedence at config render time, top wins:
 
 ## 1. Persona TOML
 
-**Path:** `/var/lib/hal0/agents/hermes/personas/<id>.toml`
+**Path:** `/var/lib/hal0/.hermes/personas/<id>.toml`
 **Written by:** Operator (free-form) or `hal0 agent reprovision hermes`
 (seeds the `hermes` + `coder` defaults; operator edits stand).
 **Read by:** `_phase_config_write` to compose `agent.system_prompt_prelude`.
@@ -139,7 +139,7 @@ part — the nudge is opportunistic.
 
 ## 2. Personas active pointer
 
-**Path:** `/var/lib/hal0/agents/hermes/personas/active.txt`
+**Path:** `/var/lib/hal0/.hermes/personas/active.txt`
 **Written by:** `hal0 agent personas activate <id>` (atomic tmp+rename)
 or `_phase_persona_seed` (on first install only).
 **Read by:** `_phase_config_write` to know which persona TOML to load.
@@ -169,7 +169,7 @@ reprovision hermes` is the canonical "I edited overrides.yaml" verb.
 
 ## 4. Hermes config
 
-**Path:** `$HERMES_HOME/config.yaml` (default `/var/lib/hal0/agents/hermes/config.yaml`)
+**Path:** `$HERMES_HOME/config.yaml` (default `/var/lib/hal0/.hermes/config.yaml`)
 **Written by:** `_phase_config_write` (managed file — hash-tracked +
 atomic-swapped). Hand-edits are silently overwritten on the next
 bootstrap pass.
@@ -254,7 +254,7 @@ hermes --repair`.
 
 - `$HERMES_HOME/plugins/<name>/plugin.yaml` — agent-loop plugins (R3 §Plugin registration)
 - `$HERMES_HOME/plugins/<name>/dashboard/manifest.json` — dashboard UI plugins
-- `/var/lib/hal0/agents/hermes/plugins/memory/<name>/__init__.py` — memory providers (special-case discovery)
+- `/var/lib/hal0/.hermes/plugins/memory/<name>/__init__.py` — memory providers (special-case discovery)
 
 **Written by:** `_phase_install` (for the hal0-bundled set) or
 operator drops (for custom plugins).
@@ -271,7 +271,7 @@ plugins load on dashboard refresh.
 
 When the operator edits a persona TOML:
 
-1. `vim /var/lib/hal0/agents/hermes/personas/hermes.toml`
+1. `vim /var/lib/hal0/.hermes/personas/hermes.toml`
 2. `hal0 agent personas activate hermes` — atomically swaps active.txt
    + nudges running Hermes via JSON-RPC `reload.env`. (Or do nothing;
    the next reprovision picks it up.)

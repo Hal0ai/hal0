@@ -68,7 +68,7 @@ display     = "Hermes-Agent"
 # Filesystem sandbox root. Agent processes are chrooted/bind-mounted
 # to see only this path as their workspace. Outside writes require
 # approval (per ADR-0004 §2 destructive-action gating).
-workspace   = "/var/lib/hal0/agents/hermes/workspace"
+workspace   = "/var/lib/hal0/.hermes/workspace"
 
 # ---------------------------------------------------------------
 # MCP servers the agent is permitted to *connect* to.

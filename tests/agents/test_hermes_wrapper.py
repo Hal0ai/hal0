@@ -21,6 +21,7 @@ upstream binary, no real wrapper-on-PATH dependency.
 from __future__ import annotations
 
 import json
+import subprocess as _subprocess
 from pathlib import Path
 from typing import Any
 
@@ -234,7 +235,26 @@ def test_uninstall_is_idempotent(driver: HermesDriver) -> None:
 def test_status_returns_installed_iff_env_file_exists(
     driver: HermesDriver,
     tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # W9 (80010a5) made status() prefer real-health signals — a live
+    # ``hal0-agent@hermes`` unit or a reachable :9119 — over env-file
+    # presence, so Hermes stops showing a false "Broken" when the unit is
+    # up but a seed file is missing. Stub both higher-priority probes to
+    # False here to isolate the env-file fallback branch (the "installed
+    # but not yet started" case) that THIS test covers. Without the stubs
+    # the test is non-hermetic: run on a host where the real unit is
+    # active, the systemd probe returns True and status() is "installed"
+    # regardless of the sandbox.
+    monkeypatch.setattr(
+        "hal0.agents.hermes.driver._probe_systemd_unit_active",
+        lambda unit: False,
+    )
+    monkeypatch.setattr(
+        "hal0.agents.hermes.driver._probe_tcp_port",
+        lambda host, port, *, timeout=1.0: False,
+    )
+
     assert driver.status() == "broken"  # no install yet
 
     driver._runner = _FakeRunner()  # type: ignore[assignment]
@@ -243,6 +263,28 @@ def test_status_returns_installed_iff_env_file_exists(
 
     driver.uninstall()
     assert driver.status() == "broken"
+
+
+def test_status_installed_when_unit_active_even_without_env_file(
+    driver: HermesDriver,
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # W9 contract guard: a live unit (or reachable :9119) means "installed"
+    # even with no env file — the real health signal is systemd/port, not
+    # env-file presence. Prevents a future "make the stale test pass" change
+    # from reverting status() to env-file-only and re-breaking the
+    # false-"Broken" fix. Especially relevant once the gateway/home move
+    # relocates the env file out from under any env-file-based check.
+    monkeypatch.setattr(
+        "hal0.agents.hermes.driver._probe_systemd_unit_active",
+        lambda unit: True,
+    )
+    monkeypatch.setattr(
+        "hal0.agents.hermes.driver._probe_tcp_port",
+        lambda host, port, *, timeout=1.0: False,
+    )
+    assert driver.status() == "installed"  # no env file written
 
 
 # ── uninstall: venv + context_link teardown (#348 / #349) ────────────────────
@@ -479,3 +521,97 @@ def test_uninstall_full_teardown_via_provision_json(
     assert not venv.exists()
     assert not agents_md.exists()
     assert not hermes_md.exists()
+
+
+# ── #437 — wrapper source: canonical home + entry-point consolidation ────────
+#
+# These tests exercise the installer wrapper SCRIPTS (POSIX sh), not the
+# HermesDriver. The canonical CLI is `installer/wrappers/hermes` (no
+# HERMES_HOME pin); `installer/wrappers/hal0-hermes` is the back-compat
+# wrapper whose default home moved to /var/lib/hal0/.hermes.
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_HAL0_HERMES_WRAPPER = _REPO_ROOT / "installer" / "wrappers" / "hal0-hermes"
+_HERMES_WRAPPER = _REPO_ROOT / "installer" / "wrappers" / "hermes"
+
+
+def test_hal0_hermes_wrapper_default_home_is_dot_hermes() -> None:
+    """The back-compat hal0-hermes wrapper defaults HERMES_HOME to the
+    canonical /var/lib/hal0/.hermes when the env var is unset."""
+    text = _HAL0_HERMES_WRAPPER.read_text(encoding="utf-8")
+    assert 'HERMES_HOME="${HERMES_HOME:-/var/lib/hal0/.hermes}"' in text
+    assert "/var/lib/hal0/agents/hermes" not in text
+
+
+def test_hermes_wrapper_does_not_pin_hermes_home() -> None:
+    """The canonical `hermes` wrapper must NOT export/pin HERMES_HOME at
+    all — the hermes default ~/.hermes (== /var/lib/hal0/.hermes for hal0)
+    applies. It still injects HAL0_AGENT_ID."""
+    assert _HERMES_WRAPPER.exists(), f"missing wrapper at {_HERMES_WRAPPER}"
+    text = _HERMES_WRAPPER.read_text(encoding="utf-8")
+    # No HERMES_HOME assignment or export anywhere.
+    assert "HERMES_HOME=" not in text
+    assert "export HERMES_HOME" not in text
+    # It does default + export the agent id.
+    assert 'HAL0_AGENT_ID="${HAL0_AGENT_ID:-hermes-agent}"' in text
+    assert "export HAL0_AGENT_ID" in text
+
+
+def test_new_hermes_wrapper_injects_agent_id_and_no_home(tmp_path: Path) -> None:
+    """Run the `hermes` wrapper with --hal0-ready (sentinel short-circuit,
+    never execs the real binary) under a stub bin + a probe that dumps the
+    env. Assert HAL0_AGENT_ID defaults to hermes-agent and is exported,
+    and HERMES_HOME is NOT set."""
+    # `--hal0-ready` exits 0 before exec, so a missing bin is fine; but we
+    # also verify the env the wrapper would export by sourcing a probe.
+    # Simplest hermetic check: run the sentinel and assert rc 0.
+    result = _subprocess.run(
+        ["/bin/sh", str(_HERMES_WRAPPER), "--hal0-ready"],
+        env={"PATH": "/usr/bin:/bin", "HAL0_HERMES_BIN": "/bin/true"},
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+
+    # Now verify the exported env by replacing the exec target with a probe
+    # that prints its environment. We point HAL0_HERMES_BIN at a tiny shim.
+    probe = tmp_path / "probe.sh"
+    probe.write_text("#!/bin/sh\nenv\n", encoding="utf-8")
+    probe.chmod(0o755)
+    # env -u HERMES_HOME guarantees the parent doesn't leak the var in.
+    out = _subprocess.run(
+        ["/usr/bin/env", "-u", "HERMES_HOME", "/bin/sh", str(_HERMES_WRAPPER), "noop"],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HAL0_HERMES_BIN": str(probe),
+            "HAL0_HERMES_SECRETS": "/nonexistent/secrets.env",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    env_dump = out.stdout
+    assert "HAL0_AGENT_ID=hermes-agent" in env_dump
+    # The wrapper must not have introduced HERMES_HOME.
+    assert "HERMES_HOME=" not in env_dump
+
+
+def test_hal0_hermes_wrapper_defaults_home_when_unset(tmp_path: Path) -> None:
+    """Run hal0-hermes with HERMES_HOME unset; the exec'd binary should
+    see HERMES_HOME=/var/lib/hal0/.hermes (the new default)."""
+    probe = tmp_path / "probe.sh"
+    probe.write_text("#!/bin/sh\nenv\n", encoding="utf-8")
+    probe.chmod(0o755)
+    out = _subprocess.run(
+        ["/usr/bin/env", "-u", "HERMES_HOME", "/bin/sh", str(_HAL0_HERMES_WRAPPER), "noop"],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HAL0_HERMES_BIN": str(probe),
+            "HAL0_HERMES_SECRETS": "/nonexistent/secrets.env",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "HERMES_HOME=/var/lib/hal0/.hermes" in out.stdout
+    assert "HERMES_HOME=/var/lib/hal0/agents/hermes" not in out.stdout
