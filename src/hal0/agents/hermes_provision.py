@@ -1855,6 +1855,66 @@ def _slot_context_length(slot: dict[str, Any]) -> int | None:
         return None
 
 
+# capability slot `type` (from /api/slots) -> STATE.md rollup label.
+_CAPABILITY_TYPE_LABELS = {
+    "embedding": "embed",
+    "stt": "voice-stt",
+    "tts": "voice-tts",
+    "image": "img",
+    "img": "img",
+    "rerank": "rerank",
+}
+
+
+def _collect_capability_rollup(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ready non-chat capability slots, mapped to STATE.md rollup rows.
+
+    Chat (``type=='llm'``) slots are handled by the primary/chat path and
+    excluded here. Only ready slots are advertised so we never tell the
+    agent about a capability that isn't actually loaded.
+    """
+    out: list[dict[str, Any]] = []
+    for s in slots:
+        if not isinstance(s, dict):
+            continue
+        label = _CAPABILITY_TYPE_LABELS.get((s.get("type") or "").lower())
+        if not label:
+            continue
+        if not _is_ready(s):
+            continue
+        out.append(
+            {
+                "capability": label,
+                "model_id": _slot_model_id(s),
+                "backend": s.get("backend"),
+            }
+        )
+    return out
+
+
+def _igpu_sclk_mhz() -> int | None:
+    """Active iGPU shader clock (MHz) from amdgpu sysfs, or None.
+
+    Reads ``pp_dpm_sclk`` and returns the MHz of the active ('*') DPM
+    level. Best-effort: any read/parse error returns None so the template
+    simply omits the clock line. Tries card0..card3 (Strix Halo dev nodes).
+    """
+    for idx in range(4):
+        path = Path(f"/sys/class/drm/card{idx}/device/pp_dpm_sclk")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.rstrip().endswith("*"):
+                # e.g. "2: 2900Mhz *"
+                for tok in line.replace("Mhz", " ").replace("MHz", " ").split():
+                    if tok.isdigit():
+                        return int(tok)
+        return None
+    return None
+
+
 def _collect_chat_slots(
     slots: list[dict[str, Any]],
     contexts: dict[str, int] | None = None,

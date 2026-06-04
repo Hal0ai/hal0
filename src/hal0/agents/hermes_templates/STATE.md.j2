@@ -1,0 +1,28 @@
+{# Volatile live-state snapshot — re-rendered on restart + on model/slot
+   change, injected into every Hermes session by the on_session_start hook.
+   Keep it LEAN: this is fed to the model every session. Stable identity
+   lives in SOUL.md; structural map lives in HERMES.md.
+   Params: primary (dict|None), capabilities (list), npu (dict),
+   igpu_sclk_mhz (int|None), dashboard_url, lemonade_base, daemon, as_of. #}
+# Live system state
+
+{% if primary -%}
+- Chat model: `{{ primary.model_id }}` ({{ primary.context_length | default("?") }} ctx{% if primary.backend %}, {{ primary.backend }}{% endif %}) via `model_aliases.{{ primary.alias | default("primary") }}`
+{%- else -%}
+- Chat model: _no chat model loaded — wire one via `hal0 slot create`._
+{%- endif %}
+{% if capabilities -%}
+- Capabilities: {% for c in capabilities %}{{ c.capability }} (`{{ c.model_id }}`{% if c.backend %}/{{ c.backend }}{% endif %}){% if not loop.last %}, {% endif %}{% endfor %}
+{%- else -%}
+- Capabilities: _none loaded._
+{%- endif %}
+{% if npu.present -%}
+- NPU (XDNA): {% if npu.model_id %}`{{ npu.model_id }}` (FLM){% else %}present, idle{% endif %}
+{%- endif %}
+{% if igpu_sclk_mhz -%}
+- iGPU clock: {{ igpu_sclk_mhz }} MHz
+{%- endif %}
+- Endpoints: dashboard {{ dashboard_url }} · lemond {{ lemonade_base }}
+- Daemon: {{ daemon }}
+
+_as_of: {{ as_of }}_
