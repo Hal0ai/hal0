@@ -534,6 +534,24 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         cp "${AGENT_OVERRIDE_SRC}" "${AGENT_OVERRIDE_DST_DIR}/override.conf"
         info "wrote ${AGENT_OVERRIDE_DST_DIR}/override.conf"
     fi
+
+    # Session-start hook: inject-system-state.sh cats /etc/hal0/STATE.md into
+    # every new Hermes session (referenced by config.yaml.j2's
+    # hooks.on_session_start). MUST land at the absolute /usr/lib/hal0 path
+    # the config hardcodes (dev mode shadows it under PREFIX).
+    if [[ "${DEV_MODE}" -eq 1 ]]; then
+        LIB_DIR="${PREFIX}/usr/lib/hal0"
+    else
+        LIB_DIR="/usr/lib/hal0"
+    fi
+    HOOK_SRC="${REPO_ROOT}/installer/agents/hermes/hooks/inject-system-state.sh"
+    if [[ -f "${HOOK_SRC}" ]]; then
+        install -d "${LIB_DIR}/hermes-hooks"
+        install -m 0755 "${HOOK_SRC}" "${LIB_DIR}/hermes-hooks/inject-system-state.sh"
+        info "wrote ${LIB_DIR}/hermes-hooks/inject-system-state.sh"
+    else
+        warn "${HOOK_SRC} not found — Hermes session-state hook not installed"
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi
