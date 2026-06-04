@@ -914,9 +914,12 @@ class CogneeWrapper:
         """Delete by sidecar id. Returns ``{deleted: int}``.
 
         We delete from BOTH the sidecar AND Cognee's own dataset rows
-        (via ``cognee.datasets.delete_data``). A failure on the Cognee
-        side does not unwind the sidecar delete — better to leak a
-        Cognee chunk than to falsely report success on a 2-id batch
+        (via ``cognee.datasets.delete_data``) — but only wipe a Cognee
+        chunk once the LAST sidecar row referencing it is gone, since
+        Cognee content-addresses chunks and identical text shares one
+        ``cognee_data_id`` across rows (issue #449). A failure on the
+        Cognee side does not unwind the sidecar delete — better to leak
+        a Cognee chunk than to falsely report success on a 2-id batch
         where one half succeeded. The audit log records the count
         Cognee acknowledged.
 
@@ -967,20 +970,44 @@ class CogneeWrapper:
                 ):
                     continue
                 if row["cognee_data_id"] and row["cognee_dataset_id"]:
-                    try:
-                        await cognee.datasets.delete_data(
-                            dataset_id=uuid.UUID(row["cognee_dataset_id"]),
-                            data_id=uuid.UUID(row["cognee_data_id"]),
-                        )
-                    except Exception:
-                        # Cognee may already have evicted the chunk —
-                        # treat the sidecar as the source of truth for
-                        # the count.
-                        _audit_logger().warning(
-                            "hal0.memory.delete.cognee_miss",
-                            client_id=effective_client_id,
-                            item_id=item_id,
-                        )
+                    # Cognee 1.0 content-addresses chunks by text, so N
+                    # byte-identical adds (e.g. the static Hermes identity
+                    # cards) all resolve to the SAME ``cognee_data_id``.
+                    # Wiping that chunk on the first delete strands every
+                    # surviving sidecar row pointing at it — the rows stay,
+                    # but their vector is gone, so search never returns
+                    # them again (issue #449). Only evict the shared chunk
+                    # when this row is the LAST reference to it.
+                    #
+                    # The count runs against the live connection mid-batch,
+                    # so rows already ``DELETE``d earlier in this loop are
+                    # not seen (same uncommitted transaction). That makes
+                    # the guard correct even when one ``ids`` batch deletes
+                    # several rows sharing a chunk: only the final one wipes.
+                    survivors = conn.execute(
+                        "SELECT COUNT(*) FROM hal0_memory_items "
+                        "WHERE cognee_data_id = ? AND cognee_dataset_id = ? AND id != ?",
+                        (
+                            row["cognee_data_id"],
+                            row["cognee_dataset_id"],
+                            item_id,
+                        ),
+                    ).fetchone()[0]
+                    if survivors == 0:
+                        try:
+                            await cognee.datasets.delete_data(
+                                dataset_id=uuid.UUID(row["cognee_dataset_id"]),
+                                data_id=uuid.UUID(row["cognee_data_id"]),
+                            )
+                        except Exception:
+                            # Cognee may already have evicted the chunk —
+                            # treat the sidecar as the source of truth for
+                            # the count.
+                            _audit_logger().warning(
+                                "hal0.memory.delete.cognee_miss",
+                                client_id=effective_client_id,
+                                item_id=item_id,
+                            )
                 conn.execute(
                     "DELETE FROM hal0_memory_items WHERE id = ?",
                     (item_id,),

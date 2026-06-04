@@ -188,6 +188,51 @@ async def test_delete_single_id_decrements_list(make_wrapper):
     _ = a  # silence linter; the test only needs id references on b
 
 
+async def test_delete_identical_text_keeps_survivor_searchable(make_wrapper):
+    """Deleting one of two byte-identical items keeps the other searchable.
+
+    Regression for issue #449: Cognee 1.0 content-addresses chunks by
+    text, so two byte-identical adds (e.g. the static Hermes identity
+    cards) resolve to the SAME ``cognee_data_id``. The old delete loop
+    wiped that shared chunk on the first id, stranding the survivor's
+    sidecar row pointing at a gone vector — invisible to search. The
+    refcount guard must only evict the chunk once the last reference is
+    deleted.
+    """
+    w = make_wrapper()
+    first = await w.add("byte identical memory card")
+    second = await w.add("byte identical memory card")
+
+    # Sanity: both land, search can see the (single, shared-chunk) text.
+    before = await w.search(query="byte identical memory card", limit=10)
+    assert any("byte identical memory card" in h["text"] for h in before)
+
+    # Delete the FIRST — the shared Cognee chunk must NOT be wiped while
+    # the second row still references it.
+    res = await w.delete(ids=[first["id"]])
+    assert res == {"deleted": 1}
+
+    # The survivor is still in the sidecar...
+    listed = await w.list_items(limit=50)
+    survivor_ids = {i["id"] for i in listed["items"]}
+    assert second["id"] in survivor_ids
+    assert first["id"] not in survivor_ids
+
+    # ...AND still returned by vector search (the chunk lives on).
+    after = await w.search(query="byte identical memory card", limit=10)
+    assert any(h["id"] == second["id"] for h in after), (
+        f"survivor of identical-text pair vanished from search: {after!r}"
+    )
+
+    # Deleting the survivor too now evicts the chunk; nothing left.
+    res2 = await w.delete(ids=[second["id"]])
+    assert res2 == {"deleted": 1}
+    gone = await w.search(query="byte identical memory card", limit=10)
+    assert not any(h["id"] in {first["id"], second["id"]} for h in gone), (
+        f"expected both identical-text rows gone, got {gone!r}"
+    )
+
+
 async def test_delete_custom_dataset_item_by_owner(make_wrapper):
     """Deleting an own item in a CUSTOM dataset (e.g. ADR-0011 ``agents``)
     actually removes it.
