@@ -233,6 +233,20 @@ def _seed_state_dir(manager: AgentManager, name: str) -> Path:
     return state_dir
 
 
+def _seed_managed_home(manager: AgentManager, name: str) -> Path:
+    """Helper: simulate the agent provisioner claiming a converged home.
+
+    For agents whose data dir is a canonical home (hermes → HERMES_HOME),
+    the manager itself no longer mkdir's the tree — the provisioner does,
+    stamping the ``.hal0-managed`` marker (#453). The stub driver used in
+    these tests does neither, so tests that need a removable data dir
+    must create the marked home the way the real provisioner would."""
+    home = manager._data_dir(name)
+    home.mkdir(parents=True, exist_ok=True)
+    (home / ".hal0-managed").write_text("hal0\n")
+    return home
+
+
 def test_uninstall_removes_state_dir(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],
@@ -241,6 +255,7 @@ def test_uninstall_removes_state_dir(
     ``/var/lib/hal0/state/agents/<name>/`` in addition to the seed TOML
     + data dir."""
     manager.install("hermes")
+    _seed_managed_home(manager, "hermes")
     state_dir = _seed_state_dir(manager, "hermes")
     assert state_dir.exists()
     assert (state_dir / "provision.json").exists()
@@ -263,6 +278,7 @@ def test_uninstall_with_missing_seed_still_reports_uninstalled(
     case); the next uninstall MUST still report
     ``removed=True`` because the data + state dirs were torn down."""
     manager.install("hermes")
+    _seed_managed_home(manager, "hermes")
     _seed_state_dir(manager, "hermes")
 
     # Corrupt the registry: remove the seed TOML out from under us, but
@@ -326,6 +342,7 @@ def test_install_uninstall_install_uninstall_round_trip(
     again, uninstall again. After each uninstall every witness is gone."""
     for _ in range(2):
         manager.install("hermes")
+        _seed_managed_home(manager, "hermes")
         _seed_state_dir(manager, "hermes")
         assert manager.installed_names() == ["hermes"]
 
@@ -411,3 +428,73 @@ def test_switch_failed_install_leaves_no_installed_agent(
     # pi-coder was torn down; hermes never got a seed written.
     assert manager.installed_names() == []
     assert stubs["pi-coder"].uninstalls == 1
+
+
+# ── #453: converge hermes data_dir onto HERMES_HOME (.hermes) ─────────────────
+
+
+def test_hermes_data_dir_is_hermes_home(manager: AgentManager, tmp_path: Path) -> None:
+    """#453: the manager's data_dir for hermes must be the canonical
+    HERMES_HOME (``<var_lib>/.hermes``), NOT the legacy
+    ``<var_lib>/agents/hermes`` tree. The provisioner + systemd units
+    use ``/var/lib/hal0/.hermes``; the registry must agree or
+    status/list/uninstall act on a dead path."""
+    # var_root is tmp_path/"var" → var_lib is tmp_path → home is tmp_path/.hermes.
+    assert manager._data_dir("hermes") == tmp_path / ".hermes"
+    # Non-converged agents keep the legacy per-name layout.
+    assert manager._data_dir("pi-coder") == tmp_path / "var" / "pi-coder"
+
+
+def test_hermes_install_records_hermes_home_as_data_dir(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+    tmp_path: Path,
+) -> None:
+    """#453: the seed TOML + AgentRecord must carry the converged home so
+    ``hal0 agent status hermes`` reports ``data: <var_lib>/.hermes``."""
+    rec = manager.install("hermes")
+    assert rec.data_dir == str(tmp_path / ".hermes")
+    parsed = tomllib.loads(manager._config_path("hermes").read_text())
+    assert parsed["data_dir"] == str(tmp_path / ".hermes")
+    # Re-seed must NOT recreate the legacy /agents/hermes tree.
+    assert not (tmp_path / "var" / "hermes").exists()
+
+
+def test_hermes_uninstall_removes_managed_home(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+    tmp_path: Path,
+) -> None:
+    """#453: uninstall removes the live HERMES_HOME when it carries the
+    ``.hal0-managed`` marker."""
+    manager.install("hermes")
+    home = _seed_managed_home(manager, "hermes")
+    (home / "plugins").mkdir()
+    assert home == tmp_path / ".hermes"
+    assert home.exists()
+
+    removed = manager.uninstall("hermes")
+    assert removed is True
+    assert not home.exists()
+
+
+def test_hermes_uninstall_refuses_unmanaged_home(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+    tmp_path: Path,
+) -> None:
+    """#453 (safety guard): uninstall must NOT rmtree a HERMES_HOME that
+    lacks the ``.hal0-managed`` marker — a user's pre-existing ~/.hermes
+    or a shared tree. Refuse rather than nuke someone else's data."""
+    home = tmp_path / ".hermes"
+    home.mkdir(parents=True)
+    (home / "user-data.txt").write_text("precious\n")  # no marker
+    # Seed exists so the agent counts as installed.
+    manager._etc_root.mkdir(parents=True, exist_ok=True)
+    manager._config_path("hermes").write_text("")
+
+    manager.uninstall("hermes")
+    # Home + its contents survive — only the seed was removed.
+    assert home.exists()
+    assert (home / "user-data.txt").exists()
+    assert not manager._config_path("hermes").exists()

@@ -89,6 +89,23 @@ BUNDLED_AGENTS: tuple[str, ...] = ("pi-coder", "hermes")
 matching driver module + ``installer/agents/<name>.sh``."""
 
 
+# Marker file the Hermes provisioner stamps into ``$HERMES_HOME`` to
+# claim the tree (``hermes_provision._HAL0_MANAGED_MARKER``). Mirrored
+# here so :meth:`AgentManager.uninstall` can refuse to ``rmtree`` a home
+# that hal0 doesn't own (a user's pre-existing ~/.hermes or a shared
+# tree). Keep in sync with that module — duplicated rather than imported
+# so the manager stays importable without the provisioner's deps (#453).
+_HAL0_MANAGED_MARKER = ".hal0-managed"
+
+# Agents whose runtime data dir is a canonical home OUTSIDE the legacy
+# ``<var_lib>/agents/<name>`` layout. Hermes uses ``HERMES_HOME``
+# (``<var_lib>/.hermes``, set by the provisioner + systemd units); the
+# registry must agree or status/list report a dead path and uninstall
+# rmtree's the wrong tree (#453). Value is the home subpath under
+# ``var_lib()``. Agents not listed here keep the per-name layout.
+_AGENT_HOME_SUBDIR: dict[str, str] = {"hermes": ".hermes"}
+
+
 # ── Records ──────────────────────────────────────────────────────────────────
 
 
@@ -311,7 +328,7 @@ class AgentManager:
             toml_path.unlink()
 
         data_dir = self._data_dir(name)
-        if data_dir.exists():
+        if data_dir.exists() and self._safe_to_remove_data_dir(name, data_dir):
             shutil.rmtree(data_dir)
 
         # State dir last — see #346. Removed atomically with the seed +
@@ -333,7 +350,35 @@ class AgentManager:
         return self._etc_root / f"{name}.toml"
 
     def _data_dir(self, name: str) -> Path:
+        """Return the per-agent runtime data dir.
+
+        For agents in :data:`_AGENT_HOME_SUBDIR` this is the canonical
+        home OUTSIDE the legacy ``<var_root>/<name>`` layout — Hermes
+        resolves to ``HERMES_HOME`` (``<var_lib>/.hermes``) so the
+        registry agrees with the provisioner + systemd units (#453).
+        ``<var_lib>`` is ``self._var_root.parent`` (``_var_root`` is
+        ``var_lib()/agents``), which keeps the injectable-root contract
+        intact for tests.
+        """
+        subdir = _AGENT_HOME_SUBDIR.get(name)
+        if subdir is not None:
+            return self._var_root.parent / subdir
         return self._var_root / name
+
+    def _safe_to_remove_data_dir(self, name: str, data_dir: Path) -> bool:
+        """Gate the uninstall ``rmtree`` of a converged agent home (#453).
+
+        Legacy per-name data dirs (``<var_root>/<name>``) are always
+        hal0's to remove. But a converged home like ``HERMES_HOME`` may
+        be a user's pre-existing ``~/.hermes`` or a shared tree — the
+        provisioner only writes into it after stamping the
+        ``.hal0-managed`` marker (``_claim_hermes_home``). Mirror that
+        contract here: refuse to ``rmtree`` a converged home that lacks
+        the marker rather than nuke data hal0 doesn't own.
+        """
+        if name not in _AGENT_HOME_SUBDIR:
+            return True
+        return (data_dir / _HAL0_MANAGED_MARKER).exists()
 
     def _state_dir(self, name: str) -> Path:
         """Per-agent bootstrap state dir (provision.json + logs).
@@ -391,7 +436,14 @@ class AgentManager:
             ) from exc
 
         self._etc_root.mkdir(parents=True, exist_ok=True)
-        self._data_dir(name).mkdir(parents=True, exist_ok=True)
+        # Legacy per-name data dirs are the manager's to create. Converged
+        # homes (HERMES_HOME, :data:`_AGENT_HOME_SUBDIR`) are owned by the
+        # agent's provisioner, which claims + stamps the ``.hal0-managed``
+        # marker before any write (#453). Don't mkdir an unmarked home
+        # here — uninstall would then refuse to remove it (no marker) and
+        # leave an orphan.
+        if name not in _AGENT_HOME_SUBDIR:
+            self._data_dir(name).mkdir(parents=True, exist_ok=True)
 
         installed_at = datetime.datetime.now(tz=datetime.UTC).isoformat()
         payload: dict[str, object] = {
