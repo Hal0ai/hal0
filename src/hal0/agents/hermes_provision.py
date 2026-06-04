@@ -2194,6 +2194,29 @@ def _phase_gateway_secrets_wire(state: BootstrapState) -> PhaseResult:
     ``systemctl`` both require root, so a non-root provision SKIPs with a
     clear reason rather than failing the whole bootstrap.
     """
+    # Defense-in-depth (regression: 2026-06-04 outage). The euid!=0 guard
+    # below is the only thing that normally keeps the test suite off the
+    # host's real systemd tree — but it is DEFEATED when pytest runs as
+    # root (or, as on hal0-dev, where /etc/systemd is ACL-writable). A
+    # fixture that monkeypatches HERMES_SECRETS_ENV but forgets
+    # GATEWAY_SYSTEMD_DROPIN_FILE then writes the live drop-in with a
+    # pytest-tmp EnvironmentFile path, restart-looping the gateway once the
+    # tmp dir is reaped. So: under pytest, refuse to touch the real /etc
+    # tree. A test that genuinely exercises the write monkeypatches the
+    # drop-in dir to tmp_path, which moves it out from under /etc.
+    if os.environ.get("PYTEST_CURRENT_TEST") and str(GATEWAY_SYSTEMD_DROPIN_DIR).startswith(
+        "/etc/"
+    ):
+        return PhaseResult(
+            status=PhaseStatus.SKIP,
+            reason=(
+                "running under pytest with an un-sandboxed system drop-in path "
+                "— refusing to write the real /etc/systemd tree; monkeypatch "
+                "GATEWAY_SYSTEMD_DROPIN_DIR/FILE to tmp in the test fixture"
+            ),
+            details={"dropin_path": str(GATEWAY_SYSTEMD_DROPIN_FILE)},
+        )
+
     if os.geteuid() != 0:
         return PhaseResult(
             status=PhaseStatus.SKIP,

@@ -1472,6 +1472,36 @@ def test_gateway_secrets_wire_skips_non_root(
     assert fake.calls == []
 
 
+def test_gateway_secrets_wire_refuses_real_etc_dropin_under_pytest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the 2026-06-04 outage: a fixture that monkeypatches
+    HERMES_SECRETS_ENV but FORGETS GATEWAY_SYSTEMD_DROPIN_FILE leaves the
+    drop-in pointing at the real /etc tree. When pytest runs as root (e.g.
+    on an LXC) the euid!=0 guard is defeated, so the phase would write the
+    host's live drop-in with a pytest-tmp EnvironmentFile path → gateway
+    restart-loop once the tmp dir is reaped. The phase must refuse to touch
+    the real /etc/systemd tree under pytest regardless of euid.
+    """
+    # Intentionally do NOT sandbox the drop-in path — it stays at the real
+    # /etc default, exactly as the buggy fixture left it.
+    assert str(hp.GATEWAY_SYSTEMD_DROPIN_DIR).startswith("/etc/")
+    # Defeat the euid!=0 guard the way root-on-an-LXC does.
+    monkeypatch.setattr(hp.os, "geteuid", lambda: 0)
+
+    # If the phase reaches systemctl it has already escaped — fail loudly.
+    def _boom(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError("phase invoked systemctl against the real bus")
+
+    monkeypatch.setattr(hp.subprocess, "run", _boom)
+
+    out = hp._phase_gateway_secrets_wire(hp.BootstrapState())
+
+    assert out.status == hp.PhaseStatus.SKIP
+    assert out.reason is not None
+    assert "pytest" in out.reason.lower()
+
+
 # ── #437 — canonical home / wrapper consolidation ───────────────────────────
 
 

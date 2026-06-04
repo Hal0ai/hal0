@@ -50,6 +50,30 @@ def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "usr" / "share" / "hal0" / "skills")
     monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", tmp_path / "secrets" / "hermes.env")
     monkeypatch.setattr(hp, "AGENT_ALLOWLIST_PATH", tmp_path / "etc" / "hal0" / "agents.toml")
+    # #437 gateway_secrets_wire: redirect the SYSTEM drop-in dir under
+    # tmp_path so a pipeline run never escapes into the live
+    # /etc/systemd/system — even when the runner is root or /etc/systemd is
+    # ACL-writable (the 2026-06-04 clobber). Patching HERMES_SECRETS_ENV
+    # alone is NOT enough: that only changes the EnvironmentFile *content*,
+    # not the *destination* the phase writes to.
+    _dropin_dir = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service.d"
+    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_DIR", _dropin_dir)
+    monkeypatch.setattr(hp, "GATEWAY_SYSTEMD_DROPIN_FILE", _dropin_dir / "10-hal0-secrets.conf")
+    # Intercept ONLY `systemctl daemon-reload`; everything else passes
+    # through so env_probe / smoke phases behave as before.
+    _real_run = hp.subprocess.run
+
+    class _NoopCompleted:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _guarded_run(argv: Any, *a: Any, **kw: Any) -> Any:
+        if isinstance(argv, (list, tuple)) and list(argv[:2]) == ["systemctl", "daemon-reload"]:
+            return _NoopCompleted()
+        return _real_run(argv, *a, **kw)
+
+    monkeypatch.setattr(hp.subprocess, "run", _guarded_run)
     # Personas land under $HERMES_HOME/personas via _personas_root_for —
     # the fixture's hermes_home is already in tmp_path so no further
     # monkey-patching is needed for the persona phase.
