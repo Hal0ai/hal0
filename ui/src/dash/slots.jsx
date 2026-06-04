@@ -273,7 +273,7 @@ function SlotCard({
   })();
 
   return (
-    <div className={"slot" + (state === "serving" ? " serving" : "")}>
+    <div className={"slot" + (state === "serving" ? " serving" : "") + (swapOpen ? " swap-open" : "")}>
       <div className="slot-h">
         <IndicatorDot slot={slot} />
         <div className="slot-name">

@@ -1628,6 +1628,9 @@ a { color: inherit; text-decoration: none; }
   transition: border-color 0.12s ease;
 }
 .slot:hover { border-color: var(--line-strong); }
+/* While the inline swap dropdown is open, stop clipping so the
+   absolutely-positioned .swap-pop can extend past the card bottom. */
+.slot.swap-open { overflow: visible; }
 .slot.serving { border-color: var(--accent-line); }
 .slot-h { display: flex; align-items: center; gap: 8px; }
 .slot-name {
