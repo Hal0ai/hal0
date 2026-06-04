@@ -26,6 +26,29 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install
         run: pip install -e ".[dev]"
+      - name: Cache fastembed embedding model
+        # The cognee memory tests (tests/memory/test_cognee_wrapper.py) embed
+        # via fastembed -> BAAI/bge-small-en-v1.5 (~70 MB ONNX), fetched into
+        # ~/.cache/huggingface on first use. Caching it removes the per-run HF
+        # download that intermittently fails (could-not-load-model from any
+        # source) and gated unrelated PRs (#442, #445). The model id is fixed,
+        # so a static key caches once and restores forever (bump -vN to refresh).
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: fastembed-bge-small-en-v1.5-v1
+      - name: Warm fastembed cache
+        # On a cache miss, download the model now with retries so a transient
+        # HF blip retries here instead of failing the whole test job. On a
+        # cache hit this is a ~2-3s load from disk. Best-effort: if all
+        # attempts fail, let pytest surface the error rather than masking it.
+        run: |
+          for attempt in 1 2 3; do
+            python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5'); print('fastembed model warmed')" && exit 0
+            echo "::warning::fastembed warm attempt $attempt failed; retrying in 15s"
+            sleep 15
+          done
+          echo "::warning::fastembed warm-up failed after 3 attempts; cognee tests will surface it"
       - name: Lint
         run: ruff check src tests
       - name: Format check
