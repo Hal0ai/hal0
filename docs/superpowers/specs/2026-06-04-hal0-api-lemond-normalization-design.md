@@ -97,10 +97,12 @@ known *after* routing.
 Applied once near `_read_json_body` (`api/routes/v1.py:569`), folding in / replacing
 `_rewrite_chat_slot_alias`. Order:
 
-1. **Virtual-name resolution.** If `body["model"]` is a registered virtual name
-   (`lemonade/primary`, `hal0/primary`), resolve it to the live-loaded LLM slot via
-   `LiveSlotResolver` (§4.2). On resolver failure/empty, fall back to the configured primary slot's
-   `model.default`.
+1. **Virtual-name resolution.** If `body["model"]` is a registered virtual name, resolve it to a
+   live-loaded LLM slot via `LiveSlotResolver` (§4.2) using that name's **resolution chain**:
+   - `lemonade/primary` (alias `hal0/primary`) — the iGPU chat slot.
+   - `lemonade/npu` (alias `lemonade/flm`) — the FLM/NPU slot, for instruct-only / lighter work
+     (e.g. Hermes memory-extraction, which times out on reasoning models — `[[hal0_flm_npu_llm_models]]`).
+   - `lemonade/utility` — the designated slack-absorber slot.
 2. **Static alias rewrite (unchanged).** Existing `primary`/`agent-hermes`/`utility` → `model.default`
    behavior is preserved for back-compat.
 
@@ -121,14 +123,37 @@ only point where "is this lemond-bound?" is answerable, so the gate lives here r
 
 ### 4.2 `LiveSlotResolver`
 
-Ports `gateway/normalize/resolve.go` semantics to Python:
+Ports `gateway/normalize/resolve.go` semantics to Python and generalizes the single iGPU-first rule
+into a **configurable resolution chain** per virtual name.
 
 - Reads lemond `/api/v1/health` → `all_models_loaded[]`, filters `type=="llm"`.
-- **iGPU over FLM/NPU:** prefer a slot that is NOT FLM/NPU; the discriminator is the `-FLM`/`FLM`
-  name suffix plus optional `device`/`recipe`/`backend` hints (`npu`/`flm`). Fall back to an
-  FLM-only slot if that's all that's loaded (NPU-only setups keep working).
-- Returns the resolved `model_name`; raises/﻿signals "no LLM loaded" so the caller can fall back to the
-  configured primary.
+- **Slot classification:** the `-FLM`/`FLM` name suffix plus optional `device`/`recipe`/`backend`
+  hints (`npu`/`flm`) classify a loaded slot as iGPU-chat vs NPU/FLM (the ported `isNPUorFLM`
+  discriminator). The configured `utility` slot is identified by its slot name/role from slot config.
+- **Resolution chain (ordered preference, first loaded match wins):** each virtual name carries an
+  ordered list of slot *roles* to try against what is currently loaded. Defaults:
+
+  | Virtual name | Default chain (loaded-slot preference) |
+  |---|---|
+  | `lemonade/primary` | `[igpu-chat]` → configured primary `model.default` |
+  | `lemonade/npu` | `[npu/flm]` → `[utility]` → configured primary `model.default` |
+  | `lemonade/utility` | `[utility]` → `[npu/flm]` → configured primary `model.default` |
+
+- **Protect the fast primary (design intent).** NPU-/utility-intended work must NOT commandeer or
+  evict the iGPU primary. The chains above therefore route lighter/instruct work to a **utility**
+  slot before ever landing on the primary, and the resolver **never triggers an eviction** of the
+  primary to satisfy an `npu`/`utility` name. (Rationale: the operator's best/fastest model should
+  not be bogged down — or unloaded — by grunt work a weaker/slower slot was handling.)
+- **Operator-configurable.** When multiple slots are running, the operator picks per-name chains
+  via slot/capability config (`capabilities.toml` / slot TOML role tags), overridable per deployment.
+  An NPU-only deployment still works (the iGPU step is simply never matched); a primary-only
+  deployment collapses every chain to the configured primary.
+- **Ensure-load is opt-in, never on the primary.** If a chain's preferred role isn't loaded, the
+  default is to fall through the chain (no load). An operator may opt a *non-primary* role into
+  ensure-load (`SlotManager.load()` of the configured FLM/utility slot) — weighed against load
+  latency + lemond's serialized-load / nuclear-evict behavior (`router.cpp:238-247,374-423`).
+- Returns the resolved `model_name`; if the entire chain misses, falls back to the configured primary
+  `model.default` (never hard-fails a turn).
 - **MUST NOT add new polling.** PR #474 (`#475`, on `origin/main`) just fixed hal0-api storming
   lemond's control plane. The resolver **reuses hal0-api's already-cached lemond health/slot state**;
   if no suitable cache exists, it uses a short-TTL (≈2–5 s) memoized read. This constraint is a
@@ -176,8 +201,11 @@ Ports `gateway/normalize/resolve.go` semantics to Python:
 ### 8.1 Tests
 
 - **Unit:** port `resolve_test.go` cases (iGPU>FLM, FLM-only, empty→fallback, malformed health);
-  thinking opt-out matrix (none set / `enable_thinking` set / `thinking` set / `chat_template_kwargs`
-  set); virtual-name resolution + fallback. New module gets real unit coverage.
+  **resolution-chain matrix** per virtual name — `lemonade/primary` (iGPU; FLM not commandeered),
+  `lemonade/npu` (FLM → utility → primary; never evicts primary), `lemonade/utility` (utility →
+  FLM → primary), plus primary-only and NPU-only deployments collapsing the chains; thinking opt-out
+  matrix (none set / `enable_thinking` set / `thinking` set / `chat_template_kwargs` set);
+  virtual-name resolution + final fallback. New module gets real unit coverage.
 - **Integration:** dispatcher/v1 tests with mocked lemond `/health` + `/v1/models`; γ-suite for the
   chat path (streaming passthrough + tool-calls untouched).
 - **CT105 smoke:** curl `model: lemonade/primary` → assert it hits the live slot and
