@@ -6,10 +6,11 @@
 #   HERMES_HOME    — pins Hermes's state dir under hal0's tree so a
 #                    `hermes reset` or upstream config-rewrite stays
 #                    contained.
-#   HAL0_AGENT_ID  — read by `MCPIdentityMiddleware` (renamed from
-#                    `MCPAuthMiddleware`) via the `X-hal0-Agent`
-#                    header, then echoed back as the `client_id` for
-#                    Cognee's `private:<client_id>` namespace.
+#   HAL0_AGENT_ID  — surfaced on outbound MCP calls and echoed back as
+#                    the `client_id` for Cognee's `private:<client_id>`
+#                    namespace. The hal0 MCP mount resolves the caller's
+#                    identity + `--private` toggle straight off the live
+#                    MCP request headers (see `hal0.api.mcp_mount`).
 #
 # It then execs the hal0-managed venv's `hermes` binary. The venv
 # lives at /var/lib/hal0/venvs/hermes/ (hard-pinned in

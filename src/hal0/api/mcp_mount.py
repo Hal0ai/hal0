@@ -8,20 +8,29 @@ the FastAPI ``app``, the ``AuthIdentity`` middleware, the lifespan-scoped
 The trick the mount needs to solve: FastMCP runs as a sub-ASGI app
 underneath ``/mcp/admin`` and ``/mcp/memory``, but the MCP tool handlers
 need to know *who* is calling so the audit log + the ``--private``
-namespace promotion can stamp the right ``client_id``. Solution = a
-contextvar populated by a thin Starlette middleware on each mounted
-sub-app, paired with resolver callbacks that the FastMCP ``build_server``
-functions accept.
+namespace promotion can stamp the right ``client_id``. Solution =
+resolver callbacks (wired into each ``build_server``) that read the
+caller headers straight off the MCP SDK's per-handler request context.
+
+Why not a Starlette-middleware contextvar (issue #413)? FastMCP runs
+tool handlers inside a *lifespan-scoped* anyio task group spun up by
+``StreamableHTTPSessionManager.run()`` — not in the per-request task a
+Starlette ``BaseHTTPMiddleware`` writes into. A contextvar ``set()`` in
+request-dispatch therefore never propagates to the handler: it always
+reads the default (``private=False``, ``client_id="anonymous"``), so
+every write silently collapsed to the ``shared`` namespace regardless of
+``X-hal0-Private: 1``. The MCP SDK *does* set its own ``request_ctx``
+contextvar inside the handler's own task (``mcp.server.lowlevel.server``)
+and stashes the originating Starlette ``Request`` on it; we read the
+headers off that request at call time, mirroring the REST surface in
+:mod:`hal0.api.routes.memory` which reads them straight off ``request``.
 """
 
 from __future__ import annotations
 
 import os
-from contextvars import ContextVar
-from dataclasses import dataclass
 
 import structlog
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.types import ASGIApp
 
@@ -100,68 +109,60 @@ def _mcp_transport_security():
     )
 
 
-@dataclass
-class _MCPCallerCtx:
-    """Per-request caller info populated by :class:`MCPAuthMiddleware`."""
+def _current_mcp_request() -> Request | None:
+    """Return the Starlette ``Request`` for the in-flight MCP tool call.
 
-    bearer: str | None
-    client_id: str
-    private: bool
-
-
-_caller: ContextVar[_MCPCallerCtx | None] = ContextVar("hal0_mcp_caller", default=None)
+    The MCP SDK sets its ``request_ctx`` contextvar *inside* the handler's
+    own anyio task (``mcp.server.lowlevel.server``) and stashes the
+    originating Starlette ``Request`` on ``RequestContext.request`` — that
+    request carries the caller's HTTP headers. Returns ``None`` outside an
+    MCP request (e.g. direct dispatcher calls in unit tests), so resolvers
+    fall back to their anonymous defaults.
+    """
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+    except ImportError:  # pragma: no cover — mcp SDK absent (stubbed tests)
+        return None
+    try:
+        ctx = request_ctx.get()
+    except LookupError:
+        return None
+    request = getattr(ctx, "request", None)
+    return request if isinstance(request, Request) else None
 
 
 def bearer_resolver() -> tuple[str | None, str]:
     """Return ``(raw_bearer, client_id)`` for the current MCP request.
 
-    Wired into :func:`hal0.mcp.admin.build_server`. Falls back to
-    ``(None, "anonymous")`` outside of an MCP request — useful for
+    Wired into :func:`hal0.mcp.admin.build_server`. Reads the
+    ``Authorization`` header off the live MCP request context; falls back
+    to ``(None, "anonymous")`` outside of an MCP request — useful for
     direct dispatcher calls in tests.
     """
-    ctx = _caller.get()
-    if ctx is None:
+    request = _current_mcp_request()
+    if request is None:
         return None, "anonymous"
-    return ctx.bearer, ctx.client_id
+    bearer = _resolve_bearer(request)
+    return bearer, bearer or "anonymous"
 
 
 def client_id_resolver() -> str:
     """Return ``client_id`` for the current MCP request. See
     :func:`bearer_resolver`."""
-    ctx = _caller.get()
-    return ctx.client_id if ctx is not None else "anonymous"
+    return bearer_resolver()[1]
 
 
 def private_resolver() -> bool:
     """Return whether the calling client toggled ``--private`` mode.
 
-    Read from a ``X-hal0-Private: 1`` request header by the middleware
-    — namespace promotion per ADR-0005 §3 is opt-in per client.
+    Read from the ``X-hal0-Private: 1`` request header off the live MCP
+    request context — namespace promotion per ADR-0005 §3 is opt-in per
+    client.
     """
-    ctx = _caller.get()
-    return bool(ctx and ctx.private)
-
-
-class MCPAuthMiddleware(BaseHTTPMiddleware):
-    """Stash MCP caller ctx in a contextvar (auth removed in v0.3).
-
-    The middleware no longer enforces bearer auth — that surface was
-    removed alongside the FastAPI auth modules. It still parses any
-    Authorization: Bearer token off the request (so upstream tools that
-    do pass one can be identified for logging / scoping) but does not
-    require one.
-    """
-
-    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
-        bearer = _resolve_bearer(request)
-        client_id = bearer or "anonymous"
-        private = request.headers.get("x-hal0-private", "").lower() in {"1", "true"}
-
-        token = _caller.set(_MCPCallerCtx(bearer=bearer, client_id=client_id, private=private))
-        try:
-            return await call_next(request)
-        finally:
-            _caller.reset(token)
+    request = _current_mcp_request()
+    if request is None:
+        return False
+    return request.headers.get("x-hal0-private", "").strip().lower() in {"1", "true"}
 
 
 def mount_mcp_servers(
@@ -208,7 +209,6 @@ def mount_mcp_servers(
     # without that, mounted requests crash with
     # ``Task group is not initialized``.
     admin_app: ASGIApp = admin_server.streamable_http_app()
-    admin_app.add_middleware(MCPAuthMiddleware)
     app.mount("/mcp/admin", admin_app, name="mcp-admin")
 
     session_managers = [admin_server.session_manager]
@@ -228,7 +228,6 @@ def mount_mcp_servers(
         )
         memory_server.settings.transport_security = transport_security
         memory_app: ASGIApp = memory_server.streamable_http_app()
-        memory_app.add_middleware(MCPAuthMiddleware)
         app.mount("/mcp/memory", memory_app, name="mcp-memory")
         session_managers.append(memory_server.session_manager)
         mcp_servers["hal0-memory"] = memory_server
