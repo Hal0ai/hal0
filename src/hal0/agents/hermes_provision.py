@@ -1921,6 +1921,8 @@ def _state_body_minus_timestamp(text: str) -> str:
 
     Used for content-hash gating so a regen that finds nothing
     substantive changed does not churn the file (and bust prompt-cache).
+    Assumes ``_as_of:`` is not a prefix of any substantive content line
+    (guaranteed by STATE.md.j2, which emits it only as the final footer).
     """
     return "\n".join(line for line in text.splitlines() if not line.startswith("_as_of:"))
 
@@ -2025,8 +2027,9 @@ def render_live_context(
         if not hpath.exists() or hpath.read_text(encoding="utf-8") != hermes_md:
             _atomic_write(hpath, hermes_md)
             out["hermes_written"] = True
-    except Exception:  # best-effort; STATE.md already written
-        pass
+    except Exception as exc:  # best-effort; STATE.md already written
+        log.warning("hermes_provision.render_live_context_hermes_failed", error=str(exc))
+        out["hermes_error"] = str(exc)
 
     return out
 
