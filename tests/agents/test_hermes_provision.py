@@ -1144,6 +1144,10 @@ def test_context_link_renders_all_three_files(
     # non-root without touching the real system.
     etc = tmp_path / "etc" / "hal0"
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
+    # STATE.md now renders into RUNTIME_SNAPSHOT_DIR (#473); redirect it to
+    # tmp_path too so render_live_context's STATE.md write doesn't hit the real
+    # /var/lib/hal0 (and so its failure can't skip the HERMES.md write below).
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
     monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", etc / "agent-skills")
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "no-such-skills")
     # Context-link consults /api/slots when wiring HERMES.md's primary
@@ -1183,6 +1187,7 @@ def test_context_link_falls_back_when_soul_render_fails(
     hermes_home.mkdir()
     state = hp.BootstrapState(hermes_home=str(hermes_home))
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path / "etc" / "hal0")
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)  # STATE.md target (#473)
     monkeypatch.setattr(hp, "ETC_HAL0_AGENT_SKILLS", tmp_path / "etc" / "hal0" / "agent-skills")
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "no-skills")
     monkeypatch.setattr(hp, "_fetch_slots", lambda: [])
