@@ -49,9 +49,9 @@ function AddByHfModal({ open, onClose }) {
     if (!repo) return;
     try {
       const result = await inspect.mutateAsync({ hf_repo: repo });
-      // Auto-suggest a user.* name from the repo's tail segment.
+      // Auto-suggest a name from the repo's tail segment.
       const tail = (result?.repo || repo).split("/")[1] || "model";
-      setName(prev => prev || ("user." + tail.replace(/-GGUF$/i, "")));
+      setName(prev => prev || tail.replace(/-GGUF$/i, ""));
     } catch (e) {
       // The toast surface already renders the Hal0Error envelope;
       // surface a hint for offline mock scenarios so the operator
@@ -175,7 +175,7 @@ function AddByHfModal({ open, onClose }) {
           <div className="form-row">
             <div className="form-lbl">
               <span>Model name (in hal0)</span>
-              <span className="sub">prefixed with <span className="mono">user.</span> by convention</span>
+              <span className="sub">derived from the HF repo name — edit to taste</span>
             </div>
             <div className="form-ctl">
               <input className="input mono" value={name} onChange={e => setName(e.target.value)} />
@@ -634,7 +634,7 @@ function AddByPathModal({ open, onClose }) {
           <span className="sub">empty → derived from filename</span>
         </div>
         <div className="form-ctl">
-          <input className="input mono" value={id} onChange={e => setId(e.target.value)} placeholder="user.my-model" />
+          <input className="input mono" value={id} onChange={e => setId(e.target.value)} placeholder="my-model" />
         </div>
       </div>
 
