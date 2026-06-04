@@ -12,20 +12,12 @@
 - Memory MCP: `hal0_memory` (auto-loaded; you have full read/write on `private:hermes-agent`)
 - Admin MCP: `hal0_admin` (auto-loaded; autonomous read on all status tools, gated on destructive)
 
-# Active capability slots
-{% if primary %}
-- **primary** (chat/{{ primary.alias | default("primary") }}): `{{ primary.model_id }}`
-  - Endpoint: {{ primary.backend_url }} (alias `model_aliases.primary`)
-{%- endif %}
-{%- if chat_slots %}
-{%- for slot in chat_slots %}
-- **{{ slot.alias }}** (chat): `{{ slot.model_id }}`
-  - {{ slot.backend_url }} → call via `model_aliases.{{ slot.alias }}`
-{%- endfor %}
-{%- endif %}
-{%- if not primary and not chat_slots %}
-- _no chat slots loaded — wire one via `hal0 slot create` then re-run bootstrap with `--repair`._
-{%- endif %}
+# Live state
+
+Current loaded model, capabilities, and GPU/NPU backend are in
+`/etc/hal0/STATE.md` (auto-injected each session; refreshed on restart
+and on every model/slot change). Read it for the live picture rather
+than assuming — it carries an `_as_of:` timestamp.
 
 # Peer agents
 {% if peer_agents %}

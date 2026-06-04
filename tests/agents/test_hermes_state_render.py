@@ -147,3 +147,51 @@ def test_render_live_context_degraded_when_daemon_unreachable(tmp_path, monkeypa
     )
     assert r["degraded"] is True
     assert "degraded" in (tmp_path / "STATE.md").read_text()
+
+
+def test_phase_context_link_writes_state_md(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    home = tmp_path / "home"
+    (home / "memories").mkdir(parents=True)
+    # Seed an env snapshot so HERMES.md (env.container/env.cpu) renders, exactly
+    # as the env_probe phase would before context_link in the real pipeline.
+    (home / "env-1.json").write_text(
+        json.dumps(
+            {
+                "env_report": {
+                    "container": {"product_name": "hal0-test", "kind": "lxc"},
+                    "cpu": {"model": "AMD Strix Halo", "logical_online": 16},
+                    "npu": {"present": True},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {"primary": 32768})
+    monkeypatch.setattr(
+        hp,
+        "_fetch_slots",
+        lambda: [
+            {
+                "name": "primary",
+                "type": "llm",
+                "model_id": "qwen3-25b",
+                "status": "ready",
+                "backend": "vulkan",
+            }
+        ],
+    )
+    monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "nope")
+
+    state = hp.BootstrapState(hermes_home=str(home))
+    res = hp._phase_context_link(state)
+    assert res.status == hp.PhaseStatus.OK
+    # STATE.md written with the live model.
+    assert (tmp_path / "STATE.md").exists()
+    assert "qwen3-25b" in (tmp_path / "STATE.md").read_text()
+    # HERMES.md written, no longer carries the live snapshot heading, and
+    # points at STATE.md.
+    hermes_md = (tmp_path / "HERMES.md").read_text()
+    assert "Live system state" not in hermes_md  # that H1 now lives in STATE.md
+    assert "STATE.md" in hermes_md  # pointer present

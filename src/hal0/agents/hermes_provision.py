@@ -1424,7 +1424,6 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
         rendered["SOUL.md"] = fallback_soul
 
     for tpl_name, _out_name in (
-        ("HERMES.md.j2", "HERMES.md"),
         ("AGENTS.md.j2", "AGENTS.md"),
         ("MCP-CLIENTS.md.j2", "MCP-CLIENTS.md"),
     ):
@@ -1439,19 +1438,25 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     h = _atomic_write(soul_path, rendered["SOUL.md"])
     details["rendered"]["SOUL.md"] = {"path": str(soul_path), "sha256": h}
 
-    if "HERMES.md" in rendered:
-        try:
-            ETC_HAL0_DIR.mkdir(parents=True, exist_ok=True)
-            hpath = ETC_HAL0_DIR / "HERMES.md"
-            h = _atomic_write(hpath, rendered["HERMES.md"])
-            details["rendered"]["HERMES.md"] = {"path": str(hpath), "sha256": h}
-            # Mirror into HERMES_HOME/memories/HOST.md so context shows up in
-            # the memory tier as well as cwd auto-injection.
+    # STATE.md + HERMES.md are the live files — render via the one shared
+    # path used by the per-restart / per-swap writers. Best-effort: failure
+    # here must not fail bootstrap (SOUL/AGENTS already written).
+    try:
+        live = render_live_context(hermes_home=hermes_home)
+        details["rendered"]["STATE.md"] = {"path": live["state_path"]}
+        if live["degraded"]:
+            warnings.append("STATE.md rendered with daemon degraded")
+        if live.get("hermes_error"):
+            warnings.append(f"HERMES.md render: {live['hermes_error']}")
+        # render_live_context writes HERMES.md but not the HOST.md mirror;
+        # re-establish the symlink that the memory tier reads.
+        hpath = ETC_HAL0_DIR / "HERMES.md"
+        if hpath.exists():
             host_md = hermes_home / "memories" / "HOST.md"
             if _safe_symlink(hpath, host_md):
                 details["links"].append(str(host_md))
-        except OSError as exc:
-            warnings.append(f"HERMES.md write to /etc/hal0: {exc}")
+    except Exception as exc:  # best-effort
+        warnings.append(f"render_live_context: {exc}")
 
     if "AGENTS.md" in rendered:
         try:
