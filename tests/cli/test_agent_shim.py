@@ -32,7 +32,7 @@ class TestArgvParsing:
         assert ns.agent_id == "hermes"
         assert ns.subcommand == "serve"
 
-    @pytest.mark.parametrize("sub", ["serve", "stop", "status", "reprovision"])
+    @pytest.mark.parametrize("sub", ["serve", "stop", "status", "reprovision", "render-context"])
     def test_all_subcommands_accepted(self, sub: str) -> None:
         parser = agent_shim._build_parser()
         ns = parser.parse_args(["hermes", sub])

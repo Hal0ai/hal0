@@ -138,6 +138,7 @@ def test_render_live_context_writes_then_skips_when_unchanged(tmp_path, monkeypa
 
 def test_render_live_context_degraded_when_daemon_unreachable(tmp_path, monkeypatch):
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "_http_get", lambda *a, **k: 0)  # daemon down
     home = tmp_path / "home"
     home.mkdir()
     r = hp.render_live_context(
@@ -146,7 +147,77 @@ def test_render_live_context_degraded_when_daemon_unreachable(tmp_path, monkeypa
         now_iso="2026-06-04T10:00:00+00:00",
     )
     assert r["degraded"] is True
+    # First boot (no prior STATE.md) -> a degraded placeholder is written.
     assert "degraded" in (tmp_path / "STATE.md").read_text()
+
+
+def test_render_live_context_preserves_good_state_when_unreachable(tmp_path, monkeypatch):
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    good = "# Live system state\n- Chat model: `qwen3-25b` (32768 ctx, vulkan)\n\n_as_of: 2026-06-04T09:00:00+00:00_\n"
+    (tmp_path / "STATE.md").write_text(good)
+    monkeypatch.setattr(hp, "_http_get", lambda *a, **k: 0)  # daemon down
+    r = hp.render_live_context(
+        hermes_home=home,
+        slots_fetcher=lambda: [],
+        now_iso="2026-06-04T10:00:00+00:00",
+    )
+    assert r["degraded"] is True
+    assert r["state_written"] is False
+    # Last-good snapshot left intact — NOT clobbered with a degraded body.
+    assert (tmp_path / "STATE.md").read_text() == good
+
+
+def test_render_live_context_reachable_empty_is_not_degraded(tmp_path, monkeypatch):
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(hp, "_http_get", lambda *a, **k: 200)  # daemon up, no slots
+    r = hp.render_live_context(
+        hermes_home=home,
+        slots_fetcher=lambda: [],
+        now_iso="2026-06-04T10:00:00+00:00",
+    )
+    assert r["degraded"] is False
+    body = (tmp_path / "STATE.md").read_text()
+    assert "reachable" in body
+    assert "no chat model loaded" in body.lower()
+
+
+def test_render_live_context_bumps_mtime_when_unchanged_reachable(tmp_path, monkeypatch):
+    import os as _os
+
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    slots = [
+        {
+            "name": "primary",
+            "type": "llm",
+            "model_id": "qwen3-25b",
+            "status": "ready",
+            "backend": "vulkan",
+        }
+    ]
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {"primary": 32768})
+
+    r1 = hp.render_live_context(
+        hermes_home=home, slots_fetcher=lambda: slots, now_iso="2026-06-04T10:00:00+00:00"
+    )
+    assert r1["state_written"] is True
+    state_path = tmp_path / "STATE.md"
+    # Backdate mtime to simulate a stable system past the hook TTL.
+    old = state_path.stat().st_mtime - 10_000
+    _os.utime(state_path, (old, old))
+
+    r2 = hp.render_live_context(
+        hermes_home=home, slots_fetcher=lambda: slots, now_iso="2026-06-04T22:00:00+00:00"
+    )
+    assert r2["state_written"] is False  # content unchanged
+    assert state_path.stat().st_mtime > old  # but mtime bumped -> TTL settles
+    assert "09:00" not in state_path.read_text()  # sanity: content (as_of) NOT rewritten
+    assert "10:00:00" in state_path.read_text()  # as_of still the first render's
 
 
 def test_phase_context_link_writes_state_md(tmp_path, monkeypatch):

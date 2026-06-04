@@ -1958,7 +1958,14 @@ def render_live_context(
     """
     fetch = slots_fetcher or _fetch_slots
     slots_all = fetch() or []
-    degraded = not slots_all
+    # Reachability is independent of slot count. A reachable daemon with
+    # zero configured slots is NOT degraded (we render "no chat model
+    # loaded" + reachable). degraded == the daemon couldn't be reached at
+    # all — in which case we must NOT clobber a last-good snapshot. A
+    # non-empty fetch implies the daemon answered, so we only probe health
+    # when the slot list came back empty.
+    reachable = True if slots_all else _http_get(DAEMON_HEALTH_URL) == 200
+    degraded = not reachable
 
     contexts = _fetch_model_contexts()
     chat_slots = _collect_chat_slots(slots_all, contexts=contexts)
@@ -2000,8 +2007,8 @@ def render_live_context(
         "capabilities": capabilities,
         "npu": npu,
         "igpu_sclk_mhz": _igpu_sclk_mhz(),
-        "dashboard_url": "https://hal0.thinmint.dev",
-        "lemonade_base": "http://127.0.0.1:13305",
+        "dashboard_url": os.environ.get("HAL0_DASHBOARD_URL", "https://hal0.thinmint.dev"),
+        "lemonade_base": os.environ.get("HAL0_LEMONADE_BASE", "http://127.0.0.1:13305"),
         "daemon": "degraded" if degraded else "reachable",
         "as_of": now,
     }
@@ -2019,9 +2026,24 @@ def render_live_context(
     existing = ""
     if state_path.exists():
         existing = state_path.read_text(encoding="utf-8")
+
+    # Daemon unreachable but we already have a last-good snapshot: preserve
+    # it (spec — never clobber good state with a degraded one, e.g. when
+    # ExecStartPre fires before hal0-api is up). Leave mtime stale so the
+    # session hook keeps retrying the regen until the daemon returns.
+    if degraded and existing:
+        return out  # state_written=False, hermes_written=False, degraded=True
+
     if _state_body_minus_timestamp(existing) != _state_body_minus_timestamp(new_state):
         _atomic_write(state_path, new_state)
         out["state_written"] = True
+    elif reachable:
+        # Content unchanged, but we just confirmed it current against a
+        # reachable daemon — bump mtime so the on_session_start hook's TTL
+        # staleness check settles instead of firing a background regen every
+        # session forever. mtime is not content, so Hermes's injected text
+        # is byte-identical and the prompt-cache prefix stays warm.
+        os.utime(state_path, None)
 
     # HERMES.md — structural map; atomic write (identical content => identical
     # bytes => prompt-cache safe). Render failure is non-fatal.
