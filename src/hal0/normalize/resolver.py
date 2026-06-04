@@ -42,15 +42,6 @@ class Resolution:
     fallback: bool  # True => nothing in the chain was loaded; caller should ensure-load
 
 
-def is_npu_or_flm(model_name: str) -> bool:
-    """Name suffix/substring heuristic used only for a loaded model with no slot-config match.
-
-    Matches a ``-FLM`` suffix, or the substring ``FLM`` or ``NPU`` anywhere in the name.
-    """
-    upper = model_name.upper()
-    return upper.endswith("-FLM") or "FLM" in upper or "NPU" in upper
-
-
 def _slot_matches_role(slot: SlotView, role: str) -> bool:
     """Authoritative role binding: device for npu, role tag (else name) for primary/utility."""
     if role == "npu":

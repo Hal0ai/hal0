@@ -203,6 +203,32 @@ class _FakeDispatcher:
 
 
 @pytest.mark.asyncio
+async def test_chat_template_kwargs_opt_out_through_seam():
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"})
+    out = await v1._normalize_chat_body(
+        req, {"model": "hal0/primary", "chat_template_kwargs": {"enable_thinking": True}}
+    )
+    assert "enable_thinking" not in out
+    assert out["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_normalize_loaded_models_uses_cache_no_rpc():
+    class _RaisingShim:
+        def __init__(self, loaded):
+            self._health = _Health(loaded)
+
+        async def health(self):  # if this were called, the test would fail
+            raise AssertionError("must not poll lemond")
+
+    from types import SimpleNamespace
+
+    req = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(lemonade_metrics_shim=_RaisingShim({"big"})))
+    )
+    assert v1._normalize_loaded_models(req) == {"big"}
+
+
+@pytest.mark.asyncio
 async def test_dispatch_and_forward_does_not_normalize_non_chat(monkeypatch):
     """_dispatch_and_forward must NOT invoke _normalize_chat_body — that would
     rewrite request._body and break embeddings/rerank/multipart-audio."""

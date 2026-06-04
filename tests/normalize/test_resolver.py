@@ -3,7 +3,6 @@ import pytest
 from hal0.normalize.resolver import (
     DEFAULT_CHAINS,
     SlotView,
-    is_npu_or_flm,
     resolve_chain,
 )
 
@@ -77,11 +76,6 @@ def test_full_miss_falls_back_to_configured_primary_unloaded():
 def test_flm_alias_resolves_same_as_npu():
     r = resolve_chain("hal0/flm", _slots(), loaded={"qwen3-4b-FLM"})
     assert r.model_id == "qwen3-4b-FLM"
-
-
-def test_is_npu_or_flm_name_heuristic():
-    assert is_npu_or_flm("qwen3-4b-FLM") is True
-    assert is_npu_or_flm("big-35b") is False
 
 
 def test_empty_slots_degrades_to_blank_resolution():
