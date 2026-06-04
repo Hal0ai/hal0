@@ -1,0 +1,30 @@
+[Unit]
+Description=hal0 Bifrost LLM gateway (Hermes -> lemond normalization shim)
+Documentation=https://github.com/Hal0ai/hal0/tree/main/gateway
+After=network-online.target hal0-lemonade.service
+Wants=network-online.target
+# Gateway is useless without lemond; don't hard-require so it can start and
+# retry while lemond warms.
+After=hal0-lemonade.service
+
+[Service]
+Type=simple
+User=hal0
+Group=hal0
+# Loopback-only: the gateway sits behind hal0-api's surface, never LAN-exposed.
+Environment=APP_HOST=127.0.0.1
+Environment=APP_PORT=8079
+Environment=APP_PLUGINS_DIR=/etc/hal0/bifrost/plugins
+ExecStart=/opt/hal0/bin/bifrost-http -config /etc/hal0/bifrost/config.json -host 127.0.0.1 -port 8079
+Restart=on-failure
+RestartSec=3
+# Resource guard rails consistent with the rest of the stack.
+MemoryMax=512M
+CPUWeight=50
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hal0
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

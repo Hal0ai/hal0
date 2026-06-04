@@ -1,0 +1,34 @@
+{
+  "providers": {
+    "lemonade": {
+      "keys": [
+        { "name": "local", "value": "dummy", "models": ["*"], "weight": 1.0 }
+      ],
+      "network_config": {
+        "base_url": "http://127.0.0.1:13305/api/v1",
+        "default_request_timeout_in_seconds": 600
+      },
+      "custom_provider_config": {
+        "base_provider_type": "openai",
+        "allowed_requests": {
+          "chat_completion": true,
+          "chat_completion_stream": true
+        },
+        "request_path_overrides": {
+          "chat_completion": "/chat/completions",
+          "chat_completion_stream": "/chat/completions"
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "hal0-normalize",
+      "path": "/etc/hal0/bifrost/plugins/hal0_normalize.so",
+      "config": {
+        "health_url": "http://127.0.0.1:13305/api/v1/health",
+        "ttl_ms": 2000
+      }
+    }
+  ]
+}
