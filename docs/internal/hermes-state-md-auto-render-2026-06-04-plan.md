@@ -186,15 +186,16 @@ def _collect_capability_rollup(slots: list[dict[str, Any]]) -> list[dict[str, An
     return out
 
 
-def _igpu_sclk_mhz() -> int | None:
+def _igpu_sclk_mhz(sysfs_root: Path = Path("/sys/class/drm")) -> int | None:
     """Active iGPU shader clock (MHz) from amdgpu sysfs, or None.
 
     Reads ``pp_dpm_sclk`` and returns the MHz of the active ('*') DPM
     level. Best-effort: any read/parse error returns None so the template
-    simply omits the clock line. Tries card0..card3 (Strix Halo dev nodes).
+    simply omits the clock line. Tries card0..card3 (Strix Halo dev nodes);
+    ``sysfs_root`` is injectable for tests.
     """
     for idx in range(4):
-        path = Path(f"/sys/class/drm/card{idx}/device/pp_dpm_sclk")
+        path = sysfs_root / f"card{idx}" / "device" / "pp_dpm_sclk"
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
@@ -205,7 +206,7 @@ def _igpu_sclk_mhz() -> int | None:
                 for tok in line.replace("Mhz", " ").replace("MHz", " ").split():
                     if tok.isdigit():
                         return int(tok)
-        return None
+        # no active line on this card — try the next one
     return None
 ```
 
