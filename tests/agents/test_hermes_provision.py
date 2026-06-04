@@ -126,6 +126,10 @@ def test_phase_names_in_planned_order() -> None:
         "install",
         "env_probe",
         "home_init",
+        # #432: install_artifacts writes the manager seed + driver env +
+        # runtime.json right after $HERMES_HOME exists and before mcp_wire
+        # reads the seed allow-list.
+        "install_artifacts",
         # PR-3 (v0.3): persona_seed inserted before config_write so the
         # first render carries the active persona's system_prompt
         # prelude (Phase 7) on the same pass that lands chat_slots.
@@ -154,7 +158,11 @@ def test_run_marks_every_phase_ok_on_fresh(
     # configured (most CI envs); gateway_secrets_wire SKIPs when the test
     # runner is non-root (can't write /etc/systemd/system). Accept both
     # OK and SKIP for those phases.
-    skip_ok = {"voice_wire", "gateway_secrets_wire"}
+    # #432: install_artifacts SKIPs under the pytest sandbox guard when the
+    # /etc seed/env paths aren't monkeypatched (same posture as
+    # gateway_secrets_wire); its write path is covered by
+    # test_hermes_provision_install_artifacts.py.
+    skip_ok = {"voice_wire", "gateway_secrets_wire", "install_artifacts"}
     for name in hp.PHASE_NAMES:
         status = result.phases[name]["status"]
         allowed = {hp.PhaseStatus.OK.value} | (
@@ -196,7 +204,11 @@ def test_repair_flag_forces_rerun(tmp_path: Path, state_with_tmp_paths: hp.Boots
     # gateway_secrets_wire SKIPs when the test runner is non-root (can't
     # write /etc/systemd/system). Accept both OK and SKIP for those phases
     # (same posture as the fresh-run test above).
-    skip_ok = {"voice_wire", "gateway_secrets_wire"}
+    # #432: install_artifacts SKIPs under the pytest sandbox guard when the
+    # /etc seed/env paths aren't monkeypatched (same posture as
+    # gateway_secrets_wire); its write path is covered by
+    # test_hermes_provision_install_artifacts.py.
+    skip_ok = {"voice_wire", "gateway_secrets_wire", "install_artifacts"}
     for name in hp.PHASE_NAMES:
         status = second.phases[name]["status"]
         allowed = {hp.PhaseStatus.OK.value} | (
