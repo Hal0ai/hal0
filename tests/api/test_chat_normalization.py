@@ -58,7 +58,7 @@ async def test_virtual_name_resolved_and_thinking_injected():
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
     out = await v1._normalize_chat_body(req, {"model": "hal0/primary", "messages": []})
     assert out["model"] == "big"
-    assert out["enable_thinking"] is False
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
 
 
 @pytest.mark.asyncio
@@ -66,7 +66,7 @@ async def test_physical_model_passthrough_still_gets_thinking():
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
     out = await v1._normalize_chat_body(req, {"model": "big", "messages": []})
     assert out["model"] == "big"  # non-virtual -> not rewritten
-    assert out["enable_thinking"] is False
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
 
 
 @pytest.mark.asyncio
@@ -94,7 +94,7 @@ async def test_request_body_rewritten_for_proxy_fallthrough():
     await v1._normalize_chat_body(req, {"model": "hal0/primary", "messages": []})
     # the proxy fall-through reads request._body, so it must carry the normalized body
     assert json.loads(req._body)["model"] == "big"
-    assert json.loads(req._body)["enable_thinking"] is False
+    assert json.loads(req._body)["chat_template_kwargs"]["enable_thinking"] is False
 
 
 class _Headers:
@@ -163,7 +163,7 @@ async def test_omni_path_receives_normalized_body(monkeypatch):
 
     assert resp.status_code == 200
     assert seen["body"]["model"] == "big"
-    assert seen["body"]["enable_thinking"] is False
+    assert seen["body"]["chat_template_kwargs"]["enable_thinking"] is False
 
 
 # Single-gate invariant: _normalize_chat_body is called in exactly ONE place
