@@ -28,16 +28,20 @@ const { useState: useStateS } = React;
 //   serving + last_used_at fresh         → "serving" (green pulse) — actively processing
 //   serving + last_used_at > 1h          → "stale"   (yellow) — possibly stuck request
 //   loaded in VRAM (lemo=loaded|ready)   → "stale"   (yellow) — ready, awaiting prompt
-//   evicted / idle (lemo=idle|idle)      → "stale"   (yellow) — auto-reloads on next request
+//   evicted / idle (lemo=idle|idle)      → "offline" (grey)   — not in VRAM; loads on demand
 //   offline (clean unload/swap/evict)    → "offline" (grey)
 //
-// GREEN fires ONLY during an active in-flight request. Yellow covers
-// the entire "loaded and waiting" surface — in-VRAM and evicted both —
-// because operators don't need a colour to tell those apart (the
-// tooltip does). After a serving context manager exits, the slot
-// transitions back to READY (yellow); 1h later the idle monitor demotes
-// to IDLE (also yellow). The 1h timer in this file catches stuck-in-
-// SERVING slots where a request never finished.
+// Colour follows VRAM RESIDENCY, not configuration (truthful-display,
+// 2026-06-04, supersedes the 2026-05-27 spec): GREEN = actively
+// processing an in-flight request; YELLOW = model genuinely resident in
+// VRAM (loaded/ready, awaiting a prompt); GREY = nothing loaded —
+// disabled, cleanly offline, or evicted/idle (lemonade hot-reloads on
+// the next request). Evicted vs disabled is a label/tooltip distinction,
+// not a colour one, so the dashboard never paints a not-loaded slot in a
+// "warm" colour. After a serving context manager exits the slot returns
+// to READY (yellow, still in VRAM); it only goes grey once lemonade
+// evicts it. The 1h timer in this file catches stuck-in-SERVING slots
+// where a request never finished.
 const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h hung-request threshold for serving slots
 
 function _formatAgo(deltaMs) {
@@ -156,7 +160,7 @@ function slotIndicator(slot, now = Date.now()) {
   // the model is available but not in VRAM, lemonade hot-reloads on next request.
   if (lemo === "idle" || state === "idle") {
     return {
-      cls: "stale",
+      cls: "offline",
       label: "idle",
       tooltip: "Idle — model not in VRAM, will hot-reload on next request",
     };

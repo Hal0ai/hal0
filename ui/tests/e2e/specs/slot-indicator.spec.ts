@@ -9,7 +9,7 @@
  *   serving + fresh        → green pulse (GREEN ONLY during in-flight)
  *   serving + last>1h      → yellow (stuck-request guard)
  *   ready / lemo=loaded    → yellow (loaded, awaiting prompt)
- *   idle / lemo=idle       → yellow (evicted, hot-reload on next request)
+ *   idle / lemo=idle       → grey (evicted, not in VRAM; hot-reload on next request)
  *   warming/starting/…     → amber pulse
  *   !enabled / disabled    → grey "off"
  *   offline                → grey
@@ -101,11 +101,11 @@ test.describe('slotIndicator helper', () => {
     expect(ind.tooltip).toBe('Offline')
   })
 
-  test('idle state maps to stale (yellow)', async ({ page }) => {
+  test('idle state maps to offline (grey)', async ({ page }) => {
     const ind = await page.evaluate<Indicator>(() => {
       return (window as any).slotIndicator({ state: 'idle', last_used_at: null })
     })
-    expect(ind.cls).toBe('stale')
+    expect(ind.cls).toBe('offline')
     expect(ind.label).toBe('idle')
   })
 
@@ -187,7 +187,7 @@ test.describe('slotIndicator helper', () => {
     expect(ind.label).toBe('ready')
   })
 
-  test('lemonade_state=idle → stale (yellow, evicted)', async ({ page }) => {
+  test('lemonade_state=idle → offline (grey, evicted, not in VRAM)', async ({ page }) => {
     const ind = await page.evaluate<Indicator>(() => {
       return (window as any).slotIndicator({
         state: 'offline',
@@ -195,7 +195,7 @@ test.describe('slotIndicator helper', () => {
         model: 'foo',
       })
     })
-    expect(ind.cls).toBe('stale')
+    expect(ind.cls).toBe('offline')
     expect(ind.label).toBe('idle')
     expect(ind.tooltip).toMatch(/hot-reload on next request/)
   })
