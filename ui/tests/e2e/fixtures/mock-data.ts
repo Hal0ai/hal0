@@ -36,6 +36,7 @@ export const MOCK_DATA = {
     ram_available_mb: 94_577,
     unified_memory_mb: 131_072,
     gtt_total_mb: 107_520,
+    memory_kind: 'unified',
     gpu_name: 'AMD Radeon 8060S (Strix Halo)',
     gpu_vendor: 'amd',
     gpus: [

@@ -108,6 +108,17 @@ test.describe('Memory map — sidebar', () => {
     await expect(card).not.toContainText('free on host')
   })
 
+  test('UMA pool labelled "GPU pool (GTT)", not "unified"', async ({ page }) => {
+    // The default mock host is a Strix Halo UMA box (memory_kind: 'unified').
+    // On UMA the pool ceiling is the GTT cap, so the header must read as the
+    // GPU/GTT pool — never the misleading raw "unified" kind. See issue #462.
+    await mockStatsHardware(page, { configured: false, detected: false })
+    await page.goto('/#dashboard')
+    const card = page.locator('.memmap-sidebar')
+    await expect(card.locator('.side-card-h .right')).toContainText('GPU pool (GTT)')
+    await expect(card.locator('.side-card-h .right')).not.toContainText('unified')
+  })
+
   test('headroom labelled "pool" on bare-metal', async ({ page }) => {
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')

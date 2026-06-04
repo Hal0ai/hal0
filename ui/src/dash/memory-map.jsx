@@ -111,6 +111,10 @@ export function useMemoryMapModel() {
     mbToGb(stats.data?.ram_total_mb || 0)
   const platformLabel = rawHw.platform_label || rawHw.platform || ''
   const memoryKind = rawHw.memory_kind === 'unified' ? 'unified' : 'system'
+  // On UMA the pool ceiling is the GTT cap, not the whole unified RAM
+  // (see unifiedGb above). Don't render the raw 'unified' kind — it reads
+  // as "unified 80GB" and misleads. Label it as the GPU/GTT pool instead.
+  const poolLabel = memoryKind === 'unified' ? 'GPU pool (GTT)' : 'system'
 
   const ramUsedGb = mbToGb(stats.data?.ram_used_mb || 0)
   const gttUsedGb = mbToGb(
@@ -205,7 +209,7 @@ export function useMemoryMapModel() {
   const availableGb = Math.max(0, round1(candidate - SAFETY_MARGIN_GB))
 
   return {
-    pool: { totalGb: unifiedGb, kind: memoryKind, platformLabel },
+    pool: { totalGb: unifiedGb, kind: memoryKind, label: poolLabel, platformLabel },
     host,
     self: {
       // Model memory the map renders against the pool. `modelUsedGb` is
@@ -357,7 +361,7 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
         <div className="vh">
           <h2>Memory map</h2>
           <span className="mono dim">
-            {pool.kind} {fmtGb(total)} · {pool.platformLabel}
+            {pool.label} {fmtGb(total)} · {pool.platformLabel}
             {host.mode === 'configured' && host.totalGb && ` · host ${fmtGb(host.totalGb)}`}
           </span>
         </div>
@@ -419,7 +423,7 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
       <div className="side-card-h">
         <span>Memory map</span>
         <span className="right mono">
-          {fmtGb(usedModel)} / {fmtGb(total)}
+          {pool.label} · {fmtGb(usedModel)} / {fmtGb(total)}
         </span>
       </div>
       <div className="side-card-b">
