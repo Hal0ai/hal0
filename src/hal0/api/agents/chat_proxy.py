@@ -72,9 +72,10 @@ router = APIRouter()
 DEFAULT_HERMES_HOST: Final[str] = "127.0.0.1"
 DEFAULT_HERMES_PORT: Final[int] = 9119
 
-# runtime.json lives where PR-3's ``hermes_provision`` writes it. The
-# bootstrap chmods it 0600 — we re-tighten on every read to belt-and-
-# braces against permission drift.
+# runtime.json lives where ``hermes_provision``'s install_artifacts phase
+# writes it (issue #432 — previously nothing wrote it). The bootstrap
+# chmods it 0600; we re-tighten on every read to belt-and-braces against
+# permission drift.
 RUNTIME_JSON_DEFAULT: Final[str] = "/var/lib/hal0/.hermes/runtime.json"
 
 # tool.progress coalescing window. 100ms matches the rate at which the
@@ -100,7 +101,7 @@ def _runtime_json_path() -> Path:
     """Return the on-disk runtime.json path.
 
     Honours ``HAL0_HERMES_RUNTIME_JSON`` (tests + alt installs). The
-    default tracks PR-3's writer.
+    default tracks the bootstrap's install_artifacts writer (#432).
     """
     return Path(os.environ.get("HAL0_HERMES_RUNTIME_JSON", RUNTIME_JSON_DEFAULT))
 

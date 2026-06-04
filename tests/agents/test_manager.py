@@ -352,6 +352,50 @@ def test_list_synthesises_broken_record_for_orphan(
     assert listing[0].installed_at == ""
 
 
+def test_read_record_consults_driver_when_seed_missing(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+) -> None:
+    """#432: a running agent with on-disk artifacts but NO /etc seed must
+    report ``installed``, not ``broken``.
+
+    The ``hal0 agent bootstrap hermes`` path used to leave the data +
+    state dirs on disk without writing the seed TOML, so ``_read_record``
+    short-circuited to ``broken`` before ever consulting driver health —
+    even though the agent was up and reachable. Now the missing-seed
+    branch defers to ``driver.status()``."""
+    # Synthesise the half-state: data dir present, seed absent.
+    manager._data_dir("hermes").mkdir(parents=True)
+    assert not manager._config_path("hermes").exists()
+    # Driver reports the live agent as reachable.
+    stub_drivers["hermes"]._installed = True
+
+    listing = manager.list()
+    assert len(listing) == 1
+    assert listing[0].name == "hermes"
+    assert listing[0].status == "installed", (
+        "missing-seed + running agent reported 'broken' — #432 regression"
+    )
+    # No seed → no recorded install timestamp.
+    assert listing[0].installed_at == ""
+
+
+def test_read_record_stays_broken_when_driver_unreachable(
+    manager: AgentManager,
+    stub_drivers: dict[str, _StubDriver],
+) -> None:
+    """#432: the missing-seed branch only upgrades to ``installed`` when
+    the driver actually reports reachable. A dead agent with orphan
+    artifacts must stay ``broken`` so the repair affordance is reachable
+    (#346)."""
+    manager._state_dir("hermes").mkdir(parents=True)
+    stub_drivers["hermes"]._installed = False
+
+    listing = manager.list()
+    assert len(listing) == 1
+    assert listing[0].status == "broken"
+
+
 def test_is_present_on_disk_predicate(
     manager: AgentManager,
     stub_drivers: dict[str, _StubDriver],

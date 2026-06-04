@@ -24,6 +24,7 @@ for the agent-identity model (X-hal0-Agent header, not Bearer).
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import hashlib
 import json
@@ -209,6 +210,31 @@ WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
 # back-compat symlink to this.
 HERMES_CLI_INSTALL_PATH = Path("/usr/local/bin/hermes")
 REPO_ROOT_FOR_INSTALLER = Path(__file__).resolve().parents[3]
+
+# ── Install artifacts (issue #432) ───────────────────────────────────────────
+#
+# ``hal0 agent bootstrap hermes`` is a separate install path from
+# ``AgentManager.install``; the provision pipeline writes data/state but
+# never wrote the three artifacts downstream components key off, each of
+# which falsely assumed "some other step writes it":
+#
+#   * the manager seed at /etc/hal0/agents/hermes.toml — without it
+#     ``AgentManager._read_record`` short-circuits to ``broken`` before it
+#     ever consults driver health;
+#   * the driver env file at /etc/hal0/agents/hermes.env — the path the
+#     Hermes driver sources (NOT the outbound secrets vault at
+#     HERMES_SECRETS_ENV, a different file);
+#   * runtime.json under $HERMES_HOME — the embed token chat_proxy sends as
+#     ``Authorization: Bearer`` on the browser→hermes hop; absent, every
+#     chat request reaches hermes unauthenticated.
+#
+# All three constants live at module scope so tests can monkey-patch them
+# onto a tmp path, same posture as HERMES_SECRETS_ENV / AGENT_ALLOWLIST_PATH.
+# INSTALL_SEED_PATH is the SAME file as AGENT_ALLOWLIST_PATH — the seed
+# write merges, never clobbers, any operator ``[mcp.servers.*]`` blocks.
+INSTALL_SEED_PATH = Path("/etc/hal0/agents/hermes.toml")
+DRIVER_ENV_PATH = Path("/etc/hal0/agents/hermes.env")
+RUNTIME_JSON_NAME = "runtime.json"
 
 
 # ── Phase A: preflight ──────────────────────────────────────────────────────
@@ -2734,11 +2760,203 @@ def _phase_self_report(state: BootstrapState) -> PhaseResult:
     return PhaseResult(status=PhaseStatus.OK, details={"published": True, "summary_id": summary_id})
 
 
+# ── Phase: install_artifacts (issue #432) ────────────────────────────────────
+#
+# Writes the three manager/proxy install artifacts the provision pipeline
+# used to leak (seed TOML, driver env file, runtime.json embed token). Runs
+# right after home_init so $HERMES_HOME exists for runtime.json, and before
+# the phases that read the seed/allowlist (mcp_wire) so a single bootstrap
+# converges. Idempotent: the embed token is generated once and re-used on
+# re-runs (so the secret doesn't rotate under a running proxy); ``--repair``
+# forces a fresh token + rewrites every artifact.
+
+
+def _seed_payload(state: BootstrapState) -> dict[str, Any]:
+    """Build the ``[agent]`` seed block, mirroring AgentManager._write_seed.
+
+    Shape matches ``hal0.agents.manager.AgentManager._write_seed`` so the
+    manager's ``_read_record`` parses an identical layout regardless of which
+    install path wrote the file.
+    """
+    return {
+        "agent": {
+            "name": "hermes",
+            "installed_at": datetime.datetime.now(tz=datetime.UTC).isoformat(),
+            # Track-latest by design (ADR-0004 §3). No version pin.
+            "version_pin": False,
+        },
+        "data_dir": str(Path("/var/lib/hal0/agents/hermes")),
+    }
+
+
+def _write_seed_toml(state: BootstrapState, *, repair: bool) -> tuple[Path, bool]:
+    """Write/merge the manager seed at :data:`INSTALL_SEED_PATH`.
+
+    The seed file doubles as the MCP allow-list (``[mcp.servers.*]``), so we
+    deep-merge: refresh ``[agent]`` + ``data_dir`` while preserving any
+    operator-added server blocks. Returns ``(path, wrote)`` — ``wrote`` is
+    ``False`` when an existing ``[agent]`` block already carried an
+    ``installed_at`` and ``repair`` is off (idempotent no-op on re-run).
+    """
+    import tomllib
+
+    import tomli_w
+
+    path = INSTALL_SEED_PATH
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            existing = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            existing = {}
+
+    has_seed = bool((existing.get("agent") or {}).get("installed_at"))
+    if has_seed and not repair:
+        return path, False
+
+    payload = _seed_payload(state)
+    merged = dict(existing)
+    merged["agent"] = payload["agent"]
+    merged["data_dir"] = payload["data_dir"]
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".toml.tmp")
+    tmp.write_bytes(tomli_w.dumps(merged).encode("utf-8"))
+    os.replace(tmp, path)
+    return path, True
+
+
+def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
+    """Write the driver env file at :data:`DRIVER_ENV_PATH`.
+
+    Mirrors ``HermesDriver._write_env_file``: the wrapper sources this on
+    every invocation for the hal0 API URL + MCP endpoints. Content is
+    deterministic, so a hash-equal file is left untouched. Returns
+    ``(path, wrote)``.
+    """
+    api_base = HAL0_API_URL.rstrip("/")
+    body = (
+        "# hal0 — Hermes-Agent env (managed by hal0; safe to edit)\n"
+        f"HAL0_API_URL={api_base}\n"
+        f"HAL0_MCP_ADMIN_URL={api_base}/mcp/admin\n"
+        f"HAL0_MCP_MEMORY_URL={api_base}/mcp/memory\n"
+    )
+    path = DRIVER_ENV_PATH
+    if path.exists():
+        try:
+            if path.read_text(encoding="utf-8") == body:
+                return path, False
+        except OSError:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".env.tmp")
+    tmp.write_text(body, encoding="utf-8")
+    os.replace(tmp, path)
+    return path, True
+
+
+def _write_runtime_json(state: BootstrapState, *, repair: bool) -> tuple[Path, bool]:
+    """Write ``runtime.json`` (embed token) under ``$HERMES_HOME`` chmod 0600.
+
+    The embed token is the shared secret chat_proxy sends as
+    ``Authorization: Bearer`` on the browser→hermes hop. Generated once and
+    re-used on re-runs so the secret never rotates under a running proxy;
+    ``repair`` forces a fresh token. Returns ``(path, wrote)``.
+    """
+    import secrets as _secrets
+
+    path = Path(state.hermes_home) / RUNTIME_JSON_NAME
+    token: str | None = None
+    if path.exists() and not repair:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            existing = data.get("token") or data.get("embed_token")
+            if isinstance(existing, str) and existing:
+                token = existing
+        except (OSError, json.JSONDecodeError):
+            token = None
+    if token is not None:
+        # Re-tighten perms; the token is already on disk and unchanged.
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+        return path, False
+
+    token = _secrets.token_urlsafe(32)
+    payload = {"token": token, "written_at": _utcnow()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
+    return path, True
+
+
+def _phase_install_artifacts(state: BootstrapState) -> PhaseResult:
+    """Write the seed TOML, driver env file, and runtime.json (issue #432).
+
+    These three artifacts were previously only written by
+    ``AgentManager.install``; the ``hal0 agent bootstrap hermes`` path skipped
+    them entirely, leaving the manager reporting ``broken`` and the chat proxy
+    sending no Bearer. Idempotent + ``--repair``-aware (mirrors persona_seed).
+
+    Sandbox guard (mirrors gateway_secrets_wire): under pytest, refuse to
+    write the seed/env when they still point at the real ``/etc/`` tree.
+    A test that genuinely exercises these writes monkeypatches
+    INSTALL_SEED_PATH / DRIVER_ENV_PATH to tmp_path; the runtime.json write
+    is always tmp-safe because it tracks ``state.hermes_home``.
+    """
+    repair = bool(state.phases.get("_repair_flag"))
+
+    under_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    if under_pytest and (
+        str(INSTALL_SEED_PATH).startswith("/etc/") or str(DRIVER_ENV_PATH).startswith("/etc/")
+    ):
+        # Don't strand artifacts entirely — runtime.json is tmp-safe.
+        runtime_path, token_wrote = _write_runtime_json(state, repair=repair)
+        return PhaseResult(
+            status=PhaseStatus.SKIP,
+            reason=(
+                "running under pytest with un-sandboxed /etc seed/env paths "
+                "— refusing to write the real /etc/hal0 tree; monkeypatch "
+                "INSTALL_SEED_PATH/DRIVER_ENV_PATH to tmp in the test fixture"
+            ),
+            details={
+                "seed_path": str(INSTALL_SEED_PATH),
+                "env_path": str(DRIVER_ENV_PATH),
+                "runtime_json_path": str(runtime_path),
+                "token_wrote": token_wrote,
+            },
+        )
+
+    seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
+    env_path, env_wrote = _write_driver_env(state)
+    runtime_path, token_wrote = _write_runtime_json(state, repair=repair)
+
+    return PhaseResult(
+        status=PhaseStatus.OK,
+        details={
+            "seed_path": str(seed_path),
+            "seed_wrote": seed_wrote,
+            "env_path": str(env_path),
+            "env_wrote": env_wrote,
+            "runtime_json_path": str(runtime_path),
+            "token_wrote": token_wrote,
+        },
+    )
+
+
 PHASES: list[tuple[str, Callable[[BootstrapState], PhaseResult]]] = [
     ("preflight", _phase_preflight),
     ("install", _phase_install),
     ("env_probe", _phase_env_probe),
     ("home_init", _phase_home_init),
+    # #432: write the manager seed + driver env + runtime.json embed token
+    # right after $HERMES_HOME exists and before mcp_wire reads the seed's
+    # allow-list, so a single `bootstrap hermes` run leaves the artifacts the
+    # manager + chat_proxy key off (previously only AgentManager.install wrote
+    # them, so the bootstrap path left the agent reporting `broken`).
+    ("install_artifacts", _phase_install_artifacts),
     # PR-3 Phase 8: seed personas BEFORE config_write so the first
     # config render gets the active persona's system_prompt prelude.
     # mcp_wire runs after config_write to probe the live MCP surface;

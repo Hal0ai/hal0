@@ -38,6 +38,7 @@ shell out to ``installer/agents/<name>.sh``. Drivers are looked up by
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import shutil
 from dataclasses import dataclass
@@ -442,12 +443,23 @@ class AgentManager:
 
         if not seed_readable:
             # No seed (or unreadable) but is_present_on_disk says
-            # something else is here — synthesise a broken record so the
-            # dashboard surfaces it.
+            # something else is here. Before synthesising ``broken``,
+            # consult the driver's live health probe (#432): the
+            # ``hal0 agent bootstrap hermes`` path used to leave the
+            # data + state dirs on disk without the /etc seed, so a
+            # *running, reachable* agent reported ``broken`` purely
+            # because the seed write never happened. If the driver says
+            # the agent is reachable, report ``installed`` and recover
+            # the half-state; otherwise fall through to ``broken`` so
+            # the dashboard's repair affordance stays reachable (#346).
+            status = "broken"
+            with contextlib.suppress(Exception):
+                if self.is_present_on_disk(name) and _driver_for(name).status() == "installed":
+                    status = "installed"
             return AgentRecord(
                 name=name,
                 installed_at="",
-                status="broken",
+                status=status,
                 data_dir=str(self._data_dir(name)),
                 config_path=str(toml_path),
             )
