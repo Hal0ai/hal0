@@ -45,3 +45,22 @@ def test_virtual_rows_do_not_duplicate(client, monkeypatch):
 
     ids = [r["id"] for r in client.get("/v1/models").json()["data"]]
     assert ids.count("hal0/primary") == 1
+
+
+def test_all_canonical_virtual_names_advertised_with_fallback(client, monkeypatch):
+    async def fake_views(request):
+        return _views()
+
+    monkeypatch.setattr("hal0.api.routes.v1._normalize_slot_views", fake_views)
+    monkeypatch.setattr("hal0.api.routes.v1._normalize_loaded_models", lambda request: {"big"})
+
+    payload = client.get("/v1/models").json()
+    assert payload["object"] == "list"
+    by_id = {r["id"]: r for r in payload["data"]}
+    # all three appear; npu/utility fall back to the primary's model on a primary-only box
+    assert {"hal0/primary", "hal0/npu", "hal0/utility"}.issubset(by_id)
+    assert by_id["hal0/npu"]["_hal0"]["resolves_to"] == "big"
+    assert by_id["hal0/utility"]["_hal0"]["resolves_to"] == "big"
+    # every virtual row carries a context_length (mandatory for Hermes)
+    for vid in ("hal0/primary", "hal0/npu", "hal0/utility"):
+        assert by_id[vid]["context_length"] == 65536

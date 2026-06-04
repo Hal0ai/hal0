@@ -607,6 +607,9 @@ async def list_models(
         slot_views_provider=lambda: views,
         loaded_models_provider=lambda: _normalize_loaded_models(request),
     )
+    # All 3 canonical names are advertised whenever they resolve. hal0/npu and
+    # hal0/utility fall back to the primary when no npu/utility slot is loaded —
+    # intentional: the name always routes (see resolve_chain's fallback contract).
     for vname in DEFAULT_CHAINS:  # canonical names only (aliases excluded from the picker)
         if vname in seen:
             continue
