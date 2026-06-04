@@ -727,6 +727,7 @@ def _render_config_yaml(
     delegation: dict[str, Any] | None = None,
     auxiliary_tasks: dict[str, dict[str, Any]] | None = None,
     custom_providers: list[dict[str, Any]] | None = None,
+    live_resolve_enabled: bool = False,
 ) -> str:
     """Render the Hermes config.yaml via Jinja2.
 
@@ -787,6 +788,7 @@ def _render_config_yaml(
             auxiliary_tasks if auxiliary_tasks is not None else _default_auxiliary_tasks()
         ),
         custom_providers=custom_providers,
+        live_resolve_enabled=live_resolve_enabled,
     )
 
 
@@ -933,6 +935,7 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     cached_servers = (state.phases.get("mcp_wire") or {}).get("details", {}).get("rendered_servers")
     mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
     system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
+    live_resolve_enabled = os.environ.get("HAL0_HERMES_LIVE_RESOLVE", "0") == "1"
     rendered = _render_config_yaml(
         primary=primary,
         chat_slots=chat_slots,
@@ -943,6 +946,7 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
         delegation=delegation,
         auxiliary_tasks=auxiliary_tasks,
         custom_providers=custom_providers,
+        live_resolve_enabled=live_resolve_enabled,
     )
     rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     new_hash = content_hash(rendered)

@@ -43,7 +43,11 @@
    context now lives in the `custom_providers:` block below, matched by
    base_url + model_id. #}
 model:
-{%- if primary %}
+{%- if live_resolve_enabled %}
+  default: "hal0/primary"
+  provider: "custom"
+  base_url: "http://127.0.0.1:8080/v1"
+{%- elif primary %}
   default: {{ primary.model_id | tojson }}
   provider: "custom"
   base_url: {{ primary.backend_url | tojson }}
