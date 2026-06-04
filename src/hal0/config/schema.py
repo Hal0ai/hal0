@@ -242,6 +242,14 @@ class SlotConfig(BaseModel):
         default=True,
         description="Whether this slot is started on hal0 startup.",
     )
+    role: str | None = Field(
+        default=None,
+        description=(
+            "Optional role hint for normalization chain binding "
+            "(e.g. 'primary', 'utility', 'npu'). When unset, role is derived "
+            "from the slot name. Authoritative over the name when set."
+        ),
+    )
 
     # [model] section (nested)
     model: ModelConfig = Field(default_factory=ModelConfig)
