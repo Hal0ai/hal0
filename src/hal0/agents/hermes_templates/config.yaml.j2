@@ -23,6 +23,9 @@
                         Drives the auxiliary: block. utility-slot tasks render
                         provider:"custom"+base_url; vision/web_extract stay
                         provider:"main". (feat/hermes-role-slots)
+     live_resolve_enabled — bool      when true, model.default + providers.custom.base_url
+                        render the virtual "hal0/primary" name against the gateway
+                        (http://127.0.0.1:8080/v1) instead of the physical slot model.
 #}# Managed by hal0 (issue #241). Edits MAY be overwritten by
 # `hal0 agent bootstrap hermes`. Drop a file at
 # /etc/hal0/agents/hermes/overrides.yaml to merge on top.
@@ -65,7 +68,7 @@ providers:
   # LAN endpoints; hal0 sits in that bucket.
   custom:
     name: "hal0"
-    base_url: {{ (primary.backend_url if primary else "http://127.0.0.1:8080/v1") | tojson }}
+    base_url: {{ ("http://127.0.0.1:8080/v1" if live_resolve_enabled else (primary.backend_url if primary else "http://127.0.0.1:8080/v1")) | tojson }}
     request_timeout_seconds: 300
     stale_timeout_seconds: 900
 
