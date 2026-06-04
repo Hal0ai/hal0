@@ -16,7 +16,7 @@
 {%- else -%}
 - Capabilities: _none loaded._
 {%- endif %}
-{% if npu.present -%}
+{% if npu and npu.present -%}
 - NPU (XDNA): {% if npu.model_id %}`{{ npu.model_id }}` (FLM){% else %}present, idle{% endif %}
 {%- endif %}
 {% if igpu_sclk_mhz -%}
