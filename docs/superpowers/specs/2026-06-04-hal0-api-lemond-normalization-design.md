@@ -123,43 +123,99 @@ only point where "is this lemond-bound?" is answerable, so the gate lives here r
 > `kind=="remote"` exclusion is defensive for hal0-registered remote upstreams, not a path Hermes
 > exercises today.
 
+**Streaming timing (Hermes review #6).** Body injection completes **before** httpx opens the
+streaming connection to lemond (`_forward_streaming` sends the already-mutated `call.body`), so SSE
+frames are never delayed or buffered by normalization — the transform is on the request, not the
+response stream.
+
 ### 4.2 `LiveSlotResolver`
 
 Ports `gateway/normalize/resolve.go` semantics to Python and generalizes the single iGPU-first rule
-into a **configurable resolution chain** per virtual name.
+into a **configurable resolution chain** keyed on **slot role + device**, both read from hal0 slot
+config (authoritative) rather than guessed from the loaded model's name.
 
-- Reads lemond `/api/v1/health` → `all_models_loaded[]`, filters `type=="llm"`.
-- **Slot classification:** the `-FLM`/`FLM` name suffix plus optional `device`/`recipe`/`backend`
-  hints (`npu`/`flm`) classify a loaded slot as iGPU-chat vs NPU/FLM (the ported `isNPUorFLM`
-  discriminator). The configured `utility` slot is identified by its slot name/role from slot config.
-- **Resolution chain (ordered preference, first loaded match wins):** each virtual name carries an
-  ordered list of slot *roles* to try against what is currently loaded. Defaults:
+**How a chain step resolves a role to a live model:**
 
-  | Virtual name | Default chain (loaded-slot preference) |
+1. **Role binding (authoritative).** Each hal0 llm slot declares a `role` (new `SlotConfig` field —
+   §4.4); if unset it defaults to today's **name convention** (`primary`/`utility`/`agent-hermes`).
+   The resolver maps a chain step (`primary` / `utility` / `npu`) → the matching slot(s) → their
+   configured `model.default`.
+2. **Hardware axis is free from `device`.** iGPU vs NPU is `slot.device` (`gpu-vulkan`/`gpu-rocm` vs
+   `npu`) — no name-guessing needed for the hardware split. The ported `isNPUorFLM` name-suffix
+   heuristic is kept only as a *fallback* classifier for a loaded model that isn't in hal0 slot
+   config.
+3. **Liveness check.** Read lemond `/api/v1/health` → `all_models_loaded[]` (`type=="llm"`); a chain
+   step matches if its bound slot's `model.default` is in the loaded set.
+
+**Default chains (ordered; first loaded match wins):**
+
+  | Virtual name | Default chain (role → role → …) |
   |---|---|
-  | `hal0/primary` | `[igpu-chat]` → configured primary `model.default` |
-  | `hal0/npu` | `[npu/flm]` → `[utility]` → configured primary `model.default` |
-  | `hal0/utility` | `[utility]` → `[npu/flm]` → configured primary `model.default` |
+  | `hal0/primary` | `[primary]` → configured primary `model.default` |
+  | `hal0/npu` | `[npu]` → `[utility]` → `[primary]` |
+  | `hal0/utility` | `[utility]` → `[npu]` → `[primary]` |
 
 - **Protect the fast primary (design intent).** NPU-/utility-intended work must NOT commandeer or
-  evict the iGPU primary. The chains above therefore route lighter/instruct work to a **utility**
-  slot before ever landing on the primary, and the resolver **never triggers an eviction** of the
-  primary to satisfy an `npu`/`utility` name. (Rationale: the operator's best/fastest model should
-  not be bogged down — or unloaded — by grunt work a weaker/slower slot was handling.)
-- **Operator-configurable.** When multiple slots are running, the operator picks per-name chains
-  via slot/capability config (`capabilities.toml` / slot TOML role tags), overridable per deployment.
-  An NPU-only deployment still works (the iGPU step is simply never matched); a primary-only
+  evict the iGPU primary. The chains route lighter/instruct work to a **utility** (or npu) slot
+  before ever landing on the primary, and the resolver **never triggers an eviction** of the primary
+  to satisfy an `npu`/`utility` name. (Rationale: the operator's best/fastest model should not be
+  bogged down — or unloaded — by grunt work a weaker/slower slot was handling.)
+- **Operator-configurable.** Per-name chains are overridable in config; an operator running many
+  slots tags each slot's `role` and (optionally) reorders a chain. An NPU-only deployment still works
+  (the `primary`/`utility` steps simply never match a loaded slot and fall through); a primary-only
   deployment collapses every chain to the configured primary.
 - **Ensure-load is opt-in, never on the primary.** If a chain's preferred role isn't loaded, the
   default is to fall through the chain (no load). An operator may opt a *non-primary* role into
-  ensure-load (`SlotManager.load()` of the configured FLM/utility slot) — weighed against load
+  ensure-load (`SlotManager.load()` of the configured npu/utility slot) — weighed against load
   latency + lemond's serialized-load / nuclear-evict behavior (`router.cpp:238-247,374-423`).
-- Returns the resolved `model_name`; if the entire chain misses, falls back to the configured primary
-  `model.default` (never hard-fails a turn).
+- **Returns `(model_name, context_length)`.** The resolver returns the resolved physical model id
+  **and** the bound slot's `context_size` (slot TOML `[model] context_size`), so the `/v1/models`
+  advertisement (§4.3) and Hermes' context-length lookup get the right window for a virtual name
+  (Hermes review #2). If the entire chain misses, falls back to the configured primary
+  `model.default` + its context (never hard-fails resolution — see §7 for the load-failure terminal
+  case).
 - **MUST NOT add new polling.** PR #474 (`#475`, on `origin/main`) just fixed hal0-api storming
   lemond's control plane. The resolver **reuses hal0-api's already-cached lemond health/slot state**;
   if no suitable cache exists, it uses a short-TTL (≈2–5 s) memoized read. This constraint is a
   hard acceptance criterion, not a nice-to-have.
+
+### 4.3 `/v1/models` virtual-name advertisement
+
+Hermes' `custom` provider calls `GET /v1/models` on startup to populate its `/model` picker and
+context-length lookup (Hermes review #1, #2). hal0-api's **public** `/v1/models`
+(`api/routes/v1.py` `public_router`) must therefore advertise the virtual names alongside physical
+model rows:
+
+```json
+{
+  "id": "hal0/primary",
+  "object": "model",
+  "context_window": 65536,
+  "_hal0": { "virtual": true, "kind": "live-resolve", "resolves_to": "qwen3.6-35b-…", "device": "gpu-vulkan" }
+}
+```
+
+- One row per **enabled** virtual name. `context_window` carries the bound slot's `context_size` so
+  Hermes clips at the right boundary; `_hal0.resolves_to` / `_hal0.device` annotate what is live now
+  (the resolver already computes these — §4.2). The `_hal0` block is additive and ignored by stock
+  OpenAI clients.
+- Physical model rows are unchanged. Virtual rows are appended.
+
+### 4.4 `SlotConfig.role` (schema addition)
+
+Add one optional field to `SlotConfig` (`src/hal0/slots/…schema`): `role: str | None`. Semantics:
+
+- For `type=="llm"` slots, `role` names the slot's purpose for chain binding (`primary` / `utility` /
+  `npu` / free string). **Default when unset:** derive from the slot **name** (so existing
+  installs — `primary`, `utility`, `agent-hermes` — keep working with zero migration).
+- Authoritative over the name: a slot named `coder-mini` with `role = "utility"` binds to the
+  `utility` chain step; renaming the slot doesn't break the chain.
+- `device` (existing) remains the authoritative hardware axis; `role` only disambiguates **same-device
+  llm slots** (the one real ambiguity — heavy primary vs light utility on the iGPU).
+- Validation: non-llm slot types ignore `role`. No reserved-name collision (the field is independent
+  of `name`).
+- *Future (out of scope, §10):* surface role binding through the capability-selection system
+  (`capabilities.toml`) for a picker UI; the `role` field is the data model that path would reuse.
 
 ---
 
@@ -173,17 +229,47 @@ into a **configurable resolution chain** per virtual name.
   Never inject on remote/cloud upstreams (meaningless or harmful). Living in hal0-api — which knows
   the route target — is precisely why this gate is possible (a Hermes-config `extra_body` could not
   distinguish target).
+- **Idempotent (Hermes review #5):** re-applying `apply_thinking_policy` to an already-injected body
+  is a no-op (the opt-out check sees the field it set). Safe even though the two call sites (§4.1b)
+  are mutually exclusive in practice.
+- **`no_think` passthrough:** if the caller already suppressed thinking at the prompt level (a
+  `no_think` marker), pass it through untouched — never strip it, never double-inject.
 
 ---
 
 ## 6. Hermes side (minimal, upgrade-safe)
 
-- `src/hal0/agents/hermes_templates/config.yaml.j2`: set `model.default: hal0/primary`
-  (live-follow); keep `provider: custom` + `base_url: http://127.0.0.1:8080/v1`.
-- **No `extra_body` thinking config** — suppression is server-side.
-- Change survives bootstrap re-render via the `overrides.yaml` deep-merge seam
-  (`hermes_provision.py:818-833`); never hand-edit `config.yaml` (re-rendered on startup).
-- No plugin, no venv patch, no `PROVIDER_REGISTRY` change.
+Still `provider: custom` + `base_url: http://127.0.0.1:8080/v1` — no plugin, no venv patch, no
+`PROVIDER_REGISTRY` change, no `extra_body` thinking config (suppression is server-side). The
+template changes are about making the virtual names **discoverable + correctly sized** in Hermes.
+
+- **Render virtual names directly, not via override (Hermes review #8).** Add a provisioner-set
+  bootstrap variable `live_resolve_enabled: bool` (true when this feature is active) and render the
+  default explicitly, so the config is self-documenting rather than template-writes-X-then-override-
+  patches-Y:
+  ```jinja2
+  {%- if live_resolve_enabled %}
+    default: "hal0/primary"
+  {%- elif primary %}
+    default: {{ primary.model_id | tojson }}
+  {%- endif %}
+  ```
+- **`model_aliases` entries for virtual names (Hermes review #9).** The `model_aliases` block
+  (`config.yaml.j2:70-76`) currently loops only physical slot aliases. Add one entry per enabled
+  virtual name so Hermes' `/model` picker + session footer resolve them:
+  ```yaml
+  model_aliases:
+    hal0/primary: { model: "hal0/primary", provider: "custom", base_url: "http://127.0.0.1:8080/v1" }
+  ```
+- **Context length for virtual names (Hermes review #2).** Two redundant-but-cheap sources, so the
+  window is right regardless of which Hermes reads: (a) hal0-api advertises `context_window` on the
+  `/v1/models` virtual row (§4.3); (b) add a `custom_providers` entry **keyed by the virtual name**
+  carrying the configured primary's `context_length`. *(Which source Hermes actually consumes for a
+  `custom` provider is an open question for Hermes — see implementation questions; we ship both until
+  confirmed, then drop the redundant one.)*
+- All template changes survive bootstrap re-render natively (rendered from `live_resolve_enabled` +
+  slot config); `overrides.yaml` remains the escape hatch, not the primary mechanism. Never hand-edit
+  `config.yaml` (re-rendered on startup); restart via `hal0-agent@hermes` as the `hal0` user.
 
 ---
 
@@ -193,8 +279,21 @@ into a **configurable resolution chain** per virtual name.
 - Live-follow resolves to whatever's loaded; if **nothing** is loaded, fall back to the configured
   primary and let the existing ensure-load path warm it (covers lemond's "local model 404s if not
   loaded" + idle-unload, per memories `hal0_lemonade_v1_load_schema`, `hal0_lemonade_gotchas`).
-- Any `/health` fetch failure → fall back to configured primary `model.default`. **Never hard-fail a
-  turn on resolver error** (that was Bifrost's stated failure mode).
+- Any `/health` fetch failure → fall back to configured primary `model.default`. **Resolution never
+  hard-fails** (that was Bifrost's stated failure mode).
+- **Terminal case — define it explicitly (Hermes review #11).** "Never hard-fail a turn" means
+  *resolution* always yields a target; it does not mean inference can't fail. If the chain fully
+  misses **and** the configured primary is not loaded **and** an ensure-load of the primary fails,
+  hal0-api returns **HTTP 503 + `Retry-After`** — reusing the existing `SlotLoading` semantics
+  (`router.py` `_check_slot_ready_for_dispatch`), not a hang and not a confusing 404/502. A 503 is
+  the honest "model warming / unavailable, retry" signal; Hermes' `request_timeout_seconds: 300`
+  tolerates the warm-up.
+
+**Cold-start latency (Hermes review #7).** On Hermes' first request after idle-unload, the existing
+`SlotManager.load()` is synchronous in the handler — a 30–90 s pause with no UI signal. v1 keeps this
+(within Hermes' 300 s timeout) but **must emit a `gateway.log` line when ensure-load is triggered** so
+the operator can see what's happening. Surfacing warm progress to the user (SSE preamble) is a future
+enhancement (§10).
 
 ---
 
@@ -202,16 +301,24 @@ into a **configurable resolution chain** per virtual name.
 
 ### 8.1 Tests
 
-- **Unit:** port `resolve_test.go` cases (iGPU>FLM, FLM-only, empty→fallback, malformed health);
-  **resolution-chain matrix** per virtual name — `hal0/primary` (iGPU; FLM not commandeered),
-  `hal0/npu` (FLM → utility → primary; never evicts primary), `hal0/utility` (utility →
-  FLM → primary), plus primary-only and NPU-only deployments collapsing the chains; thinking opt-out
-  matrix (none set / `enable_thinking` set / `thinking` set / `chat_template_kwargs` set);
-  virtual-name resolution + final fallback. New module gets real unit coverage.
-- **Integration:** dispatcher/v1 tests with mocked lemond `/health` + `/v1/models`; γ-suite for the
-  chat path (streaming passthrough + tool-calls untouched).
-- **CT105 smoke:** curl `model: hal0/primary` → assert it hits the live slot and
-  `enable_thinking:false` is on the wire (adapt `gateway/scripts/smoke.sh`).
+- **Unit — resolver:** port `resolve_test.go` cases (iGPU>FLM, FLM-only, empty→fallback, malformed
+  health); **resolution-chain matrix** per virtual name — `hal0/primary` (iGPU; FLM not
+  commandeered), `hal0/npu` (npu → utility → primary; never evicts primary), `hal0/utility` (utility
+  → npu → primary); primary-only + NPU-only deployments collapsing the chains; **role binding** —
+  `role`-tag wins over name; name-convention default when `role` unset; a renamed slot (`coder-mini`
+  + `role=utility`) still binds; **chain exhaustion** — all roles miss → falls back to
+  `model.default`; no models loaded at all → ensure-load triggers for primary; **primary load-fails →
+  503 + Retry-After** (§7 terminal case). Returns `(model_name, context_length)`.
+- **Unit — thinking:** opt-out matrix (none set / `enable_thinking` set / `thinking` set /
+  `chat_template_kwargs.enable_thinking` set); **`no_think` passthrough** (caller already suppressed
+  at prompt level — not stripped, not double-injected); **idempotency** (second apply is a no-op).
+- **Integration:** dispatcher/v1 tests with mocked lemond `/health` + `/v1/models`; **`/v1/models`
+  advertisement** — virtual rows present with correct `context_window` + `_hal0` annotation, physical
+  rows unchanged; γ-suite for the chat path (streaming passthrough + tool-calls untouched; body
+  mutated before stream opens).
+- **CT105 smoke:** curl `GET /v1/models` → assert `hal0/primary` present with `context_window`; curl
+  `model: hal0/primary` → assert it hits the live slot and `enable_thinking:false` is on the wire
+  (adapt `gateway/scripts/smoke.sh`).
 
 ### 8.2 Rollout (each step independently revertible)
 
@@ -268,9 +375,23 @@ into a **configurable resolution chain** per virtual name.
 
 ---
 
-## 10. Out of scope
+## 10. Out of scope / future
 
 - Widening normalization to non-hal0-api agents (none exist today; revisit if an agent ever points
   straight at `lemond:13305`).
 - Changing lemond itself, slot lifecycle FSM, or the registry.
 - Memory-extraction model choice (instruct-only) — unaffected; separate path.
+- **Picker live-annotation (Hermes review #3).** The `_hal0.resolves_to` / `_hal0.device` fields are
+  *emitted now* (§4.3) but rendering them in Hermes' `/model` picker
+  (`hal0/primary → [now: <model>] (iGPU)`) is a downstream Hermes (or hal0 admin-skill) change. The
+  annotation format is reserved here so the data is available when that lands.
+- **Cold-start warm progress (Hermes review #7).** Surfacing slot-warming as an SSE preamble/spinner
+  during the synchronous first-token load. v1 only logs it (§7).
+- **Subagent model stability (Hermes review #12).** Hermes delegates subagents via `delegate_task`
+  reading `delegation.model`. With live-resolve, a subagent's next turn follows whatever slot is
+  loaded *now* — if the operator swaps the slot mid-run, the subagent's model changes mid-conversation.
+  This is a Hermes concern, not a hal0-api one: the resolver deliberately returns live state each
+  call. Pinning a subagent to a fixed physical model for its lifetime would be a Hermes-side feature.
+- **Capability-UI role binding.** Promote the `SlotConfig.role` field (§4.4) into the
+  `capabilities.toml` selection system so operators pick chat/utility/npu roles through the same UX as
+  embed/voice/img. The `role` data model is the seam; the orchestrator/UI work is deferred.
