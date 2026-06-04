@@ -22,6 +22,8 @@ const HAL0_DATA = {
     ram_available_mb: 75776,
     unified_memory_mb: 131072,
     gtt_total_mb: 81920,
+    memory_kind: "unified", // Strix Halo UMA — drives memory-map "GPU pool (GTT)" label
+
     gpu_name: "AMD Radeon 8060S (gfx1151, Strix Halo)",
     gpu_vendor: "amd",
     gpus: [
