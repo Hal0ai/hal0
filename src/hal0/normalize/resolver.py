@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 # Canonical virtual names -> ordered chain of roles to try against loaded slots.
 DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     "hal0/primary": ("primary",),
@@ -29,7 +28,7 @@ class SlotView:
 
     name: str
     role: str | None
-    device: str           # "gpu-vulkan" | "gpu-rocm" | "cpu" | "npu"
+    device: str  # "gpu-vulkan" | "gpu-rocm" | "cpu" | "npu"
     model_id: str
     context_length: int
 
@@ -38,12 +37,15 @@ class SlotView:
 class Resolution:
     model_id: str
     context_length: int
-    matched_role: str | None   # role that matched a loaded slot, or None on fallback
-    fallback: bool             # True => nothing in the chain was loaded; caller should ensure-load
+    matched_role: str | None  # role that matched a loaded slot, or None on fallback
+    fallback: bool  # True => nothing in the chain was loaded; caller should ensure-load
 
 
 def is_npu_or_flm(model_name: str) -> bool:
-    """Name-suffix heuristic used only for a loaded model with no slot-config match."""
+    """Name suffix/substring heuristic used only for a loaded model with no slot-config match.
+
+    Matches a ``-FLM`` suffix, or the substring ``FLM`` or ``NPU`` anywhere in the name.
+    """
     upper = model_name.upper()
     return upper.endswith("-FLM") or "FLM" in upper or "NPU" in upper
 
@@ -60,6 +62,7 @@ def _configured_primary(slots: list[SlotView]) -> SlotView | None:
     for s in slots:
         if _slot_matches_role(s, "primary"):
             return s
+    # last-resort: first enabled llm slot if none is tagged/named primary
     return slots[0] if slots else None
 
 
@@ -81,6 +84,9 @@ def resolve_chain(
 
     for role in chain:
         for slot in slots:
+            # Contract: both sides are the canonical lemond model_id, compared exactly.
+            # The async wrapper passes lemond's loaded model_names verbatim — exact
+            # match is intended, do NOT lowercase.
             if _slot_matches_role(slot, role) and slot.model_id in loaded:
                 return Resolution(slot.model_id, slot.context_length, role, fallback=False)
 

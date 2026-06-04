@@ -1,8 +1,6 @@
-import pytest
-
 from hal0.normalize.resolver import (
-    SlotView,
     DEFAULT_CHAINS,
+    SlotView,
     is_npu_or_flm,
     resolve_chain,
 )
@@ -10,9 +8,19 @@ from hal0.normalize.resolver import (
 
 def _slots():
     return [
-        SlotView(name="primary", role=None, device="gpu-vulkan", model_id="big-35b", context_length=65536),
-        SlotView(name="utility", role=None, device="gpu-vulkan", model_id="tiny-0.8b", context_length=65536),
-        SlotView(name="agent",   role=None, device="npu",        model_id="qwen3-4b-FLM", context_length=32768),
+        SlotView(
+            name="primary", role=None, device="gpu-vulkan", model_id="big-35b", context_length=65536
+        ),
+        SlotView(
+            name="utility",
+            role=None,
+            device="gpu-vulkan",
+            model_id="tiny-0.8b",
+            context_length=65536,
+        ),
+        SlotView(
+            name="agent", role=None, device="npu", model_id="qwen3-4b-FLM", context_length=32768
+        ),
     ]
 
 
@@ -38,12 +46,21 @@ def test_npu_falls_to_utility_before_primary():
 def test_utility_chain_order():
     r = resolve_chain("hal0/utility", _slots(), loaded={"qwen3-4b-FLM", "big-35b"})
     assert r.model_id == "qwen3-4b-FLM"
+    assert r.matched_role == "npu"
 
 
 def test_role_tag_overrides_name():
     slots = [
-        SlotView(name="coder-mini", role="utility", device="gpu-vulkan", model_id="cm", context_length=8192),
-        SlotView(name="primary", role=None, device="gpu-vulkan", model_id="big", context_length=65536),
+        SlotView(
+            name="coder-mini",
+            role="utility",
+            device="gpu-vulkan",
+            model_id="cm",
+            context_length=8192,
+        ),
+        SlotView(
+            name="primary", role=None, device="gpu-vulkan", model_id="big", context_length=65536
+        ),
     ]
     r = resolve_chain("hal0/utility", slots, loaded={"cm"})
     assert r.model_id == "cm"
@@ -63,6 +80,13 @@ def test_flm_alias_resolves_same_as_npu():
 def test_is_npu_or_flm_name_heuristic():
     assert is_npu_or_flm("qwen3-4b-FLM") is True
     assert is_npu_or_flm("big-35b") is False
+
+
+def test_empty_slots_degrades_to_blank_resolution():
+    r = resolve_chain("hal0/primary", [], loaded=set())
+    assert r is not None
+    assert r.model_id == ""
+    assert r.fallback is True
 
 
 def test_unknown_virtual_name_returns_none():
