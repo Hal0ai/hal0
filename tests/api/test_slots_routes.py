@@ -743,3 +743,54 @@ async def test_scrape_llama_metrics_clamps_overrun(
 
     out = await _scrape_llama_metrics(8081)
     assert out["kv_cache_usage"] == pytest.approx(1.0)
+
+
+# ── synthetic composite slot: truthful "serving" status ─────────────────────
+
+
+def test_synthetic_composite_slot_offline_when_lemond_empty(
+    slot_root: Path,
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+    lemonade_stub_state: dict[str, Any],
+) -> None:
+    """The synthetic composite ``hal0`` slot must derive ``status`` from
+    lemond's live loaded set, NOT from catalogue-cache cardinality.
+
+    Regression: the catalogue cache lists every configured chat model, so
+    the old ``"serving" if models else "offline"`` rule reported the
+    composite as serving forever — even when lemond had evicted every
+    model. The dashboard then showed models "loaded" that were not
+    resident. With nothing loaded, the slot must read ``offline``.
+    """
+    # Catalogue still advertises a chat model ...
+    isolated_app.state.model_cache["hal0"] = ["qwen3-4b-q4_k_m"]
+    # ... but lemond has nothing resident.
+    lemonade_stub_state["loaded"] = []
+
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    assert "hal0" in by_name, f"composite hal0 slot missing: {sorted(by_name)}"
+    hal0 = by_name["hal0"]
+    assert hal0.get("_synthetic") is True
+    assert hal0["advertised_models"] >= 1, "catalogue should still advertise the model"
+    assert hal0["status"] == "offline"
+
+
+def test_synthetic_composite_slot_serving_when_model_loaded(
+    slot_root: Path,
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+    lemonade_stub_state: dict[str, Any],
+) -> None:
+    """Counterpart to the offline case: when lemond reports the catalogued
+    model resident, the composite slot reads ``serving``."""
+    isolated_app.state.model_cache["hal0"] = ["qwen3-4b-q4_k_m"]
+    lemonade_stub_state["loaded"] = [{"model_name": "qwen3-4b-q4_k_m"}]
+
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    assert "hal0" in by_name, f"composite hal0 slot missing: {sorted(by_name)}"
+    assert by_name["hal0"]["status"] == "serving"

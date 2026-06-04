@@ -264,13 +264,57 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
     return out
 
 
-def _synthesize_slots_from_upstreams(request: Request) -> list[dict[str, Any]]:
+async def _lemonade_loaded_models(request: Request) -> set[str]:
+    """Model names lemond currently reports resident (``/v1/health``).
+
+    The truth source for the synthetic composite slot's ``status``: a
+    model is "serving" only when lemond actually holds it, not when the
+    catalogue merely lists it. Never raises — a down/unreachable lemond
+    yields an empty set so the dashboard degrades to "offline" instead
+    of 500ing.
+    """
+    from hal0.lemonade.errors import LemonadeError
+    from hal0.providers import lemonade_provider
+
+    try:
+        health = await lemonade_provider().client().health()
+    except LemonadeError:
+        return set()
+    except Exception:
+        return set()
+    names: set[str] = set()
+    if isinstance(health, dict):
+        for key in ("loaded", "all_models_loaded"):
+            entries = health.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if isinstance(entry, dict):
+                    name = entry.get("model_name")
+                    if isinstance(name, str) and name:
+                        names.add(name)
+    return names
+
+
+def _synthesize_slots_from_upstreams(
+    request: Request, loaded_models: set[str] | None = None
+) -> list[dict[str, Any]]:
     """Build virtual slot entries from configured upstreams.
 
     Until every upstream has a corresponding local slot, the dashboard
     still needs to show remote-backed inference targets. Each upstream
-    surfaces as a read-only slot entry: status="serving" when its model
-    cache is populated, "offline" otherwise.
+    surfaces as a read-only slot entry. ``status`` is computed by kind:
+
+      * local composite (``kind="slot"``) — ``serving`` only when one of
+        the upstream's advertised models appears in lemond's live loaded
+        set (``loaded_models``). The catalogue cache lists every configured
+        chat model, so it is NOT a liveness signal; consulting the loaded
+        set is what keeps the dashboard from showing evicted models as
+        resident. Falls back to the catalogue heuristic only when health
+        was unreadable (``loaded_models is None``).
+      * remote (``kind="remote"``) — ``serving`` when its model cache is
+        populated, since that cache is a live ``/v1/models`` probe of the
+        remote. ``offline`` otherwise.
 
     The slot's ``model`` reflects the most recently dispatched model id
     for this upstream (tracked in ``app.state.last_used_model``); falls
@@ -291,12 +335,24 @@ def _synthesize_slots_from_upstreams(request: Request) -> list[dict[str, Any]]:
             or (real_models[0] if real_models else "")
             or (models[0] if models else "")
         )
+        if u.kind == "slot":
+            # Local composite upstream: ``models`` comes from the slot
+            # CATALOGUE (config), so a non-empty list says nothing about
+            # what is resident. Truth comes from lemond's live loaded set.
+            # If health was unreadable (loaded_models is None) fall back to
+            # the catalogue heuristic rather than flapping to offline on a
+            # transient probe error.
+            serving = bool(models) if loaded_models is None else bool(set(models) & loaded_models)
+        else:
+            # Remote upstream: ``models`` is a live /v1/models probe of the
+            # remote, so a populated list is a genuine liveness signal.
+            serving = bool(models)
         out.append(
             {
                 "name": u.name,
                 "kind": u.kind,
                 "model": primary_model,
-                "status": "serving" if models else "offline",
+                "status": "serving" if serving else "offline",
                 "backend": "remote" if u.kind == "remote" else "vulkan",
                 "provider": "remote-upstream" if u.kind == "remote" else "llama-server",
                 "url": u.url,
@@ -354,7 +410,9 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
         row = per_slot_mem.get(str(entry["name"]))
         entry["mem_mb"] = round(float(row.get("mem_mb", 0) or 0), 1) if row else 0
 
-    synthetic = _synthesize_slots_from_upstreams(request)
+    synthetic = _synthesize_slots_from_upstreams(
+        request, loaded_models=await _lemonade_loaded_models(request)
+    )
     merged: list[dict[str, Any]] = list(real_entries)
     for entry in synthetic:
         if entry["name"] not in real_names:

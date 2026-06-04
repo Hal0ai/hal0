@@ -59,6 +59,7 @@ async def get_status(request: Request) -> dict[str, Any]:
     # picks them up via /api/slots directly.
     from hal0.api.routes.slots import (
         _get_slot_manager,
+        _lemonade_loaded_models,
         _slot_to_dict,
         _synthesize_slots_from_upstreams,
     )
@@ -75,7 +76,8 @@ async def get_status(request: Request) -> dict[str, Any]:
     real_names = {entry["name"] for entry in real_entries}
 
     slot_list: list[dict[str, Any]] = list(real_entries)
-    for entry in _synthesize_slots_from_upstreams(request):
+    loaded_models = await _lemonade_loaded_models(request)
+    for entry in _synthesize_slots_from_upstreams(request, loaded_models=loaded_models):
         if entry["name"] not in real_names:
             slot_list.append(entry)
 
