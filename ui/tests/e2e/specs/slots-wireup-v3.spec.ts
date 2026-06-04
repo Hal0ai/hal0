@@ -176,7 +176,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
 
     await page.goto('/#slots')
     const card = page.locator('.slot', { hasText: 'primary' }).first()
-    await card.locator('button:has-text("Unload")').click()
+    await card.locator('button:has-text("Stop")').click()
     await expect.poll(() => unloads.length).toBeGreaterThan(0)
   })
 })

@@ -76,6 +76,7 @@ const Icons = {
   download:  <Icon d="M8 2v8M4 7l4 4 4-4M3 14h10"/>,
   restart:   <Icon><path d="M14 8a6 6 0 1 1-2-4.5"/><path d="M14 1v3.5h-3.5"/></Icon>,
   unload:    <Icon d="M3 11h10M5 8l3 3 3-3M8 11V2"/>,
+  start:     <Icon d="M5 3l8 5-8 5V3z"/>,
   edit:      <Icon d="M3 13l3-1 7-7-2-2-7 7-1 3z"/>,
   more:      <Icon><circle cx="3" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="13" cy="8" r="1" fill="currentColor" stroke="none"/></Icon>,
   cpu:       <Icon><rect x="4" y="4" width="8" height="8" rx="0.5"/><path d="M4 6h-1M4 10h-1M13 6h-1M13 10h-1M6 4v-1M10 4v-1M6 13v-1M10 13v-1"/><rect x="6.5" y="6.5" width="3" height="3"/></Icon>,

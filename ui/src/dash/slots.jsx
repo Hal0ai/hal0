@@ -10,6 +10,7 @@ import {
   useSlots,
   useSlotRestart,
   useSlotUnload,
+  useSlotLoad,
   useSlotSwap,
 } from '@/api/hooks/useSlots'
 import { MemoryMap } from './memory-map'
@@ -203,6 +204,7 @@ function SlotCard({
   onOverflow,
   onRestart,
   onUnload,
+  onStart,
   onSwapPick,
   onViewLogs,
   onDelete,
@@ -214,6 +216,13 @@ function SlotCard({
   busy,
 }) {
   const { type, device, model, state, isDefault, coresident, cpuOnly, metrics } = slot;
+  // Lifecycle phase drives which action buttons render (design 2026-06-04):
+  // running (loaded/serving) -> Stop+Restart; off (not loaded) -> Start;
+  // transitional (warming/pulling/unloading) -> actions disabled.
+  const lemoState = String(slot?.lemonade_state || "");
+  const slotRunning = lemoState === "loaded" || lemoState === "ready" || state === "serving" || state === "ready";
+  const slotTransitional = state === "warming" || state === "starting" || state === "pulling" || state === "unloading";
+  const phase = slotTransitional ? "transitional" : slotRunning ? "running" : "off";
   const isLlm = type === "llm";
 
   // Only render chips backed by a real slot-payload field. Dead chips
@@ -335,16 +344,26 @@ function SlotCard({
         ))}
       </div>
       <div className="slot-actions">
-        <button
-          className="btn ghost sm"
-          disabled={!!busy}
-          onClick={() => onRestart && onRestart()}
-        >{Icons.restart} Restart</button>
-        <button
-          className="btn ghost sm"
-          disabled={!!busy}
-          onClick={() => onUnload && onUnload()}
-        >{Icons.unload} Unload</button>
+        {phase === "off" ? (
+          <button
+            className="btn ghost sm"
+            disabled={!!busy}
+            onClick={() => onStart && onStart()}
+          >{Icons.start} Start</button>
+        ) : (
+          <>
+            <button
+              className="btn ghost sm"
+              disabled={!!busy || phase === "transitional"}
+              onClick={() => onUnload && onUnload()}
+            >{Icons.unload} Stop</button>
+            <button
+              className="btn ghost sm"
+              disabled={!!busy || phase === "transitional"}
+              onClick={() => onRestart && onRestart()}
+            >{Icons.restart} Restart</button>
+          </>
+        )}
         <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit</button>
         <span className="spacer" />
       </div>
@@ -608,6 +627,7 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
 
   const restartMut = useSlotRestart();
   const unloadMut = useSlotUnload();
+  const loadMut = useSlotLoad();
   const swapMut = useSlotSwap();
 
   const toast = (msg, kind = "info") =>
@@ -699,6 +719,9 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
       }
       onUnload={() =>
         runMutation(s.name, unloadMut, s.name, `Unloaded ${s.name}`)
+      }
+      onStart={() =>
+        runMutation(s.name, loadMut, s.name, `Starting ${s.name}`)
       }
       onSwapPick={(m) =>
         runMutation(

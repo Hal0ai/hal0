@@ -190,6 +190,18 @@ const HAL0_DATA = {
       pid: 28518,
       metrics: { rpm: 2, avg: 4.1, res: "512×512", mem: 1.2 },
     },
+    {
+      name: "warming-demo",
+      type: "llm",
+      device: "gpu-rocm",
+      model: "qwen3-4b",
+      model_id: "qwen3-4b",
+      group: "chat",
+      state: "warming",
+      lemonade_state: "loading",
+      port: 8099,
+      metrics: { toks: 0, ttft: null, ctx: 8192, kv: null, mem: 4.0 },
+    },
   ],
 
   bundles: [
