@@ -644,14 +644,19 @@ fi
 ui_step "Lemonade system prerequisites"
 
 # Pinned FLM .deb — bump in lockstep with ADR-0009 / lemonade-adoption-plan
-# §5 ("flm.args = --asr 1 --embed 1"). v0.9.42 is what the trio was
-# validated against on 2026-05-22 (LXC 105, Strix Halo NPU passthrough).
-FLM_DEB_VERSION="0.9.42"
+# §5. v0.9.43 revalidated 2026-06-03 (LXC 105, Strix Halo NPU passthrough):
+# flm validate ok (NPU FW 1.1.2.65), embed-gemma-300m-FLM → 768-dim,
+# gemma3-1b-FLM chat ok. NOTE: 0.9.43 tightened CLI arg parsing — it now
+# rejects a flag passed twice. lemond auto-injects the requested model's
+# mode flag (e.g. --embed 1 for an embedding model), so flm.args must NOT
+# repeat it. Hence flm.args = "--asr 1" below (was "--asr 1 --embed 1",
+# which produced a duplicate --embed and crashed flm-server on 0.9.43).
+FLM_DEB_VERSION="0.9.43"
 FLM_DEB_URL="https://github.com/FastFlowLM/FastFlowLM/releases/download/v${FLM_DEB_VERSION}/fastflowlm_${FLM_DEB_VERSION}_ubuntu24.04_amd64.deb"
-# SHA-256 of the upstream artefact at v0.9.42. If the upstream file is
-# ever rebuilt under the same tag this will drift; bump in lockstep with
-# FLM_DEB_VERSION when bumping the pin.
-FLM_DEB_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+# SHA-256 of the upstream ubuntu24.04 artefact at v0.9.43 (verified on
+# download 2026-06-03). If upstream rebuilds under the same tag this will
+# drift; bump in lockstep with FLM_DEB_VERSION.
+FLM_DEB_SHA256="4173fa82f0043a4ff14cf7b84c7d24188fac4ac64346942601b7d2b915308479"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev installs don't touch the host's apt or third-party package
@@ -989,6 +994,49 @@ else
         chown -R hal0:hal0 "${LEMONADE_PREFIX}"
     fi
 
+    # 2b. Pin llama.cpp backend builds (ADR-0023, issue #438). Lemonade
+    #     bundles a *frozen* default in resources/backend_versions.json
+    #     (10.6.0 ships vulkan=b9253 / rocm-stable=b9247). b9253 predates
+    #     the qwen3next Vulkan kernels → our primary coding model runs an
+    #     unoptimised fallback (~4× slower gen). lemond restores whatever
+    #     matches this pin on every model load, so a hand-swapped binary
+    #     does NOT stick — the pin is the only durable lever. We pin BOTH
+    #     backends to the same official ggml-org build (b9496 ships both
+    #     ubuntu-vulkan-x64 and ubuntu-rocm-7.2-x64 assets) so they share
+    #     a build era and stay comparable. lemond downloads the matching
+    #     binary lazily on first load of each backend. rocm-nightly is
+    #     left alone (needs kernel ≥6.18.4; 64 GB alloc cap — TheRock
+    #     #4645). Bump LLAMACPP_PIN as ggml-org advances + re-run install.
+    LLAMACPP_PIN="b9496"
+    LEMONADE_BACKEND_VERSIONS="${LEMONADE_PREFIX}/resources/backend_versions.json"
+    if [[ -f "${LEMONADE_BACKEND_VERSIONS}" ]]; then
+        if "${PY}" - "${LEMONADE_BACKEND_VERSIONS}" "${LLAMACPP_PIN}" <<'PYPIN'
+import json, sys
+path, pin = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    cfg = json.load(f)
+lc = cfg.setdefault("llamacpp", {})
+changed = False
+for key in ("vulkan", "rocm-stable"):
+    if lc.get(key) != pin:
+        lc[key] = pin
+        changed = True
+if changed:
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+print("pinned" if changed else "already-pinned",
+      "vulkan/rocm-stable =", pin)
+PYPIN
+        then
+            chown hal0:hal0 "${LEMONADE_BACKEND_VERSIONS}"
+            info "pinned llamacpp vulkan + rocm-stable → ${LLAMACPP_PIN} (${LEMONADE_BACKEND_VERSIONS})"
+        else
+            warn "failed to pin backend_versions.json — Lemonade will use its bundled (slower) default builds"
+        fi
+    else
+        warn "${LEMONADE_BACKEND_VERSIONS} not present — skipping backend pin (Lemonade extract may have failed)"
+    fi
+
     # HuggingFace hub cache for /v1/pull downloads (#275 bug 4). The hal0
     # user's HOME is ${VAR_DIR} (per useradd above), so HF's default
     # cache lands at ${VAR_DIR}/.cache/huggingface/hub. Without this,
@@ -1005,6 +1053,15 @@ else
     #    parsing a half-written JSON file on next start. Overwrite on
     #    every install run — a baseline bump (port move, new key, etc.)
     #    should propagate without the operator having to delete the file.
+    #
+    #    llamacpp.args carries --no-mmap deliberately. Models live on a
+    #    ZFS dataset and the iGPU is UMA, so mmap loading is doubly bad:
+    #    (1) ZFS + mmap page-faults bypass ARC prefetch and double-buffer
+    #        → cold loads crawl (~200 MB/s vs ~1.6 GB/s with read()), and
+    #    (2) on a UMA iGPU the mmap'd file sits in the page cache AND the
+    #        GTT GPU buffer simultaneously → a 47 GB model needs ~94 GB
+    #        RAM and OOM-crashes the host. --no-mmap reads into a transient
+    #        buffer, uploads to GTT, frees it → ~1× RAM + fast sequential.
     mkdir -p "${LEMONADE_CACHE_DIR}"
     chown hal0:hal0 "${LEMONADE_CACHE_DIR}"
     LEMONADE_CONFIG_TMP="$(mktemp "${LEMONADE_CONFIG_JSON}.XXXXXX")"
@@ -1021,11 +1078,11 @@ else
   "log_level": "info",
   "rocm_channel": "stable",
   "llamacpp": {
-    "args": "--parallel 1 --threads ${LEMONADE_THREADS}",
-    "backend": "rocm",
+    "args": "--parallel 1 -fa on --threads ${LEMONADE_THREADS} --no-mmap",
+    "backend": "vulkan",
     "prefer_system": false
   },
-  "flm":        { "args": "--asr 1 --embed 1" },
+  "flm":        { "args": "--asr 1" },
   "kokoro":     { "cpu_bin": "builtin" },
   "whispercpp": { "backend": "vulkan" },
   "sdcpp":      { "backend": "rocm", "steps": 20, "cfg_scale": 7.0, "width": 512, "height": 512 }
@@ -1082,6 +1139,19 @@ ExecStartPre=+-/usr/bin/chgrp render /dev/kfd
 ExecStartPre=+-/usr/bin/chmod 0660 /dev/kfd
 DROPIN
     info "wrote ${LEMONADE_DROPIN_DIR}/kfd-perms.conf"
+
+    # 4c. Vulkan ICD pin (ADR-0023). gfx1151 (Strix Halo) runs the open
+    #     Mesa RADV driver markedly faster than AMD's closed AMDVLK for
+    #     llama.cpp Vulkan. Both ICDs are typically installed; without
+    #     this, loader order picks AMDVLK on some images. Pinning RADV is
+    #     the load-bearing half of the qwen3next Vulkan perf path (the
+    #     other half is the b9496 backend pin set earlier, step 2b).
+    #     Harmless on ROCm-only loads. Always rewritten so a bump propagates.
+    cat > "${LEMONADE_DROPIN_DIR}/20-vulkan-radv.conf" <<'DROPIN'
+[Service]
+Environment=AMD_VULKAN_ICD=RADV
+DROPIN
+    info "wrote ${LEMONADE_DROPIN_DIR}/20-vulkan-radv.conf"
 
     # daemon-reload is idempotent — always safe to call. enable (no
     # --now) so the unit auto-starts on boot; the Service start block at
@@ -1174,6 +1244,39 @@ else
         systemctl enable --now hal0-lemonade
         if wait_active hal0-lemonade 30; then
             info "hal0-lemonade is running (loopback :13305)"
+
+            # Pre-warm the default (Vulkan) backend binary. lemond pulls
+            # the build matching the b9496 pin lazily on first model load
+            # — without this, the user's first chat after install blocks
+            # on a ~33 MB download + extract. Eagerly fetching it here
+            # (only ~33 MB; ROCm + its 4.9 GB therock libs stay lazy,
+            # pulled only if a ROCm slot is selected) makes the first
+            # load instant. Fail-soft: a download miss just defers the
+            # pull to first load, exactly as before. systemd-active does
+            # not mean the REST API is listening yet, so poll health
+            # first. Skipped if curl is unavailable.
+            if command -v curl >/dev/null 2>&1; then
+                LEMONADE_READY=0
+                for _ in $(seq 1 20); do
+                    if curl -fsS -m 2 http://127.0.0.1:13305/api/v1/health >/dev/null 2>&1; then
+                        LEMONADE_READY=1
+                        break
+                    fi
+                    sleep 1
+                done
+                if [[ "${LEMONADE_READY}" -eq 1 ]]; then
+                    if ui_spinner_run "Pre-warming Vulkan backend (${LLAMACPP_PIN:-pinned} build)" \
+                        curl -fsS -m 300 -X POST http://127.0.0.1:13305/api/v1/install \
+                            -H 'Content-Type: application/json' \
+                            -d '{"recipe":"llamacpp","backend":"vulkan"}'; then
+                        info "Vulkan backend ready (first model load won't wait on a download)"
+                    else
+                        warn "Vulkan pre-warm failed — lemond will pull the binary on first load instead"
+                    fi
+                else
+                    warn "lemond REST not ready in time — skipping pre-warm (binary pulls on first load)"
+                fi
+            fi
         else
             warn "hal0-lemonade not yet active; check 'journalctl -u hal0-lemonade -n 60'"
         fi
