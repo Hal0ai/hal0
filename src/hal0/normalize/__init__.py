@@ -9,3 +9,4 @@ from hal0.normalize.resolver import (  # noqa: F401
     is_npu_or_flm,
     resolve_chain,
 )
+from hal0.normalize.thinking import apply_thinking_policy  # noqa: F401
