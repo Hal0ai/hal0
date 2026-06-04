@@ -23,6 +23,7 @@ export interface Hardware {
   ram: { total: number; used: number; free: number }
   unifiedMb: number
   gttTotalMb: number
+  memoryKind: string
   npu: {
     present: boolean
     vendor: string
@@ -88,6 +89,12 @@ function normalizeHardware(raw: any): Hardware {
     },
     unifiedMb: Number(raw?.unified_memory_mb ?? 0),
     gttTotalMb: Number(raw?.gtt_total_mb ?? 0),
+    // Authoritative UMA signal is backend memory_kind; fall back to a
+    // populated unified_memory_mb (Strix Halo UMA reports it, discrete
+    // GPUs don't) so the memory-map pool label is right even on older
+    // probes that omit the field.
+    memoryKind:
+      raw?.memory_kind ?? (Number(raw?.unified_memory_mb ?? 0) > 0 ? 'unified' : 'system'),
     npu: {
       present: !!(npu?.present ?? raw?.npu_present),
       vendor: npu?.vendor ?? '',

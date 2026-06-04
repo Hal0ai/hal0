@@ -110,7 +110,7 @@ export function useMemoryMapModel() {
     ramTotalGb ||
     mbToGb(stats.data?.ram_total_mb || 0)
   const platformLabel = rawHw.platform_label || rawHw.platform || ''
-  const memoryKind = rawHw.memory_kind === 'unified' ? 'unified' : 'system'
+  const memoryKind = rawHw.memoryKind === 'unified' ? 'unified' : 'system'
   // On UMA the pool ceiling is the GTT cap, not the whole unified RAM
   // (see unifiedGb above). Don't render the raw 'unified' kind — it reads
   // as "unified 80GB" and misleads. Label it as the GPU/GTT pool instead.
