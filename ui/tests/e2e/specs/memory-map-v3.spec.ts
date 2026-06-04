@@ -141,43 +141,9 @@ test.describe('Memory map — sidebar', () => {
   })
 })
 
-test.describe('Memory map — expanded', () => {
-  test('expanded variant renders host pool + inside-LXC + legend', async ({ page }) => {
-    await mockStatsHardware(page, {
-      configured: true,
-      ok: true,
-      node: 'pve',
-      host_mem_total_mb: 131072,
-      host_mem_used_mb: 24576,
-      host_mem_free_mb: 106496,
-      tenants_running: 1,
-      tenants_total: 1,
-    })
-    await mockProxmoxSettings(page, {
-      configured: true,
-      ok: true,
-      node: 'pve',
-      host_mem_total_mb: 131072,
-      host_mem_used_mb: 24576,
-      host_mem_free_mb: 106496,
-      tenants_running: 1,
-      tenants_total: 1,
-      tenants: [
-        { vmid: 159, name: 'halodev', type: 'lxc', status: 'running', mem_mb: 3072, maxmem_mb: 8192 },
-      ],
-    })
-    await page.goto('/#dashboard')
-    const card = page.locator('.memmap-expanded')
-    await expect(card).toBeVisible()
-    // wave-1: expanded variant has TWO sections — primary "model memory"
-    // (vs the unified pool) and a separate ".memmap-host-section" for
-    // host/Proxmox pressure ("host pressure" / "free on host").
-    await expect(card).toContainText('model memory')
-    const hostSection = card.locator('.memmap-host-section')
-    await expect(hostSection).toBeVisible()
-    await expect(hostSection).toContainText('host pressure')
-    await expect(hostSection).toContainText('free on host')
-    // Tenant legend (excluding self) lists halodev.
-    await expect(hostSection).toContainText('halodev')
-  })
-})
+// NOTE: the `Memory map — expanded` variant (with its Proxmox host-pressure
+// + tenant-breakdown section) was removed from the /#dashboard layout — the
+// dashboard now carries a single memory map (the sticky sidebar) plus the
+// live Memory hardware card. The MemoryMap component still supports
+// `variant="expanded"`, but nothing mounts it on the dashboard, so the
+// former dashboard-scoped expanded suite was retired.

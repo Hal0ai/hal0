@@ -84,6 +84,61 @@ def test_parse_meminfo_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert probe_mod._parse_meminfo() == (0, 0)
 
 
+# ── host identity (hostname / uptime / kernel / distro) ─────────────────────────
+
+
+def test_read_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        probe_mod,
+        "_read_text",
+        lambda p: "hal0\n" if str(p) == "/proc/sys/kernel/hostname" else None,
+    )
+    assert probe_mod._read_hostname() == "hal0"
+
+
+def test_read_hostname_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    assert probe_mod._read_hostname() == ""
+
+
+def test_read_uptime_s(monkeypatch: pytest.MonkeyPatch) -> None:
+    # /proc/uptime: "<uptime_seconds> <idle_seconds>"
+    monkeypatch.setattr(
+        probe_mod,
+        "_read_text",
+        lambda p: "123456.78 987654.32\n" if str(p) == "/proc/uptime" else None,
+    )
+    assert probe_mod._read_uptime_s() == 123456
+
+
+def test_read_uptime_s_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    assert probe_mod._read_uptime_s() == 0
+
+
+_OS_RELEASE_SAMPLE = """\
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+ID=debian
+"""
+
+
+def test_read_distro(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        probe_mod,
+        "_read_text",
+        lambda p: _OS_RELEASE_SAMPLE if str(p) == "/etc/os-release" else None,
+    )
+    assert probe_mod._read_distro() == "Debian GNU/Linux 13 (trixie)"
+
+
+def test_read_distro_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    assert probe_mod._read_distro() == ""
+
+
 # ── GPU detection ──────────────────────────────────────────────────────────────
 
 
@@ -290,7 +345,20 @@ def test_probe_assembles_hardware_info(monkeypatch: pytest.MonkeyPatch, tmp_path
         lambda: probe_mod.NPUInfo(present=False),
     )
     monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 512000)
-    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+
+    def fake_read_text(path: Path) -> str | None:
+        s = str(path)
+        if s == "/proc/version":
+            return "Linux version 7.0.6-2-pve (build@host) #1 SMP\n"
+        if s == "/proc/sys/kernel/hostname":
+            return "hal0\n"
+        if s == "/proc/uptime":
+            return "4242.0 9000.0\n"
+        if s == "/etc/os-release":
+            return _OS_RELEASE_SAMPLE
+        return None
+
+    monkeypatch.setattr(probe_mod, "_read_text", fake_read_text)
 
     info = HardwareProbe().probe()
     assert isinstance(info, HardwareInfo)
@@ -305,6 +373,11 @@ def test_probe_assembles_hardware_info(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert info.npu.present is False
     assert info.disk_free_mb == 512000
     assert info.probed_at  # ISO-8601 timestamp populated
+    # Host identity (added for the dashboard hardware cards).
+    assert info.hostname == "hal0"
+    assert info.uptime_s == 4242
+    assert info.kernel == "Linux version 7.0.6-2-pve"
+    assert info.distro == "Debian GNU/Linux 13 (trixie)"
 
 
 _DMIDECODE_SAMPLE = """\

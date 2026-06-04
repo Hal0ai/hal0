@@ -12,7 +12,8 @@
 import { useSlots } from '@/api/hooks/useSlots'
 import { useLemondRollup } from '@/api/hooks/useLemonade'
 import { useHardware } from '@/api/hooks/useHardware'
-import { MemoryMap } from './memory-map'
+import { useStatsHardware } from '@/api/hooks/useStatsHardware'
+import { MemoryMap, useMemoryMapModel } from './memory-map'
 
 const { useState: useStateD, useRef: useRefD, useEffect: useEffectD } = React;
 
@@ -145,81 +146,168 @@ function ThroughputCard() {
 // Inherited from extras.jsx HardwareView when the standalone #hardware
 // route was retired. The card primitives stay file-local — nothing else
 // in the codebase rendered HwCard / HwRow.
+//
+// All five cards read LIVE data: the static probe (useHardware →
+// /api/hardware) drives host/cpu/gpu/npu identity; the live counters
+// (useStatsHardware → /api/stats/hardware, 2.5s) + per-slot attribution
+// (useMemoryMapModel) drive the Memory card. No hardcoded versions,
+// kernel strings, "currently loaded" trios, or fixed bar widths remain —
+// fields a probe can't source render as "—" rather than a fabricated
+// value.
+
+// Render "—" for empty / missing fields rather than a blank cell, so a
+// gap reads as "not reported" instead of a broken layout.
+function val(v) {
+  if (v == null) return "—";
+  if (typeof v === "string") return v.trim() === "" ? "—" : v;
+  if (typeof v === "number") return v === 0 ? "—" : v;
+  return v;
+}
+
+// Device → segment colour, mirroring memory-map.jsx's file-local map so
+// the Memory card's per-slot bar matches the (sidebar) memory map.
+const DEVICE_COLOR = {
+  npu: "var(--dev-npu)",
+  cpu: "var(--dev-cpu)",
+  vulkan: "var(--dev-vulkan)",
+  rocm: "var(--dev-rocm)",
+};
+function deviceColor(d) {
+  return DEVICE_COLOR[d] || "var(--dev-rocm)";
+}
+
 function HardwareSection() {
   const hwQuery = useHardware();
-  const H = hwQuery.data || HAL0_DATA.host;
+  const H = hwQuery.data;
+  const stats = useStatsHardware();
+  const mem = useMemoryMapModel();
+  const slotsQuery = useSlots();
+  const liveSlots = (slotsQuery.data || []).filter(
+    (s) => ["ready", "serving", "idle", "warming"].includes((s.state || "").toLowerCase()),
+  );
+
+  // Loaded-model count comes from live slots, not a hardcoded "3".
+  const loadedCount = liveSlots.length;
+
+  // NPU "currently loaded" = live model ids on NPU-device slots. Empty
+  // when nothing is loaded (the common idle state) — no static trio.
+  const npuModels = liveSlots
+    .filter((s) => (s.device || "").toLowerCase() === "npu")
+    .map((s) => s.model)
+    .filter(Boolean);
+
+  // Memory: prefer live stats (2.5s) for system RAM; fall back to the
+  // probe snapshot. Pool total + per-slot model attribution come from
+  // the shared memory-map model so this card and the map never disagree.
+  const round1 = (n) => Math.round(n * 10) / 10;
+  const mbToGb = (mb) => round1((mb || 0) / 1024);
+  // Total = system RAM (what the box reports it has), not the GTT pool —
+  // matches the "system RAM" framing of the card. mem.pool is the GPU
+  // GTT ceiling, which is a different (and confusingly larger) number.
+  const ramTotalGb = (H ? H.ram.total : 0) || mem.pool.totalGb;
+  const ramUsedGb = stats.data?.ram_used_mb != null ? mbToGb(stats.data.ram_used_mb) : (H ? H.ram.used : 0);
+  const ramFreeGb = stats.data?.ram_available_mb != null
+    ? mbToGb(stats.data.ram_available_mb)
+    : (H ? H.ram.free : Math.max(0, round1(ramTotalGb - ramUsedGb)));
+  const modelUsedGb = mem.self.modelUsedGb || 0;
+  const memSlots = (mem.self.slots || []).filter((s) => s.bytesGb > 0);
+
+  // GPU vendor-stack chips reflect the PROBE's capability flags, not a
+  // baked-in "ROCm 6.4 ✓". Vulkan is the bundled default backend.
+  const stackChips = H ? (
+    <>
+      <span className={"chip " + (H.computeCapable ? "ok" : "")}>
+        ROCm {H.computeCapable ? "✓" : "—"}
+      </span>{" "}
+      <span className={"chip " + (H.vulkanCapable ? "ok" : "")}>
+        Vulkan {H.vulkanCapable ? "✓" : "—"}
+      </span>
+    </>
+  ) : "—";
+  const gpuRecommend = H && H.vulkanCapable
+    ? <span className="chip ok">llamacpp:vulkan</span>
+    : H && H.computeCapable
+      ? <span className="chip ok">llamacpp:rocm</span>
+      : <span className="chip">llamacpp:cpu</span>;
+
   return (
     <div className="hw-section">
       <div className="vh" style={{marginBottom: 12}}>
         <span className="vh-eye mono">System</span>
         <h2 style={{margin: 0, fontSize: 18, fontWeight: 500, letterSpacing: "-0.02em"}}>Hardware</h2>
         <span className="vh-spacer" />
-        <span className="hint mono">read-only · sourced from /v1/system-info</span>
+        <span className="hint mono">read-only · live from /api/hardware + /api/stats/hardware</span>
       </div>
 
       <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16}}>
         <HwCard title="Host" eyebrow="machine">
-          <HwRow k="hostname" v={H.name} />
-          <HwRow k="kernel" v="Linux 6.17.13-11-pve" />
-          <HwRow k="distro" v="Debian 13 (trixie)" />
-          <HwRow k="uptime" v={H.uptime} />
-          <HwRow k="boot id" v="b3f1a9e2-…-4c81" mono />
+          <HwRow k="hostname" v={val(H?.name)} />
+          <HwRow k="platform" v={val(H?.platformLabel)} />
+          <HwRow k="kernel" v={val(H?.kernel)} mono />
+          <HwRow k="distro" v={val(H?.distro)} />
+          <HwRow k="uptime" v={val(H?.uptime)} />
         </HwCard>
 
-        <HwCard title="CPU" eyebrow="x86-64">
-          <HwRow k="model" v={H.cpu} />
-          <HwRow k="cores" v={`${H.cores}`} />
-          <HwRow k="clock" v="3.0 GHz base · 5.1 GHz boost" />
-          <HwRow k="cache" v="L3 · 64 MB" />
-          <HwRow k="recommended" v={<span className="chip ok">llamacpp:cpu</span>} />
+        <HwCard title="CPU" eyebrow="processor">
+          <HwRow k="model" v={val(H?.cpu)} />
+          <HwRow k="cores" v={val(H?.cores)} />
+          <HwRow k="vendor" v={val(H?.gpuVendor ? H.gpuVendor.toUpperCase() : "")} />
         </HwCard>
 
         <HwCard title="GPU" eyebrow="iGPU · unified memory" full>
-          <HwRow k="device" v="AMD Radeon Graphics (gfx1151, Strix Halo)" />
-          <HwRow k="vendor stack" v={<>ROCm <span style={{color: "var(--ok)"}}>6.4 ✓</span> · Vulkan <span style={{color: "var(--ok)"}}>present</span></>} />
-          <HwRow k="vram model" v="unified · shares system RAM (128 GB)" />
-          <HwRow k="recommended" v={<><span className="chip ok">llamacpp:rocm</span> <span className="chip ok">sdcpp:rocm</span></>} />
-          <HwRow k="fallback" v={<span className="chip">llamacpp:vulkan</span>} sub="if ROCm fails to load a model" />
+          <HwRow k="device" v={val(H?.gpu)} />
+          <HwRow k="vendor stack" v={stackChips} />
+          <HwRow
+            k="vram model"
+            v={H?.gttTotalMb ? <>unified · GTT pool {mbToGb(H.gttTotalMb)} GB</> : "unified · shares system RAM"}
+          />
+          <HwRow k="recommended" v={gpuRecommend} />
         </HwCard>
 
-        <HwCard title="NPU" eyebrow="XDNA2 · coresident trio" full purple>
-          <HwRow k="device" v="AMDXDNA2" />
-          <HwRow k="topology" v={`${H.npu.columns} columns · ${H.npu.ctx} hardware context`} />
-          <HwRow k="runtime" v={<><b>FLM v0.9.42</b> · trio mode (--asr 1 --embed 1)</>} />
-          <HwRow k="currently loaded" v="gemma3:1b · whisper-v3-turbo · embed-gemma-300m" mono />
-          <HwRow k="recommended" v={<span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>flm:npu</span>} />
+        <HwCard title="NPU" eyebrow="XDNA" full purple>
+          <HwRow k="present" v={H ? (H.npu.present ? "yes" : "no") : "—"} />
+          <HwRow k="device" v={val(H?.npu.name)} />
+          <HwRow k="driver" v={val(H?.npu.driver)} mono />
+          {(H?.npu.columns || H?.npu.ctx) ? (
+            <HwRow k="topology" v={`${H.npu.columns} columns · ${H.npu.ctx} hardware context`} />
+          ) : null}
+          <HwRow
+            k="currently loaded"
+            v={npuModels.length ? npuModels.join(" · ") : "none loaded"}
+            mono
+          />
         </HwCard>
 
         <HwCard title="Memory" eyebrow="unified" full>
-          <HwRow k="total" v={<><span className="num">{H.ram.total}</span> GB</>} />
-          <HwRow k="used" v={<><span className="num">{H.ram.used}</span> GB · 3 models loaded</>} />
-          <HwRow k="free" v={<><span className="num" style={{color: "var(--ok)"}}>{H.ram.free}</span> GB</>} />
-          <HwRow k="per-type budget" v="4 loaded models" />
+          <HwRow k="pool total" v={<><span className="num">{val(round1(ramTotalGb))}</span> GB</>} />
+          <HwRow
+            k="system RAM"
+            v={<><span className="num">{round1(ramUsedGb)}</span> GB used · <span className="num" style={{color: "var(--ok)"}}>{round1(ramFreeGb)}</span> GB free</>}
+          />
+          <HwRow
+            k="model memory"
+            v={<><span className="num">{round1(modelUsedGb)}</span> GB · {loadedCount} {loadedCount === 1 ? "model" : "models"} loaded</>}
+          />
           <div style={{padding: "10px 18px", borderTop: "1px solid var(--line-soft)"}}>
             <div style={{display: "flex", height: 6, borderRadius: 1, overflow: "hidden", background: "var(--bg-3)"}}>
-              <div style={{width: `${(18.8 / H.ram.total) * 100}%`, background: "var(--dev-rocm)"}} />
-              <div style={{width: `${(1.0 / H.ram.total) * 100}%`, background: "var(--dev-npu)"}} />
-              <div style={{width: `${(0.35 / H.ram.total) * 100}%`, background: "var(--dev-rocm)", opacity: 0.6}} />
-              <div style={{width: `${(0.4 / H.ram.total) * 100}%`, background: "var(--dev-cpu)"}} />
-              <div style={{width: `${(33.45 / H.ram.total) * 100}%`, background: "var(--bg-4)"}} />
+              {memSlots.map((s) => (
+                <div
+                  key={s.name}
+                  title={`${s.name} · ${round1(s.bytesGb)} GB`}
+                  style={{width: `${(s.bytesGb / (ramTotalGb || 1)) * 100}%`, background: deviceColor(s.device)}}
+                />
+              ))}
+              <div style={{width: `${Math.max(0, 100 - (modelUsedGb / (ramTotalGb || 1)) * 100)}%`, background: "var(--bg-4)"}} />
             </div>
             <div className="mono" style={{display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--fg-4)", marginTop: 6}}>
-              <span>primary · agent · embed · tts · free</span>
-              <span>{H.ram.used} / {H.ram.total} GB</span>
+              <span>{memSlots.length ? memSlots.map((s) => s.name).join(" · ") + " · free" : "no models loaded"}</span>
+              <span>{round1(modelUsedGb)} / {round1(ramTotalGb)} GB</span>
             </div>
           </div>
         </HwCard>
 
       </div>
     </div>
-  );
-}
-
-function HardwareMemorySection() {
-  return (
-    <section className="hardware-mem">
-      <MemoryMap variant="expanded" />
-    </section>
   );
 }
 
@@ -265,6 +353,9 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
   // either the real list or a confirmed-empty state.
   const slots = slotsQuery.data || [];
   const lemond = useLemondRollup();
+  const hw = useHardware();
+  // Live host identity for the hero + empty-state (was HAL0_DATA seed).
+  const hostName = hw.data?.name || HAL0_DATA.host.name;
   const slotsLoading = slotsQuery.isLoading && !slotsQuery.data;
   // Real zero-slots detection: only when /api/slots has resolved to a
   // confirmed empty array. Still-loading (undefined) shows the skeleton.
@@ -277,7 +368,6 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
         <div className="dash">
           <div className="dash-main">
             <HardwareSection />
-            <HardwareMemorySection />
           </div>
           <div className="dash-side">
             <div className="snap" aria-busy="true">
@@ -302,11 +392,10 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
           <h1 className="mono">No models configured yet</h1>
           <p>hal0 is ready, but no slot has a model loaded. Pick a bundle to get going, or configure slots one at a time.</p>
           <div className="dash-empty-meta mono">
-            <span><span style={{color: "var(--fg-3)"}}>host</span> {HAL0_DATA.host.name}</span>
+            <span><span style={{color: "var(--fg-3)"}}>host</span> {hostName}</span>
             <span style={{color: "var(--fg-5)"}}>·</span>
-            <span><span style={{color: "var(--fg-3)"}}>ram</span> {HAL0_DATA.host.ram.total} GB</span>
-            <span style={{color: "var(--fg-5)"}}>·</span>
-            <span><span style={{color: "var(--fg-3)"}}>npu</span> ready</span>
+            <span><span style={{color: "var(--fg-3)"}}>ram</span> {hw.data?.ram.total || HAL0_DATA.host.ram.total} GB</span>
+            {hw.data?.npu.present && <><span style={{color: "var(--fg-5)"}}>·</span><span><span style={{color: "var(--fg-3)"}}>npu</span> ready</span></>}
           </div>
           <div className="dash-empty-cta">
             <button className="btn lg" onClick={() => window.location.hash = "#firstrun"}>Pick a bundle</button>
@@ -325,7 +414,7 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
             <span className="dim">Welcome back, </span>
             <b>halo</b>
             <span className="dim">. system steady on </span>
-            <span className="mono" style={{color: "var(--fg-2)"}}>{HAL0_DATA.host.name}</span>
+            <span className="mono" style={{color: "var(--fg-2)"}}>{hostName}</span>
           </div>
           <div className="spacer" />
           <span className="mono" style={{fontSize: 10, color: "var(--fg-4)"}}>steady · {slots.filter(s => s.state !== "empty").length} slots up · lemond {lemond.status}</span>
@@ -336,7 +425,6 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
       <div className="dash">
         <div className="dash-main">
           <HardwareSection />
-          <HardwareMemorySection />
         </div>
         <div className="dash-side">
           <SnapshotStrip slots={slots} onGo={onGo} />
@@ -349,4 +437,4 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
   );
 }
 
-Object.assign(window, { DashboardView, SnapshotStrip, HealthCard, ThroughputCard, HardwareSection, HardwareMemorySection });
+Object.assign(window, { DashboardView, SnapshotStrip, HealthCard, ThroughputCard, HardwareSection });

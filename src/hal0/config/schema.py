@@ -589,6 +589,17 @@ class HardwareInfo(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "allow"}
 
+    hostname: str = Field(default="", description="Kernel hostname (/proc/sys/kernel/hostname).")
+    uptime_s: int = Field(
+        default=0, ge=0, description="Seconds since boot at probe time (/proc/uptime)."
+    )
+    kernel: str = Field(
+        default="", description="Kernel version string, e.g. 'Linux version 7.0.6-2-pve'."
+    )
+    distro: str = Field(
+        default="",
+        description="OS PRETTY_NAME from /etc/os-release, e.g. 'Debian GNU/Linux 13 (trixie)'.",
+    )
     cpu_model: str = Field(default="", description="CPU model string, e.g. 'AMD Ryzen 9 7950X'.")
     cpu_cores: int = Field(default=0, ge=0, description="Physical core count.")
     cpu_threads: int = Field(default=0, ge=0, description="Logical thread count.")

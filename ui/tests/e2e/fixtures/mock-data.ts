@@ -17,14 +17,43 @@
  */
 
 export const MOCK_DATA = {
+  // Flat /api/hardware response shape (mirrors hal0.api.routes.hardware
+  // _flatten_for_ui). useHardware.normalizeHardware reads these flat keys;
+  // a few legacy display keys (name/ram) are kept as fallbacks for any
+  // consumer still reading the pre-B1 shape.
   host: {
-    name: 'halo-strix.local',
-    uptime: '14d 02:11',
-    cpu: 'AMD Ryzen AI Max+ PRO 395',
-    cores: '16c · 32t',
-    gpu: 'Radeon Graphics (gfx1151, Strix Halo)',
-    ram: { total: 128, free: 74, used: 54 },
-    npu: { present: true, columns: 8, ctx: 1 },
+    hostname: 'hal0',
+    uptime_s: 123_456, // → "1d 10:17"
+    kernel: 'Linux version 7.0.6-2-pve',
+    distro: 'Debian GNU/Linux 13 (trixie)',
+    platform: 'lxc',
+    platform_label: 'Linux container (LXC)',
+    cpu_model: 'AMD RYZEN AI MAX+ 395 w/ Radeon 8060S',
+    cpu_cores: 16,
+    cpu_threads: 16,
+    ram_mb: 96_000,
+    ram_total_mb: 96_000,
+    ram_available_mb: 94_577,
+    unified_memory_mb: 131_072,
+    gtt_total_mb: 107_520,
+    gpu_name: 'AMD Radeon 8060S (Strix Halo)',
+    gpu_vendor: 'amd',
+    gpus: [
+      {
+        vendor: 'amd',
+        name: 'AMD Radeon 8060S (Strix Halo)',
+        vram_mb: 107_520,
+        driver: 'amdgpu',
+        compute_capable: false,
+        vulkan_capable: true,
+      },
+    ],
+    npu: { present: true, vendor: 'amd', name: 'AMD NPU (XDNA)', driver: 'amdxdna' },
+    npu_present: true,
+    npu_name: 'AMD NPU (XDNA)',
+    // Legacy display-shape fallbacks (pre-B1 consumers).
+    name: 'hal0',
+    ram: { total: 93.8, free: 92.4, used: 1.4 },
   },
 
   lemond: {

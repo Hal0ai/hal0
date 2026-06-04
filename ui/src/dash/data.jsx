@@ -2,14 +2,48 @@
 // Sourced from the brief's wireframes + model strings from registry references.
 
 const HAL0_DATA = {
+  // Flat /api/hardware response shape (mirrors hal0.api.routes.hardware
+  // _flatten_for_ui). useHardware.normalizeHardware reads these flat keys;
+  // the legacy display keys (name/uptime/cpu/cores/gpu/ram) are kept so
+  // direct HAL0_DATA.host.* readers (chrome.jsx, mcp-main.jsx, flow-modals,
+  // firstrun) keep working without a hook.
   host: {
-    name: "halo-strix.local",
+    hostname: "hal0",
+    uptime_s: 1_216_771, // → "14d 02:00"
+    kernel: "Linux version 7.0.6-2-pve",
+    distro: "Debian GNU/Linux 13 (trixie)",
+    platform: "lxc",
+    platform_label: "Linux container (LXC)",
+    cpu_model: "AMD Ryzen AI Max+ PRO 395",
+    cpu_cores: 16,
+    cpu_threads: 32,
+    ram_mb: 131072,
+    ram_total_mb: 131072,
+    ram_available_mb: 75776,
+    unified_memory_mb: 131072,
+    gtt_total_mb: 81920,
+    gpu_name: "AMD Radeon 8060S (gfx1151, Strix Halo)",
+    gpu_vendor: "amd",
+    gpus: [
+      {
+        vendor: "amd",
+        name: "AMD Radeon 8060S (gfx1151, Strix Halo)",
+        vram_mb: 81920,
+        driver: "amdgpu",
+        compute_capable: true,
+        vulkan_capable: true,
+      },
+    ],
+    npu: { present: true, vendor: "amd", name: "AMD NPU (XDNA2)", driver: "amdxdna" },
+    npu_present: true,
+    npu_name: "AMD NPU (XDNA2)",
+    // Legacy display-shape keys (direct HAL0_DATA.host.* readers).
+    name: "hal0",
     uptime: "14d 02:11",
     cpu: "AMD Ryzen AI Max+ PRO 395",
     cores: "16c · 32t",
-    gpu: "Radeon Graphics (gfx1151, Strix Halo)",
+    gpu: "AMD Radeon 8060S (gfx1151, Strix Halo)",
     ram: { total: 128, free: 74, used: 54 }, // GB
-    npu: { present: true, columns: 8, ctx: 1 },
   },
 
   lemond: {

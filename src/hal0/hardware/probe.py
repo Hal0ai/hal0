@@ -182,6 +182,47 @@ def _parse_meminfo() -> tuple[int, int]:
     return total_kb // 1024, avail_kb // 1024
 
 
+def _read_hostname() -> str:
+    """Return the kernel hostname, or "" on failure.
+
+    Reads /proc/sys/kernel/hostname rather than calling socket.gethostname()
+    so the probe stays sysfs-driven and trivially mockable in tests. Inside
+    an LXC this reflects the container's own hostname, which is what the
+    dashboard should display.
+    """
+    txt = _read_text(Path("/proc/sys/kernel/hostname"))
+    return txt.strip() if txt else ""
+
+
+def _read_uptime_s() -> int:
+    """Return whole seconds since boot from /proc/uptime, 0 on failure.
+
+    /proc/uptime is "<uptime_seconds> <idle_seconds>"; we take the first
+    float and floor it. The UI formats this into "Nd HH:MM".
+    """
+    txt = _read_text(Path("/proc/uptime"))
+    if not txt:
+        return 0
+    with contextlib.suppress(IndexError, ValueError):
+        return int(float(txt.split()[0]))
+    return 0
+
+
+def _read_distro() -> str:
+    """Return PRETTY_NAME from /etc/os-release, or "" on failure."""
+    txt = _read_text(Path("/etc/os-release"))
+    if not txt:
+        return ""
+    for line in txt.splitlines():
+        if line.startswith("PRETTY_NAME="):
+            value = line.partition("=")[2].strip()
+            # PRETTY_NAME is shell-quoted: strip a single layer of quotes.
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            return value
+    return ""
+
+
 _SIZE_UNITS_MB = {"KB": 1 / 1024, "MB": 1, "GB": 1024, "TB": 1024 * 1024}
 
 
@@ -626,6 +667,10 @@ class HardwareProbe:
             include_gpu = bool(gpu.vendor and gpu.vendor != "unknown") or bool(gpu.name)
 
             return HardwareInfo(
+                hostname=_read_hostname(),
+                uptime_s=_read_uptime_s(),
+                kernel=uname,
+                distro=_read_distro(),
                 cpu_model=cpu_model,
                 cpu_cores=cpu_cores,
                 cpu_threads=cpu_threads,
@@ -637,6 +682,8 @@ class HardwareProbe:
                 disk_free_mb=disk_mb,
                 platform=platform,
                 probed_at=_dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+                # kernel is now a first-class field; keep it in extra too for
+                # back-compat with any consumer still reading extra.kernel.
                 extra={"kernel": uname} if uname else {},
             )
         except Exception as exc:
