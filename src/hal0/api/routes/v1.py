@@ -301,7 +301,7 @@ async def _normalize_slot_views(request: Request) -> list:
     sm = getattr(request.app.state, "slot_manager", None)
     if sm is None:
         return []
-    rows = await hal0_llm_slot_views(sm)
+    rows = await hal0_llm_slot_views(sm, getattr(request.app.state, "model_registry", None))
     return [
         SlotView(
             name=r["name"],
@@ -707,6 +707,10 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     # backends.
     if "omni" in body:
         body = {k: v for k, v in body.items() if k != "omni"}
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            request._body = json.dumps(body).encode("utf-8")  # type: ignore[attr-defined]
     return await _dispatch_and_forward(request, dispatcher, body=body)
 
 

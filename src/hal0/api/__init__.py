@@ -429,7 +429,10 @@ async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
     return out
 
 
-async def hal0_llm_slot_views(slot_manager: SlotManager) -> list[dict[str, Any]]:
+async def hal0_llm_slot_views(
+    slot_manager: SlotManager,
+    model_registry: ModelRegistry | None = None,
+) -> list[dict[str, Any]]:
     """Return one dict per enabled llm slot: {name, role, device, model_id, context_length}.
 
     Source for normalize.LiveSlotResolver's SlotView list. Mirrors
@@ -450,14 +453,13 @@ async def hal0_llm_slot_views(slot_manager: SlotManager) -> list[dict[str, Any]]
         model_id = _slot_model_id(cfg)
         if not name or not model_id:
             continue
-        model_section = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
         out.append(
             {
                 "name": name,
                 "role": cfg.get("role"),
                 "device": (cfg.get("device") or "").strip(),
                 "model_id": model_id,
-                "context_length": int(model_section.get("context_size") or 0),
+                "context_length": int(_slot_ctx_size(cfg, model_registry, model_id) or 0),
             }
         )
     return out
