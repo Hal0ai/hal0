@@ -41,6 +41,15 @@ class StubWrapper:
         }
 
     def set_graph_enabled(self, enabled: bool, route: str | None = None) -> None:
+        # Mirror the real CogneeWrapper #451 guard: enabling an unwired
+        # route (primary/agent — no v0.3 resolver) is rejected and the
+        # gate stays off.
+        from hal0.memory.cognee_wrapper import GraphRouteUnsupportedError
+
+        if enabled and (route or self.route) in {"primary", "agent"}:
+            raise GraphRouteUnsupportedError(
+                f"graph route {route or self.route!r} is not yet supported (lands v0.4)"
+            )
         self.set_calls.append((enabled, route))
         self.enabled = enabled
         if route is not None:
@@ -95,25 +104,33 @@ def test_graph_status_default_returns_off(client: TestClient, stub_wrapper: Stub
     assert body["builds_ok"] == 0
 
 
-def test_put_enable_with_primary_route_persists(
+def test_put_enable_with_primary_route_rejected(
     client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
+    # Issue #451 — v0.3 has no route resolver for primary/agent (lands
+    # v0.4). Enabling either must fail fast (422) and never flip the gate.
     r = client.put(
         "/api/memory/graph",
         json={"enabled": True, "route": "primary"},
     )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["enabled"] is True
-    assert body["route"] == "primary"
-    # Wrapper got flipped.
-    assert stub_wrapper.set_calls == [(True, "primary")]
-    # Status payload echoed.
-    assert body["status"]["enabled"] is True
-    # Disk persisted — re-read.
-    r2 = client.get("/api/memory/graph/status")
-    # Stub holds enabled=True now; loader reads same toml.
-    assert r2.json()["route"] == "primary"
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "config.memory_graph_route_unsupported"
+    # Wrapper was NOT flipped on.
+    assert stub_wrapper.set_calls == []
+    assert stub_wrapper.enabled is False
+
+
+def test_put_enable_with_agent_route_rejected(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    r = client.put(
+        "/api/memory/graph",
+        json={"enabled": True, "route": "agent"},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "config.memory_graph_route_unsupported"
+    assert stub_wrapper.set_calls == []
+    assert stub_wrapper.enabled is False
 
 
 def test_put_enable_upstream_without_model_rejected(

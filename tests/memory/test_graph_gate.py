@@ -40,6 +40,11 @@ def patch_cognify(monkeypatch: pytest.MonkeyPatch):
     """
     import cognee
 
+    # A real (non-placeholder) LLM key so the issue #451 enable guard +
+    # _build_graph belt let the (stubbed) cognify fire. Individual tests
+    # override this to the noop placeholder to exercise the reject paths.
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-real-upstream-key")
+
     calls: list[dict[str, Any]] = []
 
     async def fake_cognify(**kwargs):
@@ -128,6 +133,9 @@ class TestBuildFailureCounter:
     ) -> None:
         import cognee
 
+        # Real key so the #451 belt lets the build fire (then fail).
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-real-upstream-key")
+
         async def boom(**kwargs):
             raise RuntimeError("structured-output parse failed")
 
@@ -163,6 +171,9 @@ class TestBuildFailureCounter:
 class TestDisableCancelsInFlight:
     async def test_disable_cancels(self, wrapper_factory, monkeypatch: pytest.MonkeyPatch) -> None:
         import cognee
+
+        # Real key so the #451 belt lets the build fire (then park).
+        monkeypatch.setenv("LLM_API_KEY", "sk-test-real-upstream-key")
 
         long_running = asyncio.Event()
 
@@ -210,17 +221,84 @@ class TestDisableCancelsInFlight:
 
 
 class TestSetGraphEnabled:
-    async def test_route_change_persists(self, wrapper_factory, patch_cognify) -> None:
-        w = wrapper_factory()
-        w.set_graph_enabled(True, route="agent")
-        s = w.graph_status()
-        assert s["enabled"] is True
-        assert s["route"] == "agent"
-
     async def test_invalid_route_raises(self, wrapper_factory, patch_cognify) -> None:
         w = wrapper_factory()
         with pytest.raises(ValueError):
             w.set_graph_enabled(True, route="bogus")
+
+
+class TestEnableGuardrails:
+    """Issue #451 — fail-fast at enable time, never flip on an unwired
+    route or against the placeholder LLM key.
+
+    v0.3 has no route resolver (lands v0.4 per ADR-0014 §4): enabling
+    ``route=primary`` / ``route=agent`` must be rejected, and
+    ``route=upstream`` must be rejected when ``LLM_API_KEY`` is the noop
+    placeholder cognify would 401 against.
+    """
+
+    async def test_enable_primary_route_rejected(self, wrapper_factory, patch_cognify) -> None:
+        from hal0.memory.cognee_wrapper import GraphRouteUnsupportedError
+
+        w = wrapper_factory()
+        with pytest.raises(GraphRouteUnsupportedError):
+            w.set_graph_enabled(True, route="primary")
+        # Gate stays off — no silent enable.
+        assert w.graph_status()["enabled"] is False
+
+    async def test_enable_agent_route_rejected(self, wrapper_factory, patch_cognify) -> None:
+        from hal0.memory.cognee_wrapper import GraphRouteUnsupportedError
+
+        w = wrapper_factory()
+        with pytest.raises(GraphRouteUnsupportedError):
+            w.set_graph_enabled(True, route="agent")
+        assert w.graph_status()["enabled"] is False
+
+    async def test_enable_upstream_with_placeholder_key_rejected(
+        self, wrapper_factory, patch_cognify, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from hal0.memory.cognee_wrapper import _NOOP_LLM_API_KEY, GraphRouteUnsupportedError
+
+        monkeypatch.setenv("LLM_API_KEY", _NOOP_LLM_API_KEY)
+        w = wrapper_factory()
+        with pytest.raises(GraphRouteUnsupportedError):
+            w.set_graph_enabled(True, route="upstream")
+        assert w.graph_status()["enabled"] is False
+
+    async def test_enable_upstream_with_real_key_succeeds(
+        self, wrapper_factory, patch_cognify, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLM_API_KEY", "sk-real-upstream-key")
+        w = wrapper_factory()
+        w.set_graph_enabled(True, route="upstream")
+        s = w.graph_status()
+        assert s["enabled"] is True
+        assert s["route"] == "upstream"
+
+    async def test_disable_never_validates(self, wrapper_factory, patch_cognify) -> None:
+        # Disabling an unwired route must always succeed — the guard only
+        # fires on the transition to enabled.
+        w = wrapper_factory(graph_enabled=True, graph_route="primary")
+        w.set_graph_enabled(False)
+        assert w.graph_status()["enabled"] is False
+
+    async def test_build_graph_skips_on_placeholder_key(
+        self, wrapper_factory, patch_cognify, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Belt-and-suspenders: even if a hand-edited TOML constructs an
+        # enabled wrapper, _build_graph must NOT fire cognify against the
+        # placeholder key (no 401 retry storm).
+        from hal0.memory.cognee_wrapper import _NOOP_LLM_API_KEY
+
+        monkeypatch.setenv("LLM_API_KEY", _NOOP_LLM_API_KEY)
+        w = wrapper_factory(graph_enabled=True, graph_route="upstream")
+        await w.add("hello world")
+        for t in list(w._graph_tasks):
+            await t
+        # cognify was never called — gate refused to fire the build.
+        assert patch_cognify == []
+        s = w.graph_status()
+        assert s["builds_ok"] == 0
 
 
 class TestSearchModeFallback:

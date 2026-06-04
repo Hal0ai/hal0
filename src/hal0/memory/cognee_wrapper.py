@@ -104,6 +104,36 @@ DEFAULT_COGNEE_DIR = Path("/var/lib/hal0/memory/cognee")
 # events for the §5 audit-log assertions.
 AUDIT_EVENT = "hal0.memory.audit"
 
+# Placeholder LLM key seeded by ``_configure_cognee`` when the host has no
+# real upstream key. cognify run against it 401s; litellm then retries
+# (default 5x) per memory_add — the issue #451 auth-retry storm. Both the
+# enable guard and the ``_build_graph`` belt refuse to fire builds while
+# ``LLM_API_KEY`` is this value.
+_NOOP_LLM_API_KEY = "sk-hal0-noop-v0.2-no-cognify"
+
+# ADR-0014 §4: the per-route LLM-target resolver (primary / agent slot
+# dispatch) lands in v0.4 with the eval suite. Until then only
+# ``upstream`` — which cognify reaches through the ambient ``LLM_API_KEY``
+# — has a working target.
+_WIRED_GRAPH_ROUTES = frozenset({"upstream"})
+
+
+class GraphRouteUnsupportedError(Exception):
+    """Raised at enable time when the requested graph route has no usable
+    LLM target in v0.3 (issue #451).
+
+    Two cases:
+
+      - ``route`` is ``primary`` / ``agent`` — the per-route resolver is a
+        v0.4 deliverable (ADR-0014 §4), so there is nothing to dispatch to.
+      - ``route == upstream`` but ``LLM_API_KEY`` is the noop placeholder —
+        cognify would 401 + retry-storm on every ``memory_add``.
+
+    The enable path raises this instead of silently flipping the gate on,
+    so a misconfigured enable fails fast (HTTP 422 / CLI nonzero) and the
+    gate stays off.
+    """
+
 
 # ── Public payload shape ──────────────────────────────────────────────────
 
@@ -380,7 +410,7 @@ class CogneeWrapper:
         os.environ.setdefault("ENABLE_BACKEND_ACCESS_CONTROL", "false")
         os.environ.setdefault("CACHING", "false")
         os.environ.setdefault("COGNEE_SKIP_CONNECTION_TEST", "true")
-        os.environ.setdefault("LLM_API_KEY", "sk-hal0-noop-v0.2-no-cognify")
+        os.environ.setdefault("LLM_API_KEY", _NOOP_LLM_API_KEY)
         os.environ["EMBEDDING_PROVIDER"] = self._embedding_provider
         os.environ["EMBEDDING_MODEL"] = self._embedding_model
         os.environ["EMBEDDING_DIMENSIONS"] = str(self._embedding_dimensions)
@@ -596,7 +626,25 @@ class CogneeWrapper:
         ingestion. Route resolution itself (upstream vs primary vs
         agent) lands in v0.4 with the eval suite; v0.3 runs Cognee's
         default cognify against whatever ``LLM_API_KEY`` the env carries.
+
+        Issue #451 belt-and-suspenders: even though ``set_graph_enabled``
+        rejects unbuildable routes at enable time, a hand-edited
+        ``hal0.toml`` can still construct an enabled wrapper. Re-check the
+        route target here and skip (not error) the build so a placeholder
+        key never triggers the litellm 401 retry storm.
         """
+        try:
+            _validate_graph_route_target(self._graph_route)
+        except GraphRouteUnsupportedError as exc:
+            self._graph_last_error = f"{type(exc).__name__}: {exc}"[:200]
+            _audit_logger().warning(
+                "hal0.memory.graph.build_skipped",
+                client_id=self._client_id,
+                dataset=dataset,
+                reason=str(exc)[:200],
+                route=self._graph_route,
+            )
+            return
         cognee = _cognee()
         try:
             await cognee.cognify(datasets=[dataset], run_in_background=False)
@@ -663,11 +711,24 @@ class CogneeWrapper:
         implementation lands in v0.4 with the eval suite; v0.3 stores
         the pick so a process restart preserves user intent + the
         dashboard always reflects current state.
+
+        Issue #451 — enabling fails fast (raises
+        :class:`GraphRouteUnsupportedError`) when the requested route has
+        no usable LLM target: ``primary`` / ``agent`` have no v0.3
+        resolver, and ``upstream`` needs a real ``LLM_API_KEY`` (not the
+        noop placeholder cognify would 401 against). The gate is left OFF
+        on rejection so a misconfigured enable can't trigger the
+        per-``memory_add`` retry storm. Disabling never validates.
         """
         if route is not None and route not in {"upstream", "primary", "agent"}:
             raise ValueError(
                 f"graph route {route!r} is not valid; choose from 'upstream' | 'primary' | 'agent'"
             )
+        effective_route = route if route is not None else self._graph_route
+        if enabled:
+            # Validate BEFORE mutating any state so a rejected enable
+            # leaves the gate (and the stored route) untouched.
+            _validate_graph_route_target(effective_route)
         if route is not None:
             self._graph_route = route
         if not enabled and self._graph_enabled:
@@ -1292,6 +1353,38 @@ def _chunk_score(chunk: Any) -> float | None:
 def _now_iso() -> str:
     """UTC ISO-8601 timestamp matching ADR-0005 §2 (date filter input)."""
     return datetime.now(UTC).isoformat()
+
+
+def _has_usable_llm_key() -> bool:
+    """Return whether a real (non-placeholder) ``LLM_API_KEY`` is present.
+
+    cognify reaches its extraction LLM through the ambient
+    ``LLM_API_KEY``. Empty or the noop placeholder means cognify would
+    401 + retry-storm (issue #451), so callers treat this as "no target".
+    """
+    key = os.environ.get("LLM_API_KEY", "").strip()
+    return bool(key) and key != _NOOP_LLM_API_KEY
+
+
+def _validate_graph_route_target(route: str) -> None:
+    """Raise :class:`GraphRouteUnsupportedError` if ``route`` can't build.
+
+    v0.3 fail-fast (issue #451): ``primary`` / ``agent`` have no route
+    resolver (lands v0.4 per ADR-0014 §4), and ``upstream`` needs a real
+    ``LLM_API_KEY``. Returns ``None`` when the route is buildable.
+    """
+    if route not in _WIRED_GRAPH_ROUTES:
+        raise GraphRouteUnsupportedError(
+            f"graph route {route!r} is not yet supported in v0.3 — the "
+            f"per-route resolver lands in v0.4 (ADR-0014 §4). Use "
+            f"route='upstream' with a configured provider key."
+        )
+    if not _has_usable_llm_key():
+        raise GraphRouteUnsupportedError(
+            "graph route 'upstream' has no usable LLM_API_KEY — cognify "
+            "would 401 on every memory_add. Configure a real upstream "
+            "provider key before enabling graph extraction."
+        )
 
 
 def _clear_cognee_caches() -> None:

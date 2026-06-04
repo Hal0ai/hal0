@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import GraphUpstreamConfig, MemoryGraphConfig
+from hal0.memory.cognee_wrapper import GraphRouteUnsupportedError
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
     MemoryNamespaceError,
@@ -136,6 +137,20 @@ class MemoryGraphConfigInvalid(Hal0Error):
 
     code = "config.memory_graph_invalid"
     status = 400
+
+
+class MemoryGraphRouteUnsupported(Hal0Error):
+    """Enable rejected: the requested graph route has no usable LLM target.
+
+    Issue #451 — v0.3 has no resolver for ``route=primary`` / ``agent``
+    (lands v0.4 per ADR-0014 §4) and ``route=upstream`` needs a real
+    ``LLM_API_KEY``. Surfaced as 422 (semantically valid request the
+    server can't fulfil yet) so the dashboard + CLI can fail fast without
+    flipping the gate on.
+    """
+
+    code = "config.memory_graph_route_unsupported"
+    status = 422
 
 
 class MemoryUnavailable(Hal0Error):
@@ -249,6 +264,17 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             details=_validation_error_details(exc),
         ) from exc
 
+    # Flip the live wrapper BEFORE persisting so a rejected enable
+    # (issue #451 — unwired route / placeholder key) never leaves
+    # ``enabled = true`` on disk. ADR-0014 §6: disable cancels in-flight
+    # builds — handled inside set_graph_enabled.
+    try:
+        wrapper.set_graph_enabled(new_cfg.enabled, route=new_cfg.route)
+    except GraphRouteUnsupportedError as exc:
+        raise MemoryGraphRouteUnsupported(str(exc)) from exc
+    except ValueError as exc:
+        raise MemoryGraphConfigInvalid(str(exc)) from exc
+
     cfg.memory.graph = new_cfg
     try:
         save_hal0_config(cfg)
@@ -257,14 +283,6 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             f"could not persist hal0 config: {exc}",
             details={"error": str(exc), "errno": getattr(exc, "errno", None)},
         ) from exc
-
-    # Flip the live wrapper so the very next memory_add observes the
-    # new gate. ADR-0014 §6: disable cancels in-flight builds —
-    # handled inside set_graph_enabled.
-    try:
-        wrapper.set_graph_enabled(new_cfg.enabled, route=new_cfg.route)
-    except ValueError as exc:
-        raise MemoryGraphConfigInvalid(str(exc)) from exc
 
     out = new_cfg.model_dump(mode="json")
     # Echo the live status so the dashboard's optimistic-update path
@@ -470,6 +488,7 @@ __all__ = [
     "MemoryAgentIdInvalid",
     "MemoryGraphConfig",
     "MemoryGraphConfigInvalid",
+    "MemoryGraphRouteUnsupported",
     "MemoryNamespaceInvalid",
     "MemoryUnavailable",
     "router",
