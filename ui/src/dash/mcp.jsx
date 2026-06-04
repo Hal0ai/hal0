@@ -382,22 +382,26 @@ function McpView() {
   // (new per-agent view). Defaults to "servers" so existing nav stays
   // unchanged.
   const [mode, setMode] = useStateM("servers");
-  // Live data via /api/mcp/* (issue #206). When the backend returns no
-  // rows (404 → mock fallback in the hook, or genuinely empty), fall
-  // through to the HAL0_DATA mock so the prototype demo + Playwright
-  // specs keep rendering against the rich fixture set.
+  // Live data via /api/mcp/* (issue #206). Prototype mode is decided as
+  // a whole, NOT per-query (issue #436): only when BOTH live queries
+  // come back empty do we fall through to the rich HAL0_DATA fixtures so
+  // the demo + Playwright specs keep rendering. On a real host with
+  // registered servers, the live client array is used verbatim — even
+  // when it's empty — so a live-but-idle host shows the honest
+  // NoClientsState instead of fake Claude Code / Cursor rows.
   const serversQ = useMcpServers();
   const clientsQ = useMcpClients();
   const liveServers = serversQ.data || [];
   const liveClients = clientsQ.data || [];
-  const servers = liveServers.length > 0 ? liveServers : MCP_SERVERS;
-  const clients = liveClients.length > 0 ? liveClients.map(c => ({
+  const prototype = liveServers.length === 0 && liveClients.length === 0;
+  const servers = prototype ? MCP_SERVERS : liveServers;
+  const clients = prototype ? MCP_CLIENTS : liveClients.map(c => ({
     ...c,
     // The prototype card reads `servers` (legacy alias) + a `since`
     // string; normalise so the existing render path keeps working.
     servers: c.servers || c.connected_to || [],
     since: typeof c.since === 'number' ? new Date(c.since * 1000).toLocaleTimeString() : (c.since || '—'),
-  })) : MCP_CLIENTS;
+  }));
   const [filter, setFilter] = useStateM("all");
   const [menuId, setMenuId] = useStateM(null);
   const [installOpen, setInstallOpen] = useStateM(false);
