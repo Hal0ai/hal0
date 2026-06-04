@@ -463,6 +463,37 @@ def cmd_reprovision(cfg: AgentConfig) -> int:
     return subprocess.call(argv)
 
 
+def _render_live_context(*, hermes_home: Path) -> dict[str, object]:
+    """Indirection so tests can patch; lazy import keeps shim startup light."""
+    from hal0.agents.hermes_provision import render_live_context
+
+    return render_live_context(hermes_home=hermes_home)
+
+
+def cmd_render_context(cfg: AgentConfig) -> int:
+    """Re-probe live hal0 state and (re)write STATE.md + HERMES.md.
+
+    Wired as ``ExecStartPre`` on hal0-agent@hermes.service (non-fatal) and
+    spawned detached after a model/slot change. Render is best-effort:
+    a daemon-unreachable read leaves last-good files and still exits 0 so
+    it never blocks the service from starting.
+    """
+    if cfg.agent_type != "hermes":
+        _die(f"agent type '{cfg.agent_type}' not supported by this shim yet")
+    try:
+        result = _render_live_context(hermes_home=cfg.home)
+    except Exception as exc:  # never block service start
+        print(f"hal0-agent: render-context failed (non-fatal): {exc}", file=sys.stderr)
+        return 0
+    state = "degraded" if result.get("degraded") else "ok"
+    print(
+        f"hal0-agent: render-context {state} "
+        f"(state_written={result.get('state_written')}, "
+        f"hermes_written={result.get('hermes_written')})"
+    )
+    return 0
+
+
 # ----------------------------------------------------------------------------
 # Argv parsing
 # ----------------------------------------------------------------------------
@@ -482,7 +513,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "subcommand",
-        choices=["serve", "stop", "status", "reprovision"],
+        choices=["serve", "stop", "status", "reprovision", "render-context"],
         help="What to do with the agent.",
     )
     return parser
@@ -500,6 +531,7 @@ _DISPATCH: dict[str, Callable[[AgentConfig], int]] = {
     "stop": cmd_stop,
     "status": cmd_status,
     "reprovision": cmd_reprovision,
+    "render-context": cmd_render_context,
 }
 
 

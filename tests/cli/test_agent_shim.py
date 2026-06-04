@@ -434,3 +434,43 @@ class TestIsReady:
             side_effect=urllib.error.URLError("boom"),
         ):
             assert agent_shim._is_ready(self._cfg()) is False
+
+
+# ---------------------------------------------------------------------------
+# cmd_render_context
+# ---------------------------------------------------------------------------
+
+
+def test_render_context_dispatch_calls_render(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    called: dict[str, Path] = {}
+
+    def fake_render(*, hermes_home: Path) -> dict[str, object]:
+        called["home"] = hermes_home
+        return {
+            "state_written": True,
+            "hermes_written": False,
+            "degraded": False,
+            "state_path": "/etc/hal0/STATE.md",
+        }
+
+    monkeypatch.setattr(agent_shim, "_render_live_context", fake_render)
+
+    cfg = agent_shim.AgentConfig(
+        agent_id="hermes",
+        agent_type="hermes",
+        home=tmp_path,
+        venv=tmp_path / "venv",
+        host="127.0.0.1",
+        port=8133,
+    )
+    rc = agent_shim.cmd_render_context(cfg)
+    assert rc == 0
+    assert called["home"] == tmp_path
+
+
+def test_render_context_in_parser_choices() -> None:
+    parser = agent_shim._build_parser()
+    args = parser.parse_args(["hermes", "render-context"])
+    assert args.subcommand == "render-context"
