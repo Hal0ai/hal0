@@ -12,7 +12,7 @@
 Add a single normalization step to hal0-api's OpenAI-compatible chat path so **every** agent that
 talks to lemond through hal0-api (`http://127.0.0.1:8080/v1`) automatically gets:
 
-1. **Live-slot model resolution** — a stable virtual model name (`lemonade/primary`) that resolves
+1. **Live-slot model resolution** — a stable virtual model name (`hal0/primary`) that resolves
    to whichever LLM slot is actually loaded right now (iGPU chat slot preferred over NPU/FLM), so
    callers never track runtime model swaps.
 2. **Reasoning suppression** — top-level `enable_thinking: false` injected for lemond-bound requests
@@ -99,10 +99,12 @@ Applied once near `_read_json_body` (`api/routes/v1.py:569`), folding in / repla
 
 1. **Virtual-name resolution.** If `body["model"]` is a registered virtual name, resolve it to a
    live-loaded LLM slot via `LiveSlotResolver` (§4.2) using that name's **resolution chain**:
-   - `lemonade/primary` (alias `hal0/primary`) — the iGPU chat slot.
-   - `lemonade/npu` (alias `lemonade/flm`) — the FLM/NPU slot, for instruct-only / lighter work
+   - `hal0/primary` — the iGPU chat slot.
+   - `hal0/npu` (alias `hal0/flm`) — the FLM/NPU slot, for instruct-only / lighter work
      (e.g. Hermes memory-extraction, which times out on reasoning models — `[[hal0_flm_npu_llm_models]]`).
-   - `lemonade/utility` — the designated slack-absorber slot.
+   - `hal0/utility` — the designated slack-absorber slot.
+
+   The `hal0/` namespace marks these as hal0-owned virtual names (not lemond-native model ids).
 2. **Static alias rewrite (unchanged).** Existing `primary`/`agent-hermes`/`utility` → `model.default`
    behavior is preserved for back-compat.
 
@@ -135,9 +137,9 @@ into a **configurable resolution chain** per virtual name.
 
   | Virtual name | Default chain (loaded-slot preference) |
   |---|---|
-  | `lemonade/primary` | `[igpu-chat]` → configured primary `model.default` |
-  | `lemonade/npu` | `[npu/flm]` → `[utility]` → configured primary `model.default` |
-  | `lemonade/utility` | `[utility]` → `[npu/flm]` → configured primary `model.default` |
+  | `hal0/primary` | `[igpu-chat]` → configured primary `model.default` |
+  | `hal0/npu` | `[npu/flm]` → `[utility]` → configured primary `model.default` |
+  | `hal0/utility` | `[utility]` → `[npu/flm]` → configured primary `model.default` |
 
 - **Protect the fast primary (design intent).** NPU-/utility-intended work must NOT commandeer or
   evict the iGPU primary. The chains above therefore route lighter/instruct work to a **utility**
@@ -176,7 +178,7 @@ into a **configurable resolution chain** per virtual name.
 
 ## 6. Hermes side (minimal, upgrade-safe)
 
-- `src/hal0/agents/hermes_templates/config.yaml.j2`: set `model.default: lemonade/primary`
+- `src/hal0/agents/hermes_templates/config.yaml.j2`: set `model.default: hal0/primary`
   (live-follow); keep `provider: custom` + `base_url: http://127.0.0.1:8080/v1`.
 - **No `extra_body` thinking config** — suppression is server-side.
 - Change survives bootstrap re-render via the `overrides.yaml` deep-merge seam
@@ -201,14 +203,14 @@ into a **configurable resolution chain** per virtual name.
 ### 8.1 Tests
 
 - **Unit:** port `resolve_test.go` cases (iGPU>FLM, FLM-only, empty→fallback, malformed health);
-  **resolution-chain matrix** per virtual name — `lemonade/primary` (iGPU; FLM not commandeered),
-  `lemonade/npu` (FLM → utility → primary; never evicts primary), `lemonade/utility` (utility →
+  **resolution-chain matrix** per virtual name — `hal0/primary` (iGPU; FLM not commandeered),
+  `hal0/npu` (FLM → utility → primary; never evicts primary), `hal0/utility` (utility →
   FLM → primary), plus primary-only and NPU-only deployments collapsing the chains; thinking opt-out
   matrix (none set / `enable_thinking` set / `thinking` set / `chat_template_kwargs` set);
   virtual-name resolution + final fallback. New module gets real unit coverage.
 - **Integration:** dispatcher/v1 tests with mocked lemond `/health` + `/v1/models`; γ-suite for the
   chat path (streaming passthrough + tool-calls untouched).
-- **CT105 smoke:** curl `model: lemonade/primary` → assert it hits the live slot and
+- **CT105 smoke:** curl `model: hal0/primary` → assert it hits the live slot and
   `enable_thinking:false` is on the wire (adapt `gateway/scripts/smoke.sh`).
 
 ### 8.2 Rollout (each step independently revertible)
@@ -218,10 +220,10 @@ into a **configurable resolution chain** per virtual name.
    behavior for existing model names is unchanged.
 2. CT105 curl verification (virtual name routes to live slot; thinking suppressed; streaming + tools
    intact).
-3. Flip Hermes `model.default` → `lemonade/primary` via template + `overrides.yaml`; re-render
+3. Flip Hermes `model.default` → `hal0/primary` via template + `overrides.yaml`; re-render
    (`hal0-agent@hermes` restart as `hal0` user — never root).
 4. **Hermes OpenRouter→local cutover** — switch Hermes from the cloud model to the local
-   `lemonade/primary` path to test end-to-end. Operator-gated (Tier-2); real behavior change. Verify a
+   `hal0/primary` path to test end-to-end. Operator-gated (Tier-2); real behavior change. Verify a
    full reason→tool→reason turn completes without `<think>` timeouts.
 5. Retire Bifrost: stop/disable `hal0-bifrost.service` on CT105; close PR #469 (keep the branch as
    reference for the ported resolver).
