@@ -3,13 +3,15 @@
 #
 # Wired by hermes_templates/config.yaml.j2 (hooks.on_session_start).
 # Contract: emit context to stdout for the new session; stay inside the
-# 2s hook timeout. We ONLY cat the pre-rendered /etc/hal0/STATE.md (the
+# 2s hook timeout. We ONLY cat the pre-rendered /var/lib/hal0/STATE.md (the
 # expensive probe runs in the writers, not here). If STATE.md is older
 # than the TTL we additionally kick a DETACHED background refresh so the
 # NEXT session is fresh — we never block this session on a probe.
 set -eu
 
-STATE_FILE="/etc/hal0/STATE.md"
+# Runtime snapshot lives under the hal0-owned /var/lib/hal0 (#473) so the
+# User=hal0 render-context writer can produce it under the hermes sandbox.
+STATE_FILE="/var/lib/hal0/STATE.md"
 TTL_SECONDS=300   # 5 min — defense-in-depth for missed change events.
 
 # Missing file (first boot before any render) => emit nothing, exit clean.

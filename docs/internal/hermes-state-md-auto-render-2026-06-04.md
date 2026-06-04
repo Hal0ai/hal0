@@ -55,7 +55,7 @@ configured with a **2s timeout**.
                      orchestrator.apply()                              CAPABILITY CHANGE)
                           │
                           ▼
-                  /etc/hal0/STATE.md   ← thin volatile snapshot (~12 lines)
+                  /var/lib/hal0/STATE.md   ← thin volatile snapshot (~12 lines)
                           │
    reader ────────────────┤
                   on_session_start hook (inject-system-state.sh)
@@ -76,7 +76,7 @@ timeout.
 
 ### 1. `STATE.md` — volatile live snapshot
 
-- Path: `/etc/hal0/STATE.md` (same dir as `HERMES.md`, which is the
+- Path: `/var/lib/hal0/STATE.md` (same dir as `HERMES.md`, which is the
   Hermes `terminal.cwd`).
 - New template: `src/hal0/agents/hermes_templates/STATE.md.j2`.
 - Target size: ~12 lines. Holds **only** volatile state. Fields:
@@ -135,7 +135,7 @@ timeout.
 - Path: `/usr/lib/hal0/hermes-hooks/inject-system-state.sh` (shipped by
   the installer; referenced by `config.yaml.j2` `on_session_start`).
 - Behavior:
-  1. `cat` `/etc/hal0/STATE.md` to stdout in the hook's JSON wire
+  1. `cat` `/var/lib/hal0/STATE.md` to stdout in the hook's JSON wire
      format (inject as session context).
   2. If `STATE.md` mtime is older than **TTL = 5 minutes**, additionally
      spawn a **detached** `hal0-agent hermes render-context` (background,

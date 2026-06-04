@@ -95,6 +95,7 @@ def test_state_body_minus_timestamp_ignores_as_of_line():
 
 def test_render_live_context_writes_then_skips_when_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
     home = tmp_path / "home"
     home.mkdir()
 
@@ -138,6 +139,7 @@ def test_render_live_context_writes_then_skips_when_unchanged(tmp_path, monkeypa
 
 def test_render_live_context_degraded_when_daemon_unreachable(tmp_path, monkeypatch):
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
     monkeypatch.setattr(hp, "_http_get", lambda *a, **k: 0)  # daemon down
     home = tmp_path / "home"
     home.mkdir()
@@ -153,6 +155,7 @@ def test_render_live_context_degraded_when_daemon_unreachable(tmp_path, monkeypa
 
 def test_render_live_context_preserves_good_state_when_unreachable(tmp_path, monkeypatch):
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
     home = tmp_path / "home"
     home.mkdir()
     good = "# Live system state\n- Chat model: `qwen3-25b` (32768 ctx, vulkan)\n\n_as_of: 2026-06-04T09:00:00+00:00_\n"
@@ -171,6 +174,7 @@ def test_render_live_context_preserves_good_state_when_unreachable(tmp_path, mon
 
 def test_render_live_context_reachable_empty_is_not_degraded(tmp_path, monkeypatch):
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(hp, "_http_get", lambda *a, **k: 200)  # daemon up, no slots
@@ -189,6 +193,7 @@ def test_render_live_context_bumps_mtime_when_unchanged_reachable(tmp_path, monk
     import os as _os
 
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
     home = tmp_path / "home"
     home.mkdir()
     slots = [
@@ -224,6 +229,7 @@ def test_phase_context_link_writes_state_md(tmp_path, monkeypatch):
     import json
 
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)
     home = tmp_path / "home"
     (home / "memories").mkdir(parents=True)
     # Seed an env snapshot so HERMES.md (env.container/env.cpu) renders, exactly

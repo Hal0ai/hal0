@@ -1276,6 +1276,15 @@ HAL0_BUNDLED_SKILLS = Path("/usr/share/hal0/skills")
 ETC_HAL0_DIR = Path("/etc/hal0")
 ETC_HAL0_AGENT_SKILLS = ETC_HAL0_DIR / "agent-skills"
 
+# STATE.md — the volatile live snapshot rewritten on every restart / model
+# swap — lives under the hal0-owned /var/lib/hal0 rather than the root-owned
+# /etc/hal0 (#473): the hermes unit runs User=hal0 with ProtectSystem=strict,
+# so its ExecStartPre `render-context` can only write to paths in
+# ReadWritePaths — /var/lib/hal0 is already there, /etc/hal0 is not. HERMES.md
+# (structural, cwd-injected from /etc/hal0) and the rest of the config stay
+# under ETC_HAL0_DIR, written at provision time as root.
+RUNTIME_SNAPSHOT_DIR = Path("/var/lib/hal0")
+
 
 def _latest_env_snapshot(hermes_home: Path) -> dict[str, Any]:
     """Load the most recent env-<ts>.json snapshot env_probe wrote.
@@ -2018,11 +2027,14 @@ def render_live_context(
         "state_written": False,
         "hermes_written": False,
         "degraded": degraded,
-        "state_path": str(ETC_HAL0_DIR / "STATE.md"),
+        "state_path": str(RUNTIME_SNAPSHOT_DIR / "STATE.md"),
     }
 
-    # STATE.md — content-hash gated (ignore the as_of line).
-    state_path = ETC_HAL0_DIR / "STATE.md"
+    # STATE.md — content-hash gated (ignore the as_of line). Written under the
+    # hal0-owned RUNTIME_SNAPSHOT_DIR so render-context works under the User=hal0
+    # / ProtectSystem=strict hermes sandbox (#473).
+    RUNTIME_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    state_path = RUNTIME_SNAPSHOT_DIR / "STATE.md"
     existing = ""
     if state_path.exists():
         existing = state_path.read_text(encoding="utf-8")

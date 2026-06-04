@@ -535,7 +535,7 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         info "wrote ${AGENT_OVERRIDE_DST_DIR}/override.conf"
     fi
 
-    # Session-start hook: inject-system-state.sh cats /etc/hal0/STATE.md into
+    # Session-start hook: inject-system-state.sh cats /var/lib/hal0/STATE.md into
     # every new Hermes session (referenced by config.yaml.j2's
     # hooks.on_session_start). MUST land at the absolute /usr/lib/hal0 path
     # the config hardcodes (dev mode shadows it under PREFIX).

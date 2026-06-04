@@ -4,7 +4,7 @@
 
 **Goal:** Hermes always sees current hal0 live state (loaded model, capabilities, GPU/NPU backend) — refreshed on every service restart **and** every runtime model/capability change — without bloating the cacheable persona or stalling Hermes session start.
 
-**Architecture:** A thin `/etc/hal0/STATE.md` snapshot is the buffer. One shared `render_live_context()` function (re)writes it, content-hash gated. Two event writers call it: `ExecStartPre` on restart, and a detached best-effort spawn after `manager.swap()` / `orchestrator.apply()` on runtime change. The (previously-dangling) `on_session_start` hook `cat`s the file into every new Hermes session and background-regens only when stale (>5 min TTL). `SOUL.md` stays byte-stable; live primary/slot lines move out of `HERMES.md` into `STATE.md`.
+**Architecture:** A thin `/var/lib/hal0/STATE.md` snapshot is the buffer. One shared `render_live_context()` function (re)writes it, content-hash gated. Two event writers call it: `ExecStartPre` on restart, and a detached best-effort spawn after `manager.swap()` / `orchestrator.apply()` on runtime change. The (previously-dangling) `on_session_start` hook `cat`s the file into every new Hermes session and background-regens only when stale (>5 min TTL). `SOUL.md` stays byte-stable; live primary/slot lines move out of `HERMES.md` into `STATE.md`.
 
 **Tech Stack:** Python 3.12, Jinja2, pytest, systemd unit drop-ins, POSIX shell (hook + installer). All hal0 code under `src/hal0/`, tests under `tests/`.
 
@@ -523,7 +523,7 @@ Replace it with a pointer to STATE.md:
 # Live state
 
 Current loaded model, capabilities, and GPU/NPU backend are in
-`/etc/hal0/STATE.md` (auto-injected each session; refreshed on restart
+`/var/lib/hal0/STATE.md` (auto-injected each session; refreshed on restart
 and on every model/slot change). Read it for the live picture rather
 than assuming — it carries an `_as_of:` timestamp.
 ```
@@ -587,7 +587,7 @@ def test_render_context_dispatch_calls_render(monkeypatch, tmp_path):
     def fake_render(*, hermes_home):
         called["home"] = hermes_home
         return {"state_written": True, "hermes_written": False,
-                "degraded": False, "state_path": "/etc/hal0/STATE.md"}
+                "degraded": False, "state_path": "/var/lib/hal0/STATE.md"}
 
     monkeypatch.setattr(agent_shim, "_render_live_context", fake_render)
 
@@ -739,13 +739,13 @@ Create `installer/agents/hermes/hooks/inject-system-state.sh` (mode 0755):
 #
 # Wired by hermes_templates/config.yaml.j2 (hooks.on_session_start).
 # Contract: emit context to stdout for the new session; stay inside the
-# 2s hook timeout. We ONLY cat the pre-rendered /etc/hal0/STATE.md (the
+# 2s hook timeout. We ONLY cat the pre-rendered /var/lib/hal0/STATE.md (the
 # expensive probe runs in the writers, not here). If STATE.md is older
 # than the TTL we additionally kick a DETACHED background refresh so the
 # NEXT session is fresh — we never block this session on a probe.
 set -eu
 
-STATE_FILE="/etc/hal0/STATE.md"
+STATE_FILE="/var/lib/hal0/STATE.md"
 TTL_SECONDS=300   # 5 min — defense-in-depth for missed change events.
 
 # Missing file (first boot before any render) => emit nothing, exit clean.
@@ -982,14 +982,14 @@ Then verify each trigger:
 ```bash
 # (a) Restart trigger — ExecStartPre rewrites STATE.md.
 ssh hal0 'sudo systemctl daemon-reload && sudo systemctl restart hal0-agent@hermes'
-ssh hal0 'cat /etc/hal0/STATE.md'   # shows current model + as_of just now
+ssh hal0 'cat /var/lib/hal0/STATE.md'   # shows current model + as_of just now
 ssh hal0 'journalctl -u hal0-agent@hermes -n 20 | grep render-context'  # "render-context ok ..."
 
 # (b) Runtime change trigger — swap a slot, STATE.md as_of bumps.
-ssh hal0 'cat /etc/hal0/STATE.md | grep _as_of'   # note timestamp
+ssh hal0 'cat /var/lib/hal0/STATE.md | grep _as_of'   # note timestamp
 ssh hal0 'hal0 slot swap primary <some-other-model>'  # or capability_set
 sleep 3
-ssh hal0 'cat /etc/hal0/STATE.md | grep _as_of'   # timestamp advanced; model changed
+ssh hal0 'cat /var/lib/hal0/STATE.md | grep _as_of'   # timestamp advanced; model changed
 
 # (c) Hook injection — new session sees STATE.md.
 ssh hal0 'cat /usr/lib/hal0/hermes-hooks/inject-system-state.sh'  # installed
