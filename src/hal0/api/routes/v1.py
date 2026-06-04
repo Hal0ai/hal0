@@ -598,6 +598,37 @@ async def list_models(
                     "owned_by": u.name,
                 }
             )
+    # Advertise live-resolve virtual names so Hermes' /model picker discovers them.
+    # context_length is mandatory: without it Hermes assumes a 256K window.
+    from hal0.normalize.resolver import DEFAULT_CHAINS, LiveSlotResolver
+
+    views = await _normalize_slot_views(request)
+    resolver = LiveSlotResolver(
+        slot_views_provider=lambda: views,
+        loaded_models_provider=lambda: _normalize_loaded_models(request),
+    )
+    for vname in DEFAULT_CHAINS:   # canonical names only (aliases excluded from the picker)
+        if vname in seen:
+            continue
+        res = await resolver.resolve(vname)
+        if res is None or not res.model_id:
+            continue
+        seen.add(vname)
+        device = next((v.device for v in views if v.model_id == res.model_id), "")
+        data.append({
+            "id": vname,
+            "object": "model",
+            "created": now,
+            "owned_by": "hal0",
+            "context_length": res.context_length,
+            "_hal0": {
+                "virtual": True,
+                "kind": "live-resolve",
+                "resolves_to": res.model_id,
+                "device": device,
+            },
+        })
+
     return {"object": "list", "data": data}
 
 
