@@ -1081,6 +1081,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await omni_router_client.aclose()
         await slot_manager.stop_idle_monitor()
         await dispatcher.aclose()
+        with contextlib.suppress(Exception):
+            await lemonade_proxy_routes.aclose_client()
         log.info("hal0.api.shutdown")
 
 

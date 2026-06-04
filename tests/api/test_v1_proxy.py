@@ -63,6 +63,9 @@ def _install_mock(
             timeout=timeout,
         )
 
+    # #474: the proxy now keeps a process-wide shared client + a short TTL
+    # cache. Reset both so each test starts clean and picks up this mock.
+    lemonade_proxy._reset_state()
     monkeypatch.setattr(lemonade_proxy, "_build_client", _fake_build_client)
     return state
 
@@ -291,3 +294,84 @@ def test_lemonade_base_url_defaults_to_loopback_13305(
 ) -> None:
     monkeypatch.delenv("LEMONADE_BASE_URL", raising=False)
     assert lemonade_proxy._lemonade_base_url() == "http://127.0.0.1:13305"
+
+
+# ── #474: connection-storm guards (pooled client + TTL/single-flight cache) ──
+
+
+def test_v1_health_cached_within_ttl(client: TestClient, lemonade_state: dict[str, Any]) -> None:
+    """A 2nd GET /v1/health inside the TTL is served from cache — no 2nd poll.
+
+    This is the amplifier killer: N dashboard tabs polling /v1/health every 2s
+    collapse into one upstream call per TTL window instead of one per tab.
+    """
+    r1 = client.get("/v1/health")
+    r2 = client.get("/v1/health")
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["status"] == "ok" and r2.json()["status"] == "ok"
+    assert len(lemonade_state["requests"]) == 1, "2nd health poll should hit the cache"
+
+
+def test_v1_stats_cached_within_ttl(client: TestClient, lemonade_state: dict[str, Any]) -> None:
+    client.get("/v1/stats")
+    client.get("/v1/stats")
+    stats_polls = [r for r in lemonade_state["requests"] if r["path"] == "/v1/stats"]
+    assert len(stats_polls) == 1, "2nd stats poll should hit the cache"
+
+
+def test_v1_health_query_params_bypass_cache(
+    client: TestClient, lemonade_state: dict[str, Any]
+) -> None:
+    """Query-bearing requests are not cacheable — they always reach lemond."""
+    client.get("/v1/health")
+    client.get("/v1/health?debug=1")
+    assert len(lemonade_state["requests"]) == 2
+
+
+def test_v1_load_post_is_not_cached(client: TestClient, lemonade_state: dict[str, Any]) -> None:
+    """Writes (POST /v1/load) must never be cached — each call reaches lemond."""
+    client.post("/v1/load", json={"model_name": "gemma3:1b"})
+    client.post("/v1/load", json={"model_name": "gemma3:1b"})
+    loads = [r for r in lemonade_state["requests"] if r["path"] == "/v1/load"]
+    assert len(loads) == 2
+
+
+def test_v1_health_non_2xx_is_not_cached(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-2xx upstream (e.g. lemond mid-load) is not cached — keep polling."""
+    calls = {"n": 0}
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, json={"status": "loading"})
+
+    _install_mock(monkeypatch, _handler)
+    assert client.get("/v1/health").status_code == 503
+    assert client.get("/v1/health").status_code == 503
+    assert calls["n"] == 2, "non-2xx must not be cached"
+
+
+def test_proxy_reuses_a_single_pooled_client(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proxy builds ONE shared client and reuses it across requests (#474).
+
+    Previously a fresh httpx.AsyncClient (new TCP connection) was built per
+    request, storming lemond's accept queue.
+    """
+    built: list[int] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"cpu": "ryzen"})
+
+    def _counting_build(timeout: httpx.Timeout) -> httpx.AsyncClient:
+        built.append(1)
+        return httpx.AsyncClient(transport=httpx.MockTransport(_handler), timeout=timeout)
+
+    lemonade_proxy._reset_state()
+    monkeypatch.setattr(lemonade_proxy, "_build_client", _counting_build)
+    # /v1/system-info is not cacheable, so each call exercises _get_client().
+    for _ in range(3):
+        assert client.get("/v1/system-info").status_code == 200
+    assert built == [1], "expected exactly one shared client across 3 requests"

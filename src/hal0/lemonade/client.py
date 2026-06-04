@@ -68,9 +68,16 @@ DEFAULT_LOAD_TIMEOUT_S = 120.0
 # /api/slots refresh (SlotManager.list() fans out _is_active over every
 # slot, each calling health()), plus one more from the route's enrichment
 # pass — ~8 identical round-trips per request on a 7-slot box. The body is
-# a global pool snapshot, so a sub-second coalescing cache collapses the
-# burst to one upstream call without changing observed behaviour.
-_HEALTH_CACHE_TTL_S = 0.5
+# a global pool snapshot, so a short coalescing cache collapses the burst to
+# one upstream call without changing observed behaviour.
+#
+# #474: raised 0.5s -> 2.0s to match the dashboard's fastest poll cadence
+# (useLemonadeHealth at 2s). lemond's control plane (cpp-httplib, 8 threads,
+# accept backlog 5) wedges under poll pressure when a big model is loaded and
+# inference serialises its threads; a 2s window keeps the multiple
+# health-bearing routes (/api/slots, /api/status) to one upstream poll per
+# window. Staleness ceiling stays at 2s, acceptable for a status snapshot.
+_HEALTH_CACHE_TTL_S = 2.0
 
 
 class LemonadeClient:

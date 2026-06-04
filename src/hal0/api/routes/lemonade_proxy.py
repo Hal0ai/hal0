@@ -33,8 +33,11 @@ Out of scope (handled elsewhere or deferred):
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
+import time
 from typing import Any
 
 import httpx
@@ -42,6 +45,31 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 router = APIRouter()
+
+# Per-request timeout. Connect is short so a dead daemon surfaces as 503
+# quickly; read is generous because /v1/load can take tens of seconds.
+_DEFAULT_TIMEOUT = httpx.Timeout(connect=2.0, read=120.0, write=30.0, pool=5.0)
+
+# Issue #474: the dashboard's useLemonadeHealth (2s) + useLemonadeStats (5s)
+# hooks poll through this proxy, once PER open browser tab. lemond is a
+# cpp-httplib server with a hardcoded 8-thread pool + accept backlog of 5, so an
+# unbounded fan-out of fresh TCP connections starves its control plane (FIN-
+# WAIT-2 pile-up, /health timeouts). Two guards:
+#   1. A single shared, pooled client caps concurrent upstream connections.
+#   2. A short TTL + single-flight cache on the read-only /v1/health and
+#      /v1/stats polls collapses N tabs into one upstream call per window.
+_POOL_LIMITS = httpx.Limits(max_connections=4, max_keepalive_connections=2)
+
+# GET paths cheap + safe to coalesce (global pool snapshots, no side effects).
+_CACHEABLE_GET_PATHS = frozenset({"health", "stats"})
+_CACHE_TTL_S = 2.0
+
+# Module-level shared client + cache. The client is built lazily (so importing
+# this module opens no sockets) and lives for the process; closed by the app
+# lifespan via aclose_client(). _reset_state() exists for test isolation.
+_client: httpx.AsyncClient | None = None
+_cache: dict[str, tuple[float, int, bytes, str | None, dict[str, str]]] = {}
+_cache_locks: dict[str, asyncio.Lock] = {}
 
 
 # Headers that MUST NOT round-trip across the proxy.  ``host`` would
@@ -94,12 +122,61 @@ def _lemonade_base_url() -> str:
 
 
 def _build_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
-    """Construct the per-request httpx client.
+    """Construct the shared httpx client.
 
     Lives as a module-level seam so tests can monkeypatch it to inject
-    an ``httpx.MockTransport`` without spinning up a real socket.
+    an ``httpx.MockTransport`` without spinning up a real socket. The pool
+    limits (#474) cap concurrent connections to lemond's control plane.
     """
-    return httpx.AsyncClient(timeout=timeout)
+    return httpx.AsyncClient(timeout=timeout, limits=_POOL_LIMITS)
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Return the process-wide shared proxy client, building it lazily.
+
+    Reused across requests so dashboard polls amortise keep-alive instead of
+    opening a fresh TCP connection per poll (#474). The check-and-set is atomic
+    under asyncio (no await between), so concurrent first-callers can't race in
+    two clients.
+    """
+    global _client
+    if _client is None:
+        _client = _build_client(_DEFAULT_TIMEOUT)
+    return _client
+
+
+async def aclose_client() -> None:
+    """Close the shared client on app shutdown. Idempotent."""
+    global _client
+    if _client is not None:
+        with contextlib.suppress(Exception):
+            await _client.aclose()
+        _client = None
+
+
+def _reset_state() -> None:
+    """Drop the shared client + cache. For test isolation only."""
+    global _client
+    _client = None
+    _cache.clear()
+    _cache_locks.clear()
+
+
+def _cache_get(path: str) -> tuple[float, int, bytes, str | None, dict[str, str]] | None:
+    """Return a live cache entry for ``path`` or None (evicting if expired)."""
+    entry = _cache.get(path)
+    if entry is None:
+        return None
+    if time.monotonic() >= entry[0]:
+        _cache.pop(path, None)
+        return None
+    return entry
+
+
+def _response_from_cache(
+    entry: tuple[float, int, bytes, str | None, dict[str, str]],
+) -> Response:
+    return _make_response(entry[1:])
 
 
 def _filter_request_headers(headers: Any) -> dict[str, str]:
@@ -136,62 +213,96 @@ async def _proxy(request: Request, path: str) -> Response:
     # path converter; we anchor it ourselves so the upstream sees the
     # full /v1/<path>.
     target_url = f"{base}/v1/{path}"
+
+    # Non-cacheable (writes, query-bearing, or non-health/stats GETs) go
+    # straight upstream over the shared pooled client.
+    cacheable = (
+        request.method == "GET" and path in _CACHEABLE_GET_PATHS and not request.query_params
+    )
+    if not cacheable:
+        return _make_response(await _forward(request, target_url))
+
+    # Fast path: serve a fresh cache entry without touching lemond.
+    hit = _cache_get(path)
+    if hit is not None:
+        return _response_from_cache(hit)
+
+    # Single-flight: the first caller fills the cache while concurrent callers
+    # for the same path wait on the lock and then re-check the cache — so N
+    # dashboard tabs collapse into one upstream poll per TTL window (#474).
+    lock = _cache_locks.setdefault(path, asyncio.Lock())
+    async with lock:
+        hit = _cache_get(path)
+        if hit is not None:
+            return _response_from_cache(hit)
+        status, content, media_type, headers = await _forward(request, target_url)
+        if 200 <= status < 300:
+            _cache[path] = (
+                time.monotonic() + _CACHE_TTL_S,
+                status,
+                content,
+                media_type,
+                headers,
+            )
+        return _make_response((status, content, media_type, headers))
+
+
+async def _forward(
+    request: Request, target_url: str
+) -> tuple[int, bytes, str | None, dict[str, str]]:
+    """Forward one request to lemond over the shared client.
+
+    Returns the response parts ``(status, content, media_type, headers)`` —
+    including hal0-shaped 503/502 envelopes when lemond is unreachable or
+    errors — so the caller can both build a Response and (for cacheable GETs)
+    store the parts.
+    """
     headers = _filter_request_headers(request.headers)
     body = await request.body()
     params = list(request.query_params.multi_items())
 
-    # Cap the per-request timeout generously — Lemonade can take tens of
-    # seconds to load a model on /v1/load. Connect timeout is short so a
-    # dead daemon surfaces as 503 quickly instead of hanging the
-    # dashboard poll.
-    timeout = httpx.Timeout(connect=2.0, read=120.0, write=30.0, pool=5.0)
-
-    client = _build_client(timeout)
+    client = _get_client()
     try:
-        try:
-            upstream_resp = await client.request(
-                method=request.method,
-                url=target_url,
-                headers=headers,
-                content=body if body else None,
-                params=params,
-            )
-        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-            envelope = {
-                "error": {
-                    "code": "lemonade.unavailable",
-                    "message": "lemonade is not reachable on loopback",
-                    "details": {"target": target_url, "reason": str(exc)},
-                }
+        upstream_resp = await client.request(
+            method=request.method,
+            url=target_url,
+            headers=headers,
+            content=body if body else None,
+            params=params,
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        envelope = {
+            "error": {
+                "code": "lemonade.unavailable",
+                "message": "lemonade is not reachable on loopback",
+                "details": {"target": target_url, "reason": str(exc)},
             }
-            return Response(
-                content=json.dumps(envelope).encode("utf-8"),
-                status_code=503,
-                media_type="application/json",
-            )
-        except httpx.HTTPError as exc:
-            envelope = {
-                "error": {
-                    "code": "lemonade.proxy_error",
-                    "message": "error forwarding request to lemonade",
-                    "details": {"target": target_url, "reason": str(exc)},
-                }
+        }
+        return 503, json.dumps(envelope).encode("utf-8"), "application/json", {}
+    except httpx.HTTPError as exc:
+        envelope = {
+            "error": {
+                "code": "lemonade.proxy_error",
+                "message": "error forwarding request to lemonade",
+                "details": {"target": target_url, "reason": str(exc)},
             }
-            return Response(
-                content=json.dumps(envelope).encode("utf-8"),
-                status_code=502,
-                media_type="application/json",
-            )
-    finally:
-        await client.aclose()
+        }
+        return 502, json.dumps(envelope).encode("utf-8"), "application/json", {}
 
-    response_headers = _filter_response_headers(upstream_resp.headers)
-    media_type = upstream_resp.headers.get("content-type")
+    return (
+        upstream_resp.status_code,
+        upstream_resp.content,
+        upstream_resp.headers.get("content-type"),
+        _filter_response_headers(upstream_resp.headers),
+    )
 
+
+def _make_response(parts: tuple[int, bytes, str | None, dict[str, str]]) -> Response:
+    status, content, media_type, headers = parts
     return Response(
-        content=upstream_resp.content,
-        status_code=upstream_resp.status_code,
-        headers=response_headers,
+        content=content,
+        status_code=status,
+        headers=dict(headers),
         media_type=media_type,
     )
 
