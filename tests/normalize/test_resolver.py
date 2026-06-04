@@ -1,3 +1,5 @@
+import pytest
+
 from hal0.normalize.resolver import (
     DEFAULT_CHAINS,
     SlotView,
@@ -97,3 +99,25 @@ def test_default_chains_shape():
     assert DEFAULT_CHAINS["hal0/primary"] == ("primary",)
     assert DEFAULT_CHAINS["hal0/npu"] == ("npu", "utility", "primary")
     assert DEFAULT_CHAINS["hal0/utility"] == ("utility", "npu", "primary")
+
+
+@pytest.mark.asyncio
+async def test_live_resolver_reads_views_and_health():
+    from hal0.normalize.resolver import LiveSlotResolver, SlotView
+
+    views = [
+        SlotView(
+            name="primary", role=None, device="gpu-vulkan", model_id="big", context_length=65536
+        ),
+        SlotView(
+            name="utility", role=None, device="gpu-vulkan", model_id="tiny", context_length=65536
+        ),
+    ]
+    resolver = LiveSlotResolver(
+        slot_views_provider=lambda: views,
+        loaded_models_provider=lambda: {"tiny", "big"},
+    )
+    res = await resolver.resolve("hal0/utility")
+    assert res.model_id == "tiny"
+    # passthrough: non-virtual names return None so the caller leaves the body alone
+    assert await resolver.resolve("some-physical-model") is None

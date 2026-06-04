@@ -7,6 +7,7 @@ wrapper reuses ``MetricsShim._health`` (see hal0-api lifespan).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # Canonical virtual names -> ordered chain of roles to try against loaded slots.
@@ -97,4 +98,28 @@ def resolve_chain(
     return Resolution("", 0, None, fallback=True)
 
 
-LiveSlotResolver = None  # type: ignore[assignment]  # implemented in a later task
+class LiveSlotResolver:
+    """Async wrapper around ``resolve_chain``.
+
+    ``slot_views_provider`` returns the current list of ``SlotView`` (built from
+    slot config). ``loaded_models_provider`` returns the set of currently-loaded
+    model ids from the cached health snapshot — NO new lemond poll.
+    """
+
+    def __init__(
+        self,
+        slot_views_provider: Callable[[], list[SlotView]],
+        loaded_models_provider: Callable[[], set[str]],
+    ) -> None:
+        self._views = slot_views_provider
+        self._loaded = loaded_models_provider
+
+    async def resolve(self, model_name: str) -> Resolution | None:
+        if model_name not in DEFAULT_CHAINS and model_name not in VIRTUAL_ALIASES:
+            return None
+        try:
+            views = list(self._views() or [])
+            loaded = set(self._loaded() or set())
+        except Exception:
+            views, loaded = [], set()
+        return resolve_chain(model_name, views, loaded)
