@@ -260,6 +260,107 @@ async def test_entries_without_last_use_are_skipped() -> None:
         assert script.unload_calls == []
 
 
+# ── tick(): per-model TTL (issue #414) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_per_model_ttl_keeps_long_lived_model_loaded() -> None:
+    """Acceptance #1: a model whose mapped TTL is 86400 stays loaded past 300s.
+
+    The driver's global default is 300s, but the per-model TTL provider
+    maps ``long`` → 86400. After well over 300s of unchanged counter the
+    model must NOT be evicted.
+    """
+    clock = _Clock()
+    script = _HealthScript([[{"model_name": "long", "last_use": 7}]] * 20)
+    async with _mock_transport(script) as transport:
+        client = LemonadeClient(http_client=transport)
+        driver = IdleDriver(
+            client,
+            idle_timeout_s=300.0,
+            poll_interval_s=30.0,
+            ttl_provider=lambda: {"long": 86400.0},
+            clock=clock,
+        )
+        for _ in range(20):  # 20 * 30 = 600s > 300s default, < 86400s
+            assert await driver.tick() == 0
+            clock.advance(30.0)
+        assert script.unload_calls == []
+
+
+@pytest.mark.asyncio
+async def test_per_model_ttl_zero_disables_eviction() -> None:
+    """Acceptance #2: idle_timeout_s == 0 means never evict (no unload, no crash)."""
+    clock = _Clock()
+    script = _HealthScript([[{"model_name": "pinned", "last_use": 7}]] * 20)
+    async with _mock_transport(script) as transport:
+        client = LemonadeClient(http_client=transport)
+        driver = IdleDriver(
+            client,
+            idle_timeout_s=300.0,
+            poll_interval_s=30.0,
+            ttl_provider=lambda: {"pinned": 0.0},
+            clock=clock,
+        )
+        for _ in range(20):
+            assert await driver.tick() == 0
+            clock.advance(30.0)
+        assert script.unload_calls == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_falls_back_to_global_default() -> None:
+    """Acceptance #3: a model not in the TTL map still evicts at the 300s default."""
+    clock = _Clock()
+    # 12 ticks at 30s = 330s dwell; counter never moves.
+    script = _HealthScript([[{"model_name": "other", "last_use": 7}]] * 12)
+    async with _mock_transport(script) as transport:
+        client = LemonadeClient(http_client=transport)
+        driver = IdleDriver(
+            client,
+            idle_timeout_s=300.0,
+            poll_interval_s=30.0,
+            ttl_provider=lambda: {"long": 86400.0},  # "other" absent → default
+            clock=clock,
+        )
+        unloaded = False
+        for _ in range(12):
+            if await driver.tick():
+                unloaded = True
+                break
+            clock.advance(30.0)
+        assert unloaded
+        assert script.unload_calls == ["other"]
+
+
+@pytest.mark.asyncio
+async def test_ttl_provider_exception_falls_back_to_default() -> None:
+    """A provider that raises must not crash the sweep — falls back to default TTL."""
+    clock = _Clock()
+    script = _HealthScript([[{"model_name": "x", "last_use": 7}]] * 12)
+
+    def _boom() -> dict[str, float]:
+        raise RuntimeError("config read failed")
+
+    async with _mock_transport(script) as transport:
+        client = LemonadeClient(http_client=transport)
+        driver = IdleDriver(
+            client,
+            idle_timeout_s=300.0,
+            poll_interval_s=30.0,
+            ttl_provider=_boom,
+            clock=clock,
+        )
+        unloaded = False
+        for _ in range(12):
+            if await driver.tick():
+                unloaded = True
+                break
+            clock.advance(30.0)
+        assert unloaded
+        assert script.unload_calls == ["x"]
+
+
 # ── tick(): resilience ────────────────────────────────────────────────
 
 

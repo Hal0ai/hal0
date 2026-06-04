@@ -686,12 +686,41 @@ async def _start_lemonade_metrics_shim(app: FastAPI) -> MetricsShim | None:
         return None
 
 
-async def _start_lemonade_idle_driver(app: FastAPI) -> IdleDriver | None:
+def _build_idle_ttl_provider(
+    slot_manager: SlotManager,
+) -> Callable[[], dict[str, float]]:
+    """Build the per-model idle-TTL provider for the IdleDriver (issue #414).
+
+    Returns a callable the driver invokes once per tick to get the
+    current ``lemond model_name`` → ``idle_timeout_s`` map, derived from
+    each slot's ``[model] default`` and its ``idle_timeout_s``. Rebuilt
+    every call so a config change (PUT slot config) is picked up on the
+    next tick without restarting the driver.
+
+    The driver's resolver is synchronous and runs inside the running
+    event loop, so the provider delegates to ``SlotManager``'s
+    synchronous TOML reader rather than awaiting ``iter_configs``. A
+    model with ``idle_timeout_s == 0`` maps to 0, which the driver
+    treats as "never evict". Unconfigured models aren't in the map and
+    fall back to the driver's global default (300s).
+    """
+
+    def _provider() -> dict[str, float]:
+        return slot_manager.idle_timeout_by_model()
+
+    return _provider
+
+
+async def _start_lemonade_idle_driver(app: FastAPI, slot_manager: SlotManager) -> IdleDriver | None:
     """Start the Lemonade idle-unload driver.
 
     v0.2 (ADR-0008 §1): Lemonade is the sole inference backend; this
     driver always starts. PR-10 removed the prior ``HAL0_BACKEND``
     gate — the v0.1.x toolbox path no longer exists.
+
+    The driver consumes a per-model TTL provider (issue #414) so each
+    slot's configured ``idle_timeout_s`` actually drives eviction
+    instead of a single hardcoded 300s global.
 
     Failures here MUST NOT block API startup — a busted Lemonade
     config shouldn't keep the dashboard from coming up so the user
@@ -709,7 +738,10 @@ async def _start_lemonade_idle_driver(app: FastAPI) -> IdleDriver | None:
         client = LemonadeClient(
             api_key=os.environ.get("LEMONADE_API_KEY") or None,
         )
-        driver = IdleDriver(client)
+        driver = IdleDriver(
+            client,
+            ttl_provider=_build_idle_ttl_provider(slot_manager),
+        )
         await driver.start()
         # Stash on app.state so /api/health surfaces + tests can find it.
         app.state.lemonade_client = client
@@ -955,7 +987,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # makes Lemonade the sole backend, so this driver always starts —
     # the prior ``HAL0_BACKEND=lemonade`` gate retired in PR-10. Stored
     # on app.state so tests + future shutdown hooks can introspect it.
-    lemonade_idle_driver = await _start_lemonade_idle_driver(app)
+    lemonade_idle_driver = await _start_lemonade_idle_driver(app, slot_manager)
     # Lemonade metrics shim (PR-12, plan §10.1 + §11). Shares the
     # ``app.state.lemonade_client`` attached by the idle driver so we
     # don't double up on connection pools against lemond. Provides the

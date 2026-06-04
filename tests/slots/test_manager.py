@@ -176,6 +176,66 @@ async def test_route_for_request_returns_none_when_nothing_matches(
     assert await sm.route_for_request("llm") is None
 
 
+# ── idle_timeout_by_model (issue #414) ──────────────────────────────────────
+
+
+def _write_idle_slot(
+    root: Path,
+    name: str,
+    *,
+    model_default: str,
+    idle_timeout_s: int | None,
+    port: int = 8081,
+) -> None:
+    """Write a minimal slot TOML with an optional flat idle_timeout_s."""
+    lines = [
+        f'name = "{name}"',
+        f"port = {port}",
+        'provider = "lemonade"',
+        "enabled = true",
+    ]
+    if idle_timeout_s is not None:
+        lines.append(f"idle_timeout_s = {idle_timeout_s}")
+    lines.append("[model]")
+    lines.append(f'default = "{model_default}"')
+    (root / f"{name}.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_idle_timeout_by_model_maps_model_name_to_ttl(slot_root: Path) -> None:
+    """Each slot's [model] default maps to its configured idle_timeout_s."""
+    _write_idle_slot(slot_root, "a", model_default="model-a", idle_timeout_s=86400, port=8082)
+    _write_idle_slot(slot_root, "b", model_default="model-b", idle_timeout_s=120, port=8083)
+    sm = SlotManager()
+    m = sm.idle_timeout_by_model()
+    assert m["model-a"] == 86400.0
+    assert m["model-b"] == 120.0
+
+
+def test_idle_timeout_by_model_preserves_zero(slot_root: Path) -> None:
+    """idle_timeout_s == 0 (disable eviction) round-trips as 0.0, not dropped."""
+    _write_idle_slot(slot_root, "keep", model_default="pinned-model", idle_timeout_s=0, port=8082)
+    sm = SlotManager()
+    m = sm.idle_timeout_by_model()
+    assert m["pinned-model"] == 0.0
+
+
+def test_idle_timeout_by_model_skips_slots_without_model_default(slot_root: Path) -> None:
+    """A slot with an empty [model] default contributes no entry."""
+    _write_idle_slot(slot_root, "empty", model_default="", idle_timeout_s=300, port=8082)
+    sm = SlotManager()
+    m = sm.idle_timeout_by_model()
+    assert "" not in m
+
+
+def test_idle_timeout_by_model_tolerates_malformed_toml(slot_root: Path) -> None:
+    """A malformed slot TOML is skipped, not fatal — others still map."""
+    _write_idle_slot(slot_root, "good", model_default="good-model", idle_timeout_s=42, port=8082)
+    (slot_root / "broken.toml").write_text("name = \nport = ", encoding="utf-8")
+    sm = SlotManager()
+    m = sm.idle_timeout_by_model()
+    assert m["good-model"] == 42.0
+
+
 # ── add_slot / remove_slot (PR-10 §4.3) ─────────────────────────────────────
 
 

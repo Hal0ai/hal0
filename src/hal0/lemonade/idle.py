@@ -60,7 +60,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from hal0.lemonade.client import LemonadeClient
@@ -108,6 +108,7 @@ class IdleDriver:
         *,
         idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
+        ttl_provider: Callable[[], Mapping[str, float]] | None = None,
         clock: Any = time.time,
     ) -> None:
         if idle_timeout_s <= 0:
@@ -115,8 +116,17 @@ class IdleDriver:
         if poll_interval_s <= 0:
             raise ValueError("poll_interval_s must be > 0")
         self._client = client
+        # ``idle_timeout_s`` is the GLOBAL fallback applied to any model
+        # without a per-slot override. Per-model TTLs come from
+        # ``ttl_provider`` (issue #414) — a callable rebuilt-per-tick
+        # map of lemond ``model_name`` → ``idle_timeout_s`` derived from
+        # the loaded ``SlotConfig``s. A per-model TTL of 0 means "never
+        # evict this model" (the schema allows idle_timeout_s=0 = disable);
+        # the global fallback must still be > 0 so an empty/missing map
+        # preserves the v0.1.x 300s policy.
         self._idle_timeout_s = idle_timeout_s
         self._poll_interval_s = poll_interval_s
+        self._ttl_provider = ttl_provider
         # Injectable clock so tests can fast-forward without
         # monkeypatching the time module globally.
         self._clock = clock
@@ -233,6 +243,13 @@ class IdleDriver:
         if not loaded:
             return 0
 
+        # Resolve the per-model TTL map once per tick (issue #414). Built
+        # fresh each sweep so a config change picks up on the next tick
+        # without restarting the driver. A flaky provider must never
+        # crash the sweep — fall back to the global default for all
+        # models if it raises.
+        ttl_map = self._resolve_ttl_map()
+
         now = float(self._clock())
         evicted = 0
         for entry in loaded:
@@ -267,10 +284,18 @@ class IdleDriver:
 
             # Counter unchanged since first_seen_at. Decide on
             # wall-clock age, NOT on the opaque counter's value.
-            age = now - first_seen_at
-            if age <= self._idle_timeout_s:
+            #
+            # Per-model TTL (issue #414): resolve this model's configured
+            # idle_timeout_s, falling back to the global default for
+            # unknown/unconfigured models. A TTL of 0 disables eviction
+            # for that model entirely (keep it loaded indefinitely).
+            ttl = ttl_map.get(name, self._idle_timeout_s)
+            if ttl <= 0:
                 continue
-            ok = await self._unload(name, age=age)
+            age = now - first_seen_at
+            if age <= ttl:
+                continue
+            ok = await self._unload(name, age=age, idle_timeout_s=ttl)
             if ok:
                 # Drop tracker state proactively so an immediate
                 # reload (before the next health poll observes the
@@ -279,12 +304,34 @@ class IdleDriver:
                 evicted += 1
         return evicted
 
-    async def _unload(self, model_name: str, *, age: float) -> bool:
+    def _resolve_ttl_map(self) -> Mapping[str, float]:
+        """Build the per-model TTL map for this tick (issue #414).
+
+        Returns the ``model_name`` → ``idle_timeout_s`` mapping from the
+        injected ``ttl_provider``, or an empty mapping when no provider
+        is wired (the legacy single-global-TTL behaviour). A provider
+        that raises is logged + treated as empty so a busted config
+        never crashes the sweep — every model falls back to the global
+        default that tick.
+        """
+        if self._ttl_provider is None:
+            return {}
+        try:
+            return self._ttl_provider()
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning(
+                "lemonade.idle.ttl_provider_error",
+                extra={"error": str(exc), "error_type": type(exc).__name__},
+            )
+            return {}
+
+    async def _unload(self, model_name: str, *, age: float, idle_timeout_s: float) -> bool:
         """Call ``POST /v1/unload``. Returns True on success.
 
         Per-model failure is logged + swallowed so the sweep moves on
         to the next candidate. The next tick will retry whatever we
-        missed.
+        missed. ``idle_timeout_s`` is the per-model TTL that triggered
+        the eviction (issue #414), logged for audit.
         """
         try:
             await self._client.unload(model_name)
@@ -304,7 +351,7 @@ class IdleDriver:
             extra={
                 "model_name": model_name,
                 "age_s": age,
-                "idle_timeout_s": self._idle_timeout_s,
+                "idle_timeout_s": idle_timeout_s,
             },
         )
         return True

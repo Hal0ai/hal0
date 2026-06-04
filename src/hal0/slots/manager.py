@@ -962,6 +962,50 @@ class SlotManager:
             out.append(cfg)
         return out
 
+    def idle_timeout_by_model(self) -> dict[str, float]:
+        """Map each slot's lemond ``model_name`` → its ``idle_timeout_s``.
+
+        Issue #414: the Lemonade idle-unload driver evicts by lemond
+        ``model_name``, but the per-slot ``idle_timeout_s`` (config
+        source of truth) was never plumbed through, so every model used
+        the driver's hardcoded 300s global. This synchronous reader
+        builds the per-model TTL map the driver consumes once per tick.
+
+        Synchronous on purpose: the driver's resolver runs inside the
+        running event loop and can't await. We read each slot's TOML
+        directly (the same files ``iter_configs`` reads), which is a
+        cheap local-disk op. Slots with an empty ``[model] default`` or
+        an unreadable / malformed config are skipped — the driver falls
+        back to its global default for any model absent from the map.
+
+        A value of ``idle_timeout_s == 0`` is preserved (maps to 0.0);
+        the driver treats it as "never evict this model".
+        """
+        try:
+            import tomllib
+        except ImportError:  # py<3.11
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        out: dict[str, float] = {}
+        for name in self._all_configured_slot_names():
+            path = self._config_file(name)
+            try:
+                with open(path, "rb") as f:
+                    data = tomllib.load(f)
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                log.warning("slot.idle_ttl_skipped", slot=name, error=str(exc))
+                continue
+            model = data.get("model") or {}
+            model_name = ""
+            if isinstance(model, dict):
+                model_name = str(model.get("default") or "")
+            if not model_name:
+                continue
+            ttl = data.get("idle_timeout_s")
+            if isinstance(ttl, (int, float)) and not isinstance(ttl, bool):
+                out[model_name] = float(ttl)
+        return out
+
     # ── PR-10: seeded slot catalogue + routing helpers ──────────────────────
 
     @staticmethod
