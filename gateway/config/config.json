@@ -1,4 +1,5 @@
 {
+  "$schema": "https://www.getbifrost.ai/schema",
   "providers": {
     "lemonade": {
       "keys": [
@@ -24,6 +25,7 @@
   "plugins": [
     {
       "name": "hal0-normalize",
+      "enabled": true,
       "path": "/etc/hal0/bifrost/plugins/hal0_normalize.so",
       "config": {
         "health_url": "http://127.0.0.1:13305/api/v1/health",

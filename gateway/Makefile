@@ -6,7 +6,7 @@
 # this plugin via a go.work workspace. Do not mix a prebuilt bifrost-http with a
 # locally-built .so — it will fail to load with a version-skew panic.
 
-BIFROST_REF ?= v1.5.16            # core module version this plugin is written against
+BIFROST_REF ?= core/v1.5.16       # monorepo tag; go.work pins transport+plugin to this in-tree core
 BIFROST_REPO ?= https://github.com/maximhq/bifrost.git
 SRC := bifrost-src
 OUT := build
@@ -35,12 +35,17 @@ deps: ## Clone/checkout the pinned Bifrost source for an ABI-matched build
 # go.work unites this module + the checkout so the plugin and transport share
 # one dependency graph -> loadable .so.
 go.work: deps
-	go work init . $(SRC)/core $(SRC)/transports/bifrost-http 2>/dev/null || true
+	go work init . $(SRC)/core $(SRC)/transports 2>/dev/null || true
 	go work sync
 
-gateway: go.work ## Build bifrost-http from the pinned source
+stub-ui: deps ## bifrost-http //go:embed all:ui needs a ui/ dir; we run headless so stub it
+	@mkdir -p $(SRC)/transports/bifrost-http/ui
+	@[ -f $(SRC)/transports/bifrost-http/ui/index.html ] || \
+	  printf '<!doctype html><title>hal0-bifrost</title>headless gateway\n' > $(SRC)/transports/bifrost-http/ui/index.html
+
+gateway: go.work stub-ui ## Build bifrost-http from the pinned source
 	@mkdir -p $(OUT)
-	go build -o $(GATEWAY) ./$(SRC)/transports/bifrost-http
+	go build -o $(GATEWAY) github.com/maximhq/bifrost/transports/bifrost-http
 	@echo "gateway built: $(GATEWAY)"
 
 plugin: go.work ## Build the ABI-matched plugin .so

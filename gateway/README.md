@@ -63,9 +63,14 @@ make build         # ABI-matched: bifrost-http + plugin .so from one pinned chec
 
 `-buildmode=plugin` demands the `.so` and `bifrost-http` share an identical
 module graph. `make build` guarantees this by joining this module to a pinned
-Bifrost checkout (`BIFROST_REF`, default `v1.5.16`) via a `go.work` workspace and
-building both from it. **Never** load a locally-built `.so` into a prebuilt
-`bifrost-http` — it panics on version skew.
+Bifrost checkout (`BIFROST_REF`, default `core/v1.5.16`) via a `go.work`
+workspace and building both from it. **Never** load a locally-built `.so` into a
+prebuilt `bifrost-http` — it panics on version skew.
+
+`bifrost-http`'s `main.go` has `//go:embed all:ui` (its web console, built
+separately and absent from the source clone). We run headless — only the `/v1`
+API is used — so `make stub-ui` drops a one-line `ui/index.html` placeholder to
+satisfy the embed. The console routes are inert; the proxy API is unaffected.
 
 ## Deploy (HELD — not yet run)
 

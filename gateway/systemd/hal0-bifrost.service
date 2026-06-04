@@ -12,10 +12,9 @@ Type=simple
 User=hal0
 Group=hal0
 # Loopback-only: the gateway sits behind hal0-api's surface, never LAN-exposed.
-Environment=APP_HOST=127.0.0.1
-Environment=APP_PORT=8079
-Environment=APP_PLUGINS_DIR=/etc/hal0/bifrost/plugins
-ExecStart=/opt/hal0/bin/bifrost-http -config /etc/hal0/bifrost/config.json -host 127.0.0.1 -port 8079
+# bifrost-http reads config.json + sqlite state from -app-dir; plugins live in
+# <app-dir>/plugins and are referenced by absolute path in config.json.
+ExecStart=/opt/hal0/bin/bifrost-http -app-dir /etc/hal0/bifrost -host 127.0.0.1 -port 8079 -log-style json
 Restart=on-failure
 RestartSec=3
 # Resource guard rails consistent with the rest of the stack.
