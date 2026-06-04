@@ -363,6 +363,82 @@ def test_config_yaml_contains_role_slot_blocks(
     assert "bge-test" not in cfg["custom_providers"][0]["models"]
 
 
+def test_namespace_register_skips_add_on_delete_count_mismatch(
+    tmp_path: Path, hermetic_state: hp.BootstrapState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#448: when memory_delete reports fewer removals than requested, the
+    phase must NOT rewrite the card (avoid duplicate accumulation, #446).
+
+    Repro: search finds one prior card id, but the delete reports
+    ``deleted: 0`` (the custom-dataset skip bug). The HTTP call is OK, so
+    the old call site trusted it and re-added — flooding the Peer view.
+    The fixed call site inspects the count, warns, and skips the add.
+    """
+    add_calls: list[dict[str, Any]] = []
+
+    def _mismatch_memory_call(method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        tool = (params or {}).get("name", "")
+        if tool == "memory_search":
+            return {
+                "ok": True,
+                "result": {
+                    "items": [{"id": "prior-1", "metadata": {"agent_id": hermetic_state.agent_id}}]
+                },
+            }
+        if tool == "memory_add":
+            add_calls.append(params)
+            return {"ok": True, "result": {"id": "memid-stable"}}
+        if tool == "memory_delete":
+            # Found one prior, removed none — the delete-0 mismatch.
+            return {"ok": True, "result": {"deleted": 0}}
+        return {"ok": True, "result": {}}
+
+    monkeypatch.setattr(hp, "_mcp_memory_call", _mismatch_memory_call)
+
+    result = hp._phase_namespace_register(hermetic_state)
+
+    assert result.status == hp.PhaseStatus.OK
+    assert result.details["registered"] is False
+    assert result.details["refreshed_existing"] is False
+    assert not add_calls, "card was re-added despite a delete-count mismatch"
+    assert any("memory_delete" in w for w in result.details["warnings"]), (
+        "expected a delete-count-mismatch warning"
+    )
+
+
+def test_namespace_register_rewrites_when_delete_count_matches(
+    tmp_path: Path, hermetic_state: hp.BootstrapState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#448 counterpart: when the delete count matches the requested ids,
+    the refresh proceeds normally (card re-added, refreshed_existing True)."""
+    add_calls: list[dict[str, Any]] = []
+
+    def _matching_memory_call(method: str, params: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        tool = (params or {}).get("name", "")
+        if tool == "memory_search":
+            return {
+                "ok": True,
+                "result": {
+                    "items": [{"id": "prior-1", "metadata": {"agent_id": hermetic_state.agent_id}}]
+                },
+            }
+        if tool == "memory_add":
+            add_calls.append(params)
+            return {"ok": True, "result": {"id": "memid-stable"}}
+        if tool == "memory_delete":
+            return {"ok": True, "result": {"deleted": 1}}
+        return {"ok": True, "result": {}}
+
+    monkeypatch.setattr(hp, "_mcp_memory_call", _matching_memory_call)
+
+    result = hp._phase_namespace_register(hermetic_state)
+
+    assert result.status == hp.PhaseStatus.OK
+    assert result.details["registered"] is True
+    assert result.details["refreshed_existing"] is True
+    assert len(add_calls) == 1
+
+
 def test_persona_seed_appears_in_phase_order_before_config_write(tmp_path: Path) -> None:
     """Ordering guard — persona_seed must come BEFORE config_write so the
     first render gets the active persona's system_prompt."""

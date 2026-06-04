@@ -1647,8 +1647,39 @@ def _phase_namespace_register(state: BootstrapState) -> PhaseResult:
             {"name": "memory_delete", "arguments": {"ids": existing_ids}},
             agent_id=state.agent_id,
         )
+        # #448: a delete that returns HTTP 200 but removes fewer ids than
+        # requested (e.g. the custom-dataset skip bug behind #446) looks
+        # identical to a real prune. Re-adding on top of un-deleted priors
+        # floods the Peer view with duplicates. Verify the count, not just
+        # the transport status — on any shortfall, skip the rewrite.
         if not deleted["ok"]:
             warnings.append(f"memory_delete: {deleted['error']}")
+            return PhaseResult(
+                status=PhaseStatus.OK,
+                details={
+                    "registered": False,
+                    "refreshed_existing": False,
+                    "warnings": warnings,
+                    "card": card,
+                },
+                reason="memory_delete failed; not rewriting to avoid duplicate accumulation",
+            )
+        removed = (deleted.get("result") or {}).get("deleted", 0)
+        if removed != len(existing_ids):
+            warnings.append(
+                f"memory_delete: requested {len(existing_ids)}, removed {removed} "
+                "— not rewriting to avoid duplicate accumulation"
+            )
+            return PhaseResult(
+                status=PhaseStatus.OK,
+                details={
+                    "registered": False,
+                    "refreshed_existing": False,
+                    "warnings": warnings,
+                    "card": card,
+                },
+                reason="memory_delete count mismatch; not rewriting to avoid duplicate accumulation",
+            )
 
     add = _mcp_memory_call(
         "tools/call",
