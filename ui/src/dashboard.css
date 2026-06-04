@@ -60,6 +60,19 @@
   --mem-tenant-2: #8a7848;
   --mem-tenant-3: #695830;
 
+  /* Memory-map per-slot categorical palette — one stable colour per loaded
+     model slot so co-resident models are visually distinguishable in the
+     bar + legend (device colour alone collapses multiple GPU slots into one
+     hue). Colourblind-aware 8-colour set (Okabe-Ito derived). */
+  --mem-slot-1: #5b9bd5; /* blue */
+  --mem-slot-2: #e69f00; /* orange */
+  --mem-slot-3: #009e73; /* bluish green */
+  --mem-slot-4: #cc79a7; /* reddish purple */
+  --mem-slot-5: #f0e442; /* yellow */
+  --mem-slot-6: #d55e00; /* vermillion */
+  --mem-slot-7: #56b4e9; /* sky blue */
+  --mem-slot-8: #b39ddb; /* lavender */
+
   /* Type */
   --geist: "Geist", "Geist Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
   --jbm:   "JetBrains Mono", "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;

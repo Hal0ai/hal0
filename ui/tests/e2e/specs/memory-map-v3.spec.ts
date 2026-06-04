@@ -119,14 +119,24 @@ test.describe('Memory map — sidebar', () => {
     await expect(card.locator('.side-card-h .right')).not.toContainText('unified')
   })
 
-  test('headroom labelled "pool" on bare-metal', async ({ page }) => {
+  test('sidebar no longer renders the headroom line (pool scenario)', async ({ page }) => {
+    // The oversized "Headroom for new models … limited by pool/host" line was
+    // dropped from the SIDEBAR variant — the "<free> free" value above the bar
+    // is the kept signal. The headroom + limited-by string now lives ONLY in
+    // the expanded variant (see EXPANDED-variant coverage below).
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    // Scope to sidebar — expanded variant also renders .memmap-headroom
-    await expect(page.locator('.memmap-sidebar .memmap-headroom')).toContainText('limited by pool')
+    const card = page.locator('.memmap-sidebar')
+    await expect(card).toBeVisible()
+    await expect(card.locator('.memmap-headroom')).toHaveCount(0)
+    // The retained free signal is still present in the sidebar header row.
+    await expect(card.locator('.memmap-h')).toContainText('free')
   })
 
-  test('headroom labelled "host" when host free is the binding constraint', async ({ page }) => {
+  test('sidebar drops headroom even when host is the binding constraint', async ({ page }) => {
+    // Host-limited pool: previously the sidebar showed "limited by host". The
+    // limited-by distinction is now expanded-only; the sidebar must show no
+    // headroom line regardless of which constraint binds.
     await mockStatsHardware(page, {
       configured: true,
       ok: true,
@@ -147,8 +157,28 @@ test.describe('Memory map — sidebar', () => {
       tenants: [],
     })
     await page.goto('/#dashboard')
-    // Scope to sidebar — expanded variant also renders .memmap-headroom
-    await expect(page.locator('.memmap-sidebar .memmap-headroom')).toContainText('limited by host')
+    const card = page.locator('.memmap-sidebar')
+    await expect(card).toBeVisible()
+    await expect(card.locator('.memmap-headroom')).toHaveCount(0)
+  })
+
+  test('co-resident slots render distinct legend swatch colours', async ({ page }) => {
+    // Change 1: each loaded model slot gets its OWN stable colour so
+    // co-resident models are visually distinguishable. The default mock has
+    // four live slots with mem_mb > 0 (primary/agent/coder/embed) — three of
+    // them share device=gpu-rocm, which used to collapse to one device hue.
+    // Their legend swatches must now differ.
+    await mockStatsHardware(page, { configured: false, detected: false })
+    await page.goto('/#dashboard')
+    const swatches = page.locator('.memmap-sidebar .memmap-legend .ln .sw')
+    // free row adds one swatch; expect ≥3 (>=2 live slots + free).
+    await expect(swatches.first()).toBeVisible()
+    const count = await swatches.count()
+    expect(count).toBeGreaterThanOrEqual(3)
+    // First two slot swatches (sorted by name) must be distinct colours.
+    const c0 = await swatches.nth(0).evaluate((el) => getComputedStyle(el).backgroundColor)
+    const c1 = await swatches.nth(1).evaluate((el) => getComputedStyle(el).backgroundColor)
+    expect(c0).not.toBe(c1)
   })
 })
 
@@ -158,3 +188,15 @@ test.describe('Memory map — sidebar', () => {
 // live Memory hardware card. The MemoryMap component still supports
 // `variant="expanded"`, but nothing mounts it on the dashboard, so the
 // former dashboard-scoped expanded suite was retired.
+//
+// HEADROOM coverage: the "Headroom for new models … limited by pool/host"
+// line (and the pool-vs-host limited-by distinction) now renders ONLY in the
+// expanded variant — it was dropped from the sidebar (the "<free> free" value
+// above the bar is the kept signal). Because no live route mounts the
+// expanded variant, the limited-by string is not e2e-reachable today; the
+// `limitedBy` logic still lives in useMemoryMapModel() and the expanded
+// <HeadroomLabel> render. The former sidebar "limited by pool"/"limited by
+// host" assertions were converted above to assert the sidebar no longer shows
+// the headroom line (under both pool- and host-constrained mocks). When a
+// route mounts variant="expanded", re-add a `.memmap-expanded .memmap-headroom`
+// limited-by assertion here.

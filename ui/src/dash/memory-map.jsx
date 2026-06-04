@@ -16,6 +16,33 @@ const LIVE_STATES = new Set(['ready', 'serving', 'idle', 'warming'])
 const SAFETY_MARGIN_GB = 2
 const MB_PER_GB = 1024
 
+// Categorical per-slot palette (CSS custom props defined in dashboard.css).
+// Each loaded model slot gets its OWN stable colour so co-resident models
+// are distinguishable in the bar + legend — device colour alone collapses
+// several GPU slots into a single hue.
+const SLOT_PALETTE = [
+  'var(--mem-slot-1)',
+  'var(--mem-slot-2)',
+  'var(--mem-slot-3)',
+  'var(--mem-slot-4)',
+  'var(--mem-slot-5)',
+  'var(--mem-slot-6)',
+  'var(--mem-slot-7)',
+  'var(--mem-slot-8)',
+]
+
+// Deterministic, render-stable colour for a slot: sort live slot names and
+// index by position into the palette. A given slot name always maps to the
+// same colour within a render set, and the swatch matches its bar segment.
+function assignSlotColors(slotNames) {
+  const sorted = [...slotNames].sort()
+  const map = new Map()
+  sorted.forEach((name, i) => {
+    map.set(name, SLOT_PALETTE[i % SLOT_PALETTE.length])
+  })
+  return map
+}
+
 const round1 = (n) => Math.round(n * 10) / 10
 
 function mbToGb(mb) {
@@ -220,13 +247,17 @@ export function useMemoryMapModel() {
       ramUsedGb,
       gttUsedGb,
       npuModelGb,
-      slots: attributed.map((a) => ({
-        name: a.slot.name,
-        device: a.device,
-        bytesGb: a.bytesGb,
-        modelId: a.slot.model || '',
-        approx: a.approx,
-      })),
+      slots: (() => {
+        const colorMap = assignSlotColors(attributed.map((a) => a.slot.name))
+        return attributed.map((a) => ({
+          name: a.slot.name,
+          device: a.device,
+          color: colorMap.get(a.slot.name),
+          bytesGb: a.bytesGb,
+          modelId: a.slot.model || '',
+          approx: a.approx,
+        }))
+      })(),
     },
     headroom: { availableGb, limitedBy },
     loading: hw.isLoading || stats.isLoading || slotsQ.isLoading || pveSettings.isLoading,
@@ -234,13 +265,6 @@ export function useMemoryMapModel() {
 }
 
 // ── Render helpers ─────────────────────────────────────────────────────
-
-function colorForDevice(device) {
-  if (device === 'npu') return 'var(--dev-npu)'
-  if (device === 'cpu') return 'var(--dev-cpu)'
-  if (device === 'vulkan') return 'var(--dev-vulkan)'
-  return 'var(--dev-rocm)'
-}
 
 function fmtGb(n) {
   if (n == null) return '—'
@@ -296,7 +320,7 @@ function SidebarBar({ model }) {
         <PctSeg
           key={s.name}
           widthPct={pct(s.bytesGb)}
-          color={colorForDevice(s.device)}
+          color={s.color}
           title={`${s.name} · ${fmtGb(s.bytesGb)}`}
         />
       ))}
@@ -377,7 +401,7 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
           {self.slots.map((s) => (
             <LegendRow
               key={s.name}
-              swatch={colorForDevice(s.device)}
+              swatch={s.color}
               name={s.name}
               sub={`${s.device}${s.approx ? ' · ≈' : ''}${s.modelId ? ' · ' + s.modelId : ''}`}
               sz={s.bytesGb}
@@ -439,17 +463,14 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
             {self.slots.map((s) => (
               <LegendRow
                 key={s.name}
-                swatch={colorForDevice(s.device)}
+                swatch={s.color}
                 name={s.name}
+                sub={s.device}
                 sz={s.bytesGb}
               />
             ))}
             <LegendRow swatch="var(--bg-4)" name="free" sz={free} />
           </div>
-          <HeadroomLabel
-            availableGb={headroom.availableGb}
-            limitedBy={headroom.limitedBy}
-          />
           {host.mode === 'detected_unconfigured' && (
             <PveNudge hint={host.hint} onConfigure={onConfigure} />
           )}
