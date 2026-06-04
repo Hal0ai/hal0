@@ -195,3 +195,31 @@ def test_phase_context_link_writes_state_md(tmp_path, monkeypatch):
     hermes_md = (tmp_path / "HERMES.md").read_text()
     assert "Live system state" not in hermes_md  # that H1 now lives in STATE.md
     assert "STATE.md" in hermes_md  # pointer present
+
+
+def test_spawn_context_refresh_is_best_effort(monkeypatch):
+    from hal0.agents import hermes_refresh
+
+    calls = {}
+
+    def fake_popen(argv, **kw):
+        calls["argv"] = argv
+        calls["kw"] = kw
+
+        class _P:  # minimal stand-in
+            pass
+
+        return _P()
+
+    monkeypatch.setattr(hermes_refresh.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(hermes_refresh.shutil, "which", lambda _n: "/usr/local/bin/hal0-agent")
+
+    hermes_refresh.spawn_context_refresh("hermes")
+    assert calls["argv"] == ["/usr/local/bin/hal0-agent", "hermes", "render-context"]
+
+    # Never raises even if Popen blows up.
+    def boom(*a, **k):
+        raise OSError("no exec")
+
+    monkeypatch.setattr(hermes_refresh.subprocess, "Popen", boom)
+    hermes_refresh.spawn_context_refresh("hermes")  # must not raise

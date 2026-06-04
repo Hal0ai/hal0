@@ -790,7 +790,13 @@ class SlotManager:
             raise SlotConfigError("swap requires a non-empty model id")
         self._ensure_known(slot_name)
         await self.unload(slot_name)
-        return await self.load(slot_name, model_id=new_model_id)
+        slot = await self.load(slot_name, model_id=new_model_id)
+        # Refresh Hermes's live-context files so a model swap is visible to
+        # the agent on its next session (detached; never blocks the swap).
+        from hal0.agents.hermes_refresh import spawn_context_refresh
+
+        spawn_context_refresh()
+        return slot
 
     # ── queries ──────────────────────────────────────────────────────────────
 

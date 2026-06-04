@@ -44,6 +44,15 @@ from hal0.slots.state import (
 # and the other slot-suite modules.
 
 
+@pytest.fixture(autouse=True)
+def _no_spawn_context_refresh(monkeypatch):
+    # The runtime writers (swap/apply) fire a detached hal0-agent
+    # render-context; stub it so tests never launch real subprocesses.
+    import hal0.agents.hermes_refresh as _hr
+
+    monkeypatch.setattr(_hr, "spawn_context_refresh", lambda *a, **k: None)
+
+
 # ── SEEDED_SLOTS + NPU_SEEDED_SLOTS (PR-10 §10.2) ───────────────────────────
 
 

@@ -431,6 +431,13 @@ class CapabilityOrchestrator:
         # call doesn't leave a stale selection on disk.
         self._save(cfg)
 
+        # A capability change (enable/disable/model/backend) just altered
+        # live slot state — refresh Hermes's context files (detached;
+        # best-effort, never blocks the API response).
+        from hal0.agents.hermes_refresh import spawn_context_refresh
+
+        spawn_context_refresh()
+
         status_str = await self._slot_status_string(slot_name)
         return {
             "backend": merged.backend,

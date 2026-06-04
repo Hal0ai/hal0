@@ -35,6 +35,15 @@ def _mock_provider(handler) -> LemonadeProvider:
     return LemonadeProvider(client=LemonadeClient(http_client=transport))
 
 
+@pytest.fixture(autouse=True)
+def _no_spawn_context_refresh(monkeypatch):
+    # The runtime writers (swap/apply) fire a detached hal0-agent
+    # render-context; stub it so tests never launch real subprocesses.
+    import hal0.agents.hermes_refresh as _hr
+
+    monkeypatch.setattr(_hr, "spawn_context_refresh", lambda *a, **k: None)
+
+
 @pytest.fixture
 def lemonade_env() -> None:
     """No-op fixture (PR-10 retired the HAL0_BACKEND gate).
