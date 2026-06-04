@@ -1442,8 +1442,15 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     # path used by the per-restart / per-swap writers. Best-effort: failure
     # here must not fail bootstrap (SOUL/AGENTS already written).
     try:
+        # NB: render_live_context re-fetches /api/slots + /v1/models itself
+        # (separate from the vars_ fetch above). Acceptable at bootstrap
+        # frequency; keeps it usable standalone from the restart/swap writers.
         live = render_live_context(hermes_home=hermes_home)
         details["rendered"]["STATE.md"] = {"path": live["state_path"]}
+        details["rendered"]["HERMES.md"] = {
+            "path": str(ETC_HAL0_DIR / "HERMES.md"),
+            "written": live["hermes_written"],
+        }
         if live["degraded"]:
             warnings.append("STATE.md rendered with daemon degraded")
         if live.get("hermes_error"):
