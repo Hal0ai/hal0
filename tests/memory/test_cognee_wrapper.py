@@ -188,6 +188,46 @@ async def test_delete_single_id_decrements_list(make_wrapper):
     _ = a  # silence linter; the test only needs id references on b
 
 
+async def test_delete_custom_dataset_item_by_owner(make_wrapper):
+    """Deleting an own item in a CUSTOM dataset (e.g. ADR-0011 ``agents``)
+    actually removes it.
+
+    Regression for the Peer-memory stale-card flood: the delete guard
+    hardcoded the allowed-read set to ``shared`` + own-private, so any id
+    whose row lived in a custom dataset (``agents``) was silently skipped,
+    ``deleted`` stayed 0, and Hermes bootstrap's "delete-then-rewrite"
+    dedup leaked one identity card per run.
+    """
+    w = make_wrapper(client_id="hermes-agent")
+    card = await w.add("identity card", dataset="agents", tags=["agent-identity"])
+
+    res = await w.delete(ids=[card["id"]])
+    assert res == {"deleted": 1}
+
+    remaining = await w.search(
+        query="identity card", dataset="agents", tags=["agent-identity"], limit=10
+    )
+    assert remaining == []
+
+
+async def test_delete_does_not_reach_other_clients_private(make_wrapper):
+    """The dataset guard still blocks deleting another client's private item.
+
+    Tightening the guard to honor custom datasets must NOT regress the
+    cross-client private protection it was written for.
+    """
+    alice = make_wrapper(client_id="alice", private_mode=True)
+    secret = await alice.add("alice secret")  # lands in private:alice
+
+    bob = make_wrapper(client_id="bob", private_mode=False)
+    res = await bob.delete(ids=[secret["id"]])
+    assert res == {"deleted": 0}
+
+    # Still there for the owner.
+    still = await alice.search(query="alice secret", limit=10)
+    assert any(h["text"] == "alice secret" for h in still)
+
+
 async def test_list_items_pagination(make_wrapper):
     """Cursor-based pagination walks the dataset in timestamp DESC order."""
     w = make_wrapper()

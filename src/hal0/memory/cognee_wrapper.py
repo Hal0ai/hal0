@@ -953,8 +953,17 @@ class CogneeWrapper:
                 # against a leaked id being used to reach into a different
                 # client's private namespace. (v0.2 single-user => moot
                 # in practice, but the check is cheap + Phase-9-ready.)
+                #
+                # Scope the check to the ROW's own dataset — not a
+                # hardcoded ``shared``. Passing ``SHARED_DATASET`` made the
+                # allowed set always ``[shared, private:<client>]``, so an
+                # id in a custom dataset (e.g. ADR-0011 ``agents``) could
+                # never match and was silently skipped — leaking one Hermes
+                # identity card per bootstrap (Peer-memory stale-card flood).
+                # ``_allowed_read_datasets`` still drops *another* client's
+                # ``private:*``, so the cross-client guard is preserved.
                 if row["dataset"] not in self._allowed_read_datasets(
-                    SHARED_DATASET, client_id=client_id
+                    row["dataset"], client_id=client_id
                 ):
                     continue
                 if row["cognee_data_id"] and row["cognee_dataset_id"]:
