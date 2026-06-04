@@ -1916,6 +1916,121 @@ def _igpu_sclk_mhz(sysfs_root: Path = Path("/sys/class/drm")) -> int | None:
     return None
 
 
+def _state_body_minus_timestamp(text: str) -> str:
+    """STATE.md body with the volatile ``_as_of:`` line removed.
+
+    Used for content-hash gating so a regen that finds nothing
+    substantive changed does not churn the file (and bust prompt-cache).
+    """
+    return "\n".join(line for line in text.splitlines() if not line.startswith("_as_of:"))
+
+
+def render_live_context(
+    *,
+    hermes_home: Path,
+    slots_fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+    now_iso: str | None = None,
+) -> dict[str, Any]:
+    """Re-probe live slot/capability state; (re)write HERMES.md + STATE.md.
+
+    STATE.md is content-hash gated: rewritten (and its ``_as_of`` line
+    bumped) only when the substantive body changes. HERMES.md is written
+    atomically (identical content => identical bytes => prompt-cache safe).
+    Never raises on a daemon-unreachable read — leaves last-good files and
+    reports ``degraded=True``.
+
+    Returns: {"state_written": bool, "hermes_written": bool,
+              "degraded": bool, "state_path": str}.
+    """
+    fetch = slots_fetcher or _fetch_slots
+    slots_all = fetch() or []
+    degraded = not slots_all
+
+    contexts = _fetch_model_contexts()
+    chat_slots = _collect_chat_slots(slots_all, contexts=contexts)
+    primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
+
+    primary_slot = next(
+        (s for s in slots_all if isinstance(s, dict) and s.get("name") == "primary"),
+        None,
+    )
+    primary_for_template: dict[str, Any] | None = None
+    if primary_raw["model"] and primary_raw["model"] != "primary":
+        primary_for_template = {
+            "alias": _slot_alias(primary_slot) if primary_slot else "primary",
+            "model_id": primary_raw["model"],
+            "backend_url": primary_raw["base_url"],
+            "context_length": primary_raw["context_length"],
+            "backend": (primary_slot or {}).get("backend"),
+        }
+
+    capabilities = _collect_capability_rollup(slots_all)
+
+    # NPU: present from the cached env snapshot; loaded model from any FLM
+    # backend slot (NPU LLM path is FastFlowLM).
+    env_report = _latest_env_snapshot(hermes_home).get("env_report", {})
+    npu_model = next(
+        (
+            _slot_model_id(s)
+            for s in slots_all
+            if isinstance(s, dict) and "flm" in str(s.get("backend") or "").lower()
+        ),
+        None,
+    )
+    npu = {"present": bool(env_report.get("npu", {}).get("present")), "model_id": npu_model}
+
+    now = now_iso or datetime.datetime.now(datetime.UTC).isoformat()
+
+    state_vars = {
+        "primary": primary_for_template,
+        "capabilities": capabilities,
+        "npu": npu,
+        "igpu_sclk_mhz": _igpu_sclk_mhz(),
+        "dashboard_url": "https://hal0.thinmint.dev",
+        "lemonade_base": "http://127.0.0.1:13305",
+        "daemon": "degraded" if degraded else "reachable",
+        "as_of": now,
+    }
+    new_state = _render_template("STATE.md.j2", **state_vars)
+
+    out: dict[str, Any] = {
+        "state_written": False,
+        "hermes_written": False,
+        "degraded": degraded,
+        "state_path": str(ETC_HAL0_DIR / "STATE.md"),
+    }
+
+    # STATE.md — content-hash gated (ignore the as_of line).
+    state_path = ETC_HAL0_DIR / "STATE.md"
+    existing = ""
+    if state_path.exists():
+        existing = state_path.read_text(encoding="utf-8")
+    if _state_body_minus_timestamp(existing) != _state_body_minus_timestamp(new_state):
+        _atomic_write(state_path, new_state)
+        out["state_written"] = True
+
+    # HERMES.md — structural map; atomic write (identical content => identical
+    # bytes => prompt-cache safe). Render failure is non-fatal.
+    try:
+        hermes_md = _render_template(
+            "HERMES.md.j2",
+            env=env_report,
+            hal0_version=_hal0_version_string(),
+            hermes_version=_hermes_version_pin(),
+            primary=primary_for_template,
+            chat_slots=chat_slots,
+            peer_agents=[],
+        )
+        hpath = ETC_HAL0_DIR / "HERMES.md"
+        if not hpath.exists() or hpath.read_text(encoding="utf-8") != hermes_md:
+            _atomic_write(hpath, hermes_md)
+            out["hermes_written"] = True
+    except Exception:  # best-effort; STATE.md already written
+        pass
+
+    return out
+
+
 def _collect_chat_slots(
     slots: list[dict[str, Any]],
     contexts: dict[str, int] | None = None,

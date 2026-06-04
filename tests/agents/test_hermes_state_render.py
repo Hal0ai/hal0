@@ -85,3 +85,65 @@ def test_igpu_sclk_mhz_parses_active_line_and_scans_cards(tmp_path):
 
 def test_igpu_sclk_mhz_returns_none_when_absent(tmp_path):
     assert hp._igpu_sclk_mhz(sysfs_root=tmp_path) is None
+
+
+def test_state_body_minus_timestamp_ignores_as_of_line():
+    a = "# Live system state\n- Chat model: x\n\n_as_of: 2026-06-04T10:00:00+00:00_\n"
+    b = "# Live system state\n- Chat model: x\n\n_as_of: 2026-06-04T22:00:00+00:00_\n"
+    assert hp._state_body_minus_timestamp(a) == hp._state_body_minus_timestamp(b)
+
+
+def test_render_live_context_writes_then_skips_when_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+
+    slots = [
+        {
+            "name": "primary",
+            "type": "llm",
+            "model_id": "qwen3-25b",
+            "status": "ready",
+            "backend": "vulkan",
+        },
+        {
+            "name": "embed",
+            "type": "embedding",
+            "model_id": "bge-m3",
+            "status": "ready",
+            "backend": "vulkan",
+        },
+    ]
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {"primary": 32768})
+
+    r1 = hp.render_live_context(
+        hermes_home=home,
+        slots_fetcher=lambda: slots,
+        now_iso="2026-06-04T10:00:00+00:00",
+    )
+    assert r1["state_written"] is True
+    assert r1["degraded"] is False
+    state = (tmp_path / "STATE.md").read_text()
+    assert "qwen3-25b" in state and "bge-m3" in state
+
+    # Same substantive state, different clock-time -> NOT rewritten.
+    r2 = hp.render_live_context(
+        hermes_home=home,
+        slots_fetcher=lambda: slots,
+        now_iso="2026-06-04T22:00:00+00:00",
+    )
+    assert r2["state_written"] is False
+    assert "10:00:00" in (tmp_path / "STATE.md").read_text()  # as_of unchanged
+
+
+def test_render_live_context_degraded_when_daemon_unreachable(tmp_path, monkeypatch):
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    r = hp.render_live_context(
+        hermes_home=home,
+        slots_fetcher=lambda: [],
+        now_iso="2026-06-04T10:00:00+00:00",
+    )
+    assert r["degraded"] is True
+    assert "degraded" in (tmp_path / "STATE.md").read_text()
