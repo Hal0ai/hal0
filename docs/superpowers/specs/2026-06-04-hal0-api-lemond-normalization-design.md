@@ -190,16 +190,27 @@ model rows:
 {
   "id": "hal0/primary",
   "object": "model",
-  "context_window": 65536,
+  "context_length": 65536,
   "_hal0": { "virtual": true, "kind": "live-resolve", "resolves_to": "qwen3.6-35b-…", "device": "gpu-vulkan" }
 }
 ```
 
-- One row per **enabled** virtual name. `context_window` carries the bound slot's `context_size` so
-  Hermes clips at the right boundary; `_hal0.resolves_to` / `_hal0.device` annotate what is live now
-  (the resolver already computes these — §4.2). The `_hal0` block is additive and ignored by stock
-  OpenAI clients.
-- Physical model rows are unchanged. Virtual rows are appended.
+- One row per **enabled** virtual name. **`context_length`** carries the bound slot's `context_size`
+  (verified field choice — Hermes scans `_CONTEXT_LENGTH_KEYS` and `context_length` is *first* in
+  precedence: `agent/model_metadata.py:291-304`). `_hal0.resolves_to` / `_hal0.device` annotate what
+  is live now (the resolver already computes these — §4.2). The `_hal0` block is additive; Hermes
+  parses `/v1/models` leniently (no schema validation — `model_metadata.py:739-755`) so extra fields
+  are safe.
+- **Advertising `context_length` is mandatory, not cosmetic.** If a virtual row omits every
+  context key, Hermes falls back to `DEFAULT_FALLBACK_CONTEXT = 256_000` (`model_metadata.py:128`),
+  which would over-run a smaller local window and silently corrupt context handling.
+- This `/v1/models` row is the **single source** of context for virtual names (see §6 — we
+  deliberately do *not* render a `custom_providers` entry, which would out-prioritize it). Hermes
+  caches the probe ~300 s, so a context change after a slot swap propagates within that window —
+  acceptable.
+- Physical model rows are unchanged. Virtual rows are appended. The picker enumerates virtual names
+  from `data[].id` with no extra config (`discover_models` defaults `True`; the `provider: custom`
+  path probes regardless — `hermes_cli/model_switch.py:1540`, `models.py:2000/3108/3186`).
 
 ### 4.4 `SlotConfig.role` (schema addition)
 
@@ -254,19 +265,20 @@ template changes are about making the virtual names **discoverable + correctly s
     default: {{ primary.model_id | tojson }}
   {%- endif %}
   ```
-- **`model_aliases` entries for virtual names (Hermes review #9).** The `model_aliases` block
-  (`config.yaml.j2:70-76`) currently loops only physical slot aliases. Add one entry per enabled
-  virtual name so Hermes' `/model` picker + session footer resolve them:
-  ```yaml
-  model_aliases:
-    hal0/primary: { model: "hal0/primary", provider: "custom", base_url: "http://127.0.0.1:8080/v1" }
-  ```
-- **Context length for virtual names (Hermes review #2).** Two redundant-but-cheap sources, so the
-  window is right regardless of which Hermes reads: (a) hal0-api advertises `context_window` on the
-  `/v1/models` virtual row (§4.3); (b) add a `custom_providers` entry **keyed by the virtual name**
-  carrying the configured primary's `context_length`. *(Which source Hermes actually consumes for a
-  `custom` provider is an open question for Hermes — see implementation questions; we ship both until
-  confirmed, then drop the redundant one.)*
+- **Picker discovery needs nothing beyond `/v1/models` (revised after source check — Hermes review
+  #9 superseded).** Hermes' `/model` picker for `provider: custom` is built **solely** from the
+  server's `/v1/models` `data[].id` (`hermes_cli/models.py:3108-3186`), not from `model_aliases`. So
+  advertising the virtual name in `/v1/models` (§4.3) is **sufficient** for discovery — *no
+  `model_aliases` entry is required*. `model_aliases` only provides optional request-time
+  **shorthand** (e.g. `hermes` → `hal0/primary`, `model_switch.py:179-243`); add a shorthand entry
+  *only if desired*, not for discovery. (This drops the original #9 requirement.)
+- **Context length: `/v1/models` only — do NOT render `custom_providers` (revised, Hermes review #2).**
+  Source check: Hermes resolves context in precedence order where `custom_providers[].models.<id>.
+  context_length` **out-prioritizes** the live `/v1/models` probe (`config.py:3479-3541`,
+  `model_metadata.py:1484+`). A `custom_providers` virtual entry would therefore **lock a stale
+  value** and defeat live-follow. So the **single source** is the `context_length` field on the
+  `/v1/models` virtual row (§4.3); the template renders **no** `custom_providers` entry for virtual
+  names.
 - All template changes survive bootstrap re-render natively (rendered from `live_resolve_enabled` +
   slot config); `overrides.yaml` remains the escape hatch, not the primary mechanism. Never hand-edit
   `config.yaml` (re-rendered on startup); restart via `hal0-agent@hermes` as the `hal0` user.
@@ -313,10 +325,10 @@ enhancement (§10).
   `chat_template_kwargs.enable_thinking` set); **`no_think` passthrough** (caller already suppressed
   at prompt level — not stripped, not double-injected); **idempotency** (second apply is a no-op).
 - **Integration:** dispatcher/v1 tests with mocked lemond `/health` + `/v1/models`; **`/v1/models`
-  advertisement** — virtual rows present with correct `context_window` + `_hal0` annotation, physical
-  rows unchanged; γ-suite for the chat path (streaming passthrough + tool-calls untouched; body
-  mutated before stream opens).
-- **CT105 smoke:** curl `GET /v1/models` → assert `hal0/primary` present with `context_window`; curl
+  advertisement** — virtual rows present with correct `context_length` + `_hal0` annotation, physical
+  rows unchanged, and **no `custom_providers` virtual entry** rendered in the Hermes config; γ-suite
+  for the chat path (streaming passthrough + tool-calls untouched; body mutated before stream opens).
+- **CT105 smoke:** curl `GET /v1/models` → assert `hal0/primary` present with `context_length`; curl
   `model: hal0/primary` → assert it hits the live slot and `enable_thinking:false` is on the wire
   (adapt `gateway/scripts/smoke.sh`).
 
@@ -345,6 +357,20 @@ enhancement (§10).
 - `hermes_cli/auth.py:460-491` — api-key-only auto-extend; skips `custom`/`openrouter`.
 - `hermes_cli/runtime_provider.py:619-623` — `_custom_provider_request_overrides` (`extra_body`).
 - `hermes_cli/model_normalize.py:326-466` — stateless per-provider name normalization (not live).
+
+**Hermes `/v1/models` + config consumption contract (venv `hermes_agent-0.15.2`, dual-verified):**
+- `agent/model_metadata.py:291-304` — `_CONTEXT_LENGTH_KEYS` (13 keys; `context_length` first).
+- `agent/model_metadata.py:128` — `DEFAULT_FALLBACK_CONTEXT = 256_000` (hazard if context unadvertised).
+- `agent/model_metadata.py:739-755` — lenient `/v1/models` parse (no schema validation; `_hal0` safe).
+- `agent/model_metadata.py:1484+` + `hermes_cli/config.py:3479-3541` — context precedence:
+  `custom_providers` config > live `/v1/models` probe (≈300 s cache). → use `/v1/models` only.
+- `hermes_cli/models.py:2000,3108-3186` — `provider: custom` picker = `/v1/models` `data[].id` only.
+- `hermes_cli/model_switch.py:1540` — `discover_models` defaults `True`; `:179-243` `model_aliases`
+  = request-time shorthand, not picker source.
+- `tools/delegate_tool.py:2345` — `delegation.model` resolved once at spawn.
+- `hermes_cli/auth.py:6353-6448` — `/model` picker renders id-only (no per-row label).
+- grep (hermes_cli/agent/tools/gateway): **zero** `enable_thinking`/`chat_template_kwargs`/`no_think`
+  set-sites → hal0-api injection is unopposed.
 
 **hal0 Hermes integration (`src/hal0/agents/`):**
 - `hermes_templates/config.yaml.j2:30-38` — `custom`-provider rationale; `Hal0Profile` removal.
@@ -382,16 +408,19 @@ enhancement (§10).
 - Changing lemond itself, slot lifecycle FSM, or the registry.
 - Memory-extraction model choice (instruct-only) — unaffected; separate path.
 - **Picker live-annotation (Hermes review #3).** The `_hal0.resolves_to` / `_hal0.device` fields are
-  *emitted now* (§4.3) but rendering them in Hermes' `/model` picker
-  (`hal0/primary → [now: <model>] (iGPU)`) is a downstream Hermes (or hal0 admin-skill) change. The
-  annotation format is reserved here so the data is available when that lands.
+  *emitted now* (§4.3) but Hermes' `/model` picker renders **id-only** today — no per-row
+  label/description (`hermes_cli/auth.py:6353-6448`; a `/v1/models` `name` field *is* read at
+  `model_metadata.py:742` but the picker doesn't render it). So `hal0/primary → [now: <model>] (iGPU)`
+  needs a downstream Hermes (or hal0 admin-skill) change. The annotation format is reserved here so
+  the data is ready when that lands.
 - **Cold-start warm progress (Hermes review #7).** Surfacing slot-warming as an SSE preamble/spinner
   during the synchronous first-token load. v1 only logs it (§7).
-- **Subagent model stability (Hermes review #12).** Hermes delegates subagents via `delegate_task`
-  reading `delegation.model`. With live-resolve, a subagent's next turn follows whatever slot is
-  loaded *now* — if the operator swaps the slot mid-run, the subagent's model changes mid-conversation.
-  This is a Hermes concern, not a hal0-api one: the resolver deliberately returns live state each
-  call. Pinning a subagent to a fixed physical model for its lifetime would be a Hermes-side feature.
+- **Subagent model stability (Hermes review #12).** Hermes resolves `delegation.model` **once at
+  `delegate_task` spawn**, not per-turn (verified: `tools/delegate_tool.py:2345`). With a live-resolve
+  virtual name, a subagent therefore keeps *sending* `hal0/primary` for its whole run, and hal0-api
+  maps it to whatever slot is loaded **now** each turn — so a mid-run slot swap changes the subagent's
+  effective model. That's intended: a subagent "sees whatever is loaded, same as any caller." Pinning
+  a subagent to a fixed physical model for its lifetime would be a Hermes-side feature, not hal0-api.
 - **Capability-UI role binding.** Promote the `SlotConfig.role` field (§4.4) into the
   `capabilities.toml` selection system so operators pick chat/utility/npu roles through the same UX as
   embed/voice/img. The `role` data model is the seam; the orchestrator/UI work is deferred.
