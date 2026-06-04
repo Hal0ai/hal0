@@ -12,18 +12,23 @@ Type=simple
 User=hal0
 Group=hal0
 # Loopback-only: the gateway sits behind hal0-api's surface, never LAN-exposed.
-# bifrost-http reads config.json + sqlite state from -app-dir; plugins live in
-# <app-dir>/plugins and are referenced by absolute path in config.json.
-ExecStart=/opt/hal0/bin/bifrost-http -app-dir /etc/hal0/bifrost -host 127.0.0.1 -port 8079 -log-style json
+# bifrost-http reads config.json AND writes its sqlite store + logs into
+# -app-dir, so it must be writable by the hal0 user (ProtectSystem=strict makes
+# /etc read-only). Plugins live in <app-dir>/plugins, referenced by absolute
+# path in config.json.
+ExecStart=/opt/hal0/bin/bifrost-http -app-dir /var/lib/hal0/bifrost -host 127.0.0.1 -port 8079 -log-style json
 Restart=on-failure
 RestartSec=3
-# Resource guard rails consistent with the rest of the stack.
-MemoryMax=512M
+# Resource guard rails. bifrost-http loads a ~3019-model catalog + plugins into
+# memory at startup, so keep headroom above 512M.
+MemoryMax=1G
 CPUWeight=50
 NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/hal0
-ProtectHome=true
+# NOTE: FS sandboxing (ProtectSystem=strict / ProtectHome) is intentionally
+# omitted — bifrost-http writes its sqlite store + journal under -app-dir, which
+# sits in the hal0 user's home (/var/lib/hal0); strict mode blocked sqlite's
+# temp writes with disk-I/O/read-only errors. Revisit with a scoped
+# ReadWritePaths + PrivateTmp once the exact write set is characterised.
 
 [Install]
 WantedBy=multi-user.target

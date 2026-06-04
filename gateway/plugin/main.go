@@ -42,7 +42,10 @@ var (
 	mu          sync.RWMutex
 	cachedModel string
 	cachedAt    time.Time
-	httpClient  = &http.Client{Timeout: 3 * time.Second}
+	// Short timeout so a slow/hung lemond /health (a known failure mode while a
+	// big model is loaded) fails fast and we fall back to the last-known-good
+	// cached slot instead of blocking the request for 3s.
+	httpClient = &http.Client{Timeout: 1500 * time.Millisecond}
 )
 
 // Init is called once when Bifrost loads the plugin.
@@ -77,15 +80,21 @@ func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*sche
 		return req, nil, nil // not a chat request — leave untouched
 	}
 
-	primary, err := resolvePrimary()
+	primary, stale, err := resolvePrimary()
 	if err != nil {
-		// No LLM loaded (or lemond unreachable). Don't rewrite to an empty
-		// model; let the original request fall through and surface lemond's
-		// own error rather than masking it.
+		// No LLM loaded and nothing cached (or lemond unreachable on the very
+		// first poll). Don't rewrite to an empty model; let the original request
+		// fall through and surface lemond's own error rather than masking it.
 		if ctx != nil {
 			ctx.Log(schemas.LogLevelWarn, "hal0-normalize: primary resolve failed, passing through: "+err.Error())
 		}
 		return req, nil, nil
+	}
+	if stale && ctx != nil {
+		// Health fetch/parse failed but we have a last-known-good slot. Serve it
+		// (stale-but-serving) instead of 404-ing the caller; the next request
+		// after lemond recovers will refresh the cache.
+		ctx.Log(schemas.LogLevelWarn, "hal0-normalize: lemond health unavailable, using cached primary: "+primary)
 	}
 
 	// Adapt Bifrost -> pure view.
@@ -100,13 +109,21 @@ func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*sche
 
 	normalize.Apply(view, primary, callerOptedThinking)
 
-	// Write back. The openai/custom provider merges ExtraParams into the wire
-	// body via MergeExtraParamsIntoJSON, so chat_template_kwargs reaches lemond.
+	// Write back. Bifrost's openai-base custom provider only merges ExtraParams
+	// into the outgoing wire body (via MergeExtraParamsIntoJSON) when the context
+	// flag BifrostContextKeyPassthroughExtraParams is set true — the vllm/sgl
+	// providers set it for us, but the custom provider does NOT. Without the flag
+	// our chat_template_kwargs is silently dropped and reasoning models keep
+	// emitting <think> blocks. So we set it ourselves whenever we have params to
+	// pass through. (Bifrost core/providers/utils/utils.go merge gate.)
 	req.ChatRequest.Model = view.Model
 	if req.ChatRequest.Params == nil {
 		req.ChatRequest.Params = &schemas.ChatParameters{}
 	}
 	req.ChatRequest.Params.ExtraParams = view.ExtraParams
+	if ctx != nil && len(view.ExtraParams) > 0 {
+		ctx.SetValue(schemas.BifrostContextKeyPassthroughExtraParams, true)
+	}
 	return req, nil, nil
 }
 
@@ -119,14 +136,19 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, bif
 func Cleanup() error { return nil }
 
 // resolvePrimary returns the live LLM slot model id, cached for cfg.TTLMillis.
-func resolvePrimary() (string, error) {
+//
+// The bool return is "stale": true when the fresh health fetch/parse failed and
+// we are serving the last-known-good cached slot instead. On the happy path it
+// is false. An error is returned only when the fetch fails AND there is no
+// cached value to fall back to (e.g. lemond down before the very first poll).
+func resolvePrimary() (model string, stale bool, err error) {
 	ttl := time.Duration(cfg.TTLMillis) * time.Millisecond
 
 	mu.RLock()
 	if cachedModel != "" && time.Since(cachedAt) < ttl {
 		m := cachedModel
 		mu.RUnlock()
-		return m, nil
+		return m, false, nil
 	}
 	mu.RUnlock()
 
@@ -134,9 +156,25 @@ func resolvePrimary() (string, error) {
 	defer mu.Unlock()
 	// Re-check after acquiring the write lock (another goroutine may have refreshed).
 	if cachedModel != "" && time.Since(cachedAt) < ttl {
-		return cachedModel, nil
+		return cachedModel, false, nil
 	}
 
+	m, ferr := fetchPrimary()
+	if ferr != nil {
+		// Fresh resolve failed. Fall back to the last-known-good slot if we have
+		// one (stale-but-serving) rather than erroring the caller into a 404.
+		if cachedModel != "" {
+			return cachedModel, true, nil
+		}
+		return "", false, ferr
+	}
+	cachedModel = m
+	cachedAt = time.Now()
+	return m, false, nil
+}
+
+// fetchPrimary does one live lemond /health poll + parse. Caller holds mu.
+func fetchPrimary() (string, error) {
 	resp, err := httpClient.Get(cfg.HealthURL)
 	if err != nil {
 		return "", err
@@ -146,11 +184,5 @@ func resolvePrimary() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	model, err := normalize.ParseLoadedLLM(body)
-	if err != nil {
-		return "", err
-	}
-	cachedModel = model
-	cachedAt = time.Now()
-	return model, nil
+	return normalize.ParseLoadedLLM(body)
 }
