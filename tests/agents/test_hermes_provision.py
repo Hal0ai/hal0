@@ -192,9 +192,11 @@ def test_repair_flag_forces_rerun(tmp_path: Path, state_with_tmp_paths: hp.Boots
     second = hp.run(state_root=tmp_path, initial_state=state_with_tmp_paths, repair=True)
     # Repair re-runs everything → nothing was skipped via checkpoint.
     assert second.skipped == []
-    # voice_wire legitimately returns SKIP when no STT/TTS slots exist
+    # voice_wire legitimately returns SKIP when no STT/TTS slots exist;
+    # gateway_secrets_wire SKIPs when the test runner is non-root (can't
+    # write /etc/systemd/system). Accept both OK and SKIP for those phases
     # (same posture as the fresh-run test above).
-    skip_ok = {"voice_wire"}
+    skip_ok = {"voice_wire", "gateway_secrets_wire"}
     for name in hp.PHASE_NAMES:
         status = second.phases[name]["status"]
         allowed = {hp.PhaseStatus.OK.value} | (
