@@ -94,15 +94,24 @@ model:
 then `hermes restart` (as the `hal0` user — never root). Re-read the file first;
 it may have changed in an in-flight Hermes update.
 
+## Status
+
+Validated locally on hal0-dev (no CT105 contact):
+
+- [x] `make build` end-to-end — ABI-matched transport + `.so` from one `go.work`
+      over the pinned `core/v1.5.16` checkout.
+- [x] Plugin loads into a running `bifrost-http`: `plugin status: hal0-normalize
+      - active`, server binds `:8079`, no version-skew panic. The `compat`
+      plugin (drop-params shim) is active by default.
+- [x] Config schema settled: `plugins[]` entries reference an absolute `path`
+      and require `enabled: true`; gateway is launched with `-app-dir`.
+
 ## Open items before production
 
-- [ ] Confirm the exact `plugins[]` schema the running `bifrost-http` expects
-      (path vs plugins-dir auto-load) — the transport module wasn't inspected
-      offline; verify at deploy.
-- [ ] Pin `BIFROST_REF` to the release whose transport uses core v1.5.16 and
-      smoke-test `make build` end-to-end.
-- [ ] Live smoke: `curl :8079/v1/chat/completions` with `model: lemonade/primary`
-      → confirm it hits the loaded slot and `enable_thinking=false` is on the wire.
-- [ ] Then the Hermes cutover above. Hermes-only first; widen to pi-coder / other
-      agents after it's proven.
+- [ ] **Live chat smoke** (needs a reachable lemond — not done, CT105 was
+      off-limits): `scripts/smoke.sh` → confirm `model: lemonade/primary` routes
+      to the loaded slot and `enable_thinking=false` is on the wire.
+- [ ] **Deploy** to CT105 (`make deploy`) — pushes binary/.so/config/unit only.
+- [ ] **Hermes cutover** (above): OpenRouter → `lemonade/primary`. Hermes-only
+      first; widen to pi-coder / other agents after it's proven.
 ```
