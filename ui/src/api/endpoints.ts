@@ -15,6 +15,10 @@ export const ENDPOINTS = {
     unload: '/v1/unload',
   },
 
+  // ── Lemonade admin config (hal0-api → lemond /internal/config) ────
+  // GET/POST the immediate-vs-deferred config surface (issue #461).
+  lemonadeConfig: '/api/lemonade/config',
+
   // ── Slots / status (hal0-api) ────────────────────────────────────
   status: '/api/status',
   slots: '/api/slots',

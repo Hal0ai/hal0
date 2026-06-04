@@ -5,6 +5,7 @@
 // those views stay on HAL0_DATA mock for B1 (see issues #TBD).
 
 export * from './useLemonade'
+export * from './useLemonadeConfig'
 export * from './useSlots'
 export * from './useModels'
 export * from './useBackends'

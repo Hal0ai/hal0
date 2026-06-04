@@ -61,6 +61,53 @@ function buildStats() {
   }
 }
 
+function buildLemonadeConfig() {
+  // /api/lemonade/config fallback (issue #461). Mirrors the lemond
+  // /internal/config snapshot the backend forwards, plus the `_hal0`
+  // envelope (immediate-vs-deferred key partition + locked store path)
+  // so the admin form renders real labels in forced-mock + on a 404.
+  // Key/effect taxonomy tracks hal0.api.routes.lemonade_admin.
+  return {
+    max_loaded_models: 4,
+    ctx_size: 4096,
+    llamacpp_args: '--parallel 1 --threads 8 --flash-attn on',
+    flm_args: '--asr 1 --embed 1',
+    whispercpp_backend: 'vulkan',
+    sdcpp_backend: 'rocm',
+    steps: 20,
+    cfg_scale: 7.0,
+    width: 512,
+    height: 512,
+    extra_models_dir: '/var/lib/hal0/models',
+    _hal0: {
+      effects: {
+        immediate: [
+          'extra_models_dir',
+          'global_timeout',
+          'host',
+          'log_level',
+          'no_broadcast',
+          'port',
+        ],
+        deferred: [
+          'cfg_scale',
+          'ctx_size',
+          'flm_args',
+          'height',
+          'llamacpp_args',
+          'llamacpp_backend',
+          'max_loaded_models',
+          'sdcpp_backend',
+          'steps',
+          'whispercpp_backend',
+          'width',
+        ],
+      },
+      locked: { extra_models_dir: '/var/lib/hal0/models' },
+    },
+  }
+}
+
 function buildStatus() {
   const d = data()
   return {
@@ -182,6 +229,7 @@ type Builder = (url: string, match: RegExpMatchArray) => unknown
 export const MOCK_ALLOWLIST: ReadonlyArray<{ re: RegExp; build: Builder }> = Object.freeze([
   { re: /^\/v1\/health$/, build: buildHealth },
   { re: /^\/v1\/stats$/, build: buildStats },
+  { re: /^\/api\/lemonade\/config$/, build: buildLemonadeConfig },
   { re: /^\/api\/status$/, build: buildStatus },
   { re: /^\/api\/slots$/, build: buildSlots },
   { re: /^\/api\/slots\/[^/]+$/, build: () => null }, // 404-style — Slot detail not in mock
