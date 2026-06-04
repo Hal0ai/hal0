@@ -281,6 +281,85 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
     return new_body
 
 
+def _normalize_loaded_models(request: Request) -> set[str]:
+    """Currently-loaded model ids from the cached health snapshot (NO new lemond poll)."""
+    shim = getattr(request.app.state, "lemonade_metrics_shim", None)
+    if shim is None:
+        return set()
+    try:
+        return set(shim._health.loaded_models)
+    except Exception:  # pragma: no cover — defensive
+        return set()
+
+
+async def _normalize_slot_views(request: Request) -> list:
+    """Build SlotView list from slot config (awaits hal0_llm_slot_views, like the
+    existing per-request alias-map read)."""
+    from hal0.api import hal0_llm_slot_views
+    from hal0.normalize.resolver import SlotView
+
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return []
+    rows = await hal0_llm_slot_views(sm)
+    return [
+        SlotView(
+            name=r["name"],
+            role=r.get("role"),
+            device=r.get("device", ""),
+            model_id=r["model_id"],
+            context_length=int(r.get("context_length") or 0),
+        )
+        for r in rows
+    ]
+
+
+def _is_remote_model(request: Request, model_id: str) -> bool:
+    """True if model_id maps to a kind=='remote' upstream (skip thinking injection)."""
+    upstreams = getattr(request.app.state, "upstreams", None)
+    cache = getattr(request.app.state, "upstream_models", {}) or {}
+    if upstreams is None:
+        return False
+    try:
+        for u in upstreams.list():
+            if getattr(u, "kind", "") == "remote" and model_id in set(cache.get(u.name, [])):
+                return True
+    except Exception:  # pragma: no cover — defensive
+        return False
+    return False
+
+
+async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """Resolve hal0/* virtual model names + inject thinking policy for lemond-bound calls.
+
+    Rewrites request._body so BOTH the dispatcher path and the NoRouteFound proxy
+    fall-through observe the normalized body.
+    """
+    from hal0.normalize.resolver import LiveSlotResolver
+    from hal0.normalize.thinking import apply_thinking_policy
+
+    views = await _normalize_slot_views(request)
+    resolver = LiveSlotResolver(
+        slot_views_provider=lambda: views,
+        loaded_models_provider=lambda: _normalize_loaded_models(request),
+    )
+    raw_model = body.get("model")
+    if isinstance(raw_model, str) and raw_model:
+        res = await resolver.resolve(raw_model)
+        if res is not None and res.model_id:
+            body = {**body, "model": res.model_id}
+
+    model_id = body.get("model")
+    if isinstance(model_id, str) and not _is_remote_model(request, model_id):
+        body = apply_thinking_policy(body)
+
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        request._body = json.dumps(body).encode("utf-8")  # type: ignore[attr-defined]
+    return body
+
+
 async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> None:
     """#430: load a slot-backed model under its DECLARED backend before routing.
 
@@ -572,6 +651,17 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     # see the real model name. Also rewrites the cached request body for
     # the lemonade fall-through.
     body = await _rewrite_chat_slot_alias(request, body)
+    # SOLE normalization gate (chat only). Resolves hal0/* virtual names +
+    # injects the thinking policy, and rewrites request._body. Placed BEFORE
+    # the omni branch so the OmniRouter posts the normalized body; the
+    # non-omni path then hands the already-normalized body=body into
+    # _dispatch_and_forward (which sees request._body too via the proxy
+    # fall-through). Deliberately NOT in _dispatch_and_forward — that helper
+    # also serves /v1/completions, /v1/embeddings, /v1/rerankings, and the
+    # multipart /v1/audio/transcriptions, none of which are chat and where an
+    # unconditional request._body=json(body) rewrite would corrupt the
+    # multipart upload / inject a meaningless enable_thinking.
+    body = await _normalize_chat_body(request, body)
     if body.get("omni") is True:
         looped = await _maybe_run_omni_loop(request, body)
         if looped is not None:
