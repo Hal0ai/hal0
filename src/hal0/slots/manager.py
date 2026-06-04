@@ -955,8 +955,7 @@ class SlotManager:
             except SlotConfigError as exc:
                 log.warning(
                     "slot.config_skipped",
-                    slot=name,
-                    error=str(exc),
+                    extra={"slot": name, "error": str(exc)},
                 )
                 continue
             out.append(cfg)
@@ -993,7 +992,10 @@ class SlotManager:
                 with open(path, "rb") as f:
                     data = tomllib.load(f)
             except (OSError, tomllib.TOMLDecodeError) as exc:
-                log.warning("slot.idle_ttl_skipped", slot=name, error=str(exc))
+                log.warning(
+                    "slot.idle_ttl_skipped",
+                    extra={"slot": name, "error": str(exc)},
+                )
                 continue
             model = data.get("model") or {}
             model_name = ""
