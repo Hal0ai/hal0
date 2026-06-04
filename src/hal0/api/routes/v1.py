@@ -607,7 +607,7 @@ async def list_models(
         slot_views_provider=lambda: views,
         loaded_models_provider=lambda: _normalize_loaded_models(request),
     )
-    for vname in DEFAULT_CHAINS:   # canonical names only (aliases excluded from the picker)
+    for vname in DEFAULT_CHAINS:  # canonical names only (aliases excluded from the picker)
         if vname in seen:
             continue
         res = await resolver.resolve(vname)
@@ -615,19 +615,21 @@ async def list_models(
             continue
         seen.add(vname)
         device = next((v.device for v in views if v.model_id == res.model_id), "")
-        data.append({
-            "id": vname,
-            "object": "model",
-            "created": now,
-            "owned_by": "hal0",
-            "context_length": res.context_length,
-            "_hal0": {
-                "virtual": True,
-                "kind": "live-resolve",
-                "resolves_to": res.model_id,
-                "device": device,
-            },
-        })
+        data.append(
+            {
+                "id": vname,
+                "object": "model",
+                "created": now,
+                "owned_by": "hal0",
+                "context_length": res.context_length,
+                "_hal0": {
+                    "virtual": True,
+                    "kind": "live-resolve",
+                    "resolves_to": res.model_id,
+                    "device": device,
+                },
+            }
+        )
 
     return {"object": "list", "data": data}
 
