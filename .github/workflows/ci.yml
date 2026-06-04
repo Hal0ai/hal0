@@ -8,6 +8,11 @@ on:
 jobs:
   python:
     runs-on: ubuntu-latest
+    env:
+      # fastembed (cognee memory tests) honours FASTEMBED_CACHE_PATH
+      # (fastembed/common/utils.py). Pin it to a stable, cacheable dir so the
+      # warm step AND pytest share one location that actions/cache persists.
+      FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -27,26 +32,26 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Cache fastembed embedding model
-        # The cognee memory tests (tests/memory/test_cognee_wrapper.py) embed
-        # via fastembed -> BAAI/bge-small-en-v1.5 (~70 MB ONNX), fetched into
-        # ~/.cache/huggingface on first use. Caching it removes the per-run HF
-        # download that intermittently fails (could-not-load-model from any
-        # source) and gated unrelated PRs (#442, #445). The model id is fixed,
-        # so a static key caches once and restores forever (bump -vN to refresh).
+        # cognee memory tests (tests/memory/test_cognee_wrapper.py) embed via
+        # fastembed, which downloads qdrant/bge-small-en-v1.5-onnx-q (~64 MB)
+        # into FASTEMBED_CACHE_PATH on first use. That per-run download
+        # intermittently slow-fails (could-not-load-model-from-any-source) and
+        # gated unrelated PRs (#442, #445). The model id is fixed, so a static
+        # key caches once and restores forever (bump -vN to refresh).
         uses: actions/cache@v4
         with:
-          path: ~/.cache/huggingface
-          key: fastembed-bge-small-en-v1.5-v1
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-bge-small-en-v1.5-v2
       - name: Warm fastembed cache
-        # On a cache miss, download the model now with retries so a transient
-        # HF blip retries here instead of failing the whole test job. On a
-        # cache hit this is a ~2-3s load from disk. Best-effort: if all
-        # attempts fail, let pytest surface the error rather than masking it.
+        # On a cache miss, download the model now. fastembed already retries 3x
+        # internally; we wrap each attempt in `timeout` so a stalled connection
+        # is bounded (~6 min) and retried fresh rather than hanging. Best-effort:
+        # on total failure, let pytest surface the error rather than masking it.
         run: |
           for attempt in 1 2 3; do
-            python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5'); print('fastembed model warmed')" && exit 0
-            echo "::warning::fastembed warm attempt $attempt failed; retrying in 15s"
-            sleep 15
+            timeout 360 python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5'); print('fastembed model warmed')" && exit 0
+            echo "::warning::fastembed warm attempt $attempt failed/timed out; retrying in 10s"
+            sleep 10
           done
           echo "::warning::fastembed warm-up failed after 3 attempts; cognee tests will surface it"
       - name: Lint
