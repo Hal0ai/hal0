@@ -417,6 +417,27 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     for entry in synthetic:
         if entry["name"] not in real_names:
             merged.append(entry)
+
+    # Embed live metrics in the card-expected shape (#26 / BE-METRICS): the
+    # dashboard reads slot.metrics.{toks,ttft,ctx,kv,mem}. Source the merged
+    # per-slot rows (upstream stats + local tps/ttft + child-port scrape) and
+    # remap to the frontend keys. Never fatal — absent rows leave the
+    # frontend's zero/null defaults in place.
+    try:
+        raw_metrics = await slot_metrics(request)
+    except Exception:
+        raw_metrics = {}
+    for entry in merged:
+        rm = raw_metrics.get(str(entry.get("name"))) or {}
+        kv = rm.get("kv_cache_usage")
+        ttft_s = rm.get("ttft_seconds")
+        entry["metrics"] = {
+            "toks": round(float(rm.get("tokens_per_sec") or 0), 1),
+            "ttft": round(float(ttft_s) * 1000) if ttft_s else None,
+            "ctx": int(rm.get("ctx") or 0),
+            "kv": round(float(kv) * 100, 1) if kv is not None else None,
+            "mem": round(float(entry.get("mem_mb") or 0) / 1024.0, 2),
+        }
     return merged
 
 
@@ -803,6 +824,42 @@ async def _docker_container_mem_bytes(container_name: str) -> int:
         return 0
 
 
+async def _lemond_loaded_map(request: Request) -> dict[str, dict[str, Any]]:
+    """Map loaded ``model_name`` → ``{"port": child_port, "ctx": ctx_size}`` from
+    lemond's ``health.all_models_loaded``.
+
+    Lemond assigns each llama-server child its own port (8001+), so scraping the
+    slot's configured port misses the live process. Never raises — a down lemond
+    yields an empty map and metrics degrade to the slot-port fallback.
+    """
+    try:
+        from hal0.providers import lemonade_provider
+        from hal0.providers.lemonade import _port_from_backend_url
+
+        health = await lemonade_provider().client().health()
+    except Exception:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for entry in (health or {}).get("all_models_loaded") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("model_name")
+        if not name:
+            continue
+        ctx = 0
+        ro = entry.get("recipe_options")
+        if isinstance(ro, dict):
+            try:
+                ctx = int(ro.get("ctx_size") or 0)
+            except (TypeError, ValueError):
+                ctx = 0
+        out[str(name)] = {
+            "port": _port_from_backend_url(entry.get("backend_url")),
+            "ctx": ctx,
+        }
+    return out
+
+
 async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
     """Build per-slot live metrics from cgroup + systemd activation time.
 
@@ -826,11 +883,18 @@ async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
+    # Lemond runs each llama-server child on its OWN port (8001+), not the
+    # slot's configured port — resolve the real child port + ctx so the
+    # KV-cache / ctx scrape hits the live process (#26 / BE-METRICS).
+    loaded_map = await _lemond_loaded_map(request)
+
     import time
 
     monotonic_now_us = int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1_000_000)
 
     async def _one(slot: Slot) -> tuple[str, dict[str, Any]]:
+        loaded = loaded_map.get(slot.model_id or "") or {}
+        scrape_port = loaded.get("port") or slot.port
         unit = f"hal0-slot@{slot.name}.service"
         # Fan systemd properties + docker cgroup + llama metrics out in
         # parallel — three independent IO waits, no point serialising.
@@ -843,7 +907,7 @@ async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
             )
         )
         mem_task = asyncio.create_task(_docker_container_mem_bytes(f"hal0-slot-{slot.name}"))
-        metrics_task = asyncio.create_task(_scrape_llama_metrics(slot.port))
+        metrics_task = asyncio.create_task(_scrape_llama_metrics(scrape_port))
         props, mem_bytes, llm_metrics = await asyncio.gather(
             props_task, mem_task, metrics_task, return_exceptions=False
         )
@@ -879,6 +943,8 @@ async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
                 out["requests_deferred"] = int(llm_metrics["requests_deferred"])
             if "kv_cache_usage" in llm_metrics:
                 out["kv_cache_usage"] = float(llm_metrics["kv_cache_usage"])
+        if loaded.get("ctx"):
+            out["ctx"] = int(loaded["ctx"])
         return slot.name, out
 
     pairs = await asyncio.gather(*(_one(s) for s in slots), return_exceptions=True)
@@ -938,6 +1004,8 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
         # the local scrape when we have one.
         if "kv_cache_usage" in local:
             entry["kv_cache_usage"] = local["kv_cache_usage"]
+        if local.get("ctx"):
+            entry["ctx"] = local["ctx"]
     # TTFT samples are captured on the dispatcher's streaming wrapper
     # and only exist locally — fold them in last so they win.
     for name, ttft in _per_slot_ttft(request).items():
