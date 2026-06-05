@@ -709,12 +709,57 @@ a { color: inherit; text-decoration: none; }
    ════════════════════════════════════════════════════════════════════ */
 .dash {
   display: grid;
-  grid-template-columns: 1fr 380px;
+  grid-template-columns: 1fr 320px;
   gap: 20px;
   align-items: start;
 }
 .dash-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .dash-side { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 12px; }
+
+/* Main 50/50 row — Memory map | Throughput (home-redesign 2026-06-05).
+   Both halves are .side-card so they read as a matched pair. */
+.dash-5050 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+/* System side card — the five Hardware cards collapsed to one glanceable
+   line each, plus a live RAM glance and the folded-in lemond health row. */
+.sys-card-b { padding: 0; }
+.sys-row {
+  display: grid;
+  grid-template-columns: 50px 1fr;
+  gap: 12px;
+  align-items: baseline;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12.5px;
+}
+.sys-row:last-child { border-bottom: none; }
+.sys-row .k {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-4);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.sys-row .v { color: var(--fg); min-width: 0; }
+.sys-row .v .dim { color: var(--fg-4); }
+.sys-row .v .sub {
+  display: block;
+  margin-top: 4px;
+  color: var(--fg-3);
+  font-size: 11.5px;
+}
+.sys-row .v .num { color: var(--fg); font-weight: 500; }
+.sys-divider { height: 1px; background: var(--line-soft); }
+.sys-health { display: inline-flex; align-items: center; gap: 6px; }
+.sys-health.up { color: var(--ok); }
+.sys-health.up .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.sys-health.down { color: var(--err); }
+.sys-health.down .dot { background: var(--err); box-shadow: 0 0 8px var(--err); }
 
 .hero-strip {
   display: flex;
@@ -2163,6 +2208,7 @@ a { color: inherit; text-decoration: none; }
   .reactor { grid-template-columns: 1fr; }
   .dash { grid-template-columns: 1fr; }
   .dash-side { position: static; display: flex; flex-direction: column; gap: 12px; }
+  .dash-5050 { grid-template-columns: 1fr; }
   .models-layout { grid-template-columns: 1fr; }
   .mdl-filters { position: static; }
   .mdl-detail { position: static; }
