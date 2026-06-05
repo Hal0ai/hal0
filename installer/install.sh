@@ -58,6 +58,18 @@ wait_active() {
 
 DEV_MODE=0
 NO_START=0
+# ROCmFP4 + MTP "power pack" (issue #516, locked decision D5). OPT-IN only:
+# never default, never auto-enabled by the hal0-max bundle. Scaffolds the
+# gfx1151-only / ROCm-only fork path (charlie12345/rocmfp4-llama) — a global
+# `rocm_bin` override + a `gpu-rocmfp4` slot + the HSA_OVERRIDE_GFX_VERSION
+# guard. Toggle with `--rocmfp4` or HAL0_ENABLE_ROCMFP4=1. The actual fork
+# binary is built out-of-band (see installer/README.md "ROCmFP4 power pack");
+# this flag only wires an EXISTING binary in, warning + skipping if it or the
+# host eligibility is missing. Default install is byte-for-byte unaffected.
+ENABLE_ROCMFP4=0
+if [[ "${HAL0_ENABLE_ROCMFP4:-0}" == "1" ]]; then
+    ENABLE_ROCMFP4=1
+fi
 # TLS posture: hal0-api binds 0.0.0.0:8080 directly. TLS termination,
 # DNS, and any per-host certs are the responsibility of an upstream
 # reverse proxy (Traefik, nginx, Cloudflare Tunnel) — hal0 does not ship
@@ -71,12 +83,20 @@ for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
         --no-start) NO_START=1 ;;
+        --rocmfp4) ENABLE_ROCMFP4=1 ;;
         --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
         --help|-h)
             cat <<EOF
-Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
+Usage: install.sh [--dev] [--no-start] [--rocmfp4] [--models-dir=PATH]
   --dev               install under \$PWD/.hal0ai/, no systemd setup
   --no-start          set up everything but don't enable/start the API
+  --rocmfp4           opt-in ROCmFP4 + MTP "power pack": wires a prebuilt
+                      charlie12345/rocmfp4-llama fork binary as Lemonade's
+                      global rocm_bin and seeds a gpu-rocmfp4 slot. gfx1151 +
+                      ROCm only; warns + skips cleanly on ineligible hosts or
+                      if the fork binary is absent. Same as HAL0_ENABLE_ROCMFP4=1.
+                      The fork binary is built out-of-band — see
+                      installer/README.md "ROCmFP4 power pack (opt-in)".
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
@@ -1258,6 +1278,167 @@ DROPIN
             warn "systemctl enable hal0-lemonade failed — check 'systemctl status hal0-lemonade'"
     else
         warn "${LEMONADE_PREFIX}/lemond missing — leaving hal0-lemonade.service disabled"
+    fi
+fi
+
+# ── ROCmFP4 + MTP power pack (issue #516, opt-in) ──────────────────────────
+# Locked decision D5: the ROCmFP4 + MTP fork path (charlie12345/rocmfp4-llama)
+# is NOT default and NOT auto-enabled by the hal0-max bundle. It is gfx1151-only
+# (Strix Halo) + ROCm-only, ~7.8 GB of ROCm libs, and depends on a stale-prone
+# HSA_OVERRIDE_GFX_VERSION — too fragile for out-of-box. When it applies it is a
+# big win (27B 12.9 → 22.8 tok/s, 1.77x MTP, verified) so we ship it as an
+# explicit power pack: `--rocmfp4` or HAL0_ENABLE_ROCMFP4=1.
+#
+# This block ONLY runs when explicitly requested. It:
+#   1. checks host eligibility (gfx1151 / AMD ROCm) — warns + skips otherwise,
+#   2. wires Lemonade's GLOBAL rocm_bin override to a PREBUILT fork binary taken
+#      from HAL0_ROCMFP4_BIN (default /opt/hal0/rocmfp4-llama/build/bin), warning
+#      + skipping with build instructions if the path is absent,
+#   3. seeds a gpu-rocmfp4 slot TOML (with the HSA_OVERRIDE_GFX_VERSION guard
+#      documented inline),
+#   4. leaves a guard/repair note for the known stale-HSA-override crash after a
+#      ROCm bundle upgrade.
+# Every failure mode here is a `warn` + `continue past` — NEVER fatal — so the
+# rest of the install is unaffected. Skipped entirely on --dev (no system
+# Lemonade config to patch).
+if [[ "${ENABLE_ROCMFP4}" -eq 1 && "${DEV_MODE}" -eq 0 ]]; then
+    info "ROCmFP4 power pack requested (--rocmfp4 / HAL0_ENABLE_ROCMFP4=1) — opt-in, not default"
+
+    # Default fork binary location. Built out-of-band (see installer/README.md
+    # "ROCmFP4 power pack (opt-in)"); override with HAL0_ROCMFP4_BIN. May be the
+    # real llama-server or the LD_LIBRARY_PATH + HSA-override wrapper that execs it.
+    ROCMFP4_BIN="${HAL0_ROCMFP4_BIN:-/opt/hal0/rocmfp4-llama/build/bin/llama-server}"
+    # gfx1151 maps to HSA_OVERRIDE_GFX_VERSION=11.5.1. Overridable in case a
+    # future ROCm bundle wants a different tag (see the stale-override note below).
+    ROCMFP4_HSA_OVERRIDE="${HAL0_ROCMFP4_HSA_OVERRIDE:-11.5.1}"
+    ROCMFP4_SLOT_MODEL="${HAL0_ROCMFP4_MODEL:-Qwen3.6-27B-MTP-GGUF}"
+
+    rocmfp4_eligible=1
+    # Eligibility: AMD ROCm + gfx1151 (Strix Halo). Best-effort, never fatal.
+    # rocminfo is the authoritative probe; fall back to the Lemonade ROCm
+    # bundle's per-arch dir (bin/therock/gfx1151-*) which only exists on a
+    # gfx1151 ROCm host. If neither signal is present we warn + skip.
+    rocmfp4_gfx_seen=""
+    if command -v rocminfo >/dev/null 2>&1; then
+        if rocminfo 2>/dev/null | grep -qi "gfx1151"; then
+            rocmfp4_gfx_seen="rocminfo:gfx1151"
+        fi
+    fi
+    if [[ -z "${rocmfp4_gfx_seen}" ]] \
+        && compgen -G "${LEMONADE_PREFIX}/bin/therock/gfx1151-*" >/dev/null 2>&1; then
+        rocmfp4_gfx_seen="lemonade-bundle:gfx1151"
+    fi
+    if [[ -z "${rocmfp4_gfx_seen}" ]]; then
+        rocmfp4_eligible=0
+        warn "ROCmFP4 power pack: host does not look gfx1151 / ROCm-eligible"
+        warn "  (no rocminfo gfx1151 and no ${LEMONADE_PREFIX}/bin/therock/gfx1151-* bundle)"
+        warn "  This pack is Strix Halo (gfx1151) + ROCm only — skipping cleanly."
+    fi
+
+    if [[ "${rocmfp4_eligible}" -eq 1 ]]; then
+        if [[ ! -x "${ROCMFP4_BIN}" ]]; then
+            warn "ROCmFP4 power pack: fork binary not found / not executable at ${ROCMFP4_BIN}"
+            warn "  The charlie12345/rocmfp4-llama fork is built OUT-OF-BAND (it ships new"
+            warn "  ggml quant types stock llama.cpp cannot load). Build it, then re-run with"
+            warn "  --rocmfp4 (or set HAL0_ROCMFP4_BIN=/path/to/llama-server):"
+            warn "    1. clone github.com/charlie12345/rocmfp4-llama (branch mtp-rocmfp4-strix)"
+            warn "    2. build in a rocm/dev-ubuntu-24.04:7.2.1-complete container (docker run"
+            warn "       --security-opt apparmor=unconfined on an LXC host)"
+            warn "    3. install the binary (+ its ROCm libs) under ${ROCMFP4_BIN%/*}"
+            warn "  Skipping the power pack — the rest of the install is unaffected."
+        else
+            info "ROCmFP4 power pack: using fork binary ${ROCMFP4_BIN}"
+
+            # 1. Wire the GLOBAL rocm_bin override into the Lemonade config we
+            #    just wrote. rocm_bin is global to the rocm backend, but every
+            #    OTHER hal0 slot runs Vulkan (backend=vulkan), so isolation is
+            #    clean — only gpu-rocm slots pick up the fork. Patch in place via
+            #    an atomic tempfile + rename so a crash mid-write can't leave
+            #    lemond parsing half-written JSON. Idempotent.
+            if [[ -f "${LEMONADE_CONFIG_JSON}" ]]; then
+                ROCMFP4_CFG_TMP="$(mktemp "${LEMONADE_CONFIG_JSON}.XXXXXX")"
+                if "${PY}" - "${LEMONADE_CONFIG_JSON}" "${ROCMFP4_BIN}" "${ROCMFP4_CFG_TMP}" <<'PYROCMFP4'
+import json, sys
+src, rocm_bin, dst = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(src) as f:
+    cfg = json.load(f)
+lc = cfg.setdefault("llamacpp", {})
+lc["rocm_bin"] = rocm_bin
+with open(dst, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+print("set llamacpp.rocm_bin =", rocm_bin)
+PYROCMFP4
+                then
+                    chown hal0:hal0 "${ROCMFP4_CFG_TMP}" 2>/dev/null || true
+                    chmod 0644 "${ROCMFP4_CFG_TMP}"
+                    mv "${ROCMFP4_CFG_TMP}" "${LEMONADE_CONFIG_JSON}"
+                    info "wired llamacpp.rocm_bin → ${ROCMFP4_BIN} in ${LEMONADE_CONFIG_JSON}"
+                    info "  restart hal0-lemonade for it to take effect (not a live /v1/params key)"
+                else
+                    rm -f "${ROCMFP4_CFG_TMP}"
+                    warn "ROCmFP4 power pack: failed to patch rocm_bin into ${LEMONADE_CONFIG_JSON} — skipped"
+                fi
+            else
+                warn "ROCmFP4 power pack: ${LEMONADE_CONFIG_JSON} absent — cannot set rocm_bin, skipped"
+            fi
+
+            # 2. Seed the gpu-rocmfp4 slot. Never overwrite an existing one (an
+            #    operator may have tuned extra_args / picked a different FP4
+            #    model). The slot loads via device=gpu-rocm → llamacpp_backend=rocm,
+            #    so it inherits the global rocm_bin fork. extra_args carries the
+            #    MTP / self-speculative flags; --parallel 1 (mandatory for MTP) and
+            #    -fa on / --no-mmap come from the global llamacpp.args.
+            ROCMFP4_SLOT_TOML="${ETC_DIR}/slots/gpu-rocmfp4.toml"
+            if [[ -f "${ROCMFP4_SLOT_TOML}" ]]; then
+                info "ROCmFP4 power pack: ${ROCMFP4_SLOT_TOML} exists — left alone"
+            else
+                mkdir -p "${ETC_DIR}/slots"
+                cat > "${ROCMFP4_SLOT_TOML}" <<ROCMFP4SLOT
+# hal0 ROCmFP4 + MTP slot — OPT-IN power pack (issue #516, decision D5).
+#
+# Seeded ONLY when install.sh is run with --rocmfp4 / HAL0_ENABLE_ROCMFP4=1 on a
+# gfx1151 + ROCm host with the charlie12345/rocmfp4-llama fork binary present.
+# NOT part of the default install and NOT auto-enabled by the hal0-max bundle.
+#
+# Requires the global rocm_bin override (llamacpp.rocm_bin in
+# /var/lib/hal0/lemonade/config.json → ${ROCMFP4_BIN}) — the stock Lemonade
+# llama-server cannot load these FP4 GGUFs (new ggml quant types).
+#
+# HSA_OVERRIDE_GFX_VERSION guard: this path needs HSA_OVERRIDE_GFX_VERSION set
+# (gfx1151 → ${ROCMFP4_HSA_OVERRIDE}). It is carried by the fork wrapper binary,
+# NOT by this slot. KNOWN CRASH MODE: after a Lemonade ROCm-bundle upgrade that
+# adds native gfx1151 kernels, a STALE override (e.g. an old gfx1100 / 11.0.0
+# drop-in) makes rocBLAS look up the wrong arch and crash llama-server on first
+# inference ("Cannot read TensileLibrary.dat ... gfx1100"), surfacing as a chat
+# 502. REPAIR: ls /var/lib/hal0/lemonade/bin/therock/ — if gfx1151-* exists, the
+# override is no longer needed; disable any stale
+# /etc/systemd/system/hal0-lemonade.service.d/rocm-gfx-override.conf (rename to
+# .disabled-<date>), systemctl daemon-reload, systemctl restart hal0-lemonade.
+# If still needed for a different arch tag, set it to match (e.g. ${ROCMFP4_HSA_OVERRIDE}).
+
+name = "gpu-rocmfp4"
+provider = "lemonade"
+port = 8188
+device = "gpu-rocm"
+backend = "rocm"
+
+[model]
+default = "${ROCMFP4_SLOT_MODEL}"
+context_size = 8192
+
+[server]
+# MTP / self-speculative decoding flags (the NextN head is baked into the GGUF
+# — no separate draft model). Global llamacpp.args already supplies
+# --parallel 1 -fa on --no-mmap --threads N. For a vision FP4 model, append
+# --mmproj /path/to/mmproj (vision runs WITHOUT mtp per the fork author).
+extra_args = "--spec-type draft-mtp -ctk q4_0 -ctv q4_0 -b 512 -ub 512"
+ROCMFP4SLOT
+                chmod 0644 "${ROCMFP4_SLOT_TOML}"
+                info "seeded ROCmFP4 slot → ${ROCMFP4_SLOT_TOML} (model ${ROCMFP4_SLOT_MODEL})"
+                info "  HSA_OVERRIDE_GFX_VERSION guard + stale-override repair documented inline"
+            fi
+        fi
     fi
 fi
 

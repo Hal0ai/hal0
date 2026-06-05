@@ -80,6 +80,10 @@ These are the variables `installer/install.sh` actually reads:
 | `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where model pulls land (Lemonade's `extra_models_dir`); same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
 | `HAL0_OPENWEBUI_PORT` † | `3001` | OpenWebUI host port — **dev mode only** |
+| `HAL0_ENABLE_ROCMFP4` | _(unset)_ | Set to `1` to opt into the ROCmFP4 + MTP power pack; same as `--rocmfp4`. See [ROCmFP4 power pack (opt-in)](#rocmfp4-power-pack-opt-in). |
+| `HAL0_ROCMFP4_BIN` | `/opt/hal0/rocmfp4-llama/build/bin/llama-server` | Path to the prebuilt `charlie12345/rocmfp4-llama` fork binary (or its wrapper) wired in as Lemonade's `rocm_bin`. Only read when the power pack is enabled. |
+| `HAL0_ROCMFP4_MODEL` | `Qwen3.6-27B-MTP-GGUF` | Model id seeded into the `gpu-rocmfp4` slot. Power pack only. |
+| `HAL0_ROCMFP4_HSA_OVERRIDE` | `11.5.1` | `HSA_OVERRIDE_GFX_VERSION` tag (gfx1151) referenced in the seeded slot's guard note. Power pack only. |
 
 † `HAL0_OPENWEBUI_PORT` is honored by `scripts/dev-bootstrap.sh` (the dev-mode launcher). The installed `hal0-openwebui.service` hardcodes `:3001`; to change it post-install, edit `/etc/systemd/system/hal0-openwebui.service` and reload.
 
@@ -145,6 +149,88 @@ Two ways to resolve this, depending on what you're trying to do:
    After that, slot operations work against the dev tree. Edits to the linked unit files take effect after another `systemctl daemon-reload`.
 
 The installer prints the same warning block at the end of every `--dev` run as a reminder.
+
+## ROCmFP4 power pack (opt-in)
+
+The **ROCmFP4 + MTP power pack** wires a custom `charlie12345/rocmfp4-llama`
+fork of llama.cpp behind Lemonade so FP4 GGUFs with a baked-in multi-token-
+prediction (MTP) head can self-speculate. Where it applies it is a big win
+(measured: 27B at 12.9 → 22.8 tok/s, ~1.77× with MTP).
+
+It is **off by default and is NOT auto-enabled by the `hal0-max` bundle**
+(locked decision D5). It is deliberately opt-in because it is fragile:
+
+- **gfx1151-only / ROCm-only** — Strix Halo iGPU under AMD ROCm. No effect on
+  Vulkan, CPU, NPU, or any other GPU arch.
+- **out-of-band binary** — the fork ships new ggml quant types
+  (`Q4_0_ROCMFP4*`) that **stock llama.cpp cannot load**, so the fork binary
+  (~7.8 GB with its bundled ROCm libs) is built separately, not by this
+  installer.
+- **HSA override dependency** — it needs `HSA_OVERRIDE_GFX_VERSION` (gfx1151 →
+  `11.5.1`), carried by the fork wrapper binary. A *stale* override after a
+  Lemonade ROCm-bundle upgrade is a known crash mode (see below).
+
+### Prerequisite — build the fork binary out-of-band
+
+The installer only *wires in* an existing binary; build it first:
+
+1. Clone `github.com/charlie12345/rocmfp4-llama` (branch `mtp-rocmfp4-strix`).
+2. Build inside a `rocm/dev-ubuntu-24.04:7.2.1-complete` container. On an LXC
+   host, `docker run --security-opt apparmor=unconfined` (docker *build* is
+   apparmor-blocked in an LXC, but *run* works with that flag).
+3. Install the resulting `llama-server` (plus its ROCm libs) somewhere stable.
+   The installer defaults to `/opt/hal0/rocmfp4-llama/build/bin/llama-server`;
+   point `HAL0_ROCMFP4_BIN` elsewhere if you put it somewhere else. A wrapper
+   that sets `LD_LIBRARY_PATH` + `HSA_OVERRIDE_GFX_VERSION` + execs the real
+   binary is a valid target too.
+
+### Enable it
+
+```sh
+# flag form
+sudo bash installer/install.sh --rocmfp4
+
+# env form (equivalent), with a custom binary path + slot model
+HAL0_ENABLE_ROCMFP4=1 \
+HAL0_ROCMFP4_BIN=/opt/hal0/rocmfp4-llama/build/bin/llama-server \
+HAL0_ROCMFP4_MODEL=Qwen3.6-27B-MTP-GGUF \
+  sudo bash installer/install.sh
+```
+
+When enabled on an eligible host with the binary present, the installer:
+
+1. sets `llamacpp.rocm_bin` in `/var/lib/hal0/lemonade/config.json` to the fork
+   binary (global to the ROCm backend; every other hal0 slot runs Vulkan, so
+   isolation is clean). **Restart `hal0-lemonade` for it to take effect** —
+   `rocm_bin` is not a live `/v1/params` key.
+2. seeds `/etc/hal0/slots/gpu-rocmfp4.toml` (device `gpu-rocm`, the MTP /
+   self-speculative `extra_args`, and the HSA-override guard documented
+   inline). An existing slot file is left untouched.
+
+If the host is **not** gfx1151 / ROCm, or the fork binary is **absent**, the
+installer **warns and skips cleanly** — the rest of the install is unaffected.
+`--rocmfp4` is also a no-op under `--dev`.
+
+### Repair — stale `HSA_OVERRIDE_GFX_VERSION` crash
+
+Lemonade's weekly-breaking-release cadence changes the bundled ROCm/rocBLAS
+layout. A `HSA_OVERRIDE_GFX_VERSION` written for an *older* bundle can become
+actively harmful once the new bundle adds native gfx1151 kernels: rocBLAS then
+looks up the wrong arch and crashes `llama-server` on the **first inference**
+(`Cannot read TensileLibrary.dat ... gfx1100`), surfacing as a chat **502**.
+
+Fix:
+
+```sh
+ls /var/lib/hal0/lemonade/bin/therock/    # look for a gfx1151-* dir
+```
+
+- If `gfx1151-*` exists, the override is no longer needed — disable any stale
+  `/etc/systemd/system/hal0-lemonade.service.d/rocm-gfx-override.conf` (rename
+  to `.disabled-<date>`), then `systemctl daemon-reload && systemctl restart
+  hal0-lemonade`.
+- If still needed but for a different arch tag, set `HSA_OVERRIDE_GFX_VERSION`
+  to match (e.g. `11.5.1` for gfx1151).
 
 ## Uninstall
 
