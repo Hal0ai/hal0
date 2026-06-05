@@ -2,7 +2,7 @@
 
 Covers:
   * ``recommend_primary_slot`` selects the largest-that-fits curated chat
-    model by *unified RAM* (35B-A3B ≥48 GB, 9B 16–48 GB, 4B <16 GB), the
+    model by *unified RAM* (35B-A3B ≥48 GB, 9B 16-48 GB, 4B <16 GB), the
     same RAM signal the bundle picker gates on.
   * The primary slot ctx is resolved from the curated model's GGUF arch
     max (capped per tier), not a flat hard-coded 8192. The MoE/MTP
@@ -103,7 +103,7 @@ def test_pick_chat_model_thresholds() -> None:
 def test_moe_primary_gets_large_ctx() -> None:
     rec = recommend_primary_slot(_amd_uma_host(96))
     assert rec["model"]["default"] == "Qwen3.6-35B-A3B-MTP-GGUF"
-    # Hybrid SSM+attn KV is tiny — default to the full 131072 window.
+    # Hybrid SSM+attn KV is tiny - default to the full 131072 window.
     assert rec["model"]["context_size"] == 131072
 
 
