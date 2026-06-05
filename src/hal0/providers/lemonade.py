@@ -147,6 +147,11 @@ def device_to_backend(device: str | None) -> tuple[str | None, str | None]:
 _BACKEND_PATH_MARKERS: tuple[tuple[str, str], ...] = (
     ("/vulkan/", "vulkan"),
     ("/rocm-stable/", "rocm"),
+    # Custom ROCmFP4 fork (charlie12345/rocmfp4-llama) wired via lemond
+    # rocm_bin — its install path has no /rocm-stable/ marker, so without
+    # this it falls through to the cpu fallback and the dashboard shows a
+    # bogus declared≠actual mismatch for rocm slots serving FP4 models.
+    ("/rocmfp4-llama/", "rocm"),
 )
 
 

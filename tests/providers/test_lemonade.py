@@ -375,6 +375,18 @@ def test_resolve_actual_backend_rocm(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resolve_actual_backend(entry) == "rocm"
 
 
+def test_resolve_actual_backend_rocmfp4_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The custom ROCmFP4 fork binary has no /rocm-stable/ marker; it must
+    # still classify as rocm rather than fall through to the cpu fallback.
+    _patch_actual_backend_chain(
+        monkeypatch,
+        pid=4245,
+        exe="/opt/rocmfp4-llama/bin/llama-server",
+    )
+    entry = {"model_name": "m", "backend_url": "http://127.0.0.1:8001/v1"}
+    assert resolve_actual_backend(entry) == "rocm"
+
+
 def test_resolve_actual_backend_cpu_when_no_gpu_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
