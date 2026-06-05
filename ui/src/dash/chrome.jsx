@@ -10,6 +10,7 @@ import { useLemondRollup } from '@/api/hooks/useLemonade'
 import { useLogsStream } from '@/api/hooks/useLogs'
 import { useSlots, useEndpoints } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
+import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
@@ -133,12 +134,18 @@ function Sidebar({ route, onGo }) {
   const modelsQuery = useModels();
   const slotCount   = slotsQuery.data?.length  ?? 0;
   const modelCount  = modelsQuery.data?.length ?? 0;
+  // 0.4 gate: the Agent route is reduced to the Memory tab, so when the
+  // memory subsystem is disabled (HAL0_MEMORY_ENABLED!=1) there is nothing
+  // to show — drop the nav item entirely. Driven by /api/status so the UI
+  // can never disagree with the backend. main.jsx applies the matching
+  // route guard for deep links.
+  const memoryEnabled = useMemoryEnabled();
   const items = [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
     { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount },
     { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
     { id: "logs",      label: "Logs",      icon: Icons.logs },
-    { id: "agent",     label: "Agent",     icon: Icons.agent },
+    ...(memoryEnabled ? [{ id: "agent", label: "Agent", icon: Icons.agent }] : []),
     // Issue #206 — MCP page wired to /api/mcp/*. Lives under "Agents"
     // conceptually but kept as a sibling in the sidebar so the URL is
     // discoverable. Icon reuses the agent glyph (no dedicated MCP icon

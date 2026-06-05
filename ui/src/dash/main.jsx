@@ -65,6 +65,16 @@ function App() {
   const [footerOpen, setFooterOpen] = useStateA(false);
   const [paletteOpen, setPaletteOpen] = useStateA(false);
 
+  // 0.4 gate: the Agent route is reduced to the Memory tab, so it only
+  // renders when the memory subsystem is live (HAL0_MEMORY_ENABLED, surfaced
+  // via /api/status). Read through the window bridge to keep this strict
+  // no-ES-imports prototype file within the dash/*.jsx contract — the bridge
+  // is imported in main.tsx before main.jsx evaluates, so the ref is stable.
+  // We conditionally RENDER rather than redirect so a deep link to #agent in
+  // a memory-enabled dev build isn't bounced away during the status fetch.
+  const useMemEnabled = (typeof window !== "undefined" && window.__hal0UseMemoryEnabled) || null;
+  const memoryEnabled = useMemEnabled ? useMemEnabled() : false;
+
   useEffectA(() => {
     const onHash = () => setRouteState(parseRoute());
     window.addEventListener("hashchange", onHash);
@@ -157,7 +167,16 @@ function App() {
         );
       case "models":   return <ModelsView />;
       case "logs":     return <LogsView />;
-      case "agent":    return <AgentView />;
+      case "agent":
+        // 0.4: hidden from the sidebar when memory is off; this guard
+        // catches stale deep links / bookmarks to #agent.
+        return memoryEnabled ? (
+          <AgentView />
+        ) : (
+          <div className="view">
+            <div className="empty">The memory surface is disabled in this release.</div>
+          </div>
+        );
       case "mcp":      return <McpView />;
       case "settings": return <SettingsView />;
       default:         return <div className="view">Not found.</div>;

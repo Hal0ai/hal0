@@ -432,6 +432,11 @@ if [[ ! -f "${API_ENV}" ]]; then
     cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
+# Memory subsystem (Cognee engine + /mcp/memory + the Agent → Memory tab)
+# is deferred in this release and ships disabled by default. Uncomment to
+# reintroduce it — no other change needed; the dashboard Agent nav returns
+# automatically once /api/status reports it live.
+# HAL0_MEMORY_ENABLED=1
 # Uncomment to pin specific toolbox images:
 # HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0ai/hal0-toolbox-vulkan:v1
 # HAL0_TOOLBOX_IMAGE_ROCM=ghcr.io/hal0ai/hal0-toolbox-rocm:v1

@@ -64,6 +64,10 @@ export async function installDefaultMocks(page: Page, state: MockState) {
       update_available: false,
       slots: state.slots,
       hardware: state.host,
+      // 0.4 gate: the dashboard hides the Agent (Memory) nav unless
+      // /api/status reports memory live. The γ-suite exercises the memory
+      // UI, so the default mock keeps it on; a dedicated spec flips it off.
+      memory_enabled: true,
     }),
   )
   await page.route('**/api/hardware', (route) => json(route, state.host))

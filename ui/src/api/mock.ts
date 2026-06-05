@@ -110,10 +110,20 @@ function buildLemonadeConfig() {
 
 function buildStatus() {
   const d = data()
+  // 0.4 gate: forced-mock dev/preview build keeps the memory surface ON so
+  // the Agent → Memory tab stays reachable for layout/screenshot work. The
+  // shipped backend defaults this OFF (HAL0_MEMORY_ENABLED). Because
+  // forced-mock short-circuits `page.route`, a spec can't override
+  // /api/status the usual way — it sets `window.__hal0MockMemoryEnabled =
+  // false` via addInitScript to exercise the disabled path. Default ON.
+  const memoryOff =
+    typeof window !== 'undefined' &&
+    (window as unknown as { __hal0MockMemoryEnabled?: boolean }).__hal0MockMemoryEnabled === false
   return {
     hostname: d.host?.name ?? 'halo-strix.local',
     hardware: d.host ?? null,
     slots: d.slots ?? [],
+    memory_enabled: !memoryOff,
   }
 }
 

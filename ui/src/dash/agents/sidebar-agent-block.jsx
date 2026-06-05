@@ -77,6 +77,16 @@ function SidebarAgentBlock({ onGo }) {
   const rollup = _useSidebarAgentRollup();
   const { installed, agentId, agentStatus, loading } = rollup;
 
+  // 0.4 gate: the "Memory →" CTA below targets the #agent route, which is
+  // the Memory surface. When the memory subsystem is disabled
+  // (HAL0_MEMORY_ENABLED, surfaced via /api/status) that route shows a
+  // "disabled" notice, so suppress the CTA rather than offer a dead end.
+  // Read through the window bridge to keep the dash/*.jsx no-ES-imports
+  // contract. Called before the early returns to satisfy rules-of-hooks.
+  const _useMemEnabled =
+    (typeof window !== "undefined" && window.__hal0UseMemoryEnabled) || null;
+  const memoryEnabled = _useMemEnabled ? _useMemEnabled() : false;
+
   // Loading state: keep skeleton minimal — sidebar must NOT layout-shift
   // when the first 5s tick lands. Render the same row stack with em-dashes
   // so the dimensions match the populated state exactly.
@@ -145,15 +155,22 @@ function SidebarAgentBlock({ onGo }) {
           disconnected from what the running Hermes actually uses (it runs
           off SOUL.md, not the persona prompt), so surfacing it here was
           misleading. Honest minimal surface = health dot + chat affordance. */}
-      <div className="ln" />
-      <button
-        className="nudge sb-status-cta"
-        onClick={() => onGo && onGo("agent")}
-        title={TUI_HINT}
-        data-testid="sidebar-agent-open-memory"
-      >
-        Memory →
-      </button>
+      {/* 0.4 gate: the Memory → CTA targets the #agent (Memory) route,
+          which is disabled in this release — suppress it rather than offer
+          a dead-end link. */}
+      {memoryEnabled && (
+        <>
+          <div className="ln" />
+          <button
+            className="nudge sb-status-cta"
+            onClick={() => onGo && onGo("agent")}
+            title={TUI_HINT}
+            data-testid="sidebar-agent-open-memory"
+          >
+            Memory →
+          </button>
+        </>
+      )}
       <div
         className="sb-status-tui mono"
         title="Run the agent chat in your terminal"

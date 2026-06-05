@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 
 import pytest
@@ -9,6 +10,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
+
+# 0.4: the memory subsystem ships disabled by default (HAL0_MEMORY_ENABLED
+# gate in create_app). The bulk of the suite exercises the memory MCP, the
+# /api/memory/* routes, and the Hermes memory provider with memory PRESENT,
+# so default the flag on for tests. `setdefault` runs once at import — before
+# any app is built — and respects an explicit override, so the dedicated gate
+# test (tests/api/test_memory_gate.py) can still set it to "0" per-test.
+os.environ.setdefault("HAL0_MEMORY_ENABLED", "1")
 
 pytest_plugins = ()
 

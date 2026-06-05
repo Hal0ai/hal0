@@ -90,6 +90,12 @@ async def get_status(request: Request) -> dict[str, Any]:
         "hardware": None,  # populated by /api/hardware on demand
         "slots": slot_list,
         "upstreams": upstream_summary,
+        # 0.4: single source of truth for whether the memory subsystem is
+        # live (gated by HAL0_MEMORY_ENABLED at create_app). The dashboard
+        # reads this to show/hide the Agent → Memory nav so the UI and the
+        # backend can never disagree. Reflects the real wrapper, so an init
+        # failure also reads as off.
+        "memory_enabled": getattr(request.app.state, "memory_wrapper", None) is not None,
     }
 
 

@@ -58,3 +58,22 @@ export function useUpdateMemoryGraph() {
     },
   })
 }
+
+// 0.4 release gate. /api/status carries `memory_enabled`, gated by
+// HAL0_MEMORY_ENABLED at create_app. The dashboard reads it to show/hide
+// the Agent → Memory nav so the UI and backend can never disagree.
+//
+// Treat the loading/unknown state as OFF (`=== true`): 0.4 ships memory
+// disabled, so the common case stays hidden with no flicker; a dev build
+// with memory on simply reveals the Agent item once status lands
+// (sub-second). Distinct query key from useSlots' /api/status race so the
+// two consumers don't fight over one cache entry.
+export function useMemoryEnabled(): boolean {
+  const q = useQuery<{ memory_enabled?: boolean }>({
+    queryKey: ['status', 'memory_enabled'],
+    queryFn: () => apiGet<{ memory_enabled?: boolean }>(ENDPOINTS.status),
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  })
+  return q.data?.memory_enabled === true
+}
