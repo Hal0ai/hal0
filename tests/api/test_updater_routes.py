@@ -144,6 +144,61 @@ def test_check_no_update_when_versions_match(
     assert body["latest"] == __version__
 
 
+def test_check_revoked_latest_not_recommended(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revoked latest must report update_available=False + surface the reason."""
+    manifest = _write_manifest(
+        tmp_path / "revoked.json",
+        {
+            "version": "99.9.9",
+            "url": "https://example.test/hal0-99.9.9.tar.gz",
+            "revoked": True,
+            "revoked_reason": "yanked: corrupt tarball",
+        },
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest))
+
+    r = isolated_client.get("/api/updates/check")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["latest"] == "99.9.9"
+    assert body["update_available"] is False
+    assert body["revoked"] is True
+    assert body["revoked_reason"] == "yanked: corrupt tarball"
+
+
+def test_state_revoked_latest_surfaced(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /api/updates/state nests revoked info in the hal0 block."""
+    from hal0.api.routes import updater as u_mod
+
+    monkeypatch.setattr(u_mod, "_probe_version", lambda _c: None)
+    manifest = _write_manifest(
+        tmp_path / "revoked.json",
+        {
+            "version": "99.9.9",
+            "url": "https://example.test/hal0-99.9.9.tar.gz",
+            "revoked": True,
+            "revoked_reason": "yanked: corrupt tarball",
+        },
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest))
+
+    r = isolated_client.get("/api/updates/state")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Top-level shape unchanged for the dashboard contract.
+    assert set(body.keys()) == {"hal0", "lemonade", "flm", "autoCheck"}
+    # Revoked latest is not advertised as available …
+    assert body["hal0"]["available"] is None
+    # … but the withdrawal is surfaced so the UI can show a note.
+    assert body["hal0"]["revoked"] is True
+    assert body["hal0"]["revoked_reason"] == "yanked: corrupt tarball"
+    assert body["hal0"]["revoked_version"] == "99.9.9"
+
+
 def test_check_bad_manifest_returns_envelope(
     isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

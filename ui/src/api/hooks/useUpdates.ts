@@ -15,6 +15,12 @@ export interface UpdateChannel {
   channel?: string
   pinned?: boolean
   source?: string
+  // Set when the latest release on this channel was yanked/withdrawn. When
+  // true, `available` is null (a revoked release is never offered) and the
+  // Settings → Updates surface can explain why with `revoked_reason`.
+  revoked?: boolean
+  revoked_reason?: string
+  revoked_version?: string | null
 }
 
 export interface UpdateState {

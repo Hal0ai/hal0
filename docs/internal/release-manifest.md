@@ -269,6 +269,40 @@ installer's Lemonade + FLM constants (in `installer/install.sh`) are
 the live truth; the release manifest mirrors them via the new
 `lemonade` + `flm` blocks above.
 
+## Yanking a release
+
+If a published release turns out to be bad (broken cosign cert, regression,
+data-loss bug), **yank it** so `hal0 update` stops recommending it instead of
+deleting the GitHub release (which loses history and breaks anyone mid-download).
+
+A release is yanked by setting `revoked: true` on its channel manifest:
+
+```jsonc
+{
+  "version": "0.4.2",
+  "revoked": true,
+  "revoked_reason": "cosign cert mismatch — re-cut as 0.4.3",
+  // …all other fields unchanged…
+}
+```
+
+Effect (implemented in `hal0.updater`):
+
+- `Updater.check()` and `GET /api/updates/check` report `update_available: false`
+  for a revoked latest — the version is still surfaced (`revoked` + `revoked_reason`)
+  so the dashboard can explain why no update is offered, but the operator is never
+  nudged toward it. `updater.latest_revoked` is logged.
+- `GET /api/updates/state` carries `hal0.revoked` + `hal0.revoked_reason`.
+- Older manifests without the field parse as `revoked: false` (backward compatible).
+
+SOP:
+
+1. Re-upload the channel manifest asset with `revoked: true` + a `revoked_reason`
+   (`gh release upload <TAG> <channel>.json --clobber`).
+2. Annotate the GitHub release: `gh release edit <TAG> --notes "YANKED: <reason>"`.
+3. Cut and publish the fixed release; once a newer non-revoked version is the latest,
+   it supersedes the revoked one automatically.
+
 ## Related
 
 - `PLAN.md` §9 — Update mechanism spec

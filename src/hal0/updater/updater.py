@@ -176,6 +176,19 @@ class ReleaseManifest(BaseModel):
         ge=1,
         description="Minimum config schema version required after this update.",
     )
+    revoked: bool = Field(
+        default=False,
+        description=(
+            "True if this release has been yanked/withdrawn. A revoked latest "
+            "is not recommended by ``hal0 update --check`` (see "
+            "``docs/internal/release-manifest.md`` → 'Yanking a release'). "
+            "Older manifests without this field parse as not-revoked."
+        ),
+    )
+    revoked_reason: str = Field(
+        default="",
+        description="Human-readable explanation shown when ``revoked`` is true.",
+    )
     released_at: str | None = Field(default=None, description="ISO-8601 release timestamp.")
     notes_url: str | None = Field(default=None, description="Release notes URL.")
     manifest_url: str | None = Field(default=None, description="Self-reference URL.")
@@ -212,6 +225,8 @@ class ReleaseInfo:
     signer_identity: str | None
     min_data_version: int | None
     notes_url: str | None = None
+    revoked: bool = False
+    revoked_reason: str = ""
     raw_manifest: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -824,11 +839,28 @@ class Updater:
         # with just {"version": "9.9.9"} — surface it without forcing a
         # full schema match. Strict validation happens inside ``apply()``.
         latest = ""
+        revoked = False
+        revoked_reason = ""
         if isinstance(raw, dict):
             latest = str(raw.get("version") or raw.get("latest_version") or "")
-        update_available = bool(latest) and _version_tuple(latest) > _version_tuple(
-            hal0.__version__
+            revoked = bool(raw.get("revoked", False))
+            revoked_reason = str(raw.get("revoked_reason") or "")
+        # A revoked (yanked/withdrawn) latest is never recommended — the
+        # operator should not be nudged toward a release we've pulled. The
+        # version is still surfaced (revoked + reason) so the dashboard can
+        # explain why no update is offered. See docs/internal/release-manifest.md.
+        update_available = (
+            bool(latest)
+            and not revoked
+            and _version_tuple(latest) > _version_tuple(hal0.__version__)
         )
+        if revoked and bool(latest):
+            log.warning(
+                "updater.latest_revoked",
+                version=latest,
+                channel=ch,
+                reason=revoked_reason,
+            )
         return ReleaseInfo(
             current=hal0.__version__,
             latest=latest or None,
@@ -839,6 +871,8 @@ class Updater:
             signer_identity=raw.get("signer_identity") if isinstance(raw, dict) else None,
             min_data_version=raw.get("min_data_version") if isinstance(raw, dict) else None,
             notes_url=raw.get("notes_url") if isinstance(raw, dict) else None,
+            revoked=revoked,
+            revoked_reason=revoked_reason,
             raw_manifest=raw if isinstance(raw, dict) else {},
         )
 

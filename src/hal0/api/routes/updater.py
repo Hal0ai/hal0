@@ -215,12 +215,20 @@ async def update_state(request: Request) -> dict[str, Any]:
     # a manifest fetch failure (dashboard shouldn't go blank just
     # because GitHub is rate-limiting).
     hal0_available: str | None = None
+    hal0_revoked = False
+    hal0_revoked_reason = ""
+    hal0_revoked_version: str | None = None
     try:
         manifest = await fetch_release_manifest(channel)
         if isinstance(manifest, dict):
             latest_raw = manifest.get("version") or manifest.get("latest_version") or ""
             latest = str(latest_raw)
-            if latest and _version_tuple(latest) > _version_tuple(__version__):
+            hal0_revoked = bool(manifest.get("revoked", False))
+            hal0_revoked_reason = str(manifest.get("revoked_reason") or "")
+            if hal0_revoked and latest:
+                hal0_revoked_version = latest
+            # A revoked latest is not offered (but its reason is surfaced).
+            if latest and not hal0_revoked and _version_tuple(latest) > _version_tuple(__version__):
                 hal0_available = latest
     except (OSError, ValueError):
         pass
@@ -233,6 +241,9 @@ async def update_state(request: Request) -> dict[str, Any]:
             "current": __version__,
             "available": hal0_available,
             "channel": channel,
+            "revoked": hal0_revoked,
+            "revoked_reason": hal0_revoked_reason,
+            "revoked_version": hal0_revoked_version,
         },
         "lemonade": {
             "current": _parse_lemonade_version(lemonade_raw),
@@ -286,16 +297,25 @@ async def check_updates(request: Request) -> dict[str, Any]:
         ) from exc
 
     latest = ""
+    revoked = False
+    revoked_reason = ""
     if isinstance(manifest, dict):
         latest_raw = manifest.get("version") or manifest.get("latest_version") or ""
         latest = str(latest_raw)
+        revoked = bool(manifest.get("revoked", False))
+        revoked_reason = str(manifest.get("revoked_reason") or "")
 
-    update_available = bool(latest) and _version_tuple(latest) > _version_tuple(__version__)
+    # A revoked (yanked) latest is never offered as an available update.
+    update_available = (
+        bool(latest) and not revoked and _version_tuple(latest) > _version_tuple(__version__)
+    )
     return {
         "current": __version__,
         "latest": latest or None,
         "channel": channel,
         "update_available": update_available,
+        "revoked": revoked,
+        "revoked_reason": revoked_reason,
         "manifest_url": url,
         "manifest": manifest if isinstance(manifest, dict) else {},
     }

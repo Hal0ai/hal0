@@ -218,6 +218,39 @@ def test_manifest_schema_rejects_malformed_digest() -> None:
         _parse_manifest(payload)
 
 
+def test_manifest_schema_defaults_revoked_false(tmp_path: Path) -> None:
+    """An older manifest without a ``revoked`` field parses with revoked=False."""
+    tarball = _build_release_tarball(tmp=tmp_path, version="0.0.1")
+    sig = tmp_path / "sig"
+    sig.write_bytes(b"x")
+    payload = _write_release_manifest(
+        manifest_path=tmp_path / "latest.json",
+        tarball=tarball,
+        sig=sig,
+        version="0.0.1",
+    )
+    m = _parse_manifest(payload)
+    assert m.revoked is False
+    assert m.revoked_reason == ""
+
+
+def test_manifest_schema_accepts_revoked(tmp_path: Path) -> None:
+    """A manifest with ``revoked: true`` + reason parses and round-trips."""
+    tarball = _build_release_tarball(tmp=tmp_path, version="0.0.1")
+    sig = tmp_path / "sig"
+    sig.write_bytes(b"x")
+    payload = _write_release_manifest(
+        manifest_path=tmp_path / "latest.json",
+        tarball=tarball,
+        sig=sig,
+        version="0.0.1",
+        overrides={"revoked": True, "revoked_reason": "bad cosign cert"},
+    )
+    m = _parse_manifest(payload)
+    assert m.revoked is True
+    assert m.revoked_reason == "bad cosign cert"
+
+
 # ── check ──────────────────────────────────────────────────────────────────────
 
 
@@ -239,6 +272,64 @@ def test_check_handles_missing_manifest(
     monkeypatch.setenv("HAL0_RELEASES_URL", str(tmp_path / "nope.json"))
     with pytest.raises(UpdateError):
         asyncio.run(Updater().check())
+
+
+def test_check_does_not_recommend_revoked_latest(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A revoked latest manifest is NOT reported as an available update."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    version = "99.0.0"  # far ahead of __version__ so it WOULD update if not revoked
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    sig = artifacts / f"hal0-{version}.tar.gz.sig"
+    sig.write_bytes(b"sig\n")
+    cert = artifacts / f"hal0-{version}.tar.gz.crt"
+    cert.write_bytes(b"cert\n")
+    manifest_path = artifacts / "latest.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        sig=sig,
+        cert=cert,
+        version=version,
+        overrides={"revoked": True, "revoked_reason": "yanked: broken slot load"},
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+
+    info = asyncio.run(Updater().check())
+    assert info.latest == version
+    assert info.update_available is False
+    assert info.revoked is True
+    assert info.revoked_reason == "yanked: broken slot load"
+
+
+def test_check_recommends_non_revoked_newer_latest(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-revoked newer manifest IS reported as an available update."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    version = "99.0.0"
+    tarball = _build_release_tarball(tmp=artifacts, version=version)
+    sig = artifacts / f"hal0-{version}.tar.gz.sig"
+    sig.write_bytes(b"sig\n")
+    cert = artifacts / f"hal0-{version}.tar.gz.crt"
+    cert.write_bytes(b"cert\n")
+    manifest_path = artifacts / "latest.json"
+    _write_release_manifest(
+        manifest_path=manifest_path,
+        tarball=tarball,
+        sig=sig,
+        cert=cert,
+        version=version,
+    )
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+
+    info = asyncio.run(Updater().check())
+    assert info.latest == version
+    assert info.update_available is True
+    assert info.revoked is False
 
 
 # ── atomic symlink swap ────────────────────────────────────────────────────────
