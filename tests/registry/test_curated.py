@@ -25,11 +25,19 @@ def test_catalogue_entries_have_hf_coordinates() -> None:
     Allowed file extensions: .gguf for chat (llama.cpp), .safetensors /
     .ckpt for image-gen (ComfyUI). Anything else trips this so a typo
     doesn't make it into a release.
+
+    ``bundle_only`` entries (#500) are exempt from the extension check:
+    they are Lemonade-stock models loaded via their own recipe
+    (whispercpp/kokoro/sd-cpp) rather than hal0's hf pull layer, so they
+    legitimately carry .bin / .onnx coordinates. hf_repo/hf_file are still
+    required (informational), but the extension allowlist does not apply.
     """
     allowed_suffixes = (".gguf", ".safetensors", ".ckpt")
     for m in CURATED_MODELS:
         assert m.hf_repo, f"{m.id}: hf_repo is required"
         assert m.hf_file, f"{m.id}: hf_file is required"
+        if m.bundle_only:
+            continue
         assert m.hf_file.endswith(allowed_suffixes), (
             f"{m.id}: hf_file {m.hf_file!r} not in allowed extensions {allowed_suffixes}"
         )

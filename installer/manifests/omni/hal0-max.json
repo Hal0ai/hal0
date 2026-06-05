@@ -5,44 +5,44 @@
     "min_ram_gb": 100,
     "primary": {
       "slot": "chat.primary",
-      "model_name": "Qwen3.6-35B-A3B-MTP",
+      "model_name": "Qwen3.6-35B-A3B-MTP-GGUF",
       "size_gb": 23.8,
       "lru": false
     },
     "coder": {
       "slot": "chat.coder",
-      "model_name": "Qwen3-Coder-Next-80B-A3B",
+      "model_name": "qwen3-coder-next",
       "size_gb": 48.0,
       "lru": true
     },
     "aux": [
       {
         "slot": "embed",
-        "model_name": "nomic-v1.5",
+        "model_name": "nomic-embed-text-v1.5-q8_0",
         "size_gb": 0.3,
         "lru": false
       },
       {
         "slot": "rerank",
-        "model_name": "bge-reranker-v2-m3",
+        "model_name": "bge-reranker-v2-m3-q4_k_m",
         "size_gb": 0.45,
         "lru": false
       },
       {
         "slot": "stt",
-        "model_name": "whisper-large-v3-turbo",
+        "model_name": "Whisper-Large-v3-Turbo",
         "size_gb": 1.6,
         "lru": false
       },
       {
         "slot": "tts",
-        "model_name": "kokoro:cpu",
+        "model_name": "kokoro-v1",
         "size_gb": 0.35,
         "lru": false
       },
       {
         "slot": "img",
-        "model_name": "flux-2-klein-9b",
+        "model_name": "Flux-2-Klein-9B-GGUF",
         "size_gb": 9.0,
         "lru": true
       }
@@ -58,13 +58,13 @@
     "name": "hal0-Max",
     "description": "Max bundle: largest chat + coder (LRU), Whisper Turbo, Flux 2 Klein.",
     "members": [
-      { "model_name": "Qwen3.6-35B-A3B-MTP" },
-      { "model_name": "Qwen3-Coder-Next-80B-A3B" },
-      { "model_name": "nomic-v1.5" },
-      { "model_name": "bge-reranker-v2-m3" },
-      { "model_name": "whisper-large-v3-turbo" },
-      { "model_name": "kokoro:cpu" },
-      { "model_name": "flux-2-klein-9b" }
+      { "model_name": "Qwen3.6-35B-A3B-MTP-GGUF" },
+      { "model_name": "qwen3-coder-next" },
+      { "model_name": "nomic-embed-text-v1.5-q8_0" },
+      { "model_name": "bge-reranker-v2-m3-q4_k_m" },
+      { "model_name": "Whisper-Large-v3-Turbo" },
+      { "model_name": "kokoro-v1" },
+      { "model_name": "Flux-2-Klein-9B-GGUF" }
     ]
   }
 }

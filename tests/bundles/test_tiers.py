@@ -57,24 +57,24 @@ def test_hal0_default_matches_plan_table():
     assert m.primary.size_gb == pytest.approx(6.9)
     assert m.coder is None
     aux_models = {entry.model_name for entry in m.aux}
-    assert aux_models == {"nomic-v1.5", "whisper-tiny", "kokoro:cpu"}
+    assert aux_models == {"nomic-embed-text-v1.5-q8_0", "Whisper-Tiny", "kokoro-v1"}
     assert m.npu_trio_shown is False
 
 
 def test_hal0_pro_matches_plan_table():
     m = bundle_tiers.load_bundle("hal0-Pro").bundle
     assert m.min_ram_gb == 64
-    assert m.primary is not None and m.primary.model_name == "Qwen3.6-27B-MTP"
+    assert m.primary is not None and m.primary.model_name == "Qwen3.6-27B-MTP-GGUF"
     assert m.primary.size_gb == pytest.approx(18.8)
-    assert m.coder is not None and m.coder.model_name == "Qwen3-Coder-30B-A3B"
+    assert m.coder is not None and m.coder.model_name == "Qwen3-Coder-30B-A3B-Instruct-GGUF"
     assert m.coder.size_gb == pytest.approx(18.6)
     assert m.coder.lru is True
     aux_models = {entry.model_name for entry in m.aux}
     # +bge-reranker, +whisper-base, +sd-turbo (plus carryover embed +
     # kokoro:cpu — the "+" notation in plan §8.2 inherits Default's aux).
-    assert "bge-reranker-v2-m3" in aux_models
-    assert "whisper-base" in aux_models
-    assert "sd-turbo" in aux_models
+    assert "bge-reranker-v2-m3-q4_k_m" in aux_models
+    assert "Whisper-Base" in aux_models
+    assert "SD-Turbo-GGUF" in aux_models
     assert m.npu_trio_shown is True
     assert m.npu_trio_optin is False  # opt-in means user must tick the box
 
@@ -82,24 +82,24 @@ def test_hal0_pro_matches_plan_table():
 def test_hal0_max_matches_plan_table():
     m = bundle_tiers.load_bundle("hal0-Max").bundle
     assert m.min_ram_gb == 100
-    assert m.primary is not None and m.primary.model_name == "Qwen3.6-35B-A3B-MTP"
+    assert m.primary is not None and m.primary.model_name == "Qwen3.6-35B-A3B-MTP-GGUF"
     assert m.primary.size_gb == pytest.approx(23.8)
-    assert m.coder is not None and m.coder.model_name == "Qwen3-Coder-Next-80B-A3B"
+    assert m.coder is not None and m.coder.model_name == "qwen3-coder-next"
     assert m.coder.size_gb == pytest.approx(48.0)
     assert m.coder.lru is True
     aux_models = {entry.model_name for entry in m.aux}
-    assert "whisper-large-v3-turbo" in aux_models
-    assert "flux-2-klein-9b" in aux_models
+    assert "Whisper-Large-v3-Turbo" in aux_models
+    assert "Flux-2-Klein-9B-GGUF" in aux_models
     assert m.npu_trio_shown is True
 
 
 def test_lmx_kit_matches_plan_table():
     m = bundle_tiers.load_bundle("LMX-Omni-52B-Halo").bundle
     assert m.min_ram_gb == 100
-    assert m.primary is not None and m.primary.model_name == "Qwen3.6-35B-A3B-MTP"
+    assert m.primary is not None and m.primary.model_name == "Qwen3.6-35B-A3B-MTP-GGUF"
     assert m.coder is None  # vendor kit doesn't ship a coder
     aux_models = {entry.model_name for entry in m.aux}
-    assert aux_models == {"Whisper-Large-v3-Turbo", "kokoro-v1", "Flux-2-Klein-9B"}
+    assert aux_models == {"Whisper-Large-v3-Turbo", "kokoro-v1", "Flux-2-Klein-9B-GGUF"}
     assert m.vendor == "amd"
     assert m.npu_trio_shown is False  # kit doesn't expose the toggle
 

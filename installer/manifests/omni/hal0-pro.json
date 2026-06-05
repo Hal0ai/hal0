@@ -5,44 +5,44 @@
     "min_ram_gb": 64,
     "primary": {
       "slot": "chat.primary",
-      "model_name": "Qwen3.6-27B-MTP",
+      "model_name": "Qwen3.6-27B-MTP-GGUF",
       "size_gb": 18.8,
       "lru": false
     },
     "coder": {
       "slot": "chat.coder",
-      "model_name": "Qwen3-Coder-30B-A3B",
+      "model_name": "Qwen3-Coder-30B-A3B-Instruct-GGUF",
       "size_gb": 18.6,
       "lru": true
     },
     "aux": [
       {
         "slot": "embed",
-        "model_name": "nomic-v1.5",
+        "model_name": "nomic-embed-text-v1.5-q8_0",
         "size_gb": 0.3,
         "lru": false
       },
       {
         "slot": "rerank",
-        "model_name": "bge-reranker-v2-m3",
+        "model_name": "bge-reranker-v2-m3-q4_k_m",
         "size_gb": 0.45,
         "lru": false
       },
       {
         "slot": "stt",
-        "model_name": "whisper-base",
+        "model_name": "Whisper-Base",
         "size_gb": 0.15,
         "lru": false
       },
       {
         "slot": "tts",
-        "model_name": "kokoro:cpu",
+        "model_name": "kokoro-v1",
         "size_gb": 0.35,
         "lru": false
       },
       {
         "slot": "img",
-        "model_name": "sd-turbo",
+        "model_name": "SD-Turbo-GGUF",
         "size_gb": 1.4,
         "lru": true
       }
@@ -58,13 +58,13 @@
     "name": "hal0-Pro",
     "description": "Pro bundle: chat, coder (LRU), embed/rerank, voice, image.",
     "members": [
-      { "model_name": "Qwen3.6-27B-MTP" },
-      { "model_name": "Qwen3-Coder-30B-A3B" },
-      { "model_name": "nomic-v1.5" },
-      { "model_name": "bge-reranker-v2-m3" },
-      { "model_name": "whisper-base" },
-      { "model_name": "kokoro:cpu" },
-      { "model_name": "sd-turbo" }
+      { "model_name": "Qwen3.6-27B-MTP-GGUF" },
+      { "model_name": "Qwen3-Coder-30B-A3B-Instruct-GGUF" },
+      { "model_name": "nomic-embed-text-v1.5-q8_0" },
+      { "model_name": "bge-reranker-v2-m3-q4_k_m" },
+      { "model_name": "Whisper-Base" },
+      { "model_name": "kokoro-v1" },
+      { "model_name": "SD-Turbo-GGUF" }
     ]
   }
 }

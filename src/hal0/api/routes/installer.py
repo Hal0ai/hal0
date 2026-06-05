@@ -289,7 +289,9 @@ async def curated_models() -> dict[str, Any]:
     model", which is meaningless and previously confused users. Sourcing
     capability picks happens through ``/api/capabilities``.
     """
-    chat_picks = [m for m in CURATED_MODELS if m.recommended_slot == "primary"]
+    chat_picks = [
+        m for m in CURATED_MODELS if m.recommended_slot == "primary" and not m.bundle_only
+    ]
     return {
         "models": [m.model_dump(mode="json") for m in chat_picks],
         "custom_allowed": True,

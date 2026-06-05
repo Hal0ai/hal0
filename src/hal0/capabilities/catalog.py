@@ -502,7 +502,11 @@ def _flat_rows_for_capability(
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
-    curated_only = [e for e in CURATED if not isinstance(e, HaloaiModel)]
+    curated_only = [
+        e
+        for e in CURATED
+        if not isinstance(e, HaloaiModel) and not getattr(e, "bundle_only", False)
+    ]
     candidates: list[Any] = curated_only + _iter_registry_models(registry)
 
     for entry in candidates:

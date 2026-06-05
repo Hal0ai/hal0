@@ -13,19 +13,19 @@
     "aux": [
       {
         "slot": "embed",
-        "model_name": "nomic-v1.5",
+        "model_name": "nomic-embed-text-v1.5-q8_0",
         "size_gb": 0.3,
         "lru": false
       },
       {
         "slot": "stt",
-        "model_name": "whisper-tiny",
+        "model_name": "Whisper-Tiny",
         "size_gb": 0.075,
         "lru": false
       },
       {
         "slot": "tts",
-        "model_name": "kokoro:cpu",
+        "model_name": "kokoro-v1",
         "size_gb": 0.35,
         "lru": false
       }
@@ -42,9 +42,9 @@
     "description": "Recommended starter bundle: chat, embed, STT, TTS.",
     "members": [
       { "model_name": "qwen3.5-9b" },
-      { "model_name": "nomic-v1.5" },
-      { "model_name": "whisper-tiny" },
-      { "model_name": "kokoro:cpu" }
+      { "model_name": "nomic-embed-text-v1.5-q8_0" },
+      { "model_name": "Whisper-Tiny" },
+      { "model_name": "kokoro-v1" }
     ]
   }
 }
