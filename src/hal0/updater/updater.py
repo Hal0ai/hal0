@@ -13,8 +13,9 @@ Updater handles the full update lifecycle:
   7. Atomically swap the ``/usr/lib/hal0/current`` symlink using the
      POSIX ``symlink(tmp) + os.replace(tmp, current)`` pattern.
   8. Record the prior symlink target in ``/var/lib/hal0/hal0.previous`` for
-     rollback. Slot units are NOT touched — only ``hal0-api.service`` is
-     restarted (by the CLI / operator, not this function).
+     rollback. Slot units are NOT touched. The ``hal0-api.service`` restart
+     is the route layer's job (``routes/updater._run_apply_job``), not this
+     function - apply() only swaps the tree.
 
 Rollback reads ``/var/lib/hal0/hal0.previous``, atomic-swaps the
 ``current`` symlink back, and warns (without erroring) if the
@@ -51,8 +52,6 @@ from hal0.config import paths
 from hal0.config.loader import load_hal0_config, write_toml_atomic
 from hal0.config.migrations import latest_version, run_migrations
 from hal0.errors import Hal0Error
-
-DEFAULT_RELEASES_URL = "https://releases.hal0.dev/latest.json"
 
 log = structlog.get_logger(__name__)
 
@@ -148,7 +147,7 @@ class ReleaseManifest(BaseModel):
 
     schema_id: str = Field(default="hal0.releases.v1", alias="_schema")
     version: str = Field(..., description="Release version, e.g. '0.1.1'.")
-    channel: str = Field(default="stable", description="stable | nightly | dev")
+    channel: str = Field(default="stable", description="stable | nightly")
     url: str = Field(..., description="Tarball download URL (https or file).")
     sig_url: str = Field(..., description="Detached cosign signature URL.")
     cert_url: str = Field(
@@ -893,8 +892,9 @@ class Updater:
           8. Atomic-swap the ``/usr/lib/hal0/current`` symlink.
           9. Record the prior target in ``/var/lib/hal0/hal0.previous``.
 
-        Slot units are NOT restarted; ``hal0-api.service`` restart is the
-        CLI / operator's responsibility (per PLAN §9).
+        Slot units are NOT restarted; the ``hal0-api.service`` restart is
+        the route layer's responsibility (``routes/updater._run_apply_job``
+        try-restarts it fail-soft after a successful apply).
 
         Returns a breadcrumb dict the route layer can attach to the job
         record (``version``, ``previous``, ``installed_at``,
@@ -1034,10 +1034,6 @@ class Updater:
             "installed_at": time.time(),
         }
 
-    # Backwards-compat alias for the CLI; new callers should prefer apply().
-    async def pull(self, version: str | None = None) -> dict[str, Any]:
-        return await self.apply(version)
-
     # ── rollback ───────────────────────────────────────────────────────────────
 
     async def rollback(self) -> dict[str, Any]:
@@ -1128,7 +1124,6 @@ class Updater:
 
 
 __all__ = [
-    "DEFAULT_RELEASES_URL",
     "ReleaseInfo",
     "ReleaseManifest",
     "UpdateCosignFailed",

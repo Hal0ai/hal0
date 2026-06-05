@@ -1,10 +1,10 @@
 """CLI implementation for ``hal0 update``.
 
 Thin client over the /api/updates/* surface. The CLI never invokes
-``Updater`` directly — it goes through the daemon so the same code path
+``Updater`` directly - it goes through the daemon so the same code path
 is exercised whether you trigger an update from the dashboard or the
-shell. ``--restart-slots`` reaches around the API to ``systemctl`` after
-a successful apply (see PLAN §9 + Team D brief).
+shell. After a successful apply the daemon try-restarts hal0-api itself
+(see ``routes/updater._run_apply_job``); the CLI does not touch systemd.
 
 Surface:
     hal0 update                 # check + apply if newer
@@ -12,21 +12,21 @@ Surface:
     hal0 update --rollback      # roll back to previous tree
     hal0 update --channel CH    # set channel (persists), then check
     hal0 update --target VER    # pin a specific version
-    hal0 update --restart-slots # also bounce hal0-slot@*.service
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 import time
+import tomllib
 from enum import StrEnum
+from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+import hal0
 from hal0.cli._shared import (
     CliApiError,
     _api_base,
@@ -45,35 +45,64 @@ class UpdateChannel(StrEnum):
     nightly = "nightly"
 
 
-def _restart_slots() -> None:
-    """Bounce every hal0-slot@*.service unit on this host.
+def _editable_source_version() -> str | None:
+    """Return the version in the source-tree pyproject.toml, if this is an
+    editable/source checkout; otherwise None.
 
-    Reaches around the API directly because the dashboard's contract is
-    that slot units are untouched across updates; this is an opt-in
-    operator action (``--restart-slots``) per PLAN §9. Missing systemctl
-    or non-root is reported but not fatal — the swap already succeeded.
+    In an editable install ``importlib.metadata.version("hal0")`` is frozen
+    at ``pip install -e`` time and goes stale after a ``git pull``. We detect
+    the source tree by walking up from ``hal0.__file__`` for a pyproject.toml
+    whose project name is ``hal0`` and reading its declared version.
     """
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        console.print("[yellow]systemctl not found; skipping slot restart.[/yellow]")
+    mod_file = getattr(hal0, "__file__", None)
+    if not mod_file:
+        return None
+    for parent in Path(mod_file).resolve().parents:
+        pp = parent / "pyproject.toml"
+        if not pp.is_file():
+            continue
+        try:
+            data = tomllib.loads(pp.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+        project = data.get("project", {})
+        if project.get("name") == "hal0":
+            ver = project.get("version")
+            return str(ver) if ver else None
+        # A pyproject that isn't hal0's - stop walking (we left the tree).
+        return None
+    return None
+
+
+def _warn_editable_version_drift() -> None:
+    """Warn if the installed metadata version lags the source pyproject.
+
+    Best-effort and silent on the common case (versions match or no source
+    tree found). Surfaces the post-``git pull`` lie so an operator isn't
+    misled by a stale ``hal0 --version``.
+    """
+    source = _editable_source_version()
+    if not source:
         return
+    installed = hal0.__version__
+    # Compare semantically so PEP 440 normalization (0.3.2-alpha.1 vs
+    # 0.3.2a1) doesn't trip a false positive. Fall back to string equality
+    # if either side is unparseable.
     try:
-        proc = subprocess.run(
-            [systemctl, "restart", "hal0-slot@*.service"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        console.print(f"[yellow]slot restart errored: {exc}[/yellow]")
-        return
-    if proc.returncode != 0:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            drifted = Version(source) != Version(installed)
+        except InvalidVersion:
+            drifted = source != installed
+    except ImportError:
+        drifted = source != installed
+    if drifted:
         console.print(
-            f"[yellow]slot restart returned {proc.returncode}:[/yellow] {proc.stderr.strip()[:300]}"
+            f"[yellow]editable install: package metadata reports "
+            f"{installed} but the source tree is {source}. "
+            f"Re-run `pip install -e .` to refresh the version.[/yellow]"
         )
-    else:
-        console.print("[green]slot units restarted.[/green]")
 
 
 def _print_check(body: dict) -> None:
@@ -144,11 +173,6 @@ def update(
         "--target",
         help="Pin a specific version (e.g. v0.1.1). Overrides the latest manifest version.",
     ),
-    restart_slots: bool = typer.Option(
-        False,
-        "--restart-slots",
-        help="After a successful apply, also systemctl restart hal0-slot@*.service.",
-    ),
 ) -> None:
     """Check for, apply, or roll back a hal0 update.
 
@@ -158,6 +182,8 @@ def update(
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
+
+    _warn_editable_version_drift()
 
     if channel is not None:
         try:
@@ -213,8 +239,10 @@ def update(
     state = final.get("state")
     if state == "applied":
         console.print(Panel("[green]update applied.[/green]", border_style="green"))
-        if restart_slots:
-            _restart_slots()
+        if final.get("restarted") is False and final.get("restart_error"):
+            console.print(
+                f"[yellow]hal0-api restart did not complete:[/yellow] {final['restart_error']}"
+            )
     else:
         err = final.get("error") or "unknown error"
         die(f"update {state}: {err}")

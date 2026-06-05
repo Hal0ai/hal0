@@ -6,7 +6,6 @@ tests point at a local JSON file written into the pytest tmp dir.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from collections.abc import Iterator
@@ -246,14 +245,15 @@ def test_status_unknown_job_returns_envelope(isolated_client: TestClient) -> Non
     assert r.json()["error"]["code"] == "system.update_job_not_found"
 
 
-def test_apply_status_eventually_failed_until_team_d_ports(
+def test_apply_status_eventually_failed_on_invalid_manifest(
     isolated_client: TestClient,
 ) -> None:
-    """Apply transitions queued → running → failed because Updater.apply()
-    raises NotImplementedError until Team D ports the symlink swap.
+    """Apply transitions queued -> running -> failed on a bad manifest.
 
-    The route layer is what's under test here — that the background task
-    runs, records its error, and the status endpoint reflects it.
+    The isolated_client manifest is minimal ({"version", "url"}) so it
+    fails schema validation inside ``Updater.apply()``. The route layer is
+    what's under test here - that the background task runs, records its
+    error, and the status endpoint reflects it.
     """
     r = isolated_client.post("/api/updates/apply", json={})
     job_id = r.json()["id"]
@@ -268,22 +268,25 @@ def test_apply_status_eventually_failed_until_team_d_ports(
         if final["state"] in ("failed", "applied"):
             break
         # Give the event loop a chance to run the background task.
-        asyncio.run(asyncio.sleep(0.05))
+        time.sleep(0.05)
     assert final.get("state") == "failed", f"expected failed, got {final}"
     assert final.get("error")
 
 
-def test_rollback_returns_pending_envelope_until_ported(
+def test_rollback_without_previous_returns_envelope(
     isolated_client: TestClient,
 ) -> None:
-    """Rollback surfaces the NotImplementedError as a typed envelope, not a 500."""
+    """Rollback with no previous-version record surfaces the typed envelope.
+
+    ``Updater.rollback()`` raises ``UpdateRollbackUnavailable`` (a typed
+    Hal0Error) which the route now surfaces directly instead of wrapping
+    it - the dashboard keys off the structured code.
+    """
     r = isolated_client.post("/api/updates/rollback")
     assert r.status_code in (400, 500, 501)
     body = r.json()
     assert "error" in body
-    # The message should mention rollback or team-d so the dashboard can
-    # render a clear "rollback pending" hint.
-    assert "rollback" in body["error"]["message"].lower()
+    assert body["error"]["code"] == "system.update_rollback_unavailable"
 
 
 def test_channel_get_returns_stable_default(isolated_client: TestClient) -> None:
@@ -319,3 +322,175 @@ def test_channel_put_invalid_value_returns_envelope(isolated_client: TestClient)
     body = r.json()
     assert "error" in body
     assert "allowed" in body["error"]["details"]
+
+
+def test_channel_put_rejects_dev(isolated_client: TestClient) -> None:
+    """The ``dev`` channel is not a valid update channel (reconciled #510)."""
+    r = isolated_client.put("/api/updates/channel", json={"channel": "dev"})
+    assert r.status_code in (400, 500)
+    body = r.json()
+    assert "error" in body
+    assert "dev" not in body["error"]["details"]["allowed"]
+
+
+# ── #509: durable job store + hal0-api restart on apply ────────────────────────
+
+
+def test_apply_persists_job_to_disk(isolated_client: TestClient, tmp_hal0_home: str) -> None:
+    """A queued apply job is written under /var/lib/hal0/update-jobs/<id>.json."""
+    r = isolated_client.post("/api/updates/apply", json={})
+    assert r.status_code == 202, r.text
+    job_id = r.json()["id"]
+
+    job_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "update-jobs" / f"{job_id}.json"
+    # The queued snapshot is persisted synchronously before the route returns.
+    assert job_file.exists(), f"expected on-disk job record at {job_file}"
+    on_disk = json.loads(job_file.read_text(encoding="utf-8"))
+    assert on_disk["id"] == job_id
+    assert "state" in on_disk
+    assert "updated_at" in on_disk
+
+
+def test_status_falls_back_to_disk_after_restart(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """Status poll resolves from disk even when the in-memory dict was wiped.
+
+    Simulates an ``hal0-api`` restart mid-apply: the process-local
+    ``app.state.update_jobs`` dict is cleared, but the durable record on
+    disk lets the CLI's status poll still resolve (no 404 -> 600s timeout).
+    """
+    r = isolated_client.post("/api/updates/apply", json={})
+    job_id = r.json()["id"]
+
+    # Wait for the background task to land a terminal state on disk.
+    job_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "update-jobs" / f"{job_id}.json"
+    deadline = time.monotonic() + 6.0
+    while time.monotonic() < deadline:
+        if job_file.exists():
+            rec = json.loads(job_file.read_text(encoding="utf-8"))
+            if rec.get("state") in ("applied", "failed"):
+                break
+        time.sleep(0.05)
+
+    # Simulate the restart: blow away the in-memory registry.
+    isolated_client.app.state.update_jobs = {}
+
+    s = isolated_client.get(f"/api/updates/status/{job_id}")
+    assert s.status_code == 200, s.text
+    body = s.json()
+    assert body["id"] == job_id
+    assert body["state"] in ("queued", "running", "applied", "failed")
+
+
+def test_apply_success_tries_restart_hal0_api_fail_soft(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A successful apply records a restart breadcrumb and never tears down.
+
+    We stub ``Updater.apply`` to succeed and capture the systemctl call so
+    the test doesn't depend on systemd. A restart failure must be fail-soft
+    (logged + recorded), not fatal to the applied job.
+    """
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_apply(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.9", "installed_at": time.time()}
+
+    monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *a: object, **k: object) -> object:
+        calls.append(cmd)
+
+        class _R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(u_mod.subprocess, "run", fake_run)
+
+    r = isolated_client.post("/api/updates/apply", json={})
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("applied", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert final.get("state") == "applied", final
+    # systemctl try-restart hal0-api.service was invoked.
+    assert any("try-restart" in c and "hal0-api.service" in c for c in calls), calls
+    assert final.get("restarted") is True
+
+
+def test_apply_success_restart_failure_is_fail_soft(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the restart raises, the job is still 'applied' with a breadcrumb."""
+    from hal0.api.routes import updater as u_mod
+
+    async def fake_apply(self: object, version: str | None = None) -> dict:
+        return {"version": "0.0.9"}
+
+    monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
+
+    def boom_run(cmd: list[str], *a: object, **k: object) -> object:
+        raise OSError("systemctl exploded")
+
+    monkeypatch.setattr(u_mod.subprocess, "run", boom_run)
+
+    r = isolated_client.post("/api/updates/apply", json={})
+    job_id = r.json()["id"]
+
+    deadline = time.monotonic() + 6.0
+    final: dict = {}
+    while time.monotonic() < deadline:
+        final = isolated_client.get(f"/api/updates/status/{job_id}").json()
+        if final["state"] in ("applied", "failed"):
+            break
+        time.sleep(0.05)
+
+    # The just-installed tree is NOT torn down: the job stays applied.
+    assert final.get("state") == "applied", final
+    assert final.get("restarted") is False
+    assert final.get("restart_error")
+
+
+def test_apply_target_strips_leading_v(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/updates/apply normalizes a leading 'v' on the version.
+
+    ``{"version": "v0.1.1"}`` and ``{"version": "0.1.1"}`` must drive the
+    same target so the CLI and direct API callers behave identically (#510).
+    """
+    from hal0.api.routes import updater as u_mod
+
+    seen: list[str | None] = []
+
+    async def fake_apply(self: object, version: str | None = None) -> dict:
+        seen.append(version)
+        return {"version": version or "latest"}
+
+    monkeypatch.setattr(u_mod.Updater, "apply", fake_apply)
+    monkeypatch.setattr(u_mod.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
+
+    r = isolated_client.post("/api/updates/apply", json={"version": "v0.1.1"})
+    job_id = r.json()["id"]
+    deadline = time.monotonic() + 6.0
+    while time.monotonic() < deadline:
+        if isolated_client.get(f"/api/updates/status/{job_id}").json()["state"] in (
+            "applied",
+            "failed",
+        ):
+            break
+        time.sleep(0.05)
+
+    assert seen == ["0.1.1"], seen

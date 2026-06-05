@@ -5,15 +5,15 @@ The route layer owns:
     which honours ``HAL0_RELEASES_URL`` for tests + file:// fallback)
   - version comparison against ``hal0.__version__``
   - channel read/write (persisted in ``hal0.toml`` via ``Hal0Config.telemetry.channel``)
-  - apply-job bookkeeping (queued / running / applied / failed) — jobs
-    live on ``app.state.update_jobs`` so the dashboard can poll status
-    without touching the updater module directly.
+  - apply-job bookkeeping (queued / running / applied / failed) - jobs
+    live on ``app.state.update_jobs`` AND are mirrored to disk under
+    ``/var/lib/hal0/update-jobs/<id>.json`` so a daemon restart mid-apply
+    doesn't 404 the CLI's status poll.
 
-The actual symlink swap / cosign verify is Team D's domain inside the
-``Updater`` class; the route layer calls ``Updater.apply()`` /
-``Updater.rollback()`` which currently raise ``NotImplementedError``.
-A failing apply surfaces as a job in the ``failed`` state with the
-NotImplementedError message attached — the route surface is real.
+The actual symlink swap / cosign verify lives in the ``Updater`` class;
+the route layer calls ``Updater.apply()`` / ``Updater.rollback()``. After
+a successful apply the route try-restarts ``hal0-api.service`` fail-soft
+(a restart failure is recorded on the job, never tears down the new tree).
 
 Endpoints:
     GET  /api/updates/check              — release-manifest fetch + diff
@@ -27,19 +27,28 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import os
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Request
 
 from hal0 import __version__
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
+from hal0.config import paths
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
 from hal0.updater import Updater, fetch_release_manifest, releases_url
+
+log = structlog.get_logger(__name__)
 
 # See slots.py for the writer-gate rationale.
 
@@ -100,6 +109,96 @@ def _update_jobs(request: Request) -> dict[str, dict[str, Any]]:
     return jobs
 
 
+# ── durable job store (#509) ───────────────────────────────────────────────────
+#
+# The in-memory ``update_jobs`` dict is process-local, so an ``hal0-api``
+# restart mid-apply would 404 the CLI's status poll into a 600s timeout.
+# We mirror each job snapshot to ``/var/lib/hal0/update-jobs/<id>.json``
+# (atomic write) and fall back to disk on status lookup.
+
+
+def _jobs_dir() -> Path:
+    """Return ``/var/lib/hal0/update-jobs`` (HAL0_HOME-aware via paths)."""
+    return paths.var_lib() / "update-jobs"
+
+
+def _job_file(job_id: str) -> Path:
+    return _jobs_dir() / f"{job_id}.json"
+
+
+def _persist_job(job: dict[str, Any]) -> None:
+    """Atomically write a job snapshot to disk (best-effort, fail-soft).
+
+    A failure to persist must never break the apply flow - the in-memory
+    registry remains authoritative for the running process.
+    """
+    job_id = job.get("id")
+    if not job_id:
+        return
+    path = _job_file(str(job_id))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        tmp_path = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(job, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None  # type: ignore[assignment]
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("updater.job_persist_failed", job_id=job_id, error=str(exc))
+
+
+def _load_persisted_job(job_id: str) -> dict[str, Any] | None:
+    """Read a persisted job snapshot from disk, or None if absent/unreadable."""
+    path = _job_file(job_id)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        loaded = json.loads(raw)
+    except ValueError:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _try_restart_hal0_api() -> tuple[bool, str | None]:
+    """``systemctl try-restart hal0-api.service`` - fail-soft.
+
+    Returns ``(restarted, error)``. No-ops cleanly when ``systemctl`` is
+    absent (tests / dev hosts) and never raises: a restart failure must not
+    tear down the just-installed tree.
+    """
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        log.info("updater.restart_skipped", reason="systemctl not found")
+        return (False, "systemctl not found")
+    try:
+        proc = subprocess.run(
+            [systemctl, "try-restart", "hal0-api.service"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("updater.restart_errored", error=str(exc))
+        return (False, str(exc))
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()[:300] or f"systemctl exited {proc.returncode}"
+        log.warning("updater.restart_nonzero", returncode=proc.returncode, stderr=err)
+        return (False, err)
+    log.info("updater.restart_ok")
+    return (True, None)
+
+
 async def _run_apply_job(
     jobs: dict[str, dict[str, Any]],
     job_id: str,
@@ -108,30 +207,36 @@ async def _run_apply_job(
 ) -> None:
     """Background task that drives ``Updater.apply()`` and records progress.
 
-    The actual update work is Team D's. Until then, ``Updater.apply()``
-    raises ``NotImplementedError`` and we land the job in the ``failed``
-    state with the exception message. That keeps the dashboard's polling
-    flow exercising real states (queued → running → failed) instead of
-    just hitting a 501 wall.
+    Persists each state transition to disk so a daemon restart mid-apply
+    doesn't strand the CLI's status poll. On a successful apply it
+    try-restarts ``hal0-api.service`` fail-soft - a restart failure is
+    recorded on the job (``restarted`` / ``restart_error``) but never
+    re-fails the apply or tears down the new tree.
     """
     job = jobs[job_id]
     job["state"] = "running"
     job["updated_at"] = time.time()
+    _persist_job(job)
     try:
         updater = Updater(channel=channel)
         await updater.apply(version)
-    except NotImplementedError as exc:
-        job["state"] = "failed"
-        job["error"] = str(exc)
-        job["error_code"] = "system.update_pending"
     except Exception as exc:
         job["state"] = "failed"
         job["error"] = str(exc)
         job["error_code"] = type(exc).__name__
     else:
+        # Bounce hal0-api so the new tree is actually serving. Fail-soft:
+        # the swap already succeeded - a restart hiccup is a breadcrumb,
+        # not a rollback trigger. Record the restart outcome BEFORE flipping
+        # the job to its terminal "applied" state so a status poll never
+        # observes "applied" without the restart breadcrumb attached.
+        restarted, restart_error = await asyncio.to_thread(_try_restart_hal0_api)
+        job["restarted"] = restarted
+        job["restart_error"] = restart_error
         job["state"] = "applied"
     finally:
         job["updated_at"] = time.time()
+        _persist_job(job)
 
 
 # ── /state ─────────────────────────────────────────────────────────────────
@@ -349,7 +454,10 @@ async def apply_update(request: Request) -> dict[str, Any]:
     if isinstance(body, dict):
         v = body.get("version")
         if isinstance(v, str) and v.strip():
-            version = v.strip()
+            # Strip a leading "v" so {"version": "v0.1.1"} and "0.1.1"
+            # drive the same target - matches the CLI's --target handling
+            # (#510). lstrip is fine here: versions never start with "v".
+            version = v.strip().lstrip("v") or None
 
     channel = _current_channel(request)
     jobs = _update_jobs(request)
@@ -363,6 +471,9 @@ async def apply_update(request: Request) -> dict[str, Any]:
         "updated_at": time.time(),
         "error": None,
     }
+    # Persist the queued snapshot before returning so a status poll always
+    # resolves, even if the daemon restarts before the background task runs.
+    _persist_job(jobs[job_id])
     # Fire-and-forget; the route returns the queued snapshot. The
     # background task transitions the entry to running → applied | failed.
     # We retain a reference on app.state so the task isn't GC'd while
@@ -379,10 +490,20 @@ async def apply_update(request: Request) -> dict[str, Any]:
 
 @router.get("/status/{job_id}")
 async def update_status(job_id: str, request: Request) -> dict[str, Any]:
-    """Return the current snapshot of an update job by id."""
+    """Return the current snapshot of an update job by id.
+
+    Reads the in-memory registry first, then falls back to the on-disk
+    store (``/var/lib/hal0/update-jobs/<id>.json``) so a status poll still
+    resolves after an ``hal0-api`` restart wiped the process-local dict.
+    """
     jobs = _update_jobs(request)
     job = jobs.get(job_id)
     if job is None:
+        persisted = _load_persisted_job(job_id)
+        if persisted is not None:
+            # Re-seed the in-memory registry so subsequent polls are fast.
+            jobs[job_id] = persisted
+            return dict(persisted)
         raise UpdateJobNotFound(
             f"no update job with id {job_id!r}",
             details={"job_id": job_id},
@@ -397,23 +518,18 @@ async def update_status(job_id: str, request: Request) -> dict[str, Any]:
 async def rollback_update(request: Request) -> dict[str, Any]:
     """Invoke ``Updater.rollback()`` to revert to the retained previous version.
 
-    Until Team D ports the real symlink swap, this surfaces a typed
-    envelope (``code: "system.update_pending"``) carrying the
-    NotImplementedError message — keeps the surface real without
-    pretending the rollback succeeded.
+    ``Updater.rollback()`` raises typed ``Hal0Error`` subclasses
+    (e.g. ``UpdateRollbackUnavailable`` when there's no previous record),
+    which the middleware renders as structured envelopes. Anything else is
+    wrapped as a generic ``system.update_error``.
     """
     channel = _current_channel(request)
     updater = Updater(channel=channel)
     try:
         await updater.rollback()
-    except NotImplementedError as exc:
-        # 5xx: feature not yet implemented on the server side; not a
-        # client validation failure. Leave at the default 500 envelope
-        # until Team D ports the real symlink-swap path.
-        raise Hal0Error(
-            f"rollback not yet implemented: {exc}",
-            details={"channel": channel, "owner": "team-d"},
-        ) from exc
+    except Hal0Error:
+        # Already-typed updater errors surface as their own envelope.
+        raise
     except Exception as exc:
         raise UpdateError(
             f"rollback failed: {exc}",

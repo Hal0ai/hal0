@@ -687,3 +687,28 @@ def test_cosign_skip_false_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr("hal0.__version__", "1.0.0-rc1")
     monkeypatch.delenv("HAL0_UPDATE_SKIP_COSIGN", raising=False)
     assert _cosign_skip() is False
+
+
+# ── #510: dead-code sweep ──────────────────────────────────────────────────────
+
+
+def test_default_releases_url_export_removed() -> None:
+    """The stale DEFAULT_RELEASES_URL export (pointed at /latest.json) is gone."""
+    import hal0.updater as pkg
+    import hal0.updater.updater as mod
+
+    assert not hasattr(mod, "DEFAULT_RELEASES_URL")
+    assert not hasattr(pkg, "DEFAULT_RELEASES_URL")
+    assert "DEFAULT_RELEASES_URL" not in mod.__all__
+    assert "DEFAULT_RELEASES_URL" not in pkg.__all__
+
+
+def test_updater_pull_alias_removed() -> None:
+    """Updater.pull (no callers) is removed; apply() is the only entrypoint."""
+    assert not hasattr(Updater, "pull")
+
+
+def test_release_manifest_channel_does_not_advertise_dev() -> None:
+    """The manifest channel description is reconciled to stable | nightly only."""
+    desc = ReleaseManifest.model_fields["channel"].description or ""
+    assert "dev" not in desc
