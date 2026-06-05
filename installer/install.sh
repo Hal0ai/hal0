@@ -154,6 +154,35 @@ fi
 VENV_DIR="${PREFIX}/.venv"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# ── Release verification gate ──────────────────────────────────────────────
+# Refuse to run as root against an UNVERIFIED release tree. The signed
+# install path (`curl -fsSL https://hal0.dev/install.sh | sudo bash`) runs
+# through bootstrap.sh, which sha256 + cosign-verifies the release tarball
+# and exports HAL0_BOOTSTRAP_VERIFIED=1 before exec'ing us. A git checkout
+# is trusted (you cloned it from your own remote) and --dev installs are
+# local. Any other path — e.g. someone who downloaded a random tarball and
+# ran `sudo bash install.sh` — would execute arbitrary code as root, so it
+# must opt in explicitly with HAL0_INSTALL_SKIP_VERIFY=1.
+if [[ "${DEV_MODE}" -eq 0 \
+      && "${HAL0_BOOTSTRAP_VERIFIED:-0}" != "1" \
+      && ! -d "${REPO_ROOT}/.git" ]]; then
+    if [[ "${HAL0_INSTALL_SKIP_VERIFY:-0}" == "1" ]]; then
+        warn "HAL0_INSTALL_SKIP_VERIFY=1 — installing from an UNVERIFIED source (no cosign check)"
+    else
+        die "Refusing to install from an unverified release tree.
+
+  This tree did NOT come through the signed installer (no cosign
+  verification, and it is not a git checkout). Installing it would run
+  arbitrary code as root.
+
+  Use the signed one-liner instead:
+      curl -fsSL https://hal0.dev/install.sh | sudo bash
+
+  Or, if you trust THIS source and accept the risk:
+      HAL0_INSTALL_SKIP_VERIFY=1 sudo bash installer/install.sh"
+    fi
+fi
+
 # Resolve pull destination: explicit flag / env wins, then an interactive
 # prompt (only when attached to a tty), then the FHS default. Always
 # absolute — relative paths under sudo would land in /root or wherever

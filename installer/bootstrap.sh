@@ -195,6 +195,11 @@ main() {
     ok "ready — handing off to installer"
     printf '\n'
 
+    # Signal install.sh that this tree was sha256 + cosign-verified above,
+    # so its release-verification gate lets us through without an explicit
+    # HAL0_INSTALL_SKIP_VERIFY opt-out.
+    export HAL0_BOOTSTRAP_VERIFIED=1
+
     # Pass through stdin so install.sh's interactive prompts work when
     # the user invoked us as `sudo bash install.sh`. When invoked via
     # curl|bash, stdin is closed and install.sh falls back to defaults.
