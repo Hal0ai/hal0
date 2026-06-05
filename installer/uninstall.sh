@@ -8,10 +8,21 @@
 #        bash uninstall.sh --dev       # remove dev-mode tree under $PWD/.hal0ai
 #   HAL0_FORCE=1 sudo bash uninstall.sh # equivalent to --force
 #
+# What it removes (system mode): the hal0-api / hal0-openwebui /
+# hal0-lemonade / hal0-agent@ / hermes-gateway units (+ their drop-in
+# dirs), the install PREFIX (/opt/hal0), the Lemonade runtime
+# (/opt/lemonade — gated behind a separate confirmation unless --force),
+# the hal0 system user AND group, the ppa:lemonade-team/stable apt source,
+# and the fastflowlm .deb. Config + state (/etc/hal0, /var/lib/hal0) go too
+# unless --keep-data. Idempotent — never hard-fails on an already-gone
+# target.
+#
 # Env overrides:
 #   HAL0_PREFIX        installation root (default /opt/hal0; --dev defaults
 #                      to $PWD/.hal0ai). When set, --dev path layout is used
 #                      so the uninstall mirrors the matching install.sh run.
+#   HAL0_LEMONADE_PREFIX  Lemonade runtime root to remove (default
+#                      /opt/lemonade; ignored in --dev mode)
 #   HAL0_PATH_LINK     PATH symlink to remove (default /usr/local/bin/hal0;
 #                      ignored in --dev mode)
 
@@ -92,13 +103,28 @@ trap 'error "Uninstall failed at line ${LINENO}."; exit 1' ERR
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     step "Stopping services"
 
-    UNITS=(hal0-api hal0-openwebui hal0-caddy)
+    # Static units the installer writes. hal0-lemonade + hal0-agent@hermes +
+    # hermes-gateway were missed before #508 — install.sh enables all three
+    # (the lemonade daemon, the per-agent runner instance, and the
+    # Telegram/Discord gateway hermes_cli lays down), so they must be torn
+    # down here too. hal0-caddy is legacy (pre-v0.3 auth/Caddy removal) but
+    # kept for old-install cleanup.
+    UNITS=(hal0-api hal0-openwebui hal0-caddy hal0-lemonade \
+           hal0-agent@hermes hermes-gateway)
 
     # Discover any running slot instances
     while IFS= read -r UNIT; do
         UNITS+=("${UNIT%.service}")
     done < <(systemctl list-units --type=service --all --no-legend 2>/dev/null \
         | awk '{print $1}' | grep '^hal0-slot@' || true)
+
+    # Discover any other hal0-agent@ instances (besides hermes, added above)
+    # so a box that bootstrapped extra agents tears them all down.
+    while IFS= read -r UNIT; do
+        [[ "${UNIT}" == "hal0-agent@hermes.service" ]] && continue
+        UNITS+=("${UNIT%.service}")
+    done < <(systemctl list-units --type=service --all --no-legend 2>/dev/null \
+        | awk '{print $1}' | grep '^hal0-agent@' || true)
 
     for UNIT in "${UNITS[@]}"; do
         if systemctl is-active "${UNIT}" &>/dev/null 2>&1; then
@@ -178,7 +204,10 @@ for UNIT_FILE in \
     "${UNIT_DIR}/hal0-api.service" \
     "${UNIT_DIR}/hal0-openwebui.service" \
     "${UNIT_DIR}/hal0-caddy.service" \
-    "${UNIT_DIR}/hal0-slot@.service"
+    "${UNIT_DIR}/hal0-slot@.service" \
+    "${UNIT_DIR}/hal0-lemonade.service" \
+    "${UNIT_DIR}/hal0-agent@.service" \
+    "${UNIT_DIR}/hermes-gateway.service"
 do
     if [[ -f "${UNIT_FILE}" ]]; then
         rm -f "${UNIT_FILE}"
@@ -188,19 +217,85 @@ do
     fi
 done
 
+# Drop-in directories the installer creates alongside the units:
+#   hal0-lemonade.service.d/      — kfd-perms.conf + 20-vulkan-radv.conf
+#   hal0-agent@hermes.service.d/  — override.conf (hermes-specific env)
+#   hermes-gateway.service.d/     — 10-hal0-secrets.conf (bootstrap secrets)
+for DROPIN_DIR in \
+    "${UNIT_DIR}/hal0-lemonade.service.d" \
+    "${UNIT_DIR}/hal0-agent@hermes.service.d" \
+    "${UNIT_DIR}/hermes-gateway.service.d"
+do
+    if [[ -d "${DROPIN_DIR}" ]]; then
+        rm -rf "${DROPIN_DIR}"
+        info "Removed ${DROPIN_DIR}"
+    fi
+done
+
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     systemctl daemon-reload
     info "systemctl daemon-reload done"
 fi
 
 # ── Remove code ───────────────────────────────────────────────────────────────
-step "Removing ${LIB_DIR}"
+step "Removing code"
 
+# /usr/lib/hal0 — Hermes hooks + any FHS-migrated tree (#495). The
+# `[[ -L .../current ]]` test catches the editable→FHS layout where
+# `current` is a symlink into a versioned dir.
 if [[ -d "${LIB_DIR}" ]] || [[ -L "${LIB_DIR}/current" ]]; then
     rm -rf "${LIB_DIR}"
     info "Removed ${LIB_DIR}"
 else
     info "${LIB_DIR} not present"
+fi
+
+# The install PREFIX (default /opt/hal0). install.sh rsyncs the source
+# tree + builds the venv here; before #508 the uninstaller only removed
+# LIB_DIR and left this behind. In --dev mode PREFIX is handled by the
+# dev-tree cleanup block lower down (it lives under $PWD/.hal0ai), so we
+# only sweep it here for a system install.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    if [[ -d "${PREFIX}" ]]; then
+        rm -rf "${PREFIX}"
+        info "Removed ${PREFIX}"
+    else
+        info "${PREFIX} not present"
+    fi
+fi
+
+# ── Lemonade runtime tree (/opt/lemonade) ─────────────────────────────────────
+# The embeddable lemond + lemonade CLI + resources/ (hundreds of MB, plus
+# any lazily-pulled llama.cpp / ROCm backend binaries). Expensive to
+# re-fetch, so we gate it behind its own confirmation unless --force /
+# HAL0_FORCE=1. System mode only — install.sh --dev never touches
+# /opt/lemonade. The cache dir under ${VAR_DIR}/lemonade rides along with
+# the data-dir removal below (respecting --keep-data).
+LEMONADE_PREFIX="${HAL0_LEMONADE_PREFIX:-/opt/lemonade}"
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    step "Lemonade runtime"
+    if [[ -d "${LEMONADE_PREFIX}" ]]; then
+        REMOVE_LEMONADE=1
+        if [[ "${HAL0_FORCE}" -ne 1 ]]; then
+            printf '\n%b%bLemonade runtime%b at %s is expensive to re-download\n' \
+                "${YELLOW}" "${BOLD}" "${RESET}" "${LEMONADE_PREFIX}"
+            printf '(the embeddable tarball + backend binaries are hundreds of MB).\n'
+            printf 'Remove it? Type %byes%b to delete, anything else to keep: ' \
+                "${BOLD}" "${RESET}"
+            read -r LEMONADE_CONFIRM || LEMONADE_CONFIRM=""
+            if [[ "${LEMONADE_CONFIRM}" != "yes" ]]; then
+                REMOVE_LEMONADE=0
+            fi
+        fi
+        if [[ "${REMOVE_LEMONADE}" -eq 1 ]]; then
+            rm -rf "${LEMONADE_PREFIX}"
+            info "Removed ${LEMONADE_PREFIX}"
+        else
+            warn "Keeping ${LEMONADE_PREFIX} (re-run with --force to remove)"
+        fi
+    else
+        info "${LEMONADE_PREFIX} not present"
+    fi
 fi
 
 # ── PATH symlink (system mode only) ───────────────────────────────────────────
@@ -286,9 +381,9 @@ if [[ "${DEV_MODE}" -eq 1 && -d "${PREFIX}" ]]; then
     fi
 fi
 
-# ── System user (system mode only) ────────────────────────────────────────────
+# ── System user + group (system mode only) ────────────────────────────────────
 if [[ "${DEV_MODE}" -eq 0 ]]; then
-    step "System user"
+    step "System user + group"
 
     if id hal0 &>/dev/null 2>&1; then
         if userdel hal0; then
@@ -298,6 +393,51 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         fi
     else
         info "System user hal0 not present"
+    fi
+
+    # userdel removes the user but NOT the matching primary group (which
+    # install.sh creates separately via `groupadd --system hal0`). Remove
+    # it explicitly. groupdel refuses if the group is still the primary
+    # group of a remaining user, or if it's gone — both are fine to ignore
+    # here (the user was just deleted, and a missing group is the goal).
+    if getent group hal0 &>/dev/null 2>&1; then
+        if groupdel hal0 2>/dev/null; then
+            info "Removed system group hal0"
+        else
+            warn "Could not remove group hal0 (still in use or already gone)"
+        fi
+    else
+        info "System group hal0 not present"
+    fi
+fi
+
+# ── Lemonade apt sources + FLM .deb (apt hosts only) ──────────────────────────
+# install.sh adds ppa:lemonade-team/stable and installs the `fastflowlm`
+# .deb on Debian/Ubuntu hosts (NPU runtime path). Reverse both. Guarded by
+# `command -v apt-get` so non-apt hosts skip cleanly, and every step is
+# fail-soft — a stale PPA or leftover package must never abort the
+# uninstall. dev mode never touched apt, so it skips this entirely.
+if [[ "${DEV_MODE}" -eq 0 ]] && command -v apt-get &>/dev/null 2>&1; then
+    step "Lemonade apt sources + FLM package"
+
+    if dpkg-query -W -f='${Status}' fastflowlm 2>/dev/null | grep -q "install ok installed"; then
+        if apt-get remove -y fastflowlm &>/dev/null; then
+            info "Removed fastflowlm package"
+        else
+            warn "Could not remove fastflowlm package (continuing)"
+        fi
+    else
+        info "fastflowlm package not installed"
+    fi
+
+    if command -v add-apt-repository &>/dev/null 2>&1; then
+        if add-apt-repository --remove -y ppa:lemonade-team/stable &>/dev/null; then
+            info "Removed ppa:lemonade-team/stable"
+        else
+            warn "Could not remove ppa:lemonade-team/stable (may already be gone)"
+        fi
+    else
+        info "add-apt-repository not present — leaving any Lemonade PPA in place"
     fi
 fi
 
