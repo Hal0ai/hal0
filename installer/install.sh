@@ -345,6 +345,10 @@ if [[ ! -d "${VENV_DIR}" ]]; then
 fi
 PIP="${VENV_DIR}/bin/pip"
 HAL0_BIN="${VENV_DIR}/bin/hal0"
+# The `hal0-agent` console script (pyproject [project.scripts]) is the
+# stable entry point the `hal0-agent@.service` unit ExecStart's. pip
+# installs it alongside `hal0` in the venv.
+HAL0_AGENT_BIN="${VENV_DIR}/bin/hal0-agent"
 
 # Refresh pip + install hal0 in editable mode pointing at this checkout.
 # ui_spinner_run drops the >/dev/null — the spinner shows the live tail
@@ -368,6 +372,21 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         info "linked ${HAL0_PATH_LINK} → ${HAL0_BIN}"
     else
         warn "could not link ${HAL0_PATH_LINK} (check permissions); add ${VENV_DIR}/bin to PATH manually"
+    fi
+    # Also link `hal0-agent` — the `hal0-agent@.service` unit ExecStart's
+    # `/usr/local/bin/hal0-agent`, so without this symlink the agent units
+    # fail with status=203/EXEC the moment an operator runs
+    # `hal0 agent bootstrap hermes`. Derive the link dir from HAL0_PATH_LINK
+    # so a relocated `hal0` keeps `hal0-agent` beside it.
+    HAL0_AGENT_LINK="$(dirname "${HAL0_PATH_LINK}")/hal0-agent"
+    if [[ -x "${HAL0_AGENT_BIN}" ]]; then
+        if ln -sfn "${HAL0_AGENT_BIN}" "${HAL0_AGENT_LINK}" 2>/dev/null; then
+            info "linked ${HAL0_AGENT_LINK} → ${HAL0_AGENT_BIN}"
+        else
+            warn "could not link ${HAL0_AGENT_LINK} (check permissions); agent units need it on PATH"
+        fi
+    else
+        warn "hal0-agent shim not found at ${HAL0_AGENT_BIN} — agent units will fail until it is linked"
     fi
 fi
 

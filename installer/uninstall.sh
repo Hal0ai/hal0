@@ -212,6 +212,12 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     else
         info "${HAL0_PATH_LINK} not present"
     fi
+    # hal0-agent shim symlink (created alongside hal0 by install.sh)
+    HAL0_AGENT_LINK="$(dirname "${HAL0_PATH_LINK}")/hal0-agent"
+    if [[ -L "${HAL0_AGENT_LINK}" ]] || [[ -f "${HAL0_AGENT_LINK}" ]]; then
+        rm -f "${HAL0_AGENT_LINK}"
+        info "Removed ${HAL0_AGENT_LINK}"
+    fi
 fi
 
 # ── Data dirs ─────────────────────────────────────────────────────────────────
