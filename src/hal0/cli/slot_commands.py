@@ -537,6 +537,47 @@ def slot_delete(
     console.print(f"Deleted slot [bold]{name}[/bold].")
 
 
+@app.command("add", hidden=True)
+def slot_add(
+    name: str = typer.Argument(..., help="Slot name (e.g. primary, embed, stt)"),
+    type_: SlotType = typer.Option(SlotType.llm, "--type", "-t", case_sensitive=False),
+    provider: SlotProvider = typer.Option("llama-server", "--provider", case_sensitive=False),
+    hardware: SlotHardware | None = typer.Option(None, "--hardware", case_sensitive=False),
+    backend: str | None = typer.Option(None, "--backend", "-b", hidden=True),
+    model: str = typer.Option(..., "--model", "-m"),
+    port: int | None = typer.Option(None, "--port", "-p", min=1024, max=65535),
+    ctx_size: int = typer.Option(4096, "--ctx-size", min=128),
+) -> None:
+    """[DEPRECATED] alias for `slot create`; use `slot create` instead."""
+    typer.echo(
+        "[deprecated] `slot add` is renamed to `slot create`; use `slot create`.",
+        err=True,
+    )
+    slot_create(
+        name=name,
+        type_=type_,
+        provider=provider,
+        hardware=hardware,
+        backend=backend,
+        model=model,
+        port=port,
+        ctx_size=ctx_size,
+    )
+
+
+@app.command("remove", hidden=True)
+def slot_remove(
+    name: str = typer.Argument(..., help="Slot name to delete"),
+    force: bool = typer.Option(False, "--force", "-f"),
+) -> None:
+    """[DEPRECATED] alias for `slot delete`; use `slot delete` instead."""
+    typer.echo(
+        "[deprecated] `slot remove` is renamed to `slot delete`; use `slot delete`.",
+        err=True,
+    )
+    slot_delete(name=name, force=force)
+
+
 @app.command("show")
 def slot_show(
     name: str = typer.Argument(..., help="Slot name to inspect"),

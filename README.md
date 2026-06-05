@@ -104,7 +104,7 @@ be evicted out from under a streaming request.
   `model`, plus `enabled` and optional `default`. Six seeded slots
   (`primary`, `embed`, `rerank`, `stt`, `tts`, `img`) plus three NPU
   slots (`agent`, `stt-npu`, `embed-npu`) when FastFlowLM is installed.
-  User-added slots via `hal0 slot add NAME --type TYPE --model MODEL`.
+  User-added slots via `hal0 slot create NAME --type TYPE --model MODEL`.
 - **Lemonade as the unified runtime** — one `lemond` process,
   loopback-only on `:13305`, supervised by `hal0-lemonade.service`.
   Cache + config at `/var/lib/hal0/lemonade/`. The hal0 capability

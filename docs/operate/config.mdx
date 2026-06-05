@@ -52,7 +52,7 @@ Three supported workflows:
   hal0 config edit       # opens $EDITOR
   hal0 config validate   # schema check without writing
   hal0 config show       # print merged view
-  hal0 config migrate    # apply schema migrations to an older config
+  hal0 config migrate    # migrate hal0.toml to the latest schema (no-op when current)
   ```
 - **Direct edit.** Open the file in any editor. On the next
   `hal0-api` restart (or a `hal0 config validate` run), the schema

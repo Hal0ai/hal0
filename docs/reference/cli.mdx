@@ -33,12 +33,19 @@ UMA changes, GPU swaps, or RAM upgrades.
 ```sh
 hal0 slot list [--json]
 hal0 slot show <name> [--json]
+hal0 slot create <name> --model M [--type T] # add a new slot
+hal0 slot delete <name> [--force]            # remove a slot
 hal0 slot load <name> [--model M]
 hal0 slot unload <name>
 hal0 slot restart <name>
 hal0 slot swap <name> --model M
 hal0 slot logs <name> [--follow]             # SSE tail of journald
 ```
+
+The canonical verbs are `slot create` / `slot delete`. The older
+`slot add` / `slot remove` names still work as hidden deprecated
+aliases (they print a deprecation notice and delegate to the canonical
+command), but prefer `create` / `delete`.
 
 `hal0 slot swap` is the most-used command in normal operation. It
 changes a slot's model in one call and you watch it transition
@@ -99,12 +106,24 @@ to the browser.
 hal0 config show
 hal0 config edit                             # opens $EDITOR
 hal0 config validate                         # schema check
-hal0 config migrate                          # apply schema migrations
+hal0 config migrate                          # migrate hal0.toml to the latest schema
 ```
 
 `hal0 config validate` is safe to run at any time and doesn't write
 anything. Use it before `hal0 config edit` to confirm your starting
 point is clean.
+
+`hal0 config migrate` runs the registered migration chain in
+`hal0.config.migrations` against `hal0.toml`, stamping
+`meta.schema_version` forward and atomically rewriting the file only
+when the schema actually advances. If the config is already at the
+latest version (the common case today, schema v1) it reports that and
+leaves the file untouched.
+
+The model registry has its own generator: `hal0 capabilities sync`
+regenerates Lemonade's `server_models.json` from `registry.toml`. (An
+earlier `hal0 registry sync` name was never shipped under `registry`;
+use `hal0 capabilities sync`.)
 
 ## Updates
 

@@ -78,10 +78,55 @@ def config_edit() -> None:
 
 @app.command("migrate")
 def config_migrate() -> None:
-    """Apply pending schema migrations to /etc/hal0/ (Tier 3, no-op today)."""
+    """Migrate hal0.toml forward to the latest config schema version.
+
+    Reads ``meta.schema_version`` from the on-disk config, runs the
+    registered migration chain in ``hal0.config.migrations`` up to the
+    latest version, and atomically writes the result back only if the
+    version actually advanced. If the config is already current (or
+    absent), nothing is written and that is reported honestly.
+    """
+    import tomllib
+
+    from hal0.config.loader import write_toml_atomic
+    from hal0.config.migrations import MigrationError, latest_version, run_migrations
+
+    path = _hal0_toml_path()
+    if not path.exists():
+        console.print(f"[dim]No config at {path} - nothing to migrate.[/dim]")
+        raise typer.Exit(0)
+
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        die(f"could not read {path}: {exc}")
+        return
+
+    current = int((data.get("meta") or {}).get("schema_version", 1) or 1)
+    target = latest_version()
+
+    if current >= target:
+        console.print(
+            f"[green]OK[/green] Config schema is up to date "
+            f"(v{current}, latest v{target}) - nothing to migrate."
+        )
+        raise typer.Exit(0)
+
+    try:
+        migrated, new_version = run_migrations(data, target_version=target)
+    except MigrationError as exc:
+        die(f"migration failed: {exc}")
+        return
+
+    try:
+        write_toml_atomic(path, migrated)
+    except OSError as exc:
+        die(f"could not write {path}: {exc}")
+        return
+
     console.print(
-        "Config schema is at v1 — no migrations pending. "
-        "Future versions will run idempotent transforms here."
+        f"[green]OK[/green] Migrated config schema v{current} -> v{new_version} ({path})."
     )
 
 
