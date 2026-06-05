@@ -235,6 +235,12 @@ export function usePullJob(): PullSnapshot {
     if (typeof payload.state === 'string' && TERMINAL.has(payload.state)) {
       closeStream()
       qc.invalidateQueries({ queryKey: ['models'] })
+      // Broadcast terminal state so route-independent listeners (e.g. the
+      // command palette's "Cancel download" affordance) can stop offering
+      // to cancel a pull that has finished.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('hal0:pull-ended', { detail: { modelId } }))
+      }
     }
   }
 
@@ -309,6 +315,9 @@ export function usePullJob(): PullSnapshot {
       await apiPost(ENDPOINTS.modelPullCancel(modelId))
       setState('cancelled')
       closeStream()
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('hal0:pull-ended', { detail: { modelId } }))
+      }
     } catch (e) {
       if (e instanceof Hal0Error) {
         setError({ code: e.code, message: e.message, details: e.details })

@@ -669,6 +669,14 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
     return () => window.removeEventListener("hal0:create-slot", onOpen);
   }, []);
 
+  // Open the live log drawer for a slot — fired by the command palette's
+  // "View logs — <slot>" action (which routes here first).
+  React.useEffect(() => {
+    const onLogs = (e) => { const n = e && e.detail && e.detail.name; if (n) setLogsForSlot(n); };
+    window.addEventListener("hal0:slot-logs", onLogs);
+    return () => window.removeEventListener("hal0:slot-logs", onLogs);
+  }, []);
+
   // Close menus on outside click
   React.useEffect(() => {
     const off = () => { setSwapName(null); setMenuName(null); };

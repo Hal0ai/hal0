@@ -220,6 +220,7 @@ function App() {
       />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <SlotActionBridge />
 
       {toast && (
         <div className={"hal0-toast " + (toast.kind || "info")} role="status" aria-live="polite">
