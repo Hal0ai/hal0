@@ -33,7 +33,7 @@ from hal0.registry.store import ModelRegistry
 def test_curated_catalogue_includes_image_entries() -> None:
     """The named v1 image-gen picks must always be present."""
     ids = {m.id for m in CURATED_MODELS}
-    assert {"sdxl-turbo", "sd-1.5-pruned-emaonly", "flux-schnell"}.issubset(ids)
+    assert {"sdxl-turbo", "sd-1.5-pruned-emaonly"}.issubset(ids)
 
 
 def test_curated_image_entries_have_workflow_metadata() -> None:

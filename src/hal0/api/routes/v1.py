@@ -1051,7 +1051,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     if curated is None or curated.capability != "image":
         raise _ImageModelNotCurated(
             f"model {requested!r} is not in the curated image-gen catalogue; "
-            "current built-ins: sdxl-turbo, sd-1.5-pruned-emaonly, flux-schnell",
+            "current built-ins: sdxl-turbo, sd-1.5-pruned-emaonly",
             details={"model": requested},
         )
 

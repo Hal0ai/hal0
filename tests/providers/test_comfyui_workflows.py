@@ -41,7 +41,7 @@ def test_template_for_unknown_falls_back_to_sdxl_turbo() -> None:
 
 def test_model_class_table_has_named_entries() -> None:
     """Curated catalogue's image entries map to known templates."""
-    for cls in ("sdxl-turbo", "sd-1.5", "flux-schnell"):
+    for cls in ("sdxl-turbo", "sd-1.5", "flux-klein"):
         assert cls in MODEL_CLASS_TO_TEMPLATE
         assert MODEL_CLASS_TO_TEMPLATE[cls]
 

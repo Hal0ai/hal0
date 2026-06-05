@@ -37,7 +37,7 @@ _IMAGE_PATHS = ("/images/generations", "/images/edits", "/images/variations")
 _EMBED_NAME_HINTS = ("embed", "rerank")
 
 # Model id prefixes that pin to the image-gen slot. Curated catalogue uses
-# these prefixes (sdxl-turbo, sd-1.5-..., flux-schnell). Anything matching
+# these prefixes (sdxl-turbo, sd-1.5-..., flux-*). Anything matching
 # these in the bare-model lookup goes to the `img` slot before legacy slot
 # name resolution kicks in.
 _IMAGE_NAME_PREFIXES = ("sdxl", "sd-1.5", "sd15", "flux")

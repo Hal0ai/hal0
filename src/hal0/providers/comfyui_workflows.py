@@ -60,11 +60,11 @@ MODEL_CLASS_TO_TEMPLATE: dict[str, str] = {
     "sdxl": "sdxl_turbo_simple",
     "sd-1.5": "sd15_simple",
     "sd15": "sd15_simple",
-    # NOTE: flux-schnell would want its own template (different VAE,
-    # T5 text encoder, sampler defaults). Until we ship it, route Flux
-    # callers through SDXL Turbo's graph as a soft fallback so the API
-    # never 404s on a registered curated id.
-    "flux-schnell": "sdxl_turbo_simple",
+    # NOTE: Flux model classes (e.g. flux-klein) want their own template
+    # (different VAE, text encoder, sampler defaults). Until we ship one,
+    # route Flux callers through SDXL Turbo's graph as a soft fallback so
+    # the API never 404s on a registered curated id.
+    "flux-klein": "sdxl_turbo_simple",
 }
 
 # Hardcoded OpenAI-compat default size when caller omits ``size``.

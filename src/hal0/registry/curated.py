@@ -138,8 +138,8 @@ class CuratedModel(BaseModel):
     model_class: str = Field(
         default="",
         description=(
-            "Image-gen model class discriminator, e.g. 'sdxl-turbo', 'sd-1.5', "
-            "'flux-schnell'. Selects which ComfyUI workflow template to render. "
+            "Image-gen model class discriminator, e.g. 'sdxl-turbo' or "
+            "'sd-1.5'. Selects which ComfyUI workflow template to render. "
             "Empty for non-image entries."
         ),
     )
@@ -244,7 +244,11 @@ CURATED_MODELS: list[CuratedModel] = [
     CuratedModel(
         id="qwen3.5-0.8b",
         display_name="Qwen3.5 0.8B",
-        description="Tiny first-boot pick. Useful for smoke-testing the install before pulling a real chat model.",
+        description=(
+            "Tiny chat pick with a dual role: it is the primary model the Lite "
+            "omni bundle ships, and it doubles as the install smoke-test model "
+            "before pulling a full-size chat pick."
+        ),
         family="qwen",
         size_gb=0.6,
         vram_gb_min=1.0,
@@ -254,8 +258,8 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="Qwen3.5-0.8B-UD-Q4_K_XL.gguf",
         context_length=32768,
         recommended_slot="primary",
-        tags=["chat", "tiny", "smoke-test"],
-        notes="Sub-second cold start. Good for verifying the slot lifecycle before downloading a 20+ GB pick.",
+        tags=["chat", "tiny", "lite-bundle", "smoke-test"],
+        notes="Sub-second cold start. Lite-bundle primary; also verifies the slot lifecycle before downloading a 20+ GB pick.",
     ),
     # ── Kept-in-featured legacy picks (explicit user ask): qwen3-4b for
     # mid-tier Vulkan hosts, phi3-mini for the MIT-licensed pick.  Slot
@@ -434,9 +438,8 @@ CURATED_MODELS: list[CuratedModel] = [
     # ── Image-gen models (recommended_slot="img", routed through ComfyUI) ────
     #
     # Curated picks intentionally span the licensing spectrum:
-    #   - SDXL Turbo  : SAI Non-Commercial Research Community (research only).
-    #   - SD 1.5      : CreativeML Open RAIL-M (research + commercial w/ caveats).
-    #   - Flux Schnell: Apache-2.0 (the OSS unicorn — no usage restrictions).
+    #   - SDXL Turbo : SAI Non-Commercial Research Community (research only).
+    #   - SD 1.5     : CreativeML Open RAIL-M (research + commercial w/ caveats).
     # The picker UI must surface these license badges so users pick consciously.
     CuratedModel(
         id="sdxl-turbo",
@@ -487,34 +490,6 @@ CURATED_MODELS: list[CuratedModel] = [
         ),
         capability="image",
         model_class="sd-1.5",
-        comfyui_subdir="checkpoints",
-    ),
-    CuratedModel(
-        id="flux-schnell",
-        display_name="FLUX.1 [schnell]",
-        description=(
-            "Black Forest Labs' Flux Schnell. State-of-the-art quality, "
-            "Apache-2.0 licensed (rare in this space)."
-        ),
-        family="flux",
-        size_gb=23.8,
-        vram_gb_min=24.0,
-        license="Apache-2.0",
-        license_url="https://www.apache.org/licenses/LICENSE-2.0",
-        hf_repo="black-forest-labs/FLUX.1-schnell",
-        hf_file="flux1-schnell.safetensors",
-        context_length=0,
-        recommended_slot="img",
-        tags=["image", "flux", "apache", "high-vram"],
-        notes=(
-            "23 GB checkpoint — fits Strix Halo's 100 GB unified pool but the "
-            "default sdxl_turbo_simple workflow won't load Flux's T5 text "
-            "encoder. Ship a flux-specific workflow before promoting this in "
-            "the picker UI; for v1 it's catalogued so the curated list is "
-            "complete."
-        ),
-        capability="image",
-        model_class="flux-schnell",
         comfyui_subdir="checkpoints",
     ),
     # ── Bundle-only canonical defs (#500) ────────────────────────────────

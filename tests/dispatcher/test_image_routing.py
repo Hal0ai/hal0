@@ -60,7 +60,7 @@ def test_flux_model_prefix_routes_to_img() -> None:
     reg = _registry_with_slots("primary", "img")
     upstream = resolve_slot(
         "/v1/images/generations",
-        {"model": "flux-schnell", "prompt": "x"},
+        {"model": "Flux-2-Klein-9B-GGUF", "prompt": "x"},
         reg,
     )
     assert upstream.name == "img"

@@ -45,22 +45,13 @@ states, controls, and metrics.
 
 ## Curated models
 
-The picker UI surfaces three curated entries spanning the licensing
+The picker UI surfaces two curated entries spanning the licensing
 spectrum (see `src/hal0/registry/curated.py`):
 
 | Id                       | Family            | On-disk  | Min VRAM | License                                       |
 |--------------------------|-------------------|----------|----------|-----------------------------------------------|
 | `sdxl-turbo`             | SDXL distilled    | ~6.5 GB  | 8 GB     | SAI Non-Commercial Research Community         |
 | `sd-1.5-pruned-emaonly`  | SD 1.5            | ~4.3 GB  | 4 GB     | CreativeML Open RAIL-M                        |
-| `flux-schnell`           | FLUX.1 [schnell]  | ~23.8 GB | 24 GB    | Apache-2.0                                    |
-
-<Aside type="note">
-  `flux-schnell` is catalogued for completeness, but the default
-  `sdxl_turbo_simple` workflow won't load its T5 text encoder. A
-  Flux-specific workflow is on the punch list before Flux gets
-  promoted in the picker UI. For now treat it as
-  bring-your-own-workflow.
-</Aside>
 
 ## curl: image generation
 
@@ -154,10 +145,7 @@ to the `img` slot.
   in the repo for ComfyUI on Strix Halo iGPU. Treat the curated
   models' VRAM hints as the only published sizing data until a real
   measurement lands.
-- **Flux workflow.** As above: `flux-schnell` is catalogued but the
-  default workflow can't drive it. A Flux workflow is the gating
-  item before Flux is fully picker-grade.
-- **License spread.** The three curated entries each have a
+- **License spread.** The two curated entries each have a
   different license. The picker UI surfaces the badge so you pick
   consciously; check the bundled `license_url` field before shipping
   output anywhere production-facing.
