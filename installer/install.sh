@@ -843,10 +843,14 @@ LEMONADE_VERSION="v10.6.0"
 LEMONADE_VERSION_BARE="${LEMONADE_VERSION#v}"
 LEMONADE_TARBALL="lemonade-embeddable-${LEMONADE_VERSION_BARE}-ubuntu-x64.tar.gz"
 LEMONADE_URL="https://github.com/lemonade-sdk/lemonade/releases/download/${LEMONADE_VERSION}/${LEMONADE_TARBALL}"
-# SHA-256 of the upstream artefact at v10.6.0. Placeholder pre-pin; gate
-# release on populating with the real checksum. HAL0_SKIP_LEMONADE_SHA=1
-# lets CI / dev installs proceed against the placeholder explicitly.
-LEMONADE_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+# SHA-256 of the upstream artefact (the ${LEMONADE_TARBALL} asset on the
+# lemonade-sdk/lemonade ${LEMONADE_VERSION} GitHub release). When bumping
+# LEMONADE_VERSION, re-pin this from the release's published digest:
+#   gh api repos/lemonade-sdk/lemonade/releases/tags/${LEMONADE_VERSION} \
+#     --jq '.assets[] | select(.name=="'"${LEMONADE_TARBALL}"'") | .digest'
+# (equivalently: curl -fsSL "${LEMONADE_URL}" | sha256sum). HAL0_SKIP_LEMONADE_SHA=1
+# lets CI / dev installs proceed without a matching checksum explicitly.
+LEMONADE_SHA256="3b50b5cc5a9695f970b85f5cf3023297bde215f2230c993134e670baab2474a1"
 
 LEMONADE_PREFIX="/opt/lemonade"
 LEMONADE_CACHE_DIR="${VAR_DIR}/lemonade"
