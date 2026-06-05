@@ -17,6 +17,17 @@ import { ENDPOINTS } from '@/api/endpoints'
 
 const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React;
 
+// Map a slot lifecycle state to a chip color class.
+//   online/ready/serving → green (ok); starting → amber (warn);
+//   error → red (err); offline/empty/anything else → neutral grey (base chip).
+function stateChipClass(state) {
+  const s = String(state || "").toLowerCase();
+  if (["ready", "online", "loaded", "serving", "running"].includes(s)) return "chip ok";
+  if (["starting", "loading", "pending", "stopping"].includes(s)) return "chip warn";
+  if (["error", "failed", "broken"].includes(s)) return "chip err";
+  return "chip"; // offline / empty / unconfigured → neutral grey
+}
+
 // Map /api/models registry rows → the shape this file's swap popover and
 // create-slot modal grew up around (HAL0_DATA seed). Done in JSX rather
 // than at the API layer so the response stays identical to what the
@@ -442,7 +453,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       <div style={{display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
         <ReadOnlyStrip k="provider" v="lemonade" />
         <ReadOnlyStrip k="port" v={`:${slot.port || "—"}`} />
-        <ReadOnlyStrip k="state" v={<span className="chip ok">{slot.state}</span>} />
+        <ReadOnlyStrip k="state" v={<span className={stateChipClass(slot.state)}>{slot.state}</span>} />
       </div>
 
       {/* Declared vs actual backend (ADR-0022). DECLARED = the normalized
