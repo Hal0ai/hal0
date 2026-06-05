@@ -1263,7 +1263,7 @@ REGISTRY_TOML="${VAR_DIR}/registry/registry.toml"
 
 if [[ "${DEV_MODE}" -eq 0 && -d "${LEMONADE_RESOURCES}" ]]; then
     if [[ ! -f "${REGISTRY_TOML}" ]]; then
-        warn "registry.toml not found at ${REGISTRY_TOML}; writing empty server_models.json"
+        info "registry.toml not found at ${REGISTRY_TOML}; writing curated stock catalog (#210)"
     fi
     if "${VENV_DIR}/bin/python" -m hal0.lemonade.server_models_gen \
         --registry "${REGISTRY_TOML}" \

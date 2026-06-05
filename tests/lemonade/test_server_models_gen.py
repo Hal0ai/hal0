@@ -23,10 +23,12 @@ import pytest
 import tomli_w
 
 from hal0.lemonade.server_models_gen import (
+    STOCK_FALLBACK_IDS,
     cli_main,
     generate_server_models,
     write_server_models,
 )
+from hal0.registry.curated import CURATED_BY_ID
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -697,15 +699,23 @@ class TestAtomicWrite:
 
 
 class TestRegistryMissingOrMalformed:
-    def test_missing_registry_yields_empty_catalog(self, tmp_path: Path) -> None:
-        out = generate_server_models(tmp_path / "does-not-exist.toml")
-        assert out == {}
+    def test_missing_registry_yields_stock_fallback(self, tmp_path: Path) -> None:
+        """A fresh install (no registry.toml) must NOT blank the catalog.
 
-    def test_malformed_registry_yields_empty_catalog(self, tmp_path: Path) -> None:
+        Issue #210: install.sh writes this output over Lemonade's bundled
+        ``server_models.json`` (180 stock entries). If we emit ``{}`` the
+        daemon has nothing to load and the user can't chat until they
+        manually pull. Fall back to the canonical curated stock set so a
+        fresh box has loadable models out of the box.
+        """
+        out = generate_server_models(tmp_path / "does-not-exist.toml")
+        assert out, "empty registry must fall back to a non-empty stock catalog"
+
+    def test_malformed_registry_yields_stock_fallback(self, tmp_path: Path) -> None:
         registry = tmp_path / "registry.toml"
         registry.write_text("this is not valid toml [[[")
         out = generate_server_models(registry)
-        assert out == {}
+        assert out, "malformed registry must fall back to a non-empty stock catalog"
 
     def test_list_shape_registry_accepted(self, tmp_path: Path) -> None:
         """Mirror ModelRegistry's haloai backcompat: list-of-tables works."""
@@ -719,6 +729,82 @@ class TestRegistryMissingOrMalformed:
         )
         out = generate_server_models(registry)
         assert "a" in out
+
+    def test_empty_models_table_yields_stock_fallback(self, tmp_path: Path) -> None:
+        """A registry that parses fine but lists zero models still falls back."""
+        registry = tmp_path / "registry.toml"
+        registry.write_text("")
+        out = generate_server_models(registry)
+        assert out, "registry with no models must fall back to stock catalog"
+
+
+# ── Stock fallback on empty registry (issue #210) ────────────────────────────
+
+
+class TestStockFallback:
+    """When the registry yields no usable models, the generator emits a
+    curated STOCK set instead of an empty catalog, so a fresh install has
+    loadable models without manual ``hal0 model pull``."""
+
+    def test_fallback_ids_are_canonical_curated_ids(self, tmp_path: Path) -> None:
+        """Every stock-fallback id resolves in the canonical curated catalog
+        (``CURATED_BY_ID``). Blocked-by #500 guarantees these ids exist and
+        do not drift."""
+        out = generate_server_models(tmp_path / "missing.toml")
+        assert out  # non-empty
+        for mid in out:
+            assert mid in CURATED_BY_ID, f"stock id {mid!r} not a canonical curated id"
+
+    def test_fallback_covers_core_chat_modality(self, tmp_path: Path) -> None:
+        """A fresh box must at least have a loadable chat model so the user
+        can reach a streamed token on first run."""
+        # Type-driving labels Lemonade's classifier resolves to a non-LLM type.
+        type_labels = {"embeddings", "reranking", "transcription", "tts", "image"}
+        out = generate_server_models(tmp_path / "missing.toml")
+        chat_ids = [
+            mid
+            for mid in out
+            if CURATED_BY_ID[mid].capability == "chat"
+            # A chat model carries no type-driving label, so Lemonade
+            # classifies it as LLM (chat).
+            and not (set(out[mid]["labels"]) & type_labels)
+        ]
+        assert chat_ids, "stock fallback must include at least one chat model"
+
+    def test_fallback_entries_have_valid_lemonade_shape(self, tmp_path: Path) -> None:
+        """Each stock entry has the keys Lemonade's loader needs."""
+        out = generate_server_models(tmp_path / "missing.toml")
+        for mid, entry in out.items():
+            assert entry["checkpoint"], f"{mid} missing checkpoint"
+            assert entry["recipe"], f"{mid} missing recipe"
+            assert isinstance(entry["labels"], list)
+            assert entry["suggested"] is False
+
+    def test_fallback_set_matches_declared_ids(self, tmp_path: Path) -> None:
+        """The output ids are exactly the declared STOCK_FALLBACK_IDS."""
+        out = generate_server_models(tmp_path / "missing.toml")
+        assert set(out.keys()) == set(STOCK_FALLBACK_IDS)
+
+    def test_populated_registry_does_not_fall_back(self, tmp_path: Path) -> None:
+        """When the registry IS populated, behaviour is unchanged — no stock
+        ids leak in."""
+        registry = tmp_path / "registry.toml"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        with open(registry, "wb") as f:
+            tomli_w.dump(
+                {
+                    "models": {
+                        "my-only-model": {
+                            "path": "/x.gguf",
+                            "capabilities": ["chat"],
+                            "backends": ["vulkan"],
+                        }
+                    }
+                },
+                f,
+            )
+        out = generate_server_models(registry)
+        assert set(out.keys()) == {"my-only-model"}
 
 
 # ── CLI entry point ──────────────────────────────────────────────────────────

@@ -170,6 +170,33 @@ _DEFAULT_RECIPE_BY_LABEL: dict[str, str] = {
 _DEFAULT_LLM_CTX: int = 8192
 
 
+# ── Stock fallback (issue #210) ─────────────────────────────────────────────
+#
+# On a fresh ``curl | bash`` install the hal0 registry is not yet seeded, so
+# ``_read_registry`` yields zero models. install.sh writes our output over
+# Lemonade's bundled ``server_models.json`` (which ships ~180 stock entries),
+# so emitting an empty dict here would blank the catalog and leave the daemon
+# with nothing to load - the user can't chat until they manually pull a model.
+#
+# To keep a fresh box usable we fall back to a small curated STOCK set drawn
+# from ``hal0.registry.curated.CURATED_BY_ID``. These ids are the canonical
+# curated ids (kept stable by #500), so the output is non-empty and the daemon
+# has loadable models out of the box. Picked to cover the core modalities a
+# first-run user reaches for: a sub-second smoke/chat model, a lean default
+# chat model, an embed model, a reranker, an STT model, and a TTS voice.
+#
+# This fallback ONLY applies when the registry yields no usable models. A
+# populated registry is emitted verbatim (unchanged behaviour).
+STOCK_FALLBACK_IDS: tuple[str, ...] = (
+    "qwen3.5-0.8b",  # sub-second smoke + Lite-bundle primary chat
+    "qwen3.5-9b",  # lean default chat
+    "nomic-embed-text-v1.5-q8_0",  # default embed
+    "bge-reranker-v2-m3-q4_k_m",  # default reranker
+    "Whisper-Large-v3-Turbo",  # STT
+    "kokoro-v1",  # TTS voice
+)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -352,6 +379,84 @@ def _entry_labels(caps: list[str], tags: list[str], primary_label: str | None) -
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 
+def _lemon_entry_from_registry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Convert one registry entry dict into its Lemonade server-model entry."""
+    caps = list(entry.get("capabilities") or [])
+    primary = _pick_primary_capability(caps)
+    primary_label = _CAPABILITY_TO_LABEL.get(primary or "chat")
+    # primary_label is None when capability is 'chat' (no Lemonade label
+    # needed) or unrecognised. Either way recipe-resolve handles it.
+
+    backends = list(entry.get("backends") or [])
+    recipe = _resolve_recipe(backends, primary_label)
+
+    checkpoint = _resolve_checkpoint(entry)
+    size_gb = _resolve_size_gb(entry)
+    labels = _entry_labels(caps, list(entry.get("tags") or []), primary)
+
+    lemon: dict[str, Any] = {
+        "checkpoint": checkpoint,
+        "recipe": recipe,
+        "labels": labels,
+        "size": size_gb,
+        "suggested": False,
+    }
+
+    ctx = _resolve_ctx(entry, primary)
+    # Lemonade reads max_context_window via recipe_options at load time;
+    # we surface it as a sibling key for documentation + hal0 UI use.
+    if ctx is not None and recipe in ("llamacpp", "flm"):
+        lemon["max_context_window"] = ctx
+
+    return lemon
+
+
+def _curated_to_registry_entry(model: Any) -> dict[str, Any]:
+    """Adapt a ``CuratedModel`` into the registry-entry dict the generator
+    consumes, so a curated pick flows through the same per-entry machinery.
+
+    The curated schema uses singular field names (``hf_file``, ``capability``,
+    ``backend``) where the registry uses plural ones (``hf_filename``,
+    ``capabilities``, ``backends``); this bridges the two.
+    """
+    size_bytes = round(float(model.size_gb) * (1024**3)) if model.size_gb else 0
+    entry: dict[str, Any] = {
+        "capabilities": [model.capability] if model.capability else ["chat"],
+        "backends": [model.backend] if model.backend else [],
+        "hf_repo": model.hf_repo,
+        "hf_filename": model.hf_file,
+        "tags": list(model.tags),
+        "size_bytes": size_bytes,
+    }
+    if getattr(model, "context_length", 0):
+        entry["metadata"] = {"context_length": model.context_length}
+    return entry
+
+
+def _stock_fallback_catalog() -> dict[str, dict[str, Any]]:
+    """Build the non-empty stock catalog used when the registry is empty.
+
+    Draws the canonical curated ids in :data:`STOCK_FALLBACK_IDS` from
+    ``hal0.registry.curated.CURATED_BY_ID`` and shapes each as a Lemonade
+    server-model entry. Imported lazily so the registry package is not pulled
+    in on the common (populated-registry) path.
+    """
+    # Local import to keep the populated-registry path import-light and avoid
+    # a module-level dependency cycle between lemonade and registry.
+    from hal0.registry.curated import CURATED_BY_ID
+
+    out: dict[str, dict[str, Any]] = {}
+    for mid in STOCK_FALLBACK_IDS:
+        model = CURATED_BY_ID.get(mid)
+        if model is None:
+            # Defensive: a curated id was renamed without updating the
+            # fallback list. Skip it rather than emit a broken entry.
+            log.warning("stock fallback id %s not in curated catalog - skipping", mid)
+            continue
+        out[mid] = _lemon_entry_from_registry(_curated_to_registry_entry(model))
+    return out
+
+
 def generate_server_models(registry_path: Path) -> dict[str, dict[str, Any]]:
     """Read ``registry.toml`` and return the Lemonade ``server_models.json`` dict.
 
@@ -359,10 +464,15 @@ def generate_server_models(registry_path: Path) -> dict[str, dict[str, Any]]:
     file is diff-friendly across runs. The caller serialises with
     ``json.dumps(..., indent=4)`` to match Lemonade's own formatting.
 
+    When the registry yields no usable models (missing/malformed file, or a
+    not-yet-seeded fresh install), a curated STOCK set is returned instead of
+    an empty dict - see :data:`STOCK_FALLBACK_IDS` and issue #210. install.sh
+    overwrites Lemonade's bundled catalog with this output, so a blank result
+    would leave the daemon with nothing to load.
+
     Args:
-        registry_path: Absolute path to ``registry.toml``. A missing file
-            yields an empty dict (warning logged); the install hook can
-            still write a valid empty catalog.
+        registry_path: Absolute path to ``registry.toml``. A missing or empty
+            registry yields the stock fallback (warning logged).
 
     Returns:
         ``{model_id: {checkpoint, recipe, labels, size, suggested, ...}}``.
@@ -370,37 +480,16 @@ def generate_server_models(registry_path: Path) -> dict[str, dict[str, Any]]:
     registry_path = Path(registry_path)
     entries = _read_registry(registry_path)
 
+    if not entries:
+        log.warning(
+            "registry yielded no models - emitting %d stock fallback entries (#210)",
+            len(STOCK_FALLBACK_IDS),
+        )
+        return _stock_fallback_catalog()
+
     out: dict[str, dict[str, Any]] = {}
     for mid in sorted(entries):
-        entry = entries[mid]
-        caps = list(entry.get("capabilities") or [])
-        primary = _pick_primary_capability(caps)
-        primary_label = _CAPABILITY_TO_LABEL.get(primary or "chat")
-        # primary_label is None when capability is 'chat' (no Lemonade label
-        # needed) or unrecognised. Either way recipe-resolve handles it.
-
-        backends = list(entry.get("backends") or [])
-        recipe = _resolve_recipe(backends, primary_label)
-
-        checkpoint = _resolve_checkpoint(entry)
-        size_gb = _resolve_size_gb(entry)
-        labels = _entry_labels(caps, list(entry.get("tags") or []), primary)
-
-        lemon: dict[str, Any] = {
-            "checkpoint": checkpoint,
-            "recipe": recipe,
-            "labels": labels,
-            "size": size_gb,
-            "suggested": False,
-        }
-
-        ctx = _resolve_ctx(entry, primary)
-        # Lemonade reads max_context_window via recipe_options at load time;
-        # we surface it as a sibling key for documentation + hal0 UI use.
-        if ctx is not None and recipe in ("llamacpp", "flm"):
-            lemon["max_context_window"] = ctx
-
-        out[mid] = lemon
+        out[mid] = _lemon_entry_from_registry(entries[mid])
 
     return out
 
@@ -524,6 +613,7 @@ if __name__ == "__main__":  # pragma: no cover — exercised via test_cli_main
 
 
 __all__ = [
+    "STOCK_FALLBACK_IDS",
     "cli_main",
     "generate_server_models",
     "write_server_models",
