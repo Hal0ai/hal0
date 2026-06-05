@@ -142,6 +142,8 @@ async def get_urls(request: Request) -> dict[str, object]:
           "api":               "http://<host>:8080" | "https://<host>",
           "openwebui":         "http://<host>:3001" | "https://chat.<host>",
           "openwebui_enabled": true | false,
+          "hermes":            "" | "https://hermes.<host>",
+          "hermes_enabled":    true | false,
         }
 
     ``HAL0_OPENWEBUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins
@@ -156,8 +158,17 @@ async def get_urls(request: Request) -> dict[str, object]:
     Reverse-proxy deploys without the env var get ``openwebui_enabled =
     false`` so the dashboard hides the Chat link instead of dangling it
     at a broken URL.
+
+    Hermes is different: its dashboard binds ``127.0.0.1:9119`` (loopback)
+    so — unlike OpenWebUI — there is NO browser-reachable host:port
+    fallback. It is advertised ONLY when the operator declares a public
+    URL via ``HAL0_HERMES_PUBLIC_URL`` (its own (sub)domain behind the
+    proxy, e.g. ``https://hermes.example.com``). On a stock install the
+    key is ``""`` / ``hermes_enabled = false`` so the dashboard renders the
+    hermes health row without a dead-end link.
     """
     public = os.environ.get("HAL0_OPENWEBUI_PUBLIC_URL", "").strip().rstrip("/")
+    hermes = os.environ.get("HAL0_HERMES_PUBLIC_URL", "").strip().rstrip("/")
     host = _resolve_host(request)
     enabled = await _openwebui_is_active()
 
@@ -168,7 +179,13 @@ async def get_urls(request: Request) -> dict[str, object]:
             api_url = f"{scheme}://{forwarded_host}"
         else:
             api_url = f"http://{host}:{_api_port()}"
-        return {"api": api_url, "openwebui": public, "openwebui_enabled": enabled}
+        return {
+            "api": api_url,
+            "openwebui": public,
+            "openwebui_enabled": enabled,
+            "hermes": hermes,
+            "hermes_enabled": bool(hermes),
+        }
 
     if _behind_proxy(request):
         scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -177,11 +194,15 @@ async def get_urls(request: Request) -> dict[str, object]:
             "api": f"{scheme}://{forwarded_host}",
             "openwebui": "",
             "openwebui_enabled": False,
+            "hermes": hermes,
+            "hermes_enabled": bool(hermes),
         }
     return {
         "api": f"http://{host}:{_api_port()}",
         "openwebui": f"http://{host}:{_OPENWEBUI_PORT}",
         "openwebui_enabled": enabled,
+        "hermes": hermes,
+        "hermes_enabled": bool(hermes),
     }
 
 

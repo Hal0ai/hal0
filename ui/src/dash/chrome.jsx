@@ -13,7 +13,7 @@ import { useModels } from '@/api/hooks/useModels'
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useSidebarAgentRollup } from '@/api/hooks/useAgents'
-import { useInstallState } from '@/api/hooks/useInstallState'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -200,19 +200,17 @@ function Sidebar({ route, onGo }) {
 //   - openwebui — the external chat UI unit (useInstallState.openwebui_running).
 //                 Row key deep-links to the OpenWebUI app.
 //
-// hermes + openwebui open their own web apps on the LAN (Traefik hosts) — the
-// same external targets the command palette already uses (a-open-owui). These
-// are intentionally absolute hosts: OpenWebUI emits root-absolute URLs and
-// can't be path-prefixed behind hal0-api, so it lives on its own host.
-const HERMES_DASH_URL = "https://hermes.thinmint.dev";
-const OPENWEBUI_URL   = "https://hal0-chat.thinmint.dev";
-
+// hermes + openwebui link targets are NOT hardcoded — useConfigUrls() reads
+// GET /api/config/urls, where the backend derives the reachable host from the
+// request (so links work on localhost / LAN IP / hal0.local / a custom
+// reverse-proxy domain) and honours the HAL0_{OPENWEBUI,HERMES}_PUBLIC_URL
+// env overrides. Each `*_enabled` flag gates whether we render a link at all.
 function SidebarRuntimeWidget({ onGo }) {
   const L         = useLemondRollup();
   const agent     = useSidebarAgentRollup();
   const endpoints = useEndpoints().data || [];
   const slots     = useSlots().data     || [];
-  const install   = useInstallState();
+  const urls      = useConfigUrls();
 
   // ── lemond ──
   const lemondClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
@@ -228,6 +226,10 @@ function SidebarRuntimeWidget({ onGo }) {
       : agent.agentStatus === 'running' ? 'running'
         : agent.agentStatus === 'broken' ? 'broken'
           : '—';
+  // hermes web dashboard link — only when the backend advertises a public
+  // URL (loopback-only otherwise, so no host:port fallback exists).
+  const hermesUrl      = urls.data?.hermes || "";
+  const hermesLinkable = urls.data?.hermes_enabled === true && !!hermesUrl;
 
   // ── hal0 endpoint ── the synthetic composite upstream (first/only one).
   const ep        = endpoints[0];
@@ -244,25 +246,33 @@ function SidebarRuntimeWidget({ onGo }) {
   if (imgCount   > 0) extraParts.push(`${imgCount} img`);
   const modelsTitle = [`${chatCount} chat`, ...extraParts].join(" · ");
 
-  // ── openwebui ── "—" until /api/install/state resolves, then running/off.
-  const owuiKnown   = install.isSuccess && install.data != null;
-  const owuiRunning = install.data?.openwebui_running === true;
-  const owuiClass   = !owuiKnown ? 'warn' : owuiRunning ? 'up' : 'down';
-  const owuiLabel   = !owuiKnown ? '—' : owuiRunning ? 'running' : 'off';
+  // ── openwebui ── "—" until /api/config/urls resolves, then running/off.
+  // `openwebui_enabled` already folds in "unit up AND reachably linkable",
+  // so it drives both the dot and whether the key is a link.
+  const owuiUrl      = urls.data?.openwebui || "";
+  const owuiKnown    = urls.isSuccess;
+  const owuiEnabled  = urls.data?.openwebui_enabled === true;
+  const owuiClass    = !owuiKnown ? 'warn' : owuiEnabled ? 'up' : 'down';
+  const owuiLabel    = !owuiKnown ? '—' : owuiEnabled ? 'running' : 'off';
+  const owuiLinkable = owuiEnabled && !!owuiUrl;
 
   return (
     <div className="sb-status sb-runtime" data-testid="sidebar-runtime-widget">
       <div className="sb-runtime-h">Runtime</div>
 
-      {/* hermes — deep-links to the Hermes dashboard */}
+      {/* hermes — deep-links to the Hermes dashboard when one is published */}
       <div className="row" data-testid="runtime-row-hermes">
-        <a
-          className="k rt-link"
-          href={HERMES_DASH_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Open the Hermes dashboard"
-        >hermes ↗</a>
+        {hermesLinkable ? (
+          <a
+            className="k rt-link"
+            href={hermesUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open the Hermes dashboard"
+          >hermes ↗</a>
+        ) : (
+          <span className="k">hermes</span>
+        )}
         <span className={"v " + agentClass} title={`agent ${agent.agentId ?? ""} — ${agentLabel}`}>
           <span className="dot" />{agentLabel}
         </span>
@@ -302,15 +312,19 @@ function SidebarRuntimeWidget({ onGo }) {
         </div>
       )}
 
-      {/* openwebui — deep-links to the external chat UI */}
+      {/* openwebui — deep-links to the external chat UI when reachable */}
       <div className="row" data-testid="runtime-row-openwebui">
-        <a
-          className="k rt-link"
-          href={OPENWEBUI_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          title="Open the OpenWebUI chat"
-        >openwebui ↗</a>
+        {owuiLinkable ? (
+          <a
+            className="k rt-link"
+            href={owuiUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open the OpenWebUI chat"
+          >openwebui ↗</a>
+        ) : (
+          <span className="k">openwebui</span>
+        )}
         <span className={"v " + owuiClass}><span className="dot" />{owuiLabel}</span>
       </div>
 

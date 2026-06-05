@@ -153,6 +153,11 @@ export const ENDPOINTS = {
   // Secrets
   secrets: '/api/secrets',
   secret: (name: string) => `/api/secrets/${encodeURIComponent(name)}`,
+  // Service URL discovery — the dashboard reads this to resolve the
+  // reachable hostnames for sibling services (OpenWebUI, Hermes) from the
+  // request host, so links work on any install (localhost / LAN IP /
+  // hal0.local / custom domain) without hardcoding. See routes/config.py.
+  configUrls: '/api/config/urls',
   // Install / FirstRun
   installState: '/api/install/state',
   firstrunState: '/api/firstrun/state',

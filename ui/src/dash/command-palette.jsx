@@ -15,6 +15,7 @@
 
 import { useSlots, useSlotRestart, useSlotLoad, useSlotUnload } from '@/api/hooks/useSlots'
 import { useModels, fmtBytes } from '@/api/hooks/useModels'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 
 const { useState: useStateCP, useEffect: useEffectCP, useRef: useRefCP, useMemo: useMemoCP } = React;
 
@@ -69,6 +70,11 @@ function CommandPaletteInner({ onClose }) {
 
   const slots = useSlots().data || [];
   const models = useModels().data || [];
+  // OpenWebUI deep-link resolved from the backend (request-host derived +
+  // HAL0_OPENWEBUI_PUBLIC_URL override), not hardcoded — empty when the unit
+  // is down or not reachably linkable, in which case the action is hidden.
+  const cfgUrls = useConfigUrls().data;
+  const owuiUrl = cfgUrls?.openwebui_enabled ? (cfgUrls.openwebui || "") : "";
 
   useEffectCP(() => {
     setTimeout(() => inputRef.current && inputRef.current.focus(), 0);
@@ -86,7 +92,7 @@ function CommandPaletteInner({ onClose }) {
     };
   }, []);
 
-  const items = useMemoCP(() => buildCommandItems(slots, models, activePull), [slots, models, activePull]);
+  const items = useMemoCP(() => buildCommandItems(slots, models, activePull, owuiUrl), [slots, models, activePull, owuiUrl]);
 
   // Fuzzy-filter: characters in order, weighted by exact prefix. Per-slot
   // control verbs are hidden from the empty-query view (hideWhenEmpty) so
@@ -219,7 +225,8 @@ function highlightCp(text, q) {
 const CP_RUNNING_STATES = new Set(["serving", "ready", "idle", "warming"]);
 
 // Build a unified list of palette items from LIVE slots + models.
-function buildCommandItems(slots, models, activePull) {
+// `owuiUrl` is the backend-resolved OpenWebUI link ("" when not reachable).
+function buildCommandItems(slots, models, activePull, owuiUrl = "") {
   const items = [];
 
   // Routes
@@ -288,8 +295,10 @@ function buildCommandItems(slots, models, activePull) {
     () => { window.location.hash = "#models"; });
   action("a-rotate-token", "Rotate hal0 token", "invalidates the current Bearer immediately",
     () => { window.location.hash = "#settings"; window.__hal0Toast && window.__hal0Toast("Routing to Auth → Rotate", "info"); });
-  action("a-open-owui", "Open Chat Pro UI →", "external · OpenWebUI",
-    () => window.open("https://hal0-chat.thinmint.dev", "_blank", "noopener"));
+  if (owuiUrl) {
+    action("a-open-owui", "Open Chat Pro UI →", "external · OpenWebUI",
+      () => window.open(owuiUrl, "_blank", "noopener"));
+  }
   action("a-docs", "Open docs →", "external · hal0.dev/docs",
     () => window.open("https://hal0.dev/docs", "_blank", "noopener"));
 
