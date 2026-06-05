@@ -70,10 +70,6 @@ def apply_thinking_policy(
 
     ctk = {**(body.get("chat_template_kwargs") or {}), "enable_thinking": want}
     # Drop the ineffective top-level booleans; keep everything else.
-    new = {
-        k: v
-        for k, v in body.items()
-        if not (k in _TOP_LEVEL_KEYS and isinstance(v, bool))
-    }
+    new = {k: v for k, v in body.items() if not (k in _TOP_LEVEL_KEYS and isinstance(v, bool))}
     new["chat_template_kwargs"] = ctk
     return new
