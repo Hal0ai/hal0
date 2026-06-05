@@ -51,6 +51,7 @@ _CHILD_TO_SLOT: dict[tuple[str, str], str] = {
     ("voice", "stt"): "stt",
     ("voice", "tts"): "tts",
     ("img", "img"): "img",
+    ("vision", "vision"): "vision",
 }
 
 # Inverse for status surfacing ("which child is this slot serving").
@@ -59,7 +60,7 @@ _SLOT_TO_CHILD: dict[str, tuple[str, str]] = {
 }
 
 # The legal capability/child surface — used by HTTP validation.
-LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img")
+LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img", "vision")
 
 
 def legal_children(slot: str) -> list[str]:
@@ -90,6 +91,7 @@ _CHILD_TO_CAPABILITY: dict[tuple[str, str], str] = {
     ("voice", "stt"): "stt",
     ("voice", "tts"): "tts",
     ("img", "img"): "image",
+    ("vision", "vision"): "vision",
 }
 
 

@@ -68,7 +68,7 @@ log = logging.getLogger(__name__)
 #: Slots that exist on every hal0 install regardless of hardware. The
 #: dashboard creates these as empty cards at first run; the bundle
 #: picker (Phase 5) populates their ``model.default`` fields.
-SEEDED_SLOTS: tuple[str, ...] = ("primary", "embed", "rerank", "stt", "tts", "img")
+SEEDED_SLOTS: tuple[str, ...] = ("primary", "embed", "rerank", "stt", "tts", "img", "vision")
 
 #: NPU slots seeded only when the FastFlowLM ``.deb`` is installed
 #: (``shutil.which('flm')`` truthy). These back the AMDXDNA hardware

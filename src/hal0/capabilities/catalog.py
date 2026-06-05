@@ -223,6 +223,13 @@ def _model_capabilities(entry: CuratedModel | HaloaiModel | Any) -> list[str]:
     Curated entries expose a single ``capability`` string; haloai-seeded
     entries do the same. Registry-loaded :class:`~hal0.registry.model.Model`
     rows carry a ``capabilities`` list. Either shape works.
+
+    Vision (#515) is a secondary capability: the curated multimodal MoE
+    primaries keep ``capability="chat"`` (they are still chat models) but
+    advertise ``vision`` via their ``tags`` and ship an mmproj sidecar.
+    Surfacing ``vision`` from the ``tags`` lets the same entry appear in
+    both the chat slot and the dedicated vision capability dropdown
+    without a brand-new model download.
     """
     caps: list[str] = []
     cap = getattr(entry, "capability", None)
@@ -233,6 +240,9 @@ def _model_capabilities(entry: CuratedModel | HaloaiModel | Any) -> list[str]:
         for c in cap_list:
             if isinstance(c, str) and c and c not in caps:
                 caps.append(c)
+    tags = getattr(entry, "tags", None)
+    if isinstance(tags, list) and "vision" in tags and "vision" not in caps:
+        caps.append("vision")
     return caps
 
 
@@ -504,10 +514,19 @@ def _flat_rows_for_capability(
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
+    # ``bundle_only`` entries are normally hidden from capability
+    # dropdowns (they exist only to give bundle manifests a loadable id).
+    # The ``vision`` capability (#515) is the exception: it deliberately
+    # REUSES the curated multimodal MoE primaries (which are bundle_only
+    # because they double as the chat/primary tier) rather than shipping a
+    # new model. Let bundle_only entries through for vision so the dropdown
+    # surfaces a real, already-curated multimodal pick.
+    allow_bundle_only = capability == "vision"
     curated_only = [
         e
         for e in CURATED
-        if not isinstance(e, HaloaiModel) and not getattr(e, "bundle_only", False)
+        if not isinstance(e, HaloaiModel)
+        and (allow_bundle_only or not getattr(e, "bundle_only", False))
     ]
     candidates: list[Any] = curated_only + _iter_registry_models(registry)
 
@@ -680,6 +699,9 @@ def catalogs_by_slot(
         },
         "img": {
             "img": models_for_capability("image", registry=registry),
+        },
+        "vision": {
+            "vision": models_for_capability("vision", registry=registry),
         },
         "chat": {
             "chat": models_for_capability("chat", registry=registry),

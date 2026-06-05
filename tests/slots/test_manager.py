@@ -57,7 +57,9 @@ def _no_spawn_context_refresh(monkeypatch):
 
 
 def test_seeded_slots_matches_plan_section_10_2() -> None:
-    assert SEEDED_SLOTS == ("primary", "embed", "rerank", "stt", "tts", "img")
+    # ``vision`` added in #515 (first-class vision capability, reusing the
+    # curated multimodal MoE primaries + their mmproj sidecar).
+    assert SEEDED_SLOTS == ("primary", "embed", "rerank", "stt", "tts", "img", "vision")
 
 
 def test_npu_seeded_slots_matches_plan_section_10_2() -> None:
