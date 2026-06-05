@@ -32,7 +32,9 @@ def test_catalogue_entries_have_hf_coordinates() -> None:
     legitimately carry .bin / .onnx coordinates. hf_repo/hf_file are still
     required (informational), but the extension allowlist does not apply.
     """
-    allowed_suffixes = (".gguf", ".safetensors", ".ckpt")
+    # .bin covers whisper.cpp ggml weights (#514 — whisper-large-v3-turbo is a
+    # visible STT default loaded via Lemonade's whispercpp recipe).
+    allowed_suffixes = (".gguf", ".safetensors", ".ckpt", ".bin")
     for m in CURATED_MODELS:
         assert m.hf_repo, f"{m.id}: hf_repo is required"
         assert m.hf_file, f"{m.id}: hf_file is required"

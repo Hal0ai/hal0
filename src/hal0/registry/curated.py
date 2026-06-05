@@ -572,7 +572,7 @@ CURATED_MODELS: list[CuratedModel] = [
         recommended_slot="stt",
         tags=["stt", "transcription"],
         notes="Lemonade-stock key (whispercpp recipe). Loaded from Lemonade's bundled catalogue.",
-        capability="asr",
+        capability="stt",
         backend="whispercpp",
         bundle_only=True,
     ),
@@ -590,7 +590,7 @@ CURATED_MODELS: list[CuratedModel] = [
         recommended_slot="stt",
         tags=["stt", "transcription"],
         notes="Lemonade-stock key (whispercpp recipe).",
-        capability="asr",
+        capability="stt",
         backend="whispercpp",
         bundle_only=True,
     ),
@@ -608,9 +608,12 @@ CURATED_MODELS: list[CuratedModel] = [
         recommended_slot="stt",
         tags=["stt", "transcription"],
         notes="Lemonade-stock key (whispercpp recipe). NPU encoder variant available.",
-        capability="asr",
+        capability="stt",
         backend="whispercpp",
-        bundle_only=True,
+        # Visible STT default (#514): loads via Lemonade's built-in whispercpp
+        # recipe, so no whisper-cpp toolbox image is needed. Tiny/Base stay
+        # bundle_only as lower-tier bundle picks.
+        bundle_only=False,
     ),
     CuratedModel(
         id="kokoro-v1",
