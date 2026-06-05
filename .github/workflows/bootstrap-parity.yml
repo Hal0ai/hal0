@@ -1,0 +1,74 @@
+name: Bootstrap parity (daily)
+
+# Detect drift between the in-tree, audited installer/bootstrap.sh and the
+# LIVE one-liner served at https://hal0.dev/install.sh (hal0-web's mirrored
+# public/install.sh — what `curl https://hal0.dev/install.sh | bash` runs).
+#
+# Why this is NOT a required PR check:
+#   The check depends on the live public site. Network flakiness or a known,
+#   not-yet-synced drift would block every unrelated PR. Instead it runs on a
+#   daily schedule and on demand, surfacing drift in the run output so the
+#   installer team can reconcile hal0-web in a follow-up. The header of
+#   bootstrap.sh promises the two stay mirrored; this is the safety net.
+#
+# The script is the contract (scripts/check-bootstrap-parity.sh):
+#   exit 0 — in sync.   exit 1 — drift (unified diff printed).
+#   exit 2 — operational error (fetch failed / empty) — NOT read as drift.
+
+on:
+  schedule:
+    # 06:00 UTC daily — early enough that a fresh drift is visible at the
+    # start of the working day across the Americas/EU.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: bootstrap-parity
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    name: Diff in-tree bootstrap.sh against live install.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout hal0
+        uses: actions/checkout@v4
+
+      - name: Run bootstrap-parity check
+        id: parity
+        # Exit 0 = in sync, 1 = drift, 2 = operational error. We surface the
+        # script's stdout/stderr (the unified diff lives there) into the step
+        # summary so a glance at the run page tells the whole story.
+        run: |
+          set +e
+          bash scripts/check-bootstrap-parity.sh > parity.out 2>&1
+          rc=$?
+          set -e
+
+          {
+            echo "## Bootstrap parity check"
+            echo ""
+            echo '```diff'
+            cat parity.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cat parity.out
+
+          case "$rc" in
+            0)
+              echo "::notice::installer/bootstrap.sh is in sync with the live install.sh."
+              ;;
+            1)
+              echo "::error::DRIFT — installer/bootstrap.sh differs from the live hal0.dev/install.sh. Sync hal0-web:public/install.sh."
+              ;;
+            *)
+              echo "::warning::Could not fetch the live installer (operational error, exit ${rc}). NOT treated as drift."
+              ;;
+          esac
+          exit "$rc"
