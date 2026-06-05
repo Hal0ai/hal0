@@ -815,8 +815,12 @@ a { color: inherit; text-decoration: none; }
 .snap-rows { display: flex; flex-direction: column; }
 .snap-row {
   display: grid;
-  grid-template-columns: 14px 90px 1fr 80px 80px auto;
-  gap: 14px;
+  /* Sidebar is 380px: keep fixed tracks lean and let model + optional
+     chip columns shrink (minmax/auto) so the trailing status column
+     ("idle" / "N tok/s") stays inside the row's 16px right padding
+     instead of overflowing flush against the card border. */
+  grid-template-columns: 14px 84px minmax(0, 1fr) auto auto auto;
+  gap: 10px;
   align-items: center;
   padding: 10px 16px;
   border-bottom: 1px solid var(--line-soft);
