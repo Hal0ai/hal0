@@ -475,9 +475,10 @@ class TestMetaConfigVersion:
 class TestManifestLoader:
     """Covers the toolbox-image manifest reader used at slot-spawn time.
 
-    The manifest is populated by `.github/workflows/toolbox.yml` post-publish.
-    The runtime reads it through `load_manifest` / `manifest_image_ref` to
-    decide whether to pin pulls by digest or fall back to :v1 tags.
+    The manifest's digests are refreshed by `scripts/update-toolbox-digests.sh`
+    before a release. The runtime reads it through `load_manifest` /
+    `manifest_image_ref` to decide whether to pin pulls by digest or fall
+    back to :v1 tags.
     """
 
     def _write_manifest(self, home: str, payload: dict[str, object]) -> None:

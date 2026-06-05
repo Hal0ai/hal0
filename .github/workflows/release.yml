@@ -17,10 +17,11 @@ name: Release
 #
 # What this workflow does NOT do (deliberate, see "Blockers" in
 # scripts/release-prototype/RELEASE_PIPELINE_NOTES.md):
-#   - rebuild + republish toolbox images. That stays in toolbox.yml. The
-#     release manifest mirrors the toolbox digests pinned in
-#     manifest.json at the moment of the tag — the assumption is the
-#     toolbox workflow ran on main first.
+#   - rebuild + republish toolbox images. The release manifest mirrors the
+#     toolbox digests pinned in manifest.json at the moment of the tag. Those
+#     digests are refreshed by running scripts/update-toolbox-digests.sh on
+#     main before cutting the release (it queries ghcr.io and patches
+#     manifest.json in place); see docs/internal/release-manifest.md.
 #
 # See: docs/internal/release-manifest.md, src/hal0/updater/updater.py,
 #      scripts/release-prototype/verify-roundtrip.sh, PLAN §9 + §17.
@@ -258,7 +259,7 @@ jobs:
           # release would advertise images we never actually pinned.
           missing = [n for n, e in payload["toolbox_images"].items() if not e.get("digest")]
           if missing:
-              sys.exit(f"toolbox_images digests missing for: {missing} — run toolbox.yml on main first")
+              sys.exit(f"toolbox_images digests missing for: {missing} - run scripts/update-toolbox-digests.sh on main first")
           open(out, "w").write(json.dumps(payload, indent=2) + "\n")
           print(f"wrote {out}")
           PY

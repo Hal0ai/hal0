@@ -242,9 +242,10 @@ def _probe_one(
          "error": str | None}
 
     Digest mismatch is surfaced via ``matches_pin``; it doesn't flip
-    ``ok`` to False because reconciling drift is a separate workflow
-    (the manifest job in toolbox.yml). The probe's job is just
-    "reachable yes/no" + "here's what's actually there".
+    ``ok`` to False because reconciling drift is a separate step
+    (scripts/update-toolbox-digests.sh, run before a release). The
+    probe's job is just "reachable yes/no" + "here's what's actually
+    there".
     """
     row: dict[str, Any] = {
         "name": name,

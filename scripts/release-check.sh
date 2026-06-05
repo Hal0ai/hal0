@@ -116,9 +116,10 @@ fi
 # ── 4. Toolbox image manifest ─────────────────────────────────────────────────
 step "4. Toolbox image manifest"
 
-# Authoritative manifest is repo-root manifest.json (Team A patches it
-# post-build in toolbox.yml).  The legacy src/hal0/manifest.json shape is
-# checked as a soft warning.
+# Authoritative manifest is repo-root manifest.json. Its toolbox image
+# digests are refreshed by scripts/update-toolbox-digests.sh (run on main
+# before a release).  The legacy src/hal0/manifest.json shape is checked as
+# a soft warning.
 MANIFEST="${REPO_ROOT}/manifest.json"
 if [[ -f "${MANIFEST}" ]]; then
     info "manifest.json found at repo root"

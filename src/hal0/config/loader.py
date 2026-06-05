@@ -523,10 +523,10 @@ def _find_manifest_path() -> Path | None:
 def load_manifest(path: Path | None = None) -> dict[str, Any]:
     """Load the release manifest.
 
-    The GHA `toolbox.yml` workflow patches `toolbox_images.<name>.digest`
-    with the published image's content digest post-build.  Callers
-    (notably the providers when constructing ContainerSpec.image) use
-    the digest to pin pulls, falling back to the `tag` when digest is
+    `scripts/update-toolbox-digests.sh` patches `toolbox_images.<name>.digest`
+    with the published image's content digest (run before a release).
+    Callers (notably the providers when constructing ContainerSpec.image)
+    use the digest to pin pulls, falling back to the `tag` when digest is
     null/missing (see PLAN.md §12 and §17 Risks).
 
     Schema (see manifest.json at repo root for the canonical comment):

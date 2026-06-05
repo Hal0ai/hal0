@@ -269,6 +269,39 @@ installer's Lemonade + FLM constants (in `installer/install.sh`) are
 the live truth; the release manifest mirrors them via the new
 `lemonade` + `flm` blocks above.
 
+## Toolbox image digests
+
+The `toolbox_images` block in the repo-root `manifest.json` pins each
+toolbox image (`vulkan`, `rocm`, `flm`, `moonshine`, `kokoro`,
+`comfyui`) to its published `ghcr.io/hal0ai/...` content digest. These
+digests are **not** patched by any CI workflow (the historical
+`.github/workflows/toolbox.yml` was never built). Refresh them with the
+runnable script:
+
+```sh
+# Run on main BEFORE cutting a release. Queries ghcr.io anonymously for
+# each image's published digest and patches manifest.json in place.
+scripts/update-toolbox-digests.sh
+
+git diff manifest.json   # review
+git add manifest.json && git commit -m "chore: refresh toolbox image digests"
+```
+
+Behaviour:
+
+- The script resolves each digest from the ghcr.io registry v2 manifest
+  API (anonymous pull token + `Docker-Content-Digest` header), falling
+  back to `docker buildx imagetools inspect` when the curl/token flow is
+  unavailable.
+- An unpublished or unreachable image leaves its `digest` as `null` and
+  emits a warning. **A null digest is a soft fallback:** the runtime
+  pulls that image by `:tag` and warns (see `load_manifest` /
+  `manifest_image_ref`). It does not crash anything.
+- `release.yml` (and `scripts/release-check.sh`) **refuse to publish a
+  release manifest while any `toolbox_images.<n>.digest` is null** — so
+  run this script and commit the result before tagging, or the release
+  job fails fast with the list of missing images.
+
 ## Yanking a release
 
 If a published release turns out to be bad (broken cosign cert, regression,

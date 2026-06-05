@@ -54,8 +54,8 @@ verification. They are anchored to `${GITHUB_REF}` (i.e.
 ### 3. `manifest.json` toolbox digests must be pinned BEFORE tagging
 
 `release.yml` refuses to publish if any `toolbox_images.<n>.digest` is
-null. That means `toolbox.yml` must have run on `main` and committed
-the patched `manifest.json` first. `flm` is currently null
+null. That means `scripts/update-toolbox-digests.sh` must have run on
+`main` and committed the patched `manifest.json` first. `flm` is currently null
 (stretch) — that will block a real `v1.0.0-rc1` cut unless we either
 ship without flm or stub a placeholder digest.
 
@@ -75,7 +75,7 @@ ship without flm or stub a placeholder digest.
    - drop FLM from the v1 toolbox set and re-add post-launch (PLAN
      already calls FLM a stretch), or
    - publish a real FLM image so the digest gets pinned by
-     `toolbox.yml`.
+     `scripts/update-toolbox-digests.sh`.
 
 3. **`HAL0_UPDATE_SKIP_COSIGN=1` escape hatch exists.** Documented gap
    in `docs/internal/release-manifest.md` — must close before v1 ships. Decision:
