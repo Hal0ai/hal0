@@ -47,7 +47,7 @@ def _manifest_model_refs() -> dict[str, list[str]]:
 
 
 def test_primary_tiers_ids_are_curated() -> None:
-    missing = [cid for cid, _ in _PRIMARY_TIERS if cid not in CURATED_BY_ID]
+    missing = [cid for cid, *_ in _PRIMARY_TIERS if cid not in CURATED_BY_ID]
     assert not missing, f"_PRIMARY_TIERS ids not defined in CURATED_MODELS: {missing}"
 
 

@@ -475,7 +475,25 @@ class TestSizeAndContext:
             },
         )
         out = generate_server_models(registry_path)
+        # No regression: a model with no GGUF ctx signal still gets the
+        # conservative 8192 fallback (#513 — small/unknown tiers stay safe).
         assert out["m"]["max_context_window"] == 8192
+
+    def test_large_arch_ctx_from_metadata_is_preserved(self, registry_path: Path) -> None:
+        """#513: a MoE primary advertising a 131072 arch max keeps it."""
+        _write_registry(
+            registry_path,
+            {
+                "moe-primary": {
+                    "path": "/x.gguf",
+                    "capabilities": ["chat"],
+                    "backends": ["vulkan"],
+                    "metadata": {"context_length": 131072},
+                },
+            },
+        )
+        out = generate_server_models(registry_path)
+        assert out["moe-primary"]["max_context_window"] == 131072
 
 
 # ── Snapshot ──────────────────────────────────────────────────────────────────
