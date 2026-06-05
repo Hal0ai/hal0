@@ -33,6 +33,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"
 # shellcheck source=lib/preflight.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/preflight.sh"
 
+# Non-interactive apt for every apt-get call in this installer (PPA add,
+# software-properties-common, Lemonade prereqs, FLM .deb) — without this a
+# debconf prompt can hang a tty install or fail a CI/non-tty run.
+export DEBIAN_FRONTEND=noninteractive
+
 # Poll `systemctl is-active` for up to `timeout` seconds. Returns 0 the
 # moment the unit reports active, 1 on timeout. Use instead of a flat
 # `sleep N; is-active` so slow first boots (OpenWebUI pulling images,
@@ -245,6 +250,14 @@ fi
 
 info "system: $(uname -srm)"
 
+# Architecture is a hard requirement in every mode — all shipped binaries
+# (Lemonade embeddable, FastFlowLM .deb, toolbox images) are amd64-only.
+preflight_arch || die "hal0 requires an x86_64 host (see the message above)"
+
+# Single up-front connectivity probe (soft) so a network/proxy problem
+# surfaces once with guidance instead of as N download failures later.
+preflight_network
+
 # Systemd is hard-required outside dev mode; preflight_systemd just
 # reports presence, so we wrap it in the dev-mode skip and turn its
 # non-zero return into a die().
@@ -263,6 +276,11 @@ if ! preflight_python; then
     # Version warning already printed; keep going.
 fi
 
+# `python3 -m venv` capability is a hard requirement — the install always
+# creates a venv. Catches the common Debian "python3 present, python3-venv
+# missing" case before it fails with an opaque ensurepip error.
+preflight_venv || die "python venv module missing — install python3-venv (see above)"
+
 # preflight_docker is soft (always returns 0 with a warning when
 # Docker is absent), so we don't need to guard the call.
 preflight_docker
@@ -275,6 +293,8 @@ preflight_docker
 # "Pre-flight checks" recovery hint above.
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     pf_rc=0
+    preflight_writable "${PREFIX}" /usr/lib/hal0 "${ETC_DIR}" "${UNIT_DIR}" \
+        "${VAR_DIR}" /opt/lemonade /usr/local/bin || pf_rc=$?
     preflight_disk 20 "${VAR_DIR}"            || pf_rc=$?
     preflight_ports "${HAL0_PORT}" 3001       || pf_rc=$?
     if (( pf_rc != 0 )); then

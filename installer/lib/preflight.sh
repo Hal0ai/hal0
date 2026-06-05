@@ -80,8 +80,75 @@ preflight_python() {
         info "python: ${py} (${ver})"
         return 0
     fi
-    warn "python: ${py} (${ver}) — hal0 is tested on 3.11–3.14"
+    warn "python: ${py} (${ver}) — hal0 is tested on 3.11-3.14"
     return 1
+}
+
+# CPU architecture — hal0 ships x86_64-only binaries (Lemonade embeddable,
+# FastFlowLM .deb, toolbox images). On ARM the install gets deep into apt
+# before failing cryptically, so refuse up front.
+preflight_arch() {
+    local m
+    m="$(uname -m 2>/dev/null || echo unknown)"
+    if [[ "${m}" == "x86_64" || "${m}" == "amd64" ]]; then
+        info "arch: ${m}"
+        return 0
+    fi
+    err "unsupported architecture '${m}' — hal0 requires x86_64 (Lemonade/FLM/toolboxes are amd64-only)"
+    return 1
+}
+
+# `python3 -m venv` needs the `ensurepip` + `venv` stdlib modules, which
+# Debian/Ubuntu split into the `python3-venv` package. Without it the
+# venv step fails with an opaque "ensurepip is not available".
+preflight_venv() {
+    local py="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
+    if "${py}" -c 'import ensurepip, venv' >/dev/null 2>&1; then
+        info "python venv: available"
+        return 0
+    fi
+    err "'${py} -m venv' is unavailable (missing ensurepip/venv)"
+    warn "  install the venv module, e.g. 'apt install python3-venv'"
+    return 1
+}
+
+# The install writes to several system trees; if any is read-only (overlay
+# LXC, SELinux-strict, /usr mounted ro) the install explodes halfway. Probe
+# writability of each parent up front. Pass dirs as args; defaults cover the
+# system-mode layout. Runs after the sudo re-exec, so we expect to be root.
+# shellcheck disable=SC2120  # called with args from install.sh, argless (defaults) from preflight_all
+preflight_writable() {
+    local rc=0 d parent
+    local dirs=("$@")
+    if [[ ${#dirs[@]} -eq 0 ]]; then
+        dirs=(/opt /usr/lib /etc/hal0 /etc/systemd/system /var/lib /usr/local/bin)
+    fi
+    for d in "${dirs[@]}"; do
+        parent="${d}"
+        while [[ -n "${parent}" && ! -e "${parent}" ]]; do parent="$(dirname "${parent}")"; done
+        if [[ -w "${parent}" ]]; then
+            continue
+        fi
+        err "not writable: ${parent} (needed to create ${d})"
+        rc=1
+    done
+    [[ "${rc}" -eq 0 ]] && info "writable paths: ok"
+    return "${rc}"
+}
+
+# Single up-front connectivity probe so a network/proxy problem surfaces
+# once with an actionable message instead of as N separate download
+# failures later. curl honours http(s)_proxy/no_proxy automatically. Soft:
+# warns (returns 0) so offline-from-local-tarball installs aren't blocked.
+preflight_network() {
+    local url="${HAL0_NET_PROBE_URL:-https://github.com}"
+    if curl -fsS -m 8 -I "${url}" >/dev/null 2>&1; then
+        info "network: reachable (${url})"
+    else
+        warn "network: could not reach ${url} — check connectivity/proxy (http_proxy/https_proxy)"
+        warn "  downloads (release, Lemonade, FLM, models, images) will fail if this host is offline"
+    fi
+    return 0
 }
 
 preflight_docker() {
@@ -251,8 +318,12 @@ preflight_ports() {
 # picture, not the first failure.
 preflight_all() {
     local rc=0
+    preflight_arch    || rc=$?
     preflight_systemd || rc=$?
     preflight_python  || rc=$?
+    preflight_venv    || rc=$?
+    preflight_writable || rc=$?
+    preflight_network || rc=$?
     preflight_docker  || rc=$?
     preflight_disk    || rc=$?
     preflight_ports   || rc=$?
