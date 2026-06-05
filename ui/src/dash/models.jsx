@@ -14,7 +14,8 @@ const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
 function ModelsView() {
   const [selId, setSelId] = useStateM(null);
-  const [filters, setFilters] = useStateM({ type: null, device: null, ns: null });
+  const [filters, setFilters] = useStateM({ type: null, device: null });
+  const [q, setQ] = useStateM("");
   const [addOpen, setAddOpen] = useStateM(false);
   const [addByPathOpen, setAddByPathOpen] = useStateM(false);
   const [scanOpen, setScanOpen] = useStateM(false);
@@ -42,8 +43,18 @@ function ModelsView() {
 
   const fil = m => {
     if (filters.type && m.type !== filters.type) return false;
-    if (filters.device && m.device !== filters.device) return false;
-    if (filters.ns && m.ns !== filters.ns) return false;
+    if (filters.device) {
+      // Match against the full backend set (a model that resolves to device
+      // "rocm" may still also run on vulkan/cpu), not just the single
+      // best-device the normalizer picked.
+      const bes = Array.isArray(m.backends) ? m.backends : [];
+      if (!bes.includes(filters.device) && m.device !== filters.device) return false;
+    }
+    if (q.trim()) {
+      const needle = q.trim().toLowerCase();
+      const hay = `${m.longName || ""} ${m.name || ""} ${m.id || ""} ${m.repo || ""}`.toLowerCase();
+      if (!hay.includes(needle)) return false;
+    }
     return true;
   };
   const installed = modelList.filter(m => m.installed && fil(m));
@@ -78,56 +89,35 @@ function ModelsView() {
       </div>
 
       <div className="models-layout">
-        {/* ── Filters ── */}
-        <div className="mdl-filters">
-          <div className="mdl-filter-grp">
-            <div className="lbl">type</div>
-            <div className="mdl-filter-chips">
+        {/* ── List (toolbar + rows) ── */}
+        <div className="mdl-list">
+          <div className="mdl-toolbar">
+            <input
+              className="input mono mdl-search"
+              placeholder="search name, repo, id…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+            <div className="mdl-toolbar-grp">
+              <span className="lbl">type</span>
               {["llm", "embedding", "reranking", "transcription", "tts", "image"].map(t => (
                 <button key={t} className={"mdl-chip" + (filters.type === t ? " on" : "")} onClick={() => toggle("type", t)}>{t}</button>
               ))}
             </div>
-          </div>
-          <div className="mdl-filter-grp">
-            <div className="lbl">device</div>
-            <div className="mdl-filter-chips">
-              {["gpu-rocm", "gpu-vulkan", "cpu", "npu"].map(d => (
+            <div className="mdl-toolbar-grp">
+              <span className="lbl">device</span>
+              {["rocm", "vulkan", "cpu", "npu"].map(d => (
                 <button key={d} className={"mdl-chip" + (filters.device === d ? " on" : "")} onClick={() => toggle("device", d)}>{d}</button>
               ))}
             </div>
+            {(filters.type || filters.device || q.trim()) && (
+              <button className="mdl-chip mdl-clear" onClick={() => { setFilters({ type: null, device: null }); setQ(""); }}>clear ✕</button>
+            )}
           </div>
-          <div className="mdl-filter-grp">
-            <div className="lbl">namespace</div>
-            <div className="mdl-filter-chips">
-              {["blessed", "pulled"].map(n => (
-                <button key={n} className={"mdl-chip" + (filters.ns === n ? " on" : "")} onClick={() => toggle("ns", n)}>{n}</button>
-              ))}
-            </div>
-          </div>
-          <div className="mdl-filter-grp">
-            <div className="lbl">labels</div>
-            <div className="mdl-filter-chips">
-              {["chat", "tool-calling", "vision", "embeddings", "reranking", "transcription", "tts", "image", "edit"].map(l => (
-                <button key={l} className="mdl-chip">{l}</button>
-              ))}
-            </div>
-          </div>
-          <div className="mdl-filter-grp">
-            <div className="lbl">search</div>
-            <input className="input mono" placeholder="qwen, embed, …" />
-          </div>
-          <div style={{borderTop: "1px solid var(--line-soft)", paddingTop: 10, fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", lineHeight: 1.7}}>
-            <div>{modelList.length} total · {modelList.filter(m => m.installed).length} on disk</div>
-            <div style={{color: "var(--fg-5)"}}>{modelList.filter(m => m.ns === "blessed").length} blessed · {modelList.filter(m => m.ns === "pulled").length} pulled</div>
-          </div>
-        </div>
-
-        {/* ── List ── */}
-        <div className="mdl-list">
           <div className="mdl-list-h">
             <span>Catalog</span>
             <span className="ct">· {installed.length + blessed.length + userNs.length} shown</span>
-            <span className="right">sort: <span style={{color: "var(--fg-2)"}}>installed</span> ▾</span>
+            <span className="right mono">{modelList.length} total · {modelList.filter(m => m.installed).length} on disk · {modelList.filter(m => m.ns === "blessed").length} blessed · {modelList.filter(m => m.ns === "pulled").length} pulled</span>
           </div>
 
           {modelsQuery.isPending && (
@@ -153,6 +143,12 @@ function ModelsView() {
           {userNs.map(m => (
             <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} />
           ))}
+
+          {!modelsQuery.isPending && !modelsQuery.isError && (installed.length + blessed.length + userNs.length) === 0 && (
+            <div style={{padding: 24, textAlign: "center", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>
+              No models match — {(q.trim() || filters.type || filters.device) ? "adjust the search or filters." : "the catalog is empty."}
+            </div>
+          )}
         </div>
 
         {/* ── Detail + Downloads ── */}
@@ -177,14 +173,23 @@ function ModelsView() {
 }
 
 function ModelRow({ model, selected, onSelect }) {
+  // Backend tags use the unified device palette (.chip.dev-rocm / dev-vulkan /
+  // dev-cpu / dev-npu) so a Vulkan tag here is the same blue as everywhere
+  // else on the dash. `type` is the dispatcher vocab derived in normalizeApiModel.
+  const backends = Array.isArray(model.backends) ? model.backends : [];
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
       <span className={"dot " + (model.installed ? "ready" : "empty")} />
       <span className="nm">
         {model.longName || model.name || model.id}
-        <span className="sub">{model.repo || model.hf_repo || ""}</span>
+        <span className="sub">{model.repo || ""}</span>
       </span>
-      <span className="sz num">{model.params || ""}</span>
+      <span className="mdl-row-tags">
+        {model.type && <span className="chip">{model.type}</span>}
+        {backends.map(b => (
+          <span key={b} className={"chip dev-" + b}>{b}</span>
+        ))}
+      </span>
       <span className="sz num">{model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "")}</span>
       <span className="tg">
         {model.installed
@@ -328,7 +333,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
             <button className="btn" onClick={onPull} disabled={pull.inFlight}>
               {Icons.download} {pull.inFlight ? `Pulling ${pull.pct ?? 0}%` : `Pull (${model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "—")})`}
             </button>
-            <button className="btn ghost sm" onClick={() => window.open(`https://huggingface.co/${model.repo || model.hf_repo || ""}`, "_blank")}>View on HF →</button>
+            <button className="btn ghost sm" onClick={() => window.open(`https://huggingface.co/${model.hf_repo || model.repo || ""}`, "_blank")}>View on HF →</button>
           </>
         )}
       </div>

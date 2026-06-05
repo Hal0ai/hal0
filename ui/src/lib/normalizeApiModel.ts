@@ -62,6 +62,25 @@ function formatSize(b: number): string {
   return `${(b / 1024 ** 3).toFixed(2)} GB`
 }
 
+// Coordinate shown under a model's name. We standardize on the HuggingFace
+// `<org>/<repo>` style and NEVER surface a raw `/mnt/ai-models/…/x.gguf`
+// filesystem path (which leaked through the old `hf_repo || path` fallback):
+//   1. an explicit `hf_repo` wins;
+//   2. else reconstruct coords from a HF cache path
+//      (`…/models--<org>--<repo>/snapshots/<sha>/…` → `<org>/<repo>`);
+//   3. else it's a genuinely local model → a clean `local/<id>` coordinate.
+function deriveRepo(m: ApiModelRaw): string {
+  if (typeof m.hf_repo === 'string' && m.hf_repo) return m.hf_repo
+  const path = typeof m.path === 'string' ? m.path : ''
+  const cacheMatch = path.match(/models--([^/]+)/)
+  if (cacheMatch) {
+    const parts = cacheMatch[1].split('--')
+    if (parts.length >= 2) return `${parts[0]}/${parts.slice(1).join('--')}`
+  }
+  if (m.id) return `local/${m.id}`
+  return ''
+}
+
 export function normalizeApiModel(m: ApiModelRaw): NormalizedModel {
   const caps = Array.isArray(m.capabilities) ? m.capabilities : []
   const backends = Array.isArray(m.backends) ? m.backends : []
@@ -71,6 +90,6 @@ export function normalizeApiModel(m: ApiModelRaw): NormalizedModel {
     device: deriveDevice(backends),
     longName: m.name || m.id,
     size: formatSize(m.size_bytes || 0),
-    repo: m.hf_repo || m.path || '',
+    repo: deriveRepo(m),
   }
 }

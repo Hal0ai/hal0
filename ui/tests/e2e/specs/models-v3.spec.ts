@@ -1,6 +1,8 @@
 /**
- * models-v3 — `#models` route renders the 3-pane layout (filters / list
- * / detail) and exposes the "Add by HF coords" trigger.
+ * models-v3 — `#models` route renders the 2-pane layout (list-with-toolbar
+ * / detail) and exposes the "Add by HF coords" trigger. The left filter
+ * sidebar was folded into a toolbar above the catalog rows; search +
+ * type/device filters live there now.
  *
  * Wireup (#220 brief): the catalog drives off `useModels()` and the
  * AddByHF modal calls `POST /api/models/inspect` →
@@ -13,11 +15,12 @@
 import { test, expect } from '../fixtures/apiMock'
 
 test.describe('Models v3 (/models)', () => {
-  test('renders 3-pane catalog layout', async ({ page }) => {
+  test('renders catalog layout (toolbar + list + detail)', async ({ page }) => {
     await page.goto('/#models')
     await expect(page.locator('.view .vh h1')).toHaveText('Models')
     await expect(page.locator('.models-layout')).toBeVisible()
-    await expect(page.locator('.mdl-filters')).toBeVisible()
+    await expect(page.locator('.mdl-toolbar')).toBeVisible()
+    await expect(page.locator('.mdl-search')).toBeVisible()
     await expect(page.locator('.mdl-list')).toBeVisible()
   })
 
@@ -27,12 +30,26 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.view .vh button:has-text("Search HF")')).toBeVisible()
   })
 
-  test('filter chips for type/device/namespace are clickable', async ({ page }) => {
+  test('type/device filter chips in the toolbar are clickable', async ({ page }) => {
     await page.goto('/#models')
-    const llmChip = page.locator('.mdl-filter-chips button.mdl-chip', { hasText: 'llm' }).first()
+    const llmChip = page.locator('.mdl-toolbar button.mdl-chip', { hasText: 'llm' }).first()
     await expect(llmChip).toBeVisible()
     await llmChip.click()
     await expect(llmChip).toHaveClass(/on/)
+    // Device chip uses the normalized backend vocab (rocm, not gpu-rocm).
+    const rocmChip = page.locator('.mdl-toolbar button.mdl-chip', { hasText: 'rocm' }).first()
+    await expect(rocmChip).toBeVisible()
+  })
+
+  test('search input filters the catalog and shows an empty state on no match', async ({
+    page,
+  }) => {
+    await page.goto('/#models')
+    // Sanity: at least one row before filtering.
+    await expect(page.locator('.mdl-row').first()).toBeVisible()
+    await page.locator('.mdl-search').fill('zzz-no-such-model-zzz')
+    await expect(page.locator('.mdl-row')).toHaveCount(0)
+    await expect(page.locator('.mdl-list')).toContainText('No models match')
   })
 
   test('namespace chips render from backend ns field (blessed + pulled)', async ({ page }) => {
