@@ -86,10 +86,12 @@ def test_sync_dry_run_does_not_write(tmp_path: Path) -> None:
     assert "m" in result.output
 
 
-def test_sync_empty_registry_warns(tmp_path: Path) -> None:
+def test_sync_empty_registry_emits_stock_fallback(tmp_path: Path) -> None:
     registry = tmp_path / "registry.toml"
     output = tmp_path / "server_models.json"
-    # No registry file present at all → empty catalog, warning issued.
+    # No registry file present at all -> #210: instead of a blank catalog,
+    # the generator now emits a curated STOCK fallback so a fresh install
+    # still has loadable models. The sync output reflects that non-empty set.
 
     result = runner.invoke(
         capabilities_app,
@@ -97,5 +99,8 @@ def test_sync_empty_registry_warns(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    # The warning is emitted regardless of dry-run.
-    assert "no models" in result.output or "warning" in result.output.lower()
+    # Non-empty stock fallback rendered: a short canonical id appears
+    # untruncated and the summary reports the 6-entry fallback count
+    # (long ids are Rich-table-truncated, so assert on stable substrings).
+    assert "qwen3.5-9b" in result.output
+    assert "6 entries" in result.output
