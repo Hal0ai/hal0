@@ -728,40 +728,6 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
   );
 }
 
-// ─── Overflow menu (⋯) ──────────────────────────────────────────
-function SlotOverflowMenu({ slot, onClose, onViewLogs, onDelete }) {
-  return (
-    <Menu
-      anchor="right"
-      onClose={onClose}
-      items={[
-        {
-          icon: Icons.logs,
-          label: "View slot logs",
-          onClick: () => onViewLogs && onViewLogs(),
-        },
-        {
-          icon: Icons.flame,
-          label: slot.isDefault ? "Already default" : "Set as default",
-          onClick: () => window.__hal0Toast && window.__hal0Toast(`${slot.name} set as default for ${slot.type}`, "ok"),
-        },
-        {
-          icon: Icons.ext,
-          label: "Copy curl example",
-          onClick: () => window.__hal0Toast && window.__hal0Toast("curl example copied to clipboard", "ok"),
-        },
-        { divider: true },
-        {
-          icon: Icons.unload,
-          label: "Delete slot",
-          danger: true,
-          onClick: () => onDelete && onDelete(),
-        },
-      ]}
-    />
-  );
-}
-
 // ─── Slot logs drawer ────────────────────────────────────────────
 // Minimal SSE-backed log tail. The slot-logs stream endpoint
 // (ENDPOINTS.slotLogsStream) emits one JSON-lines event per log line;
@@ -883,4 +849,4 @@ function ErrorSlotCardBanner({ slot, message }) {
   );
 }
 
-Object.assign(window, { CreateSlotModal, EditSlotDrawer, InlineSwapPopover, SlotOverflowMenu, EmptySlotCard, ErrorSlotCardBanner, SlotLogsDrawer });
+Object.assign(window, { CreateSlotModal, EditSlotDrawer, InlineSwapPopover, EmptySlotCard, ErrorSlotCardBanner, SlotLogsDrawer });

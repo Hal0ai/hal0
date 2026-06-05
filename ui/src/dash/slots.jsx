@@ -201,17 +201,13 @@ function SlotCard({
   slot,
   onSwap,
   onEdit,
-  onOverflow,
   onRestart,
   onUnload,
   onStart,
   onSwapPick,
   onViewLogs,
-  onDelete,
   swapOpen,
   onCloseSwap,
-  menuOpen,
-  onCloseMenu,
   errorMsg,
   busy,
 }) {
@@ -279,18 +275,9 @@ function SlotCard({
         <div className="slot-name">
           <span className="nm">{slot.name}</span>
         </div>
-        <div className="right" style={{position: "relative"}}>
+        <div className="right">
           {isDefault && <div className="default-badge">★ default</div>}
           {coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
-          <button className="more" onClick={e => { e.stopPropagation(); onOverflow && onOverflow(); }}>{Icons.more}</button>
-          {menuOpen && (
-            <SlotOverflowMenu
-              slot={slot}
-              onClose={onCloseMenu}
-              onViewLogs={onViewLogs}
-              onDelete={onDelete}
-            />
-          )}
         </div>
       </div>
       <div className="slot-model mono" onClick={onSwap} style={{position: "relative"}}>
@@ -364,6 +351,7 @@ function SlotCard({
             >{Icons.restart} Restart</button>
           </>
         )}
+        <button className="btn ghost sm" onClick={() => onViewLogs && onViewLogs()}>{Icons.logs} Logs</button>
         <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit</button>
         <span className="spacer" />
       </div>
@@ -619,7 +607,6 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
   const [createDefaults, setCreateDefaults] = useStateS({});
   const [editName, setEditName] = useStateS(null);
   const [swapName, setSwapName] = useStateS(null);
-  const [menuName, setMenuName] = useStateS(null);
   const [logsForSlot, setLogsForSlot] = useStateS(null);
   const [busyName, setBusyName] = useStateS(null);
   const { active: activeBanners } = useBanners();
@@ -679,7 +666,7 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
 
   // Close menus on outside click
   React.useEffect(() => {
-    const off = () => { setSwapName(null); setMenuName(null); };
+    const off = () => { setSwapName(null); };
     document.addEventListener("click", off);
     return () => document.removeEventListener("click", off);
   }, []);
@@ -716,11 +703,8 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
       errorMsg={errorMsg}
       busy={busyName === s.name}
       swapOpen={swapName === s.name}
-      onSwap={(e) => { e.stopPropagation(); setSwapName(swapName === s.name ? null : s.name); setMenuName(null); }}
+      onSwap={(e) => { e.stopPropagation(); setSwapName(swapName === s.name ? null : s.name); }}
       onCloseSwap={() => setSwapName(null)}
-      menuOpen={menuName === s.name}
-      onOverflow={() => { setMenuName(menuName === s.name ? null : s.name); setSwapName(null); }}
-      onCloseMenu={() => setMenuName(null)}
       onEdit={() => { window.location.hash = "#slots/" + s.name; }}
       onRestart={() =>
         runMutation(s.name, restartMut, s.name, `Restarting ${s.name}`)
@@ -739,8 +723,7 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
           `Swapping ${s.name} → ${m.longName || m.id}`,
         )
       }
-      onViewLogs={() => { setLogsForSlot(s.name); setMenuName(null); }}
-      onDelete={() => { setEditName(s.name); setMenuName(null); }}
+      onViewLogs={() => { setLogsForSlot(s.name); }}
     />
   );
 

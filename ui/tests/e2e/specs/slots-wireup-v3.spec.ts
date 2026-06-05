@@ -4,7 +4,7 @@
  * Covers the six lifecycle paths the slot panel must drive end-to-end:
  *   1. Create  — `New slot` modal POSTs /api/slots.
  *   2. Edit    — drawer PUTs /config + PATCHes /defaults (ctx_size).
- *   3. Delete  — overflow menu → confirm → DELETE /api/slots/{name}.
+ *   3. Delete  — Edit drawer danger button → confirm → DELETE /api/slots/{name}.
  *   4. Swap    — inline popover POSTs /api/slots/{name}/swap.
  *   5. Restart — card button POSTs /api/slots/{name}/restart.
  *   6. Unload  — card button POSTs /api/slots/{name}/unload.
@@ -94,7 +94,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     await expect.poll(() => putBodies.length).toBeGreaterThan(0)
   })
 
-  test('Delete slot — overflow → confirm → DELETE /api/slots/{name}', async ({ page }) => {
+  test('Delete slot — drawer danger button → confirm → DELETE /api/slots/{name}', async ({ page }) => {
     const deletes: string[] = []
     await page.route('**/api/slots/primary', async (route) => {
       if (route.request().method() === 'DELETE') {

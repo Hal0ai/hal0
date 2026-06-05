@@ -1665,12 +1665,6 @@ a { color: inherit; text-decoration: none; }
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.slot .more {
-  width: 22px; height: 22px;
-  display: inline-flex; align-items: center; justify-content: center;
-  color: var(--fg-4); cursor: pointer; border-radius: var(--rad-sm);
-}
-.slot .more:hover { color: var(--fg); background: var(--bg-2); }
 
 .slot-model {
   display: flex; align-items: center; gap: 8px;
