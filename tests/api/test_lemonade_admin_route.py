@@ -348,45 +348,54 @@ def test_post_config_accepts_llamacpp_args_threads_equals_form(
     assert r.status_code == 200, r.text
 
 
-def test_post_config_rejects_flm_args_missing_asr(
+def test_post_config_accepts_flm_args_chat_plus_embed_only(
     isolated_client: TestClient,
     installed_lemonade_stub: dict[str, Any],
 ) -> None:
-    """Without --asr 1 the FLM trio collapses to chat-only — the NPU
-    stt-npu slot would 404 against a non-existent backend port."""
+    """Spec 2 relaxation: a chat+embed stack (no ASR) is a valid config.
+    The dashboard NPU section sets flags explicitly and keeps the NPU
+    transcription slot disabled to match, so this no longer 404s."""
     r = isolated_client.post(
         "/api/lemonade/config",
         json={"flm_args": "--embed 1"},
     )
-    assert r.status_code == 400, r.text
-    details = r.json()["error"]["details"]
-    assert "--asr 1" in details["flm_args"]
+    assert r.status_code == 200, r.text
 
 
-def test_post_config_rejects_flm_args_missing_embed(
+def test_post_config_accepts_flm_args_chat_plus_asr_only(
     isolated_client: TestClient,
     installed_lemonade_stub: dict[str, Any],
 ) -> None:
-    """Symmetric to missing-asr: without --embed 1 the embed-npu slot
-    has no backend."""
+    """Symmetric: a chat+ASR stack (no embed) is valid under Spec 2."""
     r = isolated_client.post(
         "/api/lemonade/config",
         json={"flm_args": "--asr 1"},
     )
-    assert r.status_code == 400, r.text
-    details = r.json()["error"]["details"]
-    assert "--embed 1" in details["flm_args"]
+    assert r.status_code == 200, r.text
 
 
-def test_post_config_rejects_flm_args_with_disable_flag(
+def test_post_config_accepts_flm_args_explicit_disable(
     isolated_client: TestClient,
     installed_lemonade_stub: dict[str, Any],
 ) -> None:
-    """``--asr 0`` is the disable form — must NOT pass the trio
-    mandate, even though "--asr" appears in the string."""
+    """``--asr 0`` (explicit disable) is now a valid, accepted value — the
+    NPU section sends explicit 0/1 and disables the matching slot."""
     r = isolated_client.post(
         "/api/lemonade/config",
         json={"flm_args": "--asr 0 --embed 1"},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_post_config_rejects_flm_args_malformed_value(
+    isolated_client: TestClient,
+    installed_lemonade_stub: dict[str, Any],
+) -> None:
+    """Only 0/1 are valid for --asr/--embed; a non-binary value is
+    malformed and must be rejected."""
+    r = isolated_client.post(
+        "/api/lemonade/config",
+        json={"flm_args": "--asr 2 --embed 1"},
     )
     assert r.status_code == 400, r.text
 
