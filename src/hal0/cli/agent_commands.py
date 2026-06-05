@@ -9,6 +9,7 @@ ADR-0004 §5 "Pending items").
 
 from __future__ import annotations
 
+import json as jsonlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -288,7 +289,13 @@ def _warn_memory_outcome(outcome: MemoryUninstallOutcome) -> None:
 
 
 @app.command("list")
-def agent_list() -> None:
+def agent_list(
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the raw /api/agents JSON for CI/pipe use (no Rich table).",
+    ),
+) -> None:
     """List installed bundled agents."""
     url = _api_base()
     if _api_unreachable(url):
@@ -297,6 +304,9 @@ def agent_list() -> None:
         data = api_get("/api/agents")
     except CliApiError as exc:
         die(str(exc))
+        return
+    if json_out:
+        typer.echo(jsonlib.dumps(data, indent=2))
         return
     agents = data.get("agents", []) if isinstance(data, dict) else data
     if not agents:

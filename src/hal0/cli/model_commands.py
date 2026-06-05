@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json as jsonlib
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -33,7 +35,13 @@ def _fmt_size(b: int | None) -> str:
 
 
 @app.command("list")
-def model_list() -> None:
+def model_list(
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the raw /api/models JSON for CI/pipe use (no Rich table).",
+    ),
+) -> None:
     """List all models in the local registry and from upstreams."""
     url = _api_base()
     if _api_unreachable(url):
@@ -42,6 +50,9 @@ def model_list() -> None:
         data = api_get("/api/models")
     except CliApiError as exc:
         die(str(exc))
+        return
+    if json_out:
+        typer.echo(jsonlib.dumps(data, indent=2))
         return
     models = data.get("models", []) if isinstance(data, dict) else data
     table = Table(title=f"Models ({len(models)})")
@@ -175,6 +186,11 @@ def model_rm(
 @app.command("show")
 def model_show(
     ref: str = typer.Argument(..., help="Model ref to inspect"),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the raw model metadata JSON for CI/pipe use (no Rich table).",
+    ),
 ) -> None:
     """Show a model's metadata."""
     url = _api_base()
@@ -184,6 +200,9 @@ def model_show(
         m = api_get(f"/api/models/{ref}")
     except CliApiError as exc:
         die(str(exc))
+        return
+    if json_out:
+        typer.echo(jsonlib.dumps(m, indent=2))
         return
     table = Table(show_header=False, title=m.get("id", ref))
     for k, v in m.items():

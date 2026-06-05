@@ -131,7 +131,13 @@ def _fmt_state(state: str | None) -> str:
 
 
 @app.command("list")
-def slot_list() -> None:
+def slot_list(
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the raw /api/slots JSON for CI/pipe use (no Rich table).",
+    ),
+) -> None:
     """List all configured slots and their current state."""
     url = _api_base()
     if _api_unreachable(url):
@@ -140,6 +146,9 @@ def slot_list() -> None:
         slots = api_get("/api/slots")
     except CliApiError as exc:
         die(str(exc))
+        return
+    if json_out:
+        typer.echo(jsonlib.dumps(slots, indent=2))
         return
     table = Table(title="hal0 slots")
     table.add_column("Name", style="bold")
@@ -531,6 +540,11 @@ def slot_delete(
 @app.command("show")
 def slot_show(
     name: str = typer.Argument(..., help="Slot name to inspect"),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit raw JSON ({status, config}) for CI/pipe use (no Rich panel).",
+    ),
 ) -> None:
     """Show full slot config + status (GET /api/slots/{name})."""
     url = _api_base()
@@ -546,6 +560,9 @@ def slot_show(
     except CliApiError:
         cfg = None
     body = jsonlib.dumps({"status": status, "config": cfg}, indent=2)
+    if json_out:
+        typer.echo(body)
+        return
     console.print(
         Panel(
             Syntax(body, "json", theme="ansi_dark", background_color="default"),

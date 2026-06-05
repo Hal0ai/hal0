@@ -31,7 +31,8 @@ UMA changes, GPU swaps, or RAM upgrades.
 ## Slots
 
 ```sh
-hal0 slot list
+hal0 slot list [--json]
+hal0 slot show <name> [--json]
 hal0 slot load <name> [--model M]
 hal0 slot unload <name>
 hal0 slot restart <name>
@@ -46,10 +47,33 @@ through `unloading → starting → warming → ready`.
 `hal0 slot logs <name> --follow` is the journald tail wrapped over
 SSE; it shows the same stream the dashboard's Logs view tails.
 
+### JSON output for pipes / CI
+
+`slot list`, `slot show`, `model list`, `model show`, and `agent list`
+take a `--json` flag that prints the raw API response and nothing else —
+no Rich table, no panel — so the output is safe to pipe into `grep`,
+`jq`, or a CI script even from a non-TTY:
+
+```sh
+hal0 slot list --json | jq '.[] | select(.provider=="llama-server")'
+hal0 slot show primary --json | jq .config
+```
+
+The JSON shape is exactly what the underlying endpoint returns:
+
+| Command            | Shape                                                        |
+| ------------------ | ----------------------------------------------------------- |
+| `slot list --json` | `GET /api/slots` — a JSON array of slot objects             |
+| `slot show --json` | `{ "status": <GET /api/slots/{name}>, "config": <GET …/config> }` |
+| `model list --json`| `GET /api/models` — typically `{ "models": [...] }`         |
+| `model show --json`| `GET /api/models/{ref}` — a single model object             |
+| `agent list --json`| `GET /api/agents` — typically `{ "agents": [...] }`         |
+
 ## Models
 
 ```sh
-hal0 model list
+hal0 model list [--json]
+hal0 model show <ref> [--json]
 hal0 model pull <ref>                        # HF streaming pull
 hal0 model rm <ref>
 hal0 model assign <ref> --slot S
