@@ -58,7 +58,7 @@ import './dash/extras.jsx'
 // AgentView is the `#agent` route shell. v0.4 reduced it to the Memory
 // capability only — the web-chat (HermesChatTab) surface plus the
 // Personas / Skills / Plugins tabs were removed (web chat is abandoned in
-// favour of the `hal0 chat` TUI; the other tabs showed fixtures rather
+// favour of the `hermes chat` TUI; the other tabs showed fixtures rather
 // than live data). The MemoryTab bridge installs its TanStack-Query
 // hooks onto `window.__hal0Use*` BEFORE memory-tab.jsx evaluates, and
 // memory-tab.jsx registers on window BEFORE agent-view.jsx mounts.

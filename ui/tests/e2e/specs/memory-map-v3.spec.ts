@@ -51,7 +51,11 @@ test.describe('Memory map — sidebar', () => {
     await expect(card).not.toContainText('host free')
   })
 
-  test('detected_unconfigured — amber band with Configure link', async ({ page }) => {
+  test('detected_unconfigured — sidebar no longer shows the Proxmox nudge', async ({ page }) => {
+    // The "⚠ Hosted on Proxmox — host pressure unknown. Configure →" nudge was
+    // removed from the SIDEBAR variant (it now lives only in the expanded
+    // hardware-page variant). Even in the detected-but-unconfigured state the
+    // compact sidebar stays model-memory only.
     await mockStatsHardware(page, {
       configured: false,
       detected: true,
@@ -60,8 +64,11 @@ test.describe('Memory map — sidebar', () => {
     })
     await page.goto('/#dashboard')
     const card = page.locator('.memmap-sidebar')
-    await expect(card).toContainText('Hosted on Proxmox')
-    await expect(card.locator('a', { hasText: 'Configure' })).toBeVisible()
+    await expect(card).toBeVisible()
+    await expect(card).not.toContainText('Hosted on Proxmox')
+    await expect(card.locator('.memmap-pve-nudge')).toHaveCount(0)
+    // Model-memory framing is still the sidebar's content.
+    await expect(card).toContainText('model memory')
   })
 
   test('configured — sidebar shows MODEL memory only, no host section', async ({ page }) => {

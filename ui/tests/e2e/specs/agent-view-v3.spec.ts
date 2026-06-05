@@ -2,7 +2,7 @@
  * agent-view-v3 — v0.4 Memory-only AgentView contract.
  *
  * The `#agent` route was reduced to the Memory capability ONLY. Web chat
- * (HermesChatTab) was abandoned in favour of the `hal0 chat` TUI, and the
+ * (HermesChatTab) was abandoned in favour of the `hermes chat` TUI, and the
  * Personas / Skills / Plugins tabs were removed (they surfaced fixtures,
  * not live data). The single-tab nav is kept so the route + deep-link
  * shape stay stable.
@@ -12,7 +12,7 @@
  *   - the Memory tab content is visible by default
  *   - the removed tabs (chat / personas / skills / plugins / inbox /
  *     peers / overview) are ABSENT from the nav
- *   - the header carries the `hal0 chat` terminal hint
+ *   - the header carries the `hermes chat` terminal hint
  *   - the Memory tab exposes the "Peer memory" subsection
  *   - hash routes `#agent`, `#agent/memory`, and legacy `#peers` all land
  *     on the Memory tab
@@ -61,11 +61,11 @@ test.describe('AgentView v3 (#agent — v0.4 Memory-only)', () => {
     await expect(nav).not.toContainText('Plugins')
   })
 
-  test('header carries the `hal0 chat` terminal hint (web chat replaced by TUI)', async ({
+  test('header carries the `hermes chat` terminal hint (web chat replaced by TUI)', async ({
     page,
   }) => {
     await page.goto('/#agent')
-    await expect(page.locator('.view .vh')).toContainText('hal0 chat', { timeout: FIVE_S })
+    await expect(page.locator('.view .vh')).toContainText('hermes chat', { timeout: FIVE_S })
   })
 
   test('Memory tab shows the "Peer memory" subsection', async ({ page }) => {

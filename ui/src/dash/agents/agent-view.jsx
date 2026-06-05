@@ -2,7 +2,7 @@
 //
 // AgentView is the `#agent` route. v0.4 reduced it to the Memory
 // capability only. The web-chat surface (HermesChatTab) was abandoned in
-// favour of the `hal0 chat` TUI, and the Personas / Skills / Plugins tabs
+// favour of the `hermes chat` TUI, and the Personas / Skills / Plugins tabs
 // were removed (they showed fixtures rather than live data). The single-
 // tab nav is kept so the route + deep-link shape stay stable.
 //
@@ -24,7 +24,7 @@ const { useState: useStateAV, useEffect: useEffectAV } = React;
 
 // v0.4: the Agent view is reduced to the Memory capability only. Web
 // chat (HermesChatTab) plus the Personas / Skills / Plugins tabs were
-// removed — web chat is abandoned in favour of the `hal0 chat` TUI, and
+// removed — web chat is abandoned in favour of the `hermes chat` TUI, and
 // the other tabs surfaced fixtures rather than live data. The tab nav is
 // kept (single tab) so the route + deep-link shape stay stable.
 const AGENT_TABS = [
@@ -82,7 +82,7 @@ function AgentView() {
         <span className="vh-eye mono">Tools</span>
         <h1>Agent</h1>
         <span className="vh-spacer" />
-        <span className="hint mono">Chat in terminal: <code>hal0 chat</code></span>
+        <span className="hint mono">Chat in terminal: <code>hermes chat</code></span>
       </div>
 
       <div
