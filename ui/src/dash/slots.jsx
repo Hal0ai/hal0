@@ -12,7 +12,10 @@ import {
   useSlotUnload,
   useSlotLoad,
   useSlotSwap,
+  useSlotEdit,
 } from '@/api/hooks/useSlots'
+import { useModels } from '@/api/hooks/useModels'
+import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
 import { MemoryMap } from './memory-map'
 
 const { useState: useStateS } = React;
@@ -411,188 +414,311 @@ function npuTrioBackendUrl(slots) {
   }
   return null;
 }
-function npuTrioBackendBadge(slots) {
-  for (const s of slots) {
-    const b = s.backend || s.metadata?.backend || s.provider;
-    if (typeof b === "string" && b) return b;
-  }
-  return null;
+
+// ─── flm_args parsing helpers (pure) ───
+//
+// The FLM trio's coresident modalities are driven by lemond's
+// `flm_args` string ("--asr <0|1> --embed <0|1>"), set via
+// POST /api/lemonade/config and applied at the next FLM load. We parse
+// the live string to drive the toggles and recompose it on flip.
+// The backend now accepts explicit 0/1 for both flags, so we always
+// emit both keys (absence must never silently disable a modality).
+function parseFlmArgs(str) {
+  const s = typeof str === "string" ? str : "";
+  const asrM = s.match(/--asr\s+(\d)/);
+  const embM = s.match(/--embed\s+(\d)/);
+  return {
+    // Default ON when the flag is absent — matches the seeded trio
+    // ("--asr 1 --embed 1") so an empty/unparsed config reads as the
+    // full coresident stack rather than silently-off.
+    asr: asrM ? asrM[1] === "1" : true,
+    embed: embM ? embM[1] === "1" : true,
+  };
 }
-function chatMetric(slot, key) {
-  const v = slot?.metrics?.[key];
-  return v === undefined || v === null || v === "" ? "—" : v;
+function composeFlmArgs({ asr, embed }) {
+  return `--asr ${asr ? 1 : 0} --embed ${embed ? 1 : 0}`;
 }
 
-// ─── NPU trio — Block variant (default per brief) ───
-function NpuBlock({ slots }) {
-  const npuSlots = slots.filter(s => s.device === "npu");
-  if (!npuSlots.length) return null;
-  const chat = npuSlots.find(s => s.type === "llm");
-  const flm = chat || npuSlots[0];
-  const coresGroup = npuTrioGroupLabel(npuSlots);
-  const backendUrl = npuTrioBackendUrl(npuSlots);
-  const backendName = npuTrioBackendBadge(npuSlots);
+// FLM models live in their own namespace (registry seed backend:"flm",
+// upstream:"npu"). Filter /api/models defensively across the field
+// shapes the registry/upstream rows can present, then narrow by the
+// dispatcher `type` vocabulary the picker is for. Never offer GGUFs.
+function isFlmModel(m) {
+  const backends = Array.isArray(m?.backends) ? m.backends : [];
   return (
-    <div className="card npu-card live">
-      <div className="npu-h">
-        <span className="npu-glyph mono">NPU</span>
-        <span className="title mono">
-          FLM trio<span className="sub">one process · three roles · {chat ? chat.model : "no chat model"} active</span>
-        </span>
+    backends.includes("flm") ||
+    m?.backend === "flm" ||
+    m?.runtime === "flm" ||
+    m?.upstream === "npu"
+  );
+}
+// `normalizeApiModel` derives `type` from the plural `capabilities`
+// array and discards any backend-set type. FLM seed rows carry a
+// SINGULAR `capability` ("chat"|"embed"|"asr"), so when `capabilities`
+// is empty `type` lands as "" — fall back to the singular field so the
+// pickers still populate. (Dispatcher vocab: chat→llm, embed→embedding,
+// asr/transcription→transcription.)
+function modelSlotType(m) {
+  if (m?.type) return m.type;
+  const cap = String(m?.capability || "").toLowerCase();
+  if (cap === "chat") return "llm";
+  if (cap === "embed" || cap === "embeddings") return "embedding";
+  if (cap === "asr" || cap === "transcription") return "transcription";
+  if (cap === "rerank") return "reranking";
+  if (cap === "tts") return "tts";
+  if (cap === "image") return "image";
+  return "";
+}
+function flmModelsByType(models, type) {
+  return (Array.isArray(models) ? models : [])
+    .filter(isFlmModel)
+    .filter(m => modelSlotType(m) === type);
+}
+
+const NPU_CHIP = {
+  color: "var(--dev-npu)",
+  borderColor: "rgba(200,150,255,0.30)",
+  background: "rgba(200,150,255,0.06)",
+};
+
+function slotIsLoaded(slot) {
+  const lemo = String(slot?.lemonade_state || "");
+  const state = String(slot?.state || "");
+  return lemo === "loaded" || lemo === "ready" || state === "serving" || state === "ready";
+}
+
+// A small native-looking select for the FLM model pickers.
+function NpuModelSelect({ value, models, disabled, onChange }) {
+  const opts = Array.isArray(models) ? models : [];
+  const hasCurrent = value && opts.some(m => m.id === value);
+  return (
+    <select
+      className="input mono npu-sel"
+      value={value || ""}
+      disabled={disabled}
+      onChange={e => onChange && onChange(e.target.value)}
+    >
+      {/* Keep the live model selectable even if the catalog hasn't
+          surfaced it (offline /api/models, un-catalogued FLM tag). */}
+      {value && !hasCurrent && <option value={value}>{value}</option>}
+      {!value && <option value="">—</option>}
+      {opts.map(m => (
+        <option key={m.id} value={m.id}>{m.longName || m.id}</option>
+      ))}
+    </select>
+  );
+}
+
+// A11y-friendly on/off switch (matches the prototype's visual language).
+function NpuSwitch({ on, disabled, label, onClick }) {
+  return (
+    <button
+      type="button"
+      className="npu-switch"
+      role="switch"
+      aria-checked={!!on}
+      aria-label={label}
+      disabled={disabled}
+      data-on={on ? "1" : "0"}
+      onClick={onClick}
+    >
+      <span className="knob" />
+    </button>
+  );
+}
+
+// One modality mini-card inside the bracketed trio.
+function NpuModalityCard({ icon, label, slot, on, fixed, models, busy, onToggle, onPickModel }) {
+  return (
+    <div className="slot npu-mod" data-on={on ? "1" : "0"}>
+      <div className="slot-h">
+        <span className="npu-mod-icon" aria-hidden="true">{icon}</span>
+        <div className="slot-name"><span className="nm">{label}</span></div>
         <div className="right">
-          {coresGroup && (
-            <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.08)"}}>
-              <span className="dot" style={{width: 5, height: 5, background: "currentColor", boxShadow: "0 0 6px currentColor"}} />
-              {coresGroup}
-            </span>
-          )}
-          <span className="pid mono">
-            pid {flm?.pid ?? "—"} · port :{flm?.port ?? "—"}
-            {backendUrl ? <> · <span title={backendUrl}>{backendUrl}</span></> : null}
-          </span>
+          {fixed
+            ? <span className="chip" style={{...NPU_CHIP, fontSize: 10}}>always</span>
+            : <NpuSwitch on={on} disabled={busy} label={`Toggle ${label}`} onClick={onToggle} />}
         </div>
       </div>
-      <div className="npu-body">
-        {npuSlots.map((s, i) => {
-          const lemState = s.lemonade_state || s.state || "—";
-          const isLead = s.type === "llm";
-          return (
-            <div key={s.name} className={"npu-subrow" + (isLead ? " lead" : "")}>
-              <span className={"dot " + (i === 0 ? "ready" : "coresident")} />
-              <div className="role mono">
-                {s.name}
-                <span className="sub">{s.type}</span>
-              </div>
-              <div className="model mono">
-                {s.model}
-                {isLead && <span className="chev">{Icons.chev}</span>}
-              </div>
-              <div className="met mono">
-                {isLead && (
-                  <span>
-                    <b>{chatMetric(s, "toks")}</b> tok/s · TTFT <b>{chatMetric(s, "ttft")}</b>ms · KV <b>{chatMetric(s, "kv")}</b>%
-                  </span>
-                )}
-                {s.type === "transcription" && (
-                  <span><b>{chatMetric(s, "xrt")}</b> xrt · {s.metrics?.precision || "—"}</span>
-                )}
-                {s.type === "embedding" && (
-                  <span>{s.metrics?.dim || "—"}-dim · {lemState}</span>
-                )}
-              </div>
-              <div className="st">
-                <span className="chip" style={{color: isLead ? "var(--ok)" : "var(--dev-npu)", borderColor: isLead ? "var(--ok-line)" : "rgba(200,150,255,0.30)", background: isLead ? "var(--ok-soft)" : "rgba(200,150,255,0.06)"}}>
-                  {lemState}{isLead && s.isDefault ? " · default" : ""}
-                </span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div className="npu-foot mono">
-        <span className="item">backend <b>{backendName || "—"}</b></span>
-        <span style={{color: "var(--fg-5)"}}>·</span>
-        <span className="item">group <b>{coresGroup || "—"}</b></span>
-        <span style={{color: "var(--fg-5)"}}>·</span>
-        <span className="item">disabling stt-npu/embed-npu frees a role at next FLM restart</span>
+      <div className="npu-mod-body">
+        <NpuModelSelect
+          value={slot?.model || ""}
+          models={models}
+          disabled={!on || busy || !slot}
+          onChange={onPickModel}
+        />
       </div>
     </div>
   );
 }
 
-// ─── NPU trio — Reactor variant ───
-function NpuReactor({ slots }) {
+// ─── NPU · FLM Stack — Variant B (bracketed trio control surface) ───
+//
+// THE npu rendering. One FLM process packs chat + ASR + embed coresident
+// (the trio boots together when the NPU chat slot loads with
+// flm_args "--asr 1 --embed 1"). This section lets the operator pick the
+// FLM chat model, toggle ASR/embed modalities, and load/unload the whole
+// stack — keyed off device=="npu" (never literal slot names).
+function NpuFlmStack({ slots }) {
   const npuSlots = slots.filter(s => s.device === "npu");
+  // Hooks must run unconditionally (rules-of-hooks) — gate render below.
+  const cfgQuery = useLemonadeConfig();
+  const cfgSet = useLemonadeConfigSet();
+  const modelsQuery = useModels();
+  const swapMut = useSlotSwap();
+  const loadMut = useSlotLoad();
+  const unloadMut = useSlotUnload();
+  const editMut = useSlotEdit();
+  const [pending, setPending] = useStateS(false);
+  const [busy, setBusy] = useStateS(false);
+
   if (!npuSlots.length) return null;
+
   const chat = npuSlots.find(s => s.type === "llm");
-  const stt = npuSlots.find(s => s.type === "transcription");
-  const emb = npuSlots.find(s => s.type === "embedding");
+  const asr = npuSlots.find(s => s.type === "transcription");
+  const embed = npuSlots.find(s => s.type === "embedding");
+  const anySlot = chat || npuSlots[0];
+
   const coresGroup = npuTrioGroupLabel(npuSlots);
   const backendUrl = npuTrioBackendUrl(npuSlots);
-  const backendName = npuTrioBackendBadge(npuSlots);
+  const childPort = anySlot?.port ?? null;
+
+  const flmArgsLive = typeof cfgQuery.data?.flm_args === "string" ? cfgQuery.data.flm_args : "";
+  const parsed = parseFlmArgs(flmArgsLive);
+
+  const allModels = modelsQuery.data || [];
+  const chatModels = flmModelsByType(allModels, "llm");
+  const asrModels = flmModelsByType(allModels, "transcription");
+  const embedModels = flmModelsByType(allModels, "embedding");
+
+  const loaded = chat ? slotIsLoaded(chat) : npuSlots.some(slotIsLoaded);
+  // Live flm.args string for the footer — pending toggles preview the
+  // string that WILL apply on the next load.
+  const previewArgs = composeFlmArgs(parsed);
+
+  const toast = (msg, kind = "warn") =>
+    window.__hal0Toast && window.__hal0Toast(msg, kind);
+
+  const run = async (fn) => {
+    setBusy(true);
+    try {
+      await fn();
+    } catch (err) {
+      toast(err?.message ? err.message : "NPU action failed", "warn");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Master power — load/unload the whole stack via the chat (anchor) slot.
+  // Loading applies the current flm_args, so it clears the pending hint.
+  const onMaster = () => {
+    if (!chat) { toast("No NPU chat slot to load", "warn"); return; }
+    run(async () => {
+      if (loaded) {
+        await unloadMut.mutateAsync(chat.name);
+      } else {
+        await loadMut.mutateAsync(chat.name);
+      }
+      // Either edge resolves the pending flm_args: a load applies them,
+      // an unload tears down the process that held the stale args.
+      setPending(false);
+    });
+  };
+
+  // Reload to apply pending flm_args (unload+load the anchor slot).
+  const onReload = () => {
+    if (!chat) return;
+    run(async () => {
+      if (loaded) await unloadMut.mutateAsync(chat.name);
+      await loadMut.mutateAsync(chat.name);
+      setPending(false);
+    });
+  };
+
+  const onPickChat = (model_id) => {
+    if (!chat || !model_id || model_id === chat.model) return;
+    run(() => swapMut.mutateAsync({ name: chat.name, model_id }));
+  };
+
+  // Toggle a coresident modality: recompose flm_args (flip the one flag,
+  // keep the other), POST it to lemond, AND flip the shadow slot's
+  // `enabled` so dispatch gating (v1.py _is_npu_trio_request) stays in
+  // sync. flm_args apply at the next load → mark pending.
+  const onToggleModality = (which, slot) => {
+    const next = { ...parsed, [which]: !parsed[which] };
+    run(async () => {
+      await cfgSet.mutateAsync({ flm_args: composeFlmArgs(next) });
+      if (slot) {
+        await editMut.mutateAsync({ name: slot.name, body: { enabled: next[which] } });
+      }
+      setPending(true);
+    });
+  };
+
+  const onPickAsrModel = (model_id) => {
+    if (!asr || !model_id || model_id === asr.model) return;
+    run(() => swapMut.mutateAsync({ name: asr.name, model_id }));
+  };
+  const onPickEmbedModel = (model_id) => {
+    if (!embed || !model_id || model_id === embed.model) return;
+    run(() => swapMut.mutateAsync({ name: embed.name, model_id }));
+  };
+
   return (
-    <div className="card npu-card live">
-      <div className="npu-h">
-        <span className="npu-glyph mono">NPU</span>
-        <span className="title mono">FLM trio<span className="sub">reactor view · one process driving three roles</span></span>
-        <div className="right">
-          {coresGroup && (
-            <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.08)"}}>
-              <span className="dot" style={{width: 5, height: 5, background: "currentColor", boxShadow: "0 0 6px currentColor"}} />
-              {coresGroup}
-            </span>
-          )}
-          <span className="pid mono">pid {chat?.pid ?? "—"}</span>
+    <div className="npu-stack">
+      <div className="npu-stack-h">
+        <span className="title mono">NPU · FLM Stack</span>
+        <span className="chip" style={NPU_CHIP}>
+          <span className="dot" style={{width: 5, height: 5, background: "currentColor", boxShadow: "0 0 6px currentColor"}} />
+          coresident · boots together
+        </span>
+        <span className="npu-stack-spacer" />
+        <span className="npu-stack-master-lbl mono">master</span>
+        <NpuSwitch on={loaded} disabled={busy || !chat} label="Load/unload FLM stack" onClick={onMaster} />
+      </div>
+
+      <div className="npu-bracket">
+        <div className="npu-bracket-rail" aria-hidden="true" />
+        <div className="npu-trio">
+          <NpuModalityCard
+            icon="💬" label="Chat" slot={chat} on fixed
+            models={chatModels} busy={busy} onPickModel={onPickChat}
+          />
+          <NpuModalityCard
+            icon="🎙" label="ASR" slot={asr} on={parsed.asr}
+            models={asrModels} busy={busy}
+            onToggle={() => onToggleModality("asr", asr)}
+            onPickModel={onPickAsrModel}
+          />
+          <NpuModalityCard
+            icon="🧬" label="Embed" slot={embed} on={parsed.embed}
+            models={embedModels} busy={busy}
+            onToggle={() => onToggleModality("embed", embed)}
+            onPickModel={onPickEmbedModel}
+          />
         </div>
       </div>
-      <div className="npu-reactor">
-        <div className="reactor-core">
-          <div className="reactor-disc">
-            <div className="lbl">
-              backend<b>{backendName || "—"}</b>
-              <div style={{marginTop: 4, color: "var(--fg-4)"}}>{backendUrl || "—"}</div>
-            </div>
-          </div>
-          <div className="reactor-meta">group {coresGroup || "—"}</div>
-        </div>
-        <div className="reactor-roles">
-          {chat && (
-            <div className="reactor-role lead">
-              <span className="dot ready" />
-              <div className="lbl">
-                {chat.name}
-                <span className="sub">chat · llm{chat.isDefault ? " · default" : ""}</span>
-              </div>
-              <div className="md">{chat.model}</div>
-              <div className="met">
-                <div><b style={{color: "var(--fg)"}}>{chatMetric(chat, "toks")}</b> tok/s</div>
-                <div style={{color: "var(--fg-4)"}}>KV {chatMetric(chat, "kv")}%</div>
-              </div>
-            </div>
-          )}
-          {stt && (
-            <div className="reactor-role">
-              <span className="dot coresident" />
-              <div className="lbl">
-                {stt.name}
-                <span className="sub">transcription · passenger</span>
-              </div>
-              <div className="md">{stt.model}</div>
-              <div className="met">
-                <div><b style={{color: "var(--fg)"}}>{chatMetric(stt, "xrt")}</b> xrt</div>
-                <div style={{color: "var(--fg-4)"}}>{stt.metrics?.precision || "—"}</div>
-              </div>
-            </div>
-          )}
-          {emb && (
-            <div className="reactor-role">
-              <span className="dot coresident" />
-              <div className="lbl">
-                {emb.name}
-                <span className="sub">embedding · passenger</span>
-              </div>
-              <div className="md">{emb.model}</div>
-              <div className="met">
-                <div><b style={{color: "var(--fg)"}}>{emb.metrics?.dim || "—"}</b> dim</div>
-                <div style={{color: "var(--fg-4)"}}>{emb.lemonade_state || emb.state || "—"}</div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-      <div className="npu-foot mono">
-        <span className="item">backend <b>{backendName || "—"}</b></span>
-        <span style={{color: "var(--fg-5)"}}>·</span>
-        <span className="item">group <b>{coresGroup || "—"}</b></span>
-        <span style={{color: "var(--fg-5)"}}>·</span>
-        <span className="item">pauses voice + embed on chat-model swap</span>
+
+      <div className="npu-stack-foot mono">
+        <code className="npu-args">flm.args = "{previewArgs}"</code>
+        <span className="sep">·</span>
+        <span className="item">port :{childPort ?? "—"}{backendUrl ? <span title={backendUrl}> · {backendUrl}</span> : null}</span>
+        {coresGroup && <><span className="sep">·</span><span className="item">{coresGroup}</span></>}
+        {pending && (
+          <>
+            <span className="npu-stack-spacer" />
+            <span className="npu-pending" title="flm_args apply on the next FLM load">⟳ reload to apply</span>
+            <button className="btn ghost sm" disabled={busy || !chat} onClick={onReload}>Reload</button>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
 // ─── Slots view ───
-function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
+function SlotsView({ slotVariant, slotParam, onGo }) {
   const slotsQuery = useSlots();
   // Single source of truth: the hook. The Playwright apiMock fixture
   // fulfils /api/slots so mock-mode coverage is symmetric with live runs;
@@ -676,7 +802,6 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
     embed: slots.filter(s => s.group === "embed"),
     voice: slots.filter(s => s.group === "voice"),
     img:   slots.filter(s => s.group === "img"),
-    npu:   slots.filter(s => s.group === "npu"),
   };
 
   const editSlot = (slots || []).find(s => s.name === editName);
@@ -923,13 +1048,13 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
           {renderGroup("Voice", groups.voice)}
           {renderGroup("Image", groups.img)}
 
-          {groups.npu.length > 0 && (
+          {slots.some(s => s.device === "npu") && (
             <section style={{marginBottom: 24}}>
               <div className="sec">
                 <h2>NPU<span className="ct mono">trio · 1 process · 3 roles</span></h2>
                 <div className="rule" />
               </div>
-              {npuVariant === "reactor" ? <NpuReactor slots={slots} /> : <NpuBlock slots={slots} />}
+              <NpuFlmStack slots={slots} />
             </section>
           )}
         </div>
@@ -960,4 +1085,4 @@ function SlotsView({ slotVariant, npuVariant, slotParam, onGo }) {
   );
 }
 
-Object.assign(window, { SlotsView, SlotCard, SlotListRow, NpuBlock, NpuReactor, Spark });
+Object.assign(window, { SlotsView, SlotCard, SlotListRow, NpuFlmStack, Spark });

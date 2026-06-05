@@ -1781,165 +1781,95 @@ a { color: inherit; text-decoration: none; }
 .slot.spec .slot-met .v { font-size: 22px; }
 
 /* NPU trio card */
-.npu-card {
-  background: linear-gradient(135deg, var(--bg-1) 0%, color-mix(in oklab, rgba(200, 150, 255, 0.06) 100%, var(--bg-1)) 100%);
-  border: 1px solid var(--line);
-  border-radius: var(--rad-lg);
-  overflow: hidden;
-  position: relative;
+/* ── NPU · FLM Stack (Variant B — bracketed trio control surface) ──────
+   Replaces the read-only NpuBlock/NpuReactor. One FLM process packs
+   chat + ASR + embed coresident; this section drives the stack. */
+.npu-stack { display: flex; flex-direction: column; gap: 12px; }
+
+.npu-stack-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
-.npu-card.live { border-color: rgba(200, 150, 255, 0.30); }
-.npu-card::before {
-  content: ""; position: absolute; inset: 0;
-  background: radial-gradient(circle at 0% 0%, rgba(200, 150, 255, 0.08), transparent 50%);
+.npu-stack-h .title {
+  font-family: var(--jbm);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: 0.02em;
+}
+.npu-stack-spacer { flex: 1; }
+.npu-stack-master-lbl { font-size: 11px; color: var(--fg-3); text-transform: uppercase; letter-spacing: 0.08em; }
+
+/* The left bracket that binds the trio "boots together". */
+.npu-bracket { position: relative; padding-left: 18px; }
+.npu-bracket-rail {
+  position: absolute;
+  left: 0; top: 6px; bottom: 6px;
+  width: 10px;
+  border-left: 2px solid var(--dev-npu);
+  border-top: 2px solid var(--dev-npu);
+  border-bottom: 2px solid var(--dev-npu);
+  border-radius: 6px 0 0 6px;
+  opacity: 0.45;
   pointer-events: none;
 }
-.npu-h {
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--line-soft);
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  position: relative;
-}
-.npu-h .npu-glyph {
-  width: 32px; height: 32px;
-  border: 1px solid rgba(200, 150, 255, 0.40);
-  border-radius: 3px;
-  background: rgba(200, 150, 255, 0.08);
-  font-family: var(--jbm);
-  font-size: 10px;
-  color: var(--dev-npu);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  letter-spacing: 0.05em;
-  font-weight: 600;
-}
-.npu-h .title { font-family: var(--jbm); font-size: 14px; font-weight: 500; color: var(--fg); }
-.npu-h .title .sub { color: var(--fg-3); font-weight: 400; font-size: 11.5px; margin-left: 8px; }
-.npu-h .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-.npu-h .pid {
-  font-family: var(--jbm);
-  font-size: 10px;
-  color: var(--fg-4);
-  padding: 2px 7px;
+.npu-trio { display: flex; gap: 10px; align-items: stretch; }
+
+/* Each modality mini-card reuses the .slot visual language. */
+.npu-mod { flex: 1; min-width: 0; transition: opacity 0.15s, border-color 0.15s; }
+.npu-mod[data-on="1"] { border-color: rgba(200, 150, 255, 0.30); }
+.npu-mod[data-on="0"] { opacity: 0.5; }
+.npu-mod .npu-mod-icon { font-size: 15px; line-height: 1; }
+.npu-mod-body { padding: 8px 0 2px; }
+.npu-sel { width: 100%; }
+
+/* On/off switch (matches prototype). */
+.npu-switch {
+  width: 42px; height: 24px;
+  border-radius: 999px;
   border: 1px solid var(--line);
-  border-radius: 3px;
-}
-
-.npu-body { display: flex; flex-direction: column; }
-.npu-subrow {
-  display: grid;
-  grid-template-columns: 14px 120px 1fr 130px 100px;
-  gap: 14px;
-  align-items: center;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--line-soft);
-  font-family: var(--jbm);
+  background: var(--bg-3);
   position: relative;
+  cursor: pointer;
+  flex: 0 0 auto;
+  padding: 0;
+  transition: background 0.15s, border-color 0.15s;
 }
-.npu-subrow:last-child { border-bottom: none; }
-.npu-subrow.lead { background: rgba(200, 150, 255, 0.04); }
-.npu-subrow .role { color: var(--fg); font-size: 13px; font-weight: 500; }
-.npu-subrow .role .sub { color: var(--fg-4); font-size: 10px; display: block; margin-top: 2px; font-weight: 400; }
-.npu-subrow .model { color: var(--fg-2); font-size: 12px; display: flex; align-items: center; gap: 8px; }
-.npu-subrow .model .chev { color: var(--fg-4); cursor: pointer; }
-.npu-subrow .met { color: var(--fg-3); font-size: 11.5px; }
-.npu-subrow .met b { color: var(--fg); font-weight: 500; }
-.npu-subrow .st { display: flex; justify-content: flex-end; }
+.npu-switch[data-on="1"] { background: var(--dev-npu); border-color: var(--dev-npu); }
+.npu-switch:disabled { opacity: 0.5; cursor: not-allowed; }
+.npu-switch .knob {
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 18px; height: 18px;
+  border-radius: 999px;
+  background: #fff;
+  transition: left 0.15s;
+}
+.npu-switch[data-on="1"] .knob { left: 20px; }
 
-.npu-foot {
-  padding: 12px 18px;
-  background: var(--bg);
-  border-top: 1px solid var(--line-soft);
-  font-family: var(--jbm);
-  font-size: 11px;
-  color: var(--fg-4);
+.npu-stack-foot {
   display: flex;
   align-items: center;
-  gap: 14px;
-}
-.npu-foot .item { display: inline-flex; align-items: center; gap: 6px; }
-.npu-foot .item b { color: var(--fg-2); font-weight: 500; }
-
-/* NPU reactor variant */
-.npu-reactor {
-  position: relative;
-  padding: 24px 24px;
-  display: grid;
-  grid-template-columns: 200px 1fr;
-  gap: 24px;
-  align-items: center;
-}
-.reactor-core {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-.reactor-disc {
-  width: 140px; height: 140px;
-  border: 1px solid rgba(200, 150, 255, 0.40);
-  border-radius: 50%;
-  background:
-    radial-gradient(circle at center, rgba(200, 150, 255, 0.12), transparent 70%),
-    var(--bg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-}
-.reactor-disc::before, .reactor-disc::after {
-  content: ""; position: absolute; inset: 12px;
-  border: 1px dashed rgba(200, 150, 255, 0.20);
-  border-radius: 50%;
-}
-.reactor-disc::after { inset: 28px; opacity: 0.5; }
-.reactor-disc .lbl { font-family: var(--jbm); font-size: 11px; color: var(--dev-npu); text-align: center; letter-spacing: 0.05em; position: relative; z-index: 2; }
-.reactor-disc .lbl b { display: block; font-size: 15px; color: var(--fg); margin-top: 2px; }
-.reactor-meta { font-family: var(--jbm); font-size: 10px; color: var(--fg-4); text-align: center; }
-.reactor-roles { display: flex; flex-direction: column; gap: 8px; }
-.reactor-role {
-  display: grid;
-  grid-template-columns: 16px 110px 1fr auto;
-  gap: 12px;
-  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
   padding: 10px 12px;
   background: var(--bg);
   border: 1px solid var(--line-soft);
-  border-radius: var(--rad);
-  font-family: var(--jbm);
-  font-size: 12px;
+  border-radius: var(--rad-sm);
+  font-size: 11px;
+  color: var(--fg-4);
 }
-.reactor-role.lead { border-color: rgba(200, 150, 255, 0.30); }
-.reactor-role .lbl { color: var(--fg); font-weight: 500; }
-.reactor-role .lbl .sub { color: var(--fg-4); font-size: 10px; display: block; margin-top: 1px; font-weight: 400; }
-.reactor-role .md { color: var(--fg-2); font-size: 11.5px; }
-.reactor-role .met { color: var(--fg-3); font-size: 11px; text-align: right; }
-
-/* NPU stack variant */
-.npu-stack { padding: 0; }
-.npu-stack-lead {
-  padding: 20px 22px;
-  border-bottom: 1px solid var(--line-soft);
-  background: rgba(200, 150, 255, 0.06);
+.npu-stack-foot .npu-args { color: var(--dev-npu); font-size: 11.5px; }
+.npu-stack-foot .item { display: inline-flex; align-items: center; gap: 6px; }
+.npu-stack-foot .sep { color: var(--fg-5); }
+.npu-pending {
+  color: var(--warn);
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
-.npu-stack-lead .role { font-family: var(--jbm); font-size: 10px; color: var(--dev-npu); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
-.npu-stack-lead .model { font-family: var(--jbm); font-size: 18px; font-weight: 500; color: var(--fg); letter-spacing: -0.02em; margin-bottom: 8px; }
-.npu-stack-lead .met { display: flex; gap: 16px; font-family: var(--jbm); font-size: 11px; color: var(--fg-3); }
-.npu-stack-lead .met b { color: var(--fg); font-weight: 500; }
-.npu-stack-passengers { display: grid; grid-template-columns: 1fr 1fr; }
-.npu-stack-pass {
-  padding: 14px 22px;
-  border-right: 1px solid var(--line-soft);
-  font-family: var(--jbm);
-}
-.npu-stack-pass:last-child { border-right: none; }
-.npu-stack-pass .role { font-size: 10px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
-.npu-stack-pass .md { font-size: 13px; color: var(--fg); margin-bottom: 4px; }
-.npu-stack-pass .met { font-size: 11px; color: var(--fg-3); }
 
 /* ════════════════════════════════════════════════════════════════════
    Models view
@@ -2201,9 +2131,7 @@ a { color: inherit; text-decoration: none; }
   .fr-confirm-row .tag { display: none; }
   .s-row { grid-template-columns: 1fr; }
   .s-tool-row { grid-template-columns: 1fr; }
-  .npu-subrow { grid-template-columns: 14px 1fr; }
-  .npu-subrow .model, .npu-subrow .met, .npu-subrow .st { display: none; }
-  .reactor { grid-template-columns: 1fr; }
+  .npu-trio { flex-direction: column; }
   .dash { grid-template-columns: 1fr; }
   .dash-side { position: static; display: flex; flex-direction: column; gap: 12px; }
   .dash-5050 { grid-template-columns: 1fr; }
