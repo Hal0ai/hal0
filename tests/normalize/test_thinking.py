@@ -8,13 +8,30 @@ def test_injects_chat_template_kwargs_enable_thinking_false_by_default():
     assert "enable_thinking" not in out
 
 
-def test_opt_out_enable_thinking_preserved():
+def test_top_level_enable_thinking_true_translated_to_kwarg():
+    # Top-level boolean is the common/standard field; we translate it to the
+    # lever Qwen3 honors and drop the ineffective top-level key.
     out = apply_thinking_policy({"enable_thinking": True})
-    assert out["enable_thinking"] is True
-    assert "chat_template_kwargs" not in out
+    assert out["chat_template_kwargs"]["enable_thinking"] is True
+    assert "enable_thinking" not in out
 
 
-def test_opt_out_thinking_field_preserved():
+def test_top_level_enable_thinking_false_translated_to_kwarg():
+    # The bug this fixes: top-level enable_thinking:false used to pass through
+    # to lemond's ineffective /no_think; now it suppresses via the kwarg.
+    out = apply_thinking_policy({"enable_thinking": False})
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
+    assert "enable_thinking" not in out
+
+
+def test_top_level_thinking_bool_translated():
+    out = apply_thinking_policy({"thinking": True})
+    assert out["chat_template_kwargs"]["enable_thinking"] is True
+    assert "thinking" not in out
+
+
+def test_opt_out_thinking_dict_field_preserved():
+    # Anthropic-style extended-thinking object is an explicit opt-in; untouched.
     out = apply_thinking_policy({"thinking": {"type": "enabled"}})
     assert "chat_template_kwargs" not in out
     assert out["thinking"] == {"type": "enabled"}
@@ -45,7 +62,17 @@ def test_idempotent():
     assert once == twice
 
 
+def test_idempotent_after_top_level_translation():
+    once = apply_thinking_policy({"enable_thinking": False})
+    twice = apply_thinking_policy(once)
+    assert once == twice
+
+
 def test_does_not_mutate_input():
     src = {"model": "m"}
     apply_thinking_policy(src)
     assert "chat_template_kwargs" not in src
+
+    src2 = {"enable_thinking": False}
+    apply_thinking_policy(src2)
+    assert src2 == {"enable_thinking": False}
