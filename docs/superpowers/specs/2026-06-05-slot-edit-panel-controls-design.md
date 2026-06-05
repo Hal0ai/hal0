@@ -1,8 +1,13 @@
-# Slot edit panel controls — `enable_thinking`, `enabled`, `n_gpu_layers`
+# Slots page: edit controls + layout (`enable_thinking`, `enabled`, `n_gpu_layers`, sort, Capabilities grid)
 
 **Date:** 2026-06-05
 **Status:** Approved design — ready for implementation plan
 **Area:** dashboard SPA (`ui/src/dash/`) + slots API (`src/hal0/api/routes/slots.py`)
+
+**Scope note:** This is "Spec 1" — pure slots-page UX (controls + layout). The
+**NPU / FLM stack management** section is a separate "Spec 2" (its own design),
+because NPU embedding is a coresident FLM-trio modality, not a standalone slot,
+and needs backend modeling decisions first.
 
 ## Problem
 
@@ -23,6 +28,10 @@ Three high-value settings have no UI:
 - Toggle `enable_thinking` per slot from the edit drawer; effect on next message.
 - Toggle `enabled` per slot directly on the slot **card**; faded card when off.
 - Edit `n_gpu_layers` from the drawer's Advanced section.
+- **Sort** enabled slots first, disabled slots to the end of the grid.
+- **Capabilities section**: render the utility slots (embedding, reranking,
+  transcription, tts) in a denser 4-up (quarter-width) grid, since their card
+  content is narrow.
 
 **Non-goals**
 - Per-slot sampling defaults (`temperature`/`top_p`/`max_tokens`) — those are
@@ -116,6 +125,28 @@ saved with the **existing Save button** via `defaultsMut` →
 `PATCH /{name}/defaults { n_gpu_layers }` (alongside `ctx_size`). Shows the
 `⟳ restart required` badge. (Not instant — changes model load.)
 
+### Component 6 — Frontend: sort enabled-first, disabled-to-end
+
+In the slots grid render (`ui/src/dash/slots.jsx`), stable-sort so `enabled`
+slots render before `!enabled` ones, preserving existing order within each group
+(don't disturb the current type/role ordering otherwise). Pairs with the faded
+card so disabled slots visually and positionally sink to the bottom.
+
+### Component 7 — Frontend: Capabilities section (4-up grid)
+
+Group the slots page into sections:
+- **Primary/chat** (llm slots) — current card width.
+- **Capabilities** — `embedding`, `reranking`, `transcription`, `tts` slots in a
+  **4-up** (quarter-width) responsive grid. These cards have minimal content
+  (a chip or two + one metric), so quarter-width avoids the wasted space of
+  full-width cards. Responsive: 4-up on wide, collapsing to 2-up / 1-up on
+  narrow viewports.
+
+This is layout/CSS only — same `SlotCard`, rendered into a `.slot-grid--quarter`
+container for the Capabilities section. No card-internal changes. (The optimal
+section composition and where a future NPU section sits will be validated via a
+throwaway UI prototype before implementation.)
+
 ## Data flow
 
 ```
@@ -158,8 +189,10 @@ Drawer n_gpu_layers + Save ─PATCH /defaults {n_gpu_layers}─▶ TOML [model]
 
 - `src/hal0/api/routes/slots.py` — payload fields; `enabled` stop-on-disable +
   invalid-enable error surfacing (verify/extend).
-- `ui/src/dash/slots.jsx` — card `enabled` switch + fade.
+- `ui/src/dash/slots.jsx` — card `enabled` switch + fade; enabled-first sort;
+  Capabilities section grouping.
 - `ui/src/dash/slot-modals.jsx` — drawer `enable_thinking` toggle + `n_gpu_layers`
   input.
-- `ui/src/dash/dashboard.css` — `.slot--disabled` opacity; switch styling.
+- `ui/src/dash/dashboard.css` — `.slot--disabled` opacity; switch styling;
+  `.slot-grid--quarter` 4-up responsive grid.
 - Tests: backend slot-config tests + γ-suite slot specs.
