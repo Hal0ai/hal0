@@ -68,6 +68,24 @@ def test_idempotent_after_top_level_translation():
     assert once == twice
 
 
+def test_per_slot_default_thinking_true():
+    # Per-slot default (slot TOML enable_thinking=true) makes reasoning the
+    # default for that slot when the caller expresses no preference.
+    out = apply_thinking_policy({"model": "m"}, default_thinking=True)
+    assert out["chat_template_kwargs"]["enable_thinking"] is True
+
+
+def test_per_slot_default_overridden_by_caller():
+    # An explicit per-request preference always wins over the slot default.
+    out = apply_thinking_policy({"enable_thinking": False}, default_thinking=True)
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_per_slot_default_false_is_baseline():
+    out = apply_thinking_policy({"model": "m"}, default_thinking=False)
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
+
+
 def test_does_not_mutate_input():
     src = {"model": "m"}
     apply_thinking_policy(src)

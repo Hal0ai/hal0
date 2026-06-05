@@ -329,6 +329,26 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
     return False
 
 
+async def _slot_thinking_default(request: Request, model_id: str) -> bool:
+    """Per-slot reasoning default: the ``enable_thinking`` flag of the slot whose
+    default model is ``model_id``. Falls back to False (global suppression) when
+    no slot sets it. Always overridable per request."""
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return False
+    try:
+        for cfg in await sm.iter_configs():
+            if not isinstance(cfg, dict):
+                continue
+            model = cfg.get("model")
+            default_model = model.get("default") if isinstance(model, dict) else None
+            if default_model == model_id and cfg.get("enable_thinking") is not None:
+                return bool(cfg["enable_thinking"])
+    except Exception:
+        return False
+    return False
+
+
 async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """Resolve hal0/* virtual model names + inject thinking policy for lemond-bound calls.
 
@@ -351,7 +371,8 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
 
     model_id = body.get("model")
     if isinstance(model_id, str) and not _is_remote_model(request, model_id):
-        body = apply_thinking_policy(body)
+        default_thinking = await _slot_thinking_default(request, model_id)
+        body = apply_thinking_policy(body, default_thinking=default_thinking)
 
     import contextlib
 

@@ -80,10 +80,41 @@ async def test_remote_model_not_thinking_injected():
 
 
 @pytest.mark.asyncio
-async def test_caller_opted_thinking_preserved():
+async def test_caller_top_level_thinking_translated_to_kwarg():
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
     out = await v1._normalize_chat_body(req, {"model": "hal0/primary", "enable_thinking": True})
-    assert out["enable_thinking"] is True
+    # #487: top-level enable_thinking is translated to the chat-template lever
+    # (lemond's /no_think is ineffective on abliterated Qwen3), not passed through.
+    assert out["chat_template_kwargs"]["enable_thinking"] is True
+    assert "enable_thinking" not in out
+
+
+_PRIMARY_THINKING = [
+    {
+        "name": "primary",
+        "type": "llm",
+        "enabled": True,
+        "device": "gpu-rocm",
+        "role": None,
+        "enable_thinking": True,
+        "model": {"default": "big", "context_size": 4096},
+    }
+]
+
+
+@pytest.mark.asyncio
+async def test_per_slot_enable_thinking_default_applied():
+    # Slot configured enable_thinking=true → requests to its model default to ON.
+    req = _make_request(cfgs=_PRIMARY_THINKING, loaded={"big"})
+    out = await v1._normalize_chat_body(req, {"model": "big", "messages": []})
+    assert out["chat_template_kwargs"]["enable_thinking"] is True
+
+
+@pytest.mark.asyncio
+async def test_per_slot_default_overridden_by_request():
+    req = _make_request(cfgs=_PRIMARY_THINKING, loaded={"big"})
+    out = await v1._normalize_chat_body(req, {"model": "big", "enable_thinking": False})
+    assert out["chat_template_kwargs"]["enable_thinking"] is False
 
 
 @pytest.mark.asyncio

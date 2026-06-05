@@ -46,14 +46,17 @@ def _caller_intent(body: dict[str, Any]) -> bool | None:
     return None
 
 
-def apply_thinking_policy(body: dict[str, Any]) -> dict[str, Any]:
+def apply_thinking_policy(
+    body: dict[str, Any], *, default_thinking: bool = False
+) -> dict[str, Any]:
     """Return a copy of ``body`` whose reasoning is steered via
     ``chat_template_kwargs.enable_thinking``.
 
     A top-level boolean ``enable_thinking`` / ``thinking`` is translated into the
     chat-template kwarg (Qwen3's working lever) and stripped, so a caller asking
     for ``enable_thinking: false`` actually gets no reasoning. Absent any caller
-    preference, reasoning is suppressed by default."""
+    preference, reasoning defaults to ``default_thinking`` — the per-slot default
+    (slot TOML ``enable_thinking``), falling back to suppression (False)."""
     # Caller used the precise lever already — respect it verbatim.
     if _explicit_kwarg_set(body):
         return body
@@ -63,7 +66,7 @@ def apply_thinking_policy(body: dict[str, Any]) -> dict[str, Any]:
         return body
 
     intent = _caller_intent(body)
-    want = False if intent is None else intent
+    want = default_thinking if intent is None else intent
 
     ctk = {**(body.get("chat_template_kwargs") or {}), "enable_thinking": want}
     # Drop the ineffective top-level booleans; keep everything else.

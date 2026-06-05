@@ -250,6 +250,15 @@ class SlotConfig(BaseModel):
             "from the slot name. Authoritative over the name when set."
         ),
     )
+    enable_thinking: bool | None = Field(
+        default=None,
+        description=(
+            "Per-slot reasoning default. true → requests routed to this slot "
+            "default to thinking ON; false → OFF; None → global default "
+            "(suppressed). Always overridable per request via top-level "
+            "enable_thinking / chat_template_kwargs. See normalize/thinking.py."
+        ),
+    )
 
     # [model] section (nested)
     model: ModelConfig = Field(default_factory=ModelConfig)
