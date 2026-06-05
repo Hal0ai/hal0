@@ -54,10 +54,7 @@ def test_primary_tiers_ids_are_curated() -> None:
 def test_manifest_model_names_are_curated() -> None:
     refs = _manifest_model_refs()
     missing = {name: locs for name, locs in refs.items() if name not in CURATED_BY_ID}
-    detail = "\n".join(
-        f"  {name}  ({', '.join(locs)})" for name, locs in sorted(missing.items())
-    )
+    detail = "\n".join(f"  {name}  ({', '.join(locs)})" for name, locs in sorted(missing.items()))
     assert not missing, (
-        "omni manifest model_names not defined in CURATED_MODELS (drift — #500):\n"
-        + detail
+        "omni manifest model_names not defined in CURATED_MODELS (drift — #500):\n" + detail
     )
