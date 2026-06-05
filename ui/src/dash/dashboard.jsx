@@ -101,7 +101,6 @@ function SysRow({ k, v, mono }) {
 function SystemCard() {
   const hw = useHardware();
   const stats = useStatsHardware();
-  const lemond = useLemondRollup();
   const H = hw.data;
 
   const ramTotalGb = (H ? H.ram.total : 0) || mbToGb(stats.data?.ram_total_mb);
@@ -125,9 +124,8 @@ function SystemCard() {
     ? (H.npu.present ? joinDot(H.npu.name || "XDNA", H.npu.driver) : "absent")
     : "—";
 
-  const upCls = lemond.status === "up" ? "up" : lemond.status === "down" ? "down" : "";
-  const verb = lemond.status === "up" ? "up" : lemond.status === "down" ? "down" : "connecting";
-
+  // lemond health row removed (2026-06-05) — runtime status now lives solely
+  // in the sidebar Runtime widget; the System card is hardware identity only.
   return (
     <div className="side-card sys-card">
       <div className="side-card-h">
@@ -141,16 +139,6 @@ function SystemCard() {
         <SysRow k="gpu" v={<>{sval(H?.gpu)}{gpuChips}</>} />
         <SysRow k="npu" v={npuVal} mono />
         <SysRow k="ram" v={hasRam ? <><span className="num">{round1(ramUsedGb)}</span> / {round1(ramTotalGb)} GB</> : "—"} />
-        <div className="sys-divider" />
-        <SysRow
-          k="lemond"
-          v={
-            <span className={"sys-health " + upCls}>
-              <span className="dot" />
-              {verb}{lemond.status === "up" && lemond.version !== "—" ? ` · ${lemond.version}` : ""}
-            </span>
-          }
-        />
       </div>
     </div>
   );

@@ -43,10 +43,10 @@ test.describe('Footer update chip (#325)', () => {
     })
     await page.goto('/')
     await expect(page.locator('.footer')).toBeVisible()
-    // Wait for the rollup poll to land — the loaded-chip text proves
+    // Wait for the rollup poll to land — the lemond-chip text proves
     // useLemondRollup has settled, which means useUpdateState has had
     // time to run too.
-    await expect(page.locator('.footer .foot-chip', { hasText: 'loaded' })).toBeVisible({
+    await expect(page.locator('.footer .foot-chip', { hasText: 'lemond' })).toBeVisible({
       timeout: 6_000,
     })
     await expect(UPDATE_CHIP(page)).toHaveCount(0)
@@ -60,7 +60,7 @@ test.describe('Footer update chip (#325)', () => {
     })
     await page.goto('/')
     await expect(page.locator('.footer')).toBeVisible()
-    await expect(page.locator('.footer .foot-chip', { hasText: 'loaded' })).toBeVisible({
+    await expect(page.locator('.footer .foot-chip', { hasText: 'lemond' })).toBeVisible({
       timeout: 6_000,
     })
     await expect(UPDATE_CHIP(page)).toHaveCount(0)

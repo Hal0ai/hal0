@@ -317,6 +317,8 @@ a { color: inherit; text-decoration: none; }
 .sb-status .row .k { color: var(--fg-4); }
 .sb-status .row .v { color: var(--fg); display: inline-flex; align-items: center; gap: 6px; }
 .sb-status .row .v.up { color: var(--ok); }
+.sb-status .row .v.down { color: var(--err); }
+.sb-status .row .v.warn { color: var(--warn); }
 .sb-status .row .v .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
 .sb-status .ln { height: 1px; background: var(--line); margin: 6px 0; }
 .sb-status .nudge {
@@ -332,6 +334,33 @@ a { color: inherit; text-decoration: none; }
 .sb-status-agent { margin: 6px 12px 6px; }
 .sb-status-agent + .sb-status { margin-top: 4px; }
 .sb-status-empty { opacity: 0.85; }
+
+/* Runtime widget (2026-06-05) — consolidated hermes/hal0/lemond/openwebui
+   rollup. Inherits the base .sb-status card chrome; these rules add the
+   section header, deep-link row keys, and the indented hal0 model sub-row. */
+.sb-runtime .sb-runtime-h {
+  color: var(--fg-4);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.sb-runtime .row { padding: 2.5px 0; }
+.sb-runtime .row.rt-sub { padding-top: 0; }
+.sb-runtime .row.rt-sub .k { padding-left: 10px; opacity: 0.8; }
+.sb-runtime .rt-extra { color: var(--fg-4); font-size: 0.85em; margin-left: 4px; }
+.sb-runtime a.rt-link {
+  color: var(--fg-4);
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.sb-runtime a.rt-link:hover { color: var(--accent); }
+.sb-runtime a.rt-link:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 
 /* ─── Footer ────────────────────────────────────────────────────── */
 .footer {
@@ -754,12 +783,8 @@ a { color: inherit; text-decoration: none; }
   font-size: 11.5px;
 }
 .sys-row .v .num { color: var(--fg); font-weight: 500; }
-.sys-divider { height: 1px; background: var(--line-soft); }
-.sys-health { display: inline-flex; align-items: center; gap: 6px; }
-.sys-health.up { color: var(--ok); }
-.sys-health.up .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-.sys-health.down { color: var(--err); }
-.sys-health.down .dot { background: var(--err); box-shadow: 0 0 8px var(--err); }
+/* .sys-divider / .sys-health removed (2026-06-05) — the System card no longer
+   carries the lemond health row; runtime status moved to the sidebar widget. */
 
 .hero-strip {
   display: flex;

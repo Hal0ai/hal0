@@ -19,7 +19,7 @@ test.describe('Footer chips honor backend null (#221)', () => {
     const footer = page.locator('.footer')
     await expect(footer).toBeVisible()
     // Give the 2s health poll a chance to resolve.
-    await expect(page.locator('.sb-status .row .v', { hasText: /^v\d/ })).toBeVisible({ timeout: 6_000 })
+    await expect(page.locator('[data-testid="runtime-row-lemond"] .v', { hasText: /v\d/ })).toBeVisible({ timeout: 6_000 })
 
     const queuedChip = footer.locator('.foot-chip', { has: page.locator('.k', { hasText: /^queued$/ }) })
     await expect(queuedChip).toBeVisible()
@@ -54,7 +54,7 @@ test.describe('Footer chips honor backend null (#221)', () => {
     const footer = page.locator('.footer')
     await expect(footer).toBeVisible()
     // Wait for sidebar rollup to repaint with hook data.
-    await expect(page.locator('.sb-status .row .v', { hasText: /^v\d/ })).toBeVisible({ timeout: 6_000 })
+    await expect(page.locator('[data-testid="runtime-row-lemond"] .v', { hasText: /v\d/ })).toBeVisible({ timeout: 6_000 })
     // Extra beat so the second health poll lands.
     await page.waitForTimeout(2_500)
 
