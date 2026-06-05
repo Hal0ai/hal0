@@ -18,11 +18,11 @@ Connect external tools (Claude Code, OpenWebUI, etc.) to hal0's MCP servers.
 
 ## Quick Start
 
-```bash
-hal0 connect claude-code
-```
-
-This auto-discovers MCP servers and wires them into your client. Supports `--dry-run` to preview, `--repair` to fix misconfigurations.
+> **Planned:** a `hal0 connect <client>` helper that auto-discovers MCP
+> servers and wires them into your client (with `--dry-run` /
+> `--repair`) is planned per ADR-0021 but **not yet implemented** —
+> running it today yields a "no such command" error. Until it ships,
+> wire clients with the manual configuration below.
 
 ## Manual Configuration
 
@@ -84,10 +84,10 @@ Should return the tool count (typically 25+ for admin, 4 for memory).
 | HTTP 405 Method Not Allowed | URL missing `/mcp` suffix (e.g. `/mcp/admin`) | Use full path: `/mcp/admin/mcp` |
 | HTTP 406 Not Acceptable | Using `streamable-http` transport (sends GET + POST) | Use `http` transport (POST-only) |
 | Connection refused | hal0 API not running | `systemctl status hal0-api` |
-| Unknown tool | MCP server not connected | Run `hal0 connect <client>` |
+| Unknown tool | MCP server not connected | Re-apply the manual configuration above (the `hal0 connect <client>` helper is planned, ADR-0021, not yet shipped) |
 
 ## See Also
 
 - `/etc/hal0/AGENTS.md` — agent-facing project context
 - `/root/.dexto/agents/hal0-services/agent.yml` — working reference config
-- `hal0 connect --list` — list all supported connectors and their status
+- `hal0 connect --list` (planned, ADR-0021) — will list all supported connectors and their status once implemented

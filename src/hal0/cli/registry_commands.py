@@ -206,7 +206,7 @@ def import_backup(
     Slot selections, ``capabilities.toml``, per-slot TOML files, and all
     other v0.1.x state are NOT restored. Plan §9 is explicit: v0.1.x →
     v0.2 is a clean break. After import, redo slot selection via the
-    bundle picker or ``hal0 slot add``.
+    bundle picker or ``hal0 slot create``.
     """
     # ── 1. Validate the source tarball ────────────────────────────────
     if not path.exists():
@@ -278,5 +278,5 @@ def import_backup(
         f"  [bold]hal0 capabilities sync[/bold]\n"
         f"\n"
         f"Slot selections from v0.1.x are NOT migrated. Use the bundle\n"
-        f"picker or [bold]hal0 slot add[/bold] to declare slots."
+        f"picker or [bold]hal0 slot create[/bold] to declare slots."
     )

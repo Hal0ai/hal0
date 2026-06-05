@@ -755,9 +755,9 @@ def model_layout(
     if report.unclassified:
         console.print(
             f"[yellow]warning[/yellow]: {len(report.unclassified)} on-disk model(s) "
-            f"could not be classified automatically — see the table above for paths. "
-            f"Add them to the registry with [bold]hal0 model import[/bold] or "
-            f"[bold]hal0 registry add[/bold] and re-run."
+            f"could not be classified automatically - see the table above for paths. "
+            f"Register them with [bold]hal0 model register <id> --path <p>[/bold] "
+            f"and re-run."
         )
 
     if blocked:

@@ -181,12 +181,16 @@ per allowed server:
 The view is read-only in v0.3 — TOML edits are still the way to
 change the allow-list. A future PR will surface inline edit + save.
 
-## `hal0 agent doctor <name>` (planned)
+## `hal0 agent doctor <name>` (planned — not yet implemented)
+
+> **Not in the CLI today.** This verb is planned (ADR-0013); running it
+> currently yields a Typer "no such command" error. Until it ships, use
+> the equivalent round-trip below.
 
 Round-trips every allowed server during bootstrap repair. Output
 shows per-server health (green / yellow / red) so operators can see
 at a glance which entries in the TOML are still talking to a
-reachable upstream. Currently planned; the MCP-wire phase of
+reachable upstream. In the meantime, the MCP-wire phase of
 `hal0 agent bootstrap hermes` performs an equivalent round-trip
 synchronously (see [`hermes-bootstrap.md`](./hermes-bootstrap.md)
 phase 6).

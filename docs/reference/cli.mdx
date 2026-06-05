@@ -8,58 +8,90 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 hal0 ships a single `hal0` binary built with Typer
-(`src/hal0/cli/main.py`). Every non-`serve` subcommand talks to the
-local daemon on `127.0.0.1:8080`, so the CLI and the dashboard end up
-calling the same code paths.
+(`src/hal0/cli/main.py`). Every subcommand except `serve`, `uninstall`,
+and a handful of disk-only repair commands talks to the local daemon on
+`127.0.0.1:8080`, so the CLI and the dashboard end up calling the same
+code paths.
 
-Every command listed below hits a live endpoint. The `# real` /
-`# stub` markers used in earlier builds have been retired now that
-the surface is fully wired.
+This page documents the **real** command surface. Every command listed
+here exists in code today; commands that are documented elsewhere but
+not yet implemented are collected under
+[Planned — not yet implemented](#planned--not-yet-implemented) so you
+know not to reach for them.
+
+<Aside type="tip" title="Discover the surface live">
+`hal0 --help` (and `--help` on any subcommand or group) is always the
+authoritative list — it's generated straight from the Typer app. This
+page mirrors it for reference, and a CI check
+(`tests/cli/test_cli_docs_parity.py`) fails the build if the two drift.
+</Aside>
 
 ## System
 
 ```sh
 hal0 status                                  # system + slot summary
 hal0 probe                                   # re-run hardware detection
-hal0 serve [--host] [--port] [--reload]      # daemon mode
+hal0 serve [--host] [--port] [--reload]      # daemon mode (hal0-api.service)
+hal0 update [...]                            # see Updates below
+hal0 uninstall [...]                        # see Uninstall below
+hal0 --version                               # print version and exit (-V)
 ```
 
 `hal0 status` is what you run first when something looks off.
 `hal0 probe` rewrites `/etc/hal0/hardware.json` — re-run after BIOS
-UMA changes, GPU swaps, or RAM upgrades.
+UMA changes, GPU swaps, or RAM upgrades. `hal0 serve` is what
+`hal0-api.service` execs; you rarely run it by hand.
 
 ## Slots
 
 ```sh
 hal0 slot list [--json]
 hal0 slot show <name> [--json]
-hal0 slot create <name> --model M [--type T] # add a new slot
-hal0 slot delete <name> [--force]            # remove a slot
+hal0 slot create <name> --model M [--type T] [--provider P] \
+     [--hardware H] [--port N] [--ctx-size N]   # add a new slot
+hal0 slot edit <name> [--model M] [--port N] [--ctx-size N] \
+     [--provider P] [--hardware H]              # change one or more fields
+hal0 slot delete <name> [--force]               # remove a slot
 hal0 slot load <name> [--model M]
 hal0 slot unload <name>
 hal0 slot restart <name>
-hal0 slot swap <name> --model M
-hal0 slot logs <name> [--follow]             # SSE tail of journald
+hal0 slot swap <name> --model M [--no-persist]
+hal0 slot logs <name> [--follow] [--lines N]    # SSE tail of journald
 ```
 
 The canonical verbs are `slot create` / `slot delete`. The older
-`slot add` / `slot remove` names still work as hidden deprecated
-aliases (they print a deprecation notice and delegate to the canonical
-command), but prefer `create` / `delete`.
+`slot add` / `slot remove` names still work as hidden, deprecated
+aliases — they print a deprecation notice on stderr and delegate to the
+canonical command — but prefer `create` / `delete` (#503).
+
+`hal0 slot create` flags:
+
+| Flag           | Default                    | Notes                                                              |
+| -------------- | -------------------------- | ------------------------------------------------------------------ |
+| `--model` `-m` | *(required)*               | Initial model ref to assign.                                        |
+| `--type` `-t`  | `llm`                      | `llm` / `embedding` / `reranking` / `transcription` / `tts` / `image`. Drives dispatcher routing. |
+| `--provider`   | `llama-server`             | Inference engine (`llama-server` / `flm` / `moonshine` / `kokoro`). Legacy under Lemonade. |
+| `--hardware`   | auto-detect (else `vulkan`) | `vulkan` / `rocm` / `cpu`. Derives the Lemonade `device`.           |
+| `--port` `-p`  | first free 8081–8099       | Slot port.                                                          |
+| `--ctx-size`   | `4096`                     | Context window (min 128).                                           |
 
 `hal0 slot swap` is the most-used command in normal operation. It
-changes a slot's model in one call and you watch it transition
-through `unloading → starting → warming → ready`.
+changes a slot's model in one call and you watch it transition through
+`unloading → starting → warming → ready`. By default the swap is also
+persisted to `/etc/hal0/slots/<slot>.toml` so it survives a restart;
+pass `--no-persist` to hot-swap a model for a quick try without
+changing the on-disk default.
 
 `hal0 slot logs <name> --follow` is the journald tail wrapped over
 SSE; it shows the same stream the dashboard's Logs view tails.
 
 ### JSON output for pipes / CI
 
-`slot list`, `slot show`, `model list`, `model show`, and `agent list`
-take a `--json` flag that prints the raw API response and nothing else —
-no Rich table, no panel — so the output is safe to pipe into `grep`,
-`jq`, or a CI script even from a non-TTY:
+`slot list`, `slot show`, `model list`, `model show`, `agent list`,
+and `memory graph status` take a `--json` flag that prints the raw API
+response and nothing else — no Rich table, no panel — so the output is
+safe to pipe into `grep`, `jq`, or a CI script even from a non-TTY
+(#502):
 
 ```sh
 hal0 slot list --json | jq '.[] | select(.provider=="llama-server")'
@@ -68,28 +100,36 @@ hal0 slot show primary --json | jq .config
 
 The JSON shape is exactly what the underlying endpoint returns:
 
-| Command            | Shape                                                        |
-| ------------------ | ----------------------------------------------------------- |
-| `slot list --json` | `GET /api/slots` — a JSON array of slot objects             |
-| `slot show --json` | `{ "status": <GET /api/slots/{name}>, "config": <GET …/config> }` |
-| `model list --json`| `GET /api/models` — typically `{ "models": [...] }`         |
-| `model show --json`| `GET /api/models/{ref}` — a single model object             |
-| `agent list --json`| `GET /api/agents` — typically `{ "agents": [...] }`         |
+| Command                    | Shape                                                             |
+| -------------------------- | ---------------------------------------------------------------- |
+| `slot list --json`         | `GET /api/slots` — a JSON array of slot objects                  |
+| `slot show --json`         | `{ "status": <GET /api/slots/{name}>, "config": <GET …/config> }` |
+| `model list --json`        | `GET /api/models` — typically `{ "models": [...] }`              |
+| `model show --json`        | `GET /api/models/{ref}` — a single model object                  |
+| `agent list --json`        | `GET /api/agents` — typically `{ "agents": [...] }`              |
+| `memory graph status --json` | `GET /api/memory/graph/status` — the live gate state            |
 
 ## Models
 
 ```sh
 hal0 model list [--json]
 hal0 model show <ref> [--json]
-hal0 model pull <ref>                        # HF streaming pull
-hal0 model rm <ref>
+hal0 model pull <ref>                          # HF streaming pull
+hal0 model register <id> --path P [--name N] [--license SPDX]
+hal0 model rm <ref> [--force]
 hal0 model assign <ref> --slot S
 ```
 
 `hal0 model list` is the CLI view of what the dashboard's `/models`
-page shows: every registered model with its size, backend, and
+page shows: every registered model with its size, upstream, and
 capability tags. Use it when you've SSH'd in and don't want to bounce
 to the browser.
+
+`hal0 model pull <ref>` downloads a curated alias (e.g. `qwen3-4b`) or a
+registered model id from Hugging Face, streaming a progress bar.
+`hal0 model register` adds a model that's already on disk into the
+registry. `hal0 model assign` points a slot's default at a model
+without loading it.
 
 <img
   src="/screenshots/models-registry.png"
@@ -100,13 +140,29 @@ to the browser.
   loading="lazy"
 />
 
+## Memory
+
+```sh
+hal0 memory graph status [--json]
+hal0 memory graph enable [--route R] [--provider P] [--model M] [--json]
+hal0 memory graph disable [--json]
+```
+
+The `memory graph` group is the ADR-0014 graph-extraction gate. It
+controls whether Cognee runs the (expensive) graph-build step on
+memory writes and which upstream serves it. `--route=upstream`
+requires `--provider` and `--model`; `--route=primary` and
+`--route=agent` reuse hal0's own slots.
+
 ## Configuration
 
 ```sh
 hal0 config show
 hal0 config edit                             # opens $EDITOR
-hal0 config validate                         # schema check
+hal0 config validate                         # schema check (read-only)
 hal0 config migrate                          # migrate hal0.toml to the latest schema
+hal0 config reload                           # ask the daemon to re-read TOMLs
+hal0 config hardware                         # show the cached hardware probe
 ```
 
 `hal0 config validate` is safe to run at any time and doesn't write
@@ -116,27 +172,122 @@ point is clean.
 `hal0 config migrate` runs the registered migration chain in
 `hal0.config.migrations` against `hal0.toml`, stamping
 `meta.schema_version` forward and atomically rewriting the file only
-when the schema actually advances. If the config is already at the
-latest version (the common case today, schema v1) it reports that and
-leaves the file untouched.
+when the schema actually advances (#503). If the config is already at
+the latest version (the common case today, schema v1) it reports that
+and leaves the file untouched.
 
-The model registry has its own generator: `hal0 capabilities sync`
-regenerates Lemonade's `server_models.json` from `registry.toml`. (An
-earlier `hal0 registry sync` name was never shipped under `registry`;
-use `hal0 capabilities sync`.)
+## Capabilities
+
+```sh
+hal0 capabilities migrate [--dry-run]
+hal0 capabilities migrate-to-lemonade [--apply] [--revert] [--path P]
+hal0 capabilities sync [--registry P] [--output P] [--dry-run]
+```
+
+`hal0 capabilities migrate` repairs `capabilities.toml` selections
+whose `(model, backend)` pair became illegal against the live catalog.
+`migrate-to-lemonade` is the one-shot v0.1 → v0.2 schema bump
+(ADR-0006 §7); the on-boot auto-migration runs the same logic.
+
+`hal0 capabilities sync` regenerates Lemonade's `server_models.json`
+from `registry.toml` — this is the model-registry generator.
+
+<Aside type="caution" title="It's `capabilities sync`, not `registry sync`">
+Older planning docs referenced `hal0 registry sync`; that name never
+shipped under the `registry` group. The generator lives under
+`capabilities`: use **`hal0 capabilities sync`**.
+</Aside>
+
+## Doctor
+
+```sh
+hal0 doctor [--plain] [--ports "8080 3001"]
+hal0 doctor toolbox-pull [--json] [--manifest P]
+```
+
+`hal0 doctor` re-runs the installer's pre-flight battery (systemd,
+python, docker, disk, ports) against the live host and preserves the
+script's exit code so it composes (`hal0 doctor && hal0 status`).
+`hal0 doctor toolbox-pull` asserts every pinned toolbox image in
+`manifest.json` is anonymously pullable from ghcr.io.
+
+## Agents
+
+```sh
+hal0 agent install <name> [--switch]
+hal0 agent uninstall <name> [--keep-memory]
+hal0 agent list [--json]
+hal0 agent peers                              # discoverable identity cards
+hal0 agent status [name]                      # bootstrap checkpoint
+hal0 agent log [name] [--phase P]
+hal0 agent upgrade [name] [--to VER]
+hal0 agent reprovision [name] [--repair] [--verbose]
+
+hal0 agent bootstrap hermes [--repair] [--dry-run] [--skip-phase P] \
+     [--offline] [--verbose]
+
+hal0 agent approvals list
+hal0 agent approvals approve <id>
+hal0 agent approvals deny <id>
+
+hal0 agent personas list
+hal0 agent personas show <id>
+hal0 agent personas activate <id> [--reload-url URL]
+```
+
+The `agent` group manages the bundled agent (Hermes today). Lifecycle
+verbs (`install` / `uninstall` / `list`) hit `/api/agents/*`;
+`bootstrap hermes` runs the provisioning state machine;
+`reprovision` is the name-stable "re-converge" verb. `approvals`
+drives the gated-destructive approval queue (ADR-0004 §5), and
+`personas` manages the Hermes persona TOML store.
+
+<Aside type="note" title="No agent token rotation">
+Post-ADR-0012 the daemon has no auth, so there is **no**
+`hal0 agent rotate-token`. Agent identity flows via the
+`X-hal0-Agent` header the wrapper exports from `$HAL0_AGENT_ID`.
+</Aside>
+
+## One-shot migrations
+
+```sh
+hal0 migrate model-layout [--apply] [--force] [--registry P] \
+     [--mount-root P] [--canonical-root P]
+```
+
+Reorganises the v0.1.x ad-hoc model store into the canonical
+`<recipe>/<capability>/` symlink tree (ADR-0008 §7). Default is
+dry-run; pass `--apply` to write. Model files are never moved or
+copied — only per-leaf symlinks are created — and the run is
+idempotent.
+
+## Registry
+
+```sh
+hal0 registry import <backup.tar.gz> [--force] [--dest P]
+```
+
+Restores `registry.toml` from a v0.1.x backup tarball. v0.1.x → v0.2
+is a clean break: only the registry is restored, not slot selections
+or `capabilities.toml`. After import, regenerate Lemonade's catalog
+with `hal0 capabilities sync` and redeclare slots with
+`hal0 slot create`.
 
 ## Updates
 
 ```sh
-hal0 update                                  # apply latest stable
+hal0 update                                  # check + apply if newer
+hal0 update --check                          # check only, don't apply
 hal0 update --channel stable
 hal0 update --channel nightly
-hal0 update --check                          # print version, don't apply
 hal0 update --rollback                       # revert to previous version
+hal0 update --target v0.3.1                   # pin a specific version
 ```
 
-See [Updates & rollback](/docs/operate/updates/) for the atomic
-symlink-swap mechanics.
+This is a thin client over `/api/updates/*`; the actual symlink-swap
+happens in the daemon, which try-restarts `hal0-api` itself on a
+successful apply. See [Updates & rollback](/docs/operate/updates/) for
+the mechanics.
 
 ## Uninstall
 
@@ -146,10 +297,9 @@ hal0 uninstall [--keep-data] [--force] [--dev]
 
 Thin wrapper over `installer/uninstall.sh`. The CLI exec's the script
 so the DELETE confirmation prompt inherits the live TTY; in
-non-interactive contexts pass `--force` or `--keep-data` to skip the
-prompt. `--dev` mirrors `install.sh --dev` for a `$PWD/.hal0ai`
+non-interactive contexts pass `--force` (`-f`) or `--keep-data` to skip
+the prompt. `--dev` mirrors `install.sh --dev` for a `$PWD/.hal0ai`
 tree.
-
 
 ## Talking to the daemon
 
@@ -163,3 +313,18 @@ curl -X POST http://localhost:8080/api/slots/primary/restart
 ```
 
 The CLI is for ergonomics; the API is the source of truth.
+
+## Planned — not yet implemented
+
+These verbs appear in design docs (ADRs) or older planning notes but
+are **not** in the CLI today. Running them yields a Typer "no such
+command" error — they're listed here so you know that's expected, not
+a broken install.
+
+| Command                        | Status                                                                      |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| `hal0 mcp {list,install,uninstall,restart,status,catalog}` | Planned (ADR-0015, MCP-as-host-platform). Tracked in [#504](https://github.com/Hal0ai/hal0/issues/504). |
+| `hal0 connect <client>`        | Planned (ADR-0021). External MCP-client wiring helper. Until it ships, wire clients by hand — see [MCP overview](/docs/mcp/overview/). |
+| `hal0 agent doctor <name>`     | Planned (ADR-0013). The `agent bootstrap hermes` MCP-wire phase already round-trips every allowed server synchronously. |
+| `hal0 agent rotate-token`      | Dropped — superseded by ADR-0012 (no daemon auth). Identity is the `X-hal0-Agent` header. |
+| `hal0 auth token …`            | Dropped — superseded by ADR-0012 (auth + Caddy removed entirely).            |
