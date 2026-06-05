@@ -471,9 +471,10 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
             ))}
             <LegendRow swatch="var(--bg-4)" name="free" sz={free} />
           </div>
-          {host.mode === 'detected_unconfigured' && (
-            <PveNudge hint={host.hint} onConfigure={onConfigure} />
-          )}
+          {/* Proxmox host-pressure nudge intentionally omitted from the
+              sidebar — it lives only in the expanded (hardware-page)
+              variant where the Configure → affordance has room to land.
+              The compact sidebar stays model-memory only. */}
         </div>
       </div>
     </div>

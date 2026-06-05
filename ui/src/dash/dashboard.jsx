@@ -214,21 +214,25 @@ function HardwareSection() {
 
   // GPU vendor-stack chips reflect the PROBE's capability flags, not a
   // baked-in "ROCm 6.4 ✓". Vulkan is the bundled default backend.
+  // Colour by device identity (--dev-rocm red / --dev-vulkan blue) so these
+  // match the slot-snapshot + memory-map chips everywhere else; the ✓/—
+  // glyph carries the capability signal, so an incapable backend renders
+  // as a plain (uncoloured) chip rather than a green "ok" one.
   const stackChips = H ? (
     <>
-      <span className={"chip " + (H.computeCapable ? "ok" : "")}>
+      <span className={"chip " + (H.computeCapable ? "dev-rocm" : "")}>
         ROCm {H.computeCapable ? "✓" : "—"}
       </span>{" "}
-      <span className={"chip " + (H.vulkanCapable ? "ok" : "")}>
+      <span className={"chip " + (H.vulkanCapable ? "dev-vulkan" : "")}>
         Vulkan {H.vulkanCapable ? "✓" : "—"}
       </span>
     </>
   ) : "—";
   const gpuRecommend = H && H.vulkanCapable
-    ? <span className="chip ok">llamacpp:vulkan</span>
+    ? <span className="chip dev-vulkan">llamacpp:vulkan</span>
     : H && H.computeCapable
-      ? <span className="chip ok">llamacpp:rocm</span>
-      : <span className="chip">llamacpp:cpu</span>;
+      ? <span className="chip dev-rocm">llamacpp:rocm</span>
+      : <span className="chip dev-cpu">llamacpp:cpu</span>;
 
   return (
     <div className="hw-section">

@@ -11,9 +11,12 @@
  *
  *   - health dot + status label, keyed off /api/agents `status`
  *     (installed→running/up, broken→down, else unknown→warn)
- *   - an OPTIONAL active-profile row, only when a persona name exists
  *   - an "Open chat →" button → onGo("agent")
  *   - empty state when no agent installed → "Install Hermes →" CTA
+ *
+ * The persona/profile row was removed: active.txt's persona is disconnected
+ * from the prompt the running Hermes actually uses (SOUL.md), so it misled.
+ * The persona testid MUST now be absent in every state.
  *
  * Tests below assert the new minimal surface; removed-row testids
  * (sidebar-agent-approvals/skills/memory/mcp) MUST be absent.
@@ -84,11 +87,16 @@ test.describe('SidebarAgentBlock — populated', () => {
     await expect(statusRow.locator('.v .dot')).toBeVisible()
   })
 
-  test('renders active persona display name', async ({ page }) => {
+  test('does NOT render the persona/profile row even when a persona is active', async ({
+    page,
+  }) => {
     await page.goto('/')
-    const persona = page.locator('[data-testid="sidebar-agent-persona"]')
-    await expect(persona).toBeVisible({ timeout: FIVE_S })
-    await expect(persona).toHaveText('Hermes')
+    // Even with an active persona in the payload, the row was removed —
+    // it misrepresented the running agent's actual prompt source (SOUL.md).
+    await expect(page.locator('[data-testid="sidebar-agent-block"]')).toBeVisible({
+      timeout: FIVE_S,
+    })
+    await expect(page.locator('[data-testid="sidebar-agent-persona"]')).toHaveCount(0)
   })
 
   test('does NOT render removed approvals/skills/memory/mcp rows', async ({ page }) => {
@@ -105,13 +113,14 @@ test.describe('SidebarAgentBlock — populated', () => {
 
   test('Memory CTA navigates to #agent + inline TUI hint present', async ({ page }) => {
     // v0.4: web chat is gone — the CTA is now "Memory →" (still onGo("agent"))
-    // and an inline `hal0 chat` terminal hint sits below it.
+    // and an inline `hermes chat` terminal hint sits below it (the real
+    // command — `hal0 chat` does not exist).
     await page.goto('/')
     const cta = page.locator('[data-testid="sidebar-agent-open-memory"]')
     await expect(cta).toBeVisible({ timeout: FIVE_S })
     await expect(cta).toContainText('Memory')
     const hint = page.locator('[data-testid="sidebar-agent-tui-hint"]')
-    await expect(hint).toContainText('hal0 chat')
+    await expect(hint).toContainText('hermes chat')
     await cta.click()
     await expect(page).toHaveURL(/#agent/)
   })
@@ -167,11 +176,10 @@ test.describe('SidebarAgentBlock — status tone mapping', () => {
   })
 })
 
-test.describe('SidebarAgentBlock — profile row is conditional', () => {
-  test('omits the profile row when no active persona', async ({ page }) => {
+test.describe('SidebarAgentBlock — persona row is gone', () => {
+  test('omits the profile row regardless of persona payload', async ({ page }) => {
     await page.route('**/api/agents', (route) => json(route, MOCK_AGENTS_INSTALLED))
-    // active=null and no matching persona → personaName resolves to null,
-    // so the profile row must NOT render.
+    // Whatever the personas endpoint returns, the row is no longer rendered.
     await page.route('**/api/agents/hermes/personas', (route) =>
       json(route, { agent_id: 'hermes', active: null, personas: [] }),
     )

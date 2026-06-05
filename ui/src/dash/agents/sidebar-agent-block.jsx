@@ -9,10 +9,13 @@
 //   - service health dot (green when running, amber when unknown, red
 //     when genuinely broken/down)
 //   - agent name + status label
-//   - active persona/profile name (from /api/agents/<id>/personas)
 //   - [Memory →] → onGo("agent") (the dashboard's agent route, now the
-//     Memory capability) plus an inline `hal0 chat` TUI hint. v0.4 dropped
+//     Memory capability) plus an inline `hermes chat` TUI hint. v0.4 dropped
 //     the web chat surface, so the affordance no longer opens a dead chat.
+//
+// NOTE: the persona/profile row was removed — active.txt's persona is
+// disconnected from the prompt the running Hermes actually uses (SOUL.md),
+// so the value misled more than it informed.
 //   - empty state when no agent installed: "Install Hermes" CTA → docs
 //
 // W9 simplification: the prior version rendered approvals / skills /
@@ -26,8 +29,8 @@
 // Data:
 //   useSidebarAgentRollup() (ui/src/api/hooks/useAgents.ts) — TanStack
 //   Query, 5s refetch + revalidate-on-focus. Fields used: agentStatus
-//   (from /api/agents `status`, truthful post-J1), agentId, personaName
-//   (from /api/agents/<id>/personas). No invented fields.
+//   (from /api/agents `status`, truthful post-J1) and agentId. No invented
+//   fields.
 //
 // Mount point:
 //   chrome.jsx Sidebar() — between `<div className="sb-spacer" />` and
@@ -68,11 +71,11 @@ const STATUS_LABEL = {
 
 // Terminal fallback shown in the Open-chat tooltip when there's no
 // in-app deep link beyond the dashboard's own agent route.
-const TUI_HINT = "Open the agent pane — or run `hal0 chat` in a terminal";
+const TUI_HINT = "Open the agent pane — or run `hermes chat` in a terminal";
 
 function SidebarAgentBlock({ onGo }) {
   const rollup = _useSidebarAgentRollup();
-  const { installed, agentId, agentStatus, personaName, loading } = rollup;
+  const { installed, agentId, agentStatus, loading } = rollup;
 
   // Loading state: keep skeleton minimal — sidebar must NOT layout-shift
   // when the first 5s tick lands. Render the same row stack with em-dashes
@@ -138,18 +141,10 @@ function SidebarAgentBlock({ onGo }) {
           {STATUS_LABEL[agentStatus] ?? "—"}
         </span>
       </div>
-      {personaName && (
-        <div className="row">
-          <span className="k">profile</span>
-          <span
-            className="v"
-            title={`active profile: ${personaName}`}
-            data-testid="sidebar-agent-persona"
-          >
-            {personaName}
-          </span>
-        </div>
-      )}
+      {/* Persona/profile row removed: the value (from active.txt) is
+          disconnected from what the running Hermes actually uses (it runs
+          off SOUL.md, not the persona prompt), so surfacing it here was
+          misleading. Honest minimal surface = health dot + chat affordance. */}
       <div className="ln" />
       <button
         className="nudge sb-status-cta"
@@ -164,7 +159,7 @@ function SidebarAgentBlock({ onGo }) {
         title="Run the agent chat in your terminal"
         data-testid="sidebar-agent-tui-hint"
       >
-        Chat in terminal: <code>hal0 chat</code>
+        Chat in terminal: <code>hermes chat</code>
       </div>
     </div>
   );
