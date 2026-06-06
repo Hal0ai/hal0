@@ -222,13 +222,23 @@ def uninstall(
     """
     import shutil
 
-    # Editable install: src/hal0/__init__.py -> repo root is parents[2].
-    repo_root = Path(hal0.__file__).resolve().parents[2]
-    script = repo_root / "installer" / "uninstall.sh"
-    if not script.is_file():
+    from hal0.config import paths
+
+    # The uninstaller ships in the source tree, which lives in different places
+    # depending on install layout (#495):
+    #   - editable/dev:  src/hal0/__init__.py -> repo root is parents[2]
+    #   - FHS prod:      installed non-editable, so __file__ is in the venv
+    #     site-packages; the source tree is under the `current` symlink.
+    candidates = [
+        Path(hal0.__file__).resolve().parents[2] / "installer" / "uninstall.sh",
+        paths.usr_lib() / "installer" / "uninstall.sh",
+    ]
+    script = next((c for c in candidates if c.is_file()), None)
+    if script is None:
         die(
-            f"uninstall.sh not found at {script}. "
-            "This hal0 install looks packaged differently — run the script directly."
+            "uninstall.sh not found (looked in "
+            + ", ".join(str(c) for c in candidates)
+            + "). This hal0 install looks packaged differently — run the script directly."
         )
 
     if not shutil.which("bash"):

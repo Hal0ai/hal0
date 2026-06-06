@@ -132,14 +132,46 @@ def test_uninstall_non_tty_with_hal0_force_env(monkeypatch: pytest.MonkeyPatch) 
     assert captured["argv"][1].endswith("/installer/uninstall.sh")
 
 
+def test_uninstall_resolves_fhs_path_when_not_editable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, captured_exec: dict[str, Any]
+) -> None:
+    """Non-editable FHS install (#495): __file__ is in the venv site-packages
+    (no installer/ next to it), so the wrapper falls back to the source tree
+    under the `current` symlink (paths.usr_lib())."""
+    import hal0
+    from hal0.config import paths
+
+    # site-packages layout — parents[2]/installer/uninstall.sh does NOT exist.
+    fake_module = (
+        tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "hal0" / "__init__.py"
+    )
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("")
+    monkeypatch.setattr(hal0, "__file__", str(fake_module))
+
+    # A real uninstall.sh lives under the FHS `current` tree.
+    fhs_current = tmp_path / "usr-lib" / "current"
+    (fhs_current / "installer").mkdir(parents=True)
+    (fhs_current / "installer" / "uninstall.sh").write_text("#!/usr/bin/env bash\n")
+    monkeypatch.setattr(paths, "usr_lib", lambda: fhs_current)
+
+    with pytest.raises(typer.Exit) as exc:
+        uninstall(keep_data=False, force=True, dev=False)
+    assert (exc.value.exit_code or 0) == 0
+    assert captured_exec["argv"][1] == str(fhs_current / "installer" / "uninstall.sh")
+
+
 def test_uninstall_missing_script_dies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """If uninstall.sh isn't where we expect, fail loudly instead of running."""
     import hal0
+    from hal0.config import paths
 
     fake_module = tmp_path / "src" / "hal0" / "__init__.py"
     fake_module.parent.mkdir(parents=True)
     fake_module.write_text("")
     monkeypatch.setattr(hal0, "__file__", str(fake_module))
+    # Neither layout has the script: point the FHS candidate at an empty tree.
+    monkeypatch.setattr(paths, "usr_lib", lambda: tmp_path / "nonexistent" / "current")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
     called: dict[str, Any] = {}

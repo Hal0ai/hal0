@@ -113,7 +113,10 @@ SSH "hal0 status && hal0 --version && for i in \$(seq 1 15); do curl -fsS -m 5 h
 
 # ── uninstall ────────────────────────────────────────────────────────────────
 log "uninstall"
+# `hal0 uninstall` resolves uninstall.sh for either layout (#495). Fall back to
+# running it directly — FHS prod path first, then the legacy editable path.
 if SSH "sudo hal0 uninstall --force" >&2 2>&1 \
+   || SSH "sudo bash /usr/lib/hal0/current/installer/uninstall.sh --force" >&2 2>&1 \
    || SSH "sudo bash /opt/hal0/installer/uninstall.sh --force" >&2 2>&1; then
   UNINSTALL_OK=true
 fi
