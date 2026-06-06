@@ -53,7 +53,9 @@ function buildStats() {
   const L = d.lemond || {}
   return {
     time_to_first_token: 0.22,
-    tokens_per_second: typeof L.lastTokPerSec === 'number' ? L.lastTokPerSec : 45.0,
+    // Respect an EXPLICIT null/0 clobber (e2e sets lastTokPerSec=null to test
+    // the hidden / MB/s-fallback paths); only default to 45.0 when ABSENT.
+    tokens_per_second: 'lastTokPerSec' in L ? L.lastTokPerSec : 45.0,
     prompt_tokens: 312,
     output_tokens: 188,
     input_tokens: 312,
