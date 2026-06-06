@@ -147,4 +147,76 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(chatCards.first()).toContainText('primary')
     await expect(chatCards.nth(1)).toContainText('coder')
   })
+
+  // #587: the slot-edit drawer used to seed idle_timeout_s / workers /
+  // llamacpp_args from hardcoded constants and send all three
+  // unconditionally on Save, clobbering the on-disk values. The fix
+  // is two-layered:
+  //   - the list payload carries the slot's real on-disk values, so the
+  //     drawer seeds from truth;
+  //   - the drawer dirty-tracks the seeded values and only ships fields
+  //     that actually changed. This test exercises the second layer:
+  //     opening the drawer on a slot whose payload lists e.g.
+  //     idle_timeout_s=1200, then clicking Save without touching
+  //     anything, must NOT send idle_timeout_s on the wire.
+  test('#587 — no-op Save does not send idle_timeout_s / workers / extra_args', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') {
+        puts.push(JSON.parse(route.request().postData() || '{}'))
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    // PRIMARY carries the real on-disk values for the three clobber-
+    // prone fields. The drawer must seed from these and stay quiet on
+    // Save when nothing changed.
+    const PRIMARY_WITH_DEFAULTS = {
+      ...PRIMARY,
+      idle_timeout_s: 1200,
+      workers: 4,
+      llamacpp_args: '--threads 6 --no-mmap',
+    }
+    await seedSlots(page, [PRIMARY_WITH_DEFAULTS, EMBED])
+
+    await page.goto('/#slots/primary')
+    // Click Save immediately — no field edits.
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    const body = puts[0]
+    expect(body).not.toHaveProperty('idle_timeout_s')
+    expect(body).not.toHaveProperty('workers')
+    expect(body).not.toHaveProperty('llamacpp_args')
+  })
+
+  test('#587 — editing idle_timeout_s sends only that field', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') {
+        puts.push(JSON.parse(route.request().postData() || '{}'))
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await seedSlots(page, [
+      { ...PRIMARY, idle_timeout_s: 300, workers: 2, llamacpp_args: '' },
+      EMBED,
+    ])
+
+    await page.goto('/#slots/primary')
+    const row = page.locator('.drawer .form-row', { hasText: 'idle_timeout_s' })
+    await expect(row).toBeVisible()
+    await row.locator('input').fill('1800')
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    const body = puts[0]
+    expect(body.idle_timeout_s).toBe(1800)
+    // workers + extra_args were untouched → must not appear in the body.
+    expect(body).not.toHaveProperty('workers')
+    expect(body).not.toHaveProperty('llamacpp_args')
+  })
 })

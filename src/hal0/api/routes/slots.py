@@ -224,6 +224,35 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
         n_gpu = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
         entry["n_gpu_layers"] = n_gpu if isinstance(n_gpu, int) else -1
 
+        # Spec 1 / Component 2 (issue #587): surface idle_timeout_s,
+        # workers, and the slot's freeform llamacpp_args so the Edit
+        # drawer can seed from real on-disk values. Without these the
+        # drawer used hardcoded constants (900 / 1 /
+        # "--flash-attn on --no-mmap") and unconditionally rewrote the
+        # on-disk values on every Save — same bug class as #584. The
+        # on-disk field for the freeform overlay is ``[server].extra_args``
+        # (ServerConfig); the dashboard's wire key is ``llamacpp_args``
+        # (matches the global lemond admin panel), so we map at this
+        # boundary. ``idle_timeout_s`` and ``workers`` are flat top-level
+        # SlotConfig fields, hoisted from [slot] by the loader. Defaults
+        # are NOT applied here — the wire payload is the truth source
+        # the dashboard uses to dirty-track changes, so an absent
+        # on-disk field should surface as null/None, not the schema
+        # default (which would let a stale slot sneak in a new value
+        # on a no-op save).
+        entry["idle_timeout_s"] = cfg.get("idle_timeout_s")
+        entry["workers"] = cfg.get("workers")
+        server_cfg = cfg.get("server")
+        if server_cfg is None:
+            extra_args: Any = None
+        elif isinstance(server_cfg, dict):
+            extra_args = server_cfg.get("extra_args")
+        else:
+            # ServerConfig pydantic model — read via attribute to stay
+            # consistent with the .get() pattern above.
+            extra_args = getattr(server_cfg, "extra_args", None)
+        entry["llamacpp_args"] = extra_args
+
         loaded_entry = loaded_by_model.get(model_default) if model_default else None
         if not enabled:
             entry["lemonade_state"] = "disabled"

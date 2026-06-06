@@ -316,6 +316,91 @@ def test_list_slots_enable_thinking_null_when_unset(
     assert "n_gpu_layers" in primary
 
 
+# ── Spec 1 / Component 2 (issue #587) ──────────────────────────────────────
+#
+# The slot-edit drawer seeds idle_timeout_s / workers / llamacpp_args from
+# the list payload. Before #587 the list omitted all three so the drawer
+# used hardcoded constants (900 / 1 / "--flash-attn on --no-mmap") and
+# clobbered the on-disk values on every Save. After the fix the payload
+# carries the slot's real on-disk values so the drawer (and its dirty-
+# tracking) can leave untouched fields alone.
+
+
+def test_list_slots_exposes_idle_timeout_workers_llamacpp_args(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """idle_timeout_s / workers / llamacpp_args ride along on /api/slots.
+
+    The on-disk shape is:
+      - ``workers`` + ``idle_timeout_s`` are flat top-level SlotConfig
+        fields (hoisted from the [slot] TOML table by the loader).
+      - ``llamacpp_args`` is the dashboard's wire name; the on-disk field
+        lives under ``[server].extra_args`` (ServerConfig). The list
+        payload maps to the dashboard's key so the drawer can seed
+        directly.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'type = "llm"',
+            "enabled = true",
+            "workers = 4",
+            "idle_timeout_s = 1200",
+            "[model]",
+            'default = "qwen3"',
+            "[server]",
+            'extra_args = "--threads 6 --no-mmap"',
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["idle_timeout_s"] == 1200
+    assert primary["workers"] == 4
+    assert primary["llamacpp_args"] == "--threads 6 --no-mmap"
+
+
+def test_list_slots_llamacpp_args_none_when_server_table_absent(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """Slot with no [server] table → payload's llamacpp_args is null.
+
+    Mirror the existing enable_thinking behaviour: absent on-disk → null
+    in the wire payload (effective unset), not omitted. The dashboard
+    uses null to skip sending the field on Save.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'type = "llm"',
+            "enabled = true",
+            "workers = 2",
+            "idle_timeout_s = 600",
+            "[model]",
+            'default = "qwen3"',
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["idle_timeout_s"] == 600
+    assert primary["workers"] == 2
+    assert primary["llamacpp_args"] is None
+
+
 def test_list_slots_skips_coresident_for_disabled_sibling(
     tmp_hal0_home: str,
     installed_lemonade_stub: dict[str, Any],

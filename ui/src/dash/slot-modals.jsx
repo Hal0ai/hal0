@@ -340,6 +340,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const deleteMut = useSlotDelete();
   const backendMut = useSlotBackend();
 
+  // Seed from the slot list payload when available (PR #587 — same fix
+  // class as #584). idle_timeout_s / workers / llamacpp_args are all
+  // surfaced on the list payload now, so the drawer mirrors them
+  // verbatim and only sends what actually changed. When the payload
+  // is missing the field (older backend, or synthetic slot), the
+  // schema defaults act as a fallback for first-time edits only.
+  const initialIdle = slot?.idle_timeout_s != null ? slot.idle_timeout_s : 900;
+  const initialWorkers = slot?.workers != null ? slot.workers : 1;
+  const initialExtraArgs = slot?.llamacpp_args != null ? slot.llamacpp_args : "";
+
   const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 4096);
   // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
   // button through PATCH /defaults. Both seed from the slot list payload.
@@ -348,9 +358,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [nGpuLayers, setNGpuLayers] = useStateSM(
     slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1"
   );
-  const [idleTimeout, setIdleTimeout] = useStateSM(900);
-  const [workers, setWorkers] = useStateSM(1);
-  const [extraArgs, setExtraArgs] = useStateSM("--flash-attn on --no-mmap");
+  const [idleTimeout, setIdleTimeout] = useStateSM(initialIdle);
+  const [workers, setWorkers] = useStateSM(initialWorkers);
+  const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
   const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
   const [submitErr, setSubmitErr] = useStateSM(null);
@@ -370,9 +380,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
       setDevice(slot.device || "gpu-rocm");
       setMakeDefault(!!slot.isDefault);
-      setIdleTimeout(900);
-      setWorkers(1);
-      setExtraArgs("--flash-attn on --no-mmap");
+      // #587: re-seed from the slot prop so the drawer tracks the real
+      // on-disk values (was hardcoded constants before — that was the
+      // bug). The dirty-tracking in onSaveClick below only ships fields
+      // that actually changed, so a no-op edit no longer rewrites
+      // anything.
+      setIdleTimeout(slot.idle_timeout_s != null ? slot.idle_timeout_s : 900);
+      setWorkers(slot.workers != null ? slot.workers : 1);
+      setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
       setSubmitErr(null);
       setSelectedBackend(
         slot.declared_backend || (slot.device || "gpu-rocm").replace("gpu-", "") || "rocm"
@@ -393,22 +408,39 @@ function EditSlotDrawer({ open, slot, onClose }) {
       const idleNum = Number(idleTimeout);
       const workersNum = Number(workers);
       const nglNum = Number(nGpuLayers);
+      // #587 dirty-tracking: only include a field in the body if the
+      // user actually changed it from the seeded (on-disk) value.
+      // Sending every field unconditionally is what clobbered values
+      // before — same fix class as #584. ctx_size / n_gpu_layers stay
+      // unconditional because the drawer's seed is best-effort
+      // (metrics?.ctx / -1 sentinel) and NOT the truth source.
+      const ctxBody = {
+        ctx_size: Number.isFinite(ctxNum) ? ctxNum : ctx,
+        n_gpu_layers: Number.isFinite(nglNum) ? nglNum : -1,
+      };
+      const slotBody = {
+        device,
+        default: makeDefault,
+      };
+      const idleSeeded = initialIdle;
+      const workersSeeded = initialWorkers;
+      const extraArgsSeeded = initialExtraArgs;
+      if (Number(idleTimeout) !== Number(idleSeeded)) {
+        slotBody.idle_timeout_s = Number.isFinite(idleNum) ? idleNum : idleTimeout;
+      }
+      if (Number(workers) !== Number(workersSeeded)) {
+        slotBody.workers = Number.isFinite(workersNum) ? workersNum : workers;
+      }
+      if (extraArgs !== extraArgsSeeded) {
+        slotBody.llamacpp_args = extraArgs;
+      }
       await defaultsMut.mutateAsync({
         name: slot.name,
-        body: {
-          ctx_size: Number.isFinite(ctxNum) ? ctxNum : ctx,
-          n_gpu_layers: Number.isFinite(nglNum) ? nglNum : -1,
-        },
+        body: ctxBody,
       });
       await editMut.mutateAsync({
         name: slot.name,
-        body: {
-          device,
-          default: makeDefault,
-          llamacpp_args: extraArgs,
-          idle_timeout_s: Number.isFinite(idleNum) ? idleNum : idleTimeout,
-          workers: Number.isFinite(workersNum) ? workersNum : workers,
-        },
+        body: slotBody,
       });
       window.__hal0Toast && window.__hal0Toast(
         `Slot "${slot.name}" saved — restart required for ctx_size`,
