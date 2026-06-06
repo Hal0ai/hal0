@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPost } from '../client'
+import { apiGet, apiPost, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 export interface UpdateChannel {
@@ -69,6 +69,22 @@ export function useUpdateApply() {
   return useMutation({
     mutationFn: (version?: string) =>
       apiPost<UpdateJob>(ENDPOINTS.updateApply, version ? { version } : {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['updates'] }),
+  })
+}
+
+// Channel switch (issue #546). PUT /api/updates/channel with {channel:
+// "stable" | "nightly"} persists to hal0.toml; on success the updates/
+// state query is invalidated so the per-component hal0.channel /
+// lemonade.channel fields (which the UI binds to for the current value)
+// refetch the persisted channel before the next render.
+export type UpdateChannelName = 'stable' | 'nightly'
+
+export function useSetUpdateChannel() {
+  const qc = useQueryClient()
+  return useMutation<{ channel: UpdateChannelName }, Error, UpdateChannelName>({
+    mutationFn: (channel) =>
+      apiPut<{ channel: UpdateChannelName }>(ENDPOINTS.updateChannel, { channel }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['updates'] }),
   })
 }

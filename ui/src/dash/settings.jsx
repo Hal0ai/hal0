@@ -11,7 +11,7 @@
 // agent view, respectively. The settings rail is for knobs only.
 
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
-import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob } from '@/api/hooks/useUpdates'
+import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel } from '@/api/hooks/useUpdates'
 import { useCapabilities, useCapabilityPatch } from '@/api/hooks/useCapabilities'
 import { useLemondRollup, useLemonadeStats } from '@/api/hooks/useLemonade'
 import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
@@ -379,10 +379,19 @@ function UpdatesSection() {
   // Phase B1: live state + check + apply mutations. While the query is
   // in flight or 5xx'd we render an empty envelope and let the SRow
   // fallbacks show '—' rather than fabricated versions.
+  // Issue #546: channel switch (stable | nightly) is wired to
+  // useSetUpdateChannel → PUT /api/updates/channel; reads the current
+  // value from useUpdateState().hal0.channel on load.
   const stateQuery = useUpdateState();
   const checkM = useUpdateCheck();
   const applyM = useUpdateApply();
-  const u = stateQuery.data || { hal0: {}, lemonade: {}, flm: {}, autoCheck: true };
+  const setChannelM = useSetUpdateChannel();
+  const u = stateQuery.data || { hal0: {}, lemonade: {}, flm: {} };
+
+  // The current channel lives on each per-component envelope (both
+  // populated from telemetry.channel in hal0.toml); hal0.channel is
+  // authoritative for the switch's initial value.
+  const currentChannel = u.hal0?.channel || 'stable';
 
   // Track the most recent apply job so the user sees the backend's
   // verdict, not just the 202 ack. Toasts fire once on terminal state.
@@ -463,9 +472,32 @@ function UpdatesSection() {
           v={u.flm?.current || '—'}
         />
         <SRow
-          k="Auto-check"
-          sub="Once per day · 09:00 local"
-          v={<label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}><input type="checkbox" defaultChecked={!!u.autoCheck} style={{accentColor: "var(--accent)"}} /><span>enabled</span></label>}
+          k="Channel"
+          sub="Release track · persisted to hal0.toml"
+          v={
+            <select
+              className="input mono"
+              value={currentChannel}
+              disabled={setChannelM.isPending}
+              onChange={(e) => {
+                const next = e.target.value === 'nightly' ? 'nightly' : 'stable';
+                if (next === currentChannel) return;
+                setChannelM.mutate(next, {
+                  onSuccess: () => {
+                    window.__hal0Toast && window.__hal0Toast(`Channel set to ${next}`, "ok");
+                  },
+                  onError: (err) => {
+                    const msg = (err && err.message) || "could not set channel";
+                    window.__hal0Toast && window.__hal0Toast(`Channel change failed: ${msg}`, "err");
+                  },
+                });
+              }}
+              style={{maxWidth: 160}}
+            >
+              <option value="stable">stable</option>
+              <option value="nightly">nightly</option>
+            </select>
+          }
         />
         <SRow
           k="FirstRun"
