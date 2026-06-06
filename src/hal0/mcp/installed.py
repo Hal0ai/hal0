@@ -27,8 +27,10 @@ what the operator chose to install + their per-server env overrides.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import tomllib
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -256,6 +258,26 @@ def uninstall(server_id: str) -> None:
     log.info("hal0.mcp.installed.removed", server_id=server_id)
 
 
+@contextlib.contextmanager
+def _registry_lock(server_id: str) -> Iterator[None]:
+    """Advisory exclusive lock serializing read-modify-write on one server's
+    registry record (#382).
+
+    Two concurrent ``patch_config`` calls would otherwise interleave
+    read -> modify -> write and clobber each other's update. The lock is
+    held on a sibling ``<record>.lock`` file for the duration of the RMW.
+    """
+    target = _registry_path(server_id)
+    lock_path = target.parent / f"{target.name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 def patch_config(
     server_id: str,
     *,
@@ -269,20 +291,21 @@ def patch_config(
     sends the full intended set, not a delta). ``enabled`` flips the
     flag without touching anything else.
     """
-    record = get_installed(server_id)
-    updates: dict[str, Any] = {}
-    if env is not None:
-        # Coerce values to strings — pydantic validates the type but the
-        # FastAPI body is permissive (numbers, bools, etc).
-        updates["env"] = {k: str(v) for k, v in env.items()}
-    if enabled is not None:
-        updates["enabled"] = bool(enabled)
-    if not updates:
-        return record
-    next_record = record.model_copy(update=updates)
-    target_path = _registry_path(server_id)
-    write_toml_atomic(target_path, next_record.to_toml_dict())
-    _harden_registry_perms(target_path)
+    with _registry_lock(server_id):
+        record = get_installed(server_id)
+        updates: dict[str, Any] = {}
+        if env is not None:
+            # Coerce values to strings — pydantic validates the type but the
+            # FastAPI body is permissive (numbers, bools, etc).
+            updates["env"] = {k: str(v) for k, v in env.items()}
+        if enabled is not None:
+            updates["enabled"] = bool(enabled)
+        if not updates:
+            return record
+        next_record = record.model_copy(update=updates)
+        target_path = _registry_path(server_id)
+        write_toml_atomic(target_path, next_record.to_toml_dict())
+        _harden_registry_perms(target_path)
     log.info(
         "hal0.mcp.installed.patched",
         server_id=server_id,

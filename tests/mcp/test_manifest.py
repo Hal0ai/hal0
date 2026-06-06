@@ -207,3 +207,42 @@ async def test_resolve_caps_tools_count_at_4096() -> None:
 
     r = await manifest.resolve("https://example.com/m.json", fetcher=_fetch)
     assert r.tools == 4096
+
+
+@pytest.mark.asyncio
+async def test_default_fetcher_aborts_oversized_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#381: the production fetcher streams and aborts once cumulative body
+    bytes exceed _MAX_MANIFEST_BYTES, rather than buffering it all first."""
+    import httpx
+
+    monkeypatch.setattr(manifest, "_enforce_safe_url", lambda url: None)
+    monkeypatch.setattr(manifest, "_MAX_MANIFEST_BYTES", 32)
+
+    class _FakeResp:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self):
+            yield b"x" * 20
+            yield b"y" * 20  # cumulative 40 > 32 -> must abort here
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return _FakeResp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            return _FakeStream()
+
+    monkeypatch.setattr(manifest.httpx, "AsyncClient", lambda *a, **k: _FakeClient())
+    with pytest.raises(httpx.HTTPError, match="too large"):
+        await manifest._default_fetcher("https://example.com/big.json")
