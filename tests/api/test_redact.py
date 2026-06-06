@@ -24,7 +24,6 @@ from hal0.api._redact import (
     redact_value,
 )
 
-
 # ── is_sensitive_key ──────────────────────────────────────────────────────
 
 
@@ -153,18 +152,36 @@ def test_redact_config_walks_nested_dicts() -> None:
 
 
 def test_redact_config_walks_lists_of_dicts() -> None:
-    """Lists of dicts are walked element-by-element."""
+    """Lists of dicts are walked element-by-element.
+
+    Note the container key (``upstreams``) is deliberately NON-sensitive:
+    a sensitive container key (e.g. ``secrets``) is over-redacted wholesale
+    by design (see test_redact_sensitive_container_masks_wholesale), so it
+    would never reach the list. We want to exercise list recursion here.
+    """
     out = redact_config(
         {
-            "secrets": [
+            "upstreams": [
                 {"name": "OPENAI", "token": "sk-1"},
                 {"name": "ANTHROPIC", "token": ""},
             ],
         },
     )
-    assert out["secrets"][0]["token"] == {"value": "***REDACTED***", "set": True}
-    assert out["secrets"][1]["token"] == {"value": "***REDACTED***", "set": False}
-    assert out["secrets"][0]["name"] == "OPENAI"  # plain key passes through
+    assert out["upstreams"][0]["token"] == {"value": "***REDACTED***", "set": True}
+    assert out["upstreams"][1]["token"] == {"value": "***REDACTED***", "set": False}
+    assert out["upstreams"][0]["name"] == "OPENAI"  # plain key passes through
+
+
+def test_redact_sensitive_container_masks_wholesale() -> None:
+    """A sensitive *container* key over-redacts its whole value (by design).
+
+    ``re.search`` on the key name means a container named ``secrets`` is
+    masked wholesale rather than recursed — the conservative behaviour the
+    spec asks for (never leak a secret), accepting that structure under
+    such a key is lost.
+    """
+    out = redact_config({"secrets": [{"token": "sk-1"}]})
+    assert out["secrets"] == {"value": "***REDACTED***", "set": True}
 
 
 def test_redact_config_list_of_scalars_passes_through() -> None:
