@@ -183,6 +183,22 @@ def test_get_config_attaches_locked_invariants(
     assert body["_hal0"]["locked"]["extra_models_dir"] == _locked_extra_models_dir()
 
 
+def test_get_config_synthesizes_flm_args_from_nested(
+    isolated_client: TestClient,
+    installed_lemonade_stub: dict[str, Any],
+) -> None:
+    """lemond stores the trio args NESTED at ``flm.args`` — there is no
+    top-level ``flm_args`` in its schema. The GET route synthesizes a
+    convenience top-level ``flm_args`` from ``flm.args`` so the dashboard
+    (which reads ``data.flm_args``) sees the live value."""
+    r = isolated_client.get("/api/lemonade/config")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["flm_args"] == "--asr 1 --embed 1"
+    # The nested source is still present, verbatim.
+    assert body["flm"] == {"args": "--asr 1 --embed 1"}
+
+
 def test_immediate_and_deferred_partitions_are_disjoint() -> None:
     """No key may be in both halves — a key that's "immediate" can't
     also be "deferred"; if lemond ever changes this, the constants here
@@ -385,6 +401,44 @@ def test_post_config_accepts_flm_args_explicit_disable(
         json={"flm_args": "--asr 0 --embed 1"},
     )
     assert r.status_code == 200, r.text
+
+
+def test_post_config_translates_flm_args_to_nested_wire_shape(
+    isolated_client: TestClient,
+    installed_lemonade_stub: dict[str, Any],
+) -> None:
+    """Callers keep the convenient top-level ``flm_args`` contract, but the
+    payload reaching lemond's ``/internal/set`` is the NESTED ``flm.args``
+    shape — never a top-level ``flm_args`` (which lemond rejects 400 as an
+    unknown key). The response contract is unchanged: ``flm_args`` still
+    appears in ``effects.deferred``."""
+    r = isolated_client.post(
+        "/api/lemonade/config",
+        json={"flm_args": "--asr 0 --embed 1"},
+    )
+    assert r.status_code == 200, r.text
+    # Wire payload: nested, no top-level flm_args.
+    sent = installed_lemonade_stub["last_set"]
+    assert sent == {"flm": {"args": "--asr 0 --embed 1"}}, sent
+    assert "flm_args" not in sent
+    # Response contract unchanged — flm_args still classified deferred.
+    assert "flm_args" in r.json()["effects"]["deferred"]
+
+
+def test_post_config_preserves_other_keys_when_translating_flm_args(
+    isolated_client: TestClient,
+    installed_lemonade_stub: dict[str, Any],
+) -> None:
+    """A mixed patch carrying ``flm_args`` plus other keys forwards the
+    other keys untouched and translates only ``flm_args`` → ``flm.args``."""
+    r = isolated_client.post(
+        "/api/lemonade/config",
+        json={"flm_args": "--asr 1 --embed 1", "log_level": "debug"},
+    )
+    assert r.status_code == 200, r.text
+    sent = installed_lemonade_stub["last_set"]
+    assert sent == {"flm": {"args": "--asr 1 --embed 1"}, "log_level": "debug"}, sent
+    assert "flm_args" not in sent
 
 
 def test_post_config_rejects_flm_args_malformed_value(
