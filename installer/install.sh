@@ -1469,6 +1469,12 @@ if [[ "${DEV_MODE}" -eq 0 && -d "${LEMONADE_RESOURCES}" ]]; then
     if "${VENV_DIR}/bin/python" -m hal0.lemonade.server_models_gen \
         --registry "${REGISTRY_TOML}" \
         --output "${LEMONADE_SERVER_MODELS}"; then
+        # Issue #211: the file lands 0644 (set by the generator) but is
+        # owned by root because the dir-wide `chown -R hal0:hal0
+        # ${LEMONADE_PREFIX}` above ran BEFORE this file was created.
+        # Re-chown the file we just wrote so hal0-lemonade can update
+        # entries (e.g. add backend versions) without escalating.
+        chown hal0:hal0 "${LEMONADE_SERVER_MODELS}" 2>/dev/null || true
         info "wrote ${LEMONADE_SERVER_MODELS}"
     else
         warn "server_models_gen failed; Lemonade will fall back to its bundled catalog"

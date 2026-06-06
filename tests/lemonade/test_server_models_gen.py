@@ -694,6 +694,38 @@ class TestAtomicWrite:
         leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(".")]
         assert leftovers == []
 
+    def test_output_is_world_readable_0644(self, tmp_path: Path) -> None:
+        """#211: mkstemp leaves the temp at 0o600; the writer must chmod
+        the final path to 0o644 so the hal0 service user can read it."""
+        registry = tmp_path / "registry.toml"
+        output = tmp_path / "server_models.json"
+        _write_registry(
+            registry, {"m": {"path": "/x.gguf", "capabilities": ["chat"], "backends": ["vulkan"]}}
+        )
+
+        write_server_models(registry, output)
+
+        mode = output.stat().st_mode & 0o777
+        assert mode == 0o644, f"expected 0o644, got {oct(mode)}"
+
+    def test_overwritten_output_keeps_world_readable_mode(self, tmp_path: Path) -> None:
+        """A re-write of an already-world-readable file must not regress
+        to 0o600 (mkstemp default for the new tempfile)."""
+        registry = tmp_path / "registry.toml"
+        output = tmp_path / "server_models.json"
+        _write_registry(
+            registry, {"m": {"path": "/x.gguf", "capabilities": ["chat"], "backends": ["vulkan"]}}
+        )
+
+        write_server_models(registry, output)
+        # Force a mode that mkstemp would not have produced, to prove the
+        # chmod runs every time and not just on the first write.
+        output.chmod(0o600)
+        write_server_models(registry, output)
+
+        mode = output.stat().st_mode & 0o777
+        assert mode == 0o644, f"expected 0o644 after rewrite, got {oct(mode)}"
+
 
 # ── Missing registry handling ────────────────────────────────────────────────
 
