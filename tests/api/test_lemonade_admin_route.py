@@ -460,7 +460,10 @@ def test_post_config_aggregates_multiple_validation_errors(
         "/api/lemonade/config",
         json={
             "llamacpp_args": "--parallel 1",
-            "flm_args": "--asr 1",
+            # `--asr 1` is now VALID (Spec 2 relaxation); use a malformed
+            # non-binary value so flm_args still fails and the aggregation
+            # of multiple errors is exercised.
+            "flm_args": "--asr 2",
             "rocm_channel": "nightly",
         },
     )
