@@ -13,7 +13,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "firstrun", "slots", "models", "logs", "agent", "settings", "mcp"];
+const ROUTES = ["dashboard", "firstrun", "slots", "models", "logs", "agent", "settings", "mcp", "connections"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -182,6 +182,7 @@ function App() {
         );
       case "mcp":      return <McpView />;
       case "settings": return <SettingsView />;
+      case "connections": return <ConnectionsView />;
       default:         return <div className="view">Not found.</div>;
     }
   };

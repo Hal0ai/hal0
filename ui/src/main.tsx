@@ -46,6 +46,8 @@ import './dash/slots.jsx'
 import './dash/slot-modals.jsx'
 import './dash/models.jsx'
 import './dash/model-modals.jsx'
+// issue #549 — Connections surface: providers + upstreams list + per-row test.
+import './dash/connections.jsx'
 import './dash/settings.jsx'
 
 import './dash/extras.jsx'

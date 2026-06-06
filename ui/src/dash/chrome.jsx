@@ -15,6 +15,7 @@ import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useSidebarAgentRollup } from '@/api/hooks/useAgents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useHardware } from '@/api/hooks/useHardware'
+import { useUpstreams } from '@/api/hooks/useConnections'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -63,6 +64,8 @@ const Icons = {
   hardware:  <Icon><rect x="3" y="3" width="10" height="10" rx="1"/><rect x="5.5" y="5.5" width="5" height="5" rx="0.5"/><path d="M3 6h-1M3 10h-1M13 6h1M13 10h1M6 3v-1M10 3v-1M6 13v1M10 13v1"/></Icon>,
   backends:  <Icon><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><path d="M6 4h4M4 6v4M12 6v4M6 12h4"/></Icon>,
   logs:      <Icon><path d="M3 3h10M3 6h10M3 9h7M3 12h5"/></Icon>,
+  // issue #549 — two linked rings echo the "remote ↔ local" connection metaphor.
+  connections: <Icon><circle cx="6" cy="8" r="2.5"/><circle cx="11" cy="11" r="1.5" fill="currentColor" stroke="none"/><path d="M8 9.5l2 1M3.5 4.5h4M3.5 6.5h3"/></Icon>,
   agent:     <Icon><circle cx="8" cy="6" r="2.5"/><path d="M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5"/><circle cx="13" cy="3" r="1.5"/></Icon>,
   settings:  <Icon><circle cx="8" cy="8" r="2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></Icon>,
   bell:      <Icon d="M4 11h8c-1 0-1.5-0.5-1.5-2V6.5a2.5 2.5 0 0 0-5 0V9c0 1.5-0.5 2-1.5 2zM6.5 13a1.5 1.5 0 0 0 3 0"/>,
@@ -104,6 +107,7 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
     logs:      ["Runtime", "Logs"],
     agent:     ["Tools",  "Agent"],
     settings:  ["Configure", "Settings"],
+    connections: ["Network", "Connections"],
   };
   const [eyebrow, title] = labels[route] || ["", ""];
   return (
@@ -154,8 +158,12 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
 function useNavItems() {
   const slotsQuery  = useSlots();
   const modelsQuery = useModels();
+  const upstreamsQuery = useUpstreams();
   const slotCount   = slotsQuery.data?.length  ?? 0;
   const modelCount  = modelsQuery.data?.length ?? 0;
+  // #549 — badge the Connections nav with the total upstream count so
+  // the operator can see "I have N routing targets" at a glance.
+  const upCount     = upstreamsQuery.data?.length ?? 0;
   // 0.4 gate: the Agent route is reduced to the Memory tab, so when the
   // memory subsystem is disabled (HAL0_MEMORY_ENABLED!=1) there is nothing
   // to show — drop the nav item entirely. Driven by /api/status so the UI
@@ -172,6 +180,11 @@ function useNavItems() {
     // conceptually but kept as a sibling so the URL is discoverable.
     { id: "mcp",       label: "MCP",       icon: Icons.agent },
     { id: "settings",  label: "Settings",  icon: Icons.settings },
+    // Issue #549 — Connections surface (read-only providers/upstreams rollup
+    // with per-row reachability test). Sits between Settings and the end so
+    // the operator-configure feel reads "settings, then look at your
+    // wiring".
+    { id: "connections", label: "Connections", icon: Icons.connections, cnt: upCount },
   ];
 }
 

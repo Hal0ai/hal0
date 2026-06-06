@@ -166,6 +166,19 @@ export const ENDPOINTS = {
   // request host, so links work on any install (localhost / LAN IP /
   // hal0.local / custom domain) without hardcoding. See routes/config.py.
   configUrls: '/api/config/urls',
+
+  // ── Connections (issue #549) — providers + upstreams + reachability test
+  // ``/api/providers`` is the alias of ``/api/upstreams`` filtered to remote
+  // (kind != "slot"); ``/api/upstreams`` returns every routing target. The
+  // POST /test probe is what the dashboard's per-upstream Test button calls.
+  providers: '/api/providers',
+  providersCatalog: '/api/providers/catalog',
+  upstreams: '/api/upstreams',
+  upstream: (name: string) =>
+    `/api/upstreams/${encodeURIComponent(name)}`,
+  upstreamTest: (name: string) =>
+    `/api/upstreams/${encodeURIComponent(name)}/test`,
+
   // Install / FirstRun
   installState: '/api/install/state',
   firstrunState: '/api/firstrun/state',
