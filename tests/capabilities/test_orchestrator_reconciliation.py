@@ -369,3 +369,239 @@ async def test_fake_lemonade_client_records_set() -> None:
     await client.internal_set({"flm_args": "--asr 1 --embed 0"})
     assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 0"}
     assert (await client.internal_config())["flm_args"] == "--asr 1 --embed 0"
+
+
+# ── Step 5: NPU-trio fork (Cases 1-5, 9) ──────────────────────────────────────
+
+
+def _write_embed_slot(home: Path, *, device: str = "vulkan", slot_type: str | None = None) -> None:
+    """(Re)write etc/hal0/slots/embed.toml under ``home``."""
+    slots_dir = home / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        'name = "embed"',
+        "port = 8082",
+        f'backend = "{device}"',
+        'provider = "llama-server"',
+        "enabled = true",
+    ]
+    if slot_type:
+        lines.append(f'type = "{slot_type}"')
+    lines += ["[model]", 'default = "nomic-embed-text-v1.5-q8_0"', ""]
+    (slots_dir / "embed.toml").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_caps(home: Path, *, slot: str, child: str, fields: dict[str, Any]) -> None:
+    """Write a single-selection capabilities.toml under ``home``."""
+    caps_path = home / "etc" / "hal0" / "capabilities.toml"
+    caps_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"[selections.{slot}.{child}]"]
+    for k, v in fields.items():
+        if isinstance(v, bool):
+            lines.append(f"{k} = {str(v).lower()}")
+        else:
+            lines.append(f'{k} = "{v}"')
+    lines.append("")
+    caps_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+@pytest.fixture
+def npu_orchestrator(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient]:
+    """Orchestrator wired with a FakeLemonadeClient — engages the trio fork.
+
+    Bypasses catalog validation (downstream of the path under test). The
+    anchor is seeded live (type=llm,device=npu) with the FLM child already
+    serving chat+asr (``--asr 1 --embed 0``) so a Case-1 embed-enable
+    yields the exact ``--asr 1 --embed 1``.
+    """
+    monkeypatch.setattr(
+        CapabilityOrchestrator,
+        "_validate_model_in_catalog",
+        lambda self, slot, child, model_id, backend_id: None,
+    )
+    client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 0")
+    fake = FakeSlotManager()
+    fake.set_configs(
+        [{"name": "agent", "type": "llm", "device": "npu", "enabled": True}]
+    )
+    orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
+    return orch, fake, client
+
+
+async def test_npu_embed_enable_sets_flm_args_no_load(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    tmp_hal0_home: str,
+) -> None:
+    """Case 1: NPU embed enable → flm_args embed=1, update_config enabled, NO load."""
+    orch, fake, client = npu_orchestrator
+    home = Path(tmp_hal0_home)
+    _write_embed_slot(home, device="flm", slot_type="embedding")
+    _write_caps(home, slot="embed", child="embed", fields={
+        "backend": "npu", "provider": "flm",
+        "model": "nomic-embed-text-v1.5-q8_0", "enabled": False,
+    })
+
+    result = await orch.apply("embed", "embed", {
+        "enabled": True, "backend": "npu", "provider": "flm",
+        "model": "nomic-embed-text-v1.5-q8_0",
+    })
+
+    assert client.set_calls, "flm_args was never set"
+    assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 1"}, client.set_calls
+    # The embed slot must be flipped enabled=true via a {enabled}-only write.
+    enabled_writes = [
+        c for c in fake.calls
+        if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"] == {"enabled": True}
+    ]
+    assert enabled_writes, f"no enabled-only update_config on embed slot: {fake.calls}"
+    # ZERO load/swap/unload on the embed slot.
+    assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
+        f"NPU embed path must not bounce the slot: {fake.calls}"
+    )
+    assert result.get("pending_reload") is True, result
+
+
+async def test_npu_embed_disable_zeroes_flm_args_no_unload(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    tmp_hal0_home: str,
+) -> None:
+    """Case 2: NPU embed disable → flm_args embed=0, slot enabled=False, NO unload."""
+    orch, fake, client = npu_orchestrator
+    home = Path(tmp_hal0_home)
+    _write_embed_slot(home, device="flm", slot_type="embedding")
+    _write_caps(home, slot="embed", child="embed", fields={
+        "backend": "npu", "provider": "flm",
+        "model": "nomic-embed-text-v1.5-q8_0", "enabled": True,
+    })
+
+    result = await orch.apply("embed", "embed", {"enabled": False})
+
+    assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 0"}, client.set_calls
+    disabled_writes = [
+        c for c in fake.calls
+        if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"] == {"enabled": False}
+    ]
+    assert disabled_writes, f"no enabled=False write on embed slot: {fake.calls}"
+    assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
+        f"NPU embed disable must not unload the slot: {fake.calls}"
+    )
+    assert result.get("pending_reload") is True
+
+
+async def test_npu_stt_enable_sets_asr(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    tmp_hal0_home: str,
+) -> None:
+    """Case 3: NPU stt enable → flm_args asr=1, no standalone load."""
+    orch, fake, client = npu_orchestrator
+    home = Path(tmp_hal0_home)
+    # stt slot does not exist on disk → create path writes type=transcription.
+    _write_caps(home, slot="voice", child="stt", fields={
+        "backend": "npu", "provider": "flm", "model": "whisper-large-v3", "enabled": False,
+    })
+
+    await orch.apply("voice", "stt", {
+        "enabled": True, "backend": "npu", "provider": "flm", "model": "whisper-large-v3",
+    })
+
+    assert client.set_calls, "flm_args was never set for stt"
+    last = client.set_calls[-1]["flm_args"]
+    assert "--asr 1" in last, f"stt enable did not set asr=1: {last!r}"
+    assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
+        f"NPU stt path must not bounce a slot: {fake.calls}"
+    )
+    # Created stt slot stamps type=transcription.
+    create_calls = [c for c in fake.calls if c[0] == "create" and c[1] == "stt"]
+    assert create_calls, f"stt slot not created: {fake.calls}"
+    assert create_calls[-1][2]["cfg"].get("type") == "transcription"
+
+
+async def test_embed_gpu_to_npu_no_load(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    tmp_hal0_home: str,
+) -> None:
+    """Case 4: embed gpu-vulkan→npu → flm_args embed=1, device=npu, NO load/swap."""
+    orch, fake, client = npu_orchestrator
+    home = Path(tmp_hal0_home)
+    _write_embed_slot(home, device="vulkan", slot_type="embedding")
+    _write_caps(home, slot="embed", child="embed", fields={
+        "backend": "gpu-vulkan", "provider": "llama-server",
+        "model": "nomic-embed-text-v1.5-q8_0", "enabled": True,
+    })
+
+    await orch.apply("embed", "embed", {
+        "enabled": True, "backend": "npu", "provider": "flm",
+        "model": "nomic-embed-text-v1.5-q8_0",
+    })
+
+    assert "--embed 1" in client.set_calls[-1]["flm_args"], client.set_calls
+    # device rewritten to npu on the slot TOML.
+    dev_writes = [
+        c for c in fake.calls
+        if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"].get("device") == "npu"
+    ]
+    assert dev_writes, f"device not rewritten to npu: {fake.calls}"
+    assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
+        f"gpu->npu must not bounce the embed slot: {fake.calls}"
+    )
+
+
+async def test_embed_npu_to_gpu_zeroes_flm_and_loads(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    tmp_hal0_home: str,
+) -> None:
+    """Case 5: embed npu→gpu-vulkan → flm_args embed=0 AND gpu path DOES load/swap."""
+    orch, fake, client = npu_orchestrator
+    home = Path(tmp_hal0_home)
+    _write_embed_slot(home, device="flm", slot_type="embedding")
+    _write_caps(home, slot="embed", child="embed", fields={
+        "backend": "npu", "provider": "flm",
+        "model": "nomic-embed-text-v1.5-q8_0", "enabled": True,
+    })
+
+    await orch.apply("embed", "embed", {
+        "enabled": True, "backend": "gpu-vulkan", "provider": "llama-server",
+        "model": "nomic-embed-text-v1.5-q8_0",
+    })
+
+    # Leaving NPU must drop embed from the anchor's flm_args.
+    assert client.set_calls, "leaving npu did not touch flm_args"
+    assert "--embed 0" in client.set_calls[-1]["flm_args"], client.set_calls
+    # The gpu path runs the standard lifecycle (device/model changed → swap, or load).
+    assert [c for c in fake.calls if c[0] in ("load", "swap")], (
+        f"gpu-vulkan target must run the standard load/swap path: {fake.calls}"
+    )
+
+
+async def test_npu_embed_anchor_offline_still_pending(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Case 9: anchor offline → pending_reload True, NO restart."""
+    monkeypatch.setattr(
+        CapabilityOrchestrator,
+        "_validate_model_in_catalog",
+        lambda self, slot, child, model_id, backend_id: None,
+    )
+    client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 0")
+    fake = FakeSlotManager()
+    # No anchor record at all → "offline".
+    fake.set_configs([])
+    orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
+    home = Path(tmp_hal0_home)
+    _write_embed_slot(home, device="flm", slot_type="embedding")
+    _write_caps(home, slot="embed", child="embed", fields={
+        "backend": "npu", "provider": "flm",
+        "model": "nomic-embed-text-v1.5-q8_0", "enabled": False,
+    })
+
+    result = await orch.apply("embed", "embed", {
+        "enabled": True, "backend": "npu", "provider": "flm",
+        "model": "nomic-embed-text-v1.5-q8_0",
+    })
+
+    assert result.get("pending_reload") is True
+    assert not [c for c in fake.calls if c[0] == "restart"], (
+        f"anchor must never be eagerly restarted: {fake.calls}"
+    )

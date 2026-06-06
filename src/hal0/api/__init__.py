@@ -948,9 +948,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The orchestrator is intentionally constructed AFTER the slot
     # manager + registry are ready so initialize_if_missing() can lift
     # current slot config into capabilities.toml on first boot.
+    # NPU Phase 2: pass a zero-arg callable returning a LemonadeClient so
+    # the orchestrator's device=npu embed/stt path can read/write lemond
+    # ``flm_args`` (drive the FLM trio) instead of spawning a standalone FLM
+    # process. Local import keeps orchestrator import cheap.
+    def _lemonade_client():  # type: ignore[no-untyped-def]
+        from hal0.providers import lemonade_provider
+
+        return lemonade_provider().client()
+
     capability_orchestrator = CapabilityOrchestrator(
         slot_manager=slot_manager,
         registry=model_registry,
+        lemonade_provider=_lemonade_client,
     )
     try:
         await capability_orchestrator.initialize_if_missing()
