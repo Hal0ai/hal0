@@ -349,6 +349,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const initialIdle = slot?.idle_timeout_s != null ? slot.idle_timeout_s : 900;
   const initialWorkers = slot?.workers != null ? slot.workers : 1;
   const initialExtraArgs = slot?.llamacpp_args != null ? slot.llamacpp_args : "";
+  const initialRope = slot?.rope_freq_base != null ? slot.rope_freq_base : 0;
 
   const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 4096);
   // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
@@ -358,12 +359,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [nGpuLayers, setNGpuLayers] = useStateSM(
     slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1"
   );
+  // Issue #548: rope_freq_base — seeded from list payload (null → "0" default).
+  const [ropeFreqBase, setRopeFreqBase] = useStateSM(
+    slot?.rope_freq_base != null ? String(slot.rope_freq_base) : "0"
+  );
   const [idleTimeout, setIdleTimeout] = useStateSM(initialIdle);
   const [workers, setWorkers] = useStateSM(initialWorkers);
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
   const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
   const [submitErr, setSubmitErr] = useStateSM(null);
+  // Per-field validation errors for numeric inputs (#548).
+  const [fieldErrs, setFieldErrs] = useStateSM({});
   // Runtime Backend selector (ADR-0022). Seeded from the DECLARED backend
   // token (bare rocm|vulkan|cpu|flm), falling back to the gpu-stripped
   // device. The selector itself only offers the selectable backends.
@@ -378,6 +385,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setThinking(slot.enable_thinking === true);
       setThinkingPending(false);
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
+      setRopeFreqBase(slot.rope_freq_base != null ? String(slot.rope_freq_base) : "0");
       setDevice(slot.device || "gpu-rocm");
       setMakeDefault(!!slot.isDefault);
       // #587: re-seed from the slot prop so the drawer tracks the real
@@ -389,6 +397,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setWorkers(slot.workers != null ? slot.workers : 1);
       setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
       setSubmitErr(null);
+      setFieldErrs({});
       setSelectedBackend(
         slot.declared_backend || (slot.device || "gpu-rocm").replace("gpu-", "") || "rocm"
       );
@@ -400,14 +409,32 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
   async function onSaveClick() {
     setSubmitErr(null);
+    // Issue #548: validate numeric fields before any network call.
+    // Invalid values surface inline and block Save.
+    const ctxNum = Number(ctx);
+    const nglNum = Number(nGpuLayers);
+    const ropeNum = Number(ropeFreqBase);
+    const errs = {};
+    if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
+      errs.ctx = "Must be an integer ≥ 128";
+    }
+    if (!Number.isFinite(nglNum) || !Number.isInteger(nglNum) || nglNum < -1) {
+      errs.ngl = "Must be an integer ≥ -1 (use -1 to offload all layers)";
+    }
+    if (!Number.isFinite(ropeNum) || ropeNum < 0) {
+      errs.rope = "Must be a number ≥ 0 (0 = use model default)";
+    }
+    if (Object.keys(errs).length > 0) {
+      setFieldErrs(errs);
+      return;
+    }
+    setFieldErrs({});
     try {
-      // Two-step: defaults (ctx_size lives under [model]) + slot config
-      // for the top-level keys (device, llamacpp_args, idle_timeout_s,
-      // workers, default).
-      const ctxNum = Number(ctx);
+      // Two-step: defaults (ctx_size / n_gpu_layers / rope_freq_base live
+      // under [model]) + slot config for the top-level keys (device,
+      // llamacpp_args, idle_timeout_s, workers, default).
       const idleNum = Number(idleTimeout);
       const workersNum = Number(workers);
-      const nglNum = Number(nGpuLayers);
       // #587 dirty-tracking: only include a field in the body if the
       // user actually changed it from the seeded (on-disk) value.
       // Sending every field unconditionally is what clobbered values
@@ -415,9 +442,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
       // unconditional because the drawer's seed is best-effort
       // (metrics?.ctx / -1 sentinel) and NOT the truth source.
       const ctxBody = {
-        ctx_size: Number.isFinite(ctxNum) ? ctxNum : ctx,
-        n_gpu_layers: Number.isFinite(nglNum) ? nglNum : -1,
+        ctx_size: ctxNum,
+        n_gpu_layers: nglNum,
       };
+      // rope_freq_base is dirty-tracked (seed = real on-disk value).
+      if (Number(ropeFreqBase) !== Number(initialRope)) {
+        ctxBody.rope_freq_base = ropeNum;
+      }
       const slotBody = {
         device,
         default: makeDefault,
@@ -676,10 +707,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
         <div className="form-lbl"><span>ctx_size</span><span className="warn">⟳ restart required</span></div>
         <div className="form-ctl">
           <input
-            className="input mono"
+            className={"input mono" + (fieldErrs.ctx ? " input-err" : "")}
             value={ctx}
-            onChange={e => setCtx(e.target.value)}
+            onChange={e => { setCtx(e.target.value); setFieldErrs(p => ({...p, ctx: undefined})); }}
           />
+          {fieldErrs.ctx && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ctx}</div>}
         </div>
       </div>
 
@@ -689,11 +721,26 @@ function EditSlotDrawer({ open, slot, onClose }) {
         <div className="form-lbl"><span>n_gpu_layers</span><span className="warn">⟳ restart required</span></div>
         <div className="form-ctl">
           <input
-            className="input mono"
+            className={"input mono" + (fieldErrs.ngl ? " input-err" : "")}
             value={nGpuLayers}
-            onChange={e => setNGpuLayers(e.target.value)}
+            onChange={e => { setNGpuLayers(e.target.value); setFieldErrs(p => ({...p, ngl: undefined})); }}
           />
-          <div className="hint">-1 offloads all layers to the GPU.</div>
+          {fieldErrs.ngl && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ngl}</div>}
+          {!fieldErrs.ngl && <div className="hint">-1 offloads all layers to the GPU.</div>}
+        </div>
+      </div>
+
+      {/* Issue #548: rope_freq_base — load-time knob, restart required. */}
+      <div className="form-row">
+        <div className="form-lbl"><span>rope_freq_base</span><span className="warn">⟳ restart required</span></div>
+        <div className="form-ctl">
+          <input
+            className={"input mono" + (fieldErrs.rope ? " input-err" : "")}
+            value={ropeFreqBase}
+            onChange={e => { setRopeFreqBase(e.target.value); setFieldErrs(p => ({...p, rope: undefined})); }}
+          />
+          {fieldErrs.rope && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.rope}</div>}
+          {!fieldErrs.rope && <div className="hint">0 uses the model default. Override for long-context models.</div>}
         </div>
       </div>
 

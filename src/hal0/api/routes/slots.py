@@ -223,6 +223,12 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
         entry["enable_thinking"] = cfg.get("enable_thinking")
         n_gpu = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
         entry["n_gpu_layers"] = n_gpu if isinstance(n_gpu, int) else -1
+        # Issue #548: expose rope_freq_base so the Edit drawer can dirty-track
+        # it and avoid clobbering the on-disk value on unrelated saves.
+        # Absent (None) is surfaced as-is — frontend treats null as "use
+        # model default" (0.0 sentinel) and only writes back when changed.
+        rope = model_section.get("rope_freq_base") if isinstance(model_section, dict) else None
+        entry["rope_freq_base"] = rope if isinstance(rope, (int, float)) else None
 
         # Spec 1 / Component 2 (issue #587): surface idle_timeout_s,
         # workers, and the slot's freeform llamacpp_args so the Edit

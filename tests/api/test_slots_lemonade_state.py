@@ -401,6 +401,103 @@ def test_list_slots_llamacpp_args_none_when_server_table_absent(
     assert primary["llamacpp_args"] is None
 
 
+# ── Issue #548: rope_freq_base ───────────────────────────────────────────────
+#
+# rope_freq_base is a [model] float field. The list payload must expose it so
+# the Edit drawer can dirty-track and avoid clobbering the on-disk value.
+# The PUT round-trip must persist it through update_config's deep merge.
+
+
+def test_list_slots_exposes_rope_freq_base(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """rope_freq_base set on disk → exposed in /api/slots payload."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3"',
+            "rope_freq_base = 500000.0",
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["rope_freq_base"] == 500000.0
+
+
+def test_list_slots_rope_freq_base_null_when_absent(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """rope_freq_base absent on disk → payload carries null (not 0.0)."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3"',
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["rope_freq_base"] is None
+
+
+def test_put_config_rope_freq_base_roundtrip(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """PUT /api/slots/{name}/config with model.rope_freq_base persists the value
+    and leaves the model default key intact (deep-merge, not table replacement).
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3-4b"',
+        ],
+    )
+    r = isolated_client.put(
+        "/api/slots/primary/config",
+        json={"model": {"rope_freq_base": 1000000.0}},
+    )
+    assert r.status_code == 200, r.text
+
+    # The list payload should now reflect the written value.
+    r2 = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r2.json()}
+    assert by_name["primary"]["rope_freq_base"] == 1000000.0
+
+    # Deep-merge must not have wiped the model default key.
+    cfg = isolated_client.get("/api/slots/primary/config").json()
+    assert cfg["model"]["rope_freq_base"] == 1000000.0
+    assert cfg["model"]["default"] == "qwen3-4b"
+
+
 def test_list_slots_skips_coresident_for_disabled_sibling(
     tmp_hal0_home: str,
     installed_lemonade_stub: dict[str, Any],
