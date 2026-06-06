@@ -85,9 +85,7 @@ def _normalise_row(entry: Any) -> dict[str, Any] | None:
     }
 
 
-async def _fetch_hf_search(
-    q: str, type_filter: str, limit: int
-) -> list[dict[str, Any]]:
+async def _fetch_hf_search(q: str, type_filter: str, limit: int) -> list[dict[str, Any]]:
     """Hit HF's public models list and project it onto the row shape.
 
     Caller is responsible for capping; this returns whatever HF gave us
@@ -190,8 +188,8 @@ async def hf_search(
     now = time.monotonic()
     cached = _SEARCH_CACHE.get(cache_key)
     if cached is not None and (now - cached[0]) < _HF_CACHE_TTL_S:
-        return {"results": cached[1], "cached": True}
+        return {"results": cached[1]}
 
     rows = await _fetch_hf_search(q_norm, type_norm, _HF_UPSTREAM_LIMIT)
     _SEARCH_CACHE[cache_key] = (now, rows)
-    return {"results": rows, "cached": False}
+    return {"results": rows}

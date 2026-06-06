@@ -173,9 +173,7 @@ def test_hf_search_forwards_type_filter(
         _hf_search_handler(body=[], capture=capture),
     )
 
-    r = hf_client.get(
-        "/api/hf/search", params={"q": "embed", "type": "feature-extraction"}
-    )
+    r = hf_client.get("/api/hf/search", params={"q": "embed", "type": "feature-extraction"})
     assert r.status_code == 200
     assert "pipeline_tag=feature-extraction" in capture["url"]
 
