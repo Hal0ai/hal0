@@ -80,6 +80,40 @@ DEFAULT_LOAD_TIMEOUT_S = 120.0
 _HEALTH_CACHE_TTL_S = 2.0
 
 
+# ── FLM args schema bridge ────────────────────────────────────────────
+#
+# hal0's API + capability contract uses a convenient TOP-LEVEL ``flm_args``
+# string. lemond's runtime config has NO ``flm_args`` key — the FLM trio
+# args live NESTED at ``flm.args`` (e.g. ``{"flm": {"args": "--asr 1 ..."}}``).
+# Sending a top-level ``flm_args`` to ``/internal/set`` is rejected 400
+# ("unknown key"). These two helpers are the single place that knows the
+# nested wire shape, so the GET-read and POST-write sides (and the
+# capability orchestrator) can't drift apart. See memory
+# ``hal0_flm_args_nested_not_toplevel``.
+
+
+def flm_args_from_lemond_config(cfg: dict[str, Any]) -> str:
+    """Extract the FLM trio args string from a lemond config snapshot.
+
+    Reads the nested ``flm.args`` value (lemond's real schema). Returns an
+    empty string when ``flm`` is absent/non-dict or ``args`` is missing.
+    """
+    flm = cfg.get("flm")
+    if not isinstance(flm, dict):
+        return ""
+    args = flm.get("args", "")
+    return args if isinstance(args, str) else ""
+
+
+def flm_args_set_payload(value: str) -> dict[str, Any]:
+    """Return the ``/internal/set`` payload that sets the FLM trio args.
+
+    Translates the convenient ``flm_args`` string into lemond's nested
+    ``{"flm": {"args": value}}`` wire shape.
+    """
+    return {"flm": {"args": value}}
+
+
 class LemonadeClient:
     """Thin async wrapper around lemond's HTTP control plane.
 

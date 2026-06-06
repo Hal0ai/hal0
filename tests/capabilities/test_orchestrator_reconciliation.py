@@ -100,14 +100,15 @@ class FakeLemonadeClient:
     """Records ``internal_config`` reads + ``internal_set`` writes.
 
     Mirrors :class:`hal0.lemonade.client.LemonadeClient` for the two
-    methods the orchestrator's NPU-trio path uses. ``flm_args`` starts at
-    whatever ``initial_flm_args`` is passed (the trio anchor's current
-    args); ``internal_set`` merges the patch so a later ``internal_config``
-    reflects it.
+    methods the orchestrator's NPU-trio path uses. The trio args live at
+    the NESTED ``flm.args`` key (lemond's real schema — there is no
+    top-level ``flm_args``); ``initial_flm_args`` seeds ``flm.args``.
+    ``internal_set`` deep-merges the ``flm`` sub-dict so a later
+    ``internal_config`` reflects it.
     """
 
     def __init__(self, initial_flm_args: str = "") -> None:
-        self._config: dict[str, Any] = {"flm_args": initial_flm_args}
+        self._config: dict[str, Any] = {"flm": {"args": initial_flm_args}}
         self.set_calls: list[dict[str, Any]] = []
 
     async def internal_config(self) -> dict[str, Any]:
@@ -115,7 +116,14 @@ class FakeLemonadeClient:
 
     async def internal_set(self, values: dict[str, Any]) -> dict[str, Any]:
         self.set_calls.append(dict(values))
-        self._config.update(values)
+        for key, value in values.items():
+            if key == "flm" and isinstance(value, dict):
+                existing = self._config.get("flm")
+                merged = dict(existing) if isinstance(existing, dict) else {}
+                merged.update(value)
+                self._config["flm"] = merged
+            else:
+                self._config[key] = value
         return dict(self._config)
 
 
@@ -365,10 +373,10 @@ async def test_fake_slot_manager_iter_configs_roundtrip() -> None:
 async def test_fake_lemonade_client_records_set() -> None:
     client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 1")
     cfg = await client.internal_config()
-    assert cfg["flm_args"] == "--asr 1 --embed 1"
-    await client.internal_set({"flm_args": "--asr 1 --embed 0"})
-    assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 0"}
-    assert (await client.internal_config())["flm_args"] == "--asr 1 --embed 0"
+    assert cfg["flm"]["args"] == "--asr 1 --embed 1"
+    await client.internal_set({"flm": {"args": "--asr 1 --embed 0"}})
+    assert client.set_calls[-1] == {"flm": {"args": "--asr 1 --embed 0"}}
+    assert (await client.internal_config())["flm"]["args"] == "--asr 1 --embed 0"
 
 
 # ── Step 5: NPU-trio fork (Cases 1-5, 9) ──────────────────────────────────────
@@ -460,7 +468,7 @@ async def test_npu_embed_enable_sets_flm_args_no_load(
     )
 
     assert client.set_calls, "flm_args was never set"
-    assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 1"}, client.set_calls
+    assert client.set_calls[-1] == {"flm": {"args": "--asr 1 --embed 1"}}, client.set_calls
     # The embed slot must be flipped enabled=true + stamped type=embedding,
     # WITHOUT a nested model in that write (Decision 4).
     enabled_writes = [
@@ -478,6 +486,60 @@ async def test_npu_embed_enable_sets_flm_args_no_load(
         f"NPU embed path must not bounce the slot: {fake.calls}"
     )
     assert result.get("pending_reload") is True, result
+
+
+async def test_npu_embed_enable_reads_prior_nested_args_and_preserves_operator_flags(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prior trio args are read from the NESTED ``flm.args`` key and
+    operator flags (e.g. ``--pmode turbo``) are preserved on write.
+
+    Live lemond config carries operator flags alongside the trio toggles;
+    the orchestrator must recompose only ``--asr``/``--embed`` and keep the
+    rest verbatim, and must locate the current value at ``flm.args`` (not a
+    nonexistent top-level ``flm_args``)."""
+    monkeypatch.setattr(
+        CapabilityOrchestrator,
+        "_validate_model_in_catalog",
+        lambda self, slot, child, model_id, backend_id: None,
+    )
+    client = FakeLemonadeClient(initial_flm_args="--pmode turbo --asr 1 --embed 0")
+    fake = FakeSlotManager()
+    fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
+    orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
+    home = Path(tmp_hal0_home)
+    _write_embed_slot(home, device="flm", slot_type="embedding")
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": False,
+        },
+    )
+
+    await orch.apply(
+        "embed",
+        "embed",
+        {
+            "enabled": True,
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+        },
+    )
+
+    assert client.set_calls, "flm_args was never set"
+    written = client.set_calls[-1]
+    # Nested wire shape — never a top-level flm_args.
+    assert "flm_args" not in written, written
+    args = written["flm"]["args"]
+    assert "--pmode turbo" in args, f"operator flag dropped: {args!r}"
+    assert "--embed 1" in args, f"embed not enabled: {args!r}"
+    assert "--asr 1" in args, f"prior asr value lost: {args!r}"
 
 
 async def test_npu_embed_disable_zeroes_flm_args_no_unload(
@@ -502,7 +564,7 @@ async def test_npu_embed_disable_zeroes_flm_args_no_unload(
 
     result = await orch.apply("embed", "embed", {"enabled": False})
 
-    assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 0"}, client.set_calls
+    assert client.set_calls[-1] == {"flm": {"args": "--asr 1 --embed 0"}}, client.set_calls
     disabled_writes = [
         c
         for c in fake.calls
@@ -551,7 +613,7 @@ async def test_npu_stt_enable_sets_asr(
     )
 
     assert client.set_calls, "flm_args was never set for stt"
-    last = client.set_calls[-1]["flm_args"]
+    last = client.set_calls[-1]["flm"]["args"]
     assert "--asr 1" in last, f"stt enable did not set asr=1: {last!r}"
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
         f"NPU stt path must not bounce a slot: {fake.calls}"
@@ -593,7 +655,7 @@ async def test_embed_gpu_to_npu_no_load(
         },
     )
 
-    assert "--embed 1" in client.set_calls[-1]["flm_args"], client.set_calls
+    assert "--embed 1" in client.set_calls[-1]["flm"]["args"], client.set_calls
     # device rewritten to npu on the slot TOML.
     dev_writes = [
         c
@@ -639,7 +701,7 @@ async def test_embed_npu_to_gpu_zeroes_flm_and_loads(
 
     # Leaving NPU must drop embed from the anchor's flm_args.
     assert client.set_calls, "leaving npu did not touch flm_args"
-    assert "--embed 0" in client.set_calls[-1]["flm_args"], client.set_calls
+    assert "--embed 0" in client.set_calls[-1]["flm"]["args"], client.set_calls
     # The gpu path runs the standard lifecycle (device/model changed → swap, or load).
     assert [c for c in fake.calls if c[0] in ("load", "swap")], (
         f"gpu-vulkan target must run the standard load/swap path: {fake.calls}"

@@ -1,0 +1,15 @@
+[Unit]
+# Per-boot readiness marker for the hal0 fresh-install test template (#407).
+# fresh-test-ct.sh waits for /tmp/hal0-test-ready before driving the install.
+# /tmp is cleared on boot, so the marker is always fresh per clone start.
+Description=hal0 test-template readiness marker
+After=network-online.target ssh.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo READY > /tmp/hal0-test-ready'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

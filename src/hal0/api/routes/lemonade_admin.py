@@ -51,6 +51,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from hal0.errors import BadRequest, Hal0Error
+from hal0.lemonade.client import flm_args_from_lemond_config, flm_args_set_payload
 
 router = APIRouter()
 
@@ -310,6 +311,12 @@ async def get_lemonade_config(request: Request) -> dict[str, Any]:
 
     client = lemonade_provider().client()
     snapshot = await client.internal_config()
+    # lemond stores the FLM trio args NESTED at ``flm.args`` — there is no
+    # top-level ``flm_args`` in its schema (memory
+    # ``hal0_flm_args_nested_not_toplevel``). Synthesize the convenience
+    # top-level key the dashboard reads (``data.flm_args``) from the live
+    # nested value, leaving the verbatim ``flm`` block untouched.
+    snapshot["flm_args"] = flm_args_from_lemond_config(snapshot)
     return {
         **snapshot,
         "_hal0": {
@@ -379,7 +386,18 @@ async def set_lemonade_config(request: Request) -> dict[str, Any]:
     from hal0.providers import lemonade_provider
 
     client = lemonade_provider().client()
-    result = await client.internal_set(body)
+
+    # Translate the convenient top-level ``flm_args`` contract into lemond's
+    # NESTED ``flm.args`` wire shape — lemond has no top-level ``flm_args``
+    # key and rejects it 400 (memory ``hal0_flm_args_nested_not_toplevel``).
+    # Build a separate wire payload so ``body`` stays intact for effect
+    # classification below (``flm_args`` must remain in the response's
+    # ``effects.deferred`` — the response contract is unchanged).
+    payload = dict(body)
+    if "flm_args" in payload:
+        payload.update(flm_args_set_payload(payload.pop("flm_args")))
+
+    result = await client.internal_set(payload)
 
     # Echo the immediate-vs-deferred split for exactly the keys this
     # request touched. We classify off the request body rather than the
