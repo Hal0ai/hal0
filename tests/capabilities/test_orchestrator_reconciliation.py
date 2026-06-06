@@ -53,6 +53,17 @@ class FakeSlotManager:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        # Slot config records the orchestrator scans for the NPU anchor
+        # (type==llm && device==npu). Seed via :meth:`set_configs`.
+        self._configs: list[dict[str, Any]] = []
+
+    def set_configs(self, configs: list[dict[str, Any]]) -> None:
+        """Test helper — seed the records returned by ``iter_configs()``."""
+        self._configs = list(configs)
+
+    async def iter_configs(self) -> list[dict[str, Any]]:
+        self.calls.append(("iter_configs", "", {}))
+        return list(self._configs)
 
     async def status(self, slot_name: str) -> _StubSlot:
         self.calls.append(("status", slot_name, {}))
@@ -70,6 +81,12 @@ class FakeSlotManager:
         self.calls.append(("swap", slot_name, {"model_id": new_model_id}))
         return _StubSlot("ready")
 
+    async def restart(self, slot_name: str) -> _StubSlot:
+        # Recorded so tests can assert the NPU path NEVER eagerly restarts
+        # the anchor (Decision 1: return pending_reload, don't bounce it).
+        self.calls.append(("restart", slot_name, {}))
+        return _StubSlot("ready")
+
     async def create(self, slot_name: str, cfg: dict[str, Any]) -> _StubSlot:
         self.calls.append(("create", slot_name, {"cfg": cfg}))
         return _StubSlot("offline")
@@ -77,6 +94,29 @@ class FakeSlotManager:
     async def update_config(self, slot_name: str, updates: dict[str, Any]) -> _StubSlot:
         self.calls.append(("update_config", slot_name, {"updates": updates}))
         return _StubSlot("ready")
+
+
+class FakeLemonadeClient:
+    """Records ``internal_config`` reads + ``internal_set`` writes.
+
+    Mirrors :class:`hal0.lemonade.client.LemonadeClient` for the two
+    methods the orchestrator's NPU-trio path uses. ``flm_args`` starts at
+    whatever ``initial_flm_args`` is passed (the trio anchor's current
+    args); ``internal_set`` merges the patch so a later ``internal_config``
+    reflects it.
+    """
+
+    def __init__(self, initial_flm_args: str = "") -> None:
+        self._config: dict[str, Any] = {"flm_args": initial_flm_args}
+        self.set_calls: list[dict[str, Any]] = []
+
+    async def internal_config(self) -> dict[str, Any]:
+        return dict(self._config)
+
+    async def internal_set(self, values: dict[str, Any]) -> dict[str, Any]:
+        self.set_calls.append(dict(values))
+        self._config.update(values)
+        return dict(self._config)
 
 
 @pytest.fixture
@@ -310,3 +350,22 @@ def test_recompose_flm_args_disable_emits_explicit_zero() -> None:
     out = _recompose_flm_args("--asr 1 --embed 1", "embed", False)
     assert "--embed 0" in out
     assert "--asr 1" in out
+
+
+# ── Step 4: test stubs (FakeSlotManager.iter_configs/restart, FakeLemonadeClient)
+
+
+async def test_fake_slot_manager_iter_configs_roundtrip() -> None:
+    fake = FakeSlotManager()
+    fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
+    configs = await fake.iter_configs()
+    assert configs == [{"name": "agent", "type": "llm", "device": "npu", "enabled": True}]
+
+
+async def test_fake_lemonade_client_records_set() -> None:
+    client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 1")
+    cfg = await client.internal_config()
+    assert cfg["flm_args"] == "--asr 1 --embed 1"
+    await client.internal_set({"flm_args": "--asr 1 --embed 0"})
+    assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 0"}
+    assert (await client.internal_config())["flm_args"] == "--asr 1 --embed 0"
