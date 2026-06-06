@@ -7,7 +7,7 @@ shelled out to nvidia-smi first on every read, producing a per-read
 execve storm on AMD hosts where nvidia-smi is absent.
 
 FIX-#427: HardwareStats.snapshot() no longer scans the slot port range
-(8081–8099) on every poll. The scan remains on the public method
+(8081-8099) on every poll. The scan remains on the public method
 slot_port_occupancy() / occupied_slot_ports() for the config-validation
 and next-free-port callers that legitimately need it, but it is NOT
 performed on the polled hot path.
@@ -163,10 +163,10 @@ def test_unknown_vendor_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_snapshot_does_not_probe_slot_ports(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Polled snapshot() must not call _port_in_use on the 8081–8099 range.
+    """Polled snapshot() must not call _port_in_use on the 8081-8099 range.
 
     Issue #427: the slot-port socket scan was being triggered on every
-    dashboard poll (N concurrent clients × 19 connect_ex calls per poll)
+    dashboard poll (N concurrent clients x 19 connect_ex calls per poll)
     which had no place on the hot path. The scan remains available via
     the public slot_port_occupancy() / occupied_slot_ports() methods for
     config-validation and next-free-port callers.
