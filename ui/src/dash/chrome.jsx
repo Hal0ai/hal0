@@ -14,6 +14,7 @@ import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useSidebarAgentRollup } from '@/api/hooks/useAgents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { useHardware } from '@/api/hooks/useHardware'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -89,6 +90,11 @@ const Icons = {
 
 // ─── TopBar ───
 function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0 }) {
+  // Issue #333: hostname from live /api/hardware (useHardware hook) instead of
+  // the legacy HAL0_DATA seed. Fall back to a neutral "hal0" placeholder
+  // while the first response is in flight so the layout stays stable.
+  const hw = useHardware();
+  const hostName = hw.data?.name || "hal0";
   const labels = {
     dashboard: ["Overview", "Dashboard"],
     firstrun:  ["Setup",   "FirstRun"],
@@ -119,7 +125,7 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0
       </button>
       <div className="tb-host">
         <span className="host-dot" />
-        <b>{HAL0_DATA.host.name}</b>
+        <b>{hostName}</b>
         <span className="ut">· up {hostUptime}</span>
       </div>
       <button className="tb-bell" onClick={onBell} aria-label="Agent approvals">

@@ -212,6 +212,10 @@ function BannerStack({ scope = "global", route, vars: extraVars }) {
 }
 
 // ─── Banner catalog — every state the brief calls out ────────────────────
+// Issue #339: catalog entries are static demo copy for the Tweaks panel.
+// Use MOCK_VERSION so a version literal never lands in the production
+// bundle (the real UpdateBanner reads useUpdateState instead).
+const MOCK_VERSION = "<demo>";
 const BANNER_CATALOG = [
   // Global
   {
@@ -228,7 +232,7 @@ const BANNER_CATALOG = [
   {
     id: "update-available", scope: "global", kind: "info",
     eyebrow: "Update available",
-    heading: "hal0 v0.2.2 is available",
+    heading: `hal0 ${MOCK_VERSION} is available`,
     body: "Includes lemonade v10.7.0 pin bump and one FLM CHANGELOG note. Update expects a brief outage during lemond + hal0-api restart.",
     actions: [
       { label: "Update now", primary: true },
