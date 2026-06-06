@@ -270,3 +270,43 @@ def test_ensure_slot_exists_omits_type_for_rerank() -> None:
     # embed-rerank → child "rerank", not in the trio-type map.
     assert "rerank" not in _CHILD_TO_SLOT_TYPE
     assert "tts" not in _CHILD_TO_SLOT_TYPE
+
+
+# ── Step 2: _recompose_flm_args (Case 6) ──────────────────────────────────────
+
+
+def test_recompose_flm_args_empty_embed_enable() -> None:
+    """Empty current args + (embed, True) → both trio flags explicit, embed=1."""
+    from hal0.capabilities.orchestrator import _recompose_flm_args
+
+    out = _recompose_flm_args("", "embed", True)
+    assert "--embed 1" in out
+    assert "--asr 0" in out  # absent → appended explicit 0
+
+
+def test_recompose_flm_args_preserves_unrecognized_flags() -> None:
+    """Decision 2: only the targeted trio flag is touched; others verbatim."""
+    from hal0.capabilities.orchestrator import _recompose_flm_args
+
+    out = _recompose_flm_args("--threads 8 --asr 1 --embed 0", "embed", True)
+    assert "--threads 8" in out, f"unrecognized flag dropped: {out!r}"
+    assert "--embed 1" in out, f"embed not flipped on: {out!r}"
+    assert "--asr 1" in out, f"asr clobbered: {out!r}"
+
+
+def test_recompose_flm_args_stt_sets_asr() -> None:
+    """child=stt maps to --asr (not --embed)."""
+    from hal0.capabilities.orchestrator import _recompose_flm_args
+
+    out = _recompose_flm_args("--embed 1", "stt", True)
+    assert "--asr 1" in out
+    assert "--embed 1" in out  # preserved
+
+
+def test_recompose_flm_args_disable_emits_explicit_zero() -> None:
+    """Disabling a modality emits the explicit 0 form, keeps the other flag."""
+    from hal0.capabilities.orchestrator import _recompose_flm_args
+
+    out = _recompose_flm_args("--asr 1 --embed 1", "embed", False)
+    assert "--embed 0" in out
+    assert "--asr 1" in out

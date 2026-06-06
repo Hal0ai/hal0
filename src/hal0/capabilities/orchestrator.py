@@ -74,6 +74,59 @@ _CHILD_TO_SLOT_TYPE: dict[str, str] = {
 LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img", "vision")
 
 
+# child → the ``flm serve`` trio flag it toggles.
+_CHILD_TO_FLM_FLAG: dict[str, str] = {
+    "embed": "--embed",
+    "stt": "--asr",
+}
+
+
+def _recompose_flm_args(current: str, child: str, enable: bool) -> str:
+    """Recompute lemond ``flm_args`` for a single trio modality toggle.
+
+    Decision 2: replace ONLY the ``--asr``/``--embed`` token for ``child``
+    (append if absent), preserving every other token verbatim
+    (``--threads 8`` etc.). Both trio flags are always emitted with an
+    explicit ``0|1`` value so the FLM child's coresident-modality state is
+    unambiguous — an absent flag is normalised to its explicit ``0`` form.
+
+    ``child`` must be ``"embed"`` or ``"stt"``. The flag for ``child`` is
+    set to ``1`` when ``enable`` else ``0``; the other trio flag keeps its
+    existing value, defaulting to ``0`` when absent.
+    """
+    target_flag = _CHILD_TO_FLM_FLAG[child]
+    tokens = current.split()
+
+    # Pull the existing explicit values for both trio flags (default 0).
+    trio_values: dict[str, str] = {"--asr": "0", "--embed": "0"}
+    # Walk tokens, copying through everything that isn't a trio flag (or its
+    # value). We rebuild the trio flags at the end so ordering is stable and
+    # exactly-once even if the input had duplicates or a missing value.
+    passthrough: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in trio_values:
+            # Consume the following value token if present + value-shaped.
+            if i + 1 < len(tokens):
+                trio_values[tok] = tokens[i + 1]
+                i += 2
+            else:
+                i += 1
+            continue
+        passthrough.append(tok)
+        i += 1
+
+    # Apply the requested toggle for the targeted modality.
+    trio_values[target_flag] = "1" if enable else "0"
+
+    # Emit: preserved tokens first, then both trio flags in a stable order.
+    out = list(passthrough)
+    out += ["--asr", trio_values["--asr"]]
+    out += ["--embed", trio_values["--embed"]]
+    return " ".join(out)
+
+
 def legal_children(slot: str) -> list[str]:
     """Return the child names valid for ``slot``."""
     return [child for (s, child) in _CHILD_TO_SLOT if s == slot]
