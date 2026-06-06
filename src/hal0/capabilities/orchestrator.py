@@ -44,6 +44,7 @@ from hal0.capabilities.config import (
 from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
 from hal0.errors import BadRequest, Hal0Error, NotFound
+from hal0.lemonade.client import flm_args_from_lemond_config, flm_args_set_payload
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 
@@ -725,21 +726,23 @@ class CapabilityOrchestrator:
         return True
 
     async def _set_flm_modality(self, child: str, *, enable: bool) -> None:
-        """Read-modify-write the FLM anchor's lemond ``flm_args``.
+        """Read-modify-write the FLM anchor's lemond trio args.
 
-        Reads the current ``flm_args`` via the injected lemonade client,
-        recomposes only this modality's trio flag (Decision 2), and writes
-        it back. No-op when no lemonade client is wired.
+        lemond stores the FLM trio args NESTED at ``flm.args`` — there is no
+        top-level ``flm_args`` key in its schema (memory
+        ``hal0_flm_args_nested_not_toplevel``). Reads the current value via
+        :func:`flm_args_from_lemond_config`, recomposes only this modality's
+        trio flag (Decision 2), and writes it back as the nested
+        ``{"flm": {"args": ...}}`` payload. No-op when no lemonade client is
+        wired.
         """
         if self._lemonade_provider is None:
             return
         client = self._lemonade_provider()
         cfg = await client.internal_config()
-        current = cfg.get("flm_args") or ""
-        if not isinstance(current, str):
-            current = ""
+        current = flm_args_from_lemond_config(cfg)
         new_args = _recompose_flm_args(current, child, enable)
-        await client.internal_set({"flm_args": new_args})
+        await client.internal_set(flm_args_set_payload(new_args))
 
     async def _npu_anchor_is_live(self) -> bool:
         """Return True when the FLM trio anchor slot is currently loaded.
