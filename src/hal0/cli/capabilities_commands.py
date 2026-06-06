@@ -431,11 +431,9 @@ def sync(
             have = output.read_text(encoding="utf-8")
         except FileNotFoundError:
             console.print(f"[red]drift[/red] — {output} does not exist.")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
         if have != want:
-            console.print(
-                f"[red]drift[/red] — {output} is stale; run `hal0 capabilities sync`."
-            )
+            console.print(f"[red]drift[/red] — {output} is stale; run `hal0 capabilities sync`.")
             raise typer.Exit(1)
         console.print(f"[green]in sync[/green] — {output} matches the registry.")
         raise typer.Exit(0)

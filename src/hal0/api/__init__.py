@@ -840,9 +840,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from hal0.lemonade.server_models_gen import write_server_models
 
     _server_models_path = _Path(
-        os.environ.get(
-            "HAL0_SERVER_MODELS_PATH", "/opt/lemonade/resources/server_models.json"
-        )
+        os.environ.get("HAL0_SERVER_MODELS_PATH", "/opt/lemonade/resources/server_models.json")
     )
 
     def _regen_server_models() -> None:
