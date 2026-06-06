@@ -8,6 +8,7 @@
 import { useCuratedBundles, useFirstRunInstall, useFirstRunComplete } from '@/api/hooks/useFirstRun'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModelStore, useModelStoreSet, useModelStoreMigrate } from '@/api/hooks/useSettings'
+import { usePullJob, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 
 const { useState: useStateF, useEffect: useEffectF } = React;
 
@@ -377,69 +378,111 @@ function FirstRunConfirm({ bundleId, onBack, onInstall }) {
 
       <div className="fr-actions">
         <button className="btn ghost lg" onClick={onBack}>Cancel</button>
-        <button className="btn lg" onClick={() => {
-          // Best-effort backend kick; UI advances regardless so the
-          // mock build still shows the progress stage.
-          installM.mutate({ bundle: bundleId, withNpu });
-          onInstall();
-        }}>{Icons.download} Install hal0-{bundle.name}</button>
+        <button className="btn lg" onClick={async () => {
+          // Best-effort backend kick — advance the UI regardless.
+          // Capture model_ids from the response so the progress pane
+          // can reattach per-row SSE streams via usePullJob.reattach().
+          let ids = [];
+          try {
+            const res = await installM.mutateAsync({ bundle: bundleId, withNpu });
+            if (Array.isArray(res?.model_ids)) ids = res.model_ids;
+          } catch (_e) { /* best-effort — progress stage renders graceful empty */ }
+          onInstall(ids);
+        }} disabled={installM.isPending}>{Icons.download} {installM.isPending ? "Starting…" : `Install hal0-${bundle.name}`}</button>
       </div>
     </div>
   );
 }
 
+// ─── Per-model download row backed by usePullJob (SSE reattach) ───
+//
+// Mirrors DownloadRow in model-modals.jsx but uses the existing
+// dl-row/dl-bar/dl-pct/dl-state CSS layout from the firstrun pane.
+// reattach() on mount reconnects to any in-flight pull; if the pull
+// hasn't started yet the row shows "queued" as the initial state.
+function FrDownloadRow({ modelId }) {
+  const job = usePullJob();
+  useEffectF(() => {
+    if (modelId) job.reattach(modelId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelId]);
+
+  const state = job.state; // idle | queued | running | completed | failed | cancelled
+  const pct   = job.pct ?? 0;
+
+  const barClass = state === "completed" ? "ok" : state === "failed" ? "err" : "";
+  const pctClass = "dl-pct mono" + (
+    state === "completed" ? " ok" :
+    state === "queued" || state === "idle" ? " dim" :
+    state === "failed" || state === "cancelled" ? " err" : ""
+  );
+  const pctLabel =
+    state === "completed" ? "✓ 100%" :
+    state === "queued" || state === "idle" ? "queued" :
+    state === "failed"    ? "✗ failed" :
+    state === "cancelled" ? "cancelled" :
+    `${pct}%`;
+  const stateLabel =
+    state === "running"   ? `${fmtBytes(job.downloaded)} / ${fmtBytes(job.total)}` :
+    state === "queued" || state === "idle" ? "waiting" :
+    state === "completed" ? "complete" :
+    state === "failed"    ? (job.error?.message || "pull failed") :
+    state === "cancelled" ? "cancelled" : "";
+
+  return (
+    <div className="dl-row">
+      <div className="dl-name mono">
+        {modelId}
+        {state === "running" && job.speedBps > 0 && (
+          <span className="sub">{fmtSpeed(job.speedBps)} · {fmtEta(job.etaS)} remaining</span>
+        )}
+      </div>
+      <div className="dl-bar">
+        <i className={barClass} style={{ width: `${pct}%` }} />
+      </div>
+      <div className={pctClass}>{pctLabel}</div>
+      <div className="dl-state mono">{stateLabel}</div>
+      {state === "failed" && (
+        <div className="dl-err">
+          <span style={{color: "var(--err)", display: "inline-flex"}}>{Icons.warn}</span>
+          <span style={{flex: 1}}>
+            <b>{modelId}</b> · {job.error?.message || "pull failed"}. Retry to re-fetch, or pull later from <span className="mono" style={{color: "var(--fg)"}}>/models</span>.
+          </span>
+          <button className="btn ghost sm" onClick={() => job.start(modelId)}>{Icons.restart} Retry</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Install progress (state 3) ───
-function FirstRunProgress({ onDone, bundleId }) {
-  // Phase B1: complete-mutation flips the backend's firstrun.completed
-  // flag when the user clicks "Open dashboard". Downloads list is
-  // intentionally still HAL0_DATA — per-row SSE wiring via
-  // `usePullJob(id)` lands in B2 when DownloadRow swaps in the hook.
+function FirstRunProgress({ onDone, bundleId, modelIds }) {
+  // modelIds comes from the install mutation response (model_ids[]).
+  // Each FrDownloadRow reattaches to the in-flight SSE stream for that
+  // model via usePullJob.reattach(id). Empty array = graceful empty state.
   const completeM = useFirstRunComplete();
   const bundlesQuery = useCuratedBundles();
   const bundle = (bundlesQuery.data?.bundles ?? HAL0_DATA.bundles).find(b => b.id === bundleId)
               || HAL0_DATA.bundles.find(b => b.id === bundleId);
   const bundleName = bundle?.name ? `hal0-${bundle.name}` : 'hal0';
+  const ids = Array.isArray(modelIds) && modelIds.length > 0 ? modelIds : [];
   return (
     <div className="fr-inner">
       <div className="fr-prog-h">
         <h2>Installing {bundleName}…</h2>
-        <span className="meta">~38 GB total · est 12 min · downloads continue in background</span>
+        <span className="meta">
+          {bundle?.sizeGB ? `~${bundle.sizeGB} GB total · ` : ""}downloads continue in background
+        </span>
       </div>
 
       <div className="fr-prog-list">
-        {HAL0_DATA.downloads.map((d, i) => (
-          <div key={i} className="dl-row">
-            <div className="dl-name mono">
-              {d.name}
-              <span className="sub">{d.repo}{d.rate && d.state === "pulling" ? ` · ${d.rate} · ${d.eta} remaining` : ""}</span>
-            </div>
-            <div className="dl-bar">
-              <i className={d.state === "done" ? "ok" : d.state === "error" ? "err" : ""} style={{ width: `${d.pct}%` }} />
-            </div>
-            <div className={"dl-pct mono" + (d.state === "done" ? " ok" : d.state === "queued" ? " dim" : d.state === "error" ? " err" : "")}>
-              {d.state === "done" ? "✓ 100%" : d.state === "queued" ? "queued" : d.state === "error" ? "✗ failed" : `${d.pct}%`}
-            </div>
-            <div className="dl-state mono">
-              {d.state === "pulling" && `${d.done} / ${d.size}`}
-              {d.state === "queued" && "waiting"}
-              {d.state === "verifying" && "verifying"}
-              {d.state === "done" && "complete"}
-              {d.state === "paused" && "paused"}
-              {d.state === "error" && "shard 2/2 sha256 mismatch"}
-              {d.state === "cancelled" && "cancelled"}
-            </div>
-            {d.state === "error" && (
-              <div className="dl-err">
-                <span style={{color: "var(--err)", display: "inline-flex"}}>{Icons.warn}</span>
-                <span style={{flex: 1}}>
-                  <b>{d.name}</b> · corrupted shard 2 of 2 — sha256 mismatch. Retry to re-fetch the bad shard, or skip this model and pull it later from <span className="mono" style={{color: "var(--fg)"}}>/models</span>.
-                </span>
-                <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Retrying ${d.name}`, "info")}>{Icons.restart} Retry</button>
-                <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Skipped ${d.name} — install later from /models`, "warn")}>Skip this model</button>
-              </div>
-            )}
+        {ids.length === 0 ? (
+          <div className="dl-row" style={{color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12, padding: "16px 0"}}>
+            Install started — download rows will appear as pulls begin.
           </div>
-        ))}
+        ) : (
+          ids.map(id => <FrDownloadRow key={id} modelId={id} />)
+        )}
       </div>
 
       <div className="fr-actions" style={{justifyContent: "space-between"}}>
@@ -459,6 +502,9 @@ function FirstRunProgress({ onDone, bundleId }) {
 // ─── FirstRun view shell ───
 function FirstRunView({ frStage, setFrStage, frBundle, setFrBundle, onComplete, layout }) {
   const [skipOpen, setSkipOpen] = useStateF(false);
+  // Capture model IDs returned by the install mutation so the progress
+  // pane can reattach live SSE streams per model via FrDownloadRow.
+  const [frModelIds, setFrModelIds] = useStateF([]);
   return (
     <div className="fr">
       {frStage === "pick" && (
@@ -481,11 +527,11 @@ function FirstRunView({ frStage, setFrStage, frBundle, setFrBundle, onComplete, 
         <FirstRunConfirm
           bundleId={frBundle}
           onBack={() => setFrStage("storage")}
-          onInstall={() => setFrStage("progress")}
+          onInstall={ids => { setFrModelIds(ids || []); setFrStage("progress"); }}
         />
       )}
       {frStage === "progress" && (
-        <FirstRunProgress bundleId={frBundle} onDone={() => onComplete()} />
+        <FirstRunProgress bundleId={frBundle} modelIds={frModelIds} onDone={() => onComplete()} />
       )}
       <SkipBundleDialog
         open={skipOpen}
