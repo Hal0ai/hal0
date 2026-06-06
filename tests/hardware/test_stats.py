@@ -196,9 +196,7 @@ def test_snapshot_does_not_probe_slot_ports(
     )
 
 
-def test_slot_port_occupancy_still_available(
-    monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_slot_port_occupancy_still_available(monkeypatch: pytest.MonkeyPatch) -> None:
     """The slot-port scan MUST still be available to config-validation
     and next-free-port callers (issue #427 acceptance criterion 2).
 

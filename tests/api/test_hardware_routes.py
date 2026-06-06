@@ -303,7 +303,10 @@ async def test_cached_snapshot_fresh_hits_no_extra_probe(
     req = _fake_request(stub)
 
     fake_now = {"t": 500.0}
-    monkeypatch.setattr(hw_mod.time, "monotonic", lambda: fake_now["t"])
+    # Patch ONLY the SWR clock seam (hw_mod._now), never time.monotonic
+    # globally — asyncio's loop.time() reads time.monotonic, so freezing it
+    # would hang every asyncio.sleep (incl. _wait_until + the background path).
+    monkeypatch.setattr(hw_mod, "_now", lambda: fake_now["t"])
 
     await _cached_snapshot(req)
     await _cached_snapshot(req)  # within TTL -> cached
@@ -327,7 +330,10 @@ async def test_cached_snapshot_stale_returns_cached_and_refreshes_in_background(
     req = _fake_request(stub)
 
     fake_now = {"t": 500.0}
-    monkeypatch.setattr(hw_mod.time, "monotonic", lambda: fake_now["t"])
+    # Patch ONLY the SWR clock seam (hw_mod._now), never time.monotonic
+    # globally — asyncio's loop.time() reads time.monotonic, so freezing it
+    # would hang every asyncio.sleep (incl. _wait_until + the background path).
+    monkeypatch.setattr(hw_mod, "_now", lambda: fake_now["t"])
 
     # Cold start.
     r1 = await _cached_snapshot(req)
@@ -342,9 +348,7 @@ async def test_cached_snapshot_stale_returns_cached_and_refreshes_in_background(
     r2 = await _cached_snapshot(req)
     elapsed = time.monotonic() - t0
     # The probe takes 50ms; SWR should return essentially instantly.
-    assert elapsed < 0.01, (
-        f"stale poll took {elapsed*1000:.1f}ms — SWR returned a blocking call"
-    )
+    assert elapsed < 0.01, f"stale poll took {elapsed * 1000:.1f}ms — SWR returned a blocking call"
     assert r2 == {"ram_used_gb": 1.0, "gpu_util": 0.5}  # stale value preserved
 
     # Background refresh fires asynchronously. Wait for both the probe
@@ -352,8 +356,7 @@ async def test_cached_snapshot_stale_returns_cached_and_refreshes_in_background(
     # done_callback after the task transitions to done — the latter
     # is sequenced AFTER the probe body returns).
     assert await _wait_until(
-        lambda: stub.calls >= 2
-        and not getattr(stub, "_refresh_in_flight", False),
+        lambda: stub.calls >= 2 and not getattr(stub, "_refresh_in_flight", False),
         timeout_s=2.0,
     ), (
         f"background refresh not fully done "
@@ -381,7 +384,10 @@ async def test_cached_snapshot_concurrent_stale_polls_no_wedge(
     req = _fake_request(stub)
 
     fake_now = {"t": 500.0}
-    monkeypatch.setattr(hw_mod.time, "monotonic", lambda: fake_now["t"])
+    # Patch ONLY the SWR clock seam (hw_mod._now), never time.monotonic
+    # globally — asyncio's loop.time() reads time.monotonic, so freezing it
+    # would hang every asyncio.sleep (incl. _wait_until + the background path).
+    monkeypatch.setattr(hw_mod, "_now", lambda: fake_now["t"])
 
     # Cold start.
     await _cached_snapshot(req)
@@ -397,7 +403,7 @@ async def test_cached_snapshot_concurrent_stale_polls_no_wedge(
     # All return the cached stale value, none waited for the 50ms probe.
     assert all(r == {"ram_used_gb": 1.0, "gpu_util": 0.5} for r in results)
     assert elapsed < 0.02, (
-        f"concurrent stale polls took {elapsed*1000:.1f}ms — SWR self-DoS wedge"
+        f"concurrent stale polls took {elapsed * 1000:.1f}ms — SWR self-DoS wedge"
     )
 
     # Exactly one background refresh fires (single-flight), not 4.

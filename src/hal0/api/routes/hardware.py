@@ -27,6 +27,13 @@ router = APIRouter()
 # value immediately and revalidating in the background.
 _SNAPSHOT_TTL_S = 5.0
 
+# Clock seam for the SWR cache. Tests drive the TTL deterministically by
+# patching ``_now``; patching ``time.monotonic`` globally would also freeze
+# asyncio's event-loop clock (``loop.time()`` reads it), which hangs every
+# ``asyncio.sleep`` and deadlocks the background-revalidate path. Reading the
+# clock through this indirection keeps the loop's timers on the real clock.
+_now = time.monotonic
+
 _PVE_CONFIGURE_HINT = "Configure /etc/hal0/proxmox.json to see host pressure."
 
 
@@ -289,14 +296,14 @@ async def _refresh_snapshot_cache(stats: Any) -> dict[str, Any]:
         # written the cache while we were waiting on the lock.
         cached = getattr(stats, "_snapshot_cache", None)
         cached_at = getattr(stats, "_snapshot_cache_at", 0.0)
-        if cached is not None and (time.monotonic() - cached_at) < _SNAPSHOT_TTL_S:
+        if cached is not None and (_now() - cached_at) < _SNAPSHOT_TTL_S:
             return cached
         try:
             snap = await asyncio.to_thread(stats.snapshot)
         except Exception:
             snap = {}
         stats._snapshot_cache = snap
-        stats._snapshot_cache_at = time.monotonic()
+        stats._snapshot_cache_at = _now()
         return snap
 
 
@@ -344,7 +351,7 @@ async def _cached_snapshot(request: Request) -> dict[str, Any]:
 
     cached = getattr(stats, "_snapshot_cache", None)
     cached_at = getattr(stats, "_snapshot_cache_at", 0.0)
-    now = time.monotonic()
+    now = _now()
     age = (now - cached_at) if cached is not None else float("inf")
 
     # Fast path — fresh cache, no refresh needed.

@@ -214,7 +214,7 @@ class HardwareStats:
         range (19 connect attempts). It is intentionally NOT part of
         snapshot() (issue #427) — the polled /api/stats/hardware path
         does not need port occupancy, and N concurrent dashboard clients
-        × 19 connect_ex calls per poll wedged the single-event-loop API.
+        x 19 connect_ex calls per poll wedged the single-event-loop API.
         Callers that legitimately need it (config validation, next-free-
         port display) should call this method directly.
         """
@@ -228,9 +228,7 @@ class HardwareStats:
         """
         return [p for p, used in self.slot_port_occupancy().items() if used]
 
-    def snapshot(
-        self, *, include_slot_ports: bool = False
-    ) -> dict[str, Any]:
+    def snapshot(self, *, include_slot_ports: bool = False) -> dict[str, Any]:
         """Return a JSON-safe dict of all available stats.
 
         Field shape mirrors the haloai /api/status response (subset):
