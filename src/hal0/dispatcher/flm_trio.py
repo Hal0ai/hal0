@@ -194,11 +194,19 @@ class FLMTrioRouter:
                     continue
                 backend_url = entry.get("backend_url")
                 if isinstance(backend_url, str) and backend_url.strip():
-                    # Strip trailing slashes so ``{backend_url}/v1/...``
-                    # joining never produces ``//v1/...``. lemond's
-                    # backend_url is conventionally bare (no trailing
-                    # slash) but defensiveness is cheap.
-                    return backend_url.rstrip("/")
+                    # Normalise the discovered base so the
+                    # ``{backend_url}/v1/...`` joins below always produce
+                    # exactly one ``/v1``. lemond versions disagree on the
+                    # shape: some emit a bare ``host:port``, but 10.6.0
+                    # includes the OpenAI ``/v1`` suffix
+                    # (``http://127.0.0.1:8001/v1``). Without stripping it the
+                    # dispatch URL became ``/v1/v1/embeddings`` → 404 (the
+                    # NPU embed/STT slots silently failed on the public API
+                    # path). Strip a trailing ``/v1`` and any trailing slash.
+                    url = backend_url.strip().rstrip("/")
+                    if url.endswith("/v1"):
+                        url = url[: -len("/v1")]
+                    return url
 
         return None
 

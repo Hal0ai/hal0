@@ -195,6 +195,47 @@ async def test_find_backend_url_strips_trailing_slash() -> None:
 
 
 @pytest.mark.asyncio
+async def test_find_backend_url_strips_trailing_v1_suffix() -> None:
+    """Regression: lemond 10.6.0 reports ``backend_url`` WITH a ``/v1``
+    suffix (e.g. ``http://127.0.0.1:8001/v1``). The dispatch methods join
+    ``{backend_url}/v1/...``, so an unstripped suffix produced
+    ``/v1/v1/embeddings`` → 404. Normalise the discovered base to drop a
+    trailing ``/v1`` (and any trailing slash) so the join yields exactly
+    one ``/v1``."""
+    payload = {
+        "loaded": [
+            {
+                "recipe": "flm",
+                "type": "llm",
+                "backend_url": "http://127.0.0.1:8001/v1",
+            }
+        ]
+    }
+    client, transport = _lemonade_with_health(payload)
+    async with transport:
+        router = FLMTrioRouter(client)
+        assert await router.find_flm_chat_backend_url() == "http://127.0.0.1:8001"
+
+
+@pytest.mark.asyncio
+async def test_find_backend_url_strips_trailing_v1_with_slash() -> None:
+    """``/v1/`` (suffix + trailing slash) normalises the same way."""
+    payload = {
+        "loaded": [
+            {
+                "recipe": "flm",
+                "type": "llm",
+                "backend_url": "http://127.0.0.1:8001/v1/",
+            }
+        ]
+    }
+    client, transport = _lemonade_with_health(payload)
+    async with transport:
+        router = FLMTrioRouter(client)
+        assert await router.find_flm_chat_backend_url() == "http://127.0.0.1:8001"
+
+
+@pytest.mark.asyncio
 async def test_find_backend_url_returns_none_when_backend_url_missing() -> None:
     payload = {
         "loaded": [{"recipe": "flm", "type": "llm"}],
