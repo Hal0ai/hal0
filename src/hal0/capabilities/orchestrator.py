@@ -690,11 +690,16 @@ class CapabilityOrchestrator:
 
           1. Ensure the device=npu, type=embedding|transcription slot
              RECORD exists (create path stamps ``type``).
-          2. Write a ``{enabled}``-only ``update_config`` (covers enable AND
-             disable so ``v1._is_npu_trio_request``'s ``enabled is False``
-             check blocks dispatch). Runs AFTER ``_rewrite_underlying_slot``
-             (Decision 4) — and NEVER passes ``model`` (nested dicts are
-             replaced wholesale by the shallow merge).
+          2. Write ``{enabled, type}`` via ``update_config`` (covers enable
+             AND disable so ``v1._is_npu_trio_request``'s ``enabled is
+             False`` check blocks dispatch). The ``type`` stamp is essential
+             for PRE-EXISTING slots: ``_ensure_slot_exists_npu`` early-returns
+             when the TOML exists, so a real drifted ``embed.toml`` with no
+             ``type`` would otherwise never gate trio dispatch. ``type`` is a
+             top-level SCALAR, so co-writing it is safe under Decision 4 —
+             that prohibition is specifically about the nested ``model`` dict
+             (replaced wholesale by the shallow merge), which we still NEVER
+             pass here. Runs AFTER ``_rewrite_underlying_slot``.
           3. Recompose the anchor's lemond ``flm_args`` for this modality.
           4. Return ``pending_reload=True`` ALWAYS (Decision 1: never
              auto-restart the live anchor; if the anchor is offline the new
@@ -703,8 +708,13 @@ class CapabilityOrchestrator:
              for ``type==llm && device==npu``; we never restart it here.
         """
         await self._ensure_slot_exists_npu(slot_name, child, selection)
-        # {enabled}-only write — explicitly NOT carrying ``model`` (Decision 4).
-        await self._slot_manager.update_config(slot_name, {"enabled": selection.enabled})
+        # Stamp {enabled, type} — NEVER the nested ``model`` (Decision 4).
+        # ``type`` is required even for an existing slot whose TOML predates
+        # Phase 2 and carries no ``type``; without it trio dispatch no-ops.
+        await self._slot_manager.update_config(
+            slot_name,
+            {"enabled": selection.enabled, "type": _CHILD_TO_SLOT_TYPE[child]},
+        )
         await self._set_flm_modality(child, enable=selection.enabled)
         # Decision 1: surface pending_reload whether or not the anchor is
         # live; we never eagerly bounce it. (The anchor scan is informational

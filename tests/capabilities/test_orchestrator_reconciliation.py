@@ -461,13 +461,18 @@ async def test_npu_embed_enable_sets_flm_args_no_load(
 
     assert client.set_calls, "flm_args was never set"
     assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 1"}, client.set_calls
-    # The embed slot must be flipped enabled=true via a {enabled}-only write.
+    # The embed slot must be flipped enabled=true + stamped type=embedding,
+    # WITHOUT a nested model in that write (Decision 4).
     enabled_writes = [
         c
         for c in fake.calls
-        if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"] == {"enabled": True}
+        if c[0] == "update_config"
+        and c[1] == "embed"
+        and c[2]["updates"].get("enabled") is True
+        and c[2]["updates"].get("type") == "embedding"
     ]
-    assert enabled_writes, f"no enabled-only update_config on embed slot: {fake.calls}"
+    assert enabled_writes, f"no enabled+type update_config on embed slot: {fake.calls}"
+    assert "model" not in enabled_writes[-1][2]["updates"], enabled_writes[-1]
     # ZERO load/swap/unload on the embed slot.
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
         f"NPU embed path must not bounce the slot: {fake.calls}"
@@ -501,9 +506,13 @@ async def test_npu_embed_disable_zeroes_flm_args_no_unload(
     disabled_writes = [
         c
         for c in fake.calls
-        if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"] == {"enabled": False}
+        if c[0] == "update_config"
+        and c[1] == "embed"
+        and c[2]["updates"].get("enabled") is False
+        and c[2]["updates"].get("type") == "embedding"
     ]
-    assert disabled_writes, f"no enabled=False write on embed slot: {fake.calls}"
+    assert disabled_writes, f"no enabled=False+type write on embed slot: {fake.calls}"
+    assert "model" not in disabled_writes[-1][2]["updates"], disabled_writes[-1]
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
         f"NPU embed disable must not unload the slot: {fake.calls}"
     )
@@ -680,3 +689,65 @@ async def test_npu_embed_anchor_offline_still_pending(
     assert not [c for c in fake.calls if c[0] == "restart"], (
         f"anchor must never be eagerly restarted: {fake.calls}"
     )
+
+
+async def test_npu_embed_existing_slot_without_type_gets_typed(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    tmp_hal0_home: str,
+) -> None:
+    """A pre-existing embed slot with NO ``type`` must be stamped on the npu path.
+
+    The real production drift shape (the original ``drifted_state`` fixture)
+    has an ``embed.toml`` with no ``type`` key. ``_ensure_slot_exists_npu``
+    early-returns for an existing TOML, so the ``type`` discriminator must be
+    written some other way — otherwise ``v1._is_npu_trio_request`` never
+    matches (``cfg.get("type") != "embedding"``) and trio dispatch silently
+    no-ops, violating the hard constraint that the npu path leaves a
+    ``device=npu, type=embedding`` record in force.
+    """
+    orch, fake, _client = npu_orchestrator
+    home = Path(tmp_hal0_home)
+    # Existing slot, NO type (matches the production drift shape).
+    _write_embed_slot(home, device="vulkan", slot_type=None)
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": False,
+        },
+    )
+
+    await orch.apply(
+        "embed",
+        "embed",
+        {
+            "enabled": True,
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+        },
+    )
+
+    # The embed slot record must carry type=embedding after the apply, via
+    # one of the update_config writes on the slot.
+    type_writes = [
+        c
+        for c in fake.calls
+        if c[0] == "update_config"
+        and c[1] == "embed"
+        and c[2]["updates"].get("type") == "embedding"
+    ]
+    assert type_writes, (
+        "embed slot was never stamped with type=embedding on the npu path; "
+        f"trio dispatch would silently no-op. calls: {fake.calls}"
+    )
+    # Decision 4: the write that carries type must NOT carry a nested model
+    # (nested dicts are replaced wholesale by the shallow merge).
+    for c in type_writes:
+        assert "model" not in c[2]["updates"], (
+            f"type write must not carry model (Decision 4): {c[2]['updates']!r}"
+        )

@@ -110,6 +110,8 @@ async def test_npu_phase2_embed_enable_end_to_end(
     slots_dir = home / "etc" / "hal0" / "slots"
     slots_dir.mkdir(parents=True, exist_ok=True)
     # Drift: slot TOML still vulkan/llama-server while caps wants npu/flm.
+    # NB: NO ``type`` on disk — the real production drift shape. The apply
+    # must stamp ``type=embedding`` itself, else trio dispatch never gates.
     (slots_dir / "embed.toml").write_text(
         "\n".join(
             [
@@ -118,7 +120,6 @@ async def test_npu_phase2_embed_enable_end_to_end(
                 'backend = "vulkan"',
                 'provider = "llama-server"',
                 "enabled = false",
-                'type = "embedding"',
                 "[model]",
                 'default = "nomic-embed-text-v1.5-q8_0"',
                 "",
@@ -162,15 +163,18 @@ async def test_npu_phase2_embed_enable_end_to_end(
     assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 1"}, client.set_calls
 
     # 2. A device=npu, type=embedding slot record is in force. The slot TOML
-    #    already existed (drift fixture) so the type survives; the enabled
-    #    flag is flipped via a {enabled}-only update_config (Decision 4).
+    #    existed with NO type (drift shape), so the apply must stamp
+    #    type=embedding alongside enabled — WITHOUT a nested model (Decision 4).
     enabled_writes = [
         c
         for c in fake.calls
-        if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"] == {"enabled": True}
+        if c[0] == "update_config"
+        and c[1] == "embed"
+        and c[2]["updates"].get("enabled") is True
+        and c[2]["updates"].get("type") == "embedding"
     ]
-    assert enabled_writes, f"no {{enabled}}-only write on embed slot: {fake.calls}"
-    # The {enabled}-only write must NOT carry model (Decision 4).
+    assert enabled_writes, f"no enabled+type write on embed slot: {fake.calls}"
+    # That write must NOT carry the nested model (Decision 4).
     assert "model" not in enabled_writes[-1][2]["updates"]
 
     # 3. ZERO standalone spawn on the embed slot.
