@@ -341,6 +341,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const backendMut = useSlotBackend();
 
   const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 4096);
+  // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
+  // button through PATCH /defaults. Both seed from the slot list payload.
+  const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
+  const [thinkingPending, setThinkingPending] = useStateSM(false);
+  const [nGpuLayers, setNGpuLayers] = useStateSM(
+    slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1"
+  );
   const [idleTimeout, setIdleTimeout] = useStateSM(900);
   const [workers, setWorkers] = useStateSM(1);
   const [extraArgs, setExtraArgs] = useStateSM("--flash-attn on --no-mmap");
@@ -358,6 +365,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
   useEffectSM(() => {
     if (slot) {
       setCtx(slot.metrics?.ctx || 4096);
+      setThinking(slot.enable_thinking === true);
+      setThinkingPending(false);
+      setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
       setDevice(slot.device || "gpu-rocm");
       setMakeDefault(!!slot.isDefault);
       setIdleTimeout(900);
@@ -382,10 +392,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
       const ctxNum = Number(ctx);
       const idleNum = Number(idleTimeout);
       const workersNum = Number(workers);
+      const nglNum = Number(nGpuLayers);
       await defaultsMut.mutateAsync({
         name: slot.name,
         body: {
           ctx_size: Number.isFinite(ctxNum) ? ctxNum : ctx,
+          n_gpu_layers: Number.isFinite(nglNum) ? nglNum : -1,
         },
       });
       await editMut.mutateAsync({
@@ -583,6 +595,49 @@ function EditSlotDrawer({ open, slot, onClose }) {
         </div>
       </div>
 
+      {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
+          own PUT /config), no restart: _slot_thinking_default reads it live
+          on the next request. */}
+      {slot.type === "llm" && (
+        <div className="form-row">
+          <div className="form-lbl">
+            <span>Thinking</span>
+            <span className="sub">Stream reasoning before the answer. Off = faster, direct replies.</span>
+          </div>
+          <div className="form-ctl">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={thinking}
+                disabled={thinkingPending}
+                onChange={async (e) => {
+                  const next = e.target.checked;
+                  setThinking(next);
+                  setThinkingPending(true);
+                  setSubmitErr(null);
+                  try {
+                    await editMut.mutateAsync({
+                      name: slot.name,
+                      body: { enable_thinking: next },
+                    });
+                    window.__hal0Toast && window.__hal0Toast(
+                      `${slot.name} thinking ${next ? "on" : "off"} — applies to next message`,
+                      "ok",
+                    );
+                  } catch (err) {
+                    setThinking(!next); // revert on failure
+                    setSubmitErr(err?.message || "thinking toggle failed");
+                  } finally {
+                    setThinkingPending(false);
+                  }
+                }}
+              />
+              <span>{thinking ? "Reasoning on" : "Reasoning off"}</span>
+            </label>
+          </div>
+        </div>
+      )}
+
       <div className="form-section">Advanced</div>
 
       <div className="form-row">
@@ -593,6 +648,20 @@ function EditSlotDrawer({ open, slot, onClose }) {
             value={ctx}
             onChange={e => setCtx(e.target.value)}
           />
+        </div>
+      </div>
+
+      {/* C5: GPU offload tuning — saved via the Save button (PATCH /defaults),
+          restart-required like ctx_size since it changes model load. */}
+      <div className="form-row">
+        <div className="form-lbl"><span>n_gpu_layers</span><span className="warn">⟳ restart required</span></div>
+        <div className="form-ctl">
+          <input
+            className="input mono"
+            value={nGpuLayers}
+            onChange={e => setNGpuLayers(e.target.value)}
+          />
+          <div className="hint">-1 offloads all layers to the GPU.</div>
         </div>
       </div>
 

@@ -65,6 +65,16 @@ export interface Slot {
    *  model in memory. Source of truth for the memory-map attribution
    *  (BE-METRICS contract). Prefer this over equal-split GTT division. */
   mem_mb?: number
+  /** Whether the slot is activated. Disabled slots fade on the card, sort to
+   *  the end of the grid, and hide their lifecycle buttons. Defaults to true
+   *  when absent (a slot is enabled unless explicitly off). */
+  enabled?: boolean
+  /** Per-slot reasoning default (llm slots). true → thinking on; false/null →
+   *  off (suppressed). Seeds the drawer's Thinking toggle. */
+  enable_thinking?: boolean | null
+  /** GPU offload layer count for the slot's model (-1 = all). Seeds the
+   *  drawer's Advanced n_gpu_layers input. */
+  n_gpu_layers?: number
   /** Wall-clock epoch (seconds) of the most recent request served by
    *  this slot. ``null``/undefined means hal0-api has not seen a request
    *  for this slot since startup. Used by the slots view to render the
@@ -192,6 +202,10 @@ function normalizeSlot(s: any): Slot {
     declared_backend: s?.declared_backend ?? null,
     actual_backend: s?.actual_backend ?? null,
     backend_mismatch: !!s?.backend_mismatch,
+    // Spec 1: a slot is enabled unless explicitly off. /api/status-sourced
+    // entries in the union may omit the flag, so default it here rather than
+    // letting the card read undefined as "disabled".
+    enabled: s?.enabled !== false,
   }
 }
 

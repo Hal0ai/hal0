@@ -211,10 +211,14 @@ function SlotCard({
   onViewLogs,
   swapOpen,
   onCloseSwap,
+  onToggleEnabled,
   errorMsg,
   busy,
 }) {
   const { type, device, model, state, isDefault, coresident, cpuOnly, metrics } = slot;
+  // Spec 1 / C3: a slot is enabled unless explicitly off. Disabled slots fade,
+  // hide lifecycle buttons, and sort to the end of the grid (SlotsView).
+  const enabled = slot.enabled !== false;
   // Lifecycle phase drives which action buttons render (design 2026-06-04):
   // running (loaded/serving) -> Stop+Restart; off (not loaded) -> Start;
   // transitional (warming/pulling/unloading) -> actions disabled.
@@ -272,7 +276,7 @@ function SlotCard({
   })();
 
   return (
-    <div className={"slot" + (state === "serving" ? " serving" : "") + (swapOpen ? " swap-open" : "")}>
+    <div className={"slot" + (state === "serving" ? " serving" : "") + (swapOpen ? " swap-open" : "") + (enabled ? "" : " slot--disabled")}>
       <div className="slot-h">
         <IndicatorDot slot={slot} />
         <div className="slot-name">
@@ -281,6 +285,21 @@ function SlotCard({
         <div className="right">
           {isDefault && <div className="default-badge">★ default</div>}
           {coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
+          {/* C3: enabled toggle — stays full-opacity + interactive even when
+              the card is faded, so a disabled slot can be re-enabled. */}
+          <label
+            className="slot-enable-toggle"
+            title={enabled ? "Disable slot" : "Enable slot"}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={!!busy}
+              onChange={() => onToggleEnabled && onToggleEnabled(!enabled)}
+            />
+            <span className="slot-enable-track" aria-hidden="true" />
+          </label>
         </div>
       </div>
       <div className="slot-model mono" onClick={onSwap} style={{position: "relative"}}>
@@ -334,7 +353,11 @@ function SlotCard({
         ))}
       </div>
       <div className="slot-actions">
-        {phase === "off" ? (
+        {/* C3: a disabled slot has no running child to Start/Stop/Restart —
+            hide the lifecycle buttons; the card's toggle is the way back on. */}
+        {!enabled ? (
+          <span className="slot-disabled-note mono">disabled</span>
+        ) : phase === "off" ? (
           <button
             className="btn ghost sm"
             disabled={!!busy}
@@ -742,6 +765,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   const unloadMut = useSlotUnload();
   const loadMut = useSlotLoad();
   const swapMut = useSlotSwap();
+  const editMut = useSlotEdit();
 
   const toast = (msg, kind = "info") =>
     window.__hal0Toast && window.__hal0Toast(msg, kind);
@@ -830,6 +854,20 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       swapOpen={swapName === s.name}
       onSwap={(e) => { e.stopPropagation(); setSwapName(swapName === s.name ? null : s.name); }}
       onCloseSwap={() => setSwapName(null)}
+      onToggleEnabled={async (next) => {
+        // C3: instant-apply enabled flip. Query invalidation re-renders the
+        // card from server truth; on error we leave server state untouched and
+        // toast (e.g. the npu-exclusivity 409 when enabling a 2nd NPU LLM).
+        setBusyName(s.name);
+        try {
+          await editMut.mutateAsync({ name: s.name, body: { enabled: next } });
+          toast(`${s.name} ${next ? "enabled" : "disabled"}`, "ok");
+        } catch (err) {
+          toast(err?.message ? `${s.name}: ${err.message}` : `${s.name}: toggle failed`, "warn");
+        } finally {
+          setBusyName(null);
+        }
+      }}
       onEdit={() => { window.location.hash = "#slots/" + s.name; }}
       onRestart={() =>
         runMutation(s.name, restartMut, s.name, `Restarting ${s.name}`)

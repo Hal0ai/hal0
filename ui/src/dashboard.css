@@ -1726,7 +1726,31 @@ a { color: inherit; text-decoration: none; }
    absolutely-positioned .swap-pop can extend past the card bottom. */
 .slot.swap-open { overflow: visible; }
 .slot.serving { border-color: var(--accent-line); }
+/* C3: disabled slot — fade the card body, but keep the enable toggle (which
+   lives in .slot-h .right) full-opacity + interactive so it can be flipped
+   back on. */
+.slot--disabled { opacity: 0.5; }
+.slot--disabled:hover { opacity: 0.72; }
+.slot--disabled .slot-enable-toggle { opacity: 1; }
+.slot-disabled-note { font-size: 11px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.04em; }
+/* C7: Capabilities section — denser quarter-width grid for the narrow utility
+   cards (embed/rerank/stt/tts). Collapses 4-up → 2-up → 1-up. */
+.slots-grid--quarter { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .slot-h { display: flex; align-items: center; gap: 8px; }
+/* C3: compact enable/disable switch on the card header. */
+.slot-enable-toggle { display: inline-flex; align-items: center; cursor: pointer; }
+.slot-enable-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.slot-enable-track {
+  display: inline-block; width: 26px; height: 15px; border-radius: 999px;
+  background: var(--line-strong); position: relative; transition: background 0.12s ease;
+}
+.slot-enable-track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px;
+  border-radius: 50%; background: var(--bg); transition: transform 0.12s ease;
+}
+.slot-enable-toggle input:checked + .slot-enable-track { background: var(--accent); }
+.slot-enable-toggle input:checked + .slot-enable-track::after { transform: translateX(11px); }
+.slot-enable-toggle input:focus-visible + .slot-enable-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 .slot-name {
   display: flex; align-items: center; gap: 8px;
   font-family: var(--jbm); font-size: 14.5px; font-weight: 500; color: var(--fg);
