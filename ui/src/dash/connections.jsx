@@ -17,7 +17,7 @@
 //     new probe is in flight, so the operator can sweep through a
 //     stack and still see the last-known good.
 
-import { useProviders, useUpstreams, useTestUpstream, type Upstream } from '@/api/hooks/useConnections'
+import { useProviders, useUpstreams, useTestUpstream } from '@/api/hooks/useConnections'
 
 const { useState: useStateC, useMemo: useMemoC } = React;
 
