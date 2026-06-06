@@ -872,3 +872,31 @@ def test_synthetic_composite_slot_serving_when_model_loaded(
     by_name = {e["name"]: e for e in r.json()}
     assert "hal0" in by_name, f"composite hal0 slot missing: {sorted(by_name)}"
     assert by_name["hal0"]["status"] == "serving"
+
+
+def test_patch_defaults_preserves_model_default(
+    slot_root: Path,
+    isolated_client: TestClient,
+) -> None:
+    """Regression: the slot-edit Save's ``PATCH /defaults`` must not wipe the
+    model name.
+
+    The dashboard edit drawer saves ctx_size / n_gpu_layers via
+    ``PATCH /api/slots/{name}/defaults`` with a partial ``[model]`` body.
+    A shallow merge replaced the whole ``[model]`` table, silently dropping
+    ``[model].default`` — so after a restart the slot had no resolvable model
+    and the Start button became a silent no-op. The partial update must touch
+    only the keys it carries.
+    """
+    # Sanity: the seeded slot starts with a model default.
+    before = isolated_client.get("/api/slots/primary/config")
+    assert before.status_code == 200, before.text
+    assert before.json()["model"]["default"] == "qwen3-4b-q4_k_m"
+
+    r = isolated_client.patch("/api/slots/primary/defaults", json={"ctx_size": 8192})
+    assert r.status_code == 200, r.text
+
+    after = isolated_client.get("/api/slots/primary/config").json()
+    assert after["model"]["ctx_size"] == 8192
+    # The model name survived the partial defaults write.
+    assert after["model"]["default"] == "qwen3-4b-q4_k_m"

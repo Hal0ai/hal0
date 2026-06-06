@@ -1422,10 +1422,23 @@ class SlotManager:
 
         cfg = await self._load_slot_config(slot_name)
         cfg_dict = _cfg_to_dict(cfg)
-        # Shallow merge — nested dicts are replaced wholesale to keep update
-        # semantics predictable. Callers wanting a partial nested update
-        # build the sub-dict on their side first.
-        cfg_dict.update(updates)
+        # One-level deep merge for nested TOML tables ([model], [server]).
+        # A bare shallow ``dict.update`` replaced a sub-table wholesale, so a
+        # partial ``PATCH /defaults`` body like ``{"model": {"ctx_size": N}}``
+        # silently dropped sibling keys — most damagingly ``[model].default``
+        # (the model name), which left the slot unable to resolve a model and
+        # turned the dashboard Start button into a silent no-op after a
+        # restart. Merge sub-table dicts key-by-key so partial updates only
+        # touch the fields they carry; scalars and lists still replace
+        # wholesale (predictable, and no caller relies on list-merge).
+        for key, value in updates.items():
+            existing = cfg_dict.get(key)
+            if isinstance(existing, dict) and isinstance(value, dict):
+                merged = dict(existing)
+                merged.update(value)
+                cfg_dict[key] = merged
+            else:
+                cfg_dict[key] = value
 
         # PR-11: re-run the NPU exclusivity guard whenever the merged
         # config could land a second device=npu, type=llm anchor (plan

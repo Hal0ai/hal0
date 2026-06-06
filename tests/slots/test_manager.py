@@ -705,3 +705,25 @@ async def test_hal0_backend_env_var_is_ignored(
     sm = SlotManager()
     snap = await sm.load("primary")
     assert snap.state == SlotState.READY
+
+
+async def test_update_config_preserves_sibling_model_keys(slot_root: Path) -> None:
+    """Regression: a partial ``{"model": {...}}`` update must not clobber siblings.
+
+    ``PATCH /api/slots/{name}/defaults`` sends only the model sub-keys it
+    is changing (e.g. ``ctx_size``/``n_gpu_layers``). The shallow merge
+    used to replace the whole ``[model]`` table, silently dropping
+    ``[model].default`` (the model name). After a restart the slot could
+    no longer resolve a model and the dashboard Start button became a
+    silent no-op. update_config must merge nested tables, not clobber.
+    """
+    from hal0.slots.state import SlotState as _S
+
+    sm = SlotManager()
+    await sm._transition("primary", _S.OFFLINE, force=True)
+    # Seeded primary.toml carries [model] default = "qwen3-4b-q4_k_m".
+    await sm.update_config("primary", {"model": {"ctx_size": 8192}})
+    cfg_text = (slot_root / "primary.toml").read_text(encoding="utf-8")
+    assert "ctx_size = 8192" in cfg_text
+    # The pre-existing model default MUST survive the partial update.
+    assert '"qwen3-4b-q4_k_m"' in cfg_text
