@@ -1700,6 +1700,13 @@ a { color: inherit; text-decoration: none; }
    Slots view
    ════════════════════════════════════════════════════════════════════ */
 .slots-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-bottom: 32px; }
+/* Capabilities (C7): content-light slots in a fixed 4-up quarter-width row.
+   Explicit repeat(4,1fr) — not auto-fit — to guarantee the single
+   1/4·1/4·1/4·1/4 row at wide widths; collapses to 2-up / 1-up in the media
+   blocks below. Higher specificity (.slots-grid.quarter) means the base
+   responsive `.slots-grid { 1fr }` won't override it, so each breakpoint sets
+   .slots-grid.quarter explicitly. */
+.slots-grid.quarter { grid-template-columns: repeat(4, 1fr); }
 
 /* Variant: instrument (default) */
 .slot {
@@ -2131,6 +2138,7 @@ a { color: inherit; text-decoration: none; }
   .tb-brand .ver { display: none; }
   .tb-eyebrow .sep:nth-child(2), .tb-eyebrow .now { display: none; }
   .tiers { grid-template-columns: repeat(2, 1fr); }
+  .slots-grid.quarter { grid-template-columns: repeat(2, 1fr); }
   .settings-layout { grid-template-columns: 1fr; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; }
   .models-layout { grid-template-columns: 1fr; }
@@ -2147,6 +2155,7 @@ a { color: inherit; text-decoration: none; }
   .tb-eyebrow { display: none; }
   .tiers { grid-template-columns: 1fr; }
   .slots-grid { grid-template-columns: 1fr; }
+  .slots-grid.quarter { grid-template-columns: 1fr; }
   .slot-metrics { grid-template-columns: repeat(2, 1fr); }
   .snap-row { grid-template-columns: 14px 1fr auto; }
   .snap-row .model, .snap-row .badge { display: none; }

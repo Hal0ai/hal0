@@ -1,6 +1,8 @@
 /**
- * slots-v3 — `#slots` route renders grouped sections (Chat / Embed /
- * Voice / Image / NPU rollup) + slot cards + the "New slot" CTA.
+ * slots-v3 — `#slots` route renders grouped sections (Chat / Capabilities /
+ * Image / NPU rollup) + slot cards + the "New slot" CTA. The embedding,
+ * reranking, transcription and tts slots are merged into one denser
+ * "Capabilities" section rendered as a 4-up quarter-width grid (C7).
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -8,11 +10,22 @@ test.describe('Slots v3 (/slots)', () => {
   test('renders grouped sections + slot cards', async ({ page }) => {
     await page.goto('/#slots')
     await expect(page.locator('.view .vh h1')).toHaveText('Slots')
-    // at least one group section h2 (chat/embed/voice) renders
+    // at least one group section h2 (chat/capabilities/image) renders
     await expect(page.locator('.view .sec h2').first()).toBeVisible()
     // slot cards or list rows present
     const cards = page.locator('.slots-grid > *, .slots-list > *')
     expect(await cards.count()).toBeGreaterThan(0)
+  })
+
+  test('Capabilities section (C7) renders the utility slots in a 4-up quarter grid', async ({ page }) => {
+    await page.goto('/#slots')
+    // The embedding/reranking/transcription/tts slots collapse into one
+    // "Capabilities" section heading (replacing the old Embed + Voice sections).
+    await expect(page.locator('.view .sec h2', { hasText: 'Capabilities' })).toBeVisible()
+    // ...and that section's grid carries the quarter-width modifier.
+    const quarterGrid = page.locator('.slots-grid.quarter')
+    await expect(quarterGrid.first()).toBeVisible()
+    expect(await quarterGrid.locator('> *').count()).toBeGreaterThan(0)
   })
 
   test('exposes New-slot button (create modal trigger)', async ({ page }) => {
