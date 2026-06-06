@@ -400,6 +400,12 @@ def sync(
         "--dry-run",
         help="Show entry count and recipe summary without writing the file.",
     ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Exit non-zero if the on-disk server_models.json differs from what the "
+        "registry would generate (no write). For cron/healthcheck drift detection.",
+    ),
 ) -> None:
     """Regenerate Lemonade's ``server_models.json`` from hal0's registry.
 
@@ -413,6 +419,26 @@ def sync(
     byte stream. Safe to invoke from cron, post-pull hooks, or operators.
     """
     catalog = generate_server_models(registry)
+
+    if check:
+        # Drift detection: compare the on-disk catalog against what the registry
+        # would generate, byte-for-byte (same format as write_server_models).
+        # No write; exit 1 on drift or a missing file so cron/healthchecks fail loud.
+        import json as _json
+
+        want = _json.dumps(catalog, indent=4, sort_keys=False) + "\n"
+        try:
+            have = output.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            console.print(f"[red]drift[/red] — {output} does not exist.")
+            raise typer.Exit(1)
+        if have != want:
+            console.print(
+                f"[red]drift[/red] — {output} is stale; run `hal0 capabilities sync`."
+            )
+            raise typer.Exit(1)
+        console.print(f"[green]in sync[/green] — {output} matches the registry.")
+        raise typer.Exit(0)
 
     if not catalog:
         console.print(

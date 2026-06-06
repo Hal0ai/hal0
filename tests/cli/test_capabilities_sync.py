@@ -104,3 +104,59 @@ def test_sync_empty_registry_emits_stock_fallback(tmp_path: Path) -> None:
     # (long ids are Rich-table-truncated, so assert on stable substrings).
     assert "qwen3.5-9b" in result.output
     assert "6 entries" in result.output
+
+
+# ── --check drift guard ───────────────────────────────────────────────────────
+
+
+def _sync_check_registry(path: Path) -> None:
+    _write_registry(
+        path,
+        {
+            "qwen3-4b-q4_k_m": {
+                "path": "/x/q.gguf",
+                "capabilities": ["chat"],
+                "backends": ["vulkan"],
+                "hf_repo": "unsloth/Qwen3-4B-GGUF",
+                "hf_filename": "q.gguf",
+            }
+        },
+    )
+
+
+def test_check_passes_when_in_sync(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.toml"
+    output = tmp_path / "server_models.json"
+    _sync_check_registry(registry)
+    # Write the catalog, then assert --check sees no drift.
+    runner.invoke(capabilities_app, ["sync", "--registry", str(registry), "--output", str(output)])
+    result = runner.invoke(
+        capabilities_app,
+        ["sync", "--registry", str(registry), "--output", str(output), "--check"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "in sync" in result.output
+
+
+def test_check_fails_on_drift(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.toml"
+    output = tmp_path / "server_models.json"
+    _sync_check_registry(registry)
+    output.write_text(json.dumps({"stale": {}}))  # not what the registry generates
+    result = runner.invoke(
+        capabilities_app,
+        ["sync", "--registry", str(registry), "--output", str(output), "--check"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "drift" in result.output
+
+
+def test_check_fails_when_output_missing(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.toml"
+    output = tmp_path / "server_models.json"
+    _sync_check_registry(registry)
+    result = runner.invoke(
+        capabilities_app,
+        ["sync", "--registry", str(registry), "--output", str(output), "--check"],
+    )
+    assert result.exit_code == 1, result.output
