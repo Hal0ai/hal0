@@ -143,6 +143,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "slots.max_slots": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "slots.port_range_start": {"apply_class": "manual-restart", "services": []},
     "slots.port_range_end": {"apply_class": "manual-restart", "services": []},
+    "slots.idle_timeout_s": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     # [models]
     "models.roots": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "models.auto_scan_on_start": {"apply_class": "immediate", "services": []},

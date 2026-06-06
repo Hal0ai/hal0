@@ -723,6 +723,16 @@ class SlotsConfig(BaseModel):
         le=65535,
         description="Last port in the slot pool (inclusive).",
     )
+    idle_timeout_s: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Global idle-eviction TTL (seconds). "
+            "Models that have not served a request for this long are unloaded by the "
+            "Lemonade idle driver. 0 disables global eviction (per-slot overrides still "
+            "apply). Per-slot idle_timeout_s in each slot's TOML overrides this value."
+        ),
+    )
 
     @model_validator(mode="after")
     def port_range_sane(self) -> SlotsConfig:
