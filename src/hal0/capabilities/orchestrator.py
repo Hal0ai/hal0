@@ -12,9 +12,18 @@ managed by :class:`~hal0.slots.manager.SlotManager`. This module owns:
     match the new selection and rewrites the underlying slot's TOML when
     the user changes backend/provider.
 
-NPU multiplex (one ``flm`` process serving multiple capability children)
-is OUT OF SCOPE for this round; NPU children spawn their own slot via
-the regular ``load()`` path when needed.
+NPU multiplex (NPU Phase 2): a ``device=npu`` selection for a trio
+modality (``embed`` / ``voice.stt``) does NOT spawn a standalone process.
+Instead ``apply()`` drives the FLM trio — one ``flm serve`` anchor process
+serving chat coresident with embed/asr — by recomposing the anchor's
+lemond ``flm_args`` and writing a ``device=npu``,
+``type=embedding|transcription`` slot RECORD for dispatch gating
+(``v1._is_npu_trio_request``). The modality slot is never
+load/swap/unloaded; the anchor is never eagerly restarted — the change
+returns ``pending_reload`` and the operator applies it via the dashboard
+NPU section's reload affordance. Non-trio children (rerank/tts/img/vision)
+and non-NPU devices keep spawning their own slot via the regular
+``load()`` path.
 """
 
 from __future__ import annotations
