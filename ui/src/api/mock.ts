@@ -46,15 +46,14 @@ function buildHealth() {
 }
 
 function buildStats() {
-  // /v1/stats fallback (Phase 4, #326). Lemonade's real /v1/stats does
-  // not include `throughput_mbps` — throughput is sourced exclusively
-  // from /v1/health (see useLemondRollup). DO NOT synthesize
-  // `throughput_mbps: 0.0` here as a "completeness" gesture — the
-  // footer chip is gated to hide when null/0 and a synthetic zero
-  // would re-introduce the misleading "0.0 MB/s" the chip is hiding.
+  // /v1/stats fallback (Phase 4, #326). Reads lastTokPerSec from
+  // HAL0_DATA.lemond so e2e specs can clobber it via addInitScript
+  // (same pattern as lemond.throughput → buildHealth). (#340)
+  const d = data()
+  const L = d.lemond || {}
   return {
     time_to_first_token: 0.22,
-    tokens_per_second: 45.0,
+    tokens_per_second: typeof L.lastTokPerSec === 'number' ? L.lastTokPerSec : 45.0,
     prompt_tokens: 312,
     output_tokens: 188,
     input_tokens: 312,

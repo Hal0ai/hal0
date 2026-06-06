@@ -53,7 +53,8 @@ const HAL0_DATA = {
     version: "v10.6.0",
     loaded: 3,
     budget: 4,
-    throughput: 12.4, // MB/s
+    throughput: 12.4, // MB/s — fallback only; tok/s chip takes priority (#340)
+    lastTokPerSec: 45.0, // tok/s from /v1/stats (#340)
     queued: 0,
     coresident: true,
   },

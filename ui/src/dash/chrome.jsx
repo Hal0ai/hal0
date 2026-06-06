@@ -482,18 +482,23 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
           <span className="v">{L.status}</span>
         </div>
         {/*
-          Throughput chip (#326): Lemonade does not yet surface
-          throughput_mbps on /v1/health for every backend. The rollup
-          coerces missing → null. Hide the chip entirely instead of
-          rendering "—" or "0.0 MB/s" — a value of 0 from a live system
-          actually serving traffic is just as meaningless as null.
+          Throughput chip (#340): prefer tok/s from /v1/stats (always
+          present on a serving backend) over throughput_mbps from
+          /v1/health (Lemonade omits it on most backends). Fall back to
+          MB/s only if lastTokPerSec is null. Both branches hide on
+          null/0 — a 0 from a live system is as meaningless as null.
         */}
-        {L.throughput != null && L.throughput > 0 && (
+        {L.lastTokPerSec != null && L.lastTokPerSec > 0 ? (
+          <div className="foot-chip">
+            <span className="k">throughput</span>
+            <span className="v num">{`${Math.round(L.lastTokPerSec)} tok/s`}</span>
+          </div>
+        ) : L.throughput != null && L.throughput > 0 ? (
           <div className="foot-chip">
             <span className="k">throughput</span>
             <span className="v num">{`${L.throughput} MB/s`}</span>
           </div>
-        )}
+        ) : null}
         {/* "models loaded N/budget" chip removed (2026-06-05) — the figure now
             lives in the sidebar Runtime widget's lemond row tooltip only. */}
         {L.coresident && (

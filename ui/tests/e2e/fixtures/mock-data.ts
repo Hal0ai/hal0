@@ -63,6 +63,7 @@ export const MOCK_DATA = {
     loaded: 3,
     budget: 4,
     throughput: 12.4,
+    lastTokPerSec: 45.0, // #340 tok/s chip
     queued: 0,
     coresident: true,
   },
