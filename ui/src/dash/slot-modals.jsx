@@ -12,8 +12,24 @@ import {
   useSlotBackend,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
+import { useBackends } from '@/api/hooks/useBackends'
 import { useModels } from '@/api/hooks/useModels'
 import { ENDPOINTS } from '@/api/endpoints'
+
+// Full static device list — shown as fallback when /api/backends hasn't
+// loaded yet or returns empty. Never render an empty device dropdown.
+const DEVICE_STATIC = ['gpu-rocm', 'gpu-vulkan', 'cpu', 'npu']
+
+// Map a backend id (e.g. "llamacpp:rocm", "llamacpp:vulkan", "flm:npu",
+// "llamacpp:cpu") to its slot device token.
+function backendToDevice(id) {
+  const s = String(id || '').toLowerCase()
+  if (s.includes('rocm'))   return 'gpu-rocm'
+  if (s.includes('vulkan')) return 'gpu-vulkan'
+  if (s.includes('npu') || s.includes('flm')) return 'npu'
+  if (s.includes('cpu'))    return 'cpu'
+  return null
+}
 
 const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React;
 
@@ -93,7 +109,22 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
 
   const createMut = useSlotCreate();
   const hwQuery = useHardware();
+  const backendsQuery = useBackends();
   const modelsQuery = useModels();
+
+  // Device options: derived from installed backends in /api/backends.
+  // cpu is always runnable — force-add it whenever we have real backend data.
+  // Fallback to DEVICE_STATIC when data is absent/loading/empty so the
+  // dropdown is never empty.
+  const backendsData = backendsQuery.data;
+  const haveBackends = (backendsData?.backends?.length ?? 0) > 0;
+  const deviceOptions = (() => {
+    if (!haveBackends) return DEVICE_STATIC;
+    const installed = (backendsData.backends || []).filter(b => b.state === 'installed');
+    const avail = new Set(installed.map(b => backendToDevice(b.id)).filter(Boolean));
+    avail.add('cpu'); // always runnable on the host
+    return DEVICE_STATIC.filter(d => avail.has(d));
+  })();
 
   useEffectSM(() => {
     if (open) {
@@ -107,6 +138,15 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       setSubmitErr(null);
     }
   }, [open, defaults]);
+
+  // Reconcile selected device with the derived option list: if the current
+  // selection isn't in the available set (e.g. rocm not installed), snap to
+  // the first available device rather than silently POSTing an invalid one.
+  useEffectSM(() => {
+    if (deviceOptions.length && !deviceOptions.includes(device)) {
+      setDevice(deviceOptions[0]);
+    }
+  }, [deviceOptions.join(','), device]);
 
   // validation — slot collision uses the live slot list passed in from
   // the SlotsView (useSlots data), not HAL0_DATA.
@@ -232,10 +272,11 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
         <div className="form-ctl">
           <select className="input mono" value={device} onChange={e => setDevice(e.target.value)}>
-            <option value="gpu-rocm">gpu-rocm</option>
-            <option value="gpu-vulkan">gpu-vulkan</option>
-            <option value="cpu">cpu</option>
-            <option value="npu" disabled={!npuAvailable}>npu{!npuAvailable ? " — install FLM first" : ""}</option>
+            {deviceOptions.map(d => (
+              <option key={d} value={d} disabled={d === 'npu' && !npuAvailable}>
+                {d === 'npu' && !npuAvailable ? 'npu — install FLM first' : d}
+              </option>
+            ))}
           </select>
         </div>
       </div>
