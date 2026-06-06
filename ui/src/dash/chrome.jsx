@@ -73,6 +73,7 @@ const Icons = {
   chev:      <Icon d="M4 6l4 4 4-4"/>,
   chevR:     <Icon d="M6 4l4 4-4 4"/>,
   close:     <Icon d="M4 4l8 8M12 4l-8 8"/>,
+  menu:      <Icon d="M2 4h12M2 8h12M2 12h12"/>,
   check:     <Icon d="M3 8l3 3 7-7"/>,
   warn:      <Icon><path d="M8 2l6 11H2L8 2z"/><path d="M8 7v3M8 12v0.01"/></Icon>,
   plus:      <Icon d="M8 3v10M3 8h10"/>,
@@ -89,7 +90,7 @@ const Icons = {
 };
 
 // ─── TopBar ───
-function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0 }) {
+function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuOpen = false, approvals = 0 }) {
   // Issue #333: hostname from live /api/hardware (useHardware hook) instead of
   // the legacy HAL0_DATA seed. Fall back to a neutral "hal0" placeholder
   // while the first response is in flight so the layout stays stable.
@@ -132,12 +133,25 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0
         {Icons.bell}
         {approvals > 0 && <span className="badge num">{approvals}</span>}
       </button>
+      {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
+      <button
+        className="tb-menu"
+        onClick={onMenu}
+        aria-label="Menu"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+      >
+        {Icons.menu}
+      </button>
     </div>
   );
 }
 
-// ─── Sidebar ───
-function Sidebar({ route, onGo }) {
+// ─── Nav model (shared) ───
+// Canonical list of primary destinations with live counts and the 0.4
+// memory gate applied. Shared by the desktop Sidebar and the mobile
+// NavDrawer so the two navs can never drift apart.
+function useNavItems() {
   const slotsQuery  = useSlots();
   const modelsQuery = useModels();
   const slotCount   = slotsQuery.data?.length  ?? 0;
@@ -148,19 +162,22 @@ function Sidebar({ route, onGo }) {
   // can never disagree with the backend. main.jsx applies the matching
   // route guard for deep links.
   const memoryEnabled = useMemoryEnabled();
-  const items = [
+  return [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
     { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount },
     { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
     { id: "logs",      label: "Logs",      icon: Icons.logs },
     ...(memoryEnabled ? [{ id: "agent", label: "Agent", icon: Icons.agent }] : []),
     // Issue #206 — MCP page wired to /api/mcp/*. Lives under "Agents"
-    // conceptually but kept as a sibling in the sidebar so the URL is
-    // discoverable. Icon reuses the agent glyph (no dedicated MCP icon
-    // in the design system yet).
+    // conceptually but kept as a sibling so the URL is discoverable.
     { id: "mcp",       label: "MCP",       icon: Icons.agent },
     { id: "settings",  label: "Settings",  icon: Icons.settings },
   ];
+}
+
+// ─── Sidebar ───
+function Sidebar({ route, onGo }) {
+  const items = useNavItems();
   return (
     <div className="sidebar">
       <div className="sb-section">Navigate</div>
@@ -634,28 +651,55 @@ if (typeof document !== "undefined" && !document.getElementById("hal0-modal-css"
 }
 
 // ─── Bottom tab bar (mobile <720px) ───
-function BottomTabs({ route, onGo }) {
-  const tabs = [
-    { id: "dashboard", label: "Home",   icon: Icons.dashboard },
-    { id: "agent",     label: "Agent",  icon: Icons.agent },
-    { id: "slots",     label: "Slots",  icon: Icons.slots },
-    { id: "models",    label: "Models", icon: Icons.models },
-    { id: "settings",  label: "More",   icon: Icons.settings },
-  ];
+// ─── NavDrawer (mobile) ───
+// Slide-in drawer that replaces the (display:none) desktop sidebar at
+// ≤720px. Mirrors the sidebar: the command-palette launcher (folded in
+// from the topbar on mobile), the full nav (useNavItems), and the runtime
+// status widget. Opened from the topbar hamburger; closed via backdrop,
+// the X, Esc, or navigating.
+function NavDrawer({ open, route, onGo, onClose, onCmdK }) {
+  const items = useNavItems();
   return (
-    <nav className="bottom-tabs" aria-label="Primary">
-      {tabs.map(t => (
-        <button
-          key={t.id}
-          className={"bottom-tab" + (route === t.id ? " active" : "")}
-          onClick={() => onGo(t.id)}
-        >
-          {t.icon}
-          <span>{t.label}</span>
+    <>
+      <div
+        className={"nav-drawer-backdrop" + (open ? " open" : "")}
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <aside
+        className={"nav-drawer" + (open ? " open" : "")}
+        aria-label="Navigation"
+        aria-hidden={!open}
+      >
+        {open && (<>
+        <div className="nav-drawer-head">
+          <span className="sb-section">Navigate</span>
+          <button className="nav-drawer-close" onClick={onClose} aria-label="Close menu">
+            {Icons.close}
+          </button>
+        </div>
+        <button className="nav-drawer-cmdk" onClick={onCmdK}>
+          {Icons.search}<span>Command palette</span><kbd>⌘K</kbd>
         </button>
-      ))}
-    </nav>
+        <div className="sb-list">
+          {items.map(it => (
+            <div
+              key={it.id}
+              className={"sb-row" + (route === it.id ? " active" : "")}
+              onClick={() => onGo(it.id)}
+            >
+              {it.icon}
+              <span className="lbl">{it.label}</span>
+              {it.cnt !== undefined && <span className="cnt num">{it.cnt}</span>}
+            </div>
+          ))}
+        </div>
+        <div className="sb-spacer" />
+        <SidebarRuntimeWidget onGo={onGo} />
+        </>)}
+      </aside>
+    </>
   );
 }
 
-Object.assign(window, { Wordmark, Icons, Icon, TopBar, Sidebar, Footer, ApprovalModal, BottomTabs });
+Object.assign(window, { Wordmark, Icons, Icon, TopBar, Sidebar, Footer, ApprovalModal, NavDrawer });

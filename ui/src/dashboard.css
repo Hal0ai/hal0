@@ -2224,7 +2224,8 @@ select.npu-sel {
   .view-banners { padding: 14px 16px 0; }
   .tb-brand { width: auto; }
   .tb-host .ut { display: none; }
-  .tb-cmdk span { display: none; }
+  .tb-cmdk { display: none; }   /* command palette folded into the nav drawer on mobile */
+  .topbar .tb-menu { display: flex; }
   .tb-eyebrow { display: none; }
   .tiers { grid-template-columns: 1fr; }
   .slots-grid { grid-template-columns: 1fr; }
@@ -2249,7 +2250,6 @@ select.npu-sel {
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; overflow-x: auto; }
   .topbar { padding: 0 12px; gap: 10px; }
   .footer { display: none; }
-  .bottom-tabs { display: grid; }
   .app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
 }
 
@@ -2431,34 +2431,104 @@ select.npu-sel {
 }
 
 /* ─── Bottom tab bar (mobile <720px) ──────────────────────────── */
-.bottom-tabs {
+/* ─── Mobile nav: topbar hamburger + slide-in drawer ──────────
+   .tb-menu is hidden on desktop (the sidebar handles nav) and revealed at
+   ≤720px by the media query above, where it opens .nav-drawer. */
+.tb-menu {
   display: none;
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 80;
-  background: var(--bg);
-  border-top: 1px solid var(--line);
-  grid-template-columns: repeat(5, 1fr);
-  padding-bottom: env(safe-area-inset-bottom);
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  color: var(--fg-2);
+  cursor: pointer;
 }
-.bottom-tab {
+.tb-menu:hover { color: var(--fg); border-color: var(--line-strong); }
+
+.nav-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.nav-drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+
+.nav-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  width: min(82vw, 320px);
   display: flex;
   flex-direction: column;
+  gap: 2px;
+  padding: 12px 8px calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);
+  transform: translateX(100%);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.nav-drawer.open { transform: translateX(0); }
+
+.nav-drawer-head {
+  display: flex;
   align-items: center;
-  gap: 3px;
-  padding: 9px 6px 7px;
+  justify-content: space-between;
+  padding: 2px 6px 6px;
+}
+.nav-drawer-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   background: transparent;
   border: none;
   color: var(--fg-3);
-  font-family: var(--jbm);
-  font-size: 9px;
-  letter-spacing: 0.02em;
   cursor: pointer;
 }
-.bottom-tab.active { color: var(--accent); }
-.bottom-tab svg { width: 18px; height: 18px; }
+.nav-drawer-close:hover { color: var(--fg); }
+
+.nav-drawer-cmdk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 8px 6px;
+  padding: 9px 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.nav-drawer-cmdk:hover { color: var(--fg); border-color: var(--line-strong); }
+.nav-drawer-cmdk svg { flex: 0 0 auto; }
+.nav-drawer-cmdk kbd {
+  margin-left: auto;
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+/* The 1080px breakpoint hides .sb-status globally (desktop sidebar rail
+   collapse); re-show it inside the drawer where the rail is full-width. */
+.nav-drawer .sb-status { display: block; }
 
 /* ─── Toast ────────────────────────────────────────────────────── */
 .hal0-toast {
