@@ -31,6 +31,7 @@ import os
 import tempfile
 import threading
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +85,14 @@ class ModelRegistry:
     The mtime cache invalidates itself when the registry file changes on
     disk, allowing direct file edits to take effect on the next access.
     """
+
+    # Optional post-mutation callback. When set (e.g. by create_app), every
+    # successful add/update/remove invokes it AFTER the lock is released so
+    # downstream artifacts (Lemonade's server_models.json) can be regenerated
+    # from the freshly-written registry. Best-effort by design: a failing hook
+    # is logged and swallowed, never propagated — a catalog-regen failure must
+    # not roll back or mask a successful registry write.
+    on_change: Callable[[], None] | None = None
 
     def __init__(self, registry_dir: str | Path | None = None) -> None:
         """Initialise the registry.
@@ -275,6 +284,22 @@ class ModelRegistry:
 
     # ── public writes ────────────────────────────────────────────────────
 
+    def _notify_change(self) -> None:
+        """Invoke the post-mutation hook, if any. Best-effort.
+
+        Called after every successful add/update/remove, OUTSIDE ``self._lock``
+        (the hook reads ``registry.toml`` from disk, not the locked in-memory
+        map, so there's no re-entrancy). A hook that raises is logged and
+        swallowed — the registry write has already committed.
+        """
+        cb = self.on_change
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            log.warning("registry.on_change_failed", exc_info=True)
+
     def add(self, model: Model) -> None:
         """Add a new model to the registry.
 
@@ -293,6 +318,7 @@ class ModelRegistry:
             models[model.id] = model
             self._atomic_write(models)
             self._invalidate()
+        self._notify_change()
 
     def remove(self, model_id: str) -> bool:
         """Remove a model from the registry.
@@ -307,7 +333,8 @@ class ModelRegistry:
             del models[model_id]
             self._atomic_write(models)
             self._invalidate()
-            return True
+        self._notify_change()
+        return True
 
     def update(self, model_id: str, updates: dict[str, Any]) -> Model:
         """Partially update a model entry.
@@ -346,7 +373,8 @@ class ModelRegistry:
             models[model_id] = new_model
             self._atomic_write(models)
             self._invalidate()
-            return new_model
+        self._notify_change()
+        return new_model
 
     def route_for(self, model_id: str) -> str | None:
         """Return the upstream URL for a model, or ``None`` if not assigned.

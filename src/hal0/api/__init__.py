@@ -829,6 +829,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             log.warning("models.auto_scan_failed", error=str(exc))
 
+    # Keep Lemonade's server_models.json in sync with the registry. The hook is
+    # wired AFTER the startup auto-scan so a multi-model scan triggers a single
+    # regeneration (the explicit one below) rather than one per added model.
+    # Every subsequent runtime mutation (pull, register, remove) regenerates the
+    # catalog via ModelRegistry.on_change — fixing the drift where curated models
+    # were invisible to Lemonade until a manual `hal0 capabilities sync`.
+    from pathlib import Path as _Path
+
+    from hal0.lemonade.server_models_gen import write_server_models
+
+    _server_models_path = _Path(
+        os.environ.get(
+            "HAL0_SERVER_MODELS_PATH", "/opt/lemonade/resources/server_models.json"
+        )
+    )
+
+    def _regen_server_models() -> None:
+        write_server_models(model_registry.registry_file, _server_models_path)
+
+    model_registry.on_change = _regen_server_models
+    # One-shot sync so startup scan results land in the catalog immediately,
+    # without waiting for the next mutation. Best-effort: a failure (e.g. the
+    # Lemonade resources dir is absent on a dev box) must not block startup.
+    try:
+        _regen_server_models()
+    except Exception as exc:
+        log.warning("server_models.startup_regen_failed", error=str(exc))
+
     # Shared in-process /v1/models cache.  The dispatcher's cold-cache
     # prefetch path needs cached_models() and fetch_models() to share
     # state — without this, prefetch fans out then re-checks the cache
