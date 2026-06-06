@@ -6,20 +6,26 @@ import asyncio
 import time
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Request
 
 from hal0.config import paths
 from hal0.config.loader import load_hardware_info
 
+log = structlog.get_logger(__name__)
+
 # See slots.py for the writer-gate rationale.
 
 router = APIRouter()
 
-# TTL (seconds) for the coalesced HardwareStats.snapshot() probe. The
-# dashboard's ~4 concurrent clients poll /api/stats/hardware every 2.5s;
-# a short shared cache collapses their bursts onto one probe and keeps
-# the synchronous snapshot() off the event loop's critical path.
-_SNAPSHOT_TTL_S = 1.5
+# TTL (seconds) for the coalesced HardwareStats.snapshot() probe.
+# Issue #428: the dashboard's ~4 concurrent clients poll /api/stats/
+# hardware every 2.5 s. Bumping the TTL above the poll interval keeps
+# the snapshot *fresh* in cache for at least one polling cycle so
+# repeated polls don't even consider a refresh; the SWR logic in
+# _cached_snapshot() handles the stale case by serving the cached
+# value immediately and revalidating in the background.
+_SNAPSHOT_TTL_S = 5.0
 
 _PVE_CONFIGURE_HINT = "Configure /etc/hal0/proxmox.json to see host pressure."
 
@@ -260,35 +266,30 @@ async def _npu_status(request: Request) -> dict[str, Any] | None:
     return {"ok": True, "model_mb": round(model_mb, 1)}
 
 
-async def _cached_snapshot(request: Request) -> dict[str, Any]:
-    """Return HardwareStats.snapshot() via a thread + short TTL cache.
-
-    snapshot() is synchronous and (pre-FIX-A) shells out, so it must not
-    run on the event loop. We memoise the result on the shared
-    HardwareStats singleton (app.state.hardware_stats) for _SNAPSHOT_TTL_S
-    seconds so concurrent dashboard polls coalesce onto a single probe.
-    An asyncio.Lock guards the refresh so N simultaneous misses trigger
-    exactly one to_thread call rather than N.
-    """
-    stats = getattr(request.app.state, "hardware_stats", None)
-    if stats is None:
-        return {}
-    now = time.monotonic()
-    cached = getattr(stats, "_snapshot_cache", None)
-    cached_at = getattr(stats, "_snapshot_cache_at", 0.0)
-    if cached is not None and (now - cached_at) < _SNAPSHOT_TTL_S:
-        return cached
+def _snapshot_lock(stats: Any) -> asyncio.Lock:
+    """Return the asyncio.Lock guarding the synchronous snapshot() call,
+    creating it lazily on the stats instance."""
     lock = getattr(stats, "_snapshot_lock", None)
     if lock is None:
         lock = asyncio.Lock()
         stats._snapshot_lock = lock
+    return lock
+
+
+async def _refresh_snapshot_cache(stats: Any) -> dict[str, Any]:
+    """Run HardwareStats.snapshot() in a worker thread and write the
+    result into the cache, guarded by the single-flight lock.
+
+    Used for both cold-cache bootstrap (where the caller awaits the
+    result) and background revalidation (fire-and-forget).
+    """
+    lock = _snapshot_lock(stats)
     async with lock:
-        # Re-check under the lock — another coroutine may have refreshed
-        # while we awaited it.
-        now = time.monotonic()
+        # Re-check under the lock — a concurrent refresh may have just
+        # written the cache while we were waiting on the lock.
         cached = getattr(stats, "_snapshot_cache", None)
         cached_at = getattr(stats, "_snapshot_cache_at", 0.0)
-        if cached is not None and (now - cached_at) < _SNAPSHOT_TTL_S:
+        if cached is not None and (time.monotonic() - cached_at) < _SNAPSHOT_TTL_S:
             return cached
         try:
             snap = await asyncio.to_thread(stats.snapshot)
@@ -297,6 +298,76 @@ async def _cached_snapshot(request: Request) -> dict[str, Any]:
         stats._snapshot_cache = snap
         stats._snapshot_cache_at = time.monotonic()
         return snap
+
+
+async def _background_revalidate(stats: Any) -> None:
+    """Run a snapshot probe off the event loop and update the cache.
+
+    Failures are swallowed — the previous cached value (stale or not)
+    remains in place. The single-flight in-flight flag is cleared by
+    the caller's done_callback, not here, so the flag is also cleared
+    if the task is cancelled mid-probe.
+    """
+    try:
+        await _refresh_snapshot_cache(stats)
+    except Exception:
+        log.warning("hardware.snapshot.background_revalidate_failed", exc_info=True)
+
+
+def _clear_in_flight(stats: Any):
+    """Return a done_callback that clears the single-flight flag."""
+
+    def _cb(_task: asyncio.Task[None]) -> None:
+        stats._refresh_in_flight = False
+
+    return _cb
+
+
+async def _cached_snapshot(request: Request) -> dict[str, Any]:
+    """Stale-while-revalidate snapshot cache (issue #428).
+
+    Contract:
+      * Cold cache  → synchronously fetch the first snapshot (lock +
+        double-check, so concurrent cold calls coalesce to ONE probe).
+      * Fresh cache → return cached value, no work.
+      * Stale cache → return the STALE cached value immediately
+        (NEVER block on a refresh) and schedule a single background
+        revalidation. The in-flight flag prevents a poll burst from
+        spawning N parallel probes.
+
+    The cache lives on the shared HardwareStats singleton
+    (app.state.hardware_stats) as ``_snapshot_cache`` + ``_snapshot_cache_at``.
+    """
+    stats = getattr(request.app.state, "hardware_stats", None)
+    if stats is None:
+        return {}
+
+    cached = getattr(stats, "_snapshot_cache", None)
+    cached_at = getattr(stats, "_snapshot_cache_at", 0.0)
+    now = time.monotonic()
+    age = (now - cached_at) if cached is not None else float("inf")
+
+    # Fast path — fresh cache, no refresh needed.
+    if cached is not None and age < _SNAPSHOT_TTL_S:
+        return cached
+
+    if cached is not None:
+        # Stale — serve cached immediately, schedule background revalidation.
+        if not getattr(stats, "_refresh_in_flight", False):
+            stats._refresh_in_flight = True
+            task = asyncio.create_task(_background_revalidate(stats))
+            # Always clear the flag when the task finishes (success,
+            # exception, or cancellation). Using done_callback instead
+            # of relying on the task body's try/finally is more robust
+            # against the event loop being torn down mid-probe.
+            task.add_done_callback(_clear_in_flight(stats))
+        return cached
+
+    # Cold cache — synchronously fetch (bootstrap). The lock inside
+    # _refresh_snapshot_cache coalesces concurrent cold callers to ONE
+    # probe. The caller MUST wait for the first value, so the dashboard
+    # can render something rather than an empty dict.
+    return await _refresh_snapshot_cache(stats)
 
 
 async def _local_live_stats(request: Request) -> dict[str, Any]:
@@ -313,8 +384,9 @@ async def _local_live_stats(request: Request) -> dict[str, Any]:
     if stats is None:
         return {}
     # snapshot() is synchronous and (pre-FIX-A) shells out — run it in a
-    # thread behind a short TTL cache so concurrent dashboard polls
-    # coalesce onto one probe and the event loop never blocks on it.
+    # thread behind the SWR cache in _cached_snapshot() so concurrent
+    # dashboard polls coalesce onto one probe, and a stale poll NEVER
+    # blocks on a fresh probe (issue #428).
     snap = await _cached_snapshot(request)
     if not snap:
         return {}
