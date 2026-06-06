@@ -551,7 +551,14 @@ function NpuSwitch({ on, disabled, label, onClick }) {
 }
 
 // One modality mini-card inside the bracketed trio.
-function NpuModalityCard({ icon, label, slot, on, fixed, models, busy, onToggle, onPickModel }) {
+//
+// `readOnlyModel` modalities (ASR/embed) render the served model as a
+// read-only label instead of a picker: the FLM trio serves all three
+// roles from one `flm serve` process and the asr/embed model is fixed by
+// the --asr/--embed flags — the request `model` field is ignored by FLM
+// (verified 2026-06-06), so a picker there would be cosmetic. Chat (the
+// anchor) stays a real picker.
+function NpuModalityCard({ icon, label, slot, on, fixed, models, busy, onToggle, onPickModel, readOnlyModel }) {
   return (
     <div className="slot npu-mod" data-on={on ? "1" : "0"}>
       <div className="slot-h">
@@ -564,12 +571,26 @@ function NpuModalityCard({ icon, label, slot, on, fixed, models, busy, onToggle,
         </div>
       </div>
       <div className="npu-mod-body">
-        <NpuModelSelect
-          value={slot?.model || ""}
-          models={models}
-          disabled={!on || busy || !slot}
-          onChange={onPickModel}
-        />
+        {readOnlyModel ? (
+          <div
+            className="npu-mod-fixed mono"
+            title="Served by the FLM trio — the model is fixed by the --asr/--embed flags on this FLM build, not separately selectable."
+          >
+            {/* Prefer the slot's CONFIGURED model (model_default) over the live
+                model_id: an NPU-trio modality is never loaded as its own
+                process, so its live model_id stays stale on the pre-trio GGUF.
+                The configured FLM tag is what the anchor actually serves. */}
+            <span className="npu-fixed-model">{slot?.modelDefault || slot?.model || "—"}</span>
+            <span className="npu-fixed-tag" aria-hidden="true">FLM</span>
+          </div>
+        ) : (
+          <NpuModelSelect
+            value={slot?.model || ""}
+            models={models}
+            disabled={!on || busy || !slot}
+            onChange={onPickModel}
+          />
+        )}
       </div>
     </div>
   );
@@ -609,10 +630,13 @@ function NpuFlmStack({ slots }) {
   const flmArgsLive = typeof cfgQuery.data?.flm_args === "string" ? cfgQuery.data.flm_args : "";
   const parsed = parseFlmArgs(flmArgsLive);
 
+  // Only chat (the FLM anchor) is a real model choice — the operator picks
+  // which model `flm serve` runs. ASR/embed are served coresident off that
+  // one process with the model fixed by the --asr/--embed flags, so they
+  // render a read-only label (NpuModalityCard `readOnlyModel`) instead of a
+  // picker — no asr/embed model list to compute.
   const allModels = modelsQuery.data || [];
   const chatModels = flmModelsByType(allModels, "llm");
-  const asrModels = flmModelsByType(allModels, "transcription");
-  const embedModels = flmModelsByType(allModels, "embedding");
 
   const loaded = chat ? slotIsLoaded(chat) : npuSlots.some(slotIsLoaded);
   // Live flm.args string for the footer — pending toggles preview the
@@ -679,14 +703,8 @@ function NpuFlmStack({ slots }) {
     });
   };
 
-  const onPickAsrModel = (model_id) => {
-    if (!asr || !model_id || model_id === asr.model) return;
-    run(() => swapMut.mutateAsync({ name: asr.name, model_id }));
-  };
-  const onPickEmbedModel = (model_id) => {
-    if (!embed || !model_id || model_id === embed.model) return;
-    run(() => swapMut.mutateAsync({ name: embed.name, model_id }));
-  };
+  // No onPickAsr/onPickEmbed: those modalities are read-only labels (the
+  // FLM trio fixes their model via flags). Chat keeps onPickChat above.
 
   return (
     <div className="npu-stack">
@@ -709,16 +727,14 @@ function NpuFlmStack({ slots }) {
             models={chatModels} busy={busy} onPickModel={onPickChat}
           />
           <NpuModalityCard
-            icon="🎙" label="ASR" slot={asr} on={parsed.asr}
-            models={asrModels} busy={busy}
+            icon="🎙" label="ASR" slot={asr} on={parsed.asr} readOnlyModel
+            busy={busy}
             onToggle={() => onToggleModality("asr", asr)}
-            onPickModel={onPickAsrModel}
           />
           <NpuModalityCard
-            icon="🧬" label="Embed" slot={embed} on={parsed.embed}
-            models={embedModels} busy={busy}
+            icon="🧬" label="Embed" slot={embed} on={parsed.embed} readOnlyModel
+            busy={busy}
             onToggle={() => onToggleModality("embed", embed)}
-            onPickModel={onPickEmbedModel}
           />
         </div>
       </div>

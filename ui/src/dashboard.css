@@ -1878,7 +1878,56 @@ a { color: inherit; text-decoration: none; }
 .npu-mod[data-on="0"] { opacity: 0.5; }
 .npu-mod .npu-mod-icon { font-size: 15px; line-height: 1; }
 .npu-mod-body { padding: 8px 0 2px; }
+
 .npu-sel { width: 100%; }
+/* The native <select> renders its caret hard against the right border and
+   lets the (mono, often long) model id run underneath it. Draw our own
+   chevron and reserve room for it so text never collides with the caret.
+   Use `select.npu-sel` (0,1,1) so it beats the base `select.input` rule
+   (same specificity, but this comes later) — a bare `.npu-sel` (0,1,0)
+   loses to `select.input`'s `padding`/`background` shorthand. */
+select.npu-sel {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px;
+}
+
+/* Read-only model label for the ASR/embed modalities (model fixed by FLM). */
+.npu-mod-fixed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg);
+  color: var(--fg-4);
+  font-size: 12.5px;
+  cursor: default;
+}
+.npu-mod-fixed .npu-fixed-model {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.npu-mod-fixed .npu-fixed-tag {
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--dev-npu);
+  border: 1px solid rgba(200, 150, 255, 0.30);
+  background: rgba(200, 150, 255, 0.06);
+}
 
 /* On/off switch (matches prototype). */
 .npu-switch {

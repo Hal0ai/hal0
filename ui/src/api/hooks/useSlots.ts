@@ -50,6 +50,7 @@ export interface Slot {
   device: string
   model: string
   model_id?: string
+  modelDefault?: string
   modelLong?: string
   group?: string
   state: string
@@ -195,6 +196,11 @@ function normalizeSlot(s: any): Slot {
     metrics: { ...DEFAULT_METRICS, ...(s?.metrics ?? {}) },
     spark: Array.isArray(s?.spark) ? s.spark : [],
     model: s?.model ?? s?.model_id ?? s?.model_default ?? '',
+    // Configured (TOML) model, surfaced separately so the NPU-trio
+    // read-only labels can show the intended FLM tag even when the live
+    // model_id is stale on the pre-trio GGUF (trio slots never load as
+    // their own process, so model_id never reconciles).
+    modelDefault: s?.model_default ?? '',
     // Backend selection (ADR-0022) — pass through verbatim. The backend
     // emits declared_backend always (when configured) and actual_backend/
     // backend_mismatch only when the child is introspectable; we surface

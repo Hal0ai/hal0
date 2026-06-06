@@ -53,4 +53,16 @@ test.describe('Slots v3 (/slots)', () => {
     // HAL0_DATA seeds at least one device=npu slot, so the NPU section h2 should appear
     await expect(page.locator('.view .sec h2', { hasText: 'NPU' })).toBeVisible()
   })
+
+  test('NPU trio: chat is a model picker; ASR/embed are read-only labels (model fixed by FLM)', async ({ page }) => {
+    await page.goto('/#slots')
+    const stack = page.locator('.npu-stack')
+    await expect(stack).toBeVisible()
+    // Chat (the FLM anchor) keeps a real <select> model picker.
+    await expect(stack.locator('.npu-sel')).toHaveCount(1)
+    // ASR + embed serve coresident off that one process with the model fixed
+    // by the --asr/--embed flags, so they render read-only labels, not pickers.
+    await expect(stack.locator('.npu-mod-fixed')).toHaveCount(2)
+    await expect(stack.locator('.npu-mod-fixed .npu-fixed-tag')).toHaveCount(2)
+  })
 })
