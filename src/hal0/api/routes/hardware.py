@@ -81,6 +81,11 @@ def _flatten_for_ui(info: dict[str, Any]) -> dict[str, Any]:
         "platform": platform,
         "platform_label": _platform_label(platform, primary_gpu),
         "memory_kind": memory_kind,
+        # cgroup memory cap (issue #372). The dashboard treats this as a
+        # 3rd headroom candidate: when BELOW min(pool, host) it becomes
+        # the binding constraint and limitedBy is reported as 'cgroup'.
+        # ``None`` means "unlimited" — cgroup doesn't constrain headroom.
+        "cgroup_max_mb": info.get("cgroup_max_mb"),
     }
 
 

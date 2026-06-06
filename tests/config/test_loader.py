@@ -45,6 +45,7 @@ from hal0.config.schema import (
     Hal0Config,
     HardwareInfo,
     MetaConfig,
+    NPUInfo,
     ProviderEntry,
     ProvidersConfig,
     SlotConfig,
@@ -358,6 +359,24 @@ class TestHardwareJsonRoundTrip:
         assert loaded.cpu_cores == 16
         assert len(loaded.gpus) == 1
         assert loaded.gpus[0].name == "RTX 4080"
+
+    def test_cgroup_max_mb_round_trips(self, tmp_hal0_home: str) -> None:
+        """The cgroup cap is part of the probe snapshot (#372) — make
+        sure it round-trips through the JSON file so the dashboard can
+        see it after a probe + restart."""
+        h = HardwareInfo(
+            cpu_model="AMD Ryzen",
+            cpu_cores=16,
+            cpu_threads=32,
+            ram_mb=96 * 1024,
+            unified_memory_mb=96 * 1024,
+            gpus=[],
+            npu=NPUInfo(present=False),
+            cgroup_max_mb=80 * 1024,
+        )
+        save_hardware_info(h)
+        loaded = load_hardware_info()
+        assert loaded.cgroup_max_mb == 80 * 1024
 
     def test_load_with_invalid_json_raises(self, tmp_hal0_home: str) -> None:
         paths.hardware_json().parent.mkdir(parents=True, exist_ok=True)

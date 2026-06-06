@@ -649,6 +649,20 @@ class HardwareInfo(BaseModel):
         ge=0,
         description="Free space on /var/lib/hal0 in MiB.",
     )
+    cgroup_max_mb: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Running cgroup memory cap in MiB (issue #372). Read at probe "
+            "time from /sys/fs/cgroup/memory.max (cgroup-v2) or the v1 "
+            "fallback /sys/fs/cgroup/memory/memory.limit_in_bytes. None "
+            "when the cgroup is unlimited (literal 'max' on v2, the "
+            "9223372036854775807 sentinel on v1) or the file is unreadable. "
+            "The dashboard treats this as a 3rd headroom candidate: when "
+            "BELOW min(pool, host) it becomes the binding constraint and "
+            "limitedBy is reported as 'cgroup'."
+        ),
+    )
     probed_at: str = Field(
         default="",
         description="ISO-8601 UTC timestamp of the last probe run.",

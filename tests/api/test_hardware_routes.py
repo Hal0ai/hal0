@@ -108,6 +108,38 @@ def test_platform_label_for_known_strings() -> None:
     assert _platform_label("nonsense-value", {}) == "Unknown platform"
 
 
+# ── cgroup_max_mb surfacing (#372) ───────────────────────────────────────────
+
+
+def test_flatten_includes_cgroup_max_mb_when_set() -> None:
+    info = HardwareInfo(
+        cpu_model="x86_64",
+        ram_mb=96 * 1024,
+        unified_memory_mb=96 * 1024,
+        gpus=[],
+        npu=NPUInfo(present=False),
+        platform="lxc",
+        cgroup_max_mb=80 * 1024,
+    ).model_dump(mode="python")
+    flat = _flatten_for_ui(info)
+    assert flat["cgroup_max_mb"] == 80 * 1024
+
+
+def test_flatten_cgroup_max_mb_none_when_unlimited() -> None:
+    info = HardwareInfo(
+        cpu_model="x86_64",
+        ram_mb=96 * 1024,
+        unified_memory_mb=96 * 1024,
+        gpus=[],
+        npu=NPUInfo(present=False),
+        platform="lxc",
+    ).model_dump(mode="python")
+    flat = _flatten_for_ui(info)
+    # When unlimited/unreadable, the field is absent (or None) — the UI
+    # falls back to pool/host as if cgroup weren't a constraint.
+    assert flat.get("cgroup_max_mb") in (None,)
+
+
 class TestHostDetectionInStatsHardware:
     """When proxmox.json is missing, /api/stats/hardware surfaces detection
     state so the dashboard's MemoryMap can render a Configure → nudge."""

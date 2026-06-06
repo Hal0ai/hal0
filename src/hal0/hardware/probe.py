@@ -289,6 +289,55 @@ def _derive_unified_memory_mb(ram_mb: int, gpu: GPUInfo | None) -> int:
     return ram_mb
 
 
+# cgroup memory cap paths (issue #372). v2 unified hosts use memory.max;
+# v1 hybrid hosts expose memory.limit_in_bytes under /sys/fs/cgroup/memory/.
+# v2 is the canonical location on a unified host — we read it first and
+# only fall through to v1 when v2 is missing.
+_CGROUP_V2_MEMORY_MAX = Path("/sys/fs/cgroup/memory.max")
+_CGROUP_V1_MEMORY_LIMIT = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+# cgroup-v1's "infinite" sentinel. The kernel writes this when no limit is
+# configured; treat it the same as the v2 literal "max" — unlimited, ignore.
+_CGROUP_V1_INFINITE = 9_223_372_036_854_775_807
+
+
+def _read_cgroup_memory_max_mb() -> int | None:
+    """Return the running cgroup's memory cap in MiB, or None when unlimited.
+
+    The cgroup cap is a 3rd headroom candidate (issue #372): when below
+    min(pool, host) it becomes the binding constraint. On cgroup-v2 the
+    file holds a literal ``"max"`` (= unlimited) or a byte count; on
+    cgroup-v1 the byte count uses a 9223… sentinel for "unlimited".
+
+    Unreadable, unparseable, or "unlimited" → ``None`` (no constraint).
+    Never raises.
+    """
+    for path, sentinel_unlimited in (
+        (_CGROUP_V2_MEMORY_MAX, "max"),
+        (_CGROUP_V1_MEMORY_LIMIT, None),  # v1 uses the numeric sentinel
+    ):
+        txt = _read_text(path)
+        if txt is None:
+            continue  # missing file → try the next candidate
+        stripped = txt.strip()
+        if not stripped:
+            return None  # zero-byte file — treat as "no constraint"
+        if sentinel_unlimited is not None and stripped == sentinel_unlimited:
+            return None
+        try:
+            n = int(stripped)
+        except ValueError:
+            log.debug(
+                "hardware.probe.cgroup_memory_max_parse_fail",
+                path=str(path),
+                raw=stripped[:40],
+            )
+            return None
+        if n < 0 or n == _CGROUP_V1_INFINITE:
+            return None
+        return n // (1024 * 1024)
+    return None
+
+
 # ── GPU detection ──────────────────────────────────────────────────────────────
 
 
@@ -680,6 +729,7 @@ class HardwareProbe:
                 gpus=[gpu] if include_gpu else [],
                 npu=npu,
                 disk_free_mb=disk_mb,
+                cgroup_max_mb=_read_cgroup_memory_max_mb(),
                 platform=platform,
                 probed_at=_dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
                 # kernel is now a first-class field; keep it in extra too for
