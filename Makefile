@@ -1,6 +1,6 @@
 .PHONY: help install dev test test-unit release-test release-test-report \
         harness harness-report harness-clean \
-        lint fmt typecheck ui-install ui-dev ui-build clean \
+        lint fmt typecheck ui-install ui-dev ui-build deploy clean \
         proto-ttft proto-ttft-live
 
 # ── hal0-test LXC connection knobs (release-gate) ───────────────────────────
@@ -102,6 +102,13 @@ ui-dev:
 
 ui-build:
 	cd ui && npm run build
+
+# Update an editable runtime checkout (e.g. CT 105) to origin/main: reset
+# source, REBUILD the gitignored dashboard bundle, restart hal0-api, health
+# check. Run this on the runtime host instead of a bare `git reset --hard`,
+# which leaves ui/dist stale. Pass args via ARGS, e.g. `make deploy ARGS=--no-restart`.
+deploy:
+	bash scripts/deploy.sh $(ARGS)
 
 # ── throwaway prototypes ──────────────────────────────────────────────────
 # scripts/prototype_ttft/ — TTFT + KV-cache % measurement and aggregation.
