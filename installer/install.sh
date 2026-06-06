@@ -164,20 +164,33 @@ PY="${HAL0_PYTHON:-python3}"
 # the comment on TLS posture near the flag parser.
 API_BIND_HOST="0.0.0.0"
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${DEV_MODE}" -eq 1 ]]; then
+    # Dev: editable checkout, everything under one prefix. The updater
+    # refuses apply() in this mode (re-run `git pull && pip install -e .`).
     PREFIX="${HAL0_PREFIX:-${PWD}/.hal0ai}"
     ETC_DIR="${PREFIX}/etc/hal0"
     VAR_DIR="${PREFIX}/var/lib/hal0"
     UNIT_DIR="${PREFIX}/etc/systemd/system"
+    VENV_DIR="${PREFIX}/.venv"
+    CURRENT_LINK=""
     info "Dev mode — all paths under ${PREFIX}"
 else
-    PREFIX="${HAL0_PREFIX:-/opt/hal0}"
+    # Prod FHS (#495): code lives in a versioned dir with a `current`
+    # symlink; the venv is shared at ${FHS_ROOT}/venv so it survives
+    # `hal0 update`'s atomic symlink swaps (the updater re-pips `current`
+    # into this venv on apply).
+    HAL0_FHS_ROOT="${HAL0_PREFIX:-/usr/lib/hal0}"
+    VERSION="$(grep -m1 '^version' "${REPO_ROOT}/pyproject.toml" 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')"
+    [[ -n "${VERSION}" ]] || VERSION="0.0.0"
+    PREFIX="${HAL0_FHS_ROOT}/hal0-${VERSION}"
+    CURRENT_LINK="${HAL0_FHS_ROOT}/current"
     ETC_DIR="/etc/hal0"
     VAR_DIR="/var/lib/hal0"
     UNIT_DIR="/etc/systemd/system"
+    VENV_DIR="${HAL0_FHS_ROOT}/venv"
+    info "FHS layout — code ${PREFIX}, current → ${CURRENT_LINK}, venv ${VENV_DIR}"
 fi
-VENV_DIR="${PREFIX}/.venv"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ── Release verification gate ──────────────────────────────────────────────
 # Refuse to run as root against an UNVERIFIED release tree. The signed
@@ -206,6 +219,16 @@ if [[ "${DEV_MODE}" -eq 0 \
   Or, if you trust THIS source and accept the risk:
       HAL0_INSTALL_SKIP_VERIFY=1 sudo bash installer/install.sh"
     fi
+fi
+
+# Heads-up if a legacy editable /opt/hal0 install is present (pre-#495).
+# This run installs the FHS layout under ${HAL0_FHS_ROOT} and rewrites the
+# systemd units to the shared venv, so the old tree is orphaned. We do NOT
+# auto-delete it (it may be a CT-105-style working checkout) — uninstall.sh
+# cleans /opt/hal0 if the operator later wants it gone.
+if [[ "${DEV_MODE}" -eq 0 && -e "/opt/hal0/.venv" && "${HAL0_FHS_ROOT}" != "/opt/hal0" ]]; then
+    warn "legacy install at /opt/hal0 detected — superseded by the FHS layout at ${HAL0_FHS_ROOT}"
+    warn "  the old tree is now orphaned; remove it with 'sudo bash installer/uninstall.sh' or 'sudo rm -rf /opt/hal0' once you've confirmed the new install works"
 fi
 
 # Resolve pull destination: explicit flag / env wins, then an interactive
@@ -335,12 +358,14 @@ mkdir -p \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
-# Production install ships the source tree into ${PREFIX} so `pip install
-# --editable` ends up pointing at a persistent location, not the temp dir
-# the bootstrap unpacks into (which gets cleaned on exit — and on a
-# tmpfs /tmp, doesn't survive a reboot). Dev installs skip this: their
-# REPO_ROOT is the operator's git checkout and we want pip's editable
-# link aimed there so source edits flow without a reinstall.
+# Production (FHS, #495) ships the source tree into the versioned dir
+# ${PREFIX} (=${FHS_ROOT}/hal0-<version>) and points `current` at it, so
+# `hal0 update` can atomically swap `current` to a new versioned tree.
+# The shared venv at ${FHS_ROOT}/venv pip-installs hal0 (non-editable)
+# from this tree; the updater re-pips the swapped-in tree on apply. Dev
+# installs skip the copy: REPO_ROOT is the operator's git checkout and we
+# want pip's editable link aimed there so source edits flow without a
+# reinstall.
 if [[ "${DEV_MODE}" -eq 0 && "${REPO_ROOT}" != "${PREFIX}" ]]; then
     if command -v rsync >/dev/null 2>&1; then
         ui_spinner_run "Copying source to ${PREFIX}" \
@@ -363,6 +388,16 @@ if [[ "${DEV_MODE}" -eq 0 && "${REPO_ROOT}" != "${PREFIX}" ]]; then
         info "copied source → ${PREFIX} (tar fallback)"
     fi
     REPO_ROOT="${PREFIX}"
+fi
+
+# Point the `current` symlink at this release's versioned tree (prod only).
+# Atomic swap so a concurrent reader never sees a missing link: write a
+# temp symlink then rename over the old one. This is the same target the
+# updater swaps on `hal0 update`.
+if [[ "${DEV_MODE}" -eq 0 && -n "${CURRENT_LINK}" ]]; then
+    ln -sfn "${PREFIX}" "${CURRENT_LINK}.tmp.$$"
+    mv -T "${CURRENT_LINK}.tmp.$$" "${CURRENT_LINK}"
+    info "current → ${PREFIX}"
 fi
 
 # Seed hal0.toml's [models].pull_root when the operator picked a non-default
@@ -419,13 +454,21 @@ HAL0_BIN="${VENV_DIR}/bin/hal0"
 # installs it alongside `hal0` in the venv.
 HAL0_AGENT_BIN="${VENV_DIR}/bin/hal0-agent"
 
-# Refresh pip + install hal0 in editable mode pointing at this checkout.
+# Refresh pip, then install hal0. Prod (FHS) installs NON-editable from the
+# versioned tree so the venv owns its own copy of the code and `hal0 update`
+# can re-pip a swapped-in tree (#495). Dev installs editable so the
+# operator's source edits flow without a reinstall.
 # ui_spinner_run drops the >/dev/null — the spinner shows the live tail
 # of pip's output, and on failure replays the last 50 lines on stderr.
 ui_spinner_run "Upgrading pip / setuptools / wheel" \
     "${PIP}" install --upgrade pip setuptools wheel
-ui_spinner_run "Installing hal0 from ${REPO_ROOT}" \
-    "${PIP}" install -e "${REPO_ROOT}"
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    ui_spinner_run "Installing hal0 (editable) from ${REPO_ROOT}" \
+        "${PIP}" install -e "${REPO_ROOT}"
+else
+    ui_spinner_run "Installing hal0 from ${REPO_ROOT}" \
+        "${PIP}" install "${REPO_ROOT}"
+fi
 
 if [[ ! -x "${HAL0_BIN}" ]]; then
     die "hal0 binary not produced at ${HAL0_BIN} — check pip install output"
@@ -515,11 +558,23 @@ fi
 chmod 0755 "${ETC_DIR}" 2>/dev/null || true
 chmod 0644 "${HAL0_TOML}" 2>/dev/null || true
 
+# Pin the dashboard's built assets. Prod installs hal0 NON-editable, so the
+# package's __file__ lives in the venv site-packages and the walk-up that
+# finds ui/dist in a checkout no longer reaches it — point HAL0_UI_DIST at
+# the `current` tree's ui/dist (follows atomic update swaps). Dev points at
+# the editable checkout's build.
+if [[ -n "${CURRENT_LINK}" ]]; then
+    HAL0_UI_DIST_VAL="${CURRENT_LINK}/ui/dist"
+else
+    HAL0_UI_DIST_VAL="${UI_DIST}"
+fi
+
 API_ENV="${ETC_DIR}/api.env"
 if [[ ! -f "${API_ENV}" ]]; then
     cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
+HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
 # Memory subsystem (Cognee engine + /mcp/memory + the Agent → Memory tab)
 # is deferred in this release and ships disabled by default. Uncomment to
 # reintroduce it — no other change needed; the dashboard Agent nav returns
@@ -569,6 +624,9 @@ fi
 
 ui_step "Systemd units"
 
+# WorkingDirectory follows `current` in prod so a `hal0 update` symlink swap
+# moves it to the new tree without rewriting the unit; dev uses the checkout.
+API_WORKDIR="${CURRENT_LINK:-${PREFIX}}"
 API_UNIT="${UNIT_DIR}/hal0-api.service"
 cat > "${API_UNIT}" <<EOF
 [Unit]
@@ -580,7 +638,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${HAL0_USER}
-WorkingDirectory=${PREFIX}
+WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
 ExecStart=${HAL0_BIN} serve --host ${API_BIND_HOST} --port \${HAL0_PORT}
 Restart=on-failure

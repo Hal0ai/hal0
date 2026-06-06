@@ -440,6 +440,86 @@ def test_apply_records_previous_for_rollback(
     assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.2"
 
 
+# ── apply re-pip into venv (#495) ────────────────────────────────────────────────
+
+
+def test_apply_repips_swapped_tree_when_not_editable(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prod (non-editable) apply re-pips the swapped-in tree into the venv."""
+    calls: list[Path] = []
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    monkeypatch.setattr(
+        "hal0.updater.updater._reinstall_into_venv",
+        lambda install_dir, *, job_id=None: calls.append(install_dir),
+    )
+
+    res = asyncio.run(Updater().apply())
+
+    assert res["version"] == "0.0.1"
+    assert calls == [_versioned_install_dir("0.0.1")]
+    # Re-pip succeeded → the swap stands.
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
+
+
+def test_apply_skips_repip_in_editable_mode(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Editable/dev installs never re-pip — there is no FHS venv to refresh."""
+    calls: list[Path] = []
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
+    monkeypatch.setattr(
+        "hal0.updater.updater._reinstall_into_venv",
+        lambda install_dir, *, job_id=None: calls.append(install_dir),
+    )
+
+    asyncio.run(Updater().apply())
+
+    assert calls == []
+
+
+def test_apply_repip_failure_rolls_back_symlink(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed re-pip rolls `current` back to the prior tree (consistency)."""
+    # First apply (editable skip) lands current → 0.0.1.
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
+    asyncio.run(Updater().apply())
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
+
+    # Build v0.0.2 and rewire the manifest.
+    artifacts = tmp_path / "v2"
+    artifacts.mkdir()
+    tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
+    sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
+    sig2.write_bytes(b"sig")
+    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
+    cert2.write_bytes(b"cert")
+    _write_release_manifest(
+        manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
+        tarball=tarball2,
+        sig=sig2,
+        cert=cert2,
+        version="0.0.2",
+    )
+
+    # Now force non-editable mode with a re-pip that blows up.
+    def _boom(install_dir: Path, *, job_id: str | None = None) -> None:
+        raise UpdateError("pip reinstall failed", details={})
+
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater._reinstall_into_venv", _boom)
+
+    with pytest.raises(UpdateError):
+        asyncio.run(Updater().apply())
+
+    # Rolled back: current still points at the prior (0.0.1) tree.
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
+
+
 # ── apply error paths ──────────────────────────────────────────────────────────
 
 

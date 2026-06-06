@@ -12,10 +12,15 @@ Updater handles the full update lifecycle:
      when ``min_data_version`` advances the schema.
   7. Atomically swap the ``/usr/lib/hal0/current`` symlink using the
      POSIX ``symlink(tmp) + os.replace(tmp, current)`` pattern.
-  8. Record the prior symlink target in ``/var/lib/hal0/hal0.previous`` for
+  8. Re-pip the swapped-in tree into the running venv (non-editable prod
+     only, #495) — the venv imports hal0 from its own site-packages, so the
+     symlink swap alone changes nothing until the code is reinstalled. A
+     failed re-pip rolls the symlink back so ``current`` and the venv stay
+     consistent. Skipped for editable/dev installs.
+  9. Record the prior symlink target in ``/var/lib/hal0/hal0.previous`` for
      rollback. Slot units are NOT touched. The ``hal0-api.service`` restart
      is the route layer's job (``routes/updater._run_apply_job``), not this
-     function - apply() only swaps the tree.
+     function — apply() swaps the tree and refreshes the venv.
 
 Rollback reads ``/var/lib/hal0/hal0.previous``, atomic-swaps the
 ``current`` symlink back, and warns (without erroring) if the
@@ -37,6 +42,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -772,6 +778,55 @@ def _current_symlink() -> Path:
     return _usr_lib_root() / "current"
 
 
+def _is_editable_install() -> bool:
+    """True when hal0 runs from an editable/dev checkout, not the FHS venv.
+
+    FHS/prod (#495): hal0 is pip-installed into the venv site-packages (under
+    ``sys.prefix``). Editable/dev: ``hal0.__file__`` resolves to a source tree
+    outside the venv (e.g. ``/opt/hal0/src/hal0``). apply()'s re-pip step is a
+    no-op-and-skip in editable mode — there is no FHS venv to refresh.
+    """
+    import hal0
+
+    try:
+        Path(hal0.__file__).resolve().relative_to(Path(sys.prefix).resolve())
+        return False
+    except ValueError:
+        return True
+
+
+def _reinstall_into_venv(install_dir: Path, *, job_id: str | None = None) -> None:
+    """``pip install --no-deps --force-reinstall <install_dir>`` into the running venv.
+
+    apply() swaps the ``current`` symlink but the venv imports hal0 from its own
+    site-packages, so the swap alone changes nothing until the code is
+    reinstalled. ``--no-deps`` keeps it fast and offline-safe (deps were
+    resolved at install time); a release that changes deps needs a full
+    reinstall. Raises ``UpdateError`` on a non-zero pip exit.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-deps",
+        "--force-reinstall",
+        str(install_dir),
+    ]
+    log.info("updater.reinstall_start", job_id=job_id, install_dir=str(install_dir))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise UpdateError(
+            f"pip reinstall of {install_dir} failed (rc={proc.returncode})",
+            details={
+                "install_dir": str(install_dir),
+                "returncode": proc.returncode,
+                "stderr": proc.stderr[-2000:],
+            },
+        )
+    log.info("updater.reinstall_ok", job_id=job_id, install_dir=str(install_dir))
+
+
 def _previous_record() -> Path:
     """Return ``/var/lib/hal0/hal0.previous`` — the rollback breadcrumb."""
     return paths.var_lib() / "hal0.previous"
@@ -1013,6 +1068,25 @@ class Updater:
                 f"atomic symlink swap failed: {exc}",
                 details={"link": str(link), "target": str(install_dir), "error": str(exc)},
             ) from exc
+
+        # Step 8b: re-install the swapped-in code into the running venv.
+        # apply() only swaps the `current` symlink; the venv imports hal0
+        # from its own site-packages (a normal, non-editable install), so a
+        # symlink swap alone would NOT change the running version. Re-pip the
+        # freshly-swapped tree so the next hal0-api restart actually runs the
+        # new code (#495). Editable/dev installs are exempt — there is no FHS
+        # venv to refresh and apply() is unsupported there.
+        if not _is_editable_install():
+            try:
+                await asyncio.to_thread(_reinstall_into_venv, install_dir, job_id=self.job_id)
+            except UpdateError:
+                # Re-pip failed: roll the symlink back (when there is a prior
+                # target) so `current` and the venv's installed code stay
+                # consistent — both = prior.
+                if prior is not None:
+                    with contextlib.suppress(OSError):
+                        _atomic_symlink_swap(prior, link)
+                raise
 
         if prior is not None:
             _write_atomic_text(_previous_record(), str(prior))
