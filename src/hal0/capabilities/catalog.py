@@ -636,7 +636,7 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
     next ``/api/capabilities`` GET flips ``downloaded`` to True without a
     process restart.
     """
-    if capability not in {"chat", "embed", "stt"}:
+    if capability not in _NPU_FANOUT_CAPS:
         return []
     # Local import so catalog.py doesn't drag the provider module (and
     # its httpx dependency) onto every import path.
@@ -651,7 +651,7 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
         # Filter capabilities reported to the dashboard down to the
         # in-scope subset; otherwise an "stt" tag would leak through on a
         # chat row and confuse the picker.
-        reported_caps = [c for c in entry["capabilities"] if c in {"chat", "embed", "stt"}]
+        reported_caps = [c for c in entry["capabilities"] if c in _NPU_FANOUT_CAPS]
         # FLM's reported `size` is the raw weights footprint; for
         # quantized models it under-reports actual disk usage, so prefer
         # the larger of size and runtime footprint as the displayed value.

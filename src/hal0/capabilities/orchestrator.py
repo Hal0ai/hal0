@@ -116,8 +116,10 @@ def _recompose_flm_args(current: str, child: str, enable: bool) -> str:
     while i < len(tokens):
         tok = tokens[i]
         if tok in trio_values:
-            # Consume the following value token if present + value-shaped.
-            if i + 1 < len(tokens):
+            # Consume the following value token only if present AND
+            # value-shaped (not another flag) — so "--embed --threads 8"
+            # doesn't swallow "--threads" as the embed value.
+            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
                 trio_values[tok] = tokens[i + 1]
                 i += 2
             else:
