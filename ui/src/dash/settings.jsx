@@ -1,12 +1,17 @@
-// hal0 dashboard — Settings view (secrets, updates, lemond admin, omnirouter, memory, agent policy)
+// hal0 dashboard — Settings view (secrets, storage, updates, runtime, general, about)
 //
-// Phase B1: Secrets, Updates, and the Lemonade admin version readouts
-// pull from live hooks; AgentPolicy + Memory (Cognee) stay scripted
-// (their backends live behind the Agent surface, deferred to B2).
-// Capabilities hook feeds the Lemonade admin section's per-cap fields.
+// Phase B2: every section reads from live hooks. Storage drives
+// [models].store + propagates to Lemonade's extra_models_dir; Runtime
+// edits /internal/config with immediate/deferred effect hints; General
+// is the cosmetic placeholders block (theme locked to dark, density
+// picker, accent chip).
+//
+// OmniRouter routing table, Agent-policy, and Memory (Cognee) sections
+// were removed in #544 — those surfaces live on the MCP view and the
+// agent view, respectively. The settings rail is for knobs only.
 
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
-import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob } from '@/api/hooks/useUpdates'
+import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel } from '@/api/hooks/useUpdates'
 import { useCapabilities, useCapabilityPatch } from '@/api/hooks/useCapabilities'
 import { useLemondRollup, useLemonadeStats } from '@/api/hooks/useLemonade'
 import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
@@ -24,13 +29,10 @@ function SettingsView() {
   const [section, setSection] = useStateSet("secrets");
   const sections = [
     { id: "secrets",   label: "Secrets" },
-    { id: "models",    label: "Models" },
+    { id: "storage",   label: "Storage" },
     { id: "updates",   label: "Updates" },
-    { id: "lemonade",  label: "Lemonade admin" },
-    { id: "omni",      label: "OmniRouter" },
-    { id: "agent",     label: "Agent policy" },
-    { id: "memory",    label: "Memory (Cognee)" },
-    { id: "appearance",label: "Appearance" },
+    { id: "runtime",   label: "Runtime" },
+    { id: "general",   label: "General" },
     { id: "about",     label: "About" },
   ];
 
@@ -58,13 +60,10 @@ function SettingsView() {
 
         <div className="settings-content">
           {section === "secrets" && <SecretsSection />}
-          {section === "models" && <ModelsSection />}
+          {section === "storage" && <StorageSection />}
           {section === "updates" && <UpdatesSection />}
-          {section === "lemonade" && <LemonadeSection />}
-          {section === "omni" && <OmniRouterSection />}
-          {section === "agent" && <AgentPolicySection />}
-          {section === "memory" && <MemorySection />}
-          {section === "appearance" && <AppearanceSection />}
+          {section === "runtime" && <RuntimeSection />}
+          {section === "general" && <GeneralSection />}
           {section === "about" && <AboutSection />}
         </div>
       </div>
@@ -102,7 +101,7 @@ function _fmtBytes(n) {
   return (n / 1024 ** 3).toFixed(2) + " GB";
 }
 
-function ModelsSection() {
+function StorageSection() {
   const settings = useSettings();
   const update = useSettingsUpdate();
   const storeQuery = useModelStore();
@@ -182,7 +181,7 @@ function ModelsSection() {
 
   return (
     <div className="s-section">
-      <h2>Models</h2>
+      <h2>Storage</h2>
       <p className="desc">
         Where hal0 reads and writes model files. One path drives both <span className="mono" style={{color: "var(--fg)"}}>hal0-api</span> and Lemonade — pick once, applies everywhere.
       </p>
@@ -380,10 +379,19 @@ function UpdatesSection() {
   // Phase B1: live state + check + apply mutations. While the query is
   // in flight or 5xx'd we render an empty envelope and let the SRow
   // fallbacks show '—' rather than fabricated versions.
+  // Issue #546: channel switch (stable | nightly) is wired to
+  // useSetUpdateChannel → PUT /api/updates/channel; reads the current
+  // value from useUpdateState().hal0.channel on load.
   const stateQuery = useUpdateState();
   const checkM = useUpdateCheck();
   const applyM = useUpdateApply();
-  const u = stateQuery.data || { hal0: {}, lemonade: {}, flm: {}, autoCheck: true };
+  const setChannelM = useSetUpdateChannel();
+  const u = stateQuery.data || { hal0: {}, lemonade: {}, flm: {} };
+
+  // The current channel lives on each per-component envelope (both
+  // populated from telemetry.channel in hal0.toml); hal0.channel is
+  // authoritative for the switch's initial value.
+  const currentChannel = u.hal0?.channel || 'stable';
 
   // Track the most recent apply job so the user sees the backend's
   // verdict, not just the 202 ack. Toasts fire once on terminal state.
@@ -438,7 +446,7 @@ function UpdatesSection() {
                 });
               }}
             >{applyM.isPending ? "Starting…" : (jobBusy ? "Installing…" : "Install update")}</button>
-            <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Opening hal0.dev/changelog", "info")}>Changelog →</button>
+            <a className="btn ghost sm" href="https://hal0.dev/changelog" target="_blank" rel="noreferrer">Changelog →</a>
           </>}
         />
         <SRow
@@ -462,12 +470,34 @@ function UpdatesSection() {
           sub="Manual deb · vendor-supplied"
           mono
           v={u.flm?.current || '—'}
-          actions={<button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Opening FLM install guide", "info")}>Re-install</button>}
         />
         <SRow
-          k="Auto-check"
-          sub="Once per day · 09:00 local"
-          v={<label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}><input type="checkbox" defaultChecked={!!u.autoCheck} style={{accentColor: "var(--accent)"}} /><span>enabled</span></label>}
+          k="Channel"
+          sub="Release track · persisted to hal0.toml"
+          v={
+            <select
+              className="input mono"
+              value={currentChannel}
+              disabled={setChannelM.isPending}
+              onChange={(e) => {
+                const next = e.target.value === 'nightly' ? 'nightly' : 'stable';
+                if (next === currentChannel) return;
+                setChannelM.mutate(next, {
+                  onSuccess: () => {
+                    window.__hal0Toast && window.__hal0Toast(`Channel set to ${next}`, "ok");
+                  },
+                  onError: (err) => {
+                    const msg = (err && err.message) || "could not set channel";
+                    window.__hal0Toast && window.__hal0Toast(`Channel change failed: ${msg}`, "err");
+                  },
+                });
+              }}
+              style={{maxWidth: 160}}
+            >
+              <option value="stable">stable</option>
+              <option value="nightly">nightly</option>
+            </select>
+          }
         />
         <SRow
           k="FirstRun"
@@ -480,14 +510,14 @@ function UpdatesSection() {
   );
 }
 
-// Lemonade admin keys this form edits, in render order. Each row binds
+// Runtime keys this form edits, in render order. Each row binds
 // to one key in the live /internal/config snapshot; the effect label
 // (Immediate / Deferred) is derived from the backend's `_hal0.effects`
 // partition rather than hard-coded here, so the two never drift.
 //
 // `extra_models_dir` is intentionally NOT editable from this panel —
 // the backend locks it to the [models].store single source of truth
-// (see ModelsSection + lemonade_admin._validate_extra_models_dir). We
+// (see StorageSection + lemonade_admin._validate_extra_models_dir). We
 // surface it read-only so the operator can see the locked value.
 const LEMONADE_FIELDS = [
   { key: "max_loaded_models", sub: "Per-type LRU budget", kind: "number", width: 80 },
@@ -524,7 +554,7 @@ const LEMONADE_FIELDS = [
   { key: "height", sub: "sd.cpp output height (px)", kind: "number", width: 80 },
 ];
 
-function LemonadeSection() {
+function RuntimeSection() {
   // Phase B2 (issue #461): the admin config form now reads + writes the
   // live /api/lemonade/config surface. The runtime readouts at the top
   // stay on the polling rollup; capabilities preview stays as-is.
@@ -625,7 +655,7 @@ function LemonadeSection() {
 
   return (
     <div className="s-section">
-      <h2>Lemonade admin</h2>
+      <h2>Runtime</h2>
       <p className="desc">Direct edit of <span className="mono" style={{color: "var(--fg)"}}>/internal/config</span>. <span style={{color: "var(--ok)"}}>Immediate</span> keys apply on save; <span style={{color: "var(--warn)"}}>deferred</span> keys take hold on the next <span className="mono">/v1/load</span>.</p>
       <div className="s-panel" style={{marginBottom: 12}}>
         <SRow k="runtime" mono v={<>{lemond.version} · {lemond.status} · <b>{lemond.loaded}</b>/{lemond.budget} loaded</>} />
@@ -695,7 +725,7 @@ function LemonadeSection() {
             })}
             <SRow
               k="extra_models_dir"
-              sub="Locked to the model store — change via Settings → Models"
+              sub="Locked to the model store — change via Settings → Storage"
               mono
               v={<span style={{color: "var(--fg-3)"}}>{lockedDir || "—"}</span>}
             />
@@ -741,105 +771,10 @@ function LemonadeSection() {
   );
 }
 
-function OmniRouterSection() {
+function GeneralSection() {
   return (
     <div className="s-section">
-      <h2>OmniRouter</h2>
-      <p className="desc">Client-side tool-calling loop owned by hal0. Eight tools — five upstream, three hal0-custom. Active set filters per-request based on enabled slots.</p>
-      <div className="s-panel">
-        <div style={{padding: "10px 18px", borderBottom: "1px solid var(--line-soft)", background: "var(--bg)", fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em", display: "grid", gridTemplateColumns: "200px 100px 1fr auto", gap: 16}}>
-          <span>tool</span>
-          <span>status</span>
-          <span>target</span>
-          <span>actions</span>
-        </div>
-        {HAL0_DATA.omnirouter.map(t => (
-          <div key={t.name} className="s-tool-row">
-            <span className="nm">{t.name}</span>
-            <span className="st">{t.active ? <span className="chip ok">active</span> : <span className="chip">inactive</span>}</span>
-            <span className="tg">
-              {t.active ? <>target: <b>{t.target}</b></> : t.target}
-            </span>
-            <button className="btn ghost sm">{Icons.edit}</button>
-          </div>
-        ))}
-      </div>
-      <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
-        <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, color: "var(--fg-2)", fontSize: 12, cursor: "pointer"}}>
-          <input type="checkbox" defaultChecked style={{accentColor: "var(--accent)"}} />
-          <span>Persist persona swaps as default</span>
-        </label>
-        <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>session-only by default</span>
-      </div>
-    </div>
-  );
-}
-
-function AgentPolicySection() {
-  return (
-    <div className="s-section">
-      <h2>Agent policy</h2>
-      <p className="desc">Per-capability approval policy for bundled agents. <span className="mono">always</span> requires approval each call · <span className="mono">remember</span> auto-approves after first OK · <span className="mono">deny</span> blocks.</p>
-      <div className="s-panel">
-        {[
-          { cap: "registry-write", desc: "model_pull, model_delete", policy: "always" },
-          { cap: "fs-read",        desc: "read_file, list_dir",       policy: "remember" },
-          { cap: "fs-write",       desc: "write_file, edit_file",     policy: "always" },
-          { cap: "shell-exec",     desc: "run shell commands",         policy: "always" },
-          { cap: "net-fetch",      desc: "http_get, fetch_url",        policy: "remember" },
-          { cap: "slot-control",   desc: "restart_slot, unload_slot",  policy: "always" },
-        ].map(p => (
-          <SRow
-            key={p.cap}
-            k={<span style={{fontFamily: "var(--jbm)"}}>{p.cap}</span>}
-            sub={p.desc}
-            v={
-              <div className="mono" style={{display: "inline-flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden"}}>
-                {["always", "remember", "deny"].map(o => (
-                  <span
-                    key={o}
-                    style={{
-                      padding: "4px 10px",
-                      fontSize: 11,
-                      cursor: "pointer",
-                      background: p.policy === o ? "var(--accent-soft)" : "transparent",
-                      color: p.policy === o ? "var(--accent)" : "var(--fg-3)",
-                      borderRight: o !== "deny" ? "1px solid var(--line)" : "none",
-                    }}
-                  >{o}</span>
-                ))}
-              </div>
-            }
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function MemorySection() {
-  return (
-    <div className="s-section">
-      <h2>Memory (Cognee)</h2>
-      <p className="desc">Cognee namespace + store inspection. The dashboard exposes only what operators need; agents own the rest of the surface via MCP in Phase 8.</p>
-      <div className="s-panel">
-        <SRow k="Namespace" mono v="shared (default)" actions={<button className="btn ghost sm">{Icons.edit} Change</button>} />
-        <SRow k="Store" mono v="SQLite + LanceDB + Kuzu" />
-        <SRow k="Records" mono v={<span className="num">2,847</span>} />
-        <SRow k="Disk usage" mono v="184 MB" />
-        <SRow k="Last write" mono v="3 min ago · pi-coder" />
-      </div>
-      <div style={{marginTop: 14}}>
-        <button className="btn danger">{Icons.warn} Reset namespace</button>
-      </div>
-    </div>
-  );
-}
-
-function AppearanceSection() {
-  return (
-    <div className="s-section">
-      <h2>Appearance</h2>
+      <h2>General</h2>
       <p className="desc">Dark only for v0.2.1. Light mode lands when the website adds one.</p>
       <div className="s-panel">
         <SRow k="Theme" v={<span className="chip amber">dark</span>} />
@@ -857,15 +792,20 @@ function AppearanceSection() {
 }
 
 function AboutSection() {
+  // #543: read hal0 version live from /api/updates/state instead of a
+  // hardcoded literal that drifts from the running build. Empty until the
+  // first response lands so the layout doesn't shift around a stale value.
+  const stateQuery = useUpdateState();
+  const liveVersion = stateQuery.data?.hal0?.current || "";
   return (
     <div className="s-section">
       <h2>About</h2>
       <div className="s-panel">
-        <SRow k="hal0" mono v="v0.2.1 — Lemonade-embedded slots" />
+        <SRow k="hal0" mono v={liveVersion ? `${liveVersion} — Lemonade-embedded slots` : "—"} />
         <SRow k="License" v="Apache-2.0" />
-        <SRow k="Repository" mono v="github.com/Hal0ai/hal0" actions={<button className="btn ghost sm">{Icons.ext} Open</button>} />
-        <SRow k="Docs" v="hal0.dev/docs/v0.2-upgrade" actions={<button className="btn ghost sm">{Icons.ext} Open</button>} />
-        <SRow k="Discord" v="discord.gg/hal0" actions={<button className="btn ghost sm">{Icons.ext} Join</button>} />
+        <SRow k="Repository" mono v="github.com/Hal0ai/hal0" actions={<a className="btn ghost sm" href="https://github.com/Hal0ai/hal0" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
+        <SRow k="Docs" v="hal0.dev/docs/v0.2-upgrade" actions={<a className="btn ghost sm" href="https://hal0.dev/docs/v0.2-upgrade" target="_blank" rel="noreferrer">{Icons.ext} Open</a>} />
+        <SRow k="Discord" v="discord.gg/hal0" actions={<a className="btn ghost sm" href="https://discord.gg/hal0" target="_blank" rel="noreferrer">{Icons.ext} Join</a>} />
       </div>
       <div style={{marginTop: 14, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)"}}>
         Built on AMD Lemonade, FLM (XDNA2), llama.cpp, whisper.cpp, sd.cpp, Kokoro, Cognee.

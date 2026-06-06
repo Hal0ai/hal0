@@ -5,6 +5,12 @@ methods read sysfs directly and make ZERO nvidia-smi subprocess calls.
 Previously each of gpu_util()/gpu_vram_used_mb()/gpu_vram_total_mb()
 shelled out to nvidia-smi first on every read, producing a per-read
 execve storm on AMD hosts where nvidia-smi is absent.
+
+FIX-#427: HardwareStats.snapshot() no longer scans the slot port range
+(8081-8099) on every poll. The scan remains on the public method
+slot_port_occupancy() / occupied_slot_ports() for the config-validation
+and next-free-port callers that legitimately need it, but it is NOT
+performed on the polled hot path.
 """
 
 from __future__ import annotations
@@ -149,3 +155,81 @@ def test_unknown_vendor_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.gpu_util() is None
     assert s.gpu_vram_used_mb() is None
     assert s.gpu_vram_total_mb() is None
+
+
+# ── FIX-#427: slot-port scan dropped from the polled snapshot ────────
+
+
+def test_snapshot_does_not_probe_slot_ports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Polled snapshot() must not call _port_in_use on the 8081-8099 range.
+
+    Issue #427: the slot-port socket scan was being triggered on every
+    dashboard poll (N concurrent clients x 19 connect_ex calls per poll)
+    which had no place on the hot path. The scan remains available via
+    the public slot_port_occupancy() / occupied_slot_ports() methods for
+    config-validation and next-free-port callers.
+    """
+    drm = _mk_amd_drm(tmp_path)
+    monkeypatch.setattr(stats_mod, "_amd_drm_device", lambda: drm)
+    monkeypatch.setattr(stats_mod, "_run", _RunSpy())
+
+    port_calls: list[int] = []
+
+    def _spy_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+        port_calls.append(port)
+        return False
+
+    monkeypatch.setattr(stats_mod, "_port_in_use", _spy_port_in_use)
+
+    s = HardwareStats()
+    for _ in range(20):
+        snap = s.snapshot()
+        # The polled snapshot must NOT include the slot_ports_occupied
+        # field at all — the scan is only run on opt-in callers.
+        assert "slot_ports_occupied" not in snap
+
+    assert port_calls == [], (
+        f"polled snapshot triggered {len(port_calls)} slot-port probes; "
+        f"expected zero (first 5: {port_calls[:5]})"
+    )
+
+
+def test_slot_port_occupancy_still_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The slot-port scan MUST still be available to config-validation
+    and next-free-port callers (issue #427 acceptance criterion 2).
+
+    It is removed from the polled snapshot() but the public methods
+    slot_port_occupancy() and occupied_slot_ports() remain.
+    """
+    port_calls: list[int] = []
+
+    def _spy_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+        port_calls.append(port)
+        # Mark port 8081 as in use to confirm filtering survives.
+        return port == 8081
+
+    monkeypatch.setattr(stats_mod, "_port_in_use", _spy_port_in_use)
+
+    s = HardwareStats()
+    occ = s.slot_port_occupancy()
+    assert isinstance(occ, dict)
+    assert sorted(occ.keys()) == list(
+        range(stats_mod.SLOT_PORT_RANGE_START, stats_mod.SLOT_PORT_RANGE_END + 1)
+    )
+    assert occ[8081] is True
+    assert occ[8082] is False
+
+    # occupied_slot_ports() delegates to slot_port_occupancy() — expect
+    # the scan to fire again (and report the same occupied set).
+    calls_after_first_scan = len(port_calls)
+    occupied = s.occupied_slot_ports()
+    assert occupied == [8081]
+    assert len(port_calls) == calls_after_first_scan + 19
+
+    # The snapshot() opt-in (include_slot_ports=True) also re-uses the
+    # public scan path — verify the integration still works.
+    snap_with_ports = s.snapshot(include_slot_ports=True)
+    assert snap_with_ports.get("slot_ports_occupied") == [8081]
+    assert len(port_calls) == calls_after_first_scan + 19 + 19

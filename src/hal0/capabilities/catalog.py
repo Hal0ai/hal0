@@ -247,12 +247,13 @@ def _model_capabilities(entry: CuratedModel | HaloaiModel | Any) -> list[str]:
 
 
 # Capabilities the AMD NPU (XDNA + FLM stack) can serve. Mirrors the
-# ``flm → caps={chat, embed}`` line in src/hal0/registry/detect.py:85.
-# Used to decide whether a llama.cpp-compatible entry should also fan
-# out to ``npu`` when the host has an NPU. Voice (stt/tts) is NOT here
-# — those route through dedicated providers (moonshine, kokoro), not
-# through FLM.
-_NPU_FANOUT_CAPS: frozenset[str] = frozenset({"chat", "embed"})
+# ``flm`` capability set in src/hal0/registry/detect.py. Used to decide
+# whether a llama.cpp-compatible entry should also fan out to ``npu``
+# when the host has an NPU. ``stt`` is included as of NPU Phase 2: the
+# FLM trio (one ``flm serve`` process) coresides ASR with chat/embed, so
+# ``voice.stt`` can run on the NPU. TTS is NOT here — it routes through a
+# dedicated provider (kokoro), not through FLM.
+_NPU_FANOUT_CAPS: frozenset[str] = frozenset({"chat", "embed", "stt"})
 
 
 def _backend_variants(entry: Any) -> list[str]:
@@ -622,10 +623,10 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
 
     Probes :func:`hal0.providers.flm.flm_served_models` (cached at module
     scope after first call) and projects each FLM tag into a picker row
-    with ``backend="npu"`` / ``provider="flm"``. Scope is intentionally
-    limited to ``chat`` and ``embed`` per the 2026-05-20 design call —
-    FLM also serves ``stt`` (whisper-v3, gemma4-it asr=true) but the NPU
-    voice path through the slot manager is a later slice.
+    with ``backend="npu"`` / ``provider="flm"``. Scope is ``chat``,
+    ``embed`` and ``stt`` (NPU Phase 2): the FLM trio coresides ASR with
+    chat/embed in one ``flm serve`` process, so ``voice.stt`` runs on the
+    NPU. ``tts`` is still out — it routes through kokoro, not FLM.
 
     ``pullable`` is True for FLM tags — the pull route (routes/models.py)
     detects FLM ids via :func:`hal0.providers.flm.is_flm_tag` and dispatches
@@ -635,7 +636,7 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
     next ``/api/capabilities`` GET flips ``downloaded`` to True without a
     process restart.
     """
-    if capability not in {"chat", "embed"}:
+    if capability not in _NPU_FANOUT_CAPS:
         return []
     # Local import so catalog.py doesn't drag the provider module (and
     # its httpx dependency) onto every import path.
@@ -650,7 +651,7 @@ def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
         # Filter capabilities reported to the dashboard down to the
         # in-scope subset; otherwise an "stt" tag would leak through on a
         # chat row and confuse the picker.
-        reported_caps = [c for c in entry["capabilities"] if c in {"chat", "embed"}]
+        reported_caps = [c for c in entry["capabilities"] if c in _NPU_FANOUT_CAPS]
         # FLM's reported `size` is the raw weights footprint; for
         # quantized models it under-reports actual disk usage, so prefer
         # the larger of size and runtime footprint as the displayed value.

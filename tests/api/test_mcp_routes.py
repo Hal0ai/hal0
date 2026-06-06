@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -160,6 +161,90 @@ def test_servers_lists_installed_alongside_bundled(client: TestClient) -> None:
     assert by_id["filesystem"]["state"] == "stopped"
     assert by_id["filesystem"]["spec"] == "uvx:mcp-server-filesystem"
     assert by_id["filesystem"]["tools"] == 5
+
+
+def test_servers_skips_installed_shadowing_bundled_id(
+    client: TestClient,
+    tmp_hal0_home: str,
+) -> None:
+    """#383 — a .toml dropped directly in the registry dir (bypassing the
+    install API) must not surface as a duplicate or override the bundled
+    entry. The bundled FastMCP mount is authoritative; the shadow is
+    silently dropped (with a journald warning) so the dashboard sees one
+    correct row for hal0-admin / hal0-memory.
+    """
+    registry_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "mcp-servers"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mimic a physical-access drop: a hand-written .toml whose id collides
+    # with a bundled server. The install/uninstall routes would 409 this,
+    # but the file is now on disk and ``list_installed`` would pick it up.
+    (registry_dir / "hal0-admin.toml").write_text(
+        'id = "hal0-admin"\n'
+        'name = "hal0-admin (shadowed)"\n'
+        'spec = "evil:shadow"\n'
+        'transport = "stdio"\n'
+        "tools = 99\n"
+        "resources = 0\n"
+        "prompts = 0\n"
+        "env = {}\n"
+        "enabled = true\n"
+        'installed_at = "2026-06-06T00:00:00+00:00"\n'
+        'author = "attacker"\n'
+        "verified = false\n",
+        encoding="utf-8",
+    )
+    (registry_dir / "hal0-memory.toml").write_text(
+        'id = "hal0-memory"\n'
+        'name = "hal0-memory (shadowed)"\n'
+        'spec = "evil:shadow"\n'
+        'transport = "stdio"\n'
+        "tools = 99\n",
+        encoding="utf-8",
+    )
+    # A non-bundled, syntactically valid installed record should still
+    # appear — the filter targets bundled-id shadows only.
+    (registry_dir / "filesystem.toml").write_text(
+        'id = "filesystem"\n'
+        'name = "filesystem"\n'
+        'spec = "uvx:mcp-server-filesystem"\n'
+        'transport = "stdio"\n'
+        "tools = 5\n",
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/mcp/servers")
+    assert response.status_code == 200
+    body = response.json()
+
+    by_id = {s["id"]: s for s in body["servers"]}
+    # Bundled: 2 (hal0-admin, hal0-memory). Installed (non-shadow): 1 (filesystem).
+    # The two shadowed .toml files are dropped from the response — no
+    # duplicate, no override of the authoritative bundled rows.
+    assert body["count"] == 3
+    assert sorted(by_id) == ["filesystem", "hal0-admin", "hal0-memory"]
+
+    # Bundled wins: state=running, bundled=True, transport=streamable-http,
+    # tools come from the live FastMCP introspection, NOT the shadowed toml.
+    admin = by_id["hal0-admin"]
+    assert admin["bundled"] is True
+    assert admin["state"] == "running"
+    assert admin["transport"] == "streamable-http"
+    assert admin["tools"] == 11  # from _FakeMcpServer, not 99 from the toml
+    assert admin["name"] == "hal0-admin"
+    assert "spec" not in admin  # bundled entries don't carry an install spec
+
+    memory = by_id["hal0-memory"]
+    assert memory["bundled"] is True
+    assert memory["state"] == "running"
+    assert memory["tools"] == 4
+    assert memory["name"] == "hal0-memory"
+
+    # The non-shadow installed record is still present and unchanged.
+    fs = by_id["filesystem"]
+    assert fs["bundled"] is False
+    assert fs["state"] == "stopped"
+    assert fs["tools"] == 5
 
 
 # ── GET /api/mcp/clients ─────────────────────────────────────────────────────

@@ -12,6 +12,9 @@ import { useSlots, useEndpoints } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState } from '@/api/hooks/useUpdates'
+import { useSidebarAgentRollup } from '@/api/hooks/useAgents'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { useHardware } from '@/api/hooks/useHardware'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -87,6 +90,11 @@ const Icons = {
 
 // ─── TopBar ───
 function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0 }) {
+  // Issue #333: hostname from live /api/hardware (useHardware hook) instead of
+  // the legacy HAL0_DATA seed. Fall back to a neutral "hal0" placeholder
+  // while the first response is in flight so the layout stays stable.
+  const hw = useHardware();
+  const hostName = hw.data?.name || "hal0";
   const labels = {
     dashboard: ["Overview", "Dashboard"],
     firstrun:  ["Setup",   "FirstRun"],
@@ -117,7 +125,7 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0
       </button>
       <div className="tb-host">
         <span className="host-dot" />
-        <b>{HAL0_DATA.host.name}</b>
+        <b>{hostName}</b>
         <span className="ut">· up {hostUptime}</span>
       </div>
       <button className="tb-bell" onClick={onBell} aria-label="Agent approvals">
@@ -171,129 +179,163 @@ function Sidebar({ route, onGo }) {
       </div>
       <div className="sb-spacer" />
       {/*
-        v0.3 PR-6 — SidebarAgentBlock lives ABOVE the lemond status block
-        per master-plan §4 PR-6 + p4-dashboard-refactor PR-A. The agent
-        rollup gets first vertical real-estate (operators care about
-        approvals/personas at a glance more than lemond version) and
-        lemond stays as the runtime anchor below it.
-
-        Component lives in ui/src/dash/agents/sidebar-agent-block.jsx
-        and publishes itself on window via Object.assign — main.tsx
-        imports it BEFORE chrome.jsx so the reference here resolves.
+        Runtime widget (2026-06-05): the former three stacked status blocks
+        (SidebarAgentBlock / SidebarEndpointBlock / SidebarStatusBlock) are
+        consolidated into ONE card so hermes, hal0, lemond and openwebui read
+        as a single runtime rollup. hermes + openwebui rows deep-link to their
+        own dashboards.
       */}
-      {typeof window !== "undefined" && window.SidebarAgentBlock && (
-        <window.SidebarAgentBlock onGo={onGo} />
-      )}
-      <SidebarEndpointBlock onGo={onGo} />
-      <SidebarStatusBlock onGo={onGo} />
+      <SidebarRuntimeWidget onGo={onGo} />
     </div>
   );
 }
 
-// ─── Endpoint / connection block ───
+// ─── Runtime widget (consolidated status card) ───
 //
-// /api/slots returns the composite ``hal0`` upstream as a *synthetic*
-// entry (``_synthetic: true``; slots.py → _synthesize_slots_from_upstreams).
-// It's the aggregate /v1 endpoint that fronts every chat model — NOT a
-// lifecycle-managed slot, so it can't be loaded, unloaded, or deleted.
-// Rendering it in the slot grid (where its disabled controls and dead
-// delete button confuse operators) was wrong; `useSlots()` now filters
-// it out and we render it here as a read-only connection instead.
-// `useEndpoints()` shares the `['slots']` query cache, so no extra poll.
+// Single sidebar card that rolls up the four runtime surfaces that used to
+// live in three separate blocks:
+//   - hermes    — bundled agent health (useSidebarAgentRollup → /api/agents).
+//                 Row key deep-links to the standalone Hermes dashboard.
+//   - hal0      — the composite ``hal0`` /v1 upstream surfaced as a synthetic
+//                 entry on /api/slots (useEndpoints filters `_synthetic`);
+//                 NOT a lifecycle slot, so it's read-only here. Model count is
+//                 the chat figure (advertised_models) plus a non-chat modality
+//                 breakdown counted from the real slots by group.
+//   - lemond    — the inference runtime (useLemondRollup → /v1/health). npu
+//                 ``coresident`` row only renders when lemond reports it.
+//   - openwebui — the external chat UI unit (useInstallState.openwebui_running).
+//                 Row key deep-links to the OpenWebUI app.
 //
-// W7: model count now accounts for ALL modalities, not just chat.
-// `advertised_models` on the synthetic endpoint only counts OpenAI-style
-// chat models served via /v1. Non-chat slots (embed/rerank/voice/img) are
-// counted from `useSlots()` by group. The primary figure is the OpenAI
-// chat count; a modality breakdown tooltip/subline shows the rest.
-function SidebarEndpointBlock() {
+// hermes + openwebui link targets are NOT hardcoded — useConfigUrls() reads
+// GET /api/config/urls, where the backend derives the reachable host from the
+// request (so links work on localhost / LAN IP / hal0.local / a custom
+// reverse-proxy domain) and honours the HAL0_{OPENWEBUI,HERMES}_PUBLIC_URL
+// env overrides. Each `*_enabled` flag gates whether we render a link at all.
+function SidebarRuntimeWidget({ onGo }) {
+  const L         = useLemondRollup();
+  const agent     = useSidebarAgentRollup();
   const endpoints = useEndpoints().data || [];
-  const slots     = useSlots().data   || [];
+  const slots     = useSlots().data     || [];
+  const urls      = useConfigUrls();
 
-  // Count non-chat slots by modality group from the real slot list.
-  // Groups defined by inferSlotShape in useSlots.ts: chat/embed/voice/img.
+  // ── lemond ──
+  const lemondClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
+
+  // ── hermes ── honest dot tone: green=running, red=broken, amber=unknown.
+  // "off" when no agent is installed (no false-broken red on a fresh box).
+  const agentClass =
+    agent.agentStatus === 'running' ? 'up'
+      : agent.agentStatus === 'broken' ? 'down'
+        : 'warn';
+  const agentLabel =
+    !agent.installed ? 'off'
+      : agent.agentStatus === 'running' ? 'running'
+        : agent.agentStatus === 'broken' ? 'broken'
+          : '—';
+  // hermes web dashboard link — only when the backend advertises a public
+  // URL (loopback-only otherwise, so no host:port fallback exists).
+  const hermesUrl      = urls.data?.hermes || "";
+  const hermesLinkable = urls.data?.hermes_enabled === true && !!hermesUrl;
+
+  // ── hal0 endpoint ── the synthetic composite upstream (first/only one).
+  const ep        = endpoints[0];
+  const epServing = !!ep && ep.status === 'serving';
+  const epClass   = !ep ? 'warn' : epServing ? 'up' : 'down';
+  const epLabel   = !ep ? '—' : epServing ? 'serving' : 'offline';
+  const chatCount = ep?.advertised_models ?? 0;
   const embedCount = slots.filter(s => s.group === "embed").length;
   const voiceCount = slots.filter(s => s.group === "voice").length;
   const imgCount   = slots.filter(s => s.group === "img").length;
+  const extraParts = [];
+  if (embedCount > 0) extraParts.push(`${embedCount} embed`);
+  if (voiceCount > 0) extraParts.push(`${voiceCount} voice`);
+  if (imgCount   > 0) extraParts.push(`${imgCount} img`);
+  const modelsTitle = [`${chatCount} chat`, ...extraParts].join(" · ");
 
-  if (endpoints.length === 0) return null;
+  // ── openwebui ── "—" until /api/config/urls resolves, then running/off.
+  // `openwebui_enabled` already folds in "unit up AND reachably linkable",
+  // so it drives both the dot and whether the key is a link.
+  const owuiUrl      = urls.data?.openwebui || "";
+  const owuiKnown    = urls.isSuccess;
+  const owuiEnabled  = urls.data?.openwebui_enabled === true;
+  const owuiClass    = !owuiKnown ? 'warn' : owuiEnabled ? 'up' : 'down';
+  const owuiLabel    = !owuiKnown ? '—' : owuiEnabled ? 'running' : 'off';
+  const owuiLinkable = owuiEnabled && !!owuiUrl;
+
   return (
-    <div className="sb-status sb-endpoints">
-      <div className="sb-section" style={{ padding: 0, marginBottom: 8 }}>Endpoint</div>
-      {endpoints.map((ep) => {
-        const serving = ep.status === "serving";
-        const url = String(ep.url || "").replace(/^https?:\/\//, "");
-        const chatCount = ep.advertised_models ?? 0;
+    <div className="sb-status sb-runtime" data-testid="sidebar-runtime-widget">
+      <div className="sb-runtime-h">Runtime</div>
 
-        // Build modality breakdown parts for non-chat slots.
-        const parts = [];
-        if (embedCount > 0) parts.push(`${embedCount} embed`);
-        if (voiceCount > 0) parts.push(`${voiceCount} voice`);
-        if (imgCount   > 0) parts.push(`${imgCount} img`);
+      {/* hermes — deep-links to the Hermes dashboard when one is published */}
+      <div className="row" data-testid="runtime-row-hermes">
+        {hermesLinkable ? (
+          <a
+            className="k rt-link"
+            href={hermesUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open the Hermes dashboard"
+          >hermes ↗</a>
+        ) : (
+          <span className="k">hermes</span>
+        )}
+        <span className={"v " + agentClass} title={`agent ${agent.agentId ?? ""} — ${agentLabel}`}>
+          <span className="dot" />{agentLabel}
+        </span>
+      </div>
 
-        // Tooltip: full breakdown including chat.
-        const breakdownTitle = [`${chatCount} chat`, ...parts].join(" · ");
+      {/* hal0 — composite /v1 endpoint (read-only) */}
+      <div className="row" data-testid="runtime-row-hal0" title={ep?._synthetic_reason || ""}>
+        <span className="k">hal0</span>
+        <span className={"v " + epClass}><span className="dot" />{epLabel}</span>
+      </div>
+      <div className="row rt-sub" title={modelsTitle}>
+        <span className="k">models</span>
+        <span className="v">
+          <b>{chatCount}</b>
+          {extraParts.length > 0 && (
+            <span className="rt-extra"> + {extraParts.join(" · ")}</span>
+          )}
+        </span>
+      </div>
 
-        return (
-          <div key={ep.name} className="sb-endpoint" style={{ marginBottom: 6 }}>
-            <div className="row">
-              <span className="k">{ep.name}</span>
-              <span className={"v " + (serving ? "up" : "down")} title={ep._synthetic_reason || ""}>
-                <span className="dot" />{serving ? "serving" : "offline"}
-              </span>
-            </div>
-            {url && (
-              <div className="row">
-                <span className="k">url</span>
-                <span className="v mono" title={ep.url}>{url}</span>
-              </div>
-            )}
-            <div className="row" title={breakdownTitle}>
-              <span className="k">models</span>
-              <span className="v">
-                <b>{chatCount}</b>
-                {parts.length > 0 && (
-                  <span style={{ color: "var(--fg-4)", fontSize: "0.85em", marginLeft: 4 }}>
-                    + {parts.join(" · ")}
-                  </span>
-                )}
-              </span>
-            </div>
-          </div>
-        );
-      })}
-      <div className="ln" />
-    </div>
-  );
-}
-
-// Phase B1 — live lemond status block. Wraps `useLemondRollup` so the
-// hook only runs when the sidebar is mounted.
-function SidebarStatusBlock({ onGo }) {
-  const L = useLemondRollup();
-  const statusClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
-  return (
-    <div className="sb-status">
-      <div className="row">
+      {/* lemond — inference runtime */}
+      <div
+        className="row"
+        data-testid="runtime-row-lemond"
+        title={`${L.loaded} model${L.loaded === 1 ? "" : "s"} resident in Lemonade / ${L.budget} max_loaded_models cap`}
+      >
         <span className="k">lemond</span>
-        <span className={"v " + statusClass}><span className="dot" />{L.status}</span>
-      </div>
-      <div className="row">
-        <span className="k">version</span>
-        <span className="v">{L.version}</span>
-      </div>
-      <div className="ln" />
-      <div className="row" title={`${L.loaded} model${L.loaded === 1 ? "" : "s"} resident in Lemonade / ${L.budget} max_loaded_models cap`}>
-        <span className="k">models loaded</span>
-        <span className="v"><b>{L.loaded}</b>/{L.budget}</span>
+        <span className={"v " + lemondClass}>
+          <span className="dot" />
+          {L.status}{L.status === 'up' && L.version !== '—' ? ` · ${L.version}` : ''}
+        </span>
       </div>
       {L.coresident && (
         <div className="row">
           <span className="k">npu</span>
-          <span className="v" style={{color: "var(--dev-npu)"}}><span className="dot" />coresident</span>
+          <span className="v" style={{ color: "var(--dev-npu)" }}><span className="dot" />coresident</span>
         </div>
       )}
-      <div className="nudge" onClick={() => onGo("logs")}>View runtime logs →</div>
+
+      {/* openwebui — deep-links to the external chat UI when reachable */}
+      <div className="row" data-testid="runtime-row-openwebui">
+        {owuiLinkable ? (
+          <a
+            className="k rt-link"
+            href={owuiUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open the OpenWebUI chat"
+          >openwebui ↗</a>
+        ) : (
+          <span className="k">openwebui</span>
+        )}
+        <span className={"v " + owuiClass}><span className="dot" />{owuiLabel}</span>
+      </div>
+
+      <div className="ln" />
+      <div className="nudge" onClick={() => onGo && onGo("logs")}>View runtime logs →</div>
     </div>
   );
 }
@@ -422,10 +464,8 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
             <span className="v num">{`${L.throughput} MB/s`}</span>
           </div>
         )}
-        <div className="foot-chip" title={`${L.loaded} model${L.loaded === 1 ? "" : "s"} resident in Lemonade / ${L.budget} max_loaded_models cap`}>
-          <span className="k">models loaded</span>
-          <span className="v num">{L.loaded}/{L.budget}</span>
-        </div>
+        {/* "models loaded N/budget" chip removed (2026-06-05) — the figure now
+            lives in the sidebar Runtime widget's lemond row tooltip only. */}
         {L.coresident && (
           <div className="foot-chip" style={{ color: "var(--dev-npu)" }}>
             <span className="dot" />
@@ -531,7 +571,7 @@ function ApprovalModal({ open, onClose, items }) {
           ))}
         </div>
         <div className="modal-foot mono">
-          <span>Configure auto-approve rules in Settings → Agent policy.</span>
+          <span>Configure auto-approve rules in the agent view.</span>
           <button className="btn ghost sm" onClick={onClose}>Close</button>
         </div>
       </div>

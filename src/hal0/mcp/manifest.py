@@ -34,6 +34,7 @@ render *something* for any plausibly-shaped paste.
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 import socket
 from collections.abc import Awaitable, Callable
@@ -380,17 +381,26 @@ async def _default_fetcher(url: str) -> Any:
     final URL directly.
     """
     _enforce_safe_url(url)
-    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=False) as client:
-        resp = await client.get(url, headers={"Accept": "application/json"})
+    # Stream the body and abort the moment we cross the cap (#381) — a
+    # misbehaving server must not be able to make us buffer an unbounded
+    # response into memory before we reject it.
+    async with (
+        httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=False) as client,
+        client.stream("GET", url, headers={"Accept": "application/json"}) as resp,
+    ):
         resp.raise_for_status()
-        # Bound body size so a misbehaving server can't stuff us.
-        body = resp.content
-        if len(body) > _MAX_MANIFEST_BYTES:
-            raise httpx.HTTPError(f"manifest body too large ({len(body)} > {_MAX_MANIFEST_BYTES})")
-        try:
-            return resp.json()
-        except ValueError:
-            return None
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in resp.aiter_bytes():
+            total += len(chunk)
+            if total > _MAX_MANIFEST_BYTES:
+                raise httpx.HTTPError(f"manifest body too large (> {_MAX_MANIFEST_BYTES})")
+            chunks.append(chunk)
+    body = b"".join(chunks)
+    try:
+        return json.loads(body)
+    except ValueError:
+        return None
 
 
 async def resolve(url: str, *, fetcher: HttpFetcher | None = None) -> ResolvedManifest:

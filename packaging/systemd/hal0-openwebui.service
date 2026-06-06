@@ -23,8 +23,9 @@ EnvironmentFile=/etc/hal0/openwebui.env
 
 # Pre-pull on first start so the unit doesn't sit in 'activating' for
 # minutes the first time. Idempotent — Docker reuses the cached image.
-# tracked-in: #79 — pin :main to a specific digest per hal0 release (PLAN §8).
-ExecStartPre=-/usr/bin/docker pull ghcr.io/open-webui/open-webui:main
+# pin per release (#79) — sha256 digest is deterministic; bump on each
+# hal0 release after a smoke test.
+ExecStartPre=-/usr/bin/docker pull ghcr.io/open-webui/open-webui@sha256:d05c6ff8baf5ae701d86a3332c0db4ebb2802ca3d0d341be7fd157fa730306ab
 
 # Best-effort cleanup of any stale container from a previous start that
 # didn't shut down cleanly. The leading `-` makes systemd ignore the
@@ -36,7 +37,8 @@ ExecStartPre=-/usr/bin/docker rm -f hal0-openwebui
 # Data lives in /var/lib/hal0/openwebui/ which survives container
 # restarts and hal0 updates. The host port :3001 binds 0.0.0.0 by
 # default (PLAN §2 "public" tier).
-# tracked-in: #79 — pin ghcr.io/open-webui/open-webui:main to a digest per release.
+# pin per release (#79) — sha256 digest is deterministic; bump the
+# digest on each hal0 release (match install.sh OPENWEBUI_IMAGE).
 ExecStart=/usr/bin/docker run \
   --rm \
   --name hal0-openwebui \
@@ -45,7 +47,7 @@ ExecStart=/usr/bin/docker run \
   -p 0.0.0.0:3001:8080 \
   --add-host=host.docker.internal:host-gateway \
   --security-opt apparmor=unconfined \
-  ghcr.io/open-webui/open-webui:main
+  ghcr.io/open-webui/open-webui@sha256:d05c6ff8baf5ae701d86a3332c0db4ebb2802ca3d0d341be7fd157fa730306ab
 
 # Graceful stop: tell the named container to stop (SIGTERM + 10s timeout
 # is docker's default). systemd will SIGKILL ExecStart if it doesn't

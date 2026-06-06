@@ -3,7 +3,6 @@ const { useState: useStateA, useEffect: useEffectA } = React;
 
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "slotVariant": "instrument",
-  "npuVariant": "block",
   "showHero": true,
   "firstRunLayout": "grid",
   "personaPlacement": "composer-left"
@@ -160,7 +159,6 @@ function App() {
           <SlotsView
             slots={HAL0_DATA.slots}
             slotVariant={tweaks.slotVariant}
-            npuVariant={tweaks.npuVariant}
             slotParam={param}
             onGo={go}
           />
@@ -259,18 +257,6 @@ function App() {
               { value: "instrument", label: "Instrument" },
               { value: "list",       label: "Compact list" },
               { value: "spec",       label: "Spec card" },
-            ]}
-          />
-        </TweakSection>
-
-        <TweakSection title="NPU trio">
-          <TweakRadio
-            label="Layout"
-            value={tweaks.npuVariant}
-            onChange={v => setTweak("npuVariant", v)}
-            options={[
-              { value: "block",   label: "Block (sub-rows)" },
-              { value: "reactor", label: "Reactor diagram" },
             ]}
           />
         </TweakSection>

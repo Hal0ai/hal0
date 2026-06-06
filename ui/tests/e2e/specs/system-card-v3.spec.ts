@@ -17,11 +17,13 @@
 import { test, expect } from '../fixtures/apiMock'
 
 test.describe('System card (dashboard sidebar)', () => {
-  test('renders the condensed host/os/cpu/gpu/npu/ram + lemond rows', async ({ page }) => {
+  test('renders the condensed host/os/cpu/gpu/npu/ram rows', async ({ page }) => {
     await page.goto('/#dashboard')
     const card = page.locator('.sys-card')
     await expect(card).toBeVisible()
-    // one row per identity field, plus the folded-in lemond health row
+    // one row per identity field. The former folded-in lemond health row was
+    // removed (2026-06-05) — runtime status now lives in the sidebar Runtime
+    // widget, so the System card is hardware identity only.
     await expect(card.locator('.sys-row .k')).toHaveText([
       'host',
       'os',
@@ -29,7 +31,6 @@ test.describe('System card (dashboard sidebar)', () => {
       'gpu',
       'npu',
       'ram',
-      'lemond',
     ])
   })
 
@@ -69,11 +70,11 @@ test.describe('System card (dashboard sidebar)', () => {
     await expect(card).toContainText('amdxdna')
   })
 
-  test('lemond health row is folded into the System card', async ({ page }) => {
+  test('lemond health row is no longer present in the System card', async ({ page }) => {
     await page.goto('/#dashboard')
     const card = page.locator('.sys-card')
-    // the row key + the status pill render; the standalone Health card is gone
-    await expect(card.locator('.sys-row .k', { hasText: 'lemond' })).toBeVisible()
-    await expect(card.locator('.sys-health')).toBeVisible()
+    // Removed 2026-06-05 — folded into the sidebar Runtime widget instead.
+    await expect(card.locator('.sys-row .k', { hasText: 'lemond' })).toHaveCount(0)
+    await expect(card.locator('.sys-health')).toHaveCount(0)
   })
 })

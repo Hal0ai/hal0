@@ -703,3 +703,120 @@ def test_detect_lspci_fallback_handles_display_controller(
     info = probe_mod._detect_lspci_fallback()
     assert info is not None
     assert "Microsoft" in info.name
+
+
+# ── cgroup memory.max reader (#372) ──────────────────────────────────────────
+# The running LXC's cgroup memory cap is a candidate headroom constraint.
+# On cgroup-v2 /sys/fs/cgroup/memory.max holds a literal "max" (unlimited)
+# or an integer byte count. On cgroup-v1 the equivalent is
+# /sys/fs/cgroup/memory/memory.limit_in_bytes, with the "infinite" sentinel
+# 9223372036854775807. Both missing → None (no behavior change).
+
+_CGROUP_V2_PATH = "/sys/fs/cgroup/memory.max"
+_CGROUP_V1_PATH = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+
+
+def test_cgroup_v2_returns_mib(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 16 GiB = 16 * 1024 * 1024 * 1024 = 17_179_869_184 bytes
+    limit_bytes = 16 * 1024 * 1024 * 1024
+    table = {_CGROUP_V2_PATH: str(limit_bytes), _CGROUP_V1_PATH: None}
+    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
+    out = probe_mod._read_cgroup_memory_max_mb()
+    assert out == 16 * 1024
+
+
+def test_cgroup_v2_max_literal_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """cgroup-v2 signals 'unlimited' with the literal string 'max'."""
+    table = {_CGROUP_V2_PATH: "max\n"}
+    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
+    assert probe_mod._read_cgroup_memory_max_mb() is None
+
+
+def test_cgroup_v1_returns_mib(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 8 GiB in bytes
+    limit_bytes = 8 * 1024 * 1024 * 1024
+    table = {_CGROUP_V2_PATH: None, _CGROUP_V1_PATH: str(limit_bytes)}
+    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
+    out = probe_mod._read_cgroup_memory_max_mb()
+    assert out == 8 * 1024
+
+
+def test_cgroup_v1_infinite_sentinel_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cgroup-v1 reports the 'infinite' limit as 9223372036854775807."""
+    table = {
+        _CGROUP_V2_PATH: None,
+        _CGROUP_V1_PATH: "9223372036854775807\n",
+    }
+    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
+    assert probe_mod._read_cgroup_memory_max_mb() is None
+
+
+def test_cgroup_v2_takes_precedence_over_v1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If both files are present, trust v2 (it's the canonical location
+    on a cgroup-v2 unified host — v1 is just a compat shim)."""
+    v2_bytes = 4 * 1024 * 1024 * 1024
+    v1_bytes = 8 * 1024 * 1024 * 1024
+    table = {
+        _CGROUP_V2_PATH: str(v2_bytes),
+        _CGROUP_V1_PATH: str(v1_bytes),
+    }
+    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
+    out = probe_mod._read_cgroup_memory_max_mb()
+    assert out == 4 * 1024
+
+
+def test_cgroup_missing_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No v2, no v1 → None (caller treats as 'no constraint')."""
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    assert probe_mod._read_cgroup_memory_max_mb() is None
+
+
+def test_cgroup_garbage_value_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file that exists but doesn't parse as an int must not crash."""
+    table = {_CGROUP_V2_PATH: "not a number\n"}
+    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
+    assert probe_mod._read_cgroup_memory_max_mb() is None
+
+
+def test_cgroup_empty_string_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty content (zero-byte file, or read that landed mid-stream)
+    must be treated as 'no constraint', not as 0 MiB."""
+    table = {_CGROUP_V2_PATH: ""}
+    monkeypatch.setattr(probe_mod, "_read_text", lambda p: table.get(str(p)))
+    assert probe_mod._read_cgroup_memory_max_mb() is None
+
+
+def test_probe_populates_cgroup_max_mb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: HardwareProbe.probe() picks up the cgroup max so the
+    /api/hardware response can surface cgroup_max_mb to the dashboard."""
+    monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("CPU", 4, 4))
+    monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (16384, 12000))
+    monkeypatch.setattr(probe_mod, "_detect_gpu", lambda: GPUInfo(vendor="unknown"))
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
+    monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 1024)
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    monkeypatch.setattr(probe_mod, "_detect_platform", lambda *_: "lxc")
+    monkeypatch.setattr(probe_mod, "_read_cgroup_memory_max_mb", lambda: 12 * 1024)
+
+    info = HardwareProbe().probe()
+    assert info.cgroup_max_mb == 12 * 1024
+
+
+def test_probe_cgroup_max_mb_none_when_unlimited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlimited cgroup (literal 'max') → field stays None so the UI
+    falls back to pool/host without the cgroup constraint."""
+    monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("CPU", 4, 4))
+    monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (16384, 12000))
+    monkeypatch.setattr(probe_mod, "_detect_gpu", lambda: GPUInfo(vendor="unknown"))
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
+    monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 1024)
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+    monkeypatch.setattr(probe_mod, "_detect_platform", lambda *_: "lxc")
+    monkeypatch.setattr(probe_mod, "_read_cgroup_memory_max_mb", lambda: None)
+
+    info = HardwareProbe().probe()
+    assert info.cgroup_max_mb is None

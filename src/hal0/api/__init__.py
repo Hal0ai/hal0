@@ -63,6 +63,7 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     hardware,
     health,
+    hf,
     images,
     installer,
     logs,
@@ -947,9 +948,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The orchestrator is intentionally constructed AFTER the slot
     # manager + registry are ready so initialize_if_missing() can lift
     # current slot config into capabilities.toml on first boot.
+    # NPU Phase 2: pass a zero-arg callable returning a LemonadeClient so
+    # the orchestrator's device=npu embed/stt path can read/write lemond
+    # ``flm_args`` (drive the FLM trio) instead of spawning a standalone FLM
+    # process. Local import keeps orchestrator import cheap.
+    def _lemonade_client():  # type: ignore[no-untyped-def]
+        from hal0.providers import lemonade_provider
+
+        return lemonade_provider().client()
+
     capability_orchestrator = CapabilityOrchestrator(
         slot_manager=slot_manager,
         registry=model_registry,
+        lemonade_provider=_lemonade_client,
     )
     try:
         await capability_orchestrator.initialize_if_missing()
@@ -1176,6 +1187,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(slots.router, prefix="/api/slots", tags=["slots"])
     app.include_router(models.router, prefix="/api/models", tags=["models"])
+    # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
+    # to the models surface so the dashboard's "Search HF" button has a
+    # backend to call; the inspect endpoint already lives under
+    # /api/models/inspect and is a *different* flow (known coord →
+    # variants) than this search proxy (free-text → coord candidates).
+    app.include_router(hf.router, prefix="/api/hf", tags=["hf"])
     app.include_router(hardware.router, prefix="/api", tags=["hardware"])
     app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
     # PR-11: Lemonade log proxy — surfaces the /logs/stream WS as SSE

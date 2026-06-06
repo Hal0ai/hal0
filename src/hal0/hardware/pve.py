@@ -221,6 +221,9 @@ class PveDetectionState(StrEnum):
 # Module-level Paths so tests can monkeypatch the read sources.
 _PROC_VERSION = Path("/proc/version")
 _PROC_1_CGROUP = Path("/proc/1/cgroup")
+_PROC_1_ENVIRON = Path("/proc/1/environ")
+_DEV_LXC = Path("/dev/.lxc")
+_RUN_SYSTEMD_CONTAINER = Path("/run/systemd/container")
 
 
 def _has_pve_kernel() -> bool:
@@ -230,24 +233,72 @@ def _has_pve_kernel() -> bool:
         return False
 
 
+def _lxc_via_cgroup_v1(text: str) -> bool:
+    """Legacy cgroup-v1 pattern: lxc.payload.<vmid>/… or /lxc/<vmid>/…"""
+    return "lxc.payload" in text or "/lxc/" in text
+
+
+def _lxc_via_cgroup_v2_marker() -> bool:
+    """cgroup-v2 unified LXCs have a /init.scope cgroup path that looks
+    identical to a systemd host's. Distinguish them with a corroborating
+    container marker — env, /dev/.lxc, or systemd's container file. The
+    cgroup path alone is not enough: a cgroup-v2 systemd host also reads
+    ``0::/init.scope`` and we MUST NOT false-positive as LXC.
+    """
+    # /proc/1/environ uses NUL separators, not newlines.
+    try:
+        env = _PROC_1_ENVIRON.read_text(errors="ignore")
+    except OSError:
+        env = ""
+    if env and "container=lxc" in env.replace("\x00", " "):
+        return True
+    try:
+        if _DEV_LXC.exists():
+            return True
+    except OSError:
+        pass
+    try:
+        text = _RUN_SYSTEMD_CONTAINER.read_text(errors="ignore")
+    except OSError:
+        text = ""
+    return "lxc" in text.lower().strip()
+
+
 def _is_lxc_init() -> bool:
     try:
         text = _PROC_1_CGROUP.read_text(errors="ignore")
     except OSError:
         return False
-    # Proxmox LXCs put init under lxc.payload.<vmid>/… or /lxc/<vmid>/…
-    return "lxc.payload" in text or "/lxc/" in text
+    # Proxmox LXC: cgroup-v1 puts init under lxc.payload.<vmid>/… or /lxc/<vmid>/…
+    if _lxc_via_cgroup_v1(text):
+        return True
+    # cgroup-v2 unified LXCs (hal0 LXC): /proc/1/cgroup reads 0::/init.scope
+    # — identical to a systemd host. Escalate only when a positive container
+    # marker (env, /dev/.lxc, systemd/container) confirms we're inside a
+    # container at all.
+    if "0::/" in text:
+        return _lxc_via_cgroup_v2_marker()
+    return False
 
 
 def detect_proxmox_host() -> PveDetectionState:
     """Best-effort detection of whether hal0 is running inside a Proxmox LXC.
 
     Signals (each independent, none requires shelling out):
-      - /proc/version contains '-pve'   (strong)
-      - /proc/1/cgroup is lxc-shaped    (medium)
+      - /proc/version contains '-pve'                       (strong)
+      - /proc/1/cgroup matches the cgroup-v1 lxc.payload /  (medium)
+        /lxc/ pattern
+      - /proc/1/cgroup is cgroup-v2 shaped AND any of         (medium)
+        ``container=lxc`` in /proc/1/environ,
+        /dev/.lxc exists, or /run/systemd/container = lxc
 
-    Both signals present → DETECTED. Either signal alone → UNCERTAIN. Neither → NOT_DETECTED.
-    Never raises; unreadable inputs collapse to NOT_DETECTED.
+    Both kernel + cgroup signals present → DETECTED. Either signal alone →
+    UNCERTAIN. Neither → NOT_DETECTED. Never raises; unreadable inputs
+    collapse to NOT_DETECTED.
+
+    Conservative on cgroup-v2: the cgroup path alone is not sufficient,
+    because a systemd host also reads ``0::/init.scope``. We only
+    escalate to DETECTED when a corroborating container marker exists.
     """
     pve_kernel = _has_pve_kernel()
     lxc_init = _is_lxc_init()

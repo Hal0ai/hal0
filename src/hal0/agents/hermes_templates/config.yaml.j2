@@ -71,6 +71,19 @@ providers:
     base_url: {{ ("http://127.0.0.1:8080/v1" if live_resolve_enabled else (primary.backend_url if primary else "http://127.0.0.1:8080/v1")) | tojson }}
     request_timeout_seconds: 300
     stale_timeout_seconds: 900
+{%- if live_resolve_enabled %}
+    # Live model discovery. Under live-resolve, base_url above is the hal0-api
+    # gateway (:8080), which serves every loaded slot at /v1/models. hal0-api
+    # is unauthenticated, but Hermes's Section-3 picker only runs live
+    # /v1/models discovery when an api_key is present (see model_switch.py:
+    # ``if api_url and api_key and discover``). Without it the picker shows
+    # only ``model.default`` and never sees the other slots (e.g. a ROCm MOE
+    # slot). The placeholder key opens that gate; its value is ignored by the
+    # gateway. When live-resolve is OFF, base_url points at a single physical
+    # slot backend, so discovery is intentionally omitted there.
+    api_key: "hal0-local"
+    discover_models: true
+{%- endif %}
 
 {%- if chat_slots %}
 

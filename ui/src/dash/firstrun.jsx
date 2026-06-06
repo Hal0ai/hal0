@@ -22,7 +22,7 @@ function _frFmtBytes(n) {
 // ─── Storage step (state 1.5 — between picker and confirm) ───
 //
 // Lets the operator decide WHERE models live before any pulls start.
-// Mirrors the Settings → Models surface (same hooks, same dry-run
+// Mirrors the Settings → Storage surface (same hooks, same dry-run
 // migration plumbing) so the FirstRun choice and the Settings page
 // stay in lockstep.
 function FirstRunStorage({ onContinue, onBack }) {

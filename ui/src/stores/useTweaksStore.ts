@@ -14,7 +14,6 @@ const IS_DEV = !!(import.meta.env && (import.meta.env as any).DEV)
 
 export interface TweaksState {
   slotCardVariant: 'a' | 'b' | 'c' | 'instrument' | 'list' | 'spec'
-  npuVariant: 'block' | 'reactor'
   heroStrip: 'sparkline' | 'metrics' | 'minimal'
   composerState: 'idle' | 'sending' | 'streaming' | 'swap' | 'no-tools' | 'offline'
   firstrunLayout: 'tiers' | 'wizard' | 'grid' | 'table'
@@ -28,7 +27,6 @@ export interface TweaksState {
 
 const DEFAULTS: TweaksState = {
   slotCardVariant: 'instrument',
-  npuVariant: 'block',
   heroStrip: 'sparkline',
   composerState: 'idle',
   firstrunLayout: 'grid',

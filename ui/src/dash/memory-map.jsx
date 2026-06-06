@@ -223,7 +223,11 @@ export function useMemoryMapModel() {
 
   // ── Headroom ──
   // Pool free = unified cap minus model memory actually held. Host free
-  // can be the tighter constraint when running on Proxmox.
+  // can be the tighter constraint when running on Proxmox. The running
+  // LXC's cgroup memory cap is a third candidate (issue #372): when
+  // BELOW the current min(pool, host) it becomes the binding constraint.
+  // When unlimited / unreadable, cgroup_max_mb is null and the cgroup
+  // branch is a no-op.
   const poolHeadroom = unifiedGb - modelUsedGb
   let limitedBy = 'pool'
   let candidate = poolHeadroom
@@ -231,8 +235,17 @@ export function useMemoryMapModel() {
     candidate = host.freeGb
     limitedBy = 'host'
   }
-  // cgroup branch: best-effort, defer to follow-up issue. limitedBy stays
-  // pool/host today.
+  // cgroup branch: treat the running cgroup's memory.max as a third
+  // ceiling. Subtract the same modelUsedGb the pool already accounts
+  // for — the cgroup cap is a hard absolute, not a "free" figure.
+  const cgroupMaxMb = rawHw.cgroup_max_mb
+  if (cgroupMaxMb && Number.isFinite(cgroupMaxMb)) {
+    const cgroupFreeGb = mbToGb(cgroupMaxMb) - modelUsedGb
+    if (cgroupFreeGb < candidate) {
+      candidate = cgroupFreeGb
+      limitedBy = 'cgroup'
+    }
+  }
   const availableGb = Math.max(0, round1(candidate - SAFETY_MARGIN_GB))
 
   return {

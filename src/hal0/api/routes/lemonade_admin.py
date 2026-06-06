@@ -195,24 +195,29 @@ def _validate_llamacpp_args(value: object) -> str | None:
 
 
 def _validate_flm_args(value: object) -> str | None:
-    """Return an error message if ``flm_args`` would break the FLM-trio
-    mandate, else None.
+    """Return an error message if ``flm_args`` is malformed, else None.
 
-    Per plan §5 + ADR-0009 §1, the NPU has a single AMDXDNA hardware
-    context per host — a single ``flm serve`` process. The trio flags
-    ``--asr 1 --embed 1`` pack chat + ASR + embed into that one process.
-    Without both flags the NPU stt-npu and embed-npu slots have no
-    backend; the dashboard would render those slots green while requests
-    404 against a non-existent FLM child port.
+    The NPU has a single AMDXDNA hardware context per host (ADR-0009 §1) —
+    one ``flm serve`` process. The trio flags ``--asr <0|1>`` / ``--embed <0|1>``
+    toggle whether ASR and embed ride coresident in that one process.
+
+    Relaxed 2026-06-05 (Spec 2: NPU/FLM stack section): the dashboard NPU
+    section sets these flags explicitly, so a chat-only or chat+one-modality
+    stack is a valid configuration — we no longer mandate ``--asr 1 --embed 1``.
+    We reject only MALFORMED values. NOTE: when a modality is set to 0, the
+    caller MUST also disable the corresponding NPU ``transcription`` /
+    ``embedding`` slot so dispatch gating (``v1._is_npu_trio_request``) doesn't
+    route requests to a modality the FLM child isn't serving (which would 404).
+    The dashboard NPU section keeps these in sync.
     """
     if not isinstance(value, str):
         return "must be a string"
     # Tolerate any whitespace between flag and arg ("--asr 1", "--asr  1",
-    # "--asr\t1"). Reject "--asr 0" — that's the disable form.
-    if not re.search(r"--asr\s+1(?:\s|$)", value):
-        return "must include --asr 1 (FLM trio mandate, plan §5)"
-    if not re.search(r"--embed\s+1(?:\s|$)", value):
-        return "must include --embed 1 (FLM trio mandate, plan §5)"
+    # "--asr\t1"). Accept 0 (disable) or 1 (enable); reject anything else.
+    for flag in ("asr", "embed"):
+        m = re.search(rf"--{flag}\s+(\S+)", value)
+        if m and m.group(1) not in ("0", "1"):
+            return f"--{flag} must be 0 or 1 (got {m.group(1)!r})"
     return None
 
 

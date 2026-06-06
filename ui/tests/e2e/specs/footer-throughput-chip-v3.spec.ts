@@ -21,7 +21,7 @@ test.describe('Footer throughput chip hides on missing/zero (#326)', () => {
     await expect(footer).toBeVisible()
     // Wait for the 2s health poll to land — sidebar version row is a
     // good proxy for "rollup data has propagated".
-    await expect(page.locator('.sb-status .row .v', { hasText: /^v\d/ })).toBeVisible({ timeout: 6_000 })
+    await expect(page.locator('[data-testid="runtime-row-lemond"] .v', { hasText: /v\d/ })).toBeVisible({ timeout: 6_000 })
 
     const throughputChip = footer.locator('.foot-chip', { has: page.locator('.k', { hasText: /^throughput$/ }) })
     await expect(throughputChip).toBeVisible()
@@ -43,7 +43,7 @@ test.describe('Footer throughput chip hides on missing/zero (#326)', () => {
     await page.goto('/')
     const footer = page.locator('.footer')
     await expect(footer).toBeVisible()
-    await expect(page.locator('.sb-status .row .v', { hasText: /^v\d/ })).toBeVisible({ timeout: 6_000 })
+    await expect(page.locator('[data-testid="runtime-row-lemond"] .v', { hasText: /v\d/ })).toBeVisible({ timeout: 6_000 })
     await page.waitForTimeout(2_500)
 
     const throughputChip = footer.locator('.foot-chip', { has: page.locator('.k', { hasText: /^throughput$/ }) })
@@ -67,7 +67,7 @@ test.describe('Footer throughput chip hides on missing/zero (#326)', () => {
     await page.goto('/')
     const footer = page.locator('.footer')
     await expect(footer).toBeVisible()
-    await expect(page.locator('.sb-status .row .v', { hasText: /^v\d/ })).toBeVisible({ timeout: 6_000 })
+    await expect(page.locator('[data-testid="runtime-row-lemond"] .v', { hasText: /v\d/ })).toBeVisible({ timeout: 6_000 })
     await page.waitForTimeout(2_500)
 
     const throughputChip = footer.locator('.foot-chip', { has: page.locator('.k', { hasText: /^throughput$/ }) })

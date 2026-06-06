@@ -9,10 +9,12 @@
  *
  *   - the sidebar drops the "Agent" nav item entirely
  *   - a deep link to #agent shows a "disabled" notice, not the Memory tab
- *   - the SidebarAgentBlock omits its "Memory →" CTA (no dead-end link)
+ *   - the sidebar Runtime widget carries no dead-end "Memory →" link
+ *     (the widget consolidated the old SidebarAgentBlock; its agent row now
+ *     deep-links to the Hermes dashboard, never the gated Memory route)
  *
  * The ON state is covered by the default mock (memory_enabled: true) across
- * agent-view-v3 / memory-graph-v3 / sidebar-agent-block.
+ * agent-view-v3 / memory-graph-v3 / sidebar-runtime-widget.
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
@@ -49,9 +51,12 @@ test.describe('memory gate OFF (HAL0_MEMORY_ENABLED unset)', () => {
     await expect(page.locator('[data-testid="agent-tab-nav"]')).toHaveCount(0)
   })
 
-  test('SidebarAgentBlock omits the Memory CTA', async ({ page }) => {
+  test('Runtime widget renders with no dead-end Memory link', async ({ page }) => {
     await page.goto('/#dashboard')
     await expect(page.locator('.sb-list')).toBeVisible({ timeout: FIVE_S })
+    // The consolidated Runtime widget still renders under the memory gate...
+    await expect(page.locator('[data-testid="sidebar-runtime-widget"]')).toBeVisible()
+    // ...and never offers the old dead-end "Memory →" CTA into the gated route.
     await expect(page.locator('[data-testid="sidebar-agent-open-memory"]')).toHaveCount(0)
   })
 })

@@ -163,3 +163,18 @@ def test_validate_id_rejects_path_traversal(tmp_hal0_home: str) -> None:
     with pytest.raises(BadRequest) as exc:
         registry.uninstall("../evil")
     assert exc.value.code == "mcp.id_invalid"
+
+
+def test_patch_config_locked_rmw_applies(tmp_hal0_home: str) -> None:
+    """#382: patch_config wraps its read-modify-write in an advisory lock.
+
+    Functional guard that the locked RMW still applies env + enabled
+    updates and the write lands on disk (the lock must not swallow the
+    write or corrupt the record)."""
+    registry.install(_record("filesystem", enabled=True))
+    patched = registry.patch_config("filesystem", enabled=False, env={"FOO": "bar"})
+    assert patched.enabled is False
+    assert patched.env == {"FOO": "bar"}
+    reloaded = registry.get_installed("filesystem")
+    assert reloaded.enabled is False
+    assert reloaded.env == {"FOO": "bar"}

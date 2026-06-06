@@ -108,6 +108,38 @@ def test_platform_label_for_known_strings() -> None:
     assert _platform_label("nonsense-value", {}) == "Unknown platform"
 
 
+# ── cgroup_max_mb surfacing (#372) ───────────────────────────────────────────
+
+
+def test_flatten_includes_cgroup_max_mb_when_set() -> None:
+    info = HardwareInfo(
+        cpu_model="x86_64",
+        ram_mb=96 * 1024,
+        unified_memory_mb=96 * 1024,
+        gpus=[],
+        npu=NPUInfo(present=False),
+        platform="lxc",
+        cgroup_max_mb=80 * 1024,
+    ).model_dump(mode="python")
+    flat = _flatten_for_ui(info)
+    assert flat["cgroup_max_mb"] == 80 * 1024
+
+
+def test_flatten_cgroup_max_mb_none_when_unlimited() -> None:
+    info = HardwareInfo(
+        cpu_model="x86_64",
+        ram_mb=96 * 1024,
+        unified_memory_mb=96 * 1024,
+        gpus=[],
+        npu=NPUInfo(present=False),
+        platform="lxc",
+    ).model_dump(mode="python")
+    flat = _flatten_for_ui(info)
+    # When unlimited/unreadable, the field is absent (or None) — the UI
+    # falls back to pool/host as if cgroup weren't a constraint.
+    assert flat.get("cgroup_max_mb") in (None,)
+
+
 class TestHostDetectionInStatsHardware:
     """When proxmox.json is missing, /api/stats/hardware surfaces detection
     state so the dashboard's MemoryMap can render a Configure → nudge."""
@@ -236,22 +268,28 @@ class TestHostDetectionInStatsHardware:
 
 
 # ── _cached_snapshot coalescing + thread-offload (FIX-B) ─────────────
+# ── _cached_snapshot stale-while-revalidate (FIX-#428) ───────────────
 
 
 class _SnapStub:
     """Stand-in for the HardwareStats singleton on app.state. Records how
     many times snapshot() ran and which thread it ran on."""
 
-    def __init__(self) -> None:
+    def __init__(self, sleep_s: float = 0.05) -> None:
         self.calls = 0
         self.threads: set[int] = set()
+        # Mutable payload so we can detect that a refresh actually replaced
+        # the cache (the SWR background refresh produces a different value).
+        self._n = 0
+        self._sleep_s = sleep_s
 
     def snapshot(self) -> dict:
         self.calls += 1
         self.threads.add(threading.get_ident())
         # Simulate a slow synchronous probe so concurrent callers overlap.
-        time.sleep(0.05)
-        return {"ram_used_gb": 1.0, "gpu_util": 0.5}
+        time.sleep(self._sleep_s)
+        self._n += 1
+        return {"ram_used_gb": float(self._n), "gpu_util": 0.5}
 
 
 def _fake_request(stats: object) -> object:
@@ -260,6 +298,16 @@ def _fake_request(stats: object) -> object:
     state = types.SimpleNamespace(hardware_stats=stats)
     app = types.SimpleNamespace(state=state)
     return types.SimpleNamespace(app=app)
+
+
+async def _wait_until(predicate, *, timeout_s: float = 1.0, step_s: float = 0.01) -> bool:
+    """Poll predicate() in an event-loop-friendly sleep loop until True."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(step_s)
+    return predicate()
 
 
 @pytest.mark.asyncio
@@ -278,23 +326,128 @@ async def test_cached_snapshot_coalesces_concurrent_polls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cached_snapshot_refreshes_after_ttl(
+async def test_cached_snapshot_fresh_hits_no_extra_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Past the TTL window, a fresh snapshot() is taken."""
+    """Within the TTL window, repeated polls return the cached value
+    and do not invoke snapshot() at all."""
     stub = _SnapStub()
     req = _fake_request(stub)
 
     fake_now = {"t": 500.0}
-    monkeypatch.setattr(hw_mod.time, "monotonic", lambda: fake_now["t"])
+    # Patch ONLY the SWR clock seam (hw_mod._now), never time.monotonic
+    # globally — asyncio's loop.time() reads time.monotonic, so freezing it
+    # would hang every asyncio.sleep (incl. _wait_until + the background path).
+    monkeypatch.setattr(hw_mod, "_now", lambda: fake_now["t"])
 
     await _cached_snapshot(req)
     await _cached_snapshot(req)  # within TTL -> cached
     assert stub.calls == 1
 
-    fake_now["t"] += hw_mod._SNAPSHOT_TTL_S + 0.01
+    # Advance halfway through TTL — still no extra probe.
+    fake_now["t"] += hw_mod._SNAPSHOT_TTL_S / 2
     await _cached_snapshot(req)
-    assert stub.calls == 2
+    assert stub.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cached_snapshot_stale_returns_cached_and_refreshes_in_background(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #428: past the TTL, a poll returns the cached snapshot
+    IMMEDIATELY (no blocking on a fresh probe) and schedules a
+    background refresh. The refresh fires async; a follow-up poll
+    within the new TTL window sees the updated value."""
+    stub = _SnapStub()
+    req = _fake_request(stub)
+
+    fake_now = {"t": 500.0}
+    # Patch ONLY the SWR clock seam (hw_mod._now), never time.monotonic
+    # globally — asyncio's loop.time() reads time.monotonic, so freezing it
+    # would hang every asyncio.sleep (incl. _wait_until + the background path).
+    monkeypatch.setattr(hw_mod, "_now", lambda: fake_now["t"])
+
+    # Cold start.
+    r1 = await _cached_snapshot(req)
+    assert stub.calls == 1
+    assert r1 == {"ram_used_gb": 1.0, "gpu_util": 0.5}
+
+    # Advance well past TTL.
+    fake_now["t"] += hw_mod._SNAPSHOT_TTL_S + 0.01
+
+    # Stale poll: MUST return the cached value synchronously, NOT block.
+    t0 = time.monotonic()
+    r2 = await _cached_snapshot(req)
+    elapsed = time.monotonic() - t0
+    # The probe takes 50ms; SWR should return essentially instantly.
+    assert elapsed < 0.01, f"stale poll took {elapsed * 1000:.1f}ms — SWR returned a blocking call"
+    assert r2 == {"ram_used_gb": 1.0, "gpu_util": 0.5}  # stale value preserved
+
+    # Background refresh fires asynchronously. Wait for both the probe
+    # to complete AND the in-flight flag to be cleared (cleared via
+    # done_callback after the task transitions to done — the latter
+    # is sequenced AFTER the probe body returns).
+    assert await _wait_until(
+        lambda: stub.calls >= 2 and not getattr(stub, "_refresh_in_flight", False),
+        timeout_s=2.0,
+    ), (
+        f"background refresh not fully done "
+        f"(stub.calls={stub.calls}, in_flight={getattr(stub, '_refresh_in_flight', False)})"
+    )
+
+    # Advance past TTL again — a fresh background refresh should be
+    # allowed to fire (single-flight guarantee cleared).
+    fake_now["t"] += hw_mod._SNAPSHOT_TTL_S + 0.01
+    r3 = await _cached_snapshot(req)
+    assert r3 == {"ram_used_gb": 2.0, "gpu_util": 0.5}  # newer value
+    assert await _wait_until(lambda: stub.calls >= 3, timeout_s=2.0), (
+        f"second background refresh did not fire (stub.calls={stub.calls})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cached_snapshot_concurrent_stale_polls_no_wedge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #428 wedge regression: 4 concurrent stale polls must all
+    return within bounded latency (no self-DoS on the event loop) and
+    trigger at most ONE background refresh."""
+    stub = _SnapStub(sleep_s=0.05)  # 50ms per probe
+    req = _fake_request(stub)
+
+    fake_now = {"t": 500.0}
+    # Patch ONLY the SWR clock seam (hw_mod._now), never time.monotonic
+    # globally — asyncio's loop.time() reads time.monotonic, so freezing it
+    # would hang every asyncio.sleep (incl. _wait_until + the background path).
+    monkeypatch.setattr(hw_mod, "_now", lambda: fake_now["t"])
+
+    # Cold start.
+    await _cached_snapshot(req)
+    assert stub.calls == 1
+
+    # Advance past TTL to make every subsequent call stale.
+    fake_now["t"] += hw_mod._SNAPSHOT_TTL_S + 0.01
+
+    # 4 concurrent stale polls — none should block on the probe.
+    t0 = time.monotonic()
+    results = await asyncio.gather(*(_cached_snapshot(req) for _ in range(4)))
+    elapsed = time.monotonic() - t0
+    # All return the cached stale value, none waited for the 50ms probe.
+    assert all(r == {"ram_used_gb": 1.0, "gpu_util": 0.5} for r in results)
+    assert elapsed < 0.02, (
+        f"concurrent stale polls took {elapsed * 1000:.1f}ms — SWR self-DoS wedge"
+    )
+
+    # Exactly one background refresh fires (single-flight), not 4.
+    assert await _wait_until(lambda: stub.calls >= 2, timeout_s=2.0), (
+        f"single-flight background refresh did not fire (stub.calls={stub.calls})"
+    )
+    # Give the single in-flight task time to finish; no second one should spawn.
+    await asyncio.sleep(0.15)
+    assert stub.calls == 2, (
+        f"expected exactly 1 background refresh for 4 concurrent stale polls, "
+        f"got stub.calls={stub.calls} (single-flight broken)"
+    )
 
 
 @pytest.mark.asyncio

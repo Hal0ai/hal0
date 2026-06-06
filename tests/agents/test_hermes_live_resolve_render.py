@@ -34,6 +34,23 @@ def test_disabled_renders_physical_default():
     assert "hal0/primary" not in out
 
 
+def test_live_resolve_enables_live_model_discovery():
+    """Under live-resolve, providers.custom carries an api_key + discover_models
+    so Hermes's Section-3 picker runs live /v1/models discovery against the
+    gateway (surfacing every slot, not just model.default)."""
+    out = _render_config_yaml(live_resolve_enabled=True, **_ctx())
+    assert "discover_models: true" in out
+    assert 'api_key: "hal0-local"' in out
+
+
+def test_disabled_omits_live_model_discovery():
+    """With live-resolve OFF, base_url points at a single physical slot
+    backend, so live discovery is intentionally not enabled."""
+    out = _render_config_yaml(live_resolve_enabled=False, **_ctx())
+    assert "discover_models" not in out
+    assert "hal0-local" not in out
+
+
 def test_live_resolve_forces_gateway_for_nonlocal_primary():
     """A non-8080 primary backend_url must NOT leak into either base_url
     under live_resolve — both model.base_url and providers.custom.base_url

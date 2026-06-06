@@ -212,6 +212,10 @@ function BannerStack({ scope = "global", route, vars: extraVars }) {
 }
 
 // ─── Banner catalog — every state the brief calls out ────────────────────
+// Issue #339: catalog entries are static demo copy for the Tweaks panel.
+// Use MOCK_VERSION so a version literal never lands in the production
+// bundle (the real UpdateBanner reads useUpdateState instead).
+const MOCK_VERSION = "<demo>";
 const BANNER_CATALOG = [
   // Global
   {
@@ -228,7 +232,7 @@ const BANNER_CATALOG = [
   {
     id: "update-available", scope: "global", kind: "info",
     eyebrow: "Update available",
-    heading: "hal0 v0.2.2 is available",
+    heading: `hal0 ${MOCK_VERSION} is available`,
     body: "Includes lemonade v10.7.0 pin bump and one FLM CHANGELOG note. Update expects a brief outage during lemond + hal0-api restart.",
     actions: [
       { label: "Update now", primary: true },
@@ -351,7 +355,7 @@ const BANNER_CATALOG = [
     id: "fr-ram-low", scope: "firstrun", kind: "warn",
     eyebrow: "Hardware · low RAM",
     heading: "Detected RAM is below the Lite minimum (16 GB)",
-    body: "hal0 needs at least 16 GB of unified RAM to load any bundled chat model. You can still install hal0 — Settings → Lemonade admin can point at an external model store.",
+    body: "hal0 needs at least 16 GB of unified RAM to load any bundled chat model. You can still install hal0 — Settings → Runtime can point at an external model store.",
   },
 
   // Agent

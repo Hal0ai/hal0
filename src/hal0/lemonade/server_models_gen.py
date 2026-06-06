@@ -505,6 +505,13 @@ def write_server_models(
     Lemonade's existing catalog intact. Same pattern as
     ``ModelRegistry._atomic_write``.
 
+    The output file is chmod'd ``0o644`` (world-readable) after the
+    replace. ``mkstemp`` leaves the temp at ``0o600``, which ``os.replace``
+    preserves; without this chmod, a root-owned write during install lands
+    ``0600 root:root`` and ``hal0-lemonade.service`` (running as
+    ``hal0:hal0``) can't read it — issue #211. The catalog is non-secret
+    (model ids, recipes, HF coords), so world-readable is correct.
+
     Idempotent: re-running with an unchanged registry produces the same
     bytes (sorted keys + stable float rounding). Safe to call from the
     install.sh hook OR from ``hal0 capabilities sync``.
@@ -534,6 +541,10 @@ def write_server_models(
             raise
         os.replace(tmp_path, output_path)
         tmp_path = None
+        # mkstemp → 0o600, os.replace preserves mode. The catalog is
+        # non-secret (model ids + recipes + HF coords) and the hal0
+        # service user must be able to read it (#211).
+        os.chmod(output_path, 0o644)
     finally:
         if tmp_path is not None:
             with contextlib.suppress(OSError):

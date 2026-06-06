@@ -209,29 +209,49 @@ class HardwareStats:
 
         Used by SlotsConfig validation and the dashboard's "next free port"
         display. Probes 127.0.0.1 only (slots never bind public).
+
+        NOTE: this performs a connect_ex() scan over the full slot port
+        range (19 connect attempts). It is intentionally NOT part of
+        snapshot() (issue #427) — the polled /api/stats/hardware path
+        does not need port occupancy, and N concurrent dashboard clients
+        x 19 connect_ex calls per poll wedged the single-event-loop API.
+        Callers that legitimately need it (config validation, next-free-
+        port display) should call this method directly.
         """
         return {p: _port_in_use(p) for p in range(SLOT_PORT_RANGE_START, SLOT_PORT_RANGE_END + 1)}
 
     def occupied_slot_ports(self) -> list[int]:
-        """Return the sorted list of slot ports currently bound."""
+        """Return the sorted list of slot ports currently bound.
+
+        See :meth:`slot_port_occupancy` for the connect_ex cost warning.
+        Not invoked by the polled snapshot() — call directly if needed.
+        """
         return [p for p, used in self.slot_port_occupancy().items() if used]
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, include_slot_ports: bool = False) -> dict[str, Any]:
         """Return a JSON-safe dict of all available stats.
 
         Field shape mirrors the haloai /api/status response (subset):
             ram_used_gb, ram_available_gb,
             gpu_util, gpu_vram_used_mb, gpu_vram_total_mb,
-            slot_ports_occupied: list[int]
+            slot_ports_occupied: list[int]   (only when include_slot_ports=True)
+
+        ``include_slot_ports`` defaults to False — the slot-port scan
+        (19 connect_ex calls) does NOT belong on the polled hot path
+        (issue #427). The polled /api/stats/hardware dashboard refresh
+        only needs RAM + GPU numbers; the slot-port view is sourced
+        from the dedicated config-validation / next-free-port callers.
         """
-        return {
+        out: dict[str, Any] = {
             "ram_used_gb": self.ram_used_gb(),
             "ram_available_gb": self.ram_available_gb(),
             "gpu_util": self.gpu_util(),
             "gpu_vram_used_mb": self.gpu_vram_used_mb(),
             "gpu_vram_total_mb": self.gpu_vram_total_mb(),
-            "slot_ports_occupied": self.occupied_slot_ports(),
         }
+        if include_slot_ports:
+            out["slot_ports_occupied"] = self.occupied_slot_ports()
+        return out
 
     # Internal helpers kept here (rather than imported) so tests can monkeypatch
     # this instance method without touching the probe module's globals.

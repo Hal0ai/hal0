@@ -61,4 +61,16 @@ if [ ! -x "$HAL0_HERMES_BIN" ]; then
     exit 127
 fi
 
+# cwd-safety guard: hermes probes for a git/workspace root by walking UP from
+# $PWD. If the invoking cwd is not traversable by the effective user -- e.g.
+# launched as the hal0 service user from root's 0700 /root via `h0 hermes`, or a
+# systemd unit with an unreadable WorkingDirectory -- that probe EACCESes
+# ('[Errno 13] Permission denied: /root/.git'; Python 3.12 Path.exists() re-raises
+# EACCES). Step into a guaranteed-traversable dir first; a no-op when cwd is
+# already fine. The bashrc hermes() fn cds to a workspace itself, so this only
+# covers the other entry paths (h0 hermes, systemd, bare invocations).
+if ! { cwd=$(pwd 2>/dev/null) && [ -n "$cwd" ] && [ -r "$cwd" ] && [ -x "$cwd" ]; }; then
+    cd "${HOME:-/var/lib/hal0}" 2>/dev/null || cd /var/lib/hal0 2>/dev/null || cd /
+fi
+
 exec "$HAL0_HERMES_BIN" "$@"

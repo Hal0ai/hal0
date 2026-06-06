@@ -37,6 +37,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
@@ -44,6 +45,8 @@ from hal0 import __version__
 from hal0.errors import BadRequest, Conflict, Hal0Error
 from hal0.mcp import installed as installed_registry
 from hal0.mcp import manifest as manifest_resolver
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -409,7 +412,23 @@ async def list_servers(request: Request) -> dict[str, Any]:
     # ``state="stopped"`` so the dashboard renders it in the list +
     # offers the config / uninstall affordances; the Start button is the
     # action-stub 501 path that surfaces the "pending supervisor" toast.
+    #
+    # Bundled-id shadow defense (#383): the install / uninstall routes
+    # reject ``BUNDLED_SERVER_IDS``, but a direct .toml drop in the
+    # registry dir bypasses that guard (physical-access scenario). The
+    # bundled FastMCP mount is authoritative — skip any installed record
+    # whose id is already represented by a bundled server so the operator
+    # sees a single, correct entry instead of a duplicate or a shadowed
+    # record that would override the authoritative bundled state.
+    bundled_ids = set(servers_state) | set(installed_registry.BUNDLED_SERVER_IDS)
     for record in installed_registry.list_installed():
+        if record.id in bundled_ids:
+            log.warning(
+                "hal0.mcp.list.shadow_skipped",
+                server_id=record.id,
+                reason="installed record shadows a bundled server id",
+            )
+            continue
         items.append(
             {
                 "id": record.id,

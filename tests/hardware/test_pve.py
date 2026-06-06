@@ -403,3 +403,121 @@ class TestDetectProxmoxHost:
         # _PROC_1_CGROUP raise when the helpers try to read them.
         with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
             assert pve.detect_proxmox_host() == pve.PveDetectionState.NOT_DETECTED
+
+    # ── cgroup-v2 unified LXC detection (#371) ────────────────────────────
+    # On cgroup-v2 unified hosts (hal0 LXC) /proc/1/cgroup reads
+    # "0::/init.scope" — not the "lxc.payload" or "/lxc/" pattern the
+    # original heuristic looked for. An LXC is misclassified as the host.
+    # The fix accepts corroborating signals: container=lxc env, /dev/.lxc,
+    # or /run/systemd/container. Only escalate to DETECTED when at least
+    # one positive container marker is present.
+
+    def test_returns_detected_on_cgroup_v2_lxc_via_environ(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        version = tmp_path / "version"
+        version.write_text("Linux version 6.8.0-1-pve (builder@…)\n")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/init.scope\n")
+        environ = tmp_path / "environ"
+        # /proc/1/environ uses NUL separators, not newlines
+        environ.write_bytes(b"PATH=/usr/bin\x00container=lxc\x00HOME=/root\x00")
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        monkeypatch.setattr(pve, "_PROC_1_ENVIRON", environ)
+        monkeypatch.setattr(pve, "_DEV_LXC", tmp_path / "missing-lxc-dir")
+        monkeypatch.setattr(pve, "_RUN_SYSTEMD_CONTAINER", tmp_path / "missing-systemd-file")
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.DETECTED
+
+    def test_returns_detected_on_cgroup_v2_lxc_via_dev_lxc(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        version = tmp_path / "version"
+        version.write_text("Linux version 6.8.0-1-pve (builder@…)\n")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/init.scope\n")
+        environ = tmp_path / "environ"
+        environ.write_text("")
+        dev_lxc = tmp_path / "lxc"
+        dev_lxc.mkdir()
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        monkeypatch.setattr(pve, "_PROC_1_ENVIRON", environ)
+        monkeypatch.setattr(pve, "_DEV_LXC", dev_lxc)
+        monkeypatch.setattr(pve, "_RUN_SYSTEMD_CONTAINER", tmp_path / "missing-systemd-file")
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.DETECTED
+
+    def test_returns_detected_on_cgroup_v2_lxc_via_systemd_container(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        version = tmp_path / "version"
+        version.write_text("Linux version 6.8.0-1-pve (builder@…)\n")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/init.scope\n")
+        environ = tmp_path / "environ"
+        environ.write_text("")
+        systemd_container = tmp_path / "systemd-container"
+        systemd_container.write_text("lxc\n")
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        monkeypatch.setattr(pve, "_PROC_1_ENVIRON", environ)
+        monkeypatch.setattr(pve, "_DEV_LXC", tmp_path / "missing-lxc-dir")
+        monkeypatch.setattr(pve, "_RUN_SYSTEMD_CONTAINER", systemd_container)
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.DETECTED
+
+    def test_cgroup_v2_host_root_without_markers_is_not_detected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bare-metal / non-PVE / non-LXC: cgroup-v2 reads 0::/ with no
+        container marker → still NOT_DETECTED. Don't false-positive on
+        a fresh cgroup-v2 host just because /proc/1/cgroup looks LXC-ish.
+        """
+        version = tmp_path / "version"
+        version.write_text("Linux version 6.10.5-arch1-1\n")  # not -pve
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/\n")  # host root scope, not /init.scope
+        environ = tmp_path / "environ"
+        environ.write_text("")
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        monkeypatch.setattr(pve, "_PROC_1_ENVIRON", environ)
+        monkeypatch.setattr(pve, "_DEV_LXC", tmp_path / "missing-lxc-dir")
+        monkeypatch.setattr(pve, "_RUN_SYSTEMD_CONTAINER", tmp_path / "missing-systemd-file")
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.NOT_DETECTED
+
+    def test_cgroup_v2_init_scope_without_markers_is_uncertain(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An /init.scope cgroup path looks container-like; combined with a
+        -pve kernel it should at least surface as UNCERTAIN. We do NOT
+        escalate to DETECTED without a positive container marker — that's
+        the conservative behaviour the issue calls for.
+        """
+        version = tmp_path / "version"
+        version.write_text("Linux version 6.8.0-1-pve (builder@…)\n")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/init.scope\n")
+        environ = tmp_path / "environ"
+        environ.write_text("")
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        monkeypatch.setattr(pve, "_PROC_1_ENVIRON", environ)
+        monkeypatch.setattr(pve, "_DEV_LXC", tmp_path / "missing-lxc-dir")
+        monkeypatch.setattr(pve, "_RUN_SYSTEMD_CONTAINER", tmp_path / "missing-systemd-file")
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.UNCERTAIN
+
+    def test_legacy_lxc_payload_pattern_still_works(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cgroup-v1 / Proxmox-V1 path: lxc.payload.<vmid> still
+        short-circuits to DETECTED on a -pve kernel, just like before.
+        """
+        version = tmp_path / "version"
+        version.write_text("Linux version 5.15.0-1-pve\n")
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("12:devices:/lxc.payload.105\n")
+        monkeypatch.setattr(pve, "_PROC_VERSION", version)
+        monkeypatch.setattr(pve, "_PROC_1_CGROUP", cgroup)
+        # No need to monkeypatch the new signals — the legacy path
+        # already returns DETECTED before they are consulted.
+        assert pve.detect_proxmox_host() == pve.PveDetectionState.DETECTED

@@ -12,9 +12,18 @@ managed by :class:`~hal0.slots.manager.SlotManager`. This module owns:
     match the new selection and rewrites the underlying slot's TOML when
     the user changes backend/provider.
 
-NPU multiplex (one ``flm`` process serving multiple capability children)
-is OUT OF SCOPE for this round; NPU children spawn their own slot via
-the regular ``load()`` path when needed.
+NPU multiplex (NPU Phase 2): a ``device=npu`` selection for a trio
+modality (``embed`` / ``voice.stt``) does NOT spawn a standalone process.
+Instead ``apply()`` drives the FLM trio — one ``flm serve`` anchor process
+serving chat coresident with embed/asr — by recomposing the anchor's
+lemond ``flm_args`` and writing a ``device=npu``,
+``type=embedding|transcription`` slot RECORD for dispatch gating
+(``v1._is_npu_trio_request``). The modality slot is never
+load/swap/unloaded; the anchor is never eagerly restarted — the change
+returns ``pending_reload`` and the operator applies it via the dashboard
+NPU section's reload affordance. Non-trio children (rerank/tts/img/vision)
+and non-NPU devices keep spawning their own slot via the regular
+``load()`` path.
 """
 
 from __future__ import annotations
@@ -59,8 +68,74 @@ _SLOT_TO_CHILD: dict[str, tuple[str, str]] = {
     slot_name: key for key, slot_name in _CHILD_TO_SLOT.items()
 }
 
+# ── Trio dispatch discriminator: capability child → slot ``type`` ─────────────
+# The FLM trio (one ``flm serve`` process serving chat + embed + asr) is gated
+# in v1._is_npu_trio_request on the slot record's ``type`` field. Only the two
+# trio modalities carry a type; rerank/tts/img/vision are NOT trio members and
+# get no ``type`` key (their auto-created slots are plain llama-server/dedicated
+# providers). Mirrors providers/flm._classify_flm_model emitting "embed"/"stt".
+_CHILD_TO_SLOT_TYPE: dict[str, str] = {
+    "embed": "embedding",
+    "stt": "transcription",
+}
+
 # The legal capability/child surface — used by HTTP validation.
 LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img", "vision")
+
+
+# child → the ``flm serve`` trio flag it toggles.
+_CHILD_TO_FLM_FLAG: dict[str, str] = {
+    "embed": "--embed",
+    "stt": "--asr",
+}
+
+
+def _recompose_flm_args(current: str, child: str, enable: bool) -> str:
+    """Recompute lemond ``flm_args`` for a single trio modality toggle.
+
+    Decision 2: replace ONLY the ``--asr``/``--embed`` token for ``child``
+    (append if absent), preserving every other token verbatim
+    (``--threads 8`` etc.). Both trio flags are always emitted with an
+    explicit ``0|1`` value so the FLM child's coresident-modality state is
+    unambiguous — an absent flag is normalised to its explicit ``0`` form.
+
+    ``child`` must be ``"embed"`` or ``"stt"``. The flag for ``child`` is
+    set to ``1`` when ``enable`` else ``0``; the other trio flag keeps its
+    existing value, defaulting to ``0`` when absent.
+    """
+    target_flag = _CHILD_TO_FLM_FLAG[child]
+    tokens = current.split()
+
+    # Pull the existing explicit values for both trio flags (default 0).
+    trio_values: dict[str, str] = {"--asr": "0", "--embed": "0"}
+    # Walk tokens, copying through everything that isn't a trio flag (or its
+    # value). We rebuild the trio flags at the end so ordering is stable and
+    # exactly-once even if the input had duplicates or a missing value.
+    passthrough: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in trio_values:
+            # Consume the following value token only if present AND
+            # value-shaped (not another flag) — so "--embed --threads 8"
+            # doesn't swallow "--threads" as the embed value.
+            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                trio_values[tok] = tokens[i + 1]
+                i += 2
+            else:
+                i += 1
+            continue
+        passthrough.append(tok)
+        i += 1
+
+    # Apply the requested toggle for the targeted modality.
+    trio_values[target_flag] = "1" if enable else "0"
+
+    # Emit: preserved tokens first, then both trio flags in a stable order.
+    out = list(passthrough)
+    out += ["--asr", trio_values["--asr"]]
+    out += ["--embed", trio_values["--embed"]]
+    return " ".join(out)
 
 
 def legal_children(slot: str) -> list[str]:
@@ -127,10 +202,17 @@ class CapabilityOrchestrator:
         *,
         config_path: Path | None = None,
         registry: ModelRegistry | None = None,
+        lemonade_provider: Any | None = None,
     ) -> None:
         self._slot_manager = slot_manager
         self._config_path = Path(config_path) if config_path else capabilities_toml_path()
         self._registry = registry
+        # Zero-arg callable returning a LemonadeClient (NOT a provider) —
+        # used by the NPU-trio path to read/write lemond ``flm_args``. When
+        # None (e.g. unit tests that don't exercise the trio path), the
+        # device=npu embed/stt fork is bypassed and the standard slot
+        # lifecycle runs instead.
+        self._lemonade_provider = lemonade_provider
 
     # ── persistence ──────────────────────────────────────────────────────────
 
@@ -390,6 +472,19 @@ class CapabilityOrchestrator:
         # rewrite below covers it. Reintroduce if the swap path grows a
         # provider-aware case.
 
+        # NPU-trio fork (NPU Phase 2). When a lemonade client is wired AND
+        # the child is a trio modality (embed/stt), a device=npu selection
+        # drives the FLM trio (set lemond flm_args + write a device=npu,
+        # type=embedding|transcription slot RECORD) instead of spawning a
+        # standalone FLM process. ``is_npu_target`` gates lifecycle routing;
+        # ``is_npu_modality`` gates the flm_args side-effect, which must
+        # also fire on DEPARTURE from npu (Case 5: npu→gpu must zero the
+        # anchor's embed/asr flag even though the new device isn't npu).
+        is_npu_modality = child in _CHILD_TO_SLOT_TYPE and self._lemonade_provider is not None
+        is_npu_target = is_npu_modality and merged.device == "npu"
+        leaving_npu = is_npu_modality and before_device == "npu" and merged.device != "npu"
+        pending_reload = False
+
         try:
             # Reconcile the slot TOML against the merged selection whenever
             # the slot is going to be enabled. We rewrite unconditionally —
@@ -403,20 +498,35 @@ class CapabilityOrchestrator:
             if merged.enabled:
                 await self._rewrite_underlying_slot(slot_name, merged)
 
-            if enabled_changed and merged.enabled:
-                # off → on: ensure the slot exists, then load with the model.
-                await self._ensure_slot_exists(slot_name, merged)
-                if merged.model:
-                    await self._slot_manager.load(slot_name, model_id=merged.model)
-            elif enabled_changed and not merged.enabled:
-                # on → off: best-effort unload; tolerate slots that were
-                # never loaded (status() will return OFFLINE → unload is a no-op).
-                with contextlib.suppress(Exception):
-                    await self._slot_manager.unload(slot_name)
-            elif merged.enabled and (model_changed or backend_changed) and merged.model:
-                # Still on, but model / backend changed → hot-swap.
-                await self._ensure_slot_exists(slot_name, merged)
-                await self._slot_manager.swap(slot_name, merged.model)
+            if is_npu_target:
+                # NPU trio: drive flm_args + a device=npu slot RECORD; never
+                # load/swap/unload the embed/stt slot. (Decision 4: the
+                # _rewrite_underlying_slot above — which sets the model
+                # sub-table — has already run for the enabled case.)
+                pending_reload = await self._apply_npu_trio_modality(slot_name, child, merged)
+            else:
+                if enabled_changed and merged.enabled:
+                    # off → on: ensure the slot exists, then load with the model.
+                    await self._ensure_slot_exists(slot_name, merged)
+                    if merged.model:
+                        await self._slot_manager.load(slot_name, model_id=merged.model)
+                elif enabled_changed and not merged.enabled:
+                    # on → off: best-effort unload; tolerate slots that were
+                    # never loaded (status() returns OFFLINE → unload is a no-op).
+                    with contextlib.suppress(Exception):
+                        await self._slot_manager.unload(slot_name)
+                elif merged.enabled and (model_changed or backend_changed) and merged.model:
+                    # Still on, but model / backend changed → hot-swap.
+                    await self._ensure_slot_exists(slot_name, merged)
+                    await self._slot_manager.swap(slot_name, merged.model)
+
+                # Leaving the NPU (npu→gpu/cpu) for a trio modality: drop it
+                # from the anchor's flm_args so the FLM child stops serving
+                # it (Case 5). The standard lifecycle above already loaded
+                # the new GPU/CPU slot.
+                if leaving_npu:
+                    await self._set_flm_modality(child, enable=False)
+                    pending_reload = True
         except Hal0Error:
             # Re-raise typed errors as the apply_failed envelope so the UI
             # surfaces a single, recognisable code.
@@ -452,6 +562,11 @@ class CapabilityOrchestrator:
             "enabled": merged.enabled,
             "slot": slot_name,
             "status": status_str,
+            # NPU Phase 2: when an embed/stt change altered the FLM anchor's
+            # flm_args, the live anchor must be reloaded to take effect. We
+            # never auto-restart it (Decision 1) — the dashboard NPU section
+            # surfaces this via its "⟳ reload to apply" affordance.
+            "pending_reload": pending_reload,
         }
 
     # ── slot TOML helpers ────────────────────────────────────────────────────
@@ -537,7 +652,7 @@ class CapabilityOrchestrator:
         slot_backend = self._slot_backend_for_catalog_id(selection.device)
         slot_device = self._slot_device_for_catalog_id(selection.device)
         provider = selection.provider or "llama-server"
-        cfg_dict = {
+        cfg_dict: dict[str, Any] = {
             "name": slot_name,
             "port": port,
             "backend": slot_backend or "vulkan",
@@ -545,6 +660,135 @@ class CapabilityOrchestrator:
             "provider": provider,
             "enabled": True,
             "model": {"default": selection.model or ""},
+        }
+        # Stamp the trio dispatch discriminator for embed/stt children so
+        # v1._is_npu_trio_request can gate on it. Non-trio children
+        # (rerank/tts/img/vision) get no ``type`` key.
+        _, child = _SLOT_TO_CHILD.get(slot_name, (None, None))
+        slot_type = _CHILD_TO_SLOT_TYPE.get(child) if child else None
+        if slot_type:
+            cfg_dict["type"] = slot_type
+        try:
+            await self._slot_manager.create(slot_name, cfg_dict)
+        except Exception as exc:
+            raise CapabilityApplyFailed(
+                f"failed to create slot {slot_name!r}: {exc}",
+                details={"slot": slot_name, "error": str(exc)},
+            ) from exc
+
+    # ── NPU trio (NPU Phase 2) ────────────────────────────────────────────────
+
+    async def _apply_npu_trio_modality(
+        self,
+        slot_name: str,
+        child: str,
+        selection: CapabilitySelection,
+    ) -> bool:
+        """Drive an NPU embed/stt modality through the FLM trio.
+
+        Never load/swap/unload the embed/stt slot — the FLM anchor (a
+        single ``flm serve`` process) serves the modality coresident with
+        chat. We instead:
+
+          1. Ensure the device=npu, type=embedding|transcription slot
+             RECORD exists (create path stamps ``type``).
+          2. Write ``{enabled, type}`` via ``update_config`` (covers enable
+             AND disable so ``v1._is_npu_trio_request``'s ``enabled is
+             False`` check blocks dispatch). The ``type`` stamp is essential
+             for PRE-EXISTING slots: ``_ensure_slot_exists_npu`` early-returns
+             when the TOML exists, so a real drifted ``embed.toml`` with no
+             ``type`` would otherwise never gate trio dispatch. ``type`` is a
+             top-level SCALAR, so co-writing it is safe under Decision 4 —
+             that prohibition is specifically about the nested ``model`` dict
+             (replaced wholesale by the shallow merge), which we still NEVER
+             pass here. Runs AFTER ``_rewrite_underlying_slot``.
+          3. Recompose the anchor's lemond ``flm_args`` for this modality.
+          4. Return ``pending_reload=True`` ALWAYS (Decision 1: never
+             auto-restart the live anchor; if the anchor is offline the new
+             flm_args won't take effect until the user loads it — still
+             pending). The anchor is found by scanning ``iter_configs()``
+             for ``type==llm && device==npu``; we never restart it here.
+        """
+        await self._ensure_slot_exists_npu(slot_name, child, selection)
+        # Stamp {enabled, type} — NEVER the nested ``model`` (Decision 4).
+        # ``type`` is required even for an existing slot whose TOML predates
+        # Phase 2 and carries no ``type``; without it trio dispatch no-ops.
+        await self._slot_manager.update_config(
+            slot_name,
+            {"enabled": selection.enabled, "type": _CHILD_TO_SLOT_TYPE[child]},
+        )
+        await self._set_flm_modality(child, enable=selection.enabled)
+        # Decision 1: surface pending_reload whether or not the anchor is
+        # live; we never eagerly bounce it. (The anchor scan is informational
+        # only — kept here so the contract "never restart" is auditable.)
+        await self._npu_anchor_is_live()
+        return True
+
+    async def _set_flm_modality(self, child: str, *, enable: bool) -> None:
+        """Read-modify-write the FLM anchor's lemond ``flm_args``.
+
+        Reads the current ``flm_args`` via the injected lemonade client,
+        recomposes only this modality's trio flag (Decision 2), and writes
+        it back. No-op when no lemonade client is wired.
+        """
+        if self._lemonade_provider is None:
+            return
+        client = self._lemonade_provider()
+        cfg = await client.internal_config()
+        current = cfg.get("flm_args") or ""
+        if not isinstance(current, str):
+            current = ""
+        new_args = _recompose_flm_args(current, child, enable)
+        await client.internal_set({"flm_args": new_args})
+
+    async def _npu_anchor_is_live(self) -> bool:
+        """Return True when the FLM trio anchor slot is currently loaded.
+
+        The anchor is the ``type==llm && device==npu`` slot — found by
+        scanning ``iter_configs()``, never by hardcoded name. We DO NOT
+        restart it regardless of the result (Decision 1).
+        """
+        try:
+            configs = await self._slot_manager.iter_configs()
+        except Exception:
+            return False
+        for cfg in configs:
+            if cfg.get("type") != "llm" or cfg.get("device") != "npu":
+                continue
+            name = str(cfg.get("name", "")).strip()
+            if not name:
+                continue
+            try:
+                snap = await self._slot_manager.status(name)
+            except Exception:
+                return False
+            return getattr(snap.state, "value", "") == "ready"
+        return False
+
+    async def _ensure_slot_exists_npu(
+        self, slot_name: str, child: str, selection: CapabilitySelection
+    ) -> None:
+        """Create the device=npu, type=embedding|transcription slot RECORD.
+
+        Like :meth:`_ensure_slot_exists` but forces the FLM-trio shape:
+        ``device=npu``, ``provider=flm``, ``backend=flm``, and always
+        stamps the trio ``type`` so dispatch gating activates. No-op when
+        the slot TOML already exists (its existing fields, including
+        ``type``, survive — ``update_config`` is a shallow top-level merge).
+        """
+        cfg_path = paths.slots_config_dir() / f"{slot_name}.toml"
+        if cfg_path.exists():
+            return
+        port = self._next_free_slot_port()
+        cfg_dict: dict[str, Any] = {
+            "name": slot_name,
+            "port": port,
+            "backend": "flm",
+            "device": "npu",
+            "provider": "flm",
+            "enabled": bool(selection.enabled),
+            "model": {"default": selection.model or ""},
+            "type": _CHILD_TO_SLOT_TYPE[child],
         }
         try:
             await self._slot_manager.create(slot_name, cfg_dict)

@@ -228,7 +228,7 @@ function OnboardingTour({ open, onClose, steps }) {
 const TOUR_STEPS = [
   {
     title: "Persona dropdown",
-    body: <span>Open the dropdown to swap which slot serves the next message. Changes are session-only by default; opt-in to persist in <span className="mono">Settings → OmniRouter</span>.</span>,
+    body: <span>Open the dropdown to swap which slot serves the next message. Changes are session-only by default.</span>,
     selector: ".persona",
   },
   {

@@ -47,6 +47,11 @@ export const ENDPOINTS = {
   modelScanPreview: '/api/models/scan/preview',
   modelScanCommit: '/api/models/scan',
   modelAddFromPath: '/api/models/add-from-path',
+  // Issue #311: free-text HF Hub model search backing the dashboard
+  // "Search HF" button. Distinct from /api/models/inspect (which
+  // resolves a known coord into variants) — this proxies HF's
+  // /api/models?search=… and returns a small typed list.
+  hfSearch: '/api/hf/search',
 
   // ── Backends ─────────────────────────────────────────────────────
   backends: '/api/backends',
@@ -137,7 +142,7 @@ export const ENDPOINTS = {
   settings: '/api/settings',
   settingsReload: '/api/settings/reload',
   settingsSchema: '/api/settings/schema',
-  // Single-source-of-truth model storage (Settings → Models + Firstrun → Storage).
+  // Single-source-of-truth model storage (Settings → Storage).
   settingsModelsStore: '/api/settings/models/store',
   settingsModelsStoreMigrate: '/api/settings/models/store/migrate',
   // Full-shape Proxmox status — includes tenants[] stripped by the
@@ -150,9 +155,17 @@ export const ENDPOINTS = {
   updateCheck: '/api/updates/check',
   updateApply: '/api/updates/apply',
   updateStatus: (jobId: string) => `/api/updates/status/${encodeURIComponent(jobId)}`,
+  // Channel (stable | nightly) — GET reads hal0.toml telemetry.channel;
+  // PUT persists the choice back so subsequent /check calls honour it.
+  updateChannel: '/api/updates/channel',
   // Secrets
   secrets: '/api/secrets',
   secret: (name: string) => `/api/secrets/${encodeURIComponent(name)}`,
+  // Service URL discovery — the dashboard reads this to resolve the
+  // reachable hostnames for sibling services (OpenWebUI, Hermes) from the
+  // request host, so links work on any install (localhost / LAN IP /
+  // hal0.local / custom domain) without hardcoding. See routes/config.py.
+  configUrls: '/api/config/urls',
   // Install / FirstRun
   installState: '/api/install/state',
   firstrunState: '/api/firstrun/state',

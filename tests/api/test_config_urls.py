@@ -106,3 +106,49 @@ def test_urls_public_url_env_overrides_lan_direct(
     resp = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"})
     body = resp.json()
     assert body["openwebui"] == "http://chat.lan:7000", body
+
+
+def test_urls_hermes_keys_present_and_hidden_by_default(client: TestClient) -> None:
+    """Hermes keys are always present; hidden (loopback) without the env var.
+
+    Hermes' dashboard binds 127.0.0.1:9119 so there's no browser-reachable
+    host:port fallback — a stock install advertises no hermes link.
+    """
+    resp = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) >= {"hermes", "hermes_enabled"}
+    assert body["hermes"] == "", body
+    assert body["hermes_enabled"] is False, body
+
+
+def test_urls_hermes_public_url_env_wins(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """HAL0_HERMES_PUBLIC_URL is the canonical override for the hermes link."""
+    monkeypatch.setenv("HAL0_HERMES_PUBLIC_URL", "https://hermes.example.com/")
+    resp = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"})
+    assert resp.status_code == 200
+    body = resp.json()
+    # Trailing slash stripped so links concat predictably.
+    assert body["hermes"] == "https://hermes.example.com", body
+    assert body["hermes_enabled"] is True, body
+
+
+def test_urls_hermes_advertised_even_behind_proxy(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """The hermes public URL is honoured on reverse-proxy deploys too."""
+    monkeypatch.setenv("HAL0_HERMES_PUBLIC_URL", "https://hermes.example.com")
+    resp = client.get(
+        "/api/config/urls",
+        headers={
+            "x-forwarded-host": "hal0.example.com",
+            "x-forwarded-proto": "https",
+        },
+    )
+    body = resp.json()
+    assert body["hermes"] == "https://hermes.example.com", body
+    assert body["hermes_enabled"] is True, body
