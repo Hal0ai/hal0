@@ -6,7 +6,7 @@
 // model + slot routing per cap key (chat, embed, voice, img, npu).
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiGet, apiPatch } from '../client'
+import { apiGet, apiPatch, apiPost } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 export interface CapabilityRow {
@@ -42,5 +42,23 @@ export function useCapabilityPatch() {
     mutationFn: ({ key, body }: { key: string; body: Partial<CapabilityRow> }) =>
       apiPatch(ENDPOINTS.capability(key), body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['capabilities'] }),
+  })
+}
+
+/**
+ * POST /api/capabilities/{slot}/{child} — apply a partial selection to one
+ * (slot, child) pair. Accepted keys: model, provider, enabled.
+ * This is the correct persistence path for voice/img capability picks;
+ * the orchestrator reconciles slot lifecycle (load/swap/unload) automatically.
+ */
+export function useCapabilityApply() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ slot, child, body }: { slot: string; child: string; body: Partial<CapabilityRow> }) =>
+      apiPost(ENDPOINTS.capabilityApply(slot, child), body as Record<string, unknown>),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['capabilities'] })
+      qc.invalidateQueries({ queryKey: ['slots'] })
+    },
   })
 }

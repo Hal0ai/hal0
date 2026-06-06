@@ -61,6 +61,10 @@ export const ENDPOINTS = {
   // ── Capabilities ─────────────────────────────────────────────────
   capabilities: '/api/capabilities',
   capability: (key: string) => `/api/capabilities/${encodeURIComponent(key)}`,
+  // POST /api/capabilities/{slot}/{child} — apply a partial selection update
+  // (model/provider/enabled). Whitelisted keys only; 400 on unknown fields.
+  capabilityApply: (slot: string, child: string) =>
+    `/api/capabilities/${encodeURIComponent(slot)}/${encodeURIComponent(child)}`,
 
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',

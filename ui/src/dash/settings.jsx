@@ -1,4 +1,4 @@
-// hal0 dashboard — Settings view (secrets, storage, updates, runtime, general, about)
+// hal0 dashboard — Settings view (secrets, storage, updates, runtime, voice, image-gen, general, about)
 //
 // Phase B2: every section reads from live hooks. Storage drives
 // [models].store + propagates to Lemonade's extra_models_dir; Runtime
@@ -9,13 +9,20 @@
 // OmniRouter routing table, Agent-policy, and Memory (Cognee) sections
 // were removed in #544 — those surfaces live on the MCP view and the
 // agent view, respectively. The settings rail is for knobs only.
+//
+// #554: Voice (STT model, TTS model, TTS default voice) + Image-gen
+// (enable toggle, engine/model) sections persist via:
+//   - POST /api/capabilities/{slot}/{child}  — model/provider/enabled
+//   - PUT  /api/slots/{name}/config          — default_voice extra field
+// Extras that have no slot-config path (image size, steps, workflow per-request
+// params read from the body at inference time) are deferred (#554 follow-up).
 
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
 import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel } from '@/api/hooks/useUpdates'
-import { useCapabilities, useCapabilityPatch } from '@/api/hooks/useCapabilities'
+import { useCapabilities, useCapabilityPatch, useCapabilityApply } from '@/api/hooks/useCapabilities'
 import { useLemondRollup, useLemonadeStats } from '@/api/hooks/useLemonade'
 import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
-import { useSlots, useSlotEdit } from '@/api/hooks/useSlots'
+import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import {
   useSettings,
   useSettingsUpdate,
@@ -34,6 +41,8 @@ function SettingsView() {
     { id: "storage",   label: "Storage" },
     { id: "updates",   label: "Updates" },
     { id: "runtime",   label: "Runtime" },
+    { id: "voice",     label: "Voice" },
+    { id: "imagegen",  label: "Image-gen" },
     { id: "general",   label: "General" },
     { id: "about",     label: "About" },
   ];
@@ -65,6 +74,8 @@ function SettingsView() {
           {section === "storage" && <StorageSection />}
           {section === "updates" && <UpdatesSection />}
           {section === "runtime" && <RuntimeSection />}
+          {section === "voice" && <VoiceSection />}
+          {section === "imagegen" && <ImageGenSection />}
           {section === "general" && <GeneralSection />}
           {section === "about" && <AboutSection />}
         </div>
@@ -1287,6 +1298,301 @@ function RuntimeSection() {
         message={<span>Some changed keys are <span className="chip" style={{color: "var(--warn)", borderColor: "var(--warn)", fontSize: 10, padding: "1px 6px"}}>⟳ restart on next load</span> — lemond persists them now but applies them only on the next <span className="mono">/v1/load</span>. Restart a slot to apply immediately. <span className="chip" style={{color: "var(--ok)", borderColor: "var(--ok)", fontSize: 10, padding: "1px 6px"}}>live</span> keys take effect right away.</span>}
         confirmLabel="Save"
       />
+    </div>
+  );
+}
+
+// ─── Kokoro TTS voice list ──────────────────────────────────────────────────
+// Remsky Kokoro-FastAPI af_bella default. Full list from kokoro-v1 pack.
+// No backend API exposes the voice list — hardcoded against the upstream.
+// See: https://github.com/remsky/Kokoro-FastAPI#voices
+const KOKORO_VOICES = [
+  { id: "af_bella",   label: "Bella (af) — American female, warm" },
+  { id: "af_sarah",   label: "Sarah (af) — American female, clear" },
+  { id: "af_nicole",  label: "Nicole (af) — American female" },
+  { id: "am_adam",    label: "Adam (am) — American male" },
+  { id: "am_michael", label: "Michael (am) — American male" },
+  { id: "bf_emma",    label: "Emma (bf) — British female" },
+  { id: "bf_isabella",label: "Isabella (bf) — British female" },
+  { id: "bm_george",  label: "George (bm) — British male" },
+  { id: "bm_lewis",   label: "Lewis (bm) — British male" },
+];
+
+// ─── VoiceSection ───────────────────────────────────────────────────────────
+//
+// STT: pick model from capabilities.catalogs.voice.stt — persisted via
+//   POST /api/capabilities/voice/stt {model, provider, enabled}.
+// TTS: pick model + default_voice — model/enabled via capabilities POST,
+//   default_voice via PUT /api/slots/tts/config {default_voice}.
+//
+// Reflects current effective values from capabilities.selections.voice.{stt,tts}
+// and from /api/slots/tts/config (for default_voice).
+//
+// Deferred (no per-slot-config path today):
+//   - STT language hints, silence thresholds (per-request params, not slot config).
+//   - TTS speed/sample-rate (per-request in /v1/audio/speech body, not persisted).
+function VoiceSection() {
+  const capsQuery = useCapabilities();
+  const applyCapability = useCapabilityApply();
+  const ttsSlotCfgQuery = useSlotConfig("tts");
+  const editSlot = useSlotEdit();
+
+  const caps = capsQuery.data;
+  const voiceCatalogs = caps?.catalogs?.voice || {};
+  const voiceSelections = caps?.selections?.voice || {};
+
+  const sttSelection = voiceSelections.stt || {};
+  const ttsSelection = voiceSelections.tts || {};
+  const ttsCfg = ttsSlotCfgQuery.data || {};
+
+  // STT local edit state
+  const [sttModel, setSttModel] = useStateSet("");
+  const [sttEnabled, setSttEnabled] = useStateSet(false);
+  // TTS local edit state
+  const [ttsModel, setTtsModel] = useStateSet("");
+  const [ttsEnabled, setTtsEnabled] = useStateSet(false);
+  const [ttsVoice, setTtsVoice] = useStateSet("");
+
+  // Populate from live data
+  useEffectSet(() => {
+    if (sttSelection.model != null) setSttModel(sttSelection.model || "");
+    if (sttSelection.enabled != null) setSttEnabled(!!sttSelection.enabled);
+  }, [sttSelection.model, sttSelection.enabled]);
+
+  useEffectSet(() => {
+    if (ttsSelection.model != null) setTtsModel(ttsSelection.model || "");
+    if (ttsSelection.enabled != null) setTtsEnabled(!!ttsSelection.enabled);
+  }, [ttsSelection.model, ttsSelection.enabled]);
+
+  useEffectSet(() => {
+    const v = ttsCfg.default_voice;
+    if (v != null) setTtsVoice(String(v));
+  }, [ttsCfg.default_voice]);
+
+  const sttDirty = sttModel !== (sttSelection.model || "") || sttEnabled !== !!sttSelection.enabled;
+  const ttsDirty = ttsModel !== (ttsSelection.model || "") || ttsEnabled !== !!ttsSelection.enabled || ttsVoice !== (ttsCfg.default_voice ? String(ttsCfg.default_voice) : "");
+
+  const sttCatalogItems = voiceCatalogs.stt?.items || voiceCatalogs.stt?.models || [];
+  const ttsCatalogItems = voiceCatalogs.tts?.items || voiceCatalogs.tts?.models || [];
+
+  const doSaveStt = async () => {
+    try {
+      await applyCapability.mutateAsync({ slot: "voice", child: "stt", body: { model: sttModel, enabled: sttEnabled } });
+      window.__hal0Toast && window.__hal0Toast("STT settings saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`STT save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const doSaveTts = async () => {
+    try {
+      // Persist model + enabled via capability apply
+      await applyCapability.mutateAsync({ slot: "voice", child: "tts", body: { model: ttsModel, enabled: ttsEnabled } });
+      // Persist default_voice via slot config if changed
+      const origVoice = ttsCfg.default_voice ? String(ttsCfg.default_voice) : "";
+      if (ttsVoice !== origVoice && ttsVoice) {
+        await editSlot.mutateAsync({ name: "tts", body: { default_voice: ttsVoice } });
+      }
+      window.__hal0Toast && window.__hal0Toast("TTS settings saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`TTS save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const loading = capsQuery.isLoading;
+  const sttStatus = sttSelection.status || "offline";
+  const ttsStatus = ttsSelection.status || "offline";
+
+  const statusChip = (st) => {
+    const color = st === "ready" || st === "serving" ? "var(--ok)" : st === "starting" || st === "warming" ? "var(--warn)" : "var(--fg-4)";
+    return <span className="chip mono" style={{borderColor: color, color, fontSize: 10, padding: "1px 6px"}}>{st}</span>;
+  };
+
+  return (
+    <div className="s-section">
+      <h2>Voice</h2>
+      <p className="desc">STT (speech-to-text) and TTS (text-to-speech) slot configuration. Changes persist to the voice.stt and voice.tts capability slots.</p>
+
+      {/* ── STT ── */}
+      <div className="s-panel" style={{marginBottom: 12}}>
+        <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+          <div className="k"><span>STT</span><span className="sub">speech-to-text · voice.stt slot</span></div>
+          <div className="v">{statusChip(sttStatus)}</div>
+        </div>
+        <SRow k="Enabled" v={
+          <input type="checkbox" checked={sttEnabled} onChange={e => setSttEnabled(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+        } />
+        <SRow k="Model" v={
+          sttCatalogItems.length > 0 ? (
+            <select value={sttModel} onChange={e => setSttModel(e.target.value)}
+              style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
+              <option value="">— unset —</option>
+              {sttCatalogItems.map(m => (
+                <option key={m.id || m.model_id || m} value={m.id || m.model_id || m}>{m.id || m.model_id || m}</option>
+              ))}
+            </select>
+          ) : (
+            <input value={sttModel} onChange={e => setSttModel(e.target.value)} placeholder="model id (e.g. moonshine-base)"
+              className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 260}} />
+          )
+        } sub={sttCatalogItems.length === 0 ? "no installed STT models — install one in the Models view" : undefined} />
+        <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+          {sttDirty && (
+            <button className="btn ghost sm" onClick={() => { setSttModel(sttSelection.model || ""); setSttEnabled(!!sttSelection.enabled); }}>Reset</button>
+          )}
+          <button className="btn sm" disabled={!sttDirty || loading || applyCapability.isPending} onClick={doSaveStt}>Save STT</button>
+        </div>
+      </div>
+
+      {/* ── TTS ── */}
+      <div className="s-panel">
+        <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+          <div className="k"><span>TTS</span><span className="sub">text-to-speech · voice.tts slot</span></div>
+          <div className="v">{statusChip(ttsStatus)}</div>
+        </div>
+        <SRow k="Enabled" v={
+          <input type="checkbox" checked={ttsEnabled} onChange={e => setTtsEnabled(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+        } />
+        <SRow k="Model" v={
+          ttsCatalogItems.length > 0 ? (
+            <select value={ttsModel} onChange={e => setTtsModel(e.target.value)}
+              style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
+              <option value="">— unset —</option>
+              {ttsCatalogItems.map(m => (
+                <option key={m.id || m.model_id || m} value={m.id || m.model_id || m}>{m.id || m.model_id || m}</option>
+              ))}
+            </select>
+          ) : (
+            <input value={ttsModel} onChange={e => setTtsModel(e.target.value)} placeholder="model id (e.g. kokoro-v1)"
+              className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 260}} />
+          )
+        } sub={ttsCatalogItems.length === 0 ? "no installed TTS models — install one in the Models view" : undefined} />
+        <SRow k="Default voice" sub="applied when /v1/audio/speech omits the voice param" v={
+          <select value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}
+            style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
+            <option value="">— use server default (af_bella) —</option>
+            {KOKORO_VOICES.map(v => (
+              <option key={v.id} value={v.id}>{v.label}</option>
+            ))}
+          </select>
+        } />
+        <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+          {ttsDirty && (
+            <button className="btn ghost sm" onClick={() => {
+              setTtsModel(ttsSelection.model || "");
+              setTtsEnabled(!!ttsSelection.enabled);
+              setTtsVoice(ttsCfg.default_voice ? String(ttsCfg.default_voice) : "");
+            }}>Reset</button>
+          )}
+          <button className="btn sm" disabled={!ttsDirty || loading || applyCapability.isPending || editSlot.isPending} onClick={doSaveTts}>Save TTS</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ImageGenSection ─────────────────────────────────────────────────────────
+//
+// Image-gen exposes enable/engine(provider)/model picks for the img.img slot.
+// Persisted via POST /api/capabilities/img/img {model, provider, enabled}.
+//
+// Deferred (#554 follow-up — no clean slot-config path):
+//   - Default size (width × height): read from /v1/images/generations body, not slot config.
+//   - Steps: from extra_body.steps per-request; template defaults in workflows JSON.
+//   - ComfyUI workflow selection: bound at inference time by model_class from the registry.
+//   These require either per-request defaults in slot TOML (not yet modelled) or a
+//   new /api/slots/{name}/defaults surface — tracked in the issue body.
+function ImageGenSection() {
+  const capsQuery = useCapabilities();
+  const applyCapability = useCapabilityApply();
+
+  const caps = capsQuery.data;
+  const imgCatalogs = caps?.catalogs?.img || {};
+  const imgSelections = caps?.selections?.img || {};
+  const imgSelection = imgSelections.img || {};
+
+  const [imgModel, setImgModel] = useStateSet("");
+  const [imgEnabled, setImgEnabled] = useStateSet(false);
+  const [imgProvider, setImgProvider] = useStateSet("");
+
+  useEffectSet(() => {
+    if (imgSelection.model != null) setImgModel(imgSelection.model || "");
+    if (imgSelection.enabled != null) setImgEnabled(!!imgSelection.enabled);
+    if (imgSelection.provider != null) setImgProvider(imgSelection.provider || "");
+  }, [imgSelection.model, imgSelection.enabled, imgSelection.provider]);
+
+  const imgDirty = imgModel !== (imgSelection.model || "") || imgEnabled !== !!imgSelection.enabled || imgProvider !== (imgSelection.provider || "");
+  const imgCatalogItems = imgCatalogs.img?.items || imgCatalogs.img?.models || [];
+  const imgStatus = imgSelection.status || "offline";
+
+  const doSave = async () => {
+    try {
+      const body = { model: imgModel, enabled: imgEnabled };
+      if (imgProvider) body.provider = imgProvider;
+      await applyCapability.mutateAsync({ slot: "img", child: "img", body });
+      window.__hal0Toast && window.__hal0Toast("Image-gen settings saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Image-gen save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const statusChip = (st) => {
+    const color = st === "ready" || st === "serving" ? "var(--ok)" : st === "starting" || st === "warming" ? "var(--warn)" : "var(--fg-4)";
+    return <span className="chip mono" style={{borderColor: color, color, fontSize: 10, padding: "1px 6px"}}>{st}</span>;
+  };
+
+  const loading = capsQuery.isLoading;
+
+  return (
+    <div className="s-section">
+      <h2>Image-gen</h2>
+      <p className="desc">ComfyUI / stable-diffusion image generation slot configuration. Changes persist to the img.img capability slot.</p>
+
+      <div className="s-panel">
+        <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+          <div className="k"><span>Image-gen</span><span className="sub">img.img slot · ComfyUI engine</span></div>
+          <div className="v">{statusChip(imgStatus)}</div>
+        </div>
+        <SRow k="Enabled" v={
+          <input type="checkbox" checked={imgEnabled} onChange={e => setImgEnabled(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+        } />
+        <SRow k="Engine" sub="provider for the img slot" v={
+          <select value={imgProvider} onChange={e => setImgProvider(e.target.value)}
+            style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
+            <option value="">— auto —</option>
+            <option value="comfyui">comfyui</option>
+          </select>
+        } />
+        <SRow k="Model" v={
+          imgCatalogItems.length > 0 ? (
+            <select value={imgModel} onChange={e => setImgModel(e.target.value)}
+              style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
+              <option value="">— unset —</option>
+              {imgCatalogItems.map(m => (
+                <option key={m.id || m.model_id || m} value={m.id || m.model_id || m}>{m.id || m.model_id || m}</option>
+              ))}
+            </select>
+          ) : (
+            <input value={imgModel} onChange={e => setImgModel(e.target.value)} placeholder="model id (e.g. sdxl-turbo-fp16)"
+              className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 260}} />
+          )
+        } sub={imgCatalogItems.length === 0 ? "no installed image models — install one in the Models view" : undefined} />
+
+        <SRow k="Size / Steps / Workflow" sub="per-request params — set in the API call body (extra_body.steps, size, etc.)" v={
+          <span className="chip mono" style={{color: "var(--fg-4)", borderColor: "var(--line)", fontSize: 10, padding: "1px 6px"}}>deferred</span>
+        } />
+
+        <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+          {imgDirty && (
+            <button className="btn ghost sm" onClick={() => {
+              setImgModel(imgSelection.model || "");
+              setImgEnabled(!!imgSelection.enabled);
+              setImgProvider(imgSelection.provider || "");
+            }}>Reset</button>
+          )}
+          <button className="btn sm" disabled={!imgDirty || loading || applyCapability.isPending} onClick={doSave}>Save Image-gen</button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -388,3 +388,18 @@ export function useSlotDelete() {
     onSuccess: invalidate,
   })
 }
+
+/**
+ * GET /api/slots/{name}/config — read a slot's full TOML config as a dict.
+ * Used by voice + image-gen settings sections to reflect current effective
+ * values (e.g. default_voice, default_steps) that live in the slot TOML
+ * but are not surfaced by the capabilities/selections payload.
+ */
+export function useSlotConfig(name: string | null | undefined) {
+  return useQuery<Record<string, unknown>>({
+    queryKey: ['slot-config', name],
+    queryFn: () => apiGet<Record<string, unknown>>(ENDPOINTS.slotConfig(name as string)),
+    enabled: !!name,
+    staleTime: 10_000,
+  })
+}

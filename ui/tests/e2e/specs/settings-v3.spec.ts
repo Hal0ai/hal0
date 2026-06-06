@@ -1,18 +1,19 @@
 /**
- * settings-v3 — `#settings` route renders the rail nav with all 6
- * sections (secrets, storage, updates, runtime, general, about) and
- * swaps the right pane on click.
+ * settings-v3 — `#settings` route renders the rail nav with all 8
+ * sections (secrets, storage, updates, runtime, voice, image-gen, general, about)
+ * and swaps the right pane on click.
  *
  * Auth section removed per ADR-0012 (PRs #254-#267); default landing
  * is now Secrets. #544 pruned the fully-mock OmniRouter/Agent-policy/
  * Memory (Cognee) sections (those surfaces live on MCP + agent views);
  * surviving sections were renamed for accuracy — Models→Storage,
  * Lemonade admin→Runtime, Appearance→General.
+ * #554 added Voice + Image-gen sections.
  */
 import { test, expect } from '../fixtures/apiMock'
 
 const SECTIONS = [
-  'Secrets', 'Storage', 'Updates', 'Runtime', 'General', 'About',
+  'Secrets', 'Storage', 'Updates', 'Runtime', 'Voice', 'Image-gen', 'General', 'About',
 ]
 
 test.describe('Settings v3 (/settings)', () => {
