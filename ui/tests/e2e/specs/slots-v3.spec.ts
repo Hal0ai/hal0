@@ -34,6 +34,20 @@ test.describe('Slots v3 (/slots)', () => {
     await expect(newBtn).toBeVisible()
   })
 
+  test('enabled-first sort (C6): a disabled slot sinks to the end of its section', async ({ page }) => {
+    await page.goto('/#slots')
+    // The Chat section: HAL0_DATA declares a disabled "legacy" slot early in
+    // source order; the enabled-first sort must render it last.
+    const chatSection = page.locator('.view section', {
+      has: page.locator('.sec h2', { hasText: 'Chat' }),
+    })
+    const names = await chatSection.locator('.slot .slot-name .nm').allInnerTexts()
+    expect(names.length).toBeGreaterThan(1)
+    expect(names).toContain('legacy')
+    expect(names[names.length - 1]).toBe('legacy') // disabled → last
+    expect(names[0]).not.toBe('legacy') // enabled slots come first
+  })
+
   test('NPU rollup section renders when an NPU slot is present', async ({ page }) => {
     await page.goto('/#slots')
     // HAL0_DATA seeds at least one device=npu slot, so the NPU section h2 should appear

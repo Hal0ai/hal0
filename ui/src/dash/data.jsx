@@ -86,6 +86,21 @@ const HAL0_DATA = {
       spark: [3, 5, 7, 6, 8, 9, 10, 8, 9, 11, 12, 9, 10, 11, 13, 10],
     },
     {
+      // Disabled slot — demonstrates the offline/faded card and C6 enabled-first
+      // sort (declared early here, but renders at the end of the Chat section).
+      name: "legacy",
+      type: "llm",
+      device: "gpu-rocm",
+      model: "qwen2.5-7b-instruct",
+      model_id: "qwen2.5-7b",
+      modelLong: "Qwen/Qwen2.5-7B-Instruct-GGUF",
+      group: "chat",
+      state: "offline",
+      enabled: false,
+      port: 8099,
+      metrics: { toks: 0, ttft: null, ctx: 4096, kv: null, mem: 7.2 },
+    },
+    {
       name: "agent",
       type: "llm",
       device: "npu",

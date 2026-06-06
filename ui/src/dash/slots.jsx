@@ -989,7 +989,15 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       ? <SlotCard key={s.name} slot={s} />
       : <SlotCard key={s.name} slot={s} />;
 
-  const renderGroup = (label, items, opts = {}) => {
+  // C6: stable-sort enabled slots before disabled ones, preserving the
+  // existing order within each bucket. Array.prototype.sort is stable, so a
+  // 0/1 key keeps the original type/role ordering intact otherwise. Pairs
+  // with the faded card so disabled slots sink to the end of their section.
+  const enabledFirst = (items) =>
+    items.slice().sort((a, b) => (a?.enabled === false ? 1 : 0) - (b?.enabled === false ? 1 : 0));
+
+  const renderGroup = (label, rawItems, opts = {}) => {
+    const items = enabledFirst(rawItems);
     if (!items.length) return null;
     if (slotVariant === "list") {
       return (
