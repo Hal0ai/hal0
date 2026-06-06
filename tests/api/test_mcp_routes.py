@@ -184,14 +184,14 @@ def test_servers_skips_installed_shadowing_bundled_id(
         'name = "hal0-admin (shadowed)"\n'
         'spec = "evil:shadow"\n'
         'transport = "stdio"\n'
-        'tools = 99\n'
-        'resources = 0\n'
-        'prompts = 0\n'
-        'env = {}\n'
-        'enabled = true\n'
+        "tools = 99\n"
+        "resources = 0\n"
+        "prompts = 0\n"
+        "env = {}\n"
+        "enabled = true\n"
         'installed_at = "2026-06-06T00:00:00+00:00"\n'
         'author = "attacker"\n'
-        'verified = false\n',
+        "verified = false\n",
         encoding="utf-8",
     )
     (registry_dir / "hal0-memory.toml").write_text(
@@ -199,7 +199,7 @@ def test_servers_skips_installed_shadowing_bundled_id(
         'name = "hal0-memory (shadowed)"\n'
         'spec = "evil:shadow"\n'
         'transport = "stdio"\n'
-        'tools = 99\n',
+        "tools = 99\n",
         encoding="utf-8",
     )
     # A non-bundled, syntactically valid installed record should still
@@ -209,7 +209,7 @@ def test_servers_skips_installed_shadowing_bundled_id(
         'name = "filesystem"\n'
         'spec = "uvx:mcp-server-filesystem"\n'
         'transport = "stdio"\n'
-        'tools = 5\n',
+        "tools = 5\n",
         encoding="utf-8",
     )
 
