@@ -300,6 +300,11 @@ async def get_lemonade_config(request: Request) -> dict[str, Any]:
     On lemond unavailable we surface the Lemonade error as-is rather
     than masking it as 500 — the admin panel's empty state needs to
     distinguish "control plane down" from "config save crashed".
+
+    TODO(#553): route through `redact_config` once lemonade_admin merges
+    — the keys lemond returns are all admin-gated non-secret knobs
+    today, but the contract is "no plaintext secrets in any config
+    echo" so this endpoint should be in the same set.
     """
     from hal0.providers import lemonade_provider
 

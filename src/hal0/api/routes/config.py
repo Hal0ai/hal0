@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
+from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import ModelsConfig
@@ -211,9 +212,17 @@ async def get_urls(request: Request) -> dict[str, object]:
 
 @router.get("/models")
 async def get_models_config() -> dict[str, Any]:
-    """Return the current [models] section (roots / auto-scan / extensions)."""
+    """Return the current [models] section (roots / auto-scan / extensions).
+
+    Routed through :func:`redact_config` so any sensitive-keyed value the
+    operator has tucked into the ``extra``-allow escape hatch
+    (``api_key`` / ``token`` / …) is masked before it leaves the API
+    (#553). The stock schema carries only paths and booleans, so the
+    walk is a no-op on a clean install — but a stray ``api_key = "sk-x"``
+    in hal0.toml's ``[models]`` table will not be echoed in plaintext.
+    """
     cfg = load_hal0_config()
-    return cfg.models.model_dump(mode="json")
+    return redact_config(cfg.models.model_dump(mode="json"))
 
 
 @router.put("/models")
@@ -274,4 +283,4 @@ async def update_models_config(request: Request) -> dict[str, Any]:
 
     out = new_models.model_dump(mode="json")
     out["scan"] = scan_result
-    return out
+    return redact_config(out)

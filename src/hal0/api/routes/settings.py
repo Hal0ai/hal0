@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
+from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
@@ -86,7 +87,15 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
 
 
 def _config_to_dict(cfg: Hal0Config) -> dict[str, Any]:
-    return cfg.model_dump(mode="json")
+    """Project a Hal0Config into a JSON-safe dict, scrubbing sensitive keys.
+
+    Every config-echoing endpoint routes through this helper so the
+    redaction is applied exactly once (#553). The walk masks any
+    sensitive-named value (api_key, token, password, …) at any depth,
+    which catches stragglers living in the ``extra: dict[str, Any]``
+    pydantic escape hatch.
+    """
+    return redact_config(cfg.model_dump(mode="json"))
 
 
 @router.get("")

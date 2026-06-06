@@ -26,6 +26,7 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
 from hal0.upstreams.integrations import get_catalog
@@ -72,9 +73,14 @@ def _serialize_upstream(u: Any, *, last_models: list[str] | None = None) -> dict
     """Project an Upstream dataclass into the dashboard-friendly dict.
 
     Mirrors /api/slots' shape — `name`, `kind`, `url`, plus a sanitized
-    auth descriptor that never leaks credential values.
+    auth descriptor that never leaks credential values. The output is
+    run through :func:`redact_config` as a defense-in-depth pass (#553):
+    the schema only stores the env-var NAME (``auth_value_env``), never
+    a secret, so a redaction trigger on the well-known shape is a no-op
+    today — but if a future field lands here whose name matches a
+    sensitive pattern, the walk catches it without a round of edits.
     """
-    return {
+    out = {
         "name": u.name,
         "kind": u.kind,
         "url": u.url,
@@ -87,6 +93,7 @@ def _serialize_upstream(u: Any, *, last_models: list[str] | None = None) -> dict
         "advertise_models": u.advertise_models,
         "models": last_models or [],
     }
+    return redact_config(out)
 
 
 @router.get("/upstreams")
