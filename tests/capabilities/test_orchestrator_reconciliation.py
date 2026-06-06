@@ -226,3 +226,47 @@ async def test_apply_no_rewrite_on_pure_disable(
 
     update_calls = [c for c in fake.calls if c[0] == "update_config"]
     assert update_calls == [], f"unexpected update_config on disable transition: {update_calls}"
+
+
+# ── Step 1: _CHILD_TO_SLOT_TYPE + type written by _ensure_slot_exists ──────────
+
+
+def test_child_to_slot_type_mapping() -> None:
+    """The trio-modality children carry their dispatch ``type`` discriminator."""
+    from hal0.capabilities.orchestrator import _CHILD_TO_SLOT_TYPE
+
+    assert _CHILD_TO_SLOT_TYPE["embed"] == "embedding"
+    assert _CHILD_TO_SLOT_TYPE["stt"] == "transcription"
+
+
+async def test_ensure_slot_exists_writes_type_for_embed(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto-creating the embed slot stamps ``type=embedding`` into the cfg.
+
+    The dispatch gate (`v1._is_npu_trio_request`) keys on ``type`` first;
+    a created slot that omits it never activates trio dispatch.
+    """
+    from hal0.capabilities.config import CapabilitySelection
+
+    fake = FakeSlotManager()
+    orch = CapabilityOrchestrator(slot_manager=fake)
+    selection = CapabilitySelection.model_validate(
+        {"device": "npu", "provider": "flm", "model": "some-embed", "enabled": True}
+    )
+    # No embed.toml on disk under tmp_hal0_home → create path fires.
+    await orch._ensure_slot_exists("embed", selection)
+
+    create_calls = [c for c in fake.calls if c[0] == "create"]
+    assert create_calls, f"create was never invoked: {fake.calls}"
+    cfg = create_calls[-1][2]["cfg"]
+    assert cfg.get("type") == "embedding", f"created cfg missing type: {cfg!r}"
+
+
+def test_ensure_slot_exists_omits_type_for_rerank() -> None:
+    """Non-trio children (rerank/tts/img) get no ``type`` key."""
+    from hal0.capabilities.orchestrator import _CHILD_TO_SLOT_TYPE
+
+    # embed-rerank → child "rerank", not in the trio-type map.
+    assert "rerank" not in _CHILD_TO_SLOT_TYPE
+    assert "tts" not in _CHILD_TO_SLOT_TYPE

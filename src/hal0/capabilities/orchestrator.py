@@ -59,6 +59,17 @@ _SLOT_TO_CHILD: dict[str, tuple[str, str]] = {
     slot_name: key for key, slot_name in _CHILD_TO_SLOT.items()
 }
 
+# ── Trio dispatch discriminator: capability child → slot ``type`` ─────────────
+# The FLM trio (one ``flm serve`` process serving chat + embed + asr) is gated
+# in v1._is_npu_trio_request on the slot record's ``type`` field. Only the two
+# trio modalities carry a type; rerank/tts/img/vision are NOT trio members and
+# get no ``type`` key (their auto-created slots are plain llama-server/dedicated
+# providers). Mirrors providers/flm._classify_flm_model emitting "embed"/"stt".
+_CHILD_TO_SLOT_TYPE: dict[str, str] = {
+    "embed": "embedding",
+    "stt": "transcription",
+}
+
 # The legal capability/child surface — used by HTTP validation.
 LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img", "vision")
 
@@ -537,7 +548,7 @@ class CapabilityOrchestrator:
         slot_backend = self._slot_backend_for_catalog_id(selection.device)
         slot_device = self._slot_device_for_catalog_id(selection.device)
         provider = selection.provider or "llama-server"
-        cfg_dict = {
+        cfg_dict: dict[str, Any] = {
             "name": slot_name,
             "port": port,
             "backend": slot_backend or "vulkan",
@@ -546,6 +557,13 @@ class CapabilityOrchestrator:
             "enabled": True,
             "model": {"default": selection.model or ""},
         }
+        # Stamp the trio dispatch discriminator for embed/stt children so
+        # v1._is_npu_trio_request can gate on it. Non-trio children
+        # (rerank/tts/img/vision) get no ``type`` key.
+        _, child = _SLOT_TO_CHILD.get(slot_name, (None, None))
+        slot_type = _CHILD_TO_SLOT_TYPE.get(child) if child else None
+        if slot_type:
+            cfg_dict["type"] = slot_type
         try:
             await self._slot_manager.create(slot_name, cfg_dict)
         except Exception as exc:
