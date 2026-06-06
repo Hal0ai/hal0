@@ -1,5 +1,5 @@
 .PHONY: help install dev test test-unit release-test release-test-report \
-        harness harness-report harness-clean \
+        harness harness-report harness-clean harness-install \
         lint fmt typecheck ui-install ui-dev ui-build clean \
         proto-ttft proto-ttft-live
 
@@ -68,6 +68,16 @@ harness-report:
 
 harness-clean:
 	rm -rf tests/harness/reports/
+
+# Fresh-install smoke (#407): clone the CT-200 hal0-test-template, run a full
+# install -> smoke -> uninstall -> destroy cycle on a clean box, and append the
+# JSON result line to tests/harness/reports/install-smoke.jsonl. Pass harness
+# args via ARGS, e.g.:  make harness-install ARGS="--from-tree $(PWD)"
+# Requires SSH to the Proxmox host (HAL0_PVE, default alias 'pve') + the
+# CT-200 template. See docs/internal/install-test-harness.md.
+harness-install:
+	@mkdir -p tests/harness/reports
+	bash scripts/fresh-test-ct.sh $(ARGS) | tee -a tests/harness/reports/install-smoke.jsonl
 
 release-test:
 	HAL0_TEST_HOST="$(HAL0_TEST_HOST)" \
