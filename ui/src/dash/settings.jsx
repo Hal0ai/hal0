@@ -510,54 +510,77 @@ function UpdatesSection() {
   );
 }
 
-// Runtime keys this form edits, in render order. Each row binds
-// to one key in the live /internal/config snapshot; the effect label
-// (Immediate / Deferred) is derived from the backend's `_hal0.effects`
-// partition rather than hard-coded here, so the two never drift.
+// ─── Lemonade config helpers ────────────────────────────────────────
 //
-// `extra_models_dir` is intentionally NOT editable from this panel —
-// the backend locks it to the [models].store single source of truth
-// (see StorageSection + lemonade_admin._validate_extra_models_dir). We
-// surface it read-only so the operator can see the locked value.
+// `--threads` is a typed number input in the UI but the wire-level key
+// is `llamacpp_args` (a free-text flag string, DEFERRED). The regex
+// matches the backend's `_THREADS_RE` in lemonade_admin.py so what the
+// operator types here produces the same parsed value the server sees.
+const THREADS_RE = /--threads\s+(\d+)/;
+
+function extractThreads(llamacppArgs) {
+  if (typeof llamacppArgs !== "string") return null;
+  const m = llamacppArgs.match(THREADS_RE);
+  return m ? m[1] : null;
+}
+
+function substituteThreads(llamacppArgs, next) {
+  const base = typeof llamacppArgs === "string" ? llamacppArgs.trim() : "";
+  if (THREADS_RE.test(base)) return base.replace(THREADS_RE, `--threads ${next}`).trim();
+  return base ? `${base} --threads ${next}` : `--threads ${next}`;
+}
+
+// One-flag extractor (mirrors lemonade_admin._validate_flm_args shape).
+// Used for the effective readouts chip strip.
+function extractFlagValue(s, name) {
+  if (typeof s !== "string") return null;
+  const m = s.match(new RegExp(`--${name}\\s+(\\S+)`));
+  return m ? m[1] : null;
+}
+
+// Runtime keys this form edits, in render order. Each row binds
+// to one key in the live /internal/config snapshot; the effect badge
+// (live / restart on next load) is derived from the backend's
+// `_hal0.effects` partition rather than hard-coded here, so the two
+// never drift. The `threads` row is a typed UI over `llamacpp_args` —
+// the underlying key it writes on save is still llamacpp_args (deferred).
+//
+// `host` / `port` are read-only — changing them requires a systemd
+// unit edit (the lemond service pins the listen endpoint). `extra_models_dir`
+// stays locked to the [models].store single source of truth.
 const LEMONADE_FIELDS = [
-  { key: "max_loaded_models", sub: "Per-type LRU budget", kind: "number", width: 80 },
-  { key: "ctx_size", sub: "Default per /v1/load — overridable per slot", kind: "number", width: 100 },
-  {
-    key: "llamacpp_args",
-    sub: "Mandatory baseline · ADR-0008",
-    kind: "text",
-    warn: "⚠ Must keep --threads N (N ≥ 2) or lemond deadlocks under concurrent load",
-  },
+  // ── immediate-effect knobs ──
+  { key: "global_timeout",  sub: "Default per-request timeout (sec)", kind: "number", width: 100, min: 1 },
+  { key: "log_level",       sub: "Lemonade log verbosity",            kind: "select", options: ["critical","error","warn","info","debug","trace"], width: 140 },
+  { key: "no_broadcast",    sub: "Skip UDP backend discovery",        kind: "toggle" },
+  // ── deferred-effect knobs (apply on next /v1/load) ──
+  { key: "threads",         sub: "llama.cpp thread count (≥2 — typed; writes llamacpp_args)", kind: "threads", min: 2 },
+  { key: "llamacpp_backend", sub: "llama.cpp compute backend",         kind: "select", options: ["rocm","vulkan","cpu"], width: 140 },
+  { key: "max_loaded_models", sub: "Per-type LRU budget",              kind: "number", width: 100, min: 1 },
+  { key: "ctx_size",        sub: "Default per /v1/load — overridable per slot", kind: "number", width: 100, min: 256 },
+  { key: "sdcpp_backend",   sub: "sd.cpp compute backend",            kind: "select", options: ["rocm","vulkan","cpu"], width: 140 },
+  { key: "whispercpp_backend", sub: "whisper.cpp compute backend",     kind: "select", options: ["vulkan","cpu","cublas"], width: 140 },
+  { key: "steps",           sub: "sd.cpp sampling steps",             kind: "number", width: 100, min: 1 },
+  { key: "cfg_scale",       sub: "sd.cpp classifier-free guidance",   kind: "number", width: 100, min: 0, step: 0.5 },
+  { key: "width",           sub: "sd.cpp output width (px)",          kind: "number", width: 100, min: 64 },
+  { key: "height",          sub: "sd.cpp output height (px)",         kind: "number", width: 100, min: 64 },
   {
     key: "flm_args",
-    sub: "FLM trio config — drives the NPU coresident packing",
+    sub: "FLM trio config — drives NPU coresident packing",
     kind: "text",
-    warn: "⚠ Must keep --asr 1 --embed 1 or the NPU stt/embed slots lose their backend",
+    warn: "--asr/--embed take 0 or 1; setting a modality to 0 requires disabling the corresponding NPU slot in dispatch.",
   },
-  {
-    key: "whispercpp_backend",
-    sub: "whisper.cpp compute backend",
-    kind: "select",
-    options: ["vulkan", "cpu", "cublas"],
-    width: 160,
-  },
-  {
-    key: "sdcpp_backend",
-    sub: "sd.cpp compute backend",
-    kind: "select",
-    options: ["rocm", "vulkan", "cpu"],
-    width: 160,
-  },
-  { key: "steps", sub: "sd.cpp sampling steps", kind: "number", width: 80 },
-  { key: "cfg_scale", sub: "sd.cpp classifier-free guidance", kind: "number", width: 80 },
-  { key: "width", sub: "sd.cpp output width (px)", kind: "number", width: 80 },
-  { key: "height", sub: "sd.cpp output height (px)", kind: "number", width: 80 },
+  // ── read-only (systemd-gated / locked) ──
+  { key: "host", sub: "Listen host — change requires systemd unit edit", kind: "readonly" },
+  { key: "port", sub: "Listen port — change requires systemd unit edit", kind: "readonly" },
 ];
 
 function RuntimeSection() {
-  // Phase B2 (issue #461): the admin config form now reads + writes the
-  // live /api/lemonade/config surface. The runtime readouts at the top
-  // stay on the polling rollup; capabilities preview stays as-is.
+  // Issue #545 — typed Lemonade runtime knobs. Reads + writes the live
+  // /api/lemonade/config surface. The per-row apply badge is derived
+  // from the backend's `_hal0.effects` partition (immediate/deferred)
+  // rather than hard-coded; the typed `threads` input maps to the
+  // `llamacpp_args` wire key on save.
   const lemond = useLemondRollup();
   const stats = useLemonadeStats();
   const caps = useCapabilities();
@@ -569,47 +592,99 @@ function RuntimeSection() {
 
   // Edit buffer holds string values per key; populated from the live
   // snapshot once it loads. We keep everything as strings so the inputs
-  // are controlled, and coerce numbers back on submit.
+  // are controlled, and coerce numbers back on submit. The `threads`
+  // field is special — its value lives inside `cfg.llamacpp_args`, not
+  // at `cfg.threads`; the populate + buildPatch helpers translate.
   const [edits, setEdits] = useStateSet({});
   // Per-key validation errors echoed from the backend's
-  // `lemonade.config_invalid` envelope details map.
+  // `lemonade.config_invalid` envelope details map; client-side
+  // pre-checks (threads < 2) also land here before the round-trip.
   const [fieldErrors, setFieldErrors] = useStateSet({});
   // ConfirmDialog gate — saving a deferred-effect key warns it won't
   // take hold until the next /v1/load.
   const [confirmOpen, setConfirmOpen] = useStateSet(false);
 
+  // Resolve the "original" value a row was loaded from. For `threads`
+  // we extract from llamacpp_args; everything else is a verbatim read.
+  const original = (key) => {
+    if (!cfg) return "";
+    if (key === "threads") {
+      const t = extractThreads(cfg.llamacpp_args);
+      return t == null ? "" : t;
+    }
+    const v = cfg[key];
+    return v == null ? "" : String(v);
+  };
+
   useEffectSet(() => {
     if (!cfg) return;
     const next = {};
     for (const f of LEMONADE_FIELDS) {
-      const v = cfg[f.key];
-      next[f.key] = v == null ? "" : String(v);
+      next[f.key] = original(f.key);
     }
     setEdits(next);
   }, [cfg]);
 
-  const original = (key) => {
-    const v = cfg?.[key];
-    return v == null ? "" : String(v);
-  };
+  // Dirty keys are those whose edit-buffer value diverges from the
+  // live snapshot. `threads` is a derived field, so its "original" is
+  // the value parsed out of `llamacpp_args` (not a top-level key).
+  // The `k in edits` gate prevents a one-frame "all dirty" flash on
+  // first cfg load (edits starts as {} before the populate effect runs).
   const dirtyKeys = LEMONADE_FIELDS
     .map((f) => f.key)
-    .filter((k) => cfg && (edits[k] ?? "") !== original(k));
-  const touchesDeferred = dirtyKeys.some((k) => effects.deferred.includes(k));
+    .filter((k) => cfg && k in edits && (edits[k] ?? "") !== original(k));
+  const touchesDeferred = dirtyKeys.some((k) =>
+    k === "threads" || effects.deferred.includes(k),
+  );
+
+  // Client-side pre-validation. The backend re-checks these — but
+  // surfacing the error inline before the round-trip keeps the form
+  // feeling responsive and the typing flow tight. We do NOT block the
+  // save; the backend may know better (e.g. it has the FLM trio
+  // invariant); the `details` map from `lemonade.config_invalid`
+  // overwrites this on response.
+  useEffectSet(() => {
+    const next = {};
+    for (const f of LEMONADE_FIELDS) {
+      if (f.kind === "threads") {
+        const raw = (edits[f.key] ?? "").trim();
+        if (raw !== "" && Number(raw) < 2) {
+          next[f.key] = "must be ≥ 2 — below 2 trips the Vulkan dispatch deadlock";
+        }
+      } else if (typeof f.min === "number" && f.kind === "number") {
+        const raw = (edits[f.key] ?? "").trim();
+        if (raw !== "" && Number.isFinite(Number(raw)) && Number(raw) < f.min) {
+          next[f.key] = `must be ≥ ${f.min}`;
+        }
+      }
+    }
+    setFieldErrors((prev) => ({ ...prev, ...next }));
+  }, [edits]);
 
   const setField = (key, value) => {
     setEdits((e) => ({ ...e, [key]: value }));
+    // Clear server-side errors on edit; client errors re-derive in the
+    // useEffect above on the next render.
     if (fieldErrors[key]) setFieldErrors((fe) => ({ ...fe, [key]: undefined }));
   };
 
   // Coerce the dirty edits back to typed values for the POST body. We
-  // only send keys the operator actually changed.
+  // only send keys the operator actually changed. The typed `threads`
+  // field rewrites the underlying `llamacpp_args` string so the
+  // backend validator (which inspects the raw args) still trips.
   const buildPatch = () => {
     const patch = {};
     for (const f of LEMONADE_FIELDS) {
       if (!dirtyKeys.includes(f.key)) continue;
+      if (f.kind === "readonly") continue;
       const raw = (edits[f.key] ?? "").trim();
-      if (f.kind === "number") {
+      if (f.kind === "threads") {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < (f.min ?? 2)) continue;
+        patch.llamacpp_args = substituteThreads(cfg?.llamacpp_args, n);
+      } else if (f.kind === "toggle") {
+        patch[f.key] = raw === "true";
+      } else if (f.kind === "number") {
         const n = Number(raw);
         patch[f.key] = Number.isFinite(n) ? n : raw;
       } else {
@@ -619,27 +694,35 @@ function RuntimeSection() {
     return patch;
   };
 
+  // A dirty key with an active error blocks the save (client validation
+  // OR a server error echoed back on a prior attempt for that exact
+  // key). Stale server errors on UNCHANGED fields don't block — the
+  // user is intentionally re-saving a different key.
+  const hasBlockingError = dirtyKeys.some((k) => fieldErrors[k]);
+
   const doSave = async () => {
     const patch = buildPatch();
     if (Object.keys(patch).length === 0) return;
-    setFieldErrors({});
     try {
       const resp = await cfgSet.mutateAsync(patch);
-      const nImm = resp.effects?.immediate?.length || 0;
-      const nDef = resp.effects?.deferred?.length || 0;
+      const immediate = resp.effects?.immediate || [];
+      const deferred = resp.effects?.deferred || [];
       const parts = [];
-      if (nImm) parts.push(`${nImm} immediate`);
-      if (nDef) parts.push(`${nDef} deferred until next load`);
+      if (immediate.length) parts.push(`${immediate.length} live: ${immediate.join(", ")}`);
+      if (deferred.length) parts.push(`${deferred.length} restart on next load: ${deferred.join(", ")}`);
+      // Drop any stale server errors from a prior attempt — the form
+      // just refilled from the authoritative snapshot.
+      setFieldErrors({});
       window.__hal0Toast && window.__hal0Toast(
-        `Lemonade config saved${parts.length ? ` — ${parts.join(", ")}` : ""}`,
-        nDef ? "warn" : "ok",
+        `Lemonade config saved${parts.length ? ` — ${parts.join(" · ")}` : ""}`,
+        deferred.length ? "warn" : "ok",
       );
     } catch (e) {
       // `lemonade.config_invalid` carries a {key: reason} details map —
       // surface each reason inline beside its field.
       const details = e?.details;
       if (details && typeof details === "object") {
-        setFieldErrors(details);
+        setFieldErrors((prev) => ({ ...prev, ...details }));
       }
       window.__hal0Toast && window.__hal0Toast(
         `Save failed — ${e?.message || "see logs"}`,
@@ -653,18 +736,81 @@ function RuntimeSection() {
     else doSave();
   };
 
+  // ── effective readouts (rendered from cfg + useLemonadeStats) ──
+  // The chips show the running value, not the form default. This is
+  // the "do I have a stale page" sanity check the operator wants.
+  const effectiveThreads = extractThreads(cfg?.llamacpp_args);
+  const effectiveAsr = extractFlagValue(cfg?.flm_args, "asr");
+  const effectiveEmbed = extractFlagValue(cfg?.flm_args, "embed");
+  const liveStats = stats.data || {};
+  const readouts = [
+    { k: "threads",        v: effectiveThreads != null ? `–threads ${effectiveThreads}` : "—", emphasis: !!effectiveThreads },
+    { k: "global_timeout", v: cfg?.global_timeout != null ? `${cfg.global_timeout}s` : "—", emphasis: cfg?.global_timeout != null },
+    { k: "log_level",      v: cfg?.log_level || "—", emphasis: !!cfg?.log_level },
+    { k: "–asr",           v: effectiveAsr != null ? String(effectiveAsr) : "—", emphasis: effectiveAsr != null },
+    { k: "–embed",         v: effectiveEmbed != null ? String(effectiveEmbed) : "—", emphasis: effectiveEmbed != null },
+  ];
+  const lastStats = [
+    { k: "TTFT",         v: liveStats.time_to_first_token != null ? `${(liveStats.time_to_first_token * 1000).toFixed(0)} ms` : "—" },
+    { k: "decode",       v: liveStats.tokens_per_second != null ? `${liveStats.tokens_per_second.toFixed(1)} tok/s` : "—" },
+    { k: "prompt tok",   v: liveStats.prompt_tokens != null ? String(liveStats.prompt_tokens) : "—" },
+    { k: "output tok",   v: liveStats.output_tokens != null ? String(liveStats.output_tokens) : "—" },
+  ];
+
   return (
     <div className="s-section">
       <h2>Runtime</h2>
-      <p className="desc">Direct edit of <span className="mono" style={{color: "var(--fg)"}}>/internal/config</span>. <span style={{color: "var(--ok)"}}>Immediate</span> keys apply on save; <span style={{color: "var(--warn)"}}>deferred</span> keys take hold on the next <span className="mono">/v1/load</span>.</p>
+      <p className="desc">
+        Direct edit of <span className="mono" style={{color: "var(--fg)"}}>/internal/config</span>.{" "}
+        <span className="chip" style={{color: "var(--ok)", borderColor: "var(--ok)"}}>live</span>{" "}
+        keys apply on save;{" "}
+        <span className="chip" style={{color: "var(--warn)", borderColor: "var(--warn)"}}>⟳ restart on next load</span>{" "}
+        keys take hold on the next <span className="mono">/v1/load</span>.
+      </p>
+
+      {/* Header readouts — lemond health + capability preview (live) */}
       <div className="s-panel" style={{marginBottom: 12}}>
         <SRow k="runtime" mono v={<>{lemond.version} · {lemond.status} · <b>{lemond.loaded}</b>/{lemond.budget} loaded</>} />
         <SRow k="throughput" mono v={lemond.throughput != null ? `${lemond.throughput} MB/s` : '—'} />
-        <SRow k="last TTFT" mono v={lemond.lastTtft != null ? `${(lemond.lastTtft * 1000).toFixed(0)} ms` : '—'} />
-        <SRow k="last decode" mono v={lemond.lastTokPerSec != null ? `${lemond.lastTokPerSec.toFixed(1)} tok/s` : '—'} />
         {caps.data?.capabilities && Object.entries(caps.data.capabilities).map(([k, v]) => (
           <SRow key={k} k={`capability · ${k}`} mono v={<><b>{v.provider}</b>{v.model ? <> · {v.model}</> : null}</>} />
         ))}
+      </div>
+
+      {/* Effective readouts — what's actually running right now */}
+      <div className="s-panel" style={{marginBottom: 12, padding: "10px 12px"}}>
+        <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.6}}>effective</div>
+        <div style={{display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10}}>
+          {readouts.map((r) => (
+            <span
+              key={r.k}
+              className="chip"
+              style={{
+                fontFamily: "var(--jbm)",
+                color: r.emphasis ? "var(--fg)" : "var(--fg-4)",
+                borderColor: r.emphasis ? "var(--accent)" : "var(--line)",
+                background: r.emphasis ? "var(--accent-soft)" : "transparent",
+              }}
+              title={`effective ${r.k}`}
+            >
+              <span style={{color: "var(--fg-4)"}}>{r.k}</span>
+              <span style={{marginLeft: 6, color: r.emphasis ? "var(--fg)" : "var(--fg-4)"}}>{r.v}</span>
+            </span>
+          ))}
+        </div>
+        <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.6}}>last request</div>
+        <div style={{display: "flex", flexWrap: "wrap", gap: 6}}>
+          {lastStats.map((r) => (
+            <span
+              key={r.k}
+              className="chip"
+              style={{fontFamily: "var(--jbm)", color: "var(--fg-3)", borderColor: "var(--line)"}}
+            >
+              <span style={{color: "var(--fg-4)"}}>{r.k}</span>
+              <span style={{marginLeft: 6}}>{r.v}</span>
+            </span>
+          ))}
+        </div>
       </div>
 
       {cfgQuery.isPending && (
@@ -678,8 +824,8 @@ function RuntimeSection() {
         <>
           <div className="s-panel">
             {LEMONADE_FIELDS.map((f) => {
-              const isDeferred = effects.deferred.includes(f.key);
-              const isImmediate = effects.immediate.includes(f.key);
+              const isDeferred = f.key === "threads" || effects.deferred.includes(f.key);
+              const isImmediate = !isDeferred && effects.immediate.includes(f.key);
               const err = fieldErrors[f.key];
               return (
                 <SRow
@@ -696,12 +842,28 @@ function RuntimeSection() {
                           onChange={(e) => setField(f.key, e.target.value)}
                           style={{maxWidth: f.width}}
                         >
-                          {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                          {(f.options || []).map((o) => <option key={o} value={o}>{o}</option>)}
                         </select>
+                      ) : f.kind === "toggle" ? (
+                        <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
+                          <input
+                            type="checkbox"
+                            checked={edits[f.key] === "true"}
+                            onChange={(e) => setField(f.key, e.target.checked ? "true" : "false")}
+                            style={{accentColor: "var(--accent)"}}
+                          />
+                          <span>{edits[f.key] === "true" ? "enabled" : "disabled"}</span>
+                        </label>
+                      ) : f.kind === "readonly" ? (
+                        <span className="mono" style={{color: "var(--fg-3)"}}>
+                          {original(f.key) || "—"}
+                        </span>
                       ) : (
                         <input
                           className="input mono"
-                          type={f.kind === "number" ? "number" : "text"}
+                          type={f.kind === "threads" || f.kind === "number" ? "number" : "text"}
+                          min={f.min}
+                          step={f.step}
                           value={edits[f.key] ?? ""}
                           onChange={(e) => setField(f.key, e.target.value)}
                           style={f.width ? {maxWidth: f.width} : {minWidth: 320, width: "100%"}}
@@ -716,9 +878,23 @@ function RuntimeSection() {
                     </div>
                   }
                   actions={
-                    <span style={{fontFamily: "var(--jbm)", fontSize: 11, color: isDeferred ? "var(--warn)" : isImmediate ? "var(--ok)" : "var(--fg-4)"}}>
-                      {isDeferred ? "⟳ deferred" : isImmediate ? "immediate" : ""}
-                    </span>
+                    f.kind === "readonly" ? null : (
+                      <span
+                        className="chip"
+                        style={{
+                          fontFamily: "var(--jbm)",
+                          fontSize: 10,
+                          padding: "2px 8px",
+                          color: isDeferred ? "var(--warn)" : isImmediate ? "var(--ok)" : "var(--fg-4)",
+                          borderColor: isDeferred ? "var(--warn)" : isImmediate ? "var(--ok)" : "var(--line)",
+                          background: isDeferred ? "rgba(255,176,0,0.08)" : isImmediate ? "rgba(46,204,113,0.08)" : "transparent",
+                          whiteSpace: "nowrap",
+                        }}
+                        title={isDeferred ? "Persists to config now; takes effect on next /v1/load" : isImmediate ? "lemond applies this value immediately on POST" : ""}
+                      >
+                        {isDeferred ? "⟳ restart on next load" : isImmediate ? "live" : ""}
+                      </span>
+                    )
                   }
                 />
               );
@@ -741,17 +917,22 @@ function RuntimeSection() {
             <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
               {dirtyKeys.length === 0
                 ? "No unsaved changes"
-                : <>{dirtyKeys.length} unsaved {dirtyKeys.length === 1 ? "change" : "changes"}{touchesDeferred && <span style={{color: "var(--warn)"}}> · some deferred until next load</span>}</>}
+                : <>{dirtyKeys.length} unsaved {dirtyKeys.length === 1 ? "change" : "changes"}{touchesDeferred && <span style={{color: "var(--warn)"}}> · some restart on next load</span>}</>}
             </span>
             <div style={{display: "flex", gap: 8}}>
               <button
                 className="btn ghost"
                 disabled={dirtyKeys.length === 0 || cfgSet.isPending}
-                onClick={() => { setEdits(Object.fromEntries(LEMONADE_FIELDS.map((f) => [f.key, original(f.key)]))); setFieldErrors({}); }}
+                onClick={() => {
+                  const next = {};
+                  for (const f of LEMONADE_FIELDS) next[f.key] = original(f.key);
+                  setEdits(next);
+                  setFieldErrors({});
+                }}
               >Reset</button>
               <button
                 className="btn"
-                disabled={dirtyKeys.length === 0 || cfgSet.isPending}
+                disabled={dirtyKeys.length === 0 || cfgSet.isPending || hasBlockingError}
                 onClick={onSaveClick}
               >{cfgSet.isPending ? "Saving…" : "Save config"}</button>
             </div>
@@ -763,8 +944,8 @@ function RuntimeSection() {
         open={confirmOpen}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={() => { setConfirmOpen(false); doSave(); }}
-        title="Save deferred config changes?"
-        message={<span>Some changed keys are <span className="mono" style={{color: "var(--warn)"}}>deferred</span> — lemond persists them now but applies them only on the next <span className="mono">/v1/load</span>. Restart a slot to apply immediately. Immediate keys take effect right away.</span>}
+        title="Save runtime config changes?"
+        message={<span>Some changed keys are <span className="chip" style={{color: "var(--warn)", borderColor: "var(--warn)", fontSize: 10, padding: "1px 6px"}}>⟳ restart on next load</span> — lemond persists them now but applies them only on the next <span className="mono">/v1/load</span>. Restart a slot to apply immediately. <span className="chip" style={{color: "var(--ok)", borderColor: "var(--ok)", fontSize: 10, padding: "1px 6px"}}>live</span> keys take effect right away.</span>}
         confirmLabel="Save"
       />
     </div>
