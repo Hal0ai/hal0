@@ -1,7 +1,7 @@
 // hal0 v3 dashboard — capabilities hooks (Phase B1).
 //
 // /api/capabilities is the capabilities.toml rollup that backs the
-// FirstRun bundle picker + Settings → Lemonade admin. Per the v0.3
+// FirstRun bundle picker + Settings → Runtime. Per the v0.3
 // capability-slots system memory: capability cards group provider +
 // model + slot routing per cap key (chat, embed, voice, img, npu).
 

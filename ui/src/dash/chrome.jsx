@@ -571,7 +571,7 @@ function ApprovalModal({ open, onClose, items }) {
           ))}
         </div>
         <div className="modal-foot mono">
-          <span>Configure auto-approve rules in Settings → Agent policy.</span>
+          <span>Configure auto-approve rules in the agent view.</span>
           <button className="btn ghost sm" onClick={onClose}>Close</button>
         </div>
       </div>

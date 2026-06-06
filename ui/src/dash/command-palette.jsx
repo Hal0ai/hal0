@@ -274,14 +274,16 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
   });
 
   // Settings sections — anchor jumps
+  // #544: OmniRouter/Agent-policy/Memory (Cognee) sections pruned;
+  // entries for them are gone. Surviving sections renamed for accuracy
+  // (Storage, Runtime, General).
   [
     { id: "set-auth",      label: "Auth · token",        sub: "rotate Bearer token, allowed origins" },
     { id: "set-secrets",   label: "Secrets",              sub: "HF_TOKEN and provider keys" },
+    { id: "set-storage",   label: "Storage",              sub: "[models].store · auto_scan · file extensions" },
     { id: "set-updates",   label: "Updates",              sub: "hal0 / lemonade / flm versions" },
-    { id: "set-lemonade",  label: "Lemonade admin",       sub: "max_loaded_models, ctx_size, args" },
-    { id: "set-omni",      label: "OmniRouter tools",     sub: "8 tools · per-tool target" },
-    { id: "set-agent",     label: "Agent policy",         sub: "per-capability approval" },
-    { id: "set-memory",    label: "Memory (Cognee)",      sub: "namespace, store, records" },
+    { id: "set-runtime",   label: "Runtime",              sub: "max_loaded_models, ctx_size, args" },
+    { id: "set-general",   label: "General",              sub: "theme, density, accent" },
   ].forEach(s => items.push({ ...s, section: "Settings", icon: Icons.settings, route: "settings" }));
 
   // Global actions — every one is wired to a real effect.

@@ -4,7 +4,7 @@
 // AgentView monolith out of this file into ui/src/dash/agents/* — see
 // agent-view.jsx, hermes-chat-tab.jsx, personas-tab.jsx, skills-tab.jsx,
 // memory-tab.jsx, plugins-tab.jsx. v0.4: BackendsView removed (the page
-// duplicated Settings → Lemonade-admin + config.json).
+// duplicated Settings → Runtime + config.json).
 
 import { useLogsHistorical, useLogsStream } from '@/api/hooks/useLogs'
 

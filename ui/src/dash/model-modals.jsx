@@ -819,7 +819,7 @@ function ScanDirectoryModal({ open, onClose }) {
     >
       {scanRootMissing && (
         <div style={{padding: "10px 12px", marginBottom: 12, background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--warn)"}}>
-          No scan dir set. Type an absolute path below, or set <span className="mono">[models].roots</span> in <span className="mono">Settings → Models</span> to default it.
+          No scan dir set. Type an absolute path below, or set <span className="mono">[models].roots</span> in <span className="mono">Settings → Storage</span> to default it.
         </div>
       )}
 

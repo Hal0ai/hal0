@@ -355,7 +355,7 @@ const BANNER_CATALOG = [
     id: "fr-ram-low", scope: "firstrun", kind: "warn",
     eyebrow: "Hardware · low RAM",
     heading: "Detected RAM is below the Lite minimum (16 GB)",
-    body: "hal0 needs at least 16 GB of unified RAM to load any bundled chat model. You can still install hal0 — Settings → Lemonade admin can point at an external model store.",
+    body: "hal0 needs at least 16 GB of unified RAM to load any bundled chat model. You can still install hal0 — Settings → Runtime can point at an external model store.",
   },
 
   // Agent

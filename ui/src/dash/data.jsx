@@ -338,16 +338,11 @@ const HAL0_DATA = {
   // entries yet. No more "loaded model 'qwen3.6-27b-mtp'" mock prose
   // leaking into prod screenshots before SSE primes.
 
-  omnirouter: [
-    { name: "generate_image",   active: true,  target: "img (sd-turbo)" },
-    { name: "edit_image",       active: false, target: "needs model with 'edit' label" },
-    { name: "text_to_speech",   active: true,  target: "tts (kokoro-v1)" },
-    { name: "transcribe_audio", active: true,  target: "stt-npu (whisper-v3-turbo)" },
-    { name: "analyze_image",    active: false, target: "needs LLM with 'vision' label" },
-    { name: "embed_text",       active: true,  target: "embed (nomic-v1.5)" },
-    { name: "rerank_documents", active: true,  target: "rerank (bge-reranker-v2)" },
-    { name: "route_to_chat",    active: true,  target: "agent, primary" },
-  ],
+  // ── v0.4 #544: omnirouter routing table mock removed. The settings
+  // rail no longer renders an OmniRouter section — that surface lives
+  // on the MCP view (hal0-mcp#routing) and the live agent view. The
+  // live `/api/omni/route` snapshot drives the MCP view's per-tool
+  // target list when the backend is available.
 
   // v0.3 PR-8: HAL0_DATA.approvals removed. The dashboard reads
   // approvals from the live /api/agent/approvals queue (via

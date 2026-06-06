@@ -142,7 +142,7 @@ export const ENDPOINTS = {
   settings: '/api/settings',
   settingsReload: '/api/settings/reload',
   settingsSchema: '/api/settings/schema',
-  // Single-source-of-truth model storage (Settings → Models + Firstrun → Storage).
+  // Single-source-of-truth model storage (Settings → Storage).
   settingsModelsStore: '/api/settings/models/store',
   settingsModelsStoreMigrate: '/api/settings/models/store/migrate',
   // Full-shape Proxmox status — includes tenants[] stripped by the

@@ -1,6 +1,6 @@
 // hal0 v3 dashboard — Lemonade admin config read / write hooks.
 //
-// Backs Settings → Lemonade admin (issue #461 / parent #433). The
+// Backs Settings → Runtime (issue #461 / parent #433). The
 // backend in `hal0.api.routes.lemonade_admin` already serves:
 //
 //   GET  /api/lemonade/config  — the verbatim `lemond /internal/config`
