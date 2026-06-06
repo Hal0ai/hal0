@@ -134,6 +134,41 @@ export function useModelInspect() {
   })
 }
 
+// ─── HF Hub free-text search (issue #311) ─────────────────────────────
+
+export interface HfSearchResult {
+  id: string
+  downloads: number
+  likes: number
+  gated: boolean | string
+  pipeline_tag: string
+  library: string
+  last_modified: string
+}
+
+export interface HfSearchResponse {
+  results: HfSearchResult[]
+  cached?: boolean
+}
+
+export function useHfSearch(q: string, type?: string | null) {
+  // GET /api/hf/search?q=…&type=… — debounced upstream of the
+  // dashboard "Search HF" panel. Disabled when ``q`` is empty so the
+  // backend's cheap-empty path runs (no upstream hit). Same polling
+  // rhythm as useModels so the search panel reuses the React Query
+  // cache instead of firing per-keystroke.
+  return useQuery<HfSearchResponse, Hal0Error>({
+    queryKey: ['hf-search', q, type ?? ''],
+    queryFn: () => {
+      const params = new URLSearchParams({ q })
+      if (type) params.set('type', type)
+      return apiGet<HfSearchResponse>(`${ENDPOINTS.hfSearch}?${params.toString()}`)
+    },
+    enabled: q.trim().length > 0,
+    staleTime: 30_000,
+  })
+}
+
 export interface ModelDeleteResponse {
   id: string
   deleted: boolean

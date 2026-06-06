@@ -17,7 +17,11 @@ import { useSettings } from '@/api/hooks/useSettings'
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
 
 // ─── Add model by HF coords ─────────────────────────────────────
-function AddByHfModal({ open, onClose }) {
+function AddByHfModal({ open, onClose, initialRepo = "" }) {
+  // ``initialRepo`` lets the dashboard's HF-search panel prefill the
+  // coord when the user clicks "Add" on a search result (issue #311).
+  // The reset effect below still wins on close, so the modal opens
+  // clean on the next invocation.
   const [repo, setRepo] = useStateMM("");
   const [variant, setVariant] = useStateMM(null);
   const [name, setName] = useStateMM("");
@@ -29,12 +33,16 @@ function AddByHfModal({ open, onClose }) {
 
   useEffectMM(() => {
     if (open) {
-      setRepo(""); setVariant(null); setName(""); setLabels({ chat: true }); setMmproj("");
+      setRepo(initialRepo || "");
+      setVariant(null);
+      setName("");
+      setLabels({ chat: true });
+      setMmproj("");
       inspect.reset();
       pullJob.reset();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, initialRepo]);
 
   const variants = inspect.data?.variants ?? [];
   // mmproj affordance — HF repos often ship an mmproj-Q8.gguf next to

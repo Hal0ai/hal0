@@ -7,7 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullJob, fmtBytes } from '@/api/hooks/useModels'
+import { useModels, usePullJob, useHfSearch, fmtBytes } from '@/api/hooks/useModels'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
@@ -21,6 +21,13 @@ function ModelsView() {
   const [scanOpen, setScanOpen] = useStateM(false);
   const [recipeOpen, setRecipeOpen] = useStateM(false);
   const [delModel, setDelModel] = useStateM(null);
+  // Issue #311: "Search HF" panel state. ``searchOpen`` toggles the
+  // panel; ``searchQ`` is the input; ``searchPick`` is the coord the
+  // user clicked "Add" on, which the panel hands off to AddByHfModal
+  // via the ``initialRepo`` prop.
+  const [searchOpen, setSearchOpen] = useStateM(false);
+  const [searchQ, setSearchQ] = useStateM("");
+  const [searchPick, setSearchPick] = useStateM("");
   // Track which model_ids the user has launched a pull for this
   // session — the Downloads pane renders one DownloadRow per entry
   // and each row owns its own usePullJob() instance (which reattaches
@@ -82,7 +89,7 @@ function ModelsView() {
         <span className="vh-eye mono">Catalog</span>
         <h1>Models</h1>
         <span className="vh-spacer" />
-        <button className="btn ghost" onClick={() => window.__hal0Toast && window.__hal0Toast("HF search — stubbed", "info")}>{Icons.search} Search HF</button>
+        <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
         <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
         <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
         <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add by HF coords</button>
@@ -163,11 +170,87 @@ function ModelsView() {
         </div>
       </div>
 
-      <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} />
+      <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
       <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />
       <RecipeEditorModal open={recipeOpen} onClose={() => setRecipeOpen(false)} model={selected} />
       <DeleteModelDialog open={!!delModel} onClose={() => setDelModel(null)} model={delModel} />
+
+      {/* Issue #311: free-text HF Hub model search panel. Toggled by
+          the header "Search HF" button; debounced query against
+          /api/hf/search; each row exposes an "Add" affordance that
+          opens AddByHfModal with the chosen coord pre-filled. */}
+      {searchOpen && (
+        <HfSearchPanel
+          q={searchQ}
+          onQ={setSearchQ}
+          onPick={(repo) => { setSearchPick(repo); setSearchOpen(false); setAddOpen(true); }}
+          onClose={() => { setSearchOpen(false); setSearchQ(""); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Issue #311: HF search panel — input + result rows. Lives in
+// ModelsView's closure so it can read its state. The row click
+// pipeline mirrors ModelRow (dot + name + tags + size) and adds an
+// "Add" button that closes the panel and hands the coord to
+// AddByHfModal via the searchPick state above.
+function HfSearchPanel({ q, onQ, onPick, onClose }) {
+  const search = useHfSearch(q);
+  const rows = search.data?.results ?? [];
+  return (
+    <div className="hf-search-backdrop" onClick={onClose}>
+      <div className="hf-search-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="hf-search-h">
+          <span className="mono" style={{color: "var(--fg-3)", fontSize: 11}}>huggingface.co · search</span>
+          <span className="vh-spacer" />
+          <button className="mdl-chip" onClick={onClose}>close ✕</button>
+        </div>
+        <input
+          className="input mono hf-search-input"
+          autoFocus
+          placeholder="search HuggingFace models — e.g. qwen3 8b gguf, bge embed, kokoro tts…"
+          value={q}
+          onChange={(e) => onQ(e.target.value)}
+        />
+        {q.trim() === "" && (
+          <div className="hf-search-empty">Type a query to search the HF Hub.</div>
+        )}
+        {q.trim() !== "" && search.isPending && (
+          <div className="hf-search-empty">Searching…</div>
+        )}
+        {q.trim() !== "" && search.isError && (
+          <div className="hf-search-empty err">Search failed — {search.error?.message || "unreachable"}</div>
+        )}
+        {q.trim() !== "" && !search.isPending && !search.isError && rows.length === 0 && (
+          <div className="hf-search-empty">No results.</div>
+        )}
+        {rows.length > 0 && (
+          <div className="hf-search-list">
+            {rows.map((r) => (
+              <div key={r.id} className="hf-search-row">
+                <span className={"dot " + (r.gated ? "empty" : "ready")} />
+                <span className="nm">
+                  {r.id}
+                  <span className="sub">
+                    {r.pipeline_tag || "—"}
+                    {r.library ? ` · ${r.library}` : ""}
+                    {" · "}
+                    {Intl.NumberFormat().format(r.downloads || 0)} ↓
+                    {" · "}
+                    {r.likes || 0} ♥
+                    {r.gated ? " · gated" : ""}
+                  </span>
+                </span>
+                <span className="vh-spacer" />
+                <button className="btn ghost sm" onClick={() => onPick(r.id)}>{Icons.plus} Add</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -362,4 +445,4 @@ function DownloadsPane({ activeIds, onRemove }) {
   );
 }
 
-Object.assign(window, { ModelsView, ModelRow, ModelDetail, DownloadsPane });
+Object.assign(window, { ModelsView, ModelRow, ModelDetail, DownloadsPane, HfSearchPanel });

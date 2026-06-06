@@ -63,6 +63,7 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     hardware,
     health,
+    hf,
     images,
     installer,
     logs,
@@ -1176,6 +1177,12 @@ def create_app() -> FastAPI:
     )
     app.include_router(slots.router, prefix="/api/slots", tags=["slots"])
     app.include_router(models.router, prefix="/api/models", tags=["models"])
+    # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
+    # to the models surface so the dashboard's "Search HF" button has a
+    # backend to call; the inspect endpoint already lives under
+    # /api/models/inspect and is a *different* flow (known coord →
+    # variants) than this search proxy (free-text → coord candidates).
+    app.include_router(hf.router, prefix="/api/hf", tags=["hf"])
     app.include_router(hardware.router, prefix="/api", tags=["hardware"])
     app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
     # PR-11: Lemonade log proxy — surfaces the /logs/stream WS as SSE

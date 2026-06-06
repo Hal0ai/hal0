@@ -47,6 +47,11 @@ export const ENDPOINTS = {
   modelScanPreview: '/api/models/scan/preview',
   modelScanCommit: '/api/models/scan',
   modelAddFromPath: '/api/models/add-from-path',
+  // Issue #311: free-text HF Hub model search backing the dashboard
+  // "Search HF" button. Distinct from /api/models/inspect (which
+  // resolves a known coord into variants) — this proxies HF's
+  // /api/models?search=… and returns a small typed list.
+  hfSearch: '/api/hf/search',
 
   // ── Backends ─────────────────────────────────────────────────────
   backends: '/api/backends',
