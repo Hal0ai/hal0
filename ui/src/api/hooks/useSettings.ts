@@ -158,6 +158,35 @@ export function useModelStoreSet() {
   })
 }
 
+// ── Apply-plan registry (issue #552) ────────────────────────────────────────
+//
+// The dashboard fetches the full key→apply-class registry once on mount so
+// each settings row can render the right effect badge (live / ⟳ restart
+// <service> / ⚠ manual restart) without a per-save server round-trip.
+// The registry is static for the lifetime of the process — staleTime is
+// long so we never re-fetch it unless the user hard-reloads.
+
+export interface ApplyPlanEntry {
+  apply_class: 'immediate' | 'service-restart' | 'manual-restart'
+  services: string[]
+}
+
+export interface ApplyPlanRegistry {
+  apply_classes: string[]
+  registry: Record<string, ApplyPlanEntry>
+}
+
+const APPLY_PLAN_KEY = ['settings', 'apply-plan'] as const
+
+export function useApplyPlan() {
+  return useQuery({
+    queryKey: APPLY_PLAN_KEY,
+    queryFn: () => apiGet<ApplyPlanRegistry>(ENDPOINTS.settingsApplyPlan),
+    // Registry is static for the server's lifetime — never auto-refetch.
+    staleTime: Infinity,
+  })
+}
+
 export function useModelStoreMigrate() {
   const qc = useQueryClient()
   return useMutation<SetStoreResponse, Hal0Error, { path: string }>({

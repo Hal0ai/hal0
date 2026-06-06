@@ -21,6 +21,7 @@ import {
   useModelStore,
   useModelStoreSet,
   useModelStoreMigrate,
+  useApplyPlan,
 } from '@/api/hooks/useSettings'
 
 const { useState: useStateSet, useEffect: useEffectSet, useRef: useRefSet } = React;
@@ -83,6 +84,57 @@ const SRow = ({ k, sub, v, mono, children, actions }) => (
   </div>
 );
 
+// ─── per-key apply badge (issue #552) ────────────────────────────────────────
+//
+// Mirrors the chip style RuntimeSection uses for #545's Lemonade rows.
+// The registry is fetched once via useApplyPlan(); the component is
+// purely presentational — it looks up the key, picks a colour, and
+// renders the chip. If the registry hasn't loaded yet or the key is
+// unknown, renders nothing so the row layout stays clean.
+//
+// Badge legend:
+//   immediate     → green "live"
+//   service-restart → amber "⟳ restart <service>"
+//   manual-restart  → red "⚠ manual restart"
+function ApplyBadge({ settingsKey, registry }) {
+  const entry = registry && registry[settingsKey];
+  if (!entry) return null;
+  const cls = entry.apply_class;
+  const isImmediate = cls === "immediate";
+  const isServiceRestart = cls === "service-restart";
+  const isManualRestart = cls === "manual-restart";
+  const svc = isServiceRestart && entry.services && entry.services[0] ? entry.services[0] : null;
+  return (
+    <span
+      className="chip"
+      style={{
+        fontFamily: "var(--jbm)",
+        fontSize: 10,
+        padding: "2px 8px",
+        whiteSpace: "nowrap",
+        color: isImmediate ? "var(--ok)" : isServiceRestart ? "var(--warn)" : "var(--err)",
+        borderColor: isImmediate ? "var(--ok)" : isServiceRestart ? "var(--warn)" : "var(--err)",
+        background: isImmediate
+          ? "rgba(46,204,113,0.08)"
+          : isServiceRestart
+            ? "rgba(255,176,0,0.08)"
+            : "rgba(231,76,60,0.08)",
+      }}
+      title={
+        isImmediate
+          ? "Applied immediately on save — no restart needed"
+          : isServiceRestart
+            ? `Requires restarting ${svc || "service"} to take effect`
+            : "Requires a manual operator restart to take effect"
+      }
+    >
+      {isImmediate && "live"}
+      {isServiceRestart && (svc ? `⟳ restart ${svc}` : "⟳ restart")}
+      {isManualRestart && "⚠ manual restart"}
+    </span>
+  );
+}
+
 // ─── Models (v0.3 single-source-of-truth `[models].store`) ───────────
 //
 // Replaces the two-field roots + pull_root surface from PR #313 with
@@ -107,6 +159,8 @@ function StorageSection() {
   const storeQuery = useModelStore();
   const storeSet = useModelStoreSet();
   const storeMigrate = useModelStoreMigrate();
+  const applyPlanQuery = useApplyPlan();
+  const registry = applyPlanQuery.data?.registry || {};
   const liveModels = settings.data?.models;
   const storeState = storeQuery.data;
 
@@ -118,6 +172,11 @@ function StorageSection() {
   // dry-run response so the modal can render N files / M bytes without
   // a second round-trip.
   const [pendingPlan, setPendingPlan] = useStateSet(null);
+  // Manual-restart confirm gate — for any future key classified
+  // manual-restart; currently no editable storage rows need this but
+  // the gate is wired generically so a future registry change doesn't
+  // silently skip the confirmation.
+  const [manualConfirmPending, setManualConfirmPending] = useStateSet(null);
 
   useEffectSet(() => {
     if (storeState?.effective != null) setStorePath(storeState.effective);
@@ -154,7 +213,22 @@ function StorageSection() {
 
   const onSave = () => submitStore(storePath.trim(), { migrate: false });
 
+  // Check whether a settings key requires a manual-restart confirm
+  // before saving. If so, defer via setManualConfirmPending.
+  const needsManualConfirm = (dotKey) => {
+    const entry = registry[dotKey];
+    return entry?.apply_class === "manual-restart";
+  };
+
   const onAutoScanSave = async () => {
+    // manual-restart gate (latent — auto_scan_on_start is immediate,
+    // but the pattern is wired so a registry change auto-enforces it).
+    if (needsManualConfirm("models.auto_scan_on_start")) {
+      setManualConfirmPending(() => async () => {
+        await update.mutateAsync({ models: { auto_scan_on_start: autoScan } });
+      });
+      return;
+    }
     try {
       await update.mutateAsync({ models: { auto_scan_on_start: autoScan } });
       window.__hal0Toast && window.__hal0Toast("Auto-scan setting saved", "ok");
@@ -266,13 +340,23 @@ function StorageSection() {
                   <span>{autoScan ? "enabled" : "disabled"}</span>
                 </label>
               }
-              actions={autoScanDirty ? <button className="btn ghost sm" disabled={update.isPending} onClick={onAutoScanSave}>{update.isPending ? "Saving…" : "Save"}</button> : null}
+              actions={
+                <div style={{display: "inline-flex", alignItems: "center", gap: 6}}>
+                  <ApplyBadge settingsKey="models.auto_scan_on_start" registry={registry} />
+                  {autoScanDirty && (
+                    <button className="btn ghost sm" disabled={update.isPending} onClick={onAutoScanSave}>
+                      {update.isPending ? "Saving…" : "Save"}
+                    </button>
+                  )}
+                </div>
+              }
             />
             <SRow
               k="File extensions"
               sub="Read-only · edit via hal0 config edit"
               mono
               v={(liveModels?.file_extensions || []).join(" · ") || "—"}
+              actions={<ApplyBadge settingsKey="models.file_extensions" registry={registry} />}
             />
           </div>
 
@@ -281,7 +365,8 @@ function StorageSection() {
               Stored at <span style={{color: "var(--fg-3)"}}>/etc/hal0/hal0.toml</span> · propagates to Lemonade <span style={{color: "var(--fg-3)"}}>config.json</span>
               {storeDirty && <span style={{marginLeft: 8, color: "var(--warn)"}}>· unsaved changes</span>}
             </span>
-            <div style={{display: "inline-flex", gap: 8}}>
+            <div style={{display: "inline-flex", alignItems: "center", gap: 8}}>
+              <ApplyBadge settingsKey="models.store" registry={registry} />
               <button
                 className="btn ghost sm"
                 disabled={!storeDirty || storeSet.isPending}
@@ -317,6 +402,29 @@ function StorageSection() {
               ) : null
             }
             confirmLabel={storeMigrate.isPending ? "Moving…" : "Move + apply"}
+          />
+          <ConfirmDialog
+            open={!!manualConfirmPending}
+            onCancel={() => setManualConfirmPending(null)}
+            onConfirm={async () => {
+              const fn = manualConfirmPending;
+              setManualConfirmPending(null);
+              try {
+                await fn();
+                window.__hal0Toast && window.__hal0Toast("Setting saved — manual restart required to take effect", "warn");
+              } catch (e) {
+                window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+              }
+            }}
+            title="Manual restart required"
+            message={
+              <span>
+                This setting requires a <b>manual operator restart</b> to take effect.
+                The new value will be persisted now — restart the service to apply it.{" "}
+                <span className="chip" style={{color: "var(--err)", borderColor: "var(--err)", fontSize: 10, padding: "1px 6px"}}>⚠ manual restart</span>
+              </span>
+            }
+            confirmLabel="Save anyway"
           />
         </>
       )}

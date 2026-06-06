@@ -142,6 +142,8 @@ export const ENDPOINTS = {
   settings: '/api/settings',
   settingsReload: '/api/settings/reload',
   settingsSchema: '/api/settings/schema',
+  // Apply-plan registry — key→{apply_class, services} for all settings (#552).
+  settingsApplyPlan: '/api/settings/apply-plan',
   // Single-source-of-truth model storage (Settings → Storage).
   settingsModelsStore: '/api/settings/models/store',
   settingsModelsStoreMigrate: '/api/settings/models/store/migrate',

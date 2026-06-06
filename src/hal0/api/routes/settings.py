@@ -6,16 +6,22 @@ which uses the same tempfile+fsync+os.replace pattern as
 ``write_env_atomic`` — never a partial-write.
 
 Endpoints:
-    GET  /api/settings            — current parsed Hal0Config as a dict.
-    PUT  /api/settings            — partial update; deep-merged into the
-                                    existing config, validated against
-                                    the pydantic schema, then atomically
-                                    written.
-    POST /api/settings/reload     — re-read /etc/hal0/hal0.toml from disk
-                                    into the running process.
-    GET  /api/settings/schema     — pydantic JSON schema of Hal0Config
-                                    so the dashboard can render typed
-                                    fields without hard-coding shapes.
+    GET  /api/settings              — current parsed Hal0Config as a dict.
+    PUT  /api/settings              — partial update; deep-merged into the
+                                      existing config, validated against
+                                      the pydantic schema, then atomically
+                                      written. Response includes
+                                      ``_hal0.apply_plan`` so the UI can
+                                      render the right effect badge
+                                      without a second round-trip.
+    POST /api/settings/reload       — re-read /etc/hal0/hal0.toml from
+                                      disk into the running process.
+    GET  /api/settings/schema       — pydantic JSON schema of Hal0Config
+                                      so the dashboard can render typed
+                                      fields without hard-coding shapes.
+    GET  /api/settings/apply-plan   — full key→apply-class registry the
+                                      dashboard mounts once to render
+                                      per-row effect badges (#552).
 
 Validation failures return the structured error envelope with
 ``code: "config.invalid"`` and ``details`` containing a per-field
@@ -33,6 +39,7 @@ from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
 from hal0.api._redact import redact_config
+from hal0.api._settings_apply import APPLY_CLASSES, REGISTRY, apply_plan, get_registry
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import Hal0Config
@@ -168,7 +175,35 @@ async def update_settings(request: Request) -> dict[str, Any]:
             "hal0 config saved",
             data={"keys": sorted(body.keys())},
         )
-    return _config_to_dict(merged)
+    # Issue #552 — the per-save apply plan. The UI needs to know which
+    # keys are live vs. which need a service restart vs. which need a
+    # manual operator action *before* it renders the success toast, so
+    # the partition rides along in the response under ``_hal0.apply_plan``.
+    # The top-level config dict stays the same shape — this is purely
+    # additive, mirroring how :mod:`hal0.api.routes.lemonade_admin`
+    # surfaces ``_hal0.effects`` for the Lemonade admin rows (#545).
+    #
+    # The touched-keys list is built from the *top-level* keys the PATCH
+    # carried, not from the merged body's leaf paths: the apply-plan
+    # registry keys on dotted paths (``slots.max_slots``) which never
+    # appear at the top level of a PUT, so the partition mostly
+    # surfaces empty buckets when the operator edits via the generic
+    # endpoint. The shape stays consistent so the UI can render
+    # uniform badges regardless of which endpoint produced the
+    # response.
+    # Build the apply plan from request body keys that the registry
+    # directly knows about. Top-level section keys (e.g. "telemetry",
+    # "dispatcher") are NOT in the registry — only dotted leaf paths
+    # like "telemetry.enabled" are. Filtering them out before calling
+    # apply_plan() prevents them from landing in "unknown" (they're
+    # not unknown, just coarse-grained section names). The result is
+    # all-empty buckets for a generic section-level PUT, which the UI
+    # renders without any effect badge — correct, since the operator
+    # didn't target a specific leaf key.
+    touched_registry_keys = [k for k in body if k in REGISTRY]
+    config_view = _config_to_dict(merged)
+    config_view["_hal0"] = {"apply_plan": apply_plan(touched_registry_keys)}
+    return config_view
 
 
 @router.post("/reload")
@@ -198,6 +233,41 @@ async def settings_schema() -> dict[str, Any]:
     ``/api/openapi.json`` advertises but without the FastAPI envelope.
     """
     return Hal0Config.model_json_schema()
+
+
+@router.get("/apply-plan")
+async def get_apply_plan() -> dict[str, Any]:
+    """Return the full settings-apply-plan registry (issue #552).
+
+    Response shape::
+
+        {
+          "apply_classes": ["immediate", "service-restart", "manual-restart"],
+          "registry": {
+            "log_level":          {"apply_class": "immediate",       "services": []},
+            "llamacpp_args":      {"apply_class": "service-restart", "services": ["lemonade"]},
+            "slots.max_slots":    {"apply_class": "service-restart", "services": ["hal0-api"]},
+            "slots.port_range_start": {"apply_class": "manual-restart", "services": []},
+            ...
+          }
+        }
+
+    The dashboard fetches this once on mount so each settings row can
+    render the right apply badge (live / ⟳ restart <service> / ⚠
+    manual restart) without a per-save server round-trip. The per-save
+    partition still rides along on the PUT response as
+    ``_hal0.apply_plan`` so the success toast can show the precise
+    effect split for just the keys that were touched.
+
+    The registry merges the Lemonade admin keys (reusing
+    :mod:`hal0.api.routes.lemonade_admin` ``IMMEDIATE_KEYS`` /
+    ``DEFERRED_KEYS``) with the dotted hal0 ``Hal0Config`` paths so a
+    single GET returns the full key namespace.
+    """
+    return {
+        "apply_classes": list(APPLY_CLASSES),
+        "registry": get_registry(),
+    }
 
 
 # ── Model storage (Settings → Models · FirstRun "Storage" step) ────────────
