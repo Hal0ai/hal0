@@ -601,6 +601,11 @@ info "wrote ${API_UNIT}"
 
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
+# pin per release (#79) — single source of truth for the OpenWebUI image
+# pulled by the background job below and referenced by the systemd unit.
+# Bump the sha256 digest here on each hal0 release; update the matching
+# digest in packaging/systemd/hal0-openwebui.service at the same time.
+OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui@sha256:d05c6ff8baf5ae701d86a3332c0db4ebb2802ca3d0d341be7fd157fa730306ab"
 if [[ -f "${OPENWEBUI_UNIT_SRC}" ]]; then
     cp "${OPENWEBUI_UNIT_SRC}" "${OPENWEBUI_UNIT_DST}"
     info "wrote ${OPENWEBUI_UNIT_DST}"
@@ -663,9 +668,9 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v docker >/dev/n
     # kicked it off. The hal0-openwebui unit also has ExecStartPre=docker
     # pull (idempotent), so missing this background pull only costs first
     # -boot latency, not correctness.
-    (docker pull ghcr.io/open-webui/open-webui:main >/dev/null 2>&1 || true) &
+    (docker pull "${OPENWEBUI_IMAGE}" >/dev/null 2>&1 || true) &
     disown
-    ui_spinner_run "Pulling ghcr.io/open-webui/open-webui:main in background" sleep 3
+    ui_spinner_run "Pulling ${OPENWEBUI_IMAGE} in background" sleep 3
 fi
 
 ui_step "Hardware probe"
