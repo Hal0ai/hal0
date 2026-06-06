@@ -215,6 +215,15 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
             entry["labels"] = model_labels
         entry["enabled"] = enabled
 
+        # Spec 1 / Component 1: surface the three edit-panel config fields so
+        # the card + drawer seed their controls without a per-slot /config
+        # fetch. ``enable_thinking`` is tri-valued on disk (true/false/absent);
+        # absent → null (effective OFF). ``n_gpu_layers`` falls back to the
+        # ModelConfig default sentinel (-1 = all layers) when unset.
+        entry["enable_thinking"] = cfg.get("enable_thinking")
+        n_gpu = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
+        entry["n_gpu_layers"] = n_gpu if isinstance(n_gpu, int) else -1
+
         loaded_entry = loaded_by_model.get(model_default) if model_default else None
         if not enabled:
             entry["lemonade_state"] = "disabled"
@@ -1104,6 +1113,24 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
     snap = await sm.update_config(name, body)
+    # Spec 1 / Component 2: an explicit ``enabled: false`` write must take a
+    # running slot actually offline so the faded card matches reality. The
+    # config write alone only flips the on-disk flag; without this a disabled
+    # slot would keep its llama-server child resident until the next restart.
+    # ``unload`` is idempotent (short-circuits when already OFFLINE), but we
+    # gate on a live state so an offline/error slot incurs no /v1/unload call.
+    if body.get("enabled") is False:
+        from hal0.slots.state import SlotState
+
+        _LIVE = {
+            SlotState.STARTING,
+            SlotState.WARMING,
+            SlotState.READY,
+            SlotState.SERVING,
+            SlotState.IDLE,
+        }
+        if snap.state in _LIVE:
+            snap = await sm.unload(name)
     return _slot_to_dict(snap, request)
 
 

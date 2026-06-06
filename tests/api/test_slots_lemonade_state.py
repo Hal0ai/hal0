@@ -251,6 +251,71 @@ def test_list_slots_no_coresident_group_when_npu_anchor_disabled(
     assert by_name["stt-npu"].get("coresident_group") is None
 
 
+# ── config-field exposure (Spec 1 / Component 1) ───────────────────────────
+#
+# The slot-edit panel seeds its card + drawer controls from the slot list
+# payload. Three SlotConfig fields must ride along so the UI doesn't have to
+# fetch /config per slot: ``enabled`` (top-level), ``enable_thinking``
+# (top-level), ``n_gpu_layers`` (from [model]).
+
+
+def test_list_slots_exposes_enable_thinking_and_n_gpu_layers(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """A slot's enable_thinking + [model].n_gpu_layers ride along in the payload."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'type = "llm"',
+            "enabled = true",
+            "enable_thinking = true",
+            "[model]",
+            'default = "qwen3"',
+            "n_gpu_layers = 99",
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["enable_thinking"] is True
+    assert primary["n_gpu_layers"] == 99
+    assert primary["enabled"] is True
+
+
+def test_list_slots_enable_thinking_null_when_unset(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """No enable_thinking in TOML → payload reports it as null (effective OFF)."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "primary",
+        [
+            'name = "primary"',
+            "port = 8081",
+            'device = "gpu-rocm"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3"',
+        ],
+    )
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    primary = by_name["primary"]
+    assert primary["enable_thinking"] is None
+    # n_gpu_layers absent from [model] → field still present, default sentinel
+    assert "n_gpu_layers" in primary
+
+
 def test_list_slots_skips_coresident_for_disabled_sibling(
     tmp_hal0_home: str,
     installed_lemonade_stub: dict[str, Any],
