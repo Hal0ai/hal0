@@ -724,6 +724,58 @@ async def test_update_config_preserves_sibling_model_keys(slot_root: Path) -> No
     # Seeded primary.toml carries [model] default = "qwen3-4b-q4_k_m".
     await sm.update_config("primary", {"model": {"ctx_size": 8192}})
     cfg_text = (slot_root / "primary.toml").read_text(encoding="utf-8")
-    assert "ctx_size = 8192" in cfg_text
+    # ctx_size is normalized to the canonical context_size (#585) but the
+    # value lands either way.
+    assert "8192" in cfg_text
     # The pre-existing model default MUST survive the partial update.
     assert '"qwen3-4b-q4_k_m"' in cfg_text
+
+
+async def test_update_config_normalizes_ctx_size_to_context_size(
+    slot_root: Path,
+) -> None:
+    """#585: the dashboard writes the legacy ``ctx_size`` alias; persist it as
+    the canonical ``context_size`` so the two keys never diverge on disk.
+    """
+    from hal0.slots.state import SlotState as _S
+
+    sm = SlotManager()
+    await sm._transition("primary", _S.OFFLINE, force=True)
+    await sm.update_config("primary", {"model": {"ctx_size": 32768}})
+    cfg_text = (slot_root / "primary.toml").read_text(encoding="utf-8")
+    assert "context_size = 32768" in cfg_text
+    # The legacy alias must NOT linger alongside the canonical key.
+    assert "ctx_size = " not in cfg_text
+
+
+async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
+    slot_root: Path,
+) -> None:
+    """A fresh dashboard write (``ctx_size``) must override a stale
+    ``context_size`` seed, then collapse to the single canonical key.
+    """
+    from hal0.slots.state import SlotState as _S
+
+    # Seed a context_size so the merge sees both keys.
+    (slot_root / "primary.toml").write_text(
+        "\n".join(
+            [
+                'name = "primary"',
+                "port = 8081",
+                'provider = "lemonade"',
+                "enabled = true",
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "context_size = 4096",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    sm = SlotManager()
+    await sm._transition("primary", _S.OFFLINE, force=True)
+    await sm.update_config("primary", {"model": {"ctx_size": 32768}})
+    cfg_text = (slot_root / "primary.toml").read_text(encoding="utf-8")
+    assert "context_size = 32768" in cfg_text
+    assert "4096" not in cfg_text
+    assert "ctx_size = " not in cfg_text

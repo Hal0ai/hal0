@@ -348,12 +348,25 @@ def _slot_model(slot_cfg: dict[str, Any]) -> str:
 
 
 def _slot_ctx(slot_cfg: dict[str, Any]) -> int | None:
-    """Pull ``model.context_size`` if set. None when unset (Lemonade default)."""
+    """Pull the slot's context window if set. None when unset (Lemonade default).
+
+    Accepts both the legacy ``model.ctx_size`` alias and the canonical
+    ``model.context_size`` (SlotConfig's field). Without this a ctx set from
+    the dashboard (which writes ``ctx_size``) never reached ``/v1/load`` on
+    Lemonade slots (#585).
+
+    ``ctx_size`` is checked first — same precedence as the display shim
+    ``hal0.api._slot_ctx_size`` and SlotManager's write-normalization — so
+    that on a transient dual-key TOML the fresher dashboard write (the alias)
+    wins consistently across read, display, and write. Writes normalize back
+    to ``context_size``, so the alias only lingers on TOMLs not yet re-saved.
+    """
     model_section = slot_cfg.get("model") or {}
     if isinstance(model_section, dict):
-        ctx = model_section.get("context_size")
-        if isinstance(ctx, int) and ctx > 0:
-            return ctx
+        for key in ("ctx_size", "context_size"):
+            ctx = model_section.get(key)
+            if isinstance(ctx, int) and ctx > 0:
+                return ctx
     return None
 
 

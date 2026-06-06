@@ -151,6 +151,42 @@ async def test_load_omits_ctx_size_when_unset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_honors_legacy_ctx_size_key() -> None:
+    """#585: slot TOMLs / dashboard writes may carry the legacy ``ctx_size``
+    alias instead of the canonical ``context_size``. The Lemonade load path
+    must honor it, or dashboard ctx changes silently never reach /v1/load.
+    """
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        captured["body"] = _json.loads(req.content.decode())
+        return httpx.Response(200, json={"status": "loaded"})
+
+    provider = LemonadeProvider(client=_mock_client(h))
+    await provider.load(_slot_cfg(model={"default": "hermes-4-14b", "ctx_size": 4096}))
+    assert captured["body"]["ctx_size"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_load_prefers_ctx_size_alias_when_both_present() -> None:
+    """On a transient dual-key TOML the fresher dashboard write (``ctx_size``)
+    wins — same precedence as the display shim and the write-normalization, so
+    read/display/write never disagree about which value is live.
+    """
+    captured: dict[str, Any] = {}
+
+    def h(req: httpx.Request) -> httpx.Response:
+        captured["body"] = _json.loads(req.content.decode())
+        return httpx.Response(200, json={"status": "loaded"})
+
+    provider = LemonadeProvider(client=_mock_client(h))
+    await provider.load(
+        _slot_cfg(model={"default": "hermes-4-14b", "context_size": 8192, "ctx_size": 999})
+    )
+    assert captured["body"]["ctx_size"] == 999
+
+
+@pytest.mark.asyncio
 async def test_load_serialises_server_extra_args_as_string() -> None:
     captured: dict[str, Any] = {}
 

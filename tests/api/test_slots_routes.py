@@ -897,6 +897,23 @@ def test_patch_defaults_preserves_model_default(
     assert r.status_code == 200, r.text
 
     after = isolated_client.get("/api/slots/primary/config").json()
-    assert after["model"]["ctx_size"] == 8192
+    # The ctx value lands; #585 normalizes the alias to canonical context_size.
+    assert after["model"]["context_size"] == 8192
     # The model name survived the partial defaults write.
     assert after["model"]["default"] == "qwen3-4b-q4_k_m"
+
+
+def test_patch_defaults_canonicalizes_ctx_size_key(
+    slot_root: Path,
+    isolated_client: TestClient,
+) -> None:
+    """#585: the dashboard writes ``ctx_size``; it must persist as the canonical
+    ``context_size`` with no lingering alias, so the Lemonade load path (which
+    reads context_size) actually honors a ctx set from the UI.
+    """
+    r = isolated_client.patch("/api/slots/primary/defaults", json={"ctx_size": 32768})
+    assert r.status_code == 200, r.text
+
+    model = isolated_client.get("/api/slots/primary/config").json()["model"]
+    assert model["context_size"] == 32768
+    assert "ctx_size" not in model
