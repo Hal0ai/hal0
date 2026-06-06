@@ -56,9 +56,7 @@ def test_flm_rows_surface_stt(
     row = next(r for r in rows if r["id"] == "whisper-large-v3")
     assert row["backend"] == "npu"
     assert row["provider"] == "flm"
-    assert "stt" in row["capabilities"], (
-        f"stt was filtered out of reported_caps: {row!r}"
-    )
+    assert "stt" in row["capabilities"], f"stt was filtered out of reported_caps: {row!r}"
 
 
 def test_models_for_capability_stt_has_npu_backend(
@@ -75,6 +73,4 @@ def test_models_for_capability_stt_has_npu_backend(
     match = next((r for r in rows if r["id"] == "whisper-large-v3"), None)
     assert match is not None, f"stt model missing from models_for_capability: {rows!r}"
     legal_backends = [b["id"] for b in match.get("backends", [])]
-    assert "npu" in legal_backends, (
-        f"npu not a legal backend for the stt model: {legal_backends!r}"
-    )
+    assert "npu" in legal_backends, f"npu not a legal backend for the stt model: {legal_backends!r}"

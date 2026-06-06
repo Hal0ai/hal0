@@ -423,9 +423,7 @@ def npu_orchestrator(
     )
     client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 0")
     fake = FakeSlotManager()
-    fake.set_configs(
-        [{"name": "agent", "type": "llm", "device": "npu", "enabled": True}]
-    )
+    fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
     orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
     return orch, fake, client
 
@@ -438,21 +436,35 @@ async def test_npu_embed_enable_sets_flm_args_no_load(
     orch, fake, client = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
-    _write_caps(home, slot="embed", child="embed", fields={
-        "backend": "npu", "provider": "flm",
-        "model": "nomic-embed-text-v1.5-q8_0", "enabled": False,
-    })
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": False,
+        },
+    )
 
-    result = await orch.apply("embed", "embed", {
-        "enabled": True, "backend": "npu", "provider": "flm",
-        "model": "nomic-embed-text-v1.5-q8_0",
-    })
+    result = await orch.apply(
+        "embed",
+        "embed",
+        {
+            "enabled": True,
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+        },
+    )
 
     assert client.set_calls, "flm_args was never set"
     assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 1"}, client.set_calls
     # The embed slot must be flipped enabled=true via a {enabled}-only write.
     enabled_writes = [
-        c for c in fake.calls
+        c
+        for c in fake.calls
         if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"] == {"enabled": True}
     ]
     assert enabled_writes, f"no enabled-only update_config on embed slot: {fake.calls}"
@@ -471,16 +483,24 @@ async def test_npu_embed_disable_zeroes_flm_args_no_unload(
     orch, fake, client = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
-    _write_caps(home, slot="embed", child="embed", fields={
-        "backend": "npu", "provider": "flm",
-        "model": "nomic-embed-text-v1.5-q8_0", "enabled": True,
-    })
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": True,
+        },
+    )
 
     result = await orch.apply("embed", "embed", {"enabled": False})
 
     assert client.set_calls[-1] == {"flm_args": "--asr 1 --embed 0"}, client.set_calls
     disabled_writes = [
-        c for c in fake.calls
+        c
+        for c in fake.calls
         if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"] == {"enabled": False}
     ]
     assert disabled_writes, f"no enabled=False write on embed slot: {fake.calls}"
@@ -498,13 +518,28 @@ async def test_npu_stt_enable_sets_asr(
     orch, fake, client = npu_orchestrator
     home = Path(tmp_hal0_home)
     # stt slot does not exist on disk → create path writes type=transcription.
-    _write_caps(home, slot="voice", child="stt", fields={
-        "backend": "npu", "provider": "flm", "model": "whisper-large-v3", "enabled": False,
-    })
+    _write_caps(
+        home,
+        slot="voice",
+        child="stt",
+        fields={
+            "backend": "npu",
+            "provider": "flm",
+            "model": "whisper-large-v3",
+            "enabled": False,
+        },
+    )
 
-    await orch.apply("voice", "stt", {
-        "enabled": True, "backend": "npu", "provider": "flm", "model": "whisper-large-v3",
-    })
+    await orch.apply(
+        "voice",
+        "stt",
+        {
+            "enabled": True,
+            "backend": "npu",
+            "provider": "flm",
+            "model": "whisper-large-v3",
+        },
+    )
 
     assert client.set_calls, "flm_args was never set for stt"
     last = client.set_calls[-1]["flm_args"]
@@ -526,20 +561,34 @@ async def test_embed_gpu_to_npu_no_load(
     orch, fake, client = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="vulkan", slot_type="embedding")
-    _write_caps(home, slot="embed", child="embed", fields={
-        "backend": "gpu-vulkan", "provider": "llama-server",
-        "model": "nomic-embed-text-v1.5-q8_0", "enabled": True,
-    })
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "gpu-vulkan",
+            "provider": "llama-server",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": True,
+        },
+    )
 
-    await orch.apply("embed", "embed", {
-        "enabled": True, "backend": "npu", "provider": "flm",
-        "model": "nomic-embed-text-v1.5-q8_0",
-    })
+    await orch.apply(
+        "embed",
+        "embed",
+        {
+            "enabled": True,
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+        },
+    )
 
     assert "--embed 1" in client.set_calls[-1]["flm_args"], client.set_calls
     # device rewritten to npu on the slot TOML.
     dev_writes = [
-        c for c in fake.calls
+        c
+        for c in fake.calls
         if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"].get("device") == "npu"
     ]
     assert dev_writes, f"device not rewritten to npu: {fake.calls}"
@@ -556,15 +605,28 @@ async def test_embed_npu_to_gpu_zeroes_flm_and_loads(
     orch, fake, client = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
-    _write_caps(home, slot="embed", child="embed", fields={
-        "backend": "npu", "provider": "flm",
-        "model": "nomic-embed-text-v1.5-q8_0", "enabled": True,
-    })
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": True,
+        },
+    )
 
-    await orch.apply("embed", "embed", {
-        "enabled": True, "backend": "gpu-vulkan", "provider": "llama-server",
-        "model": "nomic-embed-text-v1.5-q8_0",
-    })
+    await orch.apply(
+        "embed",
+        "embed",
+        {
+            "enabled": True,
+            "backend": "gpu-vulkan",
+            "provider": "llama-server",
+            "model": "nomic-embed-text-v1.5-q8_0",
+        },
+    )
 
     # Leaving NPU must drop embed from the anchor's flm_args.
     assert client.set_calls, "leaving npu did not touch flm_args"
@@ -591,15 +653,28 @@ async def test_npu_embed_anchor_offline_still_pending(
     orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
-    _write_caps(home, slot="embed", child="embed", fields={
-        "backend": "npu", "provider": "flm",
-        "model": "nomic-embed-text-v1.5-q8_0", "enabled": False,
-    })
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": False,
+        },
+    )
 
-    result = await orch.apply("embed", "embed", {
-        "enabled": True, "backend": "npu", "provider": "flm",
-        "model": "nomic-embed-text-v1.5-q8_0",
-    })
+    result = await orch.apply(
+        "embed",
+        "embed",
+        {
+            "enabled": True,
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+        },
+    )
 
     assert result.get("pending_reload") is True
     assert not [c for c in fake.calls if c[0] == "restart"], (

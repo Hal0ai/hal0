@@ -478,9 +478,7 @@ class CapabilityOrchestrator:
         # ``is_npu_modality`` gates the flm_args side-effect, which must
         # also fire on DEPARTURE from npu (Case 5: npu→gpu must zero the
         # anchor's embed/asr flag even though the new device isn't npu).
-        is_npu_modality = (
-            child in _CHILD_TO_SLOT_TYPE and self._lemonade_provider is not None
-        )
+        is_npu_modality = child in _CHILD_TO_SLOT_TYPE and self._lemonade_provider is not None
         is_npu_target = is_npu_modality and merged.device == "npu"
         leaving_npu = is_npu_modality and before_device == "npu" and merged.device != "npu"
         pending_reload = False
@@ -503,9 +501,7 @@ class CapabilityOrchestrator:
                 # load/swap/unload the embed/stt slot. (Decision 4: the
                 # _rewrite_underlying_slot above — which sets the model
                 # sub-table — has already run for the enabled case.)
-                pending_reload = await self._apply_npu_trio_modality(
-                    slot_name, child, merged
-                )
+                pending_reload = await self._apply_npu_trio_modality(slot_name, child, merged)
             else:
                 if enabled_changed and merged.enabled:
                     # off → on: ensure the slot exists, then load with the model.

@@ -143,9 +143,7 @@ async def test_npu_phase2_embed_enable_end_to_end(
 
     client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 0")
     fake = FakeSlotManager()
-    fake.set_configs(
-        [{"name": "agent", "type": "llm", "device": "npu", "enabled": True}]
-    )
+    fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
     orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
 
     result = await orch.apply(
@@ -169,9 +167,7 @@ async def test_npu_phase2_embed_enable_end_to_end(
     enabled_writes = [
         c
         for c in fake.calls
-        if c[0] == "update_config"
-        and c[1] == "embed"
-        and c[2]["updates"] == {"enabled": True}
+        if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"] == {"enabled": True}
     ]
     assert enabled_writes, f"no {{enabled}}-only write on embed slot: {fake.calls}"
     # The {enabled}-only write must NOT carry model (Decision 4).
