@@ -17,7 +17,7 @@
 
 const { useState: useStateMT, useEffect: useEffectMT } = React;
 
-function MemoryTab({ subsection, onResetNs } = {}) {
+function MemoryTab({ subsection } = {}) {
   useEffectMT(() => {
     if (subsection === "peer") {
       const el = document.getElementById("peer-memory");
@@ -101,8 +101,6 @@ function MemoryTab({ subsection, onResetNs } = {}) {
                 <span style={{marginLeft: "auto", color: "var(--fg-3)"}} className="num">{n.recs}</span>
               </div>
             ))}
-            <button className="btn ghost sm" style={{marginTop: 10, width: "100%", justifyContent: "center"}} onClick={() => window.__hal0Toast && window.__hal0Toast("New namespace modal — stubbed", "info")}>{Icons.plus} New namespace</button>
-            <button className="btn danger sm" style={{marginTop: 6, width: "100%", justifyContent: "center"}} onClick={onResetNs}>{Icons.warn} Reset 'shared'</button>
           </div>
         </div>
       </div>

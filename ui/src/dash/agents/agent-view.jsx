@@ -57,7 +57,6 @@ function AgentView() {
   const initial = _parseAgentSubroute();
   const [tab, setTab] = useStateAV(initial.tab);
   const [subsection, setSubsection] = useStateAV(initial.subsection);
-  const [resetOpen, setResetOpen] = useStateAV(false);
   const noAgent = window.__hal0Banners && window.__hal0Banners.get && window.__hal0Banners.get()["no-agent"];
 
   useEffectAV(() => {
@@ -109,18 +108,7 @@ function AgentView() {
         ))}
       </div>
 
-      {tab === "memory"   && window.MemoryTab     && <window.MemoryTab subsection={subsection} onResetNs={() => setResetOpen(true)} />}
-
-      <ConfirmDialog
-        open={resetOpen}
-        onCancel={() => setResetOpen(false)}
-        onConfirm={() => { setResetOpen(false); window.__hal0Toast && window.__hal0Toast("Cognee namespace 'shared' reset — 2,847 records deleted", "warn"); }}
-        title="Reset memory namespace 'shared'?"
-        message={<span>This permanently deletes <span className="mono" style={{color: "var(--fg)"}}>2,847</span> Cognee records across SQLite + LanceDB + Kuzu. Cannot be undone.</span>}
-        confirmLabel="Reset namespace"
-        destructive
-        typeToConfirm="shared"
-      />
+      {tab === "memory"   && window.MemoryTab     && <window.MemoryTab subsection={subsection} />}
     </div>
   );
 }
