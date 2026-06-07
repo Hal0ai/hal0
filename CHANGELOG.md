@@ -420,7 +420,7 @@ locked implementation contract at
   detects v0.1.x state (presence of `/etc/hal0/slots/*.toml` AND
   absence of `/var/lib/hal0/lemonade/config.json`) and refuses to
   overwrite it, printing explicit backup + wipe instructions and
-  exiting non-zero. See [`docs/v0.2-upgrade.md`](docs/v0.2-upgrade.md)
+  exiting non-zero. See [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade)
   for the user-facing procedure.
 - **Per-modality toolbox containers retired.** `hal0-toolbox-vulkan` /
   `rocm` / `flm` / `moonshine` / `kokoro` / `comfyui` are no longer

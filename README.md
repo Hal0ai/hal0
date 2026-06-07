@@ -34,7 +34,7 @@ curl -fsSL https://hal0.dev/install.sh | bash
 > and the legacy Provider stack all retired in favour of one
 > `hal0-lemonade.service` supervising a single `lemond` daemon. v0.1.x
 > installs do **not** auto-upgrade — see
-> [`docs/v0.2-upgrade.md`](./docs/v0.2-upgrade.md) for the back-up + wipe
+> [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade) for the back-up + wipe
 > + reinstall procedure and the `hal0 registry import` recovery path.
 > First run lands a **bundle picker** (`hal0-Lite` / `Default` / `Pro` /
 > `Max` + `LMX-Omni-52B-Halo`) — `capabilities.toml` ships empty by
@@ -150,7 +150,7 @@ be evicted out from under a streaming request.
   against the workflow OIDC identity, then hands off to
   [`installer/install.sh`](./installer/install.sh). v0.1.x installs
   are detected and refused with explicit backup/wipe instructions
-  (see [`docs/v0.2-upgrade.md`](./docs/v0.2-upgrade.md)).
+  (see [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade)).
 - **One-line Proxmox VE install** — on a Proxmox host, `bash -c "$(curl
   -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"`
   creates an unprivileged Debian 13 LXC and runs the standard bootstrap
@@ -174,8 +174,8 @@ upstream `hermes`). Pick one via the first-run wizard or `hal0 agent install
 calls (`model_pull`, `slot_delete`, `config_write`, etc.) gate through
 a header bell + inbox modal in the dashboard, with CLI parity via
 `hal0 agent approvals {list,approve,deny}`. See
-[docs/api/mcp.md](./docs/api/mcp.md) and
-[docs/api/agents.md](./docs/api/agents.md).
+[docs/mcp/overview.md](./docs/mcp/overview.md) and
+[docs/agents/overview.md](./docs/agents/overview.md).
 
 ## Backends
 

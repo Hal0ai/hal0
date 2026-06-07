@@ -21,7 +21,7 @@ sudo bash installer/install.sh --models-dir=/mnt/ai-models
 > **v0.1.x users:** `install.sh` will detect existing v0.1.x state
 > (`/etc/hal0/slots/*.toml` AND no `/var/lib/hal0/lemonade/config.json`)
 > and refuse to overwrite it. See
-> [`docs/v0.2-upgrade.md`](../docs/v0.2-upgrade.md) for the backup +
+> [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade) for the backup +
 > wipe + reinstall procedure and the `hal0 registry import` recovery
 > command.
 
@@ -38,7 +38,7 @@ are no longer required, built, or pulled.
 
 1. **Pre-flight checks** — confirms Python 3.11–3.14 is on `$PATH`, systemd is present (skipped in `--dev`).
 2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed). The `lemond` daemon runs under the `hal0` system user written into `hal0-lemonade.service`. Override with `HAL0_USER=...` if you want a different unit user, but the default is intentional.
-3. **v0.1.x detection** — refuses to overwrite a v0.1.x install (`/etc/hal0/slots/*.toml` present, `/var/lib/hal0/lemonade/config.json` absent). Prints backup + wipe instructions and exits non-zero. See [`docs/v0.2-upgrade.md`](../docs/v0.2-upgrade.md).
+3. **v0.1.x detection** — refuses to overwrite a v0.1.x install (`/etc/hal0/slots/*.toml` present, `/var/lib/hal0/lemonade/config.json` absent). Prints backup + wipe instructions and exits non-zero. See [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade).
 4. **Layout** — creates `/opt/hal0/` (code + venv), `/etc/hal0/` (config), `/var/lib/hal0/{models,registry,lemonade,openwebui,cache}` (state). In `--dev` everything lands under `$PWD/.hal0ai/` instead.
 5. **Lemonade prerequisites** — installs the `lemonade-team/stable` PPA, the Lemonade embeddable tarball pinned in `manifest.json`, system libs (libxrt-npu2, ffmpeg6, boost1.83, fftw3), and (on AMDXDNA NPU hosts) the pinned FastFlowLM `.deb`.
 6. **Installs hal0** — creates a venv at `/opt/hal0/.venv/` and `pip install -e`'s the checkout into it. There is no versioned install dir or `current` symlink yet — the venv tracks the checkout in editable mode.
