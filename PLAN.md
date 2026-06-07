@@ -7,7 +7,7 @@ one-line install) and re-architected around the things that make hal0
 different from "a wrapper around llama-server": hardware-aware slots,
 clean lifecycle, and a real reliability bar.
 
-**Status (2026-05-23):** **v0.2.0 SHIPPED** (Lemonade migration + Agents
+**Status (2026-06-07):** **v0.3.2-alpha.1** (Lemonade migration + Agents
 v0.2 + MCP/memory + bundle picker, 22-PR adoption sequence closed).
 **v0.3 is the active milestone** — five interlocking work streams:
 

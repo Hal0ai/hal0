@@ -29,7 +29,7 @@ operating the box, with a built-in chat page for smoke-tests.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.2.0** — first release on the Lemonade runtime.
+> **Status:** **v0.3.2-alpha.1** — first release on the Lemonade runtime.
 > Six per-modality toolbox containers, the `hal0-slot@.service` template,
 > and the legacy Provider stack all retired in favour of one
 > `hal0-lemonade.service` supervising a single `lemond` daemon. v0.1.x
