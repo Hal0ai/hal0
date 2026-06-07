@@ -139,6 +139,17 @@ def synthetic_release(
         version=version,
     )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    # Simulate a prod (non-editable) install so apply() does not hit the
+    # editable-install guard added in #625.  Individual tests that want to
+    # exercise that guard override this back to True themselves.
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    # Stub out the venv reinstall step — the synthetic release tree is not a
+    # real pip-installable package, and tests that want to verify reinstall
+    # behaviour substitute their own stub explicitly.
+    monkeypatch.setattr(
+        "hal0.updater.updater._reinstall_into_venv",
+        lambda install_dir, *, job_id=None: None,
+    )
     return {
         "version": version,
         "tarball": tarball,
@@ -462,20 +473,20 @@ def test_apply_repips_swapped_tree_when_not_editable(
     assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
 
 
-def test_apply_skips_repip_in_editable_mode(
+def test_apply_hard_refuses_in_editable_mode_not_skip(
     synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Editable/dev installs never re-pip — there is no FHS venv to refresh."""
-    calls: list[Path] = []
+    """Editable/dev installs raise UpdateError — they no longer silently skip re-pip.
+
+    Pre-#625 behaviour was to skip the re-pip step and succeed; now apply()
+    hard-refuses so the caller knows the update was not applied (#625).
+    """
     monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
-    monkeypatch.setattr(
-        "hal0.updater.updater._reinstall_into_venv",
-        lambda install_dir, *, job_id=None: calls.append(install_dir),
-    )
 
-    asyncio.run(Updater().apply())
+    with pytest.raises(UpdateError) as exc_info:
+        asyncio.run(Updater().apply())
 
-    assert calls == []
+    assert "editable" in str(exc_info.value).lower()
 
 
 def test_apply_repip_failure_rolls_back_symlink(
@@ -485,8 +496,9 @@ def test_apply_repip_failure_rolls_back_symlink(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed re-pip rolls `current` back to the prior tree (consistency)."""
-    # First apply (editable skip) lands current → 0.0.1.
-    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
+    # First apply (non-editable, noop reinstall) lands current → 0.0.1.
+    # (synthetic_release fixture already stubs _is_editable_install → False
+    # and _reinstall_into_venv → noop, so this just exercises the swap.)
     asyncio.run(Updater().apply())
     assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
 
@@ -544,6 +556,7 @@ def test_apply_sha_mismatch_raises_typed_error(
         overrides={"digest_sha256": "0" * 64},
     )
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
 
     with pytest.raises(UpdateVerifyError) as exc_info:
         asyncio.run(Updater().apply())
@@ -608,6 +621,7 @@ def test_apply_download_failure_surfaces_typed_error(
     }
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
 
     with pytest.raises(UpdateDownloadError):
         asyncio.run(Updater().apply())
@@ -792,3 +806,30 @@ def test_release_manifest_channel_does_not_advertise_dev() -> None:
     """The manifest channel description is reconciled to stable | nightly only."""
     desc = ReleaseManifest.model_fields["channel"].description or ""
     assert "dev" not in desc
+
+
+# ── editable-install guard (#625) ─────────────────────────────────────────────
+
+
+def test_apply_hard_refuses_on_editable_install(
+    tmp_hal0_home: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Updater.apply() must raise UpdateError immediately on an editable install.
+
+    Before #625, apply() silently extracted + swapped but never re-pipped,
+    so `hal0 update` appeared to succeed while changing nothing.  The fix
+    adds an early guard that hard-refuses with a clear message.
+    """
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: True)
+
+    with pytest.raises(UpdateError) as exc_info:
+        asyncio.run(Updater().apply())
+
+    err = exc_info.value
+    # Must be an UpdateError (not a silent success or a generic exception).
+    assert isinstance(err, UpdateError)
+    # The message must guide the user toward the correct alternative.
+    assert "editable" in str(err).lower() or "git pull" in str(err).lower()
+    # No network call, no file I/O — the guard fires before Step 1.
+    # (Verified implicitly: no HAL0_RELEASES_URL env → would fail if reached.)

@@ -959,6 +959,18 @@ class Updater:
             UpdateError + subclasses on any step failure. Partial-state
             artifacts (tempfiles, half-extracted dirs) are cleaned up.
         """
+        # Guard: hard-refuse on editable/dev installs.  apply() manipulates
+        # the FHS layout (/usr/lib/hal0/current symlink + venv site-packages)
+        # which does not exist in an editable checkout.  Continuing would
+        # silently extract a tarball that is never actually loaded.
+        # Re-run `git pull && pip install -e .` instead.
+        if _is_editable_install():
+            raise UpdateError(
+                "update is not supported on an editable (dev) install — "
+                "run 'git pull && pip install -e .' to update",
+                details={"hint": "editable install detected via hal0.__file__ outside sys.prefix"},
+            )
+
         # Step 1: fetch + validate manifest.
         log.info("updater.apply_start", job_id=self.job_id, channel=self.channel, pinned=version)
         try:

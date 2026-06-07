@@ -166,8 +166,8 @@ API_BIND_HOST="0.0.0.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    # Dev: editable checkout, everything under one prefix. The updater
-    # refuses apply() in this mode (re-run `git pull && pip install -e .`).
+    # Dev: editable checkout, everything under one prefix. Updater.apply()
+    # hard-refuses in this mode — run `git pull && pip install -e .` to update.
     PREFIX="${HAL0_PREFIX:-${PWD}/.hal0ai}"
     ETC_DIR="${PREFIX}/etc/hal0"
     VAR_DIR="${PREFIX}/var/lib/hal0"
