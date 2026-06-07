@@ -580,9 +580,9 @@ HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
 # with memory dark. Needs the shared hindsight-api daemon (installer/systemd/
 # hindsight-api.service); set [memory] engine = "cognee" to fall back.
 HAL0_MEMORY_ENABLED=1
-# Uncomment to pin specific toolbox images:
-# HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0ai/hal0-toolbox-vulkan:v1
-# HAL0_TOOLBOX_IMAGE_ROCM=ghcr.io/hal0ai/hal0-toolbox-rocm:v1
+# HAL0_TOOLBOX_IMAGE_VULKAN / HAL0_TOOLBOX_IMAGE_ROCM — optional overrides for
+# the per-backend container image refs used by providers/llama_server.py.
+# Unset = use the image pinned in the provider at release time.
 EOF
     info "wrote ${API_ENV}"
 fi
@@ -651,11 +651,6 @@ SyslogIdentifier=hal0-api
 WantedBy=multi-user.target
 EOF
 info "wrote ${API_UNIT}"
-
-# Note: hal0-slot@.service template removed in PR-9 (v0.2 retires per-modality
-# toolbox containers — see docs/internal/adr/0008-lemonade-adoption.md §2 and
-# docs/internal/lemonade-adoption-plan-2026-05-22.md §10.1). Lemonade owns the
-# process lifecycle in v0.2; the SlotManager dispatch rewrite lands in PR-10.
 
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"

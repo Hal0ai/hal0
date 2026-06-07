@@ -25,7 +25,7 @@ is the last gate before a tagged release.
 |---|---|---|---|---|
 | α  Unit | `pytest`, mocked systemd/HTTP/Lemonade client | any host, no daemons | every commit / PR | `make test` |
 | β  Integration | Real `hal0-lemonade.service` + tiny GGUF; load → chat → swap → unload + slot state via `/v1/health` | GitHub Actions runner (`integration.yml`) **and** any host with systemd + Lemonade installed | every PR; required for merge | `make test-integration` |
-| γ  Release-gate | Full matrix — Lemonade `llamacpp` (Vulkan + ROCm + CPU), `flm:npu` trio, `whisper.cpp`, `kokoro:cpu`, `sd-cpp`, OpenWebUI proxy, updater round-trip | `hal0-test` LXC (10.0.1.230) over SSH | per release candidate, not per-commit | `make release-test` |
+| γ  Release-gate | Full matrix — Lemonade `llamacpp` (Vulkan + ROCm + CPU), `flm:npu` trio, `whisper.cpp`, `kokoro:cpu`, `sd-cpp`, OpenWebUI proxy, updater round-trip | `hal0-test` LXC over SSH | per release candidate, not per-commit | `make release-test` |
 
 ### α — unit (`make test`)
 
@@ -77,7 +77,7 @@ lands in `tests/release-gate-report.json`.
 make release-test
 
 # Override host / key:
-make release-test HAL0_TEST_HOST=10.0.1.231 HAL0_TEST_SSH_KEY=~/.ssh/my-test-key
+make release-test HAL0_TEST_HOST=192.0.2.10 HAL0_TEST_SSH_KEY=~/.ssh/my-test-key
 
 # Pretty-print the most recent report:
 make release-test-report
@@ -138,7 +138,7 @@ LXC (or any live install):
 HAL0_E2E_LIVE=1 npm run test:e2e
 ```
 
-The `hal0-test` LXC at `10.0.1.230` is the standing target for
+The `hal0-test` LXC is the standing target for
 release-gate runs. The Vite dev server's `vite.config.js` proxy
 already forwards `/api/*` + `/v1/*` to that host, so live mode just
 needs the env var. Live-mode adjusts test timeouts (180s per spec,

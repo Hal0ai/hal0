@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hal0 release-test driver (tier γ).
 #
-# SSHes into the hal0-test LXC (default 10.0.1.230) and walks the
+# SSHes into the hal0-test LXC (set HAL0_TEST_HOST) and walks the
 # release-gate matrix one row at a time. Each row produces a structured
 # record appended to ${HAL0_TEST_REPORT} (default tests/release-gate-report.json).
 #
@@ -11,7 +11,7 @@
 #   2   SSH / pre-flight failure (couldn't even start)
 #
 # Env (see Makefile for defaults):
-#   HAL0_TEST_HOST     SSH host (default 10.0.1.230)
+#   HAL0_TEST_HOST     SSH host (required; no default — set to your hal0-test LXC IP)
 #   HAL0_TEST_USER     SSH user (default root)
 #   HAL0_TEST_SSH_KEY  SSH key  (default ~/.ssh/id_ed25519)
 #   HAL0_TEST_PREFIX   Unique slot prefix for this run (default ci-h-<job>-<pid>)
@@ -27,7 +27,11 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-HAL0_TEST_HOST="${HAL0_TEST_HOST:-10.0.1.230}"
+HAL0_TEST_HOST="${HAL0_TEST_HOST:-}"
+if [[ -z "${HAL0_TEST_HOST}" ]]; then
+    echo "error: HAL0_TEST_HOST is not set — specify your hal0-test LXC IP or hostname" >&2
+    exit 2
+fi
 HAL0_TEST_USER="${HAL0_TEST_USER:-root}"
 HAL0_TEST_SSH_KEY="${HAL0_TEST_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
 HAL0_TEST_PREFIX="${HAL0_TEST_PREFIX:-ci-h-local-$$}"

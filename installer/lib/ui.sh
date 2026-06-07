@@ -258,7 +258,7 @@ ui_spinner_run() {
 #
 # Usage:
 #   ui_box "hal0 is ready" \
-#       "Dashboard   http://10.0.1.230:8080" \
+#       "Dashboard   http://localhost:8080" \
 #       "CLI         /opt/hal0/.venv/bin/hal0"
 ui_box() {
     local title="$1"; shift

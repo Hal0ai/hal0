@@ -12,8 +12,8 @@ PROTOTYPE — wipe me after answering:
      llama-server /metrics gauge in real time?
 
 Run:
-    BASE=http://10.0.1.142:8088 TOKEN=... python3 live_probe.py
     BASE=http://localhost:8088 TOKEN=... python3 live_probe.py
+    BASE=http://192.0.2.1:8088 TOKEN=... python3 live_probe.py
 
 Reads $BASE/v1/chat/completions with stream=true, prints the
 client-side TTFT and tok/s, then polls $BASE/api/slots/metrics for
@@ -28,7 +28,7 @@ import sys
 import time
 import urllib.request
 
-BASE = os.environ.get("BASE", "http://10.0.1.142:8088").rstrip("/")
+BASE = os.environ.get("BASE", "http://localhost:8088").rstrip("/")
 TOKEN = os.environ.get("TOKEN", "")
 MODEL = os.environ.get("MODEL", "")  # empty → server uses primary default
 PROMPT = os.environ.get("PROMPT", "Say one sentence about the moon.")
