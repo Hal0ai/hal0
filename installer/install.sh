@@ -1113,35 +1113,46 @@ else
         LEMONADE_TARBALL_TMP="/tmp/${LEMONADE_TARBALL}"
         # `curl -fsSL` — fail on HTTP error, silent, follow redirects.
         # Tarball lands in /tmp so a re-run doesn't keep a stale copy in
-        # the install tree.
+        # the install tree.  A failed download is a hard error: the hal0
+        # API will start but all Lemonade-backed slots (chat, STT, embed)
+        # will be unavailable, leaving the install broken.  Set
+        # HAL0_SKIP_LEMONADE_SHA=1 to opt out of the SHA gate only; there
+        # is no opt-out for a failed download (fix the network and rerun).
         if ! curl -fsSL -o "${LEMONADE_TARBALL_TMP}" "${LEMONADE_URL}"; then
-            warn "Lemonade tarball download failed (${LEMONADE_URL})"
-            warn "  Lemonade-backed slots will be unavailable until ${LEMONADE_PREFIX}/lemond exists"
-            NEED_LEMONADE_EXTRACT=0
+            rm -f "${LEMONADE_TARBALL_TMP}"
+            die "Lemonade tarball download failed (${LEMONADE_URL}).
+  hal0 requires Lemonade for all inference slots — a missing binary is not
+  a degraded install, it is a broken one.  Fix the network and rerun, or
+  file an issue at https://github.com/Hal0ai/hal0/issues."
         fi
     fi
 
     if [[ "${NEED_LEMONADE_EXTRACT}" -eq 1 ]]; then
-        # SHA-256 verify BEFORE extracting. Same shape as PR-4's FLM .deb
-        # check: placeholder all-zeroes pin is non-fatal when
-        # HAL0_SKIP_LEMONADE_SHA=1, otherwise refuse + skip. Real
-        # checksum mismatch is always fatal (refuse + skip — never
-        # extract a tarball we don't trust).
+        # SHA-256 verify BEFORE extracting.  A placeholder SHA (all-zeroes)
+        # means install.sh was shipped without pinning the real digest —
+        # HAL0_SKIP_LEMONADE_SHA=1 is the explicit, documented opt-out for
+        # that case only.  A real-SHA mismatch is always fatal: never extract
+        # a tarball that doesn't match its published digest.
         ACTUAL_SHA="$(sha256sum "${LEMONADE_TARBALL_TMP}" | awk '{print $1}')"
         if [[ "${LEMONADE_SHA256}" == "0000000000000000000000000000000000000000000000000000000000000000" ]]; then
-            warn "LEMONADE_SHA256 is the placeholder — pin the real checksum in install.sh before v0.2 ships"
-            warn "  observed: ${ACTUAL_SHA}"
+            warn "LEMONADE_SHA256 is the all-zeroes placeholder — release pipeline must pin the real digest"
+            warn "  # TODO: pin via: gh api repos/lemonade-sdk/lemonade/releases/tags/${LEMONADE_VERSION} \\"
+            warn "  #   --jq '.assets[] | select(.name==\"${LEMONADE_TARBALL}\") | .digest'"
+            warn "  observed SHA-256: ${ACTUAL_SHA}"
             if [[ "${HAL0_SKIP_LEMONADE_SHA:-0}" != "1" ]]; then
-                warn "  skipping Lemonade install (set HAL0_SKIP_LEMONADE_SHA=1 to accept the placeholder)"
                 rm -f "${LEMONADE_TARBALL_TMP}"
-                NEED_LEMONADE_EXTRACT=0
+                die "Refusing to extract Lemonade: SHA-256 is the all-zeroes placeholder.
+  Set HAL0_SKIP_LEMONADE_SHA=1 to accept the unverified tarball (not recommended)
+  or pin the real digest in install.sh before shipping."
             fi
         elif [[ "${ACTUAL_SHA}" != "${LEMONADE_SHA256}" ]]; then
-            warn "Lemonade tarball SHA-256 mismatch — refusing to extract"
-            warn "  expected: ${LEMONADE_SHA256}"
-            warn "  observed: ${ACTUAL_SHA}"
             rm -f "${LEMONADE_TARBALL_TMP}"
-            NEED_LEMONADE_EXTRACT=0
+            die "Lemonade tarball SHA-256 mismatch — refusing to extract.
+  expected: ${LEMONADE_SHA256}
+  observed: ${ACTUAL_SHA}
+  The downloaded tarball does not match the pinned digest.  This may indicate
+  a corrupted download or a tampered release asset — rerun to retry, or file
+  an issue at https://github.com/Hal0ai/hal0/issues."
         fi
     fi
 
@@ -1157,8 +1168,10 @@ else
             printf '%s\n' "${LEMONADE_VERSION}" > "${LEMONADE_MARKER}"
             info "extracted Lemonade ${LEMONADE_VERSION} → ${LEMONADE_PREFIX}"
         else
-            warn "tar extract failed — Lemonade-backed slots will be unavailable"
             rm -f "${LEMONADE_TARBALL_TMP}"
+            die "tar extract failed for ${LEMONADE_TARBALL}.
+  hal0 requires Lemonade for all inference slots.  Check free space under /opt
+  (embeddable tarball extracts to ~200 MB) and rerun."
         fi
     fi
 
