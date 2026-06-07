@@ -19,7 +19,7 @@ OpenWebUI runs as its own systemd unit (`hal0-openwebui.service`).
                 ┌───────────────┼───────────────┐
                 ▼               ▼               ▼
         hal0-slot@primary  hal0-slot@embed   hal0-slot@stt   ...
-        (llama.cpp)        (llama.cpp)       (Moonshine)
+        (llama.cpp)        (llama.cpp)       (whispercpp via lemond)
 ```
 
 Each slot is independent: its own port (8081+), its own model, its own
@@ -51,8 +51,8 @@ src/hal0/
 ├── cli/agent_shim.py# /usr/local/bin/hal0-agent for hal0-agent@.service
 ├── slots/           # slot lifecycle (state machine, unit rendering)
 ├── dispatcher/      # routing, single-flight, decision logging
-├── providers/       # backend abstraction (llama_server, flm, moonshine,
-│                    #   kokoro, comfyui)
+├── providers/       # backend abstraction (llama_server, flm, comfyui;
+│                    #   slot lifecycle dispatches 100% through lemonade)
 ├── lemonade/        # idle driver + metrics shim + log bridge
 ├── capabilities/    # UX overlay grouping flat slots into capability
 │                    #   cards (catalog + config + orchestrator);
@@ -70,7 +70,7 @@ src/hal0/
 ├── omni_router/     # client-side OpenAI tool-calling loop
 ├── updater/         # self-update (cosign-verified, atomic swap)
 ├── installer/       # first-run wizard backend, hardware probe writer
-├── voice/           # Moonshine + Kokoro provider glue
+├── voice/           # REMOVED in #620 — lemond serves STT/TTS natively
 ├── openwebui/       # companion service env file writer
 └── cli/             # `hal0` Typer CLI (incl. `capabilities migrate`)
 ```
@@ -98,14 +98,31 @@ is no longer valid — primarily for FLM model-tag namespace drift.
   offline, it returns a structured error; restarting is a separate API
   call.
 - **Providers are stateless.** Each provider (`LlamaServerProvider`,
-  `FLMProvider`, `MoonshineProvider`, `KokoroProvider`,
-  `ComfyUIProvider`) is a class with `build_env()`, `start_cmd()`,
-  `health()`, `infer()`. They don't hold connection state, don't manage
-  systemd, and don't share globals. One provider per backend type.
-  `FLMProvider` additionally probes `flm list -j` inside the toolbox
-  image to advertise its own model-tag namespace
-  (`share/flm/model_list.json`) — it does **not** run arbitrary GGUFs
-  from the registry.
+  `FLMProvider`, `ComfyUIProvider`, `LemonadeProvider`) is a class with
+  `build_env()`, `start_cmd()`, `health()`, `infer()`. They don't hold
+  connection state, don't manage systemd, and don't share globals.
+  One provider per backend type.
+
+  **Dispatch model (v0.2, ADR-0008):** SlotManager routes 100% through
+  `LemonadeProvider`. The three non-SlotManager callers that bypass this
+  are: `api/routes/v1.py` → `ComfyUIProvider.infer()` (image-gen);
+  `api/routes/hardware.py` → `FLMProvider.flm_served_models()` (NPU
+  footprint probe); `registry/pull.py` → `FLMProvider._probe_flm_catalog()`
+  (FLM model-tag resolution).
+
+  `FLMProvider` additionally probes `flm list -j` inside the toolbox image
+  to advertise its own model-tag namespace (`share/flm/model_list.json`) —
+  it does **not** run arbitrary GGUFs from the registry.
+
+  **STT/TTS dispatch is lemond-only (#620).** The dead local
+  `MoonshineProvider` and `KokoroProvider` implementation classes (the
+  `hal0.voice` package that ran Moonshine/Kokoro in-process) were deleted
+  in #620 — they had no live importers. `moonshine` and `kokoro` **remain
+  valid capability-provider identifiers** in the config/capability layer
+  (`SlotConfig.provider`, `capabilities/config.py`, `capabilities/catalog.py`,
+  the backend/model classification in `api/routes`); the actual STT/TTS
+  inference is served by lemond (whispercpp + kokoro recipes) or the
+  corresponding toolbox image, not by an in-process hal0 provider class.
 - **The registry is the only source of truth for "what models exist."**
   Atomic TOML files under `/var/lib/hal0/registry/`. mtime-cached. Slot
   configs reference model IDs from the registry; if a model is deleted,

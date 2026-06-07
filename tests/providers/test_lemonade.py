@@ -641,13 +641,28 @@ def test_get_provider_returns_lemonade_singleton() -> None:
     assert isinstance(a, LemonadeProvider)
 
 
-def test_legacy_providers_still_registered() -> None:
-    """Anti-scope: PR-8 must NOT remove the v0.1.x provider singletons.
-    PR-10 owns their retirement.
+def test_live_providers_registered() -> None:
+    """All live (non-vestigial) providers are registered.
+
+    PR-10 (#620) retired MoonshineProvider + KokoroProvider — lemond now
+    serves STT/TTS natively.  Only lemonade, llama-server, flm, and
+    comfyui remain registered.
     """
     from hal0.providers import get_provider
 
-    for name in ("llama-server", "flm", "moonshine", "kokoro", "comfyui"):
+    for name in ("lemonade", "llama-server", "flm", "comfyui"):
         provider = get_provider(name)
         assert provider is not None
         assert provider.__class__.__name__.lower().startswith(name.split("-")[0].lower())
+
+
+def test_retired_voice_providers_not_registered() -> None:
+    """MoonshineProvider + KokoroProvider removed in #620 (lemond serves STT/TTS now)."""
+    from hal0.providers import get_provider
+
+    for name in ("moonshine", "kokoro"):
+        try:
+            get_provider(name)
+            raise AssertionError(f"expected KeyError for retired provider {name!r}")
+        except KeyError:
+            pass

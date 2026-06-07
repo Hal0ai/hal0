@@ -21,7 +21,6 @@ _EXPECTED_MODULES = [
     "hal0.config",
     "hal0.updater",
     "hal0.installer",
-    "hal0.voice",
     "hal0.openwebui",
     "hal0.cli",
     "hal0.api",
