@@ -97,3 +97,8 @@ tests/release-gate-report.json
 Thumbs.db
 .claude/worktrees/
 .claude/wip.json
+graphify-out/cost.json
+graphify-out/cache/
+graphify-out/graph.html
+graphify-out/.graphify_*
+graphify-out/.rebuild.lock
