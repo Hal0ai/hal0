@@ -5,8 +5,8 @@
 
 # ── hal0-test LXC connection knobs (release-gate) ───────────────────────────
 # Override on the command line, e.g.:
-#   make release-test HAL0_TEST_HOST=10.0.1.231 HAL0_TEST_SSH_KEY=~/.ssh/my-test-key
-HAL0_TEST_HOST    ?= 10.0.1.230
+#   make release-test HAL0_TEST_HOST=my-test-lxc HAL0_TEST_SSH_KEY=~/.ssh/my-test-key
+HAL0_TEST_HOST    ?= localhost
 HAL0_TEST_USER    ?= root
 HAL0_TEST_SSH_KEY ?= ~/.ssh/id_ed25519
 # Unique-per-run slot prefix so concurrent agents don't collide on the

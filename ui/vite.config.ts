@@ -4,10 +4,17 @@ import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
 
 // hal0 v3 dashboard — React+TS+Vite scaffold (Phase A).
-// hal0.thinmint.dev terminates at Traefik on 10.0.1.200 and forwards to the
-// hal0 LXC (10.0.1.142). Locally `npm run dev` serves on 5173; /api+/v1 are
-// proxied to the local hal0-api on 8080. HAL0_AUTH_ENABLED=0 on dev, so no
-// header injection is required.
+// `npm run dev` serves on 5173; /api+/v1 are proxied to the local hal0-api on
+// 8080. Set VITE_ALLOWED_HOSTS (comma-separated) to expose the dev server on
+// custom hostnames (e.g. behind a reverse proxy); defaults to localhost.
+// Set VITE_HMR_HOST when serving HMR through that proxy over WSS.
+const allowedHosts = process.env.VITE_ALLOWED_HOSTS
+  ?.split(',')
+  .map((s) => s.trim())
+  .filter(Boolean) ?? ['localhost']
+
+const hmrHost = process.env.VITE_HMR_HOST
+
 function apiProxy() {
   return {
     target: 'http://127.0.0.1:8080',
@@ -37,12 +44,12 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    allowedHosts: ['hal0.thinmint.dev', 'ai-dev.thinmint.dev', 'localhost', '127.0.0.1', '10.0.1.141', '10.0.1.142'],
-    hmr: {
-      host: 'hal0.thinmint.dev',
-      protocol: 'wss',
-      clientPort: 443,
-    },
+    allowedHosts,
+    // HMR over WSS is only needed when the dev server is reached through a
+    // TLS-terminating reverse proxy; set VITE_HMR_HOST to enable it.
+    ...(hmrHost
+      ? { hmr: { host: hmrHost, protocol: 'wss', clientPort: 443 } }
+      : {}),
     proxy: {
       '/api': apiProxy(),
       '/v1': apiProxy(),
