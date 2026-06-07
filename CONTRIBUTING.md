@@ -2,17 +2,42 @@
 
 hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.2.0** — the
 Lemonade Server adoption release. The contribution model is still
-being decided (see [`PLAN.md`](./PLAN.md) §16). External PRs aren't
-being merged yet; please open issues for discussion.
+being decided (see [`PLAN.md`](./PLAN.md) §16).
+<!-- TODO(human): flip the next line to open the external-PR merge window
+     when ready (audit Q6.3 / #630). Timing is the maintainer's call. -->
+External PRs aren't being merged yet; please open issues for discussion.
 
 When the model opens up, the shape will be:
 
+- **Sign off every commit** — `git commit -s` (Developer Certificate of
+  Origin; see [below](#developer-certificate-of-origin-dco))
 - One PR per feature; small, reviewable diffs
 - Run `make lint test` before pushing
 - Update `PLAN.md` if your change moves the v0.1 scope
 - Slot/dispatcher/provider changes require both unit and integration
   tests (Tier-1 reliability is non-negotiable)
 - UI changes need Playwright coverage for any new critical path
+
+## Developer Certificate of Origin (DCO)
+
+hal0 uses the [Developer Certificate of Origin](https://developercertificate.org/)
+(DCO) — **not** a CLA. The DCO is a lightweight per-commit attestation
+that you wrote the patch or otherwise have the right to submit it under
+the project's Apache-2.0 license.
+
+Sign off each commit by adding a `Signed-off-by` trailer with your real
+name and email:
+
+```
+Signed-off-by: Jane Developer <jane@example.com>
+```
+
+`git commit -s` adds this automatically (configure `user.name` /
+`user.email` first). The full text you are certifying is at
+<https://developercertificate.org/>.
+
+> A DCO status check may be enabled on PRs once the external-PR merge
+> window opens; until then, sign-offs are documented but not gated.
 
 ## Test tiers
 
