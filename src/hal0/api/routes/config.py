@@ -62,7 +62,7 @@ def _resolve_host(request: Request) -> str:
     The user reaches the API at whatever hostname/IP they typed into
     their browser — exactly the hostname FastAPI sees in the request
     URL.  Mirroring that means the Chat link works whether the user
-    typed ``http://hal0.local:8080``, ``http://10.0.1.230:8080``, or
+    typed ``http://hal0.local:8080``, ``http://192.0.2.10:8080``, or
     ``http://127.0.0.1:8080``.
 
     Falls back to ``127.0.0.1`` if the request has no hostname (rare —

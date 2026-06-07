@@ -51,7 +51,7 @@ http:
     hal0:
       loadBalancer:
         servers:
-          - url: "http://10.0.1.142:8080"
+          - url: "http://192.0.2.10:8080"
 ```
 
 hal0-api trusts the LAN. No special header wiring is required; the
@@ -72,7 +72,7 @@ server {
     auth_basic_user_file /etc/nginx/.htpasswd;
 
     location / {
-        proxy_pass         http://10.0.1.142:8080;
+        proxy_pass         http://192.0.2.10:8080;
         proxy_set_header   Host $host;
         proxy_set_header   X-Real-IP $remote_addr;
         proxy_set_header   Upgrade $http_upgrade;

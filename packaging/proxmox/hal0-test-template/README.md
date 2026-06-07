@@ -18,7 +18,7 @@ A vanilla **Ubuntu 24.04** LXC (VMID **200**, `hal0-test-template`) with:
   otherwise (see memory `dreamserver_ct108_eval`)
 - `hal0-test-ready.service` — a per-boot oneshot that writes
   `/tmp/hal0-test-ready` so the harness knows a clone is up
-- LAN nameserver (`10.0.1.1 10.0.1.200`) — the pve host's resolv.conf points at
+- LAN nameserver (`192.0.2.1 192.0.2.2`) — the pve host's resolv.conf points at
   a Tailscale resolver (`100.100.100.100`) that does **not** work inside the CT
 
 No `mp0` model mount: bind mounts can't be templated, and the install/uninstall
@@ -35,7 +35,7 @@ pct create 200 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --unprivileged 0 --onboot 0
 # append the passthrough block (dev0-3 + cgroup allows + memlock + apparmor)
 # — copy the lines from /etc/pve/lxc/105.conf (minus the mp* mounts)
-pct set 200 --nameserver "10.0.1.1 10.0.1.200" --searchdomain thinmint.dev
+pct set 200 --nameserver "192.0.2.1 192.0.2.2" --searchdomain thinmint.dev
 pct start 200
 # provision (this dir): pct push provision.sh + hal0-test-ready.service + a
 # pubkey file, then `pct exec 200 -- bash /root/provision.sh`

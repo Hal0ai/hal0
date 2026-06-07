@@ -826,9 +826,9 @@ land directly.
 
 The δ-tier has been driven on both hosts:
 
-- **hal0-dev** (10.0.1.141, CUDA dev VM) — baseline run 2026-05-15:
+- **hal0-dev** (192.0.2.11, CUDA dev VM) — baseline run 2026-05-15:
   24 pass / 2 fail / 10 skip / 5 deferred across 41 rows.
-- **hal0-test** LXC (10.0.1.230, Strix Halo iGPU + NPU) — run
+- **hal0-test** LXC (192.0.2.10, Strix Halo iGPU + NPU) — run
   2026-05-16: 33 / 1 / 5 / 2 across 41 rows. Same run drove three
   additional probes against the live prod install: **62 distinct
   API route × method tuples** (9/9 auth-error contract probes pass),
@@ -847,9 +847,9 @@ Vulkan combinations CI can't cover.
 
 ### Three boxes, three jobs
 
-- **hal0ai** (10.0.1.141, this VM, RTX 4080): code lives here. IDE, fish shell, local toolchain. Backend logic + UI dev + installer scripting. Vulkan / CUDA dev for non-NPU paths
-- **hal0-test** (new Proxmox LXC, 10.0.1.221 or similar, Strix Halo passthrough): **installer QA target**. Wiped between release candidates. Every RC runs through `wipe → install → smoke test`. Also exercises NPU + ROCm paths that CI can't
-- **haloai** (10.0.1.220, existing): untouched until v1 cuts over. Continues running haloai + Hermes + your daily slots
+- **hal0ai** (192.0.2.11, this VM, RTX 4080): code lives here. IDE, fish shell, local toolchain. Backend logic + UI dev + installer scripting. Vulkan / CUDA dev for non-NPU paths
+- **hal0-test** (new Proxmox LXC, 192.0.2.12 or similar, Strix Halo passthrough): **installer QA target**. Wiped between release candidates. Every RC runs through `wipe → install → smoke test`. Also exercises NPU + ROCm paths that CI can't
+- **haloai** (192.0.2.13, existing): untouched until v1 cuts over. Continues running haloai + Hermes + your daily slots
 
 ### Cutover (post-v1.0)
 

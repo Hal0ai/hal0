@@ -11,7 +11,7 @@ catalog, ~0.6 GB of real-copy duplicates, one broken registry pointer) and harde
 pull path so catalog drift cannot silently recur.
 
 **Architecture:** Two parts. **Part A** is one-time *operational* cleanup run on the
-shared runtime CT 105 (10.0.1.142) — no code changes, just `hal0` CLI + filesystem ops
+shared runtime CT 105 (192.0.2.10) — no code changes, just `hal0` CLI + filesystem ops
 with verify-first discipline. **Part B** is a *code* change in the hal0 repo (developed
 in a worktree on hal0-dev, PR'd, then deployed): a centralized post-mutation hook so any
 registry write regenerates `server_models.json`, plus a `--check` drift guard for

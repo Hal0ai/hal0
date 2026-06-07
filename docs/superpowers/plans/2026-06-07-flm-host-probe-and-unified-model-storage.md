@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: `superpowers:executing-plans` (review
 > checkpoints) — this plan moves ~29 GB of model weights on a **live shared runtime**
-> (CT 105, 10.0.1.142). Steps use `- [ ]` for tracking. **No data moves before the
+> (CT 105, 192.0.2.10). Steps use `- [ ]` for tracking. **No data moves before the
 > owner approves this doc.** Migration is strictly **copy → verify → swap** (never `mv`).
 >
 > **On execution, this file is already at**

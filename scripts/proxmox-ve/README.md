@@ -61,7 +61,7 @@ Example — pinned CTID, static IP, no cosign:
 ```bash
 CTID=210 \
 HOSTNAME=hal0-test \
-NET_CONFIG="name=eth0,bridge=vmbr0,ip=10.0.1.150/24,gw=10.0.1.1" \
+NET_CONFIG="name=eth0,bridge=vmbr0,ip=192.0.2.50/24,gw=192.0.2.1" \
 INSTALL_COSIGN=0 \
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
 ```

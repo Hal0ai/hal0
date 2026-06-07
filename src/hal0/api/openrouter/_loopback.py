@@ -29,7 +29,7 @@ from fastapi import HTTPException, Request, status
 # IPv4 + IPv6 loopback literals, plus the textual ``localhost`` form
 # that some browsers / OS resolvers still hand to ASGI servers when the
 # DNS entry resolves to 127.0.0.1. Anything else is treated as
-# untrusted — including private RFC1918 LAN ranges such as 10.0.1.0/24.
+# untrusted — including private RFC1918 LAN ranges such as 10.0.0.0/8.
 _LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
