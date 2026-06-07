@@ -1877,29 +1877,4 @@ SUMMARY_LINES+=(
     "$(printf '  %shal0 config show%s    inspect %s/hal0.toml' "${BOLD}" "${RST}" "${ETC_DIR}")"
 )
 
-# --dev mode caveat — systemd units were written into the dev tree, not
-# /etc/systemd/system, so the host's systemctl does not see them. The
-# `hal0 slot create && hal0 slot load` flow will fail with "Unit
-# hal0-slot@<name>.service not found" until the operator either runs a
-# real (sudo) install or links the dev units into the system search
-# path. Documented at installer/README.md ("--dev mode limitations").
-# Tracked as harness finding #6 / task #24.
-if [[ "${DEV_MODE}" -eq 1 ]]; then
-    printf '\n'
-    warn "--dev mode: systemd units written to ${UNIT_DIR}"
-    warn "            (not /etc/systemd/system — host systemctl can't see them)"
-    warn ""
-    warn "  Consequence: 'hal0 slot load' will fail with"
-    warn "    'Unit hal0-slot@<name>.service not found'"
-    warn "  because the host's systemctl only consults /etc/systemd/system"
-    warn "  and /usr/lib/systemd/system."
-    warn ""
-    warn "  Workarounds:"
-    warn "    (a) sudo bash installer/install.sh        # real install at /opt/hal0"
-    warn "    (b) sudo systemctl link ${UNIT_DIR}/hal0-slot@.service"
-    warn "        sudo systemctl daemon-reload          # then slot load works"
-    warn ""
-    warn "  See installer/README.md ('--dev mode limitations') for details."
-fi
-
 ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"

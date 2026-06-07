@@ -204,7 +204,6 @@ for UNIT_FILE in \
     "${UNIT_DIR}/hal0-api.service" \
     "${UNIT_DIR}/hal0-openwebui.service" \
     "${UNIT_DIR}/hal0-caddy.service" \
-    "${UNIT_DIR}/hal0-slot@.service" \
     "${UNIT_DIR}/hal0-lemonade.service" \
     "${UNIT_DIR}/hal0-agent@.service" \
     "${UNIT_DIR}/hermes-gateway.service"

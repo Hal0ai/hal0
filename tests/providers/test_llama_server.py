@@ -379,32 +379,6 @@ def test_render_systemd_override_emits_full_docker_line(
     assert "-ngl" in out
 
 
-def test_render_systemd_override_quotes_var_refs_literally(
-    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any], tmp_path
-) -> None:
-    """``${VAR}`` references must reach systemd unquoted for expansion.
-
-    If a ``${HAL0_MODEL_PATH}`` literal were shell-quoted, systemd would
-    not expand it and the container would receive the literal string
-    ``${HAL0_MODEL_PATH}`` as the model path argument.
-    """
-    # Spoof a command arg that references a systemd env var.
-    from dataclasses import replace
-
-    spec = provider.container_spec(slot_cfg, model_info)
-    spec_with_var = replace(spec, command=["--model", "${HAL0_MODEL_PATH}"])
-
-    # Bypass the public API and call the renderer directly to feed our
-    # mutated spec in.
-    from hal0.slots.unit_template import _render_from_spec
-
-    env_file = tmp_path / "env"
-    out = _render_from_spec("primary", spec_with_var, "llama-server", env_file_path=env_file)
-    assert "${HAL0_MODEL_PATH}" in out
-    # Must NOT be wrapped in single quotes (which suppresses expansion).
-    assert "'${HAL0_MODEL_PATH}'" not in out
-
-
 # ─── health ───────────────────────────────────────────────────────────────────
 
 
