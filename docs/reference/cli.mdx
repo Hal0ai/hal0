@@ -37,6 +37,10 @@ hal0 slot unload <name>
 hal0 slot restart <name>
 hal0 slot swap <name> --model M
 hal0 slot logs <name> [--follow]             # SSE tail of journald
+hal0 slot create <name> --backend B          # create a new slot
+hal0 slot edit <name>                        # open slot TOML in $EDITOR
+hal0 slot show <name>                        # print slot config + state
+hal0 slot delete <name>                      # remove slot permanently
 ```
 
 `hal0 slot swap` is the most-used command in normal operation. It
@@ -46,11 +50,16 @@ through `unloading → starting → warming → ready`.
 `hal0 slot logs <name> --follow` is the journald tail wrapped over
 SSE; it shows the same stream the dashboard's Logs view tails.
 
+`slot add` / `slot remove` still work as deprecated aliases for
+`slot create` / `slot delete` but will be removed in a future release.
+
 ## Models
 
 ```sh
 hal0 model list
 hal0 model pull <ref>                        # HF streaming pull
+hal0 model register <ref>                    # register a local GGUF
+hal0 model show <ref>                        # print model metadata
 hal0 model rm <ref>
 hal0 model assign <ref> --slot S
 ```
@@ -76,11 +85,92 @@ hal0 config show
 hal0 config edit                             # opens $EDITOR
 hal0 config validate                         # schema check
 hal0 config migrate                          # apply schema migrations
+hal0 config reload                           # reload daemon config without restart
+hal0 config hardware                         # print detected hardware profile
 ```
 
 `hal0 config validate` is safe to run at any time and doesn't write
 anything. Use it before `hal0 config edit` to confirm your starting
 point is clean.
+
+`hal0 config hardware` shows the same hardware profile that `hal0 probe`
+writes — useful for a read-only check without triggering a re-detection.
+
+## Agents
+
+```sh
+hal0 agent install <name>                    # provision an agent
+hal0 agent uninstall <name>                  # remove an agent
+hal0 agent list                              # list installed agents
+hal0 agent status <name>                     # show agent state
+hal0 agent log <name>                        # tail agent logs
+hal0 agent upgrade <name>                    # upgrade agent to latest
+hal0 agent reprovision <name>                # re-run provisioning
+hal0 agent peers                             # list peer agents in the mesh
+```
+
+### Agent approvals
+
+```sh
+hal0 agent approvals list                    # pending action approvals
+hal0 agent approvals approve <id>            # approve a pending action
+hal0 agent approvals deny <id>              # deny a pending action
+```
+
+### Agent bootstrap
+
+```sh
+hal0 agent bootstrap hermes                  # bootstrap the Hermes agent
+```
+
+### Agent personas
+
+```sh
+hal0 agent personas list                     # list available personas
+hal0 agent personas show <name>              # show persona definition
+hal0 agent personas activate <name>          # set active persona
+```
+
+## Capabilities
+
+```sh
+hal0 capabilities migrate                    # migrate capabilities config format
+hal0 capabilities migrate-to-lemonade        # migrate slot backends to Lemonade
+hal0 capabilities sync                       # sync capabilities with running daemon
+```
+
+## Registry
+
+```sh
+hal0 registry import <file>                  # import a registry backup
+```
+
+## Memory
+
+```sh
+hal0 memory migrate                          # migrate memory store format
+```
+
+### Memory graph
+
+```sh
+hal0 memory graph status                     # show knowledge-graph state
+hal0 memory graph enable                     # enable the knowledge graph
+hal0 memory graph disable                    # disable the knowledge graph
+```
+
+## Migrate
+
+```sh
+hal0 migrate model-layout                    # migrate model store to canonical layout
+```
+
+## Doctor
+
+```sh
+hal0 doctor                                  # run preflight health checks
+hal0 doctor toolbox-pull                     # pull latest inference toolbox images
+```
 
 ## Updates
 
