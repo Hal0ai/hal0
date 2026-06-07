@@ -431,6 +431,7 @@ async def test_decision_logging_runs_on_every_resolution() -> None:
         # Provide is_online + cached_models so the slot appears online and the
         # registry path emits a dispatch.decision log before returning.
         models = FakeModelRegistry(routes={"anything": "primary"})
+
         async def _always_online(_u: Any) -> bool:
             return True
 

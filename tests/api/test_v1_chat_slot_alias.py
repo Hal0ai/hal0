@@ -167,7 +167,6 @@ async def test_rewrite_is_noop_without_slot_manager() -> None:
     assert body["model"] == "primary"
 
 
-
 def _patch_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake(_sm: Any) -> dict[str, str]:
         return {
