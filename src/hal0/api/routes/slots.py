@@ -119,14 +119,6 @@ def _slot_to_dict(slot: Slot, request: Request | None = None) -> dict[str, Any]:
     return base
 
 
-#: Slot names that form the NPU FLM trio — chat (agent) + ASR (stt-npu)
-#: + embed (embed-npu) coresident in one FLM process (ADR-0008 §5,
-#: ADR-0009, plan §5.2). All three back the same FLM child process when
-#: the NPU LLM slot is loaded with ``--asr 1 --embed 1``. The dashboard
-#: surfaces them with a shared ``coresident_group`` so the UI can render
-#: them as a trio rather than three independent slots.
-_FLM_TRIO_SLOTS: frozenset[str] = frozenset({"agent", "stt-npu", "embed-npu"})
-
 #: Trigger substring for the nuclear-evict log line. lemond emits this
 #: on the lone ``/v1/load`` path where the error isn't a "not found"
 #: variant — the evict-all blast radius fires. Per ADR-0008 §3 we
@@ -313,11 +305,13 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
             # ``status`` for the dot, ``lemonade_state`` for the chip.
             entry["lemonade_state"] = "idle"
 
-        # Coresident grouping — the FLM trio is hardcoded. A trio slot
-        # only gets the group marker when (a) the NPU LLM anchor is
-        # enabled and (b) THIS slot is enabled too — disabled siblings
-        # don't claim trio membership.
-        if name in _FLM_TRIO_SLOTS and trio_active and enabled:
+        # Coresident grouping — every device=npu slot (anchor + stt/embed
+        # shadows) backs the same FLM process, so they share a group marker.
+        # Keyed on device, NOT slot name: deployment renamed the trio to
+        # npu/stt/embed, so the old name-based set never matched in prod. A
+        # slot only joins when (a) the NPU LLM anchor is enabled and (b) THIS
+        # slot is enabled — disabled siblings don't claim membership.
+        if cfg.get("device") == "npu" and trio_active and enabled:
             entry["coresident_group"] = "npu-flm-trio"
 
         out[name] = entry

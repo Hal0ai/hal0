@@ -176,6 +176,22 @@ class Slot:
         }
 
 
+def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
+    """True if *cfg* is an NPU FLM trio **shadow** (stt/embed), not the anchor.
+
+    The NPU runs a single FLM process — the chat anchor (``device=npu
+    type=llm``) — which also serves transcription/embedding when lemond is
+    started with lemond-global ``--asr/--embed``. The ``stt``/``embed`` slots
+    are therefore *shadows*: served by the anchor's process and NOT
+    independently loadable. Issuing a standalone ``/v1/load`` for them on the
+    busy single-tenant NPU returns HTTP 500, so callers skip the spawn and
+    derive their state from the anchor. The anchor itself (``type=llm``) is
+    deliberately excluded.
+    """
+    d = _cfg_to_dict(cfg)
+    return d.get("device") == "npu" and d.get("type") in ("transcription", "embedding")
+
+
 # ── Manager ──────────────────────────────────────────────────────────────────
 
 
@@ -619,6 +635,26 @@ class SlotManager:
                     SlotState.OFFLINE,
                     port=_cfg_port(cfg),
                     message="no default model — pick one from the dropdown",
+                    force=True,
+                )
+                return await self.status(slot_name)
+
+            # NPU FLM trio shadow (stt/embed, device=npu): the chat anchor's
+            # single FLM process serves these via lemond-global --asr/--embed.
+            # They are NOT independently loadable — a standalone /v1/load on the
+            # busy single-tenant NPU returns HTTP 500. Treat as a read-only
+            # shadow of the anchor: skip both the spawn and the readiness probe
+            # (which targets this slot's own — non-existent — child port) and
+            # mark READY. The /api/slots enrichment derives the live shadow
+            # state from the anchor; trio inference requests are routed to the
+            # anchor's FLM process by the dispatcher, not to this slot's port.
+            if is_npu_trio_shadow(cfg):
+                await self._transition(
+                    slot_name,
+                    SlotState.READY,
+                    model_id=resolved_model,
+                    port=_cfg_port(cfg),
+                    message="served by NPU FLM anchor (trio shadow)",
                     force=True,
                 )
                 return await self.status(slot_name)

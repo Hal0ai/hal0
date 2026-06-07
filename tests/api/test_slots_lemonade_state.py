@@ -214,6 +214,66 @@ def test_list_slots_emits_coresident_group_for_npu_trio(
         )
 
 
+def test_list_slots_coresident_group_uses_device_not_legacy_names(
+    tmp_hal0_home: str,
+    installed_lemonade_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """coresident_group must key off device==npu, not the legacy slot names.
+
+    Deployment uses the real names ``npu``/``stt``/``embed`` (not the seed
+    names ``agent``/``stt-npu``/``embed-npu``). The dead ``_FLM_TRIO_SLOTS``
+    frozenset only matched the seed names, so the trio badge never rendered
+    in production. Device-based detection fixes that.
+    """
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "npu",
+        [
+            'name = "npu"',
+            "port = 8082",
+            'device = "npu"',
+            'type = "llm"',
+            "enabled = true",
+            "[model]",
+            'default = "gemma3-4b-FLM"',
+        ],
+    )
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "stt",
+        [
+            'name = "stt"',
+            "port = 8084",
+            'device = "npu"',
+            'type = "transcription"',
+            "enabled = true",
+            "[model]",
+            'default = "whisper-v3"',
+        ],
+    )
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "embed",
+        [
+            'name = "embed"',
+            "port = 8085",
+            'device = "npu"',
+            'type = "embedding"',
+            "enabled = true",
+            "[model]",
+            'default = "embed-gemma"',
+        ],
+    )
+    installed_lemonade_stub["loaded"] = [{"model_name": "gemma3-4b-FLM"}]
+    r = isolated_client.get("/api/slots")
+    by_name = {e["name"]: e for e in r.json()}
+    for slot_name in ("npu", "stt", "embed"):
+        assert by_name[slot_name].get("coresident_group") == "npu-flm-trio", (
+            f"slot {slot_name} missing coresident_group: {by_name[slot_name]}"
+        )
+
+
 def test_list_slots_no_coresident_group_when_npu_anchor_disabled(
     tmp_hal0_home: str,
     installed_lemonade_stub: dict[str, Any],
