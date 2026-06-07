@@ -93,6 +93,13 @@ auth.json
 docs/handoff-*.md
 tests/release-gate-report.json
 
+# Internal lab docs (topology, ADRs, codebase audits, brain-redesign notes) —
+# local-only; kept out of public history so no IP scrubbing is needed.
+docs/internal/
+
+# knowledge graph JSON outputs — local-only, regenerated + served to Hermes
+graphify-out/*.json
+
 # OS
 Thumbs.db
 .claude/worktrees/
