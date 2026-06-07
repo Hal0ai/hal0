@@ -25,10 +25,8 @@ Out of scope (handled elsewhere or deferred):
     existing ``lemonade_logs`` router already proxies /logs/stream → SSE
     under ``/api/lemonade/logs/stream``; a generic /v1 WS proxy is
     deferred to a follow-up issue.
-  - Auth: the catch-all sits behind the same ``require_token`` gate the
-    rest of the /v1 inference surface uses (mounted with ``_v1_auth``
-    dependencies in :mod:`hal0.api`). Lemonade itself binds loopback
-    only — anyone reaching this proxy already crossed hal0-api's gate.
+  - Auth: removed in ADR-0012. Lemonade itself binds loopback only —
+    this proxy is open on the local network.
 """
 
 from __future__ import annotations

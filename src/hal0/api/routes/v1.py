@@ -38,9 +38,8 @@ from hal0.api.deps import DispatcherDep
 
 log = structlog.get_logger("hal0-v1")
 
-# Inference router — auth-required. Mounted by hal0.api.create_app() with
-# Depends(require_token) so /v1/chat/completions, /v1/embeddings, the
-# audio + image endpoints, etc. all gate on a valid credential.
+# Inference router. Mounted by hal0.api.create_app() on /v1.
+# Auth was removed in ADR-0012; the server is open on the local network.
 router = APIRouter()
 
 # Public probe router — auth-free. Mounted on the same /v1 prefix.

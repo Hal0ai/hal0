@@ -11,9 +11,9 @@ This module fixes that for the chat-proxy WebSocket routes by:
 
 1. Origin allowlist on every WS upgrade. Configured via
    ``HAL0_ALLOWED_ORIGINS`` (comma-separated). Default covers the
-   thinmint.dev vhost, the hal0.local hostname, and dev origins
-   (``localhost:5173`` for Vite, ``127.0.0.1:8080`` for the bundled
-   SPA). The check is FREE; missing it leaves the rest of this scheme
+   hal0.local hostname and dev origins (``localhost:5173`` for Vite,
+   ``127.0.0.1:8080`` for the bundled SPA). The check is FREE; missing
+   it leaves the rest of this scheme
    moot because any drive-by site could WebSocket into hal0-api from
    the user's own browser session.
 
@@ -53,12 +53,10 @@ from starlette.websockets import WebSocket
 # Default-deny set of browser origins permitted to upgrade to chat-proxy
 # WebSockets. Operators can override at boot via ``HAL0_ALLOWED_ORIGINS``
 # (comma-separated). The default covers:
-#   - https://hal0.thinmint.dev — Traefik vhost on the LAN gateway
 #   - http://hal0.local         — mDNS / hosts-file alias
 #   - http://localhost:5173     — Vite dev server (UI hot-reload)
 #   - http://127.0.0.1:8080     — bundled SPA served from hal0-api
 DEFAULT_ALLOWED_ORIGINS: Final[tuple[str, ...]] = (
-    "https://hal0.thinmint.dev",
     "http://hal0.local",
     "http://localhost:5173",
     "http://127.0.0.1:8080",

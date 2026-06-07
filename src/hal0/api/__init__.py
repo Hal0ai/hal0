@@ -1213,13 +1213,9 @@ def create_app() -> FastAPI:
         tags=["v1", "lemonade-proxy"],
     )
 
-    # /api/install drives the first-run wizard. When HAL0_AUTH_ENABLED is
-    # unset, the gate is a pure pass-through (require_token short-circuits
-    # to an anonymous identity), so the wizard still works on a fresh
-    # install with no password set — see FINDINGS §29. Once auth is
-    # enabled, every install endpoint requires a valid identity; mutating
-    # endpoints additionally declare Depends(require_writer) at the route
-    # level (matches the #11 admin-router pattern).
+    # /api/install drives the first-run wizard. Auth was removed in ADR-0012
+    # so these endpoints are open; the installer surface is admin-only by
+    # convention (network-level access control).
     app.include_router(
         installer.router,
         prefix="/api/install",
@@ -1247,9 +1243,8 @@ def create_app() -> FastAPI:
     # PR-13: Lemonade admin panel — GET /api/lemonade/config + POST
     # /api/lemonade/config wrap lemond's /internal/config + /internal/set
     # so the Settings → Lemonade admin panel can read + edit runtime
-    # config without bypassing hal0's auth. Same admin gate as the log
-    # proxy; POST additionally declares require_writer at the route
-    # level so cookie sessions ride the CSRF tripwire.
+    # config. Auth removed in ADR-0012; access is open on the local
+    # network.
     app.include_router(
         lemonade_admin_routes.router,
         prefix="/api/lemonade",
@@ -1327,10 +1322,8 @@ def create_app() -> FastAPI:
     )
 
     # Health + config/urls routers carry endpoints that are entirely
-    # public (e.g. /api/status, /api/config/urls). Any future protected
-    # endpoints added to these routers should declare
-    # Depends(require_token) at the function level so the publicness of
-    # the rest is declared by absence rather than by allowlist.
+    # public (e.g. /api/status, /api/config/urls). Auth was removed in
+    # ADR-0012; all endpoints on this server are open on the local network.
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
 

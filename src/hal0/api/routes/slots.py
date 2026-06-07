@@ -35,10 +35,7 @@ from fastapi.responses import StreamingResponse
 from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
 from hal0.slots.manager import Slot, SlotManager
 
-# Reusable writer-scope gate applied per-route on every POST/PUT/PATCH/DELETE.
-# The router itself is mounted with require_token at include_router() time
-# (see hal0.api.create_app), which keeps GETs open to read-only tokens
-# while these per-route deps enforce the writer scope on mutations.
+# Auth was removed in ADR-0012. All routes are open on the local network.
 
 router = APIRouter()
 

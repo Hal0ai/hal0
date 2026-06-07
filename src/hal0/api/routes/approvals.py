@@ -23,12 +23,8 @@ queue mutates.
 Auth
 ----
 
-Mounted under ``Depends(require_writer)`` by the API factory — only
-admin / all scoped credentials can approve. GETs go through
-``require_token`` so a read-only token can observe the inbox. The
-writer enforcement on POST happens at include-router time in the
-orchestrator's wiring; this module declares no auth dependency itself
-so the orchestrator can choose the right gate per ADR-0004 §5.
+Auth was removed in ADR-0012 — all routes here are open on the local
+network. This module declares no auth dependency itself.
 """
 
 from __future__ import annotations
@@ -47,12 +43,8 @@ from hal0.mcp.approval_queue import ApprovalQueue
 
 router = APIRouter()
 
-# Writer-scope gate for mutating approval routes. Per security review
-# HIGH-1: read-only Bearer tokens must NOT be able to approve gated
-# tool calls — that would defeat the destructive-allow-list policy
-# of ADR-0004 §5. POST /approve and POST /deny carry this dep
-# explicitly; GETs (list + SSE) keep the looser require_token gate
-# applied by the include_router prefix in the API factory.
+# Auth was removed in ADR-0012. POST /approve and POST /deny are
+# unrestricted on the local network; access control is LAN-only.
 
 
 # SSE keep-alive cadence — matches /api/events to keep the proxy

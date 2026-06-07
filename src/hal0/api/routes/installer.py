@@ -42,13 +42,8 @@ from hal0.registry.model import Model
 from hal0.registry.pull import make_job, run_pull
 from hal0.registry.store import ModelAlreadyExists
 
-# Reusable writer-scope gate, applied per-route on every mutating endpoint
-# (POST /probe, POST /complete, POST /pick-default, PUT /slots/{slot}/model).
-# The router itself is mounted with require_token at include_router() time
-# (see hal0.api.create_app), which keeps GETs open to any valid identity
-# while these per-route deps enforce the writer scope on mutations. Both
-# gates short-circuit to a pass-through when HAL0_AUTH_ENABLED is unset,
-# preserving the fresh-install / first-run wizard UX.
+# Auth was removed in ADR-0012. All endpoints are open on the local
+# network; the first-run wizard runs without any credential.
 
 # Slot-name policy — mirrors ``SlotConfig.name`` in hal0.config.schema so a
 # slot name accepted by the API installer endpoints is also accepted by the

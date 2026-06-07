@@ -213,8 +213,9 @@ class CogneeWrapper(MemoryProvider):
 
         :param cognee_dir: Where Cognee stores its SQLite + LanceDB +
             Kuzu files. Created if missing.
-        :param client_id: Identity extracted from the Bearer token by
-            the caller (see ``hal0.api.middleware.auth.AuthIdentity``).
+        :param client_id: Caller identity string (e.g. extracted from
+            ``X-hal0-Agent`` or set to ``"anonymous"`` for unauthenticated
+            requests; auth was removed in ADR-0012).
             Stamped onto every audit-log event and into the ``source``
             field of every add.
         :param private_mode: When True, the wrapper writes to

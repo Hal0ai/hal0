@@ -16,12 +16,7 @@ for the Settings → Lemonade admin panel. Two routes:
                                     are deferred until next load — the UI
                                     surfaces this in the success toast.
 
-Both routes are admin-gated by the parent ``_admin_auth`` dependency
-applied at ``include_router`` time (see :mod:`hal0.api.__init__`), so we
-don't redeclare auth here. Read is GET; the mutating route is also
-gated by ``require_writer`` so a cookie-based session needs CSRF in
-addition to the admin scope — matching the pattern in
-``/api/settings``.
+Auth was removed in ADR-0012. Both routes are open on the local network.
 
 Validation guardrails (plan §11 PR-13 brief + ADR-0008 §3 + §7):
 
@@ -55,9 +50,7 @@ from hal0.lemonade.client import flm_args_from_lemond_config, flm_args_set_paylo
 
 router = APIRouter()
 
-# See settings.py for the writer-gate rationale: GET stays on the parent
-# admin gate (require_token), POST additionally requires writer scope so
-# cookie sessions ride through the CSRF tripwire alongside Bearer tokens.
+# Auth was removed in ADR-0012; GET and POST are both open on the local network.
 
 
 # ── key taxonomy (plan §2.2) ──────────────────────────────────────────

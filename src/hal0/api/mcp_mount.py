@@ -2,7 +2,7 @@
 FastAPI app.
 
 Lives here (the orchestrator's package) because every piece it touches —
-the FastAPI ``app``, the ``AuthIdentity`` middleware, the lifespan-scoped
+the FastAPI ``app``, the lifespan-scoped
 :class:`hal0.mcp.approval_queue.ApprovalQueue` — is orchestrator-owned.
 
 The trick the mount needs to solve: FastMCP runs as a sub-ASGI app
