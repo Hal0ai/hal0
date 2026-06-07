@@ -5,7 +5,6 @@ Submodules:
     schema.py     — pydantic v2 models: Hal0Config, SlotConfig, ModelConfig, etc.
     loader.py     — load_hal0_config() / load_slot_config() returning validated models
     env.py        — write_env_atomic(): atomic slot env file writer (Tier 1 fix)
-    features.py   — FeatureFlags: read/write [features] in hal0.toml
     migrations/   — versioned TOML migration transforms (Phase 5)
 
 Port target: haloai lib/config.py (420 lines), lib/env_manager.py, lib/features.py,
