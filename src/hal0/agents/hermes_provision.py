@@ -1420,6 +1420,10 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
         "primary": primary_for_template,
         "chat_slots": chat_slots,
         "peer_agents": [],
+        "dashboard_url": os.environ.get(
+            "HAL0_DASHBOARD_URL",
+            os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
+        ),
     }
 
     rendered: dict[str, str] = {}
@@ -2020,7 +2024,10 @@ def render_live_context(
         "capabilities": capabilities,
         "npu": npu,
         "igpu_sclk_mhz": _igpu_sclk_mhz(),
-        "dashboard_url": os.environ.get("HAL0_DASHBOARD_URL", "https://hal0.thinmint.dev"),
+        "dashboard_url": os.environ.get(
+            "HAL0_DASHBOARD_URL",
+            os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
+        ),
         "lemonade_base": os.environ.get("HAL0_LEMONADE_BASE", "http://127.0.0.1:13305"),
         "daemon": "degraded" if degraded else "reachable",
         "as_of": now,
@@ -2072,6 +2079,10 @@ def render_live_context(
             primary=primary_for_template,
             chat_slots=chat_slots,
             peer_agents=[],
+            dashboard_url=os.environ.get(
+                "HAL0_DASHBOARD_URL",
+                os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
+            ),
         )
         hpath = ETC_HAL0_DIR / "HERMES.md"
         if not hpath.exists() or hpath.read_text(encoding="utf-8") != hermes_md:
