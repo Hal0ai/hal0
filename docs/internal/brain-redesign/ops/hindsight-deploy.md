@@ -87,11 +87,17 @@ Models evaluated live:
 
 Moved extraction to the **NPU** to free the iGPU for the user-facing primary (kills the
 P2-6 eviction risk). Path-finding:
-- `gemma4-it:e2b` AND `gemma4-it:e4b` (NPU) → **BLOCKED**: `DRM_IOCTL_AMDXDNA_CREATE_HWCTX
+- `gemma4-it:e2b` AND `gemma4-it:e4b` (NPU) → ~~**BLOCKED**: `DRM_IOCTL_AMDXDNA_CREATE_HWCTX
   err=-22` ("Alloc hw resource failed"). Both sizes fail identically → Gemma-3n NPU2 arch is
   unsupported by the installed NPU stack (amdxdna `0.7`, NPU FW `1.1.2.65`, FLM `0.9.43`).
-  Needs a host NPU driver/firmware update to enable. ~16GB downloaded + parked at
-  `/var/lib/hal0/.config/flm/models/Gemma4-E{2,4}B-IT-NPU2/` for if/when that happens.
+  Needs a host NPU driver/firmware update to enable.~~ **CORRECTED 2026-06-07 (see PR #605):**
+  this conclusion was WRONG. `gemma4-it:e4b` **loads and serves chat on this exact NPU stack**
+  (no driver/FW update needed) — proven via direct `flm run` + `flm check`. The real blocker is
+  the lemond **trio flags** (`--asr 1 --embed 1`): bisected — trio+any-ctx fails, chat-only
+  loads fine. e4b's vision+audio weights + asr/embed heads overrun the NPU's 8 columns; gemma3-4b
+  tolerated the trio only because it's smaller. e4b chat-only is viable; extraction quality
+  through it is still unproven (the validation retain died on teardown, not on its merits).
+  ~16GB parked at `/var/lib/hal0/.config/flm/models/Gemma4-E{2,4}B-IT-NPU2/`.
 - `gemma3-4b-FLM` (NPU) → **WORKS** ✅. gemma3 arch loads on this NPU. Emits a ```json-fenced
   `{"facts":[...]}`; Hindsight's `fact_extraction` strips the fence + parses. Live retain+recall
   green (2 on-topic facts, with temporal/entity enrichment).
