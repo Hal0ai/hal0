@@ -70,6 +70,9 @@ class _OfflineSlotManager:
     def __init__(self) -> None:
         self.serving_calls: list[str] = []
 
+    def state(self, _slot_name: str) -> SlotState:
+        return SlotState.OFFLINE
+
     def _current_state(self, _slot_name: str) -> SlotState:
         return SlotState.OFFLINE
 

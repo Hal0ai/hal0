@@ -1,11 +1,10 @@
 """Unit tests for ``hal0.dispatcher.router.Dispatcher``.
 
-Covers all four resolution paths from PLAN.md §3:
+Covers all three resolution paths from PLAN.md §3 (#624 retired Tier-4):
 
     1. registry            — exact ModelRegistry binding
     2. passthrough         — upstream's cached /v1/models already has the id
     3. cold-cache prefetch — fanout + recheck (Tier 2 timeout + Tier 3 single-flight)
-    4. legacy fallback     — path/name heuristics in proxy.py
 
 Plus the structured-envelope assertions for every ``dispatch.*`` error code
 (PLAN.md §5 Tier 1 — no silent swallowing).
@@ -23,7 +22,6 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from hal0.api.middleware import error_codes
-from hal0.dispatcher.proxy import LegacyResolutionFailed
 from hal0.dispatcher.router import (
     Dispatcher,
     NoRouteFound,
@@ -265,42 +263,49 @@ async def test_prefetch_respects_configurable_timeout() -> None:
     assert exc.value.code == "dispatch.no_route"
 
 
-# ── 4. legacy fallback path ──────────────────────────────────────────────────
+# ── 4. NoRouteFound when all three tiers miss (#624 retired legacy fallback) ──
 
 
 @pytest.mark.asyncio
-async def test_legacy_fallback_routes_to_primary_when_nothing_else_matches() -> None:
+async def test_no_route_when_nothing_matches_any_tier() -> None:
+    """When registry has no binding and no upstream advertises the model,
+    NoRouteFound is raised immediately (Tier-4 legacy fallback was retired in #624).
+    """
     primary = make_slot("primary")
     upstreams = FakeUpstreamRegistry([primary])
     models = FakeModelRegistry(routes={})  # no binding
 
     dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
-    call = await dispatcher.dispatch(
-        make_request(),
-        body={"model": "some-unknown-model"},
-    )
-    assert call.resolution_path == "legacy_slot:primary"
-    assert call.upstream_name == "primary"
+    with pytest.raises(NoRouteFound) as exc:
+        await dispatcher.dispatch(
+            make_request(),
+            body={"model": "some-unknown-model"},
+        )
+    assert exc.value.code == "dispatch.no_route"
 
 
 @pytest.mark.asyncio
-async def test_legacy_fallback_routes_embeddings_to_embed_slot() -> None:
+async def test_no_route_for_embeddings_path_without_registry_binding() -> None:
+    """#624: /embeddings path with no registry binding raises NoRouteFound.
+    Pre-#624 the legacy fallback would have picked the 'embed' slot by
+    path-pin; now the embed model must be in the registry.
+    """
     embed = make_slot("embed", "http://127.0.0.1:8082/v1")
     upstreams = FakeUpstreamRegistry([embed])
-    models = FakeModelRegistry(routes={})
+    models = FakeModelRegistry(routes={})  # no binding, cache empty
 
     dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
-    call = await dispatcher.dispatch(
-        make_request(path="/v1/embeddings"),
-        body={"input": "hello"},
-    )
-    assert call.resolution_path == "legacy_slot:embed"
-    assert call.upstream_name == "embed"
+    with pytest.raises(NoRouteFound) as exc:
+        await dispatcher.dispatch(
+            make_request(path="/v1/embeddings"),
+            body={"input": "hello"},
+        )
+    assert exc.value.code == "dispatch.no_route"
 
 
 @pytest.mark.asyncio
-async def test_legacy_fallback_with_no_primary_raises_typed_no_route() -> None:
-    """When even legacy resolution can't find a slot, raise typed NoRouteFound."""
+async def test_no_route_raises_typed_error_with_no_upstreams() -> None:
+    """NoRouteFound is raised when nothing is registered — same typed error."""
     upstreams = FakeUpstreamRegistry([])  # nothing registered
     models = FakeModelRegistry(routes={})
 
@@ -308,7 +313,6 @@ async def test_legacy_fallback_with_no_primary_raises_typed_no_route() -> None:
     with pytest.raises(NoRouteFound) as exc:
         await dispatcher.dispatch(make_request(), body={"model": "anything"})
     assert exc.value.code == "dispatch.no_route"
-    assert isinstance(exc.value.__cause__, LegacyResolutionFailed)
 
 
 # ── path defaults ────────────────────────────────────────────────────────────
@@ -423,8 +427,19 @@ async def test_decision_logging_runs_on_every_resolution() -> None:
     try:
         primary = make_slot("primary")
         upstreams = FakeUpstreamRegistry([primary])
-        models = FakeModelRegistry(routes={})
-        dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
+        # Give the registry a binding so Tier 1 resolves and fires the log.
+        # Provide is_online + cached_models so the slot appears online and the
+        # registry path emits a dispatch.decision log before returning.
+        models = FakeModelRegistry(routes={"anything": "primary"})
+        async def _always_online(_u: Any) -> bool:
+            return True
+
+        dispatcher = Dispatcher(
+            upstream_registry=upstreams,
+            model_registry=models,
+            is_online=_always_online,
+            cached_models=lambda name: ["anything"] if name == "primary" else [],
+        )
         await dispatcher.dispatch(make_request(), body={"model": "anything"})
     finally:
         # Restore the dispatcher's prior cached bind (if any) before
@@ -445,14 +460,19 @@ class _FakeSlotManager:
     """Minimal SlotManager surface for the forward() lazy-load gate.
 
     Tracks whether ``load`` was called and reports a fixed slot state via
-    ``_current_state`` so we can drive both the cold-miss and already-loaded
-    branches of ``_ensure_slot_loaded_backend_aware``.
+    ``state()`` (the public API introduced in #624) so we can drive both
+    the cold-miss and already-loaded branches of
+    ``_ensure_slot_loaded_backend_aware``.
     """
 
     def __init__(self, state: Any) -> None:
         self._state = state
         self.load_calls: list[str] = []
 
+    def state(self, name: str) -> Any:
+        return self._state
+
+    # Keep the private alias so any lingering internal call doesn't crash.
     def _current_state(self, name: str) -> Any:
         return self._state
 

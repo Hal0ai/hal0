@@ -54,11 +54,16 @@ class _RecordingSlotManager:
     def in_flight_count(self, slot_name: str) -> int:
         return self._counts.get(slot_name, 0)
 
+    def state(self, _slot_name: str) -> SlotState:
+        # Public API introduced in #624 — Dispatcher now calls .state()
+        # instead of ._current_state().  Default READY so the existing
+        # serving-integration tests pass; tests for the gate construct
+        # the mock with the state they want to assert against.
+        return self._state
+
     def _current_state(self, _slot_name: str) -> SlotState:
-        # Mirrors SlotManager._current_state — Dispatcher's swap-window
-        # gate calls this before forwarding.  Default READY so the
-        # existing serving-integration tests pass; tests for the gate
-        # construct the mock with the state they want to assert against.
+        # Keep private alias for internal SlotManager code that still
+        # calls _current_state() directly.
         return self._state
 
     async def recover_evicted_slot(self, slot_name: str) -> None:

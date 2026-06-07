@@ -779,3 +779,40 @@ async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
     assert "context_size = 32768" in cfg_text
     assert "4096" not in cfg_text
     assert "ctx_size = " not in cfg_text
+
+
+# ── SlotManager.state() public API (#624) ────────────────────────────────────
+
+
+def test_state_returns_offline_for_unknown_slot(tmp_hal0_home: str) -> None:
+    """state() returns OFFLINE when no record exists (no file, no cache)."""
+    sm = SlotManager()
+    assert sm.state("nonexistent-slot") == SlotState.OFFLINE
+
+
+async def test_state_returns_current_after_transition(tmp_hal0_home: str) -> None:
+    """state() reflects the slot state after a _transition call."""
+    sm = SlotManager()
+    await sm._transition(
+        "primary",
+        SlotState.IDLE,
+        model_id="qwen3-4b-q4_k_m",
+        port=8081,
+        extra={"backend": "vulkan", "provider": "lemonade"},
+        force=True,
+    )
+    assert sm.state("primary") == SlotState.IDLE
+
+
+async def test_state_agrees_with_current_state(tmp_hal0_home: str) -> None:
+    """state() and _current_state() return the same value (public delegates to private)."""
+    sm = SlotManager()
+    await sm._transition(
+        "primary",
+        SlotState.READY,
+        model_id="qwen3-4b-q4_k_m",
+        port=8081,
+        extra={"backend": "vulkan", "provider": "lemonade"},
+        force=True,
+    )
+    assert sm.state("primary") == sm._current_state("primary")

@@ -304,6 +304,18 @@ class SlotManager:
 
     # ── state machine ────────────────────────────────────────────────────────
 
+    def state(self, name: str) -> SlotState:
+        """Return the current :class:`SlotState` for *name* (public API).
+
+        Reads from the in-memory cache first; falls back to the on-disk
+        ``state.json`` if the slot has not been seen yet this process.
+        Returns :attr:`SlotState.OFFLINE` when no state record exists.
+
+        Use this instead of the private ``_current_state`` — the Dispatcher
+        calls this method; internal manager code uses ``_current_state``.
+        """
+        return self._current_state(name)
+
     def _current_state(self, name: str) -> SlotState:
         rec = self._states.get(name)
         if rec is None:

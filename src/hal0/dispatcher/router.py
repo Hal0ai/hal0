@@ -17,9 +17,10 @@ Resolution order (PLAN.md §3, ported from haloai ``lib/dispatcher.py``):
      Tier 2), then re-check passthrough.  The prefetch fanout is wrapped
      in :class:`SingleFlightGroup` (Tier 3) so 100 concurrent identical
      prefetches share a single upstream call.
-  4. **legacy fallback** — :func:`hal0.dispatcher.proxy.resolve_slot`
-     path-and-name heuristics from haloai ``lib/proxy.py``.  Kept until
-     v0.2.
+
+If all three tiers miss, :class:`NoRouteFound` is raised immediately.
+The legacy path/name heuristics (``dispatcher/proxy.py``) were retired
+in #624 — image-gen and embed models must have explicit registry bindings.
 
 Decision logging: every routing decision emits one structured log line
 to journald with ``SYSLOG_IDENTIFIER=hal0-dispatch`` (PLAN.md §5 Tier 2),
@@ -43,7 +44,6 @@ import httpx
 import structlog
 from fastapi.responses import Response, StreamingResponse
 
-from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
@@ -544,52 +544,13 @@ class Dispatcher:
                     self._log_decision(call, t0, cache_state="prefetched")
                     return call
 
-        # ── Step 4: legacy heuristics ────────────────────────────────────
-        try:  # TIER1 — narrow exception handling; log + re-raise typed errors
-            slot_upstream = resolve_slot(path, body, self._upstreams)
-        except LegacyResolutionFailed as exc:
-            # Bubble the typed error up after logging the decision point.
-            log.warning(
-                "legacy fallback exhausted",
-                model=model_id,
-                path=path,
-                error=exc.message,
-            )
-            raise NoRouteFound(
-                f"model {model_id!r} not found in registry, no upstream advertised it, "
-                f"and legacy slot resolution failed",
-                details={"model": model_id, "path": path, "legacy_error": exc.message},
-            ) from exc
-        except Hal0Error:
-            # Typed errors are caller-meaningful: re-raise unchanged.
-            raise
-        except Exception as exc:  # TIER1 — was: silent swallow at haloai dispatcher.py:291
-            log.warning(
-                "legacy fallback raised unexpectedly",
-                model=model_id,
-                path=path,
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            raise NoRouteFound(
-                f"model {model_id!r}: legacy slot resolution raised {type(exc).__name__}",
-                details={"model": model_id, "path": path, "error": str(exc)},
-            ) from exc
-
-        call = UpstreamCall(
-            upstream_name=slot_upstream.name,
-            target_url=_join_url(slot_upstream.url, path),
-            headers=self._build_headers(request, slot_upstream),
-            body=_remap_model(body, original_model),
-            streaming=streaming,
-            method=method,
-            resolved_model=original_model or model_id,
-            requested_model=original_model,
-            resolution_path=f"legacy_slot:{slot_upstream.name}",
-            slot_name=_slot_name_of(slot_upstream),
+        # Tiers 1-3 exhausted — no route found.  The legacy path/name heuristics
+        # (proxy.resolve_slot) were retired in #624; image-gen and embed models
+        # must have explicit registry bindings.
+        raise NoRouteFound(
+            f"model {model_id!r} not found in registry and no upstream advertised it",
+            details={"model": model_id, "path": path},
         )
-        self._log_decision(call, t0, cache_state="legacy")
-        return call
 
     async def forward(self, call: UpstreamCall) -> Response:
         """Execute the HTTP forward and return a FastAPI Response.
@@ -666,7 +627,7 @@ class Dispatcher:
 
         assert self._slot_manager is not None  # narrowed by forward()
         slot_name = call.slot_name
-        current = self._slot_manager._current_state(slot_name)
+        current = self._slot_manager.state(slot_name)
         if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
             # Model is already loaded under whatever backend it loaded with;
             # nothing to do. (A declared≠actual drift is surfaced by the
@@ -701,7 +662,7 @@ class Dispatcher:
         from hal0.slots.state import SlotState
 
         assert self._slot_manager is not None  # narrowed by caller
-        current = self._slot_manager._current_state(call.slot_name)
+        current = self._slot_manager.state(call.slot_name)
         if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
             return
 

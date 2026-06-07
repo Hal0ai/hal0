@@ -167,38 +167,6 @@ async def test_rewrite_is_noop_without_slot_manager() -> None:
     assert body["model"] == "primary"
 
 
-# ── dispatcher / proxy non-regression ───────────────────────────────────────
-
-
-def test_resolve_slot_primary_still_falls_through_to_lemonade() -> None:
-    """``resolve_slot`` keeps the ``m != "primary"`` carve-out: a chat
-    request that reaches the legacy fallback selects ``primary`` and
-    (absent a real primary slot upstream) raises the typed legacy error,
-    which the dispatcher converts to NoRouteFound → lemonade fall-through.
-    No per-slot chat upstream is matched."""
-    from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
-    from hal0.upstreams.registry import Upstream, UpstreamRegistry
-
-    reg = UpstreamRegistry()
-    # Only the composite hal0 upstream exists (no per-slot chat upstreams).
-    reg.upsert(
-        Upstream(
-            name="hal0",
-            kind="slot",
-            url="http://127.0.0.1:8080/v1",
-            slot_name=None,
-            auth_style="none",
-        )
-    )
-    with pytest.raises(LegacyResolutionFailed):
-        # model id form — not an alias, not a registered slot name → falls
-        # to the "primary" default which has no slot upstream → legacy error.
-        resolve_slot(
-            "/v1/chat/completions",
-            {"model": "hermes-4-14b-q5km", "messages": []},
-            reg,
-        )
-
 
 def _patch_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake(_sm: Any) -> dict[str, str]:

@@ -93,19 +93,39 @@ is no longer valid — primarily for FLM model-tag namespace drift.
   doesn't import HTTP client code, doesn't know about models other than
   via the registry, and doesn't make assumptions about backends beyond
   the provider ABC.
+- **Two orthogonal routing axes — do not conflate them.**
+  - `Dispatcher.dispatch()` is the **transport axis**: given a model id
+    (or path default), it resolves which upstream URL to forward to using
+    three ordered tiers — registry lookup → passthrough on warm caches →
+    cold-cache prefetch.  If all three miss, it raises `NoRouteFound`.
+    It does not know about capability types or slot selection policy.
+  - `SlotManager.route_for_request()` (via `omni_router`) is the
+    **capability axis**: given a capability label (chat / embed / asr /
+    tts / image) it selects *which slot* is the right destination, then
+    calls `dispatch()` for the actual forwarding.  It runs before
+    `dispatch()` and is what multi-modal "omni" requests use to fan out
+    across capability groups.  Do **not** remove or bypass it —
+    `omni_router` / `route_for_request` are verified load-bearing for
+    omni's tool selection and dispatch (ADR-0022).
+  The legacy Tier-4 path/name heuristics (`dispatcher/proxy.py`) that
+  blurred these axes were retired in #624.  Image-gen and embed models
+  must now have explicit registry bindings so `dispatch()` handles them
+  via Tier 1.
 - **Dispatcher is HTTP-only.** It does not start/stop slots. It reads
-  slot status from the slot manager and routes requests. If a slot is
-  offline, it returns a structured error; restarting is a separate API
-  call.
-- **Providers are stateless.** Each provider (`LlamaServerProvider`,
-  `FLMProvider`, `MoonshineProvider`, `KokoroProvider`,
-  `ComfyUIProvider`) is a class with `build_env()`, `start_cmd()`,
-  `health()`, `infer()`. They don't hold connection state, don't manage
-  systemd, and don't share globals. One provider per backend type.
-  `FLMProvider` additionally probes `flm list -j` inside the toolbox
+  slot status from the slot manager (`SlotManager.state()`) and routes
+  requests. If a slot is offline, it returns a structured error;
+  restarting is a separate API call.
+- **Providers are stateless.** Each live provider (`LlamaServerProvider`,
+  `FLMProvider`, `ComfyUIProvider`) is a class with `build_env()`,
+  `start_cmd()`, `health()`, `infer()`. They don't hold connection state,
+  don't manage systemd, and don't share globals. One provider per backend
+  type. `FLMProvider` additionally probes `flm list -j` inside the toolbox
   image to advertise its own model-tag namespace
   (`share/flm/model_list.json`) — it does **not** run arbitrary GGUFs
-  from the registry.
+  from the registry.  `LemonadeProvider` is the primary slot lifecycle
+  driver (v0.2+); `LlamaServerProvider` and `FLMProvider` are retained for
+  Vulkan and NPU slots respectively.  `MoonshineProvider` and
+  `KokoroProvider` were retired in #620 — lemond serves STT/TTS natively.
 - **The registry is the only source of truth for "what models exist."**
   Atomic TOML files under `/var/lib/hal0/registry/`. mtime-cached. Slot
   configs reference model IDs from the registry; if a model is deleted,
