@@ -361,3 +361,7 @@ The contribution model is still being decided
 being accepted from outside contributors yet. See
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the test tiers and the
 eventual flow.
+
+This project adheres to the [Contributor Covenant](./CODE_OF_CONDUCT.md)
+code of conduct. To report a security vulnerability, see
+[`SECURITY.md`](./SECURITY.md).
