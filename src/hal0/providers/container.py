@@ -426,8 +426,14 @@ def resolved_command_for_slot(
     flags_str = resolve_profile_flags(profile)
     flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
 
-    port = int(slot_cfg.get("port", 0))
-    effective_model = model_path or str(slot_cfg.get("model", "") or "")
+    # port: may be at top-level or nested under [slot]
+    port = int(slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or 0)
+    # model lives under [model] default (nested TOML table), not as a top-level string
+    model_table = slot_cfg.get("model") or {}
+    default_model = (
+        model_table.get("default", "") if isinstance(model_table, dict) else str(model_table)
+    )
+    effective_model = model_path or str(default_model or "")
 
     argv: list[str] = [
         profile.image,

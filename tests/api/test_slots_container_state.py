@@ -326,6 +326,11 @@ def test_container_slot_has_runtime_profile_image_fields(
     assert rc is not None, "resolved_command must be present"
     assert isinstance(rc, list), "resolved_command must be a list"
     assert rc[0] == fake_profile.image, "resolved_command[0] must be the image"
+    # model token must be the string value from [model] default, not a dict repr
+    joined = " ".join(rc)
+    assert "--model llama-3b" in joined, (
+        f"resolved_command must contain '--model llama-3b' (got: {joined!r})"
+    )
 
 
 def test_container_slot_resolved_command_includes_flags(

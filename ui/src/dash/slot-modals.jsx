@@ -554,28 +554,34 @@ function EditSlotDrawer({ open, slot, onClose }) {
       // before — same fix class as #584. ctx_size / n_gpu_layers stay
       // unconditional because the drawer's seed is best-effort
       // (metrics?.ctx / -1 sentinel) and NOT the truth source.
+      const isContainerSave = slot.runtime === "container";
       const ctxBody = {
         ctx_size: ctxNum,
-        n_gpu_layers: nglNum,
+        // n_gpu_layers is defined by the profile for container slots — don't overwrite
+        ...(isContainerSave ? {} : { n_gpu_layers: nglNum }),
       };
       // rope_freq_base is dirty-tracked (seed = real on-disk value).
-      if (Number(ropeFreqBase) !== Number(initialRope)) {
+      // Container slots: profile owns rope_freq_base — skip.
+      if (!isContainerSave && Number(ropeFreqBase) !== Number(initialRope)) {
         ctxBody.rope_freq_base = ropeNum;
       }
       const slotBody = {
-        device,
+        // device selector is hidden for container slots — don't overwrite (profile picks GPU config)
+        ...(isContainerSave ? {} : { device }),
         default: makeDefault,
       };
       const idleSeeded = initialIdle;
       const workersSeeded = initialWorkers;
       const extraArgsSeeded = initialExtraArgs;
-      if (Number(idleTimeout) !== Number(idleSeeded)) {
+      // Container slots: idle_timeout_s / workers / llamacpp_args are hidden in the UI
+      // and owned by the profile — never include them in a container save.
+      if (!isContainerSave && Number(idleTimeout) !== Number(idleSeeded)) {
         slotBody.idle_timeout_s = Number.isFinite(idleNum) ? idleNum : idleTimeout;
       }
-      if (Number(workers) !== Number(workersSeeded)) {
+      if (!isContainerSave && Number(workers) !== Number(workersSeeded)) {
         slotBody.workers = Number.isFinite(workersNum) ? workersNum : workers;
       }
-      if (extraArgs !== extraArgsSeeded) {
+      if (!isContainerSave && extraArgs !== extraArgsSeeded) {
         slotBody.llamacpp_args = extraArgs;
       }
       await defaultsMut.mutateAsync({
