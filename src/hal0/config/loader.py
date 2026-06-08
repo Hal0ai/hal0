@@ -27,9 +27,11 @@ import tomli_w
 from hal0.config import paths
 from hal0.config.schema import (
     CURRENT_SCHEMA_VERSION,
+    SEED_PROFILES,
     AgentConfig,
     Hal0Config,
     HardwareInfo,
+    ProfilesConfig,
     ProvidersConfig,
     SlotConfig,
     UpstreamsConfig,
@@ -377,6 +379,41 @@ def save_upstreams_config(cfg: UpstreamsConfig, path: Path | None = None) -> Non
     write_toml_atomic(target, cfg.model_dump(mode="python"))
 
 
+# ── profiles.toml ─────────────────────────────────────────────────────────────
+
+
+def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
+    """Load and validate /etc/hal0/profiles.toml.
+
+    Returns a :class:`ProfilesConfig` seeded with the three built-in bench
+    profiles when the file is absent so ``GET /api/profiles`` is always
+    populated on a fresh install.  When the file *is* present, only its
+    contents are returned — the seeds are NOT merged in.
+
+    Args:
+        path: Override path.  If None, uses
+              :func:`hal0.config.paths.profiles_toml`.
+
+    Returns:
+        A validated :class:`ProfilesConfig`.
+
+    Raises:
+        ConfigParseError: If the TOML is malformed or fails pydantic
+                          validation (e.g. missing ``image`` field).
+    """
+    target = path if path is not None else paths.profiles_toml()
+    if not Path(target).exists():
+        return ProfilesConfig.model_validate({"profile": SEED_PROFILES})
+    raw = _read_toml(Path(target))
+    try:
+        return ProfilesConfig.model_validate(raw)
+    except Exception as exc:
+        raise ConfigParseError(
+            f"failed to validate profiles.toml at {target}: {exc}",
+            details={"path": str(target), "reason": str(exc)},
+        ) from exc
+
+
 # ── agents/<name>.toml (ADR-0013) ─────────────────────────────────────────────
 
 
@@ -620,6 +657,7 @@ __all__ = [
     "load_hal0_config",
     "load_hardware_info",
     "load_manifest",
+    "load_profiles_config",
     "load_providers_config",
     "load_slot_config",
     "load_upstreams_config",

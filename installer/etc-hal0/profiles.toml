@@ -1,0 +1,27 @@
+# hal0 profile catalog — bench-tuned backend templates.
+# A profile = (image, flags, mtp).  Slots reference a profile by name;
+# the profile supplies the container image + flag bundle.
+# See the container-runtime design doc (§1) for the layering rationale.
+#
+# NOTE: this file is OPTIONAL.  hal0-api returns these three seed profiles
+# as built-in defaults when the file is absent (SEED_PROFILES in schema.py).
+# Keep this file identical to SEED_PROFILES to avoid silent drift.
+
+[profile.moe-rocmfp4]
+# A3B MoE agents (ace-saber). ~52.8 tok/s gen, 131k ctx.
+image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+flags = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+mtp   = false
+
+[profile.dense-mtp-rocmfp4]
+# Dense chat (qwopus 27B). ~24.4 tok/s gen with MTP (~2x non-MTP). 131k ctx.
+# mtp=true expands to the full --spec-type draft-mtp bundle at resolve time.
+image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+flags = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+mtp   = true
+
+[profile.vulkan-std]
+# Fallback / non-FP4 models. Vulkan-radv, no FP4/MTP.
+image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
+flags = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+mtp   = false

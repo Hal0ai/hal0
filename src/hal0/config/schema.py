@@ -468,6 +468,119 @@ class ProvidersConfig(BaseModel):
     provider: list[ProviderEntry] = Field(default_factory=list)
 
 
+# ── ProfileConfig + ProfilesConfig ────────────────────────────────────────────
+
+#: MTP draft-speculation flag bundle, bench-tuned.  Appended verbatim after
+#: profile.flags when ``mtp=true``.  Keep in sync with the profiles.toml seed
+#: and the bench doc (hal0-container-bench-2026-06-08.md).
+MTP_FLAG_BUNDLE = (
+    "--spec-type draft-mtp"
+    " --spec-draft-device ROCm0"
+    " --spec-draft-ngl all"
+    " --spec-draft-n-max 4"
+    " --spec-draft-n-min 0"
+    " --spec-draft-p-min 0.0"
+    " --spec-draft-p-split 0.10"
+    " --spec-draft-type-k q4_0"
+    " --spec-draft-type-v q4_0"
+)
+
+#: Seed profiles shipped with hal0.  Returned by ``load_profiles_config()``
+#: when ``/etc/hal0/profiles.toml`` is absent so ``GET /api/profiles`` is
+#: always populated on a fresh install.
+SEED_PROFILES: dict[str, dict[str, object]] = {
+    "moe-rocmfp4": {
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "mtp": False,
+    },
+    "dense-mtp-rocmfp4": {
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "mtp": True,
+    },
+    "vulkan-std": {
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "mtp": False,
+    },
+}
+
+
+class ProfileConfig(BaseModel):
+    """One ``[profile.<name>]`` entry in profiles.toml.
+
+    A profile is a reusable backend template — image + bench-tuned flag
+    bundle + optional MTP toggle.  Slots reference a profile by name;
+    the profile supplies everything except the model path, context size,
+    and port (which belong to the slot).
+
+    See the hal0 container-runtime design doc (§1) and bench doc for the
+    rationale behind each seed profile.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    image: str = Field(
+        ...,
+        description="Container image ref, e.g. ghcr.io/hal0ai/…:rocm-7.2.4-rocmfp4-server.",
+    )
+    flags: str = Field(
+        default="",
+        description="Bench-tuned llama-server CLI flags (no model/port/ctx args).",
+    )
+    mtp: bool = Field(
+        default=False,
+        description=(
+            "When true, the MTP draft-speculation bundle is appended to ``flags`` "
+            "at resolve time (see ``resolve_profile_flags()``)."
+        ),
+    )
+
+    @field_validator("image")
+    @classmethod
+    def image_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("profile image must not be empty")
+        return v
+
+
+class ProfilesConfig(BaseModel):
+    """Parsed profiles.toml — top-level ``[profile]`` table.
+
+    Each key under ``[profile]`` becomes an entry in ``profile``:
+
+        [profile.moe-rocmfp4]
+        image = "ghcr.io/..."
+        flags = "-fa on ..."
+        mtp   = false
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    profile: dict[str, ProfileConfig] = Field(default_factory=dict)
+
+
+def resolve_profile_flags(profile: ProfileConfig) -> str:
+    """Return the full flag string for *profile*, expanding MTP when set.
+
+    When ``profile.mtp`` is ``True``, ``MTP_FLAG_BUNDLE`` is appended
+    after ``profile.flags`` (separated by a single space).  The model
+    path, port, and context size are the slot's concern — they are NOT
+    included here.
+
+    Args:
+        profile: A validated :class:`ProfileConfig`.
+
+    Returns:
+        The complete flag string ready to pass to llama-server.
+    """
+    base = profile.flags.strip()
+    if profile.mtp:
+        return f"{base} {MTP_FLAG_BUNDLE}".strip()
+    return base
+
+
 # ── UpstreamsConfig ────────────────────────────────────────────────────────────
 
 
@@ -1442,6 +1555,8 @@ __all__ = [
     "CAPABILITIES_SCHEMA_VERSION_LEGACY",
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_DEVICE",
+    "MTP_FLAG_BUNDLE",
+    "SEED_PROFILES",
     "AgentAuthConfig",
     "AgentAuthKindLiteral",
     "AgentConfig",
@@ -1462,6 +1577,8 @@ __all__ = [
     "ModelConfig",
     "ModelsConfig",
     "NPUInfo",
+    "ProfileConfig",
+    "ProfilesConfig",
     "ProviderEntry",
     "ProvidersConfig",
     "ServerConfig",
@@ -1472,4 +1589,5 @@ __all__ = [
     "UpstreamEntry",
     "UpstreamsConfig",
     "map_backend_to_device",
+    "resolve_profile_flags",
 ]

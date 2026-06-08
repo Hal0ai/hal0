@@ -79,6 +79,9 @@ from hal0.api.routes import (
     journal as journal_routes,
 )
 from hal0.api.routes import (
+    profiles as profiles_routes,
+)
+from hal0.api.routes import (
     lemonade_admin as lemonade_admin_routes,
 )
 from hal0.api.routes import (
@@ -1326,6 +1329,11 @@ def create_app() -> FastAPI:
     # ADR-0012; all endpoints on this server are open on the local network.
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
+
+    # Profile catalog — read-only, no auth (ADR-0012). Returns every profile
+    # from /etc/hal0/profiles.toml (falling back to the built-in seeds on a
+    # fresh install). Profiles are P1 container-runtime templates (issue #653).
+    app.include_router(profiles_routes.router, prefix="/api/profiles", tags=["profiles"])
 
     # Dashboard footer event surface — read-only, public for the same
     # reason as /api/status: the footer renders during first-run before

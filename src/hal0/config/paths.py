@@ -187,6 +187,18 @@ def bundle_chosen_marker() -> Path:
     return var_lib() / ".bundle-chosen"
 
 
+def profiles_toml() -> Path:
+    """Return the profile catalog path (/etc/hal0/profiles.toml).
+
+    The file is optional — :func:`hal0.config.loader.load_profiles_config`
+    returns the built-in seed profiles when it is absent.
+
+    FHS:       /etc/hal0/profiles.toml
+    HAL0_HOME: $HAL0_HOME/etc/hal0/profiles.toml
+    """
+    return etc() / "profiles.toml"
+
+
 def manifest_json() -> Path:
     """Return the release manifest path.
 
