@@ -28,7 +28,7 @@ from hal0.upstreams.registry import Upstream
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _pin_slot_ready(client: TestClient, slot_name: str = "primary") -> None:
+def _pin_slot_ready(client: TestClient, slot_name: str = "chat") -> None:
     """Force ``slot_name`` to READY in the SlotManager state map.
 
     The dispatcher's swap-window gate (PR-379) refuses to forward when the
@@ -58,16 +58,16 @@ def _seed_stt_upstream(client: TestClient, port: int = 8089) -> None:
 
     The legacy heuristics in ``hal0.dispatcher.proxy`` don't have a rule for
     ``/v1/audio/transcriptions`` model ids that aren't FLM tag-style, so an
-    arbitrary STT model name falls through to the ``primary`` slot. We
-    register under that name so the dispatch resolves cleanly in tests
-    without having to install a registry binding.
+    arbitrary STT model name falls through to the ``chat`` slot (renamed from
+    ``primary`` in #654). We register under that name so the dispatch resolves
+    cleanly in tests without having to install a registry binding.
     """
     client.app.state.upstreams.upsert(
         Upstream(
-            name="primary",
+            name="chat",
             kind="slot",
             url=f"http://127.0.0.1:{port}/v1",
-            slot_name="primary",
+            slot_name="chat",
             auth_style="none",
         )
     )
@@ -78,14 +78,14 @@ def _seed_tts_upstream(client: TestClient, port: int = 8090) -> None:
     """Register a fake TTS slot the dispatcher's legacy fallback will land on.
 
     Same fallthrough logic as STT — the dispatcher routes unknown ``model``
-    ids to ``primary``, so we register there.
+    ids to the ``chat`` slot, so we register there.
     """
     client.app.state.upstreams.upsert(
         Upstream(
-            name="primary",
+            name="chat",
             kind="slot",
             url=f"http://127.0.0.1:{port}/v1",
-            slot_name="primary",
+            slot_name="chat",
             auth_style="none",
         )
     )
@@ -290,7 +290,7 @@ def test_v1_audio_speech_happy_path(client: TestClient) -> None:
 @pytest.mark.parametrize(
     "path,body",
     [
-        ("/v1/chat/completions", {"model": "primary", "messages": []}),
+        ("/v1/chat/completions", {"model": "chat", "messages": []}),
     ],
 )
 def test_scrubber_does_not_touch_non_audio_routes(
@@ -305,10 +305,10 @@ def test_scrubber_does_not_touch_non_audio_routes(
     """
     client.app.state.upstreams.upsert(
         Upstream(
-            name="primary",
+            name="chat",
             kind="slot",
             url="http://127.0.0.1:8081/v1",
-            slot_name="primary",
+            slot_name="chat",
             auth_style="none",
         )
     )

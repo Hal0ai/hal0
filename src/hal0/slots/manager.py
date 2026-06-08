@@ -1983,6 +1983,11 @@ class SlotManager:
         except ImportError:  # py<3.11
             import tomli as tomllib  # type: ignore[no-redef]
 
+        # Resolve back-compat aliases (primary→chat, agent-hermes→agent) so a
+        # config read by an old slot name lands on the canonical TOML. This is
+        # the single chokepoint for config reads; callers that already resolved
+        # are unaffected (canonical names pass through unchanged).
+        slot_name = self._resolve_alias(slot_name)
         path = self._config_file(slot_name)
         if not path.exists():
             # In-memory-only slot (test injection) — fall back to the

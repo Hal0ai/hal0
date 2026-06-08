@@ -83,7 +83,7 @@ def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
     def _fake_slots() -> list[dict[str, Any]]:
         return [
             {
-                "name": "primary",
+                "name": "chat",
                 "type": "llm",
                 "kind": "local",
                 "state": "ready",
@@ -93,7 +93,7 @@ def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
                 "context_length": 32768,
             },
             {
-                "name": "agent-hermes",
+                "name": "agent",
                 "type": "llm",
                 "kind": "local",
                 "state": "ready",
@@ -294,8 +294,8 @@ def test_config_yaml_contains_chat_slot_aliases(
     hp.run(state_root=state_root, initial_state=hermetic_state)
     config = (Path(hermetic_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
     assert "model_aliases:" in config
-    assert "primary:" in config
-    assert "agent-hermes:" in config
+    assert "chat:" in config
+    assert "agent:" in config
     assert "embed:" not in config.split("model_aliases:")[1].split("\n\n")[0], (
         "embed slot leaked into chat aliases"
     )
@@ -327,14 +327,14 @@ def test_config_yaml_contains_role_slot_blocks(
     tmp_path: Path, hermetic_state: hp.BootstrapState
 ) -> None:
     """feat/hermes-role-slots: an end-to-end bootstrap renders the
-    delegation block from the ``agent-hermes`` slot and routes the
+    delegation block from the ``agent`` slot and routes the
     auxiliary compaction group to the ``utility`` slot."""
     yaml = pytest.importorskip("yaml")
     state_root = tmp_path / "state"
     hp.run(state_root=state_root, initial_state=hermetic_state)
     config_text = (Path(hermetic_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
     cfg = yaml.safe_load(config_text)
-    # delegation → agent-hermes slot model at the hal0 /v1 endpoint.
+    # delegation → agent slot model at the hal0 /v1 endpoint.
     assert cfg["delegation"]["model"] == "qwen3-coder-test"
     assert cfg["delegation"]["provider"] == "custom"
     assert cfg["delegation"]["base_url"] == "http://127.0.0.1:8080/v1"

@@ -320,11 +320,11 @@ def slot_referencing_model(
     """
     slot_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     slot_dir.mkdir(parents=True, exist_ok=True)
-    slot_path = slot_dir / "primary.toml"
+    slot_path = slot_dir / "chat.toml"
     slot_path.write_text(
         "\n".join(
             [
-                'name = "primary"',
+                'name = "chat"',
                 "port = 8081",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
@@ -353,7 +353,7 @@ def test_delete_force_cascade_false_returns_409_with_affected_slots(
     assert r.status_code == 409, r.text
     body = r.json()
     assert body["error"]["code"] == "model.in_use"
-    assert "primary" in body["error"]["details"]["affected_slots"]
+    assert "chat" in body["error"]["details"]["affected_slots"]
 
     # Model must still be registered after the rejection.
     assert crud_client.get(f"/api/models/{mid}").status_code == 200
@@ -378,7 +378,7 @@ def test_delete_cascade_clears_slot_default_and_emits_model_deleted_last(
     crud_client.post("/api/models", json={"id": mid, "path": str(slot_path)})
 
     # Load the slot so the cascade hits a running referrer.
-    r = crud_client.post("/api/slots/primary/load")
+    r = crud_client.post("/api/slots/chat/load")
     assert r.status_code == 200, r.text
 
     pre = _max_event_id(crud_client)
@@ -386,21 +386,21 @@ def test_delete_cascade_clears_slot_default_and_emits_model_deleted_last(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["deleted"] is True
-    assert body["affected_slots"] == ["primary"]
+    assert body["affected_slots"] == ["chat"]
 
     # Slot TOML now has [model].default = "" (still parseable).
     with open(slot_path, "rb") as f:
         reloaded = tomllib.load(f)
     assert reloaded["model"]["default"] == ""
 
-    # Event ordering: every slot.state event for 'primary' has an id less
+    # Event ordering: every slot.state event for 'chat' has an id less
     # than the final model.deleted id.
     new_events = _events_since(crud_client, pre)
     deleted = [ev for ev in new_events if ev["type"] == "model.deleted"]
     assert len(deleted) == 1, f"expected exactly one model.deleted, got {new_events}"
     deleted_id = deleted[0]["id"]
     slot_states = [
-        ev for ev in new_events if ev["type"] == "slot.state" and ev["source"] == "slot:primary"
+        ev for ev in new_events if ev["type"] == "slot.state" and ev["source"] == "slot:chat"
     ]
     assert slot_states, "expected slot.state events from the unload cascade"
     for ev in slot_states:

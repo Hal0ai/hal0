@@ -696,7 +696,7 @@ def test_render_config_yaml_omits_custom_providers_when_none() -> None:
 
 _ROLE_SLOTS = [
     {
-        "name": "primary",
+        "name": "chat",
         "type": "llm",
         "state": "ready",
         "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
@@ -704,7 +704,7 @@ _ROLE_SLOTS = [
         "context_length": 32768,
     },
     {
-        "name": "agent-hermes",
+        "name": "agent",
         "type": "llm",
         "state": "ready",
         "model_id": "hermes-4-14b-q5km",
@@ -740,7 +740,7 @@ def test_resolve_delegation_none_when_slot_absent() -> None:
 def test_resolve_delegation_none_when_slot_not_ready() -> None:
     slots = [
         *_ROLE_SLOTS[:1],
-        {"name": "agent-hermes", "type": "llm", "state": "idle", "model_id": "x"},
+        {"name": "agent", "type": "llm", "state": "idle", "model_id": "x"},
     ]
     assert hp._resolve_delegation(slots, hal0_base_url=_HAL0_V1) is None
 
@@ -782,7 +782,7 @@ def test_render_config_yaml_emits_delegation_and_auxiliary_blocks() -> None:
         auxiliary_tasks=aux,
     )
     cfg = yaml.safe_load(rendered)
-    # delegation block → agent-hermes model at the hal0 /v1 endpoint.
+    # delegation block → agent slot model at the hal0 /v1 endpoint.
     assert cfg["delegation"] == {
         "model": "hermes-4-14b-q5km",
         "provider": "custom",

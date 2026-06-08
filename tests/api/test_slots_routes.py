@@ -68,7 +68,7 @@ def lemonade_stub_state(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     The default state advertises ``[{model_name: "qwen3-4b-q4_k_m"}]``
     in ``/v1/health.loaded[]`` — matches the model the ``slot_root``
-    fixture writes into ``primary.toml``. Tests can mutate the
+    fixture writes into ``chat.toml``. Tests can mutate the
     returned dict to drive eviction / drift scenarios.
     """
     state: dict[str, Any] = {
@@ -119,16 +119,16 @@ def stub_await_ready() -> None:
 
 @pytest.fixture
 def slot_root(tmp_hal0_home: str) -> Path:
-    """Write a primary.toml in the HAL0_HOME slot config dir."""
+    """Write a chat.toml in the HAL0_HOME slot config dir."""
     root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     root.mkdir(parents=True, exist_ok=True)
     # NOTE: model.default matches the model_name advertised by the
     # default ``lemonade_stub_state`` fixture so adoption + /v1/load
     # both line up.
-    (root / "primary.toml").write_text(
+    (root / "chat.toml").write_text(
         "\n".join(
             [
-                'name = "primary"',
+                'name = "chat"',
                 "port = 8081",
                 'backend = "vulkan"',
                 'provider = "lemonade"',
@@ -185,12 +185,10 @@ def test_list_merges_real_and_synthetic(
     assert isinstance(body, list)
 
     by_name = {entry["name"]: entry for entry in body}
-    # primary is a real local slot from slot_root's primary.toml
-    assert "primary" in by_name, f"primary missing from {by_name.keys()}"
-    assert by_name["primary"]["kind"] == "local"
-    assert by_name["primary"].get("_synthetic") is not True, (
-        "real slot must NOT carry _synthetic=True"
-    )
+    # primary is a real local slot from slot_root's chat.toml
+    assert "chat" in by_name, f"primary missing from {by_name.keys()}"
+    assert by_name["chat"]["kind"] == "local"
+    assert by_name["chat"].get("_synthetic") is not True, "real slot must NOT carry _synthetic=True"
     # haloai is the remote upstream — synthetic until a local slot named
     # 'haloai' is installed.
     assert "haloai" in by_name
@@ -207,7 +205,7 @@ def test_list_real_wins_on_name_collision(
     # Register an upstream named 'primary' — same name as the local slot.
     isolated_app.state.upstreams.upsert(
         Upstream(
-            name="primary",
+            name="chat",
             kind="remote",
             url="http://10.0.1.220:8080/v1",
             auth_style="none",
@@ -217,7 +215,7 @@ def test_list_real_wins_on_name_collision(
     r = isolated_client.get("/api/slots")
     assert r.status_code == 200
     body = r.json()
-    primaries = [e for e in body if e["name"] == "primary"]
+    primaries = [e for e in body if e["name"] == "chat"]
     assert len(primaries) == 1, f"expected exactly one 'primary' row, got {primaries}"
     # The surviving entry must be the real one.
     assert primaries[0]["kind"] == "local"
@@ -241,7 +239,7 @@ def test_lifespan_autoregisters_composite_hal0_upstream(
     first. The composite entry points at hal0-api itself and aggregates
     every chat-capable slot through ``_fetch_hal0_composite_models``.
     """
-    # ``slot_root`` writes /etc/hal0/slots/primary.toml with port=8081.
+    # ``slot_root`` writes /etc/hal0/slots/chat.toml with port=8081.
     upstream = isolated_app.state.upstreams.get("hal0")
     assert upstream is not None, "composite ``hal0`` upstream should be auto-registered"
     assert upstream.kind == "slot"
@@ -251,7 +249,7 @@ def test_lifespan_autoregisters_composite_hal0_upstream(
     assert upstream.url == "http://127.0.0.1:8080/v1"
 
     # No legacy per-slot duplicate.
-    assert isolated_app.state.upstreams.get("primary") is None
+    assert isolated_app.state.upstreams.get("chat") is None
 
 
 def test_lifespan_autoregister_skips_when_explicit_hal0_upstream_exists(
@@ -296,11 +294,11 @@ def test_load_success_path_dispatches_via_lemonade(
     stub_await_ready: None,
     isolated_client: TestClient,
 ) -> None:
-    """POST /api/slots/primary/load goes through Lemonade /v1/load."""
-    r = isolated_client.post("/api/slots/primary/load")
+    """POST /api/slots/chat/load goes through Lemonade /v1/load."""
+    r = isolated_client.post("/api/slots/chat/load")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["name"] == "primary"
+    assert body["name"] == "chat"
     assert body["state"] == "ready"
     assert body["status"] == "ready"
     assert body["kind"] == "local"
@@ -309,6 +307,24 @@ def test_load_success_path_dispatches_via_lemonade(
     load_calls = systemctl_stub["_lemonade"]["load_calls"]
     assert load_calls, "expected at least one /v1/load call"
     assert load_calls[0]["model_name"] == "qwen3-4b-q4_k_m"
+
+
+def test_legacy_primary_slot_name_resolves_to_chat(
+    slot_root: Path,
+    systemctl_stub: dict[str, Any],
+    stub_await_ready: None,
+    isolated_client: TestClient,
+) -> None:
+    """#654: POST /api/slots/primary/load resolves via the hidden alias to the
+    chat slot (chat.toml) and loads its model — old name still works."""
+    r = isolated_client.post("/api/slots/primary/load")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The alias resolved to the canonical chat slot.
+    assert body["name"] == "chat"
+    assert body["state"] == "ready"
+    load_calls = systemctl_stub["_lemonade"]["load_calls"]
+    assert load_calls and load_calls[0]["model_name"] == "qwen3-4b-q4_k_m"
 
 
 def test_load_unknown_slot_returns_typed_envelope(
@@ -368,8 +384,8 @@ def test_unload_after_load_transitions_to_offline(
     isolated_client: TestClient,
 ) -> None:
     """Verifies the /unload lifecycle route reaches the SlotManager."""
-    isolated_client.post("/api/slots/primary/load")
-    r = isolated_client.post("/api/slots/primary/unload")
+    isolated_client.post("/api/slots/chat/load")
+    r = isolated_client.post("/api/slots/chat/unload")
     assert r.status_code == 200, r.text
     assert r.json()["state"] == "offline"
     # Lemonade /v1/unload was invoked.
@@ -390,14 +406,14 @@ def test_disable_running_slot_stops_it(
     The faded card must match reality — a disabled slot should not keep a
     llama-server child resident, so the config write is followed by an unload.
     """
-    isolated_client.post("/api/slots/primary/load")
+    isolated_client.post("/api/slots/chat/load")
     # Clear the load-path bookkeeping so we assert only the disable's unload.
     systemctl_stub["_lemonade"]["unload_calls"].clear()
 
-    r = isolated_client.put("/api/slots/primary/config", json={"enabled": False})
+    r = isolated_client.put("/api/slots/chat/config", json={"enabled": False})
     assert r.status_code == 200, r.text
     # The persisted flag is off …
-    cfg = isolated_client.get("/api/slots/primary/config").json()
+    cfg = isolated_client.get("/api/slots/chat/config").json()
     assert cfg.get("enabled") is False
     # … and the running child was actually stopped.
     assert systemctl_stub["_lemonade"]["unload_calls"], (
@@ -415,7 +431,7 @@ def test_disable_offline_slot_does_not_unload(
     # Drive the slot genuinely offline: lemond reports nothing resident, so
     # the adoption probe never marks primary running.
     systemctl_stub["_lemonade"]["loaded"] = []
-    r = isolated_client.put("/api/slots/primary/config", json={"enabled": False})
+    r = isolated_client.put("/api/slots/chat/config", json={"enabled": False})
     assert r.status_code == 200, r.text
     assert systemctl_stub["_lemonade"]["unload_calls"] == [], (
         "an offline slot needs no stop — the write alone suffices"
@@ -463,12 +479,12 @@ def test_state_endpoint_returns_lifecycle_snapshot(
     stub_await_ready: None,
     isolated_client: TestClient,
 ) -> None:
-    """GET /api/slots/primary/state returns the lightweight state shape."""
-    isolated_client.post("/api/slots/primary/load")
-    r = isolated_client.get("/api/slots/primary/state")
+    """GET /api/slots/chat/state returns the lightweight state shape."""
+    isolated_client.post("/api/slots/chat/load")
+    r = isolated_client.get("/api/slots/chat/state")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["name"] == "primary"
+    assert body["name"] == "chat"
     assert body["state"] == "ready"
     assert body["port"] == 8081
 
@@ -497,7 +513,7 @@ async def test_state_stream_emits_transition_event(
 ) -> None:
     """Driving a state change through the manager pushes a frame to the stream.
 
-    Subscribes to /api/slots/primary/state/stream after the slot is
+    Subscribes to /api/slots/chat/state/stream after the slot is
     READY, then drives an unload transition and asserts the SSE consumer
     sees the OFFLINE frame. Mirrors the wire shape the dashboard's
     useSlotState composable consumes (Team I gap #2).
@@ -512,7 +528,7 @@ async def test_state_stream_emits_transition_event(
     with TestClient(isolated_app):
         sm: SlotManager = isolated_app.state.slot_manager
         # Drive into READY first so we've got a concrete starting state.
-        await sm.load("primary")
+        await sm.load("chat")
 
         from hal0.api.routes.slots import slot_state_stream
 
@@ -522,7 +538,7 @@ async def test_state_stream_emits_transition_event(
 
             app = _AppShim()
 
-        response = await slot_state_stream("primary", _ReqShim())  # type: ignore[arg-type]
+        response = await slot_state_stream("chat", _ReqShim())  # type: ignore[arg-type]
         agen = response.body_iterator
         # Drain the initial snapshot frame.
         first = await asyncio.wait_for(agen.__anext__(), timeout=1.0)
@@ -542,7 +558,7 @@ async def test_state_stream_emits_transition_event(
             await asyncio.sleep(0.01)
         assert len(sm._subscribers) > 0, "subscriber never registered"
 
-        await sm.unload("primary")
+        await sm.unload("chat")
 
         next_frame = await asyncio.wait_for(next_frame_task, timeout=2.0)
         if isinstance(next_frame, bytes):
@@ -552,7 +568,7 @@ async def test_state_stream_emits_transition_event(
         assert next_frame.startswith("event: state\n"), f"bad SSE prefix: {next_frame!r}"
         data_line = next(line for line in next_frame.splitlines() if line.startswith("data: "))
         payload = json.loads(data_line[len("data: ") :])
-        assert payload["name"] == "primary"
+        assert payload["name"] == "chat"
         # Unload runs READY → UNLOADING → OFFLINE; either intermediate
         # frame is a valid first observation depending on scheduler order.
         # What we're really asserting is "a transition fired and the
@@ -578,7 +594,7 @@ async def test_state_stream_subscriber_cleaned_up_on_close(
     """
     with TestClient(isolated_app):
         sm: SlotManager = isolated_app.state.slot_manager
-        await sm.load("primary")
+        await sm.load("chat")
         from hal0.api.routes.slots import slot_state_stream
 
         class _ReqShim:
@@ -588,7 +604,7 @@ async def test_state_stream_subscriber_cleaned_up_on_close(
             app = _AppShim()
 
         before = len(sm._subscribers)
-        response = await slot_state_stream("primary", _ReqShim())  # type: ignore[arg-type]
+        response = await slot_state_stream("chat", _ReqShim())  # type: ignore[arg-type]
         agen = response.body_iterator
         # The generator yields the initial snapshot eagerly; the subscriber
         # only registers on the next __anext__ when the inner `async for`
@@ -633,7 +649,7 @@ async def test_state_stream_emits_sse_event_shape(
         sm: SlotManager = isolated_app.state.slot_manager
 
         # Pre-load so the snapshot reflects READY.
-        await sm.load("primary")
+        await sm.load("chat")
 
         from hal0.api.routes.slots import slot_state_stream
 
@@ -644,7 +660,7 @@ async def test_state_stream_emits_sse_event_shape(
 
             app = _AppShim()
 
-        response = await slot_state_stream("primary", _ReqShim())  # type: ignore[arg-type]
+        response = await slot_state_stream("chat", _ReqShim())  # type: ignore[arg-type]
         # Pull the first event off the async generator.
         agen = response.body_iterator
         first = await asyncio.wait_for(agen.__anext__(), timeout=1.0)
@@ -655,7 +671,7 @@ async def test_state_stream_emits_sse_event_shape(
         # Extract the data: line and JSON-parse it.
         data_line = next(line for line in first.splitlines() if line.startswith("data: "))
         payload = json.loads(data_line[len("data: ") :])
-        assert payload["name"] == "primary"
+        assert payload["name"] == "chat"
         assert payload["state"] == "ready"
         assert payload["port"] == 8081
         # Close the generator so the SlotManager removes its subscriber.
@@ -889,14 +905,14 @@ def test_patch_defaults_preserves_model_default(
     only the keys it carries.
     """
     # Sanity: the seeded slot starts with a model default.
-    before = isolated_client.get("/api/slots/primary/config")
+    before = isolated_client.get("/api/slots/chat/config")
     assert before.status_code == 200, before.text
     assert before.json()["model"]["default"] == "qwen3-4b-q4_k_m"
 
-    r = isolated_client.patch("/api/slots/primary/defaults", json={"ctx_size": 8192})
+    r = isolated_client.patch("/api/slots/chat/defaults", json={"ctx_size": 8192})
     assert r.status_code == 200, r.text
 
-    after = isolated_client.get("/api/slots/primary/config").json()
+    after = isolated_client.get("/api/slots/chat/config").json()
     # The ctx value lands; #585 normalizes the alias to canonical context_size.
     assert after["model"]["context_size"] == 8192
     # The model name survived the partial defaults write.
@@ -911,9 +927,9 @@ def test_patch_defaults_canonicalizes_ctx_size_key(
     ``context_size`` with no lingering alias, so the Lemonade load path (which
     reads context_size) actually honors a ctx set from the UI.
     """
-    r = isolated_client.patch("/api/slots/primary/defaults", json={"ctx_size": 32768})
+    r = isolated_client.patch("/api/slots/chat/defaults", json={"ctx_size": 32768})
     assert r.status_code == 200, r.text
 
-    model = isolated_client.get("/api/slots/primary/config").json()["model"]
+    model = isolated_client.get("/api/slots/chat/config").json()["model"]
     assert model["context_size"] == 32768
     assert "ctx_size" not in model

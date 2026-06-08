@@ -327,9 +327,9 @@ def test_list_slots_exposes_enable_thinking_and_n_gpu_layers(
     """A slot's enable_thinking + [model].n_gpu_layers ride along in the payload."""
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
@@ -343,7 +343,7 @@ def test_list_slots_exposes_enable_thinking_and_n_gpu_layers(
     r = isolated_client.get("/api/slots")
     assert r.status_code == 200, r.text
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["enable_thinking"] is True
     assert primary["n_gpu_layers"] == 99
     assert primary["enabled"] is True
@@ -357,9 +357,9 @@ def test_list_slots_enable_thinking_null_when_unset(
     """No enable_thinking in TOML → payload reports it as null (effective OFF)."""
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
@@ -370,7 +370,7 @@ def test_list_slots_enable_thinking_null_when_unset(
     )
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["enable_thinking"] is None
     # n_gpu_layers absent from [model] → field still present, default sentinel
     assert "n_gpu_layers" in primary
@@ -403,9 +403,9 @@ def test_list_slots_exposes_idle_timeout_workers_llamacpp_args(
     """
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
@@ -421,7 +421,7 @@ def test_list_slots_exposes_idle_timeout_workers_llamacpp_args(
     r = isolated_client.get("/api/slots")
     assert r.status_code == 200, r.text
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["idle_timeout_s"] == 1200
     assert primary["workers"] == 4
     assert primary["llamacpp_args"] == "--threads 6 --no-mmap"
@@ -440,9 +440,9 @@ def test_list_slots_llamacpp_args_none_when_server_table_absent(
     """
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
@@ -455,7 +455,7 @@ def test_list_slots_llamacpp_args_none_when_server_table_absent(
     )
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["idle_timeout_s"] == 600
     assert primary["workers"] == 2
     assert primary["llamacpp_args"] is None
@@ -476,9 +476,9 @@ def test_list_slots_exposes_rope_freq_base(
     """rope_freq_base set on disk → exposed in /api/slots payload."""
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
@@ -491,7 +491,7 @@ def test_list_slots_exposes_rope_freq_base(
     r = isolated_client.get("/api/slots")
     assert r.status_code == 200, r.text
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["rope_freq_base"] == 500000.0
 
 
@@ -503,9 +503,9 @@ def test_list_slots_rope_freq_base_null_when_absent(
     """rope_freq_base absent on disk → payload carries null (not 0.0)."""
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
@@ -516,7 +516,7 @@ def test_list_slots_rope_freq_base_null_when_absent(
     )
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["rope_freq_base"] is None
 
 
@@ -530,9 +530,9 @@ def test_put_config_rope_freq_base_roundtrip(
     """
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-rocm"',
             'type = "llm"',
@@ -542,7 +542,7 @@ def test_put_config_rope_freq_base_roundtrip(
         ],
     )
     r = isolated_client.put(
-        "/api/slots/primary/config",
+        "/api/slots/chat/config",
         json={"model": {"rope_freq_base": 1000000.0}},
     )
     assert r.status_code == 200, r.text
@@ -550,10 +550,10 @@ def test_put_config_rope_freq_base_roundtrip(
     # The list payload should now reflect the written value.
     r2 = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r2.json()}
-    assert by_name["primary"]["rope_freq_base"] == 1000000.0
+    assert by_name["chat"]["rope_freq_base"] == 1000000.0
 
     # Deep-merge must not have wiped the model default key.
-    cfg = isolated_client.get("/api/slots/primary/config").json()
+    cfg = isolated_client.get("/api/slots/chat/config").json()
     assert cfg["model"]["rope_freq_base"] == 1000000.0
     assert cfg["model"]["default"] == "qwen3-4b"
 
@@ -683,9 +683,9 @@ def test_list_slots_emits_labels_for_tool_calling_gate(
     """
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'type = "llm"',
             "enabled = true",
@@ -696,9 +696,9 @@ def test_list_slots_emits_labels_for_tool_calling_gate(
     )
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
-    assert by_name["primary"]["labels"] == ["tool-calling", "vision"]
-    assert by_name["primary"]["type"] == "llm"
-    assert by_name["primary"]["model_default"] == "qwen3-4b"
+    assert by_name["chat"]["labels"] == ["tool-calling", "vision"]
+    assert by_name["chat"]["type"] == "llm"
+    assert by_name["chat"]["model_default"] == "qwen3-4b"
 
 
 def test_list_slots_omits_labels_when_none_declared(
@@ -801,9 +801,9 @@ def test_list_slots_emits_declared_backend_when_loaded(
     the actual backend can't be introspected (no live child under test)."""
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-vulkan"',
             'type = "llm"',
@@ -817,7 +817,7 @@ def test_list_slots_emits_declared_backend_when_loaded(
     ]
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["lemonade_state"] == "loaded"
     assert primary["declared_backend"] == "vulkan"
     # No live child → actual_backend + backend_mismatch are absent (not null).
@@ -837,9 +837,9 @@ def test_list_slots_surfaces_actual_backend_and_mismatch(
 
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-vulkan"',
             'type = "llm"',
@@ -855,7 +855,7 @@ def test_list_slots_surfaces_actual_backend_and_mismatch(
     monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: "rocm")
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["declared_backend"] == "vulkan"
     assert primary["actual_backend"] == "rocm"
     assert primary["backend_mismatch"] is True
@@ -869,9 +869,9 @@ def test_list_slots_omits_backend_fields_when_not_loaded(
     """A not-loaded (idle) slot carries no declared/actual backend keys."""
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'device = "gpu-vulkan"',
             'type = "llm"',
@@ -883,7 +883,7 @@ def test_list_slots_omits_backend_fields_when_not_loaded(
     installed_lemonade_stub["loaded"] = []
     r = isolated_client.get("/api/slots")
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     assert primary["lemonade_state"] == "idle"
     assert "declared_backend" not in primary
     assert "actual_backend" not in primary

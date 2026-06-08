@@ -282,15 +282,15 @@ def test_pick_default_unknown_id_returns_404(
     assert fake_run_pull == []
 
 
-def test_pick_default_defaults_slot_to_primary(
+def test_pick_default_defaults_slot_to_chat(
     client_isolated: TestClient,
     tmp_hal0_home: str,
     fake_run_pull: list[dict[str, Any]],
 ) -> None:
-    """Body without ``slot`` falls back to ``primary``."""
+    """Body without ``slot`` falls back to ``chat`` (renamed from ``primary``, #654)."""
     r = client_isolated.post("/api/install/pick-default", json={"model_id": "qwen3-4b"})
     assert r.status_code == 200, r.text
-    assert r.json()["slot"] == "primary"
+    assert r.json()["slot"] == "chat"
 
 
 def test_pick_default_preserves_existing_slot_port_and_backend(
@@ -301,8 +301,8 @@ def test_pick_default_preserves_existing_slot_port_and_backend(
     """A pre-existing slot TOML's port/backend survive the model.default rewrite."""
     slot_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     slot_dir.mkdir(parents=True, exist_ok=True)
-    (slot_dir / "primary.toml").write_text(
-        'name = "primary"\nport = 9999\nbackend = "rocm"\nprovider = "llama-server"\n',
+    (slot_dir / "chat.toml").write_text(
+        'name = "chat"\nport = 9999\nbackend = "rocm"\nprovider = "llama-server"\n',
         encoding="utf-8",
     )
 
@@ -312,7 +312,7 @@ def test_pick_default_preserves_existing_slot_port_and_backend(
     )
     assert r.status_code == 200, r.text
 
-    with open(slot_dir / "primary.toml", "rb") as f:
+    with open(slot_dir / "chat.toml", "rb") as f:
         cfg = tomllib.load(f)
     assert cfg["port"] == 9999
     assert cfg["backend"] == "rocm"
