@@ -68,7 +68,7 @@ def app_with_container_slot(
     tmp_hal0_home: str,
     lemonade_stub: dict[str, Any],
 ) -> FastAPI:
-    """App with one container slot (gpu-chat) and one Lemonade slot (primary)."""
+    """App with one container slot (gpu-chat) and one Lemonade slot (chat)."""
     # Container slot: profile set → _is_container_slot returns True
     _seed_slot_toml(
         tmp_hal0_home,
@@ -85,9 +85,9 @@ def app_with_container_slot(
     # Lemonade slot
     _seed_slot_toml(
         tmp_hal0_home,
-        "primary",
+        "chat",
         [
-            'name = "primary"',
+            'name = "chat"',
             "port = 8081",
             'type = "llm"',
             "[model]",
@@ -207,7 +207,7 @@ def test_lemonade_slot_unaffected_no_container_keys(
     client_with_container_slot: TestClient,
     lemonade_stub: dict[str, Any],
 ) -> None:
-    """Lemonade slot (primary) has lemonade_state but no container_status/container_health keys."""
+    """Lemonade slot (chat) has lemonade_state but no container_status/container_health keys."""
     lemonade_stub["loaded"] = [{"model_name": "qwen3-4b"}]
     with (
         patch(
@@ -223,7 +223,7 @@ def test_lemonade_slot_unaffected_no_container_keys(
         r = client_with_container_slot.get("/api/slots")
     assert r.status_code == 200, r.text
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["primary"]
+    primary = by_name["chat"]
     # Lemonade enrichment must still fire
     assert "lemonade_state" in primary
     # Container enrichment must NOT apply
