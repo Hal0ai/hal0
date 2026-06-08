@@ -10,6 +10,7 @@ import {
   useSlotDefaults,
   useSlotDelete,
   useSlotBackend,
+  useSlotImagePull,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useBackends } from '@/api/hooks/useBackends'
@@ -1218,17 +1219,85 @@ function EmptySlotCard({ name, type, group, device, onConfigure }) {
   );
 }
 
+// ─── Image pull progress bar ─────────────────────────────────────
+function ImagePullBar({ pull }) {
+  // pull: ImagePullSnapshot from useSlotImagePull()
+  const { state, layer, totalLayers, image, error } = pull;
+  if (state !== "pulling" && state !== "completed" && state !== "failed") return null;
+  const pct = totalLayers > 0 ? Math.round((layer / totalLayers) * 100) : null;
+  // Truncate the image tag to the last segment for display.
+  const imgShort = image ? image.split("/").pop() : null;
+  const label =
+    state === "completed" ? `Image ready` :
+    state === "failed"    ? `Pull failed${error ? `: ${error}` : ""}` :
+    totalLayers > 0       ? `Pulling image${imgShort ? ` ${imgShort}` : ""}… (layer ${layer}/${totalLayers})` :
+                            `Pulling image${imgShort ? ` ${imgShort}` : ""}…`;
+  const barColor = state === "failed" ? "var(--err)" : state === "completed" ? "var(--ok)" : "var(--accent)";
+  return (
+    <div style={{marginTop: 6}}>
+      <div
+        aria-live="polite"
+        aria-label={label}
+        style={{fontFamily: "var(--jbm)", fontSize: 11, color: state === "failed" ? "var(--err)" : "var(--fg-2)", marginBottom: 4}}
+      >
+        {label}
+      </div>
+      <div style={{height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden"}}>
+        <div
+          role="progressbar"
+          aria-valuenow={pct ?? 0}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          style={{
+            height: "100%",
+            width: pct !== null ? `${pct}%` : "40%",
+            background: barColor,
+            borderRadius: 2,
+            transition: "width 0.3s ease",
+            // Indeterminate animation when layer count unknown.
+            animation: pct === null && state === "pulling" ? "hal0-indeterminate 1.4s ease infinite" : "none",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 // ─── Error SlotCard ─────────────────────────────────────────────
 function ErrorSlotCardBanner({ slot, message }) {
+  const pull = useSlotImagePull();
+  const isPulling = pull.slotName === slot?.name && pull.inFlight;
+
+  const handleRePull = async () => {
+    if (!slot?.name) return;
+    try {
+      await pull.start(slot.name);
+    } catch (err) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Re-pull failed for ${slot.name}: ${err?.message || err}`, "warn"
+      );
+    }
+  };
+
   return (
     <div style={{padding: "10px 12px", background: "var(--err-soft)", border: "1px solid var(--err-line)", borderRadius: "var(--rad-sm)", display: "flex", alignItems: "flex-start", gap: 8}}>
       <span style={{color: "var(--err)", display: "inline-flex"}}>{Icons.warn}</span>
       <div style={{flex: 1, fontFamily: "var(--jbm)", fontSize: 11.5, color: "var(--fg-2)", lineHeight: 1.5}}>
         <div style={{color: "var(--err)", fontWeight: 500, marginBottom: 2}}>load failed</div>
         <div>{message}</div>
+        {(isPulling || pull.state === "completed" || pull.state === "failed") && pull.slotName === slot?.name && (
+          <ImagePullBar pull={pull} />
+        )}
         <div style={{display: "flex", gap: 6, marginTop: 6}}>
           <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Retrying load for ${slot.name}`, "info")}>{Icons.restart} Retry</button>
-          <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Re-pulling model for ${slot.name}`, "info")}>{Icons.download} Re-pull</button>
+          <button
+            className="btn ghost sm"
+            disabled={isPulling}
+            onClick={handleRePull}
+            title="Re-pull the container image from the registry"
+          >
+            {Icons.download} {isPulling ? "Pulling…" : "Re-pull"}
+          </button>
         </div>
       </div>
     </div>

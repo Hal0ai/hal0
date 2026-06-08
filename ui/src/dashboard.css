@@ -2323,6 +2323,14 @@ select.npu-sel {
   animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Container image-pull indeterminate progress bar (issue #659).
+   Slides a 40% wide bar across the track — distinct from skel-shimmer
+   (which uses a gradient). Used in SlotImagePullBar + ImagePullBar. */
+@keyframes hal0-indeterminate {
+  0%   { transform: translateX(-100%); }
+  60%  { transform: translateX(150%); }
+  100% { transform: translateX(150%); }
+}
 
 /* hero close cursor */
 .hero-strip .close { cursor: pointer; }

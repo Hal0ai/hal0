@@ -13,6 +13,7 @@ import {
   useSlotLoad,
   useSlotSwap,
   useSlotEdit,
+  useSlotImagePull,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
@@ -208,6 +209,48 @@ function Spark({ data, height = 18 }) {
       {data.map((v, i) => (
         <i key={i} style={{ height: `${Math.max((v / max) * 100, 8)}%` }} />
       ))}
+    </div>
+  );
+}
+
+// ─── Container image pull progress bar ────────────────────────────
+// Shows while image_status === "pulling" (backend-polled) or while an
+// explicit Re-pull is in flight from the error banner.
+// Distinct from the model-download bar — this is a ~6GB OCI layer pull,
+// one-time per image tag.
+function SlotImagePullBar({ slot }) {
+  const isContainer = slot?.runtime === "container" || slot?.container_status != null;
+  const imageStatus = slot?.image_status;
+  const pulling = imageStatus === "pulling";
+  if (!isContainer || !pulling) return null;
+  // image tag short form for the label.
+  const imgFull = slot?.image || null;
+  const imgShort = imgFull ? imgFull.split("/").pop() : null;
+  const label = `Pulling image${imgShort ? ` ${imgShort}` : ""}…`;
+  return (
+    <div style={{marginTop: 6, marginBottom: 2}}>
+      <div
+        aria-live="polite"
+        style={{fontFamily: "var(--jbm)", fontSize: 10.5, color: "var(--fg-3)", marginBottom: 3}}
+      >
+        {label}
+      </div>
+      <div style={{height: 3, background: "var(--bg-2)", borderRadius: 2, overflow: "hidden"}}>
+        <div
+          role="progressbar"
+          aria-valuenow={0}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label={label}
+          style={{
+            height: "100%",
+            width: "40%",
+            background: "var(--accent)",
+            borderRadius: 2,
+            animation: "hal0-indeterminate 1.4s ease infinite",
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -411,6 +454,9 @@ function SlotCard({
           ))}
         </div>
       )}
+      {/* Container image pull progress — shown when image_status === "pulling"
+          (backend-polled), distinct from model download. */}
+      <SlotImagePullBar slot={slot} />
       {/* N3: touch-action:manipulation prevents 300ms tap-delay on mobile
           while keeping pan/pinch-to-zoom intact (no `touch-action: none`). */}
       <div className="slot-actions" style={{touchAction: "manipulation"}}>

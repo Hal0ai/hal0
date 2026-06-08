@@ -36,6 +36,7 @@ ABC compliance:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shlex
 import subprocess
@@ -382,6 +383,102 @@ class ContainerProvider(Provider):
         """Return True if the systemd unit is in an active state."""
         result = self._run("systemctl", "is-active", self._unit_name(slot_name), check=False)
         return result.returncode == 0
+
+    def image_present(self, image: str) -> bool:
+        """Return True if ``image`` is in the local container image store.
+
+        Uses ``<runtime> image inspect`` (exit 0 = present, non-zero = missing).
+        Runs synchronously — callers must dispatch to a thread executor when
+        called from an async context.
+        """
+        try:
+            runtime = _container_runtime()
+        except RuntimeError:
+            return False
+        result = subprocess.run(
+            [runtime, "image", "inspect", image],
+            capture_output=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    async def pull_image_stream(self, image: str):
+        """Async generator that runs ``<runtime> pull <image>`` and yields
+        layer-progress dicts.
+
+        Yields dicts::
+
+            {"state": "pulling",  "layer": N, "total_layers": M, "line": "<raw line>"}
+            {"state": "completed"}
+            {"state": "failed",   "error": "<message>"}
+
+        Layer counting heuristic (docker non-TTY output):
+          - Each ``Pulling fs layer`` / ``Waiting`` / ``Verifying Checksum`` /
+            ``Already exists`` lines indicate a discovered layer (M increments).
+          - Each ``Pull complete`` / ``Download complete`` line indicates a
+            finished layer (N increments, capped at M).
+        """
+        import asyncio as _asyncio
+
+        try:
+            runtime = _container_runtime()
+        except RuntimeError as exc:
+            yield {"state": "failed", "error": str(exc)}
+            return
+
+        proc = await _asyncio.create_subprocess_exec(
+            runtime,
+            "pull",
+            image,
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.STDOUT,
+        )
+
+        total_layers = 0
+        done_layers = 0
+
+        try:
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if not line:
+                    continue
+                # Discover new layers.
+                if any(
+                    kw in line
+                    for kw in (
+                        "Pulling fs layer",
+                        "Waiting",
+                        "Verifying Checksum",
+                        "Already exists",
+                    )
+                ):
+                    total_layers += 1
+                # Count finished layers.
+                if (
+                    "Pull complete" in line
+                    or "Download complete" in line
+                    or "Already exists" in line
+                ):
+                    done_layers = min(done_layers + 1, max(total_layers, 1))
+                yield {
+                    "state": "pulling",
+                    "layer": done_layers,
+                    "total_layers": total_layers,
+                    "line": line,
+                }
+        except Exception as exc:
+            yield {"state": "failed", "error": str(exc)}
+            return
+        finally:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+
+        exit_code = await proc.wait()
+        if exit_code == 0:
+            yield {"state": "completed", "layer": done_layers, "total_layers": total_layers}
+        else:
+            yield {"state": "failed", "error": f"pull exited with code {exit_code}"}
 
 
 # ── Module-level singleton (matches lemonade_provider() pattern) ─────────────

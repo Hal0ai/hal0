@@ -966,6 +966,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # and status routes snapshot ``as_dict()`` rather than hold the
     # dataclass across event-loop ticks.
     app.state.model_pull_jobs = {}
+    # Container image-pull job registry — keyed by slot name, value is a
+    # dict with keys: state (pulling|completed|failed), layer, total_layers,
+    # error, and a threading.Event for SSE fan-out.
+    app.state.slot_pull_jobs = {}
     # Dashboard footer event bus. Constructed above (so SlotManager could
     # be wired with the same instance); published on app.state here so
     # request handlers can reach it via ``request.app.state.events``.

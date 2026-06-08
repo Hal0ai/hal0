@@ -29,7 +29,7 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
@@ -405,13 +405,15 @@ async def _container_state_enrichment(request: Request) -> dict[str, dict[str, A
         entry["runtime"] = "container"
         profile_name = str(cfg.get("profile") or "")
         entry["profile"] = profile_name
+        image: str | None = None
         if profile_name:
             try:
                 from hal0.config.loader import load_profiles_config
 
                 catalog = load_profiles_config()
                 prof = catalog.profile.get(profile_name)
-                entry["image"] = prof.image if prof else None
+                image = prof.image if prof else None
+                entry["image"] = image
                 # resolved_command = llama-server argv starting from the image
                 from hal0.providers.container import resolved_command_for_slot
 
@@ -422,6 +424,26 @@ async def _container_state_enrichment(request: Request) -> dict[str, dict[str, A
         else:
             entry["image"] = None
             entry["resolved_command"] = None
+
+        # image_status: present | pulling | missing
+        # Check the slot_pull_jobs registry first so an in-flight pull
+        # surfaces as "pulling" without an extra inspect syscall.
+        slot_pull_jobs: dict[str, Any] = getattr(request.app.state, "slot_pull_jobs", {})
+        active_job = slot_pull_jobs.get(name)
+        if active_job is not None and getattr(active_job, "state", None) == "pulling":
+            entry["image_status"] = "pulling"
+        elif image:
+            try:
+                from hal0.providers.container import container_provider
+
+                present = await asyncio.get_event_loop().run_in_executor(
+                    None, container_provider().image_present, image
+                )
+                entry["image_status"] = "present" if present else "missing"
+            except Exception:
+                entry["image_status"] = "missing"
+        else:
+            entry["image_status"] = "missing"
 
         out[name] = entry
     return out
@@ -1791,4 +1813,196 @@ async def slot_state_stream(name: str, request: Request) -> StreamingResponse:
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+# ── container image pull ───────────────────────────────────────────────────────
+
+
+class _ImagePullJob:
+    """Lightweight job object for a container-image pull.
+
+    Tracks state (pulling | completed | failed), layer progress, and an
+    asyncio.Event used to wake SSE subscribers on each line of output.
+
+    Unlike the HF-model PullJob (byte-oriented), this job is layer-oriented:
+    layer = layers finished, total_layers = layers discovered.
+    """
+
+    __slots__ = ("error", "image", "layer", "slot_name", "state", "total_layers")
+
+    def __init__(self, slot_name: str, image: str) -> None:
+        self.slot_name = slot_name
+        self.image = image
+        self.state: str = "pulling"
+        self.layer: int = 0
+        self.total_layers: int = 0
+        self.error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "slot_name": self.slot_name,
+            "image": self.image,
+            "state": self.state,
+            "layer": self.layer,
+            "total_layers": self.total_layers,
+            "error": self.error,
+        }
+
+
+async def _run_image_pull(job: _ImagePullJob, request: Request) -> None:
+    """Run the container pull in background, updating ``job`` per line.
+
+    Writes progress into ``job`` so the 0.5-s polling SSE loop picks it up.
+    ``request`` is accepted for future use (event bus, slot invalidation)
+    but not read currently — marked ARG001 to suppress the linter.
+    """
+    from hal0.providers.container import container_provider
+
+    cp = container_provider()
+    try:
+        async for chunk in cp.pull_image_stream(job.image):
+            job.state = chunk.get("state", "pulling")
+            job.layer = int(chunk.get("layer", job.layer))
+            job.total_layers = int(chunk.get("total_layers", job.total_layers))
+            if chunk.get("error"):
+                job.error = str(chunk["error"])
+            if job.state in ("completed", "failed"):
+                break
+    except Exception as exc:
+        job.state = "failed"
+        job.error = str(exc)
+
+
+@router.post("/{name}/pull", status_code=202)
+async def pull_slot_image(
+    name: str, request: Request, background: BackgroundTasks
+) -> dict[str, object]:
+    """Start a background container image pull for slot ``name``.
+
+    Idempotent: if a pull is already in-flight for this slot, returns
+    the existing job's snapshot rather than starting a second pull.
+
+    Returns a job snapshot::
+
+        {"slot_name": "...", "image": "...", "state": "pulling",
+         "layer": 0, "total_layers": 0}
+
+    Clients should open ``GET /api/slots/{name}/pull/stream`` to receive
+    live layer-progress events after POSTing here.
+    """
+    sm = _get_slot_manager(request)
+    # Validate slot exists.
+    await sm.status(name)
+
+    slot_pull_jobs: dict[str, Any] = getattr(request.app.state, "slot_pull_jobs", {})
+
+    existing = slot_pull_jobs.get(name)
+    if existing is not None and existing.state == "pulling":
+        return {"resumed": True, **existing.as_dict()}
+
+    # Resolve image from profile.
+    image: str | None = None
+    try:
+        configs = await sm.iter_configs()
+        for cfg in configs:
+            if str(cfg.get("name", "")) == name:
+                profile_name = str(cfg.get("profile") or "")
+                if profile_name:
+                    from hal0.config.loader import load_profiles_config
+
+                    catalog = load_profiles_config()
+                    prof = catalog.profile.get(profile_name)
+                    if prof:
+                        image = prof.image
+                break
+    except Exception:
+        pass
+
+    if not image:
+        raise BadRequest(
+            f"slot {name!r} has no container profile / image — cannot pull",
+            details={"slot": name},
+        )
+
+    job = _ImagePullJob(name, image)
+    if not hasattr(request.app.state, "slot_pull_jobs"):
+        request.app.state.slot_pull_jobs = {}
+    request.app.state.slot_pull_jobs[name] = job
+    background.add_task(_run_image_pull, job, request)
+    return {"resumed": False, **job.as_dict()}
+
+
+@router.get("/{name}/pull/stream")
+async def pull_slot_image_stream(name: str, request: Request) -> StreamingResponse:
+    """SSE stream of container image-pull layer progress for slot ``name``.
+
+    Emits one frame immediately (snapshot or terminal-already state),
+    then one per layer line, and a final terminal frame on completion or
+    failure. Graceful when no pull is active: emits a ``present`` or
+    ``missing`` frame and closes.
+
+    Frame shape::
+
+        data: {"slot_name": "...", "image": "...", "state": "pulling",
+               "layer": N, "total_layers": M}
+
+    Terminal states: ``completed`` | ``failed`` | ``present`` | ``missing``.
+    """
+
+    async def _gen() -> Any:
+        slot_pull_jobs: dict[str, Any] = getattr(request.app.state, "slot_pull_jobs", {})
+        job = slot_pull_jobs.get(name)
+
+        if job is None:
+            # No active pull — inspect the image to surface present|missing.
+            image: str | None = None
+            try:
+                sm = _get_slot_manager(request)
+                configs = await sm.iter_configs()
+                for cfg in configs:
+                    if str(cfg.get("name", "")) == name:
+                        profile_name = str(cfg.get("profile") or "")
+                        if profile_name:
+                            from hal0.config.loader import load_profiles_config
+
+                            catalog = load_profiles_config()
+                            prof = catalog.profile.get(profile_name)
+                            if prof:
+                                image = prof.image
+                        break
+            except Exception:
+                pass
+
+            if image:
+                try:
+                    from hal0.providers.container import container_provider
+
+                    present = await asyncio.get_event_loop().run_in_executor(
+                        None, container_provider().image_present, image
+                    )
+                    state = "present" if present else "missing"
+                except Exception:
+                    state = "missing"
+            else:
+                state = "missing"
+
+            yield f"data: {json.dumps({'slot_name': name, 'image': image, 'state': state, 'layer': 0, 'total_layers': 0})}\n\n"
+            return
+
+        # Emit initial snapshot.
+        yield f"data: {json.dumps(job.as_dict())}\n\n"
+        last_layer = job.layer
+        while job.state == "pulling":
+            await asyncio.sleep(0.5)
+            if job.layer != last_layer or job.state != "pulling":
+                last_layer = job.layer
+                yield f"data: {json.dumps(job.as_dict())}\n\n"
+        # Terminal frame.
+        yield f"data: {json.dumps(job.as_dict())}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

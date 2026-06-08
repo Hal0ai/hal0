@@ -8,6 +8,7 @@
 // (slot defs change on edit), so 5s is enough.
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
+import { useEffect, useRef, useState } from 'react'
 import { api, apiGet } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
@@ -445,4 +446,125 @@ export function useSlotConfig(name: string | null | undefined) {
     enabled: !!name,
     staleTime: 10_000,
   })
+}
+
+// ─── useSlotImagePull ─────────────────────────────────────────────────────────
+
+export type ImagePullState = 'idle' | 'pulling' | 'completed' | 'failed' | 'present' | 'missing'
+
+export interface ImagePullSnapshot {
+  slotName: string | null
+  image: string | null
+  state: ImagePullState
+  layer: number
+  totalLayers: number
+  error: string | null
+  inFlight: boolean
+  /** Start a pull for the given slot name: POST then open SSE stream. */
+  start: (name: string) => Promise<void>
+  reset: () => void
+}
+
+const IMAGE_PULL_TERMINAL = new Set<ImagePullState>(['completed', 'failed', 'present', 'missing'])
+
+/**
+ * Container image-pull composable — mirrors the model `usePullJob` pattern.
+ *
+ * Usage:
+ *   const pull = useSlotImagePull()
+ *   pull.start(slot.name)   // POSTs /api/slots/{name}/pull, opens SSE stream
+ *   // render pull.state, pull.layer, pull.totalLayers in a progress bar
+ */
+export function useSlotImagePull(): ImagePullSnapshot {
+  const [slotName, setSlotName] = useState<string | null>(null)
+  const [image, setImage] = useState<string | null>(null)
+  const [state, setState] = useState<ImagePullState>('idle')
+  const [layer, setLayer] = useState(0)
+  const [totalLayers, setTotalLayers] = useState(0)
+  const [error, setError] = useState<string | null>(null)
+  const esRef = useRef<EventSource | null>(null)
+  const qc = useQueryClient()
+
+  const closeStream = () => {
+    if (esRef.current) {
+      esRef.current.close()
+      esRef.current = null
+    }
+  }
+
+  useEffect(() => () => closeStream(), [])
+
+  const applyPayload = (payload: any) => {
+    if (!payload || typeof payload !== 'object') return
+    if (typeof payload.slot_name === 'string') setSlotName(payload.slot_name)
+    if (typeof payload.image === 'string') setImage(payload.image)
+    if (typeof payload.state === 'string') setState(payload.state as ImagePullState)
+    if (typeof payload.layer === 'number') setLayer(payload.layer)
+    if (typeof payload.total_layers === 'number') setTotalLayers(payload.total_layers)
+    if (payload.error) setError(String(payload.error))
+    if (typeof payload.state === 'string' && IMAGE_PULL_TERMINAL.has(payload.state as ImagePullState)) {
+      closeStream()
+      // Invalidate slots so image_status refreshes on the card.
+      qc.invalidateQueries({ queryKey: ['slots'] })
+    }
+  }
+
+  const attachStream = (name: string) => {
+    closeStream()
+    try {
+      esRef.current = new EventSource(ENDPOINTS.slotPullStream(name))
+    } catch (e: any) {
+      setError(e?.message ?? 'EventSource failed')
+      setState('failed')
+      return
+    }
+    const es = esRef.current
+    es.onmessage = (evt: MessageEvent) => {
+      try { applyPayload(JSON.parse(evt.data)) } catch { /* skip */ }
+    }
+    es.onerror = () => {
+      setState('failed')
+      setError('stream error')
+      closeStream()
+    }
+  }
+
+  const start = async (name: string) => {
+    setSlotName(name)
+    setState('pulling')
+    setLayer(0)
+    setTotalLayers(0)
+    setError(null)
+    try {
+      const resp = await api<any>(ENDPOINTS.slotPull(name), { method: 'POST', raw: true })
+      if (typeof resp?.image === 'string') setImage(resp.image)
+    } catch (e: any) {
+      setState('failed')
+      setError(e?.message ?? 'pull start failed')
+      return
+    }
+    attachStream(name)
+  }
+
+  const reset = () => {
+    closeStream()
+    setSlotName(null)
+    setImage(null)
+    setState('idle')
+    setLayer(0)
+    setTotalLayers(0)
+    setError(null)
+  }
+
+  return {
+    slotName,
+    image,
+    state,
+    layer,
+    totalLayers,
+    error,
+    inFlight: state === 'pulling',
+    start,
+    reset,
+  }
 }
