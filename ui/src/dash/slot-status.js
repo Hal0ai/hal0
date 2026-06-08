@@ -37,8 +37,11 @@ const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h stuck-SERVING threshold
  * @param {number} [now] - epoch ms (injectable for tests)
  * @returns {{ phase: string, isLive: boolean, isCold: boolean }}
  *   phase   — one of: missing|pulling|starting|serving|ready|idle|stopped|crashed
- *   isLive  — true when the slot holds memory (YELLOW or GREEN states)
- *             (memory-map attribution: same semantics as old LIVE_STATES)
+ *   isLive  — heuristic "holds memory" flag for the dot vocabulary. NOTE:
+ *             this is NOT the memory-map attribution test — it folds in
+ *             enabled + lemonade_state and so DIVERGES from the legacy
+ *             LIVE_STATES set for lemond slots. Memory-map MUST use
+ *             isSlotLive() (below), which preserves LIVE_STATES exactly.
  *   isCold  — true for container slots (model swap = systemctl restart, not hot-swap)
  */
 // Detect whether a slot is a container runtime.
@@ -257,15 +260,28 @@ export function stateChipClassForSlot(slot) {
   return "chip";
 }
 
+// The exact legacy LIVE_STATES set memory-map.jsx used: a lemond slot was
+// "live" (attributed memory) iff its raw state string was one of these.
+// This MUST stay byte-identical for lemond slots — slotPhase().isLive
+// diverges (it folds in enabled + lemonade_state), so isSlotLive does NOT
+// reuse it for the lemond path. Container slots get their own live rule.
+const LEMOND_LIVE_STATES = new Set(["ready", "serving", "idle", "warming"]);
+
 /**
- * isLive test for memory-map attribution.
- * Replaces membership in LIVE_STATES set.
+ * isLive test for memory-map attribution. Replaces the old LIVE_STATES set.
  *
- * For lemond slots: LIVE_STATES was {ready, serving, idle, warming}.
- * For container slots: live = running + healthy (phase ready or serving).
+ * Lemond slots: EXACT equivalence to old `LIVE_STATES.has(slot.state)` —
+ *   live iff state ∈ {ready, serving, idle, warming}. No enabled/lemonade_state
+ *   folding (that would change which lemond slots get memory attribution).
+ * Container slots: live iff running + healthy (slotPhase → ready|serving).
  */
 export function isSlotLive(slot) {
-  return slotPhase(slot).isLive;
+  if (_isContainer(slot)) {
+    const { phase } = slotPhase(slot);
+    return phase === "ready" || phase === "serving";
+  }
+  // Lemond: preserve legacy LIVE_STATES.has(state) semantics exactly.
+  return LEMOND_LIVE_STATES.has(String(slot?.state || "").toLowerCase());
 }
 
 export { RECENTLY_LIVE_MS };

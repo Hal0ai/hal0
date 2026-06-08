@@ -17,7 +17,7 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
 import { MemoryMap } from './memory-map'
-import { slotIndicatorFromPhase } from './slot-status.js'
+import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 
 const { useState: useStateS } = React;
 
@@ -196,7 +196,7 @@ function IndicatorDot({ slot }) {
 
 // Expose for window-scope JSX (legacy pattern in this codebase) + tests.
 if (typeof window !== "undefined") {
-  Object.assign(window, { slotIndicator, IndicatorDot, RECENTLY_LIVE_MS });
+  Object.assign(window, { slotIndicator, IndicatorDot, RECENTLY_LIVE_MS, isSlotLive });
 }
 
 // ─── Mini sparkline for slot card ───

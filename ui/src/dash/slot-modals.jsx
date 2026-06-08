@@ -46,11 +46,15 @@ const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React
 function stateChipClass(stateOrSlot) {
   // Duck-type: if it's a string, keep original behaviour (lemond path).
   if (typeof stateOrSlot === "string" || stateOrSlot == null) {
+    // STRING path = lemond, byte-identical to origin/main. Do NOT add
+    // warming/pulling/crashed here — that recolored lemond state strips
+    // (e.g. state="warming" must stay grey at the EditSlotDrawer strip).
+    // Container chips route through the slot-OBJECT overload only.
     const s = String(stateOrSlot || "").toLowerCase();
     if (["ready", "online", "loaded", "serving", "running"].includes(s)) return "chip ok";
-    if (["starting", "loading", "pending", "stopping", "pulling", "warming"].includes(s)) return "chip warn";
-    if (["error", "failed", "broken", "crashed"].includes(s)) return "chip err";
-    return "chip"; // offline / empty / unconfigured → neutral grey
+    if (["starting", "loading", "pending", "stopping"].includes(s)) return "chip warn";
+    if (["error", "failed", "broken"].includes(s)) return "chip err";
+    return "chip"; // offline / warming / empty / unconfigured → neutral grey
   }
   // Full slot object: delegate to the shared N1 helper.
   // stateChipClassForSlot returns null for lemond slots (sentinel),
