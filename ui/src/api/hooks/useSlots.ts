@@ -121,6 +121,11 @@ export interface Slot {
    *  False when stopped, starting (health probe not yet passing), or crashed.
    *  Absent for Lemonade slots. */
   container_health?: boolean | null
+  /** Canonical llama-server argv for this container slot, starting from the
+   *  image tag (omits the podman boilerplate). Populated by
+   *  _container_state_enrichment() via resolved_command_for_slot() in
+   *  container.py. Absent/null for Lemonade slots. */
+  resolved_command?: string[] | null
 
   // ── Synthetic upstream-backed entries ───────────────────────────────
   // /api/slots merges real lifecycle-managed slots with synthetic
@@ -247,6 +252,9 @@ function normalizeSlot(s: any): Slot {
     // Absent for Lemonade slots; null here keeps the type honest.
     container_status: s?.container_status ?? null,
     container_health: s?.container_health ?? null,
+    // resolved_command: backend-provided llama-server argv for container slots
+    // (issue #658). Absent for Lemonade slots.
+    resolved_command: s?.resolved_command ?? null,
   }
 }
 
