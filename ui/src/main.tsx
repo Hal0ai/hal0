@@ -48,6 +48,8 @@ import './dash/models.jsx'
 import './dash/model-modals.jsx'
 // issue #549 — Connections surface: providers + upstreams list + per-row test.
 import './dash/connections.jsx'
+// issue #658 — Profiles: container-slot template catalog + iGPU intent labels.
+import './dash/profiles.jsx'
 import './dash/settings.jsx'
 
 import './dash/extras.jsx'

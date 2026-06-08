@@ -397,4 +397,49 @@ def container_provider() -> ContainerProvider:
     return _container_provider
 
 
-__all__ = ["ContainerProvider", "container_provider"]
+def resolved_command_for_slot(
+    slot_cfg: dict[str, Any],
+    model_path: str | None = None,
+) -> list[str] | None:
+    """Return the canonical llama-server argv for a container slot.
+
+    Used by the API layer (GET /api/slots + /config) to surface a
+    ``resolved_command`` field without fabricating flags client-side.
+
+    Returns the podman run argv *starting from the image tag* — the
+    boilerplate podman preamble (--device, --group-add, --security-opt,
+    --volume, --publish) is omitted because:
+      a) it requires root to read GIDs (``resolve_gpu_group_ids``), and
+      b) it is not useful for debugging inference behaviour.
+
+    Returns ``None`` when the slot has no profile (not a container slot)
+    or the profile lookup fails.
+    """
+    profile_name = str(slot_cfg.get("profile") or "")
+    if not profile_name:
+        return None
+    try:
+        profile = _resolve_profile(profile_name)
+    except (KeyError, Exception):
+        return None
+
+    flags_str = resolve_profile_flags(profile)
+    flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
+
+    port = int(slot_cfg.get("port", 0))
+    effective_model = model_path or str(slot_cfg.get("model", "") or "")
+
+    argv: list[str] = [
+        profile.image,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(port),
+    ]
+    if effective_model:
+        argv += ["--model", effective_model]
+    argv.extend(flag_tokens)
+    return argv
+
+
+__all__ = ["ContainerProvider", "container_provider", "resolved_command_for_slot"]

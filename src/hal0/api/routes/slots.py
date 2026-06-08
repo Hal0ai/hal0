@@ -399,6 +399,30 @@ async def _container_state_enrichment(request: Request) -> dict[str, dict[str, A
         entry["container_status"] = container_status
         entry["container_health"] = container_health
 
+        # Emit runtime / profile / image so the UI doesn't have to dig
+        # into metadata, and resolved_command so the drawer can show the
+        # real podman argv instead of fabricating flags client-side.
+        entry["runtime"] = "container"
+        profile_name = str(cfg.get("profile") or "")
+        entry["profile"] = profile_name
+        if profile_name:
+            try:
+                from hal0.config.loader import load_profiles_config
+
+                catalog = load_profiles_config()
+                prof = catalog.profile.get(profile_name)
+                entry["image"] = prof.image if prof else None
+                # resolved_command = llama-server argv starting from the image
+                from hal0.providers.container import resolved_command_for_slot
+
+                entry["resolved_command"] = resolved_command_for_slot(cfg)
+            except Exception:
+                entry["image"] = None
+                entry["resolved_command"] = None
+        else:
+            entry["image"] = None
+            entry["resolved_command"] = None
+
         out[name] = entry
     return out
 

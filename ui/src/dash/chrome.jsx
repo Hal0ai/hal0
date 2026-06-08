@@ -108,6 +108,7 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
     agent:     ["Tools",  "Agent"],
     settings:  ["Configure", "Settings"],
     connections: ["Network", "Connections"],
+    profiles:  ["iGPU Slots", "Profiles"],
   };
   const [eyebrow, title] = labels[route] || ["", ""];
   return (
@@ -173,6 +174,9 @@ function useNavItems() {
   return [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
     { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount },
+    // issue #658 — Profiles: container-slot templates (image + bench flags).
+    // Sits under Slots as the natural companion for container runtime config.
+    { id: "profiles",  label: "Profiles",  icon: Icons.hardware },
     { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
     { id: "logs",      label: "Logs",      icon: Icons.logs },
     ...(memoryEnabled ? [{ id: "agent", label: "Agent", icon: Icons.agent }] : []),

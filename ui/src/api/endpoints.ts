@@ -185,6 +185,9 @@ export const ENDPOINTS = {
   upstreamTest: (name: string) =>
     `/api/upstreams/${encodeURIComponent(name)}/test`,
 
+  // ── Profiles (container slot templates) ─────────────────────────
+  profiles: '/api/profiles',
+
   // Install / FirstRun
   installState: '/api/install/state',
   firstrunState: '/api/firstrun/state',

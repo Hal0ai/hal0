@@ -275,3 +275,124 @@ def test_get_slot_container_state_fields(
     slot = r.json()
     assert slot["container_status"] == "running"
     assert slot["container_health"] is True
+
+
+# ── runtime/profile/image/resolved_command enrichment (issue #658) ─────────────
+
+
+def test_container_slot_has_runtime_profile_image_fields(
+    client_with_container_slot: TestClient,
+) -> None:
+    """Container slots must expose runtime/profile/image/resolved_command on /api/slots."""
+    from hal0.config.schema import ProfileConfig
+
+    fake_profile = ProfileConfig(
+        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        flags="--flash-attn on -ngl 999",
+        mtp=False,
+    )
+    fake_catalog = MagicMock(profile={"vulkan-radv": fake_profile})
+    with (
+        patch(
+            "hal0.providers.container.ContainerProvider.is_active",
+            return_value=True,
+        ),
+        patch(
+            "hal0.providers.container.ContainerProvider.health",
+            new_callable=AsyncMock,
+            return_value={"ok": True, "status": "healthy"},
+        ),
+        # slots.py inline-imports load_profiles_config for the image field
+        patch(
+            "hal0.config.loader.load_profiles_config",
+            return_value=fake_catalog,
+        ),
+        # container.py module-level import used by resolved_command_for_slot
+        patch(
+            "hal0.providers.container.load_profiles_config",
+            return_value=fake_catalog,
+        ),
+    ):
+        r = client_with_container_slot.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    slot = by_name["gpu-chat"]
+
+    assert slot.get("runtime") == "container", "runtime must be 'container'"
+    assert slot.get("profile") == "vulkan-radv", "profile must be the slot's profile name"
+    assert slot.get("image") == fake_profile.image, "image must come from profile"
+    # resolved_command: list starting with the image tag
+    rc = slot.get("resolved_command")
+    assert rc is not None, "resolved_command must be present"
+    assert isinstance(rc, list), "resolved_command must be a list"
+    assert rc[0] == fake_profile.image, "resolved_command[0] must be the image"
+
+
+def test_container_slot_resolved_command_includes_flags(
+    client_with_container_slot: TestClient,
+) -> None:
+    """resolved_command must include profile flags tokens."""
+    from hal0.config.schema import ProfileConfig
+
+    fake_profile = ProfileConfig(
+        image="ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        flags="--flash-attn on -ngl 999",
+        mtp=False,
+    )
+    fake_catalog = MagicMock(profile={"vulkan-radv": fake_profile})
+    with (
+        patch(
+            "hal0.providers.container.ContainerProvider.is_active",
+            return_value=False,
+        ),
+        patch(
+            "subprocess.run",
+            return_value=MagicMock(stdout=b"inactive", returncode=3),
+        ),
+        # slots.py inline-imports load_profiles_config for the image field
+        patch(
+            "hal0.config.loader.load_profiles_config",
+            return_value=fake_catalog,
+        ),
+        # container.py module-level import used by resolved_command_for_slot
+        patch(
+            "hal0.providers.container.load_profiles_config",
+            return_value=fake_catalog,
+        ),
+    ):
+        r = client_with_container_slot.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    slot = by_name["gpu-chat"]
+    rc = slot.get("resolved_command")
+    assert isinstance(rc, list)
+    # Flags should be spread into the command
+    joined = " ".join(rc)
+    assert "--flash-attn" in joined, "profile flags must appear in resolved_command"
+    assert "-ngl" in joined, "profile flags must appear in resolved_command"
+
+
+def test_lemonade_slot_has_no_runtime_container_fields(
+    client_with_container_slot: TestClient,
+    lemonade_stub: dict[str, Any],
+) -> None:
+    """Lemonade slots must not have runtime='container' or profile/image/resolved_command."""
+    with (
+        patch(
+            "hal0.providers.container.ContainerProvider.is_active",
+            return_value=True,
+        ),
+        patch(
+            "hal0.providers.container.ContainerProvider.health",
+            new_callable=AsyncMock,
+            return_value={"ok": True, "status": "healthy"},
+        ),
+    ):
+        r = client_with_container_slot.get("/api/slots")
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    lemond_slot = by_name["chat"]
+
+    # Lemonade slots must not inherit container enrichment fields
+    assert lemond_slot.get("runtime") != "container"
+    assert "resolved_command" not in lemond_slot
