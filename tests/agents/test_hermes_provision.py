@@ -869,6 +869,138 @@ def test_config_write_renders_role_slots_from_live_state(
     ]
 
 
+# ── #661/#635: reasoning wiring — chat slot + display flags ──────────────────
+#
+# #635 wires the `chat` slot (Qwen3-class thinking-on model) as the top-level
+# model with reasoning visible in the TUI. Three Hermes gotchas apply:
+#   1. model.base_url MUST be set (provider:custom requires it) ← already done.
+#   2. model.max_tokens MUST be set — else Qwen3 spends the full budget on
+#      <think> and the content field comes back empty (silent TUI).
+#   3. display.streaming AND display.show_reasoning BOTH required; without
+#      streaming the TUI hangs on the reasoning block.
+#
+# Reconciliation with #661: delegation→`agent` (ace-saber MoE, thinking-off)
+# is already wired via _DELEGATION_SLOT_NAME="agent". Hermes has one delegation
+# config (no per-subagent-type routing), so the reasoning-ON path is the top-
+# level chat conversation, not a separate subagent slot. The agent MoE stays
+# thinking-off by design.
+
+
+def test_rendered_config_has_show_reasoning_true() -> None:
+    """display.show_reasoning: true is required for thinking-model TUI visibility."""
+    yaml = pytest.importorskip("yaml")
+    rendered = hp._render_config_yaml(
+        primary={
+            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+            "backend_url": _HAL0_V1,
+            "context_length": 32768,
+        },
+        agent_id="hermes-agent",
+    )
+    cfg = yaml.safe_load(rendered)
+    display = cfg.get("display") or {}
+    assert display.get("show_reasoning") is True, (
+        "display.show_reasoning must be true for Qwen3 thinking visibility "
+        "(#635 gotcha: without it, reasoning output is silently suppressed)"
+    )
+
+
+def test_rendered_config_has_streaming_true() -> None:
+    """display.streaming: true is required alongside show_reasoning for thinking models.
+
+    Without streaming, the TUI hangs on the <think> block while waiting for
+    the full response before displaying anything (#635 + memory note).
+    """
+    yaml = pytest.importorskip("yaml")
+    rendered = hp._render_config_yaml(
+        primary={
+            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+            "backend_url": _HAL0_V1,
+            "context_length": 32768,
+        },
+        agent_id="hermes-agent",
+    )
+    cfg = yaml.safe_load(rendered)
+    display = cfg.get("display") or {}
+    assert display.get("streaming") is True, (
+        "display.streaming must be true for thinking models (#635 gotcha: "
+        "without streaming, the TUI hangs silently on the <think> block)"
+    )
+
+
+def test_rendered_config_has_model_max_tokens() -> None:
+    """model.max_tokens is required to prevent silent TUI on Qwen3 thinking models.
+
+    Without a max_tokens cap, Qwen3 can exhaust the budget in <think> and
+    return an empty content field — which looks like a broken wiring even
+    when everything else is correct (#635 + smoke-test timeout comment in
+    _smoke_chat_roundtrip).
+    """
+    yaml = pytest.importorskip("yaml")
+    rendered = hp._render_config_yaml(
+        primary={
+            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
+            "backend_url": _HAL0_V1,
+            "context_length": 32768,
+        },
+        agent_id="hermes-agent",
+    )
+    cfg = yaml.safe_load(rendered)
+    model_cfg = cfg.get("model") or {}
+    max_tokens = model_cfg.get("max_tokens")
+    assert isinstance(max_tokens, int) and max_tokens > 0, (
+        "model.max_tokens must be a positive integer — "
+        "Qwen3 thinking models silently drain the budget otherwise (#635)"
+    )
+
+
+def test_rendered_config_model_base_url_set() -> None:
+    """model.base_url is always present in the rendered config.
+
+    Hermes's bare ``provider: custom`` requires model.base_url to be set
+    or it falls back to OpenRouter and emits '... is not a valid model ID' 400
+    (#635 gotcha, also tracked in memory hermes_bare_custom_needs_model_base_url).
+    """
+    yaml = pytest.importorskip("yaml")
+    # Verify both the primary-slot branch and the no-slot fallback branch.
+    for primary in [
+        {"model_id": "qwen3-27b", "backend_url": _HAL0_V1, "context_length": 32768},
+        None,
+    ]:
+        rendered = hp._render_config_yaml(primary=primary, agent_id="hermes-agent")
+        cfg = yaml.safe_load(rendered)
+        model_cfg = cfg.get("model") or {}
+        assert model_cfg.get("base_url"), (
+            f"model.base_url must be set (primary={primary!r}) — "
+            "bare provider:custom without base_url routes to OpenRouter"
+        )
+
+
+def test_delegation_targets_agent_slot_not_chat() -> None:
+    """Delegation → `agent` MoE slot (thinking-off); chat stays on main model.
+
+    This validates the #661/#635 reconciliation: #635 asked for
+    'advanced-reasoning subagents → chat-27b' but Hermes has a single
+    delegation config. Reasoning lives on the top-level chat conversation
+    (show_reasoning + streaming); the agent MoE handles delegation.
+    The chat slot model must NOT appear as the delegation model.
+    """
+    deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    assert deleg is not None, "delegation must be set when the agent slot is live"
+    # The delegation model is the agent MoE, not the chat-27b model.
+    assert deleg["model"] == "hermes-4-14b-q5km", (
+        "delegation.model must be the agent slot model "
+        "(ace-saber MoE, thinking-off) — not the chat slot"
+    )
+    chat_model = "qwen3-coder-next-reap-40b-a3b-q4kxl"
+    assert deleg["model"] != chat_model, (
+        "delegation must NOT be the chat-slot model; "
+        "reasoning runs on the top-level chat, not in subagents"
+    )
+    assert deleg["base_url"] == _HAL0_V1
+    assert deleg["provider"] == "custom"
+
+
 def test_config_write_phase_writes_yaml_idempotently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

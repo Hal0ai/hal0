@@ -17,8 +17,8 @@
      system_prompt    — str          (persona-rendered prelude; PR-3 Phase 7)
      personality_name — str          (display name of active persona; PR-3 Phase 8)
      delegation       — dict or None ({model, base_url, provider}) — subagent
-                        role model from the `agent-hermes` slot. None → block
-                        omitted → subagents inherit the chat model.
+                        role model from the `agent` slot (post-rename #654).
+                        None → block omitted → subagents inherit the chat model.
      auxiliary_tasks  — dict          task → {provider, model, base_url}.
                         Drives the auxiliary: block. utility-slot tasks render
                         provider:"custom"+base_url; vision/web_extract stay
@@ -62,6 +62,13 @@ model:
   provider: "custom"
   base_url: "http://127.0.0.1:8080/v1"
 {%- endif %}
+  # max_tokens guards against thinking-model silent-TUI: Qwen3 chat (the
+  # `chat` slot) can burn the entire budget on <think>…</think> and return
+  # an empty content field if max_tokens is unset. 8192 gives the model
+  # room to think + reply while keeping responses bounded. Without this,
+  # `display.show_reasoning: true` (below) still shows nothing because the
+  # content field is empty. Gotcha documented in #635 + hermes memory note.
+  max_tokens: 8192
 
 providers:
   # `custom` is upstream Hermes's built-in profile for OpenAI-compatible
@@ -117,12 +124,18 @@ custom_providers:
 {%- endif %}
 {%- if delegation %}
 
-{# feat/hermes-role-slots: subagents run on a dedicated slot
-   (`agent-hermes`). delegate_tool.py `_resolve_delegation_credentials`
-   reads delegation.{model,provider,base_url}; setting base_url forces
-   provider → "custom" so subagents hit hal0's OpenAI surface. Omitted
-   entirely when the slot isn't live, in which case subagents inherit the
-   parent (chat) model. #}
+{# feat/hermes-role-slots (#661): subagents run on the `agent` slot (ace-saber
+   MoE, thinking-off). This is intentionally different from the main `chat`
+   slot (thinking-on, Qwen3 class). The chat slot is used for the top-level
+   reasoning-visible conversation; the agent MoE is the fast non-think path
+   for agentic subtasks (tool use, decomposition). Reconciliation: #635 asked
+   for "advanced-reasoning subagents → chat-27b" but Hermes has one delegation
+   config (no per-subagent-type routing), so reasoning lives on the chat model
+   (show_reasoning + streaming above) and the agent slot handles delegation.
+   delegate_tool.py `_resolve_delegation_credentials` reads
+   delegation.{model,provider,base_url}; base_url forces provider → "custom"
+   so subagents hit hal0's OpenAI surface. Omitted when the slot is not live,
+   in which case subagents inherit the parent (chat) model. #}
 delegation:
   model: {{ delegation.model | tojson }}
   provider: {{ delegation.provider | default("custom") | tojson }}
@@ -185,7 +198,12 @@ agent:
 
 display:
   bell_on_complete: false
-  show_reasoning: false
+  # Reasoning visibility: `chat` slot runs Qwen3-class thinking models.
+  # Both flags are required together — streaming: true is the transport
+  # prerequisite; show_reasoning: true is the UI gate. Without streaming,
+  # the TUI hangs silently on the <think> block. Gotcha from #635.
+  streaming: true
+  show_reasoning: true
 {%- if personality_name %}
   # Phase 8 (PR-3): UI-facing label for the active persona; surfaces in
   # `hermes` itself when the operator runs the CLI directly. The
