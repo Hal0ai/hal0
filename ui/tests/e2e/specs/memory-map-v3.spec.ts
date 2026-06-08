@@ -187,6 +187,61 @@ test.describe('Memory map — sidebar', () => {
     const c1 = await swatches.nth(1).evaluate((el) => getComputedStyle(el).backgroundColor)
     expect(c0).not.toBe(c1)
   })
+
+  test('container slot legend shows image tag, not device token', async ({ page }) => {
+    // #660: container slots are uninformative with "device=rocm" in the
+    // legend sub — every GPU container slot shares the same device token.
+    // The backend emits image + profile for container slots; the legend
+    // must show the (truncated) image tag instead.
+    //
+    // With VITE_MOCK_LEMONADE=1 the mock shim reads HAL0_DATA directly;
+    // page.route() never fires. Inject the container slot via addInitScript
+    // before data.jsx sets window.HAL0_DATA, so the mock harness picks it up.
+    const containerSlot = {
+      name: 'primary-container', type: 'llm', device: 'gpu-rocm',
+      model: 'qwen3.6-35b-a3b-q4_k_m', model_id: 'qwen3.6-35b-a3b',
+      group: 'chat', state: 'ready', port: 8096,
+      runtime: 'container',
+      profile: 'rocmfp4-mtp',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image_status: 'present',
+      container_status: 'running',
+      container_health: true,
+      mem_mb: 22400,
+    }
+    await page.addInitScript((slot) => {
+      // Intercept the HAL0_DATA setter that data.jsx calls, prepend our slot.
+      let stored: any = undefined
+      Object.defineProperty(window, 'HAL0_DATA', {
+        set(v: any) {
+          stored = { ...v, slots: [slot, ...(v.slots || [])] }
+        },
+        get() { return stored },
+        configurable: true,
+      })
+    }, containerSlot)
+    await mockStatsHardware(page, { configured: false, detected: false })
+    await page.goto('/#dashboard')
+    const legend = page.locator('.memmap-sidebar .memmap-legend')
+    await expect(legend).toBeVisible()
+    // The container slot's legend sub must contain part of the image tag.
+    // slotLegendSub truncates to the last 32 chars of the image string:
+    // "…rocm-7.2.4-rocmfp4-server"
+    await expect(legend).toContainText('rocm-7.2.4-rocmfp4-server')
+  })
+
+  test('container slot mem_mb attributed in pool bar', async ({ page }) => {
+    // #660: container slots with mem_mb > 0 must register as a non-zero
+    // segment in the pool bar — i.e. the bar has ≥2 <i> width segments
+    // (at least one slot + the free remainder).
+    await mockStatsHardware(page, { configured: false, detected: false })
+    await page.goto('/#dashboard')
+    const bar = page.locator('.memmap-sidebar .memmap-bar')
+    await expect(bar).toBeVisible()
+    const segments = bar.locator('i[style*="width"]')
+    const count = await segments.count()
+    expect(count).toBeGreaterThanOrEqual(2)
+  })
 })
 
 // NOTE: the `Memory map — expanded` variant (with its Proxmox host-pressure

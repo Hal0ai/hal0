@@ -271,6 +271,13 @@ export function useMemoryMapModel() {
           bytesGb: a.bytesGb,
           modelId: a.slot.model || '',
           approx: a.approx,
+          // Container runtime fields — present when slot.runtime="container".
+          // `image` is the full image tag; `profile` is the profile slug.
+          // Used by the legend to show context relevant for container slots
+          // (device chip is uninformative for containers — all are "rocm").
+          isContainer: a.slot.runtime === 'container' || a.slot.container_status != null,
+          image: a.slot.image || null,
+          profile: a.slot.profile || null,
         }))
       })(),
     },
@@ -374,6 +381,25 @@ function HostBar({ model }) {
   )
 }
 
+// Per-slot legend sub-label.
+// Container slots: show image tag (truncated at 32 chars) or profile slug —
+// more informative than "rocm" which every container shares.
+// Lemond slots: keep the device token (rocm/vulkan/cpu/npu) as before.
+function slotLegendSub(slot) {
+  if (slot.isContainer) {
+    // Prefer image tag (e.g. "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-server")
+    // Truncate to last 32 chars so very long registry paths stay readable.
+    if (slot.image) {
+      const img = String(slot.image)
+      return img.length > 32 ? '…' + img.slice(-32) : img
+    }
+    if (slot.profile) return String(slot.profile)
+    return 'container'
+  }
+  // Lemond / legacy path: show device + approx marker.
+  return `${slot.device}${slot.approx ? ' · ≈' : ''}`
+}
+
 function LegendRow({ swatch, name, sub, sz }) {
   return (
     <div className="ln mono">
@@ -418,7 +444,7 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
               key={s.name}
               swatch={s.color}
               name={s.name}
-              sub={`${s.device}${s.approx ? ' · ≈' : ''}${s.modelId ? ' · ' + s.modelId : ''}`}
+              sub={`${slotLegendSub(s)}${s.modelId ? ' · ' + s.modelId : ''}`}
               sz={s.bytesGb}
             />
           ))}
@@ -480,7 +506,7 @@ export function MemoryMap({ variant = 'sidebar', onConfigure }) {
                 key={s.name}
                 swatch={s.color}
                 name={s.name}
-                sub={s.device}
+                sub={slotLegendSub(s)}
                 sz={s.bytesGb}
               />
             ))}
