@@ -234,16 +234,11 @@ function SlotCard({
   // (W6). When a real metric is momentarily absent (slot offline) show
   // an em-dash, never a fabricated 0.
   //
-  // `size` is derived from metrics.mem (GB). Until BE-METRICS lands a
-  // real resident-size field per modality, only show it when mem > 0;
-  // otherwise em-dash rather than "0 MB".
-  const sizeChip = () => {
-    const memGb = typeof metrics.mem === "number" ? metrics.mem : 0;
-    if (!memGb || memGb <= 0) return { l: "size", v: "—", u: "" };
-    return memGb * 1024 < 1000
-      ? { l: "size", v: (memGb * 1024).toFixed(0), u: "MB" }
-      : { l: "size", v: memGb.toFixed(1), u: "GB" };
-  };
+  // Only LLM slots carry a metrics row. The non-LLM capability cards
+  // (embedding/reranking/transcription/tts/image) used to show sparse
+  // dim/size/res chips that were mostly em-dashes; they only added card
+  // height, so the row is dropped for those types to keep the capability
+  // cards close to the compact NPU trio height.
   const num = (v, fallback = "—") =>
     v === null || v === undefined || v === "" ? fallback : v;
 
@@ -253,24 +248,6 @@ function SlotCard({
       { l: "ttft",   v: metrics.ttft ? metrics.ttft : "—", u: metrics.ttft ? "ms" : "" },
       { l: "ctx",    v: num(metrics.ctx, "—"), u: "" },
       { l: "kv",     v: metrics.kv === null || metrics.kv === undefined ? "—" : metrics.kv, u: metrics.kv === null || metrics.kv === undefined ? "" : "%", dim: metrics.kv === null || metrics.kv === undefined },
-    ];
-    if (type === "embedding") return [
-      { l: "dim",     v: num(metrics.dim, "—"), u: "" },
-      sizeChip(),
-    ];
-    if (type === "reranking") return [
-      { l: "max/req", v: num(metrics.maxDocs, "—"), u: "" },
-      sizeChip(),
-    ];
-    if (type === "transcription") return [
-      sizeChip(),
-    ];
-    if (type === "tts") return [
-      sizeChip(),
-    ];
-    if (type === "image") return [
-      { l: "res",     v: num(metrics.res, "—"), u: "" },
-      sizeChip(),
     ];
     return [];
   })();
@@ -341,17 +318,19 @@ function SlotCard({
           return <span className="chip" style={{color: chipColor}}>{ind.label}</span>;
         })()}
       </div>
-      <div className="slot-metrics">
-        {metricsRow.map((m, i) => (
-          <div key={i} className="slot-met">
-            <div className="l">{m.l}</div>
-            <div className={"v mono num" + (m.dim ? " dim" : "")}>
-              {m.v}<span className="u">{m.u}</span>
+      {metricsRow.length > 0 && (
+        <div className="slot-metrics">
+          {metricsRow.map((m, i) => (
+            <div key={i} className="slot-met">
+              <div className="l">{m.l}</div>
+              <div className={"v mono num" + (m.dim ? " dim" : "")}>
+                {m.v}<span className="u">{m.u}</span>
+              </div>
+              {i === 0 && isLlm && slot.spark && <Spark data={slot.spark} height={12} />}
             </div>
-            {i === 0 && isLlm && slot.spark && <Spark data={slot.spark} height={12} />}
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
       <div className="slot-actions">
         {/* C3: a disabled slot has no running child to Start/Stop/Restart —
             hide the lifecycle buttons; the card's toggle is the way back on. */}
