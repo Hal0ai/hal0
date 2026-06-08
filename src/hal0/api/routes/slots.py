@@ -187,10 +187,17 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
     ]
     trio_active = bool(npu_llm_enabled)
 
+    from hal0.slots.manager import SlotManager
+
     out: dict[str, dict[str, Any]] = {}
     for cfg in configs:
         name = str(cfg.get("name", ""))
         if not name:
+            continue
+        # Container slots use a separate enrichment path (_container_state_enrichment).
+        # Skip them here so they don't get a bogus lemonade_state="idle" from a
+        # lemond health probe that has no knowledge of the container.
+        if SlotManager._is_container_slot(cfg):
             continue
         enabled = cfg.get("enabled") is not False
         model_default = ""
@@ -310,6 +317,87 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
         # slot is enabled — disabled siblings don't claim membership.
         if cfg.get("device") == "npu" and trio_active and enabled:
             entry["coresident_group"] = "npu-flm-trio"
+
+        out[name] = entry
+    return out
+
+
+async def _container_state_enrichment(request: Request) -> dict[str, dict[str, Any]]:
+    """Build per-slot container state for container-backed slots.
+
+    For each slot where ``profile`` is set or ``runtime="container"``, probes
+    two live sources:
+      1. ``systemctl is-active`` → ``container_status``
+         (``running`` | ``stopped`` | ``starting`` | ``crashed``)
+      2. GET /health on the slot port → ``container_health`` (bool)
+
+    Returns ``{slot_name: {container_status, container_health, state}}`` where
+    ``state`` mirrors the hal0 SlotState value already in the snapshot so the
+    dashboard has a consistent ``state`` key regardless of slot type.
+
+    Never raises — probe failures degrade to ``stopped`` / ``False`` rather
+    than surfacing as a 500.  Lemonade slots are explicitly excluded.
+    """
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return {}
+    try:
+        configs = await sm.iter_configs()
+    except Exception:
+        return {}
+
+    from hal0.slots.manager import SlotManager, _cfg_port  # type: ignore[attr-defined]
+
+    out: dict[str, dict[str, Any]] = {}
+    for cfg in configs:
+        name = str(cfg.get("name", ""))
+        if not name:
+            continue
+        if not SlotManager._is_container_slot(cfg):
+            continue  # Lemonade / lemond slots handled by _lemonade_state_enrichment
+
+        entry: dict[str, Any] = {}
+
+        try:
+            from hal0.providers.container import container_provider
+
+            cp = container_provider()
+            # 1) systemctl is-active (synchronous — run in executor)
+            active = await asyncio.get_event_loop().run_in_executor(None, cp.is_active, name)
+            if active:
+                # 2) /health probe on the slot port to distinguish running vs starting
+                port = _cfg_port(cfg)
+                if port:
+                    health = await cp.health(port)
+                    container_health = bool(health.get("ok"))
+                    container_status = "running" if container_health else "starting"
+                else:
+                    container_health = False
+                    container_status = "running"
+            else:
+                container_health = False
+                # Distinguish crashed (failed) from clean stop by checking unit state
+                # via is-active exit codes: 0=active, 3=inactive, other=failed
+                container_status = "stopped"
+                try:
+                    import subprocess
+
+                    result = subprocess.run(
+                        ["systemctl", "is-active", f"hal0-slot@{name}.service"],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    stdout = result.stdout.decode().strip()
+                    if stdout == "failed":
+                        container_status = "crashed"
+                except Exception:
+                    pass
+        except Exception:
+            container_health = False
+            container_status = "stopped"
+
+        entry["container_status"] = container_status
+        entry["container_health"] = container_health
 
         out[name] = entry
     return out
@@ -440,10 +528,16 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     real_names = {entry["name"] for entry in real_entries}
 
     enrichment = await _lemonade_state_enrichment(request)
+    container_enrichment = await _container_state_enrichment(request)
     for entry in real_entries:
-        extra = enrichment.get(str(entry["name"]))
+        slot_name = str(entry["name"])
+        extra = enrichment.get(slot_name)
         if extra:
             for k, v in extra.items():
+                entry.setdefault(k, v)
+        c_extra = container_enrichment.get(slot_name)
+        if c_extra:
+            for k, v in c_extra.items():
                 entry.setdefault(k, v)
 
     # Stamp per-slot resident memory (model weights + KV-cache estimate) so the
@@ -1107,6 +1201,11 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         extra = enrichment.get(name)
         if extra:
             for k, v in extra.items():
+                out.setdefault(k, v)
+        c_enrichment = await _container_state_enrichment(request)
+        c_extra = c_enrichment.get(name)
+        if c_extra:
+            for k, v in c_extra.items():
                 out.setdefault(k, v)
         return out
     except Exception:

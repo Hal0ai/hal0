@@ -311,6 +311,7 @@ class SlotManager:
             auth_style="none",
             warmup_strategy="none",
             advertise_models=True,
+            slot_name=slot_name,  # marks this remote as container-backed (for dispatcher preflight)
         )
         self._upstreams_registry.upsert(upstream)
         log.info(
@@ -667,6 +668,46 @@ class SlotManager:
             )
             return False
         return bool(snap.get("loaded", False))
+
+    async def container_readiness_check(self, slot_name: str) -> tuple[bool, str]:
+        """Check whether a container-backed slot is ready to serve requests.
+
+        Performs two live probes:
+          1. ``systemctl is-active`` — is the service unit running?
+          2. GET /health on the slot's port — has the inference server started?
+
+        Returns:
+          ``(True, "ready")`` — both probes passed; safe to forward.
+          ``(False, reason)`` — not ready; reason describes the failure
+            (e.g. ``"inactive"``, ``"starting"``, ``"health_check_failed"``).
+
+        Called by ``Dispatcher.forward()`` before forwarding to a
+        container upstream so that a down/starting container returns a
+        structured ``slot.loading`` 503 instead of a raw 502 ConnectError.
+        """
+        cfg = await self._maybe_load_config(slot_name)
+        if cfg is None:
+            return False, "config_missing"
+        if not self._is_container_slot(cfg):
+            return False, "not_a_container_slot"
+
+        from hal0.providers.container import container_provider
+
+        # 1) systemctl is-active (synchronous — run in executor)
+        active = await asyncio.get_event_loop().run_in_executor(
+            None, container_provider().is_active, slot_name
+        )
+        if not active:
+            return False, "inactive"
+
+        # 2) /health probe (only meaningful when the unit is active)
+        port = _cfg_port(cfg)
+        if port:
+            health = await container_provider().health(port)
+            if not health.get("ok"):
+                return False, "starting"
+
+        return True, "ready"
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 

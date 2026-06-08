@@ -284,6 +284,21 @@ class UpstreamCall:
     empty — they have no local slot to mark.
     """
 
+    container_slot_name: str = ""
+    """Slot name when the upstream is a container-backed ``kind=remote`` entry.
+
+    Set by ``_container_slot_name_of`` when the remote upstream carries a
+    ``slot_name`` marker (written by ``SlotManager._register_container_upstream``).
+    Non-empty triggers a live readiness preflight in ``Dispatcher.forward()``
+    (systemctl is-active + /health probe) *before* forwarding so that a
+    down or still-starting container returns a structured ``slot.loading``
+    503 instead of a raw 502 ConnectError.
+
+    Deliberately separate from ``slot_name`` — container remotes must NOT
+    enter the ``_ensure_slot_loaded_backend_aware`` / ``_forward_with_serving``
+    path (no auto-load, no SERVING state wrap).
+    """
+
     latency_ms: float = 0.0
     """Time spent in routing logic (not including the upstream round-trip)."""
 
@@ -484,6 +499,7 @@ class Dispatcher:
                     requested_model=original_model,
                     resolution_path="registry",
                     slot_name=_slot_name_of(upstream),
+                    container_slot_name=_container_slot_name_of(upstream),
                 )
                 self._log_decision(call, t0, cache_state="warm" if advertised else "probed")
                 return call
@@ -515,6 +531,7 @@ class Dispatcher:
                     requested_model=original_model,
                     resolution_path=f"passthrough:{upstream.name}",
                     slot_name=_slot_name_of(upstream),
+                    container_slot_name=_container_slot_name_of(upstream),
                 )
                 self._log_decision(call, t0, cache_state="warm")
                 return call
@@ -540,6 +557,7 @@ class Dispatcher:
                         requested_model=original_model,
                         resolution_path=f"passthrough-prefetched:{upstream.name}",
                         slot_name=_slot_name_of(upstream),
+                        container_slot_name=_container_slot_name_of(upstream),
                     )
                     self._log_decision(call, t0, cache_state="prefetched")
                     return call
@@ -587,6 +605,7 @@ class Dispatcher:
             requested_model=original_model,
             resolution_path=f"legacy_slot:{slot_upstream.name}",
             slot_name=_slot_name_of(slot_upstream),
+            container_slot_name=_container_slot_name_of(slot_upstream),
         )
         self._log_decision(call, t0, cache_state="legacy")
         return call
@@ -635,6 +654,14 @@ class Dispatcher:
             # loading llama-server (raw 503 with no Retry-After).
             self._check_slot_ready_for_dispatch(call)
             return await self._forward_with_serving(call)
+        if call.container_slot_name and self._slot_manager is not None:
+            # Container-slot readiness gate (#656): container slots register
+            # as kind="remote" upstreams so slot_name is empty above and the
+            # Lemonade gate never fires.  We probe the container directly
+            # (systemctl is-active + /health) before forwarding so the client
+            # gets a structured slot.loading 503 with Retry-After instead of
+            # a raw 502 ConnectError when the container is down or starting.
+            await self._check_container_slot_ready(call)
         return await self._forward_plain(call)
 
     async def _ensure_slot_loaded_backend_aware(self, call: UpstreamCall) -> None:
@@ -686,6 +713,39 @@ class Dispatcher:
                 upstream=call.upstream_name,
                 error=str(exc),
                 error_type=type(exc).__name__,
+            )
+
+    async def _check_container_slot_ready(self, call: UpstreamCall) -> None:
+        """Raise :class:`SlotLoading` if a container-backed slot isn't ready.
+
+        Delegates to :meth:`SlotManager.container_readiness_check` which
+        runs two live probes:
+
+          1. ``systemctl is-active`` — unit must be running.
+          2. GET /health on the slot port — inference server must be up.
+
+        Raises :class:`SlotLoading` (503 + Retry-After) when either probe
+        fails, giving clients a retryable structured error instead of a
+        raw 502 ConnectError.
+
+        No-op when the slot is confirmed ready; forward proceeds normally.
+        """
+        assert self._slot_manager is not None  # narrowed by forward()
+        slot_name = call.container_slot_name
+        ready, reason = await self._slot_manager.container_readiness_check(slot_name)
+        if not ready:
+            raise SlotLoading(
+                f"container slot {slot_name!r} is not ready ({reason})",
+                details={
+                    "slot": slot_name,
+                    "state": reason,
+                    "retry_after_s": 15,
+                    "progress": {
+                        "phase": reason,
+                        "requested_model": call.requested_model,
+                        "upstream": call.upstream_name,
+                    },
+                },
             )
 
     def _check_slot_ready_for_dispatch(self, call: UpstreamCall) -> None:
@@ -1140,6 +1200,25 @@ def _slot_name_of(upstream: Upstream) -> str:
     if _is_hal0_composite(upstream):
         return ""
     return upstream.slot_name or upstream.name
+
+
+def _container_slot_name_of(upstream: Upstream) -> str:
+    """Return the container slot name for a ``kind=remote`` container-backed upstream.
+
+    Container slots register via ``SlotManager._register_container_upstream``
+    as ``kind="remote"`` entries, and since #656 they carry ``slot_name`` set
+    to the slot's name.  This distinguishes them from genuine external remotes
+    (OpenAI, OpenRouter…) that have ``slot_name=None``.
+
+    The returned name is stored in ``UpstreamCall.container_slot_name`` and
+    triggers ``Dispatcher._check_container_slot_ready()`` before forwarding,
+    returning a structured ``slot.loading`` 503 instead of a raw 502
+    ConnectError when the container is down or still starting.
+    """
+    if upstream.kind != "remote":
+        return ""
+    # slot_name is set only for container-backed remotes (see _register_container_upstream)
+    return upstream.slot_name or ""
 
 
 def _join_url(upstream_url: str, request_path: str) -> str:
