@@ -41,16 +41,25 @@ const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h stuck-SERVING threshold
  *             (memory-map attribution: same semantics as old LIVE_STATES)
  *   isCold  — true for container slots (model swap = systemctl restart, not hot-swap)
  */
+// Detect whether a slot is a container runtime.
+// Primary signal: runtime="container" (from TOML / normalizeSlot).
+// Fallback: container_status present (backend always emits this for container
+// slots even when as_dict() doesn't yet include the `runtime` field).
+// Tracked: #658 (add runtime/image/profile to slot serialisation).
+function _isContainer(slot) {
+  return String(slot?.runtime || "") === "container" || slot?.container_status != null;
+}
+
 export function slotPhase(slot, now = Date.now()) {
-  const runtime = String(slot?.runtime || "lemonade");
   const enabled = slot?.enabled !== false;
+  const isContainer = _isContainer(slot);
 
   // Disabled overrides everything.
   if (!enabled) {
-    return { phase: "stopped", isLive: false, isCold: runtime === "container" };
+    return { phase: "stopped", isLive: false, isCold: isContainer };
   }
 
-  if (runtime === "container") {
+  if (isContainer) {
     return _containerPhase(slot, now);
   }
   return _lemondPhase(slot, now);
@@ -138,29 +147,20 @@ function _lemondPhase(slot, now) {
  * It MUST stay compatible with the existing test suite.
  */
 export function slotIndicatorFromPhase(slot, now = Date.now()) {
-  const runtime = String(slot?.runtime || "lemonade");
-  const enabled = slot?.enabled !== false;
-  const state = String(slot?.state || "offline");
-  const lemo = String(slot?.lemonade_state || "");
-  const errorMsg = slot?.metadata?.message || slot?.message || "";
-  const model = slot?.model || slot?.model_id || slot?.model_default || "";
-  const backendMismatch = !!slot?.backend_mismatch;
-  const declaredBackend = slot?.declared_backend || "";
-  const actualBackend = slot?.actual_backend || "";
-
   // For lemond slots: preserve the EXACT original logic (spec-pinned by
   // slot-indicator.spec.ts). slotIndicator() calls this function only for
   // container slots; for lemond slots it falls through to the old code.
   // (We can't inline the old logic perfectly in slotPhase because the
   // hung-SERVING guard maps to "stale" cls, not "ready" phase — so the
   // two vocabularies differ. Keep them separate to avoid breaking tests.)
-  if (runtime === "container") {
+  if (_isContainer(slot)) {
     return _containerIndicator(slot, now);
   }
 
   // Fallback: callers should not reach here; the original slotIndicator()
   // remains the canonical path for lemond slots. This projection is only
   // used from the container branch.
+  const state = String(slot?.state || "offline");
   return { cls: "offline", label: state, tooltip: state };
 }
 
@@ -246,8 +246,7 @@ function _formatAgo(deltaMs) {
  */
 export function stateChipClassForSlot(slot) {
   if (!slot) return "chip";
-  const runtime = String(slot?.runtime || "lemonade");
-  if (runtime !== "container") {
+  if (!_isContainer(slot)) {
     // For lemond slots the original stateChipClass is still called directly.
     return null; // sentinel: caller uses original stateChipClass
   }

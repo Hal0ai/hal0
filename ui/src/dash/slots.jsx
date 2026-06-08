@@ -64,8 +64,12 @@ function slotIndicator(slot, now = Date.now()) {
   // N1 (container branch): delegate container slots to the unified helper.
   // Lemond slots continue through the original logic below so all existing
   // tests remain green with no changes to their expected cls/label/tooltip.
+  //
+  // Detection: runtime="container" (from TOML / normalizeSlot) OR
+  // container_status present (backend always emits this for container slots
+  // even before `runtime` is included in as_dict serialisation).
   const runtime = String(slot?.runtime || "lemonade");
-  if (runtime === "container") {
+  if (runtime === "container" || slot?.container_status != null) {
     return slotIndicatorFromPhase(slot, now);
   }
 
@@ -234,7 +238,13 @@ function SlotCard({
   //
   // N1: container slots project from container_status; lemond slots use the
   // original lemonade_state / state logic so button behavior is unchanged.
-  const isContainer = slot.runtime === "container";
+  // Detect container runtime: prefer the explicit `runtime` field (set by
+  // slot TOML / normalizeSlot default). Also gate on container_status != null
+  // as a fallback signal — the live /api/slots response always emits
+  // container_status for container slots even if the `runtime` field is not
+  // yet included in the serialised payload (see slot manager as_dict()).
+  // #658 backend task: ensure `runtime`, `image`, `profile` are emitted.
+  const isContainer = slot.runtime === "container" || slot.container_status != null;
   let phase;
   if (isContainer) {
     const cs = String(slot?.container_status || "stopped");
@@ -295,12 +305,11 @@ function SlotCard({
           {coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
           {/* C3: enabled toggle — stays full-opacity + interactive even when
               the card is faded, so a disabled slot can be re-enabled.
-              A11y: the <label> wraps a visually-hidden <input type=checkbox>
-              which already gives the correct role=checkbox + checked state
-              to AT. We also add role=switch + aria-checked on the visible
-              track so toggle-aware AT reads "switch on/off". focus-visible
-              is handled in dashboard.css via the :focus-visible selector on
-              the hidden input (same pattern as NpuSwitch). */}
+              A11y: the hidden <input type=checkbox> is the focusable AT
+              surface (role=checkbox + aria-label). The visible track span
+              is aria-hidden so AT doesn't announce it twice. NpuSwitch
+              pattern: focus-visible ring is handled in dashboard.css via
+              :focus-visible on the hidden input. */}
           <label
             className="slot-enable-toggle"
             title={enabled ? "Disable slot" : "Enable slot"}
@@ -313,12 +322,7 @@ function SlotCard({
               onChange={() => onToggleEnabled && onToggleEnabled(!enabled)}
               aria-label={enabled ? "Disable slot" : "Enable slot"}
             />
-            <span
-              className="slot-enable-track"
-              role="switch"
-              aria-checked={enabled}
-              aria-hidden="true"
-            />
+            <span className="slot-enable-track" aria-hidden="true" />
           </label>
         </div>
       </div>
@@ -344,7 +348,11 @@ function SlotCard({
           </span>
         )}
         {/* Container: image-tag chip (replaces device chip + backend mismatch block).
-            Show the image tag truncated; full ref on hover. */}
+            Show the image tag truncated; full ref on hover.
+            NOTE: `image` and `profile` are TOML fields that as_dict() does not
+            yet serialise in /api/slots — tracked in #658 (backend: emit runtime
+            + image + profile in slot serialisation). The chip degrades gracefully
+            to "no image" until that lands. container_status is always present. */}
         {isContainer ? (() => {
           const imgFull = slot.image || slot.profile || null;
           const imgShort = imgFull
@@ -357,7 +365,9 @@ function SlotCard({
               style={{maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}
             >{imgShort}</span>
           ) : (
-            <span className="chip dim">{slot.profile ? `profile:${slot.profile}` : "no image"}</span>
+            <span className="chip dim" title="Image/profile not yet emitted by backend (#658)">
+              {slot.profile ? `profile:${slot.profile}` : "no image"}
+            </span>
           );
         })() : (
           <>

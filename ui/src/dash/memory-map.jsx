@@ -11,8 +11,7 @@ import { useSlots } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useProxmoxSettings } from '@/api/hooks/useProxmoxSettings'
-
-const LIVE_STATES = new Set(['ready', 'serving', 'idle', 'warming'])
+import { isSlotLive } from './slot-status.js'
 const SAFETY_MARGIN_GB = 2
 const MB_PER_GB = 1024
 
@@ -149,7 +148,10 @@ export function useMemoryMapModel() {
   )
   const npuModelGb = mbToGb(stats.data?.npu_status?.model_mb || 0)
 
-  const liveSlots = slots.filter((s) => LIVE_STATES.has((s.state || '').toLowerCase()))
+  // N1 (slot-status unifier): isSlotLive() handles both lemond (state-string)
+  // and container (container_status + container_health) runtimes. Replaces
+  // the old static LIVE_STATES set membership test.
+  const liveSlots = slots.filter((s) => isSlotLive(s))
 
   // Prefer the BE-METRICS `mem_mb` contract (real per-slot resident
   // model + KV memory). Fall back to the legacy GTT-split / NPU-divide

@@ -15,6 +15,7 @@ import { useHardware } from '@/api/hooks/useHardware'
 import { useBackends } from '@/api/hooks/useBackends'
 import { useModels } from '@/api/hooks/useModels'
 import { ENDPOINTS } from '@/api/endpoints'
+import { stateChipClassForSlot } from './slot-status.js'
 
 // Full static device list — shown as fallback when /api/backends hasn't
 // loaded yet or returns empty. Never render an empty device dropdown.
@@ -37,11 +38,11 @@ const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React
 //   online/ready/serving → green (ok); starting → amber (warn);
 //   error → red (err); offline/empty/anything else → neutral grey (base chip).
 //
-// N1: extended to handle container states (running+healthy→ok, starting→warn,
-// crashed→err, stopped→neutral). Delegates to stateChipClassForSlot when the
-// full slot object is available (e.g. in EditSlotDrawer). The primitive
-// `stateChipClass(state)` overload is preserved for call sites that only
-// have the state string.
+// N1: accepts either a state string (lemond path, unchanged) or a full slot
+// object. When given a slot object, delegates to stateChipClassForSlot()
+// from slot-status.js which handles container runtime correctly via
+// slotPhase(). The primitive string overload is kept for call sites that
+// only have the state string — its behaviour is unchanged.
 function stateChipClass(stateOrSlot) {
   // Duck-type: if it's a string, keep original behaviour (lemond path).
   if (typeof stateOrSlot === "string" || stateOrSlot == null) {
@@ -51,16 +52,12 @@ function stateChipClass(stateOrSlot) {
     if (["error", "failed", "broken", "crashed"].includes(s)) return "chip err";
     return "chip"; // offline / empty / unconfigured → neutral grey
   }
-  // Full slot object: branch on runtime for container-aware classification.
+  // Full slot object: delegate to the shared N1 helper.
+  // stateChipClassForSlot returns null for lemond slots (sentinel),
+  // in which case we fall back to the original string-based path.
   const slot = stateOrSlot;
-  if (slot.runtime === "container") {
-    const cs = String(slot.container_status || "stopped");
-    const health = !!slot.container_health;
-    if ((cs === "running" && health) || slot.state === "serving") return "chip ok";
-    if (cs === "starting" || cs === "pulling" || (cs === "running" && !health)) return "chip warn";
-    if (cs === "crashed" || slot.state === "error") return "chip err";
-    return "chip";
-  }
+  const fromPhase = stateChipClassForSlot(slot);
+  if (fromPhase !== null) return fromPhase;
   return stateChipClass(slot.state);
 }
 
