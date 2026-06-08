@@ -192,6 +192,30 @@ export const MOCK_DATA = {
   ],
 
   approvals: [] as any[],
+
+  profiles: [
+    {
+      name: 'moe-rocmfp4',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      flags: '--flash-attn on -ngl 999',
+      mtp: true,
+      resolved_flags: '--flash-attn on -ngl 999 --draft-model /mnt/ai-models/mtp/llama-3b.gguf',
+    },
+    {
+      name: 'dense-mtp-rocmfp4',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      flags: '--flash-attn on -ngl 999',
+      mtp: true,
+      resolved_flags: '--flash-attn on -ngl 999 --draft-model /mnt/ai-models/mtp/llama-3b.gguf',
+    },
+    {
+      name: 'vulkan-std',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server',
+      flags: '--flash-attn on -ngl 999',
+      mtp: false,
+      resolved_flags: '--flash-attn on -ngl 999',
+    },
+  ],
 }
 
 export type MockData = typeof MOCK_DATA

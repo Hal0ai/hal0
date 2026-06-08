@@ -77,6 +77,7 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   await page.route('**/api/slots', (route) => json(route, { slots: state.slots }))
   await page.route('**/api/slots/metrics', (route) => json(route, {}))
   await page.route('**/api/backends', (route) => json(route, { backends: state.backends }))
+  await page.route('**/api/profiles', (route) => json(route, MOCK_DATA.profiles ?? []))
   await page.route('**/api/agent/approvals', (route) =>
     json(route, { approvals: state.approvals }),
   )
