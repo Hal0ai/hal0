@@ -9,10 +9,13 @@ Live providers (v0.2+):
     FLMProvider          — AMD NPU (optional, Strix Halo only)
     LemonadeProvider     — Lemonade gateway (sole slot-lifecycle backend)
     ComfyUIProvider      — image-gen pipeline (driven directly by api/routes/v1.py)
+    ContainerProvider    — podman container per slot (P1 tracer bullet, issue #655)
 
-Dispatch model (v0.2, ADR-0008):
-    SlotManager dispatches 100% through ``LemonadeProvider``.  The prior
-    ``MoonshineProvider`` + ``KokoroProvider`` self-managed paths were
+Dispatch model (v0.2, ADR-0008 + P1 hybrid):
+    SlotManager dispatches through ``LemonadeProvider`` for lemond slots.
+    Slots with ``profile`` set (or ``runtime="container"``) dispatch through
+    ``ContainerProvider`` (systemd podman unit per slot, loopback upstream).
+    The prior ``MoonshineProvider`` + ``KokoroProvider`` self-managed paths were
     vestigial (lemond now owns STT/TTS) and were removed in PR-10 (#620).
 
 Live exceptions (callers that bypass SlotManager dispatch):
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 from hal0.providers.base import ContainerSpec, Provider
 from hal0.providers.comfyui import ComfyUIProvider
+from hal0.providers.container import ContainerProvider, container_provider
 from hal0.providers.flm import FLMProvider
 from hal0.providers.lemonade import LemonadeProvider
 from hal0.providers.llama_server import LlamaServerProvider
@@ -34,14 +38,13 @@ from hal0.providers.llama_server import LlamaServerProvider
 # Provider name → singleton instance.  Providers are stateless (per the
 # ABC contract), so one instance per process is enough.
 #
-# v0.2 (ADR-0008 §1/§2): Lemonade is the sole inference backend.
-# SlotManager dispatches every lifecycle call through ``LemonadeProvider``
-# unconditionally.  ``ComfyUIProvider`` and ``FLMProvider`` remain for
-# non-SlotManager callers (image-gen pipeline and NPU probe respectively).
-# ``MoonshineProvider`` and ``KokoroProvider`` were removed in #620 —
-# lemond now serves STT/TTS through its whispercpp and kokoro recipes.
+# v0.2 (ADR-0008 §1/§2): Lemonade is the sole inference backend for lemond
+# slots.  ContainerProvider handles container slots (P1 tracer, issue #655).
+# ``ComfyUIProvider`` and ``FLMProvider`` remain for non-SlotManager callers.
+# ``MoonshineProvider`` and ``KokoroProvider`` were removed in #620.
 _PROVIDERS: dict[str, Provider] = {
     "lemonade": LemonadeProvider(),
+    "container": ContainerProvider(),
     "llama-server": LlamaServerProvider(),
     "flm": FLMProvider(),
     "comfyui": ComfyUIProvider(),
@@ -76,11 +79,13 @@ def lemonade_provider() -> LemonadeProvider:
 
 __all__ = [
     "ComfyUIProvider",
+    "ContainerProvider",
     "ContainerSpec",
     "FLMProvider",
     "LemonadeProvider",
     "LlamaServerProvider",
     "Provider",
+    "container_provider",
     "get_provider",
     "lemonade_provider",
 ]

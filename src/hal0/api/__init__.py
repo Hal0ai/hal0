@@ -904,7 +904,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Construct the event bus first so the SlotManager can side-channel
     # every transition through it — the footer subscribes to /api/events.
     event_bus = EventBus()
-    slot_manager = SlotManager(event_bus=event_bus)
+    slot_manager = SlotManager(event_bus=event_bus, upstreams_registry=upstreams)
 
     dispatcher = Dispatcher(
         upstream_registry=upstreams,

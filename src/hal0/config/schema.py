@@ -242,6 +242,25 @@ class SlotConfig(BaseModel):
         default=True,
         description="Whether this slot is started on hal0 startup.",
     )
+    runtime: Literal["lemonade", "container"] = Field(
+        default="lemonade",
+        description=(
+            "Slot runtime engine. 'lemonade' (default) dispatches via lemond's "
+            "control plane (ADR-0008). 'container' runs a podman container managed "
+            "by ContainerProvider — requires 'profile' to be set. Lemonade slots "
+            "are unaffected by this field. See the container-runtime design doc §3."
+        ),
+    )
+    profile: str | None = Field(
+        default=None,
+        description=(
+            "Profile name from /etc/hal0/profiles.toml. When set, SlotManager "
+            "routes this slot to ContainerProvider instead of LemonadeProvider, "
+            "regardless of 'runtime'. The profile supplies the container image + "
+            "bench-tuned flags; the slot supplies model, context_size, and port. "
+            "See ProfileConfig and the container-runtime design doc §1."
+        ),
+    )
     role: str | None = Field(
         default=None,
         description=(
