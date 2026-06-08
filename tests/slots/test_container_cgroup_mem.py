@@ -185,7 +185,7 @@ class TestBuildPerSlotContainerPath:
 
     @pytest.mark.asyncio
     async def test_container_slot_uses_cgroup_bytes(self):
-        """When cgroup probe returns bytes, build_per_slot uses them (no KV estimate)."""
+        """When cgroup exceeds the (zero) estimate, build_per_slot uses the cgroup value."""
         slot = self._make_slot("primary")
         cgroup_bytes = 20 * 1024 * 1024 * 1024  # 20 GiB
 
@@ -202,6 +202,60 @@ class TestBuildPerSlotContainerPath:
         assert row["mem_mb"] == expected_mb
         assert row["vram_mb"] == expected_mb
         assert row["ram_mb"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_container_under_report_uses_estimate_floor(self):
+        """#672 regression: Strix Halo GTT weights not charged to cgroup.
+
+        When the cgroup reports a small value (~2 GiB runtime/buffers) but the
+        model is large (~22 GiB), mem_mb must be the registry estimate, NOT the
+        too-low cgroup value — otherwise the map under-reports container memory.
+        """
+        slot = self._make_slot("primary-container")
+        small_cgroup = 2 * 1024 * 1024 * 1024  # 2 GiB (GTT weights NOT charged)
+
+        model_mock = MagicMock()
+        model_mock.size_bytes = 22 * 1024 * 1024 * 1024  # 22 GiB model
+        model_mock.model_dump = lambda: {}
+        registry = MagicMock()
+        registry.get = MagicMock(return_value=model_mock)
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=small_cgroup,
+        ):
+            result = await build_per_slot([slot], registry=registry)
+
+        row = result["primary-container"]
+        cgroup_mb = small_cgroup / (1024.0 * 1024.0)
+        file_mb = model_mock.size_bytes / (1024 * 1024)
+        # Estimate (file size + KV) must win over the under-reporting cgroup.
+        assert row["mem_mb"] >= file_mb
+        assert row["mem_mb"] > cgroup_mb
+
+    @pytest.mark.asyncio
+    async def test_container_cgroup_wins_when_above_estimate(self):
+        """When the cgroup DOES account for weights it exceeds the estimate and wins."""
+        slot = self._make_slot("primary-container")
+        big_cgroup = 24 * 1024 * 1024 * 1024  # 24 GiB (weights charged + overhead)
+
+        model_mock = MagicMock()
+        model_mock.size_bytes = 22 * 1024 * 1024 * 1024  # 22 GiB model
+        model_mock.model_dump = lambda: {}
+        registry = MagicMock()
+        registry.get = MagicMock(return_value=model_mock)
+
+        with patch(
+            "hal0.slots.capacity._container_cgroup_mem_bytes",
+            new_callable=AsyncMock,
+            return_value=big_cgroup,
+        ):
+            result = await build_per_slot([slot], registry=registry)
+
+        row = result["primary-container"]
+        expected_mb = round(big_cgroup / (1024.0 * 1024.0), 1)
+        assert row["mem_mb"] == expected_mb
 
     @pytest.mark.asyncio
     async def test_lemond_slot_falls_back_to_registry(self):

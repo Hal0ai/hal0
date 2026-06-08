@@ -225,9 +225,14 @@ async def build_per_slot(
     footprint.  Three attribution paths, in priority order:
 
     1. **NPU / FLM slots**: FLM catalog footprint_gb (includes runtime + KV).
-    2. **Container slots** (podman ``hal0-slot-<name>``): live cgroup
-       ``memory.current`` — real resident bytes including weights + KV +
-       runtime overhead.  Probed via :func:`_container_cgroup_mem_bytes`.
+    2. **Container slots** (podman ``hal0-slot-<name>``): ``max`` of the
+       live cgroup ``memory.current`` and the registry file-size + KV
+       estimate.  The ``max`` guards against Strix Halo (UMA) under-report:
+       model weights live in GTT (system RAM via amdgpu/TTM) and are often
+       NOT charged to the process cgroup, so a live container can report a
+       cgroup of only ~2 GB while holding a ~22 GB model.  When the cgroup
+       *does* account for weights it wins (≥ estimate); when it doesn't, the
+       estimate wins — so the figure never under-reports.
     3. **Lemonade / lemond slots** (fallback): model file size from the
        registry plus a coarse KV-cache estimate scaled by context window.
 
@@ -282,26 +287,9 @@ async def build_per_slot(
                     }
                     continue
                 model_mb = (entry.get("size_bytes") or 0) / (1024 * 1024)
-        # ── Container cgroup probe (path 2) ────────────────────────────────
-        # Try the live podman/docker cgroup first.  Returns 0 when no
-        # container named hal0-slot-<name> exists (i.e. for lemond slots),
-        # so the probe is naturally a no-op for the lemond path — no
-        # explicit runtime-type detection required.
-        cgroup_bytes = await _container_cgroup_mem_bytes(s.name)
-        if cgroup_bytes > 0:
-            # cgroup memory.current already includes weights + KV + runtime;
-            # do NOT add an additional KV estimate on top.
-            cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
-            out[s.name] = {
-                "vram_mb": cgroup_mb,
-                "ram_mb": 0.0,
-                "mem_mb": cgroup_mb,
-                "state": state,
-                "model_id": model_id,
-            }
-            continue
-
-        # ── Lemond / file-size fallback (path 3) ───────────────────────────
+        # ── Registry file-size + KV estimate (baseline for ALL non-NPU) ────
+        # Compute the model-file-size + KV estimate up front so it can serve
+        # as a floor for the container cgroup probe below (see path 2).
         if model_mb <= 0 and registry is not None:
             try:
                 m = registry.get(model_id)
@@ -310,7 +298,25 @@ async def build_per_slot(
             except Exception:
                 model_mb = 0.0
         kv_mb = _kv_estimate_mb(_ctx_tokens_for(ctx_meta))
-        resident_mb = round(model_mb + kv_mb, 1)
+        estimate_mb = round(model_mb + kv_mb, 1)
+
+        # ── Container cgroup probe (path 2) ────────────────────────────────
+        # Probe the live podman/docker cgroup.  Returns 0 when no container
+        # named hal0-slot-<name> exists (i.e. for lemond slots), so the probe
+        # is a no-op for the lemond path — no runtime-type detection needed.
+        #
+        # CRITICAL (#672 review): on Strix Halo (UMA) the model WEIGHTS live
+        # in GTT (system RAM via amdgpu/TTM) and are often NOT charged to the
+        # process memory cgroup.  A live container can therefore report a
+        # cgroup of only ~2 GB (runtime/buffers) while holding a ~22 GB model.
+        # Using the cgroup unconditionally would UNDER-report.  So we take the
+        # MAX of the cgroup and the registry estimate:
+        #   • cgroup accurately includes weights → cgroup ≥ estimate → wins.
+        #   • GTT not charged (cgroup too low)   → estimate wins → no under-report.
+        cgroup_bytes = await _container_cgroup_mem_bytes(s.name)
+        cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
+        resident_mb = max(cgroup_mb, estimate_mb)
+
         out[s.name] = {
             "vram_mb": resident_mb,
             "ram_mb": 0.0,
