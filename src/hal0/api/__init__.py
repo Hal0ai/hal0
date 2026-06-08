@@ -79,9 +79,6 @@ from hal0.api.routes import (
     journal as journal_routes,
 )
 from hal0.api.routes import (
-    profiles as profiles_routes,
-)
-from hal0.api.routes import (
     lemonade_admin as lemonade_admin_routes,
 )
 from hal0.api.routes import (
@@ -95,6 +92,9 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     memory as memory_routes,
+)
+from hal0.api.routes import (
+    profiles as profiles_routes,
 )
 from hal0.api.routes import (
     proxmox as proxmox_routes,
