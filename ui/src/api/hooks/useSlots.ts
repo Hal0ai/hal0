@@ -99,6 +99,29 @@ export interface Slot {
    *  true and never recomputes it from device strings. */
   backend_mismatch?: boolean
 
+  // ── Container runtime fields (#657) ─────────────────────────────────
+  /** Slot runtime engine: "lemonade" (default) or "container". Container
+   *  slots dispatch through ContainerProvider (podman/docker systemd unit)
+   *  instead of Lemonade. */
+  runtime?: 'lemonade' | 'container'
+  /** Profile name from /etc/hal0/profiles.toml. Container slots use a
+   *  profile to supply the container image + bench-tuned flags. */
+  profile?: string | null
+  /** Container image ref (from the resolved profile). E.g.
+   *  "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server". */
+  image?: string | null
+  /** Container image availability: "present" | "pulling" | "missing".
+   *  Populated by the backend when image_status is tracked. */
+  image_status?: 'present' | 'pulling' | 'missing' | null
+  /** Container unit state: "running" | "stopped" | "starting" | "crashed".
+   *  Set by _container_state_enrichment() in /api/slots. Absent for
+   *  Lemonade slots. */
+  container_status?: 'running' | 'stopped' | 'starting' | 'crashed' | null
+  /** True when the container unit is active AND /health returns ok.
+   *  False when stopped, starting (health probe not yet passing), or crashed.
+   *  Absent for Lemonade slots. */
+  container_health?: boolean | null
+
   // ── Synthetic upstream-backed entries ───────────────────────────────
   // /api/slots merges real lifecycle-managed slots with synthetic
   // entries (slots.py → _synthesize_slots_from_upstreams) that represent
@@ -212,6 +235,18 @@ function normalizeSlot(s: any): Slot {
     // entries in the union may omit the flag, so default it here rather than
     // letting the card read undefined as "disabled".
     enabled: s?.enabled !== false,
+    // Container runtime fields (#657). Pass through verbatim; absent keys
+    // surface as null/undefined so the card can safely branch on runtime.
+    runtime: s?.runtime ?? 'lemonade',
+    profile: s?.profile ?? null,
+    // image/image_status may come from profile resolution (backend TBD) or
+    // be omitted; null means "unknown — don't show image chip".
+    image: s?.image ?? null,
+    image_status: s?.image_status ?? null,
+    // container_status / container_health are set by _container_state_enrichment.
+    // Absent for Lemonade slots; null here keeps the type honest.
+    container_status: s?.container_status ?? null,
+    container_health: s?.container_health ?? null,
   }
 }
 

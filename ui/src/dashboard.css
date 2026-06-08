@@ -656,6 +656,12 @@ a { color: inherit; text-decoration: none; }
 .dot.warming { background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: pulse 1.2s ease-in-out infinite; }
 .dot.offline { background: var(--fg-4); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+/* A11y: users who prefer reduced motion — kill the pulsing dots.
+   warming/serving/pulling dots remain visible but static (no animation).
+   Keeps the colour signal (amber/green) while removing motion. */
+@media (prefers-reduced-motion: reduce) {
+  .dot.serving, .dot.warming, .dot.loading { animation: none; }
+}
 
 /* Section title — used inside views */
 .sec {

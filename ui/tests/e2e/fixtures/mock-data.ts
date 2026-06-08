@@ -101,6 +101,37 @@ export const MOCK_DATA = {
       group: 'embed', state: 'ready', port: 8095, isDefault: true,
       mem_mb: 540,
     },
+    // Container runtime slot — added for #657 container-card coverage.
+    // Models the primary chat slot running via ContainerProvider (podman
+    // systemd unit with an ROCmFP4 image). State mirrors what
+    // _container_state_enrichment() returns: container_status=running,
+    // container_health=true → slot state "ready".
+    {
+      name: 'primary-container', type: 'llm', device: 'gpu-rocm',
+      model: 'qwen3.6-35b-a3b-q4_k_m', model_id: 'qwen3.6-35b-a3b',
+      group: 'chat', state: 'ready', port: 8096,
+      runtime: 'container',
+      profile: 'rocmfp4-mtp',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image_status: 'present',
+      container_status: 'running',
+      container_health: true,
+      mem_mb: 22_400,
+      bench_toks_per_sec: 52.8,
+    },
+    // Container slot in starting state (health probe not yet passing).
+    {
+      name: 'coder-container', type: 'llm', device: 'gpu-rocm',
+      model: 'qwen3-coder-30b-a3b', model_id: 'qwen3-coder-30b',
+      group: 'chat', state: 'starting', port: 8097,
+      runtime: 'container',
+      profile: 'rocmfp4-mtp',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image_status: 'present',
+      container_status: 'starting',
+      container_health: false,
+      mem_mb: 0,
+    },
   ],
 
   /** Subset of /api/models rows the swap popover + create-slot modal
