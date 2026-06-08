@@ -155,7 +155,7 @@ _RECOVERABLE_TRANSPORT_ERRORS = (
 
 # Path defaults used only for routing — never written back into the body.
 # Mirrors haloai lib/dispatcher.py:_DEFAULT_MODEL etc.
-_DEFAULT_MODEL = "primary"
+_DEFAULT_MODEL = "chat"
 _EMBED_DEFAULT = "embed"
 _RERANK_DEFAULT = "embed"
 

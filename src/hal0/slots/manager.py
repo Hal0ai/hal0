@@ -68,13 +68,23 @@ log = logging.getLogger(__name__)
 #: Slots that exist on every hal0 install regardless of hardware. The
 #: dashboard creates these as empty cards at first run; the bundle
 #: picker (Phase 5) populates their ``model.default`` fields.
-SEEDED_SLOTS: tuple[str, ...] = ("primary", "embed", "rerank", "stt", "tts", "img", "vision")
+SEEDED_SLOTS: tuple[str, ...] = ("chat", "embed", "rerank", "stt", "tts", "img", "vision")
 
 #: NPU slots seeded only when the FastFlowLM ``.deb`` is installed
 #: (``shutil.which('flm')`` truthy). These back the AMDXDNA hardware
 #: context's trio mode — chat + ASR + embed coresident in one FLM
 #: process (ADR-0008 §5). Opt-in enabled at Pro+ bundle tier.
 NPU_SEEDED_SLOTS: tuple[str, ...] = ("agent", "stt-npu", "embed-npu")
+
+#: Back-compat alias map: old slot names → canonical new names.
+#: Aliases resolve transparently for dispatch and config lookup but are
+#: NEVER stored on disk and NEVER appear in list() / iter_configs() /
+#: /api/slots. ``agent-hermes`` maps to ``agent`` (already NPU-seeded)
+#: so no new TOML is created — the alias just redirects old references.
+SLOT_ALIASES: dict[str, str] = {
+    "primary": "chat",
+    "agent-hermes": "agent",
+}
 
 #: Lemonade-vocabulary slot types (plan §4.1).
 _VALID_SLOT_TYPES: frozenset[str] = frozenset(
@@ -273,6 +283,18 @@ class SlotManager:
         if name not in self._locks:
             self._locks[name] = asyncio.Lock()
         return self._locks[name]
+
+    @staticmethod
+    def _resolve_alias(name: str) -> str:
+        """Map a back-compat alias to its canonical slot name.
+
+        Aliases (``primary`` → ``chat``, ``agent-hermes`` → ``agent``) are
+        accepted by every public method but never stored on disk and never
+        returned by :meth:`list` or :meth:`iter_configs`.  Callers that
+        want to know whether the name was remapped can compare
+        ``_resolve_alias(name) != name``.
+        """
+        return SLOT_ALIASES.get(name, name)
 
     def _state_file(self, name: str) -> Path:
         return paths.slot_data_dir(name) / "state.json"
@@ -611,6 +633,7 @@ class SlotManager:
 
         If model_id is None, uses the model assigned in the slot's TOML config.
         """
+        slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
         async with self._lock(slot_name):
             cfg = await self._load_slot_config(slot_name)
@@ -737,6 +760,7 @@ class SlotManager:
 
     async def unload(self, slot_name: str) -> Slot:
         """Gracefully unload a slot.  Transitions: → unloading → offline."""
+        slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
         async with self._lock(slot_name):
             current = self._current_state(slot_name)
@@ -759,6 +783,7 @@ class SlotManager:
 
     async def restart(self, slot_name: str) -> Slot:
         """Restart a slot without changing its model assignment."""
+        slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
         await self.unload(slot_name)
         return await self.load(slot_name)
@@ -791,6 +816,7 @@ class SlotManager:
         the best shot at succeeding.  A subsequent retry-time
         ConnectError will surface as ``UpstreamUnavailable`` as before.
         """
+        slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
         log.info("slot.recover_evicted_dispatched", extra={"slot": slot_name})
         try:
@@ -814,6 +840,7 @@ class SlotManager:
         Mirrors haloai's slots.start() (lib/slots.py:644) so callers like
         the dispatcher wake-on-request path can share the contract.
         """
+        slot_name = self._resolve_alias(slot_name)
         current = self._current_state(slot_name)
         if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
             self.bump_last_used(slot_name)
@@ -824,6 +851,7 @@ class SlotManager:
         """Hot-swap a slot's model: unload current, load new via Lemonade."""
         if not new_model_id:
             raise SlotConfigError("swap requires a non-empty model id")
+        slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
         await self.unload(slot_name)
         slot = await self.load(slot_name, model_id=new_model_id)
@@ -851,6 +879,7 @@ class SlotManager:
             READY. Covers the case where another process or a manual
             ``/v1/load`` populated lemond out-of-band.
         """
+        slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
         rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
         active = await self._is_active(slot_name)
@@ -1226,6 +1255,7 @@ class SlotManager:
         No side effect on the underlying Lemonade model — the model
         stays in lemond's catalog.
         """
+        name = self._resolve_alias(name)
         reserved = set(SEEDED_SLOTS) | set(NPU_SEEDED_SLOTS)
         if name in reserved:
             raise SlotConfigError(
@@ -1418,6 +1448,7 @@ class SlotManager:
 
     async def delete(self, slot_name: str) -> None:
         """Delete a dynamic slot. Seeded slots cannot be deleted."""
+        slot_name = self._resolve_alias(slot_name)
         if slot_name in self.seeded_slots():
             raise SlotConfigError(
                 f"cannot delete seeded slot {slot_name!r}",
@@ -1452,6 +1483,7 @@ class SlotManager:
         runtime config on the next ``/v1/load`` call. No per-slot
         systemd override or env file to re-render.
         """
+        slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
         try:
             import tomli_w
@@ -2252,6 +2284,7 @@ def _cfg_effective_backend(cfg: SlotConfig | dict[str, Any]) -> str | None:
 __all__ = [
     "NPU_SEEDED_SLOTS",
     "SEEDED_SLOTS",
+    "SLOT_ALIASES",
     "Slot",
     "SlotManager",
 ]

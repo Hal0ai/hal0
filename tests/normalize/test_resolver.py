@@ -10,7 +10,7 @@ from hal0.normalize.resolver import (
 def _slots():
     return [
         SlotView(
-            name="primary", role=None, device="gpu-vulkan", model_id="big-35b", context_length=65536
+            name="chat", role=None, device="gpu-vulkan", model_id="big-35b", context_length=65536
         ),
         SlotView(
             name="utility",
@@ -25,10 +25,18 @@ def _slots():
     ]
 
 
-def test_primary_prefers_igpu_when_loaded():
-    r = resolve_chain("hal0/primary", _slots(), loaded={"big-35b", "qwen3-4b-FLM"})
+def test_chat_prefers_igpu_when_loaded():
+    r = resolve_chain("hal0/chat", _slots(), loaded={"big-35b", "qwen3-4b-FLM"})
     assert r.model_id == "big-35b"
     assert r.context_length == 65536
+    assert r.fallback is False
+
+
+def test_primary_alias_resolves_to_chat():
+    """Back-compat: hal0/primary still resolves (via VIRTUAL_ALIASES → hal0/chat)."""
+    r = resolve_chain("hal0/primary", _slots(), loaded={"big-35b", "qwen3-4b-FLM"})
+    assert r is not None
+    assert r.model_id == "big-35b"
     assert r.fallback is False
 
 
@@ -59,9 +67,7 @@ def test_role_tag_overrides_name():
             model_id="cm",
             context_length=8192,
         ),
-        SlotView(
-            name="primary", role=None, device="gpu-vulkan", model_id="big", context_length=65536
-        ),
+        SlotView(name="chat", role=None, device="gpu-vulkan", model_id="big", context_length=65536),
     ]
     r = resolve_chain("hal0/utility", slots, loaded={"cm"})
     assert r.model_id == "cm"
@@ -79,6 +85,14 @@ def test_flm_alias_resolves_same_as_npu():
 
 
 def test_empty_slots_degrades_to_blank_resolution():
+    r = resolve_chain("hal0/chat", [], loaded=set())
+    assert r is not None
+    assert r.model_id == ""
+    assert r.fallback is True
+
+
+def test_empty_slots_via_primary_alias_degrades():
+    """Back-compat: hal0/primary on empty slots still degrades gracefully."""
     r = resolve_chain("hal0/primary", [], loaded=set())
     assert r is not None
     assert r.model_id == ""
@@ -90,9 +104,9 @@ def test_unknown_virtual_name_returns_none():
 
 
 def test_default_chains_shape():
-    assert DEFAULT_CHAINS["hal0/primary"] == ("primary",)
-    assert DEFAULT_CHAINS["hal0/npu"] == ("npu", "utility", "primary")
-    assert DEFAULT_CHAINS["hal0/utility"] == ("utility", "npu", "primary")
+    assert DEFAULT_CHAINS["hal0/chat"] == ("chat",)
+    assert DEFAULT_CHAINS["hal0/npu"] == ("npu", "utility", "chat")
+    assert DEFAULT_CHAINS["hal0/utility"] == ("utility", "npu", "chat")
 
 
 @pytest.mark.asyncio
@@ -100,9 +114,7 @@ async def test_live_resolver_reads_views_and_health():
     from hal0.normalize.resolver import LiveSlotResolver, SlotView
 
     views = [
-        SlotView(
-            name="primary", role=None, device="gpu-vulkan", model_id="big", context_length=65536
-        ),
+        SlotView(name="chat", role=None, device="gpu-vulkan", model_id="big", context_length=65536),
         SlotView(
             name="utility", role=None, device="gpu-vulkan", model_id="tiny", context_length=65536
         ),
@@ -115,3 +127,20 @@ async def test_live_resolver_reads_views_and_health():
     assert res.model_id == "tiny"
     # passthrough: non-virtual names return None so the caller leaves the body alone
     assert await resolver.resolve("some-physical-model") is None
+
+
+@pytest.mark.asyncio
+async def test_live_resolver_hal0_primary_alias():
+    """hal0/primary is accepted by LiveSlotResolver via VIRTUAL_ALIASES."""
+    from hal0.normalize.resolver import LiveSlotResolver, SlotView
+
+    views = [
+        SlotView(name="chat", role=None, device="gpu-vulkan", model_id="big", context_length=65536),
+    ]
+    resolver = LiveSlotResolver(
+        slot_views_provider=lambda: views,
+        loaded_models_provider=lambda: {"big"},
+    )
+    res = await resolver.resolve("hal0/primary")
+    assert res is not None
+    assert res.model_id == "big"

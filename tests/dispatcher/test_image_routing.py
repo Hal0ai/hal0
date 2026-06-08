@@ -30,14 +30,14 @@ def _registry_with_slots(*names: str) -> UpstreamRegistry:
 
 
 def test_images_generations_path_routes_to_img_slot() -> None:
-    reg = _registry_with_slots("primary", "img")
+    reg = _registry_with_slots("chat", "img")
     upstream = resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
     assert upstream.name == "img"
 
 
 def test_sdxl_model_id_routes_to_img_even_without_image_path() -> None:
     """A bare /v1/chat/completions with model='sdxl-turbo' must NOT hit primary."""
-    reg = _registry_with_slots("primary", "img")
+    reg = _registry_with_slots("chat", "img")
     upstream = resolve_slot(
         "/v1/chat/completions",
         {"model": "sdxl-turbo", "messages": [{"role": "user", "content": "hi"}]},
@@ -47,7 +47,7 @@ def test_sdxl_model_id_routes_to_img_even_without_image_path() -> None:
 
 
 def test_sd15_model_prefix_routes_to_img() -> None:
-    reg = _registry_with_slots("primary", "img")
+    reg = _registry_with_slots("chat", "img")
     upstream = resolve_slot(
         "/v1/images/generations",
         {"model": "sd-1.5-pruned-emaonly", "prompt": "x"},
@@ -57,7 +57,7 @@ def test_sd15_model_prefix_routes_to_img() -> None:
 
 
 def test_flux_model_prefix_routes_to_img() -> None:
-    reg = _registry_with_slots("primary", "img")
+    reg = _registry_with_slots("chat", "img")
     upstream = resolve_slot(
         "/v1/images/generations",
         {"model": "Flux-2-Klein-9B-GGUF", "prompt": "x"},
@@ -68,18 +68,18 @@ def test_flux_model_prefix_routes_to_img() -> None:
 
 def test_chat_model_id_still_routes_to_primary() -> None:
     """The image rules must not regress chat routing."""
-    reg = _registry_with_slots("primary", "img")
+    reg = _registry_with_slots("chat", "img")
     upstream = resolve_slot(
         "/v1/chat/completions",
         {"model": "qwen3-4b", "messages": []},
         reg,
     )
-    assert upstream.name == "primary"
+    assert upstream.name == "chat"
 
 
 def test_image_path_without_img_slot_raises_typed_error() -> None:
     """Path pin selects 'img', missing 'img' upstream → typed legacy error."""
-    reg = _registry_with_slots("primary")
+    reg = _registry_with_slots("chat")
     with pytest.raises(LegacyResolutionFailed) as exc:
         resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
     assert exc.value.code == "dispatch.legacy_unresolved"

@@ -12,14 +12,16 @@ from dataclasses import dataclass
 
 # Canonical virtual names -> ordered chain of roles to try against loaded slots.
 DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
-    "hal0/primary": ("primary",),
-    "hal0/npu": ("npu", "utility", "primary"),
-    "hal0/utility": ("utility", "npu", "primary"),
+    "hal0/chat": ("chat",),
+    "hal0/npu": ("npu", "utility", "chat"),
+    "hal0/utility": ("utility", "npu", "chat"),
 }
 
 # Aliases that resolve to a canonical name before chain lookup.
 VIRTUAL_ALIASES: dict[str, str] = {
     "hal0/flm": "hal0/npu",
+    # Back-compat: hal0/primary was the pre-v0.4 name for hal0/chat.
+    "hal0/primary": "hal0/chat",
 }
 
 
@@ -51,10 +53,13 @@ def _slot_matches_role(slot: SlotView, role: str) -> bool:
 
 
 def _configured_primary(slots: list[SlotView]) -> SlotView | None:
-    for s in slots:
-        if _slot_matches_role(s, "primary"):
-            return s
-    # last-resort: first enabled llm slot if none is tagged/named primary
+    # Prefer canonical "chat" role; also accept legacy "primary" name/role
+    # from slots that haven't been migrated yet.
+    for role in ("chat", "primary"):
+        for s in slots:
+            if _slot_matches_role(s, role):
+                return s
+    # last-resort: first enabled llm slot if none is tagged/named chat/primary
     return slots[0] if slots else None
 
 

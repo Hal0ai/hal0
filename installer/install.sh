@@ -734,11 +734,11 @@ if [[ -z "${HAL0_NO_PROBE:-}" ]]; then
         HAL0_HOME_FOR_PROBE="${PREFIX}"
     fi
     # Inline Python: probe → write hardware.json → emit 4 hardware cards
-    # → (if no slots/primary.toml exists yet) render one from
+    # → (if no slots/chat.toml exists yet) render one from
     # recommend_primary_slot() so the operator has a sensible default
-    # waiting after `hal0 model pull <id>`. PRIMARY_TOML is exported so
+    # waiting after `hal0 model pull <id>`. CHAT_TOML is exported so
     # the heredoc doesn't need to know the dev-mode prefix.
-    PRIMARY_TOML="${ETC_DIR}/slots/primary.toml" \
+    CHAT_TOML="${ETC_DIR}/slots/chat.toml" \
     HAL0_HOME="${HAL0_HOME_FOR_PROBE}" "${VENV_DIR}/bin/python" - <<'PY'
 import os
 from pathlib import Path
@@ -753,10 +753,10 @@ print(f"  wrote {out}")
 for line in format_cards(info):
     print(line)
 
-# Pre-populate slots/primary.toml if absent. Idempotent: never overwrite
+# Pre-populate slots/chat.toml if absent. Idempotent: never overwrite
 # an operator-edited file. Disabled by default — they pull a model and
 # flip enabled = true when ready.
-target = Path(os.environ["PRIMARY_TOML"])
+target = Path(os.environ["CHAT_TOML"])
 if target.exists():
     print(f"  {target} exists — left alone")
 else:
@@ -765,7 +765,7 @@ else:
     import tomli_w  # hal0 install dep, always available here
     target.parent.mkdir(parents=True, exist_ok=True)
     header = (
-        "# hal0 primary slot — recommended for this hardware.\n"
+        "# hal0 chat slot — recommended for this hardware.\n"
         "# Created by install.sh on first install. Edit freely; the\n"
         "# installer will not overwrite this file on subsequent runs.\n"
         "#\n"
@@ -774,7 +774,7 @@ else:
         f"# Memory budget:     ~{meta.get('vram_budget_gb', '?')} GB\n"
         "#\n"
         "# Next: `hal0 model pull " + rec['model']['default'] + "`\n"
-        "#       then flip enabled = true and `systemctl start hal0-slot@primary`\n"
+        "#       then flip enabled = true and `systemctl start hal0-slot@chat`\n"
         "\n"
     )
     target.write_text(header + tomli_w.dumps(rec))

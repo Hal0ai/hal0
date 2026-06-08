@@ -52,7 +52,7 @@ async def test_load_transitions_through_pulling_when_not_cached(
 
     task = asyncio.create_task(consumer())
     await asyncio.sleep(0)
-    snap = await sm.load("primary")
+    snap = await sm.load("chat")
     await asyncio.wait_for(task, timeout=2.0)
 
     assert snap.state == SlotState.READY
@@ -87,7 +87,7 @@ async def test_load_skips_pulling_when_model_cached(
 
     task = asyncio.create_task(consumer())
     await asyncio.sleep(0)
-    snap = await sm.load("primary")
+    snap = await sm.load("chat")
     await asyncio.wait_for(task, timeout=2.0)
 
     assert snap.state == SlotState.READY
@@ -111,7 +111,7 @@ async def test_load_without_pull_runner_never_enters_pulling(
 
     task = asyncio.create_task(consumer())
     await asyncio.sleep(0)
-    await sm.load("primary")
+    await sm.load("chat")
     await asyncio.wait_for(task, timeout=2.0)
     assert "pulling" not in seen
 
@@ -137,8 +137,8 @@ async def test_pull_runner_failure_flips_to_error(
     lemonade_loaded_stub["loaded"] = []
 
     with pytest.raises(PullBoom):
-        await sm.load("primary")
-    snap = await sm.status("primary")
+        await sm.load("chat")
+    snap = await sm.status("chat")
     assert snap.state == SlotState.ERROR
 
 
@@ -150,15 +150,15 @@ async def test_serving_context_flips_ready_to_serving_and_back(
     lemonade_loaded_stub: dict[str, Any],
 ) -> None:
     sm = SlotManager()
-    await sm.load("primary")
-    assert (await sm.status("primary")).state == SlotState.READY
+    await sm.load("chat")
+    assert (await sm.status("chat")).state == SlotState.READY
 
-    async with sm.serving("primary"):
-        assert (await sm.status("primary")).state == SlotState.SERVING
-        assert sm.in_flight_count("primary") == 1
+    async with sm.serving("chat"):
+        assert (await sm.status("chat")).state == SlotState.SERVING
+        assert sm.in_flight_count("chat") == 1
 
-    assert (await sm.status("primary")).state == SlotState.READY
-    assert sm.in_flight_count("primary") == 0
+    assert (await sm.status("chat")).state == SlotState.READY
+    assert sm.in_flight_count("chat") == 0
 
 
 async def test_serving_concurrent_requests_keep_state_serving(
@@ -167,27 +167,27 @@ async def test_serving_concurrent_requests_keep_state_serving(
 ) -> None:
     """N concurrent requests must NOT toggle READY↔SERVING mid-flight."""
     sm = SlotManager()
-    await sm.load("primary")
+    await sm.load("chat")
 
     gate = asyncio.Event()
 
     async def hit() -> None:
-        async with sm.serving("primary"):
+        async with sm.serving("chat"):
             await gate.wait()
 
     tasks = [asyncio.create_task(hit()) for _ in range(5)]
     # Let every task enter the context.
     for _ in range(20):
-        if sm.in_flight_count("primary") == 5:
+        if sm.in_flight_count("chat") == 5:
             break
         await asyncio.sleep(0)
-    assert sm.in_flight_count("primary") == 5
-    assert (await sm.status("primary")).state == SlotState.SERVING
+    assert sm.in_flight_count("chat") == 5
+    assert (await sm.status("chat")).state == SlotState.SERVING
 
     gate.set()
     await asyncio.gather(*tasks)
-    assert sm.in_flight_count("primary") == 0
-    assert (await sm.status("primary")).state == SlotState.READY
+    assert sm.in_flight_count("chat") == 0
+    assert (await sm.status("chat")).state == SlotState.READY
 
 
 async def test_serving_from_idle_returns_to_ready(
@@ -196,17 +196,17 @@ async def test_serving_from_idle_returns_to_ready(
 ) -> None:
     """A request that lands on an IDLE slot wakes it to SERVING → READY."""
     sm = SlotManager()
-    await sm.load("primary")
+    await sm.load("chat")
     # Force IDLE manually.
-    await sm._transition("primary", SlotState.IDLE)
-    assert (await sm.status("primary")).state == SlotState.IDLE
+    await sm._transition("chat", SlotState.IDLE)
+    assert (await sm.status("chat")).state == SlotState.IDLE
 
-    async with sm.serving("primary"):
-        assert (await sm.status("primary")).state == SlotState.SERVING
+    async with sm.serving("chat"):
+        assert (await sm.status("chat")).state == SlotState.SERVING
 
     # After the request the slot is READY again — the dispatcher path
     # always rewarms, so falling back to IDLE is the monitor's job.
-    assert (await sm.status("primary")).state == SlotState.READY
+    assert (await sm.status("chat")).state == SlotState.READY
 
 
 # ── IDLE monitor ────────────────────────────────────────────────────────────
@@ -218,17 +218,17 @@ async def test_idle_monitor_demotes_ready_to_idle(
 ) -> None:
     """READY slots past the idle window flip to IDLE on the next sweep."""
     sm = SlotManager(idle_after_s=0.05, idle_monitor_interval_s=0.02)
-    await sm.load("primary")
+    await sm.load("chat")
     # Make sure last_used is older than idle_after_s.
-    sm._last_used["primary"] = 0.0  # epoch — definitely > 0.05s ago
+    sm._last_used["chat"] = 0.0  # epoch — definitely > 0.05s ago
     await sm.start_idle_monitor()
     try:
         # Poll for the transition.
         for _ in range(50):
-            if (await sm.status("primary")).state == SlotState.IDLE:
+            if (await sm.status("chat")).state == SlotState.IDLE:
                 break
             await asyncio.sleep(0.02)
-        assert (await sm.status("primary")).state == SlotState.IDLE
+        assert (await sm.status("chat")).state == SlotState.IDLE
     finally:
         await sm.stop_idle_monitor()
 
@@ -239,15 +239,15 @@ async def test_idle_monitor_skips_serving_slots(
 ) -> None:
     """An in-flight request must not be demoted to IDLE under the sweeper."""
     sm = SlotManager(idle_after_s=0.05, idle_monitor_interval_s=0.02)
-    await sm.load("primary")
+    await sm.load("chat")
     await sm.start_idle_monitor()
     try:
-        async with sm.serving("primary"):
-            sm._last_used["primary"] = 0.0  # ancient timestamp
+        async with sm.serving("chat"):
+            sm._last_used["chat"] = 0.0  # ancient timestamp
             # Wait a few sweep intervals — the slot must stay SERVING.
             for _ in range(5):
                 await asyncio.sleep(0.03)
-                assert (await sm.status("primary")).state == SlotState.SERVING
+                assert (await sm.status("chat")).state == SlotState.SERVING
     finally:
         await sm.stop_idle_monitor()
 
@@ -258,9 +258,9 @@ async def test_serving_resets_idle_clock(
 ) -> None:
     """serving() exit bumps last_used so the slot doesn't immediately re-idle."""
     sm = SlotManager(idle_after_s=10.0, idle_monitor_interval_s=10.0)
-    await sm.load("primary")
-    sm._last_used["primary"] = 0.0
-    async with sm.serving("primary"):
+    await sm.load("chat")
+    sm._last_used["chat"] = 0.0
+    async with sm.serving("chat"):
         pass
-    ts = sm.last_used("primary")
+    ts = sm.last_used("chat")
     assert ts is not None and ts > 0.1, "serving() must bump last_used on exit"

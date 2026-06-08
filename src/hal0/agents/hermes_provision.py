@@ -658,7 +658,8 @@ def _resolve_primary_slot(
         return kind in {"llm", "chat"}
 
     candidates = [s for s in slots if isinstance(s, dict) and _chat(s)]
-    primary = next((s for s in candidates if s.get("name") == "primary"), None)
+    # Accept both canonical "chat" and legacy "primary" slot names.
+    primary = next((s for s in candidates if s.get("name") in ("chat", "primary")), None)
     if primary is None:
         primary = next((s for s in candidates if _is_ready(s)), None)
     if primary is None:
@@ -1397,16 +1398,17 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     chat_slots = _collect_chat_slots(slots_all, contexts=_fetch_model_contexts())
     primary_raw = _resolve_primary_slot()
     primary_for_template: dict[str, Any] | None = None
-    primary_alias = "primary"
+    primary_alias = "chat"
     primary_slot = next(
-        (s for s in slots_all if isinstance(s, dict) and s.get("name") == "primary"), None
+        (s for s in slots_all if isinstance(s, dict) and s.get("name") in ("chat", "primary")),
+        None,
     )
     if primary_slot:
         primary_alias = _slot_alias(primary_slot)
     # primary_raw["model"] is a real model_id when a slot is live, or
-    # the placeholder string "primary" when nothing is loaded — treat
+    # the placeholder string (slot name) when nothing is loaded — treat
     # the placeholder as "no primary" for template purposes.
-    if primary_raw["model"] and primary_raw["model"] != "primary":
+    if primary_raw["model"] and primary_raw["model"] not in ("chat", "primary"):
         primary_for_template = {
             "alias": primary_alias,
             "model_id": primary_raw["model"],
@@ -1839,7 +1841,7 @@ def _slot_alias(slot: dict[str, Any]) -> str:
         v = slot.get(key)
         if isinstance(v, str) and v:
             return v
-    return "primary"
+    return "chat"
 
 
 def _slot_model_id(slot: dict[str, Any]) -> str | None:
@@ -1989,13 +1991,13 @@ def render_live_context(
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
 
     primary_slot = next(
-        (s for s in slots_all if isinstance(s, dict) and s.get("name") == "primary"),
+        (s for s in slots_all if isinstance(s, dict) and s.get("name") in ("chat", "primary")),
         None,
     )
     primary_for_template: dict[str, Any] | None = None
-    if primary_raw["model"] and primary_raw["model"] != "primary":
+    if primary_raw["model"] and primary_raw["model"] not in ("chat", "primary"):
         primary_for_template = {
-            "alias": _slot_alias(primary_slot) if primary_slot else "primary",
+            "alias": _slot_alias(primary_slot) if primary_slot else "chat",
             "model_id": primary_raw["model"],
             "backend_url": primary_raw["base_url"],
             "context_length": primary_raw["context_length"],
@@ -2226,7 +2228,7 @@ _MAIN_AUX_TASKS: tuple[str, ...] = ("vision", "web_extract")
 
 # Canonical role→slot names. Kept here (not in the template) so the
 # resolution stays data-driven and a future slot rename is a one-line edit.
-_DELEGATION_SLOT_NAME = "agent-hermes"
+_DELEGATION_SLOT_NAME = "agent"
 _UTILITY_SLOT_NAME = "utility"
 
 
@@ -2257,7 +2259,7 @@ def _resolve_delegation(
     *,
     hal0_base_url: str,
 ) -> dict[str, Any] | None:
-    """Build the ``delegation`` template dict from the ``agent-hermes`` slot.
+    """Build the ``delegation`` template dict from the ``agent`` slot.
 
     Returns ``{model, base_url, provider}`` when the slot is live, else
     ``None`` so the template omits the block and subagents inherit the

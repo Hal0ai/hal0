@@ -91,7 +91,7 @@ class CuratedModelNotFound(PickDefaultError):
     status = 404
 
 
-_DEFAULT_SLOT = "primary"
+_DEFAULT_SLOT = "chat"
 
 
 def _first_run_sentinel() -> Path:
@@ -117,8 +117,9 @@ def _models_dir_populated() -> bool:
 
 
 def _has_default_slot() -> bool:
-    """True if /etc/hal0/slots/primary.toml exists."""
-    return (paths.slots_config_dir() / "primary.toml").exists()
+    """True if the chat slot TOML exists (chat.toml or legacy primary.toml)."""
+    slots_dir = paths.slots_config_dir()
+    return (slots_dir / "chat.toml").exists() or (slots_dir / "primary.toml").exists()
 
 
 async def _openwebui_running() -> bool:
@@ -277,7 +278,7 @@ async def curated_models() -> dict[str, Any]:
             "custom_allowed": true
         }
 
-    Filtered to ``recommended_slot == "primary"`` — image models and any
+    Filtered to ``recommended_slot == "chat"`` — image models and any
     future non-chat picks live in the same source list but have their own
     placement in the wizard (step 4 capability pickers). Leaving them in
     the chat picker would let an operator install Flux as their "chat
@@ -285,7 +286,7 @@ async def curated_models() -> dict[str, Any]:
     capability picks happens through ``/api/capabilities``.
     """
     chat_picks = [
-        m for m in CURATED_MODELS if m.recommended_slot == "primary" and not m.bundle_only
+        m for m in CURATED_MODELS if m.recommended_slot in ("chat", "primary") and not m.bundle_only
     ]
     return {
         "models": [m.model_dump(mode="json") for m in chat_picks],
@@ -389,7 +390,10 @@ def _assign_to_slot(slot: str, model_id: str) -> Path:
         data.setdefault("backend", "rocm")
         data.setdefault("provider", "comfyui")
     else:
-        data.setdefault("port", 8081 if slot == "primary" else 8080 + abs(hash(slot)) % 100)
+        # chat slot (canonical "chat" or legacy alias "primary") gets port 8081.
+        data.setdefault(
+            "port", 8081 if slot in ("chat", "primary") else 8080 + abs(hash(slot)) % 100
+        )
         data.setdefault("backend", "vulkan")
         data.setdefault("provider", "llama-server")
     model_section = data.get("model")
@@ -417,9 +421,9 @@ async def pick_default(
 
     Body::
 
-        { "model_id": "qwen3-4b", "slot": "primary" }
+        { "model_id": "qwen3-4b", "slot": "chat" }
 
-    Slot defaults to ``primary`` if omitted. Flow:
+    Slot defaults to ``chat`` if omitted. Flow:
 
     1. Look up the curated entry — 404 if unknown.
     2. Seed the registry row (so the dashboard can show progress).

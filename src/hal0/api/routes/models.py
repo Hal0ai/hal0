@@ -47,7 +47,8 @@ router = APIRouter()
 # Models view because they're not real models — they're routes.
 _ALIAS_NAMES = frozenset(
     {
-        "primary",
+        "chat",
+        "primary",  # back-compat alias
         "medium",
         "tiny",
         "embed",

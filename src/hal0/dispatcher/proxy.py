@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from hal0.errors import Hal0Error
+from hal0.slots.manager import SLOT_ALIASES
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 # NOTE: revisit in Phase 5 — absorb into router.py after Dispatcher is stable.
@@ -73,8 +74,9 @@ def resolve_slot(  # TIER1
       4. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
       5. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
       6. Model id exactly matches a registered slot upstream name (other
-         than ``primary``) → that slot.
-      7. Fallback → ``primary`` slot.
+         than ``chat``) → that slot.  Back-compat aliases (``primary``
+         → ``chat``, ``agent-hermes`` → ``agent``) are resolved first.
+      7. Fallback → ``chat`` slot.
 
     Args:
         path:       The original request path (e.g. "/v1/chat/completions").
@@ -112,13 +114,16 @@ def resolve_slot(  # TIER1
                 candidate = "embed"
             else:
                 # Rule 6 — explicit slot-name addressing.
-                slot_match = upstreams.get(m)
-                if slot_match is not None and slot_match.kind == "slot" and m != "primary":
-                    candidate = m
+                # Resolve back-compat aliases (primary→chat, agent-hermes→agent)
+                # before the upstream lookup so old callers still land correctly.
+                m_resolved = SLOT_ALIASES.get(m, m)
+                slot_match = upstreams.get(m_resolved)
+                if slot_match is not None and slot_match.kind == "slot" and m_resolved != "chat":
+                    candidate = m_resolved
 
     # Rule 7 — fallback default slot.
     if candidate is None:
-        candidate = "primary"
+        candidate = "chat"
 
     upstream = upstreams.get(candidate)
     if upstream is None or upstream.kind != "slot":

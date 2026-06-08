@@ -91,7 +91,7 @@ def lemonade_loaded_stub(lemonade_stub):
 
     The default state advertises ``[{model_name: "qwen3-4b-q4_k_m"}]``
     in ``/v1/health.loaded[]`` — matches the model the ``slot_root``
-    fixture writes into ``primary.toml``. Tests can mutate the
+    fixture writes into ``chat.toml``. Tests can mutate the
     returned ``state`` dict to drive eviction / drift scenarios.
     """
     state: dict[str, Any] = {
@@ -126,10 +126,10 @@ def slot_root(tmp_hal0_home: str) -> Path:
     """Yield the slots-config root and ensure a sample slot exists on disk."""
     root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "primary.toml").write_text(
+    (root / "chat.toml").write_text(
         "\n".join(
             [
-                'name = "primary"',
+                'name = "chat"',
                 "port = 8081",
                 'backend = "vulkan"',
                 'provider = "lemonade"',

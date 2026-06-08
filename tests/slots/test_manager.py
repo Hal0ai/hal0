@@ -59,7 +59,8 @@ def _no_spawn_context_refresh(monkeypatch):
 def test_seeded_slots_matches_plan_section_10_2() -> None:
     # ``vision`` added in #515 (first-class vision capability, reusing the
     # curated multimodal MoE primaries + their mmproj sidecar).
-    assert SEEDED_SLOTS == ("primary", "embed", "rerank", "stt", "tts", "img", "vision")
+    # ``primary`` renamed to ``chat`` in #654/#633.
+    assert SEEDED_SLOTS == ("chat", "embed", "rerank", "stt", "tts", "img", "vision")
 
 
 def test_npu_seeded_slots_matches_plan_section_10_2() -> None:
@@ -270,7 +271,7 @@ async def test_add_slot_writes_toml(tmp_hal0_home: str) -> None:
 async def test_add_slot_rejects_seeded_collision(tmp_hal0_home: str) -> None:
     sm = SlotManager()
     with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.add_slot("primary", type="llm", model="x", port=8090)
+        await sm.add_slot("chat", type="llm", model="x", port=8090)
 
 
 async def test_add_slot_rejects_npu_seeded_collision(tmp_hal0_home: str) -> None:
@@ -297,7 +298,9 @@ async def test_add_slot_rejects_invalid_name(tmp_hal0_home: str) -> None:
 async def test_remove_slot_refuses_seeded(tmp_hal0_home: str) -> None:
     sm = SlotManager()
     with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.remove_slot("primary")
+        await sm.remove_slot("chat")  # canonical name
+    with pytest.raises(SlotConfigError, match="seeded"):
+        await sm.remove_slot("primary")  # back-compat alias → chat (still seeded)
     with pytest.raises(SlotConfigError, match="seeded"):
         await sm.remove_slot("agent")
 
@@ -320,10 +323,10 @@ async def test_load_dispatches_via_lemonade(
     tmp_hal0_home: str,
 ) -> None:
     sm = SlotManager()
-    snap = await sm.load("primary")
+    snap = await sm.load("chat")
     assert snap.state == SlotState.READY
     # state.json on disk reflects READY.
-    state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
+    state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "chat" / "state.json"
     payload = json.loads(state_path.read_text(encoding="utf-8"))
     assert payload["state"] == "ready"
     # POST /v1/load was invoked with the slot's model.
@@ -336,9 +339,9 @@ async def test_load_idempotent_when_ready(
     lemonade_loaded_stub: dict[str, Any],
 ) -> None:
     sm = SlotManager()
-    await sm.load("primary")
+    await sm.load("chat")
     calls_before = len(lemonade_loaded_stub["load_calls"])
-    snap = await sm.load("primary")
+    snap = await sm.load("chat")
     assert snap.state == SlotState.READY
     # No extra /v1/load — already loaded.
     assert len(lemonade_loaded_stub["load_calls"]) == calls_before
@@ -349,8 +352,8 @@ async def test_unload_transitions_to_offline(
     lemonade_loaded_stub: dict[str, Any],
 ) -> None:
     sm = SlotManager()
-    await sm.load("primary")
-    snap = await sm.unload("primary")
+    await sm.load("chat")
+    snap = await sm.unload("chat")
     assert snap.state == SlotState.OFFLINE
     assert lemonade_loaded_stub["unload_calls"], "expected /v1/unload"
 
@@ -360,8 +363,8 @@ async def test_restart_round_trip(
     lemonade_loaded_stub: dict[str, Any],
 ) -> None:
     sm = SlotManager()
-    await sm.load("primary")
-    snap = await sm.restart("primary")
+    await sm.load("chat")
+    snap = await sm.restart("chat")
     assert snap.state == SlotState.READY
 
 
@@ -370,8 +373,8 @@ async def test_swap_replaces_model_id(
     lemonade_loaded_stub: dict[str, Any],
 ) -> None:
     sm = SlotManager()
-    await sm.load("primary")
-    snap = await sm.swap("primary", "llama-3.2-3b-q4_k_m")
+    await sm.load("chat")
+    snap = await sm.swap("chat", "llama-3.2-3b-q4_k_m")
     assert snap.model_id == "llama-3.2-3b-q4_k_m"
     # Last /v1/load body carries the override model.
     assert lemonade_loaded_stub["load_calls"][-1]["model_name"] == "llama-3.2-3b-q4_k_m"
@@ -394,8 +397,8 @@ async def test_load_propagates_lemonade_error_as_slot_error(
 
     sm = SlotManager()
     with pytest.raises(SlotSpawnFailed):
-        await sm.load("primary")
-    snap = await sm.status("primary")
+        await sm.load("chat")
+    snap = await sm.status("chat")
     assert snap.state == SlotState.ERROR
 
 
@@ -412,10 +415,10 @@ async def test_status_reconciles_drift(
     message that the dispatcher reloads on next request.
     """
     sm = SlotManager()
-    await sm.load("primary")
+    await sm.load("chat")
     # Mutate the stub state so lemond no longer reports the model loaded.
     lemonade_loaded_stub["loaded"] = []
-    snap = await sm.status("primary")
+    snap = await sm.status("chat")
     assert snap.state == SlotState.OFFLINE
     # Drift transition message is operator-facing; only the state itself is contract
     # (message may be reset to empty in the post-transition Slot rebuild path).
@@ -430,8 +433,8 @@ async def test_status_adopts_running_slot_when_lemond_holds_model(
     sm = SlotManager()
     # Bypass load(): write OFFLINE directly. lemonade_loaded_stub's default
     # state advertises qwen3-4b-q4_k_m as loaded.
-    await sm._transition("primary", SlotState.OFFLINE, force=True)
-    snap = await sm.status("primary")
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+    snap = await sm.status("chat")
     assert snap.state == SlotState.READY
     # extras carry the adoption marker.
     assert snap.metadata.get("adopted") is True
@@ -445,16 +448,16 @@ async def test_status_rehydrates_backend_from_toml(
     """state.json without extra.backend should re-hydrate from TOML."""
     from hal0.slots.state import SlotStateRecord, write_state_atomic
 
-    state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
+    state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "chat" / "state.json"
     write_state_atomic(
         state_path,
-        SlotStateRecord(name="primary", state=SlotState.OFFLINE, port=8081, extra={}),
+        SlotStateRecord(name="chat", state=SlotState.OFFLINE, port=8081, extra={}),
     )
     # Empty out lemond's loaded[] so adoption can't fire.
     lemonade_loaded_stub["loaded"] = []
 
     sm = SlotManager()
-    snap = await sm.status("primary")
+    snap = await sm.status("chat")
     assert snap.backend == "vulkan"
     assert snap.metadata.get("backend") == "vulkan"
 
@@ -466,7 +469,7 @@ async def test_status_unloaded_slot_uses_toml_backend(
     """Fresh TOML, no state.json — surface backend from TOML defaults."""
     lemonade_loaded_stub["loaded"] = []  # OFFLINE — no adoption.
     sm = SlotManager()
-    snap = await sm.status("primary")
+    snap = await sm.status("chat")
     assert snap.state == SlotState.OFFLINE
     assert snap.backend == "vulkan"
     assert snap.port == 8081
@@ -493,7 +496,7 @@ async def test_list_returns_all_configured_slots(
     sm = SlotManager()
     snaps = await sm.list()
     names = {s.name for s in snaps}
-    assert {"primary", "embed"}.issubset(names)
+    assert {"chat", "embed"}.issubset(names)
 
 
 # ── error paths ─────────────────────────────────────────────────────────────
@@ -509,9 +512,9 @@ async def test_load_unknown_slot_raises_typed(slot_root: Path) -> None:
 async def test_illegal_transition_blocked(slot_root: Path) -> None:
     """Direct _transition() with an illegal edge raises IllegalSlotTransition."""
     sm = SlotManager()
-    await sm._transition("primary", SlotState.OFFLINE, force=True)
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
     with pytest.raises(IllegalSlotTransition) as exc_info:
-        await sm._transition("primary", SlotState.READY)
+        await sm._transition("chat", SlotState.READY)
     assert exc_info.value.code == "slot.illegal_transition"
     assert exc_info.value.status == 409
 
@@ -548,16 +551,16 @@ async def test_delete_removes_files_and_protects_seeded(tmp_hal0_home: str) -> N
     await sm.delete("extra")
     assert not (Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "extra.toml").exists()
     with pytest.raises(SlotConfigError):
-        await sm.delete("primary")
+        await sm.delete("chat")
 
 
 async def test_update_config_rewrites_toml(slot_root: Path) -> None:
     sm = SlotManager()
     from hal0.slots.state import SlotState as _S
 
-    await sm._transition("primary", _S.OFFLINE, force=True)
-    await sm.update_config("primary", {"workers": 4})
-    cfg_text = (slot_root / "primary.toml").read_text(encoding="utf-8")
+    await sm._transition("chat", _S.OFFLINE, force=True)
+    await sm.update_config("chat", {"workers": 4})
+    cfg_text = (slot_root / "chat.toml").read_text(encoding="utf-8")
     assert "workers = 4" in cfg_text
 
 
@@ -578,11 +581,11 @@ async def test_update_config_backend_invalidates_state_extras(
 
     # Seed an adopted-style state.json: primary is READY with
     # extra.backend=rocm (the boot-time adopted value).
-    state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
+    state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "chat" / "state.json"
     write_state_atomic(
         state_path,
         SlotStateRecord(
-            name="primary",
+            name="chat",
             state=SlotState.READY,
             model_id="qwen3-4b-q4_k_m",
             port=8081,
@@ -591,7 +594,7 @@ async def test_update_config_backend_invalidates_state_extras(
     )
 
     sm = SlotManager()
-    snap_before = await sm.status("primary")
+    snap_before = await sm.status("chat")
     # W3: the base ``backend`` field is now derived from the authoritative
     # TOML ``device`` (what the next /v1/load will actually request), not the
     # stale adopted ``extra.backend`` mirror — the primary fixture's device is
@@ -599,7 +602,7 @@ async def test_update_config_backend_invalidates_state_extras(
     # ``actual_backend`` lemonade enrichment.
     assert snap_before.backend == "vulkan"
 
-    snap_after = await sm.update_config("primary", {"backend": "vulkan"})
+    snap_after = await sm.update_config("chat", {"backend": "vulkan"})
     # The snapshot returned from update_config() must reflect the new
     # backend (this is what the API handler returns to the client).
     assert snap_after.backend == "vulkan"
@@ -607,7 +610,7 @@ async def test_update_config_backend_invalidates_state_extras(
 
     # And a fresh status() call (after the in-memory cache) reads the
     # same value — the persisted state.json was rewritten.
-    snap_via_status = await sm.status("primary")
+    snap_via_status = await sm.status("chat")
     assert snap_via_status.backend == "vulkan"
 
     # state.json on disk reflects the new backend too.
@@ -640,7 +643,7 @@ async def test_state_stream_broadcasts_transitions(
     task = asyncio.create_task(consumer())
     # Give the consumer a tick to subscribe.
     await asyncio.sleep(0)
-    await sm.load("primary")
+    await sm.load("chat")
     await asyncio.wait_for(task, timeout=2.0)
 
     states_seen = [s for _, s in received]
@@ -671,16 +674,16 @@ async def test_status_surfaces_last_used_at(
     bumps to the current wall clock after a request.
     """
     sm = SlotManager()
-    await sm.load("primary")
+    await sm.load("chat")
     # Cold slot — clear any bumps internal load paths may have produced
     # so we exercise the "no bumps yet" branch deterministically.
-    sm._last_used.pop("primary", None)
-    snap = await sm.status("primary")
+    sm._last_used.pop("chat", None)
+    snap = await sm.status("chat")
     assert snap.last_used_at is None
     assert snap.as_dict()["last_used_at"] is None
 
-    sm.bump_last_used("primary")
-    snap2 = await sm.status("primary")
+    sm.bump_last_used("chat")
+    snap2 = await sm.status("chat")
     assert snap2.last_used_at is not None
     assert snap2.last_used_at > 0
     payload = snap2.as_dict()
@@ -703,7 +706,7 @@ async def test_hal0_backend_env_var_is_ignored(
     else:
         monkeypatch.delenv("HAL0_BACKEND", raising=False)
     sm = SlotManager()
-    snap = await sm.load("primary")
+    snap = await sm.load("chat")
     assert snap.state == SlotState.READY
 
 
@@ -720,10 +723,10 @@ async def test_update_config_preserves_sibling_model_keys(slot_root: Path) -> No
     from hal0.slots.state import SlotState as _S
 
     sm = SlotManager()
-    await sm._transition("primary", _S.OFFLINE, force=True)
-    # Seeded primary.toml carries [model] default = "qwen3-4b-q4_k_m".
-    await sm.update_config("primary", {"model": {"ctx_size": 8192}})
-    cfg_text = (slot_root / "primary.toml").read_text(encoding="utf-8")
+    await sm._transition("chat", _S.OFFLINE, force=True)
+    # Seeded chat.toml carries [model] default = "qwen3-4b-q4_k_m".
+    await sm.update_config("chat", {"model": {"ctx_size": 8192}})
+    cfg_text = (slot_root / "chat.toml").read_text(encoding="utf-8")
     # ctx_size is normalized to the canonical context_size (#585) but the
     # value lands either way.
     assert "8192" in cfg_text
@@ -740,9 +743,9 @@ async def test_update_config_normalizes_ctx_size_to_context_size(
     from hal0.slots.state import SlotState as _S
 
     sm = SlotManager()
-    await sm._transition("primary", _S.OFFLINE, force=True)
-    await sm.update_config("primary", {"model": {"ctx_size": 32768}})
-    cfg_text = (slot_root / "primary.toml").read_text(encoding="utf-8")
+    await sm._transition("chat", _S.OFFLINE, force=True)
+    await sm.update_config("chat", {"model": {"ctx_size": 32768}})
+    cfg_text = (slot_root / "chat.toml").read_text(encoding="utf-8")
     assert "context_size = 32768" in cfg_text
     # The legacy alias must NOT linger alongside the canonical key.
     assert "ctx_size = " not in cfg_text
@@ -757,10 +760,10 @@ async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
     from hal0.slots.state import SlotState as _S
 
     # Seed a context_size so the merge sees both keys.
-    (slot_root / "primary.toml").write_text(
+    (slot_root / "chat.toml").write_text(
         "\n".join(
             [
-                'name = "primary"',
+                'name = "chat"',
                 "port = 8081",
                 'provider = "lemonade"',
                 "enabled = true",
@@ -773,9 +776,9 @@ async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
         encoding="utf-8",
     )
     sm = SlotManager()
-    await sm._transition("primary", _S.OFFLINE, force=True)
-    await sm.update_config("primary", {"model": {"ctx_size": 32768}})
-    cfg_text = (slot_root / "primary.toml").read_text(encoding="utf-8")
+    await sm._transition("chat", _S.OFFLINE, force=True)
+    await sm.update_config("chat", {"model": {"ctx_size": 32768}})
+    cfg_text = (slot_root / "chat.toml").read_text(encoding="utf-8")
     assert "context_size = 32768" in cfg_text
     assert "4096" not in cfg_text
     assert "ctx_size = " not in cfg_text

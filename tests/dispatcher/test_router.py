@@ -92,7 +92,7 @@ def make_request(path: str = "/v1/chat/completions", method: str = "POST") -> Re
     return Request(scope)
 
 
-def make_slot(name: str = "primary", url: str = "http://127.0.0.1:8081/v1") -> Upstream:
+def make_slot(name: str = "chat", url: str = "http://127.0.0.1:8081/v1") -> Upstream:
     return Upstream(name=name, kind="slot", url=url, slot_name=name)
 
 
@@ -105,9 +105,9 @@ def make_remote(name: str, url: str) -> Upstream:
 
 @pytest.mark.asyncio
 async def test_registry_exact_routes_to_bound_upstream_when_online() -> None:
-    primary = make_slot("primary", "http://127.0.0.1:8081/v1")
+    primary = make_slot("chat", "http://127.0.0.1:8081/v1")
     upstreams = FakeUpstreamRegistry([primary])
-    models = FakeModelRegistry(routes={"qwen3-4b": "primary"})
+    models = FakeModelRegistry(routes={"qwen3-4b": "chat"})
 
     async def online(_u: Upstream) -> bool:
         return True
@@ -116,7 +116,7 @@ async def test_registry_exact_routes_to_bound_upstream_when_online() -> None:
         upstream_registry=upstreams,
         model_registry=models,
         is_online=online,
-        cached_models=lambda name: ["qwen3-4b"] if name == "primary" else [],
+        cached_models=lambda name: ["qwen3-4b"] if name == "chat" else [],
     )
 
     call = await dispatcher.dispatch(
@@ -125,7 +125,7 @@ async def test_registry_exact_routes_to_bound_upstream_when_online() -> None:
     )
 
     assert isinstance(call, UpstreamCall)
-    assert call.upstream_name == "primary"
+    assert call.upstream_name == "chat"
     assert call.resolution_path == "registry"
     assert call.target_url == "http://127.0.0.1:8081/v1/chat/completions"
     # Body model is preserved when it matches what the slot serves.
@@ -135,9 +135,9 @@ async def test_registry_exact_routes_to_bound_upstream_when_online() -> None:
 @pytest.mark.asyncio
 async def test_registry_remaps_body_when_requested_model_not_in_slot() -> None:
     """Slot-as-truth: rewrite body.model to what the slot actually has loaded."""
-    primary = make_slot("primary")
+    primary = make_slot("chat")
     upstreams = FakeUpstreamRegistry([primary])
-    models = FakeModelRegistry(routes={"qwen3-4b": "primary"})
+    models = FakeModelRegistry(routes={"qwen3-4b": "chat"})
 
     async def online(_u: Upstream) -> bool:
         return True
@@ -147,7 +147,7 @@ async def test_registry_remaps_body_when_requested_model_not_in_slot() -> None:
         upstream_registry=upstreams,
         model_registry=models,
         is_online=online,
-        cached_models=lambda name: ["different-model"] if name == "primary" else [],
+        cached_models=lambda name: ["different-model"] if name == "chat" else [],
     )
 
     call = await dispatcher.dispatch(
@@ -173,7 +173,7 @@ async def test_registry_binding_to_unknown_upstream_raises_typed_error() -> None
 @pytest.mark.asyncio
 async def test_registry_load_failure_raises_typed_error() -> None:
     """Tier 1: registry read errors must NOT be silently swallowed."""
-    upstreams = FakeUpstreamRegistry([make_slot("primary")])
+    upstreams = FakeUpstreamRegistry([make_slot("chat")])
     models = FakeModelRegistry(raise_on=RuntimeError("disk on fire"))
     dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
 
@@ -189,7 +189,7 @@ async def test_registry_load_failure_raises_typed_error() -> None:
 @pytest.mark.asyncio
 async def test_passthrough_when_upstream_cache_has_model() -> None:
     remote = make_remote("openrouter", "https://openrouter.ai/api/v1")
-    upstreams = FakeUpstreamRegistry([make_slot("primary"), remote])
+    upstreams = FakeUpstreamRegistry([make_slot("chat"), remote])
     # No registry binding for this id.
     models = FakeModelRegistry(routes={})
 
@@ -270,7 +270,7 @@ async def test_prefetch_respects_configurable_timeout() -> None:
 
 @pytest.mark.asyncio
 async def test_legacy_fallback_routes_to_primary_when_nothing_else_matches() -> None:
-    primary = make_slot("primary")
+    primary = make_slot("chat")
     upstreams = FakeUpstreamRegistry([primary])
     models = FakeModelRegistry(routes={})  # no binding
 
@@ -279,8 +279,8 @@ async def test_legacy_fallback_routes_to_primary_when_nothing_else_matches() -> 
         make_request(),
         body={"model": "some-unknown-model"},
     )
-    assert call.resolution_path == "legacy_slot:primary"
-    assert call.upstream_name == "primary"
+    assert call.resolution_path == "legacy_slot:chat"
+    assert call.upstream_name == "chat"
 
 
 @pytest.mark.asyncio
@@ -421,7 +421,7 @@ async def test_decision_logging_runs_on_every_resolution() -> None:
     # BoundLogger that picks up our ``_capture`` processor.
     cached_bind = router_module.log.__dict__.pop("bind", None)
     try:
-        primary = make_slot("primary")
+        primary = make_slot("chat")
         upstreams = FakeUpstreamRegistry([primary])
         models = FakeModelRegistry(routes={})
         dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
@@ -484,17 +484,17 @@ async def test_forward_cold_miss_kicks_backend_aware_load_then_raises_loading() 
     sm = _FakeSlotManager(state=SlotState.OFFLINE)
     dispatcher = Dispatcher(slot_manager=sm)  # type: ignore[arg-type]
     call = UpstreamCall(
-        upstream_name="primary",
+        upstream_name="chat",
         target_url="http://127.0.0.1:8081/v1/chat/completions",
-        body=json.dumps({"model": "primary"}).encode(),
-        slot_name="primary",
+        body=json.dumps({"model": "chat"}).encode(),
+        slot_name="chat",
     )
     with pytest.raises(SlotLoading):
         await dispatcher.forward(call)
     # The backend-aware load was kicked on the cold miss.
-    assert sm.load_calls == ["primary"]
+    assert sm.load_calls == ["chat"]
     # And the body was NOT mutated (no llamacpp_backend injection).
-    assert json.loads(call.body) == {"model": "primary"}
+    assert json.loads(call.body) == {"model": "chat"}
 
 
 @pytest.mark.asyncio
@@ -508,10 +508,10 @@ async def test_forward_already_loaded_skips_load_and_forwards(
     sm = _FakeSlotManager(state=SlotState.READY)
     dispatcher = Dispatcher(slot_manager=sm)  # type: ignore[arg-type]
     call = UpstreamCall(
-        upstream_name="primary",
+        upstream_name="chat",
         target_url="http://127.0.0.1:8081/v1/chat/completions",
-        body=json.dumps({"model": "primary"}).encode(),
-        slot_name="primary",
+        body=json.dumps({"model": "chat"}).encode(),
+        slot_name="chat",
     )
 
     forwarded: dict[str, Any] = {}
@@ -530,4 +530,4 @@ async def test_forward_already_loaded_skips_load_and_forwards(
     assert sm.load_calls == []
     assert forwarded.get("called") is True
     # Body never carries an injected llamacpp_backend.
-    assert json.loads(forwarded["body"]) == {"model": "primary"}
+    assert json.loads(forwarded["body"]) == {"model": "chat"}

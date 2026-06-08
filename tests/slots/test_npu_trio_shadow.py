@@ -63,7 +63,7 @@ def _stt_shadow(home: str, name: str = "stt") -> None:
     )
 
 
-def _gpu_slot(home: str, name: str = "primary") -> None:
+def _gpu_slot(home: str, name: str = "chat") -> None:
     _write_slot_toml(
         home,
         name,
@@ -143,6 +143,6 @@ async def test_load_gpu_slot_still_spawns(tmp_hal0_home: str, patched_spawn: lis
     _gpu_slot(tmp_hal0_home)
     sm = SlotManager()
 
-    await sm.load("primary")
+    await sm.load("chat")
 
-    assert patched_spawn == ["primary"]
+    assert patched_spawn == ["chat"]

@@ -146,7 +146,7 @@ async def _fetch_hal0_composite_models(
 
     The composite ``hal0`` upstream replaces the previous per-slot
     autoregistration (R4 H2): Lemonade serialises chat loading on a
-    single port, so ``primary`` and ``agent-hermes`` both produced
+    single port, so ``chat`` and ``agent`` both produced
     ``Upstream(url="http://127.0.0.1:8001/v1")`` and ``/v1/models``
     deduplication credited whichever entry iterated first, leaving the
     other looking empty in the dashboard.
@@ -237,8 +237,8 @@ def _slot_ctx_size(
     """Resolve a slot's context length.
 
     The on-disk slot TOMLs are inconsistent about the key name:
-    ``agent-hermes.toml`` uses ``[model] ctx_size`` while ``utility.toml``
-    uses ``[model] context_size`` and ``primary.toml`` pins neither. Read
+    ``agent.toml`` uses ``[model] ctx_size`` while ``utility.toml``
+    uses ``[model] context_size`` and ``chat.toml`` pins neither. Read
     BOTH keys (plus a couple of flat shapes seen in live /api/slots
     payloads), then fall back to the model registry entry's
     ``defaults.context_size`` so a slot that doesn't pin a ctx still
@@ -323,7 +323,7 @@ async def hal0_slot_alias_models(
 
     Each enabled chat slot (``type == "llm"``) whose configured model is
     currently loaded in lemond surfaces as one model object whose ``id``
-    is the slot **alias = slot name** (e.g. ``primary``, ``agent-hermes``,
+    is the slot **alias = slot name** (e.g. ``chat``, ``agent``,
     ``utility``). The alias is the stable handle: it does not change when
     the underlying model is swapped, so callers can pin a co-resident slot
     without tracking the GGUF filename.
@@ -401,8 +401,9 @@ async def hal0_slot_alias_models(
 async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
     """Return ``{slot_alias: model_id}`` for enabled chat slots.
 
-    The slot **alias** is the slot name (``primary`` / ``agent-hermes`` /
-    ``utility``). Used by the ``/v1`` route layer to translate an
+    The slot **alias** is the slot name (``chat`` / ``agent`` /
+    ``utility``; back-compat: ``primary`` / ``agent-hermes``). Used by
+    the ``/v1`` route layer to translate an
     alias-addressed request into the slot's configured model id before
     routing, so the request reaches lemond (which serves chat models by
     name) with the correct distinct model. This is a thin translation map,
@@ -430,6 +431,15 @@ async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
         model_id = _slot_model_id(cfg)
         if model_id:
             out.setdefault(slot_name, model_id)
+    # Inject back-compat aliases (primary → chat's model_id, agent-hermes →
+    # agent's model_id) so requests using old slot names still reach the right
+    # model after the rename. Use setdefault so a literal slot still named
+    # "primary" on-disk (pre-migration) takes precedence.
+    from hal0.slots.manager import SLOT_ALIASES
+
+    for old_name, new_name in SLOT_ALIASES.items():
+        if old_name not in out and new_name in out:
+            out[old_name] = out[new_name]
     return out
 
 
@@ -511,7 +521,7 @@ async def _autoregister_slot_upstreams(
     (``max_loaded_models``). The chat slots are therefore NOT independently
     addressable on their TOML ports — registering one ``kind="slot"``
     upstream per chat slot (pointed at those ports) produces dead targets
-    and collisions (``primary`` + ``agent-hermes`` both pin ``port=8001``).
+    and collisions (``chat`` + ``agent`` both pin ``port=8001``).
     So we register exactly ONE composite ``hal0`` upstream and let the
     existing lemonade fall-through serve chat models by name; per-slot
     addressing is handled by an alias → model-id rewrite in the dispatch

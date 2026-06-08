@@ -61,27 +61,27 @@ async def test_fail_watcher_pushes_offline_when_model_drops_from_lemond(
     spawn/health/load failures.
     """
     sm = SlotManager()
-    snap = await sm.load("primary")
+    snap = await sm.load("chat")
     assert snap.state == SlotState.READY
     # The watcher should be alive and tracked.
-    assert "primary" in sm._fail_watchers
-    assert not sm._fail_watchers["primary"].done()
+    assert "chat" in sm._fail_watchers
+    assert not sm._fail_watchers["chat"].done()
 
     # Simulate eviction: lemond no longer reports the model as loaded.
     # No call to status() — the push-driven watcher is what should react.
     lemonade_loaded_stub["loaded"] = []
 
-    observed = await _wait_for_state(sm, "primary", SlotState.OFFLINE, timeout_s=5.0)
+    observed = await _wait_for_state(sm, "chat", SlotState.OFFLINE, timeout_s=5.0)
     assert observed == SlotState.OFFLINE, (
         f"watcher failed to push OFFLINE within 5s; final state={observed}"
     )
 
-    rec = sm._states["primary"]
+    rec = sm._states["chat"]
     assert "evict" in rec.message.lower() or "auto-reload" in rec.message.lower(), (
         f"OFFLINE record should carry an eviction explanation (got {rec.message!r})"
     )
     # Watcher is one-shot — it should have exited after firing.
-    watcher = sm._fail_watchers.get("primary")
+    watcher = sm._fail_watchers.get("chat")
     if watcher is not None:
         for _ in range(20):
             if watcher.done():
@@ -97,7 +97,7 @@ async def test_fail_watcher_emits_sse_frame_for_pushed_eviction(
 ) -> None:
     """The watcher-triggered OFFLINE transition must broadcast to SSE subscribers."""
     sm = SlotManager()
-    await sm.load("primary")
+    await sm.load("chat")
 
     # Subscribe before the failure so we observe the watcher-emitted frame.
     stream = sm.state_stream()
@@ -124,12 +124,12 @@ async def test_fail_watcher_does_not_fire_when_slot_unloads_cleanly(
 ) -> None:
     """A clean unload() must cancel the watcher; no spurious ERROR push."""
     sm = SlotManager()
-    await sm.load("primary")
-    assert "primary" in sm._fail_watchers
-    await sm.unload("primary")
+    await sm.load("chat")
+    assert "chat" in sm._fail_watchers
+    await sm.unload("chat")
     # Watcher must be gone (or done) after the slot left live-state.
-    watcher = sm._fail_watchers.get("primary")
+    watcher = sm._fail_watchers.get("chat")
     assert watcher is None or watcher.done()
     # Give any stray watcher time to misbehave; then assert OFFLINE held.
     await asyncio.sleep(0.6)  # > _FAIL_WATCH_INTERVAL_S
-    assert sm._states["primary"].state == SlotState.OFFLINE
+    assert sm._states["chat"].state == SlotState.OFFLINE

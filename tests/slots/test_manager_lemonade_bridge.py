@@ -105,7 +105,7 @@ async def test_load_dispatches_via_lemonade_v1_load(
     stub_provider_in_registry(h)
 
     mgr = SlotManager()
-    snap = await mgr.load("primary")
+    snap = await mgr.load("chat")
     assert snap.state == SlotState.READY
     # The slot_root fixture writes ``backend = "vulkan"`` → device =
     # gpu-vulkan via the SlotConfig promotion.
@@ -129,8 +129,8 @@ async def test_load_propagates_lemonade_load_error_as_slot_error(
 
     mgr = SlotManager()
     with pytest.raises(SlotSpawnFailed):
-        await mgr.load("primary")
-    snap = await mgr.status("primary")
+        await mgr.load("chat")
+    snap = await mgr.status("chat")
     assert snap.state == SlotState.ERROR
 
 
@@ -161,8 +161,8 @@ async def test_unload_dispatches_via_lemonade_v1_unload(
     stub_provider_in_registry(h)
 
     mgr = SlotManager()
-    await mgr.load("primary")
-    snap = await mgr.unload("primary")
+    await mgr.load("chat")
+    snap = await mgr.unload("chat")
     assert snap.state == SlotState.OFFLINE
     assert unload_calls == [{"model_name": "qwen3-4b-q4_k_m"}]
 
@@ -194,8 +194,8 @@ async def test_swap_under_lemonade_loads_new_model_name(
     stub_provider_in_registry(h)
 
     mgr = SlotManager()
-    await mgr.load("primary")
-    await mgr.swap("primary", "hermes-2-pro-llama-3-8b")
+    await mgr.load("chat")
+    await mgr.swap("chat", "hermes-2-pro-llama-3-8b")
     # Two /v1/load calls: initial + swap override.
     assert len(captured_loads) == 2
     assert captured_loads[-1]["model_name"] == "hermes-2-pro-llama-3-8b"
@@ -227,7 +227,7 @@ async def test_is_active_resolves_via_health_loaded_list(
     mgr = SlotManager()
 
     # Active branch
-    assert await mgr._is_active("primary") is True
+    assert await mgr._is_active("chat") is True
     # Inactive branch
     loaded_state["models"] = []
-    assert await mgr._is_active("primary") is False
+    assert await mgr._is_active("chat") is False

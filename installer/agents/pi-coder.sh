@@ -102,7 +102,7 @@ info "Writing pi config → $PI_CONFIG_FILE"
     else
         printf '# api_key = "<paste a hal0 Bearer token here>"\n'
     fi
-    printf 'model = "primary"\n'
+    printf 'model = "chat"\n'
 } > "${PI_CONFIG_FILE}.tmp"
 mv "${PI_CONFIG_FILE}.tmp" "$PI_CONFIG_FILE"
 

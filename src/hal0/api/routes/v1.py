@@ -233,7 +233,8 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
     """Translate a chat-slot ALIAS in ``body["model"]`` to its model id.
 
     hermes-role-slots: a request may address a co-resident chat slot by
-    its **alias** (slot name: ``primary`` / ``agent-hermes`` / ``utility``)
+    its **alias** (slot name: ``chat`` / ``agent`` / ``utility``; legacy
+    ``primary`` / ``agent-hermes`` also accepted via back-compat aliases)
     instead of the underlying model id. Lemonade serves chat models by
     name on lemond, so we rewrite the alias to the slot's configured model
     id HERE, at the route layer, before either the dispatcher routes it or
@@ -448,7 +449,7 @@ async def _dispatch_and_forward(
 ) -> Response:
     if body is None:
         body = await _read_json_body(request)
-    # Translate a chat-slot alias (primary/agent-hermes/utility) → model id
+    # Translate a chat-slot alias (chat/agent/utility; also primary/agent-hermes) → model id
     # before routing so both the dispatcher and the lemonade fall-through
     # see the real model name.
     body = await _rewrite_chat_slot_alias(request, body)
@@ -563,7 +564,7 @@ async def list_models(
     slot_manager = getattr(request.app.state, "slot_manager", None)
     model_registry = getattr(request.app.state, "model_registry", None)
 
-    # Per-slot alias entries first so a slot alias (e.g. "primary") wins
+    # Per-slot alias entries first so a slot alias (e.g. "chat") wins
     # the id over any same-named raw model id an upstream might advertise.
     if slot_manager is not None and model_registry is not None:
         try:

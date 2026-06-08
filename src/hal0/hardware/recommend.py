@@ -190,7 +190,7 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     device = map_backend_to_device(backend)
 
     return {
-        "name": "primary",
+        "name": "chat",
         "port": 8081,
         "backend": backend,
         "device": device,
