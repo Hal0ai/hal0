@@ -531,3 +531,73 @@ async def test_forward_already_loaded_skips_load_and_forwards(
     assert forwarded.get("called") is True
     # Body never carries an injected llamacpp_backend.
     assert json.loads(forwarded["body"]) == {"model": "chat"}
+
+
+# ── container-slot preemption over composite registry binding ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_container_slot_preempts_composite_registry_binding() -> None:
+    """A loaded container slot is authoritative for its advertised model.
+
+    The model registry binds every registered id (incl. container-served
+    models) to the synthetic composite ``hal0`` upstream, which forwards to
+    lemonade. When a container remote (kind="remote" + slot_name) advertises
+    the same id, it MUST win — else hal0/* requests for a container-backed
+    model get routed to lemonade and 404 (cutover #662 regression).
+    """
+    composite = Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)
+    chat = Upstream(name="chat", kind="remote", url="http://127.0.0.1:8102/v1", slot_name="chat")
+    upstreams = FakeUpstreamRegistry([composite, chat])
+    # Registry binds the model to the composite (the live bug condition).
+    models = FakeModelRegistry(routes={"qwopus3.6-27b-v2": "hal0"})
+
+    async def online(_u: Upstream) -> bool:
+        return True
+
+    cache = {"hal0": ["qwopus3.6-27b-v2"], "chat": ["qwopus3.6-27b-v2"]}
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        is_online=online,
+        cached_models=lambda name: cache.get(name, []),
+    )
+
+    call = await dispatcher.dispatch(
+        make_request(),
+        body={"model": "qwopus3.6-27b-v2", "messages": []},
+    )
+
+    assert call.upstream_name == "chat"
+    assert call.container_slot_name == "chat"
+    assert call.target_url == "http://127.0.0.1:8102/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+async def test_non_container_model_still_uses_registry_binding() -> None:
+    """Preemption must not disturb models no container slot serves — they
+    still resolve via the normal registry binding."""
+    composite = Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)
+    chat = Upstream(name="chat", kind="remote", url="http://127.0.0.1:8102/v1", slot_name="chat")
+    upstreams = FakeUpstreamRegistry([composite, chat])
+    models = FakeModelRegistry(routes={"gemma3-4b-FLM": "hal0"})
+
+    async def online(_u: Upstream) -> bool:
+        return True
+
+    # chat container only serves qwopus; gemma is lemonade-only.
+    cache = {"hal0": ["gemma3-4b-FLM", "qwopus3.6-27b-v2"], "chat": ["qwopus3.6-27b-v2"]}
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        is_online=online,
+        cached_models=lambda name: cache.get(name, []),
+    )
+
+    call = await dispatcher.dispatch(
+        make_request(),
+        body={"model": "gemma3-4b-FLM", "messages": []},
+    )
+
+    assert call.upstream_name == "hal0"
+    assert call.resolution_path == "registry"

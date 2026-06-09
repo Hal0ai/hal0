@@ -447,6 +447,33 @@ class Dispatcher:
         model_id = original_model or self._default_for_path(path)
         streaming = bool(body.get("stream"))
 
+        # ── Step 0: container-slot preemption ────────────────────────────
+        # A loaded container slot (kind="remote" + slot_name) is the
+        # authoritative server for the models it advertises. The model
+        # registry binds every registered id — including container-served
+        # models — to the synthetic composite ``hal0`` upstream, which would
+        # forward to lemonade. So a container slot MUST win over that binding,
+        # else hal0/* requests for a container-backed model route to lemonade
+        # and 404 (cutover #662). Only fires on a warm cache hit for a
+        # container remote; lemonade-only models are untouched.
+        for upstream in self._upstreams_in_priority_order():
+            if _container_slot_name_of(upstream) and model_id in self._cached_models(upstream.name):
+                call = UpstreamCall(
+                    upstream_name=upstream.name,
+                    target_url=_resolve_target_url(upstream, path),
+                    headers=self._build_headers(request, upstream),
+                    body=_remap_model(body, model_id),
+                    streaming=streaming,
+                    method=method,
+                    resolved_model=model_id,
+                    requested_model=original_model,
+                    resolution_path=f"container:{upstream.name}",
+                    slot_name=_slot_name_of(upstream),
+                    container_slot_name=_container_slot_name_of(upstream),
+                )
+                self._log_decision(call, t0, cache_state="warm")
+                return call
+
         # ── Step 1: registry lookup ──────────────────────────────────────
         registry_entry = self._registry_route_for(model_id)
         if registry_entry is not None:
