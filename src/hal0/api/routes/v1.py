@@ -282,14 +282,30 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
 
 
 def _normalize_loaded_models(request: Request) -> set[str]:
-    """Currently-loaded model ids from the cached health snapshot (NO new lemond poll)."""
+    """Currently-loaded model ids (cached health snapshot; NO new lemond poll).
+
+    Unions lemond's loaded set with the models advertised by ready container
+    remotes. Container slots aren't lemond-managed, so their models never show
+    in lemond's snapshot — without this the resolver chain sees no loaded role
+    for a container slot and falls back to the configured primary (cutover #662).
+    """
+    import contextlib
+
+    loaded: set[str] = set()
     shim = getattr(request.app.state, "lemonade_metrics_shim", None)
-    if shim is None:
-        return set()
-    try:
-        return set(shim._health.loaded_models)
-    except Exception:  # pragma: no cover — defensive
-        return set()
+    if shim is not None:
+        with contextlib.suppress(Exception):
+            loaded |= set(shim._health.loaded_models)
+    # Container-backed remotes (kind="remote" + slot_name) advertise their
+    # served model only while up, so their cached catalog == "loaded".
+    upstreams = getattr(request.app.state, "upstreams", None)
+    model_cache = getattr(request.app.state, "upstream_models", None)
+    if upstreams is not None and model_cache is not None:
+        with contextlib.suppress(Exception):
+            for up in upstreams.list():
+                if getattr(up, "kind", "") == "remote" and getattr(up, "slot_name", None):
+                    loaded |= set(model_cache.get(up.name, []))
+    return loaded
 
 
 async def _normalize_slot_views(request: Request) -> list:

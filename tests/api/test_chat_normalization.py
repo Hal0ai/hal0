@@ -276,3 +276,23 @@ async def test_dispatch_and_forward_does_not_normalize_non_chat(monkeypatch):
     await v1._dispatch_and_forward(req, _FakeDispatcher(), body=body)
 
     assert called["flag"] is False, "_dispatch_and_forward must not normalize non-chat requests"
+
+
+def test_loaded_models_includes_ready_container_slots():
+    """Container slots aren't lemond-managed, so their models never appear in
+    the lemond health snapshot. The resolver chain treats a role as available
+    only when its model is 'loaded', so container-slot models must be unioned
+    in — else hal0/agent falls back to the configured primary (cutover #662)."""
+    req = _make_request(
+        loaded={"lemond-model"},
+        upstreams=[
+            SimpleNamespace(name="agent", kind="remote", slot_name="agent"),
+            SimpleNamespace(name="or", kind="remote", slot_name=None),  # real remote
+        ],
+        upstream_models={"agent": ["chadrock-35b-ace-saber"], "or": ["gpt-x"]},
+    )
+    loaded = v1._normalize_loaded_models(req)
+    assert "lemond-model" in loaded
+    assert "chadrock-35b-ace-saber" in loaded
+    # A genuine external remote (no slot_name) is NOT a local container slot.
+    assert "gpt-x" not in loaded
