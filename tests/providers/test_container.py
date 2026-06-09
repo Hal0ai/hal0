@@ -25,6 +25,7 @@ from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
     _render_unit,
+    resolved_command_for_slot,
 )
 from hal0.slots.manager import SlotManager
 
@@ -199,6 +200,44 @@ class TestRenderUnit:
         assert "--device=/dev/kfd" in tokens
         assert "--device=/dev/dri/renderD128" in tokens
         assert "--device=/dev/dri" not in tokens
+
+    def test_ctx_size_in_exec_start(self) -> None:
+        """The slot's context_size must reach the container as --ctx-size,
+        else llama-server boots at its 4096 default (severe ctx regression)."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+            device_paths=["/dev/kfd", "/dev/dri/renderD128"],
+            context_size=131072,
+        )
+        tokens = shlex.split(self._get_exec_start(unit))
+        assert "--ctx-size" in tokens
+        assert tokens[tokens.index("--ctx-size") + 1] == "131072"
+
+    def test_server_extra_args_appended(self) -> None:
+        """[server].extra_args is honored on the container path (override/legacy),
+        appended after profile flags so slot-level flags win."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+            device_paths=["/dev/kfd", "/dev/dri/renderD128"],
+            extra_args="--override-kv tokenizer.ggml.add_bos=bool:false",
+        )
+        tokens = shlex.split(self._get_exec_start(unit))
+        assert "--override-kv" in tokens
+        assert "tokenizer.ggml.add_bos=bool:false" in tokens
 
     def test_security_opts(self) -> None:
         profile = _moe_profile()
@@ -440,6 +479,57 @@ class TestLoadSync:
         assert any("daemon-reload" in c for c in cmds), f"daemon-reload not in {cmds}"
         assert any("restart" in c for c in cmds), f"restart not in {cmds}"
         assert (tmp_path / "test.service").exists()
+
+    def test_load_sync_threads_ctx_size_and_extra_args(self, tmp_path: Path) -> None:
+        """load_sync must pull context_size + [server].extra_args off the slot
+        cfg and bake them into the rendered unit."""
+        profile = _moe_profile()
+        provider = ContainerProvider()
+        unit_file = tmp_path / "test.service"
+
+        def fake_run(*args: str, check: bool = True) -> MagicMock:
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            ),
+            patch.object(provider, "_run", side_effect=fake_run),
+            patch.object(provider, "_unit_path", return_value=unit_file),
+        ):
+            provider.load_sync(
+                {
+                    "name": "test-container",
+                    "port": 8095,
+                    "profile": "moe-rocmfp4",
+                    "model": {"default": "model", "context_size": 131072},
+                    "server": {"extra_args": "--override-kv k=bool:false"},
+                },
+                {"path": "/mnt/ai-models/model.gguf", "_model_key": "model"},
+            )
+
+        unit = unit_file.read_text()
+        assert "--ctx-size 131072" in unit
+        assert "--override-kv k=bool:false" in unit
+
+    def test_resolved_command_includes_ctx_size(self) -> None:
+        """The displayed resolved_command must show --ctx-size so it matches
+        what actually launches."""
+        profile = _moe_profile()
+        cfg = {
+            "profile": "moe-rocmfp4",
+            "port": 8095,
+            "model": {"default": "m", "context_size": 131072},
+        }
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/m.gguf")
+        assert argv is not None
+        assert "--ctx-size" in argv
+        assert argv[argv.index("--ctx-size") + 1] == "131072"
 
     def test_unload_sync_calls_stop(self, tmp_path: Path) -> None:
         provider = ContainerProvider()
