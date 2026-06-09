@@ -201,6 +201,26 @@ class TestRenderUnit:
         assert "--device=/dev/dri/renderD128" in tokens
         assert "--device=/dev/dri" not in tokens
 
+    def test_model_alias_in_exec_start(self) -> None:
+        """The container must advertise the hal0 registry model id via
+        --alias, else the dispatcher can't match hal0/* names (llama-server
+        otherwise advertises the raw GGUF basename)."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+            device_paths=["/dev/kfd", "/dev/dri/renderD128"],
+            model_alias="qwopus3.6-27b-v2",
+        )
+        tokens = shlex.split(self._get_exec_start(unit))
+        assert "--alias" in tokens
+        assert tokens[tokens.index("--alias") + 1] == "qwopus3.6-27b-v2"
+
     def test_ctx_size_in_exec_start(self) -> None:
         """The slot's context_size must reach the container as --ctx-size,
         else llama-server boots at its 4096 default (severe ctx regression)."""
@@ -516,6 +536,37 @@ class TestLoadSync:
         assert "--ctx-size 131072" in unit
         assert "--override-kv k=bool:false" in unit
 
+    def test_load_sync_advertises_model_id_alias(self, tmp_path: Path) -> None:
+        """load_sync must pass the registry model id (model_info._model_key)
+        as --alias so the dispatcher can route hal0/* names to the container."""
+        profile = _moe_profile()
+        provider = ContainerProvider()
+        unit_file = tmp_path / "test.service"
+
+        def fake_run(*args: str, check: bool = True) -> MagicMock:
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with (
+            patch("hal0.providers.container._resolve_profile", return_value=profile),
+            patch(
+                "hal0.providers.container.resolve_gpu_device_paths",
+                return_value=["/dev/kfd", "/dev/dri/renderD128"],
+            ),
+            patch.object(provider, "_run", side_effect=fake_run),
+            patch.object(provider, "_unit_path", return_value=unit_file),
+        ):
+            provider.load_sync(
+                {"name": "agent", "port": 8101, "profile": "moe-rocmfp4"},
+                {
+                    "path": "/mnt/ai-models/m.gguf",
+                    "_model_key": "chadrock-35b-ace-saber",
+                },
+            )
+
+        assert "--alias chadrock-35b-ace-saber" in unit_file.read_text()
+
     def test_resolved_command_includes_ctx_size(self) -> None:
         """The displayed resolved_command must show --ctx-size so it matches
         what actually launches."""
@@ -530,6 +581,20 @@ class TestLoadSync:
         assert argv is not None
         assert "--ctx-size" in argv
         assert argv[argv.index("--ctx-size") + 1] == "131072"
+
+    def test_resolved_command_includes_model_alias(self) -> None:
+        """resolved_command shows --alias <model id> so it matches the unit."""
+        profile = _moe_profile()
+        cfg = {
+            "profile": "moe-rocmfp4",
+            "port": 8095,
+            "model": {"default": "chadrock-35b-ace-saber", "context_size": 131072},
+        }
+        with patch("hal0.providers.container._resolve_profile", return_value=profile):
+            argv = resolved_command_for_slot(cfg)
+        assert argv is not None
+        assert "--alias" in argv
+        assert argv[argv.index("--alias") + 1] == "chadrock-35b-ace-saber"
 
     def test_unload_sync_calls_stop(self, tmp_path: Path) -> None:
         provider = ContainerProvider()

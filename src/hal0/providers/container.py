@@ -129,6 +129,7 @@ def _render_unit(
     device_paths: list[str] | None = None,
     context_size: int | None = None,
     extra_args: str | None = None,
+    model_alias: str | None = None,
 ) -> str:
     """Render a complete (non-drop-in) systemd unit for a container slot.
 
@@ -188,6 +189,10 @@ def _render_unit(
             model_path,
         ]
     )
+    # Advertise the hal0 registry model id (else llama-server reports the raw
+    # GGUF basename, which the dispatcher can't match to hal0/* virtual names).
+    if model_alias:
+        argv.extend(["--alias", model_alias])
     # Slot context window (else llama-server defaults to 4096).
     if context_size is not None:
         argv.extend(["--ctx-size", str(context_size)])
@@ -365,6 +370,11 @@ class ContainerProvider(Provider):
         context_size = model_table.get("context_size") if isinstance(model_table, dict) else None
         server_table = slot_cfg.get("server") or {}
         extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
+        # Registry model id → llama-server --alias so the container advertises
+        # the hal0 id (not the raw GGUF basename) for dispatcher matching.
+        model_alias = model_info.get("_model_key") or (
+            model_table.get("default") if isinstance(model_table, dict) else None
+        )
 
         unit_path = self._unit_path(slot_name)
         unit_text = _render_unit(
@@ -375,6 +385,7 @@ class ContainerProvider(Provider):
             flags_str,
             context_size=context_size,
             extra_args=extra_args,
+            model_alias=model_alias,
         )
 
         log.info(
@@ -578,6 +589,8 @@ def resolved_command_for_slot(
     ]
     if effective_model:
         argv += ["--model", effective_model]
+    if default_model:
+        argv += ["--alias", str(default_model)]
     if context_size is not None:
         argv += ["--ctx-size", str(context_size)]
     argv.extend(flag_tokens)
