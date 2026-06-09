@@ -13,6 +13,9 @@ from dataclasses import dataclass
 # Canonical virtual names -> ordered chain of roles to try against loaded slots.
 DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     "hal0/chat": ("chat",),
+    # hal0/agent → the slot named/tagged "agent" (a first-class chat role,
+    # e.g. the GPU MoE agent slot). Falls back to chat when agent is unloaded.
+    "hal0/agent": ("agent", "chat"),
     "hal0/npu": ("npu", "utility", "chat"),
     "hal0/utility": ("utility", "npu", "chat"),
 }

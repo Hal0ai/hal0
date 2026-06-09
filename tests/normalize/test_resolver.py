@@ -144,3 +144,14 @@ async def test_live_resolver_hal0_primary_alias():
     res = await resolver.resolve("hal0/primary")
     assert res is not None
     assert res.model_id == "big"
+
+
+def test_agent_virtual_name_resolves_to_agent_slot():
+    """hal0/agent must resolve to the slot named 'agent' (cutover #662: the
+    GPU MoE agent slot). Without a DEFAULT_CHAINS entry the virtual name is
+    unknown → passes through unnormalized → lemonade 404."""
+    r = resolve_chain("hal0/agent", _slots(), loaded={"qwen3-4b-FLM"})
+    assert r is not None
+    assert r.matched_role == "agent"
+    assert r.model_id == "qwen3-4b-FLM"  # the 'agent'-named slot in the fixture
+    assert r.fallback is False
