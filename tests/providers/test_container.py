@@ -158,6 +158,31 @@ class TestRenderUnit:
         assert "127.0.0.1:8095:8095" in exec_start
 
     def test_device_passthrough(self) -> None:
+        """Default device source is resolve_gpu_device_paths(); each node is
+        passed explicitly via --device=, never the bare /dev/dri directory."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        with patch(
+            "hal0.providers.container.resolve_gpu_device_paths",
+            return_value=["/dev/kfd", "/dev/dri/renderD128"],
+        ):
+            unit = _render_unit(
+                "test-slot",
+                profile.image,
+                8095,
+                "/mnt/ai-models/model.gguf",
+                flags,
+                runtime_bin=_TEST_RUNTIME,
+            )
+        exec_start = self._get_exec_start(unit)
+        tokens = shlex.split(exec_start)
+        assert "--device=/dev/kfd" in tokens
+        assert "--device=/dev/dri/renderD128" in tokens
+        assert "--device=/dev/dri" not in tokens
+
+    def test_explicit_device_nodes_emitted_no_bare_dri_dir(self) -> None:
+        """With explicit device_paths, the unit passes each node verbatim and
+        never the bare /dev/dri directory (which podman cannot recurse)."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_unit(
@@ -167,10 +192,13 @@ class TestRenderUnit:
             "/mnt/ai-models/model.gguf",
             flags,
             runtime_bin=_TEST_RUNTIME,
+            device_paths=["/dev/kfd", "/dev/dri/renderD128"],
         )
         exec_start = self._get_exec_start(unit)
-        assert "--device=/dev/kfd" in exec_start
-        assert "--device=/dev/dri" in exec_start
+        tokens = shlex.split(exec_start)
+        assert "--device=/dev/kfd" in tokens
+        assert "--device=/dev/dri/renderD128" in tokens
+        assert "--device=/dev/dri" not in tokens
 
     def test_security_opts(self) -> None:
         profile = _moe_profile()
@@ -326,9 +354,12 @@ class TestContainerSpec:
         assert mount_pairs[_MODEL_STORE_MOUNT] == _MODEL_STORE_MOUNT
 
     def test_devices_present(self) -> None:
-        spec = self._build_spec()
-        assert "/dev/kfd" in spec.devices
-        assert "/dev/dri" in spec.devices
+        with patch(
+            "hal0.providers.container.resolve_gpu_device_paths",
+            return_value=["/dev/kfd", "/dev/dri/renderD128"],
+        ):
+            spec = self._build_spec()
+        assert spec.devices == ["/dev/kfd", "/dev/dri/renderD128"]
 
     def test_security_opts(self) -> None:
         spec = self._build_spec()

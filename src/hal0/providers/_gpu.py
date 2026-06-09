@@ -11,9 +11,51 @@ GIDs once and pass them through.
 
 from __future__ import annotations
 
+import os
+import stat
+
 import structlog
 
 log = structlog.get_logger(__name__)
+
+
+def resolve_gpu_device_paths(
+    kfd_path: str = "/dev/kfd",
+    dri_dir: str = "/dev/dri",
+) -> list[str]:
+    """Return explicit GPU device-node paths to pass via ``--device=``.
+
+    Docker recurses a ``--device=/dev/dri`` *directory* and adds every node
+    under it; podman does not, and errors ``no devices found in /dev/dri`` on
+    hosts whose /dev/dri holds non-standard nodes (e.g. an ``amdgpu`` node and
+    no ``card0``). So we enumerate the actual character devices and pass each
+    one explicitly — which is correct for docker too.
+
+    Includes ``kfd_path`` when it exists, then every character device directly
+    under ``dri_dir`` (sorted). Subdirectories (``by-path``) and regular files
+    are skipped.
+
+    Falls back to the legacy directory paths ``["/dev/kfd", "/dev/dri"]`` when
+    neither exists (CI / no-GPU dev box) so unit rendering stays deterministic
+    off-GPU; no container actually runs there.
+    """
+    paths: list[str] = []
+    if os.path.exists(kfd_path):
+        paths.append(kfd_path)
+    try:
+        entries = sorted(os.listdir(dri_dir))
+    except OSError:
+        entries = []
+    for name in entries:
+        node = os.path.join(dri_dir, name)
+        try:
+            if stat.S_ISCHR(os.stat(node).st_mode):
+                paths.append(node)
+        except OSError:
+            continue
+    if not paths:
+        return ["/dev/kfd", "/dev/dri"]
+    return paths
 
 
 def resolve_gpu_group_ids() -> list[int]:
@@ -38,4 +80,4 @@ def resolve_gpu_group_ids() -> list[int]:
     return gids
 
 
-__all__ = ["resolve_gpu_group_ids"]
+__all__ = ["resolve_gpu_device_paths", "resolve_gpu_group_ids"]

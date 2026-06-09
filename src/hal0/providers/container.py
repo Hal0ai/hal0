@@ -47,7 +47,7 @@ import httpx
 
 from hal0.config.loader import load_profiles_config
 from hal0.config.schema import ProfileConfig, resolve_profile_flags
-from hal0.providers._gpu import resolve_gpu_group_ids
+from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
 log = logging.getLogger(__name__)
@@ -126,6 +126,7 @@ def _render_unit(
     model_path: str,
     flags_str: str,
     runtime_bin: str | None = None,
+    device_paths: list[str] | None = None,
 ) -> str:
     """Render a complete (non-drop-in) systemd unit for a container slot.
 
@@ -136,8 +137,13 @@ def _render_unit(
     ``runtime_bin``: override the container runtime binary (default: auto-detect
     via :func:`_container_runtime`).  Pass explicitly in tests to avoid
     depending on podman/docker being installed in the test environment.
+
+    ``device_paths``: explicit GPU device nodes to pass via ``--device=``
+    (default: auto-detect via :func:`resolve_gpu_device_paths`). Podman cannot
+    recurse a ``--device=/dev/dri`` directory, so we pass each node explicitly.
     """
     runtime = runtime_bin or _container_runtime()
+    devices = device_paths if device_paths is not None else resolve_gpu_device_paths()
     container_name = f"hal0-slot-{slot_name}"
     # Split the profile flags string into tokens for ExecStart quoting.
     flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
@@ -148,9 +154,10 @@ def _render_unit(
         "run",
         "--rm",
         f"--name={container_name}",
-        "--device=/dev/kfd",
-        "--device=/dev/dri",
     ]
+    # Explicit GPU device nodes (podman won't recurse the /dev/dri directory).
+    for dev in devices:
+        argv.append(f"--device={dev}")
     # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
     for gid in resolve_gpu_group_ids():
         argv.append(f"--group-add={gid}")
@@ -272,7 +279,7 @@ class ContainerProvider(Provider):
                 *flag_tokens,
             ],
             mounts=[(_MODEL_STORE_MOUNT, _MODEL_STORE_MOUNT)],
-            devices=["/dev/kfd", "/dev/dri"],
+            devices=resolve_gpu_device_paths(),
             group_add=[str(g) for g in resolve_gpu_group_ids()],
             security_opt=["apparmor=unconfined", "seccomp=unconfined"],
             port=port,
