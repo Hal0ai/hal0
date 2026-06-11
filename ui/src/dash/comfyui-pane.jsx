@@ -238,7 +238,7 @@ function SwitchoverConfirm({ target, queuePending, busy, onCancel, onConfirm }) 
                   <Ic name="warn" size={14} />
                 </span>
                 Background memory extraction pauses (NPU gemma3-4b via lemonade); it recovers
-                automatically. Embeddings + rerank are CPU-pinned and unaffected.
+                automatically. Rerank pauses too (GPU slot); embeddings are unaffected (NPU).
               </div>
             </div>
           )}
