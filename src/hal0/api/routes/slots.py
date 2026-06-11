@@ -425,6 +425,24 @@ async def _container_state_enrichment(request: Request) -> dict[str, dict[str, A
             entry["image"] = None
             entry["resolved_command"] = None
 
+        # #663: deterministic backend-of-record - the running container's image
+        # IS the backend. Surface actual_image (via podman inspect) and compute
+        # image_mismatch against the slot's declared profile image. Replaces the
+        # fragile /proc actual_backend sniff for container slots (lemond slots
+        # keep resolve_actual_backend). Degrades silently - never 500 the hot path.
+        try:
+            from hal0.providers.container import _image_mismatch, container_provider
+
+            running_image = await asyncio.get_event_loop().run_in_executor(
+                None, container_provider().running_image, name
+            )
+        except Exception:
+            running_image = None
+        if running_image:
+            entry["actual_image"] = running_image
+            if image:
+                entry["image_mismatch"] = _image_mismatch(running_image, image)
+
         # image_status: present | pulling | missing
         # Check the slot_pull_jobs registry first so an in-flight pull
         # surfaces as "pulling" without an extra inspect syscall.

@@ -114,6 +114,14 @@ export interface Slot {
   /** Container image availability: "present" | "pulling" | "missing".
    *  Populated by the backend when image_status is tracked. */
   image_status?: 'present' | 'pulling' | 'missing' | null
+  /** ACTUAL running container image ref, read from ``podman inspect`` by
+   *  _container_state_enrichment (#663). Omitted/null when the container is
+   *  not running or inspect fails — treat absence as "unknown". */
+  actual_image?: string | null
+  /** True iff actual_image is known AND differs from the declared profile
+   *  ``image`` (deterministic image-tag drift; replaces the /proc backend
+   *  sniff for container slots). UI renders the warning ONLY when true. */
+  image_mismatch?: boolean
   /** Container unit state: "running" | "stopped" | "starting" | "crashed".
    *  Set by _container_state_enrichment() in /api/slots. Absent for
    *  Lemonade slots. */
@@ -249,6 +257,10 @@ function normalizeSlot(s: any): Slot {
     // be omitted; null means "unknown — don't show image chip".
     image: s?.image ?? null,
     image_status: s?.image_status ?? null,
+    // #663: actual_image (podman inspect) + image_mismatch (running != declared
+    // profile image). Absent for Lemonade slots; coerce the flag to a boolean.
+    actual_image: s?.actual_image ?? null,
+    image_mismatch: !!s?.image_mismatch,
     // container_status / container_health are set by _container_state_enrichment.
     // Absent for Lemonade slots; null here keeps the type honest.
     container_status: s?.container_status ?? null,

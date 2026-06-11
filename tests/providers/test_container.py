@@ -24,6 +24,7 @@ from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig, resolve_profile_f
 from hal0.providers.container import (
     _MODEL_STORE_MOUNT,
     ContainerProvider,
+    _image_mismatch,
     _render_unit,
     resolved_command_for_slot,
 )
@@ -619,3 +620,32 @@ class TestLoadSync:
         assert any("stop" in c for c in cmds), f"stop not in {cmds}"
         # Unit file must be deleted
         assert not unit_file.exists()
+
+
+class TestImageMismatch:
+    """#663 - _image_mismatch compares the running image ref vs the declared profile image.
+
+    Seeded with the real refs observed live on CT105 (both agent + chat run
+    ``ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server``) so a
+    healthy slot never reports a false mismatch.
+    """
+
+    _ROCM = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+    _VULKAN = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
+
+    def test_no_mismatch_when_running_equals_declared(self) -> None:
+        assert _image_mismatch(self._ROCM, self._ROCM) is False
+
+    def test_mismatch_when_running_differs_from_declared(self) -> None:
+        assert _image_mismatch(self._VULKAN, self._ROCM) is True
+
+    def test_no_mismatch_when_running_unknown(self) -> None:
+        # Container down / inspect failed -> never cry wolf.
+        assert _image_mismatch(None, self._ROCM) is False
+        assert _image_mismatch("", self._ROCM) is False
+
+    def test_no_mismatch_when_declared_unknown(self) -> None:
+        assert _image_mismatch(self._ROCM, None) is False
+
+    def test_whitespace_is_ignored(self) -> None:
+        assert _image_mismatch(self._ROCM + "\n", self._ROCM) is False

@@ -401,3 +401,92 @@ def test_lemonade_slot_has_no_runtime_container_fields(
     # Lemonade slots must not inherit container enrichment fields
     assert lemond_slot.get("runtime") != "container"
     assert "resolved_command" not in lemond_slot
+
+
+# ── #663: actual_image + image_mismatch via running_image (podman inspect) ──────
+
+_VULKAN_IMG = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
+_ROCM_IMG = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+
+
+def _fake_vulkan_catalog() -> MagicMock:
+    """Fake profiles catalog whose 'vulkan-radv' profile declares _VULKAN_IMG."""
+    from hal0.config.schema import ProfileConfig
+
+    prof = ProfileConfig(image=_VULKAN_IMG, flags="--flash-attn on", mtp=False)
+    return MagicMock(profile={"vulkan-radv": prof})
+
+
+def test_container_actual_image_no_mismatch_when_running_matches_profile(
+    client_with_container_slot: TestClient,
+) -> None:
+    """#663: running container image == profile image -> actual_image set, image_mismatch False."""
+    cat = _fake_vulkan_catalog()
+    with (
+        patch("hal0.providers.container.ContainerProvider.is_active", return_value=True),
+        patch(
+            "hal0.providers.container.ContainerProvider.health",
+            new_callable=AsyncMock,
+            return_value={"ok": True, "status": "healthy"},
+        ),
+        patch("hal0.config.loader.load_profiles_config", return_value=cat),
+        patch("hal0.providers.container.load_profiles_config", return_value=cat),
+        patch(
+            "hal0.providers.container.ContainerProvider.running_image",
+            return_value=_VULKAN_IMG,
+        ),
+    ):
+        r = client_with_container_slot.get("/api/slots")
+    assert r.status_code == 200, r.text
+    slot = {e["name"]: e for e in r.json()}["gpu-chat"]
+    assert slot["actual_image"] == _VULKAN_IMG
+    assert slot["image_mismatch"] is False
+
+
+def test_container_image_mismatch_when_running_differs_from_profile(
+    client_with_container_slot: TestClient,
+) -> None:
+    """#663: running container image != profile image -> image_mismatch True (deterministic drift)."""
+    cat = _fake_vulkan_catalog()
+    with (
+        patch("hal0.providers.container.ContainerProvider.is_active", return_value=True),
+        patch(
+            "hal0.providers.container.ContainerProvider.health",
+            new_callable=AsyncMock,
+            return_value={"ok": True, "status": "healthy"},
+        ),
+        patch("hal0.config.loader.load_profiles_config", return_value=cat),
+        patch("hal0.providers.container.load_profiles_config", return_value=cat),
+        patch(
+            "hal0.providers.container.ContainerProvider.running_image",
+            return_value=_ROCM_IMG,  # stale: still running the old rocm image
+        ),
+    ):
+        r = client_with_container_slot.get("/api/slots")
+    assert r.status_code == 200, r.text
+    slot = {e["name"]: e for e in r.json()}["gpu-chat"]
+    assert slot["actual_image"] == _ROCM_IMG
+    assert slot["image_mismatch"] is True
+
+
+def test_lemonade_slot_has_no_image_mismatch_fields(
+    client_with_container_slot: TestClient,
+) -> None:
+    """#663: lemond slots keep existing behavior - no actual_image / image_mismatch keys."""
+    with (
+        patch("hal0.providers.container.ContainerProvider.is_active", return_value=True),
+        patch(
+            "hal0.providers.container.ContainerProvider.health",
+            new_callable=AsyncMock,
+            return_value={"ok": True, "status": "healthy"},
+        ),
+        patch(
+            "hal0.providers.container.ContainerProvider.running_image",
+            return_value=_VULKAN_IMG,
+        ),
+    ):
+        r = client_with_container_slot.get("/api/slots")
+    assert r.status_code == 200, r.text
+    chat = {e["name"]: e for e in r.json()}["chat"]
+    assert "actual_image" not in chat
+    assert "image_mismatch" not in chat

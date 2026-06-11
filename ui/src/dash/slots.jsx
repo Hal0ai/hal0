@@ -398,18 +398,32 @@ function SlotCard({
             to "no image" until that lands. container_status is always present. */}
         {isContainer ? (() => {
           const imgFull = slot.image || slot.profile || null;
-          const imgShort = imgFull
-            ? imgFull.split("/").pop() // last path segment (tag after last /)
-            : null;
-          return imgShort ? (
+          const imgShort = imgFull ? imgFull.split("/").pop() : null;
+          // #663: surface running-vs-configured image drift on the container
+          // chip (the lemond backend-mismatch block below never ran for
+          // container slots). actual_image + image_mismatch come from
+          // _container_state_enrichment via `podman inspect`.
+          const imgMismatch = !!slot.image_mismatch && !!slot.actual_image;
+          const runShort = slot.actual_image ? slot.actual_image.split("/").pop() : null;
+          if (!imgShort) {
+            return (
+              <span className="chip dim" title="Image/profile not yet emitted by backend (#658)">
+                {slot.profile ? `profile:${slot.profile}` : "no image"}
+              </span>
+            );
+          }
+          return (
             <span
               className="chip slot-image-tag mono"
-              title={imgFull}
-              style={{maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}
-            >{imgShort}</span>
-          ) : (
-            <span className="chip dim" title="Image/profile not yet emitted by backend (#658)">
-              {slot.profile ? `profile:${slot.profile}` : "no image"}
+              title={imgMismatch
+                ? `Configured ${imgFull} but running ${slot.actual_image} — reload the slot to apply the declared image.`
+                : imgFull}
+              style={imgMismatch
+                ? {maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderColor: "var(--warn-line)", background: "var(--warn-soft)"}
+                : {maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}
+            >
+              {imgShort}
+              {imgMismatch && <span style={{color: "var(--warn)", marginLeft: 4}}>≠ running {runShort}</span>}
             </span>
           );
         })() : (

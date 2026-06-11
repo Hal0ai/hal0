@@ -446,6 +446,36 @@ class ContainerProvider(Provider):
         )
         return result.returncode == 0
 
+    def running_image(self, slot_name: str) -> str | None:
+        """Return the image ref of the running container for *slot_name* (#663).
+
+        Deterministic backend-of-record for a container slot: the running
+        backend IS the image tag. Uses ``<runtime> inspect hal0-slot-<name>
+        --format {{.ImageName}}``. Returns None when the container is not
+        running or inspect fails. Reads stdout only - podman emits benign
+        device warnings to stderr under LXC. Never raises; callers dispatch to
+        a thread executor from the async status path.
+        """
+        try:
+            runtime = _container_runtime()
+        except RuntimeError:
+            return None
+        container_name = f"hal0-slot-{slot_name}"
+        try:
+            result = subprocess.run(
+                [runtime, "inspect", container_name, "--format", "{{.ImageName}}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        ref = result.stdout.strip()
+        return ref or None
+
     async def pull_image_stream(self, image: str):
         """Async generator that runs ``<runtime> pull <image>`` and yields
         layer-progress dicts.
@@ -599,3 +629,18 @@ def resolved_command_for_slot(
 
 
 __all__ = ["ContainerProvider", "container_provider", "resolved_command_for_slot"]
+
+
+def _image_mismatch(running_image: str | None, declared_image: str | None) -> bool:
+    """Return True iff both image refs are known AND differ (#663).
+
+    The deterministic replacement for the /proc ``actual_backend`` sniff on
+    container slots: the running backend IS the image tag, so drift is a plain
+    ref comparison (the running container's image vs the slot profile's
+    declared image). Returns False whenever the running image can't be
+    determined (container down / inspect failed) - never cry wolf on missing
+    data, same omit-don't-guess contract as ``resolve_actual_backend``.
+    """
+    if not running_image or not declared_image:
+        return False
+    return running_image.strip() != declared_image.strip()
