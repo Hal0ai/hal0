@@ -43,6 +43,7 @@ from hal0.capabilities.config import (
 )
 from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
+from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import BadRequest, Hal0Error, NotFound
 from hal0.lemonade.client import flm_args_from_lemond_config, flm_args_set_payload
 from hal0.registry.store import ModelRegistry
@@ -88,6 +89,13 @@ LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img", "vision")
 _CHILD_TO_FLM_FLAG: dict[str, str] = {
     "embed": "--embed",
     "stt": "--asr",
+}
+
+# child → the ``[npu]`` TOML boolean field that controls it on container slots.
+# "stt" maps to "asr" (FLM CLI flag name); "embed" maps to "embed".
+_CHILD_TO_NPU_FIELD: dict[str, str] = {
+    "stt": "asr",
+    "embed": "embed",
 }
 
 
@@ -703,10 +711,13 @@ class CapabilityOrchestrator:
              that prohibition is specifically about the nested ``model`` dict
              (replaced wholesale by the shallow merge), which we still NEVER
              pass here. Runs AFTER ``_rewrite_underlying_slot``.
-          3. Recompose the anchor's lemond ``flm_args`` for this modality.
+          3. Toggle the modality on the anchor via
+             :meth:`_set_flm_modality` — for a container anchor this writes
+             the ``[npu]`` TOML toggle; for a Lemonade anchor it recomposes
+             lemond ``flm_args``. Neither path bounces the anchor.
           4. Return ``pending_reload=True`` ALWAYS (Decision 1: never
              auto-restart the live anchor; if the anchor is offline the new
-             flm_args won't take effect until the user loads it — still
+             toggle won't take effect until the user loads it — still
              pending). The anchor is found by scanning ``iter_configs()``
              for ``type==llm && device==npu``; we never restart it here.
         """
@@ -720,22 +731,64 @@ class CapabilityOrchestrator:
         )
         await self._set_flm_modality(child, enable=selection.enabled)
         # Decision 1: surface pending_reload whether or not the anchor is
-        # live; we never eagerly bounce it. (The anchor scan is informational
-        # only — kept here so the contract "never restart" is auditable.)
-        await self._npu_anchor_is_live()
+        # live; we never eagerly bounce it.
         return True
 
     async def _set_flm_modality(self, child: str, *, enable: bool) -> None:
-        """Read-modify-write the FLM anchor's lemond trio args.
+        """Toggle a trio modality on the FLM anchor slot.
 
-        lemond stores the FLM trio args NESTED at ``flm.args`` — there is no
-        top-level ``flm_args`` key in its schema (memory
-        ``hal0_flm_args_nested_not_toplevel``). Reads the current value via
-        :func:`flm_args_from_lemond_config`, recomposes only this modality's
-        trio flag (Decision 2), and writes it back as the nested
-        ``{"flm": {"args": ...}}`` payload. No-op when no lemonade client is
-        wired.
+        For containerized NPU slots the ``[npu]`` TOML table is the single
+        source of truth (Phase A).  The anchor is located by scanning
+        ``iter_configs()`` for ``type==llm && device==npu``; when it is a
+        container slot (``is_container_npu_cfg`` returns True), the toggle is
+        written via ``SlotManager.update_config``.  It takes effect on the
+        next slot reload (``pending_reload``) — we NEVER bounce the anchor
+        here (Decision 1: never auto-restart the live anchor; the operator
+        drives the reload via the dashboard NPU section).
+
+        Field mapping (``child`` → ``[npu]`` key): ``"stt"`` → ``"asr"``,
+        ``"embed"`` → ``"embed"``.  The one-level deep merge in
+        ``update_config`` preserves sibling fields (e.g. writing
+        ``{"npu": {"asr": True}}`` never clobbers ``"embed"``).
+
+        For non-container (Lemonade-managed) anchors the legacy
+        read-modify-write of lemond ``flm.args`` is kept unchanged.
+        Phase E will remove the lemond path entirely.
+
+        No-op when neither a container anchor nor a Lemonade client is wired.
         """
+        # Locate the npu LLM anchor and decide which path to take.
+        anchor_name: str | None = None
+        anchor_cfg: dict[str, Any] | None = None
+        try:
+            configs = await self._slot_manager.iter_configs()
+        except Exception:
+            configs = []
+        for cfg in configs:
+            if cfg.get("type") != "llm" or cfg.get("device") != "npu":
+                continue
+            name = str(cfg.get("name", "")).strip()
+            if not name:
+                continue
+            anchor_name = name
+            anchor_cfg = cfg
+            break
+
+        if anchor_name is not None and is_container_npu_cfg(anchor_cfg):
+            # Container path: write the [npu] TOML toggle only. Decision 1:
+            # never auto-restart the anchor — the change takes effect on the
+            # next operator-driven reload (pending_reload surfaces it).
+            npu_field = _CHILD_TO_NPU_FIELD[child]
+            await self._slot_manager.update_config(anchor_name, {"npu": {npu_field: enable}})
+            log.info(
+                "npu container modality toggled: slot=%s npu.%s=%s (pending reload)",
+                anchor_name,
+                npu_field,
+                enable,
+            )
+            return
+
+        # Legacy Lemonade path (Phase E removes this).
         if self._lemonade_provider is None:
             return
         client = self._lemonade_provider()
@@ -743,30 +796,6 @@ class CapabilityOrchestrator:
         current = flm_args_from_lemond_config(cfg)
         new_args = _recompose_flm_args(current, child, enable)
         await client.internal_set(flm_args_set_payload(new_args))
-
-    async def _npu_anchor_is_live(self) -> bool:
-        """Return True when the FLM trio anchor slot is currently loaded.
-
-        The anchor is the ``type==llm && device==npu`` slot — found by
-        scanning ``iter_configs()``, never by hardcoded name. We DO NOT
-        restart it regardless of the result (Decision 1).
-        """
-        try:
-            configs = await self._slot_manager.iter_configs()
-        except Exception:
-            return False
-        for cfg in configs:
-            if cfg.get("type") != "llm" or cfg.get("device") != "npu":
-                continue
-            name = str(cfg.get("name", "")).strip()
-            if not name:
-                continue
-            try:
-                snap = await self._slot_manager.status(name)
-            except Exception:
-                return False
-            return getattr(snap.state, "value", "") == "ready"
-        return False
 
     async def _ensure_slot_exists_npu(
         self, slot_name: str, child: str, selection: CapabilitySelection
