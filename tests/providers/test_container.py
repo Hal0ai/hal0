@@ -159,6 +159,31 @@ class TestRenderUnit:
         exec_start = self._get_exec_start(unit)
         assert "127.0.0.1:8095:8095" in exec_start
 
+    def test_healthcheck_targets_slot_port_not_image_default(self) -> None:
+        """The toolbox image bakes a HEALTHCHECK probing a hardcoded :8080, but
+        hal0 runs llama-server on the slot port — so the unit must override
+        --health-cmd to probe the real port (else `podman ps` shows a permanent
+        false (unhealthy)). A start-period must cover model load."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+        )
+        tokens = shlex.split(self._get_exec_start(unit))
+        health_cmd = [t for t in tokens if t.startswith("--health-cmd=")]
+        assert health_cmd, f"no --health-cmd override in: {tokens}"
+        assert "127.0.0.1:8095/health" in health_cmd[0], health_cmd[0]
+        assert ":8080/" not in health_cmd[0], "must not probe the image's :8080 default"
+        assert any(t.startswith("--health-start-period=") for t in tokens), tokens
+        # Health flags are podman run options → must precede the image token.
+        img_idx = tokens.index(profile.image)
+        assert tokens.index(health_cmd[0]) < img_idx, "health flags must precede the image"
+
     def test_device_passthrough(self) -> None:
         """Default device source is resolve_gpu_device_paths(); each node is
         passed explicitly via --device=, never the bare /dev/dri directory."""

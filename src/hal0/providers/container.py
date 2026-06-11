@@ -178,6 +178,18 @@ def _render_unit(
             f"--volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro",
             # Loopback publish: expose slot port on 127.0.0.1 only.
             f"--publish=127.0.0.1:{port}:{port}",
+            # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK
+            # that probes a hardcoded :8080, but hal0 runs llama-server on the
+            # slot's own port — so the image check fails forever and `podman ps`
+            # shows a permanent false (unhealthy) even while the server is fine.
+            # Re-point it at the real slot port. ``--health-start-period`` covers
+            # model load so probes don't trip before llama-server is listening.
+            # (hal0's own ContainerProvider.health() remains the dashboard truth.)
+            f"--health-cmd=curl -fsS http://127.0.0.1:{port}/health || exit 1",
+            "--health-start-period=180s",
+            "--health-interval=30s",
+            "--health-retries=3",
+            "--health-timeout=5s",
             # Container image.
             image,
             # llama-server args follow the image (space-separated, not --key=val).
