@@ -25,3 +25,10 @@ mtp   = true
 image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
 flags = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
 mtp   = false
+
+[profile.flm-npu]
+# NPU LLM/trio slot (FastFlowLM). Flags are built by FLMProvider.container_spec,
+# not by this profile — image pin only.
+image = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
+flags = ""
+mtp   = false

@@ -170,6 +170,30 @@ class ModelConfig(BaseModel):
     )
 
 
+class NpuConfig(BaseModel):
+    """[npu] table in a slot TOML — FLM trio modality toggles.
+
+    Maps to ``flm serve --asr 1 --embed 1`` flag construction performed by
+    FLMProvider.container_spec at runtime.  This config file is the single
+    source of truth; it replaces lemond's nested flm.args approach.
+
+    Both fields default to ``False`` so a bare ``[npu]`` section in a slot
+    TOML is valid (all-off) without requiring the operator to explicitly
+    disable modalities they don't need.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    asr: bool = Field(
+        default=False,
+        description="Enable ASR (speech-to-text) modality via FLM --asr 1.",
+    )
+    embed: bool = Field(
+        default=False,
+        description="Enable embedding modality via FLM --embed 1.",
+    )
+
+
 class ServerConfig(BaseModel):
     """[server] section in a slot TOML.
 
@@ -307,6 +331,19 @@ class SlotConfig(BaseModel):
     # so loader._unflatten_slot_toml writes a proper [server] table.
     server: ServerConfig = Field(default_factory=ServerConfig)
 
+    # Typed [npu] subsection.  Same hoist/tuck round-trip pattern as
+    # [server]: loader._flatten_slot_toml lands [npu] in extra["npu"];
+    # _hoist_npu_from_extra promotes it to the typed field; _tuck_server_into_extra
+    # re-parks it under extra so _unflatten_slot_toml writes a proper [npu]
+    # table on disk.
+    npu: NpuConfig | None = Field(
+        default=None,
+        description=(
+            "[npu] table — FLM trio modality toggles (asr, embed). "
+            "Absent on non-NPU slots. See NpuConfig."
+        ),
+    )
+
     extra: dict[str, Any] = Field(
         default_factory=dict,
         description="Provider-specific slot params passed verbatim.",
@@ -338,6 +375,34 @@ class SlotConfig(BaseModel):
             new_extra = dict(extra)
             new_extra.pop("server", None)
             new_data["server"] = server
+            new_data["extra"] = new_extra
+            return new_data
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_npu_from_extra(cls, data: Any) -> Any:
+        """Pull a `[npu]` TOML table out of the loader's `extra` catch-all.
+
+        Mirrors ``_hoist_server_from_extra``: ``_flatten_slot_toml`` stashes
+        every unrecognised top-level table into ``extra``, so an on-disk
+        ``[npu]`` section for an NPU slot would never reach the typed
+        ``NpuConfig`` field without this hoist.
+        """
+        if not isinstance(data, dict):
+            return data
+        # Already top-level (e.g. passed directly in tests) — nothing to do.
+        if "npu" in data and data.get("npu") is not None:
+            return data
+        extra = data.get("extra")
+        if not isinstance(extra, dict):
+            return data
+        npu = extra.get("npu")
+        if isinstance(npu, dict):
+            new_data = dict(data)
+            new_extra = dict(extra)
+            new_extra.pop("npu", None)
+            new_data["npu"] = npu
             new_data["extra"] = new_extra
             return new_data
         return data
@@ -394,6 +459,10 @@ class SlotConfig(BaseModel):
         ``extra["server"]`` and drop the duplicate top-level entry.  Empty
         ServerConfigs (all-None) are elided so we don't write an empty
         `[server]` table to disk.
+
+        Also handles the typed ``npu`` field the same way: a non-None
+        NpuConfig dump is re-parked under ``extra["npu"]`` so the loader
+        writes a proper `[npu]` table; None (no NPU config) is elided.
         """
         data: dict[str, Any] = handler(self)
         server = data.pop("server", None)
@@ -406,6 +475,14 @@ class SlotConfig(BaseModel):
                 extra = dict(extra) if isinstance(extra, dict) else {}
                 extra["server"] = cleaned
                 data["extra"] = extra
+        # Re-park [npu] under extra so _unflatten_slot_toml writes a proper
+        # [npu] TOML table.  None means the slot has no NPU config — elide.
+        npu = data.pop("npu", None)
+        if isinstance(npu, dict):
+            extra = data.get("extra")
+            extra = dict(extra) if isinstance(extra, dict) else {}
+            extra["npu"] = npu
+            data["extra"] = extra
         return data
 
     @field_validator("name")
@@ -523,6 +600,11 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
     "vulkan-std": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
         "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "mtp": False,
+    },
+    "flm-npu": {
+        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
+        "flags": "",
         "mtp": False,
     },
 }
@@ -1598,6 +1680,7 @@ __all__ = [
     "ModelConfig",
     "ModelsConfig",
     "NPUInfo",
+    "NpuConfig",
     "ProfileConfig",
     "ProfilesConfig",
     "ProviderEntry",

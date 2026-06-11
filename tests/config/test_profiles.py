@@ -140,7 +140,7 @@ class TestLoadProfilesConfig:
 
     def test_seed_count(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert len(cfg.profile) == 3
+        assert len(cfg.profile) == 4  # moe-rocmfp4, dense-mtp-rocmfp4, vulkan-std, flm-npu
 
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
