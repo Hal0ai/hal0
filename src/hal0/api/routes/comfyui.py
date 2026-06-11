@@ -14,14 +14,15 @@ renders that engine pane from ``GET /api/comfyui/status``, which folds together:
 Every source degrades to a safe default — the pane polls this every few seconds
 and a dead container must surface as "stopped", never a 500.
 
-The switchover *write* path (``POST /api/comfyui/switchover``) runs the
-root-owned script pairs in ``/opt/comfyui`` (``stop-inference.sh`` →
-``comfy-up.sh`` for generation, ``comfy-down.sh`` → ``start-inference.sh`` for
-inference) in the background behind a 202; the ``switchover`` block on /status
-tracks the transition. Privilege-aware: as root (hal0-api on CT105 runs
-``User=root``) the scripts exec directly, otherwise via ``sudo -n`` against the
-narrow ``packaging/sudoers/hal0-comfyui`` grant. The whole path stays
-feature-gated behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` (501 when off).
+The switchover *write* path (``POST /api/comfyui/switchover``) drives the
+SlotManager's :class:`~hal0.slots.arbiter.GpuArbiter` (Phase D): generation →
+``ensure_img(pin=...)`` (drain the llm GPU group, load the img slot), inference
+→ ``restore_llm(force=...)`` (unload img, reload the saved llm slots). It runs
+in the background behind a 202; the ``switchover`` block on /status tracks the
+transition. The API no longer shells out — the ``/opt/comfyui`` control scripts
+stay on disk for manual ops only. ``POST /api/comfyui/pin`` toggles the
+arbiter's manual pin (blocks idle-restore). Both write paths stay feature-gated
+behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` (501 when off).
 """
 
 from __future__ import annotations
@@ -48,12 +49,10 @@ _PRESSURE_GB = 50
 _LEMONADE_UNIT = "hal0-lemonade.service"
 _HERMES_UNIT = "hal0-agent@hermes.service"
 
-# Switchover script pairs, run in order from the scripts dir on the runtime
-# host. ON hands the iGPU to ComfyUI; OFF hands it back to the LLM stack.
-_SWITCH_PAIRS: dict[str, tuple[str, ...]] = {
-    "generation": ("stop-inference.sh", "comfy-up.sh"),
-    "inference": ("comfy-down.sh", "start-inference.sh"),
-}
+# Switchover target modes. "generation" hands the iGPU to ComfyUI
+# (arbiter.ensure_img); "inference" hands it back to the LLM stack
+# (arbiter.restore_llm).
+_MODES = ("generation", "inference")
 
 # Short connect so a dead engine surfaces fast; the read budget is modest because
 # /system_stats and /queue are cheap snapshots.
@@ -283,6 +282,12 @@ def _engine_state(container: str, reachable: bool, running_jobs: int) -> str:
     return "generating" if running_jobs > 0 else "running"
 
 
+def _get_arbiter(request: Request) -> Any | None:
+    """The SlotManager's GpuArbiter off app.state, or None when unwired."""
+    manager = getattr(request.app.state, "slot_manager", None)
+    return manager.arbiter if manager is not None else None
+
+
 @router.get("/status")
 async def comfyui_status(request: Request) -> dict[str, Any]:
     """Aggregate docker + systemd + ComfyUI HTTP into one engine-status object."""
@@ -297,6 +302,15 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
     reachable = stats is not None
     counts = _queue_counts(queue)
     engine = _engine_state(container, reachable, counts["running"])
+    # Arbiter snapshot is fail-soft like every other probe here: a missing
+    # manager or a corrupt state file degrades to null, never a 500.
+    arbiter_block: dict[str, Any] | None = None
+    try:
+        arbiter = _get_arbiter(request)
+        if arbiter is not None:
+            arbiter_block = arbiter.status()
+    except Exception:
+        arbiter_block = None
     return {
         "mode": "generation" if container == "running" else "inference",
         "reachable": reachable,
@@ -308,104 +322,82 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "inference": {"lemonade": lemonade, "hermes": hermes},
         "inventory": _model_inventory(),
         "switchover": dict(_switch),
+        "arbiter": arbiter_block,
     }
 
 
-def _scripts_dir() -> str:
-    return os.environ.get("COMFYUI_SCRIPTS_DIR", "/opt/comfyui")
-
-
-def _script_timeout() -> float:
-    # comfy-up.sh on a FRESH container create waits for HTTP and pip-installs
-    # custom-node deps — minutes, not seconds. The resume path is fast.
+async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool = False) -> None:
+    """Drive the arbiter for ``mode``; record failure for /status to surface."""
     try:
-        return float(os.environ.get("COMFYUI_SCRIPT_TIMEOUT", "600"))
-    except ValueError:
-        return 600.0
-
-
-def _script_argv(name: str) -> list[str]:
-    """Argv for one switchover script, privilege-aware.
-
-    Root (CT105 today: hal0-api runs as ``User=root``) execs the script
-    directly. An unprivileged hal0-api goes through ``sudo -n`` against the
-    narrow ``/etc/sudoers.d/hal0-comfyui`` grant (absolute paths only); ``-n``
-    so a missing grant fails immediately instead of hanging on a password
-    prompt.
-    """
-    path = os.path.join(_scripts_dir(), name)
-    return [path] if os.geteuid() == 0 else ["sudo", "-n", path]
-
-
-async def _run_script(name: str) -> None:
-    """Execute one switchover script to completion; raises on failure."""
-    argv = _script_argv(name)
-    timeout = _script_timeout()
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        raise RuntimeError(f"{name} timed out after {timeout:.0f}s") from None
-    if proc.returncode != 0:
-        tail = out.decode("utf-8", "replace").strip().splitlines()[-5:]
-        raise RuntimeError(f"{name} exited {proc.returncode}: {' | '.join(tail)}")
-
-
-async def _run_switch(mode: str) -> None:
-    """Run the script pair for ``mode``; record failure for /status to surface."""
-    try:
-        for name in _SWITCH_PAIRS[mode]:
-            await _run_script(name)
-    except Exception as exc:  # any script failure must land in /status, never raise
+        if mode == "generation":
+            await arbiter.ensure_img(pin=pin)
+        else:
+            await arbiter.restore_llm(force=force)
+    except Exception as exc:  # any failure must land in /status, never raise
         _switch["error"] = f"{mode}: {exc}"
     finally:
         _switch["active"] = False
         _switch["target"] = None
 
 
+def _gate_closed() -> JSONResponse | None:
+    """501 when the operator hasn't enabled the GPU-switch write path."""
+    if os.environ.get("HAL0_COMFYUI_SWITCHOVER_ENABLED", "0") == "1":
+        return None
+    return JSONResponse(
+        status_code=501,
+        content={
+            "error": {
+                "code": "comfyui.switchover_disabled",
+                "message": (
+                    "ComfyUI switchover is disabled on this host. It stops "
+                    "the LLM stack (bots + memory extraction go dark) while "
+                    "generation holds the iGPU; set "
+                    "HAL0_COMFYUI_SWITCHOVER_ENABLED=1 on hal0-api to "
+                    "enable it."
+                ),
+            }
+        },
+    )
+
+
+def _arbiter_unavailable() -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": {
+                "code": "comfyui.arbiter_unavailable",
+                "message": "slot manager / GPU arbiter is not wired on this app",
+            }
+        },
+    )
+
+
 @router.post("/switchover")
 async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
     """Flip the iGPU between LLM inference and ComfyUI generation.
 
-    Body: ``{"mode": "generation" | "inference", "force": bool}``. Refuses while
-    a switch is in flight (409), no-ops when already in the target mode (200),
-    and refuses to drop a busy render queue without ``force`` (409). Otherwise
-    answers 202 and runs the script pair in the background — track completion
-    via the ``switchover`` block on ``GET /status``.
+    Body: ``{"mode": "generation" | "inference", "force": bool, "pin": bool}``
+    (``pin`` only matters for generation: hold image mode against idle-restore).
+    Refuses while a switch is in flight (409), no-ops when already in the
+    target mode (200), and refuses to drop a busy render queue without
+    ``force`` (409). Otherwise answers 202 and drives the GpuArbiter in the
+    background — track completion via the ``switchover`` block on
+    ``GET /status``.
 
-    Stays gated behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` because the scripts
-    take the messaging bots + memory extraction offline (an operator decision
-    per host), not because the path is unwired.
+    Stays gated behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` because the switch
+    takes the LLM stack (bots + memory extraction) offline (an operator
+    decision per host), not because the path is unwired.
     """
-    if os.environ.get("HAL0_COMFYUI_SWITCHOVER_ENABLED", "0") != "1":
-        return JSONResponse(
-            status_code=501,
-            content={
-                "error": {
-                    "code": "comfyui.switchover_disabled",
-                    "message": (
-                        "ComfyUI switchover is disabled on this host. It stops "
-                        "the LLM stack (bots + memory extraction go dark) while "
-                        "generation holds the iGPU; set "
-                        "HAL0_COMFYUI_SWITCHOVER_ENABLED=1 on hal0-api to "
-                        "enable it."
-                    ),
-                }
-            },
-        )
+    gate = _gate_closed()
+    if gate is not None:
+        return gate
     try:
         body = await request.json()
     except ValueError:
         body = None
     mode = body.get("mode") if isinstance(body, dict) else None
-    if mode not in _SWITCH_PAIRS:
+    if mode not in _MODES:
         return JSONResponse(
             status_code=422,
             content={
@@ -461,15 +453,48 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
                     }
                 },
             )
-    # Dispatch in the background and answer 202 immediately — the pair takes
-    # seconds to tens of seconds (service stop/start, container boot) and the
+    arbiter = _get_arbiter(request)
+    if arbiter is None:
+        return _arbiter_unavailable()
+    pin = bool(body.get("pin")) if isinstance(body, dict) else False
+    # Dispatch in the background and answer 202 immediately — the drain/reload
+    # takes seconds to tens of seconds (slot unloads, container boot) and the
     # pane's /status poll tracks the transition via the switchover block.
     _switch.update(active=True, target=mode, error=None)
-    background_tasks.add_task(_run_switch, mode)
-    return JSONResponse(
-        status_code=202,
-        content={"status": "switching", "mode": mode, "scripts": list(_SWITCH_PAIRS[mode])},
-    )
+    background_tasks.add_task(_run_switch, arbiter, mode, pin=pin, force=force)
+    return JSONResponse(status_code=202, content={"status": "switching", "mode": mode})
+
+
+@router.post("/pin")
+async def comfyui_pin(request: Request) -> JSONResponse:
+    """Toggle the arbiter's manual pin (holds image mode against idle-restore).
+
+    Body: ``{"pinned": bool}``. Gated by the same env flag as the switchover —
+    pinning only matters when the GPU-switch write path is live.
+    """
+    gate = _gate_closed()
+    if gate is not None:
+        return gate
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    pinned = body.get("pinned") if isinstance(body, dict) else None
+    if not isinstance(pinned, bool):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "comfyui.invalid_pin",
+                    "message": "body must be {'pinned': true | false}",
+                }
+            },
+        )
+    arbiter = _get_arbiter(request)
+    if arbiter is None:
+        return _arbiter_unavailable()
+    arbiter.set_pin(pinned)
+    return JSONResponse(status_code=200, content={"pinned": pinned})
 
 
 __all__ = ["aclose_client", "router"]

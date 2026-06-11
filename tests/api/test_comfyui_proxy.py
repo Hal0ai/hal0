@@ -13,15 +13,17 @@ crash on a dead container):
 The switchover *write* path (POST /api/comfyui/switchover) is feature-gated
 behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` (501 when off). When on it validates
 the target mode, no-ops if already there, refuses to drop a busy render queue
-without ``force``, and runs the script pair in the background behind a 202 —
+without ``force``, and drives the GpuArbiter in the background behind a 202 —
 the ``switchover`` block on /status is what tracks the transition to terminal.
-Scripts are never actually executed here: the subprocess seam (``_run_script``)
-is patched, mirroring the status seams.
+No subprocess is ever spawned for the switch (the shell-script path is retired):
+tests install a stub arbiter on ``app.state.slot_manager`` and assert the
+arbiter calls, mirroring the patched status seams.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -164,9 +166,6 @@ def test_status_inventory_is_none_when_share_absent(client: TestClient, tmp_path
     assert r.json()["inventory"] is None
 
 
-_BASE = "hal0.api.routes.comfyui"
-
-
 @pytest.fixture(autouse=True)
 def _reset_comfyui_module_state():
     # The switchover tracker is module-global (the app object is per-test but the
@@ -178,37 +177,85 @@ def _reset_comfyui_module_state():
     comfyui_mod._reset_state()
 
 
-def test_switchover_to_generation_runs_script_pair_in_order(
+class _StubArbiter:
+    """Stands in for ``manager.arbiter`` — the D4-D6 GpuArbiter surface."""
+
+    def __init__(self) -> None:
+        self.ensure_img = AsyncMock()
+        self.restore_llm = AsyncMock()
+        self.set_pin = Mock()
+        self.status = Mock(
+            return_value={
+                "mode": "llm",
+                "pinned": False,
+                "saved_llm_slots": [],
+                "idle_restore_at": None,
+            }
+        )
+
+
+def _install_arbiter(client: TestClient) -> _StubArbiter:
+    """Hang a stub manager+arbiter on app.state, the way the route finds it."""
+    arb = _StubArbiter()
+    client.app.state.slot_manager = SimpleNamespace(arbiter=arb)
+    return arb
+
+
+def test_switchover_generation_calls_arbiter(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # ON: stop the LLM stack, then bring the container up — exactly that pair,
-    # exactly that order, kicked off in the background behind a 202.
+    # ON: the background task drives arbiter.ensure_img — NO subprocess, the
+    # shell-script seam is gone from the module entirely.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
     c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
-    with c, s, f, patch(f"{_BASE}._run_script", new_callable=AsyncMock) as run:
+    with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code == 202
-    assert r.json() == {
-        "status": "switching",
-        "mode": "generation",
-        "scripts": ["stop-inference.sh", "comfy-up.sh"],
-    }
-    assert [call.args[0] for call in run.await_args_list] == ["stop-inference.sh", "comfy-up.sh"]
+    assert r.json() == {"status": "switching", "mode": "generation"}
+    arb.ensure_img.assert_awaited_once_with(pin=False)
+    arb.restore_llm.assert_not_awaited()
+    from hal0.api.routes import comfyui as comfyui_mod
+
+    assert not hasattr(comfyui_mod, "_run_script")  # scripts retired for real
 
 
-def test_switchover_force_to_inference_runs_pair_despite_busy_queue(
+def test_switchover_inference_calls_restore(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The UI confirm dialog already warned that queued jobs drop — force wins.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
+    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
+    assert r.status_code == 202
+    arb.restore_llm.assert_awaited_once_with(force=False)
+    arb.ensure_img.assert_not_awaited()
+
+
+def test_switchover_pin_param(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # {"pin": true} rides along to ensure_img so generation can hold the GPU.
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
+    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "generation", "pin": True})
+    assert r.status_code == 202
+    arb.ensure_img.assert_awaited_once_with(pin=True)
+
+
+def test_switchover_force_passes_to_restore(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The UI confirm dialog already warned that queued jobs drop — force wins
+    # over the busy queue AND propagates to restore_llm (pin override).
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
     c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_busy)
-    with c, s, f, patch(f"{_BASE}._run_script", new_callable=AsyncMock) as run:
+    with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference", "force": True})
     assert r.status_code == 202
-    assert [call.args[0] for call in run.await_args_list] == [
-        "comfy-down.sh",
-        "start-inference.sh",
-    ]
+    arb.restore_llm.assert_awaited_once_with(force=True)
 
 
 def test_switchover_refused_while_another_switch_in_flight(
@@ -221,25 +268,28 @@ def test_switchover_refused_while_another_switch_in_flight(
     comfyui_mod = _reset_comfyui_module_state
     comfyui_mod._switch["active"] = True
     comfyui_mod._switch["target"] = "generation"
+    arb = _install_arbiter(client)
     c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
-    with c, s, f, patch(f"{_BASE}._run_script", new_callable=AsyncMock) as run:
+    with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "comfyui.switch_in_progress"
-    run.assert_not_called()
+    arb.ensure_img.assert_not_awaited()
+    arb.restore_llm.assert_not_awaited()
 
 
 def test_switchover_noop_when_already_in_generation_mode(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Container already running → target reached; never re-run the scripts.
+    # Container already running → target reached; never re-drive the arbiter.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
     c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
-    with c, s, f, patch(f"{_BASE}._run_script", new_callable=AsyncMock) as run:
+    with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code == 200
     assert r.json() == {"status": "noop", "mode": "generation"}
-    run.assert_not_called()
+    arb.ensure_img.assert_not_awaited()
 
 
 def test_switchover_noop_when_already_in_inference_mode(
@@ -247,12 +297,13 @@ def test_switchover_noop_when_already_in_inference_mode(
 ) -> None:
     # Container down AND lemonade up → inference already owns the GPU.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
     c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
-    with c, s, f, patch(f"{_BASE}._run_script", new_callable=AsyncMock) as run:
+    with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 200
     assert r.json() == {"status": "noop", "mode": "inference"}
-    run.assert_not_called()
+    arb.restore_llm.assert_not_awaited()
 
 
 def test_switchover_to_inference_refused_while_queue_busy(
@@ -261,12 +312,13 @@ def test_switchover_to_inference_refused_while_queue_busy(
     # Tearing ComfyUI down mid-render kills the running + queued jobs — refuse
     # unless the caller explicitly forces it (the UI confirm dialog is the force).
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
     c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_busy)
-    with c, s, f, patch(f"{_BASE}._run_script", new_callable=AsyncMock) as run:
+    with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "comfyui.busy"
-    run.assert_not_called()
+    arb.restore_llm.assert_not_awaited()
 
 
 def test_status_exposes_switchover_state(client: TestClient, _reset_comfyui_module_state) -> None:
@@ -281,77 +333,86 @@ def test_status_exposes_switchover_state(client: TestClient, _reset_comfyui_modu
     assert active == {"active": True, "target": "generation", "error": None}
 
 
-def test_switchover_script_failure_is_surfaced_in_status(
+def test_switchover_arbiter_error_recorded(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A failed script must not strand the tracker as active, and the error must
-    # be visible to the pane on the next poll — never silently swallowed.
+    # A failed arbiter switch (incl. ArbiterPinned) must not strand the tracker
+    # as active, and the error must be visible on the next poll — same contract
+    # the script failures had. Never silently swallowed, never a raised 500.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
+    arb.ensure_img.side_effect = RuntimeError("img slot failed to load")
     c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
-    boom = AsyncMock(side_effect=RuntimeError("stop-inference.sh exited 1"))
-    with c, s, f, patch(f"{_BASE}._run_script", boom):
+    with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
         assert r.status_code == 202
         sw = client.get("/api/comfyui/status").json()["switchover"]
     assert sw["active"] is False
-    assert "stop-inference.sh exited 1" in sw["error"]
+    assert "img slot failed to load" in sw["error"]
 
 
-def test_script_argv_runs_directly_when_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    # hal0-api runs as root on CT105 today — exec the script straight.
-    from hal0.api.routes import comfyui as m
+def test_pin_endpoint_toggles(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same 501 feature gate as the switchover, then a plain set_pin passthrough
+    # that reflects the new value back.
+    arb = _install_arbiter(client)
+    r = client.post("/api/comfyui/pin", json={"pinned": True})
+    assert r.status_code == 501
+    arb.set_pin.assert_not_called()
 
-    monkeypatch.setenv("COMFYUI_SCRIPTS_DIR", "/opt/comfyui")
-    monkeypatch.setattr(m.os, "geteuid", lambda: 0)
-    assert m._script_argv("comfy-up.sh") == ["/opt/comfyui/comfy-up.sh"]
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    r = client.post("/api/comfyui/pin", json={"pinned": True})
+    assert r.status_code == 200
+    assert r.json() == {"pinned": True}
+    arb.set_pin.assert_called_once_with(True)
 
-
-def test_script_argv_uses_sudo_n_when_unprivileged(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Hardened install (hal0-api as the hal0 user): go through the narrow
-    # sudoers.d/hal0-comfyui grant. -n so a missing grant fails fast, not hangs.
-    from hal0.api.routes import comfyui as m
-
-    monkeypatch.setenv("COMFYUI_SCRIPTS_DIR", "/opt/comfyui")
-    monkeypatch.setattr(m.os, "geteuid", lambda: 1000)
-    assert m._script_argv("stop-inference.sh") == ["sudo", "-n", "/opt/comfyui/stop-inference.sh"]
-
-
-async def test_run_script_executes_real_script(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hal0.api.routes import comfyui as m
-
-    marker = tmp_path / "ran"
-    script = tmp_path / "ok.sh"
-    script.write_text(f"#!/usr/bin/env bash\ntouch {marker}\n")
-    script.chmod(0o755)
-    monkeypatch.setenv("COMFYUI_SCRIPTS_DIR", str(tmp_path))
-    monkeypatch.setattr(m.os, "geteuid", lambda: 0)
-    await m._run_script("ok.sh")
-    assert marker.exists()
+    r = client.post("/api/comfyui/pin", json={"pinned": False})
+    assert r.status_code == 200
+    assert r.json() == {"pinned": False}
+    arb.set_pin.assert_called_with(False)
 
 
-async def test_run_script_raises_on_nonzero_exit(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hal0.api.routes import comfyui as m
-
-    script = tmp_path / "bad.sh"
-    script.write_text("#!/usr/bin/env bash\necho boom >&2\nexit 3\n")
-    script.chmod(0o755)
-    monkeypatch.setenv("COMFYUI_SCRIPTS_DIR", str(tmp_path))
-    monkeypatch.setattr(m.os, "geteuid", lambda: 0)
-    with pytest.raises(RuntimeError, match=r"bad\.sh.*3"):
-        await m._run_script("bad.sh")
+def test_pin_endpoint_rejects_non_bool_body(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client)
+    r = client.post("/api/comfyui/pin", json={"pinned": "yes"})
+    assert r.status_code == 422
+    arb.set_pin.assert_not_called()
 
 
-async def test_run_script_raises_on_timeout(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hal0.api.routes import comfyui as m
+def test_status_carries_arbiter_block(client: TestClient) -> None:
+    # /status folds arbiter.status() in under "arbiter" so the pane can render
+    # mode/pin/idle-restore without a second endpoint.
+    arb = _install_arbiter(client)
+    arb.status.return_value = {
+        "mode": "img",
+        "pinned": True,
+        "saved_llm_slots": ["primary", "utility"],
+        "idle_restore_at": None,
+    }
+    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        r = client.get("/api/comfyui/status")
+    assert r.status_code == 200
+    assert r.json()["arbiter"] == {
+        "mode": "img",
+        "pinned": True,
+        "saved_llm_slots": ["primary", "utility"],
+        "idle_restore_at": None,
+    }
 
-    script = tmp_path / "slow.sh"
-    script.write_text("#!/usr/bin/env bash\nsleep 5\n")
-    script.chmod(0o755)
-    monkeypatch.setenv("COMFYUI_SCRIPTS_DIR", str(tmp_path))
-    monkeypatch.setenv("COMFYUI_SCRIPT_TIMEOUT", "0.2")
-    monkeypatch.setattr(m.os, "geteuid", lambda: 0)
-    with pytest.raises(RuntimeError, match=r"slow\.sh.*timed out"):
-        await m._run_script("slow.sh")
+
+def test_status_arbiter_fail_soft(client: TestClient) -> None:
+    # The status route is fail-soft by design — an arbiter blow-up degrades to
+    # "arbiter": null, the rest of the pane keeps rendering.
+    arb = _install_arbiter(client)
+    arb.status.side_effect = RuntimeError("state file corrupt")
+    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    with c, s, f:
+        r = client.get("/api/comfyui/status")
+    assert r.status_code == 200
+    assert r.json()["arbiter"] is None
 
 
 def test_switchover_rejects_unknown_mode(
