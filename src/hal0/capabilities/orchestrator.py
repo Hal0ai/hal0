@@ -46,6 +46,7 @@ from hal0.config.loader import load_slot_config, write_toml_atomic
 from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import BadRequest, Hal0Error, NotFound
 from hal0.lemonade.client import flm_args_from_lemond_config, flm_args_set_payload
+from hal0.model_meta import canonical_device, device_to_legacy_backend
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 
@@ -273,7 +274,7 @@ class CapabilityOrchestrator:
             # (not the deprecated ``backend``). SlotConfig auto-promotes
             # legacy ``backend`` on load, so ``slot_cfg.device`` is the
             # right v0.2 surface here.
-            selection.device = self._canonical_device_id(slot_cfg.device)
+            selection.device = canonical_device(slot_cfg.device)
             selection.provider = slot_cfg.provider
             selection.model = slot_cfg.model.default or ""
             selection.enabled = bool(slot_cfg.enabled) and bool(selection.model)
@@ -282,62 +283,12 @@ class CapabilityOrchestrator:
         self._save(cfg)
 
     # ── shape helpers ────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _canonical_device_id(slot_device: str) -> str:
-        """Normalise a slot's ``device`` to the capabilities catalog id.
-
-        After ADR-0006 §7 both surfaces speak the same enum
-        (``gpu-rocm | gpu-vulkan | cpu | npu``), so this is a near-identity.
-        It still tolerates a legacy ``backend``-style input
-        (``vulkan|rocm|flm|moonshine|kokoro``) for forward compatibility
-        with hand-edited slot TOMLs by routing through
-        :func:`hal0.config.schema.map_backend_to_device`.
-        """
-        from hal0.config.schema import _VALID_DEVICES, map_backend_to_device
-
-        if not slot_device:
-            return ""
-        if slot_device in _VALID_DEVICES:
-            return slot_device
-        return map_backend_to_device(slot_device)
-
-    @staticmethod
-    def _canonical_backend_id(slot_backend: str) -> str:
-        """DEPRECATED — kept for tests / external callers.
-
-        Forward to :meth:`_canonical_device_id`. Removed when the
-        ``backend`` field is excised in v0.3.
-        """
-        return CapabilityOrchestrator._canonical_device_id(slot_backend)
-
-    @staticmethod
-    def _slot_device_for_catalog_id(device_id: str) -> str:
-        """Catalog ``device`` id → SlotConfig.device string (identity)."""
-        from hal0.config.schema import _VALID_DEVICES
-
-        if device_id in _VALID_DEVICES:
-            return device_id
-        # Legacy round-trip — accept ``vulkan|rocm|flm|cpu`` and forward.
-        from hal0.config.schema import map_backend_to_device
-
-        return map_backend_to_device(device_id) if device_id else ""
-
-    @staticmethod
-    def _slot_backend_for_catalog_id(backend_id: str) -> str:
-        """DEPRECATED — translate catalog id to the legacy ``backend`` string.
-
-        Still used by code paths that write the deprecated SlotConfig.backend
-        field (kept until v0.3 for downgrade legibility). New write paths
-        should call :meth:`_slot_device_for_catalog_id` instead.
-        """
-        mapping = {
-            "gpu-vulkan": "vulkan",
-            "gpu-rocm": "rocm",
-            "npu": "flm",
-            "cpu": "cpu",
-        }
-        return mapping.get(backend_id, backend_id)
+    #
+    # The device-namespace normalisation helpers that used to live here
+    # (``_canonical_device_id`` / ``_canonical_backend_id`` /
+    # ``_slot_device_for_catalog_id`` / ``_slot_backend_for_catalog_id``)
+    # moved to :mod:`hal0.model_meta` (issue #695) as
+    # :func:`canonical_device` and :func:`device_to_legacy_backend`.
 
     def _selection_with_defaults(
         self, cfg: CapabilityConfig, slot: str, child: str
@@ -453,7 +404,7 @@ class CapabilityOrchestrator:
             if key in partial:
                 if key == "backend":
                     # Translate legacy alias forward.
-                    merged_data["device"] = self._canonical_device_id(str(partial[key]))
+                    merged_data["device"] = canonical_device(str(partial[key]))
                 else:
                     merged_data[key] = partial[key]
         try:
@@ -658,8 +609,8 @@ class CapabilityOrchestrator:
         # Emit both ``device`` (v0.2 canonical) and ``backend`` (v0.1.x
         # alias) so downgrades remain legible. SlotConfig's
         # ``_promote_backend_to_device`` validator keeps them in sync.
-        slot_backend = self._slot_backend_for_catalog_id(selection.device)
-        slot_device = self._slot_device_for_catalog_id(selection.device)
+        slot_backend = device_to_legacy_backend(selection.device)
+        slot_device = canonical_device(selection.device)
         provider = selection.provider or "llama-server"
         cfg_dict: dict[str, Any] = {
             "name": slot_name,
@@ -843,8 +794,8 @@ class CapabilityOrchestrator:
         cfg_path = paths.slots_config_dir() / f"{slot_name}.toml"
         if not cfg_path.exists():
             return
-        slot_backend = self._slot_backend_for_catalog_id(selection.device)
-        slot_device = self._slot_device_for_catalog_id(selection.device)
+        slot_backend = device_to_legacy_backend(selection.device)
+        slot_device = canonical_device(selection.device)
         updates: dict[str, Any] = {}
         if slot_backend:
             # Deprecated field, kept for one release — see ADR-0006 §7.

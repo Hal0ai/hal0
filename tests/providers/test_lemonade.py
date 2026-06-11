@@ -2,7 +2,7 @@
 
 PR-8 + PR-10 capability dispatch wiring. Covers:
 
-  * ``device_to_backend`` mapping (plan §4.1 + ADR-0008 §6)
+  * ``device_to_backend`` mapping moved to tests/model_meta (issue #695)
   * ``LemonadeProvider.load`` body construction → ``LemonadeClient.load``
   * ``LemonadeProvider.unload`` idempotence + noop on modelless slot
   * ``LemonadeProvider.status`` derivation from ``/v1/health.loaded[]``
@@ -32,7 +32,6 @@ from hal0.lemonade.client import LemonadeClient
 from hal0.lemonade.errors import LemonadeHTTPError, LemonadeLoadError
 from hal0.providers.lemonade import (
     LemonadeProvider,
-    device_to_backend,
     resolve_actual_backend,
 )
 
@@ -56,42 +55,6 @@ def _slot_cfg(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
-
-
-# ── device_to_backend ────────────────────────────────────────────────
-
-
-def test_device_to_backend_rocm() -> None:
-    assert device_to_backend("gpu-rocm") == (None, "rocm")
-
-
-def test_device_to_backend_vulkan() -> None:
-    assert device_to_backend("gpu-vulkan") == (None, "vulkan")
-
-
-def test_device_to_backend_cpu() -> None:
-    assert device_to_backend("cpu") == (None, "cpu")
-
-
-def test_device_to_backend_npu() -> None:
-    # NPU uses the FLM recipe; no llamacpp_backend.
-    assert device_to_backend("npu") == ("flm", None)
-
-
-def test_device_to_backend_empty_returns_double_none() -> None:
-    assert device_to_backend("") == (None, None)
-    assert device_to_backend(None) == (None, None)
-
-
-def test_device_to_backend_unknown_falls_back_to_double_none() -> None:
-    # Unknown devices return ``(None, None)`` so Lemonade picks its
-    # defaults rather than us trying to invent a backend tag.
-    assert device_to_backend("rocm-xtreme-edition") == (None, None)
-
-
-def test_device_to_backend_is_case_insensitive() -> None:
-    assert device_to_backend("GPU-ROCM") == (None, "rocm")
-    assert device_to_backend("  npu  ") == ("flm", None)
 
 
 # ── load() — request body construction ───────────────────────────────

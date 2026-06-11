@@ -67,59 +67,15 @@ from typing import Any
 from urllib.parse import urlparse
 
 from hal0.lemonade.client import LemonadeClient
+from hal0.model_meta import device_to_backend
 from hal0.providers.base import ContainerSpec, Provider
 
 log = logging.getLogger(__name__)
 
 
-# ── device → Lemonade recipe/backend mapping ─────────────────────────────────
-#
-# Plan §4.1 + ADR-0008 §6 locked the four-way mapping. ``gpu-*`` slots
-# load through llama.cpp with an explicit backend flag; ``cpu`` is the
-# same recipe with CPU-only inference; ``npu`` uses Lemonade's FLM
-# recipe and does not take a llamacpp_backend (FLM is its own backend).
-#
-# Returned tuple shape: ``(recipe, llamacpp_backend)``. ``recipe=None``
-# means "let Lemonade pick its default" (currently the llama.cpp recipe
-# for gpu/cpu).  Either value being ``None`` causes
-# :meth:`LemonadeClient.load` to omit the key from the request body —
-# Lemonade then falls through to its internal sentinel logic.
-
-
-def device_to_backend(device: str | None) -> tuple[str | None, str | None]:
-    """Map hal0's ``device`` enum onto Lemonade's recipe+backend pair.
-
-    Args:
-        device: One of ``gpu-rocm`` | ``gpu-vulkan`` | ``cpu`` | ``npu``.
-                Empty / unknown values fall back to ``(None, None)`` so
-                Lemonade picks its own defaults — same semantics as
-                omitting the keys from the load body.
-
-    Returns:
-        ``(recipe, llamacpp_backend)``. Either may be ``None`` to mean
-        "don't send this key in the /v1/load body". The two are
-        mutually exclusive in practice — NPU uses ``recipe="flm"`` with
-        no llamacpp_backend; everything else uses ``recipe=None`` with
-        a concrete llamacpp_backend.
-    """
-    if not device:
-        return (None, None)
-    d = device.strip().lower()
-    if d == "gpu-rocm":
-        return (None, "rocm")
-    if d == "gpu-vulkan":
-        return (None, "vulkan")
-    if d == "cpu":
-        return (None, "cpu")
-    if d == "npu":
-        # FLM recipe; ``llamacpp_backend`` is meaningless here. Lemonade
-        # routes the load to its fastflowlm_server backend.
-        return ("flm", None)
-    log.warning(
-        "lemonade.provider.unknown_device",
-        extra={"device": device},
-    )
-    return (None, None)
+# ``device_to_backend`` (the plan §4.1 / ADR-0008 §6 device → Lemonade
+# recipe+backend mapping) moved to :mod:`hal0.model_meta` (issue #695).
+# Re-exported here (see ``__all__``) for existing importers.
 
 
 # ── actual-backend introspection (B2) ────────────────────────────────────────

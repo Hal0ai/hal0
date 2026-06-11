@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
 from hal0.errors import Hal0Error
+from hal0.model_meta import classify
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
 from hal0.registry.detect import DetectionResult, detect
 from hal0.registry.discover import is_skippable, scan_and_register
@@ -75,26 +76,9 @@ def _is_alias(model_id: str) -> bool:
     return model_id in _ALIAS_NAMES
 
 
-# Capability → coarse modality bucket the dashboard's Models view (and the
-# endpoints widget W7) counts by. ``chat`` covers text/vision LLMs; the
-# rest map a model's primary non-chat function so embed/rerank/voice/image
-# models are counted instead of being lumped under "chat" or omitted.
-_CAPABILITY_TO_TYPE: dict[str, str] = {
-    "chat": "chat",
-    "vision": "chat",
-    "embed": "embed",
-    "rerank": "rerank",
-    "asr": "stt",
-    "stt": "stt",
-    "tts": "tts",
-    "image": "img",
-    "img": "img",
-}
-
-# Precedence when a model advertises several capabilities: a dedicated
-# embedder that also lists "chat" should still classify as embed. chat is
-# the lowest-priority fallback so genuinely non-chat models surface.
-_TYPE_PRIORITY: tuple[str, ...] = ("rerank", "embed", "stt", "tts", "img", "chat")
+# Capability/id → coarse modality bucket classification lives in
+# hal0.model_meta.classify (issue #695) — the W7 vocab tables moved
+# there with it.
 
 # FLM capability → dispatcher-vocab slot type. The NPU slot pickers
 # (ui/dash/slots.jsx ``modelSlotType``) speak the dispatcher vocabulary
@@ -109,38 +93,6 @@ _FLM_DISPATCH_TYPE: dict[str, str] = {
     "tts": "tts",
     "image": "image",
 }
-
-
-def _classify_type(capabilities: Any, model_id: str = "") -> str:
-    """Return the primary modality bucket for a model.
-
-    Reads the model's ``capabilities`` list (chat/embed/rerank/asr/tts/
-    vision/image). Falls back to filename heuristics on the id so
-    upstream-only rows (which carry no capabilities) still classify.
-    Defaults to ``"chat"`` when nothing else matches.
-    """
-    found: set[str] = set()
-    if isinstance(capabilities, (list, tuple)):
-        for cap in capabilities:
-            t = _CAPABILITY_TO_TYPE.get(str(cap).strip().lower())
-            if t:
-                found.add(t)
-    if not found and model_id:
-        mid = model_id.lower()
-        if "rerank" in mid:
-            found.add("rerank")
-        elif "embed" in mid or "bge" in mid or "nomic" in mid:
-            found.add("embed")
-        elif "whisper" in mid or "moonshine" in mid or "-stt" in mid or "asr" in mid:
-            found.add("stt")
-        elif "tts" in mid or "kokoro" in mid or "vibevoice" in mid or "-voice" in mid:
-            found.add("tts")
-        elif "flux" in mid or "sdxl" in mid or "stable-diffusion" in mid or "-img" in mid:
-            found.add("img")
-    for t in _TYPE_PRIORITY:
-        if t in found:
-            return t
-    return "chat"
 
 
 @router.get("")
@@ -165,7 +117,7 @@ async def list_models(request: Request) -> dict[str, Any]:
         dumped.setdefault("object", "model")
         dumped.setdefault("created", now)
         dumped.setdefault("owned_by", "local")
-        dumped["type"] = _classify_type(dumped.get("capabilities"), dumped.get("id", ""))
+        dumped["type"] = classify(dumped.get("id", ""), capabilities=dumped.get("capabilities"))
         data.append(dumped)
         seen.add(entry.id)
     for u in upstreams.list():
@@ -197,7 +149,7 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "ns": "pulled",
                     # Upstream rows carry no capabilities; classify from
                     # the id so W7 still counts embed/rerank/voice/img.
-                    "type": _classify_type(None, mid),
+                    "type": classify(mid),
                 }
             )
     # Installed FLM/NPU models — surfaced straight from the host-flm probe so

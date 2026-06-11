@@ -33,6 +33,7 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
+from hal0.model_meta import device_to_backend, is_resolvable
 from hal0.slots.manager import Slot, SlotManager
 
 # Auth was removed in ADR-0012. All routes are open on the local network.
@@ -64,22 +65,6 @@ def _get_slot_manager(request: Request) -> SlotManager:
             details={"hint": "lifespan did not run"},
         )
     return sm
-
-
-def _model_resolvable(registry: Any, model_id: str) -> bool:
-    """True if ``model_id`` can actually be loaded onto a slot.
-
-    The slot-apply guard used to require ``registry.has(model_id)``, but FLM
-    models are lemond-owned and are never in hal0's registry (see the
-    2026-06-07 shape audits) — yet they load fine via npu.toml's config path.
-    So gate on *provider-resolvability*: registry-resident OR an installed FLM
-    model. (Extensible later to a general ``lemond_serves(id)`` probe.)
-    """
-    if registry is not None and registry.has(model_id):
-        return True
-    from hal0.providers.flm import is_installed_flm_id
-
-    return is_installed_flm_id(model_id)
 
 
 def _slot_to_dict(slot: Slot, request: Request | None = None) -> dict[str, Any]:
@@ -297,13 +282,10 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
             # the child can't be introspected. Do NOT read
             # loaded_entry.get("backend") — that field does not exist.
             from hal0.providers.lemonade import (
-                device_to_backend as _device_to_backend,
-            )
-            from hal0.providers.lemonade import (
                 resolve_actual_backend as _resolve_actual_backend,
             )
 
-            _recipe, _llamacpp = _device_to_backend(cfg.get("device"))
+            _recipe, _llamacpp = device_to_backend(cfg.get("device"))
             declared_backend = _llamacpp or (_recipe if _recipe == "flm" else None)
             if declared_backend:
                 entry["declared_backend"] = declared_backend
@@ -1456,8 +1438,6 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     ``requested_backend`` / ``declared_backend`` / ``actual_backend`` /
     ``reloaded``.
     """
-    from hal0.providers.lemonade import device_to_backend
-
     sm = _get_slot_manager(request)
     try:
         body = await request.json()
@@ -1601,7 +1581,7 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
         model_id = body.get("model")
     if model_id:
         registry = getattr(request.app.state, "model_registry", None)
-        if registry is not None and not _model_resolvable(registry, model_id):
+        if registry is not None and not is_resolvable(model_id, registry):
             from hal0.registry.store import ModelNotFound
 
             raise ModelNotFound(
@@ -1651,7 +1631,7 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
             code="swap.missing_model",
         )
     registry = getattr(request.app.state, "model_registry", None)
-    if registry is not None and not _model_resolvable(registry, model_id):
+    if registry is not None and not is_resolvable(model_id, registry):
         from hal0.registry.store import ModelNotFound
 
         raise ModelNotFound(

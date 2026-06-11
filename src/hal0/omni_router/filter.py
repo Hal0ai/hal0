@@ -25,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Protocol
 
+from hal0.model_meta import labels_of
 from hal0.omni_router.tools import TOOL_DEFINITIONS, ToolDefinition
 
 
@@ -46,21 +47,6 @@ class SlotManagerLike(Protocol):
     ) -> str | None: ...
 
 
-def _labels_of_model(cfg: dict[str, Any]) -> set[str]:
-    """Pull the model.labels list out of a slot config.
-
-    Mirrors :func:`SlotManager.route_for_request` 's ``_labels_of``
-    helper — keep the two in sync so the filter's decision matches
-    what ``route_for_request`` will pick.
-    """
-    model = cfg.get("model") or {}
-    if isinstance(model, dict):
-        raw = model.get("labels", ())
-        if isinstance(raw, (list, tuple)):
-            return {str(x) for x in raw}
-    return set()
-
-
 def chat_slot_has_tool_calling(cfg: dict[str, Any]) -> bool:
     """Return True iff the chat slot's model carries the ``tool-calling`` label.
 
@@ -68,8 +54,12 @@ def chat_slot_has_tool_calling(cfg: dict[str, Any]) -> bool:
     on the caller's model, hal0 ships an empty tool list regardless of
     what other slots are configured. The LLM has no opinion on the
     tools because it never sees them.
+
+    Label extraction goes through :func:`hal0.model_meta.labels_of` —
+    the same source ``SlotManager.route_for_request`` uses — so the
+    filter's decision always matches what routing will pick.
     """
-    return "tool-calling" in _labels_of_model(cfg)
+    return "tool-calling" in labels_of(cfg)
 
 
 async def active_tools_for(

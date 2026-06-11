@@ -1258,18 +1258,14 @@ class SlotManager:
           4. ``None`` when nothing matches.
         """
 
-        def _labels_of(cfg: dict[str, Any]) -> set[str]:
-            model = cfg.get("model") or {}
-            if isinstance(model, dict):
-                raw = model.get("labels", ())
-                if isinstance(raw, (list, tuple)):
-                    return {str(x) for x in raw}
-            return set()
+        # Label extraction lives in hal0.model_meta (issue #695) — shared
+        # with omni_router/filter.py so the two never drift again.
+        from hal0.model_meta import labels_of
 
         def _satisfies(cfg: dict[str, Any]) -> bool:
             if not required_labels:
                 return True
-            return set(required_labels).issubset(_labels_of(cfg))
+            return set(required_labels).issubset(labels_of(cfg))
 
         configs = [c for c in await self.iter_configs() if c.get("type") == slot_type]
 
