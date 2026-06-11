@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout hal0
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run bootstrap-parity check
         id: parity

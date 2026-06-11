@@ -17,8 +17,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -38,7 +38,7 @@ jobs:
         # intermittently slow-fails (could-not-load-model-from-any-source) and
         # gated unrelated PRs (#442, #445). The model id is fixed, so a static
         # key caches once and restores forever (bump -vN to refresh).
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/.fastembed-cache
           key: fastembed-bge-small-en-v1.5-v2
@@ -67,8 +67,8 @@ jobs:
       run:
         working-directory: ui
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: npm

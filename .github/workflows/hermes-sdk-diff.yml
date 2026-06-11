@@ -46,10 +46,10 @@ jobs:
 
     steps:
       - name: Checkout hal0
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -113,7 +113,7 @@ jobs:
           PY
 
       - name: Upload diff report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hermes-sdk-diff
           path: hermes-sdk-diff.md
@@ -135,13 +135,13 @@ jobs:
 
     steps:
       - name: Download diff report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: hermes-sdk-diff
           path: .
 
       - name: Find or create tracking issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           PINNED_SHORT: ${{ needs.diff.outputs.pinned }}

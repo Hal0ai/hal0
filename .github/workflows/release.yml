@@ -59,7 +59,7 @@ jobs:
     steps:
       # ── 0. Resolve tag + version ────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -97,7 +97,7 @@ jobs:
 
       # ── 1. Build the UI bundle so the tarball includes ui-dist/ ─────────────
       - name: Setup Node 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: npm
@@ -164,7 +164,7 @@ jobs:
 
       # ── 3. cosign keyless-sign the tarball via GH Actions OIDC ──────────────
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4
 
       - name: cosign sign-blob (keyless OIDC, legacy raw .sig + .crt)
         id: sign
