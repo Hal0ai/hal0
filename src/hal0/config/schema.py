@@ -1428,8 +1428,10 @@ class MemoryEmbeddingConfig(BaseModel):
         wrapper calls ``rerank_url`` after vector retrieval and reorders
         candidates by relevance score. Failures fall through to the
         original vector ordering — never block memory_search.
-      - ``rerank_url`` points at hal0's built-in rerank slot (port 8086
-        per auto-memory ``hal0-rerank-slot-wiring``).
+      - ``rerank_url`` points at hal0's built-in rerank container slot
+        (port 8083, seeded by ``installer/etc-hal0/slots/rerank.toml``).
+        The old value 8086 was the retired embed-rerank combined slot;
+        ``hal0.toml`` overrides take precedence over this default.
 
     G3 (pin embedding model) deliberately ships the *existing* default
     so users who do not flip the toggle see no behavioral change. Future
@@ -1458,12 +1460,13 @@ class MemoryEmbeddingConfig(BaseModel):
         ),
     )
     rerank_url: str = Field(
-        default="http://127.0.0.1:8086",
+        default="http://127.0.0.1:8083",
         description=(
             "Base URL of the llama.cpp rerank endpoint. The wrapper "
             "POSTs to ``{rerank_url}/rerank`` with "
             "``{model, query, documents}`` per llama.cpp's reranking "
-            "protocol. Defaults to hal0's bundled embed-rerank slot."
+            "protocol. Defaults to hal0's bundled rerank container slot "
+            "(port 8083). hal0.toml overrides win."
         ),
     )
     rerank_over_fetch_factor: int = Field(

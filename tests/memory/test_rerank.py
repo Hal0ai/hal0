@@ -42,7 +42,7 @@ def test_memory_embedding_config_defaults() -> None:
     cfg = MemoryEmbeddingConfig()
     assert cfg.model == "BAAI/bge-small-en-v1.5"
     assert cfg.rerank_enabled is False
-    assert cfg.rerank_url == "http://127.0.0.1:8086"
+    assert cfg.rerank_url == "http://127.0.0.1:8083"
 
     # Nested under MemoryConfig the field must default-construct.
     mem = MemoryConfig()

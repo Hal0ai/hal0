@@ -958,7 +958,7 @@ fi
 # `cp -a installer "${STAGE}/"`), git checkouts carry it, and the prod
 # rsync to ${PREFIX} (which REPO_ROOT is re-pointed at) has no exclude
 # that touches installer/.
-for seed_slot in npu tts; do
+for seed_slot in npu tts rerank utility; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
     if [[ -f "${SLOT_TOML}" ]]; then

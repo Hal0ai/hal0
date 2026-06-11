@@ -1,0 +1,12 @@
+# Utility LLM slot — vulkan llama-server container (hal0-slot@utility).
+name = "utility"
+type = "llm"
+device = "gpu-vulkan"
+runtime = "container"
+profile = "vulkan-std"
+enabled = true
+port = 8081
+
+[model]
+default = "gemma-4-12b-it"
+context_size = 65536

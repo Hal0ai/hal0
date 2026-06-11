@@ -1,0 +1,16 @@
+# Rerank slot — llama-server --reranking in a podman container (hal0-slot@rerank).
+name = "rerank"
+type = "reranking"
+device = "gpu-vulkan"
+runtime = "container"
+profile = "vulkan-std"
+enabled = true
+port = 8083
+
+[model]
+default = "bge-reranker-v2-m3-q4_k_m"
+context_size = 4096
+
+[server]
+# llama-server reranking mode (serves /rerank + /v1/rerank natively).
+extra_args = "--reranking"
