@@ -38,7 +38,14 @@ def _slot_manager_with_container_npu(
     runtime: str | None = None,
     port: int = 8088,
 ) -> MagicMock:
-    """SlotManager mock for a container npu slot."""
+    """SlotManager mock for a container npu slot.
+
+    Mocks both the legacy ``status()`` accessor and the #696 public
+    ``is_ready_for_dispatch()`` method. The ready-set (READY | SERVING | IDLE)
+    is re-derived here from the ``state`` string so the mock is always in
+    sync with the locked definition.
+    """
+
     sm = MagicMock()
     cfg: dict[str, Any] = {
         "name": "npu",
@@ -52,6 +59,9 @@ def _slot_manager_with_container_npu(
         cfg["runtime"] = runtime
     sm.get_config = AsyncMock(return_value=cfg)
     sm.status = AsyncMock(return_value=_make_slot(state))
+    # Wire is_ready_for_dispatch per #696 locked ready-set.
+    _dispatchable = frozenset({"ready", "serving", "idle"})
+    sm.is_ready_for_dispatch = MagicMock(return_value=state in _dispatchable)
     return sm
 
 
@@ -68,6 +78,7 @@ def _slot_manager_with_lemonade_npu() -> MagicMock:
         }
     )
     sm.status = AsyncMock(return_value=_make_slot("ready"))
+    sm.is_ready_for_dispatch = MagicMock(return_value=True)
     return sm
 
 
@@ -145,6 +156,26 @@ async def test_offline_container_falls_back_to_lemond() -> None:
     assert result == "http://127.0.0.1:8201"
 
 
+@pytest.mark.asyncio
+async def test_idle_container_npu_resolves_static_port() -> None:
+    """IDLE npu container → static port, lemond NEVER called.
+
+    IDLE = "warm but quiet" (no in-flight inference). Under the locked
+    #696 ready-set (READY | SERVING | IDLE) an IDLE container is
+    dispatchable — adopting IDLE here is a behaviour change from the
+    Phase A inline ``{"ready", "serving"}`` check. The test asserts lemond
+    is never hit via the AssertionError side_effect pattern (mirrors
+    test_container_npu_resolves_static_port).
+    """
+    lemonade = MagicMock()
+    lemonade.health = AsyncMock(side_effect=AssertionError("must not hit lemond"))
+    router = FLMTrioRouter(
+        lemonade,
+        slot_manager=_slot_manager_with_container_npu(state="idle"),
+    )
+    assert await router.find_flm_chat_backend_url() == "http://127.0.0.1:8088"
+
+
 # ── Fallback: no slot_manager ──────────────────────────────────────────
 
 
@@ -198,8 +229,13 @@ async def test_get_config_raises_falls_back_to_lemond() -> None:
 
 
 @pytest.mark.asyncio
-async def test_status_raises_falls_back_to_lemond() -> None:
-    """status() raising → swallowed, fall through to lemond walk."""
+async def test_is_ready_for_dispatch_raises_falls_back_to_lemond() -> None:
+    """is_ready_for_dispatch() raising → swallowed, fall through to lemond walk.
+
+    Post-#696 refactor: _container_npu_url calls is_ready_for_dispatch()
+    instead of status(). Raising from is_ready_for_dispatch must still be
+    swallowed and treated as fallback (same resilience contract as before).
+    """
     lemonade = _lemonade_with_flm_loaded()
     sm = MagicMock()
     sm.get_config = AsyncMock(
@@ -211,7 +247,7 @@ async def test_status_raises_falls_back_to_lemond() -> None:
             "enabled": True,
         }
     )
-    sm.status = AsyncMock(side_effect=RuntimeError("state file corrupt"))
+    sm.is_ready_for_dispatch = MagicMock(side_effect=RuntimeError("state file corrupt"))
     router = FLMTrioRouter(lemonade, slot_manager=sm)
     result = await router.find_flm_chat_backend_url()
     assert result == "http://127.0.0.1:8201"

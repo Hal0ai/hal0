@@ -27,11 +27,17 @@ from hal0.slots.state import SlotState
 # ── tiny SlotManager stand-in ────────────────────────────────────────────────
 
 
+_DISPATCHABLE_STATES = frozenset({SlotState.READY, SlotState.SERVING, SlotState.IDLE})
+
+
 class _RecordingSlotManager:
     """Minimal SlotManager surface — only what Dispatcher.forward touches.
 
     Records every enter/exit so tests can assert ordering without spinning
     up a real SlotManager (which would need a slot TOML + systemctl stubs).
+
+    Exposes both the private ``_current_state`` (kept for backward compat)
+    and the #696 public ``state`` / ``is_ready_for_dispatch`` interface.
     """
 
     def __init__(
@@ -55,11 +61,16 @@ class _RecordingSlotManager:
         return self._counts.get(slot_name, 0)
 
     def _current_state(self, _slot_name: str) -> SlotState:
-        # Mirrors SlotManager._current_state — Dispatcher's swap-window
-        # gate calls this before forwarding.  Default READY so the
-        # existing serving-integration tests pass; tests for the gate
-        # construct the mock with the state they want to assert against.
+        # Mirrors SlotManager._current_state — kept for backward compat.
         return self._state
+
+    def state(self, _slot_name: str) -> SlotState:
+        """Public #696 interface — delegates to _current_state."""
+        return self._state
+
+    def is_ready_for_dispatch(self, _slot_name: str) -> bool:
+        """Public #696 ready-set check (READY | SERVING | IDLE)."""
+        return self._state in _DISPATCHABLE_STATES
 
     async def recover_evicted_slot(self, slot_name: str) -> None:
         """Mirrors SlotManager.recover_evicted_slot — dispatcher calls this

@@ -733,12 +733,10 @@ class Dispatcher:
         swallowed so the subsequent ready-check, not this helper, decides
         the client-facing outcome.
         """
-        from hal0.slots.state import SlotState
-
         assert self._slot_manager is not None  # narrowed by forward()
         slot_name = call.slot_name
-        current = self._slot_manager._current_state(slot_name)
-        if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+        # Ready-set: READY | SERVING | IDLE — single source per #696.
+        if self._slot_manager.is_ready_for_dispatch(slot_name):
             # Model is already loaded under whatever backend it loaded with;
             # nothing to do. (A declared≠actual drift is surfaced by the
             # status enrichment, not corrected mid-request.)
@@ -795,20 +793,19 @@ class Dispatcher:
     def _check_slot_ready_for_dispatch(self, call: UpstreamCall) -> None:
         """Raise :class:`SlotLoading` if the target slot isn't ready to serve.
 
-        Ready set: ``READY``, ``SERVING``, ``IDLE``.  Any other state means
+        Ready set: ``READY``, ``SERVING``, ``IDLE`` (per #696 — single source
+        in :meth:`SlotManager.is_ready_for_dispatch`).  Any other state means
         the slot is mid-lifecycle (``OFFLINE``, ``PULLING``, ``STARTING``,
         ``WARMING``, ``UNLOADING``, ``ERROR``) and forwarding would either
         ConnectError or get a raw 503 from llama-server's "still loading"
         gate.  We raise a typed error here so the middleware can emit a
         structured envelope plus a ``Retry-After`` header.
         """
-        from hal0.slots.state import SlotState
-
         assert self._slot_manager is not None  # narrowed by caller
-        current = self._slot_manager._current_state(call.slot_name)
-        if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+        if self._slot_manager.is_ready_for_dispatch(call.slot_name):
             return
 
+        current = self._slot_manager.state(call.slot_name)
         raise SlotLoading(
             f"slot {call.slot_name!r} is {current.value} — not ready to serve",
             details=self._build_loading_response(call, current),

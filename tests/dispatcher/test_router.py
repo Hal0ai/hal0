@@ -445,9 +445,12 @@ class _FakeSlotManager:
     """Minimal SlotManager surface for the forward() lazy-load gate.
 
     Tracks whether ``load`` was called and reports a fixed slot state via
-    ``_current_state`` so we can drive both the cold-miss and already-loaded
-    branches of ``_ensure_slot_loaded_backend_aware``.
+    ``_current_state`` / the #696 public interface (``state`` /
+    ``is_ready_for_dispatch``) so we can drive both the cold-miss and
+    already-loaded branches of ``_ensure_slot_loaded_backend_aware``.
     """
+
+    _DISPATCHABLE = frozenset(["ready", "serving", "idle"])
 
     def __init__(self, state: Any) -> None:
         self._state = state
@@ -455,6 +458,15 @@ class _FakeSlotManager:
 
     def _current_state(self, name: str) -> Any:
         return self._state
+
+    def state(self, name: str) -> Any:
+        """Public #696 wrapper — delegates to _current_state."""
+        return self._current_state(name)
+
+    def is_ready_for_dispatch(self, name: str) -> bool:
+        """Public #696 ready-set check."""
+        s = self._current_state(name)
+        return getattr(s, "value", str(s)) in self._DISPATCHABLE
 
     async def load(self, slot_name: str, model_id: str | None = None) -> None:
         self.load_calls.append(slot_name)

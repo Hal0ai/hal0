@@ -145,9 +145,9 @@ class FLMTrioRouter:
           - slot_manager is wired
           - "npu" slot config is a containerized NPU slot
             (see :func:`hal0.dispatcher._npu_common.is_container_npu_cfg`)
-          - slot state is "ready" or "serving" (SERVING is READY with an
-            inference in flight — the container still answers concurrent
-            STT/embed requests)
+          - slot is in the dispatchable ready-set per #696: READY, SERVING,
+            or IDLE (SERVING = READY with an inference in flight; IDLE = warm
+            but quiet — both are still dispatchable container targets)
 
         Wraps all accessor calls in try/except so a missing config,
         SlotConfigError, or any accessor bug falls through to the
@@ -169,16 +169,18 @@ class FLMTrioRouter:
         if not port:
             return None
         try:
-            slot = await self._slot_manager.status("npu")
-            # SlotState is a StrEnum — .value is the wire string.
-            state_val = slot.state.value
+            # Ready-set: READY | SERVING | IDLE — single source per #696.
+            # IDLE (warm but quiet) is dispatchable: adopting it here is a
+            # deliberate behaviour change from the Phase A inline
+            # ``{"ready", "serving"}`` — an IDLE npu container no longer
+            # falls back to the lemond walk.
+            if not self._slot_manager.is_ready_for_dispatch("npu"):
+                return None
         except Exception as exc:
             log.debug(
                 "flm_trio.container_resolve_failed",
                 extra={"error": str(exc), "error_type": type(exc).__name__},
             )
-            return None
-        if state_val not in {"ready", "serving"}:
             return None
         return f"http://127.0.0.1:{int(port)}"
 

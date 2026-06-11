@@ -386,6 +386,45 @@ class SlotManager:
             details={"slot": name},
         )
 
+    # ── public readiness interface (issue #696) ─────────────────────────────
+
+    #: States in which a slot is safe to dispatch inference requests to.
+    #: Single source of truth per #696 — never duplicate inline.
+    #: Sync read so call sites in the hot dispatch path pay zero await overhead.
+    _DISPATCHABLE_STATES: frozenset[SlotState] = frozenset(
+        {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
+    )
+
+    def state(self, name: str) -> SlotState:
+        """Return the current :class:`SlotState` for *name*.
+
+        Locked public interface (issue #696):
+          - Cache-first: returns the in-memory record when present.
+          - State.json fallback: reads ``/var/lib/hal0/slots/<name>/state.json``
+            on a cache miss and populates the cache.
+          - OFFLINE default: unknown slot → ``SlotState.OFFLINE``, never raises.
+
+        Synchronous by design — the dispatch hot path (router.py) reads
+        state without awaiting; async callers can call it directly.
+
+        Resolves back-compat aliases transparently (e.g. ``primary`` →
+        ``chat``) so callers never need to pre-resolve.
+        """
+        return self._current_state(self._resolve_alias(name))
+
+    def is_ready_for_dispatch(self, name: str) -> bool:
+        """Return ``True`` when *name* is in the dispatchable ready-set.
+
+        Ready set (issue #696): ``READY | SERVING | IDLE``.
+
+        This is the single authoritative implementation — all three
+        previously-duplicated inline checks in ``dispatcher/router.py``
+        and ``dispatcher/flm_trio.py`` delegate here.  A future state
+        addition that is NOT dispatchable will be caught automatically
+        by the ``test_is_ready_for_dispatch_parametrized`` test.
+        """
+        return self.state(name) in self._DISPATCHABLE_STATES
+
     # ── state machine ────────────────────────────────────────────────────────
 
     def _current_state(self, name: str) -> SlotState:
