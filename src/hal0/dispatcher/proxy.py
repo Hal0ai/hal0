@@ -77,6 +77,12 @@ def resolve_slot(  # TIER1
       1. ``/embeddings`` or ``/rerank`` in path → ``embed`` slot.
       2. ``/audio/speech`` in path → ``tts`` slot (kokoro; model-id unreliable).
       3. ``/images/...`` in path → ``img`` slot (ComfyUI).
+
+    Path-pinned candidates (rules 1-2) accept either a local ``kind="slot"``
+    upstream or a container-backed ``kind="remote"`` upstream whose
+    ``slot_name`` matches the candidate (container slots register as remotes
+    via ``SlotManager._register_container_upstream``, #656).  All other rules
+    require ``kind="slot"``.
       4. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
       5. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
       6. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
@@ -99,15 +105,24 @@ def resolve_slot(  # TIER1
             ``dispatch.legacy_unresolved`` code via the typed Hal0Error envelope.
     """
     candidate: str | None = None
+    # Path-pinned candidates ("route purely by path") may also resolve to a
+    # container-backed kind="remote" upstream for that slot — container slots
+    # register via SlotManager._register_container_upstream as kind="remote"
+    # with slot_name set (#656), and a registered container remote for a
+    # path-pinned slot is exactly the right target.  Model-name rules keep
+    # the strict kind=="slot" gate.
+    path_pinned = False
 
     # Rule 1 — path-based pin (embeddings/rerank).
     if any(frag in path for frag in _EMBED_PATHS):
         candidate = "embed"
+        path_pinned = True
     # Rule 2 — TTS path pin (/audio/speech → tts slot).
     # Model-id matching is unreliable for kokoro (server advertises "kokoro",
     # clients send "kokoro-v1"/"tts"/etc.) so we route purely by path.
     elif any(frag in path for frag in _TTS_PATHS):
         candidate = "tts"
+        path_pinned = True
     # Rule 3 — image-generation path pins to the img slot.
     elif any(frag in path for frag in _IMAGE_PATHS):
         candidate = "img"
@@ -138,7 +153,18 @@ def resolve_slot(  # TIER1
         candidate = "chat"
 
     upstream = upstreams.get(candidate)
-    if upstream is None or upstream.kind != "slot":
+    # Acceptance: a local slot upstream always qualifies.  For PATH-pinned
+    # candidates only, a container-backed remote (kind="remote" with
+    # slot_name == candidate — how Step 0 preemption identifies container
+    # slots) qualifies too: kokoro's tts container registers as a remote, so
+    # the old kind=="slot"-only gate sent /audio/speech to NoRouteFound and
+    # the dead lemond tts slot.  Genuine external remotes (slot_name=None)
+    # are still rejected.
+    acceptable = upstream is not None and (
+        upstream.kind == "slot"
+        or (path_pinned and upstream.kind == "remote" and upstream.slot_name == candidate)
+    )
+    if upstream is None or not acceptable:
         raise LegacyResolutionFailed(
             f"legacy fallback selected slot {candidate!r} but no matching slot upstream is registered",
             details={"slot": candidate, "path": path},

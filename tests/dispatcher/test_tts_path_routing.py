@@ -264,3 +264,122 @@ async def test_router_audio_transcriptions_not_default_to_tts() -> None:
     result = dispatcher._default_for_path("/v1/audio/transcriptions")
     assert result != "tts"
     assert result == "chat"
+
+
+# ── C1: path-pin must resolve container-backed remote upstreams ───────────────
+#
+# Container slots register as kind="remote" (manager._register_container_upstream)
+# with slot_name set. resolve_slot's old kind=="slot" gate rejected them, so
+# kokoro-v1 requests raised LegacyResolutionFailed → NoRouteFound → fell into
+# the lemonade _proxy and died on the dead lemond tts slot.
+
+
+@pytest.mark.asyncio
+async def test_dispatch_kokoro_v1_resolves_container_remote_tts() -> None:
+    """Full dispatch(): model='kokoro-v1' + tts as kind=remote → tts remote wins.
+
+    Step 0 preempt misses (container advertises 'kokoro', not 'kokoro-v1'),
+    registry/passthrough miss, so the legacy path-pin MUST resolve the
+    container-backed remote — never NoRouteFound / lemonade fall-through.
+    """
+    container_tts = make_remote_tts(port=8084)
+    upstreams = FakeUpstreamRegistry([container_tts])
+    models = FakeModelRegistry(routes={})  # no registry binding
+
+    async def online(_u: Upstream) -> bool:
+        return True
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        is_online=online,
+        # Container's /v1/models advertises 'kokoro' only — Step 0 misses.
+        cached_models=lambda name: ["kokoro"] if name == "tts" else [],
+    )
+
+    call = await dispatcher.dispatch(
+        make_request(path="/v1/audio/speech"),
+        body={"model": "kokoro-v1", "input": "hello", "voice": "af_bella"},
+    )
+    assert isinstance(call, UpstreamCall)
+    assert call.upstream_name == "tts"
+    assert call.resolution_path == "legacy_slot:tts"
+    assert call.target_url == "http://127.0.0.1:8084/v1/audio/speech"
+    # Container readiness gate must still fire in forward().
+    assert call.container_slot_name == "tts"
+
+
+def test_proxy_tts_path_pin_resolves_container_remote() -> None:
+    """resolve_slot: /audio/speech + tts registered kind=remote → returned."""
+    container_tts = make_remote_tts(port=8084)
+    upstreams = FakeUpstreamRegistry([container_tts])
+
+    upstream = resolve_slot(
+        path="/v1/audio/speech",
+        body={"model": "kokoro-v1", "input": "hi", "voice": "af_bella"},
+        upstreams=upstreams,
+    )
+    assert upstream.name == "tts"
+    assert upstream.kind == "remote"
+
+
+def test_proxy_embed_path_pin_resolves_container_remote() -> None:
+    """Path-pin container acceptance applies to embed/rerank pins too."""
+    container_embed = Upstream(
+        name="embed",
+        kind="remote",
+        url="http://127.0.0.1:8086/v1",
+        auth_style="none",
+        slot_name="embed",  # container-backed
+    )
+    upstreams = FakeUpstreamRegistry([container_embed])
+
+    upstream = resolve_slot(
+        path="/v1/embeddings",
+        body={"input": "x"},
+        upstreams=upstreams,
+    )
+    assert upstream.name == "embed"
+    assert upstream.kind == "remote"
+
+
+def test_proxy_genuine_remote_not_accepted_by_path_pin() -> None:
+    """A genuine external remote (slot_name=None) named 'tts' is still rejected.
+
+    slot_name is the container-backed marker (#656); a plain remote named
+    'tts' is NOT a local slot and must not absorb path-pinned traffic.
+    """
+    genuine_remote = Upstream(
+        name="tts",
+        kind="remote",
+        url="https://api.example.com/v1",
+        auth_style="bearer",
+        # slot_name unset — genuine remote
+    )
+    upstreams = FakeUpstreamRegistry([genuine_remote])
+
+    with pytest.raises(LegacyResolutionFailed):
+        resolve_slot(
+            path="/v1/audio/speech",
+            body={"model": "kokoro-v1", "input": "hi", "voice": "af_bella"},
+            upstreams=upstreams,
+        )
+
+
+def test_proxy_model_name_rule_does_not_resolve_container_remote() -> None:
+    """Container-remote acceptance is scoped to PATH pins only.
+
+    Rule 7 (explicit slot-name addressing via model id) on a non-pinned
+    path must NOT resolve a kind=remote upstream — model='tts' on
+    /chat/completions falls through to the chat fallback as before.
+    """
+    container_tts = make_remote_tts(port=8084)
+    chat = make_slot("chat", "http://127.0.0.1:8081/v1")
+    upstreams = FakeUpstreamRegistry([container_tts, chat])
+
+    upstream = resolve_slot(
+        path="/v1/chat/completions",
+        body={"model": "tts", "messages": []},
+        upstreams=upstreams,
+    )
+    assert upstream.name == "chat"
