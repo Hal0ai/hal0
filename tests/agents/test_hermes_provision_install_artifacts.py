@@ -44,7 +44,7 @@ def artifact_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
 
 def test_phase_writes_all_three_artifacts(artifact_state: hp.BootstrapState) -> None:
     """A fresh run leaves seed TOML + driver env + runtime.json on disk."""
-    result = hp._phase_install_artifacts(artifact_state)
+    result = hp._phase_install_artifacts(hp.context_for("install_artifacts", artifact_state))
     assert result.status is hp.PhaseStatus.OK
 
     seed_path = hp.INSTALL_SEED_PATH
@@ -77,11 +77,11 @@ def test_phase_writes_all_three_artifacts(artifact_state: hp.BootstrapState) -> 
 def test_token_is_stable_across_reruns(artifact_state: hp.BootstrapState) -> None:
     """Re-running without --repair must NOT rotate the embed token —
     otherwise a re-provision would break a running proxy mid-session."""
-    hp._phase_install_artifacts(artifact_state)
+    hp._phase_install_artifacts(hp.context_for("install_artifacts", artifact_state))
     runtime_path = Path(artifact_state.hermes_home) / hp.RUNTIME_JSON_NAME
     token_1 = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
 
-    result_2 = hp._phase_install_artifacts(artifact_state)
+    result_2 = hp._phase_install_artifacts(hp.context_for("install_artifacts", artifact_state))
     token_2 = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
     assert token_1 == token_2
     assert result_2.details["token_wrote"] is False
@@ -89,13 +89,12 @@ def test_token_is_stable_across_reruns(artifact_state: hp.BootstrapState) -> Non
 
 def test_repair_rotates_token(artifact_state: hp.BootstrapState) -> None:
     """``--repair`` explicitly resets to known-good — a fresh token."""
-    hp._phase_install_artifacts(artifact_state)
+    hp._phase_install_artifacts(hp.context_for("install_artifacts", artifact_state))
     runtime_path = Path(artifact_state.hermes_home) / hp.RUNTIME_JSON_NAME
     token_1 = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
 
-    # Simulate the orchestrator's --repair flag (stashed on state.phases).
-    artifact_state.phases["_repair_flag"] = {"status": "stub", "details": {}}
-    hp._phase_install_artifacts(artifact_state)
+    # The orchestrator's --repair flag arrives via ctx.repair (#702).
+    hp._phase_install_artifacts(hp.context_for("install_artifacts", artifact_state, repair=True))
     token_2 = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
     assert token_1 != token_2
 
@@ -109,7 +108,7 @@ def test_seed_write_preserves_operator_mcp_servers(artifact_state: hp.BootstrapS
         '[mcp.servers.custom]\nurl = "http://127.0.0.1:9000/mcp"\n',
         encoding="utf-8",
     )
-    hp._phase_install_artifacts(artifact_state)
+    hp._phase_install_artifacts(hp.context_for("install_artifacts", artifact_state))
 
     seed = tomllib.loads(seed_path.read_text(encoding="utf-8"))
     assert seed["mcp"]["servers"]["custom"]["url"] == "http://127.0.0.1:9000/mcp"
@@ -123,7 +122,7 @@ def test_chat_proxy_finds_token_after_provision(
     """End-to-end seam: chat_proxy._load_embed_token() resolves the token
     the install_artifacts phase wrote (previously always None — runtime.json
     had zero writers)."""
-    hp._phase_install_artifacts(artifact_state)
+    hp._phase_install_artifacts(hp.context_for("install_artifacts", artifact_state))
     runtime_path = Path(artifact_state.hermes_home) / hp.RUNTIME_JSON_NAME
     expected = json.loads(runtime_path.read_text(encoding="utf-8"))["token"]
 

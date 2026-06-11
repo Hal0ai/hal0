@@ -245,11 +245,8 @@ def test_phase_context_link_writes_state_md(tmp_path, monkeypatch):
             }
         )
     )
-    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {"primary": 32768})
-    monkeypatch.setattr(
-        hp,
-        "_fetch_slots",
-        lambda: [
+    io = hp.PhaseIO(
+        fetch_slots=lambda: [
             {
                 "name": "primary",
                 "type": "llm",
@@ -258,11 +255,12 @@ def test_phase_context_link_writes_state_md(tmp_path, monkeypatch):
                 "backend": "vulkan",
             }
         ],
+        fetch_model_contexts=lambda: {"primary": 32768},
     )
     monkeypatch.setattr(hp, "HAL0_BUNDLED_SKILLS", tmp_path / "nope")
 
     state = hp.BootstrapState(hermes_home=str(home))
-    res = hp._phase_context_link(state)
+    res = hp._phase_context_link(hp.context_for("context_link", state, io=io))
     assert res.status == hp.PhaseStatus.OK
     # STATE.md written with the live model.
     assert (tmp_path / "STATE.md").exists()

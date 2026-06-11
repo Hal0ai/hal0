@@ -1,8 +1,12 @@
 """Hermes-Agent bootstrap state machine (issue #238 scaffold).
 
-Twelve named phases run in a strict deterministic sequence. Each phase
-writes a checkpoint into ``provision.json``. On re-run the orchestrator
-loads the checkpoint and skips any phase already marked ``ok`` unless
+Fifteen named phases run in a strict deterministic sequence. Each phase
+is a function ``(PhaseContext) -> PhaseResult`` (#702): the context
+carries a read-only :class:`BootstrapState` view, the ``--repair`` flag,
+a :class:`PhaseIO` bundle of injectable IO seams, and ``output_of()``
+for declared cross-phase checkpoint reads. Each phase writes a
+checkpoint into ``provision.json``. On re-run the orchestrator loads
+the checkpoint and skips any phase already marked ``ok`` unless
 ``--repair`` forces re-execution.
 
 This module is the scaffold — every phase is a no-op stub that returns
@@ -171,7 +175,7 @@ class BootstrapState:
 
 # ── Phase implementations (no-op stubs in #238 scaffold) ─────────────────────
 #
-# Each phase signature: (state: BootstrapState) -> PhaseResult.
+# Each phase signature: (ctx: PhaseContext) -> PhaseResult (#702).
 #
 # Real impls land in subsequent slices:
 #   #240 — preflight, install, home_init
@@ -187,8 +191,8 @@ class BootstrapState:
 # valid.
 
 
-def _stub(name: str) -> Callable[[BootstrapState], PhaseResult]:
-    def _phase(state: BootstrapState) -> PhaseResult:
+def _stub(name: str) -> Callable[[PhaseContext], PhaseResult]:
+    def _phase(ctx: PhaseContext) -> PhaseResult:
         return PhaseResult(status=PhaseStatus.OK, details={"stub": True})
 
     _phase.__name__ = f"_phase_{name}"
@@ -258,7 +262,7 @@ def _http_get(url: str, *, timeout: float = 3.0) -> int:
         return 0
 
 
-def _phase_preflight(state: BootstrapState) -> PhaseResult:
+def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
     """Hard-fail when the host can't host Hermes.
 
     Documented blockers (plan §4):
@@ -273,6 +277,7 @@ def _phase_preflight(state: BootstrapState) -> PhaseResult:
     * ≥ 4 GiB free under ``/var/lib/hal0/`` — Hermes deps + a typical
       memory cache run ~3 GiB; 4 GiB leaves headroom for venv rebuild.
     """
+    state = ctx.state
     failures: list[str] = []
     details: dict[str, Any] = {}
 
@@ -284,7 +289,7 @@ def _phase_preflight(state: BootstrapState) -> PhaseResult:
             f"have {details['python_version']} — run `apt install python3.11`",
         )
 
-    rc = _http_get(DAEMON_HEALTH_URL)
+    rc = ctx.io.http_get(DAEMON_HEALTH_URL)
     details["daemon_http_status"] = rc
     if rc != 200:
         failures.append(
@@ -400,7 +405,7 @@ def _copy_plugin_tree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst)
 
 
-def _phase_install(state: BootstrapState) -> PhaseResult:
+def _phase_install(ctx: PhaseContext) -> PhaseResult:
     """Provision the managed Hermes venv + wrapper + plugin stubs.
 
     The plugin stub at ``installer/agents/hermes/plugins/hal0-memory/``
@@ -414,6 +419,7 @@ def _phase_install(state: BootstrapState) -> PhaseResult:
     expected version — re-runs of ``hal0 agent bootstrap hermes`` are
     cheap unless ``--repair`` forces re-install.
     """
+    state = ctx.state
     details: dict[str, Any] = {}
     venv = Path(state.venv)
     requirements = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
@@ -436,7 +442,7 @@ def _phase_install(state: BootstrapState) -> PhaseResult:
     hermes_bin = _venv_python(venv).parent / "hermes"
     if not hermes_bin.exists():
         try:
-            _install_venv(venv, requirements)
+            ctx.io.install_venv(venv, requirements)
         except (subprocess.SubprocessError, RuntimeError, OSError) as exc:
             return PhaseResult(
                 status=PhaseStatus.FAIL,
@@ -536,7 +542,7 @@ def _claim_hermes_home(hermes_home: Path) -> tuple[bool, str | None]:
     return (True, None)
 
 
-def _phase_home_init(state: BootstrapState) -> PhaseResult:
+def _phase_home_init(ctx: PhaseContext) -> PhaseResult:
     """Make the ``$HERMES_HOME`` layout canonical.
 
     Install (#240's first phase) already claimed the marker; home_init
@@ -545,7 +551,7 @@ def _phase_home_init(state: BootstrapState) -> PhaseResult:
     already did so, and necessary when home_init runs first
     (``--skip-phase install``).
     """
-    hermes_home = Path(state.hermes_home)
+    hermes_home = Path(ctx.state.hermes_home)
     claimed, reason = _claim_hermes_home(hermes_home)
     if not claimed:
         return PhaseResult(status=PhaseStatus.FAIL, reason=reason)
@@ -595,16 +601,16 @@ def _read_env_probe() -> dict[str, Any]:
     }
 
 
-def _phase_env_probe(state: BootstrapState) -> PhaseResult:
+def _phase_env_probe(ctx: PhaseContext) -> PhaseResult:
     """Capture a host-environment snapshot for downstream phases.
 
     Writes the snapshot to ``$HERMES_HOME/env-<ts>.json`` AND keeps a
     pointer in ``provision.json``. Snapshot is overwritten on every
     re-run because it's a point-in-time view, not a checkpoint.
     """
-    snapshot = _read_env_probe()
+    snapshot = ctx.io.read_env_probe()
     ts = _utcnow().replace(":", "").replace("-", "")
-    hermes_home = Path(state.hermes_home)
+    hermes_home = Path(ctx.state.hermes_home)
     hermes_home.mkdir(parents=True, exist_ok=True)
     snapshot_path = hermes_home / f"env-{ts}.json"
     snapshot_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
@@ -891,7 +897,7 @@ def _active_persona_render(
     return (prompt, persona.display_name)
 
 
-def _phase_config_write(state: BootstrapState) -> PhaseResult:
+def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
     """Atomically render ``$HERMES_HOME/config.yaml`` from the template.
 
     PR-3 overhaul: passes chat_slots + persona-rendered system_prompt +
@@ -903,9 +909,10 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     Idempotent: hash-equal output skips the write. Overrides at
     ``/etc/hal0/agents/hermes/overrides.yaml`` deep-merge on top.
     """
+    state = ctx.state
     hermes_home = Path(state.hermes_home)
     config_path = hermes_home / "config.yaml"
-    primary_raw = _resolve_primary_slot()
+    primary_raw = _resolve_primary_slot(slots_fetcher=ctx.io.fetch_slots)
     # The template names the dict keys ``model_id``/``backend_url``;
     # _resolve_primary_slot returns ``model``/``base_url`` for less
     # cognitive load at call sites. Translate at the seam.
@@ -917,8 +924,8 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     # PR-3 Phase 5: pull chat_slots into the first render so the
     # ``model_aliases:`` block lands on the first config_write pass
     # (Phase 9 used to be the only place this worked).
-    slots_all = _fetch_slots()
-    chat_slots = _collect_chat_slots(slots_all, contexts=_fetch_model_contexts())
+    slots_all = ctx.io.fetch_slots()
+    chat_slots = _collect_chat_slots(slots_all, contexts=ctx.io.fetch_model_contexts())
     # feat/hermes-role-slots: resolve per-role models from live slot NAMES.
     # delegation ← `agent-hermes` slot; auxiliary ← `utility` slot. Both
     # talk to hal0's /v1 endpoint (same base_url as the main model), so a
@@ -933,7 +940,9 @@ def _phase_config_write(state: BootstrapState) -> PhaseResult:
     # config_write (before mcp_wire runs the live probe) we fall back to
     # the default inventory; mcp_wire then captures the probed shape and
     # config gets re-rendered idempotently on Phase 9 / next bootstrap.
-    cached_servers = (state.phases.get("mcp_wire") or {}).get("details", {}).get("rendered_servers")
+    # Declared as ``needs_previous`` — mcp_wire runs AFTER config_write,
+    # so this read can only ever see a persisted prior-run checkpoint.
+    cached_servers = ctx.output_of("mcp_wire").get("rendered_servers")
     mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
     system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
     live_resolve_enabled = os.environ.get("HAL0_HERMES_LIVE_RESOLVE", "0") == "1"
@@ -1151,7 +1160,7 @@ def _probe_mcp_server(
     return {"ok": True, "tools": tools, "error": None}
 
 
-def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
+def _phase_mcp_wire(ctx: PhaseContext) -> PhaseResult:
     """Verify the two hal0-bundled MCP servers respond + record their tool list.
 
     ADR-0013 compliance: when an allow-list exists at
@@ -1161,6 +1170,7 @@ def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
     warning, NOT a hard fail — bootstrap continues so the operator
     can wire the missing piece by hand after install.
     """
+    state = ctx.state
     allowlist = _load_agent_allowlist()
     # PR-3 Phase 6: source the canonical inventory from
     # ``_default_mcp_servers()`` so the probe loop and the template loop
@@ -1179,7 +1189,9 @@ def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
             )
             results[name] = {"status": "skipped_by_allowlist"}
             continue
-        probe = _probe_mcp_server(entry["url"], agent_id=state.agent_id, private=entry["private"])
+        probe = ctx.io.probe_mcp_server(
+            entry["url"], agent_id=state.agent_id, private=entry["private"]
+        )
         if not probe["ok"]:
             warnings.append(f"{name}: {probe['error']}")
             results[name] = {"status": "degraded", "error": probe["error"]}
@@ -1226,7 +1238,7 @@ def _phase_mcp_wire(state: BootstrapState) -> PhaseResult:
 # re-seed.
 
 
-def _phase_persona_seed(state: BootstrapState) -> PhaseResult:
+def _phase_persona_seed(ctx: PhaseContext) -> PhaseResult:
     """Seed the default personas + ``active.txt`` pointer.
 
     Phase 8 (PR-3): idempotent persona file write. The next config_write
@@ -1241,10 +1253,11 @@ def _phase_persona_seed(state: BootstrapState) -> PhaseResult:
     """
     from hal0.agents import personas as _personas
 
+    state = ctx.state
     root = _personas_root_for(state)
     # Honor ``--repair`` by forcing seed overwrite. Operator edits stand
     # in the steady-state case; repair explicitly resets to known-good.
-    overwrite = bool(state.phases.get("_repair_flag"))
+    overwrite = ctx.repair
     written = _personas.seed_default_personas(
         agent_id=state.agent_id,
         root=root,
@@ -1368,7 +1381,7 @@ def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> tuple[list[str], l
     return linked, warnings
 
 
-def _phase_context_link(state: BootstrapState) -> PhaseResult:
+def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
     """Render persona + context files; mirror bundled skills.
 
     Files rendered (atomically):
@@ -1382,6 +1395,7 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     fallback is short + accurate). HERMES.md + AGENTS.md render
     failures log + skip per #244 sharpening.
     """
+    state = ctx.state
     hermes_home = Path(state.hermes_home)
     snapshot = _latest_env_snapshot(hermes_home)
     env_report = snapshot.get("env_report", {}) if isinstance(snapshot, dict) else {}
@@ -1394,9 +1408,9 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     slots_all: list[dict[str, Any]] = []
     # _fetch_slots is already failure-tolerant (returns [] on transport
     # error). No try/except needed here — it can't raise.
-    slots_all = _fetch_slots()
-    chat_slots = _collect_chat_slots(slots_all, contexts=_fetch_model_contexts())
-    primary_raw = _resolve_primary_slot()
+    slots_all = ctx.io.fetch_slots()
+    chat_slots = _collect_chat_slots(slots_all, contexts=ctx.io.fetch_model_contexts())
+    primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
     primary_for_template: dict[str, Any] | None = None
     primary_alias = "chat"
     primary_slot = next(
@@ -1464,7 +1478,12 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
         # NB: render_live_context re-fetches /api/slots + /v1/models itself
         # (separate from the vars_ fetch above). Acceptable at bootstrap
         # frequency; keeps it usable standalone from the restart/swap writers.
-        live = render_live_context(hermes_home=hermes_home)
+        live = render_live_context(
+            hermes_home=hermes_home,
+            slots_fetcher=ctx.io.fetch_slots,
+            contexts_fetcher=ctx.io.fetch_model_contexts,
+            health_probe=ctx.io.http_get,
+        )
         details["rendered"]["STATE.md"] = {"path": live["state_path"]}
         details["rendered"]["HERMES.md"] = {
             "path": str(ETC_HAL0_DIR / "HERMES.md"),
@@ -1658,7 +1677,7 @@ def _mcp_memory_call(
     return {"ok": True, "result": data}
 
 
-def _phase_namespace_register(state: BootstrapState) -> PhaseResult:
+def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
     """Write the Hermes identity card to the `agents` Cognee dataset.
 
     Idempotency: search for an existing card by ``agent_id`` first;
@@ -1669,11 +1688,12 @@ def _phase_namespace_register(state: BootstrapState) -> PhaseResult:
     Failure mode: any MCP transport error logs + returns OK with a
     warning. Bootstrap MUST NOT block on registry unavailability.
     """
+    state = ctx.state
     card = _build_identity_card(state)
     warnings: list[str] = []
 
     # Look up existing card so re-bootstrap doesn't accumulate duplicates.
-    search = _mcp_memory_call(
+    search = ctx.io.mcp_memory_call(
         "tools/call",
         {
             "name": "memory_search",
@@ -1699,7 +1719,7 @@ def _phase_namespace_register(state: BootstrapState) -> PhaseResult:
         warnings.append(f"memory_search: {search['error']}")
 
     if existing_ids:
-        deleted = _mcp_memory_call(
+        deleted = ctx.io.mcp_memory_call(
             "tools/call",
             {"name": "memory_delete", "arguments": {"ids": existing_ids}},
             agent_id=state.agent_id,
@@ -1738,7 +1758,7 @@ def _phase_namespace_register(state: BootstrapState) -> PhaseResult:
                 reason="memory_delete count mismatch; not rewriting to avoid duplicate accumulation",
             )
 
-    add = _mcp_memory_call(
+    add = ctx.io.mcp_memory_call(
         "tools/call",
         {"name": "memory_add", "arguments": card},
         agent_id=state.agent_id,
@@ -1962,6 +1982,8 @@ def render_live_context(
     *,
     hermes_home: Path,
     slots_fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+    contexts_fetcher: Callable[[], dict[str, int]] | None = None,
+    health_probe: Callable[..., int] | None = None,
     now_iso: str | None = None,
 ) -> dict[str, Any]:
     """Re-probe live slot/capability state; (re)write HERMES.md + STATE.md.
@@ -1983,10 +2005,11 @@ def render_live_context(
     # all — in which case we must NOT clobber a last-good snapshot. A
     # non-empty fetch implies the daemon answered, so we only probe health
     # when the slot list came back empty.
-    reachable = True if slots_all else _http_get(DAEMON_HEALTH_URL) == 200
+    probe = health_probe or _http_get
+    reachable = True if slots_all else probe(DAEMON_HEALTH_URL) == 200
     degraded = not reachable
 
-    contexts = _fetch_model_contexts()
+    contexts = (contexts_fetcher or _fetch_model_contexts)()
     chat_slots = _collect_chat_slots(slots_all, contexts=contexts)
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
 
@@ -2310,7 +2333,7 @@ def _resolve_auxiliary_tasks(
     return tasks
 
 
-def _phase_model_automap(state: BootstrapState) -> PhaseResult:
+def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
     """Refresh ``model_aliases`` in ``$HERMES_HOME/config.yaml``.
 
     Re-renders the whole config (so model + aliases stay consistent)
@@ -2320,6 +2343,7 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
     Embed/rerank/img slots are deliberately NOT mapped per ADR-0011 §3
     (Hermes has no top-level embed abstraction; memory MCP handles it).
     """
+    state = ctx.state
     hermes_home = Path(state.hermes_home)
     config_path = hermes_home / "config.yaml"
     if not config_path.exists():
@@ -2328,9 +2352,9 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
             reason=f"{config_path} missing — config_write must run first",
         )
 
-    slots = _fetch_slots()
-    chat_slots = _collect_chat_slots(slots, contexts=_fetch_model_contexts())
-    primary_raw = _resolve_primary_slot()
+    slots = ctx.io.fetch_slots()
+    chat_slots = _collect_chat_slots(slots, contexts=ctx.io.fetch_model_contexts())
+    primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots)
     primary = {
         "model_id": primary_raw["model"],
         "backend_url": primary_raw["base_url"],
@@ -2340,7 +2364,7 @@ def _phase_model_automap(state: BootstrapState) -> PhaseResult:
     # so a no-drift run produces a byte-identical config. Mismatch means
     # something changed (slot churn, persona swap, MCP servers came up)
     # and we want the new config; match → no-op (hash check below).
-    cached_servers = (state.phases.get("mcp_wire") or {}).get("details", {}).get("rendered_servers")
+    cached_servers = ctx.output_of("mcp_wire").get("rendered_servers")
     mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
     system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
     # feat/hermes-role-slots: identical role-slot resolution to config_write
@@ -2464,7 +2488,7 @@ def _gateway_dropin_body() -> str:
     )
 
 
-def _phase_gateway_secrets_wire(state: BootstrapState) -> PhaseResult:
+def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
     """Idempotently write the gateway secrets drop-in + daemon-reload (#437).
 
     Owns ONLY the drop-in ``10-hal0-secrets.conf`` under
@@ -2563,7 +2587,7 @@ def _phase_gateway_secrets_wire(state: BootstrapState) -> PhaseResult:
         )
 
     try:
-        subprocess.run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
+        ctx.io.run(["systemctl", "daemon-reload"], check=True)  # nosec B603 B607
     except (subprocess.SubprocessError, OSError) as exc:
         # The drop-in is on disk; the operator can daemon-reload by hand.
         # Surface as a non-fatal warning rather than failing bootstrap —
@@ -2638,14 +2662,15 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
         path.chmod(0o600)
 
 
-def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
+def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
     """Emit STT/TTS provider config + secrets env when both slots are ready.
 
     Skip semantics: when neither STT nor TTS is configured + ready,
     return SKIP with a clear reason — same posture as voice_wire in
     the plan §13.
     """
-    slots = _fetch_slots()
+    state = ctx.state
+    slots = ctx.io.fetch_slots()
     stt = _find_slot(slots, "stt")
     tts = _find_slot(slots, "tts")
     if stt is None and tts is None:
@@ -2683,15 +2708,13 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
     hermes_home = Path(state.hermes_home)
     config_path = hermes_home / "config.yaml"
     try:
-        primary_raw = _resolve_primary_slot()
+        primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots)
         primary = {
             "model_id": primary_raw["model"],
             "backend_url": primary_raw["base_url"],
             "context_length": primary_raw["context_length"],
         }
-        cached_servers = (
-            (state.phases.get("mcp_wire") or {}).get("details", {}).get("rendered_servers")
-        )
+        cached_servers = ctx.output_of("mcp_wire").get("rendered_servers")
         mcp_servers = (
             cached_servers if isinstance(cached_servers, list) and cached_servers else None
         )
@@ -2699,7 +2722,7 @@ def _phase_voice_wire(state: BootstrapState) -> PhaseResult:
         # feat/hermes-role-slots: keep role-slot blocks consistent with the
         # other render call sites so re-render stays idempotent.
         hal0_v1_base = primary["backend_url"]
-        chat_slots = _collect_chat_slots(slots, contexts=_fetch_model_contexts())
+        chat_slots = _collect_chat_slots(slots, contexts=ctx.io.fetch_model_contexts())
         delegation = _resolve_delegation(slots, hal0_base_url=hal0_v1_base)
         auxiliary_tasks = _resolve_auxiliary_tasks(slots, hal0_base_url=hal0_v1_base)
         custom_providers = _resolve_custom_providers(chat_slots, hal0_base_url=hal0_v1_base)
@@ -2777,7 +2800,7 @@ def _wrapper_bin() -> Path:
     return WRAPPER_INSTALL_PATH
 
 
-def _smoke_chat_completions(state: BootstrapState) -> tuple[bool, str]:
+def _smoke_chat_completions(state: BootstrapState, _io: PhaseIO) -> tuple[bool, str]:
     """POST against model.base_url/chat/completions; assert 'ready' in reply.
 
     Reads the live config.yaml so we hit whatever model_automap left
@@ -2839,8 +2862,8 @@ def _smoke_chat_completions(state: BootstrapState) -> tuple[bool, str]:
     return ("ready" in haystack, detail)
 
 
-def _smoke_memory_roundtrip(state: BootstrapState) -> tuple[bool, str]:
-    add = _mcp_memory_call(
+def _smoke_memory_roundtrip(state: BootstrapState, io: PhaseIO) -> tuple[bool, str]:
+    add = io.mcp_memory_call(
         "tools/call",
         {
             "name": "memory_add",
@@ -2855,7 +2878,7 @@ def _smoke_memory_roundtrip(state: BootstrapState) -> tuple[bool, str]:
     )
     if not add["ok"]:
         return (False, f"memory_add: {add['error']}")
-    search = _mcp_memory_call(
+    search = io.mcp_memory_call(
         "tools/call",
         {
             "name": "memory_search",
@@ -2877,8 +2900,8 @@ def _smoke_memory_roundtrip(state: BootstrapState) -> tuple[bool, str]:
     return (False, "memory_search returned no items for just-written marker")
 
 
-def _smoke_admin_tools_list(state: BootstrapState) -> tuple[bool, str]:
-    probe = _probe_mcp_server(
+def _smoke_admin_tools_list(state: BootstrapState, io: PhaseIO) -> tuple[bool, str]:
+    probe = io.probe_mcp_server(
         "http://127.0.0.1:8080/mcp/admin",
         agent_id=state.agent_id,
         private=False,
@@ -2889,7 +2912,7 @@ def _smoke_admin_tools_list(state: BootstrapState) -> tuple[bool, str]:
     return (n >= 5, f"{n} tools advertised")
 
 
-def _smoke_hermes_md_contains_primary(state: BootstrapState) -> tuple[bool, str]:
+def _smoke_hermes_md_contains_primary(state: BootstrapState, _io: PhaseIO) -> tuple[bool, str]:
     hermes_md = ETC_HAL0_DIR / "HERMES.md"
     if not hermes_md.exists():
         return (False, f"{hermes_md} not present")
@@ -2912,12 +2935,12 @@ def _smoke_hermes_md_contains_primary(state: BootstrapState) -> tuple[bool, str]
     )
 
 
-def _smoke_wrapper_ready(_state: BootstrapState) -> tuple[bool, str]:
+def _smoke_wrapper_ready(_state: BootstrapState, io: PhaseIO) -> tuple[bool, str]:
     wrapper = _wrapper_bin()
     if not wrapper.exists():
         return (False, f"wrapper missing at {wrapper}")
     try:
-        result = subprocess.run(  # nosec B603 — known-safe argv
+        result = io.run(  # nosec B603 — known-safe argv
             [str(wrapper), "--hal0-ready"],
             check=False,
             capture_output=True,
@@ -2928,12 +2951,12 @@ def _smoke_wrapper_ready(_state: BootstrapState) -> tuple[bool, str]:
     return (result.returncode == 0, f"--hal0-ready rc={result.returncode}")
 
 
-def _smoke_hermes_doctor(_state: BootstrapState) -> tuple[bool, str]:
+def _smoke_hermes_doctor(_state: BootstrapState, io: PhaseIO) -> tuple[bool, str]:
     venv_hermes = _venv_python(Path(_state.venv)).parent / "hermes"
     if not venv_hermes.exists():
         return (False, f"hermes binary missing at {venv_hermes}")
     try:
-        result = subprocess.run(  # nosec B603 — known-safe argv
+        result = io.run(  # nosec B603 — known-safe argv
             [str(venv_hermes), "doctor"],
             check=False,
             capture_output=True,
@@ -2945,8 +2968,9 @@ def _smoke_hermes_doctor(_state: BootstrapState) -> tuple[bool, str]:
     return (result.returncode == 0, f"rc={result.returncode}")
 
 
-def _phase_smoke_tests(state: BootstrapState) -> PhaseResult:
+def _phase_smoke_tests(ctx: PhaseContext) -> PhaseResult:
     """Run six diagnostic probes; collect results into the checkpoint."""
+    state = ctx.state
     probes = [
         ("wrapper_ready", _smoke_wrapper_ready),
         ("hermes_doctor", _smoke_hermes_doctor),
@@ -2959,7 +2983,7 @@ def _phase_smoke_tests(state: BootstrapState) -> PhaseResult:
     failures: list[str] = []
     for name, fn in probes:
         try:
-            passed, detail = fn(state)
+            passed, detail = fn(state, ctx.io)
         except Exception as exc:
             passed, detail = (False, f"{type(exc).__name__}: {exc}")
         results[name] = {"passed": passed, "detail": detail}
@@ -2978,14 +3002,15 @@ def _phase_smoke_tests(state: BootstrapState) -> PhaseResult:
 # rollup so a degraded install surfaces in chat.
 
 
-def _phase_self_report(state: BootstrapState) -> PhaseResult:
+def _phase_self_report(ctx: PhaseContext) -> PhaseResult:
     """Write a bootstrap-completion summary into the agent's private namespace.
 
     Failure of the memory write is non-fatal — same posture as
     namespace_register (#243): the memory layer being unavailable
     shouldn't fail bootstrap.
     """
-    smoke = (state.phases.get("smoke_tests") or {}).get("details") or {}
+    state = ctx.state
+    smoke = ctx.output_of("smoke_tests")
     smoke_failures = smoke.get("failures") or []
     primary_alias = ""
     config_path = Path(state.hermes_home) / "config.yaml"
@@ -3004,7 +3029,7 @@ def _phase_self_report(state: BootstrapState) -> PhaseResult:
         f"Primary model: {primary_alias or 'unwired'}. "
         f"Smoke failures: {len(smoke_failures)}."
     )
-    add = _mcp_memory_call(
+    add = ctx.io.mcp_memory_call(
         "tools/call",
         {
             "name": "memory_add",
@@ -3165,7 +3190,7 @@ def _write_runtime_json(state: BootstrapState, *, repair: bool) -> tuple[Path, b
     return path, True
 
 
-def _phase_install_artifacts(state: BootstrapState) -> PhaseResult:
+def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
     """Write the seed TOML, driver env file, and runtime.json (issue #432).
 
     These three artifacts were previously only written by
@@ -3179,7 +3204,8 @@ def _phase_install_artifacts(state: BootstrapState) -> PhaseResult:
     INSTALL_SEED_PATH / DRIVER_ENV_PATH to tmp_path; the runtime.json write
     is always tmp-safe because it tracks ``state.hermes_home``.
     """
-    repair = bool(state.phases.get("_repair_flag"))
+    state = ctx.state
+    repair = ctx.repair
 
     under_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
     if under_pytest and (
@@ -3348,29 +3374,30 @@ def _validate_phase_graph(phases: list[Phase]) -> None:
                 )
 
 
-PHASES: list[tuple[str, Callable[[BootstrapState], PhaseResult]]] = [
-    ("preflight", _phase_preflight),
-    ("install", _phase_install),
-    ("env_probe", _phase_env_probe),
-    ("home_init", _phase_home_init),
+PHASES: list[Phase] = [
+    Phase("preflight", _phase_preflight),
+    Phase("install", _phase_install),
+    Phase("env_probe", _phase_env_probe),
+    Phase("home_init", _phase_home_init),
     # #432: write the manager seed + driver env + runtime.json embed token
     # right after $HERMES_HOME exists and before mcp_wire reads the seed's
     # allow-list, so a single `bootstrap hermes` run leaves the artifacts the
     # manager + chat_proxy key off (previously only AgentManager.install wrote
     # them, so the bootstrap path left the agent reporting `broken`).
-    ("install_artifacts", _phase_install_artifacts),
+    Phase("install_artifacts", _phase_install_artifacts),
     # PR-3 Phase 8: seed personas BEFORE config_write so the first
     # config render gets the active persona's system_prompt prelude.
     # mcp_wire runs after config_write to probe the live MCP surface;
     # the probe results feed Phase 9 (model_automap)'s re-render so a
-    # post-bootstrap config still picks up the validated server list.
-    ("persona_seed", _phase_persona_seed),
-    ("config_write", _phase_config_write),
-    ("mcp_wire", _phase_mcp_wire),
-    ("context_link", _phase_context_link),
-    ("namespace_register", _phase_namespace_register),
-    ("model_automap", _phase_model_automap),
-    ("voice_wire", _phase_voice_wire),
+    # post-bootstrap config still picks up the validated server list —
+    # hence config_write's needs_previous (cross-run) edge on mcp_wire.
+    Phase("persona_seed", _phase_persona_seed),
+    Phase("config_write", _phase_config_write, needs_previous=("mcp_wire",)),
+    Phase("mcp_wire", _phase_mcp_wire),
+    Phase("context_link", _phase_context_link),
+    Phase("namespace_register", _phase_namespace_register),
+    Phase("model_automap", _phase_model_automap, needs=("mcp_wire",)),
+    Phase("voice_wire", _phase_voice_wire, needs=("mcp_wire",)),
     # #437 (SYSTEM scope): wire the gateway secrets drop-in so fresh
     # provisions/reinstalls come up with Telegram + Discord connected,
     # surviving hermes_cli main-unit regeneration. Runs after voice_wire
@@ -3378,12 +3405,39 @@ PHASES: list[tuple[str, Callable[[BootstrapState], PhaseResult]]] = [
     # before smoke_tests. The orchestrator runs `hermes gateway install`
     # separately to lay down the main unit; this phase only owns the
     # drop-in + daemon-reload.
-    ("gateway_secrets_wire", _phase_gateway_secrets_wire),
-    ("smoke_tests", _phase_smoke_tests),
-    ("self_report", _phase_self_report),
+    Phase("gateway_secrets_wire", _phase_gateway_secrets_wire),
+    Phase("smoke_tests", _phase_smoke_tests),
+    Phase("self_report", _phase_self_report, needs=("smoke_tests",)),
 ]
 
-PHASE_NAMES: tuple[str, ...] = tuple(name for name, _ in PHASES)
+_validate_phase_graph(PHASES)
+
+PHASE_NAMES: tuple[str, ...] = tuple(p.name for p in PHASES)
+
+
+def context_for(
+    phase_name: str,
+    state: BootstrapState,
+    *,
+    repair: bool = False,
+    io: PhaseIO | None = None,
+) -> PhaseContext:
+    """Build the :class:`PhaseContext` the orchestrator would hand ``phase_name``.
+
+    Looks the phase up in :data:`PHASES` so the context carries the
+    declared needs — the canonical way for per-phase unit tests to call
+    a phase body directly without re-stating the needs graph.
+    """
+    phase = next((p for p in PHASES if p.name == phase_name), None)
+    if phase is None:
+        raise KeyError(f"unknown phase {phase_name!r} (known: {', '.join(PHASE_NAMES)})")
+    return PhaseContext(
+        state=state,
+        repair=repair,
+        io=io if io is not None else PhaseIO(),
+        phase_name=phase.name,
+        allowed_needs=phase.allowed_needs,
+    )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -3433,10 +3487,13 @@ def run(
     state_root: Path | None = None,
     verbose: bool = False,
     initial_state: BootstrapState | None = None,
+    io: PhaseIO | None = None,
 ) -> RunResult:
     """Run every phase in order, persisting checkpoints to ``state_root``.
 
     * ``repair`` — re-run every phase regardless of checkpoint state.
+      Surfaced to phase bodies as ``ctx.repair`` (persona_seed +
+      install_artifacts change behaviour under it).
     * ``dry_run`` — execute each phase but don't persist the state file.
     * ``skip_phases`` — skip the named phases (logged as ``skip``).
     * ``state_root`` — overrides the default ``provision.json`` location;
@@ -3444,6 +3501,13 @@ def run(
     * ``initial_state`` — seed state when no checkpoint exists; tests
       pass one with `hermes_home` + `venv` pointed at `tmp_path` so the
       real install/home_init phases don't need write access to /var/lib.
+    * ``io`` — the :class:`PhaseIO` seam bundle every phase receives;
+      ``None`` means the production wiring (``PhaseIO()``).
+
+    FAIL policy is run-all: a failing phase never halts the loop or
+    skips dependents (fallbacks keep phases independent; convergence
+    comes via ``--repair``). ``completed_at`` is only stamped when no
+    phase failed — unchanged from the pre-#702 contract.
 
     Returns a :class:`RunResult` capturing the post-run state + the
     per-phase outcomes the CLI surface pretty-prints.
@@ -3454,16 +3518,12 @@ def run(
         state.started_at = _utcnow()
         state.completed_at = None
 
+    phase_io = io if io is not None else PhaseIO()
     skipped: list[str] = []
     failed: list[str] = []
-    # Surface ``--repair`` to phase bodies that change behavior under it
-    # (persona_seed re-writes its seeds on repair). Stash a sentinel on
-    # ``state.phases`` so the runtime doesn't need a new signature. The
-    # entry is stripped before save so it never appears in provision.json.
-    if repair:
-        state.phases["_repair_flag"] = {"status": "stub", "details": {}}
 
-    for name, phase in PHASES:
+    for phase in PHASES:
+        name = phase.name
         if name in skip_phases:
             entry = {
                 "status": PhaseStatus.SKIP.value,
@@ -3485,7 +3545,14 @@ def run(
         if verbose:
             print(f"[run ] {name}")
 
-        result = phase(state)
+        ctx = PhaseContext(
+            state=state,
+            repair=repair,
+            io=phase_io,
+            phase_name=name,
+            allowed_needs=phase.allowed_needs,
+        )
+        result = phase.fn(ctx)
         entry = result.to_dict()
         entry["at"] = _utcnow()
         state.phases[name] = entry
@@ -3493,10 +3560,6 @@ def run(
         if result.status == PhaseStatus.FAIL:
             failed.append(name)
             state.errors.append(f"{name}: {result.reason or 'unspecified failure'}")
-
-    # Strip the repair sentinel before persistence — operator never sees
-    # it in provision.json, and the next run computes it from CLI flags.
-    state.phases.pop("_repair_flag", None)
 
     if not failed:
         state.completed_at = _utcnow()

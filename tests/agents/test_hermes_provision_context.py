@@ -131,3 +131,92 @@ def test_validate_phase_graph_rejects_duplicate_phase_names() -> None:
     phases = [hp.Phase("a", _ok_phase), hp.Phase("a", _ok_phase)]
     with pytest.raises(ValueError, match="duplicate"):
         hp._validate_phase_graph(phases)
+
+
+# ── The real PHASES graph ────────────────────────────────────────────────────
+
+
+def test_phases_declare_the_locked_needs_graph() -> None:
+    """#702 locked the 4 cross-phase edges; pin them exactly."""
+    by_name = {p.name: p for p in hp.PHASES}
+    # config_write reads mcp_wire's PREVIOUS-run checkpoint (mcp_wire
+    # runs after it in the list) — a cross-run edge, not a same-run one.
+    assert by_name["config_write"].needs == ()
+    assert by_name["config_write"].needs_previous == ("mcp_wire",)
+    assert by_name["model_automap"].needs == ("mcp_wire",)
+    assert by_name["voice_wire"].needs == ("mcp_wire",)
+    assert by_name["self_report"].needs == ("smoke_tests",)
+    # No other phase declares anything.
+    declared = {p.name for p in hp.PHASES if p.needs or p.needs_previous}
+    assert declared == {"config_write", "model_automap", "voice_wire", "self_report"}
+
+
+def test_real_phases_graph_validates() -> None:
+    hp._validate_phase_graph(hp.PHASES)  # import already ran this; pin it anyway
+
+
+def test_phases_permutation_violating_needs_fails_loudly() -> None:
+    """Moving self_report ahead of smoke_tests must be rejected."""
+    permuted = sorted(hp.PHASES, key=lambda p: 0 if p.name == "self_report" else 1)
+    with pytest.raises(ValueError, match=r"self_report.*smoke_tests"):
+        hp._validate_phase_graph(permuted)
+
+
+def test_phases_permutation_violating_needs_previous_fails_loudly() -> None:
+    """Moving mcp_wire ahead of config_write flips the cross-run edge
+    into a same-run one — the mislabelled declaration must fail."""
+    permuted = sorted(hp.PHASES, key=lambda p: 0 if p.name == "mcp_wire" else 1)
+    with pytest.raises(ValueError, match="needs_previous"):
+        hp._validate_phase_graph(permuted)
+
+
+# ── context_for + undeclared reads through real phases ──────────────────────
+
+
+def test_context_for_carries_declared_needs() -> None:
+    ctx = hp.context_for("self_report", hp.BootstrapState())
+    assert ctx.allowed_needs == frozenset({"smoke_tests"})
+    assert ctx.phase_name == "self_report"
+    assert ctx.repair is False
+
+
+def test_context_for_rejects_unknown_phase() -> None:
+    with pytest.raises(KeyError, match="no_such_phase"):
+        hp.context_for("no_such_phase", hp.BootstrapState())
+
+
+def test_self_report_with_undeclared_needs_raises(tmp_path) -> None:
+    """A phase body that reads a checkpoint without its declared needs
+    must blow up loudly — the read is never silently empty."""
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    bare_ctx = hp.PhaseContext(state=state, phase_name="self_report")  # no allowed_needs
+    with pytest.raises(hp.PhaseNeedError):
+        hp._phase_self_report(bare_ctx)
+
+
+# ── ctx.repair replaces the _repair_flag sentinel ────────────────────────────
+
+
+def test_repair_flag_sentinel_is_gone() -> None:
+    """The smuggled state.phases['_repair_flag'] sentinel is deleted —
+    no run ever stashes or strips it again."""
+    assert not hasattr(hp, "_REPAIR_FLAG")
+    import inspect
+
+    assert "_repair_flag" not in inspect.getsource(hp.run)
+
+
+def test_persona_seed_overwrites_on_ctx_repair(tmp_path) -> None:
+    from hal0.agents import personas as P
+
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    out = hp._phase_persona_seed(hp.context_for("persona_seed", state))
+    assert out.status == hp.PhaseStatus.OK
+    persona_path = tmp_path / "hh" / "personas" / "hermes.toml"
+    persona_path.write_text('[persona]\nid = "hermes"\ndisplay_name = "Custom"\n', encoding="utf-8")
+    # No repair → operator edit survives.
+    hp._phase_persona_seed(hp.context_for("persona_seed", state))
+    assert P.load_persona("hermes", root=persona_path.parent).display_name == "Custom"
+    # repair → seeds rewritten.
+    hp._phase_persona_seed(hp.context_for("persona_seed", state, repair=True))
+    assert P.load_persona("hermes", root=persona_path.parent).display_name == "Hermes"
