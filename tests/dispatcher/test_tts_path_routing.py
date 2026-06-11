@@ -324,7 +324,11 @@ def test_proxy_tts_path_pin_resolves_container_remote() -> None:
 
 
 def test_proxy_embed_path_pin_resolves_container_remote() -> None:
-    """Path-pin container acceptance applies to embed/rerank pins too."""
+    """Path-pin container acceptance applies to embed pins too.
+
+    Phase C: /rerank path-pin now targets the dedicated ``rerank`` slot
+    (not embed); see test_rerank_path_routing.py for those tests.
+    """
     container_embed = Upstream(
         name="embed",
         kind="remote",

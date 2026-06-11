@@ -23,9 +23,19 @@ from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 # NOTE: revisit in Phase 5 — absorb into router.py after Dispatcher is stable.
 
-# Path fragments that pin a request to a specific slot regardless of model.
-# Mirrors haloai lib/proxy.py:51-58 (embeddings + rerank both target embed).
-_EMBED_PATHS = ("/embeddings", "/rerank")
+# Path fragments that pin a request to the embed slot regardless of model.
+# Mirrors haloai lib/proxy.py:51-58 (embeddings only; rerank split to its own
+# dedicated slot in Phase C — see _RERANK_PATHS below).
+_EMBED_PATHS = ("/embeddings",)
+
+# Path fragments that pin a request to the dedicated rerank slot (vulkan
+# llama-server with --reranking, port 8083, added Phase C task C5).
+# Both /rerankings (hal0's public OpenAI-compat route) and /rerank (llama-
+# server's native endpoint shape) route here; the dispatcher applies
+# _UPSTREAM_PATH_REWRITES to translate /v1/rerankings → /v1/rerank on the
+# outgoing upstream request (llama-server serves POST /rerank natively, not
+# /rerankings).
+_RERANK_PATHS = ("/rerankings", "/rerank")
 
 # Path fragments that pin a request to the TTS slot (kokoro container).
 # Model-id matching is unreliable — the kokoro container advertises "kokoro"
@@ -74,22 +84,26 @@ def resolve_slot(  # TIER1
     ``(slot_name, port)`` tuple.
 
     Resolution rules (in order):
-      1. ``/embeddings`` or ``/rerank`` in path → ``embed`` slot.
-      2. ``/audio/speech`` in path → ``tts`` slot (kokoro; model-id unreliable).
-      3. ``/images/...`` in path → ``img`` slot (ComfyUI).
+      1. ``/embeddings`` in path → ``embed`` slot.
+      2. ``/rerankings`` or ``/rerank`` in path → ``rerank`` slot (Phase C;
+         outgoing path is rewritten to ``/v1/rerank`` by the dispatcher —
+         llama-server's native reranking endpoint is ``POST /rerank``, not
+         ``/rerankings``).
+      3. ``/audio/speech`` in path → ``tts`` slot (kokoro; model-id unreliable).
+      4. ``/images/...`` in path → ``img`` slot (ComfyUI).
 
-    Path-pinned candidates (rules 1-2) accept either a local ``kind="slot"``
+    Path-pinned candidates (rules 1-3) accept either a local ``kind="slot"``
     upstream or a container-backed ``kind="remote"`` upstream whose
     ``slot_name`` matches the candidate (container slots register as remotes
     via ``SlotManager._register_container_upstream``, #656).  All other rules
     require ``kind="slot"``.
-      4. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
-      5. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
-      6. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
-      7. Model id exactly matches a registered slot upstream name (other
+      5. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
+      6. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
+      7. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
+      8. Model id exactly matches a registered slot upstream name (other
          than ``chat``) → that slot.  Back-compat aliases (``primary``
          → ``chat``, ``agent-hermes`` → ``agent``) are resolved first.
-      8. Fallback → ``chat`` slot.
+      9. Fallback → ``chat`` slot.
 
     Args:
         path:       The original request path (e.g. "/v1/chat/completions").
@@ -113,34 +127,41 @@ def resolve_slot(  # TIER1
     # the strict kind=="slot" gate.
     path_pinned = False
 
-    # Rule 1 — path-based pin (embeddings/rerank).
+    # Rule 1 — path-based pin (embeddings → embed slot).
     if any(frag in path for frag in _EMBED_PATHS):
         candidate = "embed"
         path_pinned = True
-    # Rule 2 — TTS path pin (/audio/speech → tts slot).
+    # Rule 2 — rerank path pin (/rerankings or /rerank → rerank slot, Phase C).
+    # The public route is /v1/rerankings; the upstream rewrite
+    # (/v1/rerankings → /v1/rerank) is applied by the dispatcher before
+    # forwarding (llama-server's native endpoint is POST /rerank).
+    elif any(frag in path for frag in _RERANK_PATHS):
+        candidate = "rerank"
+        path_pinned = True
+    # Rule 3 — TTS path pin (/audio/speech → tts slot).
     # Model-id matching is unreliable for kokoro (server advertises "kokoro",
     # clients send "kokoro-v1"/"tts"/etc.) so we route purely by path.
     elif any(frag in path for frag in _TTS_PATHS):
         candidate = "tts"
         path_pinned = True
-    # Rule 3 — image-generation path pins to the img slot.
+    # Rule 4 — image-generation path pins to the img slot.
     elif any(frag in path for frag in _IMAGE_PATHS):
         candidate = "img"
     elif body:
         model = body.get("model", "")
         if isinstance(model, str) and model:
             m = model.lower()
-            # Rule 4 — FLM tag format "name:tag" routes to NPU.
+            # Rule 5 — FLM tag format "name:tag" routes to NPU.
             if ":" in model:
                 candidate = "npu"
-            # Rule 5 — image-gen model id prefix pin (sdxl-/sd-1.5-/flux-).
+            # Rule 6 — image-gen model id prefix pin (sdxl-/sd-1.5-/flux-).
             elif any(m.startswith(prefix) for prefix in _IMAGE_NAME_PREFIXES):
                 candidate = "img"
-            # Rule 6 — name-substring pin (embed/rerank).
+            # Rule 7 — name-substring pin (embed/rerank → embed slot).
             elif any(hint in m for hint in _EMBED_NAME_HINTS):
                 candidate = "embed"
             else:
-                # Rule 7 — explicit slot-name addressing.
+                # Rule 8 — explicit slot-name addressing.
                 # Resolve back-compat aliases (primary→chat, agent-hermes→agent)
                 # before the upstream lookup so old callers still land correctly.
                 m_resolved = SLOT_ALIASES.get(m, m)
@@ -148,7 +169,7 @@ def resolve_slot(  # TIER1
                 if slot_match is not None and slot_match.kind == "slot" and m_resolved != "chat":
                     candidate = m_resolved
 
-    # Rule 8 — fallback default slot.
+    # Rule 9 — fallback default slot.
     if candidate is None:
         candidate = "chat"
 
