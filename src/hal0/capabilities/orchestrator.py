@@ -9,8 +9,12 @@ managed by :class:`~hal0.slots.manager.SlotManager`. This module owns:
   - Persistence of the operator's selections in
     ``/etc/hal0/capabilities.toml``.
   - The lifecycle dispatch — ``apply()`` flips slots load/swap/unload to
-    match the new selection and rewrites the underlying slot's TOML when
-    the user changes backend/provider.
+    match the new selection. Reconciling the selection against the
+    underlying slot's TOML is delegated to
+    :class:`hal0.slot_config.SlotConfigStore` (issue #697): the store
+    computes a before/after ChangeSet and commits both files atomically
+    before any lifecycle call, so capabilities.toml and slots/*.toml can
+    no longer drift across a half-finished apply.
 
 NPU multiplex (NPU Phase 2): a ``device=npu`` selection for a trio
 modality (``embed`` / ``voice.stt``) does NOT spawn a standalone process.
@@ -48,6 +52,7 @@ from hal0.errors import BadRequest, Hal0Error, NotFound
 from hal0.lemonade.client import flm_args_from_lemond_config, flm_args_set_payload
 from hal0.model_meta import canonical_device, device_to_legacy_backend
 from hal0.registry.store import ModelRegistry
+from hal0.slot_config import SlotConfigStore, SlotSelection
 from hal0.slots.manager import SlotManager
 
 log = logging.getLogger(__name__)
@@ -216,6 +221,10 @@ class CapabilityOrchestrator:
     ) -> None:
         self._slot_manager = slot_manager
         self._config_path = Path(config_path) if config_path else capabilities_toml_path()
+        # Reconciliation seam (#697): capabilities.toml + slots/*.toml are
+        # committed as one ChangeSet through the store, never via ad-hoc
+        # rewrites in this class.
+        self._store = SlotConfigStore(capabilities_path=self._config_path)
         self._registry = registry
         # Zero-arg callable returning a LemonadeClient (NOT a provider) —
         # used by the NPU-trio path to read/write lemond ``flm_args``. When
@@ -422,7 +431,30 @@ class CapabilityOrchestrator:
         if merged.model:
             self._validate_model_in_catalog(slot, child, merged.model, merged.device)
 
-        cfg.selections[slot][child] = merged
+        # ── reconcile + persist (issue #697) ──────────────────────────────
+        # The SlotConfigStore computes the post-state of BOTH
+        # capabilities.toml and the underlying slot TOML as one ChangeSet
+        # (compute-only), then commits it atomically BEFORE any lifecycle
+        # dispatch. This replaces the old unconditional in-place rewrite:
+        #
+        #   - drift can no longer survive a half-finished apply — a failed
+        #     commit rolls disk back to ``before``;
+        #   - a lifecycle failure below leaves both files already mutually
+        #     consistent, preserving the pre-#697 "persist the user's
+        #     intent even if the slot bounce failed" behaviour;
+        #   - the reconciliation itself (enabled selections projected onto
+        #     an existing slot TOML, model_meta-translated device/backend)
+        #     lives in the store where it is independently tested.
+        change_set = self._store.apply(
+            SlotSelection(slot=slot, child=child, slot_name=slot_name, selection=merged)
+        )
+        try:
+            self._store.commit(change_set)
+        except Exception as exc:
+            raise CapabilityApplyFailed(
+                f"failed to persist capability change: {exc}",
+                details={"slot": slot, "child": child, "error": str(exc)},
+            ) from exc
 
         # ── lifecycle dispatch ────────────────────────────────────────────
         enabled_changed = merged.enabled != before_enabled
@@ -446,23 +478,11 @@ class CapabilityOrchestrator:
         pending_reload = False
 
         try:
-            # Reconcile the slot TOML against the merged selection whenever
-            # the slot is going to be enabled. We rewrite unconditionally —
-            # not just on a selection diff — because capabilities.toml and
-            # the slot TOML can drift independently: a previous apply() that
-            # failed mid-flight, a manual edit, or an install/migration seed
-            # can leave the two disagreeing. Diffing the new selection
-            # against the *old selection* would miss that drift and let
-            # load()/swap() spawn against the stale slot TOML while we
-            # report the new selection as live.
-            if merged.enabled:
-                await self._rewrite_underlying_slot(slot_name, merged)
-
             if is_npu_target:
                 # NPU trio: drive flm_args + a device=npu slot RECORD; never
                 # load/swap/unload the embed/stt slot. (Decision 4: the
-                # _rewrite_underlying_slot above — which sets the model
-                # sub-table — has already run for the enabled case.)
+                # store commit above — which sets the model sub-table on an
+                # enabled selection — has already run.)
                 pending_reload = await self._apply_npu_trio_modality(slot_name, child, merged)
             else:
                 if enabled_changed and merged.enabled:
@@ -488,20 +508,15 @@ class CapabilityOrchestrator:
                     await self._set_flm_modality(child, enable=False)
                     pending_reload = True
         except Hal0Error:
-            # Re-raise typed errors as the apply_failed envelope so the UI
-            # surfaces a single, recognisable code.
-            self._save(cfg)  # persist the user's intent even if the slot bounce failed
+            # Re-raise typed errors so the UI surfaces a single,
+            # recognisable code. The selection is already committed (the
+            # user's intent persists even if the slot bounce failed).
             raise
         except Exception as exc:
-            self._save(cfg)
             raise CapabilityApplyFailed(
                 f"failed to apply capability change: {exc}",
                 details={"slot": slot, "child": child, "error": str(exc)},
             ) from exc
-
-        # Persist after the side effects so an interrupted lifecycle
-        # call doesn't leave a stale selection on disk.
-        self._save(cfg)
 
         # A capability change (enable/disable/model/backend) just altered
         # live slot state — refresh Hermes's context files (detached;
@@ -661,7 +676,8 @@ class CapabilityOrchestrator:
              top-level SCALAR, so co-writing it is safe under Decision 4 —
              that prohibition is specifically about the nested ``model`` dict
              (replaced wholesale by the shallow merge), which we still NEVER
-             pass here. Runs AFTER ``_rewrite_underlying_slot``.
+             pass here. Runs AFTER the store commit that reconciled the
+             slot TOML.
           3. Toggle the modality on the anchor via
              :meth:`_set_flm_modality` — for a container anchor this writes
              the ``[npu]`` TOML toggle; for a Lemonade anchor it recomposes
@@ -778,41 +794,6 @@ class CapabilityOrchestrator:
         except Exception as exc:
             raise CapabilityApplyFailed(
                 f"failed to create slot {slot_name!r}: {exc}",
-                details={"slot": slot_name, "error": str(exc)},
-            ) from exc
-
-    async def _rewrite_underlying_slot(
-        self, slot_name: str, selection: CapabilitySelection
-    ) -> None:
-        """Persist backend / provider changes into the underlying slot TOML.
-
-        Routes through :meth:`SlotManager.update_config` so the override
-        drop-in + env file get regenerated alongside the TOML. If the slot
-        doesn't exist yet, this is a no-op — the create path below will
-        write the config fresh.
-        """
-        cfg_path = paths.slots_config_dir() / f"{slot_name}.toml"
-        if not cfg_path.exists():
-            return
-        slot_backend = device_to_legacy_backend(selection.device)
-        slot_device = canonical_device(selection.device)
-        updates: dict[str, Any] = {}
-        if slot_backend:
-            # Deprecated field, kept for one release — see ADR-0006 §7.
-            updates["backend"] = slot_backend
-        if slot_device:
-            updates["device"] = slot_device
-        if selection.provider:
-            updates["provider"] = selection.provider
-        if selection.model:
-            updates["model"] = {"default": selection.model}
-        if not updates:
-            return
-        try:
-            await self._slot_manager.update_config(slot_name, updates)
-        except Exception as exc:
-            raise CapabilityApplyFailed(
-                f"failed to rewrite slot {slot_name!r}: {exc}",
                 details={"slot": slot_name, "error": str(exc)},
             ) from exc
 
