@@ -301,15 +301,18 @@ class FLMProvider(Provider):
             # apparmor=unconfined is required in LXC; on bare metal a
             # tailored profile would be tighter but Strix Halo deployments
             # under Proxmox LXC are the primary target.
-            security_opt=["apparmor=unconfined"],
+            # seccomp=unconfined matches the GPU slot rendering so
+            # _render_unit_from_spec doesn't need special-casing here.
+            security_opt=["apparmor=unconfined", "seccomp=unconfined"],
             group_add=[str(render_gid)] if render_gid is not None else [],
             port=port,
             # FLM's /v1/* server needs to be reachable from the dispatcher
             # at 127.0.0.1:<port>. Use port-mapping rather than network=host
             # so multiple slots can coexist with overlapping internal ports.
+            # The renderer derives --publish=127.0.0.1:<port>:<port> from
+            # spec.port declaratively — no hand-rolled "-p" here.
             network_mode="",
             extra_args=[
-                f"-p 127.0.0.1:{port}:{port}",
                 # NPU model weights are pinned in DMA-locked memory; this
                 # is the same flag haloai's systemd unit sets.
                 "--ulimit memlock=-1",
