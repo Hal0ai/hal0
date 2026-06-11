@@ -126,6 +126,11 @@ export interface Slot {
    *  Set by _container_state_enrichment() in /api/slots. Absent for
    *  Lemonade slots. */
   container_status?: 'running' | 'stopped' | 'starting' | 'crashed' | null
+  /** NPU trio modality toggles — present on container-runtime npu slots
+   *  (Phase A). Reflects the TOML-backed [npu] section; reads/writes go
+   *  through PUT /api/slots/{name}/config rather than lemond flm_args.
+   *  Absent/null for Lemonade-runtime NPU slots (legacy path). */
+  npu?: { asr: boolean; embed: boolean } | null
   /** True when the container unit is active AND /health returns ok.
    *  False when stopped, starting (health probe not yet passing), or crashed.
    *  Absent for Lemonade slots. */
@@ -268,6 +273,9 @@ function normalizeSlot(s: any): Slot {
     // resolved_command: backend-provided llama-server argv for container slots
     // (issue #658). Absent for Lemonade slots.
     resolved_command: s?.resolved_command ?? null,
+    // npu: trio modality toggles for container-runtime npu slots (Phase A).
+    // Absent/null for Lemonade-runtime slots (legacy path reads flm_args).
+    npu: s?.npu ?? null,
   }
 }
 

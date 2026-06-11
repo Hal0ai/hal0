@@ -119,6 +119,21 @@ export const MOCK_DATA = {
       mem_mb: 22_400,
       bench_toks_per_sec: 52.8,
     },
+    // Container-runtime NPU slot (Phase A — npu trio toggles via TOML config).
+    // asr=true, embed=false: exercises split-toggle state in npu-container spec.
+    {
+      name: 'npu', type: 'llm', device: 'npu',
+      model: 'qwen3-0.6b-npu', model_id: 'qwen3-0.6b-npu',
+      group: 'npu', state: 'ready', port: 8098,
+      runtime: 'container',
+      profile: 'flm-npu',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:flm-npu-server',
+      image_status: 'present',
+      container_status: 'running',
+      container_health: true,
+      mem_mb: 1_200,
+      npu: { asr: true, embed: false },
+    },
     // Container slot in starting state (health probe not yet passing).
     {
       name: 'coder-container', type: 'llm', device: 'gpu-rocm',

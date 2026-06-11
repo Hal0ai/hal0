@@ -736,6 +736,7 @@ function NpuFlmStack({ slots }) {
   const loadMut = useSlotLoad();
   const unloadMut = useSlotUnload();
   const editMut = useSlotEdit();
+  const restartMutNpu = useSlotRestart();
   const [pending, setPending] = useStateS(false);
   const [busy, setBusy] = useStateS(false);
 
@@ -746,12 +747,22 @@ function NpuFlmStack({ slots }) {
   const embed = npuSlots.find(s => s.type === "embedding");
   const anySlot = chat || npuSlots[0];
 
+  // Container-mode detection (Phase A): the npu chat slot carries
+  // runtime="container" OR profile when provisioned as a container slot.
+  // The `npu` field (TOML-backed {asr,embed}) is the authoritative state
+  // source on this path; flm_args is ignored.
+  const containerNpu = !!(chat?.profile || chat?.runtime === "container");
+
   const coresGroup = npuTrioGroupLabel(npuSlots);
   const backendUrl = npuTrioBackendUrl(npuSlots);
   const childPort = anySlot?.port ?? null;
 
   const flmArgsLive = typeof cfgQuery.data?.flm_args === "string" ? cfgQuery.data.flm_args : "";
-  const parsed = parseFlmArgs(flmArgsLive);
+  const parsed = containerNpu
+    // Container mode: derive toggle state from slot.npu (TOML-backed).
+    ? { asr: !!(chat?.npu?.asr), embed: !!(chat?.npu?.embed) }
+    // Legacy mode: parse lemond flm_args string.
+    : parseFlmArgs(flmArgsLive);
 
   // Only chat (the FLM anchor) is a real model choice — the operator picks
   // which model `flm serve` runs. ASR/embed are served coresident off that
@@ -811,19 +822,39 @@ function NpuFlmStack({ slots }) {
     run(() => swapMut.mutateAsync({ name: chat.name, model_id }));
   };
 
-  // Toggle a coresident modality: recompose flm_args (flip the one flag,
-  // keep the other), POST it to lemond, AND flip the shadow slot's
-  // `enabled` so dispatch gating (v1.py _is_npu_trio_request) stays in
-  // sync. flm_args apply at the next load → mark pending.
+  // Toggle a coresident modality.
+  //
+  // Container mode (Phase A): write the flip to TOML via
+  //   PUT /api/slots/{name}/config  body: { npu: { [which]: next } }
+  // then trigger an explicit slot restart so the container picks up the
+  // new config (orchestrator/API NEVER auto-restarts — ADR decision).
+  // The existing state chip streams the transition; no new UI needed.
+  //
+  // Legacy mode: recompose flm_args (flip the one flag, keep the other),
+  // POST it to lemond, AND flip the shadow slot's `enabled` so dispatch
+  // gating (v1.py _is_npu_trio_request) stays in sync. flm_args apply at
+  // the next load → mark pending. (Phase E deletes this path.)
   const onToggleModality = (which, slot) => {
-    const next = { ...parsed, [which]: !parsed[which] };
-    run(async () => {
-      await cfgSet.mutateAsync({ flm_args: composeFlmArgs(next) });
-      if (slot) {
-        await editMut.mutateAsync({ name: slot.name, body: { enabled: next[which] } });
-      }
-      setPending(true);
-    });
+    if (containerNpu) {
+      if (!chat) { toast("No NPU chat slot", "warn"); return; }
+      const nextVal = !(parsed[which]);
+      run(async () => {
+        await editMut.mutateAsync({
+          name: chat.name,
+          body: { npu: { [which]: nextVal } },
+        });
+        await restartMutNpu.mutateAsync(chat.name);
+      });
+    } else {
+      const next = { ...parsed, [which]: !parsed[which] };
+      run(async () => {
+        await cfgSet.mutateAsync({ flm_args: composeFlmArgs(next) });
+        if (slot) {
+          await editMut.mutateAsync({ name: slot.name, body: { enabled: next[which] } });
+        }
+        setPending(true);
+      });
+    }
   };
 
   // No onPickAsr/onPickEmbed: those modalities are read-only labels (the
