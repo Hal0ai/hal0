@@ -685,6 +685,15 @@ class Dispatcher:
         Mirrors haloai ``lib/dispatcher.py``'s ``_forward_direct`` and
         ``_forward_streaming`` (PLAN.md §3).
         """
+        if self._slot_manager is not None and (call.slot_name or call.container_slot_name):
+            # Phase D (spec §7): exclusive-GPU image-mode guard. Fires
+            # BEFORE the lazy-load + readiness gates so an llm-group slot
+            # refused during image mode surfaces the gpu.image_mode 503
+            # envelope (with its own Retry-After) instead of slot.loading —
+            # and so the backend-aware lazy-load below can never pull an
+            # LLM model back onto the GPU while the arbiter holds it for
+            # the img slot.
+            self._guard_gpu_image_mode(call)
         if call.slot_name and self._slot_manager is not None:
             # B1 (ADR-0022): backend-aware lazy-load. lemond auto-loads a
             # model the dispatcher forwards by name using its GLOBAL
@@ -709,6 +718,25 @@ class Dispatcher:
             # a raw 502 ConnectError when the container is down or starting.
             await self._check_container_slot_ready(call)
         return await self._forward_plain(call)
+
+    def _guard_gpu_image_mode(self, call: UpstreamCall) -> None:
+        """Refuse llm-group dispatch while the GPU is in exclusive image mode.
+
+        Delegates to :meth:`GpuArbiter.guard_llm_dispatch`, which raises the
+        typed ``GpuImageMode`` (503, code ``gpu.image_mode``, details carry
+        ``retry_after_s``) for llm-group slots and no-ops for everything
+        else (img slot itself, NPU/CPU/lemonade slots, remote upstreams).
+        The error middleware promotes ``retry_after_s`` to a ``Retry-After``
+        header exactly like it does for ``SlotLoading`` — no parallel
+        plumbing.
+
+        Test stand-ins without an ``arbiter`` attribute opt out via the
+        ``getattr`` (the real SlotManager always exposes the lazy property).
+        """
+        arbiter = getattr(self._slot_manager, "arbiter", None)
+        if arbiter is None:
+            return
+        arbiter.guard_llm_dispatch(call.slot_name or call.container_slot_name)
 
     async def _ensure_slot_loaded_backend_aware(self, call: UpstreamCall) -> None:
         """Kick a backend-aware load on a cold miss before forwarding.
@@ -831,9 +859,25 @@ class Dispatcher:
           ``False`` — recovery is not applicable (remote upstream, no slot
             manager wired) or the recover call itself raised.  Caller
             should surface the original :class:`UpstreamUnavailable`.
+
+        Raises:
+          GpuImageMode: NON-NEGOTIABLE (D4 review) — when the GpuArbiter
+            is in exclusive image mode and this is an llm-group slot, the
+            dead port is (or may as well be) the ARBITER's doing: it
+            unloaded the slot to hand the GPU to the img slot.  Recovery
+            here would reload an LLM model INTO image mode and fight the
+            arbiter for the GPU, so we suppress it and surface the same
+            structured ``gpu.image_mode`` 503 envelope the dispatch guard
+            emits (Retry-After included via the error middleware).
         """
         if not (call.slot_name and self._slot_manager is not None):
             return False
+        arbiter = getattr(self._slot_manager, "arbiter", None)
+        if arbiter is not None:
+            # Raises GpuImageMode for llm-group slots while mode == img;
+            # no-op otherwise. Covers the race where the arbiter flipped
+            # to img (and force-killed the container) mid-request.
+            arbiter.guard_llm_dispatch(call.slot_name)
         log.warning(
             "dispatch.upstream_dead_attempting_recover",
             upstream=call.upstream_name,

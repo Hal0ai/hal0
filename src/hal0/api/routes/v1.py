@@ -1090,7 +1090,47 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             details={"upstream": call.upstream_name, "url": upstream.url},
         )
 
-    # 4. Drive the ComfyUI provider directly. Inject the curated metadata
+    # 4. GPU arbitration (Phase D, spec §7). Flip the GPU to exclusive
+    #    image mode BEFORE dispatching to the img upstream (unloads llm
+    #    GPU slots, loads the img slot), and stamp img activity at request
+    #    START and again at COMPLETION so long Wan video jobs keep the
+    #    idle-restore window open. Also seed #599 request defaults from
+    #    the img slot's [image] section (default_size / default_steps).
+    manager = getattr(request.app.state, "slot_manager", None)
+    arbiter = manager.arbiter if manager is not None else None
+    if manager is not None:
+        from hal0.errors import NotFound
+        from hal0.slots.arbiter import gpu_exclusive_group
+
+        cfgs = await manager.iter_configs()
+        img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
+        img_section = (img_cfg or {}).get("image") or (img_cfg or {}).get("image_gen") or {}
+        if isinstance(img_section, dict):
+            default_size = img_section.get("default_size")
+            if not body.get("size") and isinstance(default_size, str) and default_size:
+                body["size"] = default_size
+            default_steps = img_section.get("default_steps")
+            if (
+                isinstance(default_steps, int)
+                and not isinstance(default_steps, bool)
+                and default_steps > 0
+            ):
+                extra = body.get("extra_body")
+                if not isinstance(extra, dict):
+                    extra = {}
+                    body["extra_body"] = extra
+                extra.setdefault("steps", default_steps)
+
+        try:
+            await arbiter.ensure_img()
+        except NotFound as exc:
+            # No img-group slot configured (manually-registered upstream,
+            # tests) — nothing to arbitrate; generation proceeds as-is.
+            if exc.code != "gpu.img_slot_missing":
+                raise
+        arbiter.touch_img_activity()
+
+    # 5. Drive the ComfyUI provider directly. Inject the curated metadata
     #    into the body so the provider's translator knows what to render
     #    without re-looking-up the registry.
     provider = get_provider("comfyui")
@@ -1100,13 +1140,16 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
         "_hal0_ckpt_filename": curated.hf_file,
     }
     result = await provider.infer(port, body_with_meta)
+    if arbiter is not None:
+        # Completion stamp — long jobs must reset the idle-restore clock.
+        arbiter.touch_img_activity()
 
     # Track most-recent-model for dashboard.
     last_used = getattr(request.app.state, "last_used_model", None)
     if last_used is not None and call.upstream_name:
         last_used[call.upstream_name] = requested
 
-    # 5. Emit OpenAI-shaped response.
+    # 6. Emit OpenAI-shaped response.
     response_format = (body.get("response_format") or "url").lower().strip()
     images: list[dict[str, Any]] = []
     for img in result.get("images", []):
