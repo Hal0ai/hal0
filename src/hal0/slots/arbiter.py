@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from hal0.config import paths
 from hal0.errors import Hal0Error, NotFound
+from hal0.slots.state import SlotState
 
 if TYPE_CHECKING:  # pragma: no cover — import cycle guard (manager owns us)
     from hal0.slots.manager import SlotManager
@@ -64,6 +65,12 @@ _DRAIN_POLL_S = 0.5
 #: Minimum Retry-After hint carried by GpuImageMode (matches the dispatcher's
 #: slot-loading convention in dispatcher/router.py).
 _RETRY_AFTER_FLOOR_S = 15
+
+#: Readiness poll budget after img slot load() returns — containers go
+#: STARTING → WARMING → READY asynchronously; load() only waits for systemd
+#: start, not for the health probe to pass.
+_IMG_READY_TIMEOUT_S = 120.0
+_READY_POLL_S = 0.5
 
 _DEFAULT_STATE: dict[str, Any] = {
     "mode": "llm",
@@ -121,6 +128,19 @@ class ArbiterPinned(Hal0Error):
 
     code = "gpu.pinned"
     status = 409
+
+
+class GpuImgNotReady(Hal0Error):
+    """Image slot did not become ready within the readiness timeout.
+
+    Raised when the img slot fails to reach a dispatchable state after
+    load() returns (e.g. crashed at start with exit 125, or health probe
+    never passed within _IMG_READY_TIMEOUT_S seconds).  Triggers the same
+    rollback as a load() exception so the guard is never left wedged.
+    """
+
+    code = "gpu.img_not_ready"
+    status = 503
 
 
 class GpuArbiter:
@@ -243,12 +263,63 @@ class GpuArbiter:
 
     # ── switches ─────────────────────────────────────────────────────────────
 
+    async def _rollback_to_llm(
+        self, llm_slots: list[str], img_name: str, *, unload_img: bool = False
+    ) -> None:
+        """Best-effort rollback: reload saved LLM set, persist mode=llm.
+
+        Shared by the load()-raises path (D5) and the readiness-timeout path
+        (#714). Always clears mode=img and saved_llm_slots regardless of
+        whether individual slot reloads succeed — the guard must never be
+        left wedged.
+
+        ``unload_img=True`` triggers a best-effort ``unload(img_name)`` first
+        (used by the readiness-timeout path where the container may be
+        crash-looping and holding GTT).  The D5 load()-raises path skips this
+        because load() already failed — nothing was running to unload.
+        """
+        if unload_img:
+            try:
+                await self._manager.unload(img_name)
+            except Exception as exc:  # best-effort — container may be dead
+                log.warning(
+                    "gpu_arbiter.rollback_img_unload_failed",
+                    extra={"img_slot": img_name, "error": str(exc)},
+                )
+        restored: list[str] = []
+        failed: list[str] = []
+        for slot in llm_slots:
+            try:
+                await self._manager.load(slot, None)
+                restored.append(slot)
+            except Exception as rollback_exc:  # best-effort rollback
+                failed.append(slot)
+                log.warning(
+                    "gpu_arbiter.rollback_load_failed",
+                    extra={"slot": slot, "error": str(rollback_exc)},
+                )
+        st = self._load_state()
+        st["mode"] = GpuMode.LLM.value
+        # Failed slots stay offline (operator reloads manually); a
+        # saved set is meaningless in llm mode, so clear it.
+        st["saved_llm_slots"] = []
+        st["pinned"] = False
+        self._persist()
+        log.warning(
+            "gpu_arbiter.img_load_failed_rolled_back",
+            extra={
+                "img_slot": img_name,
+                "restored": restored,
+                "failed": failed,
+            },
+        )
+
     async def ensure_img(self, *, pin: bool = False) -> None:
         """Flip the GPU to exclusive image mode (no-op when already there).
 
         Order (locked): snapshot running llm slots → persist target state
         FIRST → drain in-flight requests (bounded) → unload llm slots →
-        load the img slot's default model → stamp activity.
+        load the img slot's default model → poll for readiness → stamp activity.
         """
         async with self._switch_lock:
             st = self._load_state()
@@ -309,42 +380,59 @@ class GpuArbiter:
             try:
                 await self._manager.load(img_name, model_default or None)
             except Exception:
-                # D5 quality-gate I1: at this point the llm slots are already
-                # unloaded and mode=img is persisted. If we re-raised without
-                # rolling back, the guard would 503 ALL llm traffic and the
-                # mode==IMG no-op fast path above would swallow every retry
-                # without re-attempting the img load — a wedge with no
-                # automated escape (D6 idle-restore is not wired yet).
-                # Rollback: best-effort reload of the saved llm set, then
-                # ALWAYS persist mode=llm (even when rollback loads fail —
-                # the guard must never stay wedged), then re-raise.
-                restored: list[str] = []
-                failed: list[str] = []
-                for slot in llm_slots:
-                    try:
-                        await self._manager.load(slot, None)
-                        restored.append(slot)
-                    except Exception as rollback_exc:  # best-effort rollback
-                        failed.append(slot)
-                        log.warning(
-                            "gpu_arbiter.rollback_load_failed",
-                            extra={"slot": slot, "error": str(rollback_exc)},
-                        )
-                st["mode"] = GpuMode.LLM.value
-                # Failed slots stay offline (operator reloads manually); a
-                # saved set is meaningless in llm mode, so clear it.
-                st["saved_llm_slots"] = []
-                st["pinned"] = False
-                self._persist()
-                log.warning(
-                    "gpu_arbiter.img_load_failed_rolled_back",
-                    extra={
-                        "img_slot": img_name,
-                        "restored": restored,
-                        "failed": failed,
-                    },
-                )
+                # D5 quality-gate I1: load() raised — rollback, then re-raise
+                # the ORIGINAL load exception so callers see the root cause.
+                await self._rollback_to_llm(llm_slots, img_name, unload_img=False)
                 raise
+
+            # #714: load() only waits for systemd start, not health-probe
+            # completion (containers go STARTING → WARMING → READY async).
+            # Poll until the slot reaches a dispatchable state or we time out.
+            # Call state() exactly once per iteration — terminal states
+            # (ERROR/OFFLINE) abort the poll immediately so we don't burn the
+            # full 120s on a crash-at-start.
+            _TERMINAL: frozenset[SlotState] = frozenset({SlotState.ERROR, SlotState.OFFLINE})
+            _DISPATCHABLE: frozenset[SlotState] = frozenset(
+                {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
+            )
+            ready_deadline = time.monotonic() + _IMG_READY_TIMEOUT_S
+            img_slot_state: SlotState | str = SlotState.WARMING
+            while True:
+                img_slot_state = self._manager.state(img_name)
+                if img_slot_state in _DISPATCHABLE:
+                    break
+                if img_slot_state in _TERMINAL:
+                    log.warning(
+                        "gpu_arbiter.img_terminal_state_during_readiness",
+                        extra={"img_slot": img_name, "state": str(img_slot_state)},
+                    )
+                    await self._rollback_to_llm(llm_slots, img_name, unload_img=True)
+                    raise GpuImgNotReady(
+                        f"img slot {img_name!r} reached terminal state "
+                        f"{img_slot_state!r} after load; rolled back to LLM mode",
+                        details={"slot": img_name, "state": str(img_slot_state)},
+                    )
+                if time.monotonic() >= ready_deadline:
+                    log.warning(
+                        "gpu_arbiter.img_readiness_timeout",
+                        extra={
+                            "img_slot": img_name,
+                            "timeout_s": _IMG_READY_TIMEOUT_S,
+                            "state": str(img_slot_state),
+                        },
+                    )
+                    await self._rollback_to_llm(llm_slots, img_name, unload_img=True)
+                    raise GpuImgNotReady(
+                        f"img slot {img_name!r} did not become ready within "
+                        f"{_IMG_READY_TIMEOUT_S}s (last state: {img_slot_state!r}); "
+                        f"rolled back to LLM mode",
+                        details={
+                            "slot": img_name,
+                            "timeout_s": _IMG_READY_TIMEOUT_S,
+                            "state": str(img_slot_state),
+                        },
+                    )
+                await asyncio.sleep(_READY_POLL_S)
 
             # last_img_activity was stamped in the pre-unload persist above;
             # no second persist needed here (spec-review tidy).

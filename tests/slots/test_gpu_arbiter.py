@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 import hal0.slots.arbiter as arbiter_mod
+from hal0.errors import Hal0Error
 from hal0.slots.arbiter import (
     ArbiterPinned,
     GpuArbiter,
@@ -96,6 +97,7 @@ class FakeManager:
         *,
         ready: set[str] | None = None,
         in_flight: dict[str, Any] | None = None,
+        slot_states: dict[str, Any] | None = None,
     ) -> None:
         self.configs = configs if configs is not None else _base_configs()
         self.ready: set[str] = set(ready or {"chat", "agent", "npu", "tts"})
@@ -104,6 +106,10 @@ class FakeManager:
         self.poll_log: list[tuple[str, int]] = []
         self.on_unload = None  # optional hook(name) fired before recording
         self.fail_loads: set[str] = set()  # load(name) raises for these slots
+        # slot_states: name → str or list[str] of states consumed per state()
+        # poll (last entry sticks). When set for a slot, load() does NOT
+        # auto-add to ready — the caller drives state via the sequence.
+        self.slot_states: dict[str, Any] = dict(slot_states or {})
 
     async def iter_configs(self) -> list[dict[str, Any]]:
         return [dict(c) for c in self.configs]
@@ -112,6 +118,13 @@ class FakeManager:
         return name in self.ready
 
     def state(self, name: str) -> str:
+        if name in self.slot_states:
+            val = self.slot_states[name]
+            if isinstance(val, list):
+                s = str(val.pop(0)) if len(val) > 1 else str(val[0])
+            else:
+                s = str(val)
+            return s
         return "ready" if name in self.ready else "offline"
 
     def in_flight_count(self, name: str) -> int:
@@ -128,7 +141,10 @@ class FakeManager:
             self.calls.append(("load_failed", name, model_id))
             raise RuntimeError(f"load failed: {name}")
         self.calls.append(("load", name, model_id))
-        self.ready.add(name)
+        # Only auto-add to ready when not scripted via slot_states (the
+        # slot_states dict drives the readiness sequence for that slot).
+        if name not in self.slot_states:
+            self.ready.add(name)
 
     async def unload(self, name: str) -> None:
         if self.on_unload is not None:
@@ -812,3 +828,134 @@ async def test_zero_window_from_toml_never_auto_restores(tmp_hal0_home: str) -> 
         assert not task.done()
     finally:
         await _cancel_loop(task)
+
+
+# ── img readiness poll after load (#714) ────────────────────────────────────
+
+
+async def test_img_never_ready_rolls_back_on_timeout(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """load() succeeds but img slot never reaches READY within the timeout →
+    rollback fires: saved llm slots reloaded, mode=llm persisted, img
+    best-effort unloaded, new Hal0Error with code gpu.img_not_ready raised."""
+    # img state stays "warming" forever — simulate crash-at-start that never
+    # transitions away from WARMING (or a stuck container).
+    fake_mgr.slot_states = {"img": "warming"}
+    monkeypatch.setattr(arbiter_mod, "_IMG_READY_TIMEOUT_S", 0.05)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="hal0.slots.arbiter"),
+        pytest.raises(Hal0Error) as ei,
+    ):
+        await arb.ensure_img()
+
+    # New error, correct code
+    assert ei.value.code == "gpu.img_not_ready"
+
+    # img unloaded (best-effort) then llm set reloaded
+    assert ("unload", "img") in fake_mgr.calls
+    assert ("load", "chat", None) in fake_mgr.calls
+    assert ("load", "agent", None) in fake_mgr.calls
+
+    # mode rolled back to llm
+    assert arb.mode is GpuMode.LLM
+    final = _read_state(state_path)
+    assert final["mode"] == "llm"
+    assert final["saved_llm_slots"] == []
+    assert final["pinned"] is False
+
+    # guard is not wedged
+    arb.guard_llm_dispatch("chat")
+
+    # retry after rollback re-attempts the full switch
+    fake_mgr.slot_states = {}  # next time img goes ready immediately via load()
+    fake_mgr.calls.clear()
+    await arb.ensure_img()
+    assert arb.mode is GpuMode.IMG
+
+
+async def test_img_eventually_ready_succeeds(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """img is WARMING for first N polls then READY → ensure_img succeeds,
+    no rollback, mode stays img."""
+    fake_mgr.slot_states = {"img": ["warming", "warming", "ready"]}
+    monkeypatch.setattr(arbiter_mod, "_IMG_READY_TIMEOUT_S", 5.0)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await arb.ensure_img()
+
+    assert arb.mode is GpuMode.IMG
+    # img loaded exactly once, no rollback loads
+    assert fake_mgr.calls[-1] == ("load", "img", "sdxl-turbo")
+    rollback_calls = [c for c in fake_mgr.calls if c[0] == "load" and c[1] in {"chat", "agent"}]
+    assert rollback_calls == []
+    final = _read_state(state_path)
+    assert final["mode"] == "img"
+
+
+async def test_img_terminal_error_rolls_back_immediately(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """img reaches ERROR state → rollback fires without burning the full
+    timeout; saved llm set reloaded, gpu.img_not_ready raised."""
+    # ERROR is terminal — arbiter must abort the poll immediately.
+    fake_mgr.slot_states = {"img": ["warming", "error"]}
+    # Set a generous timeout; the test must not need to wait for it.
+    monkeypatch.setattr(arbiter_mod, "_IMG_READY_TIMEOUT_S", 30.0)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    import time as _time
+
+    start = _time.monotonic()
+    with (
+        caplog.at_level(logging.WARNING, logger="hal0.slots.arbiter"),
+        pytest.raises(Hal0Error) as ei,
+    ):
+        await arb.ensure_img()
+    elapsed = _time.monotonic() - start
+
+    # Must finish well under the 30s timeout (should be near-instant).
+    assert elapsed < 2.0, f"terminal-error abort took too long: {elapsed:.2f}s"
+    assert ei.value.code == "gpu.img_not_ready"
+
+    assert arb.mode is GpuMode.LLM
+    assert _read_state(state_path)["mode"] == "llm"
+    assert ("unload", "img") in fake_mgr.calls
+    assert ("load", "chat", None) in fake_mgr.calls
+    assert ("load", "agent", None) in fake_mgr.calls
+    arb.guard_llm_dispatch("chat")  # not wedged
+
+
+async def test_existing_load_raises_rollback_still_works(
+    fake_mgr: FakeManager,
+    state_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Existing D5 path: load() RAISES → original RuntimeError propagates.
+    The rollback helper extraction must not break the pre-existing behavior."""
+    fake_mgr.fail_loads = {"img"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="hal0.slots.arbiter"),
+        pytest.raises(RuntimeError, match="load failed: img"),
+    ):
+        await arb.ensure_img()
+
+    # rollback executed
+    assert any("img_load_failed_rolled_back" in rec.message for rec in caplog.records)
+    assert arb.mode is GpuMode.LLM
+    assert _read_state(state_path)["mode"] == "llm"
+    assert _read_state(state_path)["saved_llm_slots"] == []
+    arb.guard_llm_dispatch("chat")
