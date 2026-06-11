@@ -129,6 +129,10 @@ be evicted out from under a streaming request.
   SSE-backed status + log tail. Lemonade `/logs/stream` folded into
   the Journal panel. Settings → Lemonade admin panel surfaces the
   daemon's `/internal/config` for inspection. Dark by default.
+  The slots page splits into Inference | Image Gen tabs: the Image-Gen
+  tab operates a containerized ComfyUI generation engine (live GTT/RAM
+  gauges, queue depth, model inventory) with a gated inference ⇄
+  generation iGPU switchover behind a blast-radius confirm.
 - **OpenWebUI prewired** — chat at `:3001`, zero config. The installer
   writes `openwebui.env` pointing at the local hal0 API.
 - **OmniRouter (8 tools)** — `generate_image`, `edit_image`,

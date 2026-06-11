@@ -19,8 +19,19 @@ provider in `src/hal0/providers/comfyui.py`. Workflow templates live
 under `src/hal0/providers/workflows/`.
 
 The `img` slot sits on the same lifecycle as the chat and embed
-slots, so it shows up in the dashboard's slot grid with the same
-states, controls, and metrics.
+slots.
+
+<Aside type="note" title="Dashboard: ComfyUI as a generation engine">
+On the dashboard, ComfyUI is no longer a per-model slot card: the
+slots page splits into **Inference | Image Gen** tabs, and the
+Image-Gen tab renders ComfyUI as one containerized *generation engine*
+pane — live GTT/RAM gauges, queue depth, verified model-inventory
+counts (PR #686). Its inference ⇄ generation toggle flips the iGPU
+between the LLM stack and ComfyUI via `POST /api/comfyui/switchover`
+(PR #690), gated per host by `HAL0_COMFYUI_SWITCHOVER_ENABLED`. See
+the dashboard docs (`docs/dashboard/v3.md`) for the switchover
+semantics.
+</Aside>
 
 <img
   src="/screenshots/capability-slots.png"
