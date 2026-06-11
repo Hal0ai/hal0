@@ -69,19 +69,23 @@ log = logging.getLogger(__name__)
 
 #: Slots that exist on every hal0 install regardless of hardware. The
 #: dashboard creates these as empty cards at first run; the bundle
-#: picker (Phase 5) populates their ``model.default`` fields.
-SEEDED_SLOTS: tuple[str, ...] = ("chat", "embed", "rerank", "stt", "tts", "img", "vision")
+#: picker (Phase 5) populates their ``model.default`` fields. ``agent``
+#: is the GPU MoE chat-role sibling of ``chat`` (moved here from the NPU
+#: set in #679 — it is a GPU slot, not the NPU FLM anchor).
+SEEDED_SLOTS: tuple[str, ...] = ("chat", "embed", "rerank", "stt", "tts", "img", "vision", "agent")
 
-#: NPU slots seeded only when the FastFlowLM ``.deb`` is installed
-#: (``shutil.which('flm')`` truthy). These back the AMDXDNA hardware
-#: context's trio mode — chat + ASR + embed coresident in one FLM
-#: process (ADR-0008 §5). Opt-in enabled at Pro+ bundle tier.
-NPU_SEEDED_SLOTS: tuple[str, ...] = ("agent", "stt-npu", "embed-npu")
+#: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
+#: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that
+#: ride the same coresident FLM process as the NPU chat anchor — which is
+#: the separate ``npu`` slot, NOT listed here. ``agent`` was previously
+#: (wrongly) in this set; it is a GPU chat-role slot and moved to
+#: SEEDED_SLOTS in #679. Opt-in at Pro+ bundle tier (ADR-0008 §5).
+NPU_SEEDED_SLOTS: tuple[str, ...] = ("stt-npu", "embed-npu")
 
 #: Back-compat alias map: old slot names → canonical new names.
 #: Aliases resolve transparently for dispatch and config lookup but are
 #: NEVER stored on disk and NEVER appear in list() / iter_configs() /
-#: /api/slots. ``agent-hermes`` maps to ``agent`` (already NPU-seeded)
+#: /api/slots. ``agent-hermes`` maps to ``agent`` (a GPU seed slot, #679)
 #: so no new TOML is created — the alias just redirects old references.
 SLOT_ALIASES: dict[str, str] = {
     "primary": "chat",

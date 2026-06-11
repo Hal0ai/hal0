@@ -60,11 +60,12 @@ def test_seeded_slots_matches_plan_section_10_2() -> None:
     # ``vision`` added in #515 (first-class vision capability, reusing the
     # curated multimodal MoE primaries + their mmproj sidecar).
     # ``primary`` renamed to ``chat`` in #654/#633.
-    assert SEEDED_SLOTS == ("chat", "embed", "rerank", "stt", "tts", "img", "vision")
+    assert SEEDED_SLOTS == ("chat", "embed", "rerank", "stt", "tts", "img", "vision", "agent")
 
 
 def test_npu_seeded_slots_matches_plan_section_10_2() -> None:
-    assert NPU_SEEDED_SLOTS == ("agent", "stt-npu", "embed-npu")
+    # #679: agent dropped — it's a GPU chat-role slot, not the NPU FLM anchor.
+    assert NPU_SEEDED_SLOTS == ("stt-npu", "embed-npu")
 
 
 def test_builtin_slots_aliases_seeded_slots() -> None:
@@ -279,6 +280,18 @@ async def test_add_slot_rejects_npu_seeded_collision(tmp_hal0_home: str) -> None
     sm = SlotManager()
     with pytest.raises(SlotConfigError, match="seeded"):
         await sm.add_slot("agent", type="llm", model="x", port=8090)
+
+
+async def test_agent_slot_non_deletable_without_flm(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #679: agent is a GPU seed slot, so it is non-deletable regardless of FLM.
+    # Regression guard — while agent was NPU-seeded, delete protection vanished
+    # on non-FLM boxes (seeded_slots() excludes the NPU trio without flm).
+    monkeypatch.setattr("hal0.slots.manager.shutil.which", lambda name: None)
+    sm = SlotManager()
+    with pytest.raises(SlotConfigError, match="seeded"):
+        await sm.delete("agent")
 
 
 async def test_add_slot_rejects_invalid_type(tmp_hal0_home: str) -> None:

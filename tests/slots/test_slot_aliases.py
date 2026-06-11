@@ -26,10 +26,12 @@ def test_seeded_slots_uses_chat_not_primary():
     assert "primary" not in SEEDED_SLOTS
 
 
-def test_npu_seeded_slots_uses_agent():
-    """NPU seeded slot is still 'agent' (was never 'agent-hermes' in seeded set)."""
-    assert "agent" in NPU_SEEDED_SLOTS
+def test_agent_is_gpu_seeded_not_npu():
+    """#679: agent is a GPU chat-role seed slot, not the NPU FLM anchor."""
+    assert "agent" in SEEDED_SLOTS
+    assert "agent" not in NPU_SEEDED_SLOTS
     assert "agent-hermes" not in NPU_SEEDED_SLOTS
+    assert NPU_SEEDED_SLOTS == ("stt-npu", "embed-npu")
 
 
 def test_slot_aliases_map():
