@@ -92,10 +92,11 @@ def resolve_slot(  # TIER1
       3. ``/audio/speech`` in path → ``tts`` slot (kokoro; model-id unreliable).
       4. ``/images/...`` in path → ``img`` slot (ComfyUI).
 
-    Path-pinned candidates (rules 1-3) accept either a local ``kind="slot"``
-    upstream or a container-backed ``kind="remote"`` upstream whose
-    ``slot_name`` matches the candidate (container slots register as remotes
-    via ``SlotManager._register_container_upstream``, #656).  All other rules
+    Path-pinned candidates (rules 1-4, plus the rule-6 model-prefix pin)
+    accept either a local ``kind="slot"`` upstream or a container-backed
+    ``kind="remote"`` upstream whose ``slot_name`` matches the candidate
+    (container slots register as remotes via
+    ``SlotManager._register_container_upstream``, #656).  All other rules
     require ``kind="slot"``.
       5. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
       6. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
@@ -144,9 +145,13 @@ def resolve_slot(  # TIER1
     elif any(frag in path for frag in _TTS_PATHS):
         candidate = "tts"
         path_pinned = True
-    # Rule 4 — image-generation path pins to the img slot.
+    # Rule 4 — image-generation path pins to the img slot.  img is a
+    # container slot post-Phase-D (ComfyUI via podman, registers as a
+    # kind="remote" upstream) — same container-remote acceptance as the
+    # embed/tts/rerank path pins.
     elif any(frag in path for frag in _IMAGE_PATHS):
         candidate = "img"
+        path_pinned = True
     elif body:
         model = body.get("model", "")
         if isinstance(model, str) and model:
@@ -155,8 +160,13 @@ def resolve_slot(  # TIER1
             if ":" in model:
                 candidate = "npu"
             # Rule 6 — image-gen model id prefix pin (sdxl-/sd-1.5-/flux-).
+            # path_pinned here means "deterministically pinned": the curated
+            # sdxl-/sd-1.5-/flux- prefixes are exact catalogue prefixes, the
+            # same trust level as a path pin — so the container-backed img
+            # remote must qualify here too (Phase D).
             elif any(m.startswith(prefix) for prefix in _IMAGE_NAME_PREFIXES):
                 candidate = "img"
+                path_pinned = True
             # Rule 7 — name-substring pin (embed/rerank → embed slot).
             elif any(hint in m for hint in _EMBED_NAME_HINTS):
                 candidate = "embed"

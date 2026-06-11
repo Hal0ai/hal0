@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
+from hal0.dispatcher.router import Dispatcher
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 
@@ -27,6 +28,23 @@ def _registry_with_slots(*names: str) -> UpstreamRegistry:
             )
         )
     return reg
+
+
+def _container_remote_img() -> Upstream:
+    """Container-backed img upstream — how SlotManager._register_container_upstream
+    registers a podman slot (kind='remote' with slot_name set, #656)."""
+    return Upstream(
+        name="img",
+        kind="remote",
+        url="http://127.0.0.1:8188/v1",
+        slot_name="img",
+        auth_style="none",
+    )
+
+
+class _FakeModelRegistry:
+    def route_for(self, model_id: str) -> str | None:
+        return None
 
 
 def test_images_generations_path_routes_to_img_slot() -> None:
@@ -83,3 +101,58 @@ def test_image_path_without_img_slot_raises_typed_error() -> None:
     with pytest.raises(LegacyResolutionFailed) as exc:
         resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
     assert exc.value.code == "dispatch.legacy_unresolved"
+
+
+# ── container-remote acceptance (Phase D — img is a podman slot, #656) ────────
+
+
+def test_image_path_accepts_container_remote() -> None:
+    """/v1/images/* path pin must accept a container-backed kind='remote' img
+    upstream — same acceptance as the embed/tts/rerank path pins."""
+    reg = _registry_with_slots("chat")
+    reg.upsert(_container_remote_img())
+    upstream = resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
+    assert upstream.name == "img"
+    assert upstream.kind == "remote"
+
+
+def test_image_model_prefix_accepts_container_remote() -> None:
+    """Rule 6 (sdxl-/sd-1.5-/flux- model prefix) on a non-image path must also
+    accept the container-backed img remote."""
+    reg = _registry_with_slots("chat")
+    reg.upsert(_container_remote_img())
+    upstream = resolve_slot(
+        "/v1/chat/completions",
+        {"model": "sdxl-turbo", "messages": [{"role": "user", "content": "hi"}]},
+        reg,
+    )
+    assert upstream.name == "img"
+    assert upstream.kind == "remote"
+
+
+def test_genuine_external_remote_still_rejected() -> None:
+    """A genuine external remote (kind='remote', slot_name=None) named 'img'
+    must still be rejected — only container remotes (slot_name set) qualify."""
+    reg = _registry_with_slots("chat")
+    reg.upsert(
+        Upstream(
+            name="img",
+            kind="remote",
+            url="http://example.com/v1",
+            slot_name=None,
+            auth_style="none",
+        )
+    )
+    with pytest.raises(LegacyResolutionFailed) as exc:
+        resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
+    assert exc.value.code == "dispatch.legacy_unresolved"
+
+
+# ── router._default_for_path image default ────────────────────────────────────
+
+
+def test_default_for_path_images() -> None:
+    """Model-less /v1/images/* request defaults to the 'img' slot, not 'chat'."""
+    reg = _registry_with_slots("img")
+    dispatcher = Dispatcher(upstream_registry=reg, model_registry=_FakeModelRegistry())
+    assert dispatcher._default_for_path("/v1/images/generations") == "img"

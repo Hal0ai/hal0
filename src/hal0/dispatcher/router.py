@@ -161,6 +161,8 @@ _EMBED_DEFAULT = "embed"
 # server with --reranking, port 8083). Previously this pointed at "embed".
 _RERANK_DEFAULT = "rerank"
 _TTS_DEFAULT = "tts"
+# Phase D: model-less /v1/images/* requests default to the img slot (ComfyUI).
+_IMAGE_DEFAULT = "img"
 
 # Outgoing upstream path rewrites applied before forwarding.
 # Key: incoming /v1/* path (as-is from the client).
@@ -1078,6 +1080,8 @@ class Dispatcher:
             return _RERANK_DEFAULT
         if "/audio/speech" in path:
             return _TTS_DEFAULT
+        if "/images/" in path:
+            return _IMAGE_DEFAULT
         return _DEFAULT_MODEL
 
     def _registry_route_for(self, model_id: str) -> tuple[str, str] | None:
