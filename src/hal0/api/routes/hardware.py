@@ -11,6 +11,8 @@ from fastapi import APIRouter, Request
 
 from hal0.config import paths
 from hal0.config.loader import load_hardware_info
+from hal0.hardware import gpu_view
+from hal0.hardware.gpu_view import GPUMemorySample
 
 log = structlog.get_logger(__name__)
 
@@ -37,13 +39,18 @@ _now = time.monotonic
 _PVE_CONFIGURE_HINT = "Configure /etc/hal0/proxmox.json to see host pressure."
 
 
-def _flatten_for_ui(info: dict[str, Any]) -> dict[str, Any]:
+def _flatten_for_ui(info: dict[str, Any], gpu: GPUMemorySample | None = None) -> dict[str, Any]:
     """Project HardwareInfo into the fields the Vue Hardware view expects.
 
     The dashboard reads ``gpu_name``, ``vram_total_mb``, ``gtt_total_mb``,
     etc. — flat shapes from haloai's old stats dict.  We keep the full
     pydantic model under ``info`` so future views can opt into the richer
     schema without breaking the current view.
+
+    ``gpu`` is the live :class:`GPUMemorySample` — the single home of the
+    ``is_uma`` carve-out signature (issue #703; the old per-request
+    ``vram > ram*0.5`` heuristic is gone). ``None`` (no stats singleton,
+    pure-function tests) degrades to "not UMA".
     """
     gpus = info.get("gpus") or []
     primary_gpu = gpus[0] if gpus else {}
@@ -55,7 +62,7 @@ def _flatten_for_ui(info: dict[str, Any]) -> dict[str, Any]:
     # pool. Surface it as gtt_total_mb; expose a separate dedicated_vram_mb
     # only for non-UMA. This stops the dashboard from treating GTT and VRAM
     # as independent buckets.
-    is_uma = vendor == "amd" and vram_mb > ram_mb * 0.5
+    is_uma = gpu.is_uma if gpu is not None else False
     platform = info.get("platform", "unknown") or "unknown"
     # memory_kind tells the UI whether to label the pool "unified" or
     # "system". Only strix-halo is genuinely unified for our purposes;
@@ -119,6 +126,23 @@ def _platform_label(platform: str, primary_gpu: dict[str, Any]) -> str:
     return base
 
 
+async def _gpu_sample(request: Request) -> GPUMemorySample | None:
+    """Take a live GPU sample off the event loop (issue #703).
+
+    Prefers the HardwareStats singleton (memoised vendor/drm detection);
+    falls back to a standalone gpu_view.sample() when no singleton is
+    wired. Never raises — flatten degrades to "not UMA" on None.
+    """
+    stats = getattr(request.app.state, "hardware_stats", None)
+    try:
+        if stats is not None and hasattr(stats, "gpu_sample"):
+            return await asyncio.to_thread(stats.gpu_sample)
+        return await asyncio.to_thread(gpu_view.sample)
+    except Exception:
+        log.warning("hardware.gpu_sample_failed", exc_info=True)
+        return None
+
+
 @router.get("/hardware")
 async def get_hardware(request: Request) -> dict[str, Any]:
     """Return cached /etc/hal0/hardware.json, falling back to a fresh probe.
@@ -126,17 +150,18 @@ async def get_hardware(request: Request) -> dict[str, Any]:
     The probe is heavy enough (subprocess fanout) that we prefer the
     cached snapshot; ``POST /api/hardware/probe`` forces a re-run.
     """
+    gpu = await _gpu_sample(request)
     target = paths.hardware_json()
     if target.exists():
         try:
             info = load_hardware_info().model_dump(mode="python")
-            return _flatten_for_ui(info)
+            return _flatten_for_ui(info, gpu)
         except Exception:
             pass
     # Cache miss → probe now.
     probe = request.app.state.hardware_probe
     info = (await probe.probe_async()).model_dump(mode="python")
-    return _flatten_for_ui(info)
+    return _flatten_for_ui(info, gpu)
 
 
 @router.post("/hardware/probe")
@@ -145,7 +170,7 @@ async def reprobe_hardware(request: Request) -> dict[str, Any]:
     probe = request.app.state.hardware_probe
     info = await probe.probe_async()
     probe.write(info)
-    return _flatten_for_ui(info.model_dump(mode="python"))
+    return _flatten_for_ui(info.model_dump(mode="python"), await _gpu_sample(request))
 
 
 async def _proxy_upstream_endpoint(
@@ -403,29 +428,23 @@ async def _local_live_stats(request: Request) -> dict[str, Any]:
     if not snap:
         return {}
 
-    # gpu_vram_used_mb is the *single* GPU memory counter the probe knows;
-    # on AMD UMA the probe picks max(vram_used, gtt_used) so it surfaces
-    # GTT (the real model bytes). Split it back out by re-reading the GTT
-    # vs VRAM totals from the existing detector helpers.
-    from hal0.hardware.probe import _amd_drm_device, _read_sysfs_mb
-
-    gtt_used: float | None = None
-    vram_used: float | None = None
-    drm = _amd_drm_device()
-    if drm is not None:
-        gtt_used = _read_sysfs_mb(drm / "mem_info_gtt_used")
-        vram_used = _read_sysfs_mb(drm / "mem_info_vram_used")
-
+    # The GTT/VRAM split + forced-high flag come typed off the
+    # GPUMemorySample that HardwareStats.snapshot() embeds (issue #703) —
+    # no per-request sysfs re-reads or private probe imports here.
     ram_used_gb = snap.get("ram_used_gb") or 0.0
     out: dict[str, Any] = {
         "ram_used_gb": ram_used_gb,
         "ram_used_mb": int(ram_used_gb * 1024),
         "ram_available_gb": snap.get("ram_available_gb"),
-        "gtt_used_mb": gtt_used,
-        "vram_used_mb": vram_used,
+        "gtt_used_mb": snap.get("gtt_used_mb"),
+        "vram_used_mb": snap.get("vram_used_mb"),
         "gpu_util": snap.get("gpu_util"),
         "gpu_vram_used_mb": snap.get("gpu_vram_used_mb"),
         "gpu_vram_total_mb": snap.get("gpu_vram_total_mb"),
+        # gpu_util stays RAW; this flag tells the dashboard the counter is
+        # pinned by a forced performance level (gpu-compute.service) and
+        # should be captioned, not trusted as load.
+        "util_is_forced_high": snap.get("util_is_forced_high"),
     }
     npu_status = await _npu_status(request)
     if npu_status is not None:

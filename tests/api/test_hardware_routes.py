@@ -24,6 +24,41 @@ from hal0.api.routes.hardware import (
     _platform_label,
 )
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
+from hal0.hardware.gpu_view import GPUMemorySample
+
+
+def _uma_sample(**overrides: object) -> GPUMemorySample:
+    """A Strix Halo-shaped live sample (tiny VRAM carve-out, huge GTT)."""
+    fields: dict = dict(
+        vendor="amd",
+        is_uma=True,
+        vram_total_mb=512.0,
+        gtt_total_mb=81920.0,
+        total_mb=81920.0,
+        vram_used_mb=100.0,
+        gtt_used_mb=2048.0,
+        used_mb=2048.0,
+        gpu_busy=1.0,
+        util_is_forced_high=True,
+    )
+    fields.update(overrides)
+    return GPUMemorySample(**fields)
+
+
+def _discrete_sample() -> GPUMemorySample:
+    """A discrete-GPU-shaped sample (big dedicated VRAM, no GTT pool)."""
+    return GPUMemorySample(
+        vendor="amd",
+        is_uma=False,
+        vram_total_mb=24576.0,
+        gtt_total_mb=None,
+        total_mb=24576.0,
+        vram_used_mb=8192.0,
+        gtt_used_mb=None,
+        used_mb=8192.0,
+        gpu_busy=0.3,
+        util_is_forced_high=False,
+    )
 
 
 def test_flatten_pass_through_kvm_with_virtio_gpu() -> None:
@@ -48,6 +83,9 @@ def test_flatten_pass_through_kvm_with_virtio_gpu() -> None:
 
 
 def test_flatten_strix_halo_is_unified() -> None:
+    """is_uma comes from the live gpu_view sample (#703) — the old
+    ``vram > ram*0.5`` route heuristic is deleted. For this fixture both
+    derivations agree (96GB pooled vram > 128GB ram * 0.5)."""
     info = HardwareInfo(
         cpu_model="AMD Ryzen AI Max+ PRO 395",
         cpu_cores=16,
@@ -58,11 +96,52 @@ def test_flatten_strix_halo_is_unified() -> None:
         npu=NPUInfo(present=True, vendor="amd", name="AMD NPU (XDNA)"),
         platform="strix-halo",
     ).model_dump(mode="python")
-    flat = _flatten_for_ui(info)
+    flat = _flatten_for_ui(info, _uma_sample())
     assert flat["platform"] == "strix-halo"
     assert flat["platform_label"] == "Strix Halo (unified memory)"
     assert flat["memory_kind"] == "unified"
     assert flat["is_uma"] is True
+    # UMA split: the probe's pooled vram_mb surfaces as GTT, not VRAM.
+    assert flat["vram_total_mb"] == 0
+    assert flat["gtt_total_mb"] == 96 * 1024
+
+
+def test_flatten_discrete_sample_is_not_uma() -> None:
+    """A discrete-shaped live sample keeps the dedicated-VRAM split even
+    when the box has lots of VRAM relative to RAM (the case the old
+    heuristic misclassified)."""
+    info = HardwareInfo(
+        cpu_model="AMD Ryzen 9 7950X",
+        cpu_cores=16,
+        cpu_threads=32,
+        ram_mb=32 * 1024,
+        unified_memory_mb=32 * 1024,
+        gpus=[GPUInfo(vendor="amd", name="Radeon RX 7900 XTX", vram_mb=24 * 1024)],
+        npu=NPUInfo(present=False),
+        platform="bare-metal-amd-gpu",
+    ).model_dump(mode="python")
+    # Old heuristic would have said UMA (24576 > 32768 * 0.5); the
+    # carve-out signature says discrete.
+    flat = _flatten_for_ui(info, _discrete_sample())
+    assert flat["is_uma"] is False
+    assert flat["vram_total_mb"] == 24 * 1024
+    assert flat["gtt_total_mb"] == 0
+    assert flat["memory_kind"] == "system"
+
+
+def test_flatten_without_sample_defaults_to_not_uma() -> None:
+    """No live sample available (no stats singleton) → inert default."""
+    info = HardwareInfo(
+        cpu_model="AMD Ryzen AI Max+ PRO 395",
+        ram_mb=128 * 1024,
+        gpus=[GPUInfo(vendor="amd", name="Radeon 8060S", vram_mb=96 * 1024)],
+        npu=NPUInfo(present=False),
+        platform="strix-halo",
+    ).model_dump(mode="python")
+    flat = _flatten_for_ui(info)
+    assert flat["is_uma"] is False
+    # Platform label still drives the memory_kind for strix-halo.
+    assert flat["memory_kind"] == "unified"
 
 
 def test_flatten_bare_metal_nvidia_promotes_gpu_into_label() -> None:
@@ -455,3 +534,56 @@ async def test_cached_snapshot_no_stats_returns_empty() -> None:
     """Missing hardware_stats singleton degrades to an empty dict."""
     req = _fake_request(None)
     assert await _cached_snapshot(req) == {}
+
+
+# ── #703: typed GPU sample feeds the route — no sysfs re-reads ───────────────
+
+
+class _GpuStatsStub:
+    """HardwareStats stand-in carrying a Strix Halo-shaped live sample."""
+
+    def snapshot(self) -> dict:
+        return {
+            "ram_used_gb": 4.0,
+            "ram_available_gb": 90.0,
+            "gpu_util": 1.0,
+            "gpu_vram_used_mb": 2048.0,
+            "gpu_vram_total_mb": 81920.0,
+            "gtt_used_mb": 2048.0,
+            "vram_used_mb": 100.0,
+            "util_is_forced_high": True,
+        }
+
+    def gpu_sample(self) -> GPUMemorySample:
+        return _uma_sample()
+
+
+class TestStatsHardwareGpuSample:
+    def test_stats_hardware_surfaces_util_is_forced_high(self, client: TestClient) -> None:
+        """The forced-high flag is an ADDITIVE field on /api/stats/hardware;
+        gpu_util stays RAW (flat 1.0 here — the lie is flagged, not fixed)."""
+        client.app.state.hardware_stats = _GpuStatsStub()
+        resp = client.get("/api/stats/hardware")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["util_is_forced_high"] is True
+        assert body["gpu_util"] == 1.0
+
+    def test_stats_hardware_split_comes_from_snapshot(self, client: TestClient) -> None:
+        """gtt_used_mb / vram_used_mb are sourced from the cached snapshot
+        (typed off the sample) — the route no longer re-reads sysfs."""
+        client.app.state.hardware_stats = _GpuStatsStub()
+        resp = client.get("/api/stats/hardware")
+        body = resp.json()
+        assert body["gtt_used_mb"] == 2048.0
+        assert body["vram_used_mb"] == 100.0
+        assert body["is_uma"] is True  # via _flatten_for_ui(gpu_sample)
+
+    def test_route_module_has_no_private_probe_imports(self) -> None:
+        """#703 acceptance: zero private probe helpers in the route module."""
+        import inspect
+
+        src = inspect.getsource(hw_mod)
+        assert "_amd_drm_device" not in src
+        assert "_read_sysfs_mb" not in src
+        assert "from hal0.hardware.probe import" not in src
