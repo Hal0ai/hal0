@@ -75,3 +75,12 @@ def test_seed_npu_toml_validates() -> None:
     assert slot.profile == "flm-npu"
     assert slot.device == "npu"
     assert slot.npu is not None and slot.npu.asr is False
+
+
+def test_seed_tts_toml_validates() -> None:
+    raw = tomllib.loads((_SEEDED_SLOTS_DIR / "tts.toml").read_text(encoding="utf-8"))
+    slot = SlotConfig.model_validate(raw)
+    assert slot.runtime == "container"
+    assert slot.profile == "kokoro-cpu"
+    assert slot.device == "cpu"
+    assert slot.port == 8084

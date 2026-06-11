@@ -230,6 +230,22 @@ export const MOCK_DATA = {
       mtp: false,
       resolved_flags: '--flash-attn on -ngl 999',
     },
+    // Phase A seed — NPU container slot (FLM toolbox).
+    {
+      name: 'flm-npu',
+      image: 'ghcr.io/hal0ai/hal0-toolbox-flm:v1',
+      flags: '',
+      mtp: false,
+      resolved_flags: '',
+    },
+    // Phase B5 seed — TTS container slot (kokoro-onnx, CPU-only).
+    {
+      name: 'kokoro-cpu',
+      image: 'ghcr.io/hal0ai/hal0-toolbox-kokoro:v1',
+      flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
+      mtp: false,
+      resolved_flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
+    },
   ],
 }
 

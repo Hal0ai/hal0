@@ -1,0 +1,11 @@
+# TTS slot — kokoro-onnx in a podman container (hal0-slot@tts), CPU-only.
+name = "tts"
+type = "tts"
+device = "cpu"
+runtime = "container"
+profile = "kokoro-cpu"
+enabled = true
+port = 8084
+
+[model]
+default = "kokoro-v1"
