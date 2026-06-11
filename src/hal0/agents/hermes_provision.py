@@ -3219,6 +3219,135 @@ def _phase_install_artifacts(state: BootstrapState) -> PhaseResult:
     )
 
 
+# ── Phase pipeline plumbing (issue #702) ────────────────────────────────────
+#
+# The pipeline's IO seams + cross-phase reads, made explicit:
+#
+#   * ``PhaseIO`` bundles every external touchpoint a phase may use
+#     (HTTP, subprocess, the slot/MCP/memory fetchers). Defaults are the
+#     real module functions, so ``PhaseIO()`` IS production behaviour;
+#     tests construct ``PhaseIO(fetch_slots=fake, ...)`` instead of
+#     monkeypatching module globals.
+#   * ``PhaseContext`` is what a phase receives: read-only state, the
+#     ``--repair`` flag (formerly the ``_repair_flag`` sentinel smuggled
+#     through ``state.phases``), the IO bundle, and ``output_of(name)``
+#     — the ONLY sanctioned way to read another phase's checkpoint.
+#   * ``Phase`` entries in ``PHASES`` declare their cross-phase reads via
+#     ``needs`` (same-run: target precedes reader) or ``needs_previous``
+#     (previous-run checkpoint: target follows reader in the list, so the
+#     value can only come from a persisted prior run). ``output_of``
+#     raises ``PhaseNeedError`` for any undeclared read;
+#     ``_validate_phase_graph`` rejects a mis-ordered PHASES list at
+#     import time.
+#
+# Path constants intentionally stay module-level (tests redirect them
+# with monkeypatch) — only behavioural IO lives in PhaseIO.
+
+
+class PhaseNeedError(RuntimeError):
+    """A phase read another phase's output without declaring the need."""
+
+
+@dataclass(frozen=True)
+class PhaseIO:
+    """The IO seams a phase may touch — the monkeypatch tax, typed.
+
+    Defaults bind the real implementations, so a default-constructed
+    ``PhaseIO`` changes nothing in production. ``run`` is
+    :func:`subprocess.run` (gateway_secrets_wire's daemon-reload + the
+    smoke-test exec path).
+    """
+
+    http_get: Callable[..., int] = _http_get
+    fetch_slots: Callable[[], list[dict[str, Any]]] = _fetch_slots
+    fetch_model_contexts: Callable[[], dict[str, int]] = _fetch_model_contexts
+    probe_mcp_server: Callable[..., dict[str, Any]] = _probe_mcp_server
+    mcp_memory_call: Callable[..., dict[str, Any]] = _mcp_memory_call
+    install_venv: Callable[..., None] = _install_venv
+    read_env_probe: Callable[[], dict[str, Any]] = _read_env_probe
+    run: Callable[..., Any] = subprocess.run
+
+
+@dataclass(frozen=True)
+class PhaseContext:
+    """Everything a phase body is allowed to see.
+
+    ``state`` is a read-only view by convention (phases return a
+    :class:`PhaseResult`; only the orchestrator writes checkpoints).
+    ``output_of(name)`` returns the named phase's checkpoint ``details``
+    dict — empty when the phase has no checkpoint yet (e.g. the
+    cross-run ``config_write → mcp_wire`` read on a fresh install) —
+    and raises :class:`PhaseNeedError` unless ``name`` was declared in
+    the calling phase's ``needs`` / ``needs_previous``.
+    """
+
+    state: BootstrapState
+    repair: bool = False
+    io: PhaseIO = field(default_factory=PhaseIO)
+    phase_name: str = "<anonymous>"
+    allowed_needs: frozenset[str] = frozenset()
+
+    def output_of(self, name: str) -> dict[str, Any]:
+        if name not in self.allowed_needs:
+            raise PhaseNeedError(
+                f"phase {self.phase_name!r} read output of {name!r} without "
+                f"declaring it (declared needs: {sorted(self.allowed_needs)})"
+            )
+        entry = self.state.phases.get(name) or {}
+        details = entry.get("details") or {}
+        return details if isinstance(details, dict) else {}
+
+
+@dataclass(frozen=True)
+class Phase:
+    """One PHASES entry: name, body, and declared cross-phase reads.
+
+    ``needs``          — same-run reads; the target MUST precede this
+                         phase in the list (validated at import).
+    ``needs_previous`` — previous-run checkpoint reads; the target MUST
+                         follow this phase in the list (if it preceded,
+                         it would be a plain same-run need). The only
+                         such edge today is ``config_write → mcp_wire``:
+                         mcp_wire probes AFTER the first render and the
+                         probed server list feeds the NEXT run's render.
+    """
+
+    name: str
+    fn: Callable[[PhaseContext], PhaseResult]
+    needs: tuple[str, ...] = ()
+    needs_previous: tuple[str, ...] = ()
+
+    @property
+    def allowed_needs(self) -> frozenset[str]:
+        return frozenset(self.needs) | frozenset(self.needs_previous)
+
+
+def _validate_phase_graph(phases: list[Phase]) -> None:
+    """Fail fast (import time) when PHASES violates a declared need."""
+    index: dict[str, int] = {}
+    for i, phase in enumerate(phases):
+        if phase.name in index:
+            raise ValueError(f"PHASES: duplicate phase name {phase.name!r}")
+        index[phase.name] = i
+    for i, phase in enumerate(phases):
+        for need in phase.needs:
+            if need not in index:
+                raise ValueError(f"PHASES: {phase.name!r} needs unknown phase {need!r}")
+            if index[need] >= i:
+                raise ValueError(
+                    f"PHASES: {phase.name!r} needs {need!r} which does not precede it "
+                    f"(reader at {i}, target at {index[need]})"
+                )
+        for need in phase.needs_previous:
+            if need not in index:
+                raise ValueError(f"PHASES: {phase.name!r} needs_previous unknown phase {need!r}")
+            if index[need] < i:
+                raise ValueError(
+                    f"PHASES: {phase.name!r} declares needs_previous on {need!r}, "
+                    f"but {need!r} precedes it — declare it as a plain same-run need"
+                )
+
+
 PHASES: list[tuple[str, Callable[[BootstrapState], PhaseResult]]] = [
     ("preflight", _phase_preflight),
     ("install", _phase_install),
