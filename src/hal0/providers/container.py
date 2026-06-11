@@ -39,6 +39,7 @@ import asyncio
 import contextlib
 import logging
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -480,6 +481,17 @@ class ContainerProvider(Provider):
         :meth:`_unit_name` / :meth:`_unit_path` which are common.
         """
         unit_path = self._unit_path(slot_name)
+        dropin_dir = unit_path.with_name(unit_path.name + ".d")
+        if dropin_dir.is_dir():
+            # Lemonade-era render_systemd_override drop-ins carry dead
+            # EnvironmentFile refs that fail container units (#694 — hit
+            # live on the Phase B tts deploy). The container unit is fully
+            # self-contained; no drop-in is ever legitimate here.
+            shutil.rmtree(dropin_dir)
+            log.info(
+                "container.stale_dropin_removed",
+                extra={"slot": slot_name, "dir": str(dropin_dir)},
+            )
         log.info(
             "container.unit_write",
             extra={"slot": slot_name, "unit_path": str(unit_path)},
