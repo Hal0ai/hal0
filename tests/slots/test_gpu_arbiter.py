@@ -13,6 +13,7 @@ in_flight_count() read from dicts, load()/unload() record calls.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -101,6 +102,7 @@ class FakeManager:
         self.calls: list[tuple[Any, ...]] = []
         self.poll_log: list[tuple[str, int]] = []
         self.on_unload = None  # optional hook(name) fired before recording
+        self.fail_loads: set[str] = set()  # load(name) raises for these slots
 
     async def iter_configs(self) -> list[dict[str, Any]]:
         return [dict(c) for c in self.configs]
@@ -121,6 +123,9 @@ class FakeManager:
         return count
 
     async def load(self, name: str, model_id: str | None = None) -> None:
+        if name in self.fail_loads:
+            self.calls.append(("load_failed", name, model_id))
+            raise RuntimeError(f"load failed: {name}")
         self.calls.append(("load", name, model_id))
         self.ready.add(name)
 
@@ -264,6 +269,70 @@ async def test_drain_timeout_proceeds(
     assert arb.mode is GpuMode.IMG
 
 
+# ── img-load failure rollback (D5 quality gate I1) ──────────────────────────
+
+
+async def test_img_load_failure_rolls_back_llm_set(
+    fake_mgr: FakeManager, state_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """img load raises AFTER llm unloads → saved set reloaded, mode=llm
+    persisted, original exception propagates, retry re-attempts the switch."""
+    fake_mgr.fail_loads = {"img"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="hal0.slots.arbiter"),
+        pytest.raises(RuntimeError, match="load failed: img"),
+    ):
+        await arb.ensure_img()
+
+    assert fake_mgr.calls == [
+        ("unload", "chat"),
+        ("unload", "agent"),
+        ("load_failed", "img", "sdxl-turbo"),
+        ("load", "chat", None),
+        ("load", "agent", None),
+    ]
+    assert any("img_load_failed_rolled_back" in rec.message for rec in caplog.records)
+    assert arb.mode is GpuMode.LLM
+    final = _read_state(state_path)
+    assert final["mode"] == "llm"
+    assert final["saved_llm_slots"] == []
+    # guard must NOT be wedged
+    arb.guard_llm_dispatch("chat")
+
+    # a retried image request re-attempts the FULL switch (no IMG no-op
+    # short-circuit against a dead img port)
+    fake_mgr.fail_loads = set()
+    fake_mgr.calls.clear()
+    await arb.ensure_img()
+    assert fake_mgr.calls[-1] == ("load", "img", "sdxl-turbo")
+    assert arb.mode is GpuMode.IMG
+
+
+async def test_img_load_failure_rollback_load_also_fails(
+    fake_mgr: FakeManager, state_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """img load raises AND one rollback load raises → mode=llm STILL
+    persisted (guard never wedges), original img exception propagates."""
+    fake_mgr.fail_loads = {"img", "chat"}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="hal0.slots.arbiter"),
+        pytest.raises(RuntimeError, match="load failed: img"),
+    ):
+        await arb.ensure_img()
+
+    # rollback continued past the failed chat load and restored agent
+    assert ("load_failed", "chat", None) in fake_mgr.calls
+    assert ("load", "agent", None) in fake_mgr.calls
+    assert any("rollback_load_failed" in rec.message for rec in caplog.records)
+    assert arb.mode is GpuMode.LLM
+    assert _read_state(state_path)["mode"] == "llm"
+    arb.guard_llm_dispatch("chat")  # not wedged
+
+
 # ── restore_llm ──────────────────────────────────────────────────────────────
 
 
@@ -310,6 +379,35 @@ async def test_restore_blocked_when_pinned_unless_force(
     assert fake_mgr.calls[0] == ("unload", "img")
 
 
+# ── concurrency: one lock, no interleaved flips ──────────────────────────────
+
+
+async def test_concurrent_ensure_img_and_restore_serialize(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """ensure_img + restore_llm fired concurrently: the switch lock
+    serializes them — full img switch first, then full restore, with zero
+    interleaved load/unload recorder entries."""
+    # drain curve forces awaits INSIDE the locked ensure_img section so the
+    # restore task genuinely contends for the lock
+    fake_mgr.in_flight = {"chat": [1, 1, 0]}
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await asyncio.gather(arb.ensure_img(), arb.restore_llm())
+
+    assert fake_mgr.calls == [
+        ("unload", "chat"),
+        ("unload", "agent"),
+        ("load", "img", "sdxl-turbo"),
+        ("unload", "img"),
+        ("load", "chat", None),
+        ("load", "agent", None),
+    ]
+    assert arb.mode is GpuMode.LLM
+    assert arb.saved_llm_slots == ()
+    assert _read_state(state_path)["mode"] == "llm"
+
+
 # ── persistence across restarts ──────────────────────────────────────────────
 
 
@@ -329,6 +427,38 @@ async def test_state_survives_restart(fake_mgr: FakeManager, state_path: Path) -
     assert ("load", "chat", None) in fake2.calls
     assert ("load", "agent", None) in fake2.calls
     assert arb2.mode is GpuMode.LLM
+
+
+async def test_partial_crash_recovery_via_restore(state_path: Path) -> None:
+    """Crash mid-switch: mode=img + saved set persisted (pre-unload ordering),
+    llm slots unloaded, img never loaded. A fresh arbiter over that state
+    file restores the saved set cleanly."""
+    state_path.write_text(
+        json.dumps(
+            {
+                "mode": "img",
+                "pinned": False,
+                "saved_llm_slots": ["chat", "agent"],
+                "last_img_activity": time.time(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    mgr = FakeManager()
+    mgr.ready = set()  # nothing survived the crash
+    arb = GpuArbiter(mgr, state_path=state_path)
+    assert arb.mode is GpuMode.IMG
+    assert set(arb.saved_llm_slots) == {"chat", "agent"}
+
+    await arb.restore_llm()
+
+    assert mgr.calls == [
+        ("unload", "img"),
+        ("load", "chat", None),
+        ("load", "agent", None),
+    ]
+    assert arb.mode is GpuMode.LLM
+    assert _read_state(state_path)["mode"] == "llm"
 
 
 def test_corrupt_state_file_falls_back_to_llm(fake_mgr: FakeManager, state_path: Path) -> None:

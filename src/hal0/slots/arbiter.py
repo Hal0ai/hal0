@@ -306,7 +306,45 @@ class GpuArbiter:
             model_default = (
                 str(model_section.get("default") or "") if isinstance(model_section, dict) else ""
             )
-            await self._manager.load(img_name, model_default or None)
+            try:
+                await self._manager.load(img_name, model_default or None)
+            except Exception:
+                # D5 quality-gate I1: at this point the llm slots are already
+                # unloaded and mode=img is persisted. If we re-raised without
+                # rolling back, the guard would 503 ALL llm traffic and the
+                # mode==IMG no-op fast path above would swallow every retry
+                # without re-attempting the img load — a wedge with no
+                # automated escape (D6 idle-restore is not wired yet).
+                # Rollback: best-effort reload of the saved llm set, then
+                # ALWAYS persist mode=llm (even when rollback loads fail —
+                # the guard must never stay wedged), then re-raise.
+                restored: list[str] = []
+                failed: list[str] = []
+                for slot in llm_slots:
+                    try:
+                        await self._manager.load(slot, None)
+                        restored.append(slot)
+                    except Exception as rollback_exc:  # best-effort rollback
+                        failed.append(slot)
+                        log.warning(
+                            "gpu_arbiter.rollback_load_failed",
+                            extra={"slot": slot, "error": str(rollback_exc)},
+                        )
+                st["mode"] = GpuMode.LLM.value
+                # Failed slots stay offline (operator reloads manually); a
+                # saved set is meaningless in llm mode, so clear it.
+                st["saved_llm_slots"] = []
+                st["pinned"] = False
+                self._persist()
+                log.warning(
+                    "gpu_arbiter.img_load_failed_rolled_back",
+                    extra={
+                        "img_slot": img_name,
+                        "restored": restored,
+                        "failed": failed,
+                    },
+                )
+                raise
 
             # last_img_activity was stamped in the pre-unload persist above;
             # no second persist needed here (spec-review tidy).
