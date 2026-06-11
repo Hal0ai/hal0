@@ -17,7 +17,9 @@ import {
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
+import { useComfyui } from '@/api/hooks/useComfyui'
 import { MemoryMap } from './memory-map'
+import { ComfyuiPane } from './comfyui-pane.jsx'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 
 const { useState: useStateS } = React;
@@ -895,6 +897,13 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   const [swapName, setSwapName] = useStateS(null);
   const [logsForSlot, setLogsForSlot] = useStateS(null);
   const [busyName, setBusyName] = useStateS(null);
+  // Slots-page tabs: "inference" (chat/embed/voice/npu) vs "image" (the ComfyUI
+  // generation engine pane). ComfyUI is one container engine, not per-model
+  // slots, and is mutually exclusive with the LLM stack — so it gets its own
+  // tab instead of a SlotCard in the Image group.
+  const [tab, setTab] = useStateS("inference");
+  const comfyQuery = useComfyui({ active: tab === "image" });
+  const comfyLive = comfyQuery.data?.container?.state === "running";
   const { active: activeBanners } = useBanners();
   const skipPath = !!activeBanners["skip-path"];
 
@@ -1224,25 +1233,54 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
       </div>
 
+      {/* Inference ⇄ Image Gen tabs. Tab 1 holds every non-image slot; tab 2 is
+          the ComfyUI generation engine pane (one container, not per-model
+          slots), which replaces the old Image-group SlotCard. */}
+      <div className="slot-tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={tab === "inference"}
+          className={"slot-tab" + (tab === "inference" ? " on" : "")}
+          onClick={() => setTab("inference")}
+        >
+          <span>Inference</span>
+          <span className="slot-tab-ct num">{slots.length - groups.img.length}</span>
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "image"}
+          className={"slot-tab comfy" + (tab === "image" ? " on" : "")}
+          onClick={() => setTab("image")}
+        >
+          <span className={"slot-tab-dot" + (comfyLive ? " live" : "")} />
+          <span>Image Gen</span>
+        </button>
+      </div>
+
       <div className="dash">
         <div className="dash-main">
-          {renderGroup("Chat", groups.chat)}
-          {/* Capabilities (C7): embedding/reranking/transcription/tts cards are
-              content-light, so they render in a denser 4-up quarter-width grid
-              instead of two separate full-width Embed/Voice sections. NPU
-              modalities (group "npu") are excluded by grouping — they live in
-              the dedicated NPU/FLM stack section below. */}
-          {renderGroup("Capabilities", [...groups.embed, ...groups.voice], { quarter: true })}
-          {renderGroup("Image", groups.img)}
+          {tab === "image" ? (
+            <ComfyuiPane />
+          ) : (
+            <>
+              {renderGroup("Chat", groups.chat)}
+              {/* Capabilities (C7): embedding/reranking/transcription/tts cards are
+                  content-light, so they render in a denser 4-up quarter-width grid
+                  instead of two separate full-width Embed/Voice sections. NPU
+                  modalities (group "npu") are excluded by grouping — they live in
+                  the dedicated NPU/FLM stack section below. */}
+              {renderGroup("Capabilities", [...groups.embed, ...groups.voice], { quarter: true })}
 
-          {slots.some(s => s.device === "npu") && (
-            <section style={{marginBottom: 24}}>
-              <div className="sec">
-                <h2>NPU<span className="ct mono">trio · 1 process · 3 roles</span></h2>
-                <div className="rule" />
-              </div>
-              <NpuFlmStack slots={slots} />
-            </section>
+              {slots.some(s => s.device === "npu") && (
+                <section style={{marginBottom: 24}}>
+                  <div className="sec">
+                    <h2>NPU<span className="ct mono">trio · 1 process · 3 roles</span></h2>
+                    <div className="rule" />
+                  </div>
+                  <NpuFlmStack slots={slots} />
+                </section>
+              )}
+            </>
           )}
         </div>
         <div className="dash-side">

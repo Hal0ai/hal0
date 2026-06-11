@@ -22,6 +22,13 @@ export const ENDPOINTS = {
   // ── Slots / status (hal0-api) ────────────────────────────────────
   status: '/api/status',
   slots: '/api/slots',
+
+  // ── ComfyUI generation engine (slots-page Image-Gen tab) ─────────
+  // Read-only aggregate of docker + systemd + ComfyUI HTTP; the
+  // switchover write-path is feature-gated server-side.
+  comfyuiStatus: '/api/comfyui/status',
+  comfyuiSwitchover: '/api/comfyui/switchover',
+
   slotMetrics: '/api/slots/metrics',
   slot: (name: string) => `/api/slots/${encodeURIComponent(name)}`,
   slotConfig: (name: string) => `/api/slots/${encodeURIComponent(name)}/config`,

@@ -55,12 +55,7 @@ from hal0.api.routes import (
     capabilities as capabilities_routes,
 )
 from hal0.api.routes import (
-    config as config_routes,
-)
-from hal0.api.routes import (
-    events as events_routes,
-)
-from hal0.api.routes import (
+    comfyui,
     hardware,
     health,
     hf,
@@ -74,6 +69,12 @@ from hal0.api.routes import (
     slots,
     updater,
     v1,
+)
+from hal0.api.routes import (
+    config as config_routes,
+)
+from hal0.api.routes import (
+    events as events_routes,
 )
 from hal0.api.routes import (
     journal as journal_routes,
@@ -1187,6 +1188,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await dispatcher.aclose()
         with contextlib.suppress(Exception):
             await lemonade_proxy_routes.aclose_client()
+        with contextlib.suppress(Exception):
+            await comfyui.aclose_client()
         log.info("hal0.api.shutdown")
 
 
@@ -1239,6 +1242,9 @@ def create_app() -> FastAPI:
         tags=["installer"],
     )
     app.include_router(slots.router, prefix="/api/slots", tags=["slots"])
+    # Read-only ComfyUI "generation engine" status for the slots-page Image-Gen
+    # tab (docker + systemd + ComfyUI HTTP), plus the feature-gated switchover.
+    app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
     app.include_router(models.router, prefix="/api/models", tags=["models"])
     # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
     # to the models surface so the dashboard's "Search HF" button has a

@@ -29,6 +29,7 @@ import './globals-install'
 //    `window` via `Object.assign(window, …)`.
 import './dashboard.css'
 import './mcp.css'
+import './dash/comfyui-pane.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'

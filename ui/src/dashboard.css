@@ -54,6 +54,16 @@
   --dev-cpu:      #9c9c95;
   --dev-npu:      #c896ff;
 
+  /* ComfyUI "generation engine" accent — its own blue the way the NPU stack
+     owns purple. Mirrored in comfyui-pane.css (scoped to .comfy-pane); kept
+     here so the slots-page Image-Gen tab can glow the same hue. */
+  --comfy:        #5ea4f9;
+  --comfy-hi:     #8cc0ff;
+  --comfy-soft:   rgba(94, 164, 249, 0.10);
+  --comfy-line:   rgba(94, 164, 249, 0.34);
+  --comfy-bg:     #0c1622;
+  --comfy-glow:   rgba(94, 164, 249, 0.20);
+
   /* Memory-map tenant colours — rotated for distinguishability vs the
      device colours used in slot segments. Amber-on-grey palette. */
   --mem-tenant-1: #b89060;
@@ -750,6 +760,26 @@ a { color: inherit; text-decoration: none; }
 }
 .dash-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .dash-side { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 12px; }
+
+/* Slots-page tabs — "Inference" (all non-image slots) ⇄ "Image Gen" (the
+   ComfyUI generation engine). Mirrors the .mcp-tabs idiom; the Image-Gen tab
+   glows ComfyUI blue when active, the way that engine owns the colour. */
+.slot-tabs { display: inline-flex; border: 1px solid var(--line); border-radius: var(--rad); overflow: hidden; margin-bottom: 20px; }
+.slot-tab {
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px;
+  background: transparent; border: none; border-right: 1px solid var(--line);
+  font-family: var(--jbm); font-size: 12px; color: var(--fg-3); cursor: pointer;
+  letter-spacing: 0.02em; transition: color 0.12s ease, background 0.12s ease;
+}
+.slot-tab:last-child { border-right: none; }
+.slot-tab:hover { color: var(--fg); background: var(--bg-2); }
+.slot-tab.on { color: var(--accent); background: var(--accent-bg); }
+.slot-tab.on.comfy { color: var(--comfy); background: var(--comfy-bg); }
+.slot-tab .slot-tab-ct { font-size: 10px; color: var(--fg-5); padding: 1px 6px; background: var(--bg-2); border-radius: 999px; min-width: 16px; text-align: center; }
+.slot-tab.on .slot-tab-ct { color: var(--accent); background: transparent; }
+.slot-tab.on.comfy .slot-tab-ct { color: var(--comfy); }
+.slot-tab .slot-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-5); }
+.slot-tab .slot-tab-dot.live { background: var(--comfy); box-shadow: 0 0 8px var(--comfy); }
 
 /* Main 50/50 row — Memory map | Throughput (home-redesign 2026-06-05).
    Both halves are .side-card so they read as a matched pair. */
