@@ -1084,6 +1084,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await lemond_bridge_task
 
+    # GpuArbiter idle-restore loop (Phase D, Task D6). Auto-restores the
+    # saved LLM set after the img (ComfyUI) slot idles out — window from the
+    # img slot's ``[image].idle_restore_minutes`` (default 5; 0 = manual-only).
+    # Mirrors the refresh_task pattern above: created at startup, cancelled +
+    # awaited on shutdown via the AsyncExitStack. Guarded so an arbiter
+    # construction failure never blocks API startup (omni-router precedent).
+    gpu_arbiter_idle_task: asyncio.Task[None] | None = None
+    try:
+        gpu_arbiter_idle_task = asyncio.create_task(slot_manager.arbiter.run_idle_loop())
+        log.info("gpu_arbiter.idle_loop_started")
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("gpu_arbiter.idle_loop_start_failed", error=str(exc))
+    app.state.gpu_arbiter_idle_task = gpu_arbiter_idle_task
+
+    async def _stop_gpu_arbiter_idle_loop() -> None:
+        if gpu_arbiter_idle_task is not None:
+            gpu_arbiter_idle_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await gpu_arbiter_idle_task
+
     # Lemonade idle-unload driver (ADR-0007 §Related, ADR-0008 §1). v0.2
     # makes Lemonade the sole backend, so this driver always starts —
     # the prior ``HAL0_BACKEND=lemonade`` gate retired in PR-10. Stored
@@ -1176,6 +1196,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await stack.enter_async_context(mgr.run())
             stack.push_async_callback(_stop_refresh_task)
             stack.push_async_callback(_stop_lemond_bridge)
+            stack.push_async_callback(_stop_gpu_arbiter_idle_loop)
             yield
     finally:
         if lemonade_metrics_shim is not None:

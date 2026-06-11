@@ -389,6 +389,56 @@ class GpuArbiter:
             self._persist()
             log.info("gpu_arbiter.llm_mode", extra={"restored": saved})
 
+    # ── idle-restore loop (D6) ───────────────────────────────────────────────
+
+    async def run_idle_loop(self, *, interval_s: float = 30.0) -> None:
+        """Background loop auto-restoring the LLM set after img idles out.
+
+        Runs forever, one tick per ``interval_s``. A tick restores iff the
+        mode is IMG, not pinned, the idle window has elapsed since the last
+        img activity (``idle_restore_minutes``; 0 = manual-only restore per
+        the #599 schema), and the img slot has no in-flight job — a long
+        Wan video render defers the restore until it finishes.
+
+        Tick exceptions are logged (``gpu_arbiter.idle_loop_error``) and the
+        loop keeps running; ``CancelledError`` propagates so the lifespan
+        can shut the task down cleanly.
+        """
+        while True:
+            await asyncio.sleep(interval_s)
+            try:
+                await self._idle_tick()
+            except asyncio.CancelledError:  # pragma: no cover — clean shutdown
+                raise
+            except Exception as exc:
+                log.warning(
+                    "gpu_arbiter.idle_loop_error",
+                    extra={"error": str(exc), "error_type": type(exc).__name__},
+                )
+
+    async def _idle_tick(self) -> None:
+        """One idle-restore evaluation; restores the LLM set when eligible."""
+        if self.idle_restore_minutes <= 0:
+            return  # 0 = manual-only restore (#599 schema), never auto
+        # status() is the single source of truth for the window math:
+        # idle_restore_at is None unless mode==img, unpinned, activity known.
+        restore_at = self.status()["idle_restore_at"]
+        if restore_at is None or time.time() < restore_at:
+            return
+        # Same img-group lookup ensure_img/restore_llm use — never hardcoded.
+        cfgs = await self._manager.iter_configs()
+        img_name = next(
+            (str(c.get("name") or "") for c in cfgs if gpu_exclusive_group(c) == "img"),
+            None,
+        )
+        if img_name is not None and self._manager.in_flight_count(img_name) > 0:
+            return  # in-flight img job — defer until it completes
+        await self.restore_llm()
+        log.info(
+            "gpu_arbiter.idle_restored",
+            extra={"idle_restore_minutes": self.idle_restore_minutes},
+        )
+
     # ── sync surface (lock-free; see module docstring for why safe) ─────────
 
     def guard_llm_dispatch(self, slot_name: str) -> None:

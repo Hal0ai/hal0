@@ -14,6 +14,7 @@ in_flight_count() read from dicts, load()/unload() record calls.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -577,6 +578,126 @@ async def test_touch_and_status(fake_mgr: FakeManager, state_path: Path) -> None
     assert arb.status()["idle_restore_at"] is None
     arb.set_pin(False)
     assert arb.status()["idle_restore_at"] is not None
+
+
+# ── idle-restore loop (D6) ───────────────────────────────────────────────────
+
+#: ~0.05s idle window expressed in minutes (idle_restore_minutes * 60 = secs).
+_TINY_WINDOW_MIN = 0.05 / 60
+
+
+async def _img_mode_arbiter(fake_mgr: FakeManager, state_path: Path) -> GpuArbiter:
+    """Arbiter already flipped to IMG with a tiny idle window, calls cleared."""
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img()
+    arb.idle_restore_minutes = _TINY_WINDOW_MIN
+    fake_mgr.calls.clear()
+    return arb
+
+
+async def _cancel_loop(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_idle_restore_fires_after_window(fake_mgr: FakeManager, state_path: Path) -> None:
+    """Past the idle window the loop restores the LLM set EXACTLY once and
+    keeps ticking (mode flips to LLM so later ticks are no-ops)."""
+    arb = await _img_mode_arbiter(fake_mgr, state_path)
+
+    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
+    try:
+        await asyncio.sleep(0.3)
+        assert fake_mgr.calls.count(("unload", "img")) == 1
+        assert ("load", "chat", None) in fake_mgr.calls
+        assert ("load", "agent", None) in fake_mgr.calls
+        assert arb.mode is GpuMode.LLM
+        assert not task.done(), "loop must stay alive after restoring"
+    finally:
+        await _cancel_loop(task)
+
+
+async def test_idle_restore_skipped_when_pinned(fake_mgr: FakeManager, state_path: Path) -> None:
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    await arb.ensure_img(pin=True)
+    arb.idle_restore_minutes = _TINY_WINDOW_MIN
+    fake_mgr.calls.clear()
+
+    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
+    try:
+        await asyncio.sleep(0.2)
+        assert fake_mgr.calls == []  # nothing unloaded/loaded
+        assert arb.mode is GpuMode.IMG
+        assert not task.done()
+    finally:
+        await _cancel_loop(task)
+
+
+async def test_idle_restore_skipped_when_window_zero(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """idle_restore_minutes=0 → manual-only restore (#599 schema), never auto."""
+    arb = GpuArbiter(fake_mgr, state_path=state_path, idle_restore_minutes=0)
+    await arb.ensure_img()
+    # backdate activity far past ANY window so a buggy 0-window would fire
+    arb._load_state()["last_img_activity"] = time.time() - 10_000
+    arb._persist()
+    fake_mgr.calls.clear()
+
+    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
+    try:
+        await asyncio.sleep(0.2)
+        assert fake_mgr.calls == []
+        assert arb.mode is GpuMode.IMG
+        assert not task.done()
+    finally:
+        await _cancel_loop(task)
+
+
+async def test_in_flight_img_job_defers_restore(fake_mgr: FakeManager, state_path: Path) -> None:
+    """An in-flight img job (long Wan video render) defers the restore even
+    past the window; it fires once the job count drops to zero."""
+    arb = await _img_mode_arbiter(fake_mgr, state_path)
+    fake_mgr.in_flight = {"img": 1}
+
+    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
+    try:
+        await asyncio.sleep(0.2)
+        assert ("unload", "img") not in fake_mgr.calls
+        assert arb.mode is GpuMode.IMG
+
+        fake_mgr.in_flight = {"img": 0}  # render finished
+        await asyncio.sleep(0.2)
+        assert fake_mgr.calls.count(("unload", "img")) == 1
+        assert arb.mode is GpuMode.LLM
+    finally:
+        await _cancel_loop(task)
+
+
+async def test_idle_loop_survives_restore_exception(
+    fake_mgr: FakeManager, state_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """restore_llm raising must not kill the loop: the error is logged and
+    the restore succeeds on the next eligible tick."""
+    arb = await _img_mode_arbiter(fake_mgr, state_path)
+    fake_mgr.fail_loads = {"chat"}  # restore_llm raises mid-reload
+
+    with caplog.at_level(logging.WARNING, logger="hal0.slots.arbiter"):
+        task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
+        try:
+            await asyncio.sleep(0.2)
+            assert any("idle_loop_error" in rec.message for rec in caplog.records)
+            assert arb.mode is GpuMode.IMG  # failed restore left mode persisted
+            assert not task.done(), "loop must survive tick exceptions"
+
+            fake_mgr.fail_loads = set()
+            await asyncio.sleep(0.2)
+            assert arb.mode is GpuMode.LLM
+            assert ("load", "chat", None) in fake_mgr.calls
+            assert ("load", "agent", None) in fake_mgr.calls
+        finally:
+            await _cancel_loop(task)
 
 
 # ── manager wiring ───────────────────────────────────────────────────────────
