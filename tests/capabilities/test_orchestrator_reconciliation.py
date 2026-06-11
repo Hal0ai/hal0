@@ -15,18 +15,28 @@ already disagreed (e.g. a previous failed apply, a manual edit, or a
 seed/migration bug), no rewrite fired and the next load() spawned
 against the stale slot TOML.
 
-The fix reconciles unconditionally whenever the slot is going to be
-enabled. These tests pin that contract.
+The fix reconciles whenever the slot is going to be enabled. Since
+issue #697 the reconciliation runs through ``hal0.slot_config``'s
+``SlotConfigStore`` (compute-only ``apply`` + atomic ``commit``), so
+these tests pin the contract against the on-disk slot TOML — the
+reconciled truth — rather than against SlotManager call recording.
 """
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
+
+
+def _read_slot_toml(home: Path, slot: str = "embed") -> dict[str, Any]:
+    path = home / "etc" / "hal0" / "slots" / f"{slot}.toml"
+    with open(path, "rb") as f:
+        return tomllib.load(f)
 
 
 @pytest.fixture(autouse=True)
@@ -195,6 +205,7 @@ def orchestrator(
 
 async def test_apply_rewrites_slot_toml_when_drift_present(
     orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
+    drifted_state: Path,
 ) -> None:
     """Re-enabling embed with the *same* selection still rewrites the slot TOML.
 
@@ -202,11 +213,11 @@ async def test_apply_rewrites_slot_toml_when_drift_present(
     enabled false->true (without changing backend/provider) does not
     introduce a selection diff -- but the slot TOML still says vulkan.
 
-    Regression: the orchestrator must call ``update_config`` with
-    ``backend="flm"`` (the slot-toml form of catalog id "npu") so the
-    next ``load()`` reads the correct backend.
+    Regression: the slot TOML on disk must end up with ``backend="flm"``
+    (the slot-toml form of catalog id "npu") so the next ``load()``
+    reads the correct backend.
     """
-    orch, fake = orchestrator
+    orch, _fake = orchestrator
 
     await orch.apply("embed", "embed", {"enabled": False})
     await orch.apply(
@@ -220,26 +231,40 @@ async def test_apply_rewrites_slot_toml_when_drift_present(
         },
     )
 
-    update_calls = [c for c in fake.calls if c[0] == "update_config"]
-    assert update_calls, (
-        "update_config was never invoked -- slot TOML drift was not reconciled. "
-        f"All calls: {fake.calls}"
+    on_disk = _read_slot_toml(drifted_state)
+    assert on_disk.get("backend") == "flm", (
+        f"slot TOML backend was not reconciled to FLM: {on_disk!r}"
     )
-
-    last_updates = update_calls[-1][2]["updates"]
-    assert last_updates.get("backend") == "flm", (
-        f"slot TOML backend was not reconciled to FLM: {last_updates!r}"
+    assert on_disk.get("provider") == "flm", (
+        f"slot TOML provider was not reconciled to FLM: {on_disk!r}"
     )
-    assert last_updates.get("provider") == "flm", (
-        f"slot TOML provider was not reconciled to FLM: {last_updates!r}"
-    )
+    assert on_disk.get("device") == "npu", f"slot TOML device not reconciled: {on_disk!r}"
 
 
 async def test_apply_reconciles_before_load(
-    orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
+    drifted_state: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rewrite must happen *before* load() so the spawn reads fresh config."""
-    orch, fake = orchestrator
+    """The rewrite must hit disk *before* load() so the spawn reads fresh config."""
+    monkeypatch.setattr(
+        CapabilityOrchestrator,
+        "_validate_model_in_catalog",
+        lambda self, slot, child, model_id, backend_id: None,
+    )
+
+    class DiskPeekSlotManager(FakeSlotManager):
+        """Snapshots the slot TOML at load() time — what the spawn would read."""
+
+        def __init__(self, home: Path) -> None:
+            super().__init__()
+            self._home = home
+            self.seen_at_load: list[dict[str, Any]] = []
+
+        async def load(self, slot_name: str, model_id: str | None = None) -> _StubSlot:
+            self.seen_at_load.append(_read_slot_toml(self._home, slot_name))
+            return await super().load(slot_name, model_id=model_id)
+
+    fake = DiskPeekSlotManager(drifted_state)
+    orch = CapabilityOrchestrator(slot_manager=fake)
 
     await orch.apply("embed", "embed", {"enabled": False})
     fake.calls.clear()
@@ -255,25 +280,114 @@ async def test_apply_reconciles_before_load(
         },
     )
 
-    methods = [c[0] for c in fake.calls]
-    assert "update_config" in methods, f"no rewrite happened: {methods}"
-    assert "load" in methods, f"no load happened: {methods}"
-    assert methods.index("update_config") < methods.index("load"), (
-        f"update_config must precede load so the spawn reads the new TOML; "
-        f"observed order: {methods}"
+    assert fake.seen_at_load, f"no load happened: {fake.calls}"
+    assert fake.seen_at_load[0].get("backend") == "flm", (
+        "load() observed a stale slot TOML — reconciliation must be committed "
+        f"to disk before the spawn: {fake.seen_at_load[0]!r}"
     )
 
 
 async def test_apply_no_rewrite_on_pure_disable(
     orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
+    drifted_state: Path,
 ) -> None:
     """Disabling the slot does not require rewriting the TOML."""
     orch, fake = orchestrator
+    before = _read_slot_toml(drifted_state)
 
     await orch.apply("embed", "embed", {"enabled": False})
 
     update_calls = [c for c in fake.calls if c[0] == "update_config"]
     assert update_calls == [], f"unexpected update_config on disable transition: {update_calls}"
+    assert _read_slot_toml(drifted_state) == before, "slot TOML changed on pure disable"
+
+
+async def test_apply_commit_failure_leaves_both_files_at_before(
+    orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
+    drifted_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invariant (#697): a failed mid-apply leaves disk at ``before``.
+
+    When the store's commit blows up partway, NEITHER capabilities.toml
+    nor the slot TOML may be left changed — the half-reconciled state is
+    exactly the drift this module exists to prevent.
+    """
+    import hal0.slot_config as slot_config_mod
+
+    orch, _fake = orchestrator
+    home = drifted_state
+    caps_path = home / "etc" / "hal0" / "capabilities.toml"
+    slot_before = _read_slot_toml(home)
+    caps_before = caps_path.read_bytes()
+
+    real_write = slot_config_mod.write_toml_atomic
+
+    def _boom_on_slot(path, data):  # type: ignore[no-untyped-def]
+        if Path(path).name == "embed.toml":
+            raise OSError("disk full")
+        real_write(path, data)
+
+    monkeypatch.setattr(slot_config_mod, "write_toml_atomic", _boom_on_slot)
+
+    from hal0.errors import Hal0Error
+
+    with pytest.raises(Hal0Error):
+        await orch.apply(
+            "embed",
+            "embed",
+            {
+                "enabled": True,
+                "backend": "npu",
+                "provider": "flm",
+                "model": "nomic-embed-text-v1.5-q8_0",
+            },
+        )
+
+    monkeypatch.setattr(slot_config_mod, "write_toml_atomic", real_write)
+    assert _read_slot_toml(home) == slot_before
+    assert caps_path.read_bytes() == caps_before
+
+
+async def test_apply_lifecycle_failure_still_persists_intent(
+    drifted_state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A load() failure AFTER commit keeps the persisted selection (the
+    pre-#697 'persist the user's intent even if the slot bounce failed'
+    behaviour) — and both files stay mutually consistent."""
+    from hal0.capabilities.config import load_capabilities_config
+    from hal0.capabilities.orchestrator import CapabilityApplyFailed
+
+    monkeypatch.setattr(
+        CapabilityOrchestrator,
+        "_validate_model_in_catalog",
+        lambda self, slot, child, model_id, backend_id: None,
+    )
+
+    class ExplodingSlotManager(FakeSlotManager):
+        async def load(self, slot_name: str, model_id: str | None = None) -> _StubSlot:
+            raise RuntimeError("lemond is down")
+
+    orch = CapabilityOrchestrator(slot_manager=ExplodingSlotManager())
+    await orch.apply("embed", "embed", {"enabled": False})
+
+    with pytest.raises(CapabilityApplyFailed):
+        await orch.apply(
+            "embed",
+            "embed",
+            {
+                "enabled": True,
+                "backend": "npu",
+                "provider": "flm",
+                "model": "nomic-embed-text-v1.5-q8_0",
+            },
+        )
+
+    caps_path = drifted_state / "etc" / "hal0" / "capabilities.toml"
+    sel = load_capabilities_config(caps_path).selections["embed"]["embed"]
+    assert sel.enabled is True, "user intent must persist past a lifecycle failure"
+    on_disk = _read_slot_toml(drifted_state)
+    assert on_disk.get("backend") == "flm", "slot TOML must match the persisted selection"
 
 
 # ── Step 1: _CHILD_TO_SLOT_TYPE + type written by _ensure_slot_exists ──────────
@@ -656,13 +770,9 @@ async def test_embed_gpu_to_npu_no_load(
     )
 
     assert "--embed 1" in client.set_calls[-1]["flm"]["args"], client.set_calls
-    # device rewritten to npu on the slot TOML.
-    dev_writes = [
-        c
-        for c in fake.calls
-        if c[0] == "update_config" and c[1] == "embed" and c[2]["updates"].get("device") == "npu"
-    ]
-    assert dev_writes, f"device not rewritten to npu: {fake.calls}"
+    # device rewritten to npu on the slot TOML (committed by the store).
+    on_disk = _read_slot_toml(home)
+    assert on_disk.get("device") == "npu", f"device not rewritten to npu: {on_disk!r}"
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
         f"gpu->npu must not bounce the embed slot: {fake.calls}"
     )
