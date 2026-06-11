@@ -7,13 +7,19 @@
 // the cpp-httplib server behind :8188.
 //
 // The switchover (inference ⇄ generation) flips the single iGPU between the LLM
-// stack and ComfyUI by running root-owned scripts. The endpoint answers 202 and
-// runs the script pair in the background; the `switchover` block on /status
+// stack and ComfyUI via the API's GPU arbiter (Phase D): switching to
+// generation drains and STOPS the LLM slots, then starts the ComfyUI img slot;
+// switching back restores the saved slots. The endpoint answers 202 and the
+// arbiter runs the transition in-process; the `switchover` block on /status
 // (active/target/error) is what tracks the transition to terminal — the pane's
 // poll renders it, per the async-job-must-poll-to-terminal rule. Tearing down a
 // non-empty queue needs `force: true` (the confirm dialog is that consent). The
 // whole path stays feature-gated server-side (HAL0_COMFYUI_SWITCHOVER_ENABLED,
 // 501 when off) — surfaced as a toast, never an optimistic flip.
+//
+// `arbiter` is the arbiter-truth block ({mode img|llm, pinned, saved slots,
+// idle_restore_at}); it is null when the arbiter is unavailable (gate off /
+// older backend) and every consumer fails soft to the legacy display.
 
 import { useMutation, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { api, apiGet } from '../client'
@@ -36,6 +42,16 @@ export interface ComfyuiSwitchover {
   error: string | null
 }
 
+// GPU-arbiter truth block. `mode` is the arbiter's own vocabulary
+// ('img' | 'llm', distinct from the legacy 'generation' | 'inference');
+// `idle_restore_at` is an epoch (seconds) or null when pinned / not armed.
+export interface ComfyuiArbiter {
+  mode: string
+  pinned: boolean
+  saved_llm_slots: string[]
+  idle_restore_at: number | null
+}
+
 export interface ComfyuiStatus {
   mode: ComfyuiMode
   reachable: boolean
@@ -47,6 +63,7 @@ export interface ComfyuiStatus {
   inference: { lemonade: boolean; hermes: boolean }
   inventory: Record<string, number> | null
   switchover: ComfyuiSwitchover
+  arbiter: ComfyuiArbiter | null
 }
 
 // Neutral default so the pane renders a coherent "stopped/inference" shell on
@@ -63,6 +80,7 @@ export const COMFYUI_FALLBACK: ComfyuiStatus = {
   inference: { lemonade: false, hermes: false },
   inventory: null,
   switchover: { active: false, target: null, error: null },
+  arbiter: null,
 }
 
 // Active (Image-Gen tab open): 4s, fast enough to track queue + pressure.
@@ -86,6 +104,9 @@ export interface SwitchoverBody {
   // Required to tear down a non-empty render queue (jobs are dropped). The
   // confirm dialog's warning is the consent that sets this.
   force?: boolean
+  // Optional: pin image mode as part of the switch (disables idle
+  // auto-restore until unpinned).
+  pin?: boolean
 }
 
 // raw:true so the dev mockFetch GET-shim can't mask the 501/503 gate — we want
@@ -94,5 +115,19 @@ export function useComfyuiSwitchover() {
   return useMutation({
     mutationFn: (body: SwitchoverBody) =>
       api<unknown>(ENDPOINTS.comfyuiSwitchover, { method: 'POST', body: body as any, raw: true }),
+  })
+}
+
+// Pin / unpin image mode (disables / re-arms the arbiter's idle auto-restore).
+// Synchronous 200 {"pinned":bool} — the caller refetches /status to reflect
+// the new arbiter state. raw:true for the same 501-gate reason as switchover.
+export function useComfyuiPin() {
+  return useMutation({
+    mutationFn: (body: { pinned: boolean }) =>
+      api<{ pinned: boolean }>(ENDPOINTS.comfyuiPin, {
+        method: 'POST',
+        body: body as any,
+        raw: true,
+      }),
   })
 }

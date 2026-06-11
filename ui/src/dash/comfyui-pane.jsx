@@ -11,16 +11,26 @@
 //   - queue depth (ComfyUI /queue)
 //   - model inventory counts (verified file counts on the share)
 // The switchover toggle opens a blast-radius confirm dialog, then calls the
-// feature-gated POST /api/comfyui/switchover (202 + background scripts; the
-// status poll's `switchover` block drives the transitional UI — never an
-// optimistic flip; 501 toast when the host gate is off).
+// feature-gated POST /api/comfyui/switchover (202; the API's GPU arbiter
+// drains + stops the LLM slots and starts the ComfyUI img slot in-process —
+// no shell-out. The status poll's `switchover` block drives the transitional
+// UI — never an optimistic flip; 501 toast when the host gate is off).
+// The `arbiter` block on /status (mode img|llm, pinned, idle_restore_at) is
+// arbiter-truth: it drives the mode chip, the pin toggle and the auto-restore
+// countdown; when it is null (gate off / older backend) the pane fails soft
+// to the legacy container-telemetry display.
 //
 // Deliberately NOT wired yet (need ComfyUI's WS /ws + AMDGPUMonitor, or the
 // privileged path): per-node progress %, it/s, GPU util/temp/clocks, per-job
 // queue names, and the container start/stop/restart controls. Those render in a
 // disabled/"—" state so the layout stays faithful without inventing numbers.
 
-import { useComfyui, useComfyuiSwitchover, COMFYUI_FALLBACK } from '@/api/hooks/useComfyui'
+import {
+  useComfyui,
+  useComfyuiSwitchover,
+  useComfyuiPin,
+  COMFYUI_FALLBACK,
+} from '@/api/hooks/useComfyui'
 
 const { useState } = React
 
@@ -203,12 +213,15 @@ function SwitchoverConfirm({ target, queuePending, busy, onCancel, onConfirm }) 
             {toGen ? (
               <>
                 Only one of <span className="mono">{'{ inference, ComfyUI }'}</span> can hold the
-                single iGPU. Switching stops the LLM runtime and starts the ComfyUI container.
+                single iGPU. Switching drains in-flight requests, then <b>stops the LLM slots</b>{' '}
+                and starts the ComfyUI container. The stopped slots restore automatically after
+                the engine sits idle — pinning image mode disables that auto-restore.
               </>
             ) : (
               <>
-                This stops the ComfyUI container and restarts the LLM runtime. In-flight renders
-                are not interrupted by the dashboard — drain the queue first.
+                This stops the ComfyUI container and <b>restores the LLM slots</b> that were
+                stopped by the switchover. In-flight renders are not interrupted by the
+                dashboard — drain the queue first.
               </>
             )}
           </p>
@@ -238,19 +251,19 @@ function SwitchoverConfirm({ target, queuePending, busy, onCancel, onConfirm }) 
           <div className="cf-steps">
             {toGen ? (
               <>
-                <span className="n">1</span> <span className="cmd">stop-inference.sh</span>{' '}
-                <span className="arr">→</span> <span className="cmd">comfy-up.sh</span>
+                <span className="n">1</span> <span className="cmd">drain + stop LLM slots</span>{' '}
+                <span className="arr">→</span> <span className="cmd">start ComfyUI</span>
               </>
             ) : (
               <>
-                <span className="n">1</span> <span className="cmd">comfy-down.sh</span>{' '}
-                <span className="arr">→</span> <span className="cmd">start-inference.sh</span>
+                <span className="n">1</span> <span className="cmd">stop ComfyUI</span>{' '}
+                <span className="arr">→</span> <span className="cmd">restore LLM slots</span>
               </>
             )}
           </div>
         </div>
         <div className="cf-f">
-          <span className="note">runs root-owned scripts on the runtime host</span>
+          <span className="note">the GPU arbiter on the runtime host runs the switchover</span>
           <span className="grow" style={{ flex: 1 }} />
           <button className="rbtn" onClick={onCancel} disabled={busy}>
             Cancel
@@ -280,15 +293,36 @@ const FLOWS = [
 export function ComfyuiPane() {
   const q = useComfyui()
   const sw = useComfyuiSwitchover()
+  const pin = useComfyuiPin()
   const st = q.data || COMFYUI_FALLBACK
   const [open, setOpen] = useState(false)
   const [confirm, setConfirm] = useState(null) // target mode or null
 
   const gen = st.mode === 'generation'
   const containerUp = st.container?.state === 'running'
-  const engine = st.engine || 'stopped'
+  // GPU-arbiter truth block (null → fail soft to the legacy display).
+  const arb = st.arbiter || null
+  // Post-migration the engine IS the podman img slot, so when the arbiter
+  // block is present its mode is the engine truth: img implies the engine is
+  // up even if container telemetry lags a poll; llm implies stopped. Container
+  // telemetry stays the fallback when the arbiter is unavailable.
+  const engineRaw = st.engine || 'stopped'
+  const engine = arb
+    ? arb.mode === 'img'
+      ? engineRaw === 'stopped'
+        ? 'running'
+        : engineRaw
+      : 'stopped'
+    : engineRaw
+  // Idle auto-restore countdown — recomputed on each status poll (renders in
+  // minutes, so no per-second timer needed).
+  const restoreMin =
+    arb && arb.mode === 'img' && !arb.pinned && arb.idle_restore_at
+      ? Math.max(1, Math.ceil((arb.idle_restore_at * 1000 - Date.now()) / 60_000))
+      : null
   // A switch in flight overrides the snapshot state: the pane's poll is what
-  // tracks the transition to terminal (202 + background scripts server-side).
+  // tracks the transition to terminal (202 + the arbiter's in-process
+  // transition server-side).
   const switching = !!st.switchover?.active
   const switchError = st.switchover?.error || null
   const stateLabel = switching
@@ -307,6 +341,30 @@ export function ComfyuiPane() {
 
   const href = comfyHref()
   const openComfy = () => window.open(href, '_blank', 'noopener')
+
+  // Pin toggle — synchronous 200 {"pinned":bool}, so mirror the switchover's
+  // refetch-not-optimistic pattern: toast, then refetch /status so the arbiter
+  // block (pin state + countdown) re-renders from server truth.
+  const doPin = async () => {
+    if (!arb || pin.isPending) return
+    const next = !arb.pinned
+    try {
+      await pin.mutateAsync({ pinned: next })
+      toast(next ? 'Image mode pinned — auto-restore disabled.' : 'Unpinned — auto-restore re-armed.', 'ok')
+      q.refetch()
+    } catch (err) {
+      const code = String(err?.code || '')
+      if (code === 'comfyui.switchover_disabled' || err?.status === 501) {
+        toast(
+          'ComfyUI switchover is disabled on this host — set HAL0_COMFYUI_SWITCHOVER_ENABLED=1 ' +
+            'on hal0-api to enable it.',
+          'warn'
+        )
+      } else {
+        toast(err?.message ? `pin failed: ${err.message}` : 'pin failed', 'warn')
+      }
+    }
+  }
 
   const doSwitch = async () => {
     const target = confirm
@@ -369,6 +427,28 @@ export function ComfyuiPane() {
               <span className="dot" />
               {stateLabel}
             </span>
+            {/* Arbiter mode chip — arbiter-truth display; hidden (fail-soft)
+                when the arbiter block is null. */}
+            {arb && (
+              <span
+                className={'epill ' + (arb.mode === 'img' ? 'running' : 'stopped')}
+                data-testid="comfy-arbiter-chip"
+                title={
+                  arb.mode === 'img'
+                    ? 'The GPU arbiter holds the iGPU for image generation — LLM slots are stopped.'
+                    : 'The LLM stack holds the iGPU — the image engine is parked.'
+                }
+              >
+                <span className="dot" />
+                {arb.mode === 'img' ? 'image mode' : 'inference'}
+                {arb.pinned && arb.mode === 'img' ? ' · pinned' : ''}
+              </span>
+            )}
+            {restoreMin != null && (
+              <span className="meta" data-testid="comfy-restore-countdown">
+                auto-restore in ~{restoreMin}m
+              </span>
+            )}
             {switchError && !switching && (
               <span className="meta" style={{ color: 'var(--warn)' }} title={switchError}>
                 last switch failed
@@ -376,6 +456,22 @@ export function ComfyuiPane() {
             )}
             <span className="grow" style={{ flex: 1 }} />
             <span className="eh-right">
+              {/* Pin toggle — only with an arbiter; disables idle auto-restore. */}
+              {arb && (
+                <button
+                  className={'rbtn' + (arb.pinned ? ' primary' : '')}
+                  data-testid="comfy-pin-toggle"
+                  onClick={doPin}
+                  disabled={pin.isPending}
+                  title={
+                    arb.pinned
+                      ? 'Image mode is pinned — auto-restore disabled. Click to unpin.'
+                      : 'Pin image mode (disables the idle auto-restore of LLM slots)'
+                  }
+                >
+                  {pin.isPending ? '…' : arb.pinned ? 'pinned' : 'pin'}
+                </button>
+              )}
               <button
                 className="rbtn ghost-comfy"
                 disabled={!containerUp}

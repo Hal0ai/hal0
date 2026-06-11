@@ -215,6 +215,9 @@ const HAL0_DATA = {
       group: "img",
       state: "idle",
       isDefault: true,
+      // Phase D: the img slot is the podman ComfyUI container slot.
+      profile: "comfyui",
+      runtime: "container",
       port: 8098,
       pid: 28518,
       metrics: { rpm: 2, avg: 4.1, res: "512×512", mem: 1.2 },
@@ -232,6 +235,25 @@ const HAL0_DATA = {
       metrics: { toks: 0, ttft: null, ctx: 8192, kv: null, mem: 4.0 },
     },
   ],
+
+  // ComfyUI /api/comfyui/status mock — canonical shape incl. the Phase D GPU
+  // arbiter block (default: LLM stack holds the iGPU). NOTE: /api/comfyui/*
+  // is deliberately NOT in mock.ts's MOCK_ALLOWLIST so γ specs can drive the
+  // pane via page.route (profiles-crud convention); this object documents the
+  // shape and feeds any HAL0_DATA-driven demo reader.
+  comfyui: {
+    mode: "inference",
+    reachable: false,
+    engine: "stopped",
+    container: { name: "comfyui", state: "exited" },
+    endpoint: null,
+    memory: null,
+    queue: { running: 0, pending: 0 },
+    inference: { lemonade: true, hermes: true },
+    inventory: { checkpoints: 3, diffusion: 2, loras: 8, vae: 2 },
+    switchover: { active: false, target: null, error: null },
+    arbiter: { mode: "llm", pinned: false, saved_llm_slots: [], idle_restore_at: null },
+  },
 
   bundles: [
     {

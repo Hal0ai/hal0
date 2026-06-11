@@ -3,6 +3,7 @@
 
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useInstallState, bundleNameOr } from '@/api/hooks/useInstallState'
+import { useComfyui } from '@/api/hooks/useComfyui'
 
 const { useState: useStateP, useEffect: useEffectP, useRef: useRefP, createContext: createContextP, useContext: useContextP } = React;
 
@@ -241,6 +242,17 @@ const BANNER_CATALOG = [
     ],
   },
   {
+    // Live surface is <GpuImageModeBanner> (reads the /api/comfyui/status
+    // arbiter block); this entry keeps the Tweaks-panel demo toggle working.
+    id: "gpu-image-mode", scope: "global", kind: "info",
+    eyebrow: "GPU · arbiter",
+    heading: "GPU: image mode",
+    body: "LLM slots are stopped while image generation holds the GPU — they restore automatically after idle.",
+    actions: [
+      { label: "View slots", primary: true, onClick: () => window.location.hash = "#slots" },
+    ],
+  },
+  {
     id: "restart-required", scope: "global", kind: "warn",
     eyebrow: "Restart required",
     heading: "Lemonade restart required to apply config changes",
@@ -445,6 +457,37 @@ function UpdateBanner() {
   );
 }
 
+// ─── GpuImageModeBanner — live-data wrapper around <Banner> ─────────────
+// Phase D8: mirrors the UpdateBanner pattern — the catalog entry of the
+// same id ("gpu-image-mode") stays around for the Tweaks demo toggle, but
+// the real surface is this component, fed by the polled /api/comfyui/status
+// arbiter block. Self-shows while the GPU arbiter holds the iGPU for image
+// generation (arbiter.mode === "img"); fails soft (renders nothing) when the
+// arbiter block is null (gate off / older backend). Dismiss is per-episode:
+// it resets when the GPU returns to llm mode so the next switchover
+// re-surfaces the banner.
+function GpuImageModeBanner() {
+  const q = useComfyui();
+  const [dismissed, setDismissed] = useStateP(false);
+  const isImg = q.data?.arbiter?.mode === "img";
+  useEffectP(() => { if (!isImg) setDismissed(false); }, [isImg]);
+  if (!isImg || dismissed) return null;
+  return (
+    <Banner
+      kind="info"
+      eyebrow="GPU · arbiter"
+      heading="GPU: image mode"
+      body="LLM slots are stopped while image generation holds the GPU — they restore automatically after idle."
+      actions={
+        <button className="btn sm" onClick={() => { window.location.hash = "#slots"; }}>
+          View slots
+        </button>
+      }
+      onDismiss={() => setDismissed(true)}
+    />
+  );
+}
+
 // ─── Dropdown menu ───────────────────────────────────────────────────────
 function Menu({ anchor = "right", items, onClose, style }) {
   return (
@@ -477,4 +520,4 @@ function Menu({ anchor = "right", items, onClose, style }) {
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner });
+Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner });

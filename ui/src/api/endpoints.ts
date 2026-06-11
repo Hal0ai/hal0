@@ -28,6 +28,9 @@ export const ENDPOINTS = {
   // switchover write-path is feature-gated server-side.
   comfyuiStatus: '/api/comfyui/status',
   comfyuiSwitchover: '/api/comfyui/switchover',
+  // Pin image mode (disables the arbiter's idle auto-restore). 501 when the
+  // switchover gate is off.
+  comfyuiPin: '/api/comfyui/pin',
 
   slotMetrics: '/api/slots/metrics',
   slot: (name: string) => `/api/slots/${encodeURIComponent(name)}`,

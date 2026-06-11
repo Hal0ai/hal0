@@ -69,6 +69,16 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     ],
   },
   {
+    // Phase D8 — live surface is primitives.jsx <GpuImageModeBanner>.
+    id: 'gpu-image-mode',
+    scope: 'global',
+    kind: 'info',
+    eyebrow: 'GPU · arbiter',
+    heading: 'GPU: image mode',
+    body: 'LLM slots are stopped while image generation holds the GPU — they restore automatically after idle.',
+    actions: [{ label: 'View slots', primary: true }],
+  },
+  {
     id: 'restart-required',
     scope: 'global',
     kind: 'warn',

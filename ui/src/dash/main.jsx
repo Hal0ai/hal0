@@ -214,6 +214,9 @@ function App() {
                 the current install. BannerStack continues to drive the
                 Tweaks-panel demo toggles for every other banner state. */}
             <UpdateBanner />
+            {/* Phase D8: self-renders while the GPU arbiter reports image
+                mode (/api/comfyui/status arbiter.mode === "img"). */}
+            <GpuImageModeBanner />
             <BannerStack scope="global" route={route} />
           </div>
           {renderView()}
