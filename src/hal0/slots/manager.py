@@ -62,6 +62,7 @@ from hal0.slots.state import (
 
 if TYPE_CHECKING:
     from hal0.config.schema import SlotConfig
+    from hal0.slots.arbiter import GpuArbiter
 
 log = logging.getLogger(__name__)
 
@@ -288,6 +289,10 @@ class SlotManager:
         self._idle_after_s: float = idle_after_s
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         self._idle_monitor_task: asyncio.Task[None] | None = None
+        # GpuArbiter (Phase D, spec §7) — constructed lazily on first
+        # ``.arbiter`` access so CLI/test contexts that never touch image
+        # mode pay nothing. See the ``arbiter`` property below.
+        self._arbiter: GpuArbiter | None = None
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -2033,6 +2038,55 @@ class SlotManager:
     def in_flight_count(self, slot_name: str) -> int:
         """Return the number of currently-active ``serving()`` contexts."""
         return self._serving_count.get(slot_name, 0)
+
+    # ── GpuArbiter (Phase D, spec §7) ────────────────────────────────────────
+
+    @property
+    def arbiter(self) -> GpuArbiter:
+        """Lazily-constructed exclusive-GPU arbiter (llm ⇄ img groups).
+
+        State persists under the same var-lib root the slot state files
+        use (``paths.var_lib()``, HAL0_HOME-redirected in tests).
+        ``idle_restore_minutes`` comes from the img slot's ``[image]``
+        section when one is configured (D1), default 5.
+        """
+        if self._arbiter is None:
+            from hal0.slots.arbiter import GpuArbiter
+
+            self._arbiter = GpuArbiter(
+                self,
+                state_path=paths.var_lib() / "gpu_arbiter.json",
+                idle_restore_minutes=self._img_idle_restore_minutes(),
+            )
+        return self._arbiter
+
+    def _img_idle_restore_minutes(self) -> int:
+        """Read ``[image].idle_restore_minutes`` from the img-group slot TOML.
+
+        Synchronous direct TOML scan, mirroring ``idle_timeout_by_model``
+        (the ``arbiter`` property can't await). The first slot whose config
+        derives to the ``img`` exclusive group wins; missing/invalid values
+        fall back to the spec default of 5 minutes.
+        """
+        import tomllib
+
+        from hal0.slots.arbiter import gpu_exclusive_group
+
+        for name in self._all_configured_slot_names():
+            path = self._config_file(name)
+            try:
+                with open(path, "rb") as f:
+                    data = tomllib.load(f)
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            if gpu_exclusive_group(data) != "img":
+                continue
+            image = data.get("image") or data.get("image_gen") or {}
+            val = image.get("idle_restore_minutes") if isinstance(image, dict) else None
+            if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+                return val
+            return 5
+        return 5
 
     # ── IDLE monitor ─────────────────────────────────────────────────────────
 
