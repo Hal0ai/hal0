@@ -55,3 +55,23 @@ def test_default_models_dir_is_flm_cache() -> None:
         "/var/lib/hal0/.config/flm/models",
         "/var/lib/hal0/.config/flm/models",
     ) in spec.mounts
+
+
+def test_model_table_context_size_drives_ctx_len() -> None:
+    """[model].context_size (SlotConfig shape) must reach --ctx-len.
+
+    Regression: build_env read only the lemond-era ctx_size/defaults shapes
+    and silently fell back to 8192 for container slots (live repro on CT105,
+    Phase A deploy).
+    """
+    spec = FLMProvider().container_spec(_slot_cfg(), _model_info())
+    idx = spec.command.index("--ctx-len")
+    assert spec.command[idx + 1] == "16384"
+
+
+def test_legacy_ctx_size_still_wins_when_model_table_absent() -> None:
+    cfg = _slot_cfg(ctx_size=4096)
+    cfg["model"] = {"default": "gemma3:4b"}  # no context_size
+    spec = FLMProvider().container_spec(cfg, _model_info())
+    idx = spec.command.index("--ctx-len")
+    assert spec.command[idx + 1] == "4096"

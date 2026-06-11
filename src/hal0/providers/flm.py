@@ -155,7 +155,13 @@ class FLMProvider(Provider):
         debug shells, native systemd fallback) can use them too.
         """
         port = slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port", 8086)
-        ctx = slot_cfg.get("ctx_size") or slot_cfg.get("defaults", {}).get("context_size", 8192)
+        # [model].context_size is the SlotConfig shape (container slots);
+        # ctx_size / defaults.context_size are lemond-era legacy shapes.
+        ctx = (
+            (slot_cfg.get("model") or {}).get("context_size")
+            or slot_cfg.get("ctx_size")
+            or slot_cfg.get("defaults", {}).get("context_size", 8192)
+        )
         flm_tag = model_info.get("flm_tag") or model_info.get("_model_key") or "qwen3:0.6b"
 
         npu_table = slot_cfg.get("npu") or {}
