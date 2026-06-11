@@ -75,21 +75,23 @@ def _seed_stt_upstream(client: TestClient, port: int = 8089) -> None:
 
 
 def _seed_tts_upstream(client: TestClient, port: int = 8090) -> None:
-    """Register a fake TTS slot the dispatcher's legacy fallback will land on.
+    """Register a fake TTS slot at the ``tts`` upstream name.
 
-    Same fallthrough logic as STT — the dispatcher routes unknown ``model``
-    ids to the ``chat`` slot, so we register there.
+    POST /v1/audio/speech is path-routed to the ``tts`` slot (B4 — path-based
+    routing bypasses model-id mismatches between "kokoro" / "kokoro-v1" / "tts").
+    Register under ``tts`` so both legacy-fallback Rule 2 and
+    _default_for_path land on the right upstream.
     """
     client.app.state.upstreams.upsert(
         Upstream(
-            name="chat",
+            name="tts",
             kind="slot",
             url=f"http://127.0.0.1:{port}/v1",
-            slot_name="chat",
+            slot_name="tts",
             auth_style="none",
         )
     )
-    _pin_slot_ready(client)
+    _pin_slot_ready(client, slot_name="tts")
 
 
 def _install_mock_transport(client: TestClient, handler: httpx.MockTransport | object) -> None:
@@ -282,6 +284,40 @@ def test_v1_audio_speech_happy_path(client: TestClient) -> None:
     assert r.status_code == 200, r.text
     assert r.content == fake_wav
     assert r.headers["content-type"].startswith("audio/wav")
+
+
+def test_v1_audio_speech_kokoro_v1_reaches_tts_upstream(client: TestClient) -> None:
+    """model='kokoro-v1' on /audio/speech must reach the tts upstream.
+
+    Kokoro-v1 is the client-facing model id but the container advertises
+    'kokoro'.  Path-based routing (B4) means the model id is irrelevant —
+    /audio/speech always resolves to the tts slot.
+    """
+    _seed_tts_upstream(client)
+
+    fake_wav = b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 32
+
+    captured: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["path"] = req.url.path
+        return httpx.Response(
+            200,
+            content=fake_wav,
+            headers={"content-type": "audio/wav"},
+        )
+
+    _install_mock_transport(client, handler)
+
+    r = client.post(
+        "/v1/audio/speech",
+        json={"model": "kokoro-v1", "input": "hello world", "voice": "af_bella"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.content == fake_wav
+    # Confirm the request reached the mock upstream (forwarded, not 503/404).
+    assert captured.get("path") is not None, "handler never called — dispatch failed"
 
 
 # ── Sanity: the scrubber leaves non-audio routes alone ────────────────────────

@@ -27,6 +27,12 @@ from hal0.upstreams.registry import Upstream, UpstreamRegistry
 # Mirrors haloai lib/proxy.py:51-58 (embeddings + rerank both target embed).
 _EMBED_PATHS = ("/embeddings", "/rerank")
 
+# Path fragments that pin a request to the TTS slot (kokoro container).
+# Model-id matching is unreliable — the kokoro container advertises "kokoro"
+# while clients send "kokoro-v1", "tts", etc. — so we route by path instead.
+# Only /audio/speech (synthesis); /audio/transcriptions is STT, not TTS.
+_TTS_PATHS = ("/audio/speech",)
+
 # Path fragments that pin a request to the image-gen slot (ComfyUI). The
 # OpenAI shape is `/v1/images/generations` — when that hits the legacy
 # fallback we don't want it routed to the chat slot.
@@ -69,14 +75,15 @@ def resolve_slot(  # TIER1
 
     Resolution rules (in order):
       1. ``/embeddings`` or ``/rerank`` in path → ``embed`` slot.
-      2. ``/images/...`` in path → ``img`` slot (ComfyUI).
-      3. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
-      4. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
-      5. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
-      6. Model id exactly matches a registered slot upstream name (other
+      2. ``/audio/speech`` in path → ``tts`` slot (kokoro; model-id unreliable).
+      3. ``/images/...`` in path → ``img`` slot (ComfyUI).
+      4. Model id contains ``:`` (FLM tag-style) → ``npu`` slot.
+      5. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
+      6. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
+      7. Model id exactly matches a registered slot upstream name (other
          than ``chat``) → that slot.  Back-compat aliases (``primary``
          → ``chat``, ``agent-hermes`` → ``agent``) are resolved first.
-      7. Fallback → ``chat`` slot.
+      8. Fallback → ``chat`` slot.
 
     Args:
         path:       The original request path (e.g. "/v1/chat/completions").
@@ -96,24 +103,29 @@ def resolve_slot(  # TIER1
     # Rule 1 — path-based pin (embeddings/rerank).
     if any(frag in path for frag in _EMBED_PATHS):
         candidate = "embed"
-    # Rule 2 — image-generation path pins to the img slot.
+    # Rule 2 — TTS path pin (/audio/speech → tts slot).
+    # Model-id matching is unreliable for kokoro (server advertises "kokoro",
+    # clients send "kokoro-v1"/"tts"/etc.) so we route purely by path.
+    elif any(frag in path for frag in _TTS_PATHS):
+        candidate = "tts"
+    # Rule 3 — image-generation path pins to the img slot.
     elif any(frag in path for frag in _IMAGE_PATHS):
         candidate = "img"
     elif body:
         model = body.get("model", "")
         if isinstance(model, str) and model:
             m = model.lower()
-            # Rule 3 — FLM tag format "name:tag" routes to NPU.
+            # Rule 4 — FLM tag format "name:tag" routes to NPU.
             if ":" in model:
                 candidate = "npu"
-            # Rule 4 — image-gen model id prefix pin (sdxl-/sd-1.5-/flux-).
+            # Rule 5 — image-gen model id prefix pin (sdxl-/sd-1.5-/flux-).
             elif any(m.startswith(prefix) for prefix in _IMAGE_NAME_PREFIXES):
                 candidate = "img"
-            # Rule 5 — name-substring pin (embed/rerank).
+            # Rule 6 — name-substring pin (embed/rerank).
             elif any(hint in m for hint in _EMBED_NAME_HINTS):
                 candidate = "embed"
             else:
-                # Rule 6 — explicit slot-name addressing.
+                # Rule 7 — explicit slot-name addressing.
                 # Resolve back-compat aliases (primary→chat, agent-hermes→agent)
                 # before the upstream lookup so old callers still land correctly.
                 m_resolved = SLOT_ALIASES.get(m, m)
@@ -121,7 +133,7 @@ def resolve_slot(  # TIER1
                 if slot_match is not None and slot_match.kind == "slot" and m_resolved != "chat":
                     candidate = m_resolved
 
-    # Rule 7 — fallback default slot.
+    # Rule 8 — fallback default slot.
     if candidate is None:
         candidate = "chat"
 

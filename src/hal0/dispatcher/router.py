@@ -158,6 +158,7 @@ _RECOVERABLE_TRANSPORT_ERRORS = (
 _DEFAULT_MODEL = "chat"
 _EMBED_DEFAULT = "embed"
 _RERANK_DEFAULT = "embed"
+_TTS_DEFAULT = "tts"
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
@@ -1062,6 +1063,8 @@ class Dispatcher:
             return _EMBED_DEFAULT
         if "/rerank" in path:
             return _RERANK_DEFAULT
+        if "/audio/speech" in path:
+            return _TTS_DEFAULT
         return _DEFAULT_MODEL
 
     def _registry_route_for(self, model_id: str) -> tuple[str, str] | None:
