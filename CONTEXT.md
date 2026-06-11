@@ -367,24 +367,30 @@ The Dispatcher stops knowing the state-cache, the disk fallback, and the enum. E
 2026-06-07 audit (ANSWERS §2.1). Candidate 2 of the 2026-06-11 review. **Proposed** — the
 `state()` half is implemented by in-flight PR #649; `is_ready_for_dispatch()` remains (#696).
 
-## SlotViewAggregator (proposed)
+## SlotViewAggregator
 
-Proposed stateless module that lifts the five enrichment concerns inline in
-`api/routes/slots.py:list_slots()` (state serialization, Lemonade `/v1/health` enrich + drift
-detect, container systemctl/port probe, per-slot memory accounting, metric injection) behind
-**eager `snapshot() -> list[SlotView]`** (single computation, no per-concern composition seam
-until a second caller justifies one). Takes its stores as constructor dependencies
-(slot_manager, registry, metrics, lemonade shim) so tests inject fakes instead of crossing
-HTTP. The route becomes a thin adapter. Decision: resist per-concern methods — one caller today
-makes a composable enrichment pipeline a hypothetical seam; add `snapshot(include_metrics=...)`
-only when the admin MCP surface actually needs state-without-metrics. Candidate 3 of the
-2026-06-11 review. See [[SlotView]].
+Stateless module (`src/hal0/slot_view/`, issue #698 / PR #706) that lifts the five enrichment
+concerns previously inline in `api/routes/slots.py:list_slots()` (state serialization,
+Lemonade `/v1/health` enrich + drift detect, container systemctl/port probe, per-slot memory
+accounting, metric injection) behind **eager `snapshot() -> list[SlotView]`** (single
+computation, no per-concern composition seam until a second caller justifies one). Takes its
+stores as constructor dependencies — the real set is wider than the four nominal ones
+(model_cache, upstreams, last_used_model, slot_pull_jobs also come off `app.state`; see the
+class docstring) — so tests inject fakes instead of crossing HTTP. The route is a thin
+adapter. Decision held: no per-concern methods — one caller today makes a composable
+enrichment pipeline a hypothetical seam; add `snapshot(include_metrics=...)` only when the
+admin MCP surface actually needs state-without-metrics. Per-concern logic lives as
+module-level functions (`serialize_slot`, `lemonade_enrichment`, `container_enrichment`,
+`synthesize_upstream_entries`), each unit-tested with fake stores; helpers shared with
+`get_slot` / `routes/health.py` remain in `slots.py` as request-bound adapters. Candidate 3
+of the 2026-06-11 review. See [[SlotView]].
 
-## SlotView (proposed)
+## SlotView
 
 The enriched per-slot record `SlotViewAggregator.snapshot()` emits — one slot's state plus its
-Lemonade/container enrichment, memory attribution, and metrics, as a typed object rather than
-the ad-hoc dict assembled inline in the route today. See [[SlotViewAggregator]].
+Lemonade/container enrichment, memory attribution, and metrics (`SlotMetricsView`), as a typed
+object (with `to_dict()` for the API shape) rather than the ad-hoc dict previously assembled
+inline in the route. See [[SlotViewAggregator]].
 
 ## model_meta
 
