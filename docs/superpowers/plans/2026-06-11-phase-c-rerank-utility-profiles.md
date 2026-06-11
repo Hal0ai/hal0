@@ -171,6 +171,20 @@ def test_no_rerank_slot_falls_back() -> None: ...   # pre-migration behavior: No
 
 ---
 
+### Task C4B: #696 — public `SlotManager.state()` + `is_ready_for_dispatch()` (locked interface)
+
+**Context (arch-review drop 2026-06-11):** issue #696 locked a public-readiness interface (glossary PR #699). `state(name) -> SlotState`: cache-first, state.json fallback, OFFLINE default — keep that signature EXACTLY. `is_ready_for_dispatch(name) -> bool` owns the ready-set rule (READY | SERVING | IDLE) in exactly one place. The rule is currently duplicated in THREE sites: `dispatcher/router.py` `_ensure_slot_loaded_backend_aware` + `_check_slot_ready_for_dispatch`, and `dispatcher/flm_trio.py` `_container_npu_url` (Phase A inline `{"ready","serving"}` — note adopting the locked set is a BEHAVIOR CHANGE there: IDLE npu containers become dispatchable instead of falling back to lemond; that's correct and gets its own test). Claimed on #696 — do not narrow.
+
+**Files:**
+- Modify: `src/hal0/slots/manager.py` (public `state()` + `is_ready_for_dispatch()`; read what private accessors exist — if a `status()`-based path already computes this, the new methods wrap, not duplicate)
+- Modify: `src/hal0/dispatcher/router.py` (both call sites consume `is_ready_for_dispatch`)
+- Modify: `src/hal0/dispatcher/flm_trio.py` (`_container_npu_url` state check → `is_ready_for_dispatch`)
+- Test: `tests/slots/test_manager_readiness_api.py` (create) + extend `tests/dispatcher/test_flm_trio_container.py` (IDLE case)
+
+- [ ] **Steps:** failing tests first (state(): cache hit, cache-miss→state.json, missing→OFFLINE; is_ready_for_dispatch: true for READY/SERVING/IDLE, false for everything else; flm_trio: IDLE npu container resolves static port — lemond never called) → implement → refactor the three call sites (each site's existing tests must stay green; where a site's old inline set differed, update ITS tests consciously with a comment) → `.venv/bin/python -m pytest tests/slots tests/dispatcher tests/api -q -p no:randomly` → `git commit -s -m "feat(slots): public state() + is_ready_for_dispatch() — single ready-set rule (closes #696)"`.
+
+---
+
 ### Task C5: Seeds + consumer config — rerank.toml, utility.toml, rerank_url default
 
 **Files:**
@@ -251,7 +265,7 @@ install.sh loop: `for seed_slot in npu tts rerank utility`. schema.py rerank_url
 ### Task C8: Gate, PR, CT105 deploy + e2e, #649 close
 
 - [ ] **Step 1:** full gate (pytest --ignore=harness; ruff check/format src tests; ui build). Known env-dependent: hermes-provision docker test.
-- [ ] **Step 2:** push `feat/phase-c-rerank-utility-profiles`, PR (`--head`), CI green, squash-merge. Close #649: `gh pr close 649 --comment "Superseded: proxy.py became load-bearing for container path-pin routing (Phase B/C of the lemonade-removal spec); retiring the legacy resolver is Phase E scope where lemonade_proxy + heuristics go together. SlotManager.state() can be cherry-picked separately if needed."`
+- [ ] **Step 2:** push `feat/phase-c-rerank-utility-profiles`, PR (`--head`), CI green, squash-merge. PR body MUST state: "#696 implemented here (both halves: state() per locked signature + is_ready_for_dispatch); #649 narrowed to proxy.py retirement = Phase E" (coordination comments already posted on #696 + #649 — do NOT close #649 unilaterally; the arch-review session coordinates it). Phase E guardrail (#695): when Tier-4 heuristics are deleted, the omni-router filter is the surviving classification site — never relocate the model-id prefix pins.
 - [ ] **Step 3 (deploy, Tier 2/3):** `wip hal0 claim`; backups (`rerank.toml.bak-phase-c`, `utility.toml.bak-phase-c`); `git pull && scripts/deploy.sh`; migrate live rerank.toml + utility.toml to seed shapes (fix the blank `device=""`!); delete stale `/var/lib/hal0/slots/embed-rerank/` state + the embed-rerank drop-in dir (C3 only cleans dirs for slots being started — embed-rerank has no slot anymore, clean manually); update live `hal0.toml` `rerank_url = "http://127.0.0.1:8083"` (leave `rerank_enabled` as-is); `POST /api/slots/rerank/load` + `/api/slots/utility/load`.
 - [ ] **Step 4 (e2e matrix → PR comment):**
   1. Both units active, containers up, vulkan image, `--reranking` in rerank argv
