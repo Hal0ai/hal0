@@ -607,6 +607,11 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "",
         "mtp": False,
     },
+    "kokoro-cpu": {
+        "image": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
+        "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
+        "mtp": False,
+    },
 }
 
 

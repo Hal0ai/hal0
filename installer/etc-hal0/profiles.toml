@@ -32,3 +32,10 @@ mtp   = false
 image = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
 flags = ""
 mtp   = false
+
+[profile.kokoro-cpu]
+# CPU TTS slot (kokoro-onnx). No GPU devices. Flags feed kokoro_server.py;
+# --model_path points at the shared model store so no download on start.
+image = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
+flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
+mtp   = false

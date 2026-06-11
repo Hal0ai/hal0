@@ -140,7 +140,9 @@ class TestLoadProfilesConfig:
 
     def test_seed_count(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert len(cfg.profile) == 4  # moe-rocmfp4, dense-mtp-rocmfp4, vulkan-std, flm-npu
+        assert (
+            len(cfg.profile) == 5
+        )  # moe-rocmfp4, dense-mtp-rocmfp4, vulkan-std, flm-npu, kokoro-cpu
 
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
@@ -229,3 +231,13 @@ class TestSeedFileParity:
             assert file_entry["image"] == code_vals["image"], (
                 f"profiles.toml image for {name!r} differs from SEED_PROFILES"
             )
+
+
+# ── kokoro-cpu seed profile ───────────────────────────────────────────────────
+
+
+def test_kokoro_cpu_seed_profile() -> None:
+    prof = SEED_PROFILES["kokoro-cpu"]
+    assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
+    assert "--model_path" in prof["flags"]
+    assert prof["mtp"] is False
