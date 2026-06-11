@@ -369,7 +369,18 @@ def capabilities_toml_payload(cfg: CapabilityConfig) -> dict[str, Any]:
 
 
 def save_capabilities_config(cfg: CapabilityConfig, path: Path | None = None) -> None:
-    """Atomically rewrite ``capabilities.toml`` from a validated config."""
+    """Atomically rewrite ``capabilities.toml`` from a validated config.
+
+    NOTE(#697): the capability-apply path writes through
+    ``hal0.slot_config.SlotConfigStore`` instead (one ChangeSet covering
+    both files). This helper remains for the NON-apply writers whose
+    semantics don't fit a selection ChangeSet: the first-boot seed
+    (``CapabilityOrchestrator.initialize_if_missing``), the schema
+    migrations (``auto_migrate_capabilities_file`` + the
+    ``hal0 capabilities migrate*`` CLI with its ``.v1.bak`` backup
+    dance). Both serialise through :func:`capabilities_toml_payload`,
+    so the on-disk shape cannot diverge from the store's.
+    """
     target = path if path is not None else capabilities_toml_path()
     write_toml_atomic(target, capabilities_toml_payload(cfg))
 
