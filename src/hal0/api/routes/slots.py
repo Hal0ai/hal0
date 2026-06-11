@@ -34,6 +34,15 @@ from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
 from hal0.model_meta import device_to_backend, is_resolvable
+from hal0.slot_view import (
+    SlotViewAggregator,
+    container_enrichment,
+    fetch_lemonade_health,
+    lemonade_enrichment,
+    loaded_model_names,
+    serialize_slot,
+    synthesize_upstream_entries,
+)
 from hal0.slots.manager import Slot, SlotManager
 
 # Auth was removed in ADR-0012. All routes are open on the local network.
@@ -70,35 +79,20 @@ def _get_slot_manager(request: Request) -> SlotManager:
 def _slot_to_dict(slot: Slot, request: Request | None = None) -> dict[str, Any]:
     """Serialise a real Slot snapshot into the API shape.
 
-    Adds ``kind="local"`` so the UI can distinguish real slots from the
-    synthetic upstream-backed entries (which carry ``kind="remote"`` or
-    similar and ``_synthetic: true``).
+    Request-bound adapter over :func:`hal0.slot_view.serialize_slot`
+    (issue #698) — kept here because every per-slot route (create / get /
+    config / backend / lifecycle) and ``routes/health.py`` call it with a
+    ``Request`` in hand.
 
     When ``request`` is provided, also includes a ``models`` list pulled
     from the shared model cache. For an FLM slot serving chat + embed +
     asr concurrently, this surfaces all three tags so the dashboard can
     render the slot as multi-model instead of showing only the chat tag.
     """
-    base = slot.as_dict()
-    base["kind"] = "local"
-    base["status"] = slot.state.value
-    # Lift backend / provider out of metadata to the top level so the UI
-    # doesn't have to dig — the slot snapshot's `backend` is only set on
-    # transitions that pass it explicitly, but metadata carries both
-    # consistently after create / update_config.
-    meta = base.get("metadata") or {}
-    if not base.get("backend") and meta.get("backend"):
-        base["backend"] = meta.get("backend")
-    if not base.get("provider") and meta.get("provider"):
-        base["provider"] = meta.get("provider")
+    model_cache: dict[str, Any] | None = None
     if request is not None:
-        cache = getattr(request.app.state, "model_cache", {}) or {}
-        loaded = list(cache.get(slot.name, []))
-        if slot.model_id and slot.model_id in loaded:
-            loaded.remove(slot.model_id)
-            loaded.insert(0, slot.model_id)
-        base["models"] = loaded
-    return base
+        model_cache = getattr(request.app.state, "model_cache", {}) or {}
+    return serialize_slot(slot, model_cache=model_cache)
 
 
 #: Trigger substring for the nuclear-evict log line. lemond emits this
@@ -111,18 +105,14 @@ NUCLEAR_EVICT_TRIGGER: str = (
 
 
 async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, Any]]:
-    """Build per-slot Lemonade-derived state for list_slots.
+    """Build per-slot Lemonade-derived state for slot snapshots.
 
-    Calls ``/v1/health`` once, then walks the slot configs to build a
+    Request-bound adapter over :func:`hal0.slot_view.lemonade_enrichment`
+    (issue #698) — kept here for ``get_slot``'s per-card refresh. Calls
+    ``/v1/health`` once, then walks the slot configs to build a
     ``{slot_name: {lemonade_state, backend_url?, coresident_group?}}``
     map. Never raises — a down lemond returns an empty enrichment so
     the dashboard degrades to the on-disk view rather than 500ing.
-
-    Coresident grouping (ADR-0008 §5, plan §5.2):
-      A slot of type=llm + device=npu serving as the chat anchor and
-      any sibling ``stt-npu`` / ``embed-npu`` slots that are enabled
-      share a ``coresident_group=npu-flm-trio`` marker. The dashboard
-      uses this to render a "trio" badge linking the three cards.
     """
     sm = getattr(request.app.state, "slot_manager", None)
     if sm is None:
@@ -131,201 +121,14 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
         configs = await sm.iter_configs()
     except Exception:
         return {}
-
-    # Single /v1/health probe shared across every slot — calling once
-    # per slot would 5x lemond load for a 5-slot dashboard refresh.
-    from hal0.lemonade.errors import LemonadeError
-    from hal0.providers import lemonade_provider
-
-    health: dict[str, Any] = {}
-    try:
-        health = await lemonade_provider().client().health()
-    except LemonadeError:
-        health = {}
-    except Exception:
-        # Defensive: any error reading health degrades to "no enrichment"
-        # rather than tunnelling up as a 500 — the dashboard is the
-        # primary consumer and would render a broken card.
-        health = {}
-
-    loaded_by_model: dict[str, dict[str, Any]] = {}
-    if isinstance(health, dict):
-        for key in ("loaded", "all_models_loaded"):
-            entries = health.get(key)
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                name = entry.get("model_name")
-                if isinstance(name, str) and name:
-                    loaded_by_model[name] = entry
-
-    # First pass — pick out the NPU LLM slot(s) so we can decide if
-    # the trio is "active" (i.e. there IS an npu-llm slot enabled).
-    npu_llm_enabled: list[str] = [
-        str(cfg.get("name", ""))
-        for cfg in configs
-        if cfg.get("device") == "npu"
-        and cfg.get("type") == "llm"
-        and cfg.get("enabled") is not False
-    ]
-    trio_active = bool(npu_llm_enabled)
-
-    from hal0.slots.manager import SlotManager
-
-    out: dict[str, dict[str, Any]] = {}
-    for cfg in configs:
-        name = str(cfg.get("name", ""))
-        if not name:
-            continue
-        # Container slots use a separate enrichment path (_container_state_enrichment).
-        # Skip them here so they don't get a bogus lemonade_state="idle" from a
-        # lemond health probe that has no knowledge of the container.
-        if SlotManager._is_container_slot(cfg):
-            continue
-        enabled = cfg.get("enabled") is not False
-        model_default = ""
-        model_labels: list[str] = []
-        model_section = cfg.get("model")
-        if isinstance(model_section, dict):
-            model_default = str(model_section.get("default") or "")
-            raw_labels = model_section.get("labels", ())
-            if isinstance(raw_labels, (list, tuple)):
-                model_labels = [str(x) for x in raw_labels]
-        entry: dict[str, Any] = {}
-
-        # PR-18: lift slot ``type`` + model ``labels`` + model ``default``
-        # + ``enabled`` so the dashboard's chat surface can build the
-        # persona dropdown (which chat-type slots are enabled?) and
-        # decide whether to opt in to OmniRouter (does the active
-        # persona's model carry the ``tool-calling`` label?) without
-        # making a second call to /api/slots/{name}/config per slot.
-        # The fields are purely additive — pre-PR-18 consumers ignore
-        # them.
-        slot_type = cfg.get("type")
-        if isinstance(slot_type, str) and slot_type:
-            entry["type"] = slot_type
-        if model_default:
-            entry["model_default"] = model_default
-        if model_labels:
-            entry["labels"] = model_labels
-        entry["enabled"] = enabled
-
-        # Spec 1 / Component 1: surface the three edit-panel config fields so
-        # the card + drawer seed their controls without a per-slot /config
-        # fetch. ``enable_thinking`` is tri-valued on disk (true/false/absent);
-        # absent → null (effective OFF). ``n_gpu_layers`` falls back to the
-        # ModelConfig default sentinel (-1 = all layers) when unset.
-        entry["enable_thinking"] = cfg.get("enable_thinking")
-        n_gpu = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
-        entry["n_gpu_layers"] = n_gpu if isinstance(n_gpu, int) else -1
-        # Issue #548: expose rope_freq_base so the Edit drawer can dirty-track
-        # it and avoid clobbering the on-disk value on unrelated saves.
-        # Absent (None) is surfaced as-is — frontend treats null as "use
-        # model default" (0.0 sentinel) and only writes back when changed.
-        rope = model_section.get("rope_freq_base") if isinstance(model_section, dict) else None
-        entry["rope_freq_base"] = rope if isinstance(rope, (int, float)) else None
-
-        # Spec 1 / Component 2 (issue #587): surface idle_timeout_s,
-        # workers, and the slot's freeform llamacpp_args so the Edit
-        # drawer can seed from real on-disk values. Without these the
-        # drawer used hardcoded constants (900 / 1 /
-        # "--flash-attn on --no-mmap") and unconditionally rewrote the
-        # on-disk values on every Save — same bug class as #584. The
-        # on-disk field for the freeform overlay is ``[server].extra_args``
-        # (ServerConfig); the dashboard's wire key is ``llamacpp_args``
-        # (matches the global lemond admin panel), so we map at this
-        # boundary. ``idle_timeout_s`` and ``workers`` are flat top-level
-        # SlotConfig fields, hoisted from [slot] by the loader. Defaults
-        # are NOT applied here — the wire payload is the truth source
-        # the dashboard uses to dirty-track changes, so an absent
-        # on-disk field should surface as null/None, not the schema
-        # default (which would let a stale slot sneak in a new value
-        # on a no-op save).
-        entry["idle_timeout_s"] = cfg.get("idle_timeout_s")
-        entry["workers"] = cfg.get("workers")
-        server_cfg = cfg.get("server")
-        if server_cfg is None:
-            extra_args: Any = None
-        elif isinstance(server_cfg, dict):
-            extra_args = server_cfg.get("extra_args")
-        else:
-            # ServerConfig pydantic model — read via attribute to stay
-            # consistent with the .get() pattern above.
-            extra_args = getattr(server_cfg, "extra_args", None)
-        entry["llamacpp_args"] = extra_args
-
-        # [npu] table: expose asr/embed toggles for Lemonade-backed NPU slots.
-        # Raw TOML dict carries [npu] at the top level; also check
-        # extra["npu"] as a fallback for any validated-dump shape.
-        npu_table = cfg.get("npu") or (cfg.get("extra") or {}).get("npu")
-        if npu_table and isinstance(npu_table, dict):
-            entry["npu"] = {
-                "asr": bool(npu_table.get("asr")),
-                "embed": bool(npu_table.get("embed")),
-            }
-
-        loaded_entry = loaded_by_model.get(model_default) if model_default else None
-        if not enabled:
-            entry["lemonade_state"] = "disabled"
-        elif loaded_entry is not None:
-            entry["lemonade_state"] = "loaded"
-            backend_url = loaded_entry.get("backend_url")
-            if isinstance(backend_url, str) and backend_url:
-                entry["backend_url"] = backend_url
-            # B2: surface declared vs actual backend so the dashboard can
-            # render a drift warning. declared_backend is ALWAYS present for
-            # a configured slot (normalized token rocm|vulkan|cpu|flm, NOT
-            # the gpu- device form, so the UI compares like-for-like).
-            # actual_backend + backend_mismatch are OMITTED (not null) when
-            # the child can't be introspected. Do NOT read
-            # loaded_entry.get("backend") — that field does not exist.
-            from hal0.providers.lemonade import (
-                resolve_actual_backend as _resolve_actual_backend,
-            )
-
-            _recipe, _llamacpp = device_to_backend(cfg.get("device"))
-            declared_backend = _llamacpp or (_recipe if _recipe == "flm" else None)
-            if declared_backend:
-                entry["declared_backend"] = declared_backend
-            actual_backend = _resolve_actual_backend(loaded_entry)
-            if actual_backend:
-                entry["actual_backend"] = actual_backend
-                if declared_backend:
-                    entry["backend_mismatch"] = actual_backend != declared_backend
-        else:
-            # Enabled but not in loaded[]: idle by default. Drift into
-            # error is surfaced via the regular slot state (see
-            # SlotManager.status reconciliation); the dashboard uses
-            # ``status`` for the dot, ``lemonade_state`` for the chip.
-            entry["lemonade_state"] = "idle"
-
-        # Coresident grouping — every device=npu slot (anchor + stt/embed
-        # shadows) backs the same FLM process, so they share a group marker.
-        # Keyed on device, NOT slot name: deployment renamed the trio to
-        # npu/stt/embed, so the old name-based set never matched in prod. A
-        # slot only joins when (a) the NPU LLM anchor is enabled and (b) THIS
-        # slot is enabled — disabled siblings don't claim membership.
-        if cfg.get("device") == "npu" and trio_active and enabled:
-            entry["coresident_group"] = "npu-flm-trio"
-
-        out[name] = entry
-    return out
+    return lemonade_enrichment(configs, await fetch_lemonade_health())
 
 
 async def _container_state_enrichment(request: Request) -> dict[str, dict[str, Any]]:
     """Build per-slot container state for container-backed slots.
 
-    For each slot where ``profile`` is set or ``runtime="container"``, probes
-    two live sources:
-      1. ``systemctl is-active`` → ``container_status``
-         (``running`` | ``stopped`` | ``starting`` | ``crashed``)
-      2. GET /health on the slot port → ``container_health`` (bool)
-
-    Returns ``{slot_name: {container_status, container_health, state}}`` where
-    ``state`` mirrors the hal0 SlotState value already in the snapshot so the
-    dashboard has a consistent ``state`` key regardless of slot type.
+    Request-bound adapter over :func:`hal0.slot_view.container_enrichment`
+    (issue #698) — kept here for ``get_slot``'s per-card refresh.
 
     Never raises — probe failures degrade to ``stopped`` / ``False`` rather
     than surfacing as a 500.  Lemonade slots are explicitly excluded.
@@ -337,137 +140,10 @@ async def _container_state_enrichment(request: Request) -> dict[str, dict[str, A
         configs = await sm.iter_configs()
     except Exception:
         return {}
-
-    from hal0.slots.manager import SlotManager, _cfg_port  # type: ignore[attr-defined]
-
-    out: dict[str, dict[str, Any]] = {}
-    for cfg in configs:
-        name = str(cfg.get("name", ""))
-        if not name:
-            continue
-        if not SlotManager._is_container_slot(cfg):
-            continue  # Lemonade / lemond slots handled by _lemonade_state_enrichment
-
-        entry: dict[str, Any] = {}
-
-        try:
-            from hal0.providers.container import container_provider
-
-            cp = container_provider()
-            # 1) systemctl is-active (synchronous — run in executor)
-            active = await asyncio.get_event_loop().run_in_executor(None, cp.is_active, name)
-            if active:
-                # 2) /health probe on the slot port to distinguish running vs starting
-                port = _cfg_port(cfg)
-                if port:
-                    health = await cp.health(port)
-                    container_health = bool(health.get("ok"))
-                    container_status = "running" if container_health else "starting"
-                else:
-                    container_health = False
-                    container_status = "running"
-            else:
-                container_health = False
-                # Distinguish crashed (failed) from clean stop by checking unit state
-                # via is-active exit codes: 0=active, 3=inactive, other=failed
-                container_status = "stopped"
-                try:
-                    import subprocess
-
-                    result = subprocess.run(
-                        ["systemctl", "is-active", f"hal0-slot@{name}.service"],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                    stdout = result.stdout.decode().strip()
-                    if stdout == "failed":
-                        container_status = "crashed"
-                except Exception:
-                    pass
-        except Exception:
-            container_health = False
-            container_status = "stopped"
-
-        entry["container_status"] = container_status
-        entry["container_health"] = container_health
-
-        # [npu] table: expose asr/embed toggles so the dashboard can seed
-        # its NPU modality controls without a separate /config fetch.
-        # Raw TOML dict carries [npu] at the top level; also check
-        # extra["npu"] as a fallback for any validated-dump shape.
-        npu_table = cfg.get("npu") or (cfg.get("extra") or {}).get("npu")
-        if npu_table and isinstance(npu_table, dict):
-            entry["npu"] = {
-                "asr": bool(npu_table.get("asr")),
-                "embed": bool(npu_table.get("embed")),
-            }
-
-        # Emit runtime / profile / image so the UI doesn't have to dig
-        # into metadata, and resolved_command so the drawer can show the
-        # real podman argv instead of fabricating flags client-side.
-        entry["runtime"] = "container"
-        profile_name = str(cfg.get("profile") or "")
-        entry["profile"] = profile_name
-        image: str | None = None
-        if profile_name:
-            try:
-                from hal0.config.loader import load_profiles_config
-
-                catalog = load_profiles_config()
-                prof = catalog.profile.get(profile_name)
-                image = prof.image if prof else None
-                entry["image"] = image
-                # resolved_command = llama-server argv starting from the image
-                from hal0.providers.container import resolved_command_for_slot
-
-                entry["resolved_command"] = resolved_command_for_slot(cfg)
-            except Exception:
-                entry["image"] = None
-                entry["resolved_command"] = None
-        else:
-            entry["image"] = None
-            entry["resolved_command"] = None
-
-        # #663: deterministic backend-of-record - the running container's image
-        # IS the backend. Surface actual_image (via podman inspect) and compute
-        # image_mismatch against the slot's declared profile image. Replaces the
-        # fragile /proc actual_backend sniff for container slots (lemond slots
-        # keep resolve_actual_backend). Degrades silently - never 500 the hot path.
-        try:
-            from hal0.providers.container import _image_mismatch, container_provider
-
-            running_image = await asyncio.get_event_loop().run_in_executor(
-                None, container_provider().running_image, name
-            )
-        except Exception:
-            running_image = None
-        if running_image:
-            entry["actual_image"] = running_image
-            if image:
-                entry["image_mismatch"] = _image_mismatch(running_image, image)
-
-        # image_status: present | pulling | missing
-        # Check the slot_pull_jobs registry first so an in-flight pull
-        # surfaces as "pulling" without an extra inspect syscall.
-        slot_pull_jobs: dict[str, Any] = getattr(request.app.state, "slot_pull_jobs", {})
-        active_job = slot_pull_jobs.get(name)
-        if active_job is not None and getattr(active_job, "state", None) == "pulling":
-            entry["image_status"] = "pulling"
-        elif image:
-            try:
-                from hal0.providers.container import container_provider
-
-                present = await asyncio.get_event_loop().run_in_executor(
-                    None, container_provider().image_present, image
-                )
-                entry["image_status"] = "present" if present else "missing"
-            except Exception:
-                entry["image_status"] = "missing"
-        else:
-            entry["image_status"] = "missing"
-
-        out[name] = entry
-    return out
+    return await container_enrichment(
+        configs,
+        pull_jobs=getattr(request.app.state, "slot_pull_jobs", {}),
+    )
 
 
 async def _lemonade_loaded_models(request: Request) -> set[str]:
@@ -478,28 +154,14 @@ async def _lemonade_loaded_models(request: Request) -> set[str]:
     catalogue merely lists it. Never raises — a down/unreachable lemond
     yields an empty set so the dashboard degrades to "offline" instead
     of 500ing.
-    """
-    from hal0.lemonade.errors import LemonadeError
-    from hal0.providers import lemonade_provider
 
-    try:
-        health = await lemonade_provider().client().health()
-    except LemonadeError:
-        return set()
-    except Exception:
-        return set()
-    names: set[str] = set()
-    if isinstance(health, dict):
-        for key in ("loaded", "all_models_loaded"):
-            entries = health.get(key)
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                if isinstance(entry, dict):
-                    name = entry.get("model_name")
-                    if isinstance(name, str) and name:
-                        names.add(name)
-    return names
+    Adapter over :func:`hal0.slot_view.loaded_model_names` (issue #698)
+    — kept here for ``routes/health.py``'s composite status payload.
+    ``request`` is unused but retained for signature stability with the
+    other request-bound enrichment helpers.
+    """
+    del request  # health comes from the process-wide Lemonade provider
+    return loaded_model_names(await fetch_lemonade_health())
 
 
 def _synthesize_slots_from_upstreams(
@@ -526,51 +188,18 @@ def _synthesize_slots_from_upstreams(
     for this upstream (tracked in ``app.state.last_used_model``); falls
     back to the first non-alias from the catalog before any inference
     has happened.
-    """
-    upstreams = request.app.state.upstreams
-    cache = getattr(request.app.state, "model_cache", {})
-    last_used = getattr(request.app.state, "last_used_model", {})
-    out: list[dict[str, Any]] = []
-    for u in upstreams.list():
-        models = cache.get(u.name, [])
-        from hal0.api.routes.models import _is_alias  # local to avoid cycle
 
-        real_models = [m for m in models if not _is_alias(m)]
-        primary_model = (
-            last_used.get(u.name)
-            or (real_models[0] if real_models else "")
-            or (models[0] if models else "")
-        )
-        if u.kind == "slot":
-            # Local composite upstream: ``models`` comes from the slot
-            # CATALOGUE (config), so a non-empty list says nothing about
-            # what is resident. Truth comes from lemond's live loaded set.
-            # If health was unreadable (loaded_models is None) fall back to
-            # the catalogue heuristic rather than flapping to offline on a
-            # transient probe error.
-            serving = bool(models) if loaded_models is None else bool(set(models) & loaded_models)
-        else:
-            # Remote upstream: ``models`` is a live /v1/models probe of the
-            # remote, so a populated list is a genuine liveness signal.
-            serving = bool(models)
-        out.append(
-            {
-                "name": u.name,
-                "kind": u.kind,
-                "model": primary_model,
-                "status": "serving" if serving else "offline",
-                "backend": "remote" if u.kind == "remote" else "vulkan",
-                "provider": "remote-upstream" if u.kind == "remote" else "llama-server",
-                "url": u.url,
-                "advertised_models": len(models),
-                "last_used_model": last_used.get(u.name) or None,
-                "_synthetic": True,
-                "_synthetic_reason": (
-                    "Backed by remote upstream; install a local slot of the same name to take over."
-                ),
-            }
-        )
-    return out
+    Request-bound adapter over
+    :func:`hal0.slot_view.synthesize_upstream_entries` (issue #698) —
+    kept here for ``get_slot``'s synthetic fall-through and
+    ``routes/health.py``'s composite status payload.
+    """
+    return synthesize_upstream_entries(
+        request.app.state.upstreams,
+        getattr(request.app.state, "model_cache", {}),
+        getattr(request.app.state, "last_used_model", {}),
+        loaded_models=loaded_models,
+    )
 
 
 # ── list / create ──────────────────────────────────────────────────────────
@@ -580,77 +209,29 @@ def _synthesize_slots_from_upstreams(
 async def list_slots(request: Request) -> list[dict[str, object]]:
     """List configured slots.
 
-    Merges real SlotManager-backed entries with synthetic upstream-backed
-    ones. Real slots win on name collision so the dashboard sees a single
-    authoritative row per slot name once a local slot is installed.
-
-    PR-11: each real entry is enriched in-place with Lemonade-derived
-    fields (``lemonade_state``, optional ``backend_url`` +
-    ``coresident_group``). Synthetic upstream entries are untouched —
-    they aren't managed by lemond and have no health row to lift.
+    Thin adapter over :meth:`hal0.slot_view.SlotViewAggregator.snapshot`
+    (issue #698): the aggregator merges real SlotManager-backed entries
+    with synthetic upstream-backed ones (real slots win on name
+    collision), enriches each real entry with Lemonade-derived state +
+    container probe results, stamps per-slot resident memory, and embeds
+    live metrics in the card-expected shape. The route only wires the
+    aggregator's dependencies off ``app.state`` and serializes the typed
+    :class:`hal0.slot_view.SlotView` rows.
     """
+    import functools
+
     sm = _get_slot_manager(request)
-    real_slots = await sm.list()
-    real_entries: list[dict[str, Any]] = [_slot_to_dict(s, request) for s in real_slots]
-    real_names = {entry["name"] for entry in real_entries}
-
-    enrichment = await _lemonade_state_enrichment(request)
-    container_enrichment = await _container_state_enrichment(request)
-    for entry in real_entries:
-        slot_name = str(entry["name"])
-        extra = enrichment.get(slot_name)
-        if extra:
-            for k, v in extra.items():
-                entry.setdefault(k, v)
-        c_extra = container_enrichment.get(slot_name)
-        if c_extra:
-            for k, v in c_extra.items():
-                entry.setdefault(k, v)
-
-    # Stamp per-slot resident memory (model weights + KV-cache estimate) so the
-    # dashboard memory map (W4) attributes a real footprint per slot. Only
-    # resident slots get a non-zero row; everything else reads 0. Never let a
-    # memory-probe failure break the slots list.
-    try:
-        from hal0.slots.capacity import build_per_slot
-
-        registry = getattr(request.app.state, "model_registry", None)
-        per_slot_mem = await build_per_slot(real_slots, registry=registry)
-    except Exception:
-        per_slot_mem = {}
-    for entry in real_entries:
-        row = per_slot_mem.get(str(entry["name"]))
-        entry["mem_mb"] = round(float(row.get("mem_mb", 0) or 0), 1) if row else 0
-
-    synthetic = _synthesize_slots_from_upstreams(
-        request, loaded_models=await _lemonade_loaded_models(request)
+    state = request.app.state
+    aggregator = SlotViewAggregator(
+        sm,
+        registry=getattr(state, "model_registry", None),
+        metrics=functools.partial(slot_metrics, request),
+        model_cache=getattr(state, "model_cache", {}) or {},
+        upstreams=state.upstreams,
+        last_used_model=getattr(state, "last_used_model", {}),
+        slot_pull_jobs=getattr(state, "slot_pull_jobs", {}),
     )
-    merged: list[dict[str, Any]] = list(real_entries)
-    for entry in synthetic:
-        if entry["name"] not in real_names:
-            merged.append(entry)
-
-    # Embed live metrics in the card-expected shape (#26 / BE-METRICS): the
-    # dashboard reads slot.metrics.{toks,ttft,ctx,kv,mem}. Source the merged
-    # per-slot rows (upstream stats + local tps/ttft + child-port scrape) and
-    # remap to the frontend keys. Never fatal — absent rows leave the
-    # frontend's zero/null defaults in place.
-    try:
-        raw_metrics = await slot_metrics(request)
-    except Exception:
-        raw_metrics = {}
-    for entry in merged:
-        rm = raw_metrics.get(str(entry.get("name"))) or {}
-        kv = rm.get("kv_cache_usage")
-        ttft_s = rm.get("ttft_seconds")
-        entry["metrics"] = {
-            "toks": round(float(rm.get("tokens_per_sec") or 0), 1),
-            "ttft": round(float(ttft_s) * 1000) if ttft_s else None,
-            "ctx": int(rm.get("ctx") or 0),
-            "kv": round(float(kv) * 100, 1) if kv is not None else None,
-            "mem": round(float(entry.get("mem_mb") or 0) / 1024.0, 2),
-        }
-    return merged
+    return [view.to_dict() for view in await aggregator.snapshot()]
 
 
 def _next_free_slot_port(start: int = 8081, end: int = 8099) -> int:
