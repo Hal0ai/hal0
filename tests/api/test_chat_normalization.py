@@ -296,3 +296,21 @@ def test_loaded_models_includes_ready_container_slots():
     assert "chadrock-35b-ace-saber" in loaded
     # A genuine external remote (no slot_name) is NOT a local container slot.
     assert "gpt-x" not in loaded
+
+
+def test_container_slot_not_treated_as_remote_for_thinking():
+    """Container slots register as kind='remote' (with slot_name) but are LOCAL —
+    the thinking policy must apply to them. Only genuine external remotes
+    (slot_name=None) skip thinking injection. (cutover #662: chat reasoned by
+    default because it looked remote.)"""
+    req = _make_request(
+        upstreams=[
+            SimpleNamespace(name="chat", kind="remote", slot_name="chat"),
+            SimpleNamespace(name="or", kind="remote", slot_name=None),
+        ],
+        upstream_models={"chat": ["qwopus3.6-27b-v2"], "or": ["gpt-x"]},
+    )
+    # Container-backed remote → NOT remote-for-thinking (policy should apply).
+    assert v1._is_remote_model(req, "qwopus3.6-27b-v2") is False
+    # Genuine external remote → remote (skip thinking injection).
+    assert v1._is_remote_model(req, "gpt-x") is True

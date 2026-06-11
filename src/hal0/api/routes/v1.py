@@ -338,6 +338,10 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
         return False
     try:
         for u in upstreams.list():
+            # Container-backed remotes carry a slot_name — they are LOCAL slots,
+            # not genuine external providers, so the thinking policy must apply.
+            if getattr(u, "slot_name", None):
+                continue
             if getattr(u, "kind", "") == "remote" and model_id in set(cache.get(u.name, [])):
                 return True
     except Exception:  # pragma: no cover — defensive
