@@ -19,7 +19,9 @@ from typing import Any
 
 import structlog
 
-from hal0.hardware.probe import _amd_drm_device, _read_sysfs_mb, _run
+from hal0.hardware import gpu_view
+from hal0.hardware.gpu_view import GPUMemorySample
+from hal0.hardware.probe import _amd_drm_device, _run
 
 log = structlog.get_logger(__name__)
 
@@ -95,35 +97,29 @@ class HardwareStats:
         self._gpu_vendor = "nvidia" if (rc == 0 and out.strip()) else "unknown"
         return self._gpu_vendor
 
+    def gpu_sample(self) -> GPUMemorySample:
+        """Take a typed GPU memory + utilization sample (issue #703).
+
+        Delegates to :func:`hal0.hardware.gpu_view.sample` with the
+        memoised vendor/drm so detection isn't repeated per read.
+        ``run=_run`` is resolved through THIS module's global at call
+        time, so tests monkeypatching ``stats._run`` keep working.
+        """
+        vendor = self._vendor()
+        return gpu_view.sample(vendor=vendor, drm=self._amd_drm, run=_run)
+
     def gpu_util(self) -> float | None:
         """Return current GPU compute utilisation as a fraction [0.0, 1.0].
 
         AMD: reads sysfs gpu_busy_percent directly (no subprocess). NVIDIA:
         nvidia-smi. Returns None if no utilisation counter is exposed.
+
+        NOTE: on a forced-high AMD host (gpu-compute.service pins the perf
+        level) this counter reads flat 100 regardless of load — check
+        ``gpu_sample().util_is_forced_high`` before trusting it. The value
+        is reported RAW either way.
         """
-        vendor = self._vendor()
-        if vendor == "amd" and self._amd_drm is not None:
-            txt = self._read_text(self._amd_drm / "gpu_busy_percent")
-            if txt is not None:
-                try:
-                    return round(float(txt.strip()) / 100.0, 3)
-                except ValueError:
-                    pass
-            return None
-        if vendor == "nvidia":
-            rc, out, _ = _run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=utilization.gpu",
-                    "--format=csv,noheader,nounits",
-                ]
-            )
-            if rc == 0 and out.strip():
-                try:
-                    return round(float(out.strip().splitlines()[0]) / 100.0, 3)
-                except ValueError:
-                    pass
-        return None
+        return self.gpu_sample().gpu_busy
 
     def gpu_vram_used_mb(self) -> float | None:
         """Return current GPU VRAM usage in MiB.
@@ -131,49 +127,11 @@ class HardwareStats:
         On AMD UMA (Strix Halo) returns max(vram_used, gtt_used) via sysfs
         (no subprocess). On NVIDIA, parses nvidia-smi.
         """
-        vendor = self._vendor()
-        if vendor == "amd" and self._amd_drm is not None:
-            vram = _read_sysfs_mb(self._amd_drm / "mem_info_vram_used")
-            gtt = _read_sysfs_mb(self._amd_drm / "mem_info_gtt_used")
-            candidates = [v for v in (vram, gtt) if v is not None]
-            return max(candidates) if candidates else None
-        if vendor == "nvidia":
-            rc, out, _ = _run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=memory.used",
-                    "--format=csv,noheader,nounits",
-                ]
-            )
-            if rc == 0 and out.strip():
-                try:
-                    return round(float(out.strip().splitlines()[0]), 1)
-                except ValueError:
-                    pass
-        return None
+        return self.gpu_sample().used_mb
 
     def gpu_vram_total_mb(self) -> float | None:
         """Return total GPU VRAM in MiB (or GTT pool on UMA)."""
-        vendor = self._vendor()
-        if vendor == "amd" and self._amd_drm is not None:
-            vram = _read_sysfs_mb(self._amd_drm / "mem_info_vram_total")
-            gtt = _read_sysfs_mb(self._amd_drm / "mem_info_gtt_total")
-            candidates = [v for v in (vram, gtt) if v is not None]
-            return max(candidates) if candidates else None
-        if vendor == "nvidia":
-            rc, out, _ = _run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=memory.total",
-                    "--format=csv,noheader,nounits",
-                ]
-            )
-            if rc == 0 and out.strip():
-                try:
-                    return round(float(out.strip().splitlines()[0]), 1)
-                except ValueError:
-                    pass
-        return None
+        return self.gpu_sample().total_mb
 
     def ram_used_gb(self) -> float:
         """Return current system RAM used in GiB (MemTotal - MemAvailable)."""
@@ -242,12 +200,20 @@ class HardwareStats:
         only needs RAM + GPU numbers; the slot-port view is sourced
         from the dedicated config-validation / next-free-port callers.
         """
+        # One sample feeds every GPU field — same sysfs/nvidia-smi cost as
+        # the pre-#703 three-method spread, plus the typed split + flag the
+        # /api/stats/hardware route reads off the SWR cache (no more
+        # per-request sysfs re-reads in the route).
+        smp = self.gpu_sample()
         out: dict[str, Any] = {
             "ram_used_gb": self.ram_used_gb(),
             "ram_available_gb": self.ram_available_gb(),
-            "gpu_util": self.gpu_util(),
-            "gpu_vram_used_mb": self.gpu_vram_used_mb(),
-            "gpu_vram_total_mb": self.gpu_vram_total_mb(),
+            "gpu_util": smp.gpu_busy,
+            "gpu_vram_used_mb": smp.used_mb,
+            "gpu_vram_total_mb": smp.total_mb,
+            "gtt_used_mb": smp.gtt_used_mb,
+            "vram_used_mb": smp.vram_used_mb,
+            "util_is_forced_high": smp.util_is_forced_high,
         }
         if include_slot_ports:
             out["slot_ports_occupied"] = self.occupied_slot_ports()
