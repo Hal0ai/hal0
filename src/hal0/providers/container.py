@@ -307,6 +307,25 @@ def _render_unit_from_spec(
     return _unit_skeleton(slot_name, runtime, exec_start)
 
 
+def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
+    """Spec-building provider for non-llama container slots, or None.
+
+    llama-server slots (GPU profiles) use the flag-bundle _render_unit path.
+    FLM (NPU) and Kokoro (CPU TTS) know their own argv; they build a
+    ContainerSpec rendered by _render_unit_from_spec. ComfyUI joins in
+    Phase D.
+    """
+    if str(slot_cfg.get("device", "")) == "npu":
+        from hal0.providers.flm import FLMProvider
+
+        return FLMProvider()
+    if str(slot_cfg.get("type", "")) == "tts" or str(slot_cfg.get("profile", "")) == "kokoro-cpu":
+        from hal0.providers.kokoro import KokoroProvider
+
+        return KokoroProvider()
+    return None
+
+
 class ContainerProvider(Provider):
     """Podman-container-per-slot inference backend.
 
@@ -471,30 +490,32 @@ class ContainerProvider(Provider):
         asyncio.to_thread-friendly path — SlotManager awaits the slot spawn
         via ``await self._spawn_locked(...)``).
 
-        NPU branch: when ``slot_cfg["device"] == "npu"``, delegates to
-        :class:`~hal0.providers.flm.FLMProvider` for the :class:`ContainerSpec`
-        and renders the unit via :func:`_render_unit_from_spec` (generic
-        spec-rendered path). All other devices use the llama-server path.
+        Spec-provider dispatch: :func:`_spec_provider_for` maps NPU→FLM and
+        TTS/kokoro-cpu→Kokoro slots to their respective providers, which build a
+        :class:`ContainerSpec` rendered by :func:`_render_unit_from_spec`.
+        GPU/llama-server slots fall through to the flag-bundle :func:`_render_unit`
+        path.
         """
         slot_name: str = str(slot_cfg.get("name", ""))
 
-        # ── NPU branch (FLM container) ─────────────────────────────────────────
-        if str(slot_cfg.get("device", "")) == "npu":
-            from hal0.providers.flm import FLMProvider
+        # ── Spec-provider dispatch (NPU/FLM, TTS/Kokoro, …) ───────────────────
+        spec_provider = _spec_provider_for(slot_cfg)
+        if spec_provider is not None:
+            # Loud-fail for NPU slots only: a missing FLM tag must not silently
+            # fall through to FLM's legacy default (kept in build_env for the
+            # lemonade path until Phase E). Kokoro is self-managed and needs no
+            # registry tag — the tag check fires ONLY when device == "npu".
+            if str(slot_cfg.get("device", "")) == "npu":
+                model_table = slot_cfg.get("model") or {}
+                tag = (
+                    model_info.get("flm_tag")
+                    or model_info.get("_model_key")
+                    or (model_table.get("default") if isinstance(model_table, dict) else None)
+                )
+                if not tag:
+                    raise ValueError("npu slot has no FLM model tag — set [model].default")
 
-            # Loud-fail parity with the GPU path's _resolve_model_path: a
-            # missing tag must not silently fall through to FLM's legacy
-            # default (kept in build_env for the lemonade path until Phase E).
-            model_table = slot_cfg.get("model") or {}
-            tag = (
-                model_info.get("flm_tag")
-                or model_info.get("_model_key")
-                or (model_table.get("default") if isinstance(model_table, dict) else None)
-            )
-            if not tag:
-                raise ValueError("npu slot has no FLM model tag — set [model].default")
-
-            spec = FLMProvider().container_spec(slot_cfg, model_info)
+            spec = spec_provider.container_spec(slot_cfg, model_info)
             unit_text = _render_unit_from_spec(
                 slot_name,
                 spec,
@@ -766,6 +787,7 @@ def resolved_command_for_slot(
 __all__ = [
     "ContainerProvider",
     "_render_unit_from_spec",
+    "_spec_provider_for",
     "container_provider",
     "resolved_command_for_slot",
 ]
