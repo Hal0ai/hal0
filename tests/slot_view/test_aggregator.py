@@ -465,9 +465,7 @@ class TestContainerEnrichment:
 
 
 class TestMemoryAttribution:
-    async def test_mem_mb_stamped_from_capacity_rows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_mem_mb_stamped_from_capacity_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def fake_build(slots: Any, registry: Any = None, **kw: Any) -> dict[str, Any]:
             return {"chat": {"mem_mb": 1234.56}}
 
@@ -494,9 +492,7 @@ class TestMemoryAttribution:
         views = await agg.snapshot()
         assert views[0].mem_mb == 0
 
-    async def test_registry_passed_to_capacity_probe(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_registry_passed_to_capacity_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen: dict[str, Any] = {}
 
         async def fake_build(slots: Any, registry: Any = None, **kw: Any) -> dict[str, Any]:
