@@ -1,6 +1,6 @@
 ---
 title: Hermes-Agent bootstrap
-description: The 12-phase, checkpointed, idempotent state machine that turns a freshly-installed Hermes-Agent into a hal0-native homelab admin.
+description: The 15-phase, checkpointed, idempotent state machine that turns a freshly-installed Hermes-Agent into a hal0-native homelab admin.
 sidebar:
   order: 2
 ---
@@ -15,31 +15,65 @@ Full design doc: [`docs/internal/hermes-bootstrap-plan-2026-05-23.md`](../intern
 
 ## What it does, in one paragraph
 
-A 12-phase pipeline runs in deterministic order. Each phase is a pure
-function `(BootstrapState) -> PhaseResult` and either `ok`, `skip`, or
-`fail`. State persists to `provision.json` after every phase, so a
-crash or `^C` re-runs from the first non-`ok` phase. No phase is
-allowed to depend on bootstrap-time output for its inputs — every
-config line can be re-derived from live hal0 state at any time.
+A 15-phase pipeline runs in deterministic order. Each phase is a
+function `(PhaseContext) -> PhaseResult` (#702) and either `ok`,
+`skip`, or `fail`. The context carries a read-only `BootstrapState`
+view, the `--repair` flag, a `PhaseIO` bundle of injectable IO seams
+(HTTP, subprocess, slot/MCP/memory fetchers), and `output_of(name)` —
+the only sanctioned way to read another phase's checkpoint, gated by
+the needs each `Phase` declares in the `PHASES` list. State persists
+to `provision.json` after every phase, so a crash or `^C` re-runs from
+the first non-`ok` phase. A failing phase never halts the run or skips
+dependents (run-all policy); `completed_at` is only stamped when no
+phase failed.
 
-Source: `src/hal0/agents/hermes_provision.py:1984` (the `PHASES` list).
+Source: `src/hal0/agents/hermes_provision.py` (the `PHASES` list).
 
-## The 12 phases
+## The 15 phases
 
-| # | Phase                | What it does | Source |
-|---|----------------------|--------------|--------|
-| 1 | `preflight`          | Python ≥ 3.11, free disk ≥ 4 GiB, hal0 API health, upstream `hermes` on PATH (unless `--offline`). | `hermes_provision.py:225` |
-| 2 | `install`            | Create hal0-managed venv at `/var/lib/hal0/venvs/hermes/`, install pinned `hermes-agent` wheel, copy hal0 plugin tree (`Hal0Profile`, `Hal0MemoryProvider`) into `$HERMES_HOME/plugins/`. | `:350` |
-| 3 | `env_probe`          | Snapshot hardware (iGPU, NPU, UMA size), container (LXC + apparmor), tooling — feeds downstream phases. | `:524` |
-| 4 | `home_init`          | Claim `HERMES_HOME=/var/lib/hal0/.hermes/` with a marker file; idempotent re-runs validate the claim. | `:465` |
-| 5 | `config_write`       | Render `config.yaml` from the env probe + the live `/api/capabilities` snapshot; apply operator overrides from `/etc/hal0/agents/hermes/overrides.yaml`. | `:678` |
-| 6 | `mcp_wire`           | Register `hal0-admin` + `hal0-memory` MCPs in Hermes's `mcp_servers` map; round-trip each one via JSON-RPC `tools/list`. Reads the per-agent allow-list at `/etc/hal0/agents/hermes.toml` (ADR-0013). | `:874` |
-| 7 | `context_link`       | Symlink `/etc/hal0/HERMES.md` + `/etc/hal0/agent-skills/` into HERMES_HOME so Hermes injects them on every session start. | `:1031` |
-| 8 | `namespace_register` | Write the immutable identity card into the `agents` Cognee dataset per [ADR-0011](../../internal/adr/0011-agent-identity-cards.md). Idempotent — re-bootstrap rewrites in-place. | `:1294` |
-| 9 | `model_automap`      | Walk active slots, turn each into a `model_aliases` entry, point Hermes at the right backend URL per slot capability (primary / agent / embed / rerank / stt / tts). | `:1466` |
-| 10 | `voice_wire`        | Wire STT / TTS slots into Hermes's voice subsystem if installed; skip otherwise. | `:1609` |
-| 11 | `smoke_tests`       | Sanity round-trips: chat one token through `primary`, `memory_search` against `private:hermes-agent`, MCP `tools/list` against `hal0-admin`. | `:1896` |
-| 12 | `self_report`       | Dump a summary to `provision-logs/self_report.json`; mark `completed_at` in `provision.json`. | `:1929` |
+| # | Phase                | What it does |
+|---|----------------------|--------------|
+| 1 | `preflight`          | Python ≥ 3.11, free disk ≥ 4 GiB, hal0 API health, upstream `hermes` on PATH (unless `--offline`). |
+| 2 | `install`            | Create hal0-managed venv at `/var/lib/hal0/venvs/hermes/`, install pinned `hermes-agent` wheel, copy the hal0 plugin tree (`Hal0MemoryProvider`) into `$HERMES_HOME/plugins/`, install the `hermes` wrapper + `hal0-hermes` back-compat symlink. |
+| 3 | `env_probe`          | Snapshot hardware (iGPU, NPU, UMA size), container (LXC + apparmor), tooling — feeds downstream phases. |
+| 4 | `home_init`          | Claim `HERMES_HOME=/var/lib/hal0/.hermes/` with a marker file; idempotent re-runs validate the claim. |
+| 5 | `install_artifacts`  | (#432) Write the manager seed at `/etc/hal0/agents/hermes.toml`, the driver env file at `/etc/hal0/agents/hermes.env`, and the `runtime.json` embed token under `$HERMES_HOME` — the three artifacts the agent manager + chat proxy key off. The embed token only rotates under `--repair`. |
+| 6 | `persona_seed`       | (PR-3) Seed the default `hermes` + `coder` personas and the `active.txt` pointer under `$HERMES_HOME/personas/`. Operator edits survive re-runs; `--repair` resets to the canonical seeds. |
+| 7 | `config_write`       | Render `config.yaml` (primary model, chat-slot aliases, persona prelude, MCP block, delegation/auxiliary role-slot blocks); apply operator overrides from `/etc/hal0/agents/hermes/overrides.yaml`. |
+| 8 | `mcp_wire`           | Probe `hal0-admin` + `hal0-memory` MCPs via JSON-RPC `tools/list`; record the validated `rendered_servers` list in its checkpoint. Reads the per-agent allow-list at `/etc/hal0/agents/hermes.toml` (ADR-0013). |
+| 9 | `context_link`       | Render SOUL.md / AGENTS.md / MCP-CLIENTS.md + the live STATE.md/HERMES.md; mirror bundled skills into `/etc/hal0/agent-skills/`. |
+| 10 | `namespace_register` | Write the identity card into the `agents` dataset per [ADR-0011](../../internal/adr/0011-agent-identity-cards.md). Idempotent — re-bootstrap rewrites in-place. |
+| 11 | `model_automap`      | Re-render `config.yaml` from live slots so `model_aliases` (and the rest) converge post-`mcp_wire`; hash-equal output skips the write. |
+| 12 | `voice_wire`        | Wire STT / TTS slots into Hermes's voice subsystem when ready; skip otherwise. |
+| 13 | `gateway_secrets_wire` | (#437) Write the SYSTEM-scope systemd drop-in wiring the gateway's secrets vault; `daemon-reload` only when the file changed. Skips when not root. |
+| 14 | `smoke_tests`       | Six diagnostic round-trips: wrapper `--hal0-ready`, `hermes doctor`, chat completion, memory round-trip, admin `tools/list`, HERMES.md content. Non-fatal. |
+| 15 | `self_report`       | Write the bootstrap-completion summary memory item (includes the smoke rollup); `completed_at` lands in `provision.json` when nothing failed. |
+
+## The needs graph (#702)
+
+Phases are independent except for four declared cross-phase reads,
+enforced at runtime by `PhaseContext.output_of()` (an undeclared read
+raises `PhaseNeedError`) and validated against the list order at
+import time:
+
+```text
+config_write  ──needs_previous──▶ mcp_wire     (cross-RUN: mcp_wire runs
+                                                after config_write; the
+                                                probed server list feeds
+                                                the NEXT run's render —
+                                                the first render falls
+                                                back to the builtin
+                                                inventory)
+model_automap ──needs───────────▶ mcp_wire     (same-run checkpoint)
+voice_wire    ──needs───────────▶ mcp_wire     (same-run checkpoint)
+self_report   ──needs───────────▶ smoke_tests  (same-run checkpoint)
+```
+
+When a phase substitutes a fallback (the default MCP inventory, the
+placeholder primary, the inline SOUL.md default, or any memory-layer
+warn-as-OK degradation in `namespace_register`), it records the site
+in `PhaseResult.details["fallbacks"]` — same behaviour as before, now
+visible in `provision.json`.
 
 ## The plugin model
 
