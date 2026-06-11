@@ -77,6 +77,7 @@ def test_create_profile_201_and_listed(client: TestClient) -> None:
     assert body["mtp"] is False
     assert body["device_class"] == "gpu"
     assert "resolved_flags" in body
+    assert body["seed"] is False
     listed = client.get("/api/profiles").json()
     assert any(p["name"] == "my-vulkan" for p in listed)
 

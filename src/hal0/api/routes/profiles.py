@@ -116,6 +116,7 @@ def _serialize(name: str, p: ProfileConfig) -> dict[str, Any]:
         "mtp": p.mtp,
         "device_class": p.device_class,
         "resolved_flags": resolve_profile_flags(p),
+        "seed": name in SEED_PROFILES,
     }
 
 

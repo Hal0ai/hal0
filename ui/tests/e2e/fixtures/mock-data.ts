@@ -215,6 +215,8 @@ export const MOCK_DATA = {
       flags: '--flash-attn on -ngl 999',
       mtp: true,
       resolved_flags: '--flash-attn on -ngl 999 --draft-model /mnt/ai-models/mtp/llama-3b.gguf',
+      device_class: 'gpu',
+      seed: true,
     },
     {
       name: 'dense-mtp-rocmfp4',
@@ -222,6 +224,8 @@ export const MOCK_DATA = {
       flags: '--flash-attn on -ngl 999',
       mtp: true,
       resolved_flags: '--flash-attn on -ngl 999 --draft-model /mnt/ai-models/mtp/llama-3b.gguf',
+      device_class: 'gpu',
+      seed: true,
     },
     {
       name: 'vulkan-std',
@@ -229,6 +233,8 @@ export const MOCK_DATA = {
       flags: '--flash-attn on -ngl 999',
       mtp: false,
       resolved_flags: '--flash-attn on -ngl 999',
+      device_class: 'gpu',
+      seed: true,
     },
     // Phase A seed — NPU container slot (FLM toolbox).
     {
@@ -237,6 +243,8 @@ export const MOCK_DATA = {
       flags: '',
       mtp: false,
       resolved_flags: '',
+      device_class: 'npu',
+      seed: true,
     },
     // Phase B5 seed — TTS container slot (kokoro-onnx, CPU-only).
     {
@@ -245,6 +253,8 @@ export const MOCK_DATA = {
       flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
       mtp: false,
       resolved_flags: '--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx',
+      device_class: 'cpu',
+      seed: true,
     },
   ],
 }

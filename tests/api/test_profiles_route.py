@@ -74,6 +74,13 @@ class TestListProfiles:
             assert "mtp" in item
             assert "device_class" in item
             assert "resolved_flags" in item
+            assert "seed" in item
+
+    def test_seed_flag_true_for_seeds(self, client: TestClient) -> None:
+        """Phase C6: the UI keys immutability off the serialized seed flag."""
+        data = client.get("/api/profiles").json()
+        vulkan = next(item for item in data if item["name"] == "vulkan-std")
+        assert vulkan["seed"] is True
 
     def test_device_class_values(self, client: TestClient) -> None:
         """Phase C: device_class surfaces in the route response."""
@@ -137,3 +144,5 @@ class TestListProfiles:
             data = c.get("/api/profiles").json()
         names = {item["name"] for item in data}
         assert names == {"custom-only"}
+        custom = next(item for item in data if item["name"] == "custom-only")
+        assert custom["seed"] is False

@@ -198,6 +198,7 @@ export const ENDPOINTS = {
 
   // ── Profiles (container slot templates) ─────────────────────────
   profiles: '/api/profiles',
+  profile: (name: string) => `/api/profiles/${encodeURIComponent(name)}`,
 
   // Install / FirstRun
   installState: '/api/install/state',
