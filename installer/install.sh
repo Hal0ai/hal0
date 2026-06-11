@@ -944,6 +944,34 @@ else
     fi
 fi
 
+# ── NPU slot seed (A10) ────────────────────────────────────────────────────
+# Pre-populate /etc/hal0/slots/npu.toml if absent. Idempotent: never
+# overwrite an operator-edited file. The slot is seeded unconditionally so
+# the dashboard can show the NPU tile on any hal0 install; the slot itself
+# gates on 'flm validate' at load time. runtime=container + profile=flm-npu
+# routes it to ContainerProvider (podman). type=llm keeps the slot visible
+# to the LLM dispatch path (_is_npu_trio_request checks type=="llm").
+#
+# Single source of truth: the seed is COPIED from the repo tree
+# (installer/etc-hal0/slots/npu.toml — same file the schema tests
+# validate), never duplicated inline. Present in every install flow:
+# the release tarball ships the whole installer/ dir (release.yml
+# `cp -a installer "${STAGE}/"`), git checkouts carry it, and the prod
+# rsync to ${PREFIX} (which REPO_ROOT is re-pointed at) has no exclude
+# that touches installer/.
+NPU_SLOT_TOML="${ETC_DIR}/slots/npu.toml"
+NPU_SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/npu.toml"
+if [[ -f "${NPU_SLOT_TOML}" ]]; then
+    info "npu slot: ${NPU_SLOT_TOML} exists — left alone"
+else
+    [[ -f "${NPU_SLOT_SRC}" ]] \
+        || die "installer bundle incomplete: ${NPU_SLOT_SRC} missing (installer/etc-hal0/ should ship with every release tree)"
+    mkdir -p "${ETC_DIR}/slots"
+    cp "${NPU_SLOT_SRC}" "${NPU_SLOT_TOML}"
+    chmod 0644 "${NPU_SLOT_TOML}"
+    info "seeded NPU slot → ${NPU_SLOT_TOML}"
+fi
+
 # ── Lemonade daemon bootstrap (PR-5) ──────────────────────────────────────
 # Drops the lemond binary, baseline config.json with the mandatory
 # `--threads N` guard, and the hal0-lemonade.service systemd unit. After

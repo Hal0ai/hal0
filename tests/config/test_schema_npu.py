@@ -1,6 +1,11 @@
 """Tests for the [npu] slot table and the flm-npu seed profile (Phase A)."""
 
+import tomllib
+from pathlib import Path
+
 from hal0.config.schema import SEED_PROFILES, NpuConfig, SlotConfig
+
+_SEEDED_SLOTS_DIR = Path(__file__).resolve().parents[2] / "installer" / "etc-hal0" / "slots"
 
 
 def test_npu_config_defaults_off() -> None:
@@ -61,3 +66,12 @@ def test_flm_npu_seed_profile() -> None:
     assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
     assert prof["flags"] == ""
     assert prof["mtp"] is False
+
+
+def test_seed_npu_toml_validates() -> None:
+    raw = tomllib.loads((_SEEDED_SLOTS_DIR / "npu.toml").read_text(encoding="utf-8"))
+    slot = SlotConfig.model_validate(raw)
+    assert slot.runtime == "container"
+    assert slot.profile == "flm-npu"
+    assert slot.device == "npu"
+    assert slot.npu is not None and slot.npu.asr is False

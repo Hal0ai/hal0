@@ -1,0 +1,17 @@
+# NPU LLM slot — FastFlowLM in a podman container (hal0-slot@npu).
+# One FLM process per NPU; model swap = container restart.
+name = "npu"
+port = 8088
+device = "npu"
+runtime = "container"
+profile = "flm-npu"
+type = "llm"
+
+[model]
+default = "gemma3:4b"
+context_size = 16384
+
+[npu]
+# Trio modalities (flm serve --asr/--embed). Toggled from the dashboard.
+asr = false
+embed = false
