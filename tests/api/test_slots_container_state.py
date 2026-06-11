@@ -309,7 +309,7 @@ def test_container_slot_has_runtime_profile_image_fields(
         ),
         # container.py module-level import used by resolved_command_for_slot
         patch(
-            "hal0.providers.container.load_profiles_config",
+            "hal0.config.loader.load_profiles_config",
             return_value=fake_catalog,
         ),
     ):
@@ -361,7 +361,7 @@ def test_container_slot_resolved_command_includes_flags(
         ),
         # container.py module-level import used by resolved_command_for_slot
         patch(
-            "hal0.providers.container.load_profiles_config",
+            "hal0.config.loader.load_profiles_config",
             return_value=fake_catalog,
         ),
     ):
@@ -430,7 +430,7 @@ def test_container_actual_image_no_mismatch_when_running_matches_profile(
             return_value={"ok": True, "status": "healthy"},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=cat),
-        patch("hal0.providers.container.load_profiles_config", return_value=cat),
+        patch("hal0.config.loader.load_profiles_config", return_value=cat),
         patch(
             "hal0.providers.container.ContainerProvider.running_image",
             return_value=_VULKAN_IMG,
@@ -456,7 +456,7 @@ def test_container_image_mismatch_when_running_differs_from_profile(
             return_value={"ok": True, "status": "healthy"},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=cat),
-        patch("hal0.providers.container.load_profiles_config", return_value=cat),
+        patch("hal0.config.loader.load_profiles_config", return_value=cat),
         patch(
             "hal0.providers.container.ContainerProvider.running_image",
             return_value=_ROCM_IMG,  # stale: still running the old rocm image

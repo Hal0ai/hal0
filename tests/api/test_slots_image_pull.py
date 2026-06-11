@@ -120,7 +120,7 @@ def test_image_status_present(container_client: TestClient) -> None:
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.providers.container.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.providers.container.ContainerProvider.image_present", return_value=True),
     ):
         r = container_client.get("/api/slots")
@@ -140,7 +140,7 @@ def test_image_status_missing(container_client: TestClient) -> None:
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.providers.container.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.providers.container.ContainerProvider.image_present", return_value=False),
     ):
         r = container_client.get("/api/slots")
@@ -168,7 +168,7 @@ def test_image_status_pulling_when_job_active(
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.providers.container.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
     ):
         r = container_client.get("/api/slots")
     assert r.status_code == 200, r.text
@@ -194,7 +194,7 @@ def test_pull_start_returns_202(container_client: TestClient) -> None:
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.providers.container.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.api.routes.slots._run_image_pull", side_effect=_noop),
     ):
         r = container_client.post("/api/slots/gpu-chat/pull")
@@ -225,7 +225,7 @@ def test_pull_start_idempotent(
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.providers.container.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
     ):
         r = container_client.post("/api/slots/gpu-chat/pull")
     assert r.status_code == 202, r.text
@@ -252,7 +252,7 @@ def test_pull_stream_present_when_no_job(container_client: TestClient) -> None:
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.providers.container.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.providers.container.ContainerProvider.image_present", return_value=True),
         container_client.stream("GET", "/api/slots/gpu-chat/pull/stream") as resp,
     ):
@@ -274,7 +274,7 @@ def test_pull_stream_missing_when_no_job(container_client: TestClient) -> None:
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.providers.container.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.providers.container.ContainerProvider.image_present", return_value=False),
         container_client.stream("GET", "/api/slots/gpu-chat/pull/stream") as resp,
     ):
