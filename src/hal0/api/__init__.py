@@ -1149,6 +1149,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if lemonade_client_for_trio is not None:
             flm_trio_router = FLMTrioRouter(
                 lemonade_client=lemonade_client_for_trio,
+                slot_manager=slot_manager,
             )
             app.state.flm_trio_router = flm_trio_router
             log.info("flm_trio.attached")
