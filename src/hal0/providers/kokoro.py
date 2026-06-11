@@ -186,6 +186,12 @@ class KokoroProvider(Provider):
     async def health(self, port: int) -> dict[str, Any]:
         """Probe GET /health on the kokoro-server port.
 
+        NOTE: dead code in the container deployment path — slot health checks
+        go through :meth:`ContainerProvider.health` (which implements the same
+        ``model_loaded`` gating).  Kept because ``health`` is abstract on the
+        Provider ABC: removing it would make KokoroProvider abstract and break
+        the ``_spec_provider_for`` instantiation in container.py.
+
         kokoro_server.py returns {status: "ok", model_loaded: true} when
         ready.  Returns {"ok": bool, "status": str}.
         """

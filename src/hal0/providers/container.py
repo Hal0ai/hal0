@@ -416,6 +416,11 @@ class ContainerProvider(Provider):
         """Probe GET /health on the container port.
 
         For llama-server slots /health returns 200 when ready.
+        kokoro-server returns 200 with ``{"model_loaded": false}`` while
+        weights are still loading (multi-minute on auto-download) — when the
+        body is JSON and carries a ``model_loaded`` key, ok is gated on
+        ``model_loaded is True``. Bodies without the key (llama-server) keep
+        the plain-200 behavior.
         FLM containers have no /health endpoint — they return 404 there.
         When /health returns a non-connection error (e.g. 404), fall back to
         GET /v1/models; 200 there means the server is up and healthy.
@@ -429,6 +434,16 @@ class ContainerProvider(Provider):
             async with httpx.AsyncClient(timeout=_HEALTH_REQUEST_TIMEOUT_S) as client:
                 resp = await client.get(health_url)
                 if resp.status_code == 200:
+                    try:
+                        body = resp.json()
+                    except ValueError:
+                        body = None
+                    if isinstance(body, dict) and "model_loaded" in body:
+                        loaded = body.get("model_loaded") is True
+                        return {
+                            "ok": loaded,
+                            "status": "healthy" if loaded else "loading",
+                        }
                     return {"ok": True, "status": "healthy"}
                 # Non-200 (e.g. 404 from FLM) → try /v1/models fallback.
                 models_resp = await client.get(models_url)
