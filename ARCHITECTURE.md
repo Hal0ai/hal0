@@ -56,8 +56,12 @@ src/hal0/
 ├── lemonade/        # idle driver + metrics shim + log bridge
 ├── capabilities/    # UX overlay grouping flat slots into capability
 │                    #   cards (catalog + config + orchestrator);
-│                    #   persists selections in capabilities.toml and
-│                    #   reconciles slot TOMLs on every apply
+│                    #   selections persist in capabilities.toml,
+│                    #   reconciliation delegates to slot_config/
+├── slot_config/     # SlotConfigStore (#697): capabilities.toml +
+│                    #   slots/*.toml as one reconciled truth —
+│                    #   compute-only apply() → ChangeSet, atomic
+│                    #   commit()/revert(); single slot-TOML write path
 ├── registry/        # model registry (atomic TOML, mtime cache, GGUF
 │                    #   magic-byte detect, HF-cache repo-name fallback)
 ├── hardware/        # probe + stats (GPU, NPU, RAM, disk)
@@ -79,12 +83,24 @@ ADR-0012 removed `auth/` + `api/auth/` + `api/middleware/auth.py` —
 hal0-api binds `0.0.0.0:8080` open; LAN trust + an upstream reverse
 proxy own authentication.
 
-The capabilities layer is a **thin overlay** on the flat slot layer,
-not a replacement. Slot configs under `/etc/hal0/slots/*.toml` remain
-authoritative; `capabilities.toml` records which capability picks
-should be projected back onto those slot files. `hal0 capabilities
-migrate` cleans up persisted selections whose (backend, model) pair
-is no longer valid — primarily for FLM model-tag namespace drift.
+The capabilities layer remains a **thin overlay** on the flat slot
+layer as a UX surface, not a replacement. Slot configs under
+`/etc/hal0/slots/*.toml` remain authoritative; `capabilities.toml`
+records which capability picks should be projected back onto those
+slot files. Since #697 the projection itself is no longer an in-place
+rewrite inside the orchestrator: `hal0.slot_config.SlotConfigStore` is
+the deep module that owns both files as one reconciled truth. Its
+`apply(selection)` is compute-only and returns a
+`ChangeSet{before, after}`; `commit(cs)` writes both files atomically
+(rolling back to `before` on partial failure) and `revert(cs)` restores
+the prior state. The testable invariant: after `commit` disk equals
+`cs.after`, after `revert` disk equals `cs.before`, and a failed
+mid-apply leaves disk at `before` — the two files can never be left
+half-reconciled. `write_slot_toml()` in the same module is the single
+byte-level write path every `slots/*.toml` writer routes through.
+`hal0 capabilities migrate` still cleans up persisted selections whose
+(backend, model) pair is no longer valid — primarily for FLM model-tag
+namespace drift.
 
 ## Key boundaries
 
