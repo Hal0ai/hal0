@@ -165,8 +165,12 @@ class ComfyUIProvider(Provider):
           4. The fallback tag ``docker.io/kyuz0/amd-strix-halo-comfyui:latest``.
         """
         override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
-        if override:
-            return str(override)
+        # Only a STRING is an image-ref override. In raw slot dicts the
+        # [image] TOML section (#599 image-gen settings) shares this key —
+        # treating that dict as a ref renders str(dict) into ExecStart and
+        # podman fails with 'invalid reference format' (live CT105, Phase D).
+        if isinstance(override, str) and override:
+            return override
         env_override = os.environ.get("HAL0_TOOLBOX_IMAGE_COMFYUI", "").strip()
         if env_override:
             return env_override

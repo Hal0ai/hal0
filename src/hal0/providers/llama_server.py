@@ -331,10 +331,13 @@ class LlamaServerProvider(Provider):
         Backends: "vulkan" | "rocm" | "cpu" (cpu falls through to vulkan
         since the vulkan image runs on cpu when no GPU is exposed).
         """
-        # (1) Per-slot override always wins.
+        # (1) Per-slot override always wins — but only a STRING is an
+        # override. In raw slot dicts the [image] TOML section (#599
+        # image-gen settings) shares this key; a dict here is config,
+        # not an image ref (live CT105 'invalid reference format', Phase D).
         override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
-        if override:
-            return str(override)
+        if isinstance(override, str) and override:
+            return override
 
         backend = (
             slot_cfg.get("backend")

@@ -147,3 +147,31 @@ def test_spec_provider_for_dispatches_comfyui() -> None:
     assert isinstance(_spec_provider_for({"provider": "comfyui", "type": "image"}), ComfyUIProvider)
     assert isinstance(_spec_provider_for({"profile": "comfyui"}), ComfyUIProvider)
     assert isinstance(_spec_provider_for({"type": "image"}), ComfyUIProvider)
+
+
+def test_image_section_dict_is_not_an_image_override(monkeypatch) -> None:
+    """The [image] TOML section (#599 settings) arrives in raw slot dicts under
+    the same key as the per-slot image-ref OVERRIDE string. A dict must never
+    be treated as an image ref (live CT105 regression: ExecStart rendered
+    str(dict) -> podman 'invalid reference format', hal0-slot@img exit 125)."""
+    from hal0.providers.comfyui import ComfyUIProvider
+
+    cfg = {
+        "name": "img",
+        "port": 8188,
+        "profile": "comfyui",
+        "provider": "comfyui",
+        "image": {"idle_restore_minutes": 5, "default_size": "1024x1024"},
+    }
+    ref = ComfyUIProvider().image_ref(cfg)
+    assert isinstance(ref, str)
+    assert "idle_restore_minutes" not in ref
+    assert "kyuz0/amd-strix-halo-comfyui" in ref  # manifest pin or fallback tag
+
+
+def test_llama_image_section_dict_not_override() -> None:
+    from hal0.providers.llama_server import LlamaServerProvider
+
+    cfg = {"name": "x", "port": 8081, "profile": "vulkan-std", "image": {"idle_restore_minutes": 0}}
+    ref = LlamaServerProvider().image_ref(cfg)
+    assert isinstance(ref, str) and "idle_restore_minutes" not in ref
