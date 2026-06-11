@@ -392,6 +392,43 @@ Lemonade/container enrichment, memory attribution, and metrics (`SlotMetricsView
 object (with `to_dict()` for the API shape) rather than the ad-hoc dict previously assembled
 inline in the route. See [[SlotViewAggregator]].
 
+## LoadedSlot (proposed)
+
+The typed routing result `SlotManager.resolve_for_request(slot_type, *, required_labels)` and
+`SlotManager.loaded_slot(name)` return: `{name, model_id, system_prompt, device, slot_type,
+enabled}` — frozen, no `backend_url` (handlers use the shared dispatch-context URL). Replaces
+the omni-router pattern of routing to a bare name and re-iterating `iter_configs()` to dig the
+config back out. `route_for_request` itself is unchanged (the tool filter only consumes its
+boolean). Locked invariant: `iter_configs()` never appears in `omni_router/dispatch.py`. The
+"public slot introspection" half of the original candidate was dropped — already solved by
+[[model_meta]]'s `labels_of`. Issue #701, grilled 2026-06-12; lands after PR #649 (shared
+`slots/manager.py` surface).
+
+## PhaseContext (proposed)
+
+The argument every Hermes-bootstrap phase receives once issue #702 lands: read-only
+`BootstrapState`, an explicit `repair` flag (deleting the `_repair_flag` dict sentinel), an
+injectable `PhaseIO` bundle of the network/subprocess seams (the test suite's monkeypatch
+tax, typed), and `output_of(phase)` — which raises unless the phase declared that dependency
+in its `needs` tuple. Deliberately NOT an input→output chained pipeline: the bootstrap's 15
+phases (docs say 12 — stale) have exactly four cross-phase reads, so the deepening is
+declared-and-validated dependencies over the existing run-all runner, whose FAIL semantics
+(failures never halt or skip dependents; fallbacks fire and are now recorded in
+`details["fallbacks"]`) are preserved byte-identically. Issue #702, grilled 2026-06-12.
+
+## GPUMemorySample (proposed)
+
+The typed record `hardware/gpu_view.py:sample()` emits — vendor, both pools split
+(`vram_*`/`gtt_*`) AND max-pooled (`used_mb`/`total_mb`), `is_uma`, raw `gpu_busy`, and
+`util_is_forced_high`. One home for the live GPU-memory quirks: stats.py delegates to it, the
+hardware route stops re-importing private probe helpers to un-pool the numbers, and the two
+decisions locked 2026-06-12 are factual rather than heuristic — `util_is_forced_high` reads
+`power_dpm_force_performance_level == "high"` (the gpu-compute.service pin that makes
+`gpu_busy_percent` a flat-100 lie), and `is_uma` is the physical carve-out signature
+(`gtt_total > 0 and vram_total < 2GB`), replacing the route's `vram > ram*0.5` guess. Probe
+stays the one-time detection owner; per-slot capacity attribution and the ComfyUI proxy stay
+separate readers. Issue #703, grilled 2026-06-12.
+
 ## model_meta
 
 The single home (`src/hal0/model_meta/`, issue #695 / PR #700) for the model-classification
