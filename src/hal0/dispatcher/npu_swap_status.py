@@ -42,7 +42,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.lemonade.errors import LemonadeError
+from hal0.slots.state import SlotState
 
 log = logging.getLogger(__name__)
 
@@ -197,11 +199,79 @@ def compute_npu_swap_status(
     return NpuSwapStatus(in_progress=True, from_model=from_model, to_model=to_model)
 
 
+#: SlotState values that indicate a container NPU slot is mid-transition
+#: (model swap in progress: container restarting/loading new model).
+_TRANSITIONAL_STATES: frozenset[str] = frozenset(
+    {
+        SlotState.PULLING.value,
+        SlotState.STARTING.value,
+        SlotState.WARMING.value,
+        SlotState.UNLOADING.value,
+    }
+)
+
+
+async def _container_npu_swap_status(
+    slot_configs: list[dict[str, Any]],
+    slot_manager: Any,
+) -> NpuSwapStatus | None:
+    """Return swap status from container slot state, or None if not applicable.
+
+    Returns a :class:`NpuSwapStatus` when the enabled NPU LLM slot is a
+    container slot (Phase A); returns ``None`` to signal "fall through to
+    the lemond path" when no container NPU slot is found or any accessor
+    raises.
+
+    Transitional states (PULLING/STARTING/WARMING/UNLOADING) map to
+    ``in_progress=True`` (a model swap = container restart). Settled
+    states (READY/SERVING) map to ``in_progress=False``. IDLE/OFFLINE/ERROR
+    are settled states that map to ``in_progress=False`` (consistent with
+    the lemond path: no swap signalled when the slot is down or idle).
+
+    The ``to_model`` is the slot's ``model.default`` (the configured target).
+    The ``from_model`` is ``None`` in the container path — there is no
+    "previously loaded" signal from a container (unlike the lemond path
+    where the old FLM child is still serving). This mirrors the lemond
+    path's "fresh first load" semantics: the dashboard shows the banner
+    but cannot name the outgoing model.
+    """
+    npu_slot_cfg = _enabled_npu_llm_slot(slot_configs)
+    if npu_slot_cfg is None:
+        return None
+    if not is_container_npu_cfg(npu_slot_cfg):
+        return None
+
+    to_model = _slot_model_default(npu_slot_cfg) or None
+
+    try:
+        slot = await slot_manager.status(npu_slot_cfg.get("name") or "npu")
+        state_val = slot.state.value
+    except Exception as exc:
+        log.debug(
+            "npu_swap.container_status_failed",
+            extra={"error": str(exc), "error_type": type(exc).__name__},
+        )
+        # Can't read state → treat as settled (no swap).
+        return NpuSwapStatus(in_progress=False, from_model=None, to_model=to_model)
+
+    in_progress = state_val in _TRANSITIONAL_STATES
+    return NpuSwapStatus(in_progress=in_progress, from_model=None, to_model=to_model)
+
+
 async def fetch_npu_swap_status(
     slot_configs: list[dict[str, Any]],
     lemonade_client: Any,
+    *,
+    slot_manager: Any | None = None,
 ) -> NpuSwapStatus:
     """Async wrapper that probes ``/v1/health`` and runs the pure helper.
+
+    Phase A: when the enabled NPU LLM slot is a container slot, swap
+    detection reads the slot's lifecycle state instead of diffing Lemonade's
+    ``/v1/health`` loaded list (a swap = container restart, so state
+    transitions signal the swap window directly). The lemond diff path is
+    kept as fallback for non-container (Lemonade-managed) NPU slots and will
+    be removed in Phase E.
 
     Catches :class:`hal0.lemonade.errors.LemonadeError` and any other
     exception from the probe, degrading to ``health=None``. The
@@ -211,6 +281,13 @@ async def fetch_npu_swap_status(
     the operator isn't told a swap is in progress while the daemon is
     down.
     """
+    # Phase A: container path — slot state drives swap signal.
+    if slot_manager is not None:
+        container_status = await _container_npu_swap_status(slot_configs, slot_manager)
+        if container_status is not None:
+            return container_status
+
+    # Legacy lemond diff path — non-container NPU slots (Phase E removes this).
     health: dict[str, Any] | None = None
     if lemonade_client is not None:
         try:

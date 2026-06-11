@@ -71,7 +71,7 @@ async def get_swap_status(request: Request) -> dict[str, Any]:
         # catch covers the (unlikely) directory-level failure.
         slot_configs = []
 
-    status = await fetch_npu_swap_status(slot_configs, lemonade_client)
+    status = await fetch_npu_swap_status(slot_configs, lemonade_client, slot_manager=sm)
     return status.to_dict()
 
 

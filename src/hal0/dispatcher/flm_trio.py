@@ -62,6 +62,7 @@ from typing import Any
 
 import httpx
 
+from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import Hal0Error
 from hal0.lemonade.client import LemonadeClient
 from hal0.lemonade.errors import LemonadeError
@@ -142,9 +143,8 @@ class FLMTrioRouter:
 
         Returns non-None only when ALL hold:
           - slot_manager is wired
-          - "npu" slot config exists with device == "npu"
-          - slot is a container slot (profile set OR runtime == "container")
-          - slot is not explicitly disabled
+          - "npu" slot config is a containerized NPU slot
+            (see :func:`hal0.dispatcher._npu_common.is_container_npu_cfg`)
           - slot state is "ready" or "serving" (SERVING is READY with an
             inference in flight — the container still answers concurrent
             STT/embed requests)
@@ -163,15 +163,7 @@ class FLMTrioRouter:
                 extra={"error": str(exc), "error_type": type(exc).__name__},
             )
             return None
-        if not isinstance(cfg, dict):
-            return None
-        if cfg.get("device") != "npu":
-            return None
-        # Container slot detection: has a profile OR runtime == "container"
-        is_container = bool(cfg.get("profile")) or cfg.get("runtime") == "container"
-        if not is_container:
-            return None
-        if cfg.get("enabled") is False:
+        if not is_container_npu_cfg(cfg):
             return None
         port = cfg.get("port")
         if not port:
