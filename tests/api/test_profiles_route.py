@@ -41,9 +41,17 @@ class TestListProfiles:
         data = client.get("/api/profiles").json()
         assert isinstance(data, list)
 
-    def test_returns_three_seed_profiles(self, client: TestClient) -> None:
+    def test_returns_seed_profiles(self, client: TestClient) -> None:
+        """One entry per seed profile (4 as of Phase A: flm-npu joined)."""
         data = client.get("/api/profiles").json()
-        assert len(data) == 3
+        assert len(data) == len(SEED_PROFILES)
+        assert len(data) == 4
+
+    def test_flm_npu_seed_present(self, client: TestClient) -> None:
+        """Phase A added the flm-npu container profile to the seeds."""
+        data = client.get("/api/profiles").json()
+        flm = next(item for item in data if item["name"] == "flm-npu")
+        assert flm["mtp"] is False
 
     def test_seed_names_present(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
