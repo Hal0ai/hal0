@@ -336,14 +336,17 @@ def load_capabilities_config(path: Path | None = None) -> CapabilityConfig:
     return CapabilityConfig.model_validate(raw)
 
 
-def save_capabilities_config(cfg: CapabilityConfig, path: Path | None = None) -> None:
-    """Atomically rewrite ``capabilities.toml`` from a validated config.
+def capabilities_toml_payload(cfg: CapabilityConfig) -> dict[str, Any]:
+    """Serialise a validated config into the canonical on-disk dict shape.
 
-    Always stamps the file with the current schema_version so a downgrade
-    that wrote v1-shaped TOML on top of a v2 install can be detected on
-    the next upgrade.
+    Single source for both :func:`save_capabilities_config` and the
+    :class:`hal0.slot_config.SlotConfigStore` ChangeSet computation
+    (issue #697) so the two can never disagree on the persisted shape.
+
+    Always stamps the current schema_version so a downgrade that wrote
+    v1-shaped TOML on top of a v2 install can be detected on the next
+    upgrade.
     """
-    target = path if path is not None else capabilities_toml_path()
     # Pydantic v2 ``model_dump`` walks the nested CapabilitySelection tables
     # into plain dicts — exactly the shape ``tomli_w.dump`` wants.
     data: dict[str, Any] = cfg.model_dump(mode="python")
@@ -362,7 +365,13 @@ def save_capabilities_config(cfg: CapabilityConfig, path: Path | None = None) ->
             for _child, entry in children.items():
                 if isinstance(entry, dict):
                     entry.pop("backend", None)
-    write_toml_atomic(target, data)
+    return data
+
+
+def save_capabilities_config(cfg: CapabilityConfig, path: Path | None = None) -> None:
+    """Atomically rewrite ``capabilities.toml`` from a validated config."""
+    target = path if path is not None else capabilities_toml_path()
+    write_toml_atomic(target, capabilities_toml_payload(cfg))
 
 
 __all__ = [
@@ -372,6 +381,7 @@ __all__ = [
     "CapabilitySelection",
     "auto_migrate_capabilities_file",
     "capabilities_toml_path",
+    "capabilities_toml_payload",
     "capabilities_v1_backup_path",
     "load_capabilities_config",
     "migrate_capabilities_v1_to_v2",
