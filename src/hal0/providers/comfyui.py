@@ -226,8 +226,11 @@ class ComfyUIProvider(Provider):
           * mounts: ``<data_root>/models → /root/comfy-models`` plus
             output/input/user/custom_nodes into /opt/ComfyUI, and
             extra_model_paths.yaml read-only into the app dir.
-          * ``--ipc=host --shm-size=8g`` — Wan/Hunyuan video models need
-            shared memory.
+          * ``--ipc=host`` — Wan/Hunyuan video models need shared memory;
+            host IPC means the container uses the host's /dev/shm directly.
+            No ``--shm-size``: podman exits 125 on that combo ("cannot set
+            shmsize when running in the host IPC Namespace"), unlike docker,
+            which silently ignored it (live CT105, Phase D).
           * host networking — the LXC is the host; the ComfyUI web UI must
             stay LAN-reachable on :8188 (pre-migration behavior).
           * devices from :func:`resolve_gpu_device_paths` — explicit nodes,
@@ -272,7 +275,7 @@ class ComfyUIProvider(Provider):
             group_add=group_add,
             port=port,
             network_mode="host",
-            extra_args=["--ipc=host", "--shm-size=8g"],
+            extra_args=["--ipc=host"],
         )
 
     # ── Health ─────────────────────────────────────────────────────────────────

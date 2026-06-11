@@ -3,7 +3,8 @@
 Phase D task D2. The spec must replicate what `docker inspect comfyui`
 showed working on CT105: kyuz0 image (ComfyUI at /opt/ComfyUI, venv at
 /opt/venv), bash -lc cd+exec argv, /mnt/ai-models/comfyui data mounts,
---ipc=host + --shm-size=8g (Wan/Hunyuan video need shm), host networking,
+--ipc=host (host /dev/shm serves Wan/Hunyuan video; podman rejects
+--shm-size with host IPC, unlike docker), host networking,
 and label=disable alongside the usual LXC security opts.
 """
 
@@ -59,7 +60,11 @@ def test_comfyui_spec_matches_live_deployment() -> None:
         assert (f"/mnt/ai-models/comfyui/{sub}", f"/opt/ComfyUI/{sub}") in spec.mounts
     assert any("extra_model_paths.yaml" in src for src, _ in spec.mounts)
     # Wan/Hunyuan video models need shared memory.
-    assert "--ipc=host" in spec.extra_args and "--shm-size=8g" in spec.extra_args
+    assert "--ipc=host" in spec.extra_args
+    # podman 125s on --shm-size with --ipc=host ("cannot set shmsize when
+    # running in the host IPC Namespace") — docker ignored the combo. Host
+    # /dev/shm (63G on CT105) serves the video models directly.
+    assert not any(a.startswith("--shm-size") for a in spec.extra_args)
     assert set(spec.security_opt) == {
         "seccomp=unconfined",
         "apparmor=unconfined",
@@ -131,7 +136,7 @@ def test_renderer_host_network_skips_publish_and_keeps_shm() -> None:
     assert "--network=host" in exec_line
     assert "--publish" not in exec_line, "host networking must not publish ports"
     assert "--ipc=host" in exec_line
-    assert "--shm-size=8g" in exec_line
+    assert "--shm-size" not in exec_line
     assert "--security-opt=label=disable" in exec_line
     assert "--device=/dev/kfd" in exec_line
     assert (
