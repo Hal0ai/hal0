@@ -192,6 +192,8 @@ class HardwareStats:
         Field shape mirrors the haloai /api/status response (subset):
             ram_used_gb, ram_available_gb,
             gpu_util, gpu_vram_used_mb, gpu_vram_total_mb,
+            gtt_used_mb, vram_used_mb, util_is_forced_high   (#703, typed
+                off the GPUMemorySample for the API route)
             slot_ports_occupied: list[int]   (only when include_slot_ports=True)
 
         ``include_slot_ports`` defaults to False — the slot-port scan
