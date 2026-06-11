@@ -463,12 +463,31 @@ class SlotConfig(BaseModel):
         (#599): ``_flatten_slot_toml`` stashes the on-disk ``[image]`` table
         into ``extra["image"]``, so the img slot's persisted image-gen
         settings would never reach :class:`ImageGenConfig` without this.
+
+        Collision guard: a top-level *string* ``image`` is the documented
+        per-slot container-image override (read by ``llama_server.image_ref``
+        and ``comfyui.image_ref`` from the raw slot dict). It must NOT hit
+        the ``image_gen`` alias — pre-D1 it round-tripped via
+        ``extra="allow"``, so non-dict values are parked under
+        ``extra["image"]`` to preserve that behavior.
         """
         if not isinstance(data, dict):
             return data
+        image = data.get("image")
+        if image is not None and not isinstance(image, dict):
+            # Legacy string container-image override — park under extra so
+            # the ImageGenConfig alias never sees it and providers can keep
+            # reading it from the round-tripped config.
+            new_data = dict(data)
+            new_data.pop("image")
+            old_extra = new_data.get("extra")
+            new_extra = dict(old_extra) if isinstance(old_extra, dict) else {}
+            new_extra["image"] = image
+            new_data["extra"] = new_extra
+            return new_data
         # Already top-level (direct model_validate of a flat TOML dict,
         # where the "image" alias applies) — nothing to do.
-        if data.get("image") is not None or data.get("image_gen") is not None:
+        if isinstance(image, dict) or data.get("image_gen") is not None:
             return data
         extra = data.get("extra")
         if not isinstance(extra, dict):
