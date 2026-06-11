@@ -271,6 +271,16 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
             extra_args = getattr(server_cfg, "extra_args", None)
         entry["llamacpp_args"] = extra_args
 
+        # [npu] table: expose asr/embed toggles for Lemonade-backed NPU slots.
+        # Raw TOML dict carries [npu] at the top level; also check
+        # extra["npu"] as a fallback for any validated-dump shape.
+        npu_table = cfg.get("npu") or (cfg.get("extra") or {}).get("npu")
+        if npu_table and isinstance(npu_table, dict):
+            entry["npu"] = {
+                "asr": bool(npu_table.get("asr")),
+                "embed": bool(npu_table.get("embed")),
+            }
+
         loaded_entry = loaded_by_model.get(model_default) if model_default else None
         if not enabled:
             entry["lemonade_state"] = "disabled"
@@ -398,6 +408,17 @@ async def _container_state_enrichment(request: Request) -> dict[str, dict[str, A
 
         entry["container_status"] = container_status
         entry["container_health"] = container_health
+
+        # [npu] table: expose asr/embed toggles so the dashboard can seed
+        # its NPU modality controls without a separate /config fetch.
+        # Raw TOML dict carries [npu] at the top level; also check
+        # extra["npu"] as a fallback for any validated-dump shape.
+        npu_table = cfg.get("npu") or (cfg.get("extra") or {}).get("npu")
+        if npu_table and isinstance(npu_table, dict):
+            entry["npu"] = {
+                "asr": bool(npu_table.get("asr")),
+                "embed": bool(npu_table.get("embed")),
+            }
 
         # Emit runtime / profile / image so the UI doesn't have to dig
         # into metadata, and resolved_command so the drawer can show the
