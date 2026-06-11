@@ -78,12 +78,19 @@ def test_start_cmd_emits_required_flags(
     assert "--base-directory" in cmd
 
 
-def test_image_ref_is_hal0ai_comfyui(provider: ComfyUIProvider) -> None:
+def test_image_ref_follows_manifest_pin_or_fallback(provider: ComfyUIProvider) -> None:
+    # Phase D (#599): manifest.json repins comfyui to the kyuz0 Strix Halo
+    # build. With the repo manifest visible (HAL0_HOME unset), image_ref
+    # returns that digest pin; without a manifest it falls back to
+    # _HAL0_COMFYUI_IMAGE.
     ref = provider.image_ref({})
-    assert ref.startswith("ghcr.io/hal0ai/hal0-toolbox-comfyui")
-    assert _HAL0_COMFYUI_IMAGE.startswith("ghcr.io/hal0ai/hal0-toolbox-comfyui")
-    assert ref == _HAL0_COMFYUI_IMAGE or ref.startswith(
-        f"{_HAL0_COMFYUI_IMAGE.split(':', 1)[0]}@sha256:"
+    assert (
+        ref
+        == (
+            "docker.io/kyuz0/amd-strix-halo-comfyui"
+            "@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
+        )
+        or ref == _HAL0_COMFYUI_IMAGE
     )
 
 

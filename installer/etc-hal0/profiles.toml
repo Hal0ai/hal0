@@ -44,3 +44,11 @@ image        = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 flags        = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
 mtp          = false
 device_class = "cpu"
+
+[profile.comfyui]
+# Image-gen slot (ComfyUI on ROCm, kyuz0 Strix Halo build). Exclusive-GPU:
+# the GpuArbiter stops LLM GPU slots while img runs (Phase D, #599).
+image        = "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
+flags        = "--disable-mmap --bf16-vae --cache-none"
+mtp          = false
+device_class = "img"

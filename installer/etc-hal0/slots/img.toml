@@ -1,27 +1,20 @@
-# hal0 image-generation slot — ComfyUI + Stable Diffusion family
-#
-# Lazy-load policy: this slot is NOT enabled or auto-started by the
-# installer. It activates the first time:
-#   1. The FirstRun wizard's "Add image gen?" optional step kicks off
-#      ``POST /api/install/pick-default {model_id, slot:"img"}``, which
-#      drops a model_id into ``[model].default`` here and requests a
-#      slot start, OR
-#   2. The Settings UI flips the "Enable image gen" toggle, OR
-#   3. An operator manually runs ``hal0 slot load img --model sdxl-turbo``.
-#
-# Rationale: image-gen models are 6+ GB (SDXL Turbo) to 24 GB
-# (Flux Schnell). Booting a slot for them on every fresh install would
-# waste VRAM/RAM on hosts that never want image gen. The lazy-load
-# trigger keeps the v1 default install lean.
+# hal0 image-generation slot — ComfyUI in a podman container (hal0-slot@img).
+# Exclusive-GPU slot: the GpuArbiter stops LLM GPU slots while img runs and
+# restores them after [image].idle_restore_minutes with no jobs (spec §7).
 
 name = "img"
+type = "image"
 provider = "comfyui"
-port = 8186
-# v0.2 (ADR-0006 §7): hardware preference moved from ``backend`` →
-# ``device``. ``backend`` is retained for one release so a downgrade to
-# v0.1.x still reads this file. Drop it in v0.3.
 device = "gpu-rocm"
-backend = "rocm"
+runtime = "container"
+profile = "comfyui"
+enabled = true
+port = 8188
 
 [model]
 default = "sdxl-turbo"
+
+[image]                       # persisted image-gen settings (#599)
+idle_restore_minutes = 5
+default_size = "1024x1024"
+default_steps = 0

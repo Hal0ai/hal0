@@ -332,10 +332,9 @@ class TestSeededSlotTomls:
     was absent from the set.)
 
     Scope: this checks only the *provider-constant* invariant via the real
-    validator. It deliberately does not run load_slot_config() over img.toml
-    — img is a container slot (port 8186, outside the lemonade SlotConfig
-    8081-8099 range, flat top-level shape) and is driven by a raw dict at
-    runtime, not by SlotConfig.
+    validator. Full SlotConfig validation of the img.toml seed (port 8188,
+    in-range since Phase D widened _SLOT_PORT_MAX) lives in
+    tests/config/test_schema_seeds_d1.py.
     """
 
     def test_seeded_dir_is_non_empty(self) -> None:

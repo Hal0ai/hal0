@@ -90,9 +90,11 @@ BACKEND_TO_DEVICE: dict[str, str] = {
 # deprecated legacy value.
 _VALID_PROVIDERS = frozenset({"lemonade", "llama-server", "flm", "moonshine", "kokoro", "comfyui"})
 
-# Slot port range.  8080 is the hal0 API; slots get 8081-8099.
+# Slot port range.  8080 is the hal0 API; slots get 8081-8099; 8188 =
+# ComfyUI's stock port for the img slot — kept well-known so operator
+# bookmarks/tooling keep working.
 _SLOT_PORT_MIN = 8081
-_SLOT_PORT_MAX = 8099
+_SLOT_PORT_MAX = 8200
 
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
@@ -191,6 +193,37 @@ class NpuConfig(BaseModel):
     embed: bool = Field(
         default=False,
         description="Enable embedding modality via FLM --embed 1.",
+    )
+
+
+class ImageGenConfig(BaseModel):
+    """[image] table in a slot TOML — persisted image-gen settings (#599).
+
+    Carried by the img (ComfyUI) slot.  ``idle_restore_minutes`` feeds the
+    GpuArbiter's restore timer (Phase D spec §7): after the img slot has
+    had no jobs for this many minutes, the arbiter restores the LLM GPU
+    slots it stopped.  ``default_size``/``default_steps`` seed the image
+    generation request defaults surfaced in the dashboard.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    idle_restore_minutes: int = Field(
+        default=5,
+        ge=0,
+        description=(
+            "Minutes of img-slot job inactivity before the GpuArbiter "
+            "restores stopped LLM GPU slots.  0 = never auto-restore."
+        ),
+    )
+    default_size: str = Field(
+        default="1024x1024",
+        description="Default output size (WxH) for image generation requests.",
+    )
+    default_steps: int = Field(
+        default=0,
+        ge=0,
+        description="Default sampler steps.  0 = use the model-class default.",
     )
 
 
@@ -344,6 +377,20 @@ class SlotConfig(BaseModel):
         ),
     )
 
+    # Typed [image] subsection (#599) — persisted image-gen settings for
+    # the img (ComfyUI) slot.  Same hoist/tuck round-trip pattern as
+    # [server]/[npu].  Defaults apply on slots without an [image] table;
+    # the dump serializer elides an all-defaults ImageGenConfig so
+    # non-img slots don't grow a stray [image] table on disk.
+    image_gen: ImageGenConfig = Field(
+        default_factory=ImageGenConfig,
+        alias="image",
+        description=(
+            "[image] table — image-gen settings (idle_restore_minutes, "
+            "default_size, default_steps). See ImageGenConfig (#599)."
+        ),
+    )
+
     extra: dict[str, Any] = Field(
         default_factory=dict,
         description="Provider-specific slot params passed verbatim.",
@@ -403,6 +450,35 @@ class SlotConfig(BaseModel):
             new_extra = dict(extra)
             new_extra.pop("npu", None)
             new_data["npu"] = npu
+            new_data["extra"] = new_extra
+            return new_data
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_image_from_extra(cls, data: Any) -> Any:
+        """Pull an `[image]` TOML table out of the loader's `extra` catch-all.
+
+        Mirrors ``_hoist_npu_from_extra`` for the typed ``image_gen`` field
+        (#599): ``_flatten_slot_toml`` stashes the on-disk ``[image]`` table
+        into ``extra["image"]``, so the img slot's persisted image-gen
+        settings would never reach :class:`ImageGenConfig` without this.
+        """
+        if not isinstance(data, dict):
+            return data
+        # Already top-level (direct model_validate of a flat TOML dict,
+        # where the "image" alias applies) — nothing to do.
+        if data.get("image") is not None or data.get("image_gen") is not None:
+            return data
+        extra = data.get("extra")
+        if not isinstance(extra, dict):
+            return data
+        image = extra.get("image")
+        if isinstance(image, dict):
+            new_data = dict(data)
+            new_extra = dict(extra)
+            new_extra.pop("image", None)
+            new_data["image"] = image
             new_data["extra"] = new_extra
             return new_data
         return data
@@ -482,6 +558,15 @@ class SlotConfig(BaseModel):
             extra = data.get("extra")
             extra = dict(extra) if isinstance(extra, dict) else {}
             extra["npu"] = npu
+            data["extra"] = extra
+        # Re-park [image] (typed ``image_gen``, #599) under extra the same
+        # way.  An all-defaults ImageGenConfig is elided so non-img slots
+        # don't grow a stray [image] table on disk.
+        image_gen = data.pop("image_gen", None)
+        if isinstance(image_gen, dict) and image_gen != ImageGenConfig().model_dump():
+            extra = data.get("extra")
+            extra = dict(extra) if isinstance(extra, dict) else {}
+            extra["image"] = image_gen
             data["extra"] = extra
         return data
 
@@ -616,6 +701,12 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
         "mtp": False,
         "device_class": "cpu",
+    },
+    "comfyui": {
+        "image": "docker.io/kyuz0/amd-strix-halo-comfyui:latest",
+        "flags": "--disable-mmap --bf16-vae --cache-none",
+        "mtp": False,
+        "device_class": "img",
     },
 }
 
@@ -1705,6 +1796,7 @@ __all__ = [
     "GraphUpstreamConfig",
     "Hal0Config",
     "HardwareInfo",
+    "ImageGenConfig",
     "MCPServerConfig",
     "MemoryConfig",
     "MemoryEmbeddingConfig",

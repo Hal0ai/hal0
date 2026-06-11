@@ -42,10 +42,10 @@ class TestListProfiles:
         assert isinstance(data, list)
 
     def test_returns_seed_profiles(self, client: TestClient) -> None:
-        """One entry per seed profile (5 as of Phase B: kokoro-cpu joined)."""
+        """One entry per seed profile (6 as of Phase D: comfyui joined)."""
         data = client.get("/api/profiles").json()
         assert len(data) == len(SEED_PROFILES)
-        assert len(data) == 5
+        assert len(data) == 6
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
         """Phase A added the flm-npu container profile to the seeds."""
