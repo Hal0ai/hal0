@@ -315,11 +315,15 @@ def test_delete_in_use_409_despite_corrupt_sibling_toml(tmp_hal0_home: str) -> N
 def test_delete_succeeds_with_only_corrupt_toml_and_warns(
     tmp_hal0_home: str,
     capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Only a corrupt slot TOML on disk: DELETE succeeds; scan warning fires.
 
-    structlog in this app renders straight to stdout (not stdlib records),
-    so the warning is asserted via capsys rather than caplog.
+    structlog output routing is GLOBAL and order-dependent across the test
+    suite: standalone, this app renders via PrintLogger to stdout (capsys);
+    under the full suite another test may bridge structlog into stdlib
+    logging (caplog). Assert across BOTH channels — the contract is that
+    the warning fires, not where it lands. (Full-suite flake, Phase C gate.)
     """
     _seed_corrupt_slot_toml(tmp_hal0_home, "broken-slot")
 
@@ -330,8 +334,10 @@ def test_delete_succeeds_with_only_corrupt_toml_and_warns(
             json={"name": "my-vulkan", "image": "ghcr.io/x/y:z"},
         )
         capsys.readouterr()  # drain startup noise
-        r = c.delete("/api/profiles/my-vulkan")
+        with caplog.at_level("WARNING"):
+            r = c.delete("/api/profiles/my-vulkan")
         captured = capsys.readouterr()
     assert r.status_code == 204
-    assert "profiles.in_use_scan_error" in captured.out
-    assert "broken-slot" in captured.out
+    log_text = captured.out + captured.err + caplog.text
+    assert "profiles.in_use_scan_error" in log_text
+    assert "broken-slot" in log_text
