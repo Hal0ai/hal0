@@ -207,7 +207,16 @@ def _wire_image_app(
     )
     monkeypatch.setattr(manager, "is_ready_for_dispatch", lambda name: name == "chat")
     unload = AsyncMock()
-    load = AsyncMock()
+    # ensure_img polls state() for readiness after load (#714) — a mocked load
+    # must therefore make the slot report READY, as a real load would.
+    loaded: set[str] = set()
+    load = AsyncMock(side_effect=lambda slot_name, model=None: loaded.add(slot_name))
+    real_state = manager.state
+    monkeypatch.setattr(
+        manager,
+        "state",
+        lambda name: SlotState.READY if name in loaded else real_state(name),
+    )
     monkeypatch.setattr(manager, "unload", unload)
     monkeypatch.setattr(manager, "load", load)
     infer = AsyncMock(return_value=_FAKE_INFER_RESULT)
