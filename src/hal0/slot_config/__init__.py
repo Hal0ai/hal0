@@ -42,17 +42,22 @@ import logging
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from hal0.capabilities.config import (
-    CapabilityConfig,
-    CapabilitySelection,
-    capabilities_toml_path,
-    capabilities_toml_payload,
-)
 from hal0.config import paths
 from hal0.config.loader import write_toml_atomic
 from hal0.model_meta import canonical_device, device_to_legacy_backend
+
+if TYPE_CHECKING:
+    from hal0.capabilities.config import CapabilitySelection
+
+# NOTE: hal0.capabilities.* is imported lazily inside the store methods.
+# This module is imported by hal0.slots.manager (the write_slot_toml
+# re-point), and a module-level import of hal0.capabilities would close
+# the cycle capabilities.__init__ → orchestrator → dispatcher →
+# slots.manager → slot_config. Keeping this module import-light breaks
+# that loop while the orchestrator (which imports both) stays the
+# composition point.
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +150,8 @@ class SlotConfigStore:
     # ── path helpers ─────────────────────────────────────────────────────────
 
     def _caps_path(self) -> Path:
+        from hal0.capabilities.config import capabilities_toml_path
+
         return self._capabilities_path or capabilities_toml_path()
 
     def _slot_path(self, slot_name: str) -> Path:
@@ -223,6 +230,11 @@ class SlotConfigStore:
         self, raw_before: dict[str, Any] | None, selection: SlotSelection
     ) -> dict[str, Any]:
         """Fold ``selection`` into the capabilities file's canonical shape."""
+        from hal0.capabilities.config import (
+            CapabilityConfig,
+            capabilities_toml_payload,
+        )
+
         cfg = (
             CapabilityConfig.model_validate(raw_before)
             if raw_before is not None
