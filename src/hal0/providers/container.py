@@ -191,6 +191,10 @@ def _render_unit(
         "run",
         "--rm",
         f"--name={container_name}",
+        # Unclean shutdown leaves a stale same-name container record (--rm
+        # never ran) → exit 125 "name already in use" at next boot (#721).
+        # --replace removes it first; no-op when no stale record exists.
+        "--replace",
     ]
     # Explicit GPU device nodes (podman won't recurse the /dev/dri directory).
     for dev in devices:
@@ -278,6 +282,8 @@ def _render_unit_from_spec(
         "run",
         "--rm",
         f"--name={container_name}",
+        # Stale same-name record after unclean shutdown → exit 125 (#721).
+        "--replace",
     ]
     if spec.network_mode:
         argv.append(f"--network={spec.network_mode}")

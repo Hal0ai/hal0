@@ -126,6 +126,26 @@ class TestRenderUnit:
         exec_start = self._get_exec_start(unit)
         assert exec_start.startswith(f"{_TEST_RUNTIME} run")
 
+    def test_replace_flag_clears_stale_container_records(self) -> None:
+        """An unclean shutdown leaves a stale container record with the slot
+        name (``--rm`` never ran), so the next boot fails with podman exit 125
+        "name already in use" (#721). ``--replace`` removes any pre-existing
+        same-name container before starting; no-op when none exists."""
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "test-slot",
+            profile.image,
+            8095,
+            "/mnt/ai-models/model.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+        )
+        tokens = shlex.split(self._get_exec_start(unit))
+        assert "--replace" in tokens, f"--replace missing from argv: {tokens}"
+        # Must follow --name so the pairing is obvious in the rendered unit.
+        assert tokens.index("--replace") == tokens.index("--name=hal0-slot-test-slot") + 1
+
     def test_identical_path_mount_readonly(self) -> None:
         """Model store must be mounted at /mnt/ai-models:ro (identical path)."""
         profile = _moe_profile()

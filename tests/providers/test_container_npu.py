@@ -79,6 +79,14 @@ class TestRenderUnitFromSpec:
         unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
         assert "--name=hal0-slot-npu" in unit
 
+    def test_replace_flag_clears_stale_container_records(self) -> None:
+        """Spec-rendered units need ``--replace`` too — same #721 boot race as
+        the llama-server builder (stale name record after unclean shutdown)."""
+        unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
+        argv = _exec_start(unit)
+        assert "--replace" in argv, f"--replace missing from argv: {argv}"
+        assert argv.index("--replace") == argv.index("--name=hal0-slot-npu") + 1
+
     def test_security_opts_included(self) -> None:
         unit = _render_unit_from_spec("npu", _flm_spec(), runtime_bin=_TEST_RUNTIME)
         argv = _exec_start(unit)
