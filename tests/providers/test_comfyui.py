@@ -102,29 +102,35 @@ def test_image_ref_slot_cfg_override_wins(provider: ComfyUIProvider) -> None:
 # ─── container_spec ──────────────────────────────────────────────────────────
 
 
-def test_container_spec_passes_kfd_and_dri(
+def test_container_spec_passes_gpu_device_nodes(
     provider: ComfyUIProvider,
     slot_cfg: dict[str, Any],
     model_info: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Explicit nodes from resolve_gpu_device_paths (podman doesn't recurse
+    # /dev/dri — same fix class as #674). Pinned here: dev/CI boxes vary.
+    monkeypatch.setattr(
+        "hal0.providers.comfyui.resolve_gpu_device_paths",
+        lambda: ["/dev/kfd", "/dev/dri/renderD128"],
+    )
     spec = provider.container_spec(slot_cfg, model_info)
     assert spec.port == 8186
-    # Strix Halo iGPU passthrough requires both /dev/kfd and /dev/dri.
-    assert "/dev/kfd" in spec.devices
-    assert "/dev/dri" in spec.devices
+    assert spec.devices == ["/dev/kfd", "/dev/dri/renderD128"]
     # Group_add must be numeric GIDs (resolve_gpu_group_ids on the host).
     assert all(g.isdigit() for g in spec.group_add)
 
 
-def test_container_spec_mounts_persistent_base_dir(
+def test_container_spec_mounts_persistent_data_dirs(
     provider: ComfyUIProvider,
     slot_cfg: dict[str, Any],
     model_info: dict[str, Any],
 ) -> None:
     spec = provider.container_spec(slot_cfg, model_info)
-    # The persistent directory holds models/, custom_nodes/, output/, input/
+    # The data root holds models/, custom_nodes/, output/, input/, user/
     # — losing it on a `docker rm` would discard 6+ GB of weights.
-    assert ("/var/lib/hal0/comfyui", "/var/lib/hal0/comfyui") in spec.mounts
+    assert ("/mnt/ai-models/comfyui/models", "/root/comfy-models") in spec.mounts
+    assert ("/mnt/ai-models/comfyui/custom_nodes", "/opt/ComfyUI/custom_nodes") in spec.mounts
 
 
 def test_container_spec_command_runs_python_main(
@@ -133,10 +139,11 @@ def test_container_spec_command_runs_python_main(
     model_info: dict[str, Any],
 ) -> None:
     spec = provider.container_spec(slot_cfg, model_info)
-    assert spec.command[0] == "python"
-    assert spec.command[1] == "main.py"
+    # bash -lc so the kyuz0 image's /opt/venv login-shell activation runs.
+    assert spec.command[:2] == ["bash", "-lc"]
+    assert "exec python main.py" in spec.command[2]
     # The slot port (not the ComfyUI default) is what we listen on.
-    assert "8186" in spec.command
+    assert "--port 8186" in spec.command[2]
 
 
 # ─── health ──────────────────────────────────────────────────────────────────

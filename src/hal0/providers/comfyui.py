@@ -7,7 +7,10 @@ OpenAI-shaped ``POST /v1/images/generations`` request is translated to a
 parametric workflow (see :mod:`hal0.providers.comfyui_workflows`) and the
 result PNG bytes are unwrapped back into the OpenAI response shape.
 
-Toolbox image:    ghcr.io/hal0ai/hal0-toolbox-comfyui:v1
+Toolbox image:    docker.io/kyuz0/amd-strix-halo-comfyui (manifest digest pin
+                  is the primary path; the :latest tag is the last-resort
+                  fallback). The kyuz0 image ships ComfyUI checked out at
+                  /opt/ComfyUI with its venv at /opt/venv — NOT /app.
 Backend default:  rocm  (Strix Halo iGPU is the v1 first-class target).
 
 Endpoints we touch on the upstream:
@@ -31,13 +34,12 @@ import logging
 import os
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 import httpx
 
 from hal0.errors import Hal0Error
-from hal0.providers._gpu import resolve_gpu_group_ids
+from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 from hal0.providers.comfyui_workflows import build_workflow
 
@@ -45,14 +47,26 @@ log = logging.getLogger(__name__)
 
 
 # ── Toolbox image ──────────────────────────────────────────────────────────────
-_HAL0_COMFYUI_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-comfyui:v1"
+# Last-resort fallback only — the manifest.json digest pin is the primary
+# path (see image_ref). Points at the kyuz0 Strix Halo build that the live
+# CT105 deployment validated.
+_HAL0_COMFYUI_IMAGE = "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
 
-# In-container app + working-data layout. The toolbox image has ComfyUI
-# checked out at /app and stores models / outputs / custom_nodes under
-# /var/lib/hal0/comfyui (which we bind-mount from the host so weights
-# and custom nodes persist across container restarts).
-_COMFYUI_APP_DIR = "/app"
+# In-container app + working-data layout. The kyuz0 image has ComfyUI
+# checked out at /opt/ComfyUI (venv at /opt/venv). Host-side working data
+# (models / output / input / user / custom_nodes + extra_model_paths.yaml)
+# lives under _COMFYUI_DATA_ROOT and is bind-mounted in so weights and
+# custom nodes persist across container restarts.
+_COMFYUI_APP_DIR = "/opt/ComfyUI"
 _COMFYUI_BASE_DIR = "/var/lib/hal0/comfyui"
+
+# Host data root for the bind mounts. Overridable for tests / non-standard
+# installs via HAL0_COMFYUI_DATA_ROOT.
+_COMFYUI_DATA_ROOT = "/mnt/ai-models/comfyui"
+
+# Live-validated flag bundle (matches the "comfyui" seed profile). Used
+# when the slot has no resolvable profile.
+_DEFAULT_PROFILE_FLAGS = "--disable-mmap --bf16-vae --cache-none"
 
 # Default port — ComfyUI's stock listen port.
 _DEFAULT_PORT = 8188
@@ -147,8 +161,8 @@ class ComfyUIProvider(Provider):
         Resolution order (matches ``llama_server.image_ref``):
           1. ``slot_cfg["image"]`` — explicit override from slot TOML.
           2. ``HAL0_TOOLBOX_IMAGE_COMFYUI`` env var.
-          3. ``manifest.json`` digest pin (when published).
-          4. The default tag ``ghcr.io/hal0ai/hal0-toolbox-comfyui:v1``.
+          3. ``manifest.json`` digest pin (primary path).
+          4. The fallback tag ``docker.io/kyuz0/amd-strix-halo-comfyui:latest``.
         """
         override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
         if override:
@@ -169,44 +183,75 @@ class ComfyUIProvider(Provider):
             pass
         return _HAL0_COMFYUI_IMAGE
 
+    def _profile_flags(self, slot_cfg: dict[str, Any]) -> str:
+        """Resolve the slot's profile to its flag bundle.
+
+        Same lookup as the llama-server path in
+        :mod:`hal0.providers.container` (resolve_profile +
+        resolve_profile_flags). Falls back to the live-validated default
+        bundle when the slot has no profile or the lookup fails — the img
+        slot must always come up with the bench-tuned flags.
+        """
+        profile_name = str(slot_cfg.get("profile") or slot_cfg.get("slot", {}).get("profile") or "")
+        if profile_name:
+            try:
+                from hal0.config.loader import resolve_profile
+                from hal0.config.schema import resolve_profile_flags
+
+                flags = resolve_profile_flags(resolve_profile(profile_name)).strip()
+                if flags:
+                    return flags
+            except Exception:
+                log.warning(
+                    "comfyui.profile_lookup_failed; using default flags",
+                    extra={"profile": profile_name},
+                )
+        return _DEFAULT_PROFILE_FLAGS
+
     def container_spec(
         self,
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
     ) -> ContainerSpec:
-        """Build a ContainerSpec for ComfyUI in the toolbox image.
+        """Build a ContainerSpec replicating the live-validated CT105 deployment.
 
-        Strix Halo path: pass /dev/kfd + /dev/dri (ROCm + Vulkan share
-        the same node tree on Strix). Bind-mount /var/lib/hal0/comfyui
-        so models, custom_nodes, output, and input all survive container
-        restarts — losing a 6 GB SDXL checkpoint on a `docker rm` would
-        be bad operator UX.
+        Mirrors `docker inspect comfyui` on CT105 (migration = replicate
+        what works):
+          * argv: ``bash -lc 'cd /opt/ComfyUI && exec python main.py …'``
+            — the kyuz0 image needs the login shell to activate /opt/venv.
+          * mounts: ``<data_root>/models → /root/comfy-models`` plus
+            output/input/user/custom_nodes into /opt/ComfyUI, and
+            extra_model_paths.yaml read-only into the app dir.
+          * ``--ipc=host --shm-size=8g`` — Wan/Hunyuan video models need
+            shared memory.
+          * host networking — the LXC is the host; the ComfyUI web UI must
+            stay LAN-reachable on :8188 (pre-migration behavior).
+          * devices from :func:`resolve_gpu_device_paths` — explicit nodes,
+            podman doesn't recurse /dev/dri (same fix class as #674).
         """
         env = self.build_env(slot_cfg, model_info)
         port = int(env["HAL0_PORT"])
 
-        command: list[str] = [
-            "python",
-            "main.py",
-            "--listen",
-            "0.0.0.0",
-            "--port",
-            str(port),
-            "--base-directory",
-            _COMFYUI_BASE_DIR,
-        ]
+        flags = self._profile_flags(slot_cfg)
+        payload = (
+            f"cd {_COMFYUI_APP_DIR} && exec python main.py --listen 0.0.0.0 --port {port} {flags}"
+        ).strip()
+        command: list[str] = ["bash", "-lc", payload]
 
-        # Persistent ComfyUI state (models/checkpoints, models/loras,
-        # custom_nodes, output/, input/) lives under /var/lib/hal0/comfyui
-        # on both sides — paths match so the in-container workflow refs
-        # resolve to the same files as the registry pull layer wrote them.
-        mounts: list[tuple[str, str]] = [(_COMFYUI_BASE_DIR, _COMFYUI_BASE_DIR)]
-        # Keep the etc-hal0 mount consistent with llama-server so any
-        # operator-shipped workflow JSON under /etc/hal0/workflows/
-        # (future hook) is reachable.
-        config_root = "/etc/hal0"
-        if Path(config_root).is_dir():
-            mounts.append((config_root, config_root))
+        data_root = os.environ.get("HAL0_COMFYUI_DATA_ROOT", "").strip() or _COMFYUI_DATA_ROOT
+        # ":ro" suffix on the dst is how ContainerSpec expresses read-only
+        # mounts (_render_unit_from_spec emits --volume={src}:{dst} verbatim).
+        mounts: list[tuple[str, str]] = [
+            (f"{data_root}/models", "/root/comfy-models"),
+            (f"{data_root}/output", f"{_COMFYUI_APP_DIR}/output"),
+            (f"{data_root}/input", f"{_COMFYUI_APP_DIR}/input"),
+            (f"{data_root}/user", f"{_COMFYUI_APP_DIR}/user"),
+            (f"{data_root}/custom_nodes", f"{_COMFYUI_APP_DIR}/custom_nodes"),
+            (
+                f"{data_root}/extra_model_paths.yaml",
+                f"{_COMFYUI_APP_DIR}/extra_model_paths.yaml:ro",
+            ),
+        ]
 
         # Numeric GIDs for the host's render+video groups (see _gpu.py
         # and llama_server's notes on stock-ubuntu /etc/group).
@@ -217,13 +262,13 @@ class ComfyUIProvider(Provider):
             command=command,
             env={},
             mounts=mounts,
-            devices=["/dev/kfd", "/dev/dri"],
+            devices=resolve_gpu_device_paths(),
             cap_add=[],
-            security_opt=["seccomp=unconfined", "apparmor=unconfined"],
+            security_opt=["seccomp=unconfined", "apparmor=unconfined", "label=disable"],
             group_add=group_add,
             port=port,
             network_mode="host",
-            extra_args=[],
+            extra_args=["--ipc=host", "--shm-size=8g"],
         )
 
     # ── Health ─────────────────────────────────────────────────────────────────

@@ -43,6 +43,18 @@ def test_spec_provider_kokoro_profile_returns_kokoro() -> None:
     assert isinstance(result, KokoroProvider)
 
 
+def test_spec_provider_comfyui_returns_comfyui() -> None:
+    from hal0.providers.comfyui import ComfyUIProvider
+
+    # All three discriminators route to ComfyUI (Phase D img slot).
+    for cfg in (
+        {"provider": "comfyui", "type": "image", "device": "gpu-rocm"},
+        {"profile": "comfyui"},
+        {"type": "image"},
+    ):
+        assert isinstance(_spec_provider_for(cfg), ComfyUIProvider), cfg
+
+
 def test_spec_provider_gpu_returns_none() -> None:
     result = _spec_provider_for({"device": "gpu-rocm", "profile": "moe-rocmfp4"})
     assert result is None

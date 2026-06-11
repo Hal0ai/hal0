@@ -312,9 +312,8 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
     """Spec-building provider for non-llama container slots, or None.
 
     llama-server slots (GPU profiles) use the flag-bundle _render_unit path.
-    FLM (NPU) and Kokoro (CPU TTS) know their own argv; they build a
-    ContainerSpec rendered by _render_unit_from_spec. ComfyUI joins in
-    Phase D.
+    FLM (NPU), Kokoro (CPU TTS), and ComfyUI (image gen) know their own
+    argv; they build a ContainerSpec rendered by _render_unit_from_spec.
     """
     if str(slot_cfg.get("device", "")) == "npu":
         from hal0.providers.flm import FLMProvider
@@ -324,6 +323,14 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
         from hal0.providers.kokoro import KokoroProvider
 
         return KokoroProvider()
+    if (
+        str(slot_cfg.get("provider", "")) == "comfyui"
+        or str(slot_cfg.get("profile", "")) == "comfyui"
+        or str(slot_cfg.get("type", "")) == "image"
+    ):
+        from hal0.providers.comfyui import ComfyUIProvider
+
+        return ComfyUIProvider()
     return None
 
 
