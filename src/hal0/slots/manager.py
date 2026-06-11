@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
+from hal0.slot_config import write_slot_toml
 from hal0.slots.state import (
     IllegalSlotTransition,
     NpuExclusivityViolation,
@@ -1526,17 +1527,10 @@ class SlotManager:
         admits exactly one NPU LLM at a time. Disabled NPU LLM slots
         coexist; only the live anchor count is bounded.
 
-        TOML serialisation depends on ``tomli_w`` (declared in
-        pyproject.toml); kept inline so this module doesn't pull in
-        ``config/loader.py``.
+        TOML serialisation routes through
+        :func:`hal0.slot_config.write_slot_toml` — the single
+        slots/*.toml write path (issue #697).
         """
-        try:
-            import tomli_w
-        except ImportError as exc:  # pragma: no cover
-            raise SlotConfigError(
-                "tomli_w not installed — required for slot config writes",
-            ) from exc
-
         cfg_dict = _cfg_to_dict(slot_cfg)
         # #585: canonicalize a ctx_size alias from the create modal too.
         _normalize_ctx_key(cfg_dict)
@@ -1544,7 +1538,7 @@ class SlotManager:
         cfg_path = self._config_file(slot_name)
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            cfg_path.write_bytes(tomli_w.dumps(cfg_dict).encode("utf-8"))
+            write_slot_toml(cfg_path, cfg_dict)
         except OSError as exc:
             raise SlotConfigError(
                 f"failed to write slot config {cfg_path}: {exc}",
@@ -1609,11 +1603,6 @@ class SlotManager:
         """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
-        try:
-            import tomli_w
-        except ImportError as exc:  # pragma: no cover
-            raise SlotConfigError("tomli_w not installed") from exc
-
         cfg = await self._load_slot_config(slot_name)
         cfg_dict = _cfg_to_dict(cfg)
         # One-level deep merge for nested TOML tables ([model], [server]).
@@ -1646,7 +1635,7 @@ class SlotManager:
 
         cfg_path = self._config_file(slot_name)
         try:
-            cfg_path.write_bytes(tomli_w.dumps(cfg_dict).encode("utf-8"))
+            write_slot_toml(cfg_path, cfg_dict)
         except OSError as exc:
             raise SlotConfigError(
                 f"failed to rewrite {cfg_path}: {exc}",
@@ -1782,15 +1771,10 @@ class SlotManager:
         reads the right default instead of drifting back to the empty
         seed value that produced the "no model.default set" ERROR.
 
-        Atomic via the same ``write_bytes`` pattern as :meth:`update_config`.
-        Failures bubble up so the caller can log + soft-fail without
-        affecting the live load state.
+        Atomic via :func:`hal0.slot_config.write_slot_toml` — the single
+        slots/*.toml write path (issue #697). Failures bubble up so the
+        caller can log + soft-fail without affecting the live load state.
         """
-        try:
-            import tomli_w
-        except ImportError as exc:  # pragma: no cover
-            raise SlotConfigError("tomli_w not installed") from exc
-
         cfg = await self._load_slot_config(slot_name)
         cfg_dict = _cfg_to_dict(cfg)
         existing_model = cfg_dict.get("model")
@@ -1799,7 +1783,7 @@ class SlotManager:
 
         cfg_path = self._config_file(slot_name)
         try:
-            cfg_path.write_bytes(tomli_w.dumps(cfg_dict).encode("utf-8"))
+            write_slot_toml(cfg_path, cfg_dict)
         except OSError as exc:
             raise SlotConfigError(
                 f"failed to persist model.default to {cfg_path}: {exc}",

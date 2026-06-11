@@ -860,8 +860,12 @@ def _clear_slot_default(slot_path: Path, slot_cfg: dict[str, Any]) -> None:
     cascade — the model row is already going away, and a slot left
     pointing at a vanished id will surface as ``model.not_found`` on its
     next ``load()`` (which is the correct UX).
+
+    Routes through :func:`hal0.slot_config.write_slot_toml` (issue
+    #697) — the single, atomic slots/*.toml write path (this site used
+    to be the one non-atomic raw ``write_bytes`` writer).
     """
-    import tomli_w
+    from hal0.slot_config import write_slot_toml
 
     new_cfg = dict(slot_cfg)
     model_sect = new_cfg.get("model")
@@ -872,7 +876,7 @@ def _clear_slot_default(slot_path: Path, slot_cfg: dict[str, Any]) -> None:
     # Cascade continues if the write fails; the dangling reference is
     # surfaced later.
     with contextlib.suppress(OSError):
-        slot_path.write_bytes(tomli_w.dumps(new_cfg).encode("utf-8"))
+        write_slot_toml(slot_path, new_cfg)
 
 
 async def _unload_slot_if_running(request: Request, slot_name: str) -> None:

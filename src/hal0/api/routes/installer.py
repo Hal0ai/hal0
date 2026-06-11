@@ -357,12 +357,13 @@ def _ensure_registry_entry(registry: Any, model_id: str) -> Model:
 def _assign_to_slot(slot: str, model_id: str) -> Path:
     """Atomically update ``/etc/hal0/slots/<slot>.toml`` so ``model.default = <id>``.
 
-    Uses ``hal0.config.loader.write_toml_atomic`` so a half-written TOML
+    Routes through ``hal0.slot_config.write_slot_toml`` — the single
+    atomic slots/*.toml write path (issue #697) — so a half-written TOML
     can't take out the slot. Creates the file from scratch if it doesn't
     exist — this is the FirstRun path on a fresh install where the
     primary slot was scaffolded but never had a model assigned.
     """
-    from hal0.config.loader import write_toml_atomic
+    from hal0.slot_config import write_slot_toml
 
     slot_path = paths.slots_config_dir() / f"{slot}.toml"
     slot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -403,7 +404,7 @@ def _assign_to_slot(slot: str, model_id: str) -> Path:
     data["model"] = model_section
 
     try:
-        write_toml_atomic(slot_path, data)
+        write_slot_toml(slot_path, data)
     except OSError as exc:
         raise PickDefaultError(
             f"could not write slot TOML {slot_path}: {exc}",
