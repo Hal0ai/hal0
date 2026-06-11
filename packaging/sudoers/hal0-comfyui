@@ -1,0 +1,22 @@
+# hal0 — ComfyUI switchover grant for an UNPRIVILEGED hal0-api.
+#
+# On CT105 today hal0-api runs as root and execs /opt/comfyui/*.sh directly;
+# this file is for the hardened install model where hal0-api runs as the
+# `hal0` system user. The API invokes the scripts via `sudo -n <abs path>`
+# (src/hal0/api/routes/comfyui.py:_script_argv), so the grant is exactly the
+# six absolute script paths — no wildcards, no shell, no extra args.
+#
+# Install (as root):
+#   install -m 0440 packaging/sudoers/hal0-comfyui /etc/sudoers.d/hal0-comfyui
+#   visudo -cf /etc/sudoers.d/hal0-comfyui
+#
+# The scripts themselves must stay root-owned 0755 (they are the privilege
+# boundary — a hal0-writable script under this grant would be root escalation).
+
+hal0 ALL=(root) NOPASSWD: \
+    /opt/comfyui/stop-inference.sh, \
+    /opt/comfyui/start-inference.sh, \
+    /opt/comfyui/comfy-up.sh, \
+    /opt/comfyui/comfy-down.sh, \
+    /opt/comfyui/comfy-logs.sh, \
+    /opt/comfyui/comfy-postinstall.sh

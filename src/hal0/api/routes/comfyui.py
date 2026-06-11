@@ -14,11 +14,14 @@ renders that engine pane from ``GET /api/comfyui/status``, which folds together:
 Every source degrades to a safe default — the pane polls this every few seconds
 and a dead container must surface as "stopped", never a 500.
 
-The switchover *write* path (``POST /api/comfyui/switchover``) runs root-owned
-scripts (``stop-inference.sh`` / ``comfy-up.sh`` …) via systemctl + docker on the
-shared runtime. hal0-api is unprivileged, so that path needs a narrowly-scoped
-sudoers rule / root helper wired in a separate, explicitly-confirmed step. Until
-then it is feature-gated behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` and refuses.
+The switchover *write* path (``POST /api/comfyui/switchover``) runs the
+root-owned script pairs in ``/opt/comfyui`` (``stop-inference.sh`` →
+``comfy-up.sh`` for generation, ``comfy-down.sh`` → ``start-inference.sh`` for
+inference) in the background behind a 202; the ``switchover`` block on /status
+tracks the transition. Privilege-aware: as root (hal0-api on CT105 runs
+``User=root``) the scripts exec directly, otherwise via ``sudo -n`` against the
+narrow ``packaging/sudoers/hal0-comfyui`` grant. The whole path stays
+feature-gated behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` (501 when off).
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ import shutil
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
@@ -45,12 +48,25 @@ _PRESSURE_GB = 50
 _LEMONADE_UNIT = "hal0-lemonade.service"
 _HERMES_UNIT = "hal0-agent@hermes.service"
 
+# Switchover script pairs, run in order from the scripts dir on the runtime
+# host. ON hands the iGPU to ComfyUI; OFF hands it back to the LLM stack.
+_SWITCH_PAIRS: dict[str, tuple[str, ...]] = {
+    "generation": ("stop-inference.sh", "comfy-up.sh"),
+    "inference": ("comfy-down.sh", "start-inference.sh"),
+}
+
 # Short connect so a dead engine surfaces fast; the read budget is modest because
 # /system_stats and /queue are cheap snapshots.
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=1.5, read=4.0, write=2.0, pool=2.0)
 _POOL_LIMITS = httpx.Limits(max_connections=4, max_keepalive_connections=2)
 
 _client: httpx.AsyncClient | None = None
+
+# In-flight switchover tracker. Module-global on purpose: there is exactly one
+# iGPU, so there is exactly one switch — /status surfaces it so the pane's poll
+# can render "switching…" and any error from the last attempt.
+_SWITCH_IDLE: dict[str, Any] = {"active": False, "target": None, "error": None}
+_switch: dict[str, Any] = dict(_SWITCH_IDLE)
 
 
 def _comfyui_base_url() -> str:
@@ -87,9 +103,11 @@ async def aclose_client() -> None:
 
 
 def _reset_state() -> None:
-    """Drop the shared client. For test isolation only."""
+    """Drop the shared client + switch tracker. For test isolation only."""
     global _client
     _client = None
+    _switch.clear()
+    _switch.update(_SWITCH_IDLE)
 
 
 async def _fetch_json(path: str) -> dict[str, Any] | None:
@@ -289,16 +307,82 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "queue": counts,
         "inference": {"lemonade": lemonade, "hermes": hermes},
         "inventory": _model_inventory(),
+        "switchover": dict(_switch),
     }
 
 
+def _scripts_dir() -> str:
+    return os.environ.get("COMFYUI_SCRIPTS_DIR", "/opt/comfyui")
+
+
+def _script_timeout() -> float:
+    # comfy-up.sh on a FRESH container create waits for HTTP and pip-installs
+    # custom-node deps — minutes, not seconds. The resume path is fast.
+    try:
+        return float(os.environ.get("COMFYUI_SCRIPT_TIMEOUT", "600"))
+    except ValueError:
+        return 600.0
+
+
+def _script_argv(name: str) -> list[str]:
+    """Argv for one switchover script, privilege-aware.
+
+    Root (CT105 today: hal0-api runs as ``User=root``) execs the script
+    directly. An unprivileged hal0-api goes through ``sudo -n`` against the
+    narrow ``/etc/sudoers.d/hal0-comfyui`` grant (absolute paths only); ``-n``
+    so a missing grant fails immediately instead of hanging on a password
+    prompt.
+    """
+    path = os.path.join(_scripts_dir(), name)
+    return [path] if os.geteuid() == 0 else ["sudo", "-n", path]
+
+
+async def _run_script(name: str) -> None:
+    """Execute one switchover script to completion; raises on failure."""
+    argv = _script_argv(name)
+    timeout = _script_timeout()
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        raise RuntimeError(f"{name} timed out after {timeout:.0f}s") from None
+    if proc.returncode != 0:
+        tail = out.decode("utf-8", "replace").strip().splitlines()[-5:]
+        raise RuntimeError(f"{name} exited {proc.returncode}: {' | '.join(tail)}")
+
+
+async def _run_switch(mode: str) -> None:
+    """Run the script pair for ``mode``; record failure for /status to surface."""
+    try:
+        for name in _SWITCH_PAIRS[mode]:
+            await _run_script(name)
+    except Exception as exc:  # any script failure must land in /status, never raise
+        _switch["error"] = f"{mode}: {exc}"
+    finally:
+        _switch["active"] = False
+        _switch["target"] = None
+
+
 @router.post("/switchover")
-async def comfyui_switchover(request: Request) -> JSONResponse:
+async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
     """Flip the iGPU between LLM inference and ComfyUI generation.
 
-    Gated: the underlying scripts need root (systemctl + docker) and take the
-    messaging bots + memory extraction offline, so the privileged path is wired
-    only behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` in a separate confirmed step.
+    Body: ``{"mode": "generation" | "inference", "force": bool}``. Refuses while
+    a switch is in flight (409), no-ops when already in the target mode (200),
+    and refuses to drop a busy render queue without ``force`` (409). Otherwise
+    answers 202 and runs the script pair in the background — track completion
+    via the ``switchover`` block on ``GET /status``.
+
+    Stays gated behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` because the scripts
+    take the messaging bots + memory extraction offline (an operator decision
+    per host), not because the path is unwired.
     """
     if os.environ.get("HAL0_COMFYUI_SWITCHOVER_ENABLED", "0") != "1":
         return JSONResponse(
@@ -307,26 +391,84 @@ async def comfyui_switchover(request: Request) -> JSONResponse:
                 "error": {
                     "code": "comfyui.switchover_disabled",
                     "message": (
-                        "ComfyUI switchover is not enabled. It runs root-owned "
-                        "scripts on the shared runtime; set "
-                        "HAL0_COMFYUI_SWITCHOVER_ENABLED=1 only once a scoped "
-                        "sudoers/root-helper path is in place."
+                        "ComfyUI switchover is disabled on this host. It stops "
+                        "the LLM stack (bots + memory extraction go dark) while "
+                        "generation holds the iGPU; set "
+                        "HAL0_COMFYUI_SWITCHOVER_ENABLED=1 on hal0-api to "
+                        "enable it."
                     ),
                 }
             },
         )
-    # Flag on, but the privileged execution path is intentionally not wired yet.
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    mode = body.get("mode") if isinstance(body, dict) else None
+    if mode not in _SWITCH_PAIRS:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "comfyui.invalid_mode",
+                    "message": "body must be {'mode': 'generation' | 'inference'}",
+                }
+            },
+        )
+    # One switch at a time — racing systemctl/docker pairs is never right. Checked
+    # before the noop probe so a mid-flight flip is reported as in-progress, not
+    # as "already there" based on a half-transitioned snapshot.
+    if _switch["active"]:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "comfyui.switch_in_progress",
+                    "message": f"a switch to {_switch['target']} is already running",
+                }
+            },
+        )
+    # Idempotency: derive the current mode the same way /status does (container
+    # running ⇒ generation). Target inference additionally requires lemonade to
+    # actually be up — if both stacks are down, the switch runs as a repair.
+    container, lemonade = await asyncio.gather(
+        _container_state(_comfyui_container()),
+        _systemd_active(_LEMONADE_UNIT),
+    )
+    already_there = (
+        container == "running" if mode == "generation" else container != "running" and lemonade
+    )
+    if already_there:
+        return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
+    # Mid-render guard: switching to inference stops the container, dropping any
+    # running/pending renders. Refuse unless the caller forces it — the dashboard
+    # confirm dialog states the blast radius and passes force on user confirm.
+    force = bool(body.get("force")) if isinstance(body, dict) else False
+    if mode == "inference" and not force:
+        counts = _queue_counts(await _fetch_json("/queue"))
+        busy = counts["running"] + counts["pending"]
+        if busy:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": {
+                        "code": "comfyui.busy",
+                        "message": (
+                            f"{busy} render job(s) running or queued would be dropped; "
+                            "retry with {'force': true} to switch anyway."
+                        ),
+                        "queue": counts,
+                    }
+                },
+            )
+    # Dispatch in the background and answer 202 immediately — the pair takes
+    # seconds to tens of seconds (service stop/start, container boot) and the
+    # pane's /status poll tracks the transition via the switchover block.
+    _switch.update(active=True, target=mode, error=None)
+    background_tasks.add_task(_run_switch, mode)
     return JSONResponse(
-        status_code=503,
-        content={
-            "error": {
-                "code": "comfyui.switchover_unimplemented",
-                "message": (
-                    "switchover is enabled but the privileged root path has not "
-                    "been provisioned on this host yet."
-                ),
-            }
-        },
+        status_code=202,
+        content={"status": "switching", "mode": mode, "scripts": list(_SWITCH_PAIRS[mode])},
     )
 
 

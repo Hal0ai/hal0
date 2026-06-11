@@ -7,10 +7,13 @@
 // the cpp-httplib server behind :8188.
 //
 // The switchover (inference ⇄ generation) flips the single iGPU between the LLM
-// stack and ComfyUI by running root-owned scripts. That path is feature-gated
-// server-side (HAL0_COMFYUI_SWITCHOVER_ENABLED) and returns 501 until a scoped
-// privileged path is provisioned — so the mutation surfaces that refusal as a
-// toast rather than optimistically flipping the UI.
+// stack and ComfyUI by running root-owned scripts. The endpoint answers 202 and
+// runs the script pair in the background; the `switchover` block on /status
+// (active/target/error) is what tracks the transition to terminal — the pane's
+// poll renders it, per the async-job-must-poll-to-terminal rule. Tearing down a
+// non-empty queue needs `force: true` (the confirm dialog is that consent). The
+// whole path stays feature-gated server-side (HAL0_COMFYUI_SWITCHOVER_ENABLED,
+// 501 when off) — surfaced as a toast, never an optimistic flip.
 
 import { useMutation, useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { api, apiGet } from '../client'
@@ -27,6 +30,12 @@ export interface ComfyuiMemory {
   pressure: boolean
 }
 
+export interface ComfyuiSwitchover {
+  active: boolean
+  target: ComfyuiMode | null
+  error: string | null
+}
+
 export interface ComfyuiStatus {
   mode: ComfyuiMode
   reachable: boolean
@@ -37,6 +46,7 @@ export interface ComfyuiStatus {
   queue: { running: number; pending: number }
   inference: { lemonade: boolean; hermes: boolean }
   inventory: Record<string, number> | null
+  switchover: ComfyuiSwitchover
 }
 
 // Neutral default so the pane renders a coherent "stopped/inference" shell on
@@ -52,6 +62,7 @@ export const COMFYUI_FALLBACK: ComfyuiStatus = {
   queue: { running: 0, pending: 0 },
   inference: { lemonade: false, hermes: false },
   inventory: null,
+  switchover: { active: false, target: null, error: null },
 }
 
 // Active (Image-Gen tab open): 4s, fast enough to track queue + pressure.
@@ -72,6 +83,9 @@ export function useComfyui(opts: { active?: boolean } = {}): UseQueryResult<Comf
 
 export interface SwitchoverBody {
   mode: ComfyuiMode
+  // Required to tear down a non-empty render queue (jobs are dropped). The
+  // confirm dialog's warning is the consent that sets this.
+  force?: boolean
 }
 
 // raw:true so the dev mockFetch GET-shim can't mask the 501/503 gate — we want

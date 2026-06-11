@@ -11,8 +11,9 @@
 //   - queue depth (ComfyUI /queue)
 //   - model inventory counts (verified file counts on the share)
 // The switchover toggle opens a blast-radius confirm dialog, then calls the
-// feature-gated POST /api/comfyui/switchover (returns 501 until a privileged
-// root path is provisioned — surfaced as a toast, never an optimistic flip).
+// feature-gated POST /api/comfyui/switchover (202 + background scripts; the
+// status poll's `switchover` block drives the transitional UI — never an
+// optimistic flip; 501 toast when the host gate is off).
 //
 // Deliberately NOT wired yet (need ComfyUI's WS /ws + AMDGPUMonitor, or the
 // privileged path): per-node progress %, it/s, GPU util/temp/clocks, per-job
@@ -286,7 +287,13 @@ export function ComfyuiPane() {
   const gen = st.mode === 'generation'
   const containerUp = st.container?.state === 'running'
   const engine = st.engine || 'stopped'
-  const stateLabel = STATE_LABEL[engine] || engine
+  // A switch in flight overrides the snapshot state: the pane's poll is what
+  // tracks the transition to terminal (202 + background scripts server-side).
+  const switching = !!st.switchover?.active
+  const switchError = st.switchover?.error || null
+  const stateLabel = switching
+    ? `switching to ${st.switchover.target}…`
+    : STATE_LABEL[engine] || engine
   const mem = st.memory
   const gtt = mem?.gtt_used_gb ?? null
   const gttCeil = mem?.gtt_ceil_gb ?? 80
@@ -304,21 +311,28 @@ export function ComfyuiPane() {
   const doSwitch = async () => {
     const target = confirm
     try {
-      await sw.mutateAsync({ mode: target })
+      // The confirm dialog already warned that queued renders drop — that
+      // consent is what authorizes force when tearing down a busy queue.
+      const force = target === 'inference' && queueTotal > 0 ? true : undefined
+      await sw.mutateAsync({ mode: target, force })
       toast(`Switching to ${target} mode…`, 'ok')
       setConfirm(null)
       setTimeout(() => q.refetch(), 1500)
     } catch (err) {
       setConfirm(null)
       // Hal0Error carries the backend envelope's code directly (e.g.
-      // comfyui.switchover_disabled / _unimplemented) + the HTTP status.
-      const code = err?.code || ''
-      if (String(code).includes('switchover') || err?.status === 501 || err?.status === 503) {
+      // comfyui.switchover_disabled / comfyui.busy) + the HTTP status.
+      const code = String(err?.code || '')
+      if (code === 'comfyui.switchover_disabled' || err?.status === 501) {
         toast(
-          'ComfyUI switchover is not wired yet — run the switch scripts on the host, or enable ' +
-            'HAL0_COMFYUI_SWITCHOVER_ENABLED once a scoped sudoers path is in place.',
+          'ComfyUI switchover is disabled on this host — set HAL0_COMFYUI_SWITCHOVER_ENABLED=1 ' +
+            'on hal0-api to enable it.',
           'warn'
         )
+      } else if (code === 'comfyui.busy') {
+        toast('Renders are still running or queued — drain the queue first.', 'warn')
+      } else if (code === 'comfyui.switch_in_progress') {
+        toast('A switchover is already in progress — wait for it to finish.', 'warn')
       } else {
         toast(err?.message ? `switchover failed: ${err.message}` : 'switchover failed', 'warn')
       }
@@ -351,10 +365,15 @@ export function ComfyuiPane() {
               <span className="engine-title">ComfyUI</span>
               <span className="engine-sub">generation engine · docker</span>
             </span>
-            <span className={'epill ' + engine}>
+            <span className={'epill ' + (switching ? 'starting' : engine)}>
               <span className="dot" />
               {stateLabel}
             </span>
+            {switchError && !switching && (
+              <span className="meta" style={{ color: 'var(--warn)' }} title={switchError}>
+                last switch failed
+              </span>
+            )}
             <span className="grow" style={{ flex: 1 }} />
             <span className="eh-right">
               <button
@@ -368,12 +387,16 @@ export function ComfyuiPane() {
               </button>
               <span
                 className="sw-wrap"
-                onClick={() => setConfirm(gen ? 'inference' : 'generation')}
-                style={{ cursor: 'pointer' }}
-                title="Switch the iGPU between inference and generation"
+                onClick={() => !switching && setConfirm(gen ? 'inference' : 'generation')}
+                style={{ cursor: switching ? 'wait' : 'pointer' }}
+                title={
+                  switching
+                    ? 'Switchover in progress…'
+                    : 'Switch the iGPU between inference and generation'
+                }
               >
                 <span className={'mode' + (!gen ? ' llm-on' : '')}>inference</span>
-                <Toggle on={gen} comfy busy={sw.isPending} />
+                <Toggle on={gen} comfy busy={sw.isPending || switching} />
                 <span className={'mode' + (gen ? ' on' : '')}>generation</span>
               </span>
             </span>
