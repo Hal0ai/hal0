@@ -741,3 +741,74 @@ def test_manager_arbiter_defaults_without_img_slot(tmp_hal0_home: str) -> None:
 
     sm = SlotManager()
     assert sm.arbiter.idle_restore_minutes == 5
+
+
+def _write_img_toml(tmp_hal0_home: str, idle_restore_minutes: str) -> None:
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "img.toml").write_text(
+        "\n".join(
+            [
+                'name = "img"',
+                'type = "image"',
+                'provider = "comfyui"',
+                'device = "gpu-rocm"',
+                'runtime = "container"',
+                "port = 8188",
+                "[model]",
+                'default = "sdxl-turbo"',
+                "[image]",
+                f"idle_restore_minutes = {idle_restore_minutes}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_manager_arbiter_accepts_zero_window_from_toml(tmp_hal0_home: str) -> None:
+    """TOML ``[image].idle_restore_minutes = 0`` reaches the arbiter as 0
+    (manual-only restore, #599 schema) — NOT coerced to the default 5.
+    Negatives/garbage still fall back to 5."""
+    from hal0.slots.manager import SlotManager
+
+    _write_img_toml(tmp_hal0_home, "0")
+    assert SlotManager().arbiter.idle_restore_minutes == 0
+
+    # invalid values still fall back to 5 (fresh managers: arbiter is cached)
+    _write_img_toml(tmp_hal0_home, "-3")
+    assert SlotManager().arbiter.idle_restore_minutes == 5
+    _write_img_toml(tmp_hal0_home, "true")
+    assert SlotManager().arbiter.idle_restore_minutes == 5
+    _write_img_toml(tmp_hal0_home, '"soon"')
+    assert SlotManager().arbiter.idle_restore_minutes == 5
+
+
+async def test_zero_window_from_toml_never_auto_restores(tmp_hal0_home: str) -> None:
+    """End-to-end #599 pin: the TOML-sourced 0 window feeds an arbiter whose
+    idle loop never auto-restores (manual restore only)."""
+    from hal0.slots.manager import SlotManager
+
+    _write_img_toml(tmp_hal0_home, "0")
+    fake_mgr = FakeManager()
+    arb = GpuArbiter(
+        fake_mgr,
+        state_path=Path(tmp_hal0_home) / "gpu_arbiter.json",
+        idle_restore_minutes=SlotManager()._img_idle_restore_minutes(),
+    )
+    assert arb.idle_restore_minutes == 0
+    await arb.ensure_img()
+    # backdate activity far past ANY window so a buggy coercion-to-5 (or a
+    # 0-window treated as "always expired") would fire
+    arb._load_state()["last_img_activity"] = time.time() - 10_000
+    arb._persist()
+    fake_mgr.calls.clear()
+
+    task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
+    try:
+        await asyncio.sleep(0.1)
+        assert fake_mgr.calls == []
+        assert arb.mode is GpuMode.IMG
+        assert not task.done()
+    finally:
+        await _cancel_loop(task)

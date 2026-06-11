@@ -2066,7 +2066,9 @@ class SlotManager:
         Synchronous direct TOML scan, mirroring ``idle_timeout_by_model``
         (the ``arbiter`` property can't await). The first slot whose config
         derives to the ``img`` exclusive group wins; missing/invalid values
-        fall back to the spec default of 5 minutes.
+        (negatives, bools, non-ints) fall back to the spec default of 5
+        minutes. ``0`` is VALID and means manual-only restore (#599 schema)
+        — the arbiter's idle loop never auto-restores on a zero window.
         """
         import tomllib
 
@@ -2083,7 +2085,7 @@ class SlotManager:
                 continue
             image = data.get("image") or data.get("image_gen") or {}
             val = image.get("idle_restore_minutes") if isinstance(image, dict) else None
-            if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
                 return val
             return 5
         return 5
