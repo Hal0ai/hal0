@@ -31,6 +31,7 @@ from hal0.config.schema import (
     AgentConfig,
     Hal0Config,
     HardwareInfo,
+    ProfileConfig,
     ProfilesConfig,
     ProvidersConfig,
     SlotConfig,
@@ -414,6 +415,29 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
         ) from exc
 
 
+def resolve_profile(profile_name: str) -> ProfileConfig:
+    """Look up a named profile in the profiles.toml catalog.
+
+    Shared by every provider that resolves slot profiles
+    (ContainerProvider, KokoroProvider, …).
+
+    Args:
+        profile_name: Key under ``[profile]`` in profiles.toml.
+
+    Returns:
+        The validated :class:`ProfileConfig` for *profile_name*.
+
+    Raises:
+        KeyError: If the profile name is not in the catalog; the message
+                  lists the available profile names.
+    """
+    catalog = load_profiles_config()
+    if profile_name not in catalog.profile:
+        available = sorted(catalog.profile.keys())
+        raise KeyError(f"profile {profile_name!r} not found in catalog; available: {available}")
+    return catalog.profile[profile_name]
+
+
 # ── agents/<name>.toml (ADR-0013) ─────────────────────────────────────────────
 
 
@@ -662,6 +686,7 @@ __all__ = [
     "load_slot_config",
     "load_upstreams_config",
     "manifest_image_ref",
+    "resolve_profile",
     "save_agent_config",
     "save_hal0_config",
     "save_hardware_info",

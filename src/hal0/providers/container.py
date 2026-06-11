@@ -45,8 +45,10 @@ from typing import Any
 
 import httpx
 
-from hal0.config.loader import load_profiles_config
-from hal0.config.schema import ProfileConfig, resolve_profile_flags
+# Aliased to the old private name so existing test patch targets
+# (``hal0.providers.container._resolve_profile``) keep working.
+from hal0.config.loader import resolve_profile as _resolve_profile
+from hal0.config.schema import resolve_profile_flags
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
@@ -88,19 +90,6 @@ def _container_runtime() -> str:
 _HEALTH_POLL_INTERVAL_S = 2.0
 _HEALTH_TIMEOUT_S = 180.0
 _HEALTH_REQUEST_TIMEOUT_S = 3.0
-
-
-def _resolve_profile(profile_name: str) -> ProfileConfig:
-    """Load profiles.toml and return the named profile.
-
-    Raises:
-        KeyError: If the profile name is not in the catalog.
-    """
-    catalog = load_profiles_config()
-    if profile_name not in catalog.profile:
-        available = sorted(catalog.profile.keys())
-        raise KeyError(f"profile {profile_name!r} not found in catalog; available: {available}")
-    return catalog.profile[profile_name]
 
 
 def _resolve_model_path(model_info: dict[str, Any]) -> str:
