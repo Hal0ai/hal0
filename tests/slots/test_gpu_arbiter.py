@@ -173,8 +173,14 @@ def test_group_derivation() -> None:
         gpu_exclusive_group({"device": "gpu-rocm", "runtime": "container", "type": "image"})
         == "img"
     )
-    # missing runtime defaults to lemonade → never arbitrated
+    # missing runtime + no profile defaults to lemonade → never arbitrated
     assert gpu_exclusive_group({"device": "gpu-rocm"}) is None
+    # profile-only GPU slots ARE containers (mirrors _is_container_slot:
+    # profile is the primary signal, wins regardless of runtime) → arbitrated
+    assert gpu_exclusive_group({"device": "gpu-vulkan", "profile": "vulkan-std"}) == "llm"
+    assert gpu_exclusive_group({"device": "gpu-rocm", "profile": "comfyui"}) == "img"
+    # profile-only on a non-GPU device still never arbitrated
+    assert gpu_exclusive_group({"device": "npu", "profile": "flm-npu"}) is None
 
 
 # ── ensure_img ───────────────────────────────────────────────────────────────

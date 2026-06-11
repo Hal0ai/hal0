@@ -81,17 +81,23 @@ def gpu_exclusive_group(slot_cfg: dict[str, Any]) -> Literal["llm", "img"] | Non
     arbitrated. The img signal is provider/profile ``comfyui`` or slot
     ``type == "image"``; any other GPU container slot is an llm-group slot.
 
+    "Container" mirrors ``SlotManager._is_container_slot`` exactly:
+    ``runtime == "container"`` OR a non-empty ``profile`` — the profile is
+    the primary signal (schema doc: profile wins regardless of ``runtime``;
+    spec §9 deprecates ``runtime``). A profile-only GPU slot MUST be
+    arbitrated or it would collide with the img slot on the single iGPU.
+
     A missing ``device`` defaults to ``gpu-rocm`` (mirrors
     ``SlotManager.add_slot`` / ``hal0.config.schema.DEFAULT_DEVICE``); a
-    missing ``runtime`` defaults to ``lemonade`` (mirrors
-    ``SlotManager._is_container_slot``).
+    missing ``runtime`` defaults to ``lemonade``.
     """
     device = str(slot_cfg.get("device") or "gpu-rocm")
     runtime = str(slot_cfg.get("runtime") or "lemonade")
-    if device not in _GPU_DEVICES or runtime != "container":
+    profile = str(slot_cfg.get("profile") or "")
+    is_container = runtime == "container" or bool(profile.strip())
+    if device not in _GPU_DEVICES or not is_container:
         return None
     provider = str(slot_cfg.get("provider") or "")
-    profile = str(slot_cfg.get("profile") or "")
     slot_type = str(slot_cfg.get("type") or "")
     if provider == "comfyui" or profile == "comfyui" or slot_type == "image":
         return "img"
@@ -302,7 +308,8 @@ class GpuArbiter:
             )
             await self._manager.load(img_name, model_default or None)
 
-            self.touch_img_activity()
+            # last_img_activity was stamped in the pre-unload persist above;
+            # no second persist needed here (spec-review tidy).
             log.info(
                 "gpu_arbiter.img_mode",
                 extra={"saved_llm_slots": llm_slots, "img_slot": img_name},
