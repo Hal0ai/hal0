@@ -85,8 +85,10 @@ BACKEND_TO_DEVICE: dict[str, str] = {
 # pre-v0.2 names remain accepted so legacy slot TOMLs round-trip
 # without raising. Non-Lemonade values are deprecated and ignored by
 # SlotManager — the provider field exists only for round-trip + UI
-# label compatibility.
-_VALID_PROVIDERS = frozenset({"lemonade", "llama-server", "flm", "moonshine", "kokoro"})
+# label compatibility. ``"comfyui"`` is the exception: it is the active
+# container image-gen provider (img.toml, ADR image slots), not a
+# deprecated legacy value.
+_VALID_PROVIDERS = frozenset({"lemonade", "llama-server", "flm", "moonshine", "kokoro", "comfyui"})
 
 # Slot port range.  8080 is the hal0 API; slots get 8081-8099.
 _SLOT_PORT_MIN = 8081

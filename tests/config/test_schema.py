@@ -7,6 +7,9 @@ message and the field path — these tests pin that contract.
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -95,7 +98,7 @@ class TestSlotConfig:
             SlotConfig(name="x", port=8081, backend=b)
 
     def test_all_valid_providers(self) -> None:
-        for p in ("llama-server", "flm", "moonshine", "kokoro"):
+        for p in ("lemonade", "llama-server", "flm", "moonshine", "kokoro", "comfyui"):
             SlotConfig(name="x", port=8081, provider=p)
 
     def test_workers_must_be_positive(self) -> None:
@@ -304,3 +307,50 @@ class TestHal0Config:
         c = Hal0Config.model_validate({"future_section": {"foo": 1}})
         # extra='allow' keeps the unknown table.
         assert c.model_dump().get("future_section") == {"foo": 1}
+
+
+_SEEDED_SLOTS_DIR = Path(__file__).resolve().parents[2] / "installer" / "etc-hal0" / "slots"
+
+
+def _declared_provider(toml_path: Path) -> str | None:
+    """Pull the provider a seeded slot TOML declares, if any.
+
+    Container slots (e.g. img.toml) hold fields at the top level; lemonade
+    slots nest them under ``[slot]``. Either placement is accepted.
+    """
+    raw = tomllib.loads(toml_path.read_text())
+    slot = raw.get("slot") if isinstance(raw.get("slot"), dict) else {}
+    return slot.get("provider", raw.get("provider"))
+
+
+class TestSeededSlotTomls:
+    """Regression guard for #650.
+
+    Every provider a seeded slot TOML declares must be in _VALID_PROVIDERS,
+    so a SlotConfig built from that provider does not spuriously fail the
+    provider validator. (img.toml declared provider="comfyui" while comfyui
+    was absent from the set.)
+
+    Scope: this checks only the *provider-constant* invariant via the real
+    validator. It deliberately does not run load_slot_config() over img.toml
+    — img is a container slot (port 8186, outside the lemonade SlotConfig
+    8081-8099 range, flat top-level shape) and is driven by a raw dict at
+    runtime, not by SlotConfig.
+    """
+
+    def test_seeded_dir_is_non_empty(self) -> None:
+        tomls = sorted(_SEEDED_SLOTS_DIR.glob("*.toml"))
+        assert tomls, f"no seeded slot TOMLs found under {_SEEDED_SLOTS_DIR}"
+
+    @pytest.mark.parametrize(
+        "toml_path",
+        sorted(_SEEDED_SLOTS_DIR.glob("*.toml")),
+        ids=lambda p: p.name,
+    )
+    def test_seeded_slot_provider_is_valid(self, toml_path: Path) -> None:
+        provider = _declared_provider(toml_path)
+        if provider is None:
+            pytest.skip(f"{toml_path.name} declares no explicit provider (defaults to lemonade)")
+        # Constructing a SlotConfig exercises the real provider validator;
+        # a dummy in-range port keeps the assertion focused on `provider`.
+        SlotConfig(name="x", port=8081, provider=provider)
