@@ -119,6 +119,34 @@ export const MOCK_DATA = {
       mem_mb: 22_400,
       bench_toks_per_sec: 52.8,
     },
+    // C7 spec target: GPU container slot with a profile that has device_class=gpu.
+    // Uses dense-mtp-rocmfp4 which is in the mock profiles list.
+    {
+      name: 'chat', type: 'llm', device: 'gpu-rocm',
+      model: 'qwen3.6-35b-a3b-q4_k_m', model_id: 'qwen3.6-35b-a3b',
+      group: 'chat', state: 'ready', port: 8099,
+      runtime: 'container',
+      profile: 'dense-mtp-rocmfp4',
+      image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
+      image_status: 'present',
+      container_status: 'running',
+      container_health: true,
+      mem_mb: 22_400,
+      bench_toks_per_sec: 52.8,
+    },
+    // C7 spec target: TTS container slot with kokoro-cpu (device_class=cpu — fixed text).
+    {
+      name: 'tts', type: 'tts', device: 'cpu',
+      model: 'kokoro-v1', model_id: 'kokoro-v1',
+      group: 'voice', state: 'ready', port: 8100,
+      runtime: 'container',
+      profile: 'kokoro-cpu',
+      image: 'ghcr.io/hal0ai/hal0-toolbox-kokoro:v1',
+      image_status: 'present',
+      container_status: 'running',
+      container_health: true,
+      mem_mb: 800,
+    },
     // Container-runtime NPU slot (Phase A — npu trio toggles via TOML config).
     // asr=true, embed=false: exercises split-toggle state in npu-container spec.
     {

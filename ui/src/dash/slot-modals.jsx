@@ -11,6 +11,7 @@ import {
   useSlotDelete,
   useSlotBackend,
   useSlotImagePull,
+  useSlotRestart,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useBackends } from '@/api/hooks/useBackends'
@@ -217,7 +218,24 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       name,
       type,
       ...(isContainerSlot
-        ? { runtime: "container", profile, device: "gpu-rocm" }
+        ? {
+            runtime: "container",
+            profile,
+            // C7: derive device from the selected profile's device_class.
+            // Interim heuristic — Phase E may promote device onto ProfileConfig directly.
+            //   npu/cpu → pass through verbatim
+            //   img     → "gpu-rocm" (ComfyUI image runtime, ROCm-only for now)
+            //   gpu     → check profile image tag: vulkan → "gpu-vulkan", else "gpu-rocm"
+            device: (() => {
+              const meta = allProfiles.find(p => p.name === profile);
+              const dc = meta?.device_class || "gpu";
+              if (dc === "npu") return "npu";
+              if (dc === "cpu") return "cpu";
+              if (dc === "img") return "gpu-rocm";
+              // dc === "gpu": distinguish vulkan vs rocm by image tag
+              return (meta?.image || "").includes("vulkan") ? "gpu-vulkan" : "gpu-rocm";
+            })(),
+          }
         : { device }),
       group,
       ...(model ? { model } : {}),
@@ -453,6 +471,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const defaultsMut = useSlotDefaults();
   const deleteMut = useSlotDelete();
   const backendMut = useSlotBackend();
+  const restartMut = useSlotRestart();
+  const profilesQuery = useProfiles();
 
   // Seed from the slot list payload when available (PR #587 — same fix
   // class as #584). idle_timeout_s / workers / llamacpp_args are all
@@ -492,6 +512,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
     slot?.declared_backend || (slot?.device || "gpu-rocm").replace("gpu-", "") || "rocm"
   );
   const [backendSwitchPending, setBackendSwitchPending] = useStateSM(false);
+  // C7: profile swap for GPU container slots.
+  // Seeded from slot.profile; only sent on Save when changed. After a
+  // profile-change save the slot is restarted (model swap semantics — same
+  // cold-restart contract as profile image change).
+  const [selectedProfile, setSelectedProfile] = useStateSM(slot?.profile || "");
 
   useEffectSM(() => {
     if (slot) {
@@ -516,6 +541,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
         slot.declared_backend || (slot.device || "gpu-rocm").replace("gpu-", "") || "rocm"
       );
       setBackendSwitchPending(false);
+      // C7: re-seed profile from the (possibly-updated) slot prop.
+      setSelectedProfile(slot.profile || "");
     }
   }, [slot?.name]);
 
@@ -585,6 +612,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
       if (!isContainerSave && extraArgs !== extraArgsSeeded) {
         slotBody.llamacpp_args = extraArgs;
       }
+      // C7: GPU container slots — include profile only when changed; restart
+      // after save (profile swap = cold restart, same semantics as model swap).
+      const profileChanged = isContainerSave && selectedProfile && selectedProfile !== (slot.profile || "");
+      if (profileChanged) {
+        slotBody.profile = selectedProfile;
+      }
       await defaultsMut.mutateAsync({
         name: slot.name,
         body: ctxBody,
@@ -593,10 +626,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
         name: slot.name,
         body: slotBody,
       });
-      window.__hal0Toast && window.__hal0Toast(
-        `Slot "${slot.name}" saved — restart required for ctx_size`,
-        "warn",
-      );
+      if (profileChanged) {
+        await restartMut.mutateAsync(slot.name);
+        window.__hal0Toast && window.__hal0Toast(
+          `Slot "${slot.name}" profile changed — restarting`,
+          "warn",
+        );
+      } else {
+        window.__hal0Toast && window.__hal0Toast(
+          `Slot "${slot.name}" saved — restart required for ctx_size`,
+          "warn",
+        );
+      }
       onClose();
     } catch (err) {
       setSubmitErr(err?.message || "save failed");
@@ -615,7 +656,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
     }
   }
 
-  const saving = editMut.isPending || defaultsMut.isPending;
+  const saving = editMut.isPending || defaultsMut.isPending || restartMut.isPending;
   const deleting = deleteMut.isPending;
 
   return (
@@ -696,20 +737,55 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
       {slot.runtime === "container" ? (
         /* Container slots: profile is the configuration surface.
-           Device + Runtime Backend selectors are replaced with a read-only
-           profile display — flags are baked into the profile image. */
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>Profile</span>
-            <span className="sub">image + bench-tuned flags for this slot — set in profiles.toml</span>
-          </div>
-          <div className="form-ctl">
-            <input className="input mono" value={slot.profile || "—"} readOnly />
-            {slot.image && (
-              <div className="hint mono">{slot.image}</div>
-            )}
-          </div>
-        </div>
+           GPU-class slots get an editable select filtered to device_class==="gpu"
+           profiles. NPU/CPU/image-class slots are pinned by silicon/runtime —
+           render fixed text (no select). Profile change triggers restart
+           (same cold-restart semantics as a model swap). */
+        (() => {
+          const allProfiles = profilesQuery.data ?? [];
+          // Find the current profile's device_class from the catalog.
+          // Fall back to slot.device when the profiles query hasn't loaded:
+          //   npu/cpu devices → not GPU; gpu-rocm/gpu-vulkan/unknown → treat as GPU.
+          const currentProfileMeta = allProfiles.find(p => p.name === (slot.profile || ""));
+          const slotDeviceIsGpu = !["npu", "cpu"].includes(slot.device || "");
+          const profileDeviceClass = currentProfileMeta?.device_class
+            ?? (slotDeviceIsGpu ? "gpu" : slot.device === "npu" ? "npu" : "cpu");
+          const isGpuProfile = profileDeviceClass === "gpu";
+          const gpuProfiles = allProfiles.filter(p => p.device_class === "gpu");
+          const profileImageHint = (() => {
+            const meta = gpuProfiles.find(p => p.name === selectedProfile);
+            return meta?.image || slot.image || null;
+          })();
+          return (
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>Profile</span>
+                {isGpuProfile
+                  ? <span className="sub warn">⟳ restart required on change</span>
+                  : <span className="sub">image + bench-tuned flags for this slot — runtime-pinned</span>
+                }
+              </div>
+              <div className="form-ctl">
+                {isGpuProfile ? (
+                  <select
+                    className="input mono"
+                    value={selectedProfile}
+                    onChange={e => setSelectedProfile(e.target.value)}
+                  >
+                    {gpuProfiles.map(p => (
+                      <option key={p.name} value={p.name}>{p.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className="input mono" value={slot.profile || "—"} readOnly />
+                )}
+                {profileImageHint && (
+                  <div className="hint mono">{profileImageHint}</div>
+                )}
+              </div>
+            </div>
+          );
+        })()
       ) : (
         <>
           <div className="form-row">
