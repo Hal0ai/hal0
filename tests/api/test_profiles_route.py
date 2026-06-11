@@ -72,7 +72,18 @@ class TestListProfiles:
             assert "image" in item
             assert "flags" in item
             assert "mtp" in item
+            assert "device_class" in item
             assert "resolved_flags" in item
+
+    def test_device_class_values(self, client: TestClient) -> None:
+        """Phase C: device_class surfaces in the route response."""
+        data = client.get("/api/profiles").json()
+        flm = next(item for item in data if item["name"] == "flm-npu")
+        assert flm["device_class"] == "npu"
+        kokoro = next(item for item in data if item["name"] == "kokoro-cpu")
+        assert kokoro["device_class"] == "cpu"
+        vulkan = next(item for item in data if item["name"] == "vulkan-std")
+        assert vulkan["device_class"] == "gpu"
 
     def test_moe_rocmfp4_mtp_false(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()

@@ -33,6 +33,7 @@ def list_profiles() -> list[dict[str, Any]]:
             "image":          "ghcr.io/hal0ai/...:rocm-7.2.4-rocmfp4-server",
             "flags":          "-fa on ...",
             "mtp":            false,
+            "device_class":   "gpu",         # gpu | cpu | npu | img
             "resolved_flags": "-fa on ..."   # flags + MTP bundle when mtp=true
         }
 
@@ -46,6 +47,7 @@ def list_profiles() -> list[dict[str, Any]]:
             "image": p.image,
             "flags": p.flags,
             "mtp": p.mtp,
+            "device_class": p.device_class,
             "resolved_flags": resolve_profile_flags(p),
         }
         for name, p in cfg.profile.items()

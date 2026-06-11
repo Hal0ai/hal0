@@ -241,3 +241,29 @@ def test_kokoro_cpu_seed_profile() -> None:
     assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
     assert "--model_path" in prof["flags"]
     assert prof["mtp"] is False
+
+
+# ── device_class + DEVICE_DEFAULT_PROFILES ────────────────────────────────────
+
+
+def test_profile_device_class_defaults_gpu() -> None:
+    assert ProfileConfig(image="x").device_class == "gpu"
+
+
+def test_seed_device_classes() -> None:
+    assert SEED_PROFILES["vulkan-std"]["device_class"] == "gpu"
+    assert SEED_PROFILES["moe-rocmfp4"]["device_class"] == "gpu"
+    assert SEED_PROFILES["dense-mtp-rocmfp4"]["device_class"] == "gpu"
+    assert SEED_PROFILES["flm-npu"]["device_class"] == "npu"
+    assert SEED_PROFILES["kokoro-cpu"]["device_class"] == "cpu"
+
+
+def test_device_default_profiles_map() -> None:
+    from hal0.config.schema import DEVICE_DEFAULT_PROFILES
+
+    assert DEVICE_DEFAULT_PROFILES == {
+        "gpu-rocm": "moe-rocmfp4",
+        "gpu-vulkan": "vulkan-std",
+        "cpu": "kokoro-cpu",
+        "npu": "flm-npu",
+    }

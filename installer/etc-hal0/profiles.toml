@@ -9,33 +9,38 @@
 
 [profile.moe-rocmfp4]
 # A3B MoE agents (ace-saber). ~52.8 tok/s gen, 131k ctx.
-image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-flags = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
-mtp   = false
+image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+mtp          = false
+device_class = "gpu"
 
 [profile.dense-mtp-rocmfp4]
 # Dense chat (qwopus 27B). ~24.4 tok/s gen with MTP (~2x non-MTP). 131k ctx.
 # mtp=true expands to the full --spec-type draft-mtp bundle at resolve time.
-image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-flags = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
-mtp   = true
+image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+mtp          = true
+device_class = "gpu"
 
 [profile.vulkan-std]
 # Fallback / non-FP4 models. Vulkan-radv, no FP4/MTP.
-image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
-flags = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
-mtp   = false
+image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
+flags        = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+mtp          = false
+device_class = "gpu"
 
 [profile.flm-npu]
 # NPU LLM/trio slot (FastFlowLM). Flags are built by FLMProvider.container_spec,
 # not by this profile — image pin only.
-image = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
-flags = ""
-mtp   = false
+image        = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
+flags        = ""
+mtp          = false
+device_class = "npu"
 
 [profile.kokoro-cpu]
 # CPU TTS slot (kokoro-onnx). No GPU devices. Flags feed kokoro_server.py;
 # --model_path points at the shared model store so no download on start.
-image = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
-flags = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
-mtp   = false
+image        = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
+flags        = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
+mtp          = false
+device_class = "cpu"

@@ -415,6 +415,34 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
         ) from exc
 
 
+def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
+    """Atomically write the full profile catalog to profiles.toml.
+
+    Serializes *cfg* — which must contain the complete catalog including any
+    seed profiles that should survive — to ``paths.profiles_toml()`` (or
+    *path* if given) via :func:`write_toml_atomic`.
+
+    The written file is the single source of truth; on next load,
+    :func:`load_profiles_config` will read it instead of returning the
+    in-memory seeds (load REPLACES, it does not merge).  Callers are
+    therefore responsible for ensuring the catalog passed to this function
+    is complete (e.g. start from ``load_profiles_config()`` and add/modify
+    entries) so the seed profiles survive the round trip.
+
+    Note: :func:`write_toml_atomic` emits pure TOML — no header comment is
+    written (tomli_w has no comment support and the atomic writer takes no
+    prefix).  ``exclude_none=True`` mirrors :func:`save_hal0_config` and
+    keeps tomli_w from raising TypeError on optional None fields.
+
+    Args:
+        cfg: Full validated :class:`ProfilesConfig` to persist.
+        path: Override destination.  If ``None``, uses
+              :func:`hal0.config.paths.profiles_toml`.
+    """
+    target = Path(path) if path is not None else paths.profiles_toml()
+    write_toml_atomic(target, cfg.model_dump(mode="python", exclude_none=True))
+
+
 def resolve_profile(profile_name: str) -> ProfileConfig:
     """Look up a named profile in the profiles.toml catalog.
 
@@ -690,6 +718,7 @@ __all__ = [
     "save_agent_config",
     "save_hal0_config",
     "save_hardware_info",
+    "save_profiles_config",
     "save_providers_config",
     "save_slot_config",
     "save_upstreams_config",
