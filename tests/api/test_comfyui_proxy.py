@@ -79,6 +79,7 @@ async def _fetch_down(path: str):
 
 
 def test_status_generating_when_container_running_and_queue_busy(client: TestClient) -> None:
+    _install_arbiter(client, mode="img")  # arbiter is the mode source of truth
     c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_busy)
     with c, s, f:
         r = client.get("/api/comfyui/status")
@@ -180,13 +181,13 @@ def _reset_comfyui_module_state():
 class _StubArbiter:
     """Stands in for ``manager.arbiter`` — the D4-D6 GpuArbiter surface."""
 
-    def __init__(self) -> None:
+    def __init__(self, mode: str = "llm") -> None:
         self.ensure_img = AsyncMock()
         self.restore_llm = AsyncMock()
         self.set_pin = Mock()
         self.status = Mock(
             return_value={
-                "mode": "llm",
+                "mode": mode,
                 "pinned": False,
                 "saved_llm_slots": [],
                 "idle_restore_at": None,
@@ -194,9 +195,15 @@ class _StubArbiter:
         )
 
 
-def _install_arbiter(client: TestClient) -> _StubArbiter:
-    """Hang a stub manager+arbiter on app.state, the way the route finds it."""
-    arb = _StubArbiter()
+def _install_arbiter(client: TestClient, mode: str = "llm") -> _StubArbiter:
+    """Hang a stub manager+arbiter on app.state, the way the route finds it.
+
+    ``mode`` is the arbiter's reported GPU mode ("llm" | "img"). The arbiter is
+    the source of truth for the current mode — the docker/systemd probes are
+    only a legacy fallback (post-D9 the docker container is gone while
+    hal0-lemonade stays active, so they lie).
+    """
+    arb = _StubArbiter(mode=mode)
     client.app.state.slot_manager = SimpleNamespace(arbiter=arb)
     return arb
 
@@ -224,7 +231,7 @@ def test_switchover_inference_calls_restore(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
-    arb = _install_arbiter(client)
+    arb = _install_arbiter(client, mode="img")
     c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
@@ -250,7 +257,7 @@ def test_switchover_force_passes_to_restore(
     # The UI confirm dialog already warned that queued jobs drop — force wins
     # over the busy queue AND propagates to restore_llm (pin override).
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
-    arb = _install_arbiter(client)
+    arb = _install_arbiter(client, mode="img")
     c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_busy)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference", "force": True})
@@ -281,9 +288,9 @@ def test_switchover_refused_while_another_switch_in_flight(
 def test_switchover_noop_when_already_in_generation_mode(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Container already running → target reached; never re-drive the arbiter.
+    # Arbiter already reports img mode → target reached; never re-drive it.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
-    arb = _install_arbiter(client)
+    arb = _install_arbiter(client, mode="img")
     c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
@@ -312,13 +319,77 @@ def test_switchover_to_inference_refused_while_queue_busy(
     # Tearing ComfyUI down mid-render kills the running + queued jobs — refuse
     # unless the caller explicitly forces it (the UI confirm dialog is the force).
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
-    arb = _install_arbiter(client)
+    arb = _install_arbiter(client, mode="img")
     c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_busy)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "comfyui.busy"
     arb.restore_llm.assert_not_awaited()
+
+
+def test_switchover_post_migration_inference_uses_arbiter_truth(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Post-D9 reality: docker container gone ("absent") AND hal0-lemonade stays
+    # active through Phase D — the legacy probe would call this "already in
+    # inference" forever, locking restore_llm out of the API (pinned img mode =
+    # permanent lockout). Arbiter says img → the switch MUST run.
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    arb = _install_arbiter(client, mode="img")
+    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
+    assert r.status_code == 202
+    arb.restore_llm.assert_awaited_once_with(force=False)
+
+
+def test_status_mode_is_arbiter_truth_post_migration(client: TestClient) -> None:
+    # Same post-migration shape on the read path: docker absent + lemonade up
+    # used to render mode "inference"/endpoint null while img owned the GPU.
+    _install_arbiter(client, mode="img")
+    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_idle)
+    with c, s, f:
+        body = client.get("/api/comfyui/status").json()
+    assert body["mode"] == "generation"
+    assert body["endpoint"] == ":8188"
+
+
+def test_status_mode_legacy_fallback_when_arbiter_missing(client: TestClient) -> None:
+    # Arbiter unwired → fall back to the docker/systemd-derived mode.
+    client.app.state.slot_manager = None
+    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    with c, s, f:
+        body = client.get("/api/comfyui/status").json()
+    assert body["mode"] == "generation"
+    assert body["endpoint"] == ":8188"
+    assert body["arbiter"] is None
+
+
+def test_switchover_503_when_arbiter_unwired(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Gate open + valid non-noop request but no slot manager on app.state →
+    # explicit 503, never a dangling 202 that can't do anything.
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    client.app.state.slot_manager = None
+    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
+
+
+def test_pin_503_when_manager_has_no_arbiter(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A manager object WITHOUT an .arbiter attribute must degrade to the same
+    # 503, not a 500 (getattr guard).
+    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+    client.app.state.slot_manager = SimpleNamespace()  # no .arbiter
+    r = client.post("/api/comfyui/pin", json={"pinned": True})
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
 
 
 def test_status_exposes_switchover_state(client: TestClient, _reset_comfyui_module_state) -> None:

@@ -285,7 +285,27 @@ def _engine_state(container: str, reachable: bool, running_jobs: int) -> str:
 def _get_arbiter(request: Request) -> Any | None:
     """The SlotManager's GpuArbiter off app.state, or None when unwired."""
     manager = getattr(request.app.state, "slot_manager", None)
-    return manager.arbiter if manager is not None else None
+    return getattr(manager, "arbiter", None)
+
+
+# Arbiter GPU mode → the API's dashboard mode vocabulary.
+_ARBITER_TO_API_MODE = {"img": "generation", "llm": "inference"}
+
+
+def _arbiter_api_mode(arbiter: Any) -> str | None:
+    """Arbiter-truth current mode ("generation"|"inference"), or None.
+
+    None means "no arbiter / arbiter broken" — callers fall back to the legacy
+    docker/systemd probes. Post-migration (D9 removes the docker container,
+    hal0-lemonade stays active through Phase D) the legacy probes lie, so the
+    arbiter wins whenever it answers.
+    """
+    if arbiter is None:
+        return None
+    try:
+        return _ARBITER_TO_API_MODE.get(arbiter.status().get("mode"))
+    except Exception:
+        return None
 
 
 @router.get("/status")
@@ -311,12 +331,20 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
             arbiter_block = arbiter.status()
     except Exception:
         arbiter_block = None
+    # Mode: arbiter is the source of truth (img → generation, llm → inference);
+    # the docker-derived mode is only the legacy fallback for arbiter-less apps.
+    arb_mode = (
+        _ARBITER_TO_API_MODE.get(arbiter_block.get("mode"))
+        if isinstance(arbiter_block, dict)
+        else None
+    )
+    mode = arb_mode or ("generation" if container == "running" else "inference")
     return {
-        "mode": "generation" if container == "running" else "inference",
+        "mode": mode,
         "reachable": reachable,
         "engine": engine,
         "container": {"name": container_name, "state": container},
-        "endpoint": ":8188" if container == "running" else None,
+        "endpoint": ":8188" if mode == "generation" else None,
         "memory": _parse_memory(stats),
         "queue": counts,
         "inference": {"lemonade": lemonade, "hermes": hermes},
@@ -420,16 +448,25 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
                 }
             },
         )
-    # Idempotency: derive the current mode the same way /status does (container
-    # running ⇒ generation). Target inference additionally requires lemonade to
-    # actually be up — if both stacks are down, the switch runs as a repair.
-    container, lemonade = await asyncio.gather(
-        _container_state(_comfyui_container()),
-        _systemd_active(_LEMONADE_UNIT),
-    )
-    already_there = (
-        container == "running" if mode == "generation" else container != "running" and lemonade
-    )
+    # Idempotency: the arbiter is the source of truth for the current mode.
+    # Post-migration the docker container is gone while hal0-lemonade stays
+    # active, so the legacy probe would report "already in inference" forever
+    # (= restore_llm never invokable, pinned img mode would be a permanent
+    # lockout). Legacy docker/systemd probe ONLY when the arbiter can't answer;
+    # there, target inference additionally requires lemonade to actually be up —
+    # if both stacks are down, the switch runs as a repair.
+    arbiter = _get_arbiter(request)
+    current = _arbiter_api_mode(arbiter)
+    if current is not None:
+        already_there = current == mode
+    else:
+        container, lemonade = await asyncio.gather(
+            _container_state(_comfyui_container()),
+            _systemd_active(_LEMONADE_UNIT),
+        )
+        already_there = (
+            container == "running" if mode == "generation" else container != "running" and lemonade
+        )
     if already_there:
         return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
     # Mid-render guard: switching to inference stops the container, dropping any
@@ -453,7 +490,6 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
                     }
                 },
             )
-    arbiter = _get_arbiter(request)
     if arbiter is None:
         return _arbiter_unavailable()
     pin = bool(body.get("pin")) if isinstance(body, dict) else False
