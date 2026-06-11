@@ -26,6 +26,7 @@ from hal0.providers.container import (
     ContainerProvider,
     _image_mismatch,
     _render_unit,
+    _resolve_model_path,
     resolved_command_for_slot,
 )
 from hal0.slots.manager import SlotManager
@@ -674,3 +675,13 @@ class TestImageMismatch:
 
     def test_whitespace_is_ignored(self) -> None:
         assert _image_mismatch(self._ROCM + "\n", self._ROCM) is False
+
+
+def test_resolve_model_path_registry_miss_falls_back_to_bare_id() -> None:
+    """Registry-miss contract (Phase C final review): model_info without a
+    ``path`` falls back to the bare model id, which llama-server cannot open
+    unless the id happens to be a real path.  Container slots therefore
+    REQUIRE their [model].default to be registry-resident with a resolved
+    GGUF path — the C8 deploy precheck enforces this on CT105.
+    """
+    assert _resolve_model_path({"_model_key": "gemma-4-12b-it"}) == "gemma-4-12b-it"
