@@ -412,6 +412,8 @@ def test_namespace_register_skips_add_on_delete_count_mismatch(
     assert any("memory_delete" in w for w in result.details["warnings"]), (
         "expected a delete-count-mismatch warning"
     )
+    # #702: warn-as-OK memory-layer degradation is an observable fallback.
+    assert any(f["site"] == "memory_layer" for f in result.details["fallbacks"])
 
 
 def test_namespace_register_rewrites_when_delete_count_matches(

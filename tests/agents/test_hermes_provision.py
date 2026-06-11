@@ -1057,6 +1057,63 @@ def test_config_write_phase_applies_overrides(
     assert "999" in cfg
 
 
+# ── #702: silent fallbacks become observable ─────────────────────────────────
+
+
+def test_config_write_records_fallbacks_for_placeholder_primary_and_default_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First-run posture: no ready slot + no mcp_wire checkpoint → both
+    fallback sites land in details["fallbacks"]. Behaviour is unchanged
+    — the fallbacks are recorded, not different."""
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {})
+    out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    sites = {f["site"] for f in out.details["fallbacks"]}
+    assert sites == {"primary_slot", "mcp_servers"}
+
+
+def test_config_write_records_no_fallbacks_when_inputs_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    # A persisted mcp_wire checkpoint from a previous run.
+    state.phases["mcp_wire"] = {
+        "status": "ok",
+        "details": {"rendered_servers": hp._default_mcp_servers()},
+    }
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    io = hp.PhaseIO(fetch_slots=lambda: list(_ROLE_SLOTS), fetch_model_contexts=lambda: {})
+    out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    assert out.details["fallbacks"] == []
+
+
+def test_resolve_primary_slot_marks_placeholder() -> None:
+    assert hp._resolve_primary_slot(slots_fetcher=lambda: [])["placeholder"] is True
+    live = hp._resolve_primary_slot(
+        slots_fetcher=lambda: [
+            {
+                "name": "chat",
+                "type": "llm",
+                "state": "ready",
+                "model_id": "qwen3-test",
+                "backend_url": "http://127.0.0.1:8001/v1",
+                "context_length": 32768,
+            }
+        ]
+    )
+    assert live["placeholder"] is False
+
+
 def test_deep_merge_recurses() -> None:
     base = {"a": {"b": 1, "c": 2}, "d": 3}
     overlay = {"a": {"c": 99, "e": 4}}
@@ -1230,6 +1287,8 @@ def test_namespace_register_continues_on_mcp_failure(
     assert out.status == hp.PhaseStatus.OK
     assert out.details["registered"] is False
     assert any("memory_add" in w for w in out.details["warnings"])
+    # #702: the memory-layer warn-as-OK posture is an observable fallback.
+    assert any(f["site"] == "memory_layer" for f in out.details["fallbacks"])
 
 
 def test_mcp_wire_phase_skips_server_not_in_allowlist(
@@ -1344,6 +1403,8 @@ def test_context_link_falls_back_when_soul_render_fails(
     soul = (hermes_home / "SOUL.md").read_text()
     assert "hal0 admin agent" in soul
     assert any("SOUL.md render" in w for w in out.details["warnings"])
+    # #702: the inline-default fallback is observable, not silent.
+    assert any(f["site"] == "soul_md" for f in out.details["fallbacks"])
 
 
 # ── #245 phase impls — model_automap + voice_wire ───────────────────────────

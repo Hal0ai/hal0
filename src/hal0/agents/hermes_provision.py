@@ -649,10 +649,14 @@ def _resolve_primary_slot(
     fall-through to a placeholder URL on port 8000 — a daemon-less
     address that never wired Hermes to anything real.
     """
+    # ``placeholder`` marks the safe-but-unwired fallback so consumers can
+    # record it in details["fallbacks"] (#702 fallback observability)
+    # instead of inferring it from the model name.
     fallback = {
         "model": "primary",
         "base_url": _DEFAULT_PRIMARY_BACKEND_URL,
         "context_length": 32768,
+        "placeholder": True,
     }
     fetch = slots_fetcher or _fetch_slots
     slots = fetch() or []
@@ -685,7 +689,7 @@ def _resolve_primary_slot(
         ctx = int(ctx)
     except (TypeError, ValueError):
         ctx = fallback["context_length"]
-    return {"model": model, "base_url": base_url, "context_length": ctx}
+    return {"model": model, "base_url": base_url, "context_length": ctx, "placeholder": False}
 
 
 def _default_mcp_servers() -> list[dict[str, Any]]:
@@ -944,6 +948,26 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
     # so this read can only ever see a persisted prior-run checkpoint.
     cached_servers = ctx.output_of("mcp_wire").get("rendered_servers")
     mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
+    # #702: silent fallbacks become observable. Same behaviour as before;
+    # the fallback sites are now recorded in details["fallbacks"].
+    fallbacks: list[dict[str, str]] = []
+    if primary_raw.get("placeholder"):
+        fallbacks.append(
+            {
+                "site": "primary_slot",
+                "detail": "no ready llm slot — rendered the safe-but-unwired placeholder primary",
+            }
+        )
+    if mcp_servers is None:
+        fallbacks.append(
+            {
+                "site": "mcp_servers",
+                "detail": (
+                    "no probed rendered_servers checkpoint from mcp_wire — "
+                    "rendered the default builtin MCP inventory"
+                ),
+            }
+        )
     system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
     live_resolve_enabled = os.environ.get("HAL0_HERMES_LIVE_RESOLVE", "0") == "1"
     rendered = _render_config_yaml(
@@ -971,6 +995,7 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
                 "chat_slot_count": len(chat_slots),
                 "persona": personality_name or None,
                 "mcp_server_count": len(mcp_servers) if mcp_servers else 0,
+                "fallbacks": fallbacks,
             },
         )
 
@@ -989,6 +1014,7 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
             "mcp_server_count": len(mcp_servers) if mcp_servers else 0,
             "delegation_model": (delegation or {}).get("model"),
             "auxiliary_utility_model": _utility_aux_model(auxiliary_tasks),
+            "fallbacks": fallbacks,
         },
     )
 
@@ -1444,6 +1470,7 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
 
     rendered: dict[str, str] = {}
     warnings: list[str] = []
+    fallbacks: list[dict[str, str]] = []
     fallback_soul = (
         "# Identity\n\n"
         "You are the hal0 admin agent — the right-hand assistant for this "
@@ -1454,6 +1481,13 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
         rendered["SOUL.md"] = _render_template("SOUL.md.j2", **vars_)
     except Exception as exc:
         warnings.append(f"SOUL.md render: {exc}; falling back to default")
+        # #702: the inline-default fallback is observable, not silent.
+        fallbacks.append(
+            {
+                "site": "soul_md",
+                "detail": f"SOUL.md.j2 render failed ({exc}) — wrote the inline default SOUL.md",
+            }
+        )
         rendered["SOUL.md"] = fallback_soul
 
     for tpl_name, _out_name in (
@@ -1465,7 +1499,12 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
         except Exception as exc:
             warnings.append(f"{tpl_name} render: {exc}; skipping")
 
-    details: dict[str, Any] = {"warnings": warnings, "rendered": {}, "links": []}
+    details: dict[str, Any] = {
+        "warnings": warnings,
+        "rendered": {},
+        "links": [],
+        "fallbacks": fallbacks,
+    }
 
     soul_path = hermes_home / "SOUL.md"
     h = _atomic_write(soul_path, rendered["SOUL.md"])
@@ -1691,6 +1730,9 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
     state = ctx.state
     card = _build_identity_card(state)
     warnings: list[str] = []
+    # #702: every memory-layer warn-as-OK degradation is recorded here so
+    # the fallback posture is observable in provision.json, not silent.
+    fallbacks: list[dict[str, str]] = []
 
     # Look up existing card so re-bootstrap doesn't accumulate duplicates.
     search = ctx.io.mcp_memory_call(
@@ -1717,6 +1759,12 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
                 existing_ids.append(item["id"])
     elif not search["ok"]:
         warnings.append(f"memory_search: {search['error']}")
+        fallbacks.append(
+            {
+                "site": "memory_layer",
+                "detail": f"memory_search failed ({search['error']}) — continuing without dedupe",
+            }
+        )
 
     if existing_ids:
         deleted = ctx.io.mcp_memory_call(
@@ -1731,6 +1779,12 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
         # the transport status — on any shortfall, skip the rewrite.
         if not deleted["ok"]:
             warnings.append(f"memory_delete: {deleted['error']}")
+            fallbacks.append(
+                {
+                    "site": "memory_layer",
+                    "detail": f"memory_delete failed ({deleted['error']}) — card not rewritten",
+                }
+            )
             return PhaseResult(
                 status=PhaseStatus.OK,
                 details={
@@ -1738,6 +1792,7 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
                     "refreshed_existing": False,
                     "warnings": warnings,
                     "card": card,
+                    "fallbacks": fallbacks,
                 },
                 reason="memory_delete failed; not rewriting to avoid duplicate accumulation",
             )
@@ -1747,6 +1802,15 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
                 f"memory_delete: requested {len(existing_ids)}, removed {removed} "
                 "— not rewriting to avoid duplicate accumulation"
             )
+            fallbacks.append(
+                {
+                    "site": "memory_layer",
+                    "detail": (
+                        f"memory_delete removed {removed}/{len(existing_ids)} — "
+                        "card not rewritten to avoid duplicate accumulation"
+                    ),
+                }
+            )
             return PhaseResult(
                 status=PhaseStatus.OK,
                 details={
@@ -1754,6 +1818,7 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
                     "refreshed_existing": False,
                     "warnings": warnings,
                     "card": card,
+                    "fallbacks": fallbacks,
                 },
                 reason="memory_delete count mismatch; not rewriting to avoid duplicate accumulation",
             )
@@ -1766,9 +1831,20 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
     if not add["ok"]:
         # Bootstrap continues — the card is nice-to-have, not a blocker.
         warnings.append(f"memory_add: {add['error']}")
+        fallbacks.append(
+            {
+                "site": "memory_layer",
+                "detail": f"memory_add failed ({add['error']}) — identity card not registered",
+            }
+        )
         return PhaseResult(
             status=PhaseStatus.OK,
-            details={"registered": False, "warnings": warnings, "card": card},
+            details={
+                "registered": False,
+                "warnings": warnings,
+                "card": card,
+                "fallbacks": fallbacks,
+            },
             reason="hal0-memory unreachable; identity card not registered (continuing)",
         )
 
@@ -1783,6 +1859,7 @@ def _phase_namespace_register(ctx: PhaseContext) -> PhaseResult:
             "card": card,
             "warnings": warnings,
             "refreshed_existing": bool(existing_ids),
+            "fallbacks": fallbacks,
         },
     )
 
