@@ -329,25 +329,26 @@ A single `Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slo
 
 ---
 
-# Architecture-deepening vocabulary (proposed 2026-06-11)
+# Architecture-deepening vocabulary (2026-06-11)
 
 Terms locked during the architecture-review grilling (skill: `improve-codebase-architecture`).
-**Status: approved design directions, not yet implemented.** Each names a deepened module
-that replaces a shallow seam. Promote to a real entry (drop the "proposed" note) when the
-PR lands.
+Each names a deepened module that replaces a shallow seam. Entries are implemented unless
+explicitly marked **proposed**; promote a proposed entry (drop the note) when its PR lands.
 
 ## SlotConfigStore
 
-Proposed deep module that owns *both* `capabilities.toml` selections and `slots/*.toml` as
-one reconciled truth, ending the drift between them (today reconciled by an unconditional
-rewrite in `capabilities/orchestrator.py:apply()`). Interface: **`apply(selection) -> ChangeSet`
-is compute-only** (no disk write); the store also exposes `commit(cs)` (atomic write) and
-`revert(cs)`. Decision: keeping `apply()` pure is the whole point — it makes the write an
-explicit, observable, reversible step instead of a hidden rewrite. Replaces the "thin overlay
-reconciles on every apply" pattern with an observable, testable invariant. Supersedes the
-orchestrator's defensive rewrite as the home for capabilities ⇄ slot reconciliation. See
-[[ChangeSet]], candidate 1 of the 2026-06-11 review. Touches the ARCHITECTURE.md "thin overlay"
-framing.
+Deep module (`src/hal0/slot_config/`, issue #697) that owns *both* `capabilities.toml`
+selections and `slots/*.toml` as one reconciled truth, ending the drift between them
+(previously reconciled by an unconditional rewrite in `capabilities/orchestrator.py:apply()`).
+Interface: **`apply(selection) -> ChangeSet` is compute-only** (no disk write); the store also
+exposes `commit(cs)` (atomic per-file write with rollback-to-before on partial failure) and
+`revert(cs)`. Keeping `apply()` pure is the whole point — it makes the write an explicit,
+observable, reversible step instead of a hidden rewrite. The same module's `write_slot_toml()`
+is the single byte-level write path for `slots/*.toml`; every writer (SlotManager
+create/update/persist-default, installer pick-default, model-delete cascade) routes through it.
+First-boot seed and v1→v2 schema migrations stay on `save_capabilities_config`, which shares
+the store's `capabilities_toml_payload` serializer so shapes can't diverge. See [[ChangeSet]],
+candidate 1 of the 2026-06-11 review.
 
 ## ChangeSet
 
@@ -356,16 +357,17 @@ config. Makes reconciliation a pure computation separate from the write — drif
 `disk == after` after a committed apply, `disk == before` after a revert. A failed mid-flight
 apply leaves disk at `before`, never a half-reconciled state. See [[SlotConfigStore]].
 
-## is_ready_for_dispatch / SlotManager.state
+## is_ready_for_dispatch / SlotManager.state (proposed)
 
 The public readiness seam on `SlotManager`, replacing the Dispatcher's reach into the private
 `_current_state()` (`dispatcher/router.py:723,791`). `state(name) -> SlotState` exposes the
 slot state; `is_ready_for_dispatch(name) -> bool` owns the ready-set rule (`READY | SERVING |
 IDLE`) so it is defined exactly once instead of duplicated across Dispatcher and SlotManager.
 The Dispatcher stops knowing the state-cache, the disk fallback, and the enum. Endorsed by the
-2026-06-07 audit (ANSWERS §2.1). Candidate 2 of the 2026-06-11 review.
+2026-06-07 audit (ANSWERS §2.1). Candidate 2 of the 2026-06-11 review. **Proposed** — the
+`state()` half is implemented by in-flight PR #649; `is_ready_for_dispatch()` remains (#696).
 
-## SlotViewAggregator
+## SlotViewAggregator (proposed)
 
 Proposed stateless module that lifts the five enrichment concerns inline in
 `api/routes/slots.py:list_slots()` (state serialization, Lemonade `/v1/health` enrich + drift
@@ -378,7 +380,7 @@ makes a composable enrichment pipeline a hypothetical seam; add `snapshot(includ
 only when the admin MCP surface actually needs state-without-metrics. Candidate 3 of the
 2026-06-11 review. See [[SlotView]].
 
-## SlotView
+## SlotView (proposed)
 
 The enriched per-slot record `SlotViewAggregator.snapshot()` emits — one slot's state plus its
 Lemonade/container enrichment, memory attribution, and metrics, as a typed object rather than
@@ -386,13 +388,14 @@ the ad-hoc dict assembled inline in the route today. See [[SlotViewAggregator]].
 
 ## model_meta
 
-Proposed single home (`src/hal0/model_meta/`) for the model-classification and
-device→backend logic currently copy-pasted across `routes/models.py:_classify_type`,
-`routes/slots.py`, `capabilities/orchestrator.py` (four `_canonical_*` helpers), and the
-omni-router heuristic. **Stateless surface, no construction:** `classify(model_id) -> slot
-type` and `device_to_backend(device) -> (recipe, llamacpp)` are pure; **`is_resolvable(model_id,
-registry) -> bool` takes the registry explicitly** (it needs registry membership + FLM-catalog
-presence via `is_installed_flm_id`) so the module stays importable everywhere without a handle
-to thread through. Imported by routes, orchestrator, and omni-router so a classification rule
-changes in one place. Removes the "keep the two in sync" hazard (`omni_router/filter.py` ↔
-`slots/manager.py`). Candidate 4 of the 2026-06-11 review.
+The single home (`src/hal0/model_meta/`, issue #695 / PR #700) for the model-classification
+and device→backend logic previously copy-pasted across `routes/models.py:_classify_type`,
+`routes/slots.py`, `capabilities/orchestrator.py` (four `_canonical_*` helpers), the
+omni-router heuristic, and `providers/lemonade.py`. **Stateless surface, no construction:**
+`classify(model_id) -> slot type` and `device_to_backend(device) -> (recipe, llamacpp)` are
+pure; **`is_resolvable(model_id, registry) -> bool` takes the registry explicitly** (it needs
+registry membership + FLM-catalog presence via `is_installed_flm_id`) so the module stays
+importable everywhere without a handle to thread through. Also home to `canonical_device`,
+`device_to_legacy_backend` (deliberately separate — they disagree on unknown input, see
+`# NOTE(#695)`), and `labels_of` (the ex-"keep the two in sync" extraction shared by
+`omni_router/filter.py` and `slots/manager.py`). Candidate 4 of the 2026-06-11 review.
