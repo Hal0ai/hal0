@@ -70,10 +70,32 @@ function App() {
   // via /api/status). Read through the window bridge to keep this strict
   // no-ES-imports prototype file within the dash/*.jsx contract — the bridge
   // is imported in main.tsx before main.jsx evaluates, so the ref is stable.
-  // We conditionally RENDER rather than redirect so a deep link to #agent in
-  // a memory-enabled dev build isn't bounced away during the status fetch.
   const useMemEnabled = (typeof window !== "undefined" && window.__hal0UseMemoryEnabled) || null;
   const memoryEnabled = useMemEnabled ? useMemEnabled() : false;
+  // Companion pending flag: useMemoryEnabled() returns false during loading
+  // AND when truly disabled. Guard the redirect so we don't bounce on the
+  // transient loading false — only redirect once the query has settled.
+  const useMemEnabledPending = (typeof window !== "undefined" && window.__hal0UseMemoryEnabledPending) || null;
+  const memoryStatusPending = useMemEnabledPending ? useMemEnabledPending() : true;
+
+  // Live approval queue — bridges installed by chrome.jsx (loaded before main.jsx).
+  // TODO endpoints.ts (ui-sweep-b owns) — inline paths live in useAgents.ts hooks.
+  const useApprovalListHook = (typeof window !== "undefined" && window.__hal0UseApprovalList) || null;
+  const useApproveApprovalHook = (typeof window !== "undefined" && window.__hal0UseApproveApproval) || null;
+  const useDenyApprovalHook = (typeof window !== "undefined" && window.__hal0UseDenyApproval) || null;
+
+  const approvalQuery = useApprovalListHook ? useApprovalListHook() : { data: null };
+  const approveApproval = useApproveApprovalHook ? useApproveApprovalHook() : null;
+  const denyApproval = useDenyApprovalHook ? useDenyApprovalHook() : null;
+
+  // Map ApprovalEntry → shape expected by ApprovalModal
+  const approvalItems = (approvalQuery.data?.approvals ?? []).map(e => ({
+    id: e.id,
+    ts: e.enqueued_at ? e.enqueued_at.slice(11, 19) : "—",
+    agent: e.client_id || "hermes",
+    tool: e.tool,
+    arg: e.args ? JSON.stringify(e.args).slice(0, 120) : "—",
+  }));
 
   useEffectA(() => {
     const onHash = () => setRouteState(parseRoute());
@@ -171,15 +193,17 @@ function App() {
       case "models":   return <ModelsView />;
       case "logs":     return <LogsView />;
       case "agent":
-        // 0.4: hidden from the sidebar when memory is off; this guard
-        // catches stale deep links / bookmarks to #agent.
-        return memoryEnabled ? (
-          <AgentView />
-        ) : (
-          <div className="view">
-            <div className="empty">The memory surface is disabled in this release.</div>
-          </div>
-        );
+        // 0.4: hidden from the sidebar when memory is off. Stale deep links
+        // / bookmarks bounce to dashboard rather than showing a dead-text page.
+        // Guard: memoryStatusPending prevents redirect during the transient
+        // loading window (useMemoryEnabled returns false while the /api/status
+        // query is in-flight; we must not redirect until it settles).
+        if (!memoryEnabled && !memoryStatusPending) {
+          if (typeof window !== "undefined") window.location.hash = "#dashboard";
+          return null;
+        }
+        if (memoryStatusPending) return null; // loading — render nothing briefly
+        return <AgentView />;
       case "profiles":  return <ProfilesView />;
       case "mcp":      return <McpView />;
       case "settings": return <SettingsView />;
@@ -204,7 +228,7 @@ function App() {
           onCmdK={() => setPaletteOpen(true)}
           onMenu={() => setNavOpen(true)}
           menuOpen={navOpen}
-          approvals={0}
+          approvals={approvalItems.length}
         />
         {!isFirstrun && <Sidebar route={route} onGo={go} />}
         <div className="main">
@@ -246,14 +270,12 @@ function App() {
         />
       )}
 
-      {/* v0.3 PR-8: ApprovalModal stays mounted but its content is
-          backed by the live agent approvals queue in PR-10. Today the
-          fixture list is empty — the sidebar pip is the operative
-          surface (PR-6). */}
       <ApprovalModal
         open={bellOpen}
         onClose={() => setBellOpen(false)}
-        items={[]}
+        items={approvalItems}
+        onApprove={id => approveApproval && approveApproval.mutate(id)}
+        onDeny={id => denyApproval && denyApproval.mutate(id)}
       />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

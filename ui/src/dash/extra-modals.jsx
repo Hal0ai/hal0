@@ -1,6 +1,8 @@
 // hal0 dashboard — Add-Secret modal + Onboarding tour
 // Curated dropdown with auto-detect by token prefix; tour = 3-step coachmark overlay.
 
+import { useSecretSet } from '@/api/hooks/useSecrets'
+
 const { useState: useStateAS, useEffect: useEffectAS, useRef: useRefAS } = React;
 
 // ─── Add Secret modal ───────────────────────────────────────────
@@ -19,6 +21,7 @@ function AddSecretModal({ open, onClose }) {
   const [customName, setCustomName] = useStateAS("");
   const [value, setValue] = useStateAS("");
   const [show, setShow] = useStateAS(false);
+  const secretSet = useSecretSet();
 
   useEffectAS(() => {
     if (open) { setPicked("HF_TOKEN"); setCustomName(""); setValue(""); setShow(false); }
@@ -62,9 +65,24 @@ function AddSecretModal({ open, onClose }) {
         <>
           <span>Stored encrypted on disk · accessible to hal0 only.</span>
           <span style={{display: "inline-flex", gap: 8}}>
-            <button className="btn ghost sm" onClick={onClose}>Cancel</button>
-            <button className="btn sm" disabled={!canSave} onClick={() => { onClose(); window.__hal0Toast && window.__hal0Toast(`Secret ${finalName} stored`, "ok"); }}>
-              Add secret
+            <button className="btn ghost sm" onClick={onClose} disabled={secretSet.isPending}>Cancel</button>
+            <button
+              className="btn sm"
+              disabled={!canSave || secretSet.isPending}
+              onClick={async () => {
+                try {
+                  await secretSet.mutateAsync({ name: finalName, value });
+                  window.__hal0Toast && window.__hal0Toast(`Secret ${finalName} stored`, "ok");
+                  onClose();
+                } catch (e) {
+                  window.__hal0Toast && window.__hal0Toast(
+                    `Failed to store secret — ${e?.message || "see logs"}`,
+                    "err"
+                  );
+                }
+              }}
+            >
+              {secretSet.isPending ? "Saving…" : "Add secret"}
             </button>
           </span>
         </>

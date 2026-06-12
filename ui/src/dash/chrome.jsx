@@ -10,7 +10,7 @@ import { useSlots, useEndpoints } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState } from '@/api/hooks/useUpdates'
-import { useSidebarAgentRollup } from '@/api/hooks/useAgents'
+import { useSidebarAgentRollup, useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useUpstreams } from '@/api/hooks/useConnections'
@@ -522,8 +522,9 @@ function highlightFoot(text, q) {
 }
 
 // ─── Approval inbox modal ───
-function ApprovalModal({ open, onClose, items }) {
+function ApprovalModal({ open, onClose, items, onApprove, onDeny }) {
   if (!open) return null;
+  const pending = items.length;
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-shell approval-modal" onClick={e => e.stopPropagation()}>
@@ -533,12 +534,19 @@ function ApprovalModal({ open, onClose, items }) {
           <button className="modal-close" onClick={onClose} aria-label="Close">{Icons.close}</button>
         </div>
         <div className="modal-body">
-          <div className="approval-banner mono">
-            <span>{Icons.warn}</span>
-            <span>3 requests waiting. Calls block until you approve or deny — agents pause cleanly.</span>
-          </div>
+          {pending > 0 && (
+            <div className="approval-banner mono">
+              <span>{Icons.warn}</span>
+              <span>{pending} request{pending !== 1 ? "s" : ""} waiting. Calls block until you approve or deny — agents pause cleanly.</span>
+            </div>
+          )}
+          {pending === 0 && (
+            <div data-testid="approvals-empty" style={{padding: "24px 18px", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)", textAlign: "center"}}>
+              no pending approvals
+            </div>
+          )}
           {items.map((a, i) => (
-            <div key={i} className="approval-card">
+            <div key={a.id || i} className="approval-card">
               <div className="approval-h">
                 <span className="ts mono">{a.ts}</span>
                 <span className="ag mono">{a.agent}</span>
@@ -560,9 +568,9 @@ function ApprovalModal({ open, onClose, items }) {
                 </div>
               </div>
               <div className="approval-actions">
-                <button className="btn danger sm">Deny</button>
-                <button className="btn ghost sm">Deny + remember</button>
-                <button className="btn sm">Approve</button>
+                <button className="btn danger sm" onClick={() => onDeny && onDeny(a.id)}>Deny</button>
+                <button className="btn ghost sm" onClick={() => onDeny && onDeny(a.id)}>Deny + remember</button>
+                <button className="btn sm" onClick={() => onApprove && onApprove(a.id)}>Approve</button>
               </div>
             </div>
           ))}
@@ -683,3 +691,10 @@ function NavDrawer({ open, route, onGo, onClose, onCmdK }) {
 }
 
 Object.assign(window, { Wordmark, Icons, Icon, TopBar, Sidebar, Footer, ApprovalModal, NavDrawer });
+
+// Bridge approval hooks so main.jsx (strict no-ES-imports prototype) can call
+// them via window globals — same pattern as memory-tab-hook-bridge.ts.
+// TODO endpoints.ts (ui-sweep-b owns) — useApprovalList/useApproveApproval/useDenyApproval
+window.__hal0UseApprovalList = useApprovalList;
+window.__hal0UseApproveApproval = useApproveApproval;
+window.__hal0UseDenyApproval = useDenyApproval;

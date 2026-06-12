@@ -2,9 +2,9 @@
 //
 // Composes:
 //   - GraphExtractionPanel (ADR-0014 — graph build status + route picker)
-//   - Cognee stats card (records / DB rollup)
-//   - Recent records card
-//   - Namespaces side card
+//   - Memory engine stats card (live: /api/agents/hermes/memory/stats)
+//   - Recent records card (live: GET /api/memory/list)
+//   - Namespaces side card (derived from live stats)
 //   - "Peer memory" subsection (folded in from the old Peers tab)
 //
 // The Peer memory subsection consumes the live MCP search at
@@ -18,6 +18,16 @@
 const { useState: useStateMT, useEffect: useEffectMT } = React;
 
 function MemoryTab({ subsection } = {}) {
+  // Live hooks injected via memory-tab-hook-bridge.ts
+  const useMemoryList = window.__hal0UseMemoryList;
+  const useAgentMemoryStats = window.__hal0UseAgentMemoryStats;
+
+  const statsQuery = useAgentMemoryStats ? useAgentMemoryStats("hermes") : { isLoading: false, isError: false, data: null };
+  const listQuery = useMemoryList ? useMemoryList({ dataset: "shared", limit: 10 }) : { isLoading: false, isError: false, data: null };
+
+  const stats = statsQuery.data;
+  const records = listQuery.data?.items ?? [];
+
   useEffectMT(() => {
     if (subsection === "peer") {
       const el = document.getElementById("peer-memory");
@@ -25,49 +35,74 @@ function MemoryTab({ subsection } = {}) {
     }
   }, [subsection]);
 
+  // Namespace list derived from live stats
+  const namespaces = [];
+  if (stats) {
+    namespaces.push({ name: "shared", desc: "default · all agents", recs: null, active: true });
+    if (stats.available) {
+      namespaces.push({ name: stats.namespace, desc: "agent · private", recs: stats.writes, active: false });
+    }
+  }
+
   return (
     <div data-testid="memory-tab" style={{display: "grid", gridTemplateColumns: "1fr 320px", gap: 16}}>
       <div>
         <MemoryGraphPanel />
 
+        {/* ── Memory engine stats card ── */}
         <div className="card" style={{padding: 18, marginBottom: 14}}>
-          <div style={{display: "flex", alignItems: "center", gap: 12, marginBottom: 14}}>
-            <span className="mono" style={{fontSize: 10, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.1em"}}>Cognee · shared</span>
-            <span className="mono num" style={{fontSize: 24, color: "var(--fg)", letterSpacing: "-0.02em"}}>2,847</span>
-            <span className="mono" style={{fontSize: 12, color: "var(--fg-3)"}}>records · 184 MB</span>
-            <span style={{marginLeft: "auto"}} className="chip ok">healthy</span>
-          </div>
-          <div style={{display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, border: "1px solid var(--line)", borderRadius: "var(--rad)", overflow: "hidden"}}>
-            {[
-              { l: "SQLite",  v: "847",   sub: "indexed text" },
-              { l: "LanceDB", v: "2,140", sub: "vectors · 768d" },
-              { l: "Kuzu",    v: "412",   sub: "graph edges" },
-            ].map((s, i) => (
-              <div key={i} style={{padding: 14, borderRight: i < 2 ? "1px solid var(--line)" : "none"}}>
-                <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em"}}>{s.l}</div>
-                <div className="mono num" style={{fontSize: 22, color: "var(--fg)", marginTop: 4}}>{s.v}</div>
-                <div className="mono" style={{fontSize: 10, color: "var(--fg-4)"}}>{s.sub}</div>
+          {statsQuery.isLoading && (
+            <div className="mono" style={{fontSize: 12, color: "var(--fg-4)"}}>Loading memory stats…</div>
+          )}
+          {statsQuery.isError && (
+            <div className="mono" style={{fontSize: 12, color: "var(--err, #c66)"}}>Memory stats unavailable</div>
+          )}
+          {!statsQuery.isLoading && !statsQuery.isError && (
+            <>
+              <div style={{display: "flex", alignItems: "center", gap: 12, marginBottom: 14}}>
+                <span data-testid="memory-engine-label" className="mono" style={{fontSize: 10, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.1em"}}>memory engine · shared</span>
+                <span className="mono num" style={{fontSize: 24, color: "var(--fg)", letterSpacing: "-0.02em"}}>{stats?.writes ?? 0}</span>
+                <span className="mono" style={{fontSize: 12, color: "var(--fg-3)"}}>records</span>
+                <span style={{marginLeft: "auto"}} className={`chip ${stats?.available ? "ok" : ""}`}>
+                  {stats?.available ? "healthy" : "offline"}
+                </span>
               </div>
-            ))}
-          </div>
+              {stats?.last_write && (
+                <div className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+                  last write: {stats.last_write}
+                </div>
+              )}
+              {!stats?.available && (
+                <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", marginTop: 6}}>
+                  memory engine not configured or unavailable
+                </div>
+              )}
+            </>
+          )}
         </div>
 
+        {/* ── Recent records ── */}
         <div className="sec"><h2>Recent records</h2><div className="rule" /></div>
         <div className="card" style={{overflow: "hidden", marginBottom: 24}}>
-          {[
-            { ts: "14:02:11", source: "hermes", kind: "fact",        body: "user prefers frozen dataclasses for SlotState types" },
-            { ts: "14:00:42", source: "hermes", kind: "convo",       body: "session ftr-104 — refactor of slot_manager.py" },
-            { ts: "13:58:18", source: "hermes", kind: "code-ref",    body: "slot.py:42 — SlotState dataclass with slots=True" },
-            { ts: "13:54:01", source: "hermes", kind: "skill-trace", body: "read_file → src/hal0/launchers/slot_manager.py (3 calls)" },
-            { ts: "13:50:33", source: "user",   kind: "preference",  body: "models page: sort installed first" },
-          ].map((r, i) => (
-            <div key={i} style={{padding: "12px 18px", borderBottom: "1px solid var(--line-soft)", fontFamily: "var(--jbm)", fontSize: 12}}>
+          {listQuery.isLoading && (
+            <div style={{padding: "16px 18px", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>Loading records…</div>
+          )}
+          {listQuery.isError && (
+            <div style={{padding: "16px 18px", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--err, #c66)"}}>Could not load records</div>
+          )}
+          {!listQuery.isLoading && !listQuery.isError && records.length === 0 && (
+            <div data-testid="memory-records-empty" style={{padding: "24px 18px", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)", textAlign: "center"}}>
+              no records yet
+            </div>
+          )}
+          {records.map((r, i) => (
+            <div key={r.id || i} style={{padding: "12px 18px", borderBottom: "1px solid var(--line-soft)", fontFamily: "var(--jbm)", fontSize: 12}}>
               <div style={{display: "flex", gap: 10, marginBottom: 4}}>
-                <span style={{color: "var(--fg-5)"}}>{r.ts}</span>
-                <span style={{color: "var(--accent)"}}>{r.source}</span>
-                <span className="chip">{r.kind}</span>
+                <span style={{color: "var(--fg-5)"}}>{r.timestamp ? r.timestamp.slice(11, 19) : "—"}</span>
+                <span style={{color: "var(--accent)"}}>{r.source || r.dataset || "—"}</span>
+                {r.tags && r.tags[0] && <span className="chip">{r.tags[0]}</span>}
               </div>
-              <div style={{color: "var(--fg-2)", paddingLeft: 0}}>{r.body}</div>
+              <div style={{color: "var(--fg-2)", paddingLeft: 0}}>{r.text}</div>
             </div>
           ))}
         </div>
@@ -87,18 +122,22 @@ function MemoryTab({ subsection } = {}) {
         <div className="side-card">
           <div className="side-card-h"><span>Namespaces</span></div>
           <div className="side-card-b">
-            {[
-              { name: "shared",  desc: "default · all agents",  recs: 2847, active: true },
-              { name: "scratch", desc: "ephemeral · auto-prune", recs: 84,   active: false },
-              { name: "code",    desc: "code refs only",         recs: 412,  active: false },
-            ].map(n => (
+            {statsQuery.isLoading && (
+              <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", padding: "10px 0"}}>Loading…</div>
+            )}
+            {!statsQuery.isLoading && namespaces.length === 0 && (
+              <div data-testid="namespaces-empty" className="mono" style={{fontSize: 11, color: "var(--fg-4)", padding: "10px 0"}}>no namespaces available</div>
+            )}
+            {namespaces.map(n => (
               <div key={n.name} style={{padding: "10px 0", borderBottom: "1px solid var(--line-soft)", display: "flex", alignItems: "center", gap: 10, fontFamily: "var(--jbm)", fontSize: 12}}>
                 <span className={"dot " + (n.active ? "ready" : "idle")} />
                 <div>
                   <div style={{color: "var(--fg)", fontWeight: 500}}>{n.name}</div>
                   <div style={{color: "var(--fg-4)", fontSize: 10}}>{n.desc}</div>
                 </div>
-                <span style={{marginLeft: "auto", color: "var(--fg-3)"}} className="num">{n.recs}</span>
+                {n.recs != null && (
+                  <span style={{marginLeft: "auto", color: "var(--fg-3)"}} className="num">{n.recs}</span>
+                )}
               </div>
             ))}
           </div>

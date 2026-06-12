@@ -48,7 +48,6 @@ function SettingsView() {
         <span className="vh-eye mono">Configure</span>
         <h1>Settings</h1>
         <span className="vh-spacer" />
-        <span className="hint mono">unsaved · 0</span>
       </div>
 
       <div className="settings-layout">
@@ -431,24 +430,25 @@ function StorageSection() {
 
 function SecretsSection() {
   const [addOpen, setAddOpen] = useStateSet(false);
-  // Phase B1: live secrets list + delete mutation. The Add modal still
-  // posts via the prototype's local form; useSecretSet wires the real
-  // POST when modal upgrades land in B2.
   const secretsQuery = useSecrets();
   const delSecret = useSecretDelete();
-  // Fall back to the design's three default rows when backend hasn't
-  // shipped the endpoint.
-  const fallbackRows = [
-    { name: 'HF_TOKEN', set: true, masked: 'hf_•••••••••••••••••••••' },
-    { name: 'OPENAI_API_KEY', set: false },
-    { name: 'ANTHROPIC_API_KEY', set: false },
-  ];
-  const rows = (secretsQuery.data && secretsQuery.data.length > 0) ? secretsQuery.data : fallbackRows;
+  const rows = secretsQuery.data ?? [];
   return (
     <div className="s-section">
       <h2>Secrets</h2>
       <p className="desc">Encrypted at rest. Used for gated HF repos and provider auth.</p>
+      {secretsQuery.isLoading && (
+        <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading…</div>
+      )}
+      {secretsQuery.isError && (
+        <div className="err">{secretsQuery.error?.message || "Could not load secrets"}</div>
+      )}
       <div className="s-panel">
+        {rows.length === 0 && !secretsQuery.isLoading && !secretsQuery.isError && (
+          <div className="s-row" style={{padding: "18px 16px"}}>
+            <span className="mono" style={{fontSize: 12, color: "var(--fg-4)"}}>no secrets configured · add one</span>
+          </div>
+        )}
         {rows.map(s => (
           <SRow
             key={s.name}
@@ -472,7 +472,9 @@ function SecretsSection() {
         ))}
       </div>
       <div style={{marginTop: 14, display: "flex", justifyContent: "space-between", alignItems: "center"}}>
-        <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>{rows.length} known keys · add a custom key for any provider</span>
+        <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
+          {rows.length > 0 ? `${rows.length} key${rows.length === 1 ? "" : "s"} stored` : "add keys for gated repos and provider auth"}
+        </span>
         <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add secret</button>
       </div>
       <AddSecretModal open={addOpen} onClose={() => setAddOpen(false)} />
@@ -774,7 +776,7 @@ function VoiceSection() {
               className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 260}} />
           )
         } sub={ttsCatalogItems.length === 0 ? "no installed TTS models — install one in the Models view" : undefined} />
-        <SRow k="Default voice" sub="applied when /v1/audio/speech omits the voice param" v={
+        <SRow k="Default voice" sub="applied when /v1/audio/speech omits the voice param · bundled voices (Kokoro v1)" v={
           <select value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}
             style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
             <option value="">— use server default (af_bella) —</option>
@@ -885,9 +887,7 @@ function ImageGenSection() {
           )
         } sub={imgCatalogItems.length === 0 ? "no installed image models — install one in the Models view" : undefined} />
 
-        <SRow k="Size / Steps / Workflow" sub="per-request params — set in the API call body (extra_body.steps, size, etc.)" v={
-          <span className="chip mono" style={{color: "var(--fg-4)", borderColor: "var(--line)", fontSize: 10, padding: "1px 6px"}}>deferred</span>
-        } />
+        {/* Size / Steps / Workflow are per-request params (extra_body.*), not slot config — hidden until /api/slots/{name}/defaults lands */}
 
         <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
           {imgDirty && (
@@ -908,17 +908,11 @@ function GeneralSection() {
   return (
     <div className="s-section">
       <h2>General</h2>
-      <p className="desc">Dark only for v0.2.1. Light mode lands when the website adds one.</p>
+      <p className="desc">
+        The dashboard is dark-only by design. Theme / density / accent customization is not available in this release.
+      </p>
       <div className="s-panel">
-        <SRow k="Theme" v={<span className="chip amber">dark</span>} />
-        <SRow k="Density" sub="affects card padding + row heights" v={
-          <div className="mono" style={{display: "inline-flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden"}}>
-            {["compact", "comfortable", "spacious"].map(d => (
-              <span key={d} style={{padding: "4px 10px", fontSize: 11, cursor: "pointer", background: d === "comfortable" ? "var(--accent-soft)" : "transparent", color: d === "comfortable" ? "var(--accent)" : "var(--fg-3)", borderRight: d !== "spacious" ? "1px solid var(--line)" : "none"}}>{d}</span>
-            ))}
-          </div>
-        } />
-        <SRow k="Accent" v={<span className="chip amber">sodium amber #FFB000</span>} sub="Brand-locked. Status colors are distinct." />
+        <SRow k="Theme" v={<span className="chip mono" style={{color: "var(--fg-4)"}}>dark · locked</span>} />
       </div>
     </div>
   );

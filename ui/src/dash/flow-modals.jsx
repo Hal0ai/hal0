@@ -1,7 +1,8 @@
 // hal0 dashboard — FirstRun + Backends + Agent flow modals
 // Skip confirm, post-install hero, backend install/uninstall, FLM .deb guide, persona edit, namespace reset
 
-import { useAgentPersonaEnums } from '@/api/hooks/useAgents'
+import { useAgentPersonaEnums, usePersonaUpdate } from '@/api/hooks/useAgents'
+import { useNpuLoad, useNpuUnload } from '@/api/hooks/useBackends'
 
 const { useState: useStateFM, useEffect: useEffectFM } = React;
 
@@ -36,44 +37,34 @@ function BackendInstallModal({ open, onClose, backend }) {
   if (!backend) return null;
   const isFlm = backend.kind === "flm";
   if (isFlm) return <FlmDebGuideModal open={open} onClose={onClose} backend={backend} />;
+  // No dashboard install path exists for non-FLM backends. Show honest state.
   return (
     <Modal
       open={open}
       onClose={onClose}
       eyebrow={`Backends · install`}
-      title={`Install ${backend.name}?`}
+      title={`Install ${backend.name}`}
       width={580}
       foot={
         <>
-          <span>Backend ships pinned with sha-256 verification.</span>
-          <span style={{display: "inline-flex", gap: 8}}>
-            <button className="btn ghost sm" onClick={onClose}>Cancel</button>
-            <button className="btn sm" onClick={() => { onClose(); window.__hal0Toast && window.__hal0Toast(`Installing ${backend.name} — ETA ~2 min`, "info"); }}>{Icons.download} Install</button>
-          </span>
+          <span>Use the CLI to manage non-NPU backends.</span>
+          <button className="btn sm" onClick={onClose}>Close</button>
         </>
       }
     >
-      <p style={{fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: "0 0 14px"}}>
-        This downloads the <span className="mono" style={{color: "var(--fg)"}}>{backend.name}</span> binary and places it under <span className="mono" style={{color: "var(--fg)"}}>/opt/hal0/bin</span>.
-      </p>
-      <div style={{padding: 12, background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11.5, lineHeight: 1.7}}>
-        <div><span style={{color: "var(--fg-4)"}}>version</span> · <span style={{color: "var(--fg)"}}>{backend.ver}</span></div>
-        <div><span style={{color: "var(--fg-4)"}}>size</span> · <span style={{color: "var(--fg)"}}>~210 MB</span></div>
-        <div><span style={{color: "var(--fg-4)"}}>eta</span> · <span style={{color: "var(--fg)"}}>~2 min on a 100 Mbps link</span></div>
-        <div><span style={{color: "var(--fg-4)"}}>verify</span> · <span style={{color: "var(--ok)"}}>sha-256 pinned ✓</span></div>
-        <div><span style={{color: "var(--fg-4)"}}>restart</span> · <span style={{color: "var(--warn)"}}>affected slots restart after install</span></div>
+      <div style={{padding: "14px 16px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 12.5, color: "var(--fg-3)", lineHeight: 1.6}}>
+        <div style={{color: "var(--fg)", fontWeight: 500, marginBottom: 8}}>not installable from dashboard</div>
+        <div>Dashboard install is only available for the FLM / NPU backend. For other backends, use:</div>
+        <pre style={{margin: "10px 0 0", padding: 10, background: "#070707", borderRadius: "var(--rad-sm)", color: "var(--fg-2)", fontSize: 11}}>hal0 backend install {backend.name || backend.id}</pre>
       </div>
-      {backend.kind === "llamacpp" && backend.device === "rocm" && (
-        <div style={{marginTop: 12, padding: "10px 12px", background: "var(--info-soft)", border: "1px solid var(--info-line)", borderRadius: "var(--rad-sm)", fontSize: 12, color: "var(--info)"}}>
-          ROCm 6.4 detected on this host. The install will use gfx1151 build.
-        </div>
-      )}
     </Modal>
   );
 }
 
 function BackendUninstallModal({ open, onClose, backend }) {
   if (!backend) return null;
+  const isNpu = backend.kind === "flm" || backend.device === "npu";
+  const npuUnload = useNpuUnload();
   const slotsUsing = HAL0_DATA.slots.filter(s => {
     if (backend.kind === "llamacpp" && s.modelLong && s.modelLong.includes("GGUF")) return true;
     if (backend.kind === "whispercpp" && s.type === "transcription" && s.device !== "npu") return true;
@@ -82,6 +73,19 @@ function BackendUninstallModal({ open, onClose, backend }) {
     if (backend.kind === "flm" && s.device === "npu") return true;
     return false;
   });
+
+  const handleUninstall = isNpu
+    ? async () => {
+        try {
+          await npuUnload.mutateAsync();
+          window.__hal0Toast && window.__hal0Toast(`NPU backend unloaded`, "warn");
+          onClose();
+        } catch (e) {
+          window.__hal0Toast && window.__hal0Toast(`Unload failed — ${e?.message || "see logs"}`, "err");
+        }
+      }
+    : null; // no dashboard path for non-NPU; button hidden below
+
   return (
     <Modal
       open={open}
@@ -91,38 +95,57 @@ function BackendUninstallModal({ open, onClose, backend }) {
       width={580}
       foot={
         <>
-          <span style={{color: "var(--err)"}}>{slotsUsing.length} slot{slotsUsing.length === 1 ? "" : "s"} will lose this backend.</span>
+          {isNpu
+            ? <span style={{color: "var(--err)"}}>{slotsUsing.length} slot{slotsUsing.length === 1 ? "" : "s"} will lose this backend.</span>
+            : <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>use CLI: hal0 backend uninstall {backend.name || backend.id}</span>
+          }
           <span style={{display: "inline-flex", gap: 8}}>
-            <button className="btn ghost sm" onClick={onClose}>Cancel</button>
-            {slotsUsing.length > 0 && (
+            <button className="btn ghost sm" onClick={onClose} disabled={npuUnload.isPending}>Cancel</button>
+            {isNpu && slotsUsing.length > 0 && (
               <button className="btn ghost sm" onClick={() => { onClose(); window.location.hash = "#slots"; }}>Move slots first →</button>
             )}
-            <button className="btn danger sm" onClick={() => { onClose(); window.__hal0Toast && window.__hal0Toast(`Uninstalling ${backend.name}`, "warn"); }}>Uninstall anyway</button>
+            {isNpu && (
+              <button
+                className="btn danger sm"
+                disabled={npuUnload.isPending}
+                onClick={handleUninstall}
+              >{npuUnload.isPending ? "Unloading…" : "Uninstall anyway"}</button>
+            )}
           </span>
         </>
       }
     >
-      <p style={{fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: "0 0 14px"}}>
-        Removes <span className="mono" style={{color: "var(--fg)"}}>{backend.name}</span> from <span className="mono" style={{color: "var(--fg)"}}>/opt/hal0/bin</span>. Models on disk are not touched; they just won't have a backend to load through.
-      </p>
-      {slotsUsing.length > 0 ? (
-        <div style={{padding: "12px 14px", background: "var(--err-soft)", border: "1px solid var(--err-line)", borderRadius: "var(--rad-sm)"}}>
-          <div className="mono" style={{fontSize: 11, color: "var(--err)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8}}>⚠ Slots using this backend</div>
-          {slotsUsing.map(s => (
-            <div key={s.name} style={{display: "grid", gridTemplateColumns: "100px 1fr auto", gap: 12, padding: "6px 0", fontFamily: "var(--jbm)", fontSize: 12, borderBottom: "1px solid rgba(239,107,107,0.15)"}}>
-              <span style={{color: "var(--fg)", fontWeight: 500, display: "flex", alignItems: "center", gap: 6}}>
-                <span className={"dot " + s.state} />
-                {s.name}
-              </span>
-              <span style={{color: "var(--fg-3)"}}>{s.model}</span>
-              <span style={{color: "var(--err)"}}>will go offline</span>
-            </div>
-          ))}
+      {!isNpu ? (
+        <div style={{padding: "14px 16px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 12.5, color: "var(--fg-3)", lineHeight: 1.6}}>
+          <div style={{color: "var(--fg)", fontWeight: 500, marginBottom: 8}}>not uninstallable from dashboard</div>
+          <div>Dashboard uninstall is only available for the FLM / NPU backend. Use the CLI:</div>
+          <pre style={{margin: "10px 0 0", padding: 10, background: "#070707", borderRadius: "var(--rad-sm)", color: "var(--fg-2)", fontSize: 11}}>hal0 backend uninstall {backend.name || backend.id}</pre>
         </div>
       ) : (
-        <div style={{padding: "10px 12px", background: "var(--ok-soft)", border: "1px solid var(--ok-line)", borderRadius: "var(--rad-sm)", color: "var(--ok)", fontSize: 12}}>
-          No slots currently use this backend. Safe to uninstall.
-        </div>
+        <>
+          <p style={{fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: "0 0 14px"}}>
+            Unloads the <span className="mono" style={{color: "var(--fg)"}}>{backend.name}</span> NPU backend. Models on disk are not touched.
+          </p>
+          {slotsUsing.length > 0 ? (
+            <div style={{padding: "12px 14px", background: "var(--err-soft)", border: "1px solid var(--err-line)", borderRadius: "var(--rad-sm)"}}>
+              <div className="mono" style={{fontSize: 11, color: "var(--err)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8}}>⚠ Slots using this backend</div>
+              {slotsUsing.map(s => (
+                <div key={s.name} style={{display: "grid", gridTemplateColumns: "100px 1fr auto", gap: 12, padding: "6px 0", fontFamily: "var(--jbm)", fontSize: 12, borderBottom: "1px solid rgba(239,107,107,0.15)"}}>
+                  <span style={{color: "var(--fg)", fontWeight: 500, display: "flex", alignItems: "center", gap: 6}}>
+                    <span className={"dot " + s.state} />
+                    {s.name}
+                  </span>
+                  <span style={{color: "var(--fg-3)"}}>{s.model}</span>
+                  <span style={{color: "var(--err)"}}>will go offline</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{padding: "10px 12px", background: "var(--ok-soft)", border: "1px solid var(--ok-line)", borderRadius: "var(--rad-sm)", color: "var(--ok)", fontSize: 12}}>
+              No slots currently use this backend. Safe to unload.
+            </div>
+          )}
+        </>
       )}
     </Modal>
   );
@@ -174,6 +197,11 @@ hal0 slot restart npu`;
 // AGENT — Persona Edit · No-bundled-agent state · Reset namespace
 // ────────────────────────────────────────────────────────────────
 function PersonaEditModal({ open, onClose, persona }) {
+  // "hermes" is the only agent with a persona surface in v0.3 (single-tenant).
+  const AGENT_ID = "hermes";
+  const personaUpdate = usePersonaUpdate(AGENT_ID);
+
+  const [name, setName] = useStateFM(persona?.name || "");
   const [systemPrompt, setSystemPrompt] = useStateFM(
     "You are hal0, an operator-direct AI assistant running locally on the user's hardware. Be terse, technical, and surface the slots/tools you use as you work."
   );
@@ -190,6 +218,7 @@ function PersonaEditModal({ open, onClose, persona }) {
 
   useEffectFM(() => {
     if (open && persona) {
+      setName(persona.name || "");
       setSlot(persona.slot || "primary");
       setTone(persona.tone || "operator");
     }
@@ -208,8 +237,26 @@ function PersonaEditModal({ open, onClose, persona }) {
         <>
           <span>Personas route to a chat slot and carry their own system prompt + tone.</span>
           <span style={{display: "inline-flex", gap: 8}}>
-            <button className="btn ghost sm" onClick={onClose}>Cancel</button>
-            <button className="btn sm" onClick={() => { onClose(); window.__hal0Toast && window.__hal0Toast(`Persona saved`, "ok"); }}>Save</button>
+            <button className="btn ghost sm" onClick={onClose} disabled={personaUpdate.isPending}>Cancel</button>
+            <button
+              className="btn sm"
+              disabled={personaUpdate.isPending || !name.trim()}
+              onClick={async () => {
+                try {
+                  await personaUpdate.mutateAsync({
+                    pid: persona?.id || name.trim(),
+                    body: { name: name.trim(), slot, tone, system_prompt: systemPrompt },
+                  });
+                  window.__hal0Toast && window.__hal0Toast(`Persona saved`, "ok");
+                  onClose();
+                } catch (e) {
+                  window.__hal0Toast && window.__hal0Toast(
+                    `Save failed — ${e?.message || "endpoint not yet available"}`,
+                    "err"
+                  );
+                }
+              }}
+            >{personaUpdate.isPending ? "Saving…" : "Save"}</button>
           </span>
         </>
       }
@@ -220,7 +267,7 @@ function PersonaEditModal({ open, onClose, persona }) {
           <span className="sub">unique within personas</span>
         </div>
         <div className="form-ctl">
-          <input className="input mono" defaultValue={persona?.name || ""} placeholder="hermes-coder" />
+          <input className="input mono" value={name} onChange={e => setName(e.target.value)} placeholder="hermes-coder" />
         </div>
       </div>
 

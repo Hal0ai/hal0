@@ -273,9 +273,7 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
       {showHero && (
         <div className="hero-strip" style={{marginBottom: 16}}>
           <div className="greet">
-            <span className="dim">Welcome back, </span>
-            <b>halo</b>
-            <span className="dim">. system steady on </span>
+            <span className="dim">system steady on </span>
             <span className="mono" style={{color: "var(--fg-2)"}}>{hostName}</span>
           </div>
           <div className="spacer" />
