@@ -6,7 +6,17 @@
 // imported in main.tsx BEFORE dash/memory.jsx evaluates.
 
 import {
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+} from 'd3-force'
+
+import {
   useBankDelete,
+  useBankGraph,
+  useEntityGraph,
   useBankOperations,
   useBankStats,
   useBankTimeseries,
@@ -29,4 +39,8 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseOperationRetry: useOperationRetry,
   __hal0UseOperationCancel: useOperationCancel,
   __hal0UseConsolidate: useConsolidate,
+  __hal0UseBankGraph: useBankGraph,
+  __hal0UseEntityGraph: useEntityGraph,
+  // d3-force layout primitives for the graph explorer (no-ES-imports .jsx).
+  __hal0D3Force: { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide },
 })

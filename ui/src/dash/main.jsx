@@ -212,7 +212,7 @@ function App() {
           return null;
         }
         if (memoryStatusPending) return null;
-        return <MemoryView />;
+        return <MemoryView param={param} />;
       case "profiles":  return <ProfilesView />;
       case "mcp":      return <McpView />;
       case "settings": return <SettingsView />;

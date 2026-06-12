@@ -377,7 +377,8 @@ function MemNewBankForm({ onClose }) {
 
 // ── Main view ─────────────────────────────────────────────────────────────────
 
-function MemoryView() {
+function MemoryView({ param } = {}) {
+  const section = param === 'graph' ? 'graph' : 'overview';
   const useMemoryEngine = window.__hal0UseMemoryEngine;
   const useMemoryBanks = window.__hal0UseMemoryBanks;
   const engineQuery = useMemoryEngine ? useMemoryEngine() : { data: null, isLoading: false };
@@ -400,6 +401,27 @@ function MemoryView() {
         </div>
       </div>
 
+      <div className="mem-tabs">
+        <button
+          className={'btn ghost xs' + (section === 'overview' ? ' active' : '')}
+          onClick={() => { window.location.hash = '#memory'; }}
+          data-testid="mem-tab-overview"
+        >
+          Overview
+        </button>
+        <button
+          className={'btn ghost xs' + (section === 'graph' ? ' active' : '')}
+          onClick={() => { window.location.hash = '#memory/graph'; }}
+          data-testid="mem-tab-graph"
+        >
+          Graph
+        </button>
+      </div>
+
+      {section === 'graph' ? (
+        <MemGraphExplorer />
+      ) : (
+      <>
       <div className="mem-top">
         <MemEngineCard engine={engineQuery.data} isLoading={engineQuery.isLoading} />
         <MemTimeseries bank={chartBank} period={period} setPeriod={setPeriod} />
@@ -439,6 +461,8 @@ function MemoryView() {
           onClose={() => setSelectedId(null)}
           onDeleted={() => setSelectedId(null)}
         />
+      )}
+      </>
       )}
     </div>
   );

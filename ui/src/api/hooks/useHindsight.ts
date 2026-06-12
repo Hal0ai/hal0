@@ -182,3 +182,51 @@ export function useConsolidate() {
     },
   })
 }
+
+// ── graph explorer ───────────────────────────────────────────────────────────
+
+/** Cytoscape-style payload from Hindsight graph endpoints (0.7.x). */
+export interface GraphPayload {
+  nodes: { data: Record<string, unknown> }[]
+  edges: { data: Record<string, unknown> }[]
+  total_units?: number
+  total_entities?: number
+  total_edges?: number
+  limit?: number
+}
+
+function qs(params: Record<string, string | number | undefined>): string {
+  const pairs = Object.entries(params).filter(([, v]) => v !== undefined && v !== '')
+  if (!pairs.length) return ''
+  return (
+    '?' +
+    pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&')
+  )
+}
+
+export function useBankGraph(
+  bank: string | null,
+  opts?: { type?: string; q?: string; limit?: number },
+) {
+  const query = qs({ type: opts?.type, q: opts?.q, limit: opts?.limit })
+  return useQuery<GraphPayload>({
+    queryKey: ['memory', 'banks', bank, 'graph', query],
+    queryFn: () => apiGet<GraphPayload>(`${ENDPOINTS.memoryBankGraph(bank as string)}${query}`),
+    enabled: !!bank,
+    staleTime: 15_000,
+  })
+}
+
+export function useEntityGraph(
+  bank: string | null,
+  opts?: { min_count?: number; limit?: number },
+) {
+  const query = qs({ min_count: opts?.min_count, limit: opts?.limit })
+  return useQuery<GraphPayload>({
+    queryKey: ['memory', 'banks', bank, 'entities-graph', query],
+    queryFn: () =>
+      apiGet<GraphPayload>(`${ENDPOINTS.memoryBankEntityGraph(bank as string)}${query}`),
+    enabled: !!bank,
+    staleTime: 15_000,
+  })
+}
