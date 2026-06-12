@@ -4,11 +4,11 @@
  * Verifies that when the npu chat slot has runtime="container" + npu: {asr, embed}
  * the NpuFlmStack:
  *   1. Renders asr toggle CHECKED and embed toggle UNCHECKED from slot.npu
- *      (not from lemond flm_args).
+ *      (the TOML-backed [npu] section — the only source of trio state).
  *   2. Toggle click issues PUT /api/slots/npu/config with {npu:{embed:true}}
  *      followed by POST /api/slots/npu/restart.
  *
- * READ path: VITE_MOCK_LEMONADE=1 short-circuits GET /api/slots in mockFetch
+ * READ path: VITE_MOCK_HAL0=1 short-circuits GET /api/slots in mockFetch
  * (client-side, before network). We inject slots via page.addInitScript to
  * override window.HAL0_DATA.slots — the same seam used by slot-card-container-v3.
  *
@@ -73,6 +73,9 @@ test.describe('NPU container mode — NpuFlmStack (#Phase-A)', () => {
     // Embed switch must be off (aria-checked="false")
     const embedSwitch = stack.locator('.npu-trio .npu-mod').nth(2).locator('.npu-switch')
     await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
+
+    // Footer echoes the TOML [npu] section state.
+    await expect(stack.locator('.npu-stack-foot .npu-args')).toHaveText('npu = asr:on · embed:off')
   })
 
   // ── Write-path: toggle issues PUT /config + POST /restart ─────────────
@@ -126,11 +129,11 @@ test.describe('NPU container mode — NpuFlmStack (#Phase-A)', () => {
     expect(restarts[0]).toContain('/api/slots/npu/restart')
   })
 
-  // ── Regression: lemond flm_args path untouched for non-container NPU ──
+  // ── Defaults: slot without an [npu] TOML section ──────────────────────
 
-  test('legacy (non-container) npu slot still shows asr/embed from flm_args', async ({ page }) => {
-    const LEGACY_NPU = {
-      name: 'npu-legacy',
+  test('npu slot without an npu config section renders both toggles OFF', async ({ page }) => {
+    const NPU_NO_TOGGLES = {
+      name: 'npu-bare',
       type: 'llm',
       device: 'npu',
       model: 'gemma3:1b',
@@ -138,40 +141,33 @@ test.describe('NPU container mode — NpuFlmStack (#Phase-A)', () => {
       group: 'npu',
       state: 'ready',
       port: 8093,
-      // No runtime/profile/npu fields → legacy lemond path
+      runtime: 'container',
+      profile: 'flm-npu',
+      container_status: 'running',
+      container_health: true,
+      // No `npu` field → trio modalities default to off.
     }
 
-    // Inject legacy NPU slot — replace all npu-device slots with just this one.
+    // Inject the bare NPU slot — replace all npu-device slots with just this one.
     await page.addInitScript((slot) => {
       document.addEventListener('DOMContentLoaded', () => {
         if ((window as any).HAL0_DATA) {
           const existing = (window as any).HAL0_DATA.slots || []
           const withoutNpu = existing.filter((s: any) => s.device !== 'npu')
           ;(window as any).HAL0_DATA.slots = [...withoutNpu, slot]
-          // Seed lemond config: asr=1 embed=0 (flm_args string)
-          if (!(window as any).HAL0_DATA.lemond) (window as any).HAL0_DATA.lemond = {}
-          // Note: useLemonadeConfig reads /api/lemonade/config via mockFetch
-          // → buildLemonadeConfig returns HAL0_DATA-derived flm_args.
-          // We must set it on the mock builder level: no direct field on
-          // HAL0_DATA for flm_args, BUT buildLemonadeConfig returns its own
-          // hardcoded defaults (--asr 1 --embed 1). The legacy path with
-          // parseFlmArgs("--asr 1 --embed 1") gives both=true. For this
-          // regression test we just verify the stack USES lemond config
-          // (not slot.npu) — both toggles on = correct for the default mock.
-          ;(window as any).__hal0LegacyNpuTest = true
         }
       })
-    }, LEGACY_NPU)
+    }, NPU_NO_TOGGLES)
 
     await page.goto('/#slots')
     const stack = page.locator('.npu-stack')
     await expect(stack).toBeVisible()
 
-    // Legacy mode: lemond config returns "--asr 1 --embed 1" (mock default).
-    // Both toggles should be on (asr=true, embed=true from flm_args).
+    // No [npu] section → asr + embed both off (never inferred from flags).
     const asrSwitch = stack.locator('.npu-trio .npu-mod').nth(1).locator('.npu-switch')
-    await expect(asrSwitch).toHaveAttribute('aria-checked', 'true')
+    await expect(asrSwitch).toHaveAttribute('aria-checked', 'false')
     const embedSwitch = stack.locator('.npu-trio .npu-mod').nth(2).locator('.npu-switch')
-    await expect(embedSwitch).toHaveAttribute('aria-checked', 'true')
+    await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
+    await expect(stack.locator('.npu-stack-foot .npu-args')).toHaveText('npu = asr:off · embed:off')
   })
 })

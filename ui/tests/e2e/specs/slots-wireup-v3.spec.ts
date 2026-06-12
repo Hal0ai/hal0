@@ -51,6 +51,13 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     const nameInput = page.locator('.modal-shell .input.mono').first()
     await expect(nameInput).toBeVisible()
     await nameInput.fill('coder-large')
+    // Profile is required for container slots — Create stays disabled
+    // until one is picked.
+    const profileSel = page
+      .locator('.modal-shell .form-row', { hasText: 'Profile' })
+      .locator('select')
+    await expect(profileSel).toBeVisible()
+    await profileSel.selectOption('moe-rocmfp4')
     const createBtn = page.locator('.modal-shell button:has-text("Create slot")')
     await expect(createBtn).toBeEnabled()
     const postReq = page.waitForRequest(

@@ -3,7 +3,7 @@
  *
  * The three former stacked sidebar blocks (SidebarAgentBlock /
  * SidebarEndpointBlock / SidebarStatusBlock) are merged into ONE card so
- * hermes, hal0, lemond and openwebui read as a single runtime rollup:
+ * hermes, hal0, runtime and openwebui read as a single runtime rollup:
  *
  *   - hermes    — bundled agent health (/api/agents). Row key deep-links to
  *                 the Hermes dashboard ONLY when /api/config/urls advertises
@@ -11,15 +11,16 @@
  *                 binds loopback-only, so there's no host:port fallback).
  *   - hal0      — the composite /v1 endpoint (synthetic /api/slots entry,
  *                 served from HAL0_DATA in forced-mock) + model count.
- *   - lemond    — inference runtime (/v1/health) status + version.
+ *   - runtime   — container slot readiness (useRuntimeRollup over the
+ *                 shared /api/slots poll): "up · N/M slots ready".
  *   - openwebui — external chat UI; status + link both derived from
  *                 /api/config/urls (openwebui + openwebui_enabled), which the
  *                 backend resolves from the request host — so links work on
  *                 any install without hardcoding.
  *
  * Mock seams: /api/agents and /api/config/urls are NOT in the forced-mock
- * allowlist, so page.route drives them. /api/slots + /v1/health ARE
- * allowlisted, so those rows render from HAL0_DATA (data.jsx).
+ * allowlist, so page.route drives them. /api/slots IS allowlisted, so the
+ * hal0 + runtime rows render from HAL0_DATA (data.jsx).
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
@@ -57,14 +58,14 @@ test.describe('Sidebar Runtime widget — populated', () => {
     await page.route('**/api/config/urls', (route) => json(route, URLS_ALL))
   })
 
-  test('renders one widget with hermes / hal0 / lemond / openwebui rows', async ({ page }) => {
+  test('renders one widget with hermes / hal0 / runtime / openwebui rows', async ({ page }) => {
     await page.goto('/')
     const widget = page.locator('[data-testid="sidebar-runtime-widget"]')
     await expect(widget).toBeVisible({ timeout: FIVE_S })
     await expect(widget.locator('.sb-runtime-h')).toHaveText('Runtime')
     await expect(page.locator('[data-testid="runtime-row-hermes"]')).toBeVisible()
     await expect(page.locator('[data-testid="runtime-row-hal0"]')).toBeVisible()
-    await expect(page.locator('[data-testid="runtime-row-lemond"]')).toBeVisible()
+    await expect(page.locator('[data-testid="runtime-row-runtime"]')).toBeVisible()
     await expect(page.locator('[data-testid="runtime-row-openwebui"]')).toBeVisible()
     // The old standalone block is gone.
     await expect(page.locator('[data-testid="sidebar-agent-block"]')).toHaveCount(0)
@@ -111,11 +112,13 @@ test.describe('Sidebar Runtime widget — populated', () => {
     await expect(sub.locator('.v b')).toHaveText('2')
   })
 
-  test('lemond row shows status + version inline', async ({ page }) => {
+  test('runtime row shows status + slot readiness inline', async ({ page }) => {
     await page.goto('/')
-    const row = page.locator('[data-testid="runtime-row-lemond"]')
-    await expect(row.locator('.v')).toContainText('up', { timeout: FIVE_S })
-    await expect(row.locator('.v')).toContainText(/v\d/)
+    const row = page.locator('[data-testid="runtime-row-runtime"]')
+    await expect(row.locator('.k')).toHaveText('runtime')
+    // HAL0_DATA seeds 10 enabled slots (legacy is disabled); all but the
+    // warming-demo slot are ready.
+    await expect(row.locator('.v')).toContainText('up · 9/10 slots ready', { timeout: FIVE_S })
   })
 })
 

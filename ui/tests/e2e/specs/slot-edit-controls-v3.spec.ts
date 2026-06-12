@@ -5,12 +5,12 @@
  *   C3. enabled toggle on the slot CARD → PUT /config { enabled } + fade.
  *   C4. enable_thinking toggle in the edit DRAWER (llm slots only) →
  *       PUT /config { enable_thinking } instantly.
- *   C5. n_gpu_layers input in the drawer Advanced section → Save →
- *       PATCH /defaults { n_gpu_layers }.
+ *   C5. n_gpu_layers in the drawer Advanced section is READ-ONLY —
+ *       profile-owned; Save ships ctx_size via PATCH /defaults instead.
  *   C6. enabled slots sort before disabled ones in the grid.
  *
  * The dashboard renders the slot LIST from in-bundle HAL0_DATA
- * (VITE_MOCK_LEMONADE=1 short-circuits GET /api/slots before page.route
+ * (VITE_MOCK_HAL0=1 short-circuits GET /api/slots before page.route
  * sees it — see src/api/mock.ts). So we control the list by intercepting
  * the `window.HAL0_DATA` assignment via addInitScript (`seedSlots`).
  * Mutations to /config + /defaults are NOT allowlisted, so they fall
@@ -118,7 +118,17 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.locator('.drawer .form-row', { hasText: 'Thinking' })).toHaveCount(0)
   })
 
-  test('C5 — n_gpu_layers Save PATCHes /defaults', async ({ page }) => {
+  test('C5 — n_gpu_layers is read-only, owned by the profile', async ({ page }) => {
+    await seedSlots(page, [PRIMARY, EMBED])
+
+    await page.goto('/#slots/primary')
+    const row = page.locator('.drawer .form-row', { hasText: 'n_gpu_layers' })
+    await expect(row).toBeVisible()
+    await expect(row.locator('.form-lbl .sub')).toContainText('defined by profile')
+    await expect(row.locator('input')).toHaveAttribute('readonly', '')
+  })
+
+  test('C5 — editing ctx_size Save PATCHes /defaults { ctx_size }', async ({ page }) => {
     const patches: any[] = []
     await page.route('**/api/slots/primary/defaults', async (route) => {
       patches.push(JSON.parse(route.request().postData() || '{}'))
@@ -130,12 +140,14 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    const row = page.locator('.drawer .form-row', { hasText: 'n_gpu_layers' })
+    const row = page.locator('.drawer .form-row', { hasText: 'ctx_size' })
     await expect(row).toBeVisible()
-    await row.locator('input').fill('33')
+    await row.locator('input').fill('16384')
     await page.locator('.drawer button:has-text("Save")').click()
     await expect.poll(() => patches.length).toBeGreaterThan(0)
-    expect(patches[0].n_gpu_layers).toBe(33)
+    expect(patches[0].ctx_size).toBe(16384)
+    // Profile-owned knobs never ride the defaults PATCH.
+    expect(patches[0]).not.toHaveProperty('n_gpu_layers')
   })
 
   test('C6 — enabled slots sort before disabled ones', async ({ page }) => {
@@ -191,32 +203,17 @@ test.describe('Slot edit controls (/slots)', () => {
     expect(body).not.toHaveProperty('llamacpp_args')
   })
 
-  test('#587 — editing idle_timeout_s sends only that field', async ({ page }) => {
-    const puts: any[] = []
-    await page.route('**/api/slots/primary/config', async (route) => {
-      if (route.request().method() === 'PUT') {
-        puts.push(JSON.parse(route.request().postData() || '{}'))
-      }
-      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
-    })
-    await page.route('**/api/slots/primary/defaults', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
-    )
+  test('#587 — drawer has no idle_timeout_s / workers rows (profile-owned)', async ({ page }) => {
+    // The clobber-prone per-slot rows were removed outright — runtime
+    // tuning is owned by the profile, so the drawer no longer offers them.
     await seedSlots(page, [
       { ...PRIMARY, idle_timeout_s: 300, workers: 2, llamacpp_args: '' },
       EMBED,
     ])
 
     await page.goto('/#slots/primary')
-    const row = page.locator('.drawer .form-row', { hasText: 'idle_timeout_s' })
-    await expect(row).toBeVisible()
-    await row.locator('input').fill('1800')
-    await page.locator('.drawer button:has-text("Save")').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    const body = puts[0]
-    expect(body.idle_timeout_s).toBe(1800)
-    // workers + extra_args were untouched → must not appear in the body.
-    expect(body).not.toHaveProperty('workers')
-    expect(body).not.toHaveProperty('llamacpp_args')
+    await expect(page.locator('.drawer')).toBeVisible()
+    await expect(page.locator('.drawer .form-row', { hasText: 'idle_timeout_s' })).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'workers' })).toHaveCount(0)
   })
 })

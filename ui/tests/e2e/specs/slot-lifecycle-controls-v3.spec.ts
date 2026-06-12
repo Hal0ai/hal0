@@ -9,8 +9,9 @@
  * Start → POST /load · Stop → POST /unload · Restart → POST /restart.
  *
  * The dashboard renders the slot LIST from in-bundle HAL0_DATA
- * (VITE_MOCK_LEMONADE=1), so we target real seed slots by exact name:
- *   primary = serving (running) · coder = idle (off) · warming-demo = warming.
+ * (VITE_MOCK_HAL0=1), so we target real seed slots by exact name:
+ *   primary = serving (running) · coder = stopped via HAL0_DATA clobber
+ *   (the seed runs its container) · warming-demo = starting (transitional).
  * Mutations still go through fetch, so per-route stubs capture them.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
@@ -21,11 +22,26 @@ const cardByName = (page: Page, name: string) =>
     .first()
 
 test.describe('Slot lifecycle controls (/slots)', () => {
-  test('off slot (coder/idle) shows Start, not Stop/Restart; Start POSTs /load', async ({ page }) => {
+  test('off slot (coder/stopped) shows Start, not Stop/Restart; Start POSTs /load', async ({ page }) => {
     const loads: string[] = []
     await page.route('**/api/slots/coder/load', async (route) => {
       loads.push(route.request().url())
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+
+    // The seed coder slot runs its container — stop it so the card takes
+    // the "off" branch (container stopped → Start only).
+    await page.addInitScript(() => {
+      const id = setInterval(() => {
+        const d = (window as any).HAL0_DATA
+        const coder = d?.slots?.find((s: any) => s.name === 'coder')
+        if (coder) {
+          coder.container_status = 'stopped'
+          coder.container_health = false
+          coder.state = 'offline'
+          clearInterval(id)
+        }
+      }, 5)
     })
 
     await page.goto('/#slots')

@@ -23,7 +23,6 @@ export { MOCK_DATA } from './mock-data'
 
 export type MockState = {
   host: typeof MOCK_DATA.host
-  lemond: typeof MOCK_DATA.lemond
   slots: typeof MOCK_DATA.slots
   models: typeof MOCK_DATA.models
   backends: typeof MOCK_DATA.backends
@@ -60,7 +59,7 @@ export async function installDefaultMocks(page: Page, state: MockState) {
 
   await page.route('**/api/status', (route) =>
     json(route, {
-      version: state.lemond.version,
+      version: '0.4.0',
       update_available: false,
       slots: state.slots,
       hardware: state.host,

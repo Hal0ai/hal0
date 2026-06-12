@@ -8,7 +8,7 @@
  * AddByHF modal calls `POST /api/models/inspect` →
  * `usePullJob().start()`. Tests in this file mock the new endpoints
  * (inspect, PUT defaults, DELETE cascade) via `page.route`; the
- * listing itself is served by the FORCED VITE_MOCK_LEMONADE path
+ * listing itself is served by the FORCED VITE_MOCK_HAL0 path
  * (HAL0_DATA-backed) so we get a populated catalog without poking the
  * browser's mock cache.
  */

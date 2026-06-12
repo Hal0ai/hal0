@@ -194,7 +194,7 @@ test.describe('Memory map — sidebar', () => {
     // The backend emits image + profile for container slots; the legend
     // must show the (truncated) image tag instead.
     //
-    // With VITE_MOCK_LEMONADE=1 the mock shim reads HAL0_DATA directly;
+    // With VITE_MOCK_HAL0=1 the mock shim reads HAL0_DATA directly;
     // page.route() never fires. Inject the container slot via addInitScript
     // before data.jsx sets window.HAL0_DATA, so the mock harness picks it up.
     const containerSlot = {

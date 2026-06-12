@@ -7,10 +7,9 @@
  *     read-only, showing "defined by profile" hint
  *   - Save only sends ctx_size + default (not n_gpu_layers/device/etc.)
  *   - Resolved command displayed instead of effectiveFlagsFor() preview
- *   - Lemond slots: effectiveFlagsFor() preview unchanged (regression guard)
  *
  * Routes: /api/profiles fulfilled with MOCK_DATA.profiles via default mock.
- * Slot list: seeded via HAL0_DATA injection (VITE_MOCK_LEMONADE=1 path).
+ * Slot list: seeded via HAL0_DATA injection (VITE_MOCK_HAL0=1 path).
  */
 
 import { test, expect, json } from '../fixtures/apiMock'
@@ -48,7 +47,9 @@ const CONTAINER_SLOT = {
   metrics: { toks: 48, ttft: 240, ctx: 32768, kv: null },
 }
 
-const LEMOND_SLOT = {
+// Second container slot WITHOUT a backend-emitted resolved_command —
+// exercises the drawer's graceful degradation when enrichment is absent.
+const BASIC_CONTAINER_SLOT = {
   name: 'chat',
   type: 'llm',
   device: 'gpu-rocm',
@@ -57,12 +58,13 @@ const LEMOND_SLOT = {
   group: 'chat',
   state: 'serving',
   port: 8092,
-  lemonade_state: 'loaded',
+  runtime: 'container',
+  profile: 'vulkan-std',
+  container_status: 'running',
+  container_health: true,
   enabled: true,
   isDefault: true,
   n_gpu_layers: -1,
-  idle_timeout_s: 900,
-  workers: 1,
   ctx_size: 8192,
   metrics: { toks: 42, ttft: 180, ctx: 8192, kv: 35 },
 }
@@ -119,7 +121,7 @@ test.describe('Profiles page (#658)', () => {
 
 test.describe('Container slot edit drawer (#658)', () => {
   test.beforeEach(async ({ page }) => {
-    // Inject container + lemond slots into HAL0_DATA
+    // Inject both container slots into HAL0_DATA
     await page.addInitScript((slots) => {
       const orig = Object.getOwnPropertyDescriptor(Object.prototype, 'HAL0_DATA')
       let stored: any = undefined
@@ -132,7 +134,7 @@ test.describe('Container slot edit drawer (#658)', () => {
         },
         configurable: true,
       })
-    }, [CONTAINER_SLOT, LEMOND_SLOT])
+    }, [CONTAINER_SLOT, BASIC_CONTAINER_SLOT])
 
     await page.route('**/api/profiles', (route) =>
       json(route, MOCK_DATA.profiles),
@@ -179,8 +181,10 @@ test.describe('Container slot edit drawer (#658)', () => {
     expect(joined).not.toContain('{"default"')
   })
 
-  test('lemond slot has no resolved_command (regression guard)', async ({ page }) => {
-    const hasRc = await page.evaluate((slot) => 'resolved_command' in slot, LEMOND_SLOT)
+  test('un-enriched container slot has no resolved_command (regression guard)', async ({ page }) => {
+    // Backend omits resolved_command until _container_state_enrichment
+    // runs — the drawer must not assume the field exists.
+    const hasRc = await page.evaluate((slot) => 'resolved_command' in slot, BASIC_CONTAINER_SLOT)
     expect(hasRc).toBe(false)
   })
 })

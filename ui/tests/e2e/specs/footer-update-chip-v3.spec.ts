@@ -38,15 +38,15 @@ test.describe('Footer update chip (#325)', () => {
   test('chip hidden when useUpdateState returns no available release', async ({ page }) => {
     await withUpdateState(page, {
       hal0: { current: '0.3.0-alpha.1', available: null, channel: 'stable' },
-      lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
       autoCheck: true,
     })
     await page.goto('/')
     await expect(page.locator('.footer')).toBeVisible()
-    // Wait for the rollup poll to land — the lemond-chip text proves
-    // useLemondRollup has settled, which means useUpdateState has had
+    // Wait for the rollup poll to land — the runtime-chip text proves
+    // useRuntimeRollup has settled, which means useUpdateState has had
     // time to run too.
-    await expect(page.locator('.footer .foot-chip', { hasText: 'lemond' })).toBeVisible({
+    await expect(page.locator('.footer .foot-chip', { hasText: 'runtime' })).toBeVisible({
       timeout: 6_000,
     })
     await expect(UPDATE_CHIP(page)).toHaveCount(0)
@@ -55,12 +55,12 @@ test.describe('Footer update chip (#325)', () => {
   test('chip hidden when current === available', async ({ page }) => {
     await withUpdateState(page, {
       hal0: { current: '0.3.0-alpha.1', available: '0.3.0-alpha.1', channel: 'stable' },
-      lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
       autoCheck: true,
     })
     await page.goto('/')
     await expect(page.locator('.footer')).toBeVisible()
-    await expect(page.locator('.footer .foot-chip', { hasText: 'lemond' })).toBeVisible({
+    await expect(page.locator('.footer .foot-chip', { hasText: 'runtime' })).toBeVisible({
       timeout: 6_000,
     })
     await expect(UPDATE_CHIP(page)).toHaveCount(0)
@@ -69,7 +69,7 @@ test.describe('Footer update chip (#325)', () => {
   test('chip renders with live available version when an update is offered', async ({ page }) => {
     await withUpdateState(page, {
       hal0: { current: '0.3.0-alpha.1', available: '0.3.0', channel: 'stable' },
-      lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
       autoCheck: true,
     })
     await page.goto('/')

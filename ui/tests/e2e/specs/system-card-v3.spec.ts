@@ -2,12 +2,12 @@
  * system-card-v3 — the condensed System identity card in the dashboard
  * sidebar. Home-redesign (2026-06-05) collapsed the five Hardware cards
  * (Host / CPU / GPU / NPU / Memory) into one glanceable line each, added a
- * live RAM glance, and folded in the former standalone lemond HealthCard.
+ * live RAM glance, and folded in the former standalone runtime HealthCard.
  * (Supersedes hardware-v3.spec.ts — the .hw-section spread it tested was
  * demoted into this card.)
  *
  * Every row reads live data (static probe /api/hardware + live counters
- * /api/stats/hardware + lemond rollup). These assert the live wiring and
+ * /api/stats/hardware). These assert the live wiring and
  * guard against the old hardcoded values (kernel "Linux version " noise, a
  * baked "ROCm 6.4 ✓") creeping back. Verbose fields that did NOT survive
  * the condense (NPU "currently loaded", the "recommended" backend, the
@@ -21,7 +21,7 @@ test.describe('System card (dashboard sidebar)', () => {
     await page.goto('/#dashboard')
     const card = page.locator('.sys-card')
     await expect(card).toBeVisible()
-    // one row per identity field. The former folded-in lemond health row was
+    // one row per identity field. The former folded-in runtime health row was
     // removed (2026-06-05) — runtime status now lives in the sidebar Runtime
     // widget, so the System card is hardware identity only.
     await expect(card.locator('.sys-row .k')).toHaveText([
@@ -70,11 +70,11 @@ test.describe('System card (dashboard sidebar)', () => {
     await expect(card).toContainText('amdxdna')
   })
 
-  test('lemond health row is no longer present in the System card', async ({ page }) => {
+  test('runtime health row is no longer present in the System card', async ({ page }) => {
     await page.goto('/#dashboard')
     const card = page.locator('.sys-card')
     // Removed 2026-06-05 — folded into the sidebar Runtime widget instead.
-    await expect(card.locator('.sys-row .k', { hasText: 'lemond' })).toHaveCount(0)
+    await expect(card.locator('.sys-row .k', { hasText: 'runtime' })).toHaveCount(0)
     await expect(card.locator('.sys-health')).toHaveCount(0)
   })
 })

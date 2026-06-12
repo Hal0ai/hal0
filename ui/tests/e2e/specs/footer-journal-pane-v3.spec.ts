@@ -31,19 +31,19 @@ const HAL0_ENTRY = {
   level: 'info',
   msg: 'slot:primary state idle → ready',
 }
-const LEMOND_ENTRY = {
+const CONTAINER_ENTRY = {
   id: 2,
   ts: '2026-05-25T22:00:01.000000+00:00',
-  source: 'lemond',
+  source: 'container',
   level: 'info',
-  msg: 'POST /v1/load model=qwen3.6-27b-mtp backend=llamacpp:rocm',
+  msg: 'podman healthcheck passed for hal0-slot-primary',
 }
 const ERROR_ENTRY = {
   id: 3,
   ts: '2026-05-25T22:00:02.000000+00:00',
   source: 'hal0',
   level: 'error',
-  msg: 'nuclear evict-all triggered: error loading sd-turbo',
+  msg: 'container crashed: error loading sd-turbo',
 }
 
 test.describe('Footer journal pane (#325)', () => {
@@ -70,11 +70,11 @@ test.describe('Footer journal pane (#325)', () => {
 
     // Push two entries — they should render in the body.
     await emitSse(page, '/api/journal/stream', HAL0_ENTRY)
-    await emitSse(page, '/api/journal/stream', LEMOND_ENTRY)
+    await emitSse(page, '/api/journal/stream', CONTAINER_ENTRY)
 
     const body = page.locator('.foot-pane-body')
     await expect(body.locator('.foot-line .msg', { hasText: HAL0_ENTRY.msg })).toBeVisible()
-    await expect(body.locator('.foot-line .msg', { hasText: LEMOND_ENTRY.msg })).toBeVisible()
+    await expect(body.locator('.foot-line .msg', { hasText: CONTAINER_ENTRY.msg })).toBeVisible()
   })
 
   test('hal0 filter chip narrows source and rebuilds SSE with ?source=hal0', async ({ page }) => {
@@ -82,20 +82,20 @@ test.describe('Footer journal pane (#325)', () => {
     await page.locator('.foot-toggle').click()
     await waitForSse(page, '/api/journal/stream', 6_000)
     await emitSse(page, '/api/journal/stream', HAL0_ENTRY)
-    await emitSse(page, '/api/journal/stream', LEMOND_ENTRY)
+    await emitSse(page, '/api/journal/stream', CONTAINER_ENTRY)
 
     // Pre-condition: both render.
     const body = page.locator('.foot-pane-body')
     await expect(body.locator('.foot-line', { hasText: HAL0_ENTRY.msg })).toBeVisible()
-    await expect(body.locator('.foot-line', { hasText: LEMOND_ENTRY.msg })).toBeVisible()
+    await expect(body.locator('.foot-line', { hasText: CONTAINER_ENTRY.msg })).toBeVisible()
 
     // Click the hal0 chip — debounce + reconnect.
     await page.locator('.foot-pane-chip', { hasText: 'hal0' }).click()
     await waitForSse(page, '/api/journal/stream?source=hal0', 6_000)
 
     // Client-side source filter applied on top of the SSE URL filter —
-    // residual lemond entry already in the ring is hidden immediately.
-    await expect(body.locator('.foot-line', { hasText: LEMOND_ENTRY.msg })).toHaveCount(0)
+    // residual container entry already in the ring is hidden immediately.
+    await expect(body.locator('.foot-line', { hasText: CONTAINER_ENTRY.msg })).toHaveCount(0)
     // hal0 entry stays.
     await expect(body.locator('.foot-line', { hasText: HAL0_ENTRY.msg })).toBeVisible()
 
@@ -116,7 +116,7 @@ test.describe('Footer journal pane (#325)', () => {
     await page.locator('.foot-toggle').click()
     await waitForSse(page, '/api/journal/stream', 6_000)
     await emitSse(page, '/api/journal/stream', HAL0_ENTRY)
-    await emitSse(page, '/api/journal/stream', LEMOND_ENTRY)
+    await emitSse(page, '/api/journal/stream', CONTAINER_ENTRY)
     await emitSse(page, '/api/journal/stream', ERROR_ENTRY)
 
     const body = page.locator('.foot-pane-body')

@@ -57,17 +57,6 @@ export const MOCK_DATA = {
     ram: { total: 93.8, free: 92.4, used: 1.4 },
   },
 
-  lemond: {
-    status: 'up',
-    version: 'v10.6.0',
-    loaded: 3,
-    budget: 4,
-    throughput: 12.4,
-    lastTokPerSec: 45.0, // #340 tok/s chip
-    queued: 0,
-    coresident: true,
-  },
-
   /** Subset of slots the v3 dash seeds — enough to drive `/slots` group
    *  rendering (chat / embed / voice / img + NPU rollup).
    *
@@ -81,25 +70,37 @@ export const MOCK_DATA = {
       name: 'primary', type: 'llm', device: 'gpu-rocm',
       model: 'qwen3.6-27b-mtp-q4_k_m', model_id: 'qwen3.6-27b-mtp',
       group: 'chat', state: 'serving', port: 8092, isDefault: true,
+      runtime: 'container', profile: 'moe-rocmfp4',
+      container_status: 'running', container_health: true,
       mem_mb: 18_400,
+      metrics: { toks: 45, ttft: 220, ctx: 8192, kv: null, mem: 18.8 },
     },
     {
       name: 'agent', type: 'llm', device: 'npu',
       model: 'gemma3:1b', model_id: 'gemma3-1b-npu',
       group: 'npu', state: 'ready', port: 8093, isDefault: true,
+      runtime: 'container', profile: 'flm-npu',
+      container_status: 'running', container_health: true,
       mem_mb: 1_100,
+      metrics: { toks: 40, ttft: 280, ctx: 4096, kv: 66, mem: 1.0 },
     },
     {
       name: 'coder', type: 'llm', device: 'gpu-rocm',
       model: 'qwen3-coder-30b-a3b', model_id: 'qwen3-coder-30b',
       group: 'chat', state: 'idle', port: 8094,
+      runtime: 'container', profile: 'moe-rocmfp4',
+      container_status: 'running', container_health: true,
       mem_mb: 17_900,
+      metrics: { toks: 0, ttft: null, ctx: 32768, kv: null, mem: 18.6 },
     },
     {
       name: 'embed', type: 'embedding', device: 'gpu-rocm',
       model: 'nomic-embed-text-v1.5', model_id: 'nomic-v1.5',
       group: 'embed', state: 'ready', port: 8095, isDefault: true,
+      runtime: 'container', profile: 'vulkan-std',
+      container_status: 'running', container_health: true,
       mem_mb: 540,
+      metrics: { rpm: 124, lat: 18, dim: 768, mem: 0.35 },
     },
     // Container runtime slot — added for #657 container-card coverage.
     // Models the primary chat slot running via ContainerProvider (podman

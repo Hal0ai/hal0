@@ -1,50 +1,49 @@
 /**
- * footer-chips-v3 — issue #221.
+ * footer-chips-v3 — issue #221, retargeted for the legacy-runtime removal
+ * (#687 Phase E).
  *
- * The footer "queued" chip used to render `L.queued` which the hook
- * hardcoded to 0 (lemond never surfaced the field). The "coresident"
- * chip in both the footer and the sidebar status block was a literal
- * string with no backend signal. Both now honor `null` by hiding.
+ * History: the footer used to carry runtime-rollup "queued" and npu
+ * "coresident" chips; both surfaces are gone with the old rollup hook.
+ * The surviving footer chip is the runtime chip, driven by
+ * useRuntimeRollup() over the shared /api/slots poll. The #221 intent
+ * carries over: the chip reflects the real backend signal (container
+ * readiness counts), never a hardcoded literal.
  *
- * Spec runs against the MOCK_LEMONADE-forced dev server. `buildHealth`
- * round-trips HAL0_DATA.lemond.{queued,coresident} so the demo keeps
- * showing the chips; clearing those fields in `HAL0_DATA` simulates a
- * lemond build that doesn't surface them yet, and the chips hide.
+ * Spec runs against the VITE_MOCK_HAL0-forced dev server: /api/slots is
+ * served from window.HAL0_DATA.slots, so readiness states are driven by
+ * clobbering HAL0_DATA before the dash modules read it.
  */
 import { test, expect } from '../fixtures/apiMock'
 
-test.describe('Footer chips honor backend null (#221)', () => {
-  test('queued + coresident chips appear with default HAL0_DATA', async ({ page }) => {
+test.describe('Footer runtime chip reflects container readiness (#221)', () => {
+  test('runtime chip shows ready/total counts with default HAL0_DATA', async ({ page }) => {
     await page.goto('/')
     const footer = page.locator('.footer')
     await expect(footer).toBeVisible()
-    // Give the 2s health poll a chance to resolve.
-    await expect(page.locator('[data-testid="runtime-row-lemond"] .v', { hasText: /v\d/ })).toBeVisible({ timeout: 6_000 })
 
-    const queuedChip = footer.locator('.foot-chip', { has: page.locator('.k', { hasText: /^queued$/ }) })
-    await expect(queuedChip).toBeVisible()
-    // HAL0_DATA seeds queued=0 — chip should render the literal "0".
-    await expect(queuedChip.locator('.v')).toHaveText('0')
-
-    const npuChip = footer.locator('.foot-chip', { has: page.locator('.k', { hasText: /^npu$/ }) })
-    await expect(npuChip).toBeVisible()
-    await expect(npuChip.locator('.v')).toHaveText('coresident')
-
-    const sidebarNpu = page.locator('.sb-status .row .k', { hasText: /^npu$/ })
-    await expect(sidebarNpu).toBeVisible()
+    const runtimeChip = footer.locator('.foot-chip', {
+      has: page.locator('.k', { hasText: /^runtime:$/ }),
+    })
+    await expect(runtimeChip).toBeVisible()
+    // HAL0_DATA seeds 10 enabled slots (legacy is disabled); all but the
+    // warming-demo slot are ready → "9/10 ready", chip dot lit "up".
+    await expect(runtimeChip.locator('.v')).toHaveText('9/10 ready')
+    await expect(runtimeChip).toHaveClass(/\bup\b/)
   })
 
-  test('queued + coresident chips hidden when fields absent from health', async ({ page }) => {
-    // Clobber HAL0_DATA.lemond.{queued,coresident} BEFORE dash modules
-    // load. The mock harness reads HAL0_DATA lazily on every fetch, so
-    // by the time /v1/health is called the rollup will see undefined →
-    // hook coerces to null → chips hide.
+  test('runtime chip counts drop when containers stop', async ({ page }) => {
+    // Stop every container BEFORE dash modules load — the rollup must
+    // re-derive readiness from the live slot fields, not cache a literal.
     await page.addInitScript(() => {
       const id = setInterval(() => {
         const d = (window as any).HAL0_DATA
-        if (d && d.lemond) {
-          d.lemond.queued = undefined
-          d.lemond.coresident = undefined
+        if (d && Array.isArray(d.slots)) {
+          for (const s of d.slots) {
+            if (s._synthetic) continue
+            s.container_status = 'stopped'
+            s.container_health = false
+            s.state = 'offline'
+          }
           clearInterval(id)
         }
       }, 5)
@@ -53,18 +52,11 @@ test.describe('Footer chips honor backend null (#221)', () => {
     await page.goto('/')
     const footer = page.locator('.footer')
     await expect(footer).toBeVisible()
-    // Wait for sidebar rollup to repaint with hook data.
-    await expect(page.locator('[data-testid="runtime-row-lemond"] .v', { hasText: /v\d/ })).toBeVisible({ timeout: 6_000 })
-    // Extra beat so the second health poll lands.
-    await page.waitForTimeout(2_500)
 
-    const queuedChip = footer.locator('.foot-chip', { has: page.locator('.k', { hasText: /^queued$/ }) })
-    await expect(queuedChip).toHaveCount(0)
-
-    const npuChip = footer.locator('.foot-chip', { has: page.locator('.k', { hasText: /^npu$/ }) })
-    await expect(npuChip).toHaveCount(0)
-
-    const sidebarNpu = page.locator('.sb-status .row .k', { hasText: /^npu$/ })
-    await expect(sidebarNpu).toHaveCount(0)
+    const runtimeChip = footer.locator('.foot-chip', {
+      has: page.locator('.k', { hasText: /^runtime:$/ }),
+    })
+    await expect(runtimeChip).toBeVisible()
+    await expect(runtimeChip.locator('.v')).toHaveText('0/10 ready')
   })
 })

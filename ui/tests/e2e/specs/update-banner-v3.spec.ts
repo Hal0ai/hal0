@@ -8,7 +8,7 @@
  *   3. render `"hal0 <available> available"` when there's a newer release
  *   4. honour its dismiss × button without coming back on re-render
  *
- * The dev server runs with VITE_MOCK_LEMONADE=1 so the forced-mock layer
+ * The dev server runs with VITE_MOCK_HAL0=1 so the forced-mock layer
  * in `src/api/mock.ts` short-circuits `/api/updates/state` without ever
  * touching the network — `page.route` can't intercept. We override the
  * mock payload at boot via `window.HAL0_DATA.updateStateOverride` instead,
@@ -29,7 +29,7 @@ test.describe('UpdateBanner (#322 phase 2)', () => {
   test('renders nothing when available is null', async ({ page }) => {
     await withUpdateState(page, {
       hal0: { current: '0.3.0-alpha.1', available: null, channel: 'stable' },
-      lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
       autoCheck: true,
     })
     await page.goto('/#dashboard')
@@ -41,7 +41,7 @@ test.describe('UpdateBanner (#322 phase 2)', () => {
   test('renders nothing when current === available', async ({ page }) => {
     await withUpdateState(page, {
       hal0: { current: '0.3.0-alpha.1', available: '0.3.0-alpha.1', channel: 'stable' },
-      lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
       autoCheck: true,
     })
     await page.goto('/#dashboard')
@@ -52,7 +52,7 @@ test.describe('UpdateBanner (#322 phase 2)', () => {
   test('renders "hal0 <version> available" when an update is offered', async ({ page }) => {
     await withUpdateState(page, {
       hal0: { current: '0.3.0-alpha.1', available: '0.3.0', channel: 'stable' },
-      lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
       autoCheck: true,
     })
     await page.goto('/#dashboard')
@@ -66,7 +66,7 @@ test.describe('UpdateBanner (#322 phase 2)', () => {
   test('dismiss × hides the banner', async ({ page }) => {
     await withUpdateState(page, {
       hal0: { current: '0.3.0-alpha.1', available: '0.3.0', channel: 'stable' },
-      lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
       autoCheck: true,
     })
     await page.goto('/#dashboard')

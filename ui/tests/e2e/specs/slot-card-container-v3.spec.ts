@@ -168,21 +168,20 @@ test.describe('SlotCard container variant (#657)', () => {
     expect(ind.label).toBe('off')
   })
 
-  // ── lemond slots unaffected (regression guard) ──────────────────────
+  // ── un-enriched slots fall back to the state string (regression guard) ──
 
-  test('lemond slot indicator is unchanged by container refactor', async ({ page }) => {
+  test('un-enriched slot (no container_status) classifies on bare state', async ({ page }) => {
     const ind = await page.evaluate(() => {
       return (window as any).slotIndicator({
         state: 'ready',
-        lemonade_state: 'loaded',
         model: 'qwen3.5-4b',
         enabled: true,
       })
     })
-    // Lemond path: lemo=loaded → stale/yellow with "ready" label
+    // Fallback path: state=ready → stale/yellow with "ready" label
     expect(ind.cls).toBe('stale')
     expect(ind.label).toBe('ready')
-    expect(ind.tooltip).toMatch(/Loaded/)
+    expect(ind.tooltip).toMatch(/Ready/)
   })
 
   // ── Card rendering ───────────────────────────────────────────────────
@@ -244,7 +243,7 @@ test.describe('SlotCard container variant (#657)', () => {
 
   test('container card shows "container" runtime micro-tag — slotIndicator branches correctly', async ({ page }) => {
     // Verify that a slot with runtime=container goes through the container
-    // indicator path (slotIndicatorFromPhase) and NOT the lemond path.
+    // indicator path (slotIndicatorFromPhase), not the state-string fallback.
     const ind = await page.evaluate((slot) => {
       return (window as any).slotIndicator(slot)
     }, CONTAINER_SLOT_RUNNING)
@@ -255,33 +254,35 @@ test.describe('SlotCard container variant (#657)', () => {
     expect(ind.tooltip).toMatch(/Ready/)
   })
 
-  test('lemond slot indicator is not affected by container branch', async ({ page }) => {
-    // Default lemond slot (no runtime field) → must not be treated as container
-    const lemonSlot = {
+  test('un-enriched serving slot still renders the green dot (fallback branch)', async ({ page }) => {
+    // Snapshot without container enrichment (no container_status) → must
+    // classify on the bare state string, not the container rule.
+    const fallbackSlot = {
       state: 'serving',
       last_used_at: (Date.now() - 5_000) / 1000,
       model: 'qwen3.5-4b',
       enabled: true,
-      // runtime absent → defaults to lemond in normalizeSlot
+      // container_status absent → state-string fallback in slot-status.js
     }
     const ind = await page.evaluate((slot) => {
       return (window as any).slotIndicator(slot, Date.now())
-    }, lemonSlot)
+    }, fallbackSlot)
     expect(ind.cls).toBe('serving')
     expect(ind.label).toBe('serving')
   })
 
-  test('lemond slot cards have no container runtime tag (HAL0_DATA default)', async ({ page }) => {
-    // Default HAL0_DATA has only lemond slots — the Chat section cards
-    // should have no .slot-runtime-tag.
+  test('slot cards carry the container runtime micro-tag (HAL0_DATA default)', async ({ page }) => {
+    // Every slot is a podman container now — the Chat section cards all
+    // render the .slot-runtime-tag micro-chip.
     const chatSection = page.locator('.view section', {
       has: page.locator('.sec h2', { hasText: 'Chat' }),
     })
     await expect(chatSection).toBeVisible()
     await expect(chatSection.locator('.slots-grid > .slot').first()).toBeVisible()
-    // None of the lemond cards should have the container runtime tag
+    const cardCount = await chatSection.locator('.slots-grid > .slot').count()
     const containerTagCount = await chatSection.locator('.slot-runtime-tag').count()
-    expect(containerTagCount).toBe(0)
+    expect(cardCount).toBeGreaterThan(0)
+    expect(containerTagCount).toBe(cardCount)
   })
 
   test('starting container card renders warming dot via slotIndicator', async ({ page }) => {

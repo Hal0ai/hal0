@@ -5,14 +5,15 @@
  * matched on `slot.state`.
  *
  * Regression guard for the N1 refactor (PR #668): when slotPhase() was first
- * wired into memory-map, lemond `warming` + `idle` slots silently dropped out
- * of memory attribution (slotPhase().isLive folds in enabled + lemonade_state,
- * which the legacy set never did). CI missed it because the mocks had no
- * idle/warming lemond slots. This spec encodes the exact equivalence so it
- * cannot regress again.
+ * wired into memory-map, `warming` + `idle` slots silently dropped out of
+ * memory attribution (slotPhase().isLive folds in enabled, which the legacy
+ * set never did). CI missed it because the mocks had no idle/warming slots.
+ * This spec encodes the exact equivalence so it cannot regress again.
  *
- *   Lemond:  isSlotLive(slot) === LIVE_STATES.has(slot.state)
- *            for ALL state strings — independent of enabled / lemonade_state.
+ *   Fallback:  un-enriched snapshots (no container_status — e.g. a stale
+ *              /api/status union entry) classify on the bare state string:
+ *              isSlotLive(slot) === LIVE_STATES.has(slot.state)
+ *              for ALL state strings — independent of enabled.
  *   Container: isSlotLive = running + healthy (own rule, not state-string).
  */
 import { test, expect } from '../fixtures/apiMock'
@@ -20,7 +21,7 @@ import { test, expect } from '../fixtures/apiMock'
 // The exact legacy set memory-map.jsx matched on slot.state.
 const LEGACY_LIVE_STATES = new Set(['ready', 'serving', 'idle', 'warming'])
 
-test.describe('isSlotLive — lemond ≡ legacy LIVE_STATES', () => {
+test.describe('isSlotLive — state-string fallback ≡ legacy LIVE_STATES', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/#slots')
     await page.waitForFunction(() => typeof (window as any).isSlotLive === 'function')
@@ -34,32 +35,31 @@ test.describe('isSlotLive — lemond ≡ legacy LIVE_STATES', () => {
 
   for (const state of states) {
     const expectedLive = LEGACY_LIVE_STATES.has(state)
-    test(`lemond state="${state || '<empty>'}" → live=${expectedLive}`, async ({ page }) => {
+    test(`fallback state="${state || '<empty>'}" → live=${expectedLive}`, async ({ page }) => {
       const live = await page.evaluate<boolean, string>((s) => {
-        // No runtime / container_status → lemond path.
+        // No container_status → bare state-string fallback path.
         return (window as any).isSlotLive({ state: s })
       }, state)
       expect(live).toBe(expectedLive)
     })
   }
 
-  // The two states that regressed in PR #668 — pinned explicitly with the
-  // extra fields that previously flipped them off (enabled / lemonade_state).
-  test('lemond warming slot stays LIVE even if lemonade_state is empty (regression #668)', async ({ page }) => {
+  // The two states that regressed in PR #668 — pinned explicitly.
+  test('un-enriched warming slot stays LIVE (regression #668)', async ({ page }) => {
     const live = await page.evaluate(() =>
-      (window as any).isSlotLive({ state: 'warming', lemonade_state: '' }),
+      (window as any).isSlotLive({ state: 'warming' }),
     )
     expect(live).toBe(true)
   })
 
-  test('lemond idle slot stays LIVE (evicted-but-attributed; regression #668)', async ({ page }) => {
+  test('un-enriched idle slot stays LIVE (evicted-but-attributed; regression #668)', async ({ page }) => {
     const live = await page.evaluate(() =>
-      (window as any).isSlotLive({ state: 'idle', lemonade_state: 'idle' }),
+      (window as any).isSlotLive({ state: 'idle' }),
     )
     expect(live).toBe(true)
   })
 
-  test('lemond ready slot stays LIVE even when enabled=false (legacy ignored enabled)', async ({ page }) => {
+  test('un-enriched ready slot stays LIVE even when enabled=false (legacy ignored enabled)', async ({ page }) => {
     // Legacy LIVE_STATES.has('ready') === true regardless of enabled; a
     // disabled-but-resident slot still held memory, so it must still attribute.
     const live = await page.evaluate(() =>
@@ -68,11 +68,11 @@ test.describe('isSlotLive — lemond ≡ legacy LIVE_STATES', () => {
     expect(live).toBe(true)
   })
 
-  test('lemond offline+lemonade_state=loaded is NOT live (matches legacy state-only test)', async ({ page }) => {
-    // Legacy keyed solely off slot.state — state="offline" was never live,
-    // even if a stale lemonade_state lingered.
+  test('offline slot is NOT live even with a stale health flag (state-only fallback)', async ({ page }) => {
+    // The fallback keys solely off slot.state — state="offline" was never
+    // live, even if a stale container_health lingered without enrichment.
     const live = await page.evaluate(() =>
-      (window as any).isSlotLive({ state: 'offline', lemonade_state: 'loaded' }),
+      (window as any).isSlotLive({ state: 'offline', container_health: true }),
     )
     expect(live).toBe(false)
   })

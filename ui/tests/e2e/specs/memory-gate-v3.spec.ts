@@ -22,7 +22,7 @@ const FIVE_S = 5_500
 
 test.describe('memory gate OFF (HAL0_MEMORY_ENABLED unset)', () => {
   test.beforeEach(async ({ page }) => {
-    // The γ-suite runs under forced-mock (VITE_MOCK_LEMONADE), which
+    // The γ-suite runs under forced-mock (VITE_MOCK_HAL0), which
     // short-circuits page.route for allowlisted URLs like /api/status. The
     // mock's buildStatus honours this window flag so we can drive the
     // disabled path; it must be set before any page script evaluates.

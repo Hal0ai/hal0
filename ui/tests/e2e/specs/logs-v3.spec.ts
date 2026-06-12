@@ -8,10 +8,9 @@ test.describe('Logs v3 (/logs)', () => {
   test('renders Logs view + filter bar', async ({ page }) => {
     await page.goto('/#logs')
     await expect(page.locator('.view .vh h1')).toHaveText('Logs')
-    // source toggle (merged/hal0/lemond)
+    // source toggle (merged/hal0)
     await expect(page.locator('.view button', { hasText: 'merged' })).toBeVisible()
     await expect(page.locator('.view button', { hasText: 'hal0' })).toBeVisible()
-    await expect(page.locator('.view button', { hasText: 'lemond' })).toBeVisible()
   })
 
   test('search input + slot select + pause button render', async ({ page }) => {

@@ -3,7 +3,7 @@
  * (Phase D8): global "GPU: image mode" banner, arbiter mode chip, pin
  * toggle, and idle auto-restore countdown on the ComfyUI pane.
  *
- * Harness mirrors profiles-crud-v3.spec.ts: VITE_MOCK_LEMONADE=1 build,
+ * Harness mirrors profiles-crud-v3.spec.ts: VITE_MOCK_HAL0=1 build,
  * but /api/comfyui/* is NOT in the mockFetch allowlist, so page.route
  * intercepts both the status GET (read path) and the pin POST (raw:true
  * write path).
@@ -22,7 +22,7 @@ function comfyStatus(overrides: Record<string, any> = {}) {
     endpoint: null,
     memory: null,
     queue: { running: 0, pending: 0 },
-    inference: { lemonade: true, hermes: true },
+    inference: { hermes: true },
     inventory: { checkpoints: 3, diffusion: 2, loras: 8, vae: 2 },
     switchover: { active: false, target: null, error: null },
     arbiter: null,
@@ -37,7 +37,7 @@ const IMG_STATUS = () =>
     engine: 'running',
     container: { name: 'comfyui', state: 'running' },
     endpoint: 'http://127.0.0.1:8188',
-    inference: { lemonade: false, hermes: false },
+    inference: { hermes: false },
     arbiter: {
       mode: 'img',
       pinned: false,

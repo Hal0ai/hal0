@@ -1,7 +1,7 @@
 /**
  * profiles-crud-v3 — Playwright write-path coverage for Profiles CRUD (Phase C6).
  *
- * READ path: VITE_MOCK_LEMONADE=1 + page.route for /api/profiles (same as
+ * READ path: VITE_MOCK_HAL0=1 + page.route for /api/profiles (same as
  * profiles-page-v3.spec.ts). Mutations use raw:true → page.route intercepts.
  *
  * Covers:
