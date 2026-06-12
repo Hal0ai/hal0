@@ -40,19 +40,10 @@ class _RecordingSlotManager:
     and the #696 public ``state`` / ``is_ready_for_dispatch`` interface.
     """
 
-    def __init__(
-        self,
-        state: SlotState = SlotState.READY,
-        *,
-        recover_raises: BaseException | None = None,
-    ) -> None:
+    def __init__(self, state: SlotState = SlotState.READY) -> None:
         self.events: list[tuple[str, str]] = []  # (op, slot_name)
         self._counts: dict[str, int] = {}
         self._state = state
-        # Recorded so tests can assert the dispatcher's recovery branch fires
-        # exactly once on ConnectError for a slot upstream.
-        self.recover_calls: list[str] = []
-        self._recover_raises = recover_raises
 
     def serving(self, slot_name: str) -> _RecordingCtx:
         return _RecordingCtx(self, slot_name)
@@ -71,14 +62,6 @@ class _RecordingSlotManager:
     def is_ready_for_dispatch(self, _slot_name: str) -> bool:
         """Public #696 ready-set check (READY | SERVING | IDLE)."""
         return self._state in _DISPATCHABLE_STATES
-
-    async def recover_evicted_slot(self, slot_name: str) -> None:
-        """Mirrors SlotManager.recover_evicted_slot — dispatcher calls this
-        on ConnectError to resync after a silent Lemonade eviction.
-        """
-        self.recover_calls.append(slot_name)
-        if self._recover_raises is not None:
-            raise self._recover_raises
 
 
 class _RecordingCtx:
@@ -338,35 +321,30 @@ async def test_remote_upstream_skips_gate_even_when_slot_state_lookup_would_fail
         await dispatcher.aclose()
 
 
-# ── silent-eviction recovery (ConnectError on a READY slot) ──────────────────
+# ── dead port on a READY slot (no recovery, single try) ──────────────────────
 
 
 @pytest.mark.asyncio
-async def test_forward_recovers_from_silent_eviction_and_retries() -> None:
-    """ConnectError on a slot upstream triggers recover_evicted_slot + 1 retry.
+async def test_forward_dead_port_raises_upstream_unavailable_single_try() -> None:
+    """ConnectError on a slot upstream surfaces UpstreamUnavailable — no retry.
 
-    Reproduces the v0.3 'lemonade silent eviction' bug: hal0's state.json
-    says the slot is READY but the upstream port is dead because lemond
-    evicted the child llama-server without notifying hal0.  The dispatcher
-    must call SlotManager.recover_evicted_slot() (which drives /v1/load)
-    and then retry the forward once before giving up.
+    systemd ``Restart=`` policy owns process recovery for container slots;
+    the dispatcher never reloads a dead port and never retries the forward.
+    Exactly one upstream attempt is made, and the SERVING enter/exit must
+    still balance.
     """
     sm = _RecordingSlotManager(state=SlotState.READY)
     calls = {"n": 0}
 
     def handler(req: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        if calls["n"] == 1:
-            raise httpx.ConnectError("connection refused", request=req)
-        return httpx.Response(200, json={"ok": True})
+        raise httpx.ConnectError("connection refused", request=req)
 
     dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
     try:
-        resp = await dispatcher.forward(_slot_call())
-        assert resp.status_code == 200
-        assert calls["n"] == 2, "expected exactly one retry after recovery"
-        assert sm.recover_calls == ["primary"]
-        # SERVING enter/exit must still balance after a recovered request.
+        with pytest.raises(UpstreamUnavailable):
+            await dispatcher.forward(_slot_call())
+        assert calls["n"] == 1, "dead port must not be retried"
         assert sm.in_flight_count("primary") == 0
         assert sm.events == [("enter", "primary"), ("exit", "primary")]
     finally:
@@ -374,35 +352,12 @@ async def test_forward_recovers_from_silent_eviction_and_retries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forward_gives_up_when_retry_after_recovery_still_fails() -> None:
-    """If the retry forward also gets ConnectError, surface UpstreamUnavailable.
+async def test_forward_remote_connect_error_raises_upstream_unavailable() -> None:
+    """Remote upstreams (no slot_name) surface the same UpstreamUnavailable.
 
-    Prevents an infinite recover-retry loop when lemond is genuinely down
-    (not just an idle eviction).  recover_evicted_slot is called exactly
-    once; the second ConnectError is fatal.
-    """
-    sm = _RecordingSlotManager(state=SlotState.READY)
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("still refused", request=req)
-
-    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
-    try:
-        with pytest.raises(UpstreamUnavailable):
-            await dispatcher.forward(_slot_call())
-        assert sm.recover_calls == ["primary"], "exactly one recovery attempt"
-        assert sm.in_flight_count("primary") == 0
-    finally:
-        await dispatcher.aclose()
-
-
-@pytest.mark.asyncio
-async def test_forward_remote_connect_error_does_not_attempt_recovery() -> None:
-    """Remote upstreams (no slot_name) skip the slot-recovery branch.
-
-    Recovery only makes sense for slot upstreams whose port is owned by
-    lemonade.  Remote providers (OpenRouter, Anthropic) have nothing for
-    SlotManager to recover, and calling it would either no-op or crash.
+    Remote providers (OpenRouter, Anthropic) carry no slot identity, so the
+    dead-port image-mode guard never fires and the transport error maps
+    straight to the structured 502.
     """
     sm = _RecordingSlotManager()
 
@@ -413,96 +368,58 @@ async def test_forward_remote_connect_error_does_not_attempt_recovery() -> None:
     try:
         with pytest.raises(UpstreamUnavailable):
             await dispatcher.forward(_remote_call())
-        assert sm.recover_calls == []
     finally:
         await dispatcher.aclose()
 
 
 @pytest.mark.asyncio
-async def test_forward_streaming_recovers_from_silent_eviction() -> None:
-    """Streaming requests get the same recovery treatment as non-streaming.
+async def test_forward_streaming_dead_port_raises_upstream_unavailable() -> None:
+    """Streaming requests get the same single-try dead-port treatment.
 
     The stream is opened eagerly before the handler returns, so a
-    ConnectError on stream-open is recoverable the same way.
+    ConnectError on stream-open surfaces UpstreamUnavailable the same way
+    — and the serving counter must not leak.
     """
     sm = _RecordingSlotManager(state=SlotState.READY)
-    chunks = [b"data: 1\n\n", b"data: [DONE]\n\n"]
     calls = {"n": 0}
 
     def handler(req: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        if calls["n"] == 1:
-            raise httpx.ConnectError("dead port", request=req)
-        return httpx.Response(
-            200,
-            stream=httpx.ByteStream(b"".join(chunks)),
-            headers={"content-type": "text/event-stream"},
-        )
+        raise httpx.ConnectError("dead port", request=req)
 
     dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
     try:
-        resp = await dispatcher.forward(_slot_call(streaming=True))
-        collected = b""
-        async for c in resp.body_iterator:
-            collected += c if isinstance(c, bytes) else c.encode()
-        assert collected == b"".join(chunks)
-        assert sm.recover_calls == ["primary"]
+        with pytest.raises(UpstreamUnavailable):
+            await dispatcher.forward(_slot_call(streaming=True))
+        assert calls["n"] == 1, "dead port must not be retried"
         assert sm.in_flight_count("primary") == 0
     finally:
         await dispatcher.aclose()
 
 
 @pytest.mark.asyncio
-async def test_forward_recovers_from_remote_protocol_error() -> None:
-    """RemoteProtocolError (peer dropped mid-request) also triggers recovery.
+async def test_forward_remote_protocol_error_raises_upstream_unavailable() -> None:
+    """RemoteProtocolError (peer dropped mid-request) is a dead port too.
 
-    The race window where lemonade evicts the child while hal0 is dialing
+    The race window where the container is killed while hal0 is dialing
     surfaces as RemoteProtocolError rather than ConnectError — the TCP
-    handshake completed but the peer closed before responding.  Recovery
-    must cover both transport failure modes.
+    handshake completed but the peer closed before responding.  Both
+    transport failure modes map to UpstreamUnavailable without a retry.
     """
     sm = _RecordingSlotManager(state=SlotState.READY)
     calls = {"n": 0}
 
     def handler(req: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        if calls["n"] == 1:
-            raise httpx.RemoteProtocolError(
-                "Server disconnected without sending a response.",
-                request=req,
-            )
-        return httpx.Response(200, json={"ok": True})
-
-    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
-    try:
-        resp = await dispatcher.forward(_slot_call())
-        assert resp.status_code == 200
-        assert calls["n"] == 2
-        assert sm.recover_calls == ["primary"]
-    finally:
-        await dispatcher.aclose()
-
-
-@pytest.mark.asyncio
-async def test_forward_gives_up_when_recover_evicted_slot_itself_raises() -> None:
-    """If recover_evicted_slot raises, fall back to the original ConnectError.
-
-    Recovery errors are not retried — surfacing UpstreamUnavailable with
-    the original connection error is more informative than swallowing it
-    behind a recovery-time failure.
-    """
-    sm = _RecordingSlotManager(
-        state=SlotState.READY,
-        recover_raises=RuntimeError("lemonade unreachable"),
-    )
-
-    def handler(req: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=req)
+        raise httpx.RemoteProtocolError(
+            "Server disconnected without sending a response.",
+            request=req,
+        )
 
     dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
     try:
         with pytest.raises(UpstreamUnavailable):
             await dispatcher.forward(_slot_call())
-        assert sm.recover_calls == ["primary"]
+        assert calls["n"] == 1
     finally:
         await dispatcher.aclose()

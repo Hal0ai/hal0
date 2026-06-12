@@ -1,50 +1,65 @@
-"""NPU trio swap-in-progress detection (PR-20, plan §5.3, ADR-0009).
+"""npu_swap_status: container slot lifecycle state drives the swap signal.
 
-Tests the pure helper ``compute_npu_swap_status`` and the async
-``fetch_npu_swap_status`` wrapper that probes Lemonade's ``/v1/health``.
-
-The signal we publish: the configured NPU LLM slot's ``model.default``
-is NOT in Lemonade's ``loaded[]`` AND a different ``recipe=flm`` entry
-IS loaded (the old trio chat still serving while the new one warms up).
+``fetch_npu_swap_status`` observes the enabled NPU LLM container slot:
+transitional lifecycle states (PULLING/STARTING/WARMING/UNLOADING) map to
+``in_progress=True``; settled states (READY/SERVING/IDLE/OFFLINE/ERROR)
+map to ``in_progress=False``. ``from_model`` is always None (a restarting
+container exposes no "previously loaded" signal); ``to_model`` comes from
+the slot config's ``model.default``. The helper never raises.
 """
 
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from hal0.dispatcher.npu_swap_status import (
-    NpuSwapStatus,
-    compute_npu_swap_status,
-    fetch_npu_swap_status,
-)
-from hal0.lemonade.errors import LemonadeError
+from hal0.dispatcher.npu_swap_status import NpuSwapStatus, fetch_npu_swap_status
+from hal0.slots.state import SlotState
 
-# ── Helpers ───────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────
 
 
-def _flm_loaded(model_name: str, backend_url: str = "http://127.0.0.1:9001") -> dict[str, Any]:
-    return {
-        "model_name": model_name,
-        "backend_url": backend_url,
-        "recipe": "flm",
-        "type": "llm",
-    }
+def _make_slot(state: str) -> MagicMock:
+    """Build a Slot-like mock whose .state is a real SlotState enum value."""
+    slot = MagicMock()
+    slot.state = SlotState(state)
+    return slot
 
 
-def _npu_llm_slot(
-    name: str = "agent",
-    model: str = "llama-3.2-3b-npu",
+def _container_npu_cfg(
+    model: str = "gemma3:4b",
+    *,
+    profile: str = "flm-npu",
+    runtime: str | None = None,
     enabled: bool = True,
+    name: str = "npu",
 ) -> dict[str, Any]:
-    return {
+    """Slot config for a containerized NPU LLM slot."""
+    cfg: dict[str, Any] = {
         "name": name,
         "device": "npu",
         "type": "llm",
         "enabled": enabled,
         "model": {"default": model},
+    }
+    if profile:
+        cfg["profile"] = profile
+    if runtime is not None:
+        cfg["runtime"] = runtime
+    return cfg
+
+
+def _noncontainer_npu_cfg(model: str = "llama-3.2-3b-npu") -> dict[str, Any]:
+    """Slot config for a legacy/unmigrated (non-container) NPU LLM slot."""
+    return {
+        "name": "agent",
+        "device": "npu",
+        "type": "llm",
+        "enabled": True,
+        "model": {"default": model},
+        # no profile, no runtime=container
     }
 
 
@@ -58,229 +73,207 @@ def _gpu_slot(name: str = "primary", model: str = "phi3") -> dict[str, Any]:
     }
 
 
-# ── compute_npu_swap_status — pure helper ──────────────────────────────
+def _slot_manager(state: str = "ready") -> MagicMock:
+    """SlotManager mock returning the given slot state."""
+    sm = MagicMock()
+    sm.status = AsyncMock(return_value=_make_slot(state))
+    return sm
 
 
-def test_no_npu_slot_means_no_swap() -> None:
-    """Nothing configured → swap is not in progress."""
-    status = compute_npu_swap_status(
-        slot_configs=[_gpu_slot()],
-        health={"loaded": []},
-    )
+# ── No enabled NPU LLM slot / no slot manager → all-None settled ───────
+
+
+async def test_no_npu_slot_means_no_swap() -> None:
+    """Nothing configured → all-None settled snapshot."""
+    status = await fetch_npu_swap_status([_gpu_slot()], slot_manager=_slot_manager())
     assert status == NpuSwapStatus(in_progress=False, from_model=None, to_model=None)
 
 
-def test_disabled_npu_slot_ignored() -> None:
+async def test_disabled_npu_slot_ignored() -> None:
     """A disabled NPU LLM slot doesn't drive a swap."""
-    status = compute_npu_swap_status(
-        slot_configs=[_npu_llm_slot(enabled=False)],
-        health={"loaded": []},
+    status = await fetch_npu_swap_status(
+        [_container_npu_cfg(enabled=False)],
+        slot_manager=_slot_manager(),
     )
     assert status.in_progress is False
     assert status.to_model is None
 
 
-def test_npu_configured_but_nothing_loaded_is_not_swap() -> None:
-    """Configured + nothing in loaded[] = fresh first load, not a swap."""
-    status = compute_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        health={"loaded": []},
+async def test_no_slot_manager_means_all_none_settled() -> None:
+    """No slot_manager wired → all-None settled snapshot (test bypass)."""
+    status = await fetch_npu_swap_status([_container_npu_cfg()])
+    assert status == NpuSwapStatus(in_progress=False, from_model=None, to_model=None)
+
+
+# ── Non-container NPU slot → settled with to_model ─────────────────────
+
+
+async def test_noncontainer_npu_slot_settled_with_to_model() -> None:
+    """Legacy/unmigrated NPU record → no live container to observe.
+
+    The snapshot is settled but still names the configured model so the
+    dashboard can render the slot's target.
+    """
+    sm = MagicMock()
+    sm.status = AsyncMock(side_effect=AssertionError("must not probe a non-container slot"))
+    status = await fetch_npu_swap_status(
+        [_noncontainer_npu_cfg(model="llama-3.2-3b-npu")],
+        slot_manager=sm,
     )
     assert status.in_progress is False
+    assert status.from_model is None
     assert status.to_model == "llama-3.2-3b-npu"
+
+
+# ── Container path: transitional states → in_progress=True ─────────────
+
+
+async def test_container_starting_means_swap_in_progress() -> None:
+    """SlotState.STARTING → in_progress=True (container restarting for model swap)."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("starting"))
+    assert status.in_progress is True
+    assert status.to_model == "gemma3:4b"
+    # container path has no "from" side (no previously-loaded signal)
     assert status.from_model is None
 
 
-def test_npu_same_model_loaded_is_steady_state() -> None:
-    """Configured matches the loaded FLM → steady state."""
-    status = compute_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="gemma3:1b")],
-        health={"loaded": [_flm_loaded("gemma3:1b")]},
-    )
-    assert status.in_progress is False
-    assert status.from_model == "gemma3:1b"
-    assert status.to_model == "gemma3:1b"
-
-
-def test_npu_different_model_loaded_is_swap() -> None:
-    """Configured != loaded FLM → swap in progress."""
-    status = compute_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        health={"loaded": [_flm_loaded("gemma3:1b")]},
-    )
+async def test_container_pulling_means_swap_in_progress() -> None:
+    """SlotState.PULLING → in_progress=True."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("pulling"))
     assert status.in_progress is True
-    assert status.from_model == "gemma3:1b"
-    assert status.to_model == "llama-3.2-3b-npu"
+    assert status.to_model == "gemma3:4b"
 
 
-def test_swap_in_progress_with_gpu_peers_present() -> None:
+async def test_container_warming_means_swap_in_progress() -> None:
+    """SlotState.WARMING → in_progress=True."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("warming"))
+    assert status.in_progress is True
+
+
+async def test_container_unloading_means_swap_in_progress() -> None:
+    """SlotState.UNLOADING → in_progress=True (transition still in flight)."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("unloading"))
+    assert status.in_progress is True
+
+
+# ── Container path: settled states → in_progress=False ─────────────────
+
+
+async def test_container_ready_means_settled() -> None:
+    """SlotState.READY → in_progress=False, to_model populated from config."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("ready"))
+    assert status.in_progress is False
+    assert status.to_model == "gemma3:4b"
+    assert status.from_model is None
+
+
+async def test_container_serving_means_settled() -> None:
+    """SlotState.SERVING → in_progress=False (inference in flight, not a swap)."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("serving"))
+    assert status.in_progress is False
+
+
+async def test_container_idle_means_settled() -> None:
+    """SlotState.IDLE → in_progress=False (warm but quiet)."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("idle"))
+    assert status.in_progress is False
+
+
+async def test_container_offline_means_settled() -> None:
+    """SlotState.OFFLINE → in_progress=False (slot is not running)."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("offline"))
+    assert status.in_progress is False
+
+
+async def test_container_error_means_settled() -> None:
+    """SlotState.ERROR → in_progress=False (swap not in progress)."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("error"))
+    assert status.in_progress is False
+
+
+# ── Container detection variants + peers ───────────────────────────────
+
+
+async def test_container_via_runtime_field_also_uses_container_path() -> None:
+    """runtime='container' with no profile also triggers the container path."""
+    cfg = _container_npu_cfg(model="gemma3:4b", profile="", runtime="container")
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("starting"))
+    assert status.in_progress is True
+    assert status.to_model == "gemma3:4b"
+
+
+async def test_swap_in_progress_with_gpu_peers_present() -> None:
     """Non-NPU peer slots don't affect the swap signal."""
-    status = compute_npu_swap_status(
-        slot_configs=[
+    status = await fetch_npu_swap_status(
+        [
             _gpu_slot(name="primary", model="phi3"),
-            _npu_llm_slot(name="agent", model="llama-3.2-3b-npu"),
+            _container_npu_cfg(name="npu", model="gemma3:4b"),
             _gpu_slot(name="nano", model="qwen3-1b"),
         ],
-        health={"loaded": [_flm_loaded("gemma3:1b")]},
+        slot_manager=_slot_manager("starting"),
     )
     assert status.in_progress is True
-    assert status.from_model == "gemma3:1b"
-    assert status.to_model == "llama-3.2-3b-npu"
+    assert status.to_model == "gemma3:4b"
 
 
-def test_non_flm_loaded_entries_ignored() -> None:
-    """A llama.cpp entry in loaded[] does NOT count as the trio chat."""
-    status = compute_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        health={
-            "loaded": [
-                {
-                    "model_name": "phi3",
-                    "backend_url": "http://127.0.0.1:9002",
-                    "recipe": "llamacpp",
-                    "type": "llm",
-                },
-            ],
-        },
-    )
-    # No FLM loaded → not a swap, just a pending first load.
-    assert status.in_progress is False
-    assert status.from_model is None
-    assert status.to_model == "llama-3.2-3b-npu"
+# ── model.default edge cases ───────────────────────────────────────────
 
 
-def test_alt_health_key_all_models_loaded() -> None:
-    """Forward-compat: ``all_models_loaded`` also recognised."""
-    status = compute_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        health={"all_models_loaded": [_flm_loaded("gemma3:1b")]},
-    )
-    assert status.in_progress is True
-
-
-def test_health_none_means_no_swap() -> None:
-    """Health=None (lemond unreachable) degrades to no-swap."""
-    status = compute_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        health=None,
-    )
-    assert status.in_progress is False
-    assert status.from_model is None
-    assert status.to_model == "llama-3.2-3b-npu"
-
-
-def test_empty_slot_model_default_means_no_swap() -> None:
-    """NPU LLM slot with empty model.default → no to_model, no swap."""
-    cfg = _npu_llm_slot()
+async def test_empty_slot_model_default_means_no_to_model() -> None:
+    """NPU LLM slot with empty model.default → to_model is None."""
+    cfg = _container_npu_cfg()
     cfg["model"] = {"default": ""}
-    status = compute_npu_swap_status(
-        slot_configs=[cfg],
-        health={"loaded": [_flm_loaded("gemma3:1b")]},
-    )
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("ready"))
     assert status.in_progress is False
     assert status.to_model is None
 
 
-def test_missing_model_section_means_no_swap() -> None:
-    """NPU LLM slot missing the [model] section entirely → no to_model."""
-    cfg = {
-        "name": "agent",
-        "device": "npu",
-        "type": "llm",
-        "enabled": True,
-    }
-    status = compute_npu_swap_status(
-        slot_configs=[cfg],
-        health={"loaded": [_flm_loaded("gemma3:1b")]},
-    )
+async def test_missing_model_section_means_no_to_model() -> None:
+    """NPU LLM slot missing the [model] section entirely → to_model is None."""
+    cfg = _container_npu_cfg()
+    del cfg["model"]
+    status = await fetch_npu_swap_status([cfg], slot_manager=_slot_manager("ready"))
     assert status.in_progress is False
     assert status.to_model is None
 
 
-def test_malformed_entries_skipped() -> None:
-    """Non-dict entries in loaded[] don't crash the walker."""
-    status = compute_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        health={"loaded": ["not-a-dict", None, _flm_loaded("gemma3:1b")]},
-    )
-    assert status.in_progress is True
-    assert status.from_model == "gemma3:1b"
+# ── Accessor error resilience ──────────────────────────────────────────
+
+
+async def test_container_status_raises_degrades_to_settled() -> None:
+    """slot_manager.status() raising → swallowed, in_progress=False (safe degrade)."""
+    cfg = _container_npu_cfg(model="gemma3:4b")
+    sm = MagicMock()
+    sm.status = AsyncMock(side_effect=RuntimeError("state file corrupt"))
+    status = await fetch_npu_swap_status([cfg], slot_manager=sm)
+    assert status.in_progress is False
+    assert status.to_model == "gemma3:4b"
+
+
+# ── Wire shape ─────────────────────────────────────────────────────────
 
 
 def test_to_dict_shape() -> None:
     """NpuSwapStatus.to_dict matches the wire shape."""
     status = NpuSwapStatus(
         in_progress=True,
-        from_model="gemma3:1b",
-        to_model="llama-3.2-3b-npu",
+        from_model=None,
+        to_model="gemma3:4b",
     )
     assert status.to_dict() == {
         "in_progress": True,
-        "from_model": "gemma3:1b",
-        "to_model": "llama-3.2-3b-npu",
+        "from_model": None,
+        "to_model": "gemma3:4b",
     }
-
-
-# ── fetch_npu_swap_status — async wrapper ──────────────────────────────
-
-
-async def test_fetch_swallows_lemonade_error() -> None:
-    """When lemond is unreachable, fetch degrades to no-swap."""
-    client = AsyncMock()
-    client.health = AsyncMock(side_effect=LemonadeError("connection refused"))
-
-    status = await fetch_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        lemonade_client=client,
-    )
-    assert status.in_progress is False
-    assert status.from_model is None
-    assert status.to_model == "llama-3.2-3b-npu"
-
-
-async def test_fetch_with_none_client() -> None:
-    """No lemonade client wired → degrades to no-swap."""
-    status = await fetch_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        lemonade_client=None,
-    )
-    assert status.in_progress is False
-    assert status.to_model == "llama-3.2-3b-npu"
-
-
-async def test_fetch_returns_swap_when_health_reports_old_model() -> None:
-    """Happy path: live /v1/health reports the prior chat, slot points at new."""
-    client = AsyncMock()
-    client.health = AsyncMock(return_value={"loaded": [_flm_loaded("gemma3:1b")]})
-    status = await fetch_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        lemonade_client=client,
-    )
-    assert status.in_progress is True
-    assert status.from_model == "gemma3:1b"
-    assert status.to_model == "llama-3.2-3b-npu"
-
-
-async def test_fetch_swallows_unexpected_error() -> None:
-    """Defensive: any non-LemonadeError from .health() also degrades."""
-    client = AsyncMock()
-    client.health = AsyncMock(side_effect=RuntimeError("nginx hiccup"))
-    status = await fetch_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        lemonade_client=client,
-    )
-    assert status.in_progress is False
-
-
-async def test_fetch_handles_non_dict_health_body() -> None:
-    """If lemond returns a list (malformed), treat as no-swap."""
-    client = AsyncMock()
-    client.health = AsyncMock(return_value=["unexpected", "shape"])
-    status = await fetch_npu_swap_status(
-        slot_configs=[_npu_llm_slot(model="llama-3.2-3b-npu")],
-        lemonade_client=client,
-    )
-    assert status.in_progress is False
 
 
 # ── HTTP route smoke test ──────────────────────────────────────────────
@@ -300,40 +293,38 @@ def test_swap_status_endpoint_observes_npu_slot(
     tmp_hal0_home: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When an NPU LLM slot is configured and lemond reports a different
-    FLM as loaded, the endpoint surfaces in_progress=True.
+    """When a container NPU LLM slot is configured and its lifecycle state is
+    transitional, the endpoint surfaces in_progress=True.
 
     Seeds a slot TOML on disk so SlotManager.iter_configs() picks it up;
-    patches the lifespan-wired LemonadeClient.health() with a fake.
+    patches the slot manager's status() to report STARTING.
     """
     from pathlib import Path
 
     slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     slots_dir.mkdir(parents=True, exist_ok=True)
-    (slots_dir / "agent.toml").write_text(
-        'name = "agent"\n'
+    (slots_dir / "npu.toml").write_text(
+        'name = "npu"\n'
         "port = 8092\n"
         'device = "npu"\n'
         'type = "llm"\n'
         "enabled = true\n"
-        'backend = "flm"\n'
+        'profile = "flm-npu"\n'
         "[model]\n"
-        'default = "llama-3.2-3b-npu"\n',
+        'default = "gemma3:4b"\n',
         encoding="utf-8",
     )
 
-    # Patch app.state.lemonade_client.health for this request only.
-    app = client.app
-    fake_client = AsyncMock()
-    fake_client.health = AsyncMock(return_value={"loaded": [_flm_loaded("gemma3:1b")]})
-    monkeypatch.setattr(app.state, "lemonade_client", fake_client)
+    # The container is mid-restart: status() reports STARTING.
+    sm = client.app.state.slot_manager
+    monkeypatch.setattr(sm, "status", AsyncMock(return_value=_make_slot("starting")))
 
     resp = client.get("/api/npu/swap-status")
     assert resp.status_code == 200
     body = resp.json()
     assert body["in_progress"] is True
-    assert body["from_model"] == "gemma3:1b"
-    assert body["to_model"] == "llama-3.2-3b-npu"
+    assert body["from_model"] is None
+    assert body["to_model"] == "gemma3:4b"
 
 
-__all__ = []
+__all__: list[str] = []

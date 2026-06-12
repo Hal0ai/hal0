@@ -1,25 +1,23 @@
-"""Regression tests for issue #422 — composite ``hal0`` upstream dispatch.
+"""Tests for the composite ``hal0`` upstream's dispatch exemptions.
 
-Two distinct bugs are locked down here:
+The composite ``hal0`` upstream (built by ``_autoregister_slot_upstreams``)
+exists ONLY so the ``/v1/models`` aggregator has a single synthetic entry
+that advertises every registered model id. It has no backing server:
 
-  1. **Empty/ignored composite cache.** When the composite ``hal0`` upstream
-     advertises a chat model, a chat request for that id must resolve via the
-     registry/passthrough path — NOT fall through to the legacy heuristics
-     (which raise :class:`NoRouteFound`, demoting the whole dispatcher layer to
-     a raw Lemonade proxy and killing prompt-cache / instrumentation).
-
-  2. **Readiness-gate masquerade.** ``hal0`` is a synthetic upstream with no
-     backing slot. ``_slot_name_of`` used to fall back to ``upstream.name`` and
-     hand ``forward()`` ``slot_name="hal0"``, so the swap-window gate called
-     ``_current_state("hal0")`` → OFFLINE → a spurious 503. The composite must
-     be exempt from the gate (and the SERVING wrap), and its forward must target
-     the Lemonade gateway rather than hal0-api's own ``:8080`` (which would
-     recurse forever).
+  1. **Never forwarded to.** Its registered ``url`` is hal0-api's own
+     ``:8080/v1`` surface — forwarding a chat request there would re-enter
+     ``/v1/chat/completions`` and recurse forever. Dispatch therefore SKIPS
+     the composite at Steps 1/2/3; a registry id bound to the composite
+     with no live serving slot falls through to the Step 4 legacy
+     heuristics or surfaces a clean :class:`NoRouteFound` envelope.
+  2. **Readiness-gate exemption.** ``hal0`` is a synthetic upstream with no
+     backing slot. ``_slot_name_of`` used to fall back to ``upstream.name``
+     and hand ``forward()`` ``slot_name="hal0"``, so the swap-window gate
+     called ``_current_state("hal0")`` → OFFLINE → a spurious 503. The
+     composite must yield an EMPTY slot_name (no gate, no SERVING wrap).
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 import httpx
 import pytest
@@ -27,12 +25,11 @@ from starlette.requests import Request
 
 from hal0.dispatcher.router import (
     Dispatcher,
-    UpstreamCall,
+    NoRouteFound,
     _is_hal0_composite,
     _resolve_target_url,
     _slot_name_of,
 )
-from hal0.slots.state import SlotState
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 # ── test doubles ──────────────────────────────────────────────────────────────
@@ -56,26 +53,6 @@ class _FakeModelRegistry:
 
     def route_for(self, model_id: str) -> str | None:
         return self._routes.get(model_id)
-
-
-class _OfflineSlotManager:
-    """SlotManager stand-in whose every slot reports OFFLINE.
-
-    Records ``serving()`` entries so a test can prove the composite path
-    never opens the SERVING context. ``_current_state`` returning OFFLINE
-    would trip the readiness gate for any call carrying a non-empty
-    ``slot_name`` — the composite must carry an empty one.
-    """
-
-    def __init__(self) -> None:
-        self.serving_calls: list[str] = []
-
-    def _current_state(self, _slot_name: str) -> SlotState:
-        return SlotState.OFFLINE
-
-    def serving(self, slot_name: str) -> Any:  # pragma: no cover - guard only
-        self.serving_calls.append(slot_name)
-        raise AssertionError(f"composite forward must not enter serving() (slot={slot_name!r})")
 
 
 def _composite() -> Upstream:
@@ -134,13 +111,13 @@ def test_slot_name_of_exempts_composite_from_readiness_gate() -> None:
     assert _slot_name_of(real) == "primary"
 
 
-def test_composite_forward_target_is_lemonade_gateway_not_self() -> None:
-    """The composite must NOT forward to its own ``:8080`` URL (infinite
-    recursion); it is redirected to the Lemonade gateway."""
-    url = _resolve_target_url(_composite(), "/v1/chat/completions")
-    assert url == "http://127.0.0.1:13305/v1/chat/completions"
-    assert ":8080" not in url
-    # Non-composite upstreams forward to their own url unchanged.
+def test_resolve_target_url_joins_upstream_url_plainly() -> None:
+    """``_resolve_target_url`` is a plain join — no special-casing.
+
+    The composite is never forwarded to (dispatch skips it at every
+    resolution step), so it needs no redirect; real upstreams forward to
+    their own url unchanged.
+    """
     real = Upstream(
         name="primary", kind="slot", url="http://127.0.0.1:8081/v1", slot_name="primary"
     )
@@ -149,20 +126,17 @@ def test_composite_forward_target_is_lemonade_gateway_not_self() -> None:
     )
 
 
-def test_composite_forward_target_honours_env_override(monkeypatch: Any) -> None:
-    monkeypatch.setenv("LEMONADE_BASE_URL", "http://10.0.0.5:9999")
-    url = _resolve_target_url(_composite(), "/v1/chat/completions")
-    assert url == "http://10.0.0.5:9999/v1/chat/completions"
-
-
-# ── dispatch path ─────────────────────────────────────────────────────────────
+# ── dispatch path: composite is skipped everywhere ────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_advertised_model_resolves_via_passthrough_not_legacy() -> None:
-    """A chat request for a composite-advertised model resolves through the
-    passthrough path (Step 2) — never the legacy fallthrough that demotes the
-    dispatcher to a raw Lemonade proxy."""
+async def test_composite_advertised_model_with_no_live_slot_is_no_route() -> None:
+    """A model id only the composite advertises must NOT resolve to it.
+
+    Steps 2/3 skip the composite; with no other upstream serving the id,
+    dispatch falls to the Step 4 legacy heuristics and surfaces a clean
+    NoRouteFound — never a forward into hal0-api's own ``:8080``.
+    """
     upstreams = _FakeUpstreamRegistry([_composite()])
     models = _FakeModelRegistry(routes={})
     cache = {"hal0": ["hermes-4-14b-q5km", "qwen3-coder-next-reap-40b-a3b-q4kxl"]}
@@ -173,54 +147,60 @@ async def test_advertised_model_resolves_via_passthrough_not_legacy() -> None:
         cached_models=lambda name: cache.get(name, []),
     )
 
-    call = await dispatcher.dispatch(
-        _make_request(),
-        body={"model": "hermes-4-14b-q5km", "messages": []},
-    )
-
-    assert isinstance(call, UpstreamCall)
-    assert call.upstream_name == "hal0"
-    assert call.resolution_path == "passthrough:hal0"
-    # Readiness-gate exemption: empty slot_name.
-    assert call.slot_name == ""
-    # Forwarded to the Lemonade gateway, not back into hal0-api.
-    assert call.target_url == "http://127.0.0.1:13305/v1/chat/completions"
+    with pytest.raises(NoRouteFound):
+        await dispatcher.dispatch(
+            _make_request(),
+            body={"model": "hermes-4-14b-q5km", "messages": []},
+        )
 
 
 @pytest.mark.asyncio
-async def test_composite_call_skips_readiness_gate_on_forward() -> None:
-    """End-to-end: a composite-resolved call forwards a 200 even though the
-    SlotManager reports every slot OFFLINE — the gate must not fire, and the
-    SERVING context must never open."""
+async def test_registry_binding_to_composite_falls_through_to_no_route() -> None:
+    """A registry id bound to the composite is treated as 'not served'.
+
+    Step 1 drops the composite binding (no backing server) instead of
+    raising UnknownUpstream; with no live slot advertising the id, the
+    request surfaces NoRouteFound.
+    """
+    upstreams = _FakeUpstreamRegistry([_composite()])
+    models = _FakeModelRegistry(routes={"gemma3-4b-FLM": "hal0"})
+    cache = {"hal0": ["gemma3-4b-FLM"]}
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=models,
+        cached_models=lambda name: cache.get(name, []),
+    )
+
+    with pytest.raises(NoRouteFound):
+        await dispatcher.dispatch(
+            _make_request(),
+            body={"model": "gemma3-4b-FLM", "messages": []},
+        )
+
+
+@pytest.mark.asyncio
+async def test_composite_never_receives_forwards() -> None:
+    """End-to-end: even with a warm composite cache, no HTTP request is ever
+    sent to the composite's url (hal0-api's own ``:8080``)."""
     upstreams = _FakeUpstreamRegistry([_composite()])
     cache = {"hal0": ["hermes-4-14b-q5km"]}
-    slot_mgr = _OfflineSlotManager()
-
-    seen: dict[str, str] = {}
 
     def handler(req: httpx.Request) -> httpx.Response:
-        seen["url"] = str(req.url)
-        return httpx.Response(200, json={"id": "chatcmpl-ok", "choices": []})
+        raise AssertionError(f"composite must never be forwarded to (url={req.url})")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     dispatcher = Dispatcher(
         upstream_registry=upstreams,
         model_registry=_FakeModelRegistry(),
         cached_models=lambda name: cache.get(name, []),
-        slot_manager=slot_mgr,  # type: ignore[arg-type]
         http_client=client,
     )
     try:
-        call = await dispatcher.dispatch(
-            _make_request(),
-            body={"model": "hermes-4-14b-q5km", "messages": []},
-        )
-        resp = await dispatcher.forward(call)
-        # No spurious 503 from the readiness gate.
-        assert resp.status_code == 200
-        # Forwarded to the gateway, not hal0-api itself.
-        assert seen["url"] == "http://127.0.0.1:13305/v1/chat/completions"
-        # SERVING context never opened (the stub raises if it is).
-        assert slot_mgr.serving_calls == []
+        with pytest.raises(NoRouteFound):
+            await dispatcher.dispatch(
+                _make_request(),
+                body={"model": "hermes-4-14b-q5km", "messages": []},
+            )
     finally:
         await dispatcher.aclose()

@@ -32,6 +32,10 @@ class FakeUpstreamRegistry(UpstreamRegistry):
     def get(self, name: str) -> Upstream | None:  # type: ignore[override]
         return self._store.get(name)
 
+    def __getitem__(self, name: str) -> Upstream:
+        # Dispatcher Step 1 indexes the registry for a known-present name.
+        return self._store[name]
+
 
 class FakeModelRegistry:
     def __init__(self, routes: dict[str, str] | None = None) -> None:
@@ -203,7 +207,7 @@ async def test_container_tts_upstream_preempts_registry() -> None:
     """A tts container remote (kind=remote, slot_name=tts) wins Step 0 preemption.
 
     The tts slot registers as kind='remote' (container), not kind='slot'
-    (Lemonade). Step 0 in dispatch scans container remotes first — if the
+    (local slot). Step 0 in dispatch scans container remotes first — if the
     model id is in the cached_models for that upstream it wins immediately,
     before registry or legacy paths run.
     """
@@ -270,8 +274,8 @@ async def test_router_audio_transcriptions_not_default_to_tts() -> None:
 #
 # Container slots register as kind="remote" (manager._register_container_upstream)
 # with slot_name set. resolve_slot's old kind=="slot" gate rejected them, so
-# kokoro-v1 requests raised LegacyResolutionFailed → NoRouteFound → fell into
-# the lemonade _proxy and died on the dead lemond tts slot.
+# kokoro-v1 requests raised LegacyResolutionFailed → NoRouteFound instead of
+# reaching the live container-backed tts slot.
 
 
 @pytest.mark.asyncio
@@ -280,7 +284,7 @@ async def test_dispatch_kokoro_v1_resolves_container_remote_tts() -> None:
 
     Step 0 preempt misses (container advertises 'kokoro', not 'kokoro-v1'),
     registry/passthrough miss, so the legacy path-pin MUST resolve the
-    container-backed remote — never NoRouteFound / lemonade fall-through.
+    container-backed remote — never NoRouteFound.
     """
     container_tts = make_remote_tts(port=8084)
     upstreams = FakeUpstreamRegistry([container_tts])

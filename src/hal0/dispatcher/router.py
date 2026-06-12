@@ -502,7 +502,8 @@ class Dispatcher:
 
         if registry_entry is not None:
             upstream_name, upstream_model = registry_entry
-            upstream = self._upstreams[upstream_name]
+            upstream = self._upstreams.get(upstream_name)
+            assert upstream is not None  # guarded by the resolution block above
             advertised = self._cached_models(upstream.name)
             online = bool(advertised) or await self._is_online(upstream)
             if not online and upstream.kind == "slot":

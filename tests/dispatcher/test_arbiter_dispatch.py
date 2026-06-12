@@ -10,10 +10,10 @@ Covers:
     structured ``gpu.image_mode`` envelope + ``Retry-After`` header — fired
     BEFORE the readiness check so the client never sees ``slot.loading``.
   * NPU/CPU isolation: non-llm-group slots dispatch normally in img mode.
-  * NON-NEGOTIABLE 1 (D4 review): the silent-eviction recovery branch is
-    SUPPRESSED while the arbiter is in img mode — a ConnectError on an
-    llm slot must NOT reload it into image mode; it surfaces the same
-    ``gpu.image_mode`` 503 instead.
+  * NON-NEGOTIABLE 1 (D4 review): a dead port on an llm slot while the
+    arbiter is in img mode must NOT reload the slot into image mode — the
+    dead-port guard surfaces the same ``gpu.image_mode`` 503 instead (the
+    dispatcher never retries; systemd Restart= owns process recovery).
   * NON-NEGOTIABLE 2 (D4 review): an in-flight LLM request whose container
     the arbiter force-kills (drain timeout) gets a clean structured 5xx
     JSON envelope, not a hung socket or exception leak.
@@ -37,7 +37,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from hal0.dispatcher.router import Dispatcher, UpstreamCall
+from hal0.dispatcher.router import Dispatcher, UpstreamCall, UpstreamUnavailable
 from hal0.slots.arbiter import GpuArbiter, GpuImageMode, GpuMode
 from hal0.slots.state import SlotState
 from hal0.upstreams.registry import Upstream
@@ -60,7 +60,6 @@ class _ArbiterSlotManager:
         self._state = state
         self.events: list[tuple[str, str]] = []
         self._counts: dict[str, int] = {}
-        self.recover_calls: list[str] = []
         self.load_calls: list[tuple[str, Any]] = []
         self.unload_calls: list[str] = []
         self.cfgs: list[dict[str, Any]] = []
@@ -98,9 +97,6 @@ class _ArbiterSlotManager:
 
     def is_ready_for_dispatch(self, _slot_name: str) -> bool:
         return self._state in _DISPATCHABLE_STATES
-
-    async def recover_evicted_slot(self, slot_name: str) -> None:
-        self.recover_calls.append(slot_name)
 
     async def load(self, slot_name: str, model: Any = None) -> None:
         self.load_calls.append((slot_name, model))
@@ -388,16 +384,17 @@ async def test_llm_slot_forward_guarded_in_img_mode(tmp_path: Path) -> None:
         await dispatcher.aclose()
 
 
-# ── NON-NEGOTIABLE 1: evicted-slot recovery suppression ─────────────────────
+# ── NON-NEGOTIABLE 1: dead-port image-mode guard ─────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_evicted_recovery_suppressed_in_img_mode(tmp_path: Path) -> None:
-    """ConnectError on an llm slot while mode==img → NO recovery load, 503 gpu.image_mode.
+async def test_dead_port_in_img_mode_raises_gpu_image_mode(tmp_path: Path) -> None:
+    """ConnectError on an llm slot while mode==img → NO reload, 503 gpu.image_mode.
 
     Simulates the race: the request passed the guard in LLM mode, then the
     arbiter flipped to img and force-killed the container mid-flight. The
-    retry-once recovery must NOT reload the llm slot into image mode.
+    dead-port guard must surface the structured gpu.image_mode envelope and
+    must NOT reload the llm slot into image mode.
     """
     sm = _ArbiterSlotManager(tmp_path)  # starts in LLM mode (no state file)
 
@@ -414,7 +411,6 @@ async def test_evicted_recovery_suppressed_in_img_mode(tmp_path: Path) -> None:
             await dispatcher.forward(_slot_call("primary"))
         assert ei.value.code == "gpu.image_mode"
         assert ei.value.status == 503
-        assert sm.recover_calls == [], "recovery must be suppressed in img mode"
         assert sm.load_calls == [], "no slot load may fight the arbiter"
         # serving counter must still balance (no stuck SERVING).
         assert sm.in_flight_count("primary") == 0
@@ -423,22 +419,25 @@ async def test_evicted_recovery_suppressed_in_img_mode(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_evicted_recovery_still_runs_in_llm_mode(tmp_path: Path) -> None:
-    """Regression guard: normal silent-eviction recovery is untouched in LLM mode."""
+async def test_dead_port_in_llm_mode_raises_upstream_unavailable(tmp_path: Path) -> None:
+    """Outside image mode a dead port is a plain UpstreamUnavailable — no retry.
+
+    systemd ``Restart=`` policy owns process recovery; the dispatcher makes
+    exactly one upstream attempt and never reloads the slot itself.
+    """
     sm = _ArbiterSlotManager(tmp_path)
     calls = {"n": 0}
 
     def handler(req: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        if calls["n"] == 1:
-            raise httpx.ConnectError("connection refused", request=req)
-        return httpx.Response(200, json={"ok": True})
+        raise httpx.ConnectError("connection refused", request=req)
 
     dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm)
     try:
-        resp = await dispatcher.forward(_slot_call("primary"))
-        assert resp.status_code == 200
-        assert sm.recover_calls == ["primary"]
+        with pytest.raises(UpstreamUnavailable):
+            await dispatcher.forward(_slot_call("primary"))
+        assert calls["n"] == 1, "dead port must not be retried"
+        assert sm.load_calls == []
     finally:
         await dispatcher.aclose()
 
@@ -452,14 +451,12 @@ def test_force_killed_inflight_gets_clean_5xx(
     """In-flight chat request whose container the arbiter kills → structured 5xx JSON.
 
     Full-stack pin: the connect error surfaces through the error middleware
-    as a clean gpu.image_mode 503 envelope (suppressed recovery path), not
-    a hung socket or an exception leak.
+    as a clean gpu.image_mode 503 envelope (dead-port guard path), not a
+    hung socket or an exception leak.
     """
     _seed_chat_upstream(client, "chat")
     manager = client.app.state.slot_manager
     monkeypatch.setattr(manager, "is_ready_for_dispatch", lambda _n: True)
-    recover = AsyncMock()
-    monkeypatch.setattr(manager, "recover_evicted_slot", recover)
     arbiter = manager.arbiter  # construct in LLM mode
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -483,4 +480,3 @@ def test_force_killed_inflight_gets_clean_5xx(
     body = r.json()
     assert body["error"]["code"] == "gpu.image_mode"
     assert int(r.headers["Retry-After"]) >= 15
-    recover.assert_not_awaited()

@@ -49,6 +49,10 @@ class FakeUpstreamRegistry(UpstreamRegistry):
     def get(self, name: str) -> Upstream | None:  # type: ignore[override]
         return self._store.get(name)
 
+    def __getitem__(self, name: str) -> Upstream:
+        # Dispatcher Step 1 indexes the registry for a known-present name.
+        return self._store[name]
+
 
 class FakeModelRegistry:
     """Minimal ModelRegistry surface — only what Dispatcher uses."""
@@ -553,10 +557,11 @@ async def test_container_slot_preempts_composite_registry_binding() -> None:
     """A loaded container slot is authoritative for its advertised model.
 
     The model registry binds every registered id (incl. container-served
-    models) to the synthetic composite ``hal0`` upstream, which forwards to
-    lemonade. When a container remote (kind="remote" + slot_name) advertises
-    the same id, it MUST win — else hal0/* requests for a container-backed
-    model get routed to lemonade and 404 (cutover #662 regression).
+    models) to the synthetic composite ``hal0`` upstream, which has no
+    backing server. When a container remote (kind="remote" + slot_name)
+    advertises the same id, it MUST win at Step 0 — else requests for a
+    container-backed model dead-end on the composite binding and 404
+    (cutover #662 regression).
     """
     composite = Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)
     chat = Upstream(name="chat", kind="remote", url="http://127.0.0.1:8102/v1", slot_name="chat")
@@ -586,9 +591,10 @@ async def test_container_slot_preempts_composite_registry_binding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_container_model_still_uses_registry_binding() -> None:
-    """Preemption must not disturb models no container slot serves — they
-    still resolve via the normal registry binding."""
+async def test_composite_bound_model_without_live_slot_is_no_route() -> None:
+    """A registry id bound to the composite with no live serving slot must
+    NOT resolve to the composite (it has no backing server) — dispatch
+    falls through Steps 1/2/3 and surfaces NoRouteFound."""
     composite = Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)
     chat = Upstream(name="chat", kind="remote", url="http://127.0.0.1:8102/v1", slot_name="chat")
     upstreams = FakeUpstreamRegistry([composite, chat])
@@ -597,7 +603,7 @@ async def test_non_container_model_still_uses_registry_binding() -> None:
     async def online(_u: Upstream) -> bool:
         return True
 
-    # chat container only serves qwopus; gemma is lemonade-only.
+    # chat container only serves qwopus; gemma has no live slot anywhere.
     cache = {"hal0": ["gemma3-4b-FLM", "qwopus3.6-27b-v2"], "chat": ["qwopus3.6-27b-v2"]}
     dispatcher = Dispatcher(
         upstream_registry=upstreams,
@@ -606,10 +612,8 @@ async def test_non_container_model_still_uses_registry_binding() -> None:
         cached_models=lambda name: cache.get(name, []),
     )
 
-    call = await dispatcher.dispatch(
-        make_request(),
-        body={"model": "gemma3-4b-FLM", "messages": []},
-    )
-
-    assert call.upstream_name == "hal0"
-    assert call.resolution_path == "registry"
+    with pytest.raises(NoRouteFound):
+        await dispatcher.dispatch(
+            make_request(),
+            body={"model": "gemma3-4b-FLM", "messages": []},
+        )

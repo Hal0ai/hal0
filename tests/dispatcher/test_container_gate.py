@@ -2,7 +2,7 @@
 
 Issue #656 — the gap: container slots register as ``kind="remote"``
 upstreams so ``call.slot_name`` is always empty, bypassing the existing
-Lemonade slot gate and producing a raw 502 ConnectError when the
+slot-kind readiness gate and producing a raw 502 ConnectError when the
 container is down or starting.
 
 The fix:
@@ -22,7 +22,7 @@ This file covers:
   - Gate raises ``SlotLoading`` when the container is active but /health
     fails (still starting).
   - Gate passes through and returns the upstream response when ready.
-  - ``UpstreamCall.slot_name`` (Lemonade path) is unaffected.
+  - ``UpstreamCall.slot_name`` (slot-kind path) is unaffected.
 """
 
 from __future__ import annotations
@@ -63,11 +63,11 @@ def _remote_upstream(
 
 
 def _slot_upstream(name: str = "primary") -> Upstream:
-    """A kind='slot' upstream (Lemonade path)."""
+    """A kind='slot' upstream (local slot path)."""
     return Upstream(
         name=name,
         kind="slot",
-        url="http://127.0.0.1:13305/v1",
+        url="http://127.0.0.1:8081/v1",
         auth_style="none",
         warmup_strategy="none",
         advertise_models=True,
@@ -134,7 +134,7 @@ def test_container_slot_name_of_remote_without_slot_name() -> None:
 
 
 def test_container_slot_name_of_slot_kind() -> None:
-    """Returns empty string for kind='slot' upstreams (Lemonade path)."""
+    """Returns empty string for kind='slot' upstreams (local slot path)."""
     up = _slot_upstream()
     assert _container_slot_name_of(up) == ""
 
@@ -199,11 +199,11 @@ async def test_container_gate_crashed_raises_slot_loading() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lemonade_slot_unaffected_by_container_gate() -> None:
-    """A kind='slot' upstream (Lemonade) does NOT trigger the container gate."""
+async def test_slot_kind_upstream_unaffected_by_container_gate() -> None:
+    """A kind='slot' upstream does NOT trigger the container gate."""
     sm = MagicMock()
     sm.container_readiness_check = AsyncMock(
-        side_effect=AssertionError("container gate must not fire for Lemonade slots")
+        side_effect=AssertionError("container gate must not fire for slot-kind upstreams")
     )
     # For a kind='slot' upstream, call.slot_name is set; call.container_slot_name is empty.
     # With no SlotManager serving mock, the forward goes through _forward_plain (no gate).
