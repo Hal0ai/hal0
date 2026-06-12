@@ -49,6 +49,7 @@ _RAM_CEIL_GB = 96
 _PRESSURE_GB = 50
 
 _HERMES_UNIT = "hal0-agent@hermes.service"
+_IMG_UNIT = "hal0-slot@img.service"
 
 # Switchover target modes. "generation" hands the iGPU to ComfyUI
 # (arbiter.ensure_img); "inference" hands it back to the LLM stack
@@ -128,11 +129,17 @@ async def _fetch_json(path: str) -> dict[str, Any] | None:
 
 
 async def _container_state(name: str) -> str:
-    """Return the docker container state: 'running', 'exited', or 'absent'.
+    """Return the generation container state: 'running', 'exited', or 'absent'.
 
-    'absent' also covers "docker not installed" and any inspect failure — the
-    pane treats all non-running states as stopped.
+    Podman-first (#710): post-Phase-D the img slot runs as the
+    ``hal0-slot@img`` systemd unit — probe it the way the slots page
+    does. ``docker inspect`` survives only as the legacy fallback for
+    pre-migration installs. 'absent' also covers "docker not installed"
+    and any inspect failure — the pane treats all non-running states as
+    stopped.
     """
+    if await _systemd_active(_IMG_UNIT):
+        return "running"
     docker = shutil.which("docker")
     if not docker:
         return "absent"

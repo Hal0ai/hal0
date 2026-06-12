@@ -536,3 +536,41 @@ def test_switchover_enabled_flag_is_read_per_request(
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code != 501
+
+
+# ── _container_state: podman-first probe (#710) ──────────────────────────────
+
+
+async def test_container_state_running_when_img_unit_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#710: post-Phase-D the img slot runs as podman hal0-slot@img — the
+    systemd unit probe is the truth; docker inspect is legacy fallback only."""
+    from hal0.api.routes import comfyui as mod
+
+    probed_units: list[str] = []
+
+    async def fake_active(unit: str) -> bool:
+        probed_units.append(unit)
+        return unit == "hal0-slot@img.service"
+
+    monkeypatch.setattr(mod, "_systemd_active", fake_active)
+    # No docker binary at all — the podman path must not need it.
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+
+    assert await mod._container_state("comfyui") == "running"
+    assert "hal0-slot@img.service" in probed_units
+
+
+async def test_container_state_absent_when_unit_inactive_and_no_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.api.routes import comfyui as mod
+
+    async def fake_active(unit: str) -> bool:
+        return False
+
+    monkeypatch.setattr(mod, "_systemd_active", fake_active)
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+
+    assert await mod._container_state("comfyui") == "absent"
