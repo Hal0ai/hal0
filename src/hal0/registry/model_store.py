@@ -15,13 +15,6 @@ abstract setting into concrete on-disk effects:
   (no move required) or ``MigrationPlan(needed=True, files_count, …)``.
 * :func:`execute_migration` — move files from old → new with cross-fs
   fallback. Failure leaves both paths intact (no partial state).
-* :func:`propagate_lemonade_config` — atomically overwrite
-  ``extra_models_dir`` inside ``/var/lib/hal0/lemonade/config.json`` and
-  return whether the value actually changed (caller decides whether to
-  restart the service).
-* :func:`restart_lemonade_service` — best-effort ``systemctl restart
-  hal0-lemonade.service``. Returns True/False/None (None when systemd
-  isn't available, e.g. tests / containers).
 
 All on-disk writes go through :func:`hal0.config.loader.write_toml_atomic`'s
 tempfile + fsync + rename pattern so a crash mid-write never leaves a
@@ -30,13 +23,10 @@ half-written file on disk.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
-import json
 import logging
 import os
 import shutil
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,12 +36,9 @@ from hal0.config import paths
 log = logging.getLogger(__name__)
 
 
-# Lemonade's own config.json file lives under /var/lib/hal0/lemonade
 # and is owned by the ``hal0`` system user (per installer/install.sh).
 # We use the same path resolution so HAL0_HOME-rooted dev installs
 # write under their tree, not /var/lib/hal0.
-def _lemonade_config_path() -> Path:
-    return paths.var_lib() / "lemonade" / "config.json"
 
 
 # ── Probe one path ────────────────────────────────────────────────────────
@@ -323,105 +310,6 @@ def execute_migration(plan: MigrationPlan) -> MigrationResult:
     return result
 
 
-# ── Lemonade config propagation ──────────────────────────────────────────
-
-
-def propagate_lemonade_config(new_store: str) -> tuple[bool, str | None]:
-    """Atomically rewrite Lemonade's ``extra_models_dir``.
-
-    Returns ``(changed, previous_value)``:
-      * ``changed=True``  — ``extra_models_dir`` was updated on disk and
-        the lemond daemon needs a restart for the new value to take
-        effect at load time.
-      * ``changed=False`` — config either matched already or doesn't
-        exist (fresh install before the lemonade installer ran). The
-        caller should treat both as "no-op" and skip the restart.
-    """
-    config_path = _lemonade_config_path()
-    if not config_path.exists():
-        # The installer hasn't seeded the lemonade config yet (HAL0_HOME
-        # dev install pre-bootstrap, or a fresh container). Nothing to
-        # propagate; the next install run will pick up our new value.
-        return False, None
-    try:
-        with open(config_path, "rb") as f:
-            current = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"could not read lemonade config at {config_path}: {exc}") from exc
-
-    prev = current.get("extra_models_dir")
-    if prev == new_store:
-        return False, prev if isinstance(prev, str) else None
-
-    current["extra_models_dir"] = new_store
-
-    # Atomic write: tempfile in the same directory + fsync + os.replace.
-    # Matches the pattern in hal0.config.loader.write_toml_atomic so the
-    # invariant ("lemond never parses a half-written config.json") is
-    # uniform across hal0.
-    tmp_path: Path | None = None
-    try:
-        fd, tmp_str = tempfile.mkstemp(
-            prefix=f".{config_path.name}.",
-            suffix=".tmp",
-            dir=config_path.parent,
-        )
-        tmp_path = Path(tmp_str)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(current, f, indent=2, sort_keys=True)
-                f.write("\n")
-                f.flush()
-                os.fsync(f.fileno())
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-            raise
-        os.replace(tmp_path, config_path)
-        tmp_path = None
-    finally:
-        if tmp_path is not None:
-            with contextlib.suppress(OSError):
-                tmp_path.unlink(missing_ok=True)
-
-    return True, prev if isinstance(prev, str) else None
-
-
-# ── Lemonade service restart ─────────────────────────────────────────────
-
-
-async def restart_lemonade_service() -> bool | None:
-    """Best-effort ``systemctl restart hal0-lemonade.service``.
-
-    Returns:
-      * True  — systemctl exited 0.
-      * False — systemctl exited non-zero (caller may want to surface
-        the user-visible "restart failed" toast).
-      * None  — systemctl unavailable (HAL0_HOME dev install, container
-        without systemd, CI). The caller treats this as "nothing to
-        restart" rather than a failure.
-    """
-    if os.environ.get("HAL0_HOME"):
-        # Dev install — no real systemd to talk to. Treat as no-op.
-        return None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "systemctl",
-            "restart",
-            "hal0-lemonade.service",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except (FileNotFoundError, PermissionError, OSError):
-        return None
-    try:
-        rc = await asyncio.wait_for(proc.wait(), timeout=15.0)
-    except TimeoutError:
-        proc.kill()
-        return False
-    return rc == 0
-
-
 __all__ = [
     "MigrationPlan",
     "MigrationResult",
@@ -430,6 +318,4 @@ __all__ = [
     "describe_store_state",
     "execute_migration",
     "plan_migration",
-    "propagate_lemonade_config",
-    "restart_lemonade_service",
 ]

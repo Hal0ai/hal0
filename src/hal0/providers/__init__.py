@@ -32,18 +32,15 @@ from hal0.providers.base import ContainerSpec, Provider
 from hal0.providers.comfyui import ComfyUIProvider
 from hal0.providers.container import ContainerProvider, container_provider
 from hal0.providers.flm import FLMProvider
-from hal0.providers.lemonade import LemonadeProvider
 from hal0.providers.llama_server import LlamaServerProvider
 
 # Provider name → singleton instance.  Providers are stateless (per the
 # ABC contract), so one instance per process is enough.
 #
-# v0.2 (ADR-0008 §1/§2): Lemonade is the sole inference backend for lemond
-# slots.  ContainerProvider handles container slots (P1 tracer, issue #655).
+# ContainerProvider runs every slot (podman + systemd units).
 # ``ComfyUIProvider`` and ``FLMProvider`` remain for non-SlotManager callers.
 # ``MoonshineProvider`` and ``KokoroProvider`` were removed in #620.
 _PROVIDERS: dict[str, Provider] = {
-    "lemonade": LemonadeProvider(),
     "container": ContainerProvider(),
     "llama-server": LlamaServerProvider(),
     "flm": FLMProvider(),
@@ -65,27 +62,13 @@ def get_provider(name: str) -> Provider:
         raise KeyError(f"no provider registered for {name!r}; known: {sorted(_PROVIDERS)}") from exc
 
 
-def lemonade_provider() -> LemonadeProvider:
-    """Return the process-wide ``LemonadeProvider`` singleton.
-
-    Convenience accessor for callers that know they want the Lemonade
-    provider specifically (SlotManager's v0.2 dispatch branch is the
-    canonical caller). Equivalent to ``get_provider("lemonade")``
-    cast to ``LemonadeProvider``; kept as a typed helper so callers
-    don't have to cast.
-    """
-    return _PROVIDERS["lemonade"]  # type: ignore[return-value]
-
-
 __all__ = [
     "ComfyUIProvider",
     "ContainerProvider",
     "ContainerSpec",
     "FLMProvider",
-    "LemonadeProvider",
     "LlamaServerProvider",
     "Provider",
     "container_provider",
     "get_provider",
-    "lemonade_provider",
 ]

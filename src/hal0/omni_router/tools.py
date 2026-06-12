@@ -7,15 +7,15 @@ diff the upstream-mirrored fields without re-implementing the Python
 side. Each entry carries the dispatch metadata hal0 needs:
 
   * ``name`` — tool name surfaced to the LLM.
-  * ``source`` — ``"upstream"`` (mirrored from Lemonade) or ``"hal0"``.
+  * ``source`` — ``"upstream"`` (mirrored from the inference surface) or ``"hal0"``.
   * ``target_slot_type`` — slot type that serves the request
     (``image``, ``tts``, ``transcription``, ``embedding``,
     ``reranking``, ``llm``).
   * ``required_model_labels`` — labels the chosen slot's model MUST
     advertise. Empty for ``route_to_chat`` (caller carries the
     ``tool-calling`` label, target carries no constraint).
-  * ``endpoint`` — Lemonade path the dispatch handler calls.
-    ``None`` for ``route_to_chat`` (internal, no Lemonade endpoint).
+  * ``endpoint`` — /v1 path the dispatch handler calls.
+    ``None`` for ``route_to_chat`` (internal, no /v1 endpoint).
   * ``description`` — natural-language hint shown to the LLM.
   * ``parameters`` — OpenAI JSON-schema for the tool's args.
 
@@ -54,7 +54,7 @@ class ToolDefinition:
         """Render this tool as the OpenAI ``tools=[...]`` wire shape.
 
         OpenAI expects ``{"type": "function", "function": {name,
-        description, parameters}}``. Lemonade follows the same shape;
+        description, parameters}}``. Upstreams follow the same shape;
         hal0 forwards the result verbatim into the body.
         """
         return {

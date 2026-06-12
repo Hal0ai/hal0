@@ -4,18 +4,14 @@ Routes mounted under /api:
   GET  /api/status              — overall liveness + summary (dashboard polls this)
   GET  /api/health/system       — deep health (slots, disk, ram)
   GET  /api/metrics             — JSON metrics
-  GET  /api/metrics/prometheus  — Prometheus exposition (Lemonade /v1/stats + FLM native)
+  GET  /api/metrics/prometheus  — Prometheus exposition (slot lifecycle state)
   GET  /api/features            — feature flags
   PUT  /api/features/{name}     — toggle feature flag
 
-History (issue #36 → PR-12): the v0.1.x ``/api/metrics/prometheus`` stub
-was deleted by ADR-0001 Child B because the underlying scrape (per-slot
-toolbox /metrics) didn't survive the Lemonade migration (plan §12.1).
-PR-12 re-introduces the route on top of :mod:`hal0.lemonade.metrics_shim`
-— the underlying surfaces are ``GET /v1/stats`` + ``GET /v1/health`` +
-FLM-native fields sniffed from ``POST /v1/chat/completions`` response
-bodies. KV% for GPU/llamacpp slots remains ``—`` in v0.2 (accepted gap,
-plan §12.1).
+``/api/metrics/prometheus`` renders the per-slot lifecycle exposition
+from :mod:`hal0.slots.metrics` (``hal0_slot_up`` / ``hal0_slot_state``
+/ ``hal0_slots_ready_total``). Per-slot llama-server native metrics are
+a follow-up (scrape each container's own ``/metrics``).
 """
 
 from __future__ import annotations
@@ -59,7 +55,7 @@ async def get_status(request: Request) -> dict[str, Any]:
     # picks them up via /api/slots directly.
     from hal0.api.routes.slots import (
         _get_slot_manager,
-        _lemonade_loaded_models,
+        _loaded_models,
         _slot_to_dict,
         _synthesize_slots_from_upstreams,
     )
@@ -76,7 +72,7 @@ async def get_status(request: Request) -> dict[str, Any]:
     real_names = {entry["name"] for entry in real_entries}
 
     slot_list: list[dict[str, Any]] = list(real_entries)
-    loaded_models = await _lemonade_loaded_models(request)
+    loaded_models = await _loaded_models(request)
     for entry in _synthesize_slots_from_upstreams(request, loaded_models=loaded_models):
         if entry["name"] not in real_names:
             slot_list.append(entry)
@@ -111,14 +107,13 @@ async def metrics() -> dict[str, object]:
 
 @router.get("/metrics/prometheus")
 async def metrics_prometheus(request: Request) -> Response:
-    """Prometheus text-exposition surface (PR-12, plan §10.1 + §11).
+    """Prometheus text-exposition surface over slot lifecycle state.
 
-    Backed by :class:`hal0.lemonade.metrics_shim.MetricsShim` on
-    ``app.state.lemonade_metrics_shim`` (started in the api lifespan).
-    If the shim isn't attached (e.g. tests bypassing lifespan, or
-    Lemonade unreachable since boot), returns an empty exposition body
-    rather than 500 — Prometheus treats that as "no series", which is
-    the correct "no data yet" state.
+    Rendered by :func:`hal0.slots.metrics.render_slot_metrics` from the
+    SlotManager's snapshots. When the SlotManager isn't wired (tests
+    bypassing lifespan), returns an empty exposition body rather than
+    500 — Prometheus treats that as "no series", which is the correct
+    "no data yet" state.
 
     Public route by convention (no auth dependency declared). Operators
     behind a reverse proxy should restrict ``/api/metrics/prometheus``
@@ -126,12 +121,17 @@ async def metrics_prometheus(request: Request) -> Response:
     enforcement would block standard Prometheus scrapers that don't
     speak hal0's bearer-token auth.
     """
-    from hal0.lemonade.metrics_shim import MetricsShim
-    from hal0.lemonade.prometheus_format import render_prometheus_exposition
+    from hal0.slots.metrics import render_slot_metrics
 
-    shim: MetricsShim | None = getattr(request.app.state, "lemonade_metrics_shim", None)
-    snapshot = shim.snapshot() if shim is not None else None
-    body = render_prometheus_exposition(snapshot)
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        body = ""
+    else:
+        try:
+            slots = await sm.list()
+        except Exception:
+            slots = []
+        body = render_slot_metrics(slots)
     # Prometheus text format 0.0.4: ``text/plain; version=0.0.4; charset=utf-8``.
     return Response(content=body, media_type="text/plain; version=0.0.4; charset=utf-8")
 

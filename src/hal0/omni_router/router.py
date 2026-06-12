@@ -49,7 +49,7 @@ class OmniRouter:
     """Client-side OpenAI tool-calling loop.
 
     Constructed once per hal0-api process; the SlotManager + httpx
-    client + Lemonade URL are shared across requests. Lifetime is
+    client + API base URL are shared across requests. Lifetime is
     tied to the FastAPI lifespan.
 
     Args:
@@ -57,7 +57,9 @@ class OmniRouter:
         http_client: shared httpx client. The OmniRouter does NOT
             own this client; the lifespan owns it (matching the
             Dispatcher pattern in ``dispatcher/router.py``).
-        lemonade_base_url: ``http://127.0.0.1:13305`` per ADR-0008 §1.
+        api_base_url: hal0-api's own ``/v1`` surface (#709) — chat completions
+            re-enter the full dispatch chain (arbiter guard, readiness
+            gates, container routing).
     """
 
     def __init__(
@@ -65,11 +67,11 @@ class OmniRouter:
         *,
         slot_manager: SlotManagerLike,
         http_client: httpx.AsyncClient,
-        lemonade_base_url: str = "http://127.0.0.1:13305",
+        api_base_url: str = "http://127.0.0.1:8080",
     ) -> None:
         self._slot_manager = slot_manager
         self._http_client = http_client
-        self._lemonade_base_url = lemonade_base_url.rstrip("/")
+        self._api_base_url = api_base_url.rstrip("/")
 
     # ── filter surface ─────────────────────────────────────────────
 
@@ -188,7 +190,7 @@ class OmniRouter:
         return DispatchContext(
             slot_manager=self._slot_manager,
             http_client=self._http_client,
-            lemonade_base_url=self._lemonade_base_url,
+            api_base_url=self._api_base_url,
             caller_slot_name=caller_slot_name,
             chat_completion=self._chat_completion,
         )
@@ -200,7 +202,7 @@ class OmniRouter:
         keep stepping against. Same envelope shape as
         :func:`hal0.omni_router.dispatch._post_json` for consistency.
         """
-        url = f"{self._lemonade_base_url}/v1/chat/completions"
+        url = f"{self._api_base_url}/v1/chat/completions"
         try:
             resp = await self._http_client.post(url, json=body, timeout=300.0)
         except httpx.TimeoutException:

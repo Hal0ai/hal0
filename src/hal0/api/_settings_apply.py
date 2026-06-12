@@ -1,28 +1,16 @@
 """Typed apply-plan registry for hal0 settings (issue #552).
 
-Generalises the per-key immediate-vs-deferred taxonomy that
-:mod:`hal0.api.routes.lemonade_admin` keeps for the Lemonade admin panel
-to the *whole* settings surface. The UI needs to know what will happen
-on save before the user commits — "live", "⟳ restart <service>", or "⚠
-manual restart" — so it can render the right badge and gate the
-confirm affordance.
+Per-key immediate-vs-deferred taxonomy for the whole settings surface.
+The UI needs to know what will happen on save before the user commits —
+"live", "⟳ restart <service>", or "⚠ manual restart" — so it can render
+the right badge and gate the confirm affordance.
 
-Reuses, does not redefine, the Lemonade-side constants::
+Slot-affecting keys map to ``service-restart`` with the symbolic
+``slots`` service: the affected slot units (``hal0-slot@<name>``) need
+a restart to observe the new value (the unit re-renders from config on
+load).
 
-    from hal0.api.routes.lemonade_admin import IMMEDIATE_KEYS, DEFERRED_KEYS
-
-so the Lemonade admin rows (issue #545) and the new apply plan stay
-locked together. Mapping:
-
-  * :data:`IMMEDIATE_KEYS`  → ``{"apply_class": "immediate",       "services": []}``
-  * :data:`DEFERRED_KEYS`   → ``{"apply_class": "service-restart", "services": ["lemonade"]}``
-
-The deferred keys don't apply until the next ``/v1/load`` OR a
-``systemctl restart hal0-lemonade.service``; in the new taxonomy that
-collapses to ``service-restart`` with ``lemonade`` as the affected
-service, matching how a fresh install wires the unit.
-
-The registry also covers the hal0 ``Hal0Config`` fields the operator
+The registry covers the hal0 ``Hal0Config`` fields the operator
 edits through Settings. Each key is annotated with the
 ``apply_class`` + ``services`` it affects; ``apply_plan()`` partitions
 a set of touched keys into the three buckets the UI renders.
@@ -53,28 +41,12 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from hal0.api.routes.lemonade_admin import DEFERRED_KEYS, IMMEDIATE_KEYS
-
 # Apply-class enum. Kept as plain string literals so JSON round-trips
 # without an extra enum adapter and the type checker accepts the
 # union at every registry site.
 APPLY_CLASSES: tuple[str, ...] = ("immediate", "service-restart", "manual-restart")
-SERVICE_LEMONADE: str = "lemonade"
+SERVICE_SLOTS: str = "slots"
 SERVICE_HAL0_API: str = "hal0-api"
-
-# ── Lemonade runtime-config keys (reused from lemonade_admin) ────────────────
-#
-# These mirror :data:`lemonade_admin.IMMEDIATE_KEYS` /
-# :data:`lemonade_admin.DEFERRED_KEYS` *one-to-one*; the registry
-# builder below iterates those sets so any future addition shows up
-# here automatically. Do NOT enumerate the keys inline — that would
-# let the two definitions drift.
-
-_LEMONADE_IMMEDIATE_ENTRY: ApplyPlanEntry = {"apply_class": "immediate", "services": []}
-_LEMONADE_DEFERRED_ENTRY: ApplyPlanEntry = {
-    "apply_class": "service-restart",
-    "services": [SERVICE_LEMONADE],
-}
 
 # ── hal0.toml Hal0Config fields ──────────────────────────────────────────────
 #
@@ -101,15 +73,14 @@ _LEMONADE_DEFERRED_ENTRY: ApplyPlanEntry = {
 #   * ``[models].file_extensions``          → service-restart[hal0-api]
 #                                            (scanner iterates extensions
 #                                            from the loaded config).
-#   * ``[models].{store,pull_root}``        → service-restart[lemonade]
-#                                            (extra_models_dir propagates
-#                                            to lemond; the dedicated
+#   * ``[models].{store,pull_root}``        → service-restart[slots]
+#                                            (the slot containers mount
+#                                            the store path; the dedicated
 #                                            /api/settings/models/store
 #                                            endpoint handles the migrate
-#                                            + restart plumbing, but the
-#                                            generic PUT still tags the
-#                                            class so the UI renders the
-#                                            right badge).
+#                                            plumbing, but the generic PUT
+#                                            still tags the class so the
+#                                            UI renders the right badge).
 #   * ``[memory.embedding].model``          → service-restart[hal0-api]
 #                                            (Cognee pins the dimension
 #                                            at index build; switching
@@ -148,8 +119,8 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "models.roots": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "models.auto_scan_on_start": {"apply_class": "immediate", "services": []},
     "models.file_extensions": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "models.store": {"apply_class": "service-restart", "services": [SERVICE_LEMONADE]},
-    "models.pull_root": {"apply_class": "service-restart", "services": [SERVICE_LEMONADE]},
+    "models.store": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
+    "models.pull_root": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
     # [memory.embedding]
     "memory.embedding.model": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "memory.embedding.rerank_enabled": {"apply_class": "immediate", "services": []},
@@ -167,28 +138,9 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
 }
 
 
-def _expand_lemonade() -> dict[str, ApplyPlanEntry]:
-    """Project the lemonade_admin frozensets into the registry dict.
-
-    The Lemonade config surface is a flat key namespace (``port``,
-    ``llamacpp_args``, ...) at the wire level, so the registry uses
-    those bare names. Keys land in :data:`REGISTRY` under their
-    canonical wire name — same name the GET /api/lemonade/config
-    response uses and the UI badge in #545's RuntimeSection already
-    derives its partition from.
-    """
-    out: dict[str, ApplyPlanEntry] = {}
-    for key in IMMEDIATE_KEYS:
-        out[key] = dict(_LEMONADE_IMMEDIATE_ENTRY)
-    for key in DEFERRED_KEYS:
-        out[key] = dict(_LEMONADE_DEFERRED_ENTRY)
-    return out
-
-
 # The single source of truth. Read-only by convention — callers must go
 # through :func:`apply_plan` or :func:`get_registry` to inspect.
 REGISTRY: dict[str, ApplyPlanEntry] = {
-    **_expand_lemonade(),
     **_HAL0_REGISTRY,
 }
 
@@ -242,10 +194,8 @@ def apply_plan(touched_keys: list[str] | tuple[str, ...]) -> ApplyPlanResult:
     """Partition a set of touched keys into the three apply classes.
 
     Args:
-        touched_keys: Setting paths the caller is about to write. The
-            function accepts the dotted hal0 form (``slots.max_slots``)
-            and the bare lemonade form (``llamacpp_args``) — both
-            appear in real PUT bodies.
+        touched_keys: Setting paths the caller is about to write, in
+            the dotted hal0 form (``slots.max_slots``).
 
     Returns:
         An :class:`ApplyPlanResult` with the keys split into
@@ -255,8 +205,8 @@ def apply_plan(touched_keys: list[str] | tuple[str, ...]) -> ApplyPlanResult:
         ``unknown`` (keys the registry has no class for).
 
     Examples:
-        >>> apply_plan(["log_level", "llamacpp_args"])
-        {'immediate': ['log_level'], 'service_restart': {'lemonade': ['llamacpp_args']}, 'manual_restart': [], 'unknown': []}
+        >>> apply_plan(["models.store"])
+        {'immediate': [], 'service_restart': {'slots': ['models.store']}, 'manual_restart': [], 'unknown': []}
 
         >>> apply_plan(["slots.port_range_start"])
         {'immediate': [], 'service_restart': {}, 'manual_restart': ['slots.port_range_start'], 'unknown': []}
@@ -299,7 +249,7 @@ __all__ = [
     "APPLY_CLASSES",
     "REGISTRY",
     "SERVICE_HAL0_API",
-    "SERVICE_LEMONADE",
+    "SERVICE_SLOTS",
     "ApplyPlanEntry",
     "ApplyPlanResult",
     "apply_plan",

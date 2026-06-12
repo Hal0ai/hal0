@@ -14,9 +14,8 @@ stream is split by concern):
   for the slot's systemd unit.
 
 PR-11 (plan §11 + ADR-0008 §5): list responses are enriched with
-Lemonade-derived state — each entry carries ``lemonade_state``
-(``loaded`` | ``idle`` | ``disabled`` | ``error``), an optional
-``backend_url`` lifted from ``/v1/health.loaded[]``, and a
+config-derived fields (drawer seeds, declared backend) plus live
+container state (``container_status`` / ``container_health``), and a
 ``coresident_group`` ID grouping slots that back the same FLM process
 (the NPU trio: ``agent`` + ``stt-npu`` + ``embed-npu``). This is
 backward-compatible — every legacy field is preserved; new keys are
@@ -36,10 +35,9 @@ from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
 from hal0.model_meta import device_to_backend, is_resolvable
 from hal0.slot_view import (
     SlotViewAggregator,
+    config_enrichment,
     container_enrichment,
-    fetch_lemonade_health,
-    lemonade_enrichment,
-    loaded_model_names,
+    loaded_model_names_from_slots,
     serialize_slot,
     synthesize_upstream_entries,
 )
@@ -95,23 +93,12 @@ def _slot_to_dict(slot: Slot, request: Request | None = None) -> dict[str, Any]:
     return serialize_slot(slot, model_cache=model_cache)
 
 
-#: Trigger substring for the nuclear-evict log line. lemond emits this
-#: on the lone ``/v1/load`` path where the error isn't a "not found"
-#: variant — the evict-all blast radius fires. Per ADR-0008 §3 we
-#: surface this verbatim to operators via the dashboard banner.
-NUCLEAR_EVICT_TRIGGER: str = (
-    "Load failed with non-file-not-found error, evicting all models and retrying"
-)
+async def _config_field_enrichment(request: Request) -> dict[str, dict[str, Any]]:
+    """Build per-slot config-derived fields for slot snapshots.
 
-
-async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, Any]]:
-    """Build per-slot Lemonade-derived state for slot snapshots.
-
-    Request-bound adapter over :func:`hal0.slot_view.lemonade_enrichment`
-    (issue #698) — kept here for ``get_slot``'s per-card refresh. Calls
-    ``/v1/health`` once, then walks the slot configs to build a
-    ``{slot_name: {lemonade_state, backend_url?, coresident_group?}}``
-    map. Never raises — a down lemond returns an empty enrichment so
+    Request-bound adapter over :func:`hal0.slot_view.config_enrichment`
+    (issue #698) — kept here for ``get_slot``'s per-card refresh.
+    Never raises — a config read failure returns an empty enrichment so
     the dashboard degrades to the on-disk view rather than 500ing.
     """
     sm = getattr(request.app.state, "slot_manager", None)
@@ -121,7 +108,7 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
         configs = await sm.iter_configs()
     except Exception:
         return {}
-    return lemonade_enrichment(configs, await fetch_lemonade_health())
+    return config_enrichment(configs)
 
 
 async def _container_state_enrichment(request: Request) -> dict[str, dict[str, Any]]:
@@ -131,7 +118,7 @@ async def _container_state_enrichment(request: Request) -> dict[str, dict[str, A
     (issue #698) — kept here for ``get_slot``'s per-card refresh.
 
     Never raises — probe failures degrade to ``stopped`` / ``False`` rather
-    than surfacing as a 500.  Lemonade slots are explicitly excluded.
+    than surfacing as a 500.
     """
     sm = getattr(request.app.state, "slot_manager", None)
     if sm is None:
@@ -146,22 +133,27 @@ async def _container_state_enrichment(request: Request) -> dict[str, dict[str, A
     )
 
 
-async def _lemonade_loaded_models(request: Request) -> set[str]:
-    """Model names lemond currently reports resident (``/v1/health``).
+async def _loaded_models(request: Request) -> set[str]:
+    """Model ids currently served by dispatchable slots.
 
     The truth source for the synthetic composite slot's ``status``: a
-    model is "serving" only when lemond actually holds it, not when the
-    catalogue merely lists it. Never raises — a down/unreachable lemond
-    yields an empty set so the dashboard degrades to "offline" instead
-    of 500ing.
+    model is "serving" only when a slot in the dispatchable ready-set
+    holds it, not when the catalogue merely lists it. Never raises — a
+    slot-list failure yields an empty set so the dashboard degrades to
+    "offline" instead of 500ing.
 
-    Adapter over :func:`hal0.slot_view.loaded_model_names` (issue #698)
-    — kept here for ``routes/health.py``'s composite status payload.
-    ``request`` is unused but retained for signature stability with the
-    other request-bound enrichment helpers.
+    Adapter over :func:`hal0.slot_view.loaded_model_names_from_slots`
+    (issue #698) — kept here for ``routes/health.py``'s composite
+    status payload.
     """
-    del request  # health comes from the process-wide Lemonade provider
-    return loaded_model_names(await fetch_lemonade_health())
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return set()
+    try:
+        slots = await sm.list()
+    except Exception:
+        return set()
+    return loaded_model_names_from_slots(slots)
 
 
 def _synthesize_slots_from_upstreams(
@@ -174,7 +166,7 @@ def _synthesize_slots_from_upstreams(
     surfaces as a read-only slot entry. ``status`` is computed by kind:
 
       * local composite (``kind="slot"``) — ``serving`` only when one of
-        the upstream's advertised models appears in lemond's live loaded
+        the upstream's advertised models appears in the live loaded
         set (``loaded_models``). The catalogue cache lists every configured
         chat model, so it is NOT a liveness signal; consulting the loaded
         set is what keeps the dashboard from showing evicted models as
@@ -212,7 +204,7 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     Thin adapter over :meth:`hal0.slot_view.SlotViewAggregator.snapshot`
     (issue #698): the aggregator merges real SlotManager-backed entries
     with synthetic upstream-backed ones (real slots win on name
-    collision), enriches each real entry with Lemonade-derived state +
+    collision), enriches each real entry with config-derived fields +
     container probe results, stamps per-slot resident memory, and embeds
     live metrics in the card-expected shape. The route only wires the
     aggregator's dependencies off ``app.state`` and serializes the typed
@@ -277,13 +269,12 @@ def _normalize_create_body(body: dict[str, Any]) -> dict[str, Any]:
 
     Two compat hops (#275 bugs 1 + 2):
 
-    1. Top-level ``model: "name"`` (Lemonade-shape) → ``model: {"default":
-       "name"}`` (nested [model] table). The serializer at slots.py:191
-       reads ``cfg.get("model").get("default")`` and the SlotConfig
-       pydantic model has a nested ModelConfig — but the audit-
-       recommended Lemonade-shape body POSTs a top-level string. The
-       result was ``model_default`` MISSING from /api/slots responses
-       for any slot created via POST.
+    1. Top-level ``model: "name"`` (flat shape) → ``model: {"default":
+       "name"}`` (nested [model] table). The serializer reads
+       ``cfg.get("model").get("default")`` and the SlotConfig pydantic
+       model has a nested ModelConfig — but callers may POST a
+       top-level string. The result was ``model_default`` MISSING from
+       /api/slots responses for any slot created via POST.
     2. Missing or zero ``port`` → auto-assign via
        :func:`_next_free_slot_port`. Without this, new slots persist
        ``port=0`` and the dashboard card shows ``port=0`` instead of a
@@ -306,7 +297,7 @@ async def create_slot(request: Request) -> dict[str, object]:
     env file, and the initial state.json. Does NOT start the slot — the
     caller follows with POST /api/slots/<name>/load when ready.
 
-    Accepts both the Lemonade-shape body (top-level ``model: "name"``,
+    Accepts both the flat body shape (top-level ``model: "name"``,
     ``device: "gpu-vulkan"``, no ``port``) and the legacy nested shape
     (``[model] default = "name"``, ``[server] port = 8081``). The body
     is normalized to the nested shape via :func:`_normalize_create_body`
@@ -617,42 +608,6 @@ async def _docker_container_mem_bytes(container_name: str) -> int:
         return 0
 
 
-async def _lemond_loaded_map(request: Request) -> dict[str, dict[str, Any]]:
-    """Map loaded ``model_name`` → ``{"port": child_port, "ctx": ctx_size}`` from
-    lemond's ``health.all_models_loaded``.
-
-    Lemond assigns each llama-server child its own port (8001+), so scraping the
-    slot's configured port misses the live process. Never raises — a down lemond
-    yields an empty map and metrics degrade to the slot-port fallback.
-    """
-    try:
-        from hal0.providers import lemonade_provider
-        from hal0.providers.lemonade import _port_from_backend_url
-
-        health = await lemonade_provider().client().health()
-    except Exception:
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for entry in (health or {}).get("all_models_loaded") or []:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("model_name")
-        if not name:
-            continue
-        ctx = 0
-        ro = entry.get("recipe_options")
-        if isinstance(ro, dict):
-            try:
-                ctx = int(ro.get("ctx_size") or 0)
-            except (TypeError, ValueError):
-                ctx = 0
-        out[str(name)] = {
-            "port": _port_from_backend_url(entry.get("backend_url")),
-            "ctx": ctx,
-        }
-    return out
-
-
 async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
     """Build per-slot live metrics from cgroup + systemd activation time.
 
@@ -676,18 +631,12 @@ async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
-    # Lemond runs each llama-server child on its OWN port (8001+), not the
-    # slot's configured port — resolve the real child port + ctx so the
-    # KV-cache / ctx scrape hits the live process (#26 / BE-METRICS).
-    loaded_map = await _lemond_loaded_map(request)
-
     import time
 
     monotonic_now_us = int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1_000_000)
 
     async def _one(slot: Slot) -> tuple[str, dict[str, Any]]:
-        loaded = loaded_map.get(slot.model_id or "") or {}
-        scrape_port = loaded.get("port") or slot.port
+        scrape_port = slot.port
         unit = f"hal0-slot@{slot.name}.service"
         # Fan systemd properties + docker cgroup + llama metrics out in
         # parallel — three independent IO waits, no point serialising.
@@ -736,8 +685,6 @@ async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
                 out["requests_deferred"] = int(llm_metrics["requests_deferred"])
             if "kv_cache_usage" in llm_metrics:
                 out["kv_cache_usage"] = float(llm_metrics["kv_cache_usage"])
-        if loaded.get("ctx"):
-            out["ctx"] = int(loaded["ctx"])
         return slot.name, out
 
     pairs = await asyncio.gather(*(_one(s) for s in slots), return_exceptions=True)
@@ -837,7 +784,7 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
     local slot, fall through to the synthetic upstream-backed entry.
     SlotNotFound surfaces as the typed slot.not_found envelope.
 
-    PR-11: real-slot snapshots are enriched with Lemonade-derived state
+    PR-11: real-slot snapshots are enriched with config-derived fields
     so the dashboard's per-card refresh stays consistent with the list
     endpoint.
     """
@@ -845,7 +792,7 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
     try:
         snap = await sm.status(name)
         out = _slot_to_dict(snap, request)
-        enrichment = await _lemonade_state_enrichment(request)
+        enrichment = await _config_field_enrichment(request)
         extra = enrichment.get(name)
         if extra:
             for k, v in extra.items():
@@ -946,9 +893,9 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
 
 
 # Map a normalized runtime-backend token to the SlotConfig ``device`` enum
-# the TOML persists. ``auto`` clears the device so lemond falls back to its
-# own default. flm/npu are not selectable through this control (they require
-# a recipe switch, not a llamacpp_backend flip).
+# the TOML persists. ``auto`` clears the device so the load path falls back
+# to its default. flm/npu are not selectable through this control (they
+# require a profile switch, not a device flip).
 _BACKEND_TO_DEVICE: dict[str, str | None] = {
     "rocm": "gpu-rocm",
     "vulkan": "gpu-vulkan",
@@ -956,27 +903,20 @@ _BACKEND_TO_DEVICE: dict[str, str | None] = {
     "auto": None,
 }
 
-# Build-dir → llama-server binary that must exist for a gpu backend to be
-# selectable. cpu/auto don't require a specific GPU build.
-_BACKEND_BUILD_BIN: dict[str, str] = {
-    "rocm": "/var/lib/hal0/lemonade/bin/llamacpp/rocm-stable/llama-server",
-    "vulkan": "/var/lib/hal0/lemonade/bin/llamacpp/vulkan/llama-server",
-}
+# Container images supply the backend builds; a missing image surfaces as
+# ``image_status="missing"`` on the slot card and pulls on demand, so no
+# on-disk build-presence validation is needed here.
+_BACKEND_BUILD_BIN: dict[str, str] = {}
 
 
 def _backend_build_present(backend: str) -> bool:
-    """True if the build's ``llama-server`` binary is installed on disk.
+    """Backend builds ship inside container images — always present.
 
-    Backends with no entry in ``_BACKEND_BUILD_BIN`` (cpu / auto) are always
-    considered present. Module-level so tests can monkeypatch it without
-    reaching into the local ``import os`` inside the route handler.
+    Kept as a seam (module-level, monkeypatchable) for tests and for any
+    future host-side build requirement.
     """
-    import os
-
-    bin_path = _BACKEND_BUILD_BIN.get(backend)
-    if bin_path is None:
-        return True
-    return os.path.exists(bin_path)
+    del backend
+    return True
 
 
 def _normalize_backend_token(raw: str) -> str:
@@ -1076,17 +1016,15 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     _recipe, _llamacpp = device_to_backend(current_device)
     current_declared = _llamacpp or (_recipe if _recipe == "flm" else None)
 
-    # Is the slot currently loaded? Reuse the provider status snapshot so we
-    # can also read the actual backend for the idempotency check + response.
-    from hal0.providers import lemonade_provider
-
-    status_snap: dict[str, Any] = {}
+    # Is the slot currently loaded? Container truth is the slot's
+    # lifecycle state; per-process backend introspection retired with the
+    # legacy runtime (#663: the running image is the backend-of-record,
+    # surfaced as ``actual_image`` on the slot card).
     try:
-        status_snap = await lemonade_provider().status(cfg)
+        is_loaded = bool(sm.is_ready_for_dispatch(name))
     except Exception:
-        status_snap = {}
-    is_loaded = bool(status_snap.get("loaded"))
-    actual_backend = status_snap.get("actual_backend")
+        is_loaded = False
+    actual_backend = None
 
     # Idempotency: the requested backend already equals the declared device,
     # AND (when loaded) the actual backend already matches → no-op.
@@ -1105,13 +1043,13 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
         return out
 
     # Persist the new device. ``auto`` clears the device field entirely so
-    # lemond falls back to its own default on the next load.
+    # the load path falls back to its default on the next load.
     await sm.update_config(name, {"device": target_device or ""})
 
     reloaded = False
     if is_loaded:
-        # Restart so the model reloads under the new backend (the device-
-        # derived llamacpp_backend flows through LemonadeProvider.load).
+        # Restart so the model reloads under the new backend (the
+        # container unit re-renders from the updated TOML).
         await sm.restart(name)
         reloaded = True
 
@@ -1123,11 +1061,6 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     _nrecipe, _nllamacpp = device_to_backend(new_device)
     new_declared = _nllamacpp or (_nrecipe if _nrecipe == "flm" else None)
     new_actual = None
-    try:
-        new_status = await lemonade_provider().status(new_cfg)
-        new_actual = new_status.get("actual_backend")
-    except Exception:
-        new_actual = None
     out["requested_backend"] = backend
     out["declared_backend"] = new_declared
     out["actual_backend"] = new_actual if new_actual else None

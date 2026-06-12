@@ -49,8 +49,6 @@ from hal0.registry.model_store import (
     describe_store_state,
     execute_migration,
     plan_migration,
-    propagate_lemonade_config,
-    restart_lemonade_service,
 )
 
 log = logging.getLogger(__name__)
@@ -180,8 +178,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # manual operator action *before* it renders the success toast, so
     # the partition rides along in the response under ``_hal0.apply_plan``.
     # The top-level config dict stays the same shape — this is purely
-    # additive, mirroring how :mod:`hal0.api.routes.lemonade_admin`
-    # surfaces ``_hal0.effects`` for the Lemonade admin rows (#545).
+    # additive (#545).
     #
     # The touched-keys list is built from the *top-level* keys the PATCH
     # carried, not from the merged body's leaf paths: the apply-plan
@@ -245,7 +242,7 @@ async def get_apply_plan() -> dict[str, Any]:
           "apply_classes": ["immediate", "service-restart", "manual-restart"],
           "registry": {
             "log_level":          {"apply_class": "immediate",       "services": []},
-            "llamacpp_args":      {"apply_class": "service-restart", "services": ["lemonade"]},
+            "models.store":       {"apply_class": "service-restart", "services": ["slots"]},
             "slots.max_slots":    {"apply_class": "service-restart", "services": ["hal0-api"]},
             "slots.port_range_start": {"apply_class": "manual-restart", "services": []},
             ...
@@ -258,11 +255,6 @@ async def get_apply_plan() -> dict[str, Any]:
     partition still rides along on the PUT response as
     ``_hal0.apply_plan`` so the success toast can show the precise
     effect split for just the keys that were touched.
-
-    The registry merges the Lemonade admin keys (reusing
-    :mod:`hal0.api.routes.lemonade_admin` ``IMMEDIATE_KEYS`` /
-    ``DEFERRED_KEYS``) with the dotted hal0 ``Hal0Config`` paths so a
-    single GET returns the full key namespace.
     """
     return {
         "apply_classes": list(APPLY_CLASSES),
@@ -311,7 +303,7 @@ async def get_model_store(request: Request) -> dict[str, Any]:
     The response carries:
       * ``store`` — the raw value of ``[models].store`` (``None`` when
         unset and the legacy ``pull_root`` is being used).
-      * ``effective`` — the path the pull engine + Lemonade actually use.
+      * ``effective`` — the path the pull engine actually uses.
       * ``fallback_active`` — True when ``store`` is unset and we're
         riding the PR-#313 ``pull_root`` for backward compatibility.
       * ``current_state`` — probe of the effective path (exists / files
@@ -344,19 +336,15 @@ async def set_model_store(request: Request) -> dict[str, Any]:
     Behaviour:
       * **Dry-run** (default, ``migrate=false``): when a move is needed,
         responds 200 with ``{status: "needs_migration", plan: {...}}``
-        and does NOT touch hal0.toml, Lemonade config, or files. The UI
-        renders a confirmation modal.
+        and does NOT touch hal0.toml or files. The UI renders a
+        confirmation modal.
       * **Apply** (``migrate=true`` OR no move needed):
         1. Move files (if needed) atomically.
-        2. Overwrite ``extra_models_dir`` in Lemonade config.json.
-        3. Restart hal0-lemonade.service if its config changed.
-        4. Persist hal0.toml.
+        2. Persist hal0.toml.
 
       The order is move-first / persist-last so a failed move leaves
-      the prior config + bytes in place. Lemonade restart is best-
-      effort; failure surfaces in the response but the new value is
-      still persisted (a follow-up ``systemctl restart`` by the
-      operator picks it up).
+      the prior config + bytes in place. Slot containers observe the
+      new path on their next restart.
     """
     try:
         body = await request.json()
@@ -472,17 +460,15 @@ async def _apply_store_change(
     current: Hal0Config,
     plan: MigrationPlan,
 ) -> dict[str, Any]:
-    """Move files (if any) → propagate Lemonade config → persist hal0.toml.
+    """Move files (if any) → persist hal0.toml.
 
     Failure semantics:
-      * Move fails → return 500-style envelope; hal0.toml + Lemonade
-        config untouched.
-      * Lemonade propagate fails → return 500-style envelope; hal0.toml
-        untouched. Files already moved are NOT rolled back — operator
-        can re-run with the new path as both source + target (no-op).
-      * Lemonade restart fails → response surfaces ``restart_failed``
-        but hal0.toml IS persisted (the next manual restart picks up
-        the new value).
+      * Move fails → return 500-style envelope; hal0.toml untouched.
+        Files already moved are NOT rolled back — operator can re-run
+        with the new path as both source + target (no-op).
+
+    Slot containers mount the store path; they observe the new value on
+    their next restart (the apply-plan badge tells the operator).
     """
     migration_result_dict: dict[str, Any] | None = None
     if plan.needed:
@@ -515,24 +501,6 @@ async def _apply_store_change(
             "failed": list(mig.failed),
         }
 
-    # Propagate to Lemonade config.json. A missing file (fresh install
-    # pre-installer) returns ``changed=False, prev=None`` and we skip
-    # the restart — the next install run will seed the right value.
-    try:
-        lemonade_changed, lemonade_prev = propagate_lemonade_config(path)
-    except RuntimeError as exc:
-        raise Hal0Error(
-            f"failed to propagate to Lemonade config: {exc}",
-            code="models.lemonade_propagate_failed",
-            details={"path": path, "error": str(exc)},
-        ) from exc
-    except OSError as exc:
-        raise Hal0Error(
-            f"failed to write Lemonade config: {exc}",
-            code="models.lemonade_propagate_failed",
-            details={"path": path, "error": str(exc)},
-        ) from exc
-
     # Persist hal0.toml.
     new_models_raw = dict(current.models.model_dump(mode="python"))
     new_models_raw["store"] = path
@@ -553,18 +521,6 @@ async def _apply_store_change(
         ) from exc
     request.app.state.hal0_config = merged
 
-    # Restart the lemond unit so it picks up the new extra_models_dir.
-    # Best-effort — surface the outcome in the response.
-    restart_outcome: str = "skipped"
-    if lemonade_changed:
-        rc = await restart_lemonade_service()
-        if rc is True:
-            restart_outcome = "ok"
-        elif rc is False:
-            restart_outcome = "failed"
-        else:
-            restart_outcome = "unavailable"
-
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
         await event_bus.emit(
@@ -574,8 +530,6 @@ async def _apply_store_change(
             f"models.store → {path}",
             data={
                 "store": path,
-                "lemonade_changed": lemonade_changed,
-                "lemonade_restart": restart_outcome,
                 "migrated_files": len(migration_result_dict["moved"])
                 if migration_result_dict
                 else 0,
@@ -587,9 +541,4 @@ async def _apply_store_change(
         "config": _config_to_dict(merged),
         "state": _store_state_payload(merged),
         "migration": migration_result_dict,
-        "lemonade": {
-            "changed": lemonade_changed,
-            "previous_extra_models_dir": lemonade_prev,
-            "restart": restart_outcome,
-        },
     }

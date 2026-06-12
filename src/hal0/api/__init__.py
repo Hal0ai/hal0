@@ -12,15 +12,11 @@ import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
 import structlog
 from fastapi import FastAPI
-
-if TYPE_CHECKING:
-    from hal0.lemonade.idle import IdleDriver
-    from hal0.lemonade.metrics_shim import MetricsShim
 
 from hal0 import __version__
 from hal0.api.agents import (
@@ -80,15 +76,6 @@ from hal0.api.routes import (
     journal as journal_routes,
 )
 from hal0.api.routes import (
-    lemonade_admin as lemonade_admin_routes,
-)
-from hal0.api.routes import (
-    lemonade_logs as lemonade_logs_routes,
-)
-from hal0.api.routes import (
-    lemonade_proxy as lemonade_proxy_routes,
-)
-from hal0.api.routes import (
     mcp as mcp_routes,
 )
 from hal0.api.routes import (
@@ -105,7 +92,6 @@ from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstream
 from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
-from hal0.journal import LemondLogRing, start_lemond_bridge
 from hal0.registry.discover import scan_and_register
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
@@ -146,11 +132,9 @@ async def _fetch_hal0_composite_models(
     """Aggregate every ready chat-capable slot's model id under one upstream.
 
     The composite ``hal0`` upstream replaces the previous per-slot
-    autoregistration (R4 H2): Lemonade serialises chat loading on a
-    single port, so ``chat`` and ``agent`` both produced
-    ``Upstream(url="http://127.0.0.1:8001/v1")`` and ``/v1/models``
-    deduplication credited whichever entry iterated first, leaving the
-    other looking empty in the dashboard.
+    autoregistration (R4 H2) and exists for ``/v1/models`` aggregation
+    only — container slots register their own ``kind="remote"``
+    upstreams for actual dispatch.
 
     The returned list is sorted + deduplicated and cached for
     ``ttl_seconds`` to keep the cold-start fan-out cheap while still
@@ -278,39 +262,31 @@ def _slot_ctx_size(
 
 
 async def _loaded_model_ids(slot_manager: SlotManager) -> set[str] | None:
-    """Return the set of model ids lemond currently reports as loaded.
+    """Return the set of model ids served by dispatchable container slots.
 
-    Probes lemond's ``/v1/health`` once (mirrors
-    ``api.routes.slots._lemonade_state_enrichment``) and collects every
-    ``model_name`` under ``loaded`` / ``all_models_loaded``. Returns
-    ``None`` when the health probe can't be performed at all (no lemonade
-    provider / unexpected error) so callers can decide how to degrade —
-    distinct from an empty set, which means "lemond is up and nothing is
-    loaded".
+    A model counts as loaded when its slot is in the dispatchable
+    ready-set (READY / SERVING / IDLE, per #696). Returns ``None`` when
+    slot configs can't be read at all so callers can decide how to
+    degrade — distinct from an empty set, which means "no slot is
+    currently serving anything".
     """
-    _ = slot_manager  # signature symmetry with the other slot helpers
     try:
-        from hal0.lemonade.errors import LemonadeError
-        from hal0.providers import lemonade_provider
-
-        try:
-            health = await lemonade_provider().client().health()
-        except LemonadeError:
-            return None
-    except Exception:  # pragma: no cover — defensive (import/provider wiring)
-        return None
-    if not isinstance(health, dict):
+        cfgs = await slot_manager.iter_configs()
+    except Exception:  # pragma: no cover — defensive
         return None
     loaded: set[str] = set()
-    for key in ("loaded", "all_models_loaded"):
-        entries = health.get(key)
-        if not isinstance(entries, list):
+    for cfg in cfgs:
+        name = str(cfg.get("name") or "").strip()
+        if not name:
             continue
-        for entry in entries:
-            if isinstance(entry, dict):
-                name = entry.get("model_name")
-                if isinstance(name, str) and name:
-                    loaded.add(name)
+        model_id = _slot_model_id(cfg)
+        if not model_id:
+            continue
+        try:
+            if slot_manager.is_ready_for_dispatch(name):
+                loaded.add(model_id)
+        except Exception:
+            continue
     return loaded
 
 
@@ -323,7 +299,7 @@ async def hal0_slot_alias_models(
     """Build OpenAI ``model`` objects for every LOADED chat slot, alias-addressed.
 
     Each enabled chat slot (``type == "llm"``) whose configured model is
-    currently loaded in lemond surfaces as one model object whose ``id``
+    currently being served surfaces as one model object whose ``id``
     is the slot **alias = slot name** (e.g. ``chat``, ``agent``,
     ``utility``). The alias is the stable handle: it does not change when
     the underlying model is swapped, so callers can pin a co-resident slot
@@ -340,11 +316,11 @@ async def hal0_slot_alias_models(
       back to the model registry entry's ``defaults.context_size``.
     * ``owned_by`` — ``"hal0"``.
 
-    Slots that are disabled, lack a configured model, or whose model is
-    not currently loaded in lemond are omitted. If the lemond health probe
-    can't run at all, no alias entries are emitted (we refuse to advertise
-    a slot we can't confirm is serving) — the composite ``hal0`` model
-    list still carries the raw model ids for direct addressing.
+    Slots that are disabled, lack a configured model, or are not
+    currently serving are omitted. If slot configs can't be read at all,
+    no alias entries are emitted (we refuse to advertise a slot we can't
+    confirm is serving) — the composite ``hal0`` model list still
+    carries the raw model ids for direct addressing.
     """
     created = int(time.time()) if now is None else now
     try:
@@ -381,8 +357,8 @@ async def hal0_slot_alias_models(
             if isinstance(registry_name, str) and registry_name.strip():
                 display = registry_name.strip()
         except Exception:
-            # Model not in the registry (pulled via lemond, hand-loaded,
-            # …) — fall back to the bare model id for the display label.
+            # Model not in the registry (hand-staged, …) — fall back to
+            # the bare model id for the display label.
             display = model_id
 
         obj: dict[str, Any] = {
@@ -406,10 +382,8 @@ async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
     ``utility``; back-compat: ``primary`` / ``agent-hermes``). Used by
     the ``/v1`` route layer to translate an
     alias-addressed request into the slot's configured model id before
-    routing, so the request reaches lemond (which serves chat models by
-    name) with the correct distinct model. This is a thin translation map,
-    not a routing target — the chat slots are NOT independently addressable
-    on their TOML ports.
+    routing, so dispatch resolves the correct distinct model. This is a
+    thin translation map, not a routing target.
 
     Best-effort: returns ``{}`` on any failure so the route layer forwards
     the request untranslated rather than 500ing. Disabled slots and slots
@@ -517,16 +491,12 @@ async def _autoregister_slot_upstreams(
 ) -> None:
     """Register a single composite ``hal0`` upstream.
 
-    Lemonade serialises chat loading and serves EVERY chat model by name
-    from one process (``127.0.0.1:13305``) with co-residency
-    (``max_loaded_models``). The chat slots are therefore NOT independently
-    addressable on their TOML ports — registering one ``kind="slot"``
-    upstream per chat slot (pointed at those ports) produces dead targets
-    and collisions (``chat`` + ``agent`` both pin ``port=8001``).
-    So we register exactly ONE composite ``hal0`` upstream and let the
-    existing lemonade fall-through serve chat models by name; per-slot
-    addressing is handled by an alias → model-id rewrite in the dispatch
-    path (see :meth:`Dispatcher.dispatch`), not by separate upstreams.
+    The composite exists for ``/v1/models`` aggregation (one upstream
+    advertising every registered chat-capable model id). It is never
+    forwarded to — container slots register their own ``kind="remote"``
+    upstreams for dispatch, and per-slot alias addressing is handled by
+    an alias → model-id rewrite in the dispatch path (see
+    :meth:`Dispatcher.dispatch`).
 
     The composite upstream:
 
@@ -696,128 +666,6 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
             )
 
 
-async def _start_lemonade_metrics_shim(app: FastAPI) -> MetricsShim | None:
-    """Start the Lemonade metrics shim (PR-12, ADR-0008 §3).
-
-    Polls ``GET /v1/stats`` + ``GET /v1/health`` on a 5s cadence and
-    holds the latest snapshot on ``app.state.lemonade_metrics_shim`` so
-    the ``GET /api/metrics/prometheus`` route can read it synchronously
-    without blocking on a fresh upstream call per scrape.
-
-    Reuses the LemonadeClient attached by the idle driver — sharing the
-    client matches the pattern in :mod:`hal0.dispatcher.router` and
-    avoids opening a second connection pool against lemond. If the idle
-    driver failed to start (no client on app.state), the shim is
-    skipped: the shim is purely observability; a busted Lemonade config
-    must not block API startup.
-
-    Failures here never block lifespan progression — log + continue, the
-    /api/metrics/prometheus endpoint will simply return an empty
-    exposition body until the shim attaches successfully on a future
-    restart.
-    """
-    client = getattr(app.state, "lemonade_client", None)
-    if client is None:
-        log.info("lemonade.metrics.skipped_no_client")
-        return None
-    try:
-        from hal0.lemonade.metrics_shim import MetricsShim
-
-        shim = MetricsShim(client)
-        await shim.start()
-        app.state.lemonade_metrics_shim = shim
-        log.info("lemonade.metrics.shim_attached")
-        return shim
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning(
-            "lemonade.metrics.shim_start_failed",
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        return None
-
-
-def _build_idle_ttl_provider(
-    slot_manager: SlotManager,
-) -> Callable[[], dict[str, float]]:
-    """Build the per-model idle-TTL provider for the IdleDriver (issue #414).
-
-    Returns a callable the driver invokes once per tick to get the
-    current ``lemond model_name`` → ``idle_timeout_s`` map, derived from
-    each slot's ``[model] default`` and its ``idle_timeout_s``. Rebuilt
-    every call so a config change (PUT slot config) is picked up on the
-    next tick without restarting the driver.
-
-    The driver's resolver is synchronous and runs inside the running
-    event loop, so the provider delegates to ``SlotManager``'s
-    synchronous TOML reader rather than awaiting ``iter_configs``. A
-    model with ``idle_timeout_s == 0`` maps to 0, which the driver
-    treats as "never evict". Unconfigured models aren't in the map and
-    fall back to the driver's global default (300s).
-    """
-
-    def _provider() -> dict[str, float]:
-        return slot_manager.idle_timeout_by_model()
-
-    return _provider
-
-
-async def _start_lemonade_idle_driver(
-    app: FastAPI,
-    slot_manager: SlotManager,
-    *,
-    global_idle_timeout_s: float = 300.0,
-) -> IdleDriver | None:
-    """Start the Lemonade idle-unload driver.
-
-    v0.2 (ADR-0008 §1): Lemonade is the sole inference backend; this
-    driver always starts. PR-10 removed the prior ``HAL0_BACKEND``
-    gate — the v0.1.x toolbox path no longer exists.
-
-    The driver consumes a per-model TTL provider (issue #414) so each
-    slot's configured ``idle_timeout_s`` actually drives eviction
-    instead of a single hardcoded 300s global.
-
-    ``global_idle_timeout_s`` is the fleet-level fallback from
-    ``[slots].idle_timeout_s`` in hal0.toml (default 300 s).
-    Individual slot TOML values override this via the TTL provider.
-
-    Failures here MUST NOT block API startup — a busted Lemonade
-    config shouldn't keep the dashboard from coming up so the user
-    can fix it. The driver itself is also resilient to transient
-    lemond unavailability (see ``lemonade/idle.py`` docstring).
-
-    See ADR-0007 §Related, ADR-0008 §1.
-    """
-    import os
-
-    try:
-        from hal0.lemonade.client import LemonadeClient
-        from hal0.lemonade.idle import IdleDriver
-
-        client = LemonadeClient(
-            api_key=os.environ.get("LEMONADE_API_KEY") or None,
-        )
-        driver = IdleDriver(
-            client,
-            idle_timeout_s=global_idle_timeout_s,
-            ttl_provider=_build_idle_ttl_provider(slot_manager),
-        )
-        await driver.start()
-        # Stash on app.state so /api/health surfaces + tests can find it.
-        app.state.lemonade_client = client
-        app.state.lemonade_idle_driver = driver
-        log.info("lemonade.idle.driver_attached")
-        return driver
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning(
-            "lemonade.idle.driver_start_failed",
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        return None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("hal0.api.startup", version=__version__)
@@ -852,32 +700,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
         except Exception as exc:
             log.warning("models.auto_scan_failed", error=str(exc))
-
-    # Keep Lemonade's server_models.json in sync with the registry. The hook is
-    # wired AFTER the startup auto-scan so a multi-model scan triggers a single
-    # regeneration (the explicit one below) rather than one per added model.
-    # Every subsequent runtime mutation (pull, register, remove) regenerates the
-    # catalog via ModelRegistry.on_change — fixing the drift where curated models
-    # were invisible to Lemonade until a manual `hal0 capabilities sync`.
-    from pathlib import Path as _Path
-
-    from hal0.lemonade.server_models_gen import write_server_models
-
-    _server_models_path = _Path(
-        os.environ.get("HAL0_SERVER_MODELS_PATH", "/opt/lemonade/resources/server_models.json")
-    )
-
-    def _regen_server_models() -> None:
-        write_server_models(model_registry.registry_file, _server_models_path)
-
-    model_registry.on_change = _regen_server_models
-    # One-shot sync so startup scan results land in the catalog immediately,
-    # without waiting for the next mutation. Best-effort: a failure (e.g. the
-    # Lemonade resources dir is absent on a dev box) must not block startup.
-    try:
-        _regen_server_models()
-    except Exception as exc:
-        log.warning("server_models.startup_regen_failed", error=str(exc))
 
     # Shared in-process /v1/models cache.  The dispatcher's cold-cache
     # prefetch path needs cached_models() and fetch_models() to share
@@ -975,13 +797,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # be wired with the same instance); published on app.state here so
     # request handlers can reach it via ``request.app.state.events``.
     app.state.events = event_bus
-    # Lemond log ring (issue #323 / epic #322 Phase 1). Mirrors the
-    # EventBus ring + fan-out for lemond log lines so the unified
-    # /api/journal endpoints can backfill + live-tail both sources via
-    # one envelope. The background bridge task is started below alongside
-    # the other lemonade-bound lifespan tasks.
-    lemond_log_ring = LemondLogRing()
-    app.state.lemond_log_ring = lemond_log_ring
     await event_bus.emit(
         "system.restart",
         "info",
@@ -1063,17 +878,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with contextlib.suppress(asyncio.CancelledError):
             await refresh_task
 
-    # Lemond log bridge (issue #323). Long-running task forwarding
-    # LemonadeClient.stream_logs() into the ring so the journal panel
-    # has backfill across reconnects. The task is resilient to lemond
-    # bouncing — it reconnects with exponential backoff internally.
-    lemond_bridge_task = start_lemond_bridge(lemond_log_ring)
-
-    async def _stop_lemond_bridge() -> None:
-        lemond_bridge_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await lemond_bridge_task
-
     # GpuArbiter idle-restore loop (Phase D, Task D6). Auto-restores the
     # saved LLM set after the img (ComfyUI) slot idles out — window from the
     # img slot's ``[image].idle_restore_minutes`` (default 5; 0 = manual-only).
@@ -1094,28 +898,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             with contextlib.suppress(asyncio.CancelledError):
                 await gpu_arbiter_idle_task
 
-    # Lemonade idle-unload driver (ADR-0007 §Related, ADR-0008 §1). v0.2
-    # makes Lemonade the sole backend, so this driver always starts —
-    # the prior ``HAL0_BACKEND=lemonade`` gate retired in PR-10. Stored
-    # on app.state so tests + future shutdown hooks can introspect it.
-    lemonade_idle_driver = await _start_lemonade_idle_driver(
-        app,
-        slot_manager,
-        global_idle_timeout_s=float(hal0_cfg.slots.idle_timeout_s),
-    )
-    # Lemonade metrics shim (PR-12, plan §10.1 + §11). Shares the
-    # ``app.state.lemonade_client`` attached by the idle driver so we
-    # don't double up on connection pools against lemond. Provides the
-    # snapshot the /api/metrics/prometheus route reads.
-    lemonade_metrics_shim = await _start_lemonade_metrics_shim(app)
-
     # OmniRouter (PR-16, plan §7 + ADR-0008 §8). Client-side OpenAI
     # tool-calling loop. Wired here so the /v1/chat/completions route
     # can pick it up via ``request.app.state.omni_router`` when a
     # request body carries ``omni: true``. The router holds a
     # dedicated httpx client so its lifetime is decoupled from the
-    # LemonadeClient (which owns its own connection pool for the
-    # control plane).
+    # dispatcher's pool. Chat completions re-enter hal0's own /v1
+    # surface (#709) so the full dispatch chain — GpuArbiter
+    # image-mode guard, readiness gates, container routing — applies
+    # to omni traffic too.
     omni_router_client: httpx.AsyncClient | None = None
     try:
         from hal0.omni_router import OmniRouter
@@ -1124,13 +915,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             timeout=httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0),
             follow_redirects=False,
         )
-        lemonade_base_url = os.environ.get("LEMONADE_BASE_URL", "http://127.0.0.1:13305")
+        api_base_url = os.environ.get("HAL0_SELF_BASE_URL", "http://127.0.0.1:8080")
         app.state.omni_router = OmniRouter(
             slot_manager=slot_manager,
             http_client=omni_router_client,
-            lemonade_base_url=lemonade_base_url,
+            api_base_url=api_base_url,
         )
-        log.info("omni_router.attached", base_url=lemonade_base_url)
+        log.info("omni_router.attached", base_url=api_base_url)
     except Exception as exc:
         # Never let OmniRouter failure block API startup — the chat
         # route falls back to direct dispatch when ``omni_router`` is
@@ -1168,21 +959,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             for mgr in managers:
                 await stack.enter_async_context(mgr.run())
             stack.push_async_callback(_stop_refresh_task)
-            stack.push_async_callback(_stop_lemond_bridge)
             stack.push_async_callback(_stop_gpu_arbiter_idle_loop)
             yield
     finally:
-        if lemonade_metrics_shim is not None:
-            await lemonade_metrics_shim.stop()
-        if lemonade_idle_driver is not None:
-            await lemonade_idle_driver.stop()
         if omni_router_client is not None:
             with contextlib.suppress(Exception):
                 await omni_router_client.aclose()
         await slot_manager.stop_idle_monitor()
         await dispatcher.aclose()
-        with contextlib.suppress(Exception):
-            await lemonade_proxy_routes.aclose_client()
         with contextlib.suppress(Exception):
             await comfyui.aclose_client()
         log.info("hal0.api.shutdown")
@@ -1215,19 +999,6 @@ def create_app() -> FastAPI:
     app.include_router(v1.public_router, prefix="/v1", tags=["v1"])
     app.include_router(v1.router, prefix="/v1", tags=["v1"])
 
-    # Issue #212: Lemonade reverse-proxy catch-all on /v1/{path:path}.
-    # Mounted AFTER the dispatcher-owned v1 routers so every explicit
-    # inference path (chat, completions, embeddings, rerankings, audio,
-    # images, models) keeps its dispatcher handler; only un-covered
-    # paths (/v1/health, /v1/stats, /v1/load, /v1/unload, /v1/system-info,
-    # /v1/params, …) fall through to Lemonade. Same admin auth as the
-    # rest of the writer /v1 surface.
-    app.include_router(
-        lemonade_proxy_routes.router,
-        prefix="/v1",
-        tags=["v1", "lemonade-proxy"],
-    )
-
     # /api/install drives the first-run wizard. Auth was removed in ADR-0012
     # so these endpoints are open; the installer surface is admin-only by
     # convention (network-level access control).
@@ -1249,25 +1020,6 @@ def create_app() -> FastAPI:
     app.include_router(hf.router, prefix="/api/hf", tags=["hf"])
     app.include_router(hardware.router, prefix="/api", tags=["hardware"])
     app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
-    # PR-11: Lemonade log proxy — surfaces the /logs/stream WS as SSE
-    # streams the dashboard consumes for the journal panel (PR-14) and
-    # the nuclear-evict toast banner. Same admin auth as the rest of
-    # the slot surface.
-    app.include_router(
-        lemonade_logs_routes.router,
-        prefix="/api/lemonade",
-        tags=["lemonade", "logs"],
-    )
-    # PR-13: Lemonade admin panel — GET /api/lemonade/config + POST
-    # /api/lemonade/config wrap lemond's /internal/config + /internal/set
-    # so the Settings → Lemonade admin panel can read + edit runtime
-    # config. Auth removed in ADR-0012; access is open on the local
-    # network.
-    app.include_router(
-        lemonade_admin_routes.router,
-        prefix="/api/lemonade",
-        tags=["lemonade", "admin"],
-    )
     app.include_router(
         settings.router,
         prefix="/api/settings",
@@ -1329,10 +1081,9 @@ def create_app() -> FastAPI:
         tags=["backends"],
     )
 
-    # NPU trio swap-status (PR-20). One read-only endpoint that merges
-    # the configured NPU LLM slot model with lemond's /v1/health.loaded[]
-    # so the dashboard's "Swap incoming" banner has a single source of
-    # truth. Admin-gated alongside the rest of the capability surface.
+    # NPU trio swap-status (PR-20). One read-only endpoint deriving the
+    # swap window from the npu container slot's lifecycle state so the
+    # dashboard's "Swap incoming" banner has a single source of truth.
     app.include_router(
         npu.router,
         prefix="/api/npu",
@@ -1355,10 +1106,9 @@ def create_app() -> FastAPI:
     # any credential exists. No mutating endpoints live on this router.
     app.include_router(events_routes.router, prefix="/api/events", tags=["events"])
 
-    # Unified journal panel (issue #323, epic #322 Phase 1). Merges
-    # /api/events + /api/lemonade/logs/stream into one shape for the
-    # dashboard's journal panel. Read-only; same first-run rationale
-    # as /api/events.
+    # Unified journal panel (issue #323, epic #322 Phase 1). Serves
+    # /api/events in the journal envelope for the dashboard's journal
+    # panel. Read-only; same first-run rationale as /api/events.
     app.include_router(
         journal_routes.router,
         prefix="/api/journal",

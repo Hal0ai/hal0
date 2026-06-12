@@ -55,7 +55,7 @@ def _model_of(cfg: dict[str, Any]) -> str:
     Mirrors :func:`hal0.slots.manager._model_default` 's shape: the
     chat completion call uses the slot's ``model.default`` as the
     body's ``model`` field. If the slot has no default configured we
-    fall back to the slot name (Lemonade will 404 — surfaced as a
+    fall back to the slot name (the upstream will 404 — surfaced as a
     structured tool_result error rather than crashing the loop).
     """
     model = cfg.get("model") or {}

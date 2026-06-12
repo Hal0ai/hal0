@@ -1,6 +1,6 @@
 """Client-side OmniRouter — OpenAI tool-calling loop owned by hal0.
 
-ADR-0008 §8 + plan §7. Lemonade provides the local tool endpoints
+ADR-0008 §8 + plan §7. hal0's /v1 surface provides the local tool endpoints
 (``/v1/images/*``, ``/v1/audio/*``, ``/v1/embeddings``, ``/v1/rerank``);
 hal0 provides the LLM loop that dispatches them.
 

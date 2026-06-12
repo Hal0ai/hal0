@@ -2,7 +2,7 @@
 
 Each of the eight tools has a coroutine in this module that:
 
-  1. Validates the tool's argument dict (defensive — Lemonade may have
+  1. Validates the tool's argument dict (defensive — the model may have
      parsed the LLM's tool_call already, but a malformed shape would
      crash the loop and abandon the user, so the safer path is to
      return a structured ``{"error": ...}`` tool_result and let the
@@ -10,7 +10,7 @@ Each of the eight tools has a coroutine in this module that:
   2. Uses the injected ``SlotManagerLike`` to pick the target slot
      name via ``route_for_request`` (matching what
      :mod:`hal0.omni_router.filter` decided was eligible).
-  3. Calls the appropriate Lemonade ``/v1/*`` endpoint with the
+  3. Calls the appropriate hal0 ``/v1/*`` endpoint with the
      target slot's model and the tool's arguments.
   4. Returns a JSON-serialisable dict — the OmniRouter loop encodes it
      into the tool_result message envelope.
@@ -34,7 +34,7 @@ Endpoints (per plan §7.2):
   ``route_to_chat``              internal — see route_to_chat.py
   ============================== =================================
 
-The base URL is Lemonade's loopback URL (``http://127.0.0.1:13305``
+The base URL is hal0-api's own loopback URL (``http://127.0.0.1:8080``
 by default per ADR-0008 §1). PR-19 introduces direct-to-FLM-child
 routing for ``stt-npu``/``embed-npu`` slots; PR-16 sticks to the
 single-URL contract.
@@ -73,7 +73,7 @@ class DispatchContext:
 
     Bundled into one object so individual handler signatures stay
     short. The instance is shared across a single chat-completion
-    loop; tools see the same SlotManager + httpx client + Lemonade
+    loop; tools see the same SlotManager + httpx client + API
     URL throughout.
     """
 
@@ -82,13 +82,13 @@ class DispatchContext:
         *,
         slot_manager: SlotManagerLike,
         http_client: httpx.AsyncClient,
-        lemonade_base_url: str,
+        api_base_url: str,
         caller_slot_name: str,
         chat_completion: ChatCompletionFn | None = None,
     ) -> None:
         self.slot_manager = slot_manager
         self.http_client = http_client
-        self.lemonade_base_url = lemonade_base_url.rstrip("/")
+        self.api_base_url = api_base_url.rstrip("/")
         self.caller_slot_name = caller_slot_name
         # ``chat_completion`` is the callback the OmniRouter loop
         # provides so route_to_chat doesn't need to re-implement the
@@ -157,9 +157,9 @@ async def _post_json(
     path: str,
     body: dict[str, Any],
 ) -> dict[str, Any]:
-    """POST JSON to a Lemonade endpoint; return parsed body or an
+    """POST JSON to a hal0 /v1 endpoint; return parsed body or an
     ``{"error": ...}`` envelope. Never raises."""
-    url = f"{ctx.lemonade_base_url}{path}"
+    url = f"{ctx.api_base_url}{path}"
     try:
         resp = await ctx.http_client.post(url, json=body, timeout=_DEFAULT_TOOL_TIMEOUT_S)
     except httpx.TimeoutException:
@@ -252,10 +252,10 @@ async def handle_transcribe_audio(ctx: DispatchContext, args: Mapping[str, Any])
         return cfg_or_err or {"error": "no transcription slot"}
     body: dict[str, Any] = {
         "model": _model_id_of(cfg_or_err or {}),
-        # Lemonade's /v1/audio/transcriptions is a multipart endpoint
+        # /v1/audio/transcriptions is a multipart endpoint
         # in the OpenAI contract; tool-call args come in as a JSON
         # blob from the LLM, so PR-16 wraps that as a single-field
-        # JSON body and lets Lemonade's compatibility layer convert.
+        # JSON body and lets the upstream compatibility layer convert.
         # Real binary uploads still go through the dashboard's direct
         # /v1/audio/transcriptions route (PR-14 voice slot).
         "file": args["audio"],

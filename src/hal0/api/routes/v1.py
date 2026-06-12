@@ -148,50 +148,6 @@ def _record_nonstreaming_throughput(
     events.append((time.monotonic(), int(completion)))
 
 
-def _record_flm_native_metrics(
-    body_bytes: bytes,
-    app_state: Any,
-    slot_name: str | None,
-    model_name: str | None,
-) -> None:
-    """Sniff FLM-native perf fields from a chat-completion response body.
-
-    PR-12 (plan §11 + §12.1 + memory ``hal0_lemonade_flm_npu_install``).
-    FastFlowLM emits ``decoding_speed_tps`` / ``prefill_speed_tps`` /
-    ``prefill_duration_ttft`` / ``kv_token_occupancy_rate_percentage`` /
-    ``decoding_duration`` INSIDE the chat-completion response body —
-    not via ``/v1/stats``. This hook hands those fields to the
-    MetricsShim's in-memory store so the next /api/metrics/prometheus
-    scrape includes them.
-
-    The discriminator is presence of any FLM field in the payload
-    (handled by ``FlmMetrics.from_payload``). Non-FLM upstreams produce
-    no FLM keys → no-op. This keeps the dispatcher path uncoupled from
-    recipe routing — we don't need to ask "is this slot llamacpp or
-    flm?" before recording; the payload shape answers itself.
-
-    Robust by design: any failure (no shim attached, bad slot/model,
-    unparseable JSON) is silently swallowed so a metrics glitch never
-    affects the user-visible chat response.
-    """
-    shim = getattr(app_state, "lemonade_metrics_shim", None)
-    if shim is None or not body_bytes or not slot_name or not model_name:
-        return
-    try:
-        data = json.loads(body_bytes)
-    except (ValueError, TypeError):
-        return
-    if not isinstance(data, dict):
-        return
-    try:
-        shim.record_flm_metrics(slot_name, model_name, data)
-    except Exception:  # pragma: no cover — defensive
-        # The shim's record_flm_metrics is documented as non-raising,
-        # but we wrap defensively so a future contract slip can't take
-        # down the chat path.
-        return
-
-
 async def _read_json_body(request: Request) -> dict[str, Any]:
     """Best-effort JSON parse.  Empty / malformed bodies become ``{}``.
 
@@ -235,19 +191,17 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
     hermes-role-slots: a request may address a co-resident chat slot by
     its **alias** (slot name: ``chat`` / ``agent`` / ``utility``; legacy
     ``primary`` / ``agent-hermes`` also accepted via back-compat aliases)
-    instead of the underlying model id. Lemonade serves chat models by
-    name on lemond, so we rewrite the alias to the slot's configured model
-    id HERE, at the route layer, before either the dispatcher routes it or
-    the lemonade fall-through forwards it. After the rewrite, both
-    ``model==alias`` and ``model==model_id`` carry the correct distinct
-    model name down the existing path and hit the right co-resident model.
+    instead of the underlying model id. We rewrite the alias to the
+    slot's configured model id HERE, at the route layer, before the
+    dispatcher routes it. After the rewrite, both ``model==alias`` and
+    ``model==model_id`` carry the correct distinct model name down the
+    existing path and hit the right co-resident model.
 
     The rewrite is applied to BOTH:
       * the returned ``body`` dict (handed to ``dispatcher.dispatch``), and
-      * the request's cached body bytes (``request._body``) — so the
-        ``NoRouteFound`` → ``lemonade_proxy._proxy`` fall-through, which
-        re-reads ``request.body()`` verbatim, forwards the rewritten model
-        name rather than the bare alias.
+      * the request's cached body bytes (``request._body``) — so any
+        downstream consumer that re-reads ``request.body()`` verbatim
+        forwards the rewritten model name rather than the bare alias.
 
     No-op when: the model isn't a known chat-slot alias, equals its own
     model id already, the slot manager is absent, or the config read
@@ -270,10 +224,10 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
         return body
 
     new_body = {**body, "model": mapped}
-    # Overwrite the cached request body so the lemonade proxy fall-through
-    # (which reads request.body()) forwards the rewritten model name. If we
-    # can't (unexpected request shape), still return the rewritten dict —
-    # the dispatcher path benefits even if the proxy path can't.
+    # Overwrite the cached request body so downstream consumers that
+    # re-read request.body() see the rewritten model name. If we can't
+    # (unexpected request shape), still return the rewritten dict — the
+    # dispatcher path benefits regardless.
     import contextlib
 
     with contextlib.suppress(Exception):
@@ -282,20 +236,14 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
 
 
 def _normalize_loaded_models(request: Request) -> set[str]:
-    """Currently-loaded model ids (cached health snapshot; NO new lemond poll).
+    """Currently-loaded model ids (cached catalog reads; no live poll).
 
-    Unions lemond's loaded set with the models advertised by ready container
-    remotes. Container slots aren't lemond-managed, so their models never show
-    in lemond's snapshot — without this the resolver chain sees no loaded role
-    for a container slot and falls back to the configured primary (cutover #662).
+    Container-backed remotes advertise the models they serve, so their
+    cached catalogs are the loaded set (cutover #662).
     """
     import contextlib
 
     loaded: set[str] = set()
-    shim = getattr(request.app.state, "lemonade_metrics_shim", None)
-    if shim is not None:
-        with contextlib.suppress(Exception):
-            loaded |= set(shim._health.loaded_models)
     # Container-backed remotes (kind="remote" + slot_name) advertise their
     # served model only while up, so their cached catalog == "loaded".
     upstreams = getattr(request.app.state, "upstreams", None)
@@ -370,10 +318,10 @@ async def _slot_thinking_default(request: Request, model_id: str) -> bool:
 
 
 async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    """Resolve hal0/* virtual model names + inject thinking policy for lemond-bound calls.
+    """Resolve hal0/* virtual model names + inject thinking policy.
 
-    Rewrites request._body so BOTH the dispatcher path and the NoRouteFound proxy
-    fall-through observe the normalized body.
+    Rewrites request._body so every downstream consumer observes the
+    normalized body.
     """
     from hal0.normalize.resolver import LiveSlotResolver
     from hal0.normalize.thinking import apply_thinking_policy
@@ -404,34 +352,23 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
 async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> None:
     """#430: load a slot-backed model under its DECLARED backend before routing.
 
-    A by-name request reaches lemond by one of several paths depending on
-    cache/registry state — the composite ``hal0`` passthrough → lemond
-    gateway (PR #424), a real per-slot upstream → ``forward()`` (B1), or the
-    no-route → lemonade-proxy catch-all. On every one of them lemond, given a
-    model it hasn't loaded, auto-loads it under its GLOBAL ``config.json``
-    default backend (``rocm``) — ignoring a slot that declares
-    ``device=gpu-vulkan``. B1 only covers the real-slot path, which in the
-    current deployment has no registered per-slot upstreams, so it never
-    fires.
+    We resolve ``model_id`` → owning chat slot and drive
+    ``SlotManager.load(slot)`` HERE, before ``dispatcher.dispatch`` —
+    idempotent, and the slot's declared device/profile picks the
+    backend. Whichever path dispatch then takes, the model is already
+    loaded under the right backend. ``load`` blocks to READY,
+    preserving the existing single-request synchronous-load UX.
 
-    Rather than patch each path, we resolve ``model_id`` → owning chat slot
-    and drive ``SlotManager.load(slot)`` HERE, before ``dispatcher.dispatch``
-    — idempotent, and it routes the device-derived ``llamacpp_backend``
-    through ``LemonadeProvider.load``. Whichever path dispatch then takes, the
-    model is already loaded under the right backend, so lemond serves the
-    existing child instead of auto-loading under its global default. ``load``
-    blocks to READY, preserving the existing single-request synchronous-load
-    UX (just under the right backend).
+    Scope: chat (``type=llm``) slots, matching the alias map and B1's
+    focus; a model with no backing chat slot dispatches as-is
+    (acceptance criterion: unbacked models unaffected). A slot already
+    loaded under the wrong backend is NOT corrected mid-request
+    (``load`` is a no-op on a ready slot) — that drift is surfaced by
+    status and corrected via the manual ``/api/slots/{name}/backend``
+    control (B3).
 
-    Scope: chat (``type=llm``) slots, matching the alias map and B1's focus;
-    a model with no backing chat slot is left to lemond's global default
-    (acceptance criterion: unbacked models unaffected). A slot already loaded
-    under the wrong backend is NOT corrected mid-request (``load`` is a no-op
-    on a ready slot) — that drift is surfaced by status and corrected via the
-    manual ``/api/slots/{name}/backend`` control (B3).
-
-    Best-effort: any failure is logged and swallowed so routing still proceeds
-    (lemond auto-loads as before) rather than 500ing on this new code path.
+    Best-effort: any failure is logged and swallowed so routing still
+    proceeds rather than 500ing on this code path.
     """
     model_id = body.get("model")
     if not isinstance(model_id, str) or not model_id:
@@ -448,7 +385,7 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     # Reverse the alias→model_id map: find the chat slot that owns this model.
     slot_name = next((slot for slot, mid in alias_to_model.items() if mid == model_id), None)
     if slot_name is None:
-        # No backing chat slot — nothing to honor; lemond's global default applies.
+        # No backing chat slot — nothing to honor.
         return
     try:
         await slot_manager.load(slot_name)
@@ -470,41 +407,14 @@ async def _dispatch_and_forward(
     if body is None:
         body = await _read_json_body(request)
     # Translate a chat-slot alias (chat/agent/utility; also primary/agent-hermes) → model id
-    # before routing so both the dispatcher and the lemonade fall-through
-    # see the real model name.
+    # before routing so the dispatcher sees the real model name.
     body = await _rewrite_chat_slot_alias(request, body)
     # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
-    # loaded under its declared backend whichever routing path dispatch then
-    # takes (composite→gateway, real slot, or proxy fall-through).
+    # loaded under its declared backend whichever routing path dispatch
+    # then takes. A model no upstream serves surfaces as the dispatcher's
+    # NoRouteFound envelope (404) — there is no catch-all fall-through.
     await _ensure_backend_for_model(request, body)
-    from hal0.dispatcher.router import NoRouteFound
-
-    try:
-        call = await dispatcher.dispatch(request, body=body)
-    except NoRouteFound:
-        # Lemonade proxy fall-through (#275 bug 5). The dispatcher only
-        # knows about models advertised by configured upstreams + the
-        # hal0 model registry. Models pulled via Lemonade `/v1/pull`
-        # land in lemond's loaded[] but never in hal0's registry, so
-        # the dispatcher's `dispatch_and_forward` would 404 on them
-        # even though they're perfectly serveable.
-        #
-        # Delegate to the catch-all `/v1/{path:path}` proxy (PR #248)
-        # which forwards verbatim to lemond. This preserves the
-        # specialized routes' value (OmniRouter tool-call loop, FLM
-        # trio detection, TTFT instrumentation) for the cases they
-        # actually handle, while letting bare Lemonade-loaded models
-        # round-trip through hal0-api without registry registration.
-        from hal0.api.routes.lemonade_proxy import _proxy
-
-        # `request.url.path` is e.g. `/v1/chat/completions`; `_proxy`
-        # expects the path AFTER `/v1/` as its second arg (FastAPI's
-        # path converter strips it before passing).
-        proxy_path = request.url.path.removeprefix("/v1/").lstrip("/")
-        # #430 backend-aware load already ran pre-dispatch (see
-        # _ensure_backend_for_model above), so the model reaching lemond here
-        # is already loaded under its slot's declared backend.
-        return await _proxy(request, proxy_path)
+    call = await dispatcher.dispatch(request, body=body)
     # Remember the most recent model we sent to this upstream so the
     # dashboard's synthetic slot reflects what's actually being used,
     # not the first-non-alias from the catalog.
@@ -526,18 +436,6 @@ async def _dispatch_and_forward(
         )
     if isinstance(response, Response) and getattr(response, "body", None):
         _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
-        # PR-12: FLM-native metric ingest. The hook is unconditional —
-        # ``record_flm_metrics`` only acts when the payload carries FLM
-        # fields, so non-FLM upstreams pay only a JSON parse. Streaming
-        # FLM responses (where the same fields land in the final SSE
-        # chunk) are deferred to a follow-up; plan §11 PR-12 scope is
-        # the non-streaming hook + the /v1/stats poll surface.
-        _record_flm_native_metrics(
-            response.body,
-            request.app.state,
-            call.upstream_name,
-            call.resolved_model,
-        )
     return response
 
 
@@ -555,7 +453,7 @@ async def list_models(
     Two classes of entries are emitted:
 
     * **Per-slot alias entries** (``hermes-role-slots``). Every enabled
-      chat slot (``type == "llm"``) that is currently loaded in lemond
+      chat slot (``type == "llm"``) that is currently being served
       surfaces as one model object whose ``id`` is the slot **alias =
       slot name** (``primary``, ``agent-hermes``, ``utility``), carrying a
       human ``name`` (``"<slot> · <model display name>"``) and the slot's
@@ -719,21 +617,20 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     #   3. Stripping the field before forwarding is one line in the
     #      OmniRouter (see ``_strip_omni``).
     #
-    # When OmniRouter is unavailable (no slot_manager, no lemonade
-    # client, or the request doesn't match a chat slot we own) we
-    # fall back to the standard dispatch path.
+    # When OmniRouter is unavailable (no slot_manager, or the request
+    # doesn't match a chat slot we own) we fall back to the standard
+    # dispatch path.
     body = await _read_json_body(request)
     # Translate a chat-slot alias → model id up front so the OmniRouter
     # caller-slot match (keyed on the model id) and the dispatch path both
-    # see the real model name. Also rewrites the cached request body for
-    # the lemonade fall-through.
+    # see the real model name. Also rewrites the cached request body.
     body = await _rewrite_chat_slot_alias(request, body)
     # SOLE normalization gate (chat only). Resolves hal0/* virtual names +
     # injects the thinking policy, and rewrites request._body. Placed BEFORE
     # the omni branch so the OmniRouter posts the normalized body; the
     # non-omni path then hands the already-normalized body=body into
-    # _dispatch_and_forward (which sees request._body too via the proxy
-    # fall-through). Deliberately NOT in _dispatch_and_forward — that helper
+    # _dispatch_and_forward (which sees request._body too).
+    # Deliberately NOT in _dispatch_and_forward — that helper
     # also serves /v1/completions, /v1/embeddings, /v1/rerankings, and the
     # multipart /v1/audio/transcriptions, none of which are chat and where an
     # unconditional request._body=json(body) rewrite would corrupt the
@@ -744,8 +641,7 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
         if looped is not None:
             return looped
     # Strip the knob before forwarding so the upstream never sees it
-    # — Lemonade would reject the unknown field on strict-mode
-    # backends.
+    # — strict-mode backends would reject the unknown field.
     if "omni" in body:
         body = {k: v for k, v in body.items() if k != "omni"}
         import contextlib
@@ -852,7 +748,7 @@ def _wrap_npu_trio_response(upstream: Any) -> Response:
     Mirrors what :class:`Dispatcher._forward_direct` does — strips
     hop-by-hop headers, preserves the upstream status code, and copies
     the content-type so OpenAI clients see the same shape they would
-    have if Lemonade had handled the call. Streaming responses aren't
+    have on the standard dispatch path. Streaming responses aren't
     supported (FLM's transcribe + embed endpoints are non-streaming).
     """
     # Drop hop-by-hop / length headers; Starlette recomputes content-length.
@@ -934,8 +830,8 @@ async def embeddings(request: Request, dispatcher: DispatcherDep) -> Response:
     # PR-19: FLM trio direct-port dispatch for the ``embed-npu`` slot.
     # When a request resolves to an enabled NPU embedding slot AND the
     # FLM chat anchor is loaded, post straight to the FLM child's
-    # ``/v1/embeddings`` instead of Lemonade (which doesn't register
-    # the embed shadow role — only the chat anchor). Plan §5.2.
+    # ``/v1/embeddings`` (the dispatcher doesn't register the embed
+    # shadow role — only the chat anchor). Plan §5.2.
     body = await _read_json_body(request)
     if await _is_npu_trio_request(request, body, slot_type="embedding"):
         trio_response = await _dispatch_via_npu_trio(request, body=body, kind="embed")
@@ -1299,9 +1195,9 @@ async def _forward_multipart(
     # the model field only becomes available after the multipart parse
     # above. When the request targets an enabled NPU transcription slot,
     # forward the raw multipart bytes directly to the FLM child's
-    # ``/v1/audio/transcriptions`` — Lemonade has no transcription
-    # model registered for the FLM chat anchor, so the standard
-    # dispatch path would 404. Plan §5.2.
+    # ``/v1/audio/transcriptions`` — no transcription model is
+    # registered for the FLM chat anchor, so the standard dispatch
+    # path would 404. Plan §5.2.
     if model_value and request.url.path.endswith("/audio/transcriptions"):
         synthetic_body = {"model": model_value}
         if await _is_npu_trio_request(request, synthetic_body, slot_type="transcription"):
