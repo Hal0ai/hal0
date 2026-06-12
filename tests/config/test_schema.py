@@ -39,8 +39,9 @@ class TestSlotConfig:
         assert s.name == "primary"
         assert s.port == 8081
         assert s.backend == "vulkan"
-        # PR-10 (ADR-0008 §2): provider defaults to "lemonade".
-        assert s.provider == "lemonade"
+        # Phase E: provider is a deprecated round-trip label; default
+        # "llama-server" (lemonade no longer exists).
+        assert s.provider == "llama-server"
         assert s.enabled is True
         assert isinstance(s.model, ModelConfig)
 
@@ -349,7 +350,7 @@ class TestSeededSlotTomls:
     def test_seeded_slot_provider_is_valid(self, toml_path: Path) -> None:
         provider = _declared_provider(toml_path)
         if provider is None:
-            pytest.skip(f"{toml_path.name} declares no explicit provider (defaults to lemonade)")
+            pytest.skip(f"{toml_path.name} declares no explicit provider (defaults apply)")
         # Constructing a SlotConfig exercises the real provider validator;
         # a dummy in-range port keeps the assertion focused on `provider`.
         SlotConfig(name="x", port=8081, provider=provider)

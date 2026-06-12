@@ -106,37 +106,6 @@ class FakeSlotManager:
         return _StubSlot("ready")
 
 
-class FakeLemonadeClient:
-    """Records ``internal_config`` reads + ``internal_set`` writes.
-
-    Mirrors :class:`hal0.lemonade.client.LemonadeClient` for the two
-    methods the orchestrator's NPU-trio path uses. The trio args live at
-    the NESTED ``flm.args`` key (lemond's real schema — there is no
-    top-level ``flm_args``); ``initial_flm_args`` seeds ``flm.args``.
-    ``internal_set`` deep-merges the ``flm`` sub-dict so a later
-    ``internal_config`` reflects it.
-    """
-
-    def __init__(self, initial_flm_args: str = "") -> None:
-        self._config: dict[str, Any] = {"flm": {"args": initial_flm_args}}
-        self.set_calls: list[dict[str, Any]] = []
-
-    async def internal_config(self) -> dict[str, Any]:
-        return dict(self._config)
-
-    async def internal_set(self, values: dict[str, Any]) -> dict[str, Any]:
-        self.set_calls.append(dict(values))
-        for key, value in values.items():
-            if key == "flm" and isinstance(value, dict):
-                existing = self._config.get("flm")
-                merged = dict(existing) if isinstance(existing, dict) else {}
-                merged.update(value)
-                self._config["flm"] = merged
-            else:
-                self._config[key] = value
-        return dict(self._config)
-
-
 @pytest.fixture
 def drifted_state(tmp_hal0_home: str) -> Path:
     """Lay out the on-disk state that triggers the prod bug.
@@ -434,47 +403,7 @@ def test_ensure_slot_exists_omits_type_for_rerank() -> None:
     assert "tts" not in _CHILD_TO_SLOT_TYPE
 
 
-# ── Step 2: _recompose_flm_args (Case 6) ──────────────────────────────────────
-
-
-def test_recompose_flm_args_empty_embed_enable() -> None:
-    """Empty current args + (embed, True) → both trio flags explicit, embed=1."""
-    from hal0.capabilities.orchestrator import _recompose_flm_args
-
-    out = _recompose_flm_args("", "embed", True)
-    assert "--embed 1" in out
-    assert "--asr 0" in out  # absent → appended explicit 0
-
-
-def test_recompose_flm_args_preserves_unrecognized_flags() -> None:
-    """Decision 2: only the targeted trio flag is touched; others verbatim."""
-    from hal0.capabilities.orchestrator import _recompose_flm_args
-
-    out = _recompose_flm_args("--threads 8 --asr 1 --embed 0", "embed", True)
-    assert "--threads 8" in out, f"unrecognized flag dropped: {out!r}"
-    assert "--embed 1" in out, f"embed not flipped on: {out!r}"
-    assert "--asr 1" in out, f"asr clobbered: {out!r}"
-
-
-def test_recompose_flm_args_stt_sets_asr() -> None:
-    """child=stt maps to --asr (not --embed)."""
-    from hal0.capabilities.orchestrator import _recompose_flm_args
-
-    out = _recompose_flm_args("--embed 1", "stt", True)
-    assert "--asr 1" in out
-    assert "--embed 1" in out  # preserved
-
-
-def test_recompose_flm_args_disable_emits_explicit_zero() -> None:
-    """Disabling a modality emits the explicit 0 form, keeps the other flag."""
-    from hal0.capabilities.orchestrator import _recompose_flm_args
-
-    out = _recompose_flm_args("--asr 1 --embed 1", "embed", False)
-    assert "--embed 0" in out
-    assert "--asr 1" in out
-
-
-# ── Step 4: test stubs (FakeSlotManager.iter_configs/restart, FakeLemonadeClient)
+# ── Step 4: test stubs (FakeSlotManager.iter_configs/restart) ─────────────────
 
 
 async def test_fake_slot_manager_iter_configs_roundtrip() -> None:
@@ -482,15 +411,6 @@ async def test_fake_slot_manager_iter_configs_roundtrip() -> None:
     fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
     configs = await fake.iter_configs()
     assert configs == [{"name": "agent", "type": "llm", "device": "npu", "enabled": True}]
-
-
-async def test_fake_lemonade_client_records_set() -> None:
-    client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 1")
-    cfg = await client.internal_config()
-    assert cfg["flm"]["args"] == "--asr 1 --embed 1"
-    await client.internal_set({"flm": {"args": "--asr 1 --embed 0"}})
-    assert client.set_calls[-1] == {"flm": {"args": "--asr 1 --embed 0"}}
-    assert (await client.internal_config())["flm"]["args"] == "--asr 1 --embed 0"
 
 
 # ── Step 5: NPU-trio fork (Cases 1-5, 9) ──────────────────────────────────────
@@ -923,3 +843,73 @@ async def test_npu_embed_existing_slot_without_type_gets_typed(
         assert "model" not in c[2]["updates"], (
             f"type write must not carry model (Decision 4): {c[2]['updates']!r}"
         )
+
+
+async def test_npu_embed_enable_container_anchor_without_lemonade_provider(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase E (#687): the trio fork engages with NO lemonade provider wired.
+
+    A container NPU anchor (profile=flm-npu) plus a device=npu embed enable
+    must take the trio path — ``[npu]`` TOML toggle via update_config on the
+    anchor, pending_reload=True, zero load/swap/unload on the embed slot —
+    in a fully lemond-less deploy.
+    """
+    monkeypatch.setattr(
+        CapabilityOrchestrator,
+        "_validate_model_in_catalog",
+        lambda self, slot, child, model_id, backend_id: None,
+    )
+    fake = FakeSlotManager()
+    fake.set_configs(
+        [
+            {
+                "name": "npu",
+                "type": "llm",
+                "device": "npu",
+                "profile": "flm-npu",
+                "enabled": True,
+            }
+        ]
+    )
+    orch = CapabilityOrchestrator(slot_manager=fake)
+    home = Path(tmp_hal0_home)
+    _write_embed_slot(home, device="flm", slot_type="embedding")
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": False,
+        },
+    )
+
+    result = await orch.apply(
+        "embed",
+        "embed",
+        {
+            "enabled": True,
+            "backend": "npu",
+            "provider": "flm",
+            "model": "nomic-embed-text-v1.5-q8_0",
+        },
+    )
+
+    npu_writes = [
+        c
+        for c in fake.calls
+        if c[0] == "update_config"
+        and c[1] == "npu"
+        and c[2]["updates"] == {"npu": {"embed": True}}
+    ]
+    assert npu_writes, (
+        "container anchor [npu] toggle was never written without a lemonade "
+        f"provider — the #687 gate is still active. calls: {fake.calls}"
+    )
+    assert result.get("pending_reload") is True, result
+    assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
+        f"NPU embed path must not bounce the slot: {fake.calls}"
+    )

@@ -19,8 +19,8 @@ managed by :class:`~hal0.slots.manager.SlotManager`. This module owns:
 NPU multiplex (NPU Phase 2): a ``device=npu`` selection for a trio
 modality (``embed`` / ``voice.stt``) does NOT spawn a standalone process.
 Instead ``apply()`` drives the FLM trio — one ``flm serve`` anchor process
-serving chat coresident with embed/asr — by recomposing the anchor's
-lemond ``flm_args`` and writing a ``device=npu``,
+serving chat coresident with embed/asr — by writing the anchor's
+``[npu]`` TOML toggles and a ``device=npu``,
 ``type=embedding|transcription`` slot RECORD for dispatch gating
 (``v1._is_npu_trio_request``). The modality slot is never
 load/swap/unloaded; the anchor is never eagerly restarted — the change
@@ -49,7 +49,6 @@ from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
 from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import BadRequest, Hal0Error, NotFound
-from hal0.lemonade.client import flm_args_from_lemond_config, flm_args_set_payload
 from hal0.model_meta import canonical_device, device_to_legacy_backend
 from hal0.registry.store import ModelRegistry
 from hal0.slot_config import SlotConfigStore, SlotSelection
@@ -91,66 +90,12 @@ _CHILD_TO_SLOT_TYPE: dict[str, str] = {
 LEGAL_SLOTS: tuple[str, ...] = ("embed", "voice", "img", "vision")
 
 
-# child → the ``flm serve`` trio flag it toggles.
-_CHILD_TO_FLM_FLAG: dict[str, str] = {
-    "embed": "--embed",
-    "stt": "--asr",
-}
-
 # child → the ``[npu]`` TOML boolean field that controls it on container slots.
 # "stt" maps to "asr" (FLM CLI flag name); "embed" maps to "embed".
 _CHILD_TO_NPU_FIELD: dict[str, str] = {
     "stt": "asr",
     "embed": "embed",
 }
-
-
-def _recompose_flm_args(current: str, child: str, enable: bool) -> str:
-    """Recompute lemond ``flm_args`` for a single trio modality toggle.
-
-    Decision 2: replace ONLY the ``--asr``/``--embed`` token for ``child``
-    (append if absent), preserving every other token verbatim
-    (``--threads 8`` etc.). Both trio flags are always emitted with an
-    explicit ``0|1`` value so the FLM child's coresident-modality state is
-    unambiguous — an absent flag is normalised to its explicit ``0`` form.
-
-    ``child`` must be ``"embed"`` or ``"stt"``. The flag for ``child`` is
-    set to ``1`` when ``enable`` else ``0``; the other trio flag keeps its
-    existing value, defaulting to ``0`` when absent.
-    """
-    target_flag = _CHILD_TO_FLM_FLAG[child]
-    tokens = current.split()
-
-    # Pull the existing explicit values for both trio flags (default 0).
-    trio_values: dict[str, str] = {"--asr": "0", "--embed": "0"}
-    # Walk tokens, copying through everything that isn't a trio flag (or its
-    # value). We rebuild the trio flags at the end so ordering is stable and
-    # exactly-once even if the input had duplicates or a missing value.
-    passthrough: list[str] = []
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok in trio_values:
-            # Consume the following value token only if present AND
-            # value-shaped (not another flag) — so "--embed --threads 8"
-            # doesn't swallow "--threads" as the embed value.
-            if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-                trio_values[tok] = tokens[i + 1]
-                i += 2
-            else:
-                i += 1
-            continue
-        passthrough.append(tok)
-        i += 1
-
-    # Apply the requested toggle for the targeted modality.
-    trio_values[target_flag] = "1" if enable else "0"
-
-    # Emit: preserved tokens first, then both trio flags in a stable order.
-    out = list(passthrough)
-    out += ["--asr", trio_values["--asr"]]
-    out += ["--embed", trio_values["--embed"]]
-    return " ".join(out)
 
 
 def legal_children(slot: str) -> list[str]:
@@ -217,7 +162,6 @@ class CapabilityOrchestrator:
         *,
         config_path: Path | None = None,
         registry: ModelRegistry | None = None,
-        lemonade_provider: Any | None = None,
     ) -> None:
         self._slot_manager = slot_manager
         self._config_path = Path(config_path) if config_path else capabilities_toml_path()
@@ -226,12 +170,6 @@ class CapabilityOrchestrator:
         # rewrites in this class.
         self._store = SlotConfigStore(capabilities_path=self._config_path)
         self._registry = registry
-        # Zero-arg callable returning a LemonadeClient (NOT a provider) —
-        # used by the NPU-trio path to read/write lemond ``flm_args``. When
-        # None (e.g. unit tests that don't exercise the trio path), the
-        # device=npu embed/stt fork is bypassed and the standard slot
-        # lifecycle runs instead.
-        self._lemonade_provider = lemonade_provider
 
     # ── persistence ──────────────────────────────────────────────────────────
 
@@ -464,15 +402,15 @@ class CapabilityOrchestrator:
         # rewrite below covers it. Reintroduce if the swap path grows a
         # provider-aware case.
 
-        # NPU-trio fork (NPU Phase 2). When a lemonade client is wired AND
-        # the child is a trio modality (embed/stt), a device=npu selection
-        # drives the FLM trio (set lemond flm_args + write a device=npu,
+        # NPU-trio fork (NPU Phase 2). When the child is a trio modality
+        # (embed/stt), a device=npu selection drives the FLM trio (write the
+        # anchor's [npu] TOML toggle + a device=npu,
         # type=embedding|transcription slot RECORD) instead of spawning a
         # standalone FLM process. ``is_npu_target`` gates lifecycle routing;
-        # ``is_npu_modality`` gates the flm_args side-effect, which must
+        # ``is_npu_modality`` gates the toggle side-effect, which must
         # also fire on DEPARTURE from npu (Case 5: npu→gpu must zero the
-        # anchor's embed/asr flag even though the new device isn't npu).
-        is_npu_modality = child in _CHILD_TO_SLOT_TYPE and self._lemonade_provider is not None
+        # anchor's embed/asr toggle even though the new device isn't npu).
+        is_npu_modality = child in _CHILD_TO_SLOT_TYPE
         is_npu_target = is_npu_modality and merged.device == "npu"
         leaving_npu = is_npu_modality and before_device == "npu" and merged.device != "npu"
         pending_reload = False
@@ -679,9 +617,8 @@ class CapabilityOrchestrator:
              pass here. Runs AFTER the store commit that reconciled the
              slot TOML.
           3. Toggle the modality on the anchor via
-             :meth:`_set_flm_modality` — for a container anchor this writes
-             the ``[npu]`` TOML toggle; for a Lemonade anchor it recomposes
-             lemond ``flm_args``. Neither path bounces the anchor.
+             :meth:`_set_flm_modality`, which writes the anchor's ``[npu]``
+             TOML toggle. The anchor is never bounced.
           4. Return ``pending_reload=True`` ALWAYS (Decision 1: never
              auto-restart the live anchor; if the anchor is offline the new
              toggle won't take effect until the user loads it — still
@@ -718,11 +655,7 @@ class CapabilityOrchestrator:
         ``update_config`` preserves sibling fields (e.g. writing
         ``{"npu": {"asr": True}}`` never clobbers ``"embed"``).
 
-        For non-container (Lemonade-managed) anchors the legacy
-        read-modify-write of lemond ``flm.args`` is kept unchanged.
-        Phase E will remove the lemond path entirely.
-
-        No-op when neither a container anchor nor a Lemonade client is wired.
+        No-op when no container NPU anchor exists.
         """
         # Locate the npu LLM anchor and decide which path to take.
         anchor_name: str | None = None
@@ -754,15 +687,6 @@ class CapabilityOrchestrator:
                 enable,
             )
             return
-
-        # Legacy Lemonade path (Phase E removes this).
-        if self._lemonade_provider is None:
-            return
-        client = self._lemonade_provider()
-        cfg = await client.internal_config()
-        current = flm_args_from_lemond_config(cfg)
-        new_args = _recompose_flm_args(current, child, enable)
-        await client.internal_set(flm_args_set_payload(new_args))
 
     async def _ensure_slot_exists_npu(
         self, slot_name: str, child: str, selection: CapabilitySelection

@@ -88,7 +88,7 @@ BACKEND_TO_DEVICE: dict[str, str] = {
 # label compatibility. ``"comfyui"`` is the exception: it is the active
 # container image-gen provider (img.toml, ADR image slots), not a
 # deprecated legacy value.
-_VALID_PROVIDERS = frozenset({"lemonade", "llama-server", "flm", "moonshine", "kokoro", "comfyui"})
+_VALID_PROVIDERS = frozenset({"llama-server", "flm", "moonshine", "kokoro", "comfyui"})
 
 # Slot port range.  8080 is the hal0 API; slots get 8081-8099; 8188 =
 # ComfyUI's stock port for the img slot — kept well-known so operator
@@ -284,40 +284,37 @@ class SlotConfig(BaseModel):
         description=(
             "v0.2 hardware-preference enum: 'gpu-rocm' | 'gpu-vulkan' | 'cpu' "
             "| 'npu'. Replaces the legacy ``backend`` field which mixed "
-            "providers and backends. ``LemonadeProvider`` maps this to "
-            "Lemonade's recipe:backend pair internally. See ADR-0006 §7."
+            "providers and backends. See ADR-0006 §7."
         ),
     )
     provider: str = Field(
-        default="lemonade",
+        default="llama-server",
         description=(
-            "DEPRECATED (v0.2): the slot's runtime provider. Lemonade is the "
-            "sole inference backend (ADR-0008 §2); the legacy values "
-            "('llama-server' | 'flm' | 'moonshine' | 'kokoro') round-trip "
-            "for backwards compatibility but SlotManager ignores them."
+            "DEPRECATED: the slot's legacy provider label. Slots run as "
+            "podman containers (ContainerProvider); this field round-trips "
+            "for backwards compatibility and UI labels only."
         ),
     )
     enabled: bool = Field(
         default=True,
         description="Whether this slot is started on hal0 startup.",
     )
-    runtime: Literal["lemonade", "container"] = Field(
-        default="lemonade",
+    runtime: Literal["container"] = Field(
+        default="container",
         description=(
-            "Slot runtime engine. 'lemonade' (default) dispatches via lemond's "
-            "control plane (ADR-0008). 'container' runs a podman container managed "
-            "by ContainerProvider — requires 'profile' to be set. Lemonade slots "
-            "are unaffected by this field. See the container-runtime design doc §3."
+            "DEPRECATED (kept one release): slot runtime engine. 'container' "
+            "(podman, managed by ContainerProvider) is the only runtime; "
+            "legacy 'lemonade' values are migrated on load. See the "
+            "container-runtime design doc §3."
         ),
     )
     profile: str | None = Field(
         default=None,
         description=(
-            "Profile name from /etc/hal0/profiles.toml. When set, SlotManager "
-            "routes this slot to ContainerProvider instead of LemonadeProvider, "
-            "regardless of 'runtime'. The profile supplies the container image + "
-            "bench-tuned flags; the slot supplies model, context_size, and port. "
-            "See ProfileConfig and the container-runtime design doc §1."
+            "Profile name from /etc/hal0/profiles.toml. The profile supplies "
+            "the container image + bench-tuned flags; the slot supplies "
+            "model, context_size, and port. See ProfileConfig and the "
+            "container-runtime design doc §1."
         ),
     )
     role: str | None = Field(
@@ -395,6 +392,52 @@ class SlotConfig(BaseModel):
         default_factory=dict,
         description="Provider-specific slot params passed verbatim.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_lemonade_runtime(cls, data: Any) -> Any:
+        """Migrate pre-container slot TOMLs on load (Phase E, spec §9).
+
+        ``runtime="lemonade"`` / ``provider="lemonade"`` no longer exist;
+        a legacy TOML must still load so an upgrade over an old /etc/hal0
+        never bricks the API. The markers are coerced (runtime→container,
+        provider→llama-server) with a logged warning, and a profile-less
+        legacy slot is assigned its device-class default profile
+        (DEVICE_DEFAULT_PROFILES) so SlotManager can run it as a container.
+
+        NPU trio alias records (device=npu + type=embedding|transcription)
+        are exempt from profile assignment: the npu anchor container serves
+        them; giving them flm-npu would spawn a duplicate FLM container on
+        single-tenant NPU hardware.
+        """
+        if not isinstance(data, dict):
+            return data
+        legacy_runtime = data.get("runtime") == "lemonade"
+        legacy_provider = data.get("provider") == "lemonade"
+        if not (legacy_runtime or legacy_provider):
+            return data
+        data = dict(data)
+        if legacy_runtime:
+            data["runtime"] = "container"
+        if legacy_provider:
+            data["provider"] = "llama-server"
+        extra = data.get("extra")
+        slot_type = data.get("type") or (
+            extra.get("type") if isinstance(extra, dict) else None
+        )
+        device = data.get("device") or DEFAULT_DEVICE
+        is_trio_alias = device == "npu" and slot_type in ("embedding", "transcription")
+        if not data.get("profile") and not is_trio_alias:
+            default_profile = DEVICE_DEFAULT_PROFILES.get(device)
+            if default_profile:
+                data["profile"] = default_profile
+        log.warning(
+            "slot %r: legacy lemonade runtime/provider migrated to container "
+            "(profile=%s); rewrite the TOML to silence this warning",
+            data.get("name", "?"),
+            data.get("profile"),
+        )
+        return data
 
     @model_validator(mode="before")
     @classmethod
