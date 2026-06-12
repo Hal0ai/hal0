@@ -504,32 +504,24 @@
 .infer-pane .infer-strip {
   padding: 16px 18px;
   border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 .infer-pane .engine.open .infer-strip {
   display: none;
 }
-.infer-pane .strip-split {
+/* hero band — iGPU GTT memory map (2fr) + combined-throughput tile (1fr),
+   pinned at the top of BOTH states (P2). */
+.infer-pane .hero-band {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 22px;
+  grid-template-columns: 2fr 1fr;
+  gap: 20px;
   align-items: start;
 }
-.infer-pane .strip-divider {
-  border-left: 1px solid var(--line-soft);
-  padding-left: 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
 @media (max-width: 880px) {
-  .infer-pane .strip-split {
+  .infer-pane .hero-band {
     grid-template-columns: 1fr;
-  }
-  .infer-pane .strip-divider {
-    border-left: none;
-    padding-left: 0;
-    border-top: 1px solid var(--line-soft);
-    padding-top: 16px;
   }
 }
 
@@ -537,25 +529,27 @@
 .infer-pane .mem {
   position: relative;
 }
-.infer-pane .mem-h {
+/* iGPU GTT track header (P2's MemDual, iGPU-only) */
+.infer-pane .mtrack .mt-h {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   font-family: var(--jbm);
   font-size: 11px;
-  color: var(--fg-3);
-  margin-bottom: 9px;
+  margin-bottom: 7px;
 }
-.infer-pane .mem-h b {
+.infer-pane .mtrack .mt-h .lbl {
+  color: var(--fg-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.infer-pane .mtrack .mt-h .val {
+  color: var(--fg-2);
+}
+.infer-pane .mtrack .mt-h .val b {
   color: var(--fg);
   font-weight: 500;
-  font-size: 13px;
-}
-.infer-pane .mem-h .ceil {
-  color: var(--fg-5);
-}
-.infer-pane .mem-h .free {
-  color: var(--fg-4);
 }
 .infer-pane .membar {
   position: relative;
@@ -564,6 +558,10 @@
   border-radius: 3px;
   overflow: hidden;
   background: var(--bg-3);
+}
+.infer-pane .membar.tall {
+  height: 17px;
+  border-radius: var(--rad-xs, 2px);
 }
 .infer-pane .membar i {
   display: block;
@@ -584,49 +582,6 @@
 }
 .infer-pane .membar .seg-gap {
   box-shadow: inset -1px 0 0 var(--bg-1);
-}
-.infer-pane .mem-tick {
-  position: absolute;
-  top: -4px;
-  bottom: -4px;
-  width: 1px;
-  background: var(--fg-3);
-}
-.infer-pane .mem-tick::after {
-  content: attr(data-label);
-  position: absolute;
-  top: -15px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-family: var(--jbm);
-  font-size: 8.5px;
-  color: var(--fg-4);
-  white-space: nowrap;
-}
-.infer-pane .mem-tip {
-  position: absolute;
-  transform: translateX(-50%);
-  bottom: calc(100% + 9px);
-  background: var(--bg-2);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--rad-sm);
-  padding: 6px 10px;
-  font-family: var(--jbm);
-  font-size: 10.5px;
-  color: var(--fg);
-  white-space: nowrap;
-  pointer-events: none;
-  box-shadow: var(--shadow-menu);
-  z-index: 6;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-.infer-pane .mem-tip .sw {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  flex-shrink: 0;
 }
 .infer-pane .mem-legend {
   display: grid;
@@ -686,11 +641,8 @@
   letter-spacing: 0;
   font-weight: 400;
 }
-.infer-pane .tp-big .tp-num {
-  font-size: 32px;
-}
 .infer-pane .tp-mid .tp-num {
-  font-size: 22px;
+  font-size: 24px;
 }
 .infer-pane .tp-sub {
   font-family: var(--jbm);
@@ -720,163 +672,241 @@
 .infer-pane .spark2 i.hot {
   opacity: 1;
 }
-.infer-pane .tp-split {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-.infer-pane .tp-split .sr {
-  display: grid;
-  grid-template-columns: 64px 1fr 64px;
-  gap: 11px;
-  align-items: center;
-  font-family: var(--jbm);
-  font-size: 11px;
-}
-.infer-pane .tp-split .sr .dlbl {
-  color: var(--fg-3);
-}
-.infer-pane .tp-split .sr .dbar {
-  height: 7px;
-  border-radius: 2px;
-  background: var(--bg-3);
-  overflow: hidden;
-}
-.infer-pane .tp-split .sr .dbar i {
-  display: block;
-  height: 100%;
-}
-.infer-pane .tp-split .sr .dval {
-  text-align: right;
-  color: var(--fg);
-}
-
-/* ─── Slot list ─────────────────────────────────────────────────────── */
-.infer-pane .slist {
-  display: flex;
-  flex-direction: column;
+/* combined-throughput tile (P2's TpTile) — a bordered inset tile that rides
+   the hero band's right column in both states */
+.infer-pane .tp-tile {
   border: 1px solid var(--line);
   border-radius: var(--rad);
-  overflow: hidden;
   background: var(--bg);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
-.infer-pane .slist .sh,
-.infer-pane .slist .sr {
-  display: grid;
-  align-items: center;
+.infer-pane .tp-tile .spark2 {
+  height: 30px;
+}
+.infer-pane .tp-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
   gap: 12px;
-  padding: 9px 14px;
 }
-.infer-pane .slist .sh {
-  padding: 8px 14px;
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--line-soft);
+.infer-pane .tp-aside {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: right;
   font-family: var(--jbm);
-  font-size: 8.5px;
+  font-size: 10px;
+  color: var(--fg-4);
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  color: var(--fg-5);
 }
-.infer-pane .slist .sr {
-  border-bottom: 1px solid var(--line-soft);
-  font-family: var(--jbm);
-  font-size: 12.5px;
-  transition: background 0.12s;
-}
-.infer-pane .slist .sr:last-child {
-  border-bottom: none;
-}
-.infer-pane .slist .sr:hover {
-  background: var(--bg-2);
-}
-.infer-pane .slist .sr.dim {
-  opacity: 0.5;
-}
-.infer-pane .slist .sdot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--fg-5);
-}
-.infer-pane .slist .sdot.serving {
-  background: var(--comfy);
-  box-shadow: 0 0 7px var(--comfy);
-  animation: pulse 1.4s ease-in-out infinite;
-}
-.infer-pane .slist .sdot.ready {
-  background: var(--ok);
-}
-.infer-pane .slist .sdot.warming {
-  background: var(--warn);
-  box-shadow: 0 0 7px var(--warn);
-  animation: pulse 1.4s ease-in-out infinite;
-}
-.infer-pane .slist .sdot.error {
-  background: var(--err);
-}
-.infer-pane .slist .sdot.offline {
-  background: var(--fg-5);
-}
-.infer-pane .slist .snm {
-  color: var(--fg);
-  font-weight: 500;
-  display: inline-flex;
-  align-items: center;
-}
-.infer-pane .slist .snm-star {
-  color: var(--comfy);
-  font-size: 9px;
-  margin-left: 5px;
-}
-.infer-pane .slist .smodel {
+.infer-pane .tp-aside .pk {
   color: var(--fg-3);
+}
+
+/* ─── Slot cards (P2) ───────────────────────────────────────────────── */
+.infer-pane .scards {
+  display: grid;
+  gap: 12px;
+}
+.infer-pane .scards.compact {
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+}
+.infer-pane .scards.full {
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+}
+.infer-pane .scards-empty {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-4);
+  padding: 8px 2px;
+}
+.infer-pane .scard {
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg);
+  overflow: hidden;
+  transition: border-color 0.14s var(--ease);
+}
+.infer-pane .scard:hover {
+  border-color: var(--line-strong);
+}
+.infer-pane .scard.serving {
+  border-left: 2px solid var(--comfy);
+}
+.infer-pane .scard.warming {
+  border-left: 2px solid var(--warn);
+}
+.infer-pane .scard.error {
+  border-left: 2px solid var(--err);
+}
+.infer-pane .scard.dim {
+  opacity: 0.55;
+}
+.infer-pane .scard-h {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-1);
+}
+.infer-pane .scard-h .snm {
+  font-family: var(--jbm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.infer-pane .slist .smem {
-  text-align: right;
-  color: var(--fg-2);
+.infer-pane .sdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-5);
+  flex-shrink: 0;
 }
-.infer-pane .slist .smem .u {
-  color: var(--fg-5);
+.infer-pane .sdot.serving {
+  background: var(--comfy);
+  box-shadow: 0 0 7px var(--comfy);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.infer-pane .sdot.ready {
+  background: var(--ok);
+}
+.infer-pane .sdot.warming {
+  background: var(--warn);
+  box-shadow: 0 0 7px var(--warn);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.infer-pane .sdot.error {
+  background: var(--err);
+}
+.infer-pane .sdot.offline {
+  background: var(--fg-5);
+}
+/* status pill — serving shows live tok/s, others the state word */
+.infer-pane .spill {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--jbm);
   font-size: 10px;
+  border: 1px solid var(--line);
+  color: var(--fg-3);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
-.infer-pane .slist .stps {
-  text-align: right;
+.infer-pane .spill.serving {
   color: var(--comfy);
+  border-color: var(--comfy-line);
+  background: var(--comfy-soft);
 }
-.infer-pane .slist .stps.muted {
-  color: var(--fg-5);
+.infer-pane .spill.ready {
+  color: var(--ok);
+  border-color: var(--ok-line);
+  background: var(--ok-soft);
 }
-.infer-pane .slist .met {
+.infer-pane .spill.warming {
+  color: var(--warn);
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
+}
+.infer-pane .spill.error {
+  color: var(--err);
+  border-color: var(--err-line);
+  background: var(--err-soft);
+}
+.infer-pane .spill.offline {
+  color: var(--fg-4);
+}
+.infer-pane .scard-b {
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  text-align: right;
+  gap: 9px;
 }
-.infer-pane .slist .met .mv {
+.infer-pane .scard .smodel {
+  font-family: var(--jbm);
   font-size: 11.5px;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* meta row — tok/s · ttft · ctx (full cards) */
+.infer-pane .scard-meta {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+}
+.infer-pane .scard-meta .m .l {
+  font-family: var(--jbm);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-4);
+  margin-bottom: 2px;
+}
+.infer-pane .scard-meta .m .v {
+  font-family: var(--jbm);
+  font-size: 13px;
   color: var(--fg);
 }
-.infer-pane .slist .met .mv.acc {
+.infer-pane .scard-meta .m .v.acc {
   color: var(--comfy);
 }
-.infer-pane .slist .met .mv.muted {
+.infer-pane .scard-meta .m .v.muted {
   color: var(--fg-5);
 }
+.infer-pane .scard-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+}
+.infer-pane .scard-foot.bare {
+  border-top: none;
+  padding-top: 0;
+}
+.infer-pane .scard-foot .grow {
+  flex: 1;
+}
+.infer-pane .tag-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-family: var(--jbm);
+  font-size: 9.5px;
+  color: var(--fg-4);
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+}
 
-/* model picker (expanded list) */
-.infer-pane .slist-picker {
+/* model picker (full cards) — a real <select> styled as the design's
+   full-width bordered control */
+.infer-pane .model-picker {
   appearance: none;
   -webkit-appearance: none;
   width: 100%;
   min-width: 0;
-  padding: 5px 24px 5px 9px;
-  border: 1px solid var(--line);
+  padding: 7px 28px 7px 10px;
+  border: 1px solid var(--line-strong);
   border-radius: var(--rad-sm);
   background-color: var(--bg-1);
-  color: var(--fg-2);
+  color: var(--fg);
   font-family: var(--jbm);
   font-size: 11.5px;
   cursor: pointer;
@@ -885,15 +915,25 @@
   white-space: nowrap;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
   background-repeat: no-repeat;
-  background-position: right 8px center;
+  background-position: right 9px center;
   background-size: 11px;
+  transition: border-color var(--dur-fast) var(--ease);
 }
-.infer-pane .slist-picker:hover {
+.infer-pane .model-picker:hover {
   border-color: var(--comfy-line);
 }
-.infer-pane .slist-picker:disabled {
+.infer-pane .model-picker:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* expanded-body status line — right-aligned mono */
+.infer-pane .body-status {
+  display: flex;
+  justify-content: flex-end;
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-4);
 }
 
 /* device chip + profile pill */

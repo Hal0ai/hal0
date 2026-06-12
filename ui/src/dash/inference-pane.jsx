@@ -2,18 +2,24 @@
 //
 // The yellow-accented counterpart to the ComfyUI generation-engine pane
 // (comfyui-pane.jsx). Where ComfyUI models ONE containerized generation
-// engine, this pane is a summary engine-shell over the LLM/capability slot
-// stack: a collapsed hero strip (memory map + active slot list + combined
-// throughput) that expands to the full slot list with per-slot lifecycle
-// controls, a model picker, and a by-device throughput split.
+// engine, this pane is a summary engine-shell over the iGPU/CPU slot stack,
+// implementing the P2 *card* direction from the design handoff
+// (design_handoff_inference_slots/P2-inference-pane.html):
+//   · collapsed = compact hero — iGPU GTT memory map + combined-throughput
+//     tile + the active (serving/ready) slots as compact cards
+//   · expanded  = the same hero pinned on top, then ALL pane slots as full
+//     cards (model picker · tok/s · ttft · ctx · per-slot controls) and a
+//     right-aligned status line
 //
-// Ported from the hal0 Design System exploration (inference-row/{infer-core,
-// infer}.{jsx,css}). Presentational components are inlined here; all data is
-// LIVE via the typed hooks:
-//   - useSlots()           → the slot rollup (every non-image slot)
-//   - useModels()          → the per-slot model picker (expanded list)
-//   - useMemoryMapModel()  → per-slot resident memory (real mem_mb) + pool
-//   - useHardware()        → the unified-RAM frame (124 GB) for the mem bar
+// NPU/FLM slots are cordoned off to the NPU · FLM stack pane below — they
+// live on the NPU budget, not the GTT carve-out, so they appear in neither
+// this pane's cards nor its memory bar (the sec-label still counts them as
+// a pointer to that pane).
+//
+// All data is LIVE via the typed hooks:
+//   - useSlots()           → the slot rollup (non-image, non-NPU)
+//   - useModels()          → the per-slot model picker (full cards)
+//   - useMemoryMapModel()  → per-slot resident memory (real mem_mb) + GTT pool
 //   - useSlot{Restart,Unload,Load,Swap} → real lifecycle mutations
 // Throughput history is a client ring buffer (the ThroughputCard pattern) —
 // the backend exposes no rolling-60s series. Absent metrics render an
@@ -30,7 +36,6 @@ import {
   useSlotSwap,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
-import { useHardware } from '@/api/hooks/useHardware'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 
@@ -129,95 +134,85 @@ function ctxText(s) {
   return `${used ? kCtx(used) : '—'} / ${kCtx(max)}`
 }
 
-// ── memory map (one continuous segmented bar) ──────────────────────────────
+// a labelled block header reused across mem / throughput / slots
+function SubLabel({ icon, note, children }) {
+  return (
+    <div className="blk-h">
+      <span className="ic">
+        <Ic name={icon} size={13} />
+      </span>{' '}
+      {children}
+      {note != null && (
+        <>
+          <span className="grow" />
+          <span className="note">{note}</span>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ── memory — the iGPU GTT carve-out track (P2's MemDual, iGPU-only) ────────
 // Reuses useMemoryMapModel()'s real per-slot resident memory (mem_mb) and
-// colours. The frame is the unified RAM pool (≈124 GB); a tick marks the iGPU
-// GTT carve-out (≈80 GB). A single honest "system" segment accounts for GTT
-// in use beyond the named model weights (KV cache + runtime + buffers) — no
-// fabricated KV/OS split.
-function MemSegmented({ mm, hw, full }) {
-  const [hi, setHi] = useStateI(null)
+// colours. The frame is the GTT pool ceiling (~80 GB carve-out on the
+// appliance); NPU/FLM models are NOT in this bar — they live on the NPU
+// budget. A single honest "system" segment accounts for GTT in use beyond
+// the named model weights (KV cache + runtime + buffers) — no fabricated
+// KV/OS split. Each segment carries a native title (name · GB).
+function MemGtt({ mm, full }) {
   const pool = mm.pool || {}
   const self = mm.self || {}
-  const gttCapGb = pool.totalGb || 0
-  const unifiedGb = hw?.data?.ram?.total || gttCapGb || 0
-  const frame = unifiedGb || 1
-  const modelSegs = (self.slots || []).filter((s) => s.bytesGb > 0)
-  const modelUsedGb = self.modelUsedGb || 0
+  const capGb = pool.totalGb || 0
+  const frame = capGb || 1
+  const gpuSegs = (self.slots || [])
+    .filter((s) => (s.device === 'rocm' || s.device === 'vulkan') && s.bytesGb > 0)
+    .sort((a, b) => b.bytesGb - a.bytesGb)
+  const gpuModelGb = gpuSegs.reduce((a, s) => a + s.bytesGb, 0)
   const gttUsedGb = self.gttUsedGb || 0
-  const gpuModelGb = modelSegs
-    .filter((s) => s.device === 'rocm' || s.device === 'vulkan')
-    .reduce((a, s) => a + s.bytesGb, 0)
-  const systemOtherGb = Math.max(0, round1(gttUsedGb - gpuModelGb))
-
+  const systemGb = Math.max(0, round1(gttUsedGb - gpuModelGb))
+  const usedGb = round1(Math.max(gttUsedGb, gpuModelGb))
   const segs = [
-    ...modelSegs.map((s) => ({
-      key: s.name,
-      label: s.name,
-      gb: s.bytesGb,
-      color: s.color,
-    })),
-    ...(systemOtherGb > 0
-      ? [{ key: '__sys', label: 'system · KV + runtime', gb: systemOtherGb, color: 'var(--fg-5)' }]
+    ...gpuSegs.map((s) => ({ key: s.name, label: s.name, gb: s.bytesGb, color: s.color })),
+    ...(systemGb > 0
+      ? [{ key: '__sys', label: 'system · KV + runtime', gb: systemGb, color: 'var(--fg-5)' }]
       : []),
   ]
-  const usedGb = round1(modelUsedGb + systemOtherGb)
   const freeGb = Math.max(0, round1(frame - usedGb))
   const pct = (gb) => (gb / frame) * 100
-  let acc = 0
-  const placed = segs.map((s) => {
-    const left = (acc / frame) * 100
-    const w = (s.gb / frame) * 100
-    acc += s.gb
-    return { ...s, left, w }
-  })
 
   return (
     <div className="mem">
-      <div className="blk-h">
-        <span className="ic">
-          <Ic name="mem" size={13} />
-        </span>{' '}
-        memory map
-        <span className="grow" />
-        <span className="note">unified · {frame.toFixed(0)} GB</span>
-      </div>
-      <div className="mem-h">
-        <span>
-          <b>{usedGb.toFixed(1)}</b> / {frame.toFixed(0)} <span className="ceil">GB resident</span>
-        </span>
-        <span className="free">{freeGb.toFixed(1)} GB free</span>
-      </div>
-      <div className="membar" style={{ marginTop: 14 }} onMouseLeave={() => setHi(null)}>
-        {placed.map((s) => (
-          <i
-            key={s.key}
-            className="seg-gap"
-            style={{ width: s.w + '%', background: s.color }}
-            onMouseEnter={() => setHi(s)}
-          />
-        ))}
-        <i className="free" style={{ width: Math.max(0, 100 - pct(usedGb)) + '%' }} />
-        {gttCapGb > 0 && gttCapGb < frame && (
-          <span
-            className="mem-tick"
-            data-label={`GTT ${Math.round(gttCapGb)}`}
-            style={{ left: pct(gttCapGb) + '%' }}
-          />
-        )}
-        {hi && (
-          <span
-            className="mem-tip"
-            style={{ left: Math.min(92, Math.max(8, hi.left + hi.w / 2)) + '%' }}
-          >
-            <span className="sw" style={{ background: hi.color }} />
-            <b>{hi.label}</b> {hi.gb} GB
+      <SubLabel icon="mem" note={capGb ? `${Math.round(capGb)} GB carve-out` : '—'}>
+        memory · iGPU GTT
+      </SubLabel>
+      <div className="mtrack">
+        <div className="mt-h">
+          <span className="lbl">
+            <span className="dchip vulkan">
+              <span className="d" />
+              iGPU
+            </span>{' '}
+            GTT carve-out
           </span>
-        )}
+          <span className="val">
+            <b>{usedGb.toFixed(1)}</b> / {Math.round(capGb)} GB
+          </span>
+        </div>
+        <div className="membar tall" data-testid="infer-membar">
+          {segs.map((s) => (
+            <i
+              key={s.key}
+              className="seg-gap"
+              style={{ width: pct(s.gb) + '%', background: s.color }}
+              title={`${s.label} · ${s.gb} GB`}
+            />
+          ))}
+          <i className="free" style={{ width: Math.max(0, 100 - pct(usedGb)) + '%' }} />
+        </div>
       </div>
       {full && (
         <div className="mem-legend">
-          {placed.map((s) => (
+          {segs.map((s) => (
             <div className="ln" key={s.key}>
               <span className="sw" style={{ background: s.color }} />
               <span className="nm">{s.label}</span>
@@ -239,7 +234,7 @@ function MemSegmented({ mm, hw, full }) {
   )
 }
 
-// ── throughput ─────────────────────────────────────────────────────────────
+// ── throughput tile (P2's TpTile) ──────────────────────────────────────────
 function SparkBars({ data = [], hotN = 4 }) {
   const max = Math.max(...data, 1)
   if (!data.length) return <div className="spark2" />
@@ -256,101 +251,78 @@ function SparkBars({ data = [], hotN = 4 }) {
   )
 }
 
-function TpBig({ value, ticks, peak, servingN }) {
+function TpTile({ value, ticks, peak, servingN }) {
   return (
-    <div className="tp tp-big">
-      <div className="blk-h">
+    <div className="tp-tile" data-testid="infer-tp">
+      <div className="blk-h" style={{ margin: 0 }}>
         <span className="ic">
           <Ic name="activity" size={13} />
         </span>{' '}
         combined throughput
-        <span className="grow" />
-        <span className="note">{servingN} serving</span>
       </div>
-      <div className="tp-num">
-        {value == null ? '—' : value}
-        <span className="u">tok/s</span>
+      <div className="tp-row">
+        <div className="tp tp-mid">
+          <div className="tp-num">
+            {value == null ? '—' : value}
+            <span className="u">tok/s</span>
+          </div>
+        </div>
+        <div className="tp-aside">
+          <span>{peak == null ? 'peak —' : `peak ${peak}`}</span>
+          <span className="pk">{servingN} serving</span>
+        </div>
       </div>
       <SparkBars data={ticks} />
-      <div className="tp-sub">
-        <span>last 60s</span>
-        <span className="pk">{peak == null ? 'peak —' : `peak ${peak} t/s`}</span>
-      </div>
     </div>
   )
 }
 
-function TpSplit({ igpu, flm, combined }) {
-  const total = combined || 1
-  return (
-    <div className="tp">
-      <div className="blk-h">
-        <span className="ic">
-          <Ic name="activity" size={13} />
-        </span>{' '}
-        throughput · by device
-      </div>
-      <div className="tp tp-mid" style={{ marginBottom: 4 }}>
-        <div className="tp-num">
-          {combined == null ? '—' : combined}
-          <span className="u">tok/s combined</span>
-        </div>
-      </div>
-      <div className="tp-split">
-        <div className="sr">
-          <span className="dlbl" style={{ color: 'var(--dev-vulkan)' }}>
-            iGPU
-          </span>
-          <span className="dbar">
-            <i style={{ width: (igpu / total) * 100 + '%', background: 'var(--dev-vulkan)' }} />
-          </span>
-          <span className="dval">{igpu || '—'}</span>
-        </div>
-        <div className="sr">
-          <span className="dlbl" style={{ color: 'var(--dev-npu)' }}>
-            FLM
-          </span>
-          <span className="dbar">
-            <i style={{ width: (flm / total) * 100 + '%', background: 'var(--dev-npu)' }} />
-          </span>
-          <span className="dval">{flm || '—'}</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── slot list ────────────────────────────────────────────────────────────
-function DevCell({ s, withProfile, onProfile }) {
+// ── slot cards ──────────────────────────────────────────────────────────
+// provider tag — a joined [ device | PROFILE ] control. The profile pill
+// surfaces the slot's runtime profile (slot.profile, resolved from
+// /etc/hal0/profiles.toml by the backend) and opens the slot editor.
+function DevCell({ s, onProfile }) {
+  const kind = devKind(s.device)
   const dchip =
-    devKind(s.device) === 'npu' ? (
+    kind === 'npu' ? (
       <span className="flm-chip">FLM · npu</span>
     ) : (
-      <span className={'dchip ' + devKind(s.device)}>
+      <span className={'dchip ' + kind}>
         <span className="d" />
-        {devKind(s.device)}
+        {kind}
       </span>
     )
-  if (!withProfile || !s.profile) return dchip
   return (
     <span className="prov">
       {dchip}
-      <button className="profile-pill" title="Runtime profile — edit slot" onClick={onProfile}>
-        {s.profile}
+      <button
+        className="profile-pill"
+        title="Runtime profile — edit slot"
+        onClick={onProfile}
+        data-testid={`infer-profile-${s.name}`}
+      >
+        {s.profile || 'default'}
         <Ic name="chev" size={10} />
       </button>
     </span>
   )
 }
 
-function ModelPickerCell({ s, models, disabled, onSwap }) {
-  if (s.type !== 'llm') return <span className="smodel">{s.model || '—'}</span>
+// full cards get a real model picker (a styled <select> wired to useModels);
+// non-LLM slots keep their static model line.
+function ModelPicker({ s, models, disabled, onSwap }) {
+  if (s.type !== 'llm')
+    return (
+      <div className="smodel" title={s.model || ''}>
+        {s.model || '—'}
+      </div>
+    )
   const opts = (Array.isArray(models) ? models : []).filter((m) => m.type === 'llm')
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
   return (
     <select
-      className="slist-picker mono"
+      className="model-picker mono"
       value={cur}
       disabled={disabled}
       onClick={(e) => e.stopPropagation()}
@@ -371,7 +343,9 @@ function ModelPickerCell({ s, models, disabled, onSwap }) {
   )
 }
 
-function SlotControls({ s, phase, busy, onStart, onStop, onRestart, onLogs, onEdit }) {
+// per-slot controls — Start/Stop are mutually exclusive by running state;
+// compact (collapsed) cards get the minimal set (no Logs/Edit).
+function SlotControls({ phase, busy, compact, onStart, onStop, onRestart, onLogs, onEdit }) {
   const running = phase !== 'off'
   return (
     <span className="slot-ctrls" onClick={(e) => e.stopPropagation()}>
@@ -397,12 +371,16 @@ function SlotControls({ s, phase, busy, onStart, onStop, onRestart, onLogs, onEd
       >
         <Ic name="refresh" size={13} />
       </button>
-      <button className="sctrl" title="Logs" onClick={onLogs}>
-        <Ic name="logs" size={13} />
-      </button>
-      <button className="sctrl" title="Edit" onClick={onEdit}>
-        <Ic name="edit" size={13} />
-      </button>
+      {!compact && (
+        <button className="sctrl" title="Logs" onClick={onLogs}>
+          <Ic name="logs" size={13} />
+        </button>
+      )}
+      {!compact && (
+        <button className="sctrl" title="Edit" onClick={onEdit}>
+          <Ic name="edit" size={13} />
+        </button>
+      )}
     </span>
   )
 }
@@ -424,83 +402,83 @@ function slotCtrlPhase(slot) {
   return 'off'
 }
 
-function SlotList({ rows, full, models, busyName, handlers }) {
-  const tmplC = '10px 84px minmax(0,1fr) auto 76px 70px'
-  const tmplF = '10px 90px minmax(0,1fr) auto 64px 60px 64px 70px 132px'
-  const tmpl = full ? tmplF : tmplC
+function SlotCards({ rows, full, models, busyName, handlers }) {
+  if (!rows.length)
+    return <div className="scards-empty">no active slots — expand to start one</div>
   return (
-    <div className="slist">
-      {full && (
-        <div className="sh" style={{ gridTemplateColumns: tmpl }}>
-          <span />
-          <span>slot</span>
-          <span>model</span>
-          <span>device</span>
-          <span style={{ textAlign: 'right' }}>mem</span>
-          <span style={{ textAlign: 'right' }}>tok/s</span>
-          <span style={{ textAlign: 'right' }}>ttft</span>
-          <span style={{ textAlign: 'right' }}>ctx</span>
-          <span style={{ textAlign: 'right' }}>actions</span>
-        </div>
-      )}
+    <div className={'scards ' + (full ? 'full' : 'compact')}>
       {rows.map(({ s, ind }) => {
         const phase = slotCtrlPhase(s)
+        const dot = dotCls(ind)
         const memGb = typeof s.mem_mb === 'number' && s.mem_mb > 0 ? round1(s.mem_mb / 1024) : null
         const tps = typeof s.metrics?.toks === 'number' && s.metrics.toks > 0 ? s.metrics.toks : null
         const ttft = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
         const busy = busyName === s.name
+        const spill = dot === 'serving' ? (tps ? `${tps} tok/s` : 'serving') : dot
+        const ctrls = (
+          <SlotControls
+            phase={phase}
+            busy={busy}
+            compact={!full}
+            onStart={() => handlers.onStart(s)}
+            onStop={() => handlers.onStop(s)}
+            onRestart={() => handlers.onRestart(s)}
+            onLogs={() => handlers.onLogs(s)}
+            onEdit={() => handlers.onEdit(s)}
+          />
+        )
         return (
           <div
-            className={'sr' + (phase === 'off' ? ' dim' : '')}
+            className={'scard ' + dot + (phase === 'off' ? ' dim' : '')}
             key={s.name}
-            style={{ gridTemplateColumns: tmpl }}
             data-testid={`infer-slot-${s.name}`}
           >
-            <span className={'sdot ' + dotCls(ind)} title={ind.tooltip} />
-            <span className="snm">
-              {s.name}
-              {s.isDefault && <span className="snm-star">★</span>}
-            </span>
-            {full ? (
-              <ModelPickerCell
-                s={s}
-                models={models}
-                disabled={busy}
-                onSwap={(id) => handlers.onSwap(s, id)}
-              />
-            ) : (
-              <span className="smodel">{s.model || '—'}</span>
-            )}
-            <DevCell s={s} withProfile={full} onProfile={() => handlers.onEdit(s)} />
-            <span className="smem">
-              {memGb == null ? '—' : memGb}
-              {memGb != null && <span className="u"> GB</span>}
-            </span>
-            {!full ? (
-              <span className={'stps' + (tps ? '' : ' muted')}>{tps || '—'}</span>
-            ) : (
-              <>
-                <span className="met">
-                  <span className={'mv' + (tps ? ' acc' : ' muted')}>{tps || '—'}</span>
-                </span>
-                <span className="met">
-                  <span className={'mv' + (ttft ? '' : ' muted')}>{ttft ? ttft + 'ms' : '—'}</span>
-                </span>
-                <span className="met">
-                  <span className={'mv' + (s.ctx_max ? '' : ' muted')}>{ctxText(s)}</span>
-                </span>
-                <SlotControls
+            <div className="scard-h">
+              <span className={'sdot ' + dot} title={ind.tooltip} />
+              <span className="snm">{s.name}</span>
+              <span className={'spill ' + dot}>{spill}</span>
+            </div>
+            <div className="scard-b">
+              {full ? (
+                <ModelPicker
                   s={s}
-                  phase={phase}
-                  busy={busy}
-                  onStart={() => handlers.onStart(s)}
-                  onStop={() => handlers.onStop(s)}
-                  onRestart={() => handlers.onRestart(s)}
-                  onLogs={() => handlers.onLogs(s)}
-                  onEdit={() => handlers.onEdit(s)}
+                  models={models}
+                  disabled={busy}
+                  onSwap={(id) => handlers.onSwap(s, id)}
                 />
-              </>
-            )}
+              ) : (
+                <div className="smodel" title={s.model || ''}>
+                  {s.model || '—'}
+                </div>
+              )}
+              {full && (
+                <div className="scard-meta">
+                  <div className="m">
+                    <div className="l">tok/s</div>
+                    <div className={'v' + (tps ? ' acc' : ' muted')}>{tps || '—'}</div>
+                  </div>
+                  <div className="m">
+                    <div className="l">ttft</div>
+                    <div className={'v' + (ttft ? '' : ' muted')}>{ttft ? ttft + 'ms' : '—'}</div>
+                  </div>
+                  <div className="m">
+                    <div className="l">ctx</div>
+                    <div
+                      className={'v' + (s.ctx_max ? '' : ' muted')}
+                      style={{ fontSize: 12 }}
+                    >
+                      {ctxText(s)}
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div className={'scard-foot' + (full ? '' : ' bare')}>
+                <DevCell s={s} onProfile={() => handlers.onEdit(s)} />
+                {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
+                <span className="grow" />
+                {ctrls}
+              </div>
+            </div>
           </div>
         )
       })}
@@ -512,7 +490,6 @@ export function InferencePane() {
   const slotsQuery = useSlots()
   const modelsQuery = useModels()
   const mm = useMemoryMapModel()
-  const hw = useHardware()
   const restartMut = useSlotRestart()
   const unloadMut = useSlotUnload()
   const loadMut = useSlotLoad()
@@ -520,13 +497,20 @@ export function InferencePane() {
   const [open, setOpen] = useStateI(false)
   const [busyName, setBusyName] = useStateI(null)
 
-  // The Inference rollup is every non-image slot (chat + capabilities + the
-  // NPU/FLM trio). Image generation is its own pane (ComfyuiPane).
+  // The Inference rollup is the iGPU/CPU slot stack. Image generation is its
+  // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
+  // stack pane below — they appear here only as the sec-label FLM count.
   const allSlots = slotsQuery.data || []
-  const slots = allSlots.filter((s) => (s.group || '') !== 'img')
+  const nonImg = allSlots.filter((s) => (s.group || '') !== 'img')
+  const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
+  const npuN = nonImg.length - slots.length
 
   const rows = slots.map((s) => ({ s, ind: slotIndicatorFromPhase(s) }))
-  const activeRows = rows.filter((r) => isSlotLive(r.s) || r.ind.cls === 'serving')
+  // collapsed view: serving + ready only (warming/idle wait for the expand)
+  const compactRows = rows.filter((r) => {
+    const d = dotCls(r.ind)
+    return d === 'serving' || d === 'ready'
+  })
   const servingN = rows.filter((r) => r.ind.cls === 'serving').length
   const loadedN = rows.filter((r) => isSlotLive(r.s)).length
 
@@ -534,10 +518,10 @@ export function InferencePane() {
     const k = devKind(s.device)
     return k === 'rocm' || k === 'vulkan'
   }).length
-  const npuN = slots.filter((s) => devKind(s.device) === 'npu').length
 
-  // Combined throughput — summed tok/s across serving slots, with a client
-  // ring buffer for the 60s spark (the backend exposes no rolling series).
+  // Combined throughput — summed tok/s across this pane's serving slots
+  // (NPU/FLM throughput belongs to the NPU pane), with a client ring buffer
+  // for the spark (the backend exposes no rolling series).
   const toksVals = slots
     .map((s) => s?.metrics?.toks)
     .filter((t) => typeof t === 'number' && t > 0)
@@ -555,16 +539,9 @@ export function InferencePane() {
   const ticks = historyRef.current
   const peak = ticks.length ? Math.max(...ticks) : null
 
-  const igpuTps = Math.round(
-    slots
-      .filter((s) => devKind(s.device) !== 'npu')
-      .reduce((a, s) => a + (typeof s.metrics?.toks === 'number' ? s.metrics.toks : 0), 0),
-  )
-  const flmTps = Math.round(
-    slots
-      .filter((s) => devKind(s.device) === 'npu')
-      .reduce((a, s) => a + (typeof s.metrics?.toks === 'number' ? s.metrics.toks : 0), 0),
-  )
+  // GTT headroom for the expanded status line (the memory map's frame).
+  const gttCapGb = mm.pool?.totalGb || 0
+  const gttFreeGb = Math.max(0, Math.round(gttCapGb - (mm.self?.gttUsedGb || 0)))
 
   const run = async (name, mut, args, okMsg) => {
     setBusyName(name)
@@ -604,6 +581,13 @@ export function InferencePane() {
   const openLogs = () => {
     window.location.hash = '#logs'
   }
+
+  const hero = (full) => (
+    <div className="hero-band">
+      <MemGtt mm={mm} full={full} />
+      <TpTile value={value} ticks={ticks} peak={peak} servingN={servingN} />
+    </div>
+  )
 
   return (
     <div className="infer-pane">
@@ -651,36 +635,44 @@ export function InferencePane() {
             </span>
           </div>
 
-          {/* collapsed strip — hidden when the pane is open */}
+          {/* collapsed strip — compact hero, hidden when the pane is open */}
           <div className="infer-strip" data-testid="infer-strip">
-            <div className="strip-split">
-              <SlotList
-                rows={activeRows}
+            {hero(false)}
+            <div>
+              <SubLabel icon="slots" note={`${loadedN} loaded`}>
+                active slots
+              </SubLabel>
+              <SlotCards
+                rows={compactRows}
                 full={false}
                 models={modelsQuery.data}
                 busyName={busyName}
                 handlers={handlers}
               />
-              <div className="strip-divider">
-                <MemSegmented mm={mm} hw={hw} full={false} />
-                <TpBig value={value} ticks={ticks} peak={peak} servingN={servingN} />
-              </div>
             </div>
           </div>
 
-          {/* expandable body */}
+          {/* expandable body — hero pinned on top, then all slots as full cards */}
           <div className="engine-body">
             <div className="inner">
               <div className="engine-b">
-                <MemSegmented mm={mm} hw={hw} full />
-                <SlotList
-                  rows={rows}
-                  full
-                  models={modelsQuery.data}
-                  busyName={busyName}
-                  handlers={handlers}
-                />
-                <TpSplit igpu={igpuTps} flm={flmTps} combined={value} />
+                {hero(true)}
+                <div>
+                  <SubLabel icon="slots" note={`all ${rows.length} · full cards`}>
+                    slots
+                  </SubLabel>
+                  <SlotCards
+                    rows={rows}
+                    full
+                    models={modelsQuery.data}
+                    busyName={busyName}
+                    handlers={handlers}
+                  />
+                </div>
+                <div className="body-status">
+                  {servingN} serving
+                  {gttCapGb > 0 ? ` · ${gttFreeGb} GB free` : ''}
+                </div>
               </div>
             </div>
           </div>

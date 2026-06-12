@@ -1,12 +1,17 @@
 /**
- * inference-pane-v3 — the Inference "engine" pane (slots-page Inference tab).
+ * inference-pane-v3 — the Inference "engine" pane (slots-page Inference tab),
+ * P2 card direction (design_handoff_inference_slots).
  *
  * Behaviour under test:
- *   - collapsed hero strip renders from HAL0_DATA slots (epill + active list)
- *   - the qcaret toggles the engine open (→ full slot list + by-device split)
- *   - per-slot tok/s is shown for a serving slot (no fabricated numbers)
+ *   - collapsed hero strip renders from HAL0_DATA slots: epill, iGPU GTT
+ *     memory map, combined-throughput tile, and compact slot CARDS
+ *   - the serving card's status pill shows live tok/s (no fabricated numbers)
+ *   - the profile pill surfaces the slot's runtime profile name (slot.profile)
+ *   - NPU/FLM slots are cordoned off — absent from the inference pane, present
+ *     in the NPU · FLM stack pane below
+ *   - the qcaret toggles the engine open (→ full cards with tok/s · ttft · ctx)
  *   - a lifecycle control fires the real mutation (Stop → POST /unload)
- *   - the expanded list exposes a real model-picker <select> (useModels)
+ *   - the full card exposes a real model-picker <select> (useModels)
  *   - the NPU/FLM pane renders its own engine shell + trio
  *   - the Inference tab carries the yellow `infer` accent class
  *
@@ -26,31 +31,61 @@ const engine = (page: Page) => page.locator('.infer-pane .engine').first()
 const body = (page: Page) => page.locator('.infer-pane .engine-body').first()
 
 test.describe('Inference engine pane (/slots · Inference tab)', () => {
-  test('collapsed strip renders with epill + active slot rows', async ({ page }) => {
+  test('collapsed strip renders epill + hero band + compact slot cards', async ({ page }) => {
     await page.goto('/#slots')
     await expect(pane(page)).toBeVisible()
     await expect(engine(page)).not.toHaveClass(/\bopen\b/)
     // engine state pill summarises serving/loaded counts (primary is serving).
     await expect(page.getByTestId('infer-epill')).toContainText('serving')
-    // collapsed hero strip is visible and lists the serving primary slot.
+    // collapsed hero strip: iGPU GTT memory map + throughput tile + cards.
     const strip = page.getByTestId('infer-strip')
     await expect(strip).toBeVisible()
-    await expect(strip.getByTestId('infer-slot-primary')).toBeVisible()
-    await expect(strip.locator('.mem .blk-h')).toContainText('memory map')
+    await expect(strip.locator('.mem .blk-h')).toContainText('memory · iGPU GTT')
+    await expect(strip.locator('.tp-tile')).toBeVisible()
+    // the serving primary slot renders as a compact CARD whose status pill
+    // carries the live tok/s (45 in the seed).
+    const card = strip.getByTestId('infer-slot-primary')
+    await expect(card).toBeVisible()
+    await expect(card).toHaveClass(/\bscard\b/)
+    await expect(card.locator('.spill')).toContainText('45 tok/s')
   })
 
-  test('qcaret toggles the engine open → full list + by-device split', async ({ page }) => {
+  test('profile pill surfaces the runtime profile name (slot.profile)', async ({ page }) => {
+    await page.goto('/#slots')
+    // primary carries profile "moe-rocmfp4" in the seed; the [ device |
+    // PROFILE ] provider tag renders it on the compact card too.
+    const pill = page
+      .getByTestId('infer-strip')
+      .getByTestId('infer-profile-primary')
+    await expect(pill).toBeVisible()
+    await expect(pill).toContainText('moe-rocmfp4')
+  })
+
+  test('NPU/FLM slots are cordoned off to the NPU pane', async ({ page }) => {
+    await page.goto('/#slots')
+    await expect(pane(page)).toBeVisible()
+    // the seed's NPU slots (agent / stt-npu / embed-npu) must NOT appear in
+    // the inference pane — collapsed or expanded.
+    for (const name of ['agent', 'stt-npu', 'embed-npu']) {
+      await expect(pane(page).locator(`[data-testid="infer-slot-${name}"]`)).toHaveCount(0)
+    }
+    // …they live in the NPU · FLM stack pane below.
+    await expect(page.locator('.npu-pane').first()).toBeVisible()
+  })
+
+  test('qcaret toggles the engine open → full cards with meta row', async ({ page }) => {
     await page.goto('/#slots')
     await expect(engine(page)).not.toHaveClass(/\bopen\b/)
     await page.getByTestId('infer-qcaret').click()
     await expect(engine(page)).toHaveClass(/\bopen\b/)
-    // full-list header (actions column) + by-device split live in the body.
-    await expect(body(page).locator('.slist .sh')).toContainText('actions')
-    await expect(body(page).locator('.tp-split')).toHaveCount(1)
-    // per-slot tok/s rendered for the serving primary slot (45 in the seed).
-    await expect(body(page).getByTestId('infer-slot-primary').locator('.met').first()).toContainText(
-      '45',
-    )
+    // full-card grid + the hero band's throughput tile live in the body.
+    await expect(body(page).locator('.scards.full')).toHaveCount(1)
+    await expect(body(page).locator('.tp-tile')).toHaveCount(1)
+    // the full card's meta row reports real metrics for the serving primary
+    // slot (toks 45 · ttft 220 in the seed; no fabricated numbers).
+    const meta = body(page).getByTestId('infer-slot-primary').locator('.scard-meta')
+    await expect(meta.locator('.m .v').nth(0)).toContainText('45')
+    await expect(meta.locator('.m .v').nth(1)).toContainText('220ms')
     // toggle back closed.
     await page.getByTestId('infer-qcaret').click()
     await expect(engine(page)).not.toHaveClass(/\bopen\b/)
@@ -69,12 +104,12 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     await expect.poll(() => unloads.length).toBeGreaterThan(0)
   })
 
-  test('expanded list exposes a real model-picker <select> (useModels)', async ({ page }) => {
+  test('full card exposes a real model-picker <select> (useModels)', async ({ page }) => {
     await page.goto('/#slots')
-    // The full-list model picker lives in the (collapsible) engine body; it is
+    // The full-card model picker lives in the (collapsible) engine body; it is
     // present in the DOM regardless of open state, so assert on it directly —
     // no flaky expand-click needed for a structural check.
-    const picker = body(page).getByTestId('infer-slot-primary').locator('select.slist-picker')
+    const picker = body(page).getByTestId('infer-slot-primary').locator('select.model-picker')
     await expect(picker).toHaveCount(1)
     // the picker is populated (at minimum the current model is an option).
     await expect.poll(async () => picker.locator('option').count()).toBeGreaterThan(0)
