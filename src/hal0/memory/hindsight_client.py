@@ -103,6 +103,32 @@ class HindsightRestClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: Any | None = None,
+    ) -> Any:
+        """Generic authenticated forward to any Hindsight REST path.
+
+        The admin surface (/api/memory/banks/*) funnels its allowlisted
+        passthrough through here so auth + base-url live in one place.
+        Raises ``httpx.HTTPStatusError`` on non-2xx (callers map status).
+        """
+        resp = await self._http.request(
+            method,
+            path,
+            headers=self._headers(),
+            params=params,
+            json=json_body,
+        )
+        resp.raise_for_status()
+        if not resp.content:
+            return {}
+        return resp.json()
+
     async def aclose(self) -> None:
         if self._owns:
             await self._http.aclose()

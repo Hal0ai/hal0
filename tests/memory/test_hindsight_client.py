@@ -67,3 +67,33 @@ async def test_list_memories_hits_list_endpoint_and_returns_json():
     assert ("GET", "/v1/default/banks/shared/memories/list") in seen
     assert result == payload
     assert result["items"][0]["id"] == "fact-1"
+
+
+@pytest.mark.asyncio
+async def test_request_json_generic_forward_carries_auth_params_and_body():
+    seen: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["params"] = dict(request.url.params)
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = request.content.decode() if request.content else ""
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177") as http:
+        client = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+        out = await client.request_json(
+            "POST",
+            "/v1/default/banks/shared/memories/recall",
+            params={"limit": 5},
+            json_body={"query": "q"},
+        )
+
+    assert out == {"ok": True}
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/v1/default/banks/shared/memories/recall"
+    assert seen["params"] == {"limit": "5"}
+    assert seen["auth"] == "Bearer hal0-local-noauth"
+    assert '"query"' in seen["body"]

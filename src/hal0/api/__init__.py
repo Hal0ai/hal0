@@ -82,6 +82,9 @@ from hal0.api.routes import (
     memory as memory_routes,
 )
 from hal0.api.routes import (
+    memory_admin as memory_admin_routes,
+)
+from hal0.api.routes import (
     profiles as profiles_routes,
 )
 from hal0.api.routes import (
@@ -1076,6 +1079,14 @@ def create_app() -> FastAPI:
     # dashboard SPA fallback doesn't shadow these paths.
     app.include_router(
         memory_routes.router,
+        prefix="/api/memory",
+        tags=["memory"],
+    )
+    # Hindsight engine admin surface (banks/graph/recall/operations…) —
+    # the dashboard Memory view's data plane. Same prefix, separate router
+    # so the engine-agnostic provider routes above stay engine-agnostic.
+    app.include_router(
+        memory_admin_routes.router,
         prefix="/api/memory",
         tags=["memory"],
     )

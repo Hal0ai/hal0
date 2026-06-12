@@ -97,6 +97,11 @@ class HindsightProvider(MemoryProvider):
         self._graph_route = "upstream"
         self._rerank_enabled = reranker is not None
 
+    @property
+    def hindsight_client(self) -> Any:
+        """REST client handle for the engine admin surface (memory_admin routes)."""
+        return self._client
+
     # ── ACL: the caller's allowed namespaces → banks ───────────────────
 
     def _allowed_namespaces(self, requested: str | list[str], client_id: str | None) -> list[str]:
