@@ -29,12 +29,25 @@ headers off that request at call time, mirroring the REST surface in
 from __future__ import annotations
 
 import os
+import re
 
 import structlog
 from starlette.requests import Request
 from starlette.types import ASGIApp
 
 log = structlog.get_logger("hal0.api.mcp_mount")
+
+# Header carrying the caller's agent identity (post-ADR-0012 — Bearer auth
+# was removed; identity flows on this header, same as the REST memory
+# surface in :mod:`hal0.api.routes.memory`).
+_AGENT_HEADER = "x-hal0-agent"
+
+# ADR-0005 §5 identity grammar — alnum + ``-`` + ``_``, ≤64 chars. The
+# value feeds the ``private:<agent>`` dataset name + the audit source, so
+# it must be path-traversal-free and bounded. Mirrors
+# ``hal0.api.routes.memory._AGENT_ID_PATTERN`` so MCP + REST resolve the
+# same identity to the same namespace (issue #317).
+_AGENT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
 # Localhost values FastMCP itself uses when it auto-enables DNS-rebinding
 # protection for a 127.0.0.1 server. We keep them as the secure floor so
@@ -147,9 +160,35 @@ def bearer_resolver() -> tuple[str | None, str]:
 
 
 def client_id_resolver() -> str:
-    """Return ``client_id`` for the current MCP request. See
-    :func:`bearer_resolver`."""
-    return bearer_resolver()[1]
+    """Return ``client_id`` for the current MCP request (issue #317).
+
+    Identity comes from the ``X-hal0-Agent`` header — the same header the
+    REST memory surface reads (:func:`hal0.api.routes.memory._agent_id`).
+    Before this fix the resolver returned the Bearer token, so MCP callers
+    sending ``X-hal0-Agent`` + ``X-hal0-Private`` collapsed to the
+    ``anonymous`` client and their private writes silently landed in the
+    ``shared`` namespace.
+
+    Validation mirrors the REST side: the value must match
+    ``^[a-zA-Z0-9_\\-]{1,64}$`` and must not carry a ``private:`` prefix
+    (the namespace is reached via :func:`private_resolver`, not by
+    smuggling the prefix through identity). An absent / malformed header
+    falls back to ``"anonymous"`` — the downstream namespace resolver then
+    rejects a ``private`` write with no client_id rather than mis-scoping
+    it.
+    """
+    request = _current_mcp_request()
+    if request is None:
+        return "anonymous"
+    raw = request.headers.get(_AGENT_HEADER)
+    if raw is None:
+        return "anonymous"
+    candidate = raw.strip()
+    if not candidate or candidate.startswith("private:"):
+        return "anonymous"
+    if not _AGENT_ID_PATTERN.match(candidate):
+        return "anonymous"
+    return candidate
 
 
 def private_resolver() -> bool:
