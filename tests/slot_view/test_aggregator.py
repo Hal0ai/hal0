@@ -437,6 +437,110 @@ class TestContainerEnrichment:
         assert out["gpu-chat"]["npu"] == {"asr": True, "embed": True}
 
 
+class MapContainerProvider(FakeContainerProvider):
+    """Per-slot ``is_active`` — the trio anchor runs, shadows have no unit."""
+
+    def __init__(self, active_map: dict[str, bool], **kw: Any) -> None:
+        super().__init__(**kw)
+        self._active_map = active_map
+
+    def is_active(self, slot_name: str) -> bool:
+        return self._active_map.get(slot_name, False)
+
+
+def _npu_anchor_cfg(**over: Any) -> dict[str, Any]:
+    cfg: dict[str, Any] = {
+        "name": "npu",
+        "port": 8088,
+        "type": "llm",
+        "device": "npu",
+        "model": {"default": "gemma3:4b"},
+    }
+    cfg.update(over)
+    return cfg
+
+
+def _shadow_cfg(name: str = "embed", slot_type: str = "embedding", **over: Any) -> dict[str, Any]:
+    cfg: dict[str, Any] = {
+        "name": name,
+        "port": 8082,
+        "type": slot_type,
+        "device": "npu",
+        "model": {"default": "embed-gemma:300m"},
+    }
+    cfg.update(over)
+    return cfg
+
+
+class TestShadowSlotStatusInheritance:
+    """#733: embed/stt shadow slots have no unit/container of their own —
+    the npu anchor's FLM process serves them coresident, so their live
+    container status must be the anchor's, not their (always-absent) own."""
+
+    async def test_shadow_inherits_running_anchor(self) -> None:
+        out = await container_enrichment(
+            [
+                _npu_anchor_cfg(),
+                _shadow_cfg("embed", "embedding"),
+                _shadow_cfg("stt", "transcription"),
+            ],
+            pull_jobs={},
+            provider=MapContainerProvider({"npu": True}, healthy=True),
+        )
+        for shadow in ("embed", "stt"):
+            assert out[shadow]["container_status"] == "running"
+            assert out[shadow]["container_health"] is True
+            assert out[shadow]["served_by"] == "npu"
+        # anchor itself is untouched by the inheritance pass
+        assert out["npu"]["container_status"] == "running"
+        assert "served_by" not in out["npu"]
+
+    async def test_stopped_anchor_propagates(self) -> None:
+        out = await container_enrichment(
+            [_npu_anchor_cfg(), _shadow_cfg()],
+            pull_jobs={},
+            provider=MapContainerProvider({"npu": False}),
+        )
+        assert out["embed"]["container_status"] == "stopped"
+        assert out["embed"]["served_by"] == "npu"
+
+    async def test_disabled_shadow_not_inherited(self) -> None:
+        out = await container_enrichment(
+            [_npu_anchor_cfg(), _shadow_cfg(enabled=False)],
+            pull_jobs={},
+            provider=MapContainerProvider({"npu": True}, healthy=True),
+        )
+        assert out["embed"]["container_status"] == "stopped"
+        assert "served_by" not in out["embed"]
+
+    async def test_shadow_without_anchor_stays_stopped(self) -> None:
+        out = await container_enrichment(
+            [_shadow_cfg()],
+            pull_jobs={},
+            provider=MapContainerProvider({}),
+        )
+        assert out["embed"]["container_status"] == "stopped"
+        assert "served_by" not in out["embed"]
+
+    async def test_disabled_anchor_does_not_serve(self) -> None:
+        out = await container_enrichment(
+            [_npu_anchor_cfg(enabled=False), _shadow_cfg()],
+            pull_jobs={},
+            provider=MapContainerProvider({"npu": True}, healthy=True),
+        )
+        assert out["embed"]["container_status"] == "stopped"
+        assert "served_by" not in out["embed"]
+
+    async def test_non_npu_slots_unaffected(self) -> None:
+        out = await container_enrichment(
+            [_npu_anchor_cfg(), _container_cfg()],
+            pull_jobs={},
+            provider=MapContainerProvider({"npu": True}, healthy=True),
+        )
+        assert out["gpu-chat"]["container_status"] == "stopped"
+        assert "served_by" not in out["gpu-chat"]
+
+
 # ── concern 4: per-slot memory accounting ───────────────────────────────────
 
 

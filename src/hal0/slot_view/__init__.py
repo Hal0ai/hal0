@@ -473,6 +473,36 @@ async def container_enrichment(
             entry["image_status"] = "missing"
 
         out[name] = entry
+
+    # #733: trio shadow slots (embed/stt — device=npu, non-llm) never run a
+    # unit or container of their own; the npu anchor's FLM child serves them
+    # coresident. Their own probe always reads "stopped", so inherit the
+    # anchor's live status instead and mark the relationship for the UI.
+    anchor_cfg = next(
+        (
+            c
+            for c in configs
+            if c.get("device") == "npu" and c.get("type") == "llm" and c.get("enabled") is not False
+        ),
+        None,
+    )
+    if anchor_cfg is not None:
+        anchor_name = str(anchor_cfg.get("name", ""))
+        anchor_entry = out.get(anchor_name)
+        if anchor_entry is not None:
+            for cfg in configs:
+                name = str(cfg.get("name", ""))
+                if (
+                    name
+                    and name != anchor_name
+                    and cfg.get("device") == "npu"
+                    and cfg.get("type") != "llm"
+                    and cfg.get("enabled") is not False
+                    and name in out
+                ):
+                    out[name]["container_status"] = anchor_entry["container_status"]
+                    out[name]["container_health"] = anchor_entry["container_health"]
+                    out[name]["served_by"] = anchor_name
     return out
 
 

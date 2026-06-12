@@ -281,6 +281,13 @@ class CapabilityOrchestrator:
                 selection = self._selection_with_defaults(cfg, slot, child)
                 slot_name = _CHILD_TO_SLOT[(slot, child)]
                 status_str = await self._slot_status_string(slot_name)
+                # #733: npu-device selections are served coresident by the
+                # FLM trio anchor — their own shadow slot never runs, so
+                # "offline" there is meaningless; report the anchor's state.
+                if selection.device == "npu" and selection.enabled and status_str == "offline":
+                    anchor_status = await self._npu_anchor_status()
+                    if anchor_status is not None:
+                        status_str = anchor_status
                 selections_out[slot][child] = {
                     # ``device`` is the v0.2 canonical key (ADR-0006 §7).
                     "device": selection.device,
@@ -300,6 +307,29 @@ class CapabilityOrchestrator:
             "catalogs": catalogs,
             "selections": selections_out,
         }
+
+    async def _npu_anchor_status(self) -> str | None:
+        """Status of the FLM trio anchor slot (device=npu, type=llm).
+
+        Shadow selections (stt/embed served coresident by the trio) have
+        no process of their own — their effective status is the anchor's.
+        Returns ``None`` when no enabled npu-llm slot exists so callers
+        keep the selection's own status.
+        """
+        try:
+            configs = await self._slot_manager.iter_configs()
+        except Exception:
+            return None
+        for cfg in configs:
+            if (
+                cfg.get("device") == "npu"
+                and cfg.get("type") == "llm"
+                and cfg.get("enabled") is not False
+            ):
+                name = str(cfg.get("name", ""))
+                if name:
+                    return await self._slot_status_string(name)
+        return None
 
     async def _slot_status_string(self, slot_name: str) -> str:
         """Return the slot's current state.value, or 'offline' if unknown.

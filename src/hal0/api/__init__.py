@@ -539,12 +539,13 @@ async def _autoregister_slot_upstreams(
 
 # ── FLM multiplex model seeding ────────────────────────────────────────────
 # An FLM slot can serve up to three models from one process — the chat tag
-# in ``model.default`` plus embed-gemma (when ``defaults.load_embed=true``)
-# plus whisper-v3:turbo (when ``defaults.load_asr=true``). Those auxiliary
-# models don't show up in FLM's ``/v1/models`` response (it only lists chat
-# tags), so the dispatcher's passthrough cache never learns about them and
-# routes ``model: "embed-gemma"`` to nowhere. Seed the cache explicitly.
-_FLM_EMBED_TAG = "embed-gemma"
+# in ``model.default`` plus embed-gemma:300m (``[npu] embed=true``) plus
+# whisper-v3:turbo (``[npu] asr=true``; legacy ``[defaults] load_*`` keys
+# still honoured, #733). Those auxiliary models don't show up in FLM's
+# ``/v1/models`` response (it only lists chat tags), so the dispatcher's
+# passthrough cache never learns about them and routes the canonical tags
+# to nowhere. Seed the cache explicitly.
+_FLM_EMBED_TAG = "embed-gemma:300m"
 _FLM_ASR_TAG = "whisper-v3:turbo"
 
 
@@ -616,14 +617,20 @@ async def _seed_multiplex_models(
     bucket = model_cache.setdefault("hal0", [])
     for cfg in cfgs:
         name = cfg.get("name", "")
-        provider = cfg.get("provider", "")
-        if provider != "flm" or not name:
+        is_flm = "flm" in (cfg.get("provider", ""), cfg.get("backend", ""))
+        if not is_flm or not name:
             continue
+        # Container-era schema is the [npu] table (what FLMProvider builds
+        # the --asr/--embed argv from); [defaults] load_* is the pre-#733
+        # legacy shape, kept so older tomls keep seeding.
+        npu_table = cfg.get("npu") or {}
         defaults = cfg.get("defaults") or {}
-        if defaults.get("load_embed") and _FLM_EMBED_TAG not in bucket:
+        load_embed = npu_table.get("embed") or defaults.get("load_embed")
+        load_asr = npu_table.get("asr") or defaults.get("load_asr")
+        if load_embed and _FLM_EMBED_TAG not in bucket:
             bucket.append(_FLM_EMBED_TAG)
             log.info("slots.multiplex_seeded", slot=name, model=_FLM_EMBED_TAG)
-        if defaults.get("load_asr") and _FLM_ASR_TAG not in bucket:
+        if load_asr and _FLM_ASR_TAG not in bucket:
             bucket.append(_FLM_ASR_TAG)
             log.info("slots.multiplex_seeded", slot=name, model=_FLM_ASR_TAG)
 
