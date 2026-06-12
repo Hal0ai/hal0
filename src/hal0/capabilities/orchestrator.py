@@ -47,12 +47,9 @@ from hal0.capabilities.config import (
 )
 from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
-from hal0.config.schema import DEVICE_DEFAULT_PROFILES
 from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import BadRequest, Hal0Error, NotFound
-from hal0.model_fit import evaluate_model_fit
 from hal0.model_meta import canonical_device, device_to_legacy_backend
-from hal0.profiles import ProfileCatalog, ResolvedProfile
 from hal0.registry.store import ModelRegistry
 from hal0.slot_config import SlotConfigStore, SlotSelection
 from hal0.slots.manager import SlotManager
@@ -130,16 +127,6 @@ _CHILD_TO_CAPABILITY: dict[tuple[str, str], str] = {
     ("voice", "tts"): "tts",
     ("img", "img"): "image",
     ("vision", "vision"): "vision",
-}
-
-_CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
-    "chat": "llm",
-    "embed": "embedding",
-    "rerank": "reranking",
-    "stt": "transcription",
-    "tts": "tts",
-    "image": "image",
-    "vision": "llm",
 }
 
 
@@ -558,65 +545,6 @@ class CapabilityOrchestrator:
                     "legal_backends": legal_backends,
                 },
             )
-        slot_type = _CAPABILITY_TO_SLOT_TYPE.get(capability)
-        if slot_type is None:
-            return
-        profile = self._profile_for_fit(capability, backend_id)
-        fit = evaluate_model_fit(
-            model_id=model_id,
-            slot_type=slot_type,
-            device=backend_id,
-            profile=profile,
-            capabilities=match.get("capabilities"),
-        )
-        if not fit.allowed:
-            details: dict[str, Any] = {
-                "slot": slot,
-                "child": child,
-                "model": model_id,
-                "backend": backend_id,
-                "slot_type": slot_type,
-                "fit_status": fit.status,
-                "fit_reasons": list(fit.reasons),
-            }
-            if profile is not None:
-                details["profile"] = profile.name
-                details["runtime_family"] = profile.runtime_family
-            raise BadRequest(
-                f"model {model_id!r} is not compatible with {slot}.{child} on {backend_id!r}",
-                code="capability.illegal_model_fit",
-                details=details,
-            )
-
-    def _profile_for_fit(self, capability: str, device: str) -> ResolvedProfile | None:
-        """Infer the runtime profile implied by a capability selection.
-
-        The capability selection schema does not yet carry an explicit
-        profile. Keep inference conservative: use profiles where the
-        existing device/capability already identifies a runtime family, and
-        avoid treating generic CPU as kokoro except for TTS.
-        """
-        profile_name: str | None = None
-        if device == "npu":
-            profile_name = DEVICE_DEFAULT_PROFILES.get("npu")
-        elif device in {"gpu-rocm", "gpu-vulkan"}:
-            profile_name = DEVICE_DEFAULT_PROFILES.get(device)
-        elif capability == "tts":
-            profile_name = "kokoro-cpu"
-        elif capability == "image":
-            profile_name = "comfyui"
-        if not profile_name:
-            return None
-        try:
-            return ProfileCatalog().resolve(profile_name)
-        except Hal0Error:
-            log.warning(
-                "capability.profile_fit_skipped profile=%s capability=%s device=%s",
-                profile_name,
-                capability,
-                device,
-            )
-            return None
 
     async def _ensure_slot_exists(self, slot_name: str, selection: CapabilitySelection) -> None:
         """Auto-create the slot TOML on first use of a non-builtin child.
