@@ -1,14 +1,14 @@
 """In-process memory dispatcher for the MCP admin server.
 
 ADR-0004 §7 plus ADR-0005 §2 together demand: the admin MCP server's
-``memory_*`` tool family must reach Cognee *without* an HTTP loop-back
-through ``/mcp/memory``. The loop-back works (and was the v0.2 stopgap),
-but every round trip pays a transport tax and re-runs Bearer
-verification against the local API just to land in the same Python
-process.
+``memory_*`` tool family must reach the memory provider *without* an
+HTTP loop-back through ``/mcp/memory``. The loop-back works (and was the
+v0.2 stopgap), but every round trip pays a transport tax and re-runs
+Bearer verification against the local API just to land in the same
+Python process.
 
 :class:`MemoryDispatcher` is the thin adapter that closes the loop. It
-holds a :class:`~hal0.memory.cognee_wrapper.CogneeWrapper`, wires the
+holds a memory provider (:class:`~hal0.memory.MemoryProvider`), wires the
 same per-call ``client_id`` / ``private`` resolvers the
 out-of-process server uses, and exposes the callable shape that
 :func:`hal0.mcp.admin.dispatch` expects on its ``memory_dispatcher=``
@@ -23,7 +23,7 @@ ONE object (testable, mockable, swappable) instead of a free-floating
 closure.
 
 Construction is cheap and synchronous — the orchestrator instantiates
-in ``create_app`` next to the CogneeWrapper itself, then passes the
+in ``create_app`` next to the memory provider itself, then passes the
 instance into ``mount_mcp_servers(...)`` as ``memory_dispatcher=``.
 """
 
@@ -40,18 +40,19 @@ log = structlog.get_logger(__name__)
 
 
 class MemoryDispatcher:
-    """In-process bridge from MCP admin to a CogneeWrapper.
+    """In-process bridge from MCP admin to a memory provider.
 
     Parameters
     ----------
     wrapper:
-        The :class:`hal0.memory.cognee_wrapper.CogneeWrapper` instance
-        the dispatcher should call. Pass the same singleton the memory
-        MCP server holds so both transports see one Cognee state.
+        The memory provider (:class:`hal0.memory.MemoryProvider`) the
+        dispatcher should call. Pass the same singleton the memory MCP
+        server holds so both transports see one memory-provider state.
     client_id_resolver:
-        Zero-arg callable returning the Bearer-derived caller id for
-        the current request. Defaults to "anonymous" — tests that
-        don't care about audit grounding can leave this None.
+        Zero-arg callable returning the caller id (from the
+        ``X-hal0-Agent`` header) for the current request. Defaults to
+        "anonymous" — tests that don't care about audit grounding can
+        leave this None.
     private_resolver:
         Zero-arg callable returning whether the current call opted into
         the ``private:<client_id>`` namespace (ADR-0005 §3). Defaults
@@ -98,7 +99,7 @@ class MemoryDispatcher:
 
     @property
     def wrapper(self) -> Any:
-        """The underlying CogneeWrapper. Exposed so tests can introspect
+        """The underlying memory provider. Exposed so tests can introspect
         which instance the dispatcher is bound to without reaching into
         a private attribute."""
         return self._wrapper

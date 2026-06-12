@@ -8,13 +8,14 @@ Flagged as missing during PR-6 + PR-8 integration: the sidebar block
 needed *some* representation of "how active is this agent's memory"
 without re-fetching the full memory list. The block degrades to
 ``"—"`` / ``"never"`` chips when this endpoint returns the
-``unavailable`` shape, so a hal0 install without Cognee still renders
-sensibly.
+``unavailable`` shape, so a hal0 install without a memory provider still
+renders sensibly.
 
 Where the data comes from
 -------------------------
-Reads through the same in-process :class:`hal0.memory.CogneeWrapper`
-hal0-memory MCP + ``/api/memory/*`` REST shims use. We do NOT hit the
+Reads through the same in-process memory provider
+(:class:`hal0.memory.MemoryProvider`) the hal0-memory MCP +
+``/api/memory/*`` REST shims use. We do NOT hit the
 ``/mcp/memory`` HTTP endpoint — it would re-enter the app over the
 loopback socket and require a real MCP session (the same
 session-establishment overhead PR-3's bootstrap fixed by switching to
@@ -30,8 +31,8 @@ namespace** so the sidebar reflects what THIS agent has done — the
 
 Fallback shape
 --------------
-When the memory wrapper is absent (Cognee init failed, hal0 install
-without the optional memory extra), the route returns:
+When the memory provider is absent (init failed, hal0 install without
+the optional memory extra), the route returns:
 
 .. code-block:: json
 

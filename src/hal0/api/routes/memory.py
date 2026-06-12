@@ -6,8 +6,9 @@ through this surface; there is no other writer for ``[memory.graph]``
 so a swap-flip from either client lands atomically through the same
 ``save_hal0_config`` pipeline.
 
-The actual cognify dispatch lives in :class:`hal0.memory.CogneeWrapper`;
-this module is the thin HTTP veneer that:
+The actual graph-extraction dispatch lives in the active memory provider
+(:class:`hal0.memory.MemoryProvider`); this module is the thin HTTP
+veneer that:
 
   - Returns ``graph_status()`` (enabled / route / counters / last-built).
   - Validates the toggle payload against :class:`MemoryGraphConfig`.
