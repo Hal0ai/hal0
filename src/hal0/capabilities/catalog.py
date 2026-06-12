@@ -50,7 +50,7 @@ _BACKEND_TO_PROVIDER: dict[str, str] = {
     "llama-server": "llama-server",
     "kokoro": "kokoro",
     "moonshine": "moonshine",
-    "whispercpp": "whispercpp",  # Lemonade's built-in whisper.cpp STT recipe
+    "whispercpp": "whispercpp",  # the whisper.cpp STT recipe
     "vibevoice": "kokoro",  # closest existing provider; the UI lets the user override
     "comfyui": "comfyui",
 }
@@ -64,7 +64,7 @@ _BACKEND_TO_PROVIDER: dict[str, str] = {
 # matches a host backend wins display order in the dropdown.
 _RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
     "moonshine": ("cpu",),
-    "whispercpp": ("gpu-vulkan", "cpu"),  # Lemonade's whisper.cpp supports Vulkan + CPU
+    "whispercpp": ("gpu-vulkan", "cpu"),  # whisper.cpp supports Vulkan + CPU
     "kokoro": ("gpu-vulkan", "cpu"),
     "vibevoice": ("gpu-vulkan", "cpu"),
     "comfyui": ("gpu-vulkan",),

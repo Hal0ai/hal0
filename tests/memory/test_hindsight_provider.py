@@ -145,10 +145,10 @@ async def test_recall_merge_precedence_tier_overrides_bank_order_and_score():
 
 
 @pytest.mark.asyncio
-async def test_lemonade_reranker_posts_rerank_and_parses_results():
+async def test_hal0_reranker_posts_rerank_and_parses_results():
     import httpx
 
-    from hal0.memory.hindsight_provider import LemonadeReranker
+    from hal0.memory.hindsight_provider import Hal0Reranker
 
     seen: dict = {}
 
@@ -157,22 +157,22 @@ async def test_lemonade_reranker_posts_rerank_and_parses_results():
         return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.9}]})
 
     transport = httpx.MockTransport(handler)
-    rr = LemonadeReranker(base_url="http://127.0.0.1:13305")
+    rr = Hal0Reranker(base_url="http://127.0.0.1:8080")
     orig = httpx.AsyncClient
     httpx.AsyncClient = lambda *a, **k: orig(transport=transport)
     try:
         out = await rr.rerank("q", ["doc a", "doc b"])
     finally:
         httpx.AsyncClient = orig
-    assert seen["path"] == "/v1/reranking"
+    assert seen["path"] == "/v1/rerankings"
     assert out == [{"index": 0, "relevance_score": 0.9}]
 
 
 @pytest.mark.asyncio
-async def test_lemonade_reranker_failsoft_returns_empty_on_error():
-    from hal0.memory.hindsight_provider import LemonadeReranker
+async def test_hal0_reranker_failsoft_returns_empty_on_error():
+    from hal0.memory.hindsight_provider import Hal0Reranker
 
-    rr = LemonadeReranker(base_url="http://127.0.0.1:59999")  # nothing listening
+    rr = Hal0Reranker(base_url="http://127.0.0.1:59999")  # nothing listening
     out = await rr.rerank("q", ["a", "b"])
     assert out == []
 

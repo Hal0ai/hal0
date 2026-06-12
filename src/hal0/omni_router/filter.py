@@ -46,6 +46,13 @@ class SlotManagerLike(Protocol):
         required_labels: tuple[str, ...] = (),
     ) -> str | None: ...
 
+    async def resolve_for_request(
+        self,
+        slot_type: str,
+        *,
+        required_labels: tuple[str, ...] = (),
+    ) -> Any | None: ...
+
 
 def chat_slot_has_tool_calling(cfg: dict[str, Any]) -> bool:
     """Return True iff the chat slot's model carries the ``tool-calling`` label.

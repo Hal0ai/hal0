@@ -117,14 +117,14 @@ def _missing(args: Mapping[str, Any], *required: str) -> str | None:
 async def _route_or_error(
     ctx: DispatchContext,
     tool: ToolDefinition,
-) -> tuple[str | None, dict[str, Any] | None]:
-    """Resolve the target slot name + its config for ``tool``.
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Resolve the target loaded slot for ``tool``.
 
-    Returns ``(slot_name, slot_cfg)`` on success; ``(None, error_dict)``
-    on routing failure (no eligible slot). The error dict is shaped
-    as a tool_result body so callers can return it directly.
+    Returns ``(loaded_slot, None)`` on success; ``(None, error_dict)`` on
+    routing failure (no eligible slot). The error dict is shaped as a
+    tool_result body so callers can return it directly.
     """
-    target = await ctx.slot_manager.route_for_request(
+    target = await ctx.slot_manager.resolve_for_request(
         tool.target_slot_type,
         required_labels=tool.required_model_labels,
     )
@@ -135,21 +135,14 @@ async def _route_or_error(
                 f"with required labels {list(tool.required_model_labels)!r}"
             )
         }
-    configs = await ctx.slot_manager.iter_configs()
-    cfg = next((c for c in configs if c.get("name") == target), None)
-    if cfg is None:
-        # Race: slot config disappeared between routing + lookup.
-        return None, {"error": f"slot '{target}' vanished mid-dispatch"}
-    return target, cfg
+    return target, None
 
 
-def _model_id_of(cfg: dict[str, Any]) -> str:
-    model = cfg.get("model") or {}
-    if isinstance(model, dict):
-        default = model.get("default", "")
-        if isinstance(default, str) and default:
-            return default
-    return str(cfg.get("name", ""))
+def _model_id_of(slot: Any) -> str:
+    model_id = getattr(slot, "model_id", "")
+    if isinstance(model_id, str) and model_id:
+        return model_id
+    return str(getattr(slot, "name", ""))
 
 
 async def _post_json(
@@ -196,11 +189,11 @@ async def handle_generate_image(ctx: DispatchContext, args: Mapping[str, Any]) -
     err = _missing(args, "prompt")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["generate_image"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["generate_image"])
     if target is None:
-        return cfg_or_err or {"error": "no image slot"}
+        return err_body or {"error": "no image slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "prompt": args["prompt"],
     }
     if args.get("size"):
@@ -214,11 +207,11 @@ async def handle_edit_image(ctx: DispatchContext, args: Mapping[str, Any]) -> di
     err = _missing(args, "image", "prompt")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["edit_image"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["edit_image"])
     if target is None:
-        return cfg_or_err or {"error": "no image-edit slot"}
+        return err_body or {"error": "no image-edit slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "image": args["image"],
         "prompt": args["prompt"],
     }
@@ -231,11 +224,11 @@ async def handle_text_to_speech(ctx: DispatchContext, args: Mapping[str, Any]) -
     err = _missing(args, "input")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["text_to_speech"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["text_to_speech"])
     if target is None:
-        return cfg_or_err or {"error": "no tts slot"}
+        return err_body or {"error": "no tts slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "input": args["input"],
     }
     if args.get("voice"):
@@ -247,11 +240,11 @@ async def handle_transcribe_audio(ctx: DispatchContext, args: Mapping[str, Any])
     err = _missing(args, "audio")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["transcribe_audio"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["transcribe_audio"])
     if target is None:
-        return cfg_or_err or {"error": "no transcription slot"}
+        return err_body or {"error": "no transcription slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         # /v1/audio/transcriptions is a multipart endpoint
         # in the OpenAI contract; tool-call args come in as a JSON
         # blob from the LLM, so PR-16 wraps that as a single-field
@@ -269,13 +262,13 @@ async def handle_analyze_image(ctx: DispatchContext, args: Mapping[str, Any]) ->
     err = _missing(args, "image", "question")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["analyze_image"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["analyze_image"])
     if target is None:
-        return cfg_or_err or {"error": "no vision-capable llm slot"}
+        return err_body or {"error": "no vision-capable llm slot"}
     # Vision goes through /v1/chat/completions with an image-URL/data
     # content part in the user message — OpenAI's standard shape.
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "messages": [
             {
                 "role": "user",
@@ -296,11 +289,11 @@ async def handle_embed_text(ctx: DispatchContext, args: Mapping[str, Any]) -> di
     err = _missing(args, "input")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["embed_text"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["embed_text"])
     if target is None:
-        return cfg_or_err or {"error": "no embedding slot"}
+        return err_body or {"error": "no embedding slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "input": args["input"],
     }
     return await _post_json(ctx, "/v1/embeddings", body)
@@ -310,11 +303,11 @@ async def handle_rerank_documents(ctx: DispatchContext, args: Mapping[str, Any])
     err = _missing(args, "query", "documents")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["rerank_documents"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["rerank_documents"])
     if target is None:
-        return cfg_or_err or {"error": "no reranking slot"}
+        return err_body or {"error": "no reranking slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "query": args["query"],
         "documents": args["documents"],
     }

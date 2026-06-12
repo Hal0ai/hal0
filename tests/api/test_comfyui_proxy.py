@@ -129,7 +129,7 @@ def test_status_stopped_and_inference_mode_when_container_absent(client: TestCli
     assert body["mode"] == "inference"
     assert body["engine"] == "stopped"
     assert body["container"]["state"] == "absent"
-    assert body["inference"] == {"lemonade": True, "hermes": True}
+    assert body["inference"] == {"hermes": True}
 
 
 def test_status_reports_model_inventory_from_the_share(

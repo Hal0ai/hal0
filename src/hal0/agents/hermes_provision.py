@@ -637,14 +637,14 @@ def _resolve_primary_slot(
 ) -> dict[str, Any]:
     """Pick the live primary chat slot from the local hal0 daemon.
 
-    Reads ``/api/slots`` (canonical post-Lemonade source) and selects
+    Reads ``/api/slots`` (the canonical source post-embed migration) and selects
     the entry named ``primary`` (or the first ready ``type=='llm'``
     slot when no name matches). Returns the keys the config template
     needs. Falls back to a safe-but-unwired placeholder when no slot
     is loaded — self_report surfaces that in the bootstrap summary.
 
-    Until v0.2 this read Lemonade's ``/v1/health`` and looked for
-    ``loaded``/``slots`` keys, which post-Lemonade-embed are absent
+    Until v0.2 this read the inference daemon's ``/v1/health`` and looked
+    for ``loaded``/``slots`` keys, which post-embed migration are absent
     (the payload uses ``all_models_loaded``). The result was a silent
     fall-through to a placeholder URL on port 8000 — a daemon-less
     address that never wired Hermes to anything real.
@@ -662,8 +662,8 @@ def _resolve_primary_slot(
     slots = fetch() or []
 
     def _chat(s: dict[str, Any]) -> bool:
-        # `type` is the post-Lemonade canonical key (llm/embedding/...);
-        # `kind` survives from the pre-Lemonade schema.
+        # `type` is the canonical key post-embed migration (llm/embedding/...);
+        # `kind` survives from the pre-migration schema.
         kind = str(s.get("type") or s.get("kind") or "").lower()
         return kind in {"llm", "chat"}
 
@@ -681,7 +681,7 @@ def _resolve_primary_slot(
     # (e.g. http://127.0.0.1:8001/v1). Hermes should talk to hal0's
     # OpenAI-compat router instead so caching/dispatch stays intact.
     # hal0-api mounts the OpenAI surface at `/v1` (NOT `/api/v1` —
-    # Lemonade's native prefix is dropped at the wrapper layer).
+    # the legacy daemon's native prefix was dropped at the wrapper layer).
     if not base_url or "127.0.0.1:8001" in base_url:
         base_url = f"{HAL0_API_URL}/v1"
     ctx = primary.get("context_length") or primary.get("ctx_size") or fallback["context_length"]
@@ -2130,7 +2130,11 @@ def render_live_context(
             "HAL0_DASHBOARD_URL",
             os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
         ),
-        "lemonade_base": os.environ.get("HAL0_LEMONADE_BASE", "http://127.0.0.1:13305"),
+        # HAL0_LEMONADE_BASE is read as a back-compat fallback for one release.
+        "inference_base": os.environ.get(
+            "HAL0_INFERENCE_BASE",
+            os.environ.get("HAL0_LEMONADE_BASE", "http://127.0.0.1:8080"),
+        ),
         "daemon": "degraded" if degraded else "reachable",
         "as_of": now,
     }
@@ -2220,8 +2224,8 @@ def _collect_chat_slots(
     dashboard chat-filter at ``src/hal0/api/routes/slots.py``.
 
     Each alias's ``backend_url`` is the STABLE hal0 gateway (`:8080/v1`),
-    NOT the slot's raw ``backend_url``. lemond reassigns the per-slot
-    upstream port (`:8001/:8002/…`) on every model reload, so a baked-in
+    NOT the slot's raw ``backend_url``. The per-slot upstream port
+    (`:8001/:8002/…`) can change on every model reload, so a baked-in
     alias port goes stale immediately — and could then point at a port
     now serving a DIFFERENT co-resident model. The gateway resolves both
     the alias name and the model_id to the correct co-resident slot, so

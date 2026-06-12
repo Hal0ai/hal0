@@ -76,35 +76,33 @@ def classify(model_id: str = "", capabilities: Any = None) -> str:
     return "chat"
 
 
-# ── device → Lemonade recipe/backend mapping ─────────────────────────────────
+# ── device → recipe/backend mapping ──────────────────────────────────────────
 #
-# Plan §4.1 + ADR-0008 §6 locked the four-way mapping. ``gpu-*`` slots
-# load through llama.cpp with an explicit backend flag; ``cpu`` is the
-# same recipe with CPU-only inference; ``npu`` uses Lemonade's FLM
-# recipe and does not take a llamacpp_backend (FLM is its own backend).
+# Plan §4.1 + ADR-0008 §6 locked the four-way mapping; the result feeds
+# container profile/argv derivation. ``gpu-*`` slots load through
+# llama.cpp with an explicit backend flag; ``cpu`` is the same recipe
+# with CPU-only inference; ``npu`` uses the FLM recipe (NPU FastFlowLM)
+# and does not take a llamacpp_backend (FLM is its own backend).
 #
 # Returned tuple shape: ``(recipe, llamacpp_backend)``. ``recipe=None``
-# means "let Lemonade pick its default" (currently the llama.cpp recipe
-# for gpu/cpu).  Either value being ``None`` causes
-# :meth:`LemonadeClient.load` to omit the key from the request body —
-# Lemonade then falls through to its internal sentinel logic.
+# means "default llama.cpp recipe"; ``llamacpp_backend`` is one of
+# rocm | vulkan | cpu.
 
 
 def device_to_backend(device: str | None) -> tuple[str | None, str | None]:
-    """Map hal0's ``device`` enum onto Lemonade's recipe+backend pair.
+    """Map hal0's ``device`` enum onto the recipe+backend pair.
 
     Args:
         device: One of ``gpu-rocm`` | ``gpu-vulkan`` | ``cpu`` | ``npu``.
-                Empty / unknown values fall back to ``(None, None)`` so
-                Lemonade picks its own defaults — same semantics as
-                omitting the keys from the load body.
+                Empty / unknown values fall back to ``(None, None)``
+                ("no opinion" — callers apply their own defaults).
 
     Returns:
         ``(recipe, llamacpp_backend)``. Either may be ``None`` to mean
-        "don't send this key in the /v1/load body". The two are
-        mutually exclusive in practice — NPU uses ``recipe="flm"`` with
-        no llamacpp_backend; everything else uses ``recipe=None`` with
-        a concrete llamacpp_backend.
+        "no opinion". The two are mutually exclusive in practice — NPU
+        uses ``recipe="flm"`` with no llamacpp_backend; everything else
+        uses ``recipe=None`` with a concrete llamacpp_backend that feeds
+        container profile/argv derivation.
     """
     if not device:
         return (None, None)
@@ -116,11 +114,11 @@ def device_to_backend(device: str | None) -> tuple[str | None, str | None]:
     if d == "cpu":
         return (None, "cpu")
     if d == "npu":
-        # FLM recipe; ``llamacpp_backend`` is meaningless here. Lemonade
-        # routes the load to its fastflowlm_server backend.
+        # FLM recipe; ``llamacpp_backend`` is meaningless here — the NPU
+        # path is served by the host FLM process.
         return ("flm", None)
     log.warning(
-        "lemonade.provider.unknown_device",
+        "model_meta.unknown_device",
         extra={"device": device},
     )
     return (None, None)
@@ -152,8 +150,8 @@ def canonical_device(value: str) -> str:
 
 # NOTE(#695): this is deliberately NOT expressed through
 # ``device_to_backend`` — the two sites disagreed on unknown input.
-# ``device_to_backend`` maps unknown devices to ``(None, None)`` (let
-# Lemonade pick), while the orchestrator's ``_slot_backend_for_catalog_id``
+# ``device_to_backend`` maps unknown devices to ``(None, None)`` ("no
+# opinion"), while the orchestrator's ``_slot_backend_for_catalog_id``
 # passed unknown tokens through UNCHANGED so hand-edited values stay
 # legible on downgrade. Both behaviours are preserved as-is.
 _DEVICE_TO_LEGACY_BACKEND: dict[str, str] = {
@@ -182,10 +180,10 @@ def is_resolvable(model_id: str, registry: Any) -> bool:
     """True if ``model_id`` can actually be loaded onto a slot.
 
     The slot-apply guard used to require ``registry.has(model_id)``, but FLM
-    models are lemond-owned and are never in hal0's registry (see the
+    models are FLM-owned tags and are never in hal0's registry (see the
     2026-06-07 shape audits) — yet they load fine via npu.toml's config path.
     So gate on *provider-resolvability*: registry-resident OR an installed FLM
-    model. (Extensible later to a general ``lemond_serves(id)`` probe.)
+    model.
 
     ``registry`` is passed explicitly (anything with a ``has(model_id)``
     method, or ``None``) so this module never grows registry state.

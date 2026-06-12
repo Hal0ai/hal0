@@ -4,7 +4,7 @@ This module hosts disk-layout reshapes that v0.2 needs the operator to
 run once. Today there is exactly one such command: ``model-layout``,
 which reorganises the v0.1.x ad-hoc model store at ``/mnt/ai-models/``
 into the canonical ``<recipe>/<capability>/`` tree rooted at
-``/var/lib/hal0/models/`` (see lemonade-adoption-plan §6.1 + ADR-0008
+``/var/lib/hal0/models/`` (see the v0.2 adoption plan §6.1 + ADR-0008
 §7).
 
 Design contract (from plan §11 PR-7):
@@ -34,8 +34,8 @@ What the script does NOT do:
 * It does not download, copy, move, or hash any model file.
 * It does not write to ``/mnt/ai-models/`` at all.
 * It does not migrate ``/mnt/ai-models/huggingface/`` (HF cache) —
-  Lemonade reads HF cache directly, and clobbering it would re-trigger
-  multi-GB redownloads.
+  the inference runtimes read the HF cache directly, and clobbering it
+  would re-trigger multi-GB redownloads.
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ V01_DIR_TO_LEAF: dict[str, tuple[str, str]] = {
 }
 
 # Directories under DEFAULT_MOUNT_ROOT that the script must NOT touch.
-# - ``huggingface``: shared HF cache; Lemonade reads it directly.
+# - ``huggingface``: shared HF cache; the inference runtimes read it directly.
 # - any leaf already in canonical layout: those are the migration target.
 PROTECTED_DIRS: frozenset[str] = frozenset({"huggingface"})
 
@@ -118,7 +118,7 @@ PROTECTED_DIRS: frozenset[str] = frozenset({"huggingface"})
 # ── Registry-driven capability + recipe inference ──────────────────────────────
 
 # hal0 capability vocab → canonical capability directory.
-# Mirrors the rules in lemonade-adoption-plan-2026-05-22 §6.1.
+# Mirrors the rules in the v0.2 adoption plan (2026-05-22) §6.1.
 _CAPABILITY_TO_LEAF_CAP: dict[str, str] = {
     "chat": "chat",
     "embed": "embed",
@@ -135,9 +135,7 @@ _CAPABILITY_TO_LEAF_CAP: dict[str, str] = {
 }
 
 # Strength order — strongest non-chat capability wins when a model
-# advertises multiple. Same idea as
-# ``hal0.lemonade.server_models_gen._CAPABILITY_STRENGTH`` but the leaf
-# vocab is different.
+# advertises multiple. The leaf vocab is migration-specific.
 _CAP_STRENGTH: tuple[str, ...] = (
     "rerank",
     "reranking",
@@ -593,8 +591,7 @@ def _ensure_canonical_dirs(canonical_root: Path) -> None:
 def _atomic_symlink(link_path: Path, target: Path) -> None:
     """Write ``link_path → target`` via a tempfile + ``os.replace``.
 
-    Mirrors the atomic-write pattern in
-    ``hal0.lemonade.server_models_gen.write_server_models``: a partial /
+    Atomic-write pattern (tempfile + rename): a partial /
     crashed run never leaves a half-formed symlink at the canonical
     location.
     """

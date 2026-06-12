@@ -5,7 +5,7 @@ This module hosts operator tooling that touches
 exactly one such command — ``import`` — which restores a registry
 extracted from a ``hal0-v0.1-backup-YYYY-MM-DD.tar.gz`` tarball
 produced by following the v0.1.x backup instructions in install.sh
-(see lemonade-adoption-plan §9).
+(see the v0.2 adoption plan §9).
 
 Design contract (from plan §11 PR-21):
 
@@ -19,17 +19,16 @@ Design contract (from plan §11 PR-21):
   picks from the bundle picker; we don't silently clobber them.
 * **Atomic.** The copy goes through a sibling tempfile + ``os.replace``
   so a crash mid-copy never leaves a half-written ``registry.toml``.
-  Mirrors the pattern in ``hal0.lemonade.server_models_gen``.
 * **Tar safety.** The tarball is extracted into a freshly-created
   ``tempfile.mkdtemp`` and we refuse any member with an absolute path
   or a ``..`` component (defence against a hand-crafted backup).
 
 What this script does NOT do:
 
-* It does NOT auto-run ``hal0 capabilities sync`` — the registry import
+* It does NOT rewrite slot or capability state — the registry import
   is one step of a larger recovery flow, and the operator may want to
-  inspect the imported file before regenerating Lemonade's catalog.
-  The success message points at the next step explicitly.
+  inspect the imported file first. registry.toml is the sole catalog;
+  downstream consumers pick it up on the next read.
 * It does NOT extract ``/etc/hal0/`` from the backup — v0.2's
   ``capabilities.toml`` schema is incompatible with v0.1.x's
   per-slot TOML files.
@@ -68,7 +67,7 @@ def _registry_callback() -> None:
 
 
 # Default v0.2 canonical path for registry.toml. Override via --dest for
-# tests + dev installs. Source: lemonade-adoption-plan §6.1 + plan §9.
+# tests + dev installs. Source: the v0.2 adoption plan §6.1 + §9.
 DEFAULT_REGISTRY_PATH = Path("/var/lib/hal0/registry/registry.toml")
 
 # Relative path inside the v0.1.x backup tarball. The backup instructions
@@ -135,10 +134,9 @@ def _find_registry_in_dir(root: Path) -> Path | None:
 def _atomic_copy(source: Path, dest: Path) -> None:
     """Copy ``source`` to ``dest`` via a sibling tempfile + ``os.replace``.
 
-    Mirrors the atomic-write pattern in
-    ``hal0.lemonade.server_models_gen.write_server_models`` so a crash
+    Atomic-write pattern (tempfile + ``os.replace``) so a crash
     mid-copy never leaves a partial ``registry.toml`` at the canonical
-    path — which would brick ``hal0 capabilities sync`` until the
+    path — which would brick every registry consumer until the
     operator manually rolls back.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -273,9 +271,6 @@ def import_backup(
     # ── 6. Success guidance ───────────────────────────────────────────
     console.print(
         f"[green]registry imported[/green] from {path} → {dest}\n"
-        f"\n"
-        f"To regenerate Lemonade's catalog:\n"
-        f"  [bold]hal0 capabilities sync[/bold]\n"
         f"\n"
         f"Slot selections from v0.1.x are NOT migrated. Use the bundle\n"
         f"picker or [bold]hal0 slot create[/bold] to declare slots."

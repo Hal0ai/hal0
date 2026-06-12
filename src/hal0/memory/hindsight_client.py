@@ -3,7 +3,7 @@
 Talks to ``/v1/default/banks/{bank}/...`` (the bank-scoped REST surface the
 spike confirmed). Auth is the single server-wide key when enabled; on the LAN
 the daemon runs no-auth but Hindsight still requires a NON-EMPTY key, so we
-default to the spike's ``lemonade-local-noauth`` placeholder.
+default to a local-noauth placeholder.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 DEFAULT_BASE_URL = "http://127.0.0.1:9177"  # dynamic port — pinned by the unit (P1-6)
-DEFAULT_API_KEY = "lemonade-local-noauth"
+DEFAULT_API_KEY = "hal0-local-noauth"
 
 
 class HindsightRestClient:

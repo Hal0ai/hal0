@@ -92,8 +92,8 @@ def _read_meminfo() -> tuple[float, float]:
 _RESIDENT_STATES = frozenset({"warming", "ready", "serving", "idle"})
 
 # Default context window assumed when neither the model nor the slot config
-# pins one. Matches the hal0 lemond ctx_size baseline (memory
-# ``hal0_lemonade_ctx_size_lives_in_config_json``).
+# pins one. Matches the hal0 ctx_size baseline the platform has shipped
+# with since v0.2.
 _DEFAULT_CTX_TOKENS = 65536
 
 # Coarse KV-cache footprint estimate: bytes per context token, summed across
@@ -233,13 +233,14 @@ async def build_per_slot(
        cgroup of only ~2 GB while holding a ~22 GB model.  When the cgroup
        *does* account for weights it wins (≥ estimate); when it doesn't, the
        estimate wins — so the figure never under-reports.
-    3. **Lemonade / lemond slots** (fallback): model file size from the
-       registry plus a coarse KV-cache estimate scaled by context window.
+    3. **File-size estimate** (fallback): model file size from the
+       registry plus a coarse KV-cache estimate scaled by context window —
+       covers slots whose container is down or unnamed.
 
     The cgroup probe is attempted for every non-NPU slot and naturally
-    returns 0 for lemond slots (no matching container exists), so the
-    container → lemond fallback is automatic — no explicit runtime-type
-    detection required.
+    returns 0 when no matching container exists, so the container →
+    file-size fallback is automatic — no explicit runtime-type detection
+    required.
 
     Non-resident slots are omitted so the caller can render them as
     holding no memory. Never raises: a registry miss yields a 0-size row
@@ -302,8 +303,8 @@ async def build_per_slot(
 
         # ── Container cgroup probe (path 2) ────────────────────────────────
         # Probe the live podman/docker cgroup.  Returns 0 when no container
-        # named hal0-slot-<name> exists (i.e. for lemond slots), so the probe
-        # is a no-op for the lemond path — no runtime-type detection needed.
+        # named hal0-slot-<name> exists (container down/absent), so the
+        # fall-through to the file-size estimate is automatic.
         #
         # CRITICAL (#672 review): on Strix Halo (UMA) the model WEIGHTS live
         # in GTT (system RAM via amdgpu/TTM) and are often NOT charged to the

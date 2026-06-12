@@ -1133,10 +1133,9 @@ class CogneeWrapper(MemoryProvider):
         }
         url = f"{self._rerank_url}/rerank"
         # Split connect vs read budget so a healthy-but-slow GPU rerank
-        # (concurrent load → see auto-memory
-        # ``hal0-lemonade-threads-deadlock``) doesn't burn the connect
-        # phase's share and silently fall through. Connect stays tight
-        # so a wedged port still bails fast.
+        # (concurrent load can oversubscribe the CPU and stall responses)
+        # doesn't burn the connect phase's share and silently fall
+        # through. Connect stays tight so a wedged port still bails fast.
         timeout = httpx.Timeout(
             connect=self._rerank_connect_timeout_s,
             read=self._rerank_read_timeout_s,

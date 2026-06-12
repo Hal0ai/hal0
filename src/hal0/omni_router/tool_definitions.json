@@ -1,16 +1,12 @@
 {
   "_pin": {
-    "_comment_1": "Mirrored from upstream Lemonade's renderer/utils/toolDefinitions.json.",
+    "_comment_1": "hal0-owned tool definitions for the omni router.",
     "_comment_2": "Five tools (generate_image, edit_image, text_to_speech, transcribe_audio,",
-    "_comment_3": "analyze_image) are upstream-sourced; three (embed_text, rerank_documents,",
-    "_comment_4": "route_to_chat) are hal0-custom. Plan §7.2 + §7.5.",
-    "_comment_5": "Drift-detection script (scripts/check-tool-definitions.sh) is plan §7.5,",
-    "_comment_6": "deferred to a follow-up PR.",
-    "upstream_repo": "lemonade-sdk/lemonade",
-    "upstream_path": "src/app/src/renderer/utils/toolDefinitions.json",
-    "upstream_commit": "TBD-placeholder-replace-on-drift-script",
-    "upstream_sha256": "TBD-placeholder-replace-on-drift-script",
-    "last_reviewed": "2026-05-23"
+    "_comment_3": "analyze_image) were originally mirrored from an upstream renderer",
+    "_comment_4": "toolDefinitions.json (retired dependency); three (embed_text,",
+    "_comment_5": "rerank_documents, route_to_chat) are hal0-custom. Plan §7.2 + §7.5.",
+    "_comment_6": "hal0 owns this file now; no upstream drift tracking applies.",
+    "last_reviewed": "2026-06-11"
   },
   "tools": [
     {

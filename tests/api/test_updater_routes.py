@@ -63,7 +63,7 @@ def test_state_returns_shape_expected_by_dashboard(
 ) -> None:
     """GET /api/updates/state matches the UpdateState shape in useUpdates.ts.
 
-    Probes are stubbed so the test doesn't depend on lemonade/flm being
+    Probes are stubbed so the test doesn't depend on flm being
     installed on the test host. Issue #233.
     """
     from hal0.api.routes import updater as u_mod
@@ -74,26 +74,22 @@ def test_state_returns_shape_expected_by_dashboard(
     assert r.status_code == 200, r.text
     body = r.json()
     # Top-level keys mirror UpdateState in ui/src/api/hooks/useUpdates.ts.
-    assert set(body.keys()) == {"hal0", "lemonade", "flm", "autoCheck"}
+    assert set(body.keys()) == {"hal0", "flm", "autoCheck"}
     assert body["hal0"]["current"]  # __version__ is non-empty
     assert body["hal0"]["available"] == "9.9.9"
     assert body["hal0"]["channel"] == "stable"
-    # Probes returned None — UI should render '—' rather than fabricated versions.
-    assert body["lemonade"]["current"] is None
+    # Probe returned None — UI should render '—' rather than a fabricated version.
     assert body["flm"]["current"] is None
     assert body["autoCheck"] is True
 
 
-def test_state_parses_lemonade_and_flm_version_strings(
+def test_state_parses_flm_version_string(
     isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Probe output ``lemonade version 10.6.0`` / ``FLM v0.9.42`` parses cleanly."""
+    """Probe output ``FLM v0.9.42`` parses cleanly."""
     from hal0.api.routes import updater as u_mod
 
     def fake_probe(candidates: tuple[str, ...]) -> str | None:
-        # First candidate of the lemonade tuple is /opt/lemonade/lemonade.
-        if "lemonade" in candidates[0]:
-            return "lemonade version 10.6.0"
         if candidates[0] == "flm":
             return "FLM v0.9.42"
         return None
@@ -103,7 +99,6 @@ def test_state_parses_lemonade_and_flm_version_strings(
     r = isolated_client.get("/api/updates/state")
     assert r.status_code == 200
     body = r.json()
-    assert body["lemonade"]["current"] == "v10.6.0"
     assert body["flm"]["current"] == "v0.9.42"
 
 
@@ -189,7 +184,7 @@ def test_state_revoked_latest_surfaced(
     assert r.status_code == 200, r.text
     body = r.json()
     # Top-level shape unchanged for the dashboard contract.
-    assert set(body.keys()) == {"hal0", "lemonade", "flm", "autoCheck"}
+    assert set(body.keys()) == {"hal0", "flm", "autoCheck"}
     # Revoked latest is not advertised as available …
     assert body["hal0"]["available"] is None
     # … but the withdrawal is surfaced so the UI can show a note.

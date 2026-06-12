@@ -4,19 +4,18 @@ Each Provider is a stateless class that knows how to build the environment
 file, start command, and ContainerSpec for one backend type.  The Provider
 ABC is the contract between SlotManager and the concrete backends.
 
-Live providers (v0.2+):
-    LlamaServerProvider  — llama.cpp (Vulkan default, ROCm opt-in)
-    FLMProvider          — AMD NPU (optional, Strix Halo only)
-    LemonadeProvider     — Lemonade gateway (sole slot-lifecycle backend)
+Live providers:
+    ContainerProvider    — podman container per slot (the sole slot-lifecycle
+                           backend; systemd unit per slot, loopback upstream)
+    LlamaServerProvider  — llama.cpp argv/env derivation (Vulkan default,
+                           ROCm opt-in) consumed by container profiles
+    FLMProvider          — AMD NPU via host FLM (optional, Strix Halo only)
     ComfyUIProvider      — image-gen pipeline (driven directly by api/routes/v1.py)
-    ContainerProvider    — podman container per slot (P1 tracer bullet, issue #655)
 
-Dispatch model (v0.2, ADR-0008 + P1 hybrid):
-    SlotManager dispatches through ``LemonadeProvider`` for lemond slots.
-    Slots with ``profile`` set (or ``runtime="container"``) dispatch through
-    ``ContainerProvider`` (systemd podman unit per slot, loopback upstream).
-    The prior ``MoonshineProvider`` + ``KokoroProvider`` self-managed paths were
-    vestigial (lemond now owns STT/TTS) and were removed in PR-10 (#620).
+Dispatch model (container-only):
+    SlotManager dispatches every slot through ``ContainerProvider``.
+    The prior ``MoonshineProvider`` + ``KokoroProvider`` self-managed paths
+    were vestigial and removed in PR-10 (#620).
 
 Live exceptions (callers that bypass SlotManager dispatch):
     - ``api/routes/v1.py``  → ``ComfyUIProvider.infer()`` for image-gen

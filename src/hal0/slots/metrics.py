@@ -1,6 +1,6 @@
 """Slim Prometheus exposition over slot state.
 
-Phase E replacement for the lemond-polling metrics shim: the only
+Replacement for the legacy daemon-polling metrics shim: the only
 always-on inference processes are the per-slot containers, whose
 lifecycle state SlotManager already tracks. This module renders that
 state in Prometheus text format 0.0.4 for ``GET /api/metrics/prometheus``.

@@ -3,7 +3,7 @@
    Keep it LEAN: this is fed to the model every session. Stable identity
    lives in SOUL.md; structural map lives in HERMES.md.
    Params: primary (dict|None), capabilities (list), npu (dict),
-   igpu_sclk_mhz (int|None), dashboard_url, lemonade_base, daemon, as_of. #}
+   igpu_sclk_mhz (int|None), dashboard_url, inference_base, daemon, as_of. #}
 # Live system state
 
 {% if primary -%}
@@ -22,7 +22,7 @@
 {% if igpu_sclk_mhz -%}
 - iGPU clock: {{ igpu_sclk_mhz }} MHz
 {%- endif %}
-- Endpoints: dashboard {{ dashboard_url }} · lemond {{ lemonade_base }}
+- Endpoints: dashboard {{ dashboard_url }} · inference {{ inference_base }}
 - Daemon: {{ daemon }}
 
 _as_of: {{ as_of }}_

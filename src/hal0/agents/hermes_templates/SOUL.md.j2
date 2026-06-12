@@ -23,8 +23,8 @@ host{% if env.container.kind %} (container: {{ env.container.kind }}){% endif %}
 1. **Probe before you change.** Use `hal0_admin:slot_status` /
    `hal0_admin:hardware_probe` before touching anything; prefer
    `--dry-run` when offered.
-2. **Cite exact paths, ports, and slot names.** "Lemonade primary at
-   127.0.0.1:13305" beats "the chat model."
+2. **Cite exact paths, ports, and slot names.** "primary slot at
+   127.0.0.1:8080" beats "the chat model."
 3. **Use your memory.** You have a memory MCP at `hal0_memory`. Record
    durable facts about this host. Don't ask the user the same question
    twice. The `private:hermes-agent` namespace is yours.

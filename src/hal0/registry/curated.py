@@ -156,7 +156,7 @@ class CuratedModel(BaseModel):
         description=(
             "When True, this entry exists only to give the omni bundle "
             "manifests a canonical, loadable id to reference (e.g. a "
-            "Lemonade-stock STT/TTS/image model). It is excluded from the "
+            "stock-catalogue STT/TTS/image model). It is excluded from the "
             "FirstRun wizard's 'good defaults' cards and the capability "
             "dropdowns so adding it does not change what the wizard "
             "surfaces — it still resolves for bundle apply + drift checks. "
@@ -494,9 +494,9 @@ CURATED_MODELS: list[CuratedModel] = [
     ),
     # ── Bundle-only canonical defs (#500) ────────────────────────────────
     # These give the omni bundle manifests a single, loadable id to
-    # reference. Ids match the Lemonade stock ``server_models.json`` keys
-    # exactly, so a fresh install can load them straight from Lemonade's
-    # bundled catalogue (no hal0 registry seed required). They are
+    # reference. Ids match the legacy stock ``server_models.json`` keys
+    # exactly, so the ids stay loadable across upgrades without a hal0
+    # registry re-seed. They are
     # ``bundle_only`` — excluded from the wizard cards + capability
     # dropdowns — so adding them does not change what the wizard surfaces.
     # The actual default-model swaps (35B-A3B primary, STT turbo, etc.)
@@ -515,7 +515,7 @@ CURATED_MODELS: list[CuratedModel] = [
         context_length=131072,
         recommended_slot="chat",
         tags=["chat", "vision", "tool-calling", "mtp"],
-        notes="Lemonade-stock key. Vision-capable. MTP head needs the rocmfp4 fork to speculate.",
+        notes="Stock catalogue key. Vision-capable. MTP head needs the rocmfp4 fork to speculate.",
         capability="chat",
         backend="llamacpp",
         bundle_only=True,
@@ -534,7 +534,7 @@ CURATED_MODELS: list[CuratedModel] = [
         context_length=131072,
         recommended_slot="chat",
         tags=["chat", "vision", "tool-calling", "mtp"],
-        notes="Lemonade-stock key. Max/LMX-tier primary; vision-capable (see #515).",
+        notes="Stock catalogue key. Max/LMX-tier primary; vision-capable (see #515).",
         capability="chat",
         backend="llamacpp",
         bundle_only=True,
@@ -553,7 +553,7 @@ CURATED_MODELS: list[CuratedModel] = [
         context_length=131072,
         recommended_slot="chat",
         tags=["chat", "coding", "tool-calling"],
-        notes="Lemonade-stock key. Coder slot (LRU) on Pro.",
+        notes="Stock catalogue key. Coder slot (LRU) on Pro.",
         capability="chat",
         backend="llamacpp",
         bundle_only=True,
@@ -571,7 +571,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="ggml-tiny.bin",
         recommended_slot="stt",
         tags=["stt", "transcription"],
-        notes="Lemonade-stock key (whispercpp recipe). Loaded from Lemonade's bundled catalogue.",
+        notes="Stock catalogue key (whispercpp recipe). Loaded from the bundled catalogue.",
         capability="stt",
         backend="whispercpp",
         bundle_only=True,
@@ -589,7 +589,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="ggml-base.bin",
         recommended_slot="stt",
         tags=["stt", "transcription"],
-        notes="Lemonade-stock key (whispercpp recipe).",
+        notes="Stock catalogue key (whispercpp recipe).",
         capability="stt",
         backend="whispercpp",
         bundle_only=True,
@@ -607,11 +607,11 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="ggml-large-v3-turbo.bin",
         recommended_slot="stt",
         tags=["stt", "transcription"],
-        notes="Lemonade-stock key (whispercpp recipe). NPU encoder variant available.",
+        notes="Stock catalogue key (whispercpp recipe). NPU encoder variant available.",
         capability="stt",
         backend="whispercpp",
-        # Visible STT default (#514): loads via Lemonade's built-in whispercpp
-        # recipe, so no whisper-cpp toolbox image is needed. Tiny/Base stay
+        # Visible STT default (#514): loads via the whisper.cpp recipe,
+        # so no whisper-cpp toolbox image is needed. Tiny/Base stay
         # bundle_only as lower-tier bundle picks.
         bundle_only=False,
     ),
@@ -628,7 +628,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="kokoro-v1.0.onnx",
         recommended_slot="tts",
         tags=["tts"],
-        notes="Lemonade-stock key (kokoro recipe, multi-file ONNX).",
+        notes="Stock catalogue key (kokoro recipe, multi-file ONNX).",
         capability="tts",
         backend="kokoro",
         bundle_only=True,
@@ -646,7 +646,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="sd_turbo-f16-q8_0.gguf",
         recommended_slot="img",
         tags=["image"],
-        notes="Lemonade-stock key (sd-cpp recipe). 4 steps, cfg 1.0, 512x512.",
+        notes="Stock catalogue key (sd-cpp recipe). 4 steps, cfg 1.0, 512x512.",
         capability="image",
         model_class="sd-turbo",
         comfyui_subdir="checkpoints",
@@ -665,7 +665,7 @@ CURATED_MODELS: list[CuratedModel] = [
         hf_file="flux-2-klein-9b-Q8_0.gguf",
         recommended_slot="img",
         tags=["image", "edit"],
-        notes="Lemonade-stock key (sd-cpp recipe, multi-file: main + Qwen3-8B text encoder + vae).",
+        notes="Stock catalogue key (sd-cpp recipe, multi-file: main + Qwen3-8B text encoder + vae).",
         capability="image",
         model_class="flux-klein",
         comfyui_subdir="checkpoints",

@@ -167,7 +167,6 @@ def test_import_happy_path_canonical_layout(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert dest.read_bytes() == REGISTRY_PAYLOAD
     # Success guidance must point operators at the next step.
-    assert "hal0 capabilities sync" in result.output
     assert "bundle" in result.output.lower() or "slot add" in result.output
 
 

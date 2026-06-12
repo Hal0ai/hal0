@@ -41,13 +41,13 @@ log = logging.getLogger(__name__)
 # hardware-preference field ``SlotConfig.device``. The whitelist is kept for
 # one release so legacy slot TOMLs round-trip cleanly; a warning is logged
 # whenever ``backend`` is read without an accompanying ``device``. See
-# ADR-0006 §7 and ``docs/internal/lemonade-migration-plan.md`` decision 15.
+# ADR-0006 §7 (v0.2 migration plan, decision 15).
 _VALID_BACKENDS = frozenset({"vulkan", "rocm", "flm", "moonshine", "kokoro", "cpu"})
 
 # v0.2 hardware-preference enum. ``device`` replaces the overloaded
 # ``backend`` field — it carries hardware intent only, not provider choice.
-# ``LemonadeProvider`` (issue #140) maps these to Lemonade's recipe:backend
-# pair at the runtime layer.
+# ``hal0.model_meta.device_to_backend`` maps these to the recipe:backend
+# pair that feeds container profile/argv derivation.
 DeviceLiteral = Literal["gpu-rocm", "gpu-vulkan", "cpu", "npu"]
 _VALID_DEVICES = frozenset({"gpu-rocm", "gpu-vulkan", "cpu", "npu"})
 
@@ -60,7 +60,7 @@ DEFAULT_DEVICE: str = "gpu-rocm"
 # Used by:
 #   - ``SlotConfig`` model-validator (auto-promote on load).
 #   - ``hal0/config/migrations/capabilities_v2.py`` (file migration).
-#   - ``hal0 capabilities migrate-to-lemonade`` CLI.
+#   - the capabilities on-load auto-migration.
 # Keep these aligned with ADR-0006 §7. The values for moonshine/kokoro map
 # to ``cpu`` because those toolboxes were always CPU runtimes — the legacy
 # enum overloaded the term ``backend`` with provider identity.
@@ -80,11 +80,9 @@ BACKEND_TO_DEVICE: dict[str, str] = {
     "npu": "npu",
 }
 
-# Valid provider names. ``"lemonade"`` is the v0.2 default (ADR-0008
-# §2: Lemonade is the only Provider that drives slot lifecycle); the
-# pre-v0.2 names remain accepted so legacy slot TOMLs round-trip
-# without raising. Non-Lemonade values are deprecated and ignored by
-# SlotManager — the provider field exists only for round-trip + UI
+# Valid provider names. ContainerProvider drives every slot lifecycle;
+# the pre-container names remain accepted so legacy slot TOMLs round-trip
+# without raising — the provider field exists only for round-trip + UI
 # label compatibility. ``"comfyui"`` is the exception: it is the active
 # container image-gen provider (img.toml, ADR image slots), not a
 # deprecated legacy value.
@@ -107,7 +105,7 @@ CURRENT_SCHEMA_VERSION = 1
 #
 # - schema_version = 1 (or absent): legacy. CapabilitySelection uses
 #   ``backend`` field.
-# - schema_version = 2: post-Lemonade migration. CapabilitySelection
+# - schema_version = 2: post-v0.2 migration. CapabilitySelection
 #   uses ``device``; ``backend`` round-trips as a deprecated alias.
 CAPABILITIES_SCHEMA_VERSION_LEGACY = 1
 CAPABILITIES_SCHEMA_VERSION_CURRENT = 2
@@ -177,7 +175,7 @@ class NpuConfig(BaseModel):
 
     Maps to ``flm serve --asr 1 --embed 1`` flag construction performed by
     FLMProvider.container_spec at runtime.  This config file is the single
-    source of truth; it replaces lemond's nested flm.args approach.
+    source of truth; it replaces the legacy daemon's nested flm.args approach.
 
     Both fields default to ``False`` so a bare ``[npu]`` section in a slot
     TOML is valid (all-off) without requiring the operator to explicitly
@@ -304,7 +302,7 @@ class SlotConfig(BaseModel):
         description=(
             "DEPRECATED (kept one release): slot runtime engine. 'container' "
             "(podman, managed by ContainerProvider) is the only runtime; "
-            "legacy 'lemonade' values are migrated on load. See the "
+            "legacy values are migrated on load. See the "
             "container-runtime design doc §3."
         ),
     )
@@ -395,10 +393,10 @@ class SlotConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_lemonade_runtime(cls, data: Any) -> Any:
-        """Migrate pre-container slot TOMLs on load (Phase E, spec §9).
+    def _migrate_legacy_runtime(cls, data: Any) -> Any:
+        """Migrate pre-container slot TOMLs on load (spec §9).
 
-        ``runtime="lemonade"`` / ``provider="lemonade"`` no longer exist;
+        The legacy runtime/provider markers no longer exist;
         a legacy TOML must still load so an upgrade over an old /etc/hal0
         never bricks the API. The markers are coerced (runtime→container,
         provider→llama-server) with a logged warning, and a profile-less
@@ -422,9 +420,7 @@ class SlotConfig(BaseModel):
         if legacy_provider:
             data["provider"] = "llama-server"
         extra = data.get("extra")
-        slot_type = data.get("type") or (
-            extra.get("type") if isinstance(extra, dict) else None
-        )
+        slot_type = data.get("type") or (extra.get("type") if isinstance(extra, dict) else None)
         device = data.get("device") or DEFAULT_DEVICE
         is_trio_alias = device == "npu" and slot_type in ("embedding", "transcription")
         if not data.get("profile") and not is_trio_alias:
@@ -432,7 +428,7 @@ class SlotConfig(BaseModel):
             if default_profile:
                 data["profile"] = default_profile
         log.warning(
-            "slot %r: legacy lemonade runtime/provider migrated to container "
+            "slot %r: legacy runtime/provider migrated to container "
             "(profile=%s); rewrite the TOML to silence this warning",
             data.get("name", "?"),
             data.get("profile"),
@@ -772,8 +768,8 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
     },
 }
 
-#: Preselect map for the create-modal device picker and Phase E
-#: lemonade-migration defaults.  Keys are ``DeviceLiteral`` values (gpu-rocm,
+#: Preselect map for the create-modal device picker and legacy-slot
+#: migration defaults.  Keys are ``DeviceLiteral`` values (gpu-rocm,
 #: gpu-vulkan, cpu, npu); values are seed profile names that best represent
 #: each device class.
 DEVICE_DEFAULT_PROFILES: dict[str, str] = {
@@ -1125,10 +1121,10 @@ class SlotsConfig(BaseModel):
         default=300,
         ge=0,
         description=(
-            "Global idle-eviction TTL (seconds). "
-            "Models that have not served a request for this long are unloaded by the "
-            "Lemonade idle driver. 0 disables global eviction (per-slot overrides still "
-            "apply). Per-slot idle_timeout_s in each slot's TOML overrides this value."
+            "Default idle-eviction TTL (seconds), applied per slot. "
+            "A slot that has not served a request for this long transitions "
+            "to idle. 0 disables eviction. Per-slot idle_timeout_s in each "
+            "slot's TOML overrides this value."
         ),
     )
 
@@ -1664,8 +1660,8 @@ class MemoryEmbeddingConfig(BaseModel):
         description=(
             "Read budget for the rerank slot. Default raised from the "
             "previous shared 2.0s scalar because GPU rerank under "
-            "concurrent load (see auto-memory "
-            "``hal0-lemonade-threads-deadlock``) regularly breaches a "
+            "concurrent load (CPU oversubscription stalls responses) "
+            "regularly breaches a "
             "tight total budget, which silently falls through to vector "
             "ordering. Failures still fall through — this just stops "
             "spurious timeouts under healthy-but-loaded conditions."
@@ -1748,7 +1744,7 @@ class ModelsConfig(BaseModel):
         description=(
             "DEPRECATED — superseded by ``[models].store``. Retained so PR #313 "
             "installs round-trip without a manual edit. When ``store`` is set the "
-            "pull engine and Lemonade ignore this field; clearing ``store`` falls "
+            "pull engine ignores this field; clearing ``store`` falls "
             "back to ``pull_root`` so an operator who hand-edited their TOML pre-store "
             "still works. Will be removed in a future release."
         ),
@@ -1758,8 +1754,8 @@ class ModelsConfig(BaseModel):
         description=(
             "Single source of truth for where hal0 reads + writes model files. "
             "When set (absolute path, e.g. ``/mnt/ai-models``), the pull engine "
-            "writes here AND Lemonade's ``extra_models_dir`` is propagated to "
-            "the same path on save (with a hal0-lemonade.service restart). "
+            "writes here AND slot containers mount the path (observed on the "
+            "next slot restart). "
             "Empty falls back to ``pull_root`` for PR-#313 compatibility, "
             "which itself defaults to ``paths.models_dir()``."
         ),

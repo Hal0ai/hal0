@@ -33,6 +33,7 @@ import re
 import shutil
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -183,6 +184,27 @@ class Slot:
             "metadata": self.metadata,
             "last_used_at": self.last_used_at,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedSlot:
+    """Typed routing result for an enabled slot.
+
+    Returned by :meth:`SlotManager.resolve_for_request` and
+    :meth:`SlotManager.loaded_slot` so callers do not have to route to a
+    bare name and then reopen raw slot TOML to recover the model id,
+    device, labels, or system prompt.
+    """
+
+    name: str
+    model_id: str
+    slot_type: str
+    device: str
+    enabled: bool
+    labels: frozenset[str]
+    system_prompt: str = ""
+    profile: str | None = None
+    default: bool = False
 
 
 def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
@@ -1135,13 +1157,71 @@ class SlotManager:
             )
         return candidates[0] if candidates else None
 
-    async def route_for_request(
+    def _loaded_slot_from_config(self, cfg: dict[str, Any]) -> LoadedSlot | None:
+        """Convert one raw slot config dict into a :class:`LoadedSlot`.
+
+        Returns ``None`` when the config does not describe an enabled slot
+        with a model id. The raw TOML shapes are intentionally absorbed here
+        so request routers and tool dispatchers consume a typed result.
+        """
+        name = str(cfg.get("name") or "").strip()
+        slot_type = str(cfg.get("type") or "").strip()
+        if not name or not slot_type:
+            return None
+        if cfg.get("enabled") is False:
+            return None
+
+        model_section = cfg.get("model") or {}
+        model_id = ""
+        if isinstance(model_section, dict):
+            raw_model = model_section.get("default", "")
+            if isinstance(raw_model, str):
+                model_id = raw_model.strip()
+        if not model_id:
+            return None
+
+        from hal0.model_meta import labels_of
+
+        raw_prompt = cfg.get("system_prompt")
+        system_prompt = raw_prompt if isinstance(raw_prompt, str) else ""
+        if not system_prompt:
+            extra = cfg.get("extra")
+            if isinstance(extra, dict) and isinstance(extra.get("system_prompt"), str):
+                system_prompt = extra["system_prompt"]
+
+        profile = cfg.get("profile")
+        return LoadedSlot(
+            name=name,
+            model_id=model_id,
+            slot_type=slot_type,
+            device=str(cfg.get("device") or ""),
+            enabled=True,
+            labels=frozenset(labels_of(cfg)),
+            system_prompt=system_prompt,
+            profile=profile if isinstance(profile, str) and profile else None,
+            default=cfg.get("default") is True,
+        )
+
+    async def loaded_slot(self, name: str) -> LoadedSlot | None:
+        """Return a typed view of an enabled configured slot, or ``None``.
+
+        Resolves back-compat aliases transparently. This is a read-only
+        inventory helper; it does not probe runtime state.
+        """
+        resolved = self._resolve_alias(name)
+        try:
+            cfg = await self._load_slot_config(resolved)
+        except SlotConfigError:
+            return None
+        return self._loaded_slot_from_config(cfg)
+
+    async def resolve_for_request(
         self,
         slot_type: str,
         *,
         required_labels: tuple[str, ...] = (),
-    ) -> str | None:
-        """Resolve a request of type ``slot_type`` to a concrete slot name.
+    ) -> LoadedSlot | None:
+        """Resolve a request of type ``slot_type`` to a loaded slot.
 
         Plan §4.4 four-step routing:
 
@@ -1156,39 +1236,51 @@ class SlotManager:
              true`` slot of ``slot_type`` in TOML declaration order
              (still satisfying the label overlay if any).
           4. ``None`` when nothing matches.
+        Returning :class:`LoadedSlot` keeps callers from reopening raw slot
+        configs to discover the model id, labels, device, or system prompt.
         """
 
-        # Label extraction lives in hal0.model_meta (issue #695) — shared
-        # with omni_router/filter.py so the two never drift again.
-        from hal0.model_meta import labels_of
-
-        def _satisfies(cfg: dict[str, Any]) -> bool:
+        def _satisfies(slot: LoadedSlot) -> bool:
             if not required_labels:
                 return True
-            return set(required_labels).issubset(labels_of(cfg))
+            return set(required_labels).issubset(slot.labels)
 
-        configs = [c for c in await self.iter_configs() if c.get("type") == slot_type]
+        slots = [
+            slot
+            for cfg in await self.iter_configs()
+            if cfg.get("type") == slot_type
+            for slot in [self._loaded_slot_from_config(cfg)]
+            if slot is not None
+        ]
 
         # Step 1+2: try the default first.
         default_name = await self.default_slot_for(slot_type)
         if default_name is not None:
-            default_cfg = next((c for c in configs if c.get("name") == default_name), None)
-            if (
-                default_cfg is not None
-                and default_cfg.get("enabled", True)
-                and _satisfies(default_cfg)
-            ):
-                return default_name
+            default_slot = next((slot for slot in slots if slot.name == default_name), None)
+            if default_slot is not None and _satisfies(default_slot):
+                return default_slot
 
         # Step 3: fall-through to first enabled + label-matching slot.
-        for cfg in configs:
-            if not cfg.get("enabled", True):
+        for slot in slots:
+            if not _satisfies(slot):
                 continue
-            if not _satisfies(cfg):
-                continue
-            return str(cfg.get("name", ""))
+            return slot
 
         return None
+
+    async def route_for_request(
+        self,
+        slot_type: str,
+        *,
+        required_labels: tuple[str, ...] = (),
+    ) -> str | None:
+        """Resolve a request of type ``slot_type`` to a concrete slot name.
+
+        Compatibility wrapper for callers that have not moved to
+        :meth:`resolve_for_request` yet.
+        """
+        slot = await self.resolve_for_request(slot_type, required_labels=required_labels)
+        return slot.name if slot is not None else None
 
     async def add_slot(
         self,

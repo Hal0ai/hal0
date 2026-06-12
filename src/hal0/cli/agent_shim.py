@@ -270,7 +270,7 @@ def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
 # ----------------------------------------------------------------------------
 
 # How long to wait for the child to become reachable before bailing.
-# Longer than the default 60s WatchdogSec on first boot (lemonade
+# Longer than the default 60s WatchdogSec on first boot (model
 # warm-up + provider plugin discovery can dominate), but capped so a
 # truly-wedged hermes doesn't keep the unit in ``activating`` forever.
 _READY_TIMEOUT_S = 90.0

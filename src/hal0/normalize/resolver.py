@@ -1,8 +1,8 @@
 """Live-slot model resolution for hal0 virtual model names.
 
 Pure core (``resolve_chain``) + an async wrapper (``LiveSlotResolver``) that reads
-slot config and the cached lemond health snapshot. No new lemond polling — the
-wrapper reuses ``MetricsShim._health`` (see hal0-api lifespan).
+slot config and the container slot state. The loaded-model set derives from the
+slot states SlotManager already tracks — no extra polling.
 """
 
 from __future__ import annotations
@@ -84,8 +84,8 @@ def resolve_chain(
 
     for role in chain:
         for slot in slots:
-            # Contract: both sides are the canonical lemond model_id, compared exactly.
-            # The async wrapper passes lemond's loaded model_names verbatim — exact
+            # Contract: both sides are the canonical model_id, compared exactly.
+            # The async wrapper passes the loaded model ids verbatim — exact
             # match is intended, do NOT lowercase.
             if _slot_matches_role(slot, role) and slot.model_id in loaded:
                 return Resolution(slot.model_id, slot.context_length, role, fallback=False)
@@ -102,7 +102,7 @@ class LiveSlotResolver:
 
     ``slot_views_provider`` returns the current list of ``SlotView`` (built from
     slot config). ``loaded_models_provider`` returns the set of currently-loaded
-    model ids from the cached health snapshot — NO new lemond poll.
+    model ids derived from container slot state — no extra polling.
     """
 
     def __init__(

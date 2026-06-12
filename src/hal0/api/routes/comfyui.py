@@ -6,8 +6,8 @@ is mutually exclusive with the LLM stack on the single iGPU). The Image-Gen tab
 renders that engine pane from ``GET /api/comfyui/status``, which folds together:
 
   - **docker** container state (``comfyui`` running / exited / absent),
-  - **systemd** state of the LLM stack (``hal0-lemonade`` + ``hal0-agent@hermes``)
-    so the pane can show which mode currently owns the GPU, and
+  - **systemd** state of the Hermes agent (``hal0-agent@hermes``) so the pane
+    can show which mode currently owns the GPU, and
   - **ComfyUI's own HTTP API** (``/system_stats`` for GTT/RAM, ``/queue`` for the
     running + pending job counts).
 
@@ -46,7 +46,6 @@ _GTT_CEIL_GB = 80
 _RAM_CEIL_GB = 96
 _PRESSURE_GB = 50
 
-_LEMONADE_UNIT = "hal0-lemonade.service"
 _HERMES_UNIT = "hal0-agent@hermes.service"
 
 # Switchover target modes. "generation" hands the iGPU to ComfyUI
@@ -296,9 +295,8 @@ def _arbiter_api_mode(arbiter: Any) -> str | None:
     """Arbiter-truth current mode ("generation"|"inference"), or None.
 
     None means "no arbiter / arbiter broken" — callers fall back to the legacy
-    docker/systemd probes. Post-migration (D9 removes the docker container,
-    hal0-lemonade stays active through Phase D) the legacy probes lie, so the
-    arbiter wins whenever it answers.
+    docker container probe. Post-migration (D9 removed the docker container)
+    the legacy probe lies, so the arbiter wins whenever it answers.
     """
     if arbiter is None:
         return None
@@ -312,9 +310,8 @@ def _arbiter_api_mode(arbiter: Any) -> str | None:
 async def comfyui_status(request: Request) -> dict[str, Any]:
     """Aggregate docker + systemd + ComfyUI HTTP into one engine-status object."""
     container_name = _comfyui_container()
-    container, lemonade, hermes, stats, queue = await asyncio.gather(
+    container, hermes, stats, queue = await asyncio.gather(
         _container_state(container_name),
-        _systemd_active(_LEMONADE_UNIT),
         _systemd_active(_HERMES_UNIT),
         _fetch_json("/system_stats"),
         _fetch_json("/queue"),
@@ -347,7 +344,7 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "endpoint": ":8188" if mode == "generation" else None,
         "memory": _parse_memory(stats),
         "queue": counts,
-        "inference": {"lemonade": lemonade, "hermes": hermes},
+        "inference": {"hermes": hermes},
         "inventory": _model_inventory(),
         "switchover": dict(_switch),
         "arbiter": arbiter_block,
@@ -448,25 +445,19 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
                 }
             },
         )
-    # Idempotency: the arbiter is the source of truth for the current mode.
-    # Post-migration the docker container is gone while hal0-lemonade stays
-    # active, so the legacy probe would report "already in inference" forever
-    # (= restore_llm never invokable, pinned img mode would be a permanent
-    # lockout). Legacy docker/systemd probe ONLY when the arbiter can't answer;
-    # there, target inference additionally requires lemonade to actually be up —
-    # if both stacks are down, the switch runs as a repair.
+    # Idempotency: the arbiter is the source of truth for the current mode
+    # (D7) — the docker-era container probe is ONLY the legacy fallback for
+    # arbiter-less apps. Post-migration the docker container is gone, so the
+    # fallback would report "already in inference" forever (= restore_llm
+    # never invokable, pinned img mode would be a permanent lockout) — hence
+    # the arbiter wins whenever it answers.
     arbiter = _get_arbiter(request)
     current = _arbiter_api_mode(arbiter)
     if current is not None:
         already_there = current == mode
     else:
-        container, lemonade = await asyncio.gather(
-            _container_state(_comfyui_container()),
-            _systemd_active(_LEMONADE_UNIT),
-        )
-        already_there = (
-            container == "running" if mode == "generation" else container != "running" and lemonade
-        )
+        container = await _container_state(_comfyui_container())
+        already_there = container == "running" if mode == "generation" else container != "running"
     if already_there:
         return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
     # Mid-render guard: switching to inference stops the container, dropping any

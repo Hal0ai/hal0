@@ -168,8 +168,8 @@ def capabilities_v1_backup_path(path: Path | None = None) -> Path:
 
     The auto-migration on hal0-api boot renames the live
     ``capabilities.toml`` to this path before rewriting in the v2 shape.
-    Kept around for ``hal0 capabilities migrate-to-lemonade --revert``
-    and for v0.1.x downgrade scenarios (per the issue body).
+    Kept around so the on-load auto-migration can preserve the v1 file
+    for revert/downgrade scenarios (per the issue body).
     """
     base = Path(path) if path is not None else capabilities_toml_path()
     return base.with_name(base.name + ".v1.bak")
@@ -272,8 +272,8 @@ def auto_migrate_capabilities_file(path: Path | None = None) -> bool:
     Crash safety: the rename happens before the rewrite. If the rewrite
     crashes, the next boot sees a missing live file + an intact
     ``.v1.bak`` — the orchestrator's ``initialize_if_missing`` path will
-    re-seed from slot TOMLs, and the operator can run
-    ``hal0 capabilities migrate-to-lemonade --revert`` to restore.
+    re-seed from slot TOMLs, and the operator can restore by moving
+    ``capabilities.toml.v1.bak`` back over ``capabilities.toml``.
     """
     import os
 

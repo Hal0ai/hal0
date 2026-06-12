@@ -67,7 +67,7 @@ _DEFAULT_FLM_MODELS_DIR = "/var/lib/hal0/.config/flm/models"
 
 # ── Host FLM (catalog probe + pull) ─────────────────────────────────────────────
 # The catalog probe and model pulls run the HOST flm binary directly — NOT the
-# docker toolbox — so they use the exact binary + on-disk cache that lemond
+# docker toolbox — so they use the exact binary + on-disk cache the NPU slot
 # *serves* with. The toolbox had drifted to FLM v0.9.42 while the host serves
 # v0.9.43: it (a) bind-mounted the empty `_DEFAULT_FLM_MODELS_DIR`, so every
 # model reported installed=False and vanished from the dashboard (the UI hides
@@ -156,7 +156,7 @@ class FLMProvider(Provider):
         """
         port = slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port", 8086)
         # [model].context_size is the SlotConfig shape (container slots);
-        # ctx_size / defaults.context_size are lemond-era legacy shapes.
+        # ctx_size / defaults.context_size are legacy (pre-container) shapes.
         ctx = (
             (slot_cfg.get("model") or {}).get("context_size")
             or slot_cfg.get("ctx_size")
@@ -172,8 +172,10 @@ class FLMProvider(Provider):
             load_asr = "1" if npu_table.get("asr") else "0"
             load_embed = "1" if npu_table.get("embed") else "0"
         else:
-            # Legacy lemond-era fallback (removed in Phase E): truthy check,
-            # same semantics as before the [npu] table existed.
+            # Legacy (pre-container) fallback — still reachable from legacy
+            # TOMLs without an [npu] table (api/__init__.py reads the same
+            # ``defaults.load_*`` shape): truthy check, same semantics as
+            # before the [npu] table existed.
             load_asr = "1" if defaults.get("load_asr") else "0"
             load_embed = "1" if defaults.get("load_embed") else "0"
 
@@ -511,8 +513,8 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 def _probe_flm_catalog() -> list[dict[str, Any]] | None:
     """Run host ``flm list -j`` (as the hal0 user) and parse the JSON output.
 
-    Uses the host ``/usr/bin/flm`` — the SAME binary lemond serves with, NOT a
-    docker toolbox — so the reported ``installed`` flag reflects the weights
+    Uses the host ``/usr/bin/flm`` — the SAME binary the NPU slot serves
+    with, NOT a docker toolbox — so the reported ``installed`` flag reflects the weights
     actually on disk at ``~/.config/flm/models`` and there is no
     toolbox-vs-host version skew. Returns the raw model list (FLM's own shape)
     or ``None`` on any failure (missing binary, perms, crash, parse error,
@@ -628,15 +630,15 @@ def is_flm_tag(model_id: str) -> bool:
 def is_installed_flm_id(model_id: str) -> bool:
     """True iff ``model_id`` is the ``<tag>-FLM`` id of an INSTALLED FLM model.
 
-    FLM models are lemond-owned and are **never** in hal0's ModelRegistry
+    FLM models are host-flm-owned tags and are **never** in hal0's ModelRegistry
     (see docs/internal/brain-redesign/{model,slot}-shapes-audit-2026-06-07.md):
     the registry is the source of truth for GGUF/local models only. So the
     slot-apply registry gate (``routes/slots.py``) wrongly rejects a perfectly
     loadable FLM model — yet the npu.toml ``[model].default`` config path loads
-    the same id fine, lemond-mediated. This lets slot-apply accept an on-disk
+    the same id fine. This lets slot-apply accept an on-disk
     FLM model by *provider-resolvability* instead of registry membership.
 
-    ``model_id`` is the lemond-served ``-FLM`` form (``gemma4-it-e4b-FLM``); we
+    ``model_id`` is the served ``-FLM`` form (``gemma4-it-e4b-FLM``); we
     match it against the forward transform of each installed probe tag
     (``gemma4-it:e4b`` → ``gemma4-it-e4b-FLM``), the same map used to synthesise
     the picker rows in ``routes/models.py``.
@@ -652,8 +654,8 @@ def is_installed_flm_id(model_id: str) -> bool:
 def flm_pull_command(tag: str) -> tuple[list[str], str]:
     """Return ``(argv, host_models_dir)`` for a host ``flm pull <tag>`` run.
 
-    Uses the host ``/usr/bin/flm`` (same binary lemond serves with), NOT a
-    docker toolbox. The caller spawns ``argv`` with
+    Uses the host ``/usr/bin/flm`` (same binary the NPU slot serves with),
+    NOT a docker toolbox. The caller spawns ``argv`` with
     :func:`flm_host_spawn_kwargs` so it runs as the ``hal0`` user with ``HOME``
     set; downloads land in ``~/.config/flm/models`` (the real cache) owned by
     ``hal0``, matching serving. ``host_models_dir`` is returned so callers can

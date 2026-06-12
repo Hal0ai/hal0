@@ -88,7 +88,7 @@ class ModelRegistry:
 
     # Optional post-mutation callback. When set (e.g. by create_app), every
     # successful add/update/remove invokes it AFTER the lock is released so
-    # downstream artifacts (Lemonade's server_models.json) can be regenerated
+    # downstream catalog artifacts can be regenerated
     # from the freshly-written registry. Best-effort by design: a failing hook
     # is logged and swallowed, never propagated — a catalog-regen failure must
     # not roll back or mask a successful registry write.

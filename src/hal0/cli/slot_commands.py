@@ -49,9 +49,9 @@ SlotBackend = SlotProvider
 
 
 class SlotType(StrEnum):
-    """Lemonade-shape slot type enum (#275 bug 3).
+    """Slot type enum (#275 bug 3).
 
-    Maps to the Lemonade vocab from PLAN.md §1 v0.2 slot model:
+    Maps to the slot-type vocab from PLAN.md §1 v0.2 slot model:
     ``llm | embedding | reranking | transcription | tts | image``.
     The dispatcher routes by ``type`` (per ADR-0008 §6); without this
     flag the CLI couldn't create embedding/rerank/transcription/tts
@@ -321,7 +321,7 @@ def slot_create(
         "--type",
         "-t",
         help=(
-            "Lemonade slot type: llm | embedding | reranking | transcription | tts | image. "
+            "Slot type: llm | embedding | reranking | transcription | tts | image. "
             "Determines how the dispatcher routes requests (ADR-0008 §6)."
         ),
         case_sensitive=False,
@@ -331,7 +331,7 @@ def slot_create(
         "--provider",
         help=(
             "[Legacy v0.1] Inference provider (engine) for the slot. "
-            "Under Lemonade (v0.2+), provider is determined by --type; "
+            "Since v0.2, provider is determined by --type; "
             "this flag is preserved for backward-compat with older slot TOMLs."
         ),
         case_sensitive=False,
@@ -342,7 +342,7 @@ def slot_create(
         help=(
             "Hardware backend: vulkan | rocm | cpu. "
             "Default: auto-detected from /etc/hal0/hardware.json (vulkan if no probe). "
-            "Lemonade-shape `device` is derived: vulkan→gpu-vulkan, rocm→gpu-rocm, cpu→cpu."
+            "The `device` field is derived: vulkan→gpu-vulkan, rocm→gpu-rocm, cpu→cpu."
         ),
         case_sensitive=False,
     ),
@@ -393,7 +393,7 @@ def slot_create(
             return
 
     hw = hardware.value if hardware is not None else _detect_default_hardware()
-    # Lemonade-shape `device` (gpu-vulkan / gpu-rocm / cpu / npu) derives
+    # The `device` enum (gpu-vulkan / gpu-rocm / cpu / npu) derives
     # from the v0.1 hardware enum: vulkan/rocm → gpu-vulkan/gpu-rocm; cpu
     # stays cpu; npu has no v0.1 hardware equivalent (set --hardware via
     # the legacy schema upgrade path).

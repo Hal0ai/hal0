@@ -80,7 +80,7 @@ def gpu_target_version() -> dict[str, Any]:
     """Decode KFD's ``gfx_target_version`` to a ``gfxNNNN`` string.
 
     Strix Halo = ``gfx1151`` (raw integer ``110501``). Returns the
-    canonical string ROCm/HSA + llama.cpp/Lemonade match on so callers
+    canonical string ROCm/HSA + llama.cpp match on so callers
     can compare to known good values directly.
 
     Walks every ``/sys/class/kfd/kfd/topology/nodes/*/properties`` file

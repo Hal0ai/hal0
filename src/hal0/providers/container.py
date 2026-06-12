@@ -1,7 +1,7 @@
 """ContainerProvider — podman-container-per-slot runtime (P1 tracer bullet).
 
-Every GPU-LLM slot with ``profile`` set (or ``runtime="container"``) dispatches
-through this provider instead of LemonadeProvider.
+Every slot with ``profile`` set (or ``runtime="container"``) dispatches
+through this provider — the sole slot-lifecycle backend.
 
 Architecture (design doc §2):
   - Profile supplies:    image + bench-tuned flags (+ MTP bundle if mtp=true).
@@ -57,7 +57,7 @@ log = logging.getLogger(__name__)
 
 # Path to the hal0-slot@ base template unit (installed by the package).
 # ContainerProvider writes a complete self-contained unit here, *not*
-# a drop-in, because the Lemonade migration (PR-9) retired the base
+# a drop-in, because the v0.2 migration (PR-9) retired the base
 # template.  Writing a complete file means the manager never has to
 # know whether the base exists.
 _SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
@@ -161,7 +161,7 @@ def _render_unit(
     """Render a complete (non-drop-in) systemd unit for a container slot.
 
     Produces a self-contained unit that does NOT require a parent
-    ``hal0-slot@.service`` template (retired in Lemonade migration PR-9).
+    ``hal0-slot@.service`` template (retired in the v0.2 migration, PR-9).
     Written to ``/etc/systemd/system/hal0-slot@<name>.service``.
 
     ``runtime_bin``: override the container runtime binary (default: auto-detect
@@ -382,7 +382,7 @@ class ContainerProvider(Provider):
 
         NOTE: ContainerProvider uses _render_unit() for its own unit rendering
         rather than the inherited render_systemd_override(), because the base
-        template (hal0-slot@.service) was retired in the Lemonade migration.
+        template (hal0-slot@.service) was retired in the v0.2 migration.
         This method is kept for ABC compliance and test helpers.
         """
         profile_name = slot_cfg.get("profile") or ""
@@ -496,8 +496,8 @@ class ContainerProvider(Provider):
         unit_path = self._unit_path(slot_name)
         dropin_dir = unit_path.with_name(unit_path.name + ".d")
         if dropin_dir.is_dir():
-            # Lemonade-era render_systemd_override drop-ins carry dead
-            # EnvironmentFile refs that fail container units (#694 — hit
+            # Legacy (pre-container) render_systemd_override drop-ins carry
+            # dead EnvironmentFile refs that fail container units (#694 — hit
             # live on the Phase B tts deploy). The container unit is fully
             # self-contained; no drop-in is ever legitimate here.
             shutil.rmtree(dropin_dir)
@@ -542,8 +542,8 @@ class ContainerProvider(Provider):
         spec_provider = _spec_provider_for(slot_cfg)
         if spec_provider is not None:
             # Loud-fail for NPU slots only: a missing FLM tag must not silently
-            # fall through to FLM's legacy default (kept in build_env for the
-            # lemonade path until Phase E). Kokoro is self-managed and needs no
+            # fall through to FLM's legacy build_env default. Kokoro is
+            # self-managed and needs no
             # registry tag — the tag check fires ONLY when device == "npu".
             if str(slot_cfg.get("device", "")) == "npu":
                 model_table = slot_cfg.get("model") or {}
@@ -751,7 +751,7 @@ class ContainerProvider(Provider):
             yield {"state": "failed", "error": f"pull exited with code {exit_code}"}
 
 
-# ── Module-level singleton (matches lemonade_provider() pattern) ─────────────
+# ── Module-level singleton (matches the provider-factory pattern) ────────────
 
 _container_provider: ContainerProvider | None = None
 

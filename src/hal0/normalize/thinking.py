@@ -1,12 +1,12 @@
-"""Reasoning-suppression policy for lemond-bound chat requests.
+"""Reasoning-suppression policy for dispatcher-bound chat requests.
 
 We steer reasoning with ``chat_template_kwargs.enable_thinking`` — the Qwen3-family
 lever the jinja chat template honors (llama-server runs with ``--jinja``): the
 template emits an empty ``<think></think>`` so the model skips reasoning entirely
 (when false), or a normal reasoning block (when true).
 
-Why NOT the top-level ``enable_thinking``: lemond translates a top-level
-``enable_thinking`` into a ``/no_think`` *prompt* injection (server.cpp:58-114).
+Why NOT the top-level ``enable_thinking``: the legacy daemon translated a
+top-level ``enable_thinking`` into a ``/no_think`` *prompt* injection.
 Abliterated / "aggressive" Qwen3 fine-tunes (e.g. the qwen3.6-35b-a3b-uncensored
 primary) ignore that soft marker, emit an unbounded reasoning block, and never
 produce ``content`` (verified live: empty content, finish_reason=length). The

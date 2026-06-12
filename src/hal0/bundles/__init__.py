@@ -1,9 +1,9 @@
 """hal0 bundles — first-run picker manifests + tier eligibility.
 
-ADR-0010 (bundle picker, no default model stack) and Lemonade adoption
+ADR-0010 (bundle picker, no default model stack) and the v0.2 adoption
 plan §8 (First-run UX) define a small, fixed set of hardware-anchored
-tiers and one vendor-blessed kit. Each bundle is a
-``collection.omni``-compatible manifest plus hal0-specific slot
+tiers and one vendor-blessed kit. Each bundle is a ``collection.omni``
+manifest (hal0's own bundle format) plus hal0-specific slot
 metadata. The picker lives on the first dashboard load; this package
 is the backend half.
 

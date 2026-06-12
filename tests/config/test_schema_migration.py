@@ -8,8 +8,6 @@ Covers:
   - Auto-migration is idempotent (running twice = no-op the second time).
   - ``.v1.bak`` is created exactly once and preserved.
   - Round-trip: write v1 → load → migrates → write v2 → load → no-op.
-  - CLI subcommand prints the diff correctly; ``--apply`` mutates;
-    ``--revert`` restores.
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ from pathlib import Path
 import pytest
 import tomli_w
 from pydantic import ValidationError
-from typer.testing import CliRunner
 
 from hal0.capabilities.config import (
     CAPABILITIES_SCHEMA_VERSION_CURRENT,
@@ -33,7 +30,6 @@ from hal0.capabilities.config import (
     read_schema_version,
     save_capabilities_config,
 )
-from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.config.schema import (
     BACKEND_TO_DEVICE,
     DEFAULT_DEVICE,
@@ -389,123 +385,6 @@ class TestReadSchemaVersion:
         assert read_schema_version({"schema_version": "bogus"}) == 1
 
 
-# ── CLI: hal0 capabilities migrate-to-lemonade ───────────────────────────────
-
-
-@pytest.fixture
-def runner() -> CliRunner:
-    return CliRunner()
-
-
-class TestMigrateToLemonadeCLI:
-    def test_no_file_exits_zero(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "missing.toml"
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target)],
-        )
-        assert result.exit_code == 0
-        # Rich wraps output; collapse whitespace before the substring assertion.
-        flat = " ".join(result.stdout.split())
-        assert "does not exist" in flat
-
-    def test_already_v2_exits_zero(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        with open(target, "wb") as f:
-            tomli_w.dump({"schema_version": 2, "selections": {}}, f)
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target)],
-        )
-        assert result.exit_code == 0
-        flat = " ".join(result.stdout.split())
-        assert "already v2" in flat
-
-    def test_dry_run_prints_diff_no_write(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-        before = target.read_bytes()
-
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target)],
-        )
-        assert result.exit_code == 0
-        # File untouched.
-        assert target.read_bytes() == before
-        # Backup not created on dry-run.
-        assert not capabilities_v1_backup_path(target).exists()
-        # Diff content visible in output.
-        assert "device" in result.stdout
-        assert "schema_version" in result.stdout
-
-    def test_apply_writes_migration(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target), "--apply"],
-        )
-        assert result.exit_code == 0
-        # Live file is v2.
-        with open(target, "rb") as f:
-            after = tomllib.load(f)
-        assert after["schema_version"] == 2
-        # Backup exists.
-        assert capabilities_v1_backup_path(target).exists()
-
-    def test_revert_restores_backup(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-        original_bytes = target.read_bytes()
-
-        # Apply first.
-        runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target), "--apply"],
-        )
-        assert target.read_bytes() != original_bytes  # migrated
-
-        # Revert.
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target), "--revert"],
-        )
-        assert result.exit_code == 0
-        assert target.read_bytes() == original_bytes
-        # Backup consumed.
-        assert not capabilities_v1_backup_path(target).exists()
-
-    def test_revert_without_backup_errors(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target), "--revert"],
-        )
-        assert result.exit_code == 1
-        flat = " ".join(result.stdout.split())
-        assert "no v1 backup" in flat
-
-    def test_apply_and_revert_mutually_exclusive(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-        result = runner.invoke(
-            capabilities_app,
-            [
-                "migrate-to-lemonade",
-                "--path",
-                str(target),
-                "--apply",
-                "--revert",
-            ],
-        )
-        assert result.exit_code == 2
-        flat = " ".join(result.stdout.split())
-        assert "mutually exclusive" in flat
-
-
 # ── Phase E: lemonade runtime/provider migration (#687, spec §9) ──────────────
 
 
@@ -526,7 +405,9 @@ class TestLemonadeRuntimeMigration:
         with caplog.at_level("WARNING"):
             s = SlotConfig(name="primary", port=8081, runtime="lemonade")
         assert s.runtime == "container"
-        assert any("lemonade" in r.message for r in caplog.records)
+        assert any(
+            "legacy runtime/provider migrated to container" in r.message for r in caplog.records
+        )
 
     def test_runtime_default_is_container(self) -> None:
         s = SlotConfig(name="primary", port=8081)
@@ -545,9 +426,7 @@ class TestLemonadeRuntimeMigration:
         assert s.provider == "llama-server"
 
     def test_profile_less_legacy_slot_gets_device_class_default(self) -> None:
-        s = SlotConfig(
-            name="chat", port=8081, runtime="lemonade", device="gpu-vulkan"
-        )
+        s = SlotConfig(name="chat", port=8081, runtime="lemonade", device="gpu-vulkan")
         assert s.profile == "vulkan-std"
 
     def test_profile_less_npu_anchor_gets_flm_npu(self) -> None:
@@ -574,9 +453,7 @@ class TestLemonadeRuntimeMigration:
         )
         assert s.profile == "dense-mtp-rocmfp4"
 
-    def test_container_slot_untouched_no_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_container_slot_untouched_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level("WARNING"):
             s = SlotConfig(
                 name="chat",

@@ -2,9 +2,9 @@
 
 Bundle manifests on disk are JSON files that combine two concerns:
 
-1. A Lemonade-compatible ``collection.omni`` shape — a list of
-   pre-registered ``model_name`` entries that Lemonade can consume as a
-   single user-facing kit (see memory ``hal0_lemonade_omni_pattern``).
+1. The ``collection.omni`` shape — hal0's own bundle manifest format: a
+   list of pre-registered ``model_name`` entries consumed as a
+   single user-facing kit.
 2. hal0-specific tier metadata — minimum RAM, the slot assignment for
    each model (which slot id receives which model), whether the FLM NPU
    trio should be shown / opt-in, and human-readable display fields.
@@ -20,8 +20,8 @@ Two dataclasses model this:
     ``collection.omni`` block under ``omni`` plus a ``hal0`` block with
     the tier metadata.
 
-The split is deliberate: future v0.3 work may publish bundles through
-Lemonade's native collection endpoints without needing to re-derive the
+The split is deliberate: future work may publish bundles through
+dedicated collection endpoints without needing to re-derive the
 hal0 metadata. Until then, both halves of the JSON travel together.
 
 Serialisation is JSON via :func:`bundle_to_dict` / :func:`bundle_from_dict`.
@@ -48,10 +48,9 @@ class ModelEntry:
     ``slot`` is the hal0 slot id (``chat.primary``, ``chat.coder``,
     ``embed``, ``rerank``, ``stt``, ``tts``, ``img``, plus the FLM trio
     slots ``agent`` / ``stt-npu`` / ``embed-npu`` when present).
-    ``model_name`` is the Lemonade registry id, matching what
-    ``server_models.json`` advertises after ``hal0 registry sync``.
+    ``model_name`` is the catalog model id (registry.toml key).
     ``size_gb`` is the on-disk pull size; informational only — the actual
-    download honours whatever Lemonade resolves at pull time.
+    download honours whatever the pull engine resolves at pull time.
     ``lru`` marks a slot as eligible for LRU eviction (Pro/Max secondary
     models). The default is False for primary/aux entries.
     """
@@ -171,7 +170,7 @@ class Bundle:
 class BundleManifest:
     """The full on-disk bundle JSON shape.
 
-    The ``omni`` block mirrors the Lemonade ``collection.omni`` manifest
+    The ``omni`` block is the ``collection.omni`` manifest shape
     (kind + name + members[]), and the ``hal0`` block carries the
     :class:`Bundle` metadata. ``schema_version`` lets future formats
     add fields without breaking older installs.

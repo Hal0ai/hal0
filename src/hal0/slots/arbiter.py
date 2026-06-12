@@ -9,8 +9,7 @@ two exclusive groups:
 
 Groups are DERIVED from slot configs (:func:`gpu_exclusive_group`), never
 declared: a slot is arbitrated iff it runs on the GPU (``gpu-rocm`` /
-``gpu-vulkan``) AND in a container. Lemonade-runtime, NPU and CPU slots are
-never arbitrated.
+``gpu-vulkan``) AND in a container. NPU and CPU slots are never arbitrated.
 
 Crash-recovery ordering (locked): the arbiter persists its target state to
 ``/var/lib/hal0/gpu_arbiter.json`` BEFORE the first unload, so an api
@@ -84,8 +83,7 @@ def gpu_exclusive_group(slot_cfg: dict[str, Any]) -> Literal["llm", "img"] | Non
     """Derive the exclusive-GPU group for a raw slot-config dict.
 
     Returns ``"img"`` / ``"llm"`` for GPU container slots, ``None`` for
-    everything else (npu/cpu devices, lemonade runtime) — those are never
-    arbitrated. The img signal is provider/profile ``comfyui`` or slot
+    everything else (npu/cpu devices) — those are never arbitrated. The img signal is provider/profile ``comfyui`` or slot
     ``type == "image"``; any other GPU container slot is an llm-group slot.
 
     "Container" mirrors ``SlotManager._is_container_slot`` exactly:
@@ -96,10 +94,10 @@ def gpu_exclusive_group(slot_cfg: dict[str, Any]) -> Literal["llm", "img"] | Non
 
     A missing ``device`` defaults to ``gpu-rocm`` (mirrors
     ``SlotManager.add_slot`` / ``hal0.config.schema.DEFAULT_DEVICE``); a
-    missing ``runtime`` defaults to ``lemonade``.
+    missing ``runtime`` defaults to ``container``.
     """
     device = str(slot_cfg.get("device") or "gpu-rocm")
-    runtime = str(slot_cfg.get("runtime") or "lemonade")
+    runtime = str(slot_cfg.get("runtime") or "container")
     profile = str(slot_cfg.get("profile") or "")
     is_container = runtime == "container" or bool(profile.strip())
     if device not in _GPU_DEVICES or not is_container:

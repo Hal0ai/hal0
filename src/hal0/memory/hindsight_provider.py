@@ -34,21 +34,21 @@ def namespace_to_bank(namespace: str) -> str:
     return namespace.replace(":", "__")
 
 
-class LemonadeReranker:
-    """Async reranker over lemond's gateway (Cohere-style ``/v1/reranking``).
+class Hal0Reranker:
+    """Async reranker over hal0-api's OpenAI surface (Cohere-style ``/v1/rerankings``).
 
-    POSTs {model, query, documents} to ``{base_url}/v1/reranking`` and returns
-    the raw ``results`` list (``[{"index", "relevance_score"}, ...]``, NOT
-    pre-sorted; lemond auto-loads the model on request) that
-    HindsightProvider._rerank_union maps onto the cross-bank union. Fail-soft:
-    returns [] on any error (gateway down, model load fail, bad shape, timeout)
-    so recall falls back to fused order.
+    POSTs {model, query, documents} to ``{base_url}/v1/rerankings`` (served by
+    the rerank container slot via the dispatcher) and returns the raw
+    ``results`` list (``[{"index", "relevance_score"}, ...]``, NOT pre-sorted)
+    that HindsightProvider._rerank_union maps onto the cross-bank union.
+    Fail-soft: returns [] on any error (gateway down, model load fail, bad
+    shape, timeout) so recall falls back to fused order.
     """
 
     def __init__(
         self,
         *,
-        base_url: str = "http://127.0.0.1:13305",
+        base_url: str = "http://127.0.0.1:8080",
         model: str = "builtin.jina-reranker-v1-tiny-en-q8",
         connect_timeout_s: float = 1.0,
         read_timeout_s: float = 8.0,
@@ -69,7 +69,7 @@ class LemonadeReranker:
         )
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(f"{self._base_url}/v1/reranking", json=payload)
+                resp = await client.post(f"{self._base_url}/v1/rerankings", json=payload)
                 resp.raise_for_status()
                 body = resp.json()
         except Exception:

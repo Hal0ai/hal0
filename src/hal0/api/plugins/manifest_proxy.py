@@ -67,8 +67,8 @@ _DEFAULT_UPSTREAM = "http://127.0.0.1:9119"
 # preventing inline scripts and unallowlisted origins from running.
 _MANIFEST_CSP = "script-src 'self' 'strict-dynamic'"
 
-# Hop-by-hop headers — must not be forwarded across the proxy boundary.
-# Mirrors :mod:`hal0.api.routes.lemonade_proxy`.
+# Hop-by-hop headers — must not be forwarded across the proxy boundary
+# (standard RFC 9110 §7.6.1 set).
 _REQUEST_HOP_BY_HOP = frozenset(
     {
         "host",

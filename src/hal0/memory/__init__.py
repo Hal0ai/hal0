@@ -88,10 +88,10 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
         except Exception as exc:  # daemon down at boot → degrade ladder
             log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
             return PgVectorProvider()
-        from hal0.memory.hindsight_provider import LemonadeReranker
+        from hal0.memory.hindsight_provider import Hal0Reranker
 
-        reranker = LemonadeReranker(
-            base_url=str(getattr(embed, "rerank_gateway_url", None) or "http://127.0.0.1:13305"),
+        reranker = Hal0Reranker(
+            base_url=str(getattr(embed, "rerank_gateway_url", None) or "http://127.0.0.1:8080"),
             connect_timeout_s=float(embed.rerank_connect_timeout_s),
             read_timeout_s=float(embed.rerank_read_timeout_s),
         )

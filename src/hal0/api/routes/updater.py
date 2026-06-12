@@ -242,7 +242,6 @@ async def _run_apply_job(
 # ── /state ─────────────────────────────────────────────────────────────────
 
 
-_LEMONADE_BIN_CANDIDATES = ("/opt/lemonade/lemonade", "lemonade")
 _FLM_BIN_CANDIDATES = ("flm",)
 
 
@@ -273,15 +272,6 @@ def _probe_version(candidates: tuple[str, ...]) -> str | None:
     return None
 
 
-def _parse_lemonade_version(raw: str | None) -> str | None:
-    """``lemonade version 10.6.0`` → ``v10.6.0``."""
-    if not raw:
-        return None
-    # Pull the last whitespace-delimited token; prepend ``v`` if numeric.
-    last = raw.split()[-1] if raw.split() else raw
-    return f"v{last}" if last and last[0].isdigit() else last
-
-
 def _parse_flm_version(raw: str | None) -> str | None:
     """``FLM v0.9.42`` → ``v0.9.42``."""
     if not raw:
@@ -295,8 +285,8 @@ async def update_state(request: Request) -> dict[str, Any]:
     """Aggregate update state for the Settings → Updates surface.
 
     Combines the hal0 self-update channel + local probes of bundled
-    components (lemonade, flm) so the dashboard renders real versions
-    instead of hardcoded literals (issue #233).
+    components (flm) so the dashboard renders real versions instead of
+    hardcoded literals (issue #233).
 
     Response shape (matches ``ui/src/api/hooks/useUpdates.ts``)::
 
@@ -306,7 +296,6 @@ async def update_state(request: Request) -> dict[str, Any]:
                 "available": "0.3.0" | null,
                 "channel": "stable"
             },
-            "lemonade": {"current": "v10.6.0", "pinned": true, "channel": "stable"},
             "flm":      {"current": "v0.9.42", "source": "manual-deb"},
             "autoCheck": true
         }
@@ -338,7 +327,6 @@ async def update_state(request: Request) -> dict[str, Any]:
     except (OSError, ValueError):
         pass
 
-    lemonade_raw = await asyncio.to_thread(_probe_version, _LEMONADE_BIN_CANDIDATES)
     flm_raw = await asyncio.to_thread(_probe_version, _FLM_BIN_CANDIDATES)
 
     return {
@@ -349,11 +337,6 @@ async def update_state(request: Request) -> dict[str, Any]:
             "revoked": hal0_revoked,
             "revoked_reason": hal0_revoked_reason,
             "revoked_version": hal0_revoked_version,
-        },
-        "lemonade": {
-            "current": _parse_lemonade_version(lemonade_raw),
-            "pinned": True,
-            "channel": channel,
         },
         "flm": {
             "current": _parse_flm_version(flm_raw),

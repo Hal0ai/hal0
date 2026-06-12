@@ -156,7 +156,7 @@ async def list_models(request: Request) -> dict[str, Any]:
     # the NPU slot pickers can select any model on disk, not just the one a slot
     # already defaults to (the composite ``hal0`` upstream advertises only slot
     # defaults, so without this only the configured npu model appeared). The id
-    # mirrors lemonade's ``<tag>-FLM`` convention so the dashboard maps it to the
+    # uses the ``<tag>-FLM`` convention so the dashboard maps it to the
     # npu device; ``capabilities`` + an explicit ``device`` let the slot-swap
     # popover derive type/device without requiring a registry entry.
     try:
