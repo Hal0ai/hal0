@@ -11,6 +11,7 @@ import {
   useSlotDelete,
   useSlotImagePull,
   useSlotRestart,
+  useSlotLoad,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModels } from '@/api/hooks/useModels'
@@ -130,9 +131,6 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const compatible = allModels.filter(m => m.type === type);
 
   const canSave = !!name && !nameError && !createMut.isPending && !!profile;
-
-  // Next available port after the highest currently-allocated
-  const nextPort = Math.max(8090, ...((existingSlots || []).map(s => s.port || 8090))) + 1;
 
   async function onCreateClick() {
     setSubmitErr(null);
@@ -276,7 +274,12 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
           <span className="sub">child process port hal0 will allocate</span>
         </div>
         <div className="form-ctl">
-          <span className="mono" style={{padding: "6px 10px", background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", display: "inline-block", color: "var(--fg-3)", fontSize: 12}}>:{nextPort}</span>
+          {/* The create body intentionally omits `port` — hal0 allocates the
+              next free slot port server-side (_next_free_slot_port). Showing a
+              client-guessed number here implied a value the POST never sends
+              and the backend need not honour, so we state the behaviour
+              instead of fabricating a specific port. */}
+          <span className="mono" style={{padding: "6px 10px", background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", display: "inline-block", color: "var(--fg-4)", fontSize: 12}}>auto · assigned on save</span>
         </div>
       </div>
 
@@ -928,7 +931,24 @@ function ImagePullBar({ pull }) {
 // ─── Error SlotCard ─────────────────────────────────────────────
 function ErrorSlotCardBanner({ slot, message }) {
   const pull = useSlotImagePull();
+  const loadMut = useSlotLoad();
   const isPulling = pull.slotName === slot?.name && pull.inFlight;
+
+  // Retry was toast-only. A "load failed" banner means the slot's child never
+  // came up, so Retry re-attempts the load (POST /api/slots/{name}/load) —
+  // the same mutation the SlotCard's Start uses. Query invalidation refreshes
+  // the card on success.
+  const handleRetry = async () => {
+    if (!slot?.name) return;
+    try {
+      await loadMut.mutateAsync(slot.name);
+      window.__hal0Toast && window.__hal0Toast(`Retrying load for ${slot.name}`, "info");
+    } catch (err) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Retry failed for ${slot.name}: ${err?.message || err}`, "warn"
+      );
+    }
+  };
 
   const handleRePull = async () => {
     if (!slot?.name) return;
@@ -951,7 +971,11 @@ function ErrorSlotCardBanner({ slot, message }) {
           <ImagePullBar pull={pull} />
         )}
         <div style={{display: "flex", gap: 6, marginTop: 6}}>
-          <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast(`Retrying load for ${slot.name}`, "info")}>{Icons.restart} Retry</button>
+          <button
+            className="btn ghost sm"
+            disabled={loadMut.isPending}
+            onClick={handleRetry}
+          >{Icons.restart} {loadMut.isPending ? "Retrying…" : "Retry"}</button>
           <button
             className="btn ghost sm"
             disabled={isPulling}
