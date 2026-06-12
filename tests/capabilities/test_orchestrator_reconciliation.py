@@ -238,19 +238,23 @@ async def test_apply_reconciles_before_load(
     await orch.apply("embed", "embed", {"enabled": False})
     fake.calls.clear()
 
+    # gpu-rocm (not npu): device=npu + embed always forks to the NPU-trio
+    # path which never load()s — this test pins the STANDARD lifecycle, so
+    # target a backend whose slot-toml form ("rocm") differs from the
+    # stale on-disk "vulkan" and still drives load().
     await orch.apply(
         "embed",
         "embed",
         {
             "enabled": True,
-            "backend": "npu",
-            "provider": "flm",
+            "backend": "gpu-rocm",
+            "provider": "llama-server",
             "model": "nomic-embed-text-v1.5-q8_0",
         },
     )
 
     assert fake.seen_at_load, f"no load happened: {fake.calls}"
-    assert fake.seen_at_load[0].get("backend") == "flm", (
+    assert fake.seen_at_load[0].get("backend") == "rocm", (
         "load() observed a stale slot TOML — reconciliation must be committed "
         f"to disk before the spawn: {fake.seen_at_load[0]!r}"
     )
@@ -262,6 +266,24 @@ async def test_apply_no_rewrite_on_pure_disable(
 ) -> None:
     """Disabling the slot does not require rewriting the TOML."""
     orch, fake = orchestrator
+    # Pin the persisted selection to a non-NPU backend first: this test is
+    # about the STANDARD lifecycle's pure-disable transition, and a
+    # device=npu embed selection now always forks to the NPU-trio path
+    # (which legitimately writes update_config on the modality slot).
+    caps_path = drifted_state / "etc" / "hal0" / "capabilities.toml"
+    caps_path.write_text(
+        "\n".join(
+            [
+                "[selections.embed.embed]",
+                'backend = "gpu-vulkan"',
+                'provider = "llama-server"',
+                'model = "nomic-embed-text-v1.5-q8_0"',
+                "enabled = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     before = _read_slot_toml(drifted_state)
 
     await orch.apply("embed", "embed", {"enabled": False})
@@ -335,19 +357,22 @@ async def test_apply_lifecycle_failure_still_persists_intent(
 
     class ExplodingSlotManager(FakeSlotManager):
         async def load(self, slot_name: str, model_id: str | None = None) -> _StubSlot:
-            raise RuntimeError("lemond is down")
+            raise RuntimeError("slot runtime is down")
 
     orch = CapabilityOrchestrator(slot_manager=ExplodingSlotManager())
     await orch.apply("embed", "embed", {"enabled": False})
 
+    # gpu-rocm (not npu): device=npu + embed always forks to the NPU-trio
+    # path which never load()s — this test pins the STANDARD lifecycle's
+    # commit-then-load ordering, so it must target a backend that loads.
     with pytest.raises(CapabilityApplyFailed):
         await orch.apply(
             "embed",
             "embed",
             {
                 "enabled": True,
-                "backend": "npu",
-                "provider": "flm",
+                "backend": "gpu-rocm",
+                "provider": "llama-server",
                 "model": "nomic-embed-text-v1.5-q8_0",
             },
         )
@@ -356,7 +381,7 @@ async def test_apply_lifecycle_failure_still_persists_intent(
     sel = load_capabilities_config(caps_path).selections["embed"]["embed"]
     assert sel.enabled is True, "user intent must persist past a lifecycle failure"
     on_disk = _read_slot_toml(drifted_state)
-    assert on_disk.get("backend") == "flm", "slot TOML must match the persisted selection"
+    assert on_disk.get("backend") == "rocm", "slot TOML must match the persisted selection"
 
 
 # ── Step 1: _CHILD_TO_SLOT_TYPE + type written by _ensure_slot_exists ──────────
@@ -450,32 +475,51 @@ def _write_caps(home: Path, *, slot: str, child: str, fields: dict[str, Any]) ->
 @pytest.fixture
 def npu_orchestrator(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
-) -> tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient]:
-    """Orchestrator wired with a FakeLemonadeClient — engages the trio fork.
+) -> tuple[CapabilityOrchestrator, FakeSlotManager]:
+    """Orchestrator with a CONTAINER NPU anchor — engages the trio fork.
 
     Bypasses catalog validation (downstream of the path under test). The
-    anchor is seeded live (type=llm,device=npu) with the FLM child already
-    serving chat+asr (``--asr 1 --embed 0``) so a Case-1 embed-enable
-    yields the exact ``--asr 1 --embed 1``.
+    anchor is seeded as a container slot (type=llm, device=npu,
+    profile=flm-npu — the ``profile`` key is what makes
+    ``is_container_npu_cfg`` true), so trio toggles land as ``[npu]``
+    TOML writes via ``update_config`` on the anchor.
     """
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
         lambda self, slot, child, model_id, backend_id: None,
     )
-    client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 0")
     fake = FakeSlotManager()
-    fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
-    orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
-    return orch, fake, client
+    fake.set_configs(
+        [
+            {
+                "name": "npu",
+                "type": "llm",
+                "device": "npu",
+                "profile": "flm-npu",
+                "enabled": True,
+            }
+        ]
+    )
+    orch = CapabilityOrchestrator(slot_manager=fake)
+    return orch, fake
 
 
-async def test_npu_embed_enable_sets_flm_args_no_load(
-    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+def _anchor_npu_writes(fake: FakeSlotManager, expected: dict[str, bool]) -> list[Any]:
+    """Filter ``update_config`` calls on the anchor carrying the [npu] toggle."""
+    return [
+        c
+        for c in fake.calls
+        if c[0] == "update_config" and c[1] == "npu" and c[2]["updates"] == {"npu": expected}
+    ]
+
+
+async def test_npu_embed_enable_writes_anchor_toggle_no_load(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     tmp_hal0_home: str,
 ) -> None:
-    """Case 1: NPU embed enable → flm_args embed=1, update_config enabled, NO load."""
-    orch, fake, client = npu_orchestrator
+    """Case 1: NPU embed enable → anchor [npu] embed=true, update_config enabled, NO load."""
+    orch, fake = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
     _write_caps(
@@ -501,8 +545,9 @@ async def test_npu_embed_enable_sets_flm_args_no_load(
         },
     )
 
-    assert client.set_calls, "flm_args was never set"
-    assert client.set_calls[-1] == {"flm": {"args": "--asr 1 --embed 1"}}, client.set_calls
+    assert _anchor_npu_writes(fake, {"embed": True}), (
+        f"anchor [npu] embed toggle never written: {fake.calls}"
+    )
     # The embed slot must be flipped enabled=true + stamped type=embedding,
     # WITHOUT a nested model in that write (Decision 4).
     enabled_writes = [
@@ -522,66 +567,12 @@ async def test_npu_embed_enable_sets_flm_args_no_load(
     assert result.get("pending_reload") is True, result
 
 
-async def test_npu_embed_enable_reads_prior_nested_args_and_preserves_operator_flags(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The prior trio args are read from the NESTED ``flm.args`` key and
-    operator flags (e.g. ``--pmode turbo``) are preserved on write.
-
-    Live lemond config carries operator flags alongside the trio toggles;
-    the orchestrator must recompose only ``--asr``/``--embed`` and keep the
-    rest verbatim, and must locate the current value at ``flm.args`` (not a
-    nonexistent top-level ``flm_args``)."""
-    monkeypatch.setattr(
-        CapabilityOrchestrator,
-        "_validate_model_in_catalog",
-        lambda self, slot, child, model_id, backend_id: None,
-    )
-    client = FakeLemonadeClient(initial_flm_args="--pmode turbo --asr 1 --embed 0")
-    fake = FakeSlotManager()
-    fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
-    orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
-    home = Path(tmp_hal0_home)
-    _write_embed_slot(home, device="flm", slot_type="embedding")
-    _write_caps(
-        home,
-        slot="embed",
-        child="embed",
-        fields={
-            "backend": "npu",
-            "provider": "flm",
-            "model": "nomic-embed-text-v1.5-q8_0",
-            "enabled": False,
-        },
-    )
-
-    await orch.apply(
-        "embed",
-        "embed",
-        {
-            "enabled": True,
-            "backend": "npu",
-            "provider": "flm",
-            "model": "nomic-embed-text-v1.5-q8_0",
-        },
-    )
-
-    assert client.set_calls, "flm_args was never set"
-    written = client.set_calls[-1]
-    # Nested wire shape — never a top-level flm_args.
-    assert "flm_args" not in written, written
-    args = written["flm"]["args"]
-    assert "--pmode turbo" in args, f"operator flag dropped: {args!r}"
-    assert "--embed 1" in args, f"embed not enabled: {args!r}"
-    assert "--asr 1" in args, f"prior asr value lost: {args!r}"
-
-
-async def test_npu_embed_disable_zeroes_flm_args_no_unload(
-    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+async def test_npu_embed_disable_writes_anchor_toggle_off_no_unload(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     tmp_hal0_home: str,
 ) -> None:
-    """Case 2: NPU embed disable → flm_args embed=0, slot enabled=False, NO unload."""
-    orch, fake, client = npu_orchestrator
+    """Case 2: NPU embed disable → anchor [npu] embed=false, slot enabled=False, NO unload."""
+    orch, fake = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
     _write_caps(
@@ -598,7 +589,9 @@ async def test_npu_embed_disable_zeroes_flm_args_no_unload(
 
     result = await orch.apply("embed", "embed", {"enabled": False})
 
-    assert client.set_calls[-1] == {"flm": {"args": "--asr 1 --embed 0"}}, client.set_calls
+    assert _anchor_npu_writes(fake, {"embed": False}), (
+        f"anchor [npu] embed=false toggle never written: {fake.calls}"
+    )
     disabled_writes = [
         c
         for c in fake.calls
@@ -616,11 +609,11 @@ async def test_npu_embed_disable_zeroes_flm_args_no_unload(
 
 
 async def test_npu_stt_enable_sets_asr(
-    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     tmp_hal0_home: str,
 ) -> None:
-    """Case 3: NPU stt enable → flm_args asr=1, no standalone load."""
-    orch, fake, client = npu_orchestrator
+    """Case 3: NPU stt enable → anchor [npu] asr=true, no standalone load."""
+    orch, fake = npu_orchestrator
     home = Path(tmp_hal0_home)
     # stt slot does not exist on disk → create path writes type=transcription.
     _write_caps(
@@ -646,9 +639,9 @@ async def test_npu_stt_enable_sets_asr(
         },
     )
 
-    assert client.set_calls, "flm_args was never set for stt"
-    last = client.set_calls[-1]["flm"]["args"]
-    assert "--asr 1" in last, f"stt enable did not set asr=1: {last!r}"
+    assert _anchor_npu_writes(fake, {"asr": True}), (
+        f"stt enable did not write anchor [npu] asr=true: {fake.calls}"
+    )
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (
         f"NPU stt path must not bounce a slot: {fake.calls}"
     )
@@ -659,11 +652,11 @@ async def test_npu_stt_enable_sets_asr(
 
 
 async def test_embed_gpu_to_npu_no_load(
-    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     tmp_hal0_home: str,
 ) -> None:
-    """Case 4: embed gpu-vulkan→npu → flm_args embed=1, device=npu, NO load/swap."""
-    orch, fake, client = npu_orchestrator
+    """Case 4: embed gpu-vulkan→npu → anchor [npu] embed=true, device=npu, NO load/swap."""
+    orch, fake = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="vulkan", slot_type="embedding")
     _write_caps(
@@ -689,7 +682,9 @@ async def test_embed_gpu_to_npu_no_load(
         },
     )
 
-    assert "--embed 1" in client.set_calls[-1]["flm"]["args"], client.set_calls
+    assert _anchor_npu_writes(fake, {"embed": True}), (
+        f"gpu->npu did not write anchor [npu] embed=true: {fake.calls}"
+    )
     # device rewritten to npu on the slot TOML (committed by the store).
     on_disk = _read_slot_toml(home)
     assert on_disk.get("device") == "npu", f"device not rewritten to npu: {on_disk!r}"
@@ -698,12 +693,12 @@ async def test_embed_gpu_to_npu_no_load(
     )
 
 
-async def test_embed_npu_to_gpu_zeroes_flm_and_loads(
-    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+async def test_embed_npu_to_gpu_zeroes_anchor_toggle_and_loads(
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     tmp_hal0_home: str,
 ) -> None:
-    """Case 5: embed npu→gpu-vulkan → flm_args embed=0 AND gpu path DOES load/swap."""
-    orch, fake, client = npu_orchestrator
+    """Case 5: embed npu→gpu-vulkan → anchor [npu] embed=false AND gpu path DOES load/swap."""
+    orch, fake = npu_orchestrator
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
     _write_caps(
@@ -729,9 +724,10 @@ async def test_embed_npu_to_gpu_zeroes_flm_and_loads(
         },
     )
 
-    # Leaving NPU must drop embed from the anchor's flm_args.
-    assert client.set_calls, "leaving npu did not touch flm_args"
-    assert "--embed 0" in client.set_calls[-1]["flm"]["args"], client.set_calls
+    # Leaving NPU must drop embed from the anchor's [npu] toggle.
+    assert _anchor_npu_writes(fake, {"embed": False}), (
+        f"leaving npu did not write anchor [npu] embed=false: {fake.calls}"
+    )
     # The gpu path runs the standard lifecycle (device/model changed → swap, or load).
     assert [c for c in fake.calls if c[0] in ("load", "swap")], (
         f"gpu-vulkan target must run the standard load/swap path: {fake.calls}"
@@ -747,11 +743,10 @@ async def test_npu_embed_anchor_offline_still_pending(
         "_validate_model_in_catalog",
         lambda self, slot, child, model_id, backend_id: None,
     )
-    client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 0")
     fake = FakeSlotManager()
     # No anchor record at all → "offline".
     fake.set_configs([])
-    orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
+    orch = CapabilityOrchestrator(slot_manager=fake)
     home = Path(tmp_hal0_home)
     _write_embed_slot(home, device="flm", slot_type="embedding")
     _write_caps(
@@ -784,7 +779,7 @@ async def test_npu_embed_anchor_offline_still_pending(
 
 
 async def test_npu_embed_existing_slot_without_type_gets_typed(
-    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager, FakeLemonadeClient],
+    npu_orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     tmp_hal0_home: str,
 ) -> None:
     """A pre-existing embed slot with NO ``type`` must be stamped on the npu path.
@@ -797,7 +792,7 @@ async def test_npu_embed_existing_slot_without_type_gets_typed(
     no-ops, violating the hard constraint that the npu path leaves a
     ``device=npu, type=embedding`` record in force.
     """
-    orch, fake, _client = npu_orchestrator
+    orch, fake = npu_orchestrator
     home = Path(tmp_hal0_home)
     # Existing slot, NO type (matches the production drift shape).
     _write_embed_slot(home, device="vulkan", slot_type=None)
@@ -845,15 +840,15 @@ async def test_npu_embed_existing_slot_without_type_gets_typed(
         )
 
 
-async def test_npu_embed_enable_container_anchor_without_lemonade_provider(
+async def test_npu_embed_enable_container_anchor_without_external_runtime(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Phase E (#687): the trio fork engages with NO lemonade provider wired.
+    """Phase E (#687): the trio fork engages with NO external runtime client.
 
     A container NPU anchor (profile=flm-npu) plus a device=npu embed enable
     must take the trio path — ``[npu]`` TOML toggle via update_config on the
     anchor, pending_reload=True, zero load/swap/unload on the embed slot —
-    in a fully lemond-less deploy.
+    with the container path as the only wiring.
     """
     monkeypatch.setattr(
         CapabilityOrchestrator,
@@ -901,13 +896,11 @@ async def test_npu_embed_enable_container_anchor_without_lemonade_provider(
     npu_writes = [
         c
         for c in fake.calls
-        if c[0] == "update_config"
-        and c[1] == "npu"
-        and c[2]["updates"] == {"npu": {"embed": True}}
+        if c[0] == "update_config" and c[1] == "npu" and c[2]["updates"] == {"npu": {"embed": True}}
     ]
     assert npu_writes, (
-        "container anchor [npu] toggle was never written without a lemonade "
-        f"provider — the #687 gate is still active. calls: {fake.calls}"
+        "container anchor [npu] toggle was never written — the #687 gate "
+        f"is still active. calls: {fake.calls}"
     )
     assert result.get("pending_reload") is True, result
     assert not [c for c in fake.calls if c[0] in ("load", "swap", "unload")], (

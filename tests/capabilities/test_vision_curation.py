@@ -4,8 +4,8 @@ hal0 gains a first-class ``vision`` capability. Rather than introducing a
 brand-new model download, the vision slot REUSES the curated multimodal
 MoE primaries that PR #500 already reconciled into ``curated.py``:
 ``Qwen3.6-35B-A3B-MTP-GGUF`` and ``Qwen3.6-27B-MTP-GGUF`` both carry the
-``vision`` tag and ship a Lemonade-stock mmproj sidecar, so a vision slot
-can load them straight from Lemonade's bundled catalogue.
+``vision`` tag and ship a stock mmproj sidecar, so a vision slot
+can load them straight from the bundled catalogue.
 
 These tests pin three things:
   - the ``vision`` capability/child is a recognized slot + child, and

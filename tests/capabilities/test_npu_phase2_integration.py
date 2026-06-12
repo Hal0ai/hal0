@@ -4,7 +4,8 @@ Drives ``CapabilityOrchestrator.apply()`` through the full reconcile +
 trio fork against on-disk capabilities.toml / slot TOML, asserting the
 whole Phase 2 contract in one pass:
 
-  - lemond ``flm_args`` recomposed to enable the modality;
+  - the container anchor's ``[npu]`` toggle is written via ``update_config``
+    to enable the modality;
   - a ``device=npu``, ``type=embedding`` slot RECORD exists (so
     ``v1._is_npu_trio_request`` gates dispatch on);
   - ZERO ``load``/``swap``/``unload`` on the embed slot (the FLM anchor
@@ -84,31 +85,6 @@ class FakeSlotManager:
         return _StubSlot("ready")
 
 
-class FakeLemonadeClient:
-    """lemond stores the FLM trio args NESTED at ``flm.args`` — there is no
-    top-level ``flm_args``; ``initial_flm_args`` seeds ``flm.args`` and
-    ``internal_set`` deep-merges the ``flm`` sub-dict."""
-
-    def __init__(self, initial_flm_args: str = "") -> None:
-        self._config: dict[str, Any] = {"flm": {"args": initial_flm_args}}
-        self.set_calls: list[dict[str, Any]] = []
-
-    async def internal_config(self) -> dict[str, Any]:
-        return dict(self._config)
-
-    async def internal_set(self, values: dict[str, Any]) -> dict[str, Any]:
-        self.set_calls.append(dict(values))
-        for key, value in values.items():
-            if key == "flm" and isinstance(value, dict):
-                existing = self._config.get("flm")
-                merged = dict(existing) if isinstance(existing, dict) else {}
-                merged.update(value)
-                self._config["flm"] = merged
-            else:
-                self._config[key] = value
-        return dict(self._config)
-
-
 async def test_npu_phase2_embed_enable_end_to_end(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -153,10 +129,20 @@ async def test_npu_phase2_embed_enable_end_to_end(
         encoding="utf-8",
     )
 
-    client = FakeLemonadeClient(initial_flm_args="--asr 1 --embed 0")
     fake = FakeSlotManager()
-    fake.set_configs([{"name": "agent", "type": "llm", "device": "npu", "enabled": True}])
-    orch = CapabilityOrchestrator(slot_manager=fake, lemonade_provider=lambda: client)
+    # Container NPU anchor — the ``profile`` key makes is_container_npu_cfg true.
+    fake.set_configs(
+        [
+            {
+                "name": "npu",
+                "type": "llm",
+                "device": "npu",
+                "profile": "flm-npu",
+                "enabled": True,
+            }
+        ]
+    )
+    orch = CapabilityOrchestrator(slot_manager=fake)
 
     result = await orch.apply(
         "embed",
@@ -169,10 +155,14 @@ async def test_npu_phase2_embed_enable_end_to_end(
         },
     )
 
-    # 1. flm_args recomposed to enable embed on the anchor — written as the
-    #    NESTED ``flm.args`` wire shape (lemond has no top-level flm_args).
-    assert client.set_calls, "anchor flm_args was never set"
-    assert client.set_calls[-1] == {"flm": {"args": "--asr 1 --embed 1"}}, client.set_calls
+    # 1. The container anchor's [npu] toggle written via update_config to
+    #    enable embed on the anchor.
+    npu_writes = [
+        c
+        for c in fake.calls
+        if c[0] == "update_config" and c[1] == "npu" and c[2]["updates"] == {"npu": {"embed": True}}
+    ]
+    assert npu_writes, f"anchor [npu] embed toggle was never written: {fake.calls}"
 
     # 2. A device=npu, type=embedding slot record is in force. The slot TOML
     #    existed with NO type (drift shape), so the apply must stamp

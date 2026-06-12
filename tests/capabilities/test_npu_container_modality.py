@@ -3,10 +3,9 @@
 Contract:
   - container anchor (profile/runtime=container, device=npu, type=llm):
       update_config called with {"npu": {field: bool}}; the anchor is NEVER
-      restarted (Decision 1 — pending_reload, operator drives the reload);
-      lemond internal_set NOT called.
-  - lemonade anchor (no profile/runtime, device=npu, type=llm):
-      internal_config/internal_set called; no TOML write.
+      restarted (Decision 1 — pending_reload, operator drives the reload).
+  - non-container (legacy) anchor (no profile/runtime, device=npu, type=llm):
+      _set_flm_modality is a NO-OP — no update_config, no restart, no raise.
   - sibling preservation: one-level deep merge keeps untouched [npu] fields.
   - field mapping: "stt" → "asr", "embed" → "embed".
   - caller flow: _apply_npu_trio_modality returns pending_reload=True on the
@@ -82,29 +81,6 @@ class FakeSlotManager:
         return _StubSlot("ready")
 
 
-class FakeLemonadeClient:
-    """Minimal lemond stub — records internal_set calls."""
-
-    def __init__(self, initial_flm_args: str = "") -> None:
-        self._config: dict[str, Any] = {"flm": {"args": initial_flm_args}}
-        self.set_calls: list[dict[str, Any]] = []
-
-    async def internal_config(self) -> dict[str, Any]:
-        return dict(self._config)
-
-    async def internal_set(self, values: dict[str, Any]) -> dict[str, Any]:
-        self.set_calls.append(dict(values))
-        for key, value in values.items():
-            if key == "flm" and isinstance(value, dict):
-                existing = self._config.get("flm")
-                merged = dict(existing) if isinstance(existing, dict) else {}
-                merged.update(value)
-                self._config["flm"] = merged
-            else:
-                self._config[key] = value
-        return dict(self._config)
-
-
 def _container_anchor(name: str = "npu") -> dict[str, Any]:
     """Return a slot config dict that is_container_npu_cfg considers container."""
     return {
@@ -116,8 +92,8 @@ def _container_anchor(name: str = "npu") -> dict[str, Any]:
     }
 
 
-def _lemonade_anchor(name: str = "npu") -> dict[str, Any]:
-    """Return a slot config dict that is_container_npu_cfg considers lemonade."""
+def _legacy_anchor(name: str = "npu") -> dict[str, Any]:
+    """Return a slot config dict that is_container_npu_cfg considers NOT container."""
     return {
         "name": name,
         "type": "llm",
@@ -130,17 +106,14 @@ def _lemonade_anchor(name: str = "npu") -> dict[str, Any]:
 def _make_orch(
     configs: list[dict[str, Any]],
     tmp_path: Path,
-    lemonade_client: FakeLemonadeClient | None = None,
 ) -> tuple[CapabilityOrchestrator, FakeSlotManager]:
     """Build orchestrator + matching FakeSlotManager with minimal capabilities.toml."""
     caps_path = tmp_path / "capabilities.toml"
     caps_path.write_text("", encoding="utf-8")
     fake = FakeSlotManager(configs)
-    lemonade_provider = (lambda: lemonade_client) if lemonade_client is not None else None
     orch = CapabilityOrchestrator(
         slot_manager=fake,  # type: ignore[arg-type]
         config_path=caps_path,
-        lemonade_provider=lemonade_provider,
     )
     return orch, fake
 
@@ -152,9 +125,8 @@ def _make_orch(
 async def test_set_flm_modality_writes_npu_table_for_container_slot(
     tmp_path: Path,
 ) -> None:
-    """Container anchor: update_config with {"npu": {"asr": True}}; NO restart; no lemond."""
-    client = FakeLemonadeClient()
-    orch, fake = _make_orch([_container_anchor("npu")], tmp_path, lemonade_client=client)
+    """Container anchor: update_config with {"npu": {"asr": True}}; NO restart."""
+    orch, fake = _make_orch([_container_anchor("npu")], tmp_path)
 
     await orch._set_flm_modality("stt", enable=True)
 
@@ -167,9 +139,6 @@ async def test_set_flm_modality_writes_npu_table_for_container_slot(
     # Decision 1: the anchor is NEVER restarted — change is pending_reload.
     restart_calls = [c for c in fake.calls if c[0] == "restart"]
     assert not restart_calls, f"anchor must never be auto-restarted: {fake.calls}"
-
-    # lemond internal_set NOT touched
-    assert not client.set_calls, f"lemond should not be touched: {client.set_calls}"
 
 
 @pytest.mark.anyio
@@ -189,21 +158,19 @@ async def test_set_flm_modality_embed_field_mapping(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_set_flm_modality_lemonade_slot_keeps_legacy_path(
+async def test_set_flm_modality_non_container_anchor_is_noop(
     tmp_path: Path,
 ) -> None:
-    """Lemonade anchor: internal_config/internal_set called; no TOML write."""
-    client = FakeLemonadeClient(initial_flm_args="--asr 0 --embed 0")
-    orch, fake = _make_orch([_lemonade_anchor("npu")], tmp_path, lemonade_client=client)
+    """Non-container (legacy) anchor: _set_flm_modality is a NO-OP and does not raise."""
+    orch, fake = _make_orch([_legacy_anchor("npu")], tmp_path)
 
     await orch._set_flm_modality("stt", enable=True)
 
-    # lemond path taken
-    assert client.set_calls, "lemond internal_set must be called for lemonade anchor"
-
     # no TOML write via update_config
     uc_calls = [c for c in fake.calls if c[0] == "update_config"]
-    assert not uc_calls, f"update_config must not be called for lemonade anchor: {fake.calls}"
+    assert not uc_calls, (
+        f"update_config must not be called for a non-container anchor: {fake.calls}"
+    )
 
     # no restart
     restart_calls = [c for c in fake.calls if c[0] == "restart"]
@@ -238,8 +205,7 @@ async def test_container_path_propagates_pending_reload(tmp_hal0_home: str, tmp_
     """Caller flow: _apply_npu_trio_modality returns pending_reload=True on the
     container path (and never restarts the anchor), so apply() surfaces the
     dashboard reload affordance."""
-    client = FakeLemonadeClient()
-    orch, fake = _make_orch([_container_anchor("npu")], tmp_path, lemonade_client=client)
+    orch, fake = _make_orch([_container_anchor("npu")], tmp_path)
 
     selection = CapabilitySelection(
         device="npu",
@@ -263,6 +229,3 @@ async def test_container_path_propagates_pending_reload(tmp_hal0_home: str, tmp_
 
     # Decision 1: anchor never bounced; no standalone lifecycle on the slot.
     assert not [c for c in fake.calls if c[0] in ("restart", "load", "swap", "unload")], fake.calls
-
-    # lemond untouched on the container path.
-    assert not client.set_calls

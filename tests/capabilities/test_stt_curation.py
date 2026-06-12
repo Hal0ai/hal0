@@ -1,6 +1,6 @@
 """STT curation surfacing (#514).
 
-whisper-large-v3-turbo is a visible STT default that loads via Lemonade's
+whisper-large-v3-turbo is a visible STT default that loads via the
 built-in whisper.cpp recipe. It must show up in the ``stt`` capability
 dropdown, while the lower-tier Tiny/Base bundle picks stay hidden
 (bundle_only).
