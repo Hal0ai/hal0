@@ -2130,11 +2130,7 @@ def render_live_context(
             "HAL0_DASHBOARD_URL",
             os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
         ),
-        # HAL0_LEMONADE_BASE is read as a back-compat fallback for one release.
-        "inference_base": os.environ.get(
-            "HAL0_INFERENCE_BASE",
-            os.environ.get("HAL0_LEMONADE_BASE", "http://127.0.0.1:8080"),
-        ),
+        "inference_base": os.environ.get("HAL0_INFERENCE_BASE", "http://127.0.0.1:8080"),
         "daemon": "degraded" if degraded else "reachable",
         "as_of": now,
     }

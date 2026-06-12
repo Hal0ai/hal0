@@ -385,82 +385,43 @@ class TestReadSchemaVersion:
         assert read_schema_version({"schema_version": "bogus"}) == 1
 
 
-# ── Phase E: lemonade runtime/provider migration (#687, spec §9) ──────────────
+# ── Phase E: legacy runtime/provider markers are rejected, not migrated ───────
 
 
-class TestLemonadeRuntimeMigration:
-    """``runtime="lemonade"`` and ``provider="lemonade"`` no longer exist.
+class TestLegacyRuntimeRejected:
+    """``runtime="lemonade"`` / ``provider="lemonade"`` no longer exist.
 
-    Legacy TOMLs must still LOAD — coerced to the container runtime with a
-    logged warning — so an upgrade over a pre-Phase-E /etc/hal0 never
-    bricks the API. Profile-less legacy slots get the device-class default
-    profile (DEVICE_DEFAULT_PROFILES); NPU trio alias records (device=npu +
-    type=embedding|transcription) are exempt — the anchor container serves
-    them, so assigning flm-npu would spawn a duplicate FLM container.
+    There are no pre-container installs to upgrade (the first release ships
+    container-only), so legacy markers are a hard validation error rather
+    than a silent migration — a fail-loud signal for hand-edited TOMLs.
     """
-
-    def test_runtime_lemonade_coerces_to_container_with_warning(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        with caplog.at_level("WARNING"):
-            s = SlotConfig(name="primary", port=8081, runtime="lemonade")
-        assert s.runtime == "container"
-        assert any(
-            "legacy runtime/provider migrated to container" in r.message for r in caplog.records
-        )
 
     def test_runtime_default_is_container(self) -> None:
         s = SlotConfig(name="primary", port=8081)
         assert s.runtime == "container"
 
+    def test_legacy_runtime_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SlotConfig(name="primary", port=8081, runtime="lemonade")
+
     def test_runtime_rejects_unknown_values(self) -> None:
         with pytest.raises(ValidationError):
             SlotConfig(name="primary", port=8081, runtime="bogus")
 
-    def test_provider_lemonade_coerces_to_llama_server(self) -> None:
-        s = SlotConfig(name="primary", port=8081, provider="lemonade")
-        assert s.provider == "llama-server"
+    def test_legacy_provider_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SlotConfig(name="primary", port=8081, provider="lemonade")
 
     def test_provider_default_is_llama_server(self) -> None:
         s = SlotConfig(name="primary", port=8081)
         assert s.provider == "llama-server"
 
-    def test_profile_less_legacy_slot_gets_device_class_default(self) -> None:
-        s = SlotConfig(name="chat", port=8081, runtime="lemonade", device="gpu-vulkan")
-        assert s.profile == "vulkan-std"
-
-    def test_profile_less_npu_anchor_gets_flm_npu(self) -> None:
-        s = SlotConfig(name="npu", port=8088, runtime="lemonade", device="npu")
-        assert s.profile == "flm-npu"
-
-    def test_npu_trio_alias_record_keeps_no_profile(self) -> None:
-        s = SlotConfig(
-            name="embed",
-            port=8086,
-            runtime="lemonade",
-            device="npu",
-            type="embedding",
-        )
-        assert s.profile is None
-
-    def test_existing_profile_never_clobbered(self) -> None:
+    def test_container_slot_loads_clean(self) -> None:
         s = SlotConfig(
             name="chat",
             port=8081,
-            runtime="lemonade",
-            device="gpu-rocm",
-            profile="dense-mtp-rocmfp4",
+            runtime="container",
+            profile="vulkan-std",
         )
-        assert s.profile == "dense-mtp-rocmfp4"
-
-    def test_container_slot_untouched_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level("WARNING"):
-            s = SlotConfig(
-                name="chat",
-                port=8081,
-                runtime="container",
-                profile="vulkan-std",
-            )
         assert s.runtime == "container"
         assert s.profile == "vulkan-std"
-        assert not [r for r in caplog.records if "lemonade" in r.message]

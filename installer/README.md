@@ -176,10 +176,6 @@ sudo bash installer/uninstall.sh --keep-data
 HAL0_FORCE=1 sudo bash installer/uninstall.sh
 ```
 
-The uninstaller also sweeps state left behind by pre-Phase-E installs
-(the retired Lemonade daemon runtime, its unit, and its apt source) —
-see the labelled "legacy Lemonade cleanup" blocks in `uninstall.sh`.
-
 ## Troubleshooting
 
 ### Port already in use

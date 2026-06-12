@@ -122,14 +122,12 @@ if SSH "sudo hal0 uninstall --force" >&2 2>&1 \
 fi
 
 # ── residue assertion (the whole point: a clean uninstall leaves nothing) ─────
-# /opt/lemonade + hal0-lemonade below: # legacy Lemonade cleanup — kept so the
-# residue check still catches pre-Phase-E leftovers on upgraded boxes.
 log "residue check"
 RES="$(SSH 'r=""
-for p in /opt/hal0 /opt/lemonade /usr/lib/hal0/current /etc/hal0 /var/lib/hal0 /usr/local/bin/hal0 /usr/local/bin/hal0-agent; do  # legacy Lemonade cleanup: /opt/lemonade
+for p in /opt/hal0 /usr/lib/hal0/current /etc/hal0 /var/lib/hal0 /usr/local/bin/hal0 /usr/local/bin/hal0-agent; do
   [ -e "$p" ] && r="$r path:$p"
 done
-for u in hal0-api hal0-lemonade hal0-openwebui hal0-agent@; do  # legacy Lemonade cleanup: hal0-lemonade
+for u in hal0-api hal0-openwebui hal0-agent@; do
   systemctl list-unit-files 2>/dev/null | grep -q "^$u" && r="$r unit:$u"
 done
 getent group hal0 >/dev/null && r="$r group:hal0"
