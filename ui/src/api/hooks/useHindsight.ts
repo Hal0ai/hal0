@@ -6,7 +6,7 @@
 // cards/panels refresh without manual plumbing.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiDelete, apiGet, apiPost, apiPut } from '../client'
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // ── types (mirror Hindsight 0.7.x response shapes we consume) ───────────────
@@ -228,5 +228,175 @@ export function useEntityGraph(
       apiGet<GraphPayload>(`${ENDPOINTS.memoryBankEntityGraph(bank as string)}${query}`),
     enabled: !!bank,
     staleTime: 15_000,
+  })
+}
+
+// ── tools: recall / reflect consoles ─────────────────────────────────────────
+
+export interface RecallResult {
+  id: string
+  text: string
+  type: string
+  entities?: unknown[]
+  occurred_start?: string | null
+  tags?: string[]
+}
+
+export function useRecall() {
+  return useMutation({
+    mutationFn: ({ bank, body }: { bank: string; body: Record<string, unknown> }) =>
+      apiPost<{ results: RecallResult[] }>(ENDPOINTS.memoryBankRecall(bank), body),
+  })
+}
+
+export function useReflect() {
+  return useMutation({
+    mutationFn: ({ bank, body }: { bank: string; body: Record<string, unknown> }) =>
+      apiPost<{ text: string; based_on?: Record<string, number> }>(
+        ENDPOINTS.memoryBankReflect(bank),
+        body,
+      ),
+  })
+}
+
+// ── tools: documents ─────────────────────────────────────────────────────────
+
+export interface BankDocument {
+  id: string
+  created_at?: string | null
+  memory_unit_count?: number
+  tags?: string[]
+  original_text?: string
+}
+
+export function useBankDocuments(
+  bank: string | null,
+  opts?: { q?: string; limit?: number; offset?: number },
+) {
+  const query = qs({ q: opts?.q, limit: opts?.limit, offset: opts?.offset })
+  return useQuery<{ items: BankDocument[]; total: number }>({
+    queryKey: ['memory', 'banks', bank, 'documents', query],
+    queryFn: () =>
+      apiGet<{ items: BankDocument[]; total: number }>(
+        `${ENDPOINTS.memoryBankDocuments(bank as string)}${query}`,
+      ),
+    enabled: !!bank,
+    staleTime: 10_000,
+  })
+}
+
+export function useDocumentDelete() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id }: { bank: string; id: string }) =>
+      apiDelete(ENDPOINTS.memoryBankDocument(bank, id)),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank] })
+    },
+  })
+}
+
+export function useDocumentReprocess() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id }: { bank: string; id: string }) =>
+      apiPost(`${ENDPOINTS.memoryBankDocument(bank, id)}/reprocess`, {}),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'operations'] })
+    },
+  })
+}
+
+// ── tools: mental models ─────────────────────────────────────────────────────
+
+export interface MentalModel {
+  id: string
+  name: string
+  source_query: string
+  content?: string | null
+  tags?: string[]
+  is_stale?: boolean
+  last_refreshed_at?: string | null
+}
+
+export function useMentalModels(bank: string | null) {
+  return useQuery<{ items: MentalModel[]; total: number }>({
+    queryKey: ['memory', 'banks', bank, 'mental-models'],
+    queryFn: () =>
+      apiGet<{ items: MentalModel[]; total: number }>(
+        ENDPOINTS.memoryBankMentalModels(bank as string),
+      ),
+    enabled: !!bank,
+    staleTime: 10_000,
+  })
+}
+
+export function useMentalModelRefresh() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id }: { bank: string; id: string }) =>
+      apiPost(
+        `${ENDPOINTS.memoryBankMentalModels(bank)}/${encodeURIComponent(id)}/refresh`,
+        {},
+      ),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'mental-models'] })
+    },
+  })
+}
+
+// ── tools: directives ────────────────────────────────────────────────────────
+
+export interface Directive {
+  id: string
+  name: string
+  content: string
+  priority?: number
+  is_active?: boolean
+  tags?: string[]
+}
+
+export function useDirectives(bank: string | null) {
+  return useQuery<{ items: Directive[]; total: number }>({
+    queryKey: ['memory', 'banks', bank, 'directives'],
+    queryFn: () =>
+      apiGet<{ items: Directive[]; total: number }>(
+        ENDPOINTS.memoryBankDirectives(bank as string),
+      ),
+    enabled: !!bank,
+    staleTime: 10_000,
+  })
+}
+
+export function useDirectiveCreate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, body }: { bank: string; body: Record<string, unknown> }) =>
+      apiPost(ENDPOINTS.memoryBankDirectives(bank), body),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'directives'] })
+    },
+  })
+}
+
+export function useDirectiveUpdate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id, body }: { bank: string; id: string; body: Record<string, unknown> }) =>
+      apiPatch(`${ENDPOINTS.memoryBankDirectives(bank)}/${encodeURIComponent(id)}`, body),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'directives'] })
+    },
+  })
+}
+
+export function useDirectiveDelete() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id }: { bank: string; id: string }) =>
+      apiDelete(`${ENDPOINTS.memoryBankDirectives(bank)}/${encodeURIComponent(id)}`),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'directives'] })
+    },
   })
 }

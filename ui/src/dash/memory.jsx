@@ -378,7 +378,7 @@ function MemNewBankForm({ onClose }) {
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 function MemoryView({ param } = {}) {
-  const section = param === 'graph' ? 'graph' : 'overview';
+  const section = param === 'graph' ? 'graph' : param === 'tools' ? 'tools' : 'overview';
   const useMemoryEngine = window.__hal0UseMemoryEngine;
   const useMemoryBanks = window.__hal0UseMemoryBanks;
   const engineQuery = useMemoryEngine ? useMemoryEngine() : { data: null, isLoading: false };
@@ -416,10 +416,19 @@ function MemoryView({ param } = {}) {
         >
           Graph
         </button>
+        <button
+          className={'btn ghost xs' + (section === 'tools' ? ' active' : '')}
+          onClick={() => { window.location.hash = '#memory/tools'; }}
+          data-testid="mem-tab-tools"
+        >
+          Tools
+        </button>
       </div>
 
       {section === 'graph' ? (
         <MemGraphExplorer />
+      ) : section === 'tools' ? (
+        <MemToolsPanel />
       ) : (
       <>
       <div className="mem-top">

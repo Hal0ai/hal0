@@ -78,6 +78,7 @@ import './dash/mcp.jsx'
 // hooks on window.__hal0Use* BEFORE memory.jsx evaluates.
 import './dash/memory-hook-bridge'
 import './dash/memory-graph.jsx'
+import './dash/memory-tools.jsx'
 import './dash/memory.jsx'
 
 // 3) main.jsx mounts <App /> into #root.
