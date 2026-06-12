@@ -784,6 +784,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             log.warning("upstream.hal0_prime_failed", error=str(exc))
     await _seed_multiplex_models(upstreams, slot_manager, model_cache)
 
+    # #732: re-register per-slot remote upstreams for containers that
+    # survived the api restart (the registry is in-memory; the containers
+    # are not). Prime each restored upstream's model cache so dispatch
+    # routes immediately — no operator unload+load sweep.
+    try:
+        restored_slots = await slot_manager.reconcile_container_upstreams()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("container.upstream_reconcile_failed", error=str(exc))
+        restored_slots = []
+    for restored_name in restored_slots:
+        restored_upstream = upstreams.get(restored_name)
+        if restored_upstream is None:
+            continue
+        try:
+            await _fetch_and_cache(restored_upstream)
+        except Exception as exc:  # pragma: no cover — defensive
+            log.warning("upstream.reconcile_prime_failed", slot=restored_name, error=str(exc))
+
     from hal0.hardware import HardwareStats
 
     app.state.upstreams = upstreams

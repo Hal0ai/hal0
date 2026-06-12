@@ -346,6 +346,58 @@ class SlotManager:
         if removed:
             log.info("container.upstream_deregistered", extra={"slot": slot_name})
 
+    async def reconcile_container_upstreams(self) -> list[str]:
+        """Re-register upstreams for containers that outlived the process (#732).
+
+        Per-slot ``kind="remote"`` upstreams exist only in the in-memory
+        registry and die with the api process, while the podman containers
+        (and their loaded models) survive a ``systemctl restart hal0-api``.
+        Pre-fix, every restart left "ready" slots returning
+        ``dispatch.no_route`` until an operator unload+load sweep.
+
+        Called once from the api lifespan after startup. A slot is restored
+        when its persisted state is dispatchable AND its unit is live
+        (``is_active`` probe) — a stale state.json must never register a
+        dead upstream. Trio shadows are skipped (no container of their own;
+        the npu anchor serves them). Returns the restored slot names.
+        """
+        restored: list[str] = []
+        if self._upstreams_registry is None:
+            return restored
+        try:
+            cfgs = await self.iter_configs()
+        except Exception as exc:
+            log.warning("container.upstream_reconcile_failed", extra={"error": str(exc)})
+            return restored
+        from hal0.providers.container import container_provider
+
+        for cfg in cfgs:
+            name = str(cfg.get("name", ""))
+            if not name or is_npu_trio_shadow(cfg):
+                continue
+            if self._current_state(name) not in (
+                SlotState.READY,
+                SlotState.SERVING,
+                SlotState.IDLE,
+            ):
+                continue
+            port = _cfg_port(cfg)
+            if not port:
+                continue
+            try:
+                active = await asyncio.get_event_loop().run_in_executor(
+                    None, container_provider().is_active, name
+                )
+            except Exception:
+                continue
+            if not active:
+                continue
+            self._register_container_upstream(name, port)
+            restored.append(name)
+        if restored:
+            log.info("container.upstreams_reconciled", extra={"slots": restored})
+        return restored
+
     def _lock(self, name: str) -> asyncio.Lock:
         if name not in self._locks:
             self._locks[name] = asyncio.Lock()
@@ -783,6 +835,15 @@ class SlotManager:
             current = self._current_state(slot_name)
             if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
                 # Already loaded — return snapshot without restarting.
+                # Re-register the upstream first (#732): the registry is
+                # in-memory and dies with the api process while the
+                # container survives, so post-restart a "ready" slot is
+                # unroutable. Loading a ready slot must restore the
+                # route, not silently no-op. Idempotent via upsert.
+                if not is_npu_trio_shadow(cfg):
+                    port = _cfg_port(cfg)
+                    if port:
+                        self._register_container_upstream(slot_name, port)
                 return await self.status(slot_name)
 
             # Configuration check: a slot with no resolvable model is
