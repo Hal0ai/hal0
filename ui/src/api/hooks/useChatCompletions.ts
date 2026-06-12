@@ -1,7 +1,7 @@
 // hal0 v3 dashboard — chat-completions client (Phase B2, #200).
 //
 // Drives the main dashboard chat surface. Calls `POST /v1/chat/completions`
-// against the hal0-api proxy, which forwards to Lemonade on 127.0.0.1:13305.
+// against hal0-api, which routes to the serving slot container.
 //
 // We use `fetch` + a manual ReadableStream reader (not EventSource) for two
 // reasons:
@@ -33,7 +33,7 @@ export interface ChatRequestOptions {
   messages: ChatMessage[]
   /** When true, parse SSE and call `onDelta` for each token. */
   stream?: boolean
-  /** Hard cap on response length. Lemonade defaults to ~1024 if omitted. */
+  /** Hard cap on response length. The backend defaults to ~1024 if omitted. */
   max_tokens?: number
   /** Optional abort signal so the caller can cancel an in-flight stream. */
   signal?: AbortSignal

@@ -10,7 +10,7 @@
 // Mock fallback follows the same pattern as useAgentMcpClients — when
 // the backend isn't there (Hal0Error.status === 404 / network error),
 // we return baked-in mock shapes so the dashboard renders in dev /
-// against a stale build. Forced-mock mode (`VITE_MOCK_LEMONADE=1`) is
+// against a stale build. Forced-mock mode (`VITE_MOCK_HAL0=1`) is
 // honoured transparently through the existing mockFetch layer.
 
 import { useEffect, useRef, useState } from 'react'

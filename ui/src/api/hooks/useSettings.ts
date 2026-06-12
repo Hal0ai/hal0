@@ -65,8 +65,8 @@ export function useSettingsReload() {
 // ── Model storage (single source of truth) ──────────────────────────────
 //
 // `[models].store` (v0.3) replaces #313's roots + pull_root with one
-// path that hal0's pull engine + Lemonade's extra_models_dir both
-// point at. The dedicated endpoints below give the Settings page +
+// path that hal0's pull engine points at. The dedicated endpoints
+// below give the Settings page +
 // Firstrun "Storage" step precise validation, a dry-run probe for
 // "needs migration" detection, and an explicit migrate call so the
 // confirmation modal has a clean URL to fire at.
@@ -117,11 +117,6 @@ export type SetStoreResponse =
       config: Hal0Settings
       state: ModelStoreState
       migration: MigrationOutcome | null
-      lemonade: {
-        changed: boolean
-        previous_extra_models_dir: string | null
-        restart: 'ok' | 'failed' | 'skipped' | 'unavailable'
-      }
     }
 
 const MODEL_STORE_KEY = ['settings', 'models', 'store'] as const

@@ -16,7 +16,6 @@ import {
   useSlotImagePull,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
-import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { MemoryMap } from './memory-map'
 import { ComfyuiPane } from './comfyui-pane.jsx'
@@ -30,166 +29,29 @@ const { useState: useStateS } = React;
 // and the matching status chip. Single source of truth for the
 // user-visible colour vocabulary (per dot-state spec, 2026-05-27):
 //
-//   error                                → "error"   (red)    — load/spawn failure; investigate
-//   !enabled || lemo=disabled            → "offline" (grey)   — operator-disabled
-//   warming / starting / pulling …       → "warming" (amber pulse)
+//   error / crashed unit                 → "error"   (red)    — investigate
+//   !enabled                             → "offline" (grey)   — operator-disabled
+//   pulling / starting …                 → "warming" (amber pulse)
 //   serving + last_used_at fresh         → "serving" (green pulse) — actively processing
 //   serving + last_used_at > 1h          → "stale"   (yellow) — possibly stuck request
-//   loaded in VRAM (lemo=loaded|ready)   → "stale"   (yellow) — ready, awaiting prompt
-//   evicted / idle (lemo=idle|idle)      → "offline" (grey)   — not in VRAM; loads on demand
-//   offline (clean unload/swap/evict)    → "offline" (grey)
+//   running + healthy                    → "stale"   (yellow) — ready, awaiting prompt
+//   stopped (auto-reloads on request)    → "offline" (grey)
 //
-// Colour follows VRAM RESIDENCY, not configuration (truthful-display,
-// 2026-06-04, supersedes the 2026-05-27 spec): GREEN = actively
-// processing an in-flight request; YELLOW = model genuinely resident in
-// VRAM (loaded/ready, awaiting a prompt); GREY = nothing loaded —
-// disabled, cleanly offline, or evicted/idle (lemonade hot-reloads on
-// the next request). Evicted vs disabled is a label/tooltip distinction,
-// not a colour one, so the dashboard never paints a not-loaded slot in a
-// "warm" colour. After a serving context manager exits the slot returns
-// to READY (yellow, still in VRAM); it only goes grey once lemonade
-// evicts it. The 1h timer in this file catches stuck-in-SERVING slots
-// where a request never finished.
+// Colour follows CONTAINER RESIDENCY, not configuration (truthful-
+// display, 2026-06-04): GREEN = actively processing an in-flight
+// request; YELLOW = container running + healthy (awaiting a prompt);
+// GREY = not running — disabled or stopped (auto-reloads on the next
+// request). Stopped vs disabled is a label/tooltip distinction, not a
+// colour one, so the dashboard never paints a not-running slot in a
+// "warm" colour. The 1h timer catches stuck-in-SERVING slots where a
+// request never finished.
 const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h hung-request threshold for serving slots
 
-function _formatAgo(deltaMs) {
-  if (deltaMs < 0) return "just now";
-  const s = Math.floor(deltaMs / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
 function slotIndicator(slot, now = Date.now()) {
-  // N1 (container branch): delegate container slots to the unified helper.
-  // Lemond slots continue through the original logic below so all existing
-  // tests remain green with no changes to their expected cls/label/tooltip.
-  //
-  // Detection: runtime="container" (from TOML / normalizeSlot) OR
-  // container_status present (backend always emits this for container slots
-  // even before `runtime` is included in as_dict serialisation).
-  const runtime = String(slot?.runtime || "lemonade");
-  if (runtime === "container" || slot?.container_status != null) {
-    return slotIndicatorFromPhase(slot, now);
-  }
-
-  const state = String(slot?.state || "offline");
-  const lemo = String(slot?.lemonade_state || "");
-  const enabled = slot?.enabled !== false;
-  const lastUsedSec = typeof slot?.last_used_at === "number" ? slot.last_used_at : null;
-  const lastUsedMs = lastUsedSec != null ? lastUsedSec * 1000 : null;
-  const deltaMs = lastUsedMs != null ? now - lastUsedMs : null;
-  const errorMsg = slot?.metadata?.message || slot?.message || "";
-  const model = slot?.model || slot?.model_id || slot?.model_default || "";
-
-  // Backend mismatch (ADR-0022): rely solely on the backend-computed flag.
-  // The backend only sets backend_mismatch=true when BOTH declared_backend
-  // and actual_backend are known and differ; we never recompute from the
-  // device string (which is the gpu- form, not the bare backend token).
-  const loaded = lemo === "loaded" || lemo === "ready" || state === "serving" || state === "ready";
-  const backendMismatch = !!slot?.backend_mismatch;
-  const declaredBackend = slot?.declared_backend || "";
-  const actualBackend = slot?.actual_backend || "";
-
-  if (state === "error") {
-    const extraMsg = backendMismatch && declaredBackend && actualBackend
-      ? ` — declared ${declaredBackend} but running ${actualBackend}`
-      : "";
-    return {
-      cls: "error",
-      label: "error",
-      tooltip: errorMsg ? `Error: ${errorMsg}${extraMsg}` : `Error${extraMsg}`,
-    };
-  }
-  if (!enabled || lemo === "disabled") {
-    return {
-      cls: "offline",
-      label: "off",
-      tooltip: "Disabled",
-    };
-  }
-  if (
-    state === "warming" ||
-    state === "starting" ||
-    state === "pulling" ||
-    state === "unloading"
-  ) {
-    const verb =
-      state === "pulling" ? "Pulling"
-        : state === "unloading" ? "Unloading"
-          : "Warming up";
-    return {
-      cls: "warming",
-      label: state,
-      tooltip: model ? `${verb} ${model}…` : `${verb}…`,
-    };
-  }
-  if (state === "serving") {
-    // Hung-request guard: if a slot has been in SERVING for longer
-    // than RECENTLY_LIVE_MS without a fresh last_used_at bump, it's
-    // almost certainly stuck on a request that will never finish.
-    // Revert to yellow with a "possibly stuck" tooltip — keeps green
-    // honest as "actively processing right now", not "lit since
-    // last week".
-    const stuck = deltaMs != null && deltaMs > RECENTLY_LIVE_MS;
-    if (stuck) {
-      return {
-        cls: "stale",
-        label: "stuck?",
-        tooltip: `Serving since ${_formatAgo(deltaMs)} — request may be stuck`,
-      };
-    }
-    if (backendMismatch) {
-      return {
-        cls: "warning",
-        label: "mismatch",
-        tooltip: `Declared ${declaredBackend} but running ${actualBackend} — switch backend to reload`,
-      };
-    }
-    return {
-      cls: "serving",
-      label: "serving",
-      tooltip: model ? `Serving ${model}` : "Serving",
-    };
-  }
-  // Slot is loaded and waiting for a prompt — YELLOW per the dot-state
-  // spec ("active + available to receive prompts → yellow; green only
-  // while actively processing"). In-VRAM vs evicted is a tooltip-only
-  // distinction; the colour is the same so operators don't need to
-  // squint to tell "ready" from "idle".
-  if (lemo === "loaded" || state === "ready") {
-    if (backendMismatch) {
-      return {
-        cls: "warning",
-        label: "mismatch",
-        tooltip: `Declared ${declaredBackend} but running ${actualBackend} — switch backend to reload`,
-      };
-    }
-    return {
-      cls: "stale",
-      label: "ready",
-      tooltip: deltaMs != null
-        ? `Loaded — last used ${_formatAgo(deltaMs)}`
-        : (model ? `Loaded — ${model} in VRAM` : "Loaded — model in VRAM"),
-    };
-  }
-  // Lemonade-evicted slots arrive here as state=offline lemonade_state=idle:
-  // the model is available but not in VRAM, lemonade hot-reloads on next request.
-  if (lemo === "idle" || state === "idle") {
-    return {
-      cls: "offline",
-      label: "idle",
-      tooltip: "Idle — model not in VRAM, will hot-reload on next request",
-    };
-  }
-  return {
-    cls: "offline",
-    label: state,
-    tooltip: state === "offline" ? "Offline" : `State: ${state}`,
-  };
+  // N1: container classification is the only path. A slot snapshot that
+  // hasn't been enriched with container_status yet falls back to its bare
+  // state string inside slotIndicatorFromPhase.
+  return slotIndicatorFromPhase(slot, now);
 }
 
 function IndicatorDot({ slot }) {
@@ -278,28 +140,22 @@ function SlotCard({
   // hide lifecycle buttons, and sort to the end of the grid (SlotsView).
   const enabled = slot.enabled !== false;
   // Lifecycle phase drives which action buttons render (design 2026-06-04):
-  // running (loaded/serving) -> Stop+Restart; off (not loaded) -> Start;
-  // transitional (warming/pulling/unloading/starting) -> actions disabled.
+  // running (container healthy/serving) -> Stop+Restart; off -> Start;
+  // transitional (pulling/starting/unloading) -> actions disabled.
   //
-  // N1: container slots project from container_status; lemond slots use the
-  // original lemonade_state / state logic so button behavior is unchanged.
-  // Detect container runtime: prefer the explicit `runtime` field (set by
-  // slot TOML / normalizeSlot default). Also gate on container_status != null
-  // as a fallback signal — the live /api/slots response always emits
-  // container_status for container slots even if the `runtime` field is not
-  // yet included in the serialised payload (see slot manager as_dict()).
-  // #658 backend task: ensure `runtime`, `image`, `profile` are emitted.
-  const isContainer = slot.runtime === "container" || slot.container_status != null;
+  // N1: classify from container_status; an un-enriched snapshot (stale
+  // /api/status union entry without container_status) falls back to its
+  // bare state string.
+  const isContainer = true;
   let phase;
-  if (isContainer) {
-    const cs = String(slot?.container_status || "stopped");
+  if (slot.container_status != null) {
+    const cs = String(slot.container_status);
     const health = !!slot?.container_health;
     const cRunning = cs === "running" && health;
     const cTransitional = cs === "starting" || cs === "pulling" || (cs === "running" && !health);
     phase = cTransitional ? "transitional" : cRunning ? "running" : "off";
   } else {
-    const lemoState = String(slot?.lemonade_state || "");
-    const slotRunning = lemoState === "loaded" || lemoState === "ready" || state === "serving" || state === "ready";
+    const slotRunning = state === "serving" || state === "ready";
     const slotTransitional = state === "warming" || state === "starting" || state === "pulling" || state === "unloading";
     phase = slotTransitional ? "transitional" : slotRunning ? "running" : "off";
   }
@@ -385,8 +241,8 @@ function SlotCard({
       </div>
       <div className="slot-chips">
         <span className="chip">{type}</span>
-        {/* N5: runtime micro-tag distinguishes container from lemond so
-            operators understand why model-swap is a cold restart vs hot. */}
+        {/* N5: runtime micro-tag — model swap on a container slot is a
+            cold restart, not a hot swap. */}
         {isContainer && (
           <span className="chip slot-runtime-tag" title="Container runtime — model swap requires restart">
             container
@@ -402,8 +258,7 @@ function SlotCard({
           const imgFull = slot.image || slot.profile || null;
           const imgShort = imgFull ? imgFull.split("/").pop() : null;
           // #663: surface running-vs-configured image drift on the container
-          // chip (the lemond backend-mismatch block below never ran for
-          // container slots). actual_image + image_mismatch come from
+          // chip. actual_image + image_mismatch come from
           // _container_state_enrichment via `podman inspect`.
           const imgMismatch = !!slot.image_mismatch && !!slot.actual_image;
           const runShort = slot.actual_image ? slot.actual_image.split("/").pop() : null;
@@ -543,7 +398,7 @@ function SlotListRow({ slot, onEdit }) {
 }
 
 // Helpers — pull live values off the enriched slot dicts the backend
-// returns (slots.py:_lemonade_state_enrichment). Missing field → em-dash
+// returns (slots.py:_container_state_enrichment). Missing field → em-dash
 // rather than an invented value (per brief: no fabricated metrics).
 function npuTrioGroupLabel(slots) {
   for (const s of slots) {
@@ -559,30 +414,6 @@ function npuTrioBackendUrl(slots) {
     if (typeof s.backend_url === "string" && s.backend_url) return s.backend_url;
   }
   return null;
-}
-
-// ─── flm_args parsing helpers (pure) ───
-//
-// The FLM trio's coresident modalities are driven by lemond's
-// `flm_args` string ("--asr <0|1> --embed <0|1>"), set via
-// POST /api/lemonade/config and applied at the next FLM load. We parse
-// the live string to drive the toggles and recompose it on flip.
-// The backend now accepts explicit 0/1 for both flags, so we always
-// emit both keys (absence must never silently disable a modality).
-function parseFlmArgs(str) {
-  const s = typeof str === "string" ? str : "";
-  const asrM = s.match(/--asr\s+(\d)/);
-  const embM = s.match(/--embed\s+(\d)/);
-  return {
-    // Default ON when the flag is absent — matches the seeded trio
-    // ("--asr 1 --embed 1") so an empty/unparsed config reads as the
-    // full coresident stack rather than silently-off.
-    asr: asrM ? asrM[1] === "1" : true,
-    embed: embM ? embM[1] === "1" : true,
-  };
-}
-function composeFlmArgs({ asr, embed }) {
-  return `--asr ${asr ? 1 : 0} --embed ${embed ? 1 : 0}`;
 }
 
 // FLM models live in their own namespace (registry seed backend:"flm",
@@ -628,9 +459,9 @@ const NPU_CHIP = {
 };
 
 function slotIsLoaded(slot) {
-  const lemo = String(slot?.lemonade_state || "");
+  if (slot?.container_status != null) return slot.container_status === "running";
   const state = String(slot?.state || "");
-  return lemo === "loaded" || lemo === "ready" || state === "serving" || state === "ready";
+  return state === "serving" || state === "ready";
 }
 
 // A small native-looking select for the FLM model pickers.
@@ -721,23 +552,20 @@ function NpuModalityCard({ icon, label, slot, on, fixed, models, busy, onToggle,
 
 // ─── NPU · FLM Stack — Variant B (bracketed trio control surface) ───
 //
-// THE npu rendering. One FLM process packs chat + ASR + embed coresident
-// (the trio boots together when the NPU chat slot loads with
-// flm_args "--asr 1 --embed 1"). This section lets the operator pick the
-// FLM chat model, toggle ASR/embed modalities, and load/unload the whole
-// stack — keyed off device=="npu" (never literal slot names).
+// THE npu rendering. One FLM container packs chat + ASR + embed coresident
+// (the trio boots together when the NPU slot container starts). This
+// section lets the operator pick the FLM chat model, toggle ASR/embed
+// modalities, and load/unload the whole stack — keyed off device=="npu"
+// (never literal slot names).
 function NpuFlmStack({ slots }) {
   const npuSlots = slots.filter(s => s.device === "npu");
   // Hooks must run unconditionally (rules-of-hooks) — gate render below.
-  const cfgQuery = useLemonadeConfig();
-  const cfgSet = useLemonadeConfigSet();
   const modelsQuery = useModels();
   const swapMut = useSlotSwap();
   const loadMut = useSlotLoad();
   const unloadMut = useSlotUnload();
   const editMut = useSlotEdit();
   const restartMutNpu = useSlotRestart();
-  const [pending, setPending] = useStateS(false);
   const [busy, setBusy] = useStateS(false);
 
   if (!npuSlots.length) return null;
@@ -747,22 +575,12 @@ function NpuFlmStack({ slots }) {
   const embed = npuSlots.find(s => s.type === "embedding");
   const anySlot = chat || npuSlots[0];
 
-  // Container-mode detection (Phase A): the npu chat slot carries
-  // runtime="container" OR profile when provisioned as a container slot.
-  // The `npu` field (TOML-backed {asr,embed}) is the authoritative state
-  // source on this path; flm_args is ignored.
-  const containerNpu = !!(chat?.profile || chat?.runtime === "container");
-
   const coresGroup = npuTrioGroupLabel(npuSlots);
   const backendUrl = npuTrioBackendUrl(npuSlots);
   const childPort = anySlot?.port ?? null;
 
-  const flmArgsLive = typeof cfgQuery.data?.flm_args === "string" ? cfgQuery.data.flm_args : "";
-  const parsed = containerNpu
-    // Container mode: derive toggle state from slot.npu (TOML-backed).
-    ? { asr: !!(chat?.npu?.asr), embed: !!(chat?.npu?.embed) }
-    // Legacy mode: parse lemond flm_args string.
-    : parseFlmArgs(flmArgsLive);
+  // Toggle state comes from slot.npu (TOML-backed {asr,embed}).
+  const parsed = { asr: !!(chat?.npu?.asr), embed: !!(chat?.npu?.embed) };
 
   // Only chat (the FLM anchor) is a real model choice — the operator picks
   // which model `flm serve` runs. ASR/embed are served coresident off that
@@ -773,9 +591,6 @@ function NpuFlmStack({ slots }) {
   const chatModels = flmModelsByType(allModels, "llm");
 
   const loaded = chat ? slotIsLoaded(chat) : npuSlots.some(slotIsLoaded);
-  // Live flm.args string for the footer — pending toggles preview the
-  // string that WILL apply on the next load.
-  const previewArgs = composeFlmArgs(parsed);
 
   const toast = (msg, kind = "warn") =>
     window.__hal0Toast && window.__hal0Toast(msg, kind);
@@ -792,7 +607,6 @@ function NpuFlmStack({ slots }) {
   };
 
   // Master power — load/unload the whole stack via the chat (anchor) slot.
-  // Loading applies the current flm_args, so it clears the pending hint.
   const onMaster = () => {
     if (!chat) { toast("No NPU chat slot to load", "warn"); return; }
     run(async () => {
@@ -801,19 +615,6 @@ function NpuFlmStack({ slots }) {
       } else {
         await loadMut.mutateAsync(chat.name);
       }
-      // Either edge resolves the pending flm_args: a load applies them,
-      // an unload tears down the process that held the stale args.
-      setPending(false);
-    });
-  };
-
-  // Reload to apply pending flm_args (unload+load the anchor slot).
-  const onReload = () => {
-    if (!chat) return;
-    run(async () => {
-      if (loaded) await unloadMut.mutateAsync(chat.name);
-      await loadMut.mutateAsync(chat.name);
-      setPending(false);
     });
   };
 
@@ -822,39 +623,21 @@ function NpuFlmStack({ slots }) {
     run(() => swapMut.mutateAsync({ name: chat.name, model_id }));
   };
 
-  // Toggle a coresident modality.
-  //
-  // Container mode (Phase A): write the flip to TOML via
+  // Toggle a coresident modality (Phase A): write the flip to TOML via
   //   PUT /api/slots/{name}/config  body: { npu: { [which]: next } }
   // then trigger an explicit slot restart so the container picks up the
   // new config (orchestrator/API NEVER auto-restarts — ADR decision).
   // The existing state chip streams the transition; no new UI needed.
-  //
-  // Legacy mode: recompose flm_args (flip the one flag, keep the other),
-  // POST it to lemond, AND flip the shadow slot's `enabled` so dispatch
-  // gating (v1.py _is_npu_trio_request) stays in sync. flm_args apply at
-  // the next load → mark pending. (Phase E deletes this path.)
-  const onToggleModality = (which, slot) => {
-    if (containerNpu) {
-      if (!chat) { toast("No NPU chat slot", "warn"); return; }
-      const nextVal = !(parsed[which]);
-      run(async () => {
-        await editMut.mutateAsync({
-          name: chat.name,
-          body: { npu: { [which]: nextVal } },
-        });
-        await restartMutNpu.mutateAsync(chat.name);
+  const onToggleModality = (which) => {
+    if (!chat) { toast("No NPU chat slot", "warn"); return; }
+    const nextVal = !(parsed[which]);
+    run(async () => {
+      await editMut.mutateAsync({
+        name: chat.name,
+        body: { npu: { [which]: nextVal } },
       });
-    } else {
-      const next = { ...parsed, [which]: !parsed[which] };
-      run(async () => {
-        await cfgSet.mutateAsync({ flm_args: composeFlmArgs(next) });
-        if (slot) {
-          await editMut.mutateAsync({ name: slot.name, body: { enabled: next[which] } });
-        }
-        setPending(true);
-      });
-    }
+      await restartMutNpu.mutateAsync(chat.name);
+    });
   };
 
   // No onPickAsr/onPickEmbed: those modalities are read-only labels (the
@@ -883,28 +666,21 @@ function NpuFlmStack({ slots }) {
           <NpuModalityCard
             icon="🎙" label="ASR" slot={asr} on={parsed.asr} readOnlyModel
             busy={busy}
-            onToggle={() => onToggleModality("asr", asr)}
+            onToggle={() => onToggleModality("asr")}
           />
           <NpuModalityCard
             icon="🧬" label="Embed" slot={embed} on={parsed.embed} readOnlyModel
             busy={busy}
-            onToggle={() => onToggleModality("embed", embed)}
+            onToggle={() => onToggleModality("embed")}
           />
         </div>
       </div>
 
       <div className="npu-stack-foot mono">
-        <code className="npu-args">flm.args = "{previewArgs}"</code>
+        <code className="npu-args">npu = asr:{parsed.asr ? "on" : "off"} · embed:{parsed.embed ? "on" : "off"}</code>
         <span className="sep">·</span>
         <span className="item">port :{childPort ?? "—"}{backendUrl ? <span title={backendUrl}> · {backendUrl}</span> : null}</span>
         {coresGroup && <><span className="sep">·</span><span className="item">{coresGroup}</span></>}
-        {pending && (
-          <>
-            <span className="npu-stack-spacer" />
-            <span className="npu-pending" title="flm_args apply on the next FLM load">⟳ reload to apply</span>
-            <button className="btn ghost sm" disabled={busy || !chat} onClick={onReload}>Reload</button>
-          </>
-        )}
       </div>
     </div>
   );

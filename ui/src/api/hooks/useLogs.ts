@@ -1,12 +1,9 @@
 // hal0 v3 dashboard — journal hook (Phase 3 of epic #322).
 //
-// Calls the merged ``/api/journal`` surface that landed in PR #330
+// Calls the ``/api/journal`` surface that landed in PR #330
 // (Phase 1). Two transports:
 //   - GET /api/journal               — historical backfill (one-shot)
-//   - SSE /api/journal/stream        — hal0 + lemond merged live tail
-//   - WS  /logs/stream               — raw lemond log channel, opt-in
-//                                      via includeLemondWs for the Logs
-//                                      page's native-fidelity mode
+//   - SSE /api/journal/stream        — live tail
 //
 // The hook keeps an in-memory ring of `JournalEntry`. SSE drives the
 // tail; the historical fetch primes the buffer. SSE reconnects on
@@ -27,7 +24,7 @@ import { ENDPOINTS } from '../endpoints'
 export interface JournalEntry {
   id: number
   ts: string
-  source: 'hal0' | 'lemond'
+  source: 'hal0'
   level: 'info' | 'warn' | 'error'
   msg: string
   data?: Record<string, unknown>
@@ -46,7 +43,7 @@ const RING_MAX = 2000
 /** Debounce SSE reconnect on rapid filter chip toggling. */
 const SSE_RECONNECT_DEBOUNCE_MS = 200
 
-export type JournalSource = 'merged' | 'hal0' | 'lemond' | 'all'
+export type JournalSource = 'merged' | 'hal0' | 'all'
 export type JournalLevel = 'info' | 'warn' | 'error'
 
 export interface UseLogsHistoricalOptions {
@@ -113,16 +110,10 @@ export interface UseLogsStreamOptions {
   level?: JournalLevel | null
   /** Forwarded to the journal stream as ?q= (server-side substring filter). */
   q?: string | null
-  /**
-   * When set, also opens a WS to `/logs/stream` (lemond raw channel).
-   * Used by the Logs page when the user wants native lemond log
-   * fidelity over the journal projection.
-   */
-  includeLemondWs?: boolean
 }
 
 /**
- * SSE + (optional) WS tail. Returns the live ring (newest last) and a
+ * SSE tail. Returns the live ring (newest last) and a
  * `disconnected` flag so the UI can show "stream paused" banners.
  *
  * Reconnects on `source`/`level`/`q`/`follow` change with a 200ms debounce
@@ -134,12 +125,10 @@ export function useLogsStream(opts: UseLogsStreamOptions = {}) {
     source = 'merged',
     level = null,
     q = null,
-    includeLemondWs = false,
   } = opts
   const [ring, setRing] = useState<JournalEntry[]>([])
   const [disconnected, setDisconnected] = useState(false)
   const esRef = useRef<EventSource | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
   /** Increments on every reconnect; used to backoff on repeated errors. */
   const errorCountRef = useRef(0)
 
@@ -219,39 +208,6 @@ export function useLogsStream(opts: UseLogsStreamOptions = {}) {
       }
     }
   }, [follow, source, level, q])
-
-  useEffect(() => {
-    if (!includeLemondWs) return
-    try {
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-      wsRef.current = new WebSocket(`${proto}//${location.host}${ENDPOINTS.lemondLogsWs}`)
-    } catch {
-      return
-    }
-    const ws = wsRef.current
-    ws.onmessage = (evt) => {
-      try {
-        const f = JSON.parse(evt.data) as any
-        // Per hal0_lemonade_ws_protocol: logs.entry frames carry `{ts, level, msg}`.
-        // We project onto JournalEntry so the ring stays homogeneous.
-        if (f?.type === 'logs.entry' && f.ts && f.msg) {
-          push({
-            id: -1, // raw WS entries don't carry a journal id
-            ts: f.ts,
-            source: 'lemond',
-            level: f.level ?? 'info',
-            msg: f.msg,
-          })
-        }
-      } catch {
-        // ignore
-      }
-    }
-    return () => {
-      ws.close()
-      wsRef.current = null
-    }
-  }, [includeLemondWs])
 
   return { ring, disconnected }
 }

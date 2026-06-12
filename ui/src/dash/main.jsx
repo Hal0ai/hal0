@@ -306,7 +306,7 @@ function App() {
               { value: "streaming", label: "Streaming" },
               { value: "swap",      label: "NPU swap in progress" },
               { value: "no-tools",  label: "No tool-calling LLM" },
-              { value: "offline",   label: "lemond offline" },
+              { value: "offline",   label: "runtime offline" },
             ]}
           />
         </TweakSection>

@@ -101,10 +101,9 @@ export interface Slot {
   backend_mismatch?: boolean
 
   // ── Container runtime fields (#657) ─────────────────────────────────
-  /** Slot runtime engine: "lemonade" (default) or "container". Container
-   *  slots dispatch through ContainerProvider (podman/docker systemd unit)
-   *  instead of Lemonade. */
-  runtime?: 'lemonade' | 'container'
+  /** Slot runtime engine — always "container". Slots dispatch through
+   *  ContainerProvider (podman/docker systemd unit). */
+  runtime?: 'container'
   /** Profile name from /etc/hal0/profiles.toml. Container slots use a
    *  profile to supply the container image + bench-tuned flags. */
   profile?: string | null
@@ -119,26 +118,23 @@ export interface Slot {
    *  not running or inspect fails — treat absence as "unknown". */
   actual_image?: string | null
   /** True iff actual_image is known AND differs from the declared profile
-   *  ``image`` (deterministic image-tag drift; replaces the /proc backend
-   *  sniff for container slots). UI renders the warning ONLY when true. */
+   *  ``image`` (deterministic image-tag drift). UI renders the warning
+   *  ONLY when true. */
   image_mismatch?: boolean
   /** Container unit state: "running" | "stopped" | "starting" | "crashed".
-   *  Set by _container_state_enrichment() in /api/slots. Absent for
-   *  Lemonade slots. */
+   *  Set by _container_state_enrichment() in /api/slots. */
   container_status?: 'running' | 'stopped' | 'starting' | 'crashed' | null
-  /** NPU trio modality toggles — present on container-runtime npu slots
-   *  (Phase A). Reflects the TOML-backed [npu] section; reads/writes go
-   *  through PUT /api/slots/{name}/config rather than lemond flm_args.
-   *  Absent/null for Lemonade-runtime NPU slots (legacy path). */
+  /** NPU trio modality toggles — present on npu slots (Phase A). Reflects
+   *  the TOML-backed [npu] section; reads/writes go through
+   *  PUT /api/slots/{name}/config. */
   npu?: { asr: boolean; embed: boolean } | null
   /** True when the container unit is active AND /health returns ok.
-   *  False when stopped, starting (health probe not yet passing), or crashed.
-   *  Absent for Lemonade slots. */
+   *  False when stopped, starting (health probe not yet passing), or crashed. */
   container_health?: boolean | null
   /** Canonical llama-server argv for this container slot, starting from the
    *  image tag (omits the podman boilerplate). Populated by
    *  _container_state_enrichment() via resolved_command_for_slot() in
-   *  container.py. Absent/null for Lemonade slots. */
+   *  container.py. */
   resolved_command?: string[] | null
 
   // ── Synthetic upstream-backed entries ───────────────────────────────
@@ -255,26 +251,24 @@ function normalizeSlot(s: any): Slot {
     // letting the card read undefined as "disabled".
     enabled: s?.enabled !== false,
     // Container runtime fields (#657). Pass through verbatim; absent keys
-    // surface as null/undefined so the card can safely branch on runtime.
-    runtime: s?.runtime ?? 'lemonade',
+    // surface as null/undefined so the card can render safely.
+    runtime: s?.runtime ?? 'container',
     profile: s?.profile ?? null,
-    // image/image_status may come from profile resolution (backend TBD) or
-    // be omitted; null means "unknown — don't show image chip".
+    // image/image_status may come from profile resolution or be omitted;
+    // null means "unknown — don't show image chip".
     image: s?.image ?? null,
     image_status: s?.image_status ?? null,
     // #663: actual_image (podman inspect) + image_mismatch (running != declared
-    // profile image). Absent for Lemonade slots; coerce the flag to a boolean.
+    // profile image). Coerce the flag to a boolean.
     actual_image: s?.actual_image ?? null,
     image_mismatch: !!s?.image_mismatch,
     // container_status / container_health are set by _container_state_enrichment.
-    // Absent for Lemonade slots; null here keeps the type honest.
     container_status: s?.container_status ?? null,
     container_health: s?.container_health ?? null,
     // resolved_command: backend-provided llama-server argv for container slots
-    // (issue #658). Absent for Lemonade slots.
+    // (issue #658).
     resolved_command: s?.resolved_command ?? null,
-    // npu: trio modality toggles for container-runtime npu slots (Phase A).
-    // Absent/null for Lemonade-runtime slots (legacy path reads flm_args).
+    // npu: trio modality toggles for npu slots (Phase A).
     npu: s?.npu ?? null,
   }
 }
@@ -356,7 +350,6 @@ function useSlotsInvalidator() {
   const qc = useQueryClient()
   return () => {
     qc.invalidateQueries({ queryKey: ['slots'] })
-    qc.invalidateQueries({ queryKey: ['lemonade', 'health'] })
   }
 }
 

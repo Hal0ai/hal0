@@ -1,11 +1,10 @@
 // hal0 v3 dashboard — barrel export for hooks (Phase B1).
 //
-// Single re-export so views can `import { useSlots, useLemonadeHealth }
+// Single re-export so views can `import { useSlots, useRuntimeRollup }
 // from '@/api/hooks'`. MCP + Agent hooks are deliberately omitted —
 // those views stay on HAL0_DATA mock for B1 (see issues #TBD).
 
-export * from './useLemonade'
-export * from './useLemonadeConfig'
+export * from './useRuntime'
 export * from './useSlots'
 export * from './useModels'
 export * from './useBackends'

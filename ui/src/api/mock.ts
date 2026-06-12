@@ -1,7 +1,7 @@
 // hal0 v3 dashboard — mock fetch harness (Phase B1).
 //
 // Two activation modes (mirrors ui-vue.bak/src/composables/useMock.js):
-//   1. Forced mock: `VITE_MOCK_LEMONADE=1` at build/dev time. Every
+//   1. Forced mock: `VITE_MOCK_HAL0=1` at build/dev time. Every
 //      allowlisted URL returns baked data from `HAL0_DATA` without
 //      touching the network.
 //   2. Per-endpoint fallback: when a live fetch fails (404 / network
@@ -16,7 +16,7 @@
 // Ambient typing lives in `src/types/globals.d.ts` — no local
 // `declare global` here (it would conflict on `HAL0_DATA` modifiers).
 
-const FORCED = !!(import.meta.env && (import.meta.env as any).VITE_MOCK_LEMONADE === '1')
+const FORCED = !!(import.meta.env && (import.meta.env as any).VITE_MOCK_HAL0 === '1')
 
 export function isMockForced() {
   return FORCED
@@ -27,88 +27,6 @@ function data(): any {
 }
 
 // ─── Builders — one per endpoint family ───────────────────────────
-function buildHealth() {
-  const d = data()
-  const L = d.lemond || {}
-  return {
-    loaded: (d.slots || [])
-      .filter((s: any) => s.state === 'serving' || s.state === 'ready')
-      .map((s: any) => ({ model_name: s.model, backend_url: `http://localhost:${s.port}` })),
-    max_loaded: L.budget ?? 4,
-    version: L.version ?? 'v10.6.0',
-    throughput_mbps: L.throughput ?? null,
-    // #221 — `queued` + `coresident` round-trip via the mock so the demo
-    // chips keep rendering. Lemonade itself does not surface these on
-    // /v1/health today; production hides the chips when they're absent.
-    queued: typeof L.queued === 'number' ? L.queued : null,
-    coresident: typeof L.coresident === 'boolean' ? L.coresident : null,
-  }
-}
-
-function buildStats() {
-  // /v1/stats fallback (Phase 4, #326). Reads lastTokPerSec from
-  // HAL0_DATA.lemond so e2e specs can clobber it via addInitScript
-  // (same pattern as lemond.throughput → buildHealth). (#340)
-  const d = data()
-  const L = d.lemond || {}
-  return {
-    time_to_first_token: 0.22,
-    // Respect an EXPLICIT null/0 clobber (e2e sets lastTokPerSec=null to test
-    // the hidden / MB/s-fallback paths); only default to 45.0 when ABSENT.
-    tokens_per_second: 'lastTokPerSec' in L ? L.lastTokPerSec : 45.0,
-    prompt_tokens: 312,
-    output_tokens: 188,
-    input_tokens: 312,
-  }
-}
-
-function buildLemonadeConfig() {
-  // /api/lemonade/config fallback (issue #461). Mirrors the lemond
-  // /internal/config snapshot the backend forwards, plus the `_hal0`
-  // envelope (immediate-vs-deferred key partition + locked store path)
-  // so the admin form renders real labels in forced-mock + on a 404.
-  // Key/effect taxonomy tracks hal0.api.routes.lemonade_admin.
-  return {
-    max_loaded_models: 4,
-    ctx_size: 4096,
-    llamacpp_args: '--parallel 1 --threads 8 --flash-attn on',
-    flm_args: '--asr 1 --embed 1',
-    whispercpp_backend: 'vulkan',
-    sdcpp_backend: 'rocm',
-    steps: 20,
-    cfg_scale: 7.0,
-    width: 512,
-    height: 512,
-    extra_models_dir: '/var/lib/hal0/models',
-    _hal0: {
-      effects: {
-        immediate: [
-          'extra_models_dir',
-          'global_timeout',
-          'host',
-          'log_level',
-          'no_broadcast',
-          'port',
-        ],
-        deferred: [
-          'cfg_scale',
-          'ctx_size',
-          'flm_args',
-          'height',
-          'llamacpp_args',
-          'llamacpp_backend',
-          'max_loaded_models',
-          'sdcpp_backend',
-          'steps',
-          'whispercpp_backend',
-          'width',
-        ],
-      },
-      locked: { extra_models_dir: '/var/lib/hal0/models' },
-    },
-  }
-}
-
 function buildStatus() {
   const d = data()
   // 0.4 gate: forced-mock dev/preview build keeps the memory surface ON so
@@ -137,9 +55,8 @@ function buildModels() {
 }
 
 function buildBackends() {
-  const d = data()
   return {
-    backends: (d.backends ?? []).map((b: any) => ({
+    backends: (data().backends ?? []).map((b: any) => ({
       id: b.name,
       version: b.ver,
       state: b.state,
@@ -149,7 +66,6 @@ function buildBackends() {
       kind: b.kind,
       device: b.device,
     })),
-    lemonade: { version: d.lemond?.version, pinned: true, channel: 'stable' },
   }
 }
 
@@ -199,7 +115,6 @@ function buildUpdateState() {
   // pair in sync with pyproject.toml's version when bumping major.
   return {
     hal0: { current: '0.3.0-alpha.1', available: '0.3.0-alpha.2', channel: 'stable' },
-    lemonade: { current: 'v10.6.0', pinned: true, channel: 'stable' },
     flm: { current: 'v0.9.42', source: 'manual-deb' },
     autoCheck: true,
   }
@@ -238,9 +153,6 @@ function buildFirstRunCurated() {
 type Builder = (url: string, match: RegExpMatchArray) => unknown
 
 export const MOCK_ALLOWLIST: ReadonlyArray<{ re: RegExp; build: Builder }> = Object.freeze([
-  { re: /^\/v1\/health$/, build: buildHealth },
-  { re: /^\/v1\/stats$/, build: buildStats },
-  { re: /^\/api\/lemonade\/config$/, build: buildLemonadeConfig },
   { re: /^\/api\/status$/, build: buildStatus },
   { re: /^\/api\/slots$/, build: buildSlots },
   { re: /^\/api\/slots\/[^/]+$/, build: () => null }, // 404-style — Slot detail not in mock

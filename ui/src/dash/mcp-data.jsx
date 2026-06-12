@@ -9,7 +9,7 @@ const MCP_SERVERS = [
   {
     id: "hal0-admin",
     name: "hal0-admin",
-    description: "Inspect and supervise this hal0 box — list slots, search models, restart lemond, read journal.",
+    description: "Inspect and supervise this hal0 box — list slots, search models, restart slots, read journal.",
     provider: "hal0",
     bundled: true,
     state: "running",          // running | stopped | failed | installing

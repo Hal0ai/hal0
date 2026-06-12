@@ -148,7 +148,7 @@ export function useMemoryMapModel() {
   )
   const npuModelGb = mbToGb(stats.data?.npu_status?.model_mb || 0)
 
-  // N1 (slot-status unifier): isSlotLive() handles both lemond (state-string)
+  // N1 (slot-status unifier): isSlotLive() handles both enriched (container)
   // and container (container_status + container_health) runtimes. Replaces
   // the old static LIVE_STATES set membership test.
   const liveSlots = slots.filter((s) => isSlotLive(s))
@@ -384,7 +384,7 @@ function HostBar({ model }) {
 // Per-slot legend sub-label.
 // Container slots: show image tag (truncated at 32 chars) or profile slug —
 // more informative than "rocm" which every container shares.
-// Lemond slots: keep the device token (rocm/vulkan/cpu/npu) as before.
+// Un-enriched slots: keep the device token (rocm/vulkan/cpu/npu) as before.
 function slotLegendSub(slot) {
   if (slot.isContainer) {
     // Prefer image tag (e.g. "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-server")
@@ -396,7 +396,7 @@ function slotLegendSub(slot) {
     if (slot.profile) return String(slot.profile)
     return 'container'
   }
-  // Lemond / legacy path: show device + approx marker.
+  // Legacy / un-enriched path: show device + approx marker.
   return `${slot.device}${slot.approx ? ' · ≈' : ''}`
 }
 

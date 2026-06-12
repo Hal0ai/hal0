@@ -55,7 +55,7 @@ export default defineConfig({
     env: {
       // Force mock data so specs see steady-state markup, not real-fetch loading lag.
       // Real API integration is exercised via separate manual smoke tests.
-      VITE_MOCK_LEMONADE: '1',
+      VITE_MOCK_HAL0: '1',
     },
   },
 })

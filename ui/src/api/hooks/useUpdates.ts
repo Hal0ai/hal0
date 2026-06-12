@@ -25,7 +25,6 @@ export interface UpdateChannel {
 
 export interface UpdateState {
   hal0: UpdateChannel
-  lemonade: UpdateChannel
   flm?: UpdateChannel
   autoCheck: boolean
 }
@@ -75,9 +74,9 @@ export function useUpdateApply() {
 
 // Channel switch (issue #546). PUT /api/updates/channel with {channel:
 // "stable" | "nightly"} persists to hal0.toml; on success the updates/
-// state query is invalidated so the per-component hal0.channel /
-// lemonade.channel fields (which the UI binds to for the current value)
-// refetch the persisted channel before the next render.
+// state query is invalidated so the per-component channel fields (which
+// the UI binds to for the current value) refetch the persisted channel
+// before the next render.
 export type UpdateChannelName = 'stable' | 'nightly'
 
 export function useSetUpdateChannel() {

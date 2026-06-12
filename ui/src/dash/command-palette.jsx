@@ -9,7 +9,7 @@
 // closed. Slot control verbs (start/stop/restart/logs) are dispatched as
 // `hal0:slot-*` events handled by the always-mounted SlotActionBridge
 // below, so they work from any route without a navigate-then-dispatch
-// race. The old toast-only stub actions (restart-lemond, restart-flm,
+// race. The old toast-only stub actions (restart-runtime, restart-flm,
 // clear-downloads, replay-tour) were removed — every item now does what
 // it says.
 
@@ -235,9 +235,9 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "r-slots",     route: "slots",     label: "Slots",      icon: Icons.slots,     sub: "inventory + capability rollups", keywords: "lifecycle" },
     { id: "r-models",    route: "models",    label: "Models",     icon: Icons.models,    sub: "catalog + downloads", keywords: "catalog hugging face" },
     { id: "r-hardware",  route: "hardware",  label: "Hardware",   icon: Icons.hardware,  sub: "cpu, gpu, npu, memory" },
-    { id: "r-logs",      route: "logs",      label: "Logs",       icon: Icons.logs,      sub: "hal0 + lemond stream", keywords: "tail console output" },
+    { id: "r-logs",      route: "logs",      label: "Logs",       icon: Icons.logs,      sub: "hal0 stream", keywords: "tail console output" },
     { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "chat, personas, skills, memory, plugins" },
-    { id: "r-settings",  route: "settings",  label: "Settings",   icon: Icons.settings,  sub: "auth, secrets, updates, lemond admin" },
+    { id: "r-settings",  route: "settings",  label: "Settings",   icon: Icons.settings,  sub: "auth, secrets, updates" },
     { id: "r-firstrun",  route: "firstrun",  label: "FirstRun picker", icon: Icons.flame, sub: "re-run the bundle picker", keywords: "setup install bundle" },
   ];
   routes.forEach(r => items.push({ ...r, section: "Routes", hint: "↵ jump" }));
@@ -281,7 +281,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "set-auth",      label: "Auth · token",        sub: "rotate Bearer token, allowed origins" },
     { id: "set-secrets",   label: "Secrets",              sub: "HF_TOKEN and provider keys" },
     { id: "set-storage",   label: "Storage",              sub: "[models].store · auto_scan · file extensions" },
-    { id: "set-updates",   label: "Updates",              sub: "hal0 / lemonade / flm versions" },
+    { id: "set-updates",   label: "Updates",              sub: "hal0 / flm versions" },
     { id: "set-runtime",   label: "Runtime",              sub: "max_loaded_models, ctx_size, args" },
     { id: "set-general",   label: "General",              sub: "theme, density, accent" },
   ].forEach(s => items.push({ ...s, section: "Settings", icon: Icons.settings, route: "settings" }));

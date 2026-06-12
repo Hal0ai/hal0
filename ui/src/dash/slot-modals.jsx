@@ -9,63 +9,29 @@ import {
   useSlotEdit,
   useSlotDefaults,
   useSlotDelete,
-  useSlotBackend,
   useSlotImagePull,
   useSlotRestart,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
-import { useBackends } from '@/api/hooks/useBackends'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { ENDPOINTS } from '@/api/endpoints'
 import { stateChipClassForSlot } from './slot-status.js'
 
-// Full static device list — shown as fallback when /api/backends hasn't
-// loaded yet or returns empty. Never render an empty device dropdown.
-const DEVICE_STATIC = ['gpu-rocm', 'gpu-vulkan', 'cpu', 'npu']
-
-// Map a backend id (e.g. "llamacpp:rocm", "llamacpp:vulkan", "flm:npu",
-// "llamacpp:cpu") to its slot device token.
-function backendToDevice(id) {
-  const s = String(id || '').toLowerCase()
-  if (s.includes('rocm'))   return 'gpu-rocm'
-  if (s.includes('vulkan')) return 'gpu-vulkan'
-  if (s.includes('npu') || s.includes('flm')) return 'npu'
-  if (s.includes('cpu'))    return 'cpu'
-  return null
-}
-
 const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React;
 
 // Map a slot lifecycle state to a chip color class.
-//   online/ready/serving → green (ok); starting → amber (warn);
-//   error → red (err); offline/empty/anything else → neutral grey (base chip).
+//   running healthy/serving → green (ok); starting/pulling → amber (warn);
+//   crashed/error → red (err); stopped/anything else → neutral grey.
 //
-// N1: accepts either a state string (lemond path, unchanged) or a full slot
-// object. When given a slot object, delegates to stateChipClassForSlot()
-// from slot-status.js which handles container runtime correctly via
-// slotPhase(). The primitive string overload is kept for call sites that
-// only have the state string — its behaviour is unchanged.
+// N1: accepts either a state string or a full slot object; both delegate
+// to stateChipClassForSlot() from slot-status.js (the string overload
+// wraps it in a minimal slot shape).
 function stateChipClass(stateOrSlot) {
-  // Duck-type: if it's a string, keep original behaviour (lemond path).
   if (typeof stateOrSlot === "string" || stateOrSlot == null) {
-    // STRING path = lemond, byte-identical to origin/main. Do NOT add
-    // warming/pulling/crashed here — that recolored lemond state strips
-    // (e.g. state="warming" must stay grey at the EditSlotDrawer strip).
-    // Container chips route through the slot-OBJECT overload only.
-    const s = String(stateOrSlot || "").toLowerCase();
-    if (["ready", "online", "loaded", "serving", "running"].includes(s)) return "chip ok";
-    if (["starting", "loading", "pending", "stopping"].includes(s)) return "chip warn";
-    if (["error", "failed", "broken"].includes(s)) return "chip err";
-    return "chip"; // offline / warming / empty / unconfigured → neutral grey
+    return stateChipClassForSlot({ state: String(stateOrSlot || "") });
   }
-  // Full slot object: delegate to the shared N1 helper.
-  // stateChipClassForSlot returns null for lemond slots (sentinel),
-  // in which case we fall back to the original string-based path.
-  const slot = stateOrSlot;
-  const fromPhase = stateChipClassForSlot(slot);
-  if (fromPhase !== null) return fromPhase;
-  return stateChipClass(slot.state);
+  return stateChipClassForSlot(stateOrSlot);
 }
 
 // Map /api/models registry rows → the shape this file's swap popover and
@@ -122,60 +88,28 @@ function normalizeApiModel(m) {
 function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const [name, setName] = useStateSM(defaults.name || "");
   const [type, setType] = useStateSM(defaults.type || "llm");
-  const [device, setDevice] = useStateSM(defaults.device || "gpu-rocm");
-  const [runtime, setRuntime] = useStateSM(defaults.runtime || "lemonade");
   const [profile, setProfile] = useStateSM(defaults.profile || "");
   const [model, setModel] = useStateSM(defaults.model || "");
   const [group, setGroup] = useStateSM(defaults.group || "chat");
-  const [advOpen, setAdvOpen] = useStateSM(false);
   const [makeDefault, setMakeDefault] = useStateSM(false);
-  const [ctx, setCtx] = useStateSM(8192);
-  const [extraArgs, setExtraArgs] = useStateSM("--flash-attn on");
   const [submitErr, setSubmitErr] = useStateSM(null);
 
   const createMut = useSlotCreate();
   const hwQuery = useHardware();
-  const backendsQuery = useBackends();
   const modelsQuery = useModels();
   const profilesQuery = useProfiles();
-
-  // Device options: derived from installed backends in /api/backends.
-  // cpu is always runnable — force-add it whenever we have real backend data.
-  // Fallback to DEVICE_STATIC when data is absent/loading/empty so the
-  // dropdown is never empty.
-  const backendsData = backendsQuery.data;
-  const haveBackends = (backendsData?.backends?.length ?? 0) > 0;
-  const deviceOptions = (() => {
-    if (!haveBackends) return DEVICE_STATIC;
-    const installed = (backendsData.backends || []).filter(b => b.state === 'installed');
-    const avail = new Set(installed.map(b => backendToDevice(b.id)).filter(Boolean));
-    avail.add('cpu'); // always runnable on the host
-    return DEVICE_STATIC.filter(d => avail.has(d));
-  })();
 
   useEffectSM(() => {
     if (open) {
       setName(defaults.name || "");
       setType(defaults.type || "llm");
-      setDevice(defaults.device || "gpu-rocm");
-      setRuntime(defaults.runtime || "lemonade");
       setProfile(defaults.profile || "");
       setGroup(defaults.group || "chat");
       setModel("");
-      setAdvOpen(false);
       setMakeDefault(false);
       setSubmitErr(null);
     }
   }, [open, defaults]);
-
-  // Reconcile selected device with the derived option list: if the current
-  // selection isn't in the available set (e.g. rocm not installed), snap to
-  // the first available device rather than silently POSTing an invalid one.
-  useEffectSM(() => {
-    if (deviceOptions.length && !deviceOptions.includes(device)) {
-      setDevice(deviceOptions[0]);
-    }
-  }, [deviceOptions.join(','), device]);
 
   // validation — slot collision uses the live slot list passed in from
   // the SlotsView (useSlots data), not HAL0_DATA.
@@ -191,23 +125,11 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   // against the real registry (slot.not_found).
   const allModels = (modelsQuery.data ?? []).map(normalizeApiModel);
   const allProfiles = profilesQuery.data ?? [];
-  const isContainerSlot = runtime === "container";
-  const compatible = allModels.filter(m => {
-    if (m.type !== type) return false;
-    // Container slots: any model of the right type works (the profile's
-    // image determines the backend, not the device selector).
-    if (isContainerSlot) return true;
-    // ROCmFP4-quantized models only run on the custom rocm fork binary
-    // (lemonade rocm_bin) — never offer them for vulkan / npu / cpu slots.
-    if (Array.isArray(m.tags) && m.tags.includes("rocmfp4") && device !== "gpu-rocm") return false;
-    return device === "cpu"
-      || (Array.isArray(m.backends) && m.backends.includes((device || "cpu").replace("gpu-", "")))
-      || (device === "npu" && m.device === "npu");
-  });
+  // Any model of the right type works — the profile's image determines
+  // the backend, not a device selector.
+  const compatible = allModels.filter(m => m.type === type);
 
-  const npuAvailable = !!hwQuery.data?.npu?.present;
-  const canSave = !!name && !nameError && !createMut.isPending &&
-    (!isContainerSlot || !!profile);
+  const canSave = !!name && !nameError && !createMut.isPending && !!profile;
 
   // Next available port after the highest currently-allocated
   const nextPort = Math.max(8090, ...((existingSlots || []).map(s => s.port || 8090))) + 1;
@@ -217,38 +139,25 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
     const body = {
       name,
       type,
-      ...(isContainerSlot
-        ? {
-            runtime: "container",
-            profile,
-            // C7: derive device from the selected profile's device_class.
-            // Interim heuristic — Phase E may promote device onto ProfileConfig directly.
-            //   npu/cpu → pass through verbatim
-            //   img     → "gpu-rocm" (ComfyUI image runtime, ROCm-only for now)
-            //   gpu     → check profile image tag: vulkan → "gpu-vulkan", else "gpu-rocm"
-            device: (() => {
-              const meta = allProfiles.find(p => p.name === profile);
-              const dc = meta?.device_class || "gpu";
-              if (dc === "npu") return "npu";
-              if (dc === "cpu") return "cpu";
-              if (dc === "img") return "gpu-rocm";
-              // dc === "gpu": distinguish vulkan vs rocm by image tag
-              return (meta?.image || "").includes("vulkan") ? "gpu-vulkan" : "gpu-rocm";
-            })(),
-          }
-        : { device }),
+      runtime: "container",
+      profile,
+      // C7: derive device from the selected profile's device_class.
+      // Interim heuristic — may promote device onto ProfileConfig directly.
+      //   npu/cpu → pass through verbatim
+      //   img     → "gpu-rocm" (ComfyUI image runtime, ROCm-only for now)
+      //   gpu     → check profile image tag: vulkan → "gpu-vulkan", else "gpu-rocm"
+      device: (() => {
+        const meta = allProfiles.find(p => p.name === profile);
+        const dc = meta?.device_class || "gpu";
+        if (dc === "npu") return "npu";
+        if (dc === "cpu") return "cpu";
+        if (dc === "img") return "gpu-rocm";
+        // dc === "gpu": distinguish vulkan vs rocm by image tag
+        return (meta?.image || "").includes("vulkan") ? "gpu-vulkan" : "gpu-rocm";
+      })(),
       group,
       ...(model ? { model } : {}),
       ...(makeDefault ? { default: true } : {}),
-      ...(advOpen && !isContainerSlot
-        ? {
-            model: {
-              ...(model ? { default: model } : {}),
-              ctx_size: Number(ctx) || ctx,
-            },
-            llamacpp_args: extraArgs,
-          }
-        : {}),
     };
     try {
       await createMut.mutateAsync(body);
@@ -321,56 +230,25 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
 
       <div className="form-row">
         <div className="form-lbl">
-          <span>Runtime <span className="req">*</span></span>
-          <span className="sub">container = podman-managed iGPU image · lemonade = Lemonade-managed</span>
+          <span>Profile <span className="req">*</span></span>
+          <span className="sub">image + bench-tuned flags for this slot</span>
         </div>
         <div className="form-ctl">
-          <select className="input mono" value={runtime} onChange={e => { setRuntime(e.target.value); setModel(""); }}>
-            <option value="lemonade">lemonade</option>
-            <option value="container">container</option>
+          <select
+            className="input mono"
+            value={profile}
+            onChange={e => setProfile(e.target.value)}
+          >
+            <option value="">— select a profile</option>
+            {allProfiles.map(p => (
+              <option key={p.name} value={p.name}>
+                {p.name} · {p.image ? p.image.split(':').pop() : '—'}
+              </option>
+            ))}
           </select>
+          {!profile && <div className="hint" style={{color: "var(--warn)"}}>Profile required for container slots.</div>}
         </div>
       </div>
-
-      {isContainerSlot ? (
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>Profile <span className="req">*</span></span>
-            <span className="sub">image + bench-tuned flags for this slot</span>
-          </div>
-          <div className="form-ctl">
-            <select
-              className="input mono"
-              value={profile}
-              onChange={e => setProfile(e.target.value)}
-            >
-              <option value="">— select a profile</option>
-              {allProfiles.map(p => (
-                <option key={p.name} value={p.name}>
-                  {p.name} · {p.image ? p.image.split(':').pop() : '—'}
-                </option>
-              ))}
-            </select>
-            {!profile && <div className="hint" style={{color: "var(--warn)"}}>Profile required for container slots.</div>}
-          </div>
-        </div>
-      ) : (
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>Device <span className="req">*</span></span>
-            <span className="sub">{!npuAvailable && device === "npu" ? <span style={{color: "var(--warn)"}}>NPU disabled — FLM not installed</span> : "hardware preference for this slot"}</span>
-          </div>
-          <div className="form-ctl">
-            <select className="input mono" value={device} onChange={e => setDevice(e.target.value)}>
-              {deviceOptions.map(d => (
-                <option key={d} value={d} disabled={d === 'npu' && !npuAvailable}>
-                  {d === 'npu' && !npuAvailable ? 'npu — install FLM first' : d}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-      )}
 
       <div className="form-row">
         <div className="form-lbl">
@@ -431,34 +309,6 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
       </div>
 
-      <div className="form-section" onClick={() => setAdvOpen(v => !v)} style={{cursor: "pointer", display: "flex", alignItems: "center", gap: 8}}>
-        <span style={{transform: advOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s ease"}}>{Icons.chevR}</span>
-        <span>Recipe options</span>
-        <span style={{marginLeft: "auto", color: "var(--fg-5)", letterSpacing: 0, textTransform: "none"}}>{advOpen ? "collapse" : "expand"}</span>
-      </div>
-      {advOpen && (
-        <>
-          <div className="form-row">
-            <div className="form-lbl">
-              <span>ctx_size</span>
-              <span className="warn">⟳ restart required</span>
-            </div>
-            <div className="form-ctl">
-              <input className="input mono" value={ctx} onChange={e => setCtx(Number(e.target.value))} />
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-lbl">
-              <span>llamacpp_args</span>
-              <span className="sub">merged with --parallel 1 --threads 8 baseline</span>
-            </div>
-            <div className="form-ctl">
-              <input className="input mono" value={extraArgs} onChange={e => setExtraArgs(e.target.value)} />
-              <div className="hint">Denied flags: <span className="mono">-m / --port / --ctx-size / -ngl / --jinja / --mmproj / --embeddings / --reranking</span></div>
-            </div>
-          </div>
-        </>
-      )}
     </Modal>
   );
 }
@@ -470,20 +320,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const editMut = useSlotEdit();
   const defaultsMut = useSlotDefaults();
   const deleteMut = useSlotDelete();
-  const backendMut = useSlotBackend();
   const restartMut = useSlotRestart();
   const profilesQuery = useProfiles();
 
   // Seed from the slot list payload when available (PR #587 — same fix
-  // class as #584). idle_timeout_s / workers / llamacpp_args are all
-  // surfaced on the list payload now, so the drawer mirrors them
-  // verbatim and only sends what actually changed. When the payload
-  // is missing the field (older backend, or synthetic slot), the
-  // schema defaults act as a fallback for first-time edits only.
-  const initialIdle = slot?.idle_timeout_s != null ? slot.idle_timeout_s : 900;
-  const initialWorkers = slot?.workers != null ? slot.workers : 1;
+  // class as #584). llamacpp_args / n_gpu_layers / rope_freq_base are
+  // surfaced on the list payload and rendered read-only (the profile
+  // owns them for container slots).
   const initialExtraArgs = slot?.llamacpp_args != null ? slot.llamacpp_args : "";
-  const initialRope = slot?.rope_freq_base != null ? slot.rope_freq_base : 0;
 
   const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 4096);
   // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
@@ -497,21 +341,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [ropeFreqBase, setRopeFreqBase] = useStateSM(
     slot?.rope_freq_base != null ? String(slot.rope_freq_base) : "0"
   );
-  const [idleTimeout, setIdleTimeout] = useStateSM(initialIdle);
-  const [workers, setWorkers] = useStateSM(initialWorkers);
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
-  const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
   const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
   const [submitErr, setSubmitErr] = useStateSM(null);
   // Per-field validation errors for numeric inputs (#548).
   const [fieldErrs, setFieldErrs] = useStateSM({});
-  // Runtime Backend selector (ADR-0022). Seeded from the DECLARED backend
-  // token (bare rocm|vulkan|cpu|flm), falling back to the gpu-stripped
-  // device. The selector itself only offers the selectable backends.
-  const [selectedBackend, setSelectedBackend] = useStateSM(
-    slot?.declared_backend || (slot?.device || "gpu-rocm").replace("gpu-", "") || "rocm"
-  );
-  const [backendSwitchPending, setBackendSwitchPending] = useStateSM(false);
   // C7: profile swap for GPU container slots.
   // Seeded from slot.profile; only sent on Save when changed. After a
   // profile-change save the slot is restarted (model swap semantics — same
@@ -525,22 +359,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setThinkingPending(false);
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
       setRopeFreqBase(slot.rope_freq_base != null ? String(slot.rope_freq_base) : "0");
-      setDevice(slot.device || "gpu-rocm");
       setMakeDefault(!!slot.isDefault);
       // #587: re-seed from the slot prop so the drawer tracks the real
-      // on-disk values (was hardcoded constants before — that was the
-      // bug). The dirty-tracking in onSaveClick below only ships fields
-      // that actually changed, so a no-op edit no longer rewrites
-      // anything.
-      setIdleTimeout(slot.idle_timeout_s != null ? slot.idle_timeout_s : 900);
-      setWorkers(slot.workers != null ? slot.workers : 1);
+      // on-disk values.
       setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
       setSubmitErr(null);
       setFieldErrs({});
-      setSelectedBackend(
-        slot.declared_backend || (slot.device || "gpu-rocm").replace("gpu-", "") || "rocm"
-      );
-      setBackendSwitchPending(false);
       // C7: re-seed profile from the (possibly-updated) slot prop.
       setSelectedProfile(slot.profile || "");
     }
@@ -553,17 +377,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
     // Issue #548: validate numeric fields before any network call.
     // Invalid values surface inline and block Save.
     const ctxNum = Number(ctx);
-    const nglNum = Number(nGpuLayers);
-    const ropeNum = Number(ropeFreqBase);
     const errs = {};
     if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
       errs.ctx = "Must be an integer ≥ 128";
-    }
-    if (!Number.isFinite(nglNum) || !Number.isInteger(nglNum) || nglNum < -1) {
-      errs.ngl = "Must be an integer ≥ -1 (use -1 to offload all layers)";
-    }
-    if (!Number.isFinite(ropeNum) || ropeNum < 0) {
-      errs.rope = "Must be a number ≥ 0 (0 = use model default)";
     }
     if (Object.keys(errs).length > 0) {
       setFieldErrs(errs);
@@ -571,50 +387,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
     }
     setFieldErrs({});
     try {
-      // Two-step: defaults (ctx_size / n_gpu_layers / rope_freq_base live
-      // under [model]) + slot config for the top-level keys (device,
-      // llamacpp_args, idle_timeout_s, workers, default).
-      const idleNum = Number(idleTimeout);
-      const workersNum = Number(workers);
-      // #587 dirty-tracking: only include a field in the body if the
-      // user actually changed it from the seeded (on-disk) value.
-      // Sending every field unconditionally is what clobbered values
-      // before — same fix class as #584. ctx_size / n_gpu_layers stay
-      // unconditional because the drawer's seed is best-effort
-      // (metrics?.ctx / -1 sentinel) and NOT the truth source.
-      const isContainerSave = slot.runtime === "container";
+      // Two-step: defaults (ctx_size lives under [model]) + slot config
+      // for the top-level keys (default, profile). n_gpu_layers /
+      // rope_freq_base / llamacpp_args are owned by the profile — never
+      // include them in a save.
       const ctxBody = {
         ctx_size: ctxNum,
-        // n_gpu_layers is defined by the profile for container slots — don't overwrite
-        ...(isContainerSave ? {} : { n_gpu_layers: nglNum }),
       };
-      // rope_freq_base is dirty-tracked (seed = real on-disk value).
-      // Container slots: profile owns rope_freq_base — skip.
-      if (!isContainerSave && Number(ropeFreqBase) !== Number(initialRope)) {
-        ctxBody.rope_freq_base = ropeNum;
-      }
       const slotBody = {
-        // device selector is hidden for container slots — don't overwrite (profile picks GPU config)
-        ...(isContainerSave ? {} : { device }),
         default: makeDefault,
       };
-      const idleSeeded = initialIdle;
-      const workersSeeded = initialWorkers;
-      const extraArgsSeeded = initialExtraArgs;
-      // Container slots: idle_timeout_s / workers / llamacpp_args are hidden in the UI
-      // and owned by the profile — never include them in a container save.
-      if (!isContainerSave && Number(idleTimeout) !== Number(idleSeeded)) {
-        slotBody.idle_timeout_s = Number.isFinite(idleNum) ? idleNum : idleTimeout;
-      }
-      if (!isContainerSave && Number(workers) !== Number(workersSeeded)) {
-        slotBody.workers = Number.isFinite(workersNum) ? workersNum : workers;
-      }
-      if (!isContainerSave && extraArgs !== extraArgsSeeded) {
-        slotBody.llamacpp_args = extraArgs;
-      }
-      // C7: GPU container slots — include profile only when changed; restart
-      // after save (profile swap = cold restart, same semantics as model swap).
-      const profileChanged = isContainerSave && selectedProfile && selectedProfile !== (slot.profile || "");
+      // C7: include profile only when changed; restart after save
+      // (profile swap = cold restart, same semantics as model swap).
+      const profileChanged = !!selectedProfile && selectedProfile !== (slot.profile || "");
       if (profileChanged) {
         slotBody.profile = selectedProfile;
       }
@@ -685,40 +470,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
         </>
       }
     >
-      {/* Provider + port strip — read-only.
-          Container slots show image tag instead of "lemonade". */}
+      {/* Image + port + state strip — read-only. */}
       <div style={{display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
-        {slot.runtime === "container"
-          ? <ReadOnlyStrip k="image" v={slot.image ? slot.image.split(':').pop() : slot.profile || "—"} />
-          : <ReadOnlyStrip k="provider" v="lemonade" />
-        }
+        <ReadOnlyStrip k="image" v={slot.image ? slot.image.split(':').pop() : slot.profile || "—"} />
         <ReadOnlyStrip k="port" v={`:${slot.port || "—"}`} />
-        <ReadOnlyStrip k="state" v={<span className={stateChipClass(slot.state)}>{slot.state}</span>} />
+        <ReadOnlyStrip k="state" v={<span className={stateChipClass(slot)}>{slot.state}</span>} />
       </div>
 
-      {/* Declared vs actual backend (ADR-0022). Container slots show
-          profile + image_status instead; lemonade slots keep the declared/actual
-          backend pair. */}
-      {slot.runtime === "container" ? (
-        <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
-          <ReadOnlyStrip k="profile" v={slot.profile || "—"} />
-          <ReadOnlyStrip k="image status" v={slot.image_status || "present"} />
-        </div>
-      ) : (
-        <>
-          <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
-            <ReadOnlyStrip k="declared backend" v={slot.declared_backend || device.replace("gpu-", "") || "—"} />
-            <ReadOnlyStrip k="actual backend" v={slot.actual_backend || "—"} />
-          </div>
-
-          {/* Mismatch banner — rendered ONLY on the backend-computed flag. */}
-          {slot.backend_mismatch && (
-            <div style={{padding: 10, background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: "var(--rad-sm)", marginBottom: 12, fontSize: 11, color: "var(--fg-2)"}}>
-              ⚠ Backend mismatch: declared <b>{slot.declared_backend || device.replace("gpu-", "")}</b> but running <b>{slot.actual_backend}</b>. Pick a backend below and Apply to reload under the declared backend.
-            </div>
-          )}
-        </>
-      )}
+      {/* Profile + image status strip — read-only. */}
+      <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", overflow: "hidden", marginBottom: 16}}>
+        <ReadOnlyStrip k="profile" v={slot.profile || "—"} />
+        <ReadOnlyStrip k="image status" v={slot.image_status || "present"} />
+      </div>
 
       <div className="form-row">
         <div className="form-lbl"><span>Name</span><span className="sub">seeded slots can't be renamed</span></div>
@@ -735,133 +498,56 @@ function EditSlotDrawer({ open, slot, onClose }) {
         </div>
       </div>
 
-      {slot.runtime === "container" ? (
-        /* Container slots: profile is the configuration surface.
-           GPU-class slots get an editable select filtered to device_class==="gpu"
-           profiles. NPU/CPU/image-class slots are pinned by silicon/runtime —
-           render fixed text (no select). Profile change triggers restart
-           (same cold-restart semantics as a model swap). */
-        (() => {
-          const allProfiles = profilesQuery.data ?? [];
-          // Find the current profile's device_class from the catalog.
-          // Fall back to slot.device when the profiles query hasn't loaded:
-          //   npu/cpu devices → not GPU; gpu-rocm/gpu-vulkan/unknown → treat as GPU.
-          const currentProfileMeta = allProfiles.find(p => p.name === (slot.profile || ""));
-          const slotDeviceIsGpu = !["npu", "cpu"].includes(slot.device || "");
-          const profileDeviceClass = currentProfileMeta?.device_class
-            ?? (slotDeviceIsGpu ? "gpu" : slot.device === "npu" ? "npu" : "cpu");
-          const isGpuProfile = profileDeviceClass === "gpu";
-          const gpuProfiles = allProfiles.filter(p => p.device_class === "gpu");
-          const profileImageHint = (() => {
-            const meta = gpuProfiles.find(p => p.name === selectedProfile);
-            return meta?.image || slot.image || null;
-          })();
-          return (
-            <div className="form-row">
-              <div className="form-lbl">
-                <span>Profile</span>
-                {isGpuProfile
-                  ? <span className="sub warn">⟳ restart required on change</span>
-                  : <span className="sub">image + bench-tuned flags for this slot — runtime-pinned</span>
-                }
-              </div>
-              <div className="form-ctl">
-                {isGpuProfile ? (
-                  <select
-                    className="input mono"
-                    value={selectedProfile}
-                    onChange={e => setSelectedProfile(e.target.value)}
-                  >
-                    {gpuProfiles.map(p => (
-                      <option key={p.name} value={p.name}>{p.name}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input className="input mono" value={slot.profile || "—"} readOnly />
-                )}
-                {profileImageHint && (
-                  <div className="hint mono">{profileImageHint}</div>
-                )}
-              </div>
-            </div>
-          );
-        })()
-      ) : (
-        <>
+      {/* Profile is the configuration surface.
+          GPU-class slots get an editable select filtered to device_class==="gpu"
+          profiles. NPU/CPU/image-class slots are pinned by silicon/runtime —
+          render fixed text (no select). Profile change triggers restart
+          (same cold-restart semantics as a model swap). */}
+      {(() => {
+        const allProfiles = profilesQuery.data ?? [];
+        // Find the current profile's device_class from the catalog.
+        // Fall back to slot.device when the profiles query hasn't loaded:
+        //   npu/cpu devices → not GPU; gpu-rocm/gpu-vulkan/unknown → treat as GPU.
+        const currentProfileMeta = allProfiles.find(p => p.name === (slot.profile || ""));
+        const slotDeviceIsGpu = !["npu", "cpu"].includes(slot.device || "");
+        const profileDeviceClass = currentProfileMeta?.device_class
+          ?? (slotDeviceIsGpu ? "gpu" : slot.device === "npu" ? "npu" : "cpu");
+        const isGpuProfile = profileDeviceClass === "gpu";
+        const gpuProfiles = allProfiles.filter(p => p.device_class === "gpu");
+        const profileImageHint = (() => {
+          const meta = gpuProfiles.find(p => p.name === selectedProfile);
+          return meta?.image || slot.image || null;
+        })();
+        return (
           <div className="form-row">
-            <div className="form-lbl"><span>Device</span><span className="warn">⟳ restart required</span></div>
+            <div className="form-lbl">
+              <span>Profile</span>
+              {isGpuProfile
+                ? <span className="sub warn">⟳ restart required on change</span>
+                : <span className="sub">image + bench-tuned flags for this slot — runtime-pinned</span>
+              }
+            </div>
             <div className="form-ctl">
-              <select
-                className="input mono"
-                value={device}
-                onChange={e => setDevice(e.target.value)}
-              >
-                <option value="gpu-rocm">gpu-rocm</option>
-                <option value="gpu-vulkan">gpu-vulkan</option>
-                <option value="cpu">cpu</option>
-                <option value="npu">npu</option>
-              </select>
+              {isGpuProfile ? (
+                <select
+                  className="input mono"
+                  value={selectedProfile}
+                  onChange={e => setSelectedProfile(e.target.value)}
+                >
+                  {gpuProfiles.map(p => (
+                    <option key={p.name} value={p.name}>{p.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input className="input mono" value={slot.profile || "—"} readOnly />
+              )}
+              {profileImageHint && (
+                <div className="hint mono">{profileImageHint}</div>
+              )}
             </div>
           </div>
-
-          {/* Runtime Backend (ADR-0022) — its own mutation (POST
-              /api/slots/{name}/backend). Disabled for cpu/npu devices, where
-              the backend is not selectable. Apply writes `device` to the TOML
-              and reloads the slot when loaded. Distinct from the Save button,
-              which never touches backend. */}
-          {(() => {
-            const dev = device.replace("gpu-", "");
-            const selectable = dev === "rocm" || dev === "vulkan";
-            const declaredToken = slot.declared_backend || dev || "rocm";
-            const unchanged = selectedBackend === declaredToken;
-            return (
-              <div className="form-row">
-                <div className="form-lbl">
-                  <span>Runtime Backend</span>
-                  <span className="sub">{selectable ? "select + apply to reload under a different llama.cpp build" : "not selectable for this device"}</span>
-                </div>
-                <div className="form-ctl">
-                  <div style={{display: "flex", gap: 8, alignItems: "center"}}>
-                    <select
-                      className="input mono"
-                      value={selectedBackend}
-                      onChange={e => setSelectedBackend(e.target.value)}
-                      disabled={!selectable || backendSwitchPending}
-                    >
-                      <option value="rocm">rocm</option>
-                      <option value="vulkan">vulkan</option>
-                      <option value="auto">auto (global default)</option>
-                    </select>
-                    <button
-                      className="btn ghost sm"
-                      disabled={!selectable || backendSwitchPending || unchanged}
-                      onClick={async () => {
-                        setBackendSwitchPending(true);
-                        setSubmitErr(null);
-                        try {
-                          await backendMut.mutateAsync({
-                            name: slot.name,
-                            backend: selectedBackend,
-                          });
-                          window.__hal0Toast && window.__hal0Toast(
-                            `${slot.name} backend → ${selectedBackend}${slot.actual_backend ? " — reloading" : ""}`,
-                            "ok",
-                          );
-                        } catch (err) {
-                          setSubmitErr(err?.message || "backend switch failed");
-                        } finally {
-                          setBackendSwitchPending(false);
-                        }
-                      }}
-                    >{backendSwitchPending ? "Applying…" : "Apply"}</button>
-                  </div>
-                  <div className="hint">If the slot is loaded, applying reloads it under the new backend. The current backend stays in VRAM until the reload completes.</div>
-                </div>
-              </div>
-            );
-          })()}
-        </>
-      )}
+        );
+      })()}
 
       <div className="form-row">
         <div className="form-lbl"><span>Model</span><span className="sub">use inline swap from the card for live changes</span></div>
@@ -935,10 +621,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       <div className="form-row">
         <div className="form-lbl">
           <span>ctx_size</span>
-          {slot.runtime === "container"
-            ? <span className="warn">⟳ restarts the container (~model-load seconds)</span>
-            : <span className="warn">⟳ restart required</span>
-          }
+          <span className="warn">⟳ restarts the container (~model-load seconds)</span>
         </div>
         <div className="form-ctl">
           <input
@@ -950,147 +633,50 @@ function EditSlotDrawer({ open, slot, onClose }) {
         </div>
       </div>
 
-      {/* C5: GPU offload tuning. Container slots: read-only ("defined by profile").
-          Lemonade slots: editable, saved via the Save button (PATCH /defaults). */}
+      {/* C5: GPU offload tuning — read-only, defined by the profile. */}
       <div className="form-row">
         <div className="form-lbl">
           <span>n_gpu_layers</span>
-          {slot.runtime === "container"
-            ? <span className="sub">defined by profile {slot.profile}</span>
-            : <span className="warn">⟳ restart required</span>
-          }
+          <span className="sub">defined by profile {slot.profile}</span>
         </div>
         <div className="form-ctl">
-          <input
-            className={"input mono" + (fieldErrs.ngl ? " input-err" : "")}
-            value={nGpuLayers}
-            onChange={e => { setNGpuLayers(e.target.value); setFieldErrs(p => ({...p, ngl: undefined})); }}
-            readOnly={slot.runtime === "container"}
-          />
-          {fieldErrs.ngl && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ngl}</div>}
-          {!fieldErrs.ngl && slot.runtime !== "container" && <div className="hint">-1 offloads all layers to the GPU.</div>}
+          <input className="input mono" value={nGpuLayers} readOnly />
         </div>
       </div>
 
-      {/* Issue #548: rope_freq_base. Container: read-only. */}
+      {/* Issue #548: rope_freq_base — read-only, defined by the profile. */}
       <div className="form-row">
         <div className="form-lbl">
           <span>rope_freq_base</span>
-          {slot.runtime === "container"
-            ? <span className="sub">defined by profile {slot.profile}</span>
-            : <span className="warn">⟳ restart required</span>
-          }
+          <span className="sub">defined by profile {slot.profile}</span>
         </div>
         <div className="form-ctl">
-          <input
-            className={"input mono" + (fieldErrs.rope ? " input-err" : "")}
-            value={ropeFreqBase}
-            onChange={e => { setRopeFreqBase(e.target.value); setFieldErrs(p => ({...p, rope: undefined})); }}
-            readOnly={slot.runtime === "container"}
-          />
-          {fieldErrs.rope && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.rope}</div>}
-          {!fieldErrs.rope && slot.runtime !== "container" && <div className="hint">0 uses the model default. Override for long-context models.</div>}
+          <input className="input mono" value={ropeFreqBase} readOnly />
         </div>
       </div>
-
-      {/* idle_timeout_s + workers — hidden for container slots (no lemond idle-unload). */}
-      {slot.runtime !== "container" && (
-        <>
-          <div className="form-row">
-            <div className="form-lbl"><span>idle_timeout_s</span><span className="sub">unload after N seconds idle</span></div>
-            <div className="form-ctl">
-              <input
-                className="input mono"
-                value={idleTimeout}
-                onChange={e => setIdleTimeout(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="form-row">
-            <div className="form-lbl"><span>workers</span><span className="sub">concurrent inflight per slot · 1 = serial</span></div>
-            <div className="form-ctl">
-              <input
-                className="input mono"
-                value={workers}
-                onChange={e => setWorkers(e.target.value)}
-              />
-            </div>
-          </div>
-        </>
-      )}
 
       <div className="form-row">
         <div className="form-lbl">
           <span>extra_args</span>
-          {slot.runtime === "container"
-            ? <span className="sub">defined by profile {slot.profile}</span>
-            : <span className="sub">slot-level llamacpp_args overlay</span>
-          }
+          <span className="sub">defined by profile {slot.profile}</span>
         </div>
         <div className="form-ctl">
-          <input
-            className="input mono"
-            value={extraArgs}
-            onChange={e => setExtraArgs(e.target.value)}
-            readOnly={slot.runtime === "container"}
-          />
-          {slot.runtime !== "container" && (
-            <div className="hint">Merged with model recipe defaults + the global baseline.</div>
-          )}
+          <input className="input mono" value={extraArgs} readOnly />
         </div>
       </div>
 
-      {/* Flags preview.
-          Container slots: show backend-provided resolved_command (real podman argv).
-          Lemonade slots: show effectiveFlagsFor() preview (approximate; client-side). */}
-      {slot.runtime === "container" ? (
-        <>
-          <div className="form-section">Resolved command</div>
-          <div style={{padding: 12, background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6, whiteSpace: "pre-wrap"}}>
-            {Array.isArray(slot.resolved_command)
-              ? slot.resolved_command.join(" \\\n  ")
-              : slot.resolved_command || "— not yet available (slot not loaded)"}
-          </div>
-          <div className="hint" style={{paddingTop: 6, fontSize: 10.5, color: "var(--fg-5)", fontFamily: "var(--jbm)"}}>
-            Real podman argv from profile image + flags. Read-only.
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="form-section">Effective flags preview</div>
-          <div style={{padding: 12, background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6, whiteSpace: "pre-wrap"}}>
-            {effectiveFlagsFor(slot)}
-          </div>
-          <div className="hint" style={{paddingTop: 6, fontSize: 10.5, color: "var(--fg-5)", fontFamily: "var(--jbm)"}}>
-            Merge order: lemond baseline → backend default → model recipe → slot extra_args. Read-only.
-          </div>
-        </>
-      )}
+      {/* Flags preview — backend-provided resolved_command (real podman argv). */}
+      <div className="form-section">Resolved command</div>
+      <div style={{padding: 12, background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6, whiteSpace: "pre-wrap"}}>
+        {Array.isArray(slot.resolved_command)
+          ? slot.resolved_command.join(" \\\n  ")
+          : slot.resolved_command || "— not yet available (slot not loaded)"}
+      </div>
+      <div className="hint" style={{paddingTop: 6, fontSize: 10.5, color: "var(--fg-5)", fontFamily: "var(--jbm)"}}>
+        Real podman argv from profile image + flags. Read-only.
+      </div>
     </Drawer>
   );
-}
-
-// Per-slot-type effective flags preview
-function effectiveFlagsFor(slot) {
-  const port = `--port ${slot.port || "auto"}`;
-  const baseline = "--parallel 1 --threads 8";
-  if (slot.type === "llm") {
-    return `${baseline} --flash-attn on --no-mmap\n--ctx-size ${slot.metrics.ctx || 4096}\n-m ${slot.modelLong || slot.model}\n${port}\n-ngl ${slot.device === "cpu" ? 0 : 999}`;
-  }
-  if (slot.type === "embedding" || slot.type === "reranking") {
-    return `${baseline} --embeddings${slot.type === "reranking" ? " --reranking" : ""}\n--ctx-size ${slot.metrics.dim || 8192}\n-m ${slot.modelLong || slot.model}\n${port}\n-ngl ${slot.device === "cpu" ? 0 : 999}`;
-  }
-  if (slot.type === "transcription") {
-    return `--backend ${slot.device === "npu" ? "flm" : "whispercpp:vulkan"}\n--model ${slot.modelLong || slot.model}\n--precision ${slot.metrics.precision || "Q4_K_M"}\n${port}`;
-  }
-  if (slot.type === "tts") {
-    return `--backend kokoro:cpu\n--voice ${slot.metrics.voice || "af_heart"}\n--model ${slot.modelLong || slot.model}\n${port}`;
-  }
-  if (slot.type === "image") {
-    return `--backend sdcpp:${slot.device === "cpu" ? "cpu" : "rocm"}\n--model ${slot.modelLong || slot.model}\n--steps 20 --cfg 7.0\n--w 512 --h 512\n${port}`;
-  }
-  return `${baseline}\n${port}`;
 }
 
 function ReadOnlyStrip({ k, v }) {
@@ -1122,7 +708,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
       !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && slot.backend !== "rocm")
     );
 
-  // N2: container swap = cold systemctl restart (NOT lemond hot /v1/load).
+  // N2: container swap = cold systemctl restart (not a hot in-place swap).
   // Intercept onPick for container slots: show a confirm toast and fire
   // the same onPick (which drives restart), so the parent card drives to
   // "starting" state immediately. The parent's onSwapPick calls useSlotSwap

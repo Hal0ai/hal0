@@ -29,39 +29,34 @@ function LogsView() {
   // pass below stays for slot-name filtering (still client-only — the
   // backend journal envelope doesn't carry slot yet) and for instant
   // search feedback while the user types.
-  //
-  // includeLemondWs flips on when source=lemond is selected so the page
-  // can render raw lemond logs.entry frames alongside the projected
-  // journal envelope, satisfying the design's "native fidelity" mode.
   const historical = useLogsHistorical({ source, level: level || null, q: search || null });
   const live = useLogsStream({
     follow: !paused,
     source,
     level: level || null,
     q: search || null,
-    includeLemondWs: source === 'lemond',
   });
 
   // Demo lines preserve the design's grouped-error block (request-id
   // collapsing) so the screenshot suite has something to point at even
   // when the dev backend has no journal entries yet.
   const demoLines = [
-    { ts: "14:01:58.330", source: "lemond", level: "ok",   slot: "primary", msg: "POST /v1/load model=qwen3.6-27b-mtp-q4_k_m backend=llamacpp:rocm" },
-    { ts: "14:01:58.341", source: "lemond", level: "info", slot: "primary", msg: "ggml_init_cublas: found 1 ROCm device gfx1151" },
-    { ts: "14:02:00.812", source: "lemond", level: "info", slot: "primary", msg: "llm_load_tensors: offloaded 49/49 layers to GPU" },
-    { ts: "14:02:11.290", source: "hal0",   level: "ok",   slot: "primary", msg: "slot:primary state loading → ready · 13.1s" },
-    { ts: "14:02:12.117", source: "hal0",   level: "info", slot: null,      msg: "omnirouter: filtered tool set = [generate_image, embed_text, transcribe_audio, route_to_chat]" },
-    { ts: "14:02:15.443", source: "hal0",   level: "info", slot: "primary", msg: "session ftr-104 opened persona=primary" },
-    { ts: "14:02:18.117", source: "lemond", level: "ok",   slot: "coder",   msg: "POST /v1/load model=qwen3-coder-30b backend=llamacpp:rocm (persona swap)" },
-    { ts: "14:02:19.290", source: "hal0",   level: "ok",   slot: "coder",   msg: "tool_call read_file path=src/hal0/launchers/slot_manager.py" },
-    { ts: "14:02:20.812", source: "lemond", level: "warn", slot: "img",     msg: "sd-turbo · vae load · falling back to cpu", group: "req-7f3a" },
-    { ts: "14:02:20.890", source: "lemond", level: "warn", slot: "img",     msg: "sd-turbo · UNet partial offload (ngl 28/32)", group: "req-7f3a" },
-    { ts: "14:02:20.911", source: "lemond", level: "warn", slot: "img",     msg: "sd-turbo · sampler init: euler-a", group: "req-7f3a" },
-    { ts: "14:02:20.934", source: "lemond", level: "warn", slot: "img",     msg: "sd-turbo · scheduler: 20 steps cfg 7.0", group: "req-7f3a" },
-    { ts: "14:02:22.443", source: "lemond", level: "ok",   slot: "coder",   msg: "/v1/chat/completions coder 38 tok/s TTFT 280ms" },
-    { ts: "14:02:28.117", source: "lemond", level: "ok",   slot: "img",     msg: "POST /v1/load model=sd-turbo backend=sdcpp:rocm (tool dispatch)" },
-    { ts: "14:02:32.290", source: "hal0",   level: "ok",   slot: "img",     msg: "tool_call generate_image · 4.1s · 2.4 MB" },
-    { ts: "14:02:36.117", source: "hal0",   level: "info", slot: "img",     msg: "slot:img state serving → idle" },
+    { ts: "14:01:58.330", source: "hal0", level: "ok",   slot: "primary", msg: "slot:primary container start · profile=moe-rocmfp4" },
+    { ts: "14:01:58.341", source: "hal0", level: "info", slot: "primary", msg: "ggml_init_cublas: found 1 ROCm device gfx1151" },
+    { ts: "14:02:00.812", source: "hal0", level: "info", slot: "primary", msg: "llm_load_tensors: offloaded 49/49 layers to GPU" },
+    { ts: "14:02:11.290", source: "hal0", level: "ok",   slot: "primary", msg: "slot:primary state loading → ready · 13.1s" },
+    { ts: "14:02:12.117", source: "hal0", level: "info", slot: null,      msg: "omnirouter: filtered tool set = [generate_image, embed_text, transcribe_audio, route_to_chat]" },
+    { ts: "14:02:15.443", source: "hal0", level: "info", slot: "primary", msg: "session ftr-104 opened persona=primary" },
+    { ts: "14:02:18.117", source: "hal0", level: "ok",   slot: "coder",   msg: "slot:coder container restart · model=qwen3-coder-30b (persona swap)" },
+    { ts: "14:02:19.290", source: "hal0", level: "ok",   slot: "coder",   msg: "tool_call read_file path=src/hal0/launchers/slot_manager.py" },
+    { ts: "14:02:20.812", source: "hal0", level: "warn", slot: "img",     msg: "sd-turbo · vae load · falling back to cpu", group: "req-7f3a" },
+    { ts: "14:02:20.890", source: "hal0", level: "warn", slot: "img",     msg: "sd-turbo · UNet partial offload (ngl 28/32)", group: "req-7f3a" },
+    { ts: "14:02:20.911", source: "hal0", level: "warn", slot: "img",     msg: "sd-turbo · sampler init: euler-a", group: "req-7f3a" },
+    { ts: "14:02:20.934", source: "hal0", level: "warn", slot: "img",     msg: "sd-turbo · scheduler: 20 steps cfg 7.0", group: "req-7f3a" },
+    { ts: "14:02:22.443", source: "hal0", level: "ok",   slot: "coder",   msg: "/v1/chat/completions coder 38 tok/s TTFT 280ms" },
+    { ts: "14:02:28.117", source: "hal0", level: "ok",   slot: "img",     msg: "slot:img container start · model=sd-turbo (tool dispatch)" },
+    { ts: "14:02:32.290", source: "hal0", level: "ok",   slot: "img",     msg: "tool_call generate_image · 4.1s · 2.4 MB" },
+    { ts: "14:02:36.117", source: "hal0", level: "info", slot: "img",     msg: "slot:img state serving → idle" },
   ];
   // historical now returns `{entries, next_since}`. Fall back to the
   // demoLines block when there's no journal data yet so the Logs page
@@ -133,8 +128,8 @@ function LogsView() {
       <div className="card" style={{overflow: "hidden", marginBottom: 12, position: "relative"}}>
         <div style={{padding: "10px 14px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 8, background: "var(--bg)", flexWrap: "wrap"}}>
           <div className="mono" style={{display: "inline-flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden", fontSize: 11}}>
-            {[["merged", "merged"], ["hal0", "hal0"], ["lemond", "lemond"]].map(([k, l]) => (
-              <button key={k} onClick={() => setSource(k)} style={{padding: "4px 11px", background: source === k ? "var(--accent-soft)" : "transparent", color: source === k ? "var(--accent)" : "var(--fg-3)", border: "none", borderRight: k !== "lemond" ? "1px solid var(--line)" : "none", cursor: "pointer", fontFamily: "var(--jbm)", fontSize: 11}}>{l}</button>
+            {[["merged", "merged"], ["hal0", "hal0"]].map(([k, l]) => (
+              <button key={k} onClick={() => setSource(k)} style={{padding: "4px 11px", background: source === k ? "var(--accent-soft)" : "transparent", color: source === k ? "var(--accent)" : "var(--fg-3)", border: "none", borderRight: k !== "hal0" ? "1px solid var(--line)" : "none", cursor: "pointer", fontFamily: "var(--jbm)", fontSize: 11}}>{l}</button>
             ))}
           </div>
           <div className="mono" style={{display: "inline-flex", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden", fontSize: 11, marginLeft: 8}}>
@@ -220,7 +215,7 @@ function LogLine({ e, search }) {
   return (
     <div style={{padding: "2px 16px", display: "grid", gridTemplateColumns: "100px 78px 60px 80px 1fr", gap: 12, borderLeft: e.level === "warn" ? "2px solid var(--warn)" : e.level === "error" ? "2px solid var(--err)" : "2px solid transparent"}}>
       <span style={{color: "var(--fg-5)"}}>{e.ts}</span>
-      <span style={{color: e.source === "lemond" ? "var(--dev-vulkan)" : "var(--accent)"}}>{e.source}</span>
+      <span style={{color: "var(--accent)"}}>{e.source}</span>
       <span style={{color: e.level === "ok" ? "var(--ok)" : e.level === "warn" ? "var(--warn)" : e.level === "error" ? "var(--err)" : "var(--fg-3)"}}>{e.level}</span>
       <span style={{color: e.slot ? "var(--fg-2)" : "var(--fg-5)"}}>{e.slot || "—"}</span>
       <span style={{color: "var(--fg-2)"}}>{msg}</span>

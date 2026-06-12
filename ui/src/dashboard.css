@@ -345,7 +345,7 @@ a { color: inherit; text-decoration: none; }
 .sb-status-agent + .sb-status { margin-top: 4px; }
 .sb-status-empty { opacity: 0.85; }
 
-/* Runtime widget (2026-06-05) — consolidated hermes/hal0/lemond/openwebui
+/* Runtime widget (2026-06-05) — consolidated hermes/hal0/runtime/openwebui
    rollup. Inherits the base .sb-status card chrome; these rules add the
    section header, deep-link row keys, and the indented hal0 model sub-row. */
 .sb-runtime .sb-runtime-h {
@@ -471,7 +471,6 @@ a { color: inherit; text-decoration: none; }
 .foot-pane-search:focus { border-color: var(--accent-line); }
 
 /* Source-color shortcuts inside the pane */
-.foot-line .sl.lemond { color: var(--dev-vulkan); }
 .foot-line .sl.hal0 { color: var(--accent); }
 .foot-pane-body {
   flex: 1;
@@ -791,7 +790,7 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* System side card — the five Hardware cards collapsed to one glanceable
-   line each, plus a live RAM glance and the folded-in lemond health row. */
+   line each, plus a live RAM glance. */
 .sys-card-b { padding: 0; }
 .sys-row {
   display: grid;
@@ -820,7 +819,7 @@ a { color: inherit; text-decoration: none; }
 }
 .sys-row .v .num { color: var(--fg); font-weight: 500; }
 /* .sys-divider / .sys-health removed (2026-06-05) — the System card no longer
-   carries the lemond health row; runtime status moved to the sidebar widget. */
+   carries a runtime health row; runtime status moved to the sidebar widget. */
 
 .hero-strip {
   display: flex;

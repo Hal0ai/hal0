@@ -43,25 +43,12 @@ export interface BannerEntry {
 export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
   // ── Global ──────────────────────────────────────────────────────
   {
-    id: 'lemond-offline',
-    scope: 'global',
-    kind: 'err',
-    eyebrow: 'Runtime · critical',
-    heading: 'lemond is offline',
-    body: 'Slot state is stale and inference requests will fail. Restart lemond or inspect the runtime logs to diagnose.',
-    actions: [
-      { label: 'Restart lemond', primary: true },
-      { label: 'View status' },
-      { label: 'Troubleshooting docs' },
-    ],
-  },
-  {
     id: 'update-available',
     scope: 'global',
     kind: 'info',
     eyebrow: 'Update available',
     heading: 'hal0 v0.2.2 is available',
-    body: 'Includes lemonade v10.7.0 pin bump and one FLM CHANGELOG note. Update expects a brief outage during lemond + hal0-api restart.',
+    body: 'Includes one FLM CHANGELOG note. Update expects a brief outage during the hal0-api restart.',
     actions: [
       { label: 'Update now', primary: true },
       { label: 'Read release notes' },
@@ -78,32 +65,7 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     body: 'LLM slots are stopped while image generation holds the GPU — they restore automatically after idle.',
     actions: [{ label: 'View slots', primary: true }],
   },
-  {
-    id: 'restart-required',
-    scope: 'global',
-    kind: 'warn',
-    eyebrow: 'Restart required',
-    heading: 'Lemonade restart required to apply config changes',
-    body: 'ctx_size and llamacpp.args changed on primary. Changes apply on next restart.',
-    actions: [
-      { label: 'Restart now', primary: true },
-      { label: 'Later' },
-    ],
-  },
-
   // ── Slots view ──────────────────────────────────────────────────
-  {
-    id: 'nuclear-evict',
-    scope: 'slots',
-    kind: 'warn',
-    eyebrow: 'Lemonade · nuclear evict',
-    heading: 'Lemonade evicted all loaded models',
-    body: "At 14:23:01 a model load triggered the runtime's nuclear evict policy. Cause: CUDA out of memory while loading sd-turbo. Affected slots (4): primary, embed, rerank, agent. Reload to restore.",
-    actions: [
-      { label: 'View logs', primary: true },
-      { label: 'Reload all' },
-    ],
-  },
   {
     id: 'npu-swap',
     scope: 'slots',
@@ -114,32 +76,12 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     dismissable: false,
   },
   {
-    id: 'load-queue',
-    scope: 'slots',
-    kind: 'warn',
-    eyebrow: 'Lemonade · queue depth',
-    heading: '3 slots queued to load',
-    body: 'Lemonade serialises model loads. The runtime will process queued slots one at a time; this banner clears when the queue empties.',
-  },
-  {
-    id: 'llamacpp-args-drift',
-    scope: 'slots',
-    kind: 'warn',
-    eyebrow: 'Lemonade · config drift',
-    heading: 'llamacpp.args is missing the mandatory baseline',
-    body: 'Required: --parallel 1 --threads N. Without it, concurrent llama-server children can deadlock the GPU.',
-    actions: [
-      { label: 'Restore baseline', primary: true },
-      { label: 'View config' },
-    ],
-  },
-  {
     id: 'catalog-drift',
     scope: 'slots',
     kind: 'warn',
     eyebrow: 'Catalog · drift',
     heading: 'registry.toml is newer than server_models.json',
-    body: "Models added or removed in registry.toml won't appear until you sync. Sync will restart lemond.",
+    body: "Models added or removed in registry.toml won't appear until you sync. Sync will restart the affected slots.",
     actions: [
       { label: 'Sync now', primary: true },
       { label: 'Diff catalog' },
@@ -195,8 +137,8 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     scope: 'logs',
     kind: 'err',
     eyebrow: 'Stream · disconnected',
-    heading: 'Lost connection to lemond — logs are paused',
-    body: 'WebSocket /logs/stream closed unexpectedly. Reconnecting in 5s…',
+    heading: 'Lost connection to the journal stream — logs are paused',
+    body: 'The /api/journal/stream connection closed unexpectedly. Reconnecting in 5s…',
     actions: [{ label: 'Reconnect now', primary: true }],
   },
 
@@ -215,7 +157,7 @@ export const BANNER_CATALOG: ReadonlyArray<BannerEntry> = Object.freeze([
     kind: 'warn',
     eyebrow: 'Hardware · low RAM',
     heading: 'Detected RAM is below the Lite minimum (16 GB)',
-    body: 'hal0 needs at least 16 GB of unified RAM to load any bundled chat model. You can still install hal0 — Settings → Runtime can point at an external model store.',
+    body: 'hal0 needs at least 16 GB of unified RAM to load any bundled chat model. You can still install hal0 — Settings → Storage can point at an external model store.',
   },
 
   // ── Agent ───────────────────────────────────────────────────────

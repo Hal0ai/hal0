@@ -5,7 +5,7 @@ const { useState: useStateAS, useEffect: useEffectAS, useRef: useRefAS } = React
 
 // ─── Add Secret modal ───────────────────────────────────────────
 const SECRET_PRESETS = [
-  { id: "HF_TOKEN",           desc: "Hugging Face — gated repo auth (used by lemond for /v1/pull)", prefix: "hf_",       prefixLen: 37 },
+  { id: "HF_TOKEN",           desc: "Hugging Face — gated repo auth (used for model pulls)",        prefix: "hf_",       prefixLen: 37 },
   { id: "OPENAI_API_KEY",     desc: "Fallback provider — OpenAI",                                     prefix: "sk-",       prefixLen: 51 },
   { id: "ANTHROPIC_API_KEY",  desc: "Fallback provider — Anthropic",                                  prefix: "sk-ant-",   prefixLen: 95 },
   { id: "GOOGLE_API_KEY",     desc: "Fallback provider — Gemini",                                     prefix: "AIza",      prefixLen: 39 },
@@ -60,7 +60,7 @@ function AddSecretModal({ open, onClose }) {
       width={620}
       foot={
         <>
-          <span>Stored encrypted on disk · accessible to lemond only.</span>
+          <span>Stored encrypted on disk · accessible to hal0 only.</span>
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose}>Cancel</button>
             <button className="btn sm" disabled={!canSave} onClick={() => { onClose(); window.__hal0Toast && window.__hal0Toast(`Secret ${finalName} stored`, "ok"); }}>
@@ -89,7 +89,7 @@ function AddSecretModal({ open, onClose }) {
         <div className="form-row">
           <div className="form-lbl">
             <span>Custom key name <span className="req">*</span></span>
-            <span className="sub">SCREAMING_SNAKE_CASE · exported to lemond as env var</span>
+            <span className="sub">SCREAMING_SNAKE_CASE · exported to slot containers as env var</span>
           </div>
           <div className="form-ctl">
             <input
@@ -131,7 +131,7 @@ function AddSecretModal({ open, onClose }) {
       </div>
 
       <div style={{marginTop: 14, padding: "10px 12px", background: "var(--info-soft)", border: "1px solid var(--info-line)", borderRadius: "var(--rad-sm)", color: "var(--info)", fontFamily: "var(--jbm)", fontSize: 11.5, lineHeight: 1.5}}>
-        After save, lemond is restarted in the background (~3s) so the new env reaches its children. Existing requests fail-soft and retry.
+        After save, affected slots restart in the background (~3s) so the new env reaches their containers. Existing requests fail-soft and retry.
       </div>
     </Modal>
   );
@@ -243,7 +243,7 @@ const TOUR_STEPS = [
   },
   {
     title: "Command palette",
-    body: <span>Press <kbd className="kbd">⌘K</kbd> anywhere to jump between routes, slots, and models — or run actions like "Restart lemond" without leaving the keyboard.</span>,
+    body: <span>Press <kbd className="kbd">⌘K</kbd> anywhere to jump between routes, slots, and models — or run actions like "Restart a slot" without leaving the keyboard.</span>,
     selector: ".tb-cmdk",
   },
 ];

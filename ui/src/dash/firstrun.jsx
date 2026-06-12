@@ -70,7 +70,7 @@ function FirstRunStorage({ onContinue, onBack }) {
       <div className="fr-head">
         <div className="fr-eyebrow"><span className="blip" />FirstRun · storage</div>
         <h1 className="fr-title">Where should models live?</h1>
-        <p className="fr-lede">Hal0 reads + writes model files here. Both the pull engine and Lemonade point at the same path — pick once.</p>
+        <p className="fr-lede">Hal0 reads + writes model files here. Every slot container points at the same path — pick once.</p>
       </div>
 
       {storeQuery.isPending && <div style={{padding: 20, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Probing storage candidates…</div>}
@@ -371,7 +371,7 @@ function FirstRunConfirm({ bundleId, onBack, onInstall }) {
         <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8}}>Notes</div>
         <ul style={{margin: 0, paddingLeft: 18, lineHeight: 1.7}}>
           <li>TTS runs on CPU only on Linux (kokoro:cpu). ~1s per sentence.</li>
-          <li><span className="mono" style={{color: "var(--fg-2)"}}>coder</span> slot is LRU-evictable — only one chat model is resident at a time when both exceed the per-type budget.</li>
+          <li><span className="mono" style={{color: "var(--fg-2)"}}>coder</span> shares the iGPU with <span className="mono" style={{color: "var(--fg-2)"}}>primary</span> — the GPU arbiter stops one container to start the other when memory is tight.</li>
           <li>HF_TOKEN is not required for this bundle. Configure later in Settings if you want gated repos.</li>
         </ul>
       </div>

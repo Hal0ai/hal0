@@ -309,7 +309,7 @@ function LogsDrawer({ open, server, onClose }) {
     { ts: "14:02:11.117", lvl: "ok",   src: "supervisor", msg: `${server.name} pid ${server.pid || "—"} up · 14d 02:11` },
     { ts: "14:02:30.290", lvl: "info", src: server.name,  msg: "tool call: slot.list" },
     { ts: "14:02:30.310", lvl: "info", src: server.name,  msg: "→ 9 results (claude-code)" },
-    { ts: "14:02:34.117", lvl: "info", src: server.name,  msg: "tool call: lemond.status" },
+    { ts: "14:02:34.117", lvl: "info", src: server.name,  msg: "tool call: slot.status" },
     { ts: "14:02:34.121", lvl: "info", src: server.name,  msg: "→ {status: 'up', ...} (cursor)" },
     { ts: "14:02:39.443", lvl: "ok",   src: server.name,  msg: "tool call: model.search query='reranker'" },
     { ts: "14:02:39.502", lvl: "info", src: server.name,  msg: "→ 3 results (claude-code)" },

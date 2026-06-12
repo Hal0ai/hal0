@@ -1,7 +1,7 @@
 // hal0 v3 dashboard — backends hooks (Phase B1).
 //
 // Ported from ui-vue.bak/src/stores/backends.js. `/api/backends`
-// envelope is `{backends: Backend[], lemonade: LemonadeSelf}`.
+// envelope is `{backends: Backend[]}`.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPost } from '../client'
@@ -18,13 +18,6 @@ export interface Backend {
   device?: string
 }
 
-export interface LemonadeSelf {
-  version: string | null
-  pinned: boolean | null
-  sha?: string | null
-  channel?: string | null
-}
-
 const POLL_MS = 30_000
 const SNAPSHOT_POLL_MS = 5_000
 
@@ -34,11 +27,10 @@ export function useBackends() {
     queryFn: async () => {
       const body = await apiGet<any>(ENDPOINTS.backends)
       if (Array.isArray(body)) {
-        return { backends: body as Backend[], lemonade: null as LemonadeSelf | null }
+        return { backends: body as Backend[] }
       }
       return {
         backends: (Array.isArray(body?.backends) ? body.backends : []) as Backend[],
-        lemonade: (body?.lemonade ?? null) as LemonadeSelf | null,
       }
     },
     refetchInterval: POLL_MS,

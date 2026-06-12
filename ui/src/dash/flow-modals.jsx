@@ -54,14 +54,14 @@ function BackendInstallModal({ open, onClose, backend }) {
       }
     >
       <p style={{fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: "0 0 14px"}}>
-        This downloads the <span className="mono" style={{color: "var(--fg)"}}>{backend.name}</span> binary and places it under <span className="mono" style={{color: "var(--fg)"}}>/opt/lemonade/bin</span>.
+        This downloads the <span className="mono" style={{color: "var(--fg)"}}>{backend.name}</span> binary and places it under <span className="mono" style={{color: "var(--fg)"}}>/opt/hal0/bin</span>.
       </p>
       <div style={{padding: 12, background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11.5, lineHeight: 1.7}}>
         <div><span style={{color: "var(--fg-4)"}}>version</span> · <span style={{color: "var(--fg)"}}>{backend.ver}</span></div>
         <div><span style={{color: "var(--fg-4)"}}>size</span> · <span style={{color: "var(--fg)"}}>~210 MB</span></div>
         <div><span style={{color: "var(--fg-4)"}}>eta</span> · <span style={{color: "var(--fg)"}}>~2 min on a 100 Mbps link</span></div>
         <div><span style={{color: "var(--fg-4)"}}>verify</span> · <span style={{color: "var(--ok)"}}>sha-256 pinned ✓</span></div>
-        <div><span style={{color: "var(--fg-4)"}}>restart</span> · <span style={{color: "var(--warn)"}}>lemond restart required after install</span></div>
+        <div><span style={{color: "var(--fg-4)"}}>restart</span> · <span style={{color: "var(--warn)"}}>affected slots restart after install</span></div>
       </div>
       {backend.kind === "llamacpp" && backend.device === "rocm" && (
         <div style={{marginTop: 12, padding: "10px 12px", background: "var(--info-soft)", border: "1px solid var(--info-line)", borderRadius: "var(--rad-sm)", fontSize: 12, color: "var(--info)"}}>
@@ -103,7 +103,7 @@ function BackendUninstallModal({ open, onClose, backend }) {
       }
     >
       <p style={{fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: "0 0 14px"}}>
-        Removes <span className="mono" style={{color: "var(--fg)"}}>{backend.name}</span> from <span className="mono" style={{color: "var(--fg)"}}>/opt/lemonade/bin</span>. Models on disk are not touched; they just won't have a backend to load through.
+        Removes <span className="mono" style={{color: "var(--fg)"}}>{backend.name}</span> from <span className="mono" style={{color: "var(--fg)"}}>/opt/hal0/bin</span>. Models on disk are not touched; they just won't have a backend to load through.
       </p>
       {slotsUsing.length > 0 ? (
         <div style={{padding: "12px 14px", background: "var(--err-soft)", border: "1px solid var(--err-line)", borderRadius: "var(--rad-sm)"}}>
@@ -138,8 +138,8 @@ sudo dpkg -i flm_${(backend && backend.ver) || "0.9.42"}_amd64.deb
 # 3. Add your user to the xdna group
 sudo usermod -aG xdna $USER
 
-# 4. Reboot or re-login, then restart lemond
-sudo systemctl restart hal0-lemonade`;
+# 4. Reboot or re-login, then restart the NPU slot
+hal0 slot restart npu`;
   return (
     <Modal
       open={open}

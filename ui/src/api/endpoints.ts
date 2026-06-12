@@ -2,23 +2,10 @@
 //
 // One file so a Cmd+Shift+F surfaces every URL the dashboard touches.
 // Add new endpoints here BEFORE adding hooks, so the catalogue stays
-// authoritative when we reconcile against the backend (PRs #137+ for
-// Lemonade migration, ADR-0004 for agent surface, etc).
+// authoritative when we reconcile against the backend (ADR-0004 for
+// agent surface, etc).
 
 export const ENDPOINTS = {
-  // ── Lemonade runtime ─────────────────────────────────────────────
-  lemonade: {
-    health: '/v1/health',
-    stats: '/v1/stats',
-    chatCompletions: '/v1/chat/completions',
-    load: '/v1/load',
-    unload: '/v1/unload',
-  },
-
-  // ── Lemonade admin config (hal0-api → lemond /internal/config) ────
-  // GET/POST the immediate-vs-deferred config surface (issue #461).
-  lemonadeConfig: '/api/lemonade/config',
-
   // ── Slots / status (hal0-api) ────────────────────────────────────
   status: '/api/status',
   slots: '/api/slots',
@@ -147,14 +134,11 @@ export const ENDPOINTS = {
   memoryGraphStatus: '/api/memory/graph/status',
   memoryGraph: '/api/memory/graph',
 
-  // ── Journal (HTTP backfill + SSE tail) — unified hal0 + lemond ───
-  // Per #322 Phase 1 (PR #330): the merged ``/api/journal`` surface
-  // supersedes ``/api/logs``. The old constants stay around for the
-  // raw lemond WS channel (used by the LogsView's source=lemond mode);
-  // historical + SSE consumers should prefer the journal endpoints.
+  // ── Journal (HTTP backfill + SSE tail) ───────────────────────────
+  // Per #322 Phase 1 (PR #330): the ``/api/journal`` surface
+  // supersedes ``/api/logs``.
   journal: '/api/journal',
   journalStream: '/api/journal/stream',
-  lemondLogsWs: '/logs/stream',
 
   // ── Settings (hal0.toml read/write) ──────────────────────────────
   settings: '/api/settings',

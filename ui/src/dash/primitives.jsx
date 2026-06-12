@@ -220,21 +220,10 @@ const MOCK_VERSION = "<demo>";
 const BANNER_CATALOG = [
   // Global
   {
-    id: "lemond-offline", scope: "global", kind: "err",
-    eyebrow: "Runtime · critical",
-    heading: "lemond is offline",
-    body: "Slot state is stale and inference requests will fail. Restart lemond or inspect the runtime logs to diagnose.",
-    actions: [
-      { label: "Restart lemond", primary: true },
-      { label: "View status" },
-      { label: "Troubleshooting docs" },
-    ],
-  },
-  {
     id: "update-available", scope: "global", kind: "info",
     eyebrow: "Update available",
     heading: `hal0 ${MOCK_VERSION} is available`,
-    body: "Includes lemonade v10.7.0 pin bump and one FLM CHANGELOG note. Update expects a brief outage during lemond + hal0-api restart.",
+    body: "Includes one FLM CHANGELOG note. Update expects a brief outage during the hal0-api restart.",
     actions: [
       { label: "Update now", primary: true },
       { label: "Read release notes" },
@@ -252,28 +241,7 @@ const BANNER_CATALOG = [
       { label: "View slots", primary: true, onClick: () => window.location.hash = "#slots" },
     ],
   },
-  {
-    id: "restart-required", scope: "global", kind: "warn",
-    eyebrow: "Restart required",
-    heading: "Lemonade restart required to apply config changes",
-    body: <span><span className="mono">ctx_size</span> and <span className="mono">llamacpp.args</span> changed on <span className="mono">primary</span>. Changes apply on next restart.</span>,
-    actions: [
-      { label: "Restart now", primary: true },
-      { label: "Later" },
-    ],
-  },
-
   // Slots view
-  {
-    id: "nuclear-evict", scope: "slots", kind: "warn",
-    eyebrow: "Lemonade · nuclear evict",
-    heading: "Lemonade evicted all loaded models",
-    body: <span>At <span className="mono">14:23:01</span> a model load triggered the runtime's nuclear evict policy. Cause: <span className="mono">CUDA out of memory while loading sd-turbo</span>. Affected slots (4): <b>primary, embed, rerank, agent</b>. Reload to restore.</span>,
-    actions: [
-      { label: "View logs", primary: true },
-      { label: "Reload all" },
-    ],
-  },
   {
     id: "npu-swap", scope: "slots", kind: "warn",
     eyebrow: "NPU trio · swap in progress",
@@ -282,26 +250,10 @@ const BANNER_CATALOG = [
     dismissable: false,
   },
   {
-    id: "load-queue", scope: "slots", kind: "warn",
-    eyebrow: "Lemonade · queue depth",
-    heading: "3 slots queued to load",
-    body: "Lemonade serialises model loads. The runtime will process queued slots one at a time; this banner clears when the queue empties.",
-  },
-  {
-    id: "llamacpp-args-drift", scope: "slots", kind: "warn",
-    eyebrow: "Lemonade · config drift",
-    heading: "llamacpp.args is missing the mandatory baseline",
-    body: <span>Required: <span className="mono">--parallel 1 --threads N</span>. Without it, concurrent llama-server children can deadlock the GPU.</span>,
-    actions: [
-      { label: "Restore baseline", primary: true },
-      { label: "View config" },
-    ],
-  },
-  {
     id: "catalog-drift", scope: "slots", kind: "warn",
     eyebrow: "Catalog · drift",
     heading: "registry.toml is newer than server_models.json",
-    body: "Models added or removed in registry.toml won't appear until you sync. Sync will restart lemond.",
+    body: "Models added or removed in registry.toml won't appear until you sync. Sync will restart the affected slots.",
     actions: [
       { label: "Sync now", primary: true },
       { label: "Diff catalog" },
@@ -349,8 +301,8 @@ const BANNER_CATALOG = [
   {
     id: "ws-disconnect", scope: "logs", kind: "err",
     eyebrow: "Stream · disconnected",
-    heading: "Lost connection to lemond — logs are paused",
-    body: "WebSocket /logs/stream closed unexpectedly. Reconnecting in 5s…",
+    heading: "Lost connection to the journal stream — logs are paused",
+    body: "The /api/journal/stream connection closed unexpectedly. Reconnecting in 5s…",
     actions: [
       { label: "Reconnect now", primary: true },
     ],
@@ -367,7 +319,7 @@ const BANNER_CATALOG = [
     id: "fr-ram-low", scope: "firstrun", kind: "warn",
     eyebrow: "Hardware · low RAM",
     heading: "Detected RAM is below the Lite minimum (16 GB)",
-    body: "hal0 needs at least 16 GB of unified RAM to load any bundled chat model. You can still install hal0 — Settings → Runtime can point at an external model store.",
+    body: "hal0 needs at least 16 GB of unified RAM to load any bundled chat model. You can still install hal0 — Settings → Storage can point at an external model store.",
   },
 
   // Agent
@@ -441,7 +393,7 @@ function UpdateBanner() {
       body={
         <span>
           New release on the <span className="mono">{channel}</span> channel.
-          Update expects a brief outage during lemond + hal0-api restart.
+          Update expects a brief outage during the hal0-api restart.
         </span>
       }
       actions={

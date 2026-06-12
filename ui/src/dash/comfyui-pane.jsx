@@ -237,7 +237,7 @@ function SwitchoverConfirm({ target, queuePending, busy, onCancel, onConfirm }) 
                 <span className="ic">
                   <Ic name="warn" size={14} />
                 </span>
-                Background memory extraction pauses (NPU gemma3-4b via lemonade); it recovers
+                Background memory extraction pauses (NPU gemma3-4b slot); it recovers
                 automatically. Rerank pauses too (GPU slot); embeddings are unaffected (NPU).
               </div>
             </div>
@@ -605,8 +605,8 @@ export function ComfyuiPane() {
                         <span className="u">state</span>
                       </span>
                       <span className="gs">
-                        <b>{st.inference?.lemonade ? 'up' : 'down'}</b>
-                        <span className="u">lemonade</span>
+                        <b>{st.inference?.hermes ? 'up' : 'down'}</b>
+                        <span className="u">hermes</span>
                       </span>
                       <span className="gs">
                         <b>{containerUp ? 'up' : 'down'}</b>
@@ -692,7 +692,7 @@ export function ComfyuiPane() {
                   </button>
                   <span className="grow" style={{ flex: 1 }} />
                   <span className="mono dimx" style={{ fontSize: 11 }}>
-                    {st.inference?.lemonade ? 'inference holds the iGPU' : containerUp ? 'generation holds the iGPU' : 'iGPU idle'}
+                    {st.inference?.hermes ? 'inference holds the iGPU' : containerUp ? 'generation holds the iGPU' : 'iGPU idle'}
                   </span>
                 </div>
               </div>

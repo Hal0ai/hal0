@@ -60,7 +60,7 @@ export interface ComfyuiStatus {
   endpoint: string | null
   memory: ComfyuiMemory | null
   queue: { running: number; pending: number }
-  inference: { lemonade: boolean; hermes: boolean }
+  inference: { hermes: boolean }
   inventory: Record<string, number> | null
   switchover: ComfyuiSwitchover
   arbiter: ComfyuiArbiter | null
@@ -77,7 +77,7 @@ export const COMFYUI_FALLBACK: ComfyuiStatus = {
   endpoint: null,
   memory: null,
   queue: { running: 0, pending: 0 },
-  inference: { lemonade: false, hermes: false },
+  inference: { hermes: false },
   inventory: null,
   switchover: { active: false, target: null, error: null },
   arbiter: null,
@@ -85,9 +85,8 @@ export const COMFYUI_FALLBACK: ComfyuiStatus = {
 
 // Active (Image-Gen tab open): 4s, fast enough to track queue + pressure.
 // Idle (other tab): 20s — keeps the tab's live dot honest without spending a
-// docker inspect + 2× systemctl + 2× HTTP probe every few seconds. The proxy
-// it mirrors (lemonade_proxy) had to add caching precisely because per-tab
-// polling starved an embedded HTTP server; this is the cheap equivalent guard.
+// docker inspect + 2× systemctl + 2× HTTP probe every few seconds; per-tab
+// polling can starve an embedded HTTP server, so this is the cheap guard.
 const POLL_ACTIVE_MS = 4_000
 const POLL_IDLE_MS = 20_000
 

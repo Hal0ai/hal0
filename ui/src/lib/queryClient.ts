@@ -1,8 +1,7 @@
 // hal0 v3 dashboard — TanStack Query client (Phase B1).
 //
 // One QueryClient for the whole SPA. Defaults are tuned for a dashboard
-// that polls long-lived endpoints (slots, hardware) and short-lived ones
-// (lemonade /v1/health, /v1/stats):
+// that polls long-lived endpoints (slots, hardware) and short-lived ones:
 //
 //   - `staleTime: 30s` — most resources are happy with up-to-30s freshness;
 //     polled hooks override per-query with `refetchInterval`.

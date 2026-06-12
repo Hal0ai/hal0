@@ -13,7 +13,7 @@
 // full-width slot snapshot.
 
 import { useSlots } from '@/api/hooks/useSlots'
-import { useLemondRollup } from '@/api/hooks/useLemonade'
+import { useRuntimeRollup } from '@/api/hooks/useRuntime'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { MemoryMap } from './memory-map'
@@ -70,10 +70,10 @@ function SnapshotStrip({ slots, onGo }) {
 //
 // Condensed identity block: the five Hardware cards (Host/CPU/GPU/NPU/
 // Memory) collapsed to one glanceable line each, plus a single live RAM
-// glance and the folded-in lemond health row. All fields are LIVE
-// (useHardware static probe + useStatsHardware live counters +
-// useLemondRollup) — a field a probe can't source renders as "—" rather
-// than a fabricated value, matching the old HardwareSection contract.
+// glance. All fields are LIVE (useHardware static probe +
+// useStatsHardware live counters) — a field a probe can't source renders
+// as "—" rather than a fabricated value, matching the old
+// HardwareSection contract.
 const round1 = (n) => Math.round(n * 10) / 10;
 const mbToGb = (mb) => round1((mb || 0) / 1024);
 
@@ -124,7 +124,7 @@ function SystemCard() {
     ? (H.npu.present ? joinDot(H.npu.name || "XDNA", H.npu.driver) : "absent")
     : "—";
 
-  // lemond health row removed (2026-06-05) — runtime status now lives solely
+  // Runtime health row removed (2026-06-05) — runtime status now lives solely
   // in the sidebar Runtime widget; the System card is hardware identity only.
   return (
     <div className="side-card sys-card">
@@ -145,19 +145,23 @@ function SystemCard() {
 }
 
 function ThroughputCard() {
-  // Live last-request tok/s from /v1/stats (via useLemondRollup).
-  // Lemonade does not expose a rolling-60s history — we build one
-  // client-side by appending each new sample to an in-component ring
-  // buffer (cap 21 entries to match the original spark width).
-  const lemond = useLemondRollup();
-  const value = lemond.lastTokPerSec;
+  // Live tok/s summed across serving slots (slot metrics from the shared
+  // /api/slots poll). The backend does not expose a rolling-60s history —
+  // we build one client-side by appending each new sample to an
+  // in-component ring buffer (cap 21 entries to match the original
+  // spark width).
+  const slotsQuery = useSlots();
+  const toks = (slotsQuery.data || [])
+    .map((s) => s?.metrics?.toks)
+    .filter((t) => typeof t === "number" && t > 0);
+  const value = toks.length > 0 ? toks.reduce((a, b) => a + b, 0) : null;
   const historyRef = useRefD([]);
   const lastRef = useRefD(null);
   const [, force] = useStateD(0);
   useEffectD(() => {
     if (value == null) return;
     // Dedupe identical back-to-back samples so the spark only advances
-    // when /v1/stats reports a new (or updated) measurement.
+    // when the slot metrics report a new (or updated) measurement.
     if (lastRef.current === value) return;
     lastRef.current = value;
     historyRef.current = [...historyRef.current, value].slice(-21);
@@ -199,7 +203,7 @@ function ThroughputCard() {
 // /dashboard is the system-overview page. Main area leads with the live
 // surface — a 50/50 Memory-map | Throughput row above the full-width slot
 // snapshot — while the sidebar holds the condensed SystemCard (host/cpu/
-// gpu/npu/ram identity + folded-in lemond health). When /api/slots returns
+// gpu/npu/ram identity). When /api/slots returns
 // an empty list (fresh install, no bundle picked), we render a zero-slots
 // empty state pointing at FirstRun instead.
 function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
@@ -209,7 +213,7 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
   // load — we render a loading skeleton until the query resolves, then
   // either the real list or a confirmed-empty state.
   const slots = slotsQuery.data || [];
-  const lemond = useLemondRollup();
+  const runtime = useRuntimeRollup();
   const hw = useHardware();
   // Live host identity for the hero + empty-state (was HAL0_DATA seed).
   const hostName = hw.data?.name || HAL0_DATA.host.name;
@@ -275,7 +279,7 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
             <span className="mono" style={{color: "var(--fg-2)"}}>{hostName}</span>
           </div>
           <div className="spacer" />
-          <span className="mono" style={{fontSize: 10, color: "var(--fg-4)"}}>steady · {slots.filter(s => s.state !== "empty").length} slots up · lemond {lemond.status}</span>
+          <span className="mono" style={{fontSize: 10, color: "var(--fg-4)"}}>steady · {slots.filter(s => s.state !== "empty").length} slots up · runtime {runtime.status}</span>
           <span className="close" onClick={onDismissHero} role="button" aria-label="Dismiss hero">{Icons.close}</span>
         </div>
       )}

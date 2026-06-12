@@ -1,12 +1,10 @@
 // hal0 dashboard — chrome (TopBar, Sidebar, Footer, Wordmark, ApprovalModal)
 //
-// Phase B1: Sidebar + Footer + TopBar now read lemond status from the
-// `useLemondRollup` hook (live polling /v1/health every 2s). Fields
-// fall back to the legacy HAL0_DATA.lemond shape when the hook hasn't
-// yet returned (initial paint / mock build), so prototype layout is
-// unchanged.
+// Phase B1: Sidebar + Footer + TopBar read runtime status from the
+// `useRuntimeRollup` hook (derived from the shared /api/slots poll), so
+// prototype layout stays unchanged before the first response lands.
 
-import { useLemondRollup } from '@/api/hooks/useLemonade'
+import { useRuntimeRollup } from '@/api/hooks/useRuntime'
 import { useLogsStream } from '@/api/hooks/useLogs'
 import { useSlots, useEndpoints } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
@@ -215,7 +213,7 @@ function Sidebar({ route, onGo }) {
       {/*
         Runtime widget (2026-06-05): the former three stacked status blocks
         (SidebarAgentBlock / SidebarEndpointBlock / SidebarStatusBlock) are
-        consolidated into ONE card so hermes, hal0, lemond and openwebui read
+        consolidated into ONE card so hermes, hal0, the runtime and openwebui read
         as a single runtime rollup. hermes + openwebui rows deep-link to their
         own dashboards.
       */}
@@ -235,8 +233,7 @@ function Sidebar({ route, onGo }) {
 //                 NOT a lifecycle slot, so it's read-only here. Model count is
 //                 the chat figure (advertised_models) plus a non-chat modality
 //                 breakdown counted from the real slots by group.
-//   - lemond    — the inference runtime (useLemondRollup → /v1/health). npu
-//                 ``coresident`` row only renders when lemond reports it.
+//   - runtime   — container-slot readiness (useRuntimeRollup → /api/slots).
 //   - openwebui — the external chat UI unit (useInstallState.openwebui_running).
 //                 Row key deep-links to the OpenWebUI app.
 //
@@ -246,14 +243,14 @@ function Sidebar({ route, onGo }) {
 // reverse-proxy domain) and honours the HAL0_{OPENWEBUI,HERMES}_PUBLIC_URL
 // env overrides. Each `*_enabled` flag gates whether we render a link at all.
 function SidebarRuntimeWidget({ onGo }) {
-  const L         = useLemondRollup();
+  const L         = useRuntimeRollup();
   const agent     = useSidebarAgentRollup();
   const endpoints = useEndpoints().data || [];
   const slots     = useSlots().data     || [];
   const urls      = useConfigUrls();
 
-  // ── lemond ──
-  const lemondClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
+  // ── runtime ──
+  const runtimeClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
 
   // ── hermes ── honest dot tone: green=running, red=broken, amber=unknown.
   // "off" when no agent is installed (no false-broken red on a fresh box).
@@ -333,24 +330,18 @@ function SidebarRuntimeWidget({ onGo }) {
         </span>
       </div>
 
-      {/* lemond — inference runtime */}
+      {/* runtime — container slot readiness */}
       <div
         className="row"
-        data-testid="runtime-row-lemond"
-        title={`${L.loaded} model${L.loaded === 1 ? "" : "s"} resident in Lemonade / ${L.budget} max_loaded_models cap`}
+        data-testid="runtime-row-runtime"
+        title={`${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`}
       >
-        <span className="k">lemond</span>
-        <span className={"v " + lemondClass}>
+        <span className="k">runtime</span>
+        <span className={"v " + runtimeClass}>
           <span className="dot" />
-          {L.status}{L.status === 'up' && L.version !== '—' ? ` · ${L.version}` : ''}
+          {L.status}{L.status === 'up' ? ` · ${L.ready}/${L.total} slots ready` : ''}
         </span>
       </div>
-      {L.coresident && (
-        <div className="row">
-          <span className="k">npu</span>
-          <span className="v" style={{ color: "var(--dev-npu)" }}><span className="dot" />coresident</span>
-        </div>
-      )}
 
       {/* openwebui — deep-links to the external chat UI when reachable */}
       <div className="row" data-testid="runtime-row-openwebui">
@@ -386,10 +377,10 @@ function SidebarRuntimeWidget({ onGo }) {
 // "show if there is a real update" — never the prototype's hardcoded
 // "v0.2.2 available" string.
 function Footer({ updateAvailable, expanded = false, onToggle }) {
-  // Lemond rollup gives live status / loaded / throughput / queued.
+  // Runtime rollup gives live status + slot readiness counts.
   // useLogsStream subscribes to /api/journal/stream when the pane is
   // expanded (saves opening an SSE we don't render).
-  const L = useLemondRollup();
+  const L = useRuntimeRollup();
   const [paneSrc, setPaneSrc] = useStateC("merged");
   const [paneQ, setPaneQ] = useStateC("");
   // Source filter rides the SSE URL so the backend pre-filters; search
@@ -437,7 +428,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
             <span>Live journal</span>
             <span className="ct">· {filtered.length} / {ringSorted.length}</span>
             <div className="foot-pane-filter mono">
-              {[["merged", "merged"], ["hal0", "hal0"], ["lemond", "lemond"]].map(([k, l]) => (
+              {[["merged", "merged"], ["hal0", "hal0"]].map(([k, l]) => (
                 <button
                   key={k}
                   onClick={() => setPaneSrc(k)}
@@ -482,42 +473,9 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       <div className="foot-chips">
         <div className={"foot-chip " + (L.status === 'up' ? 'up' : '')}>
           <span className="dot" />
-          <span className="k">lemond:</span>
-          <span className="v">{L.status}</span>
+          <span className="k">runtime:</span>
+          <span className="v">{L.status === 'up' ? `${L.ready}/${L.total} ready` : L.status}</span>
         </div>
-        {/*
-          Throughput chip (#340): prefer tok/s from /v1/stats (always
-          present on a serving backend) over throughput_mbps from
-          /v1/health (Lemonade omits it on most backends). Fall back to
-          MB/s only if lastTokPerSec is null. Both branches hide on
-          null/0 — a 0 from a live system is as meaningless as null.
-        */}
-        {L.lastTokPerSec != null && L.lastTokPerSec > 0 ? (
-          <div className="foot-chip">
-            <span className="k">throughput</span>
-            <span className="v num">{`${Math.round(L.lastTokPerSec)} tok/s`}</span>
-          </div>
-        ) : L.throughput != null && L.throughput > 0 ? (
-          <div className="foot-chip">
-            <span className="k">throughput</span>
-            <span className="v num">{`${L.throughput} MB/s`}</span>
-          </div>
-        ) : null}
-        {/* "models loaded N/budget" chip removed (2026-06-05) — the figure now
-            lives in the sidebar Runtime widget's lemond row tooltip only. */}
-        {L.coresident && (
-          <div className="foot-chip" style={{ color: "var(--dev-npu)" }}>
-            <span className="dot" />
-            <span className="k">npu</span>
-            <span className="v">coresident</span>
-          </div>
-        )}
-        {L.queued != null && (
-          <div className="foot-chip">
-            <span className="k">queued</span>
-            <span className="v num">{L.queued}</span>
-          </div>
-        )}
         {showUpdateChip && (
           <div className="foot-chip accent">
             <span className="k">●</span>

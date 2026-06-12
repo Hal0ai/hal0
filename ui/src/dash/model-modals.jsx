@@ -472,7 +472,7 @@ function DownloadRow({ modelId, onRemove }) {
   const state = job.state;
   const pct = job.pct ?? 0;
   const onPause = () => {
-    // Lemonade pull engine doesn't support pause — degrade gracefully
+    // The pull engine doesn't support pause — degrade gracefully
     // by cancelling the in-flight transfer; the row can be re-pulled
     // from the catalog.
     job.cancel();

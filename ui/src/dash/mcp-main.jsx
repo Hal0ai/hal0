@@ -1,7 +1,7 @@
 // hal0 v0.3 — MCP page mount
 // Composes the existing dashboard chrome (TopBar/Sidebar/Footer) with the new McpView.
 
-import { useLemondRollup } from '@/api/hooks/useLemonade'
+import { useRuntimeRollup } from '@/api/hooks/useRuntime'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 
@@ -18,10 +18,10 @@ const MCP_TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 function McpSidebar({ active }) {
   const slotsQuery  = useSlots();
   const modelsQuery = useModels();
-  const L           = useLemondRollup();
+  const L           = useRuntimeRollup();
   const slotCount   = slotsQuery.data?.length  ?? 0;
   const modelCount  = modelsQuery.data?.length ?? 0;
-  const lemondStatusClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
+  const runtimeStatusClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
   const items = [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard, href: "hal0 v2 dashboard.html" },
     { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount, href: "hal0 v2 dashboard.html#slots" },
@@ -72,12 +72,12 @@ function McpSidebar({ active }) {
       <div className="sb-spacer" />
       <div className="sb-status">
         <div className="row">
-          <span className="k">lemond</span>
-          <span className={"v " + lemondStatusClass}><span className="dot" />{L.status}</span>
+          <span className="k">runtime</span>
+          <span className={"v " + runtimeStatusClass}><span className="dot" />{L.status}</span>
         </div>
         <div className="row">
-          <span className="k">version</span>
-          <span className="v">{L.version}</span>
+          <span className="k">slots</span>
+          <span className="v">{L.ready}/{L.total} ready</span>
         </div>
         <div className="ln" />
         <div className="row">
@@ -154,7 +154,7 @@ function McpTopBar({ onCmdK }) {
 // Toast & footer-journal we inherit from chrome.jsx; for this page we keep
 // the footer's slim journal strip but drop the expandable pane to reduce noise.
 function McpFooter() {
-  const L = HAL0_DATA.lemond;
+  const L = useRuntimeRollup();
   return (
     <div className="footer">
       <div className="foot-chips">
@@ -172,17 +172,8 @@ function McpFooter() {
           <span className="v num">{MCP_CLIENTS.length}</span>
         </div>
         <div className="foot-chip">
-          <span className="k">lemond:</span>
-          <span className="v">{L.status}</span>
-        </div>
-        <div className="foot-chip">
-          <span className="k">loaded</span>
-          <span className="v num">{L.loaded}/{L.budget}</span>
-        </div>
-        <div className="foot-chip" style={{ color: "var(--dev-npu)" }}>
-          <span className="dot" />
-          <span className="k">npu</span>
-          <span className="v">coresident</span>
+          <span className="k">runtime:</span>
+          <span className="v">{L.status === 'up' ? `${L.ready}/${L.total} ready` : L.status}</span>
         </div>
       </div>
       <div className="foot-journal mono">
