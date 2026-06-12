@@ -55,15 +55,17 @@ router = APIRouter()
 
 
 class McpNotImplemented(Hal0Error):
-    """``POST /{id}/{action}`` still stubs here.
+    """``POST /{id}/{action}`` (start / stop / restart) still stubs here.
 
     Install / uninstall / config-patch landed in #305; start / stop /
-    restart need the still-pending process-supervisor layer. The
-    dashboard surfaces a distinct toast on this code so operators can
-    tell ``install`` (works) from ``restart`` (not yet) apart.
+    restart need the still-pending process-supervisor layer (ADR-0015,
+    not yet written). The code is the explicit
+    ``mcp.supervisor_unavailable`` so the dashboard can key on it and
+    render a "supervisor not implemented yet" affordance distinct from a
+    generic 501.
     """
 
-    code = "mcp.not_implemented"
+    code = "mcp.supervisor_unavailable"
     status = 501
 
 
@@ -806,6 +808,6 @@ async def server_action(server_id: str, action: str) -> dict[str, Any]:
     for this 501 vs the (now-real) install/uninstall path.
     """
     raise McpNotImplemented(
-        f"MCP {action!r} pending the process-supervisor follow-up to #305",
+        "process supervisor not implemented (pending ADR-0015)",
         details={"server_id": server_id, "action": action},
     )

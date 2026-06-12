@@ -594,7 +594,11 @@ def test_patch_config_rejects_bad_env(client: TestClient) -> None:
 def test_action_returns_501(client: TestClient) -> None:
     response = client.post("/api/mcp/hal0-admin/restart")
     assert response.status_code == 501
-    assert response.json()["error"]["code"] == "mcp.not_implemented"
+    # Explicit supervisor-unavailable code (pending ADR-0015) so the UI can
+    # key on it rather than a generic 501.
+    err = response.json()["error"]
+    assert err["code"] == "mcp.supervisor_unavailable"
+    assert "ADR-0015" in err["message"]
 
 
 # ── Security hardening (#368 review) ────────────────────────────────────────
