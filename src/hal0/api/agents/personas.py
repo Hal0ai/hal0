@@ -15,6 +15,7 @@ routes are:
 
     GET  /api/agents/{agent_id}/personas
     GET  /api/agents/{agent_id}/personas/{persona_id}
+    PUT  /api/agents/{agent_id}/personas/{persona_id}
     POST /api/agents/{agent_id}/personas/{persona_id}/activate
 """
 
@@ -25,6 +26,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter
+from pydantic import BaseModel, Field
 
 from hal0.agents import personas as personas_mod
 from hal0.errors import BadRequest, Hal0Error, NotFound
@@ -198,6 +200,130 @@ async def get_agent_persona(agent_id: str, persona_id: str) -> dict[str, Any]:
 
     active = personas_mod.get_active(root=root)
     return _persona_detail(persona, raw_toml=raw_toml, active_id=active)
+
+
+# ── PUT /{agent_id}/personas/{persona_id} ───────────────────────────────────
+
+
+class PersonaApprovalUpdate(BaseModel):
+    """Partial ``[persona.approval]`` patch. Omitted fields are unchanged."""
+
+    default_policy: str | None = Field(default=None)
+    auto_approve: list[str] | None = Field(default=None)
+    require_approval: list[str] | None = Field(default=None)
+
+
+class PersonaUpdateBody(BaseModel):
+    """Mutable persona fields. Mirrors the GET detail schema minus the
+    server-derived bits (``id``, ``active``, ``raw_toml``) and ``budget``
+    (which has its own ``/budget`` route). Every field is optional — a PUT
+    is a partial patch; only the supplied fields are overwritten.
+    """
+
+    display_name: str | None = Field(default=None)
+    summary: str | None = Field(default=None)
+    system_prompt: str | None = Field(default=None)
+    tools_allowed: list[str] | None = Field(default=None)
+    memory_namespace: str | None = Field(default=None)
+    preferred_upstream: str | None = Field(default=None)
+    preferred_model: str | None = Field(default=None)
+    approval: PersonaApprovalUpdate | None = Field(default=None)
+
+
+@router.put("/{agent_id}/personas/{persona_id}")
+async def update_agent_persona(
+    agent_id: str,
+    persona_id: str,
+    body: PersonaUpdateBody,
+) -> dict[str, Any]:
+    """Update the mutable fields of one persona, persisting to its TOML.
+
+    Backs the dashboard's ``PersonaEditModal``. The persona ``id`` is
+    immutable (it's the filename) — only the fields in
+    :class:`PersonaUpdateBody` can change. ``budget`` is preserved
+    verbatim (it round-trips through the existing persona; the dedicated
+    ``/budget`` route owns spending-cap edits).
+
+    404 if the agent id or persona file is unknown; 400 if the existing
+    file is malformed OR the patched persona fails validation (e.g. an
+    invalid ``default_policy``). On success returns the same payload as
+    ``GET /{agent_id}/personas/{persona_id}``.
+    """
+    root = _resolve_agent(agent_id)
+
+    # Load the existing persona so unsupplied fields (and budget) survive
+    # the patch. 404/400 handling mirrors the GET detail route.
+    try:
+        existing = personas_mod.load_persona(persona_id, root=root)
+    except FileNotFoundError as exc:
+        raise NotFound(
+            f"persona {persona_id!r} not found",
+            code="persona.not_found",
+            details={"agent_id": agent_id, "persona_id": persona_id},
+        ) from exc
+    except personas_mod.PersonaError as exc:
+        raise BadRequest(
+            _safe_error_message(exc),
+            code="persona.malformed",
+            details={"agent_id": agent_id, "persona_id": persona_id},
+        ) from exc
+
+    # Start from the full TOML shape (carries budget + every sub-table),
+    # overlay the supplied fields, then round-trip through from_dict so the
+    # same validation the loader applies (default_policy enum, list-of-str
+    # shapes) gates the write.
+    data = existing.to_dict()
+    p = data["persona"]
+    p["id"] = persona_id  # immutable — the filename is authoritative.
+    if body.display_name is not None:
+        p["display_name"] = body.display_name
+    if body.summary is not None:
+        p["summary"] = body.summary
+    if body.system_prompt is not None:
+        p["prompt"]["system"] = body.system_prompt
+    if body.tools_allowed is not None:
+        p["tools"]["allowed"] = body.tools_allowed
+    if body.memory_namespace is not None:
+        p["memory"]["namespace"] = body.memory_namespace
+    if body.preferred_upstream is not None:
+        p["model"]["preferred_upstream"] = body.preferred_upstream
+    if body.preferred_model is not None:
+        p["model"]["preferred_model"] = body.preferred_model
+    if body.approval is not None:
+        if body.approval.default_policy is not None:
+            p["approval"]["default_policy"] = body.approval.default_policy
+        if body.approval.auto_approve is not None:
+            p["approval"]["auto_approve"] = body.approval.auto_approve
+        if body.approval.require_approval is not None:
+            p["approval"]["require_approval"] = body.approval.require_approval
+
+    try:
+        updated = personas_mod.Persona.from_dict(data)
+    except personas_mod.PersonaError as exc:
+        raise BadRequest(
+            _safe_error_message(exc),
+            code="persona.invalid",
+            details={"agent_id": agent_id, "persona_id": persona_id},
+        ) from exc
+
+    try:
+        target = personas_mod.save_persona(updated, root=root)
+        raw_toml = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "persona.update_write_failed",
+            agent_id=agent_id,
+            persona_id=persona_id,
+            error=str(exc),
+        )
+        raise Hal0Error(
+            "persona write failed",
+            code="persona.write_failed",
+        ) from exc
+
+    log.info("persona.updated", agent_id=agent_id, persona_id=persona_id)
+    active = personas_mod.get_active(root=root)
+    return _persona_detail(updated, raw_toml=raw_toml, active_id=active)
 
 
 # ── POST /{agent_id}/personas/{persona_id}/activate ─────────────────────────
