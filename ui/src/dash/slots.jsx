@@ -19,6 +19,7 @@ import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { MemoryMap } from './memory-map'
 import { ComfyuiPane } from './comfyui-pane.jsx'
+import { InferencePane } from './inference-pane.jsx'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 
 const { useState: useStateS } = React;
@@ -145,8 +146,11 @@ function SlotCard({
   //
   // N1: classify from container_status; an un-enriched snapshot (stale
   // /api/status union entry without container_status) falls back to its
-  // bare state string.
-  const isContainer = true;
+  // bare state string. Post-Lemonade every slot dispatches through
+  // ContainerProvider, so this is effectively always true — but derive it
+  // honestly from the payload rather than hard-coding (the non-container
+  // branch below is the defensive fallback for a pre-enrichment snapshot).
+  const isContainer = slot.runtime === "container" || slot.container_status != null;
   let phase;
   if (slot.container_status != null) {
     const cs = String(slot.container_status);
@@ -302,10 +306,12 @@ function SlotCard({
           </>
         )}
         {(() => {
+          // Colour aligned to the slotIndicatorFromPhase() vocabulary
+          // (slot-status.js): serving|stale|warming|error|offline. The old
+          // map keyed on "warning"/"recent" which that classifier never
+          // emits, so every chip fell through to the default grey.
           const ind = slotIndicator(slot);
-          const chipColor = ind.cls === "warning" ? "var(--warn)"
-            : ind.cls === "recent" ? "var(--ok)"
-            : ind.cls === "serving" ? "var(--accent)"
+          const chipColor = ind.cls === "serving" ? "var(--ok)"
             : ind.cls === "stale" || ind.cls === "warming" ? "var(--warn)"
             : ind.cls === "error" ? "var(--err)"
             : "var(--fg-3)";
@@ -367,13 +373,31 @@ function SlotCard({
 // ─── SlotCard compact list variant ───
 function SlotListRow({ slot, onEdit }) {
   const { type, device, model, state, isDefault, metrics } = slot;
+  // Restart + Edit were dead (stopPropagation-only) — wire them to the real
+  // restart mutation and the Edit drawer (via the #slots/:name route, the
+  // same path SlotCard uses). `onEdit` is optional; fall through to hash.
+  const restartMut = useSlotRestart();
+  const [busy, setBusy] = useStateS(false);
+  const goEdit = onEdit || (() => { window.location.hash = "#slots/" + slot.name; });
+  const onRestart = async () => {
+    setBusy(true);
+    try {
+      await restartMut.mutateAsync(slot.name);
+      window.__hal0Toast && window.__hal0Toast(`Restarting ${slot.name}`, "ok");
+    } catch (err) {
+      window.__hal0Toast && window.__hal0Toast(
+        err?.message ? `${slot.name}: ${err.message}` : `${slot.name}: restart failed`, "warn");
+    } finally {
+      setBusy(false);
+    }
+  };
   const tps = type === "llm" ? `${metrics.toks || 0} t/s` :
               type === "embedding" ? `${metrics.rpm} r/m` :
               type === "transcription" ? `${metrics.xrt} xrt` :
               type === "image" ? `${metrics.avg}s avg` :
               `${metrics.rpm || 0} r/m`;
   return (
-    <div className="slot-list-row" onClick={onEdit}>
+    <div className="slot-list-row" onClick={goEdit}>
       <IndicatorDot slot={slot} />
       <span className="nm">
         {slot.name}
@@ -390,8 +414,17 @@ function SlotListRow({ slot, onEdit }) {
         {type === "llm" && metrics.ctx && <span>· {metrics.ctx} ctx</span>}
       </span>
       <span className="ac">
-        <button className="btn ghost sm" onClick={e => { e.stopPropagation(); }}>{Icons.restart}</button>
-        <button className="btn ghost sm" onClick={e => { e.stopPropagation(); }}>{Icons.edit}</button>
+        <button
+          className="btn ghost sm"
+          title="Restart"
+          disabled={busy}
+          onClick={e => { e.stopPropagation(); onRestart(); }}
+        >{Icons.restart}</button>
+        <button
+          className="btn ghost sm"
+          title="Edit"
+          onClick={e => { e.stopPropagation(); goEdit(); }}
+        >{Icons.edit}</button>
       </span>
     </div>
   );
@@ -567,6 +600,7 @@ function NpuFlmStack({ slots }) {
   const editMut = useSlotEdit();
   const restartMutNpu = useSlotRestart();
   const [busy, setBusy] = useStateS(false);
+  const [npuOpen, setNpuOpen] = useStateS(false);
 
   if (!npuSlots.length) return null;
 
@@ -643,44 +677,157 @@ function NpuFlmStack({ slots }) {
   // No onPickAsr/onPickEmbed: those modalities are read-only labels (the
   // FLM trio fixes their model via flags). Chat keeps onPickChat above.
 
+  // ── derived display fields for the engine shell ──
+  // Combined NPU resident memory — sum of per-slot mem_mb (the trio shares one
+  // FLM process, so its weight shows on the loaded anchor). Em-dash, never a
+  // fabricated 0, when nothing is resident.
+  const npuMemMb = npuSlots.reduce(
+    (a, s) => a + (typeof s.mem_mb === "number" ? s.mem_mb : 0), 0,
+  );
+  const npuMemGb = npuMemMb > 0 ? Math.round((npuMemMb / 1024) * 10) / 10 : null;
+  const chatModel = chat?.model || chat?.modelDefault || "—";
+  const epillCls = loaded ? "running" : "stopped";
+  const epillLabel = loaded ? "loaded · 3 roles" : "unloaded";
+
+  // small inline glyphs (purple chip + chevron) — keeps the pane self-contained
+  const ChipGlyph = (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="3.5" width="9" height="9" rx="1" />
+      <rect x="6" y="6" width="4" height="4" rx="0.5" />
+      <path d="M6 3.5v-1.5M10 3.5v-1.5M6 14v-1.5M10 14v-1.5M3.5 6h-1.5M3.5 10h-1.5M14 6h1.5M14 10h1.5" />
+    </svg>
+  );
+  const ChevGlyph = (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 6l4 4 4-4" />
+    </svg>
+  );
+
   return (
-    <div className="npu-stack">
-      <div className="npu-stack-h">
-        <span className="title mono">NPU · FLM Stack</span>
-        <span className="chip" style={NPU_CHIP}>
-          <span className="dot" style={{width: 5, height: 5, background: "currentColor", boxShadow: "0 0 6px currentColor"}} />
-          coresident · boots together
-        </span>
-        <span className="npu-stack-spacer" />
-        <span className="npu-stack-master-lbl mono">master</span>
-        <NpuSwitch on={loaded} disabled={busy || !chat} label="Load/unload FLM stack" onClick={onMaster} />
-      </div>
-
-      <div className="npu-bracket">
-        <div className="npu-bracket-rail" aria-hidden="true" />
-        <div className="npu-trio">
-          <NpuModalityCard
-            icon="💬" label="Chat" slot={chat} on fixed
-            models={chatModels} busy={busy} onPickModel={onPickChat}
-          />
-          <NpuModalityCard
-            icon="🎙" label="ASR" slot={asr} on={parsed.asr} readOnlyModel
-            busy={busy}
-            onToggle={() => onToggleModality("asr")}
-          />
-          <NpuModalityCard
-            icon="🧬" label="Embed" slot={embed} on={parsed.embed} readOnlyModel
-            busy={busy}
-            onToggle={() => onToggleModality("embed")}
-          />
+    <div className="npu-pane">
+      <div className="proto">
+        <div className="sec-label">
+          <b>NPU Stack</b>
+          <span className="dim">·</span>
+          <span className="mono" style={{color: "var(--dev-npu)"}}>FLM</span>
+          <span className="dim">·</span>
+          <span className="meta">coresident</span>
+          <span className="dim">·</span>
+          <span className="meta">1 process · 3 roles</span>
+          <span className="grow" style={{flex: 1}} />
+          <span className="meta">{loaded ? "npu · loaded" : "npu · idle"}</span>
         </div>
-      </div>
 
-      <div className="npu-stack-foot mono">
-        <code className="npu-args">npu = asr:{parsed.asr ? "on" : "off"} · embed:{parsed.embed ? "on" : "off"}</code>
-        <span className="sep">·</span>
-        <span className="item">port :{childPort ?? "—"}{backendUrl ? <span title={backendUrl}> · {backendUrl}</span> : null}</span>
-        {coresGroup && <><span className="sep">·</span><span className="item">{coresGroup}</span></>}
+        <div className={"engine" + (loaded ? " active" : "") + (npuOpen ? " open" : "")}>
+          <div className="engine-h">
+            <span className="engine-glyph">{ChipGlyph}</span>
+            <span className="col">
+              <span className="engine-title">NPU · FLM Stack</span>
+              <span className="engine-sub">coresident · 1 process · 3 roles</span>
+            </span>
+            <span className={"epill " + epillCls} data-testid="npu-epill">
+              <span className="dot" />
+              {epillLabel}
+            </span>
+            <span className="grow" style={{flex: 1}} />
+            <span className="eh-right">
+              <span className="npu-master-lbl">master</span>
+              <NpuSwitch on={loaded} disabled={busy || !chat} label="Load/unload FLM stack" onClick={onMaster} />
+            </span>
+          </div>
+
+          {/* collapsed telemetry strip — hidden when the pane is open */}
+          <div className="collapsed-prog" data-testid="npu-strip">
+            <div className="tel-strip">
+              <span className="tel">
+                <span className="l">mem</span>
+                <span className="v comfy">{npuMemGb == null ? "—" : npuMemGb}<span className="u"> GB</span></span>
+              </span>
+              <span className="tel">
+                <span className="l">chat</span>
+                <span className="v" style={{maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{chatModel}</span>
+              </span>
+              <span className="tel">
+                <span className="l">asr</span>
+                <span className="dotline"><span className={"rdot" + (parsed.asr ? " on" : "")} /><span className="v">{parsed.asr ? "on" : "off"}</span></span>
+              </span>
+              <span className="tel">
+                <span className="l">embed</span>
+                <span className="dotline"><span className={"rdot" + (parsed.embed ? " on" : "")} /><span className="v">{parsed.embed ? "on" : "off"}</span></span>
+              </span>
+              <span className="tel">
+                <span className="l">port</span>
+                <span className="v">:{childPort ?? "—"}</span>
+              </span>
+            </div>
+          </div>
+
+          {/* expandable body — the existing bracketed trio, moved verbatim */}
+          <div className="engine-body">
+            <div className="inner">
+              <div className="engine-b">
+                <div className="npu-stack">
+                  <div className="npu-bracket">
+                    <div className="npu-bracket-rail" aria-hidden="true" />
+                    <div className="npu-trio">
+                      <NpuModalityCard
+                        icon="💬" label="Chat" slot={chat} on fixed
+                        models={chatModels} busy={busy} onPickModel={onPickChat}
+                      />
+                      <NpuModalityCard
+                        icon="🎙" label="ASR" slot={asr} on={parsed.asr} readOnlyModel
+                        busy={busy}
+                        onToggle={() => onToggleModality("asr")}
+                      />
+                      <NpuModalityCard
+                        icon="🧬" label="Embed" slot={embed} on={parsed.embed} readOnlyModel
+                        busy={busy}
+                        onToggle={() => onToggleModality("embed")}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="npu-stack-foot mono">
+                    <code className="npu-args">npu = asr:{parsed.asr ? "on" : "off"} · embed:{parsed.embed ? "on" : "off"}</code>
+                    <span className="sep">·</span>
+                    <span className="item">port :{childPort ?? "—"}{backendUrl ? <span title={backendUrl}> · {backendUrl}</span> : null}</span>
+                    {coresGroup && <><span className="sep">·</span><span className="item">{coresGroup}</span></>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* footer — flm identity + caret expand control */}
+          <div className="engine-foot has-q">
+            <div className="foot-id">
+              <span className="k">runtime</span>
+              <span className="v comfy">flm serve</span>
+              <span className="sep">·</span>
+              <span className="k">port</span>
+              <span className="v">:{childPort ?? "—"}</span>
+              {coresGroup && <>
+                <span className="sep">·</span>
+                <span className="k">group</span>
+                <span className="v comfy">{coresGroup}</span>
+              </>}
+            </div>
+            <button
+              className="qcaret"
+              onClick={() => setNpuOpen(o => !o)}
+              aria-expanded={npuOpen}
+              data-testid="npu-qcaret"
+            >
+              <span className="q">
+                {ChipGlyph} {npuOpen ? "collapse" : "trio"}
+                <span className="qn">3</span>
+              </span>
+              <span className="car">{ChevGlyph}</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1047,7 +1194,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         <button
           role="tab"
           aria-selected={tab === "inference"}
-          className={"slot-tab" + (tab === "inference" ? " on" : "")}
+          className={"slot-tab infer" + (tab === "inference" ? " on" : "")}
           onClick={() => setTab("inference")}
         >
           <span>Inference</span>
@@ -1070,23 +1217,25 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
             <ComfyuiPane />
           ) : (
             <>
+              {/* Inference "engine" pane — a summary engine-shell (yellow accent)
+                  over the whole LLM/capability slot stack: collapsed hero
+                  (memory map + active slots + combined throughput) that expands
+                  to the full slot list with per-slot lifecycle controls + a
+                  model picker + a by-device throughput split. The per-group
+                  SlotCard grids below stay the authoritative per-slot surface. */}
+              <InferencePane />
               {renderGroup("Chat", groups.chat)}
               {/* Capabilities (C7): embedding/reranking/transcription/tts cards are
                   content-light, so they render in a denser 4-up quarter-width grid
                   instead of two separate full-width Embed/Voice sections. NPU
                   modalities (group "npu") are excluded by grouping — they live in
-                  the dedicated NPU/FLM stack section below. */}
+                  the dedicated NPU/FLM stack engine pane below. */}
               {renderGroup("Capabilities", [...groups.embed, ...groups.voice], { quarter: true })}
 
-              {slots.some(s => s.device === "npu") && (
-                <section style={{marginBottom: 24}}>
-                  <div className="sec">
-                    <h2>NPU<span className="ct mono">trio · 1 process · 3 roles</span></h2>
-                    <div className="rule" />
-                  </div>
-                  <NpuFlmStack slots={slots} />
-                </section>
-              )}
+              {/* NPU · FLM stack — its own engine-shell pane (purple accent),
+                  parallel to the Inference + ComfyUI panes. No section h2: the
+                  pane supplies its own sec-label + engine header. */}
+              {slots.some(s => s.device === "npu") && <NpuFlmStack slots={slots} />}
             </>
           )}
         </div>

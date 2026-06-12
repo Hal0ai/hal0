@@ -50,8 +50,12 @@ test.describe('Slots v3 (/slots)', () => {
 
   test('NPU rollup section renders when an NPU slot is present', async ({ page }) => {
     await page.goto('/#slots')
-    // HAL0_DATA seeds at least one device=npu slot, so the NPU section h2 should appear
-    await expect(page.locator('.view .sec h2', { hasText: 'NPU' })).toBeVisible()
+    // The NPU/FLM stack now renders as its own "engine" pane (parallel to the
+    // ComfyUI + Inference panes) instead of a plain <section><h2>NPU</h2> — the
+    // standalone section header was dropped for the pane's own engine header.
+    // HAL0_DATA seeds at least one device=npu slot, so the pane appears.
+    await expect(page.locator('.npu-pane')).toBeVisible()
+    await expect(page.locator('.npu-pane .engine-title')).toContainText('NPU')
   })
 
   test('NPU trio: chat is a model picker; ASR/embed are read-only labels (model fixed by FLM)', async ({ page }) => {

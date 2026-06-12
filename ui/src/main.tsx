@@ -30,6 +30,7 @@ import './globals-install'
 import './dashboard.css'
 import './mcp.css'
 import './dash/comfyui-pane.css'
+import './dash/engine-panes.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'

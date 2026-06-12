@@ -113,6 +113,13 @@ test.describe('NPU container mode — NpuFlmStack (#Phase-A)', () => {
     const stack = page.locator('.npu-stack')
     await expect(stack).toBeVisible()
 
+    // The NPU/FLM stack now renders inside a collapsible "engine" pane
+    // (parallel to the ComfyUI + Inference panes); the trio lives in the
+    // expandable body, so open it via the caret before interacting with a
+    // toggle. Read-path assertions above work on the clipped DOM, but a
+    // click needs the control un-clipped.
+    await page.getByTestId('npu-qcaret').click()
+
     // Confirm embed starts unchecked (state from slot.npu.embed=false)
     const embedSwitch = stack.locator('.npu-trio .npu-mod').nth(2).locator('.npu-switch')
     await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
