@@ -3103,6 +3103,11 @@ select.npu-sel {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+.pf-based {
+  font-size: 10px;
+  color: var(--fg-4);
+  font-style: italic;
+}
 .pf-flags {
   font-size: 10px;
   color: var(--fg-4);

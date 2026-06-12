@@ -48,6 +48,10 @@ class ProfileBody(BaseModel):
         default="gpu",
         description="Device class this profile targets.",
     )
+    cloned_from: str | None = Field(
+        default=None,
+        description="Provenance: profile this one was cloned from (informational).",
+    )
 
     @field_validator("name")
     @classmethod
@@ -126,6 +130,7 @@ def create_profile(body: ProfileBody) -> dict[str, Any]:
             flags=body.flags,
             mtp=body.mtp,
             device_class=body.device_class,
+            cloned_from=body.cloned_from,
         ),
     )
     return profile.to_dict()

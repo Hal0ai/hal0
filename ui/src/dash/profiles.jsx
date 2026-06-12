@@ -7,8 +7,11 @@
 // ~52.8 tok/s" rather than "moe-rocmfp4".
 //
 // Phase C6: CRUD — New profile button + create/edit form (inline drawer),
-// per-card Edit/Delete for custom profiles, Clone for all (prefills form
-// with <name>-copy). Seeds are immutable: badge shown, Edit/Delete disabled.
+// per-card Edit/Delete for custom profiles, Clone for custom (prefills form
+// with <name>-copy). Seeds are immutable: badge shown, Delete disabled, and
+// Edit becomes "Edit a copy" — opens the create form prefilled from the seed
+// (name <seed>-custom) so editing forks a custom profile instead of mutating
+// the seed. Clones carry cloned_from provenance, shown as "based on <source>".
 
 import { useState, useEffect, useCallback } from 'react'
 import {
@@ -52,7 +55,7 @@ function toast(msg, kind = 'info') {
 
 const BLANK_FORM = { name: '', image: '', flags: '', mtp: false, device_class: '' };
 
-function ProfileForm({ initial, isEdit, isSeed, onClose, onSaved }) {
+function ProfileForm({ initial, isEdit, title, onClose, onSaved }) {
   const [form, setForm] = useState(initial ?? BLANK_FORM);
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
@@ -95,6 +98,7 @@ function ProfileForm({ initial, isEdit, isSeed, onClose, onSaved }) {
       flags: form.flags ?? '',
       mtp: !!form.mtp,
       ...(form.device_class ? { device_class: form.device_class } : {}),
+      ...(form.cloned_from ? { cloned_from: form.cloned_from } : {}),
     };
     try {
       if (isEdit) {
@@ -120,12 +124,13 @@ function ProfileForm({ initial, isEdit, isSeed, onClose, onSaved }) {
     }
   }
 
-  const title = isEdit ? `Edit · ${initial?.name}` : 'New profile';
+  const fallbackTitle = isEdit ? `Edit · ${initial?.name}` : 'New profile';
+  const panelTitle = title || fallbackTitle;
 
   return (
-    <div className="pf-form-panel" role="dialog" aria-label={title}>
+    <div className="pf-form-panel" role="dialog" aria-label={panelTitle}>
       <div className="pf-form-head">
-        <span className="pf-form-title mono">{title}</span>
+        <span className="pf-form-title mono">{panelTitle}</span>
         <button className="btn ghost sm pf-form-close" onClick={onClose} aria-label="Close">×</button>
       </div>
       <form onSubmit={handleSubmit} className="pf-form-body">
@@ -318,27 +323,42 @@ function ProfileCard({ profile, onEdit, onClone, onDelete }) {
         <span className="pf-sep">·</span>
         <span className="pf-tag">{tag}</span>
       </div>
+      {profile.cloned_from && (
+        <div className="pf-based mono">based on {profile.cloned_from}</div>
+      )}
       {profile.resolved_flags && (
         <div className="pf-flags mono">{profile.resolved_flags}</div>
       )}
       <div className="pf-card-actions">
-        <button
-          className="btn ghost xs"
-          onClick={() => onClone(profile)}
-          title="Clone this profile"
-          data-testid={`pf-btn-clone-${profile.name}`}
-        >
-          Clone
-        </button>
-        <button
-          className="btn ghost xs"
-          onClick={() => onEdit(profile)}
-          disabled={isSeed}
-          title={isSeed ? 'Seed profiles are immutable' : 'Edit'}
-          data-testid={`pf-btn-edit-${profile.name}`}
-        >
-          Edit
-        </button>
+        {isSeed ? (
+          <button
+            className="btn ghost xs"
+            onClick={() => onClone(profile)}
+            title="Seed profiles are immutable — edit a custom copy instead"
+            data-testid={`pf-btn-editcopy-${profile.name}`}
+          >
+            Edit a copy
+          </button>
+        ) : (
+          <>
+            <button
+              className="btn ghost xs"
+              onClick={() => onClone(profile)}
+              title="Clone this profile"
+              data-testid={`pf-btn-clone-${profile.name}`}
+            >
+              Clone
+            </button>
+            <button
+              className="btn ghost xs"
+              onClick={() => onEdit(profile)}
+              title="Edit"
+              data-testid={`pf-btn-edit-${profile.name}`}
+            >
+              Edit
+            </button>
+          </>
+        )}
         <button
           className="btn ghost xs danger"
           onClick={() => onDelete(profile)}
@@ -394,6 +414,7 @@ function ProfilesView() {
   // Build initial form values for the drawer
   let formInitial = null;
   let isEdit = false;
+  let formTitle = null;
   if (drawer) {
     if (drawer.mode === 'create') {
       formInitial = { ...BLANK_FORM };
@@ -408,14 +429,20 @@ function ProfilesView() {
       };
       isEdit = true;
     } else if (drawer.mode === 'clone' && drawer.profile) {
+      // Seeds fork via "Edit a copy" (<seed>-custom); custom profiles clone
+      // as <name>-copy. Both record cloned_from provenance on the new profile.
+      const isSeed = !!drawer.profile.seed;
+      const suffix = isSeed ? '-custom' : '-copy';
       formInitial = {
-        name: `${drawer.profile.name}-copy`,
+        name: `${drawer.profile.name}${suffix}`.slice(0, 32),
         image: drawer.profile.image || '',
         flags: drawer.profile.flags || '',
         mtp: !!drawer.profile.mtp,
         device_class: drawer.profile.device_class || '',
+        cloned_from: drawer.profile.name,
       };
       isEdit = false;
+      if (isSeed) formTitle = `Edit a copy · ${drawer.profile.name}`;
     }
   }
 
@@ -482,7 +509,7 @@ function ProfilesView() {
         <ProfileForm
           initial={formInitial}
           isEdit={isEdit}
-          isSeed={drawer.profile?.seed}
+          title={formTitle}
           onClose={closeDrawer}
           onSaved={onSaved}
         />

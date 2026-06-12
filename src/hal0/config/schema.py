@@ -773,6 +773,14 @@ class ProfileConfig(BaseModel):
             "(ComfyUI image-generation slots) and is not yet used."
         ),
     )
+    cloned_from: str | None = Field(
+        default=None,
+        description=(
+            "Provenance: name of the profile this one was cloned from "
+            "(set by the dashboard clone / edit-a-copy flow).  Informational "
+            "only — never resolved or validated against the catalog."
+        ),
+    )
 
     @field_validator("image")
     @classmethod

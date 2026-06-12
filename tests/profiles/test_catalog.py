@@ -64,3 +64,29 @@ def test_delete_profile_in_use_raises_conflict(tmp_hal0_home: str) -> None:
 
     assert exc.value.code == "profiles.in_use"
     assert exc.value.details["slots"] == ["chat"]
+
+
+def test_cloned_from_persists_and_round_trips(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+
+    created = catalog.create(
+        "vulkan-std-custom",
+        ProfileConfig(image="ghcr.io/x/y:z", flags="-fa on", cloned_from="vulkan-std"),
+    )
+    assert created.cloned_from == "vulkan-std"
+    assert created.to_dict()["cloned_from"] == "vulkan-std"
+
+    # Survives the profiles.toml round trip on a fresh catalog instance.
+    reloaded = ProfileCatalog().resolve("vulkan-std-custom")
+    assert reloaded.cloned_from == "vulkan-std"
+
+
+def test_cloned_from_defaults_to_none_and_survives_update(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+
+    plain = catalog.create("my-rocm", ProfileConfig(image="ghcr.io/x/y:z"))
+    assert plain.cloned_from is None
+
+    catalog.create("my-copy", ProfileConfig(image="ghcr.io/x/y:z", cloned_from="my-rocm"))
+    updated = catalog.update("my-copy", ProfilePatch(flags="-fa off"))
+    assert updated.cloned_from == "my-rocm"

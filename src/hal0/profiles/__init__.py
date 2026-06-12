@@ -53,6 +53,7 @@ class ResolvedProfile:
     seed: bool
     runtime_family: RuntimeFamily
     supported_slot_types: tuple[SlotType, ...]
+    cloned_from: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -65,6 +66,7 @@ class ResolvedProfile:
             "seed": self.seed,
             "runtime_family": self.runtime_family,
             "supported_slot_types": list(self.supported_slot_types),
+            "cloned_from": self.cloned_from,
         }
 
 
@@ -156,6 +158,7 @@ class ProfileCatalog:
                 device_class=(
                     patch.device_class if patch.device_class is not None else existing.device_class
                 ),
+                cloned_from=existing.cloned_from,
             )
             catalog.profile[name] = updated
             save_profiles_config(catalog, self._path)
@@ -206,6 +209,7 @@ class ProfileCatalog:
             seed=name in SEED_PROFILES,
             runtime_family=runtime,
             supported_slot_types=_supported_slot_types(runtime),
+            cloned_from=profile.cloned_from,
         )
 
     def _guard_custom(self, name: str) -> None:

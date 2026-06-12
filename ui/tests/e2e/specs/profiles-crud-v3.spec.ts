@@ -7,8 +7,11 @@
  * Covers:
  *   - "New profile" button opens the form
  *   - Create flow: fill name/image → submit → POST body asserted → card appears
- *   - Seed immutability: vulkan-std has seed badge, Edit/Delete disabled, Clone present
- *   - Clone flow: Clone on vulkan-std prefills form (name "vulkan-std-copy") → POST
+ *   - Seed cards: seed badge, Delete disabled, single "Edit a copy" action
+ *     (no plain Edit/Clone) — seeds stay immutable, editing forks a custom copy
+ *   - Edit-a-copy flow: prefills name "<seed>-custom", POST carries cloned_from
+ *   - Clone flow (custom cards): prefills "<name>-copy", POST carries cloned_from
+ *   - Provenance: cards with cloned_from show a "based on <source>" line
  *   - Delete flow: custom card Delete → confirm → DELETE fired → 204 → card gone
  *   - Delete-in-use: 409 profiles.in_use → error toast names the slot
  */
@@ -25,6 +28,7 @@ const CUSTOM_PROFILE = {
   resolved_flags: '--flash-attn on',
   device_class: 'gpu',
   seed: false,
+  cloned_from: 'vulkan-std',
 }
 
 const PROFILES_WITH_CUSTOM = [...MOCK_DATA.profiles, CUSTOM_PROFILE]
@@ -36,6 +40,14 @@ async function gotoProfiles(page: any) {
     () => typeof (window as any).ProfilesView === 'function',
   )
   await page.waitForSelector('.pf-card', { timeout: 10_000 })
+}
+
+// Helper: locate a card by its exact slug — hasText would also match cards
+// whose "based on <source>" provenance line names this profile.
+function cardBySlug(page: any, slug: string) {
+  return page.locator('.pf-card').filter({
+    has: page.locator(`.pf-slug:text-is("${slug}")`),
+  })
 }
 
 test.describe('Profiles CRUD — Phase C6', () => {
@@ -123,34 +135,32 @@ test.describe('Profiles CRUD — Phase C6', () => {
     expect(posts).toHaveLength(0)
   })
 
-  // ── Seed immutability ────────────────────────────────────────────────────────
+  // ── Seed cards ───────────────────────────────────────────────────────────────
 
-  test('vulkan-std: seed badge visible, Edit/Delete disabled, Clone present', async ({ page }) => {
+  test('vulkan-std: seed badge, Delete disabled, single enabled "Edit a copy"', async ({ page }) => {
     await gotoProfiles(page)
 
-    const vulkanCard = page.locator('.pf-card', { hasText: 'vulkan-std' })
+    const vulkanCard = cardBySlug(page, 'vulkan-std')
     await expect(vulkanCard).toBeVisible()
 
     // Seed badge.
     await expect(vulkanCard.locator('.pf-badge.immutable')).toBeVisible()
 
-    // Edit button should be disabled.
-    const editBtn = vulkanCard.locator('[data-testid="pf-btn-edit-vulkan-std"]')
-    await expect(editBtn).toBeDisabled()
+    // "Edit a copy" replaces both the disabled Edit and the Clone button.
+    const editCopyBtn = vulkanCard.locator('[data-testid="pf-btn-editcopy-vulkan-std"]')
+    await expect(editCopyBtn).toBeVisible()
+    await expect(editCopyBtn).not.toBeDisabled()
+    await expect(vulkanCard.locator('[data-testid="pf-btn-edit-vulkan-std"]')).toHaveCount(0)
+    await expect(vulkanCard.locator('[data-testid="pf-btn-clone-vulkan-std"]')).toHaveCount(0)
 
     // Delete button should be disabled.
     const deleteBtn = vulkanCard.locator('[data-testid="pf-btn-delete-vulkan-std"]')
     await expect(deleteBtn).toBeDisabled()
-
-    // Clone button should be present and enabled.
-    const cloneBtn = vulkanCard.locator('[data-testid="pf-btn-clone-vulkan-std"]')
-    await expect(cloneBtn).toBeVisible()
-    await expect(cloneBtn).not.toBeDisabled()
   })
 
-  // ── Clone flow ───────────────────────────────────────────────────────────────
+  // ── Edit-a-copy flow (seeds) ─────────────────────────────────────────────────
 
-  test('clone: prefills name as <source>-copy and image/flags; submit POSTs', async ({ page }) => {
+  test('edit a copy: prefills <seed>-custom, POST carries cloned_from', async ({ page }) => {
     const posts: any[] = []
     await page.route('**/api/profiles', async (route) => {
       if (route.request().method() === 'POST') {
@@ -162,26 +172,76 @@ test.describe('Profiles CRUD — Phase C6', () => {
 
     await gotoProfiles(page)
 
-    // Click Clone on vulkan-std.
-    const vulkanCard = page.locator('.pf-card', { hasText: 'vulkan-std' })
-    await vulkanCard.locator('[data-testid="pf-btn-clone-vulkan-std"]').click()
+    const vulkanCard = cardBySlug(page, 'vulkan-std')
+    await vulkanCard.locator('[data-testid="pf-btn-editcopy-vulkan-std"]').click()
     await expect(page.locator('.pf-form-panel')).toBeVisible()
 
-    // Name should be pre-filled as "vulkan-std-copy".
+    // Form is the create flow titled as an edit-a-copy of the seed.
+    await expect(page.locator('.pf-form-title')).toHaveText('Edit a copy · vulkan-std')
+
+    // Name prefilled as "<seed>-custom", editable; image carried over.
     const nameInput = page.locator('[data-testid="pf-input-name"]')
-    await expect(nameInput).toHaveValue('vulkan-std-copy')
+    await expect(nameInput).toHaveValue('vulkan-std-custom')
+    await expect(nameInput).not.toBeDisabled()
+    const imageInput = page.locator('[data-testid="pf-input-image"]')
+    await expect(imageInput).toHaveValue('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
+
+    await page.click('[data-testid="pf-btn-submit"]')
+    await expect(page.locator('.pf-form-panel')).not.toBeVisible({ timeout: 5_000 })
+
+    expect(posts).toHaveLength(1)
+    expect(posts[0].name).toBe('vulkan-std-custom')
+    expect(posts[0].image).toBe('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
+    expect(posts[0].cloned_from).toBe('vulkan-std')
+  })
+
+  // ── Clone flow (custom cards) ────────────────────────────────────────────────
+
+  test('clone: prefills name as <source>-copy; POST carries cloned_from', async ({ page }) => {
+    const posts: any[] = []
+    await page.route('**/api/profiles', async (route) => {
+      if (route.request().method() === 'POST') {
+        try { posts.push(JSON.parse(route.request().postData() || '{}')) } catch { posts.push({}) }
+        return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({}) })
+      }
+      return json(route, PROFILES_WITH_CUSTOM)
+    })
+
+    await gotoProfiles(page)
+
+    // Click Clone on the custom card (seeds no longer have a Clone button).
+    const customCard = page.locator('.pf-card', { hasText: 'my-custom' })
+    await customCard.locator('[data-testid="pf-btn-clone-my-custom"]').click()
+    await expect(page.locator('.pf-form-panel')).toBeVisible()
+
+    // Name should be pre-filled as "my-custom-copy".
+    const nameInput = page.locator('[data-testid="pf-input-name"]')
+    await expect(nameInput).toHaveValue('my-custom-copy')
 
     // Image should be pre-filled from the source.
     const imageInput = page.locator('[data-testid="pf-input-image"]')
-    await expect(imageInput).toHaveValue('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
+    await expect(imageInput).toHaveValue('ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server')
 
     // Submit.
     await page.click('[data-testid="pf-btn-submit"]')
     await expect(page.locator('.pf-form-panel')).not.toBeVisible({ timeout: 5_000 })
 
     expect(posts).toHaveLength(1)
-    expect(posts[0].name).toBe('vulkan-std-copy')
-    expect(posts[0].image).toBe('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
+    expect(posts[0].name).toBe('my-custom-copy')
+    expect(posts[0].cloned_from).toBe('my-custom')
+  })
+
+  // ── Provenance display ───────────────────────────────────────────────────────
+
+  test('card with cloned_from shows "based on <source>"', async ({ page }) => {
+    await gotoProfiles(page)
+
+    const customCard = cardBySlug(page, 'my-custom')
+    await expect(customCard.locator('.pf-based')).toHaveText(/based on\s+vulkan-std/)
+
+    // Seeds have no provenance line.
+    const vulkanCard = cardBySlug(page, 'vulkan-std')
+    await expect(vulkanCard.locator('.pf-based')).toHaveCount(0)
   })
 
   // ── Delete flow ──────────────────────────────────────────────────────────────

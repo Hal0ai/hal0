@@ -341,3 +341,28 @@ def test_delete_succeeds_with_only_corrupt_toml_and_warns(
     log_text = captured.out + captured.err + caplog.text
     assert "profiles.in_use_scan_error" in log_text
     assert "broken-slot" in log_text
+
+
+# ── cloned_from provenance ─────────────────────────────────────────────────────
+
+
+def test_create_with_cloned_from_201_and_listed(client: TestClient) -> None:
+    r = client.post(
+        "/api/profiles",
+        json={
+            "name": "vulkan-std-custom",
+            "image": "ghcr.io/x/y:z",
+            "cloned_from": "vulkan-std",
+        },
+    )
+    assert r.status_code == 201
+    assert r.json()["cloned_from"] == "vulkan-std"
+
+    listed = client.get("/api/profiles").json()
+    item = next(p for p in listed if p["name"] == "vulkan-std-custom")
+    assert item["cloned_from"] == "vulkan-std"
+
+
+def test_seed_profiles_have_null_cloned_from(client: TestClient) -> None:
+    listed = client.get("/api/profiles").json()
+    assert listed and all(p["cloned_from"] is None for p in listed)
