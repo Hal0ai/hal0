@@ -16,14 +16,40 @@ a follow-up (scrape each container's own ``/metrics``).
 
 from __future__ import annotations
 
+import os
+import shutil
+from pathlib import Path
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from hal0 import __version__
+from hal0.config import paths
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+# Below this free-space floor a disk check reports "degraded" (not down —
+# hal0 still serves, but model pulls / state writes are at risk).
+_DISK_FREE_FLOOR_MB = 500
+
+
+def _disk_free_mb(path: Path) -> int:
+    """Free MiB on the filesystem hosting ``path`` (0 if unavailable).
+
+    Walks up to the first existing parent so a not-yet-created state dir
+    on a fresh install still reports the underlying filesystem's space.
+    """
+    try:
+        target = path
+        while not target.exists() and target != target.parent:
+            target = target.parent
+        return shutil.disk_usage(str(target)).free // (1024 * 1024)
+    except OSError:
+        return 0
 
 
 @router.get("/status")
@@ -96,8 +122,54 @@ async def get_status(request: Request) -> dict[str, Any]:
 
 
 @router.get("/health/system")
-async def health_system() -> dict[str, object]:
-    return {"status": "ok", "checks": {}}
+async def health_system(request: Request) -> dict[str, Any]:
+    """Deep health: disk headroom, slot manager, event bus.
+
+    Always returns HTTP 200 with an honest payload — the dashboard reads
+    ``status`` (``ok`` | ``degraded``) and the per-check ``checks`` map
+    rather than relying on the HTTP status, so a single soft failure
+    (low disk, slot manager not yet wired) surfaces without 5xx-ing the
+    whole liveness poll.
+    """
+    checks: dict[str, Any] = {}
+    degraded = False
+
+    # ── disk headroom on the state + config roots ───────────────────────
+    # HAL0_HOME (when set) reparents both roots, so checking var_lib()
+    # covers the dev/test sandbox AND the production /var/lib/hal0 path.
+    for label, root in (("state", paths.var_lib()), ("config", paths.etc())):
+        free_mb = _disk_free_mb(root)
+        ok = free_mb >= _DISK_FREE_FLOOR_MB
+        checks[f"disk_{label}"] = {
+            "ok": ok,
+            "free_mb": free_mb,
+            "floor_mb": _DISK_FREE_FLOOR_MB,
+            "path": str(root),
+        }
+        degraded = degraded or not ok
+
+    # ── slot manager responsive ─────────────────────────────────────────
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        checks["slot_manager"] = {"ok": False, "detail": "not wired"}
+        degraded = True
+    else:
+        try:
+            slots = await sm.list()
+            checks["slot_manager"] = {"ok": True, "slots": len(slots)}
+        except Exception as exc:
+            checks["slot_manager"] = {"ok": False, "detail": str(exc)}
+            degraded = True
+
+    # ── event bus alive ─────────────────────────────────────────────────
+    event_bus = getattr(request.app.state, "events", None)
+    checks["event_bus"] = {"ok": event_bus is not None}
+    degraded = degraded or event_bus is None
+
+    return {
+        "status": "degraded" if degraded else "ok",
+        "checks": checks,
+    }
 
 
 @router.get("/metrics")
@@ -137,5 +209,43 @@ async def metrics_prometheus(request: Request) -> Response:
 
 
 @router.get("/features")
-async def list_features() -> dict[str, bool]:
-    return {}
+async def list_features(request: Request) -> dict[str, Any]:
+    """Runtime feature gates the dashboard branches on.
+
+    Flat ``feature → bool | str`` map:
+
+      - ``comfyui_switchover``: image-gen engine switchover is unlocked
+        (``HAL0_COMFYUI_SWITCHOVER_ENABLED=1``).
+      - ``memory``: a memory provider is wired (HAL0_MEMORY_ENABLED + a
+        successful init).
+      - ``memory_engine``: the configured engine name (``hindsight`` |
+        ``cognee`` | ``mem0`` | …) — a string, not a bool.
+      - ``npu``: an NPU was detected by the (cached) hardware probe.
+      - ``mcp_supervisor``: the MCP process supervisor (start/stop/
+        restart) — not implemented yet (pending ADR-0015), always false.
+    """
+    features: dict[str, Any] = {
+        "comfyui_switchover": os.environ.get("HAL0_COMFYUI_SWITCHOVER_ENABLED", "") == "1",
+        "memory": getattr(request.app.state, "memory_provider", None) is not None,
+        "mcp_supervisor": False,
+    }
+
+    # memory engine name — read from hal0.toml; default to the schema
+    # default rather than 500-ing the whole feature map on a parse error.
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        features["memory_engine"] = load_hal0_config().memory.engine
+    except Exception:
+        features["memory_engine"] = "unknown"
+
+    # NPU presence via the cached install-time probe (cheap: reads
+    # hardware.json, never shells out on the request path).
+    try:
+        from hal0.config.loader import load_hardware_info
+
+        features["npu"] = bool(load_hardware_info().npu.present)
+    except Exception:
+        features["npu"] = False
+
+    return features
