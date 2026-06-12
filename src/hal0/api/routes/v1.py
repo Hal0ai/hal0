@@ -770,23 +770,22 @@ async def _is_npu_trio_request(
          ``slot.model.default`` AND ``slot.name`` so callers that pass
          either the model id or the slot name (e.g. dashboard cards
          using ``model="stt-npu"``) hit the same path.
-      2. The :class:`FLMTrioRouter` itself is attached on ``app.state``
+      2. The :class:`NpuTrioRouter` itself is attached on ``app.state``
          (lifespan didn't fail to construct it).
 
     Returning ``False`` means we fall through to the regular dispatcher
     path — which, in the NPU-not-enabled case, is exactly the right
-    fallback: Lemonade routes to a GPU/CPU embed/stt slot if one exists,
+    fallback: dispatch routes to a GPU/CPU embed/stt slot if one exists,
     else 404s.
 
     Note: we deliberately DON'T check whether the FLM chat is currently
-    loaded here. That probe lives inside the trio router (it's an
-    extra ``/v1/health`` call we don't want to spend on the gating
-    check). When the chat isn't loaded the dispatch raises
-    :class:`FLMTrioNotAvailable`, which surfaces as a clean 503 with the
+    loaded here. That probe lives inside the trio router. When the
+    container isn't dispatchable the dispatch raises
+    :class:`NpuTrioNotAvailable`, which surfaces as a clean 503 with the
     "load an NPU chat slot first" envelope — better UX than silently
     falling through to a 404 from the wrong path.
     """
-    if getattr(request.app.state, "flm_trio_router", None) is None:
+    if getattr(request.app.state, "npu_trio_router", None) is None:
         return False
     slot_manager = getattr(request.app.state, "slot_manager", None)
     if slot_manager is None:
@@ -820,7 +819,7 @@ async def _is_npu_trio_request(
     return False
 
 
-async def _dispatch_via_flm_trio(
+async def _dispatch_via_npu_trio(
     request: Request,
     *,
     body: dict[str, Any],
@@ -830,7 +829,7 @@ async def _dispatch_via_flm_trio(
 
     Returns a FastAPI :class:`Response` on success / surfaced FLM error,
     or ``None`` when the trio router is not present (caller falls
-    through). :class:`FLMTrioNotAvailable` propagates out so the error
+    through). :class:`NpuTrioNotAvailable` propagates out so the error
     middleware emits the proper 503 envelope; HTTP errors from the FLM
     child are mirrored into the response verbatim.
 
@@ -840,14 +839,14 @@ async def _dispatch_via_flm_trio(
     """
     if kind != "embed":  # defensive — only one caller today
         return None
-    router_obj = getattr(request.app.state, "flm_trio_router", None)
+    router_obj = getattr(request.app.state, "npu_trio_router", None)
     if router_obj is None:
         return None
     upstream_resp = await router_obj.dispatch_embed_npu(body=body)
-    return _wrap_flm_trio_response(upstream_resp)
+    return _wrap_npu_trio_response(upstream_resp)
 
 
-def _wrap_flm_trio_response(upstream: Any) -> Response:
+def _wrap_npu_trio_response(upstream: Any) -> Response:
     """Build a FastAPI :class:`Response` from an httpx response.
 
     Mirrors what :class:`Dispatcher._forward_direct` does — strips
@@ -939,7 +938,7 @@ async def embeddings(request: Request, dispatcher: DispatcherDep) -> Response:
     # the embed shadow role — only the chat anchor). Plan §5.2.
     body = await _read_json_body(request)
     if await _is_npu_trio_request(request, body, slot_type="embedding"):
-        trio_response = await _dispatch_via_flm_trio(request, body=body, kind="embed")
+        trio_response = await _dispatch_via_npu_trio(request, body=body, kind="embed")
         if trio_response is not None:
             return trio_response
     return await _dispatch_and_forward(request, dispatcher, body=body)
@@ -1306,13 +1305,13 @@ async def _forward_multipart(
     if model_value and request.url.path.endswith("/audio/transcriptions"):
         synthetic_body = {"model": model_value}
         if await _is_npu_trio_request(request, synthetic_body, slot_type="transcription"):
-            router_obj = getattr(request.app.state, "flm_trio_router", None)
+            router_obj = getattr(request.app.state, "npu_trio_router", None)
             if router_obj is not None:
                 upstream_resp = await router_obj.dispatch_stt_npu(
                     body=raw_body,
                     content_type=content_type,
                 )
-                return _wrap_flm_trio_response(upstream_resp)
+                return _wrap_npu_trio_response(upstream_resp)
 
     call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})
 

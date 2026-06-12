@@ -1142,43 +1142,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.omni_router = None
 
-    # FLM trio router (PR-19, plan §5 + ADR-0008 §5 + ADR-0009). When an
-    # NPU chat slot is loaded with ``flm.args = "--asr 1 --embed 1"``,
-    # Lemonade only registers the chat model — STT + embed run on the
-    # same FLM child but aren't reachable through Lemonade's dispatcher.
-    # This router discovers the FLM child's ``backend_url`` from
-    # ``/v1/health`` and posts directly when v1.py's STT/embed routes
-    # detect an enabled ``stt-npu`` / ``embed-npu`` slot. Falls back
-    # cleanly when the FLM chat isn't loaded (FLMTrioNotAvailable raised
-    # at dispatch time so the user sees a clear envelope).
-    flm_trio_router = None
+    # NPU trio router (ADR-0008 §5 + ADR-0009). The containerized npu
+    # slot's single ``flm serve`` process answers chat + STT + embed on
+    # one static port; chat routes through the slot upstream like any
+    # other slot, while v1.py's STT/embed routes post the two shadow
+    # roles straight to the container when they detect an enabled
+    # ``stt-npu`` / ``embed-npu`` slot record. Degrades cleanly when the
+    # container isn't dispatchable (NpuTrioNotAvailable raised at
+    # dispatch time so the user sees a clear envelope).
     try:
-        from hal0.dispatcher.flm_trio import FLMTrioRouter
+        from hal0.dispatcher.npu_trio import NpuTrioRouter
 
-        lemonade_client_for_trio = getattr(app.state, "lemonade_client", None)
-        if lemonade_client_for_trio is not None:
-            flm_trio_router = FLMTrioRouter(
-                lemonade_client=lemonade_client_for_trio,
-                slot_manager=slot_manager,
-            )
-            app.state.flm_trio_router = flm_trio_router
-            log.info("flm_trio.attached")
-        else:
-            # No lemonade client → no trio routing. v1.py's gating check
-            # treats a missing router as "trio not available" and falls
-            # through to the normal Lemonade dispatch path, which 404s
-            # for stt-npu/embed-npu requests (since Lemonade has no
-            # such models registered) — that 404 is the expected
-            # behaviour when NPU isn't wired up.
-            app.state.flm_trio_router = None
-            log.info("flm_trio.skipped_no_lemonade_client")
+        app.state.npu_trio_router = NpuTrioRouter(slot_manager=slot_manager)
+        log.info("npu_trio.attached")
     except Exception as exc:
         log.warning(
-            "flm_trio.start_failed",
+            "npu_trio.start_failed",
             error=str(exc),
             error_type=type(exc).__name__,
         )
-        app.state.flm_trio_router = None
+        app.state.npu_trio_router = None
 
     try:
         async with AsyncExitStack() as stack:

@@ -189,7 +189,7 @@ def resolve_slot(  # TIER1
     # slot_name == candidate — how Step 0 preemption identifies container
     # slots) qualifies too: kokoro's tts container registers as a remote, so
     # the old kind=="slot"-only gate sent /audio/speech to NoRouteFound and
-    # the dead lemond tts slot.  Genuine external remotes (slot_name=None)
+    # a dead legacy tts slot.  Genuine external remotes (slot_name=None)
     # are still rejected.
     acceptable = upstream is not None and (
         upstream.kind == "slot"

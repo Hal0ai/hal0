@@ -8,17 +8,12 @@ Mounted under ``/api/npu`` (see :mod:`hal0.api.__init__`):
     block to surface a "Swap incoming" banner + spinner.
 
 Why a dedicated route (not the slot-state SSE stream): the swap-status
-signal needs to merge two unrelated sources (the slot TOML + lemond's
-``/v1/health``). Threading both into the SSE stream would couple the
-slot-state emitter to lemond's HTTP surface; a simple poll endpoint
-keeps the concerns separate and the dashboard's swap banner can re-poll
-every few seconds without holding a long-lived connection open.
+signal derives from slot TOML + slot lifecycle state; a simple poll
+endpoint keeps the dashboard's swap banner re-polling every few seconds
+without holding a long-lived connection open.
 
 The endpoint is read-only and falls back to ``in_progress=false`` on
-every error path (lemond down, no SlotManager, etc.) — the dashboard
-ALREADY surfaces the ``lemond-offline`` banner in the global banner
-stack, so the swap banner re-rendering "no swap" during an outage is
-the correct degrade.
+every error path (no SlotManager, accessor errors, etc.).
 """
 
 from __future__ import annotations
@@ -49,13 +44,11 @@ async def get_swap_status(request: Request) -> dict[str, Any]:
 
     Always 200. Returns ``in_progress=false`` whenever:
 
-      - No SlotManager / LemonadeClient is wired (test bypass).
+      - No SlotManager is wired (test bypass).
       - No NPU LLM slot is enabled.
-      - Lemonade ``/v1/health`` is unreachable (caught in the helper).
       - The configured NPU LLM model already matches the loaded one.
     """
     sm = getattr(request.app.state, "slot_manager", None)
-    lemonade_client = getattr(request.app.state, "lemonade_client", None)
 
     if sm is None:
         # Pre-lifespan / test bypass. Return a stable empty payload so
@@ -71,7 +64,7 @@ async def get_swap_status(request: Request) -> dict[str, Any]:
         # catch covers the (unlikely) directory-level failure.
         slot_configs = []
 
-    status = await fetch_npu_swap_status(slot_configs, lemonade_client, slot_manager=sm)
+    status = await fetch_npu_swap_status(slot_configs, slot_manager=sm)
     return status.to_dict()
 
 

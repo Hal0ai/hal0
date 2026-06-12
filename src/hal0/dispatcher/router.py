@@ -93,15 +93,11 @@ log = structlog.get_logger("hal0-dispatch")
 #      (``127.0.0.1:8080/v1``). That value is deliberate so the ``/v1/models``
 #      aggregator can short-circuit it instead of recursing over HTTP. But it
 #      is the WRONG target to *forward* a chat request to — forwarding to
-#      ``:8080`` would re-enter ``/v1/chat/completions`` and loop forever. The
-#      real inference backend is the Lemonade gateway, so composite forwards
-#      are redirected there.
+#      ``:8080`` would re-enter ``/v1/chat/completions`` and loop forever.
+#      Dispatch therefore SKIPS the composite at every resolution step:
+#      models without a live serving slot resolve via the remaining
+#      upstreams or surface a clean NoRouteFound envelope.
 _HAL0_COMPOSITE_NAME = "hal0"
-
-# Lemonade's OpenAI-compatible gateway (ADR-0008 §1: lemond binds
-# 127.0.0.1:13305). Overridable via ``LEMONADE_BASE_URL`` to match
-# ``hal0.api.routes.lemonade_proxy._lemonade_base_url``.
-_LEMONADE_DEFAULT_BASE_URL = "http://127.0.0.1:13305"
 
 
 def _is_hal0_composite(upstream: Upstream) -> bool:
@@ -119,36 +115,28 @@ def _is_hal0_composite(upstream: Upstream) -> bool:
     )
 
 
-def _lemonade_gateway_base() -> str:
-    """Return the Lemonade OpenAI-compat gateway base URL (no trailing slash)."""
-    import os
-
-    return os.environ.get("LEMONADE_BASE_URL", _LEMONADE_DEFAULT_BASE_URL).rstrip("/")
-
-
 def _resolve_target_url(upstream: Upstream, request_path: str) -> str:
     """Build the forward URL for ``upstream`` given the incoming request path.
 
-    For the composite ``hal0`` upstream the forward must NOT go to the
-    registered ``:8080`` URL (that re-enters hal0-api and loops); it is
-    redirected to the Lemonade gateway. Every other upstream forwards to
-    its own ``url`` via :func:`_join_url`.
+    Every upstream forwards to its own ``url`` via :func:`_join_url`. The
+    composite ``hal0`` upstream is never forwarded to (dispatch skips it),
+    so no special-casing is needed here.
     """
-    if _is_hal0_composite(upstream):
-        return _join_url(_lemonade_gateway_base() + "/v1", request_path)
     return _join_url(upstream.url, request_path)
 
 
 # Transport-layer errors that indicate the upstream's child process is gone
-# rather than a request-level failure.  These are the recoverable triggers
-# for ``_recover_evicted_slot``:
+# rather than a request-level failure:
 #   - ConnectError: TCP connect refused (port closed before the request).
-#   - RemoteProtocolError: peer dropped the connection mid-request (the
-#     classic "lemonade evicted while we were dialing" race).
+#   - RemoteProtocolError: peer dropped the connection mid-request.
 #
+# systemd ``Restart=`` policy owns process recovery for container slots;
+# the dispatcher's only job on a dead port is the GpuArbiter image-mode
+# guard (a dead llm-group port during image mode is the arbiter's doing
+# and must surface as the structured ``gpu.image_mode`` 503).
 # Read/Write timeouts are intentionally excluded — those usually mean the
-# child is alive but overloaded, and re-spawning would lose user work.
-_RECOVERABLE_TRANSPORT_ERRORS = (
+# child is alive but overloaded.
+_DEAD_PORT_TRANSPORT_ERRORS = (
     httpx.ConnectError,
     httpx.RemoteProtocolError,
 )
@@ -172,8 +160,7 @@ _IMAGE_DEFAULT = "img"
 #   hal0's public reranking route is /v1/rerankings (OpenAI-compat shape).
 #   llama-server's native reranking endpoint is POST /rerank (not /rerankings).
 #   The embed slot never served /v1/rerankings — this rewrite only fires for
-#   the dispatcher-selected rerank upstream; the lemonade fall-through
-#   (/api/routes/lemonade_proxy) is NOT touched by this table.
+#   the dispatcher-selected rerank upstream.
 _UPSTREAM_PATH_REWRITES: dict[str, str] = {
     "/v1/rerankings": "/v1/rerank",
 }
@@ -470,11 +457,10 @@ class Dispatcher:
         # A loaded container slot (kind="remote" + slot_name) is the
         # authoritative server for the models it advertises. The model
         # registry binds every registered id — including container-served
-        # models — to the synthetic composite ``hal0`` upstream, which would
-        # forward to lemonade. So a container slot MUST win over that binding,
-        # else hal0/* requests for a container-backed model route to lemonade
-        # and 404 (cutover #662). Only fires on a warm cache hit for a
-        # container remote; lemonade-only models are untouched.
+        # models — to the synthetic composite ``hal0`` upstream, which is
+        # never forwarded to. So a container slot MUST win over that
+        # binding (cutover #662). Only fires on a warm cache hit for a
+        # container remote.
         for upstream in self._upstreams_in_priority_order():
             if _container_slot_name_of(upstream) and model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
@@ -498,7 +484,14 @@ class Dispatcher:
         if registry_entry is not None:
             upstream_name, upstream_model = registry_entry
             upstream = self._upstreams.get(upstream_name)
-            if upstream is None:
+            if upstream is not None and _is_hal0_composite(upstream):
+                # Registry ids bind to the composite by default; it has no
+                # backing server to forward to. Fall through — a live slot
+                # already won in Step 0, so reaching here means the model
+                # isn't being served anywhere right now.
+                upstream = None
+                registry_entry = None
+            if registry_entry is not None and upstream is None:
                 # Explicit binding to a missing upstream — config error, not a
                 # silent fallthrough.  Mirrors haloai's UnknownUpstream raise.
                 raise UnknownUpstream(
@@ -507,6 +500,9 @@ class Dispatcher:
                     details={"model": model_id, "upstream": upstream_name},
                 )
 
+        if registry_entry is not None:
+            upstream_name, upstream_model = registry_entry
+            upstream = self._upstreams[upstream_name]
             advertised = self._cached_models(upstream.name)
             online = bool(advertised) or await self._is_online(upstream)
             if not online and upstream.kind == "slot":
@@ -557,14 +553,14 @@ class Dispatcher:
             )
 
         # ── Step 2: passthrough on warm caches ───────────────────────────
-        # The composite ``hal0`` upstream participates here (PR #424): a
-        # cache hit yields a call whose ``_slot_name_of`` is "" (no readiness
-        # gate / SERVING wrap) and whose ``_resolve_target_url`` redirects to
-        # the lemond gateway instead of hal0-api's own :8080 (avoids the
-        # self-recursion loop). Backend-aware loading for slot-backed models
-        # is handled at the route layer before dispatch (#430), independent
-        # of which upstream wins here.
+        # The composite ``hal0`` upstream is SKIPPED: it exists only for the
+        # /v1/models aggregation and has no backing server to forward to.
+        # Backend-aware loading for slot-backed models is handled at the
+        # route layer before dispatch (#430), independent of which upstream
+        # wins here.
         for upstream in self._upstreams_in_priority_order():
+            if _is_hal0_composite(upstream):
+                continue
             if model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -591,6 +587,8 @@ class Dispatcher:
         if cold_remotes:
             await self._cold_prefetch(cold_remotes)  # TIER2 + TIER3
             for upstream in self._upstreams_in_priority_order():
+                if _is_hal0_composite(upstream):
+                    continue
                 if model_id in self._cached_models(upstream.name):
                     call = UpstreamCall(
                         upstream_name=upstream.name,
@@ -695,14 +693,9 @@ class Dispatcher:
             # the img slot.
             self._guard_gpu_image_mode(call)
         if call.slot_name and self._slot_manager is not None:
-            # B1 (ADR-0022): backend-aware lazy-load. lemond auto-loads a
-            # model the dispatcher forwards by name using its GLOBAL
-            # config.json default backend — ignoring the slot's declared
-            # device. On a cold miss we kick SlotManager.load(slot_name)
-            # FIRST, which routes through LemonadeProvider.load(cfg) and
-            # sends the device-derived llamacpp_backend, so the per-model
-            # backend sticks. We do NOT inject llamacpp_backend into the
-            # chat-completions body — lemond's chat endpoint ignores it.
+            # B1 (ADR-0022): backend-aware lazy-load. On a cold miss we
+            # kick SlotManager.load(slot_name) FIRST so the slot's declared
+            # device/profile drives the load, then gate on readiness.
             await self._ensure_slot_loaded_backend_aware(call)
             # Swap-window gate: refuse to forward if the slot is loading.
             # Without this, requests hit a dead port (502) or a still-
@@ -712,7 +705,7 @@ class Dispatcher:
         if call.container_slot_name and self._slot_manager is not None:
             # Container-slot readiness gate (#656): container slots register
             # as kind="remote" upstreams so slot_name is empty above and the
-            # Lemonade gate never fires.  We probe the container directly
+            # slot-kind gate never fires.  We probe the container directly
             # (systemctl is-active + /health) before forwarding so the client
             # gets a structured slot.loading 503 with Retry-After instead of
             # a raw 502 ConnectError when the container is down or starting.
@@ -725,7 +718,7 @@ class Dispatcher:
         Delegates to :meth:`GpuArbiter.guard_llm_dispatch`, which raises the
         typed ``GpuImageMode`` (503, code ``gpu.image_mode``, details carry
         ``retry_after_s``) for llm-group slots and no-ops for everything
-        else (img slot itself, NPU/CPU/lemonade slots, remote upstreams).
+        else (img slot itself, NPU/CPU slots, remote upstreams).
         The error middleware promotes ``retry_after_s`` to a ``Retry-After``
         header exactly like it does for ``SlotLoading`` — no parallel
         plumbing.
@@ -742,12 +735,9 @@ class Dispatcher:
         """Kick a backend-aware load on a cold miss before forwarding.
 
         B1 (ADR-0022) — the name-based lazy-load gap. When a request
-        resolves to a slot whose model is NOT currently in lemond's
-        ``/v1/health.loaded[]``, lemond would auto-load it on the first
-        forward using its global default backend (rocm) regardless of the
-        slot's declared ``device``. To make the per-model backend stick we
-        instead drive ``SlotManager.load(slot_name)`` here, which sends the
-        device-derived ``llamacpp_backend`` through ``LemonadeProvider.load``.
+        resolves to a slot whose model is not loaded, we drive
+        ``SlotManager.load(slot_name)`` here so the slot's declared
+        device/profile picks the backend.
 
         Behaviour:
           - Slot already READY/SERVING/IDLE → no-op (model is loaded, fast
@@ -772,10 +762,8 @@ class Dispatcher:
             # status enrichment, not corrected mid-request.)
             return
         # Cold miss — drive the backend-aware load. SlotManager.load is
-        # idempotent (it returns early when already loaded) and routes the
-        # device→llamacpp_backend through LemonadeProvider.load(cfg), so the
-        # per-model backend sticks instead of falling back to lemond's
-        # global default.
+        # idempotent (it returns early when already loaded); the slot's
+        # declared device/profile picks the backend.
         try:
             await self._slot_manager.load(slot_name)
         except Exception as exc:
@@ -841,65 +829,31 @@ class Dispatcher:
             details=self._build_loading_response(call, current),
         )
 
-    async def _recover_evicted_slot(self, call: UpstreamCall) -> bool:
-        """Attempt to resync a slot whose upstream port went dead unexpectedly.
+    def _guard_dead_port_image_mode(self, call: UpstreamCall) -> None:
+        """Image-mode guard for a slot upstream whose port went dead.
 
-        Called from ``_forward_direct`` / ``_forward_streaming`` when an
-        :class:`httpx.ConnectError` lands on a slot upstream.  hal0's
-        in-memory state said the slot was READY/SERVING/IDLE (the gate
-        let us through), but the upstream port was dead — the usual
-        cause is a Lemonade idle/OOM eviction that hal0 didn't observe.
-
-        Delegates to ``SlotManager.recover_evicted_slot`` which forces
-        the slot OFFLINE and re-runs the normal load lifecycle (per-slot
-        lock serializes concurrent requests).
-
-        Returns:
-          ``True``  — slot recovered, caller should retry the forward once.
-          ``False`` — recovery is not applicable (remote upstream, no slot
-            manager wired) or the recover call itself raised.  Caller
-            should surface the original :class:`UpstreamUnavailable`.
+        Called from ``_forward_direct`` / ``_forward_streaming`` when a
+        transport error lands on a slot upstream. systemd ``Restart=``
+        policy owns process recovery for container slots — the dispatcher
+        never reloads on a dead port. The ONE thing it must still do
+        (D4 review, NON-NEGOTIABLE): when the GpuArbiter is in exclusive
+        image mode and this is an llm-group slot, the dead port is (or may
+        as well be) the ARBITER's doing — it unloaded the slot to hand the
+        GPU to the img slot — so the client must see the structured
+        ``gpu.image_mode`` 503 envelope (Retry-After via the error
+        middleware) instead of a generic UpstreamUnavailable.
 
         Raises:
-          GpuImageMode: NON-NEGOTIABLE (D4 review) — when the GpuArbiter
-            is in exclusive image mode and this is an llm-group slot, the
-            dead port is (or may as well be) the ARBITER's doing: it
-            unloaded the slot to hand the GPU to the img slot.  Recovery
-            here would reload an LLM model INTO image mode and fight the
-            arbiter for the GPU, so we suppress it and surface the same
-            structured ``gpu.image_mode`` 503 envelope the dispatch guard
-            emits (Retry-After included via the error middleware).
+          GpuImageMode: llm-group slot during exclusive image mode.
         """
         if not (call.slot_name and self._slot_manager is not None):
-            return False
+            return
         arbiter = getattr(self._slot_manager, "arbiter", None)
         if arbiter is not None:
             # Raises GpuImageMode for llm-group slots while mode == img;
             # no-op otherwise. Covers the race where the arbiter flipped
             # to img (and force-killed the container) mid-request.
             arbiter.guard_llm_dispatch(call.slot_name)
-        log.warning(
-            "dispatch.upstream_dead_attempting_recover",
-            upstream=call.upstream_name,
-            slot=call.slot_name,
-            target=call.target_url,
-        )
-        try:
-            await self._slot_manager.recover_evicted_slot(call.slot_name)
-        except Exception as exc:
-            log.warning(
-                "dispatch.recover_evicted_slot_failed",
-                slot=call.slot_name,
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-            return False
-        log.info(
-            "dispatch.upstream_recovered",
-            upstream=call.upstream_name,
-            slot=call.slot_name,
-        )
-        return True
 
     def _build_loading_response(
         self,
@@ -989,53 +943,48 @@ class Dispatcher:
         client: httpx.AsyncClient,
         call: UpstreamCall,
     ) -> Response:
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                resp = await client.request(
-                    call.method,
-                    call.target_url,
-                    content=call.body or None,
-                    headers=call.headers,
-                )
-                break
-            except _RECOVERABLE_TRANSPORT_ERRORS as exc:
-                if attempt == 1 and await self._recover_evicted_slot(call):
-                    continue
-                log.warning(
-                    "dispatch.forward_failed",
-                    upstream=call.upstream_name,
-                    method=call.method,
-                    target=call.target_url,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-                raise UpstreamUnavailable(
-                    f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
-                    details={
-                        "upstream": call.upstream_name,
-                        "target": call.target_url,
-                        "error": str(exc),
-                    },
-                ) from exc
-            except (httpx.HTTPError, OSError) as exc:
-                log.warning(
-                    "dispatch.forward_failed",
-                    upstream=call.upstream_name,
-                    method=call.method,
-                    target=call.target_url,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-                raise UpstreamUnavailable(
-                    f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
-                    details={
-                        "upstream": call.upstream_name,
-                        "target": call.target_url,
-                        "error": str(exc),
-                    },
-                ) from exc
+        try:
+            resp = await client.request(
+                call.method,
+                call.target_url,
+                content=call.body or None,
+                headers=call.headers,
+            )
+        except _DEAD_PORT_TRANSPORT_ERRORS as exc:
+            self._guard_dead_port_image_mode(call)
+            log.warning(
+                "dispatch.forward_failed",
+                upstream=call.upstream_name,
+                method=call.method,
+                target=call.target_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise UpstreamUnavailable(
+                f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                details={
+                    "upstream": call.upstream_name,
+                    "target": call.target_url,
+                    "error": str(exc),
+                },
+            ) from exc
+        except (httpx.HTTPError, OSError) as exc:
+            log.warning(
+                "dispatch.forward_failed",
+                upstream=call.upstream_name,
+                method=call.method,
+                target=call.target_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise UpstreamUnavailable(
+                f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                details={
+                    "upstream": call.upstream_name,
+                    "target": call.target_url,
+                    "error": str(exc),
+                },
+            ) from exc
 
         return Response(
             content=resp.content,
@@ -1052,54 +1001,49 @@ class Dispatcher:
         # We open the stream eagerly so connect errors surface as
         # UpstreamUnavailable instead of leaking through StreamingResponse
         # as a generator-time exception that confuses the error middleware.
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                req = client.build_request(
-                    call.method,
-                    call.target_url,
-                    content=call.body or None,
-                    headers=call.headers,
-                )
-                resp = await client.send(req, stream=True)
-                break
-            except _RECOVERABLE_TRANSPORT_ERRORS as exc:
-                if attempt == 1 and await self._recover_evicted_slot(call):
-                    continue
-                log.warning(
-                    "dispatch.forward_stream_open_failed",
-                    upstream=call.upstream_name,
-                    method=call.method,
-                    target=call.target_url,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-                raise UpstreamUnavailable(
-                    f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
-                    details={
-                        "upstream": call.upstream_name,
-                        "target": call.target_url,
-                        "error": str(exc),
-                    },
-                ) from exc
-            except (httpx.HTTPError, OSError) as exc:
-                log.warning(
-                    "dispatch.forward_stream_open_failed",
-                    upstream=call.upstream_name,
-                    method=call.method,
-                    target=call.target_url,
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-                raise UpstreamUnavailable(
-                    f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
-                    details={
-                        "upstream": call.upstream_name,
-                        "target": call.target_url,
-                        "error": str(exc),
-                    },
-                ) from exc
+        try:
+            req = client.build_request(
+                call.method,
+                call.target_url,
+                content=call.body or None,
+                headers=call.headers,
+            )
+            resp = await client.send(req, stream=True)
+        except _DEAD_PORT_TRANSPORT_ERRORS as exc:
+            self._guard_dead_port_image_mode(call)
+            log.warning(
+                "dispatch.forward_stream_open_failed",
+                upstream=call.upstream_name,
+                method=call.method,
+                target=call.target_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise UpstreamUnavailable(
+                f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                details={
+                    "upstream": call.upstream_name,
+                    "target": call.target_url,
+                    "error": str(exc),
+                },
+            ) from exc
+        except (httpx.HTTPError, OSError) as exc:
+            log.warning(
+                "dispatch.forward_stream_open_failed",
+                upstream=call.upstream_name,
+                method=call.method,
+                target=call.target_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise UpstreamUnavailable(
+                f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                details={
+                    "upstream": call.upstream_name,
+                    "target": call.target_url,
+                    "error": str(exc),
+                },
+            ) from exc
 
         async def _iter() -> AsyncIterator[bytes]:
             try:
@@ -1282,9 +1226,8 @@ def _slot_name_of(upstream: Upstream) -> str:
     returning ``"hal0"`` here would make ``forward()`` run the readiness
     gate against a non-existent slot (always OFFLINE → spurious 503) and
     wrap the call in a ``SlotManager.serving("hal0")`` context that can
-    never settle. Returning ``""`` routes it through ``_forward_plain``,
-    which is correct because the actual slot lifecycle is enforced on the
-    Lemonade gateway hop the composite forwards to.
+    never settle. Returning ``""`` routes it through ``_forward_plain``
+    (the composite is never actually forwarded to — dispatch skips it).
     """
     if upstream.kind != "slot":
         return ""
