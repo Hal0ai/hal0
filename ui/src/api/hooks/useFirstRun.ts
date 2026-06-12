@@ -60,22 +60,57 @@ export function useFirstRunPickDefault() {
   })
 }
 
+// Static mapping: wizard tier ids → curated model ids accepted by
+// POST /api/install/pick-default.
+//
+// Source: installer/manifests/omni/*.json primary.model_name, cross-verified
+// against GET /api/install/curated-models (which exposes the curated catalogue
+// filtered to recommended_slot in ("chat","primary")).
+//
+// Max and LMX manifests reference Qwen3.6-35B-A3B-MTP-GGUF which is NOT
+// currently in the curated catalogue — both degrade to the 27B model.
+// Log a backend follow-up to add the 35B entry so Max/LMX can use their
+// intended primary.
+const BUNDLE_CHAT_MODELS: Record<string, string> = {
+  lite:    'qwen3.5-0.8b',  // manifest: qwen3.5-0.8b ✓
+  default: 'qwen3.5-9b',    // manifest: qwen3.5-9b ✓
+  pro:     'qwen3.6-27b',   // manifest: Qwen3.6-27B-MTP-GGUF → curated id qwen3.6-27b ✓
+  max:     'qwen3.6-27b',   // manifest 35B not curated yet — degrade to 27b
+  lmx:     'qwen3.6-27b',   // LMX 35B not curated yet — degrade to 27b
+}
+
+export interface PickDefaultResponse {
+  model_id: string
+  slot: string
+  pull_job_id: string
+  next: string
+}
+
 export function useFirstRunInstall() {
   const qc = useQueryClient()
   return useMutation({
-    // No bundle-level install endpoint exists on the backend. We call
-    // POST /api/install/pick-default with the bundle id as the model_id.
-    // The backend will return 404 for unknown bundle ids (they're not
-    // curated model ids), which the wizard's catch block swallows —
-    // the progress stage renders "Install started" and picks up any
-    // per-model SSE streams that the pick-default calls have already
-    // kicked off. This is a known gap until a bundle-level endpoint lands.
-    mutationFn: ({ bundle, withNpu }: { bundle: string; withNpu?: boolean }) =>
-      apiPost(ENDPOINTS.installPickDefault, {
-        model_id: bundle,
+    // Call POST /api/install/pick-default with the REAL curated model id
+    // for the bundle's primary chat slot — NOT the bundle string itself.
+    // Bundle ids like "pro" are not valid curated model ids and 404 on the
+    // backend (CuratedModelNotFound).
+    //
+    // The progress pane (FirstRunProgress) receives { model_ids: [id] } so
+    // FrDownloadRow can reattach to the in-flight SSE pull stream immediately.
+    mutationFn: async ({ bundle, withNpu: _withNpu }: { bundle: string; withNpu?: boolean }) => {
+      const modelId = BUNDLE_CHAT_MODELS[bundle]
+      if (!modelId) {
+        // Surface unknown bundle clearly — don't silently 404 and show fake
+        // "Install started" when nothing was actually triggered.
+        throw new Error(`No curated model mapping for bundle "${bundle}" — check BUNDLE_CHAT_MODELS`)
+      }
+      const resp = await apiPost<PickDefaultResponse>(ENDPOINTS.installPickDefault, {
+        model_id: modelId,
         slot: 'chat',
-        with_npu: !!withNpu,
-      }),
+      })
+      // Normalise to the model_ids array shape the confirm → progress handoff
+      // reads (res?.model_ids) so FrDownloadRow mounts with the real id.
+      return { model_ids: [resp.model_id] }
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['firstrun'] })
       qc.invalidateQueries({ queryKey: ['models'] })
