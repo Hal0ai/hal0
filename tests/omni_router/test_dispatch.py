@@ -1,6 +1,6 @@
 """Per-tool dispatch handler tests — plan §7.
 
-Each handler validates args, routes via SlotManager, calls a Lemonade
+Each handler validates args, routes via SlotManager, calls an HTTP
 endpoint, and shapes the tool_result. We mock httpx via
 ``httpx.MockTransport`` and the SlotManager via the FakeSlotManager
 from conftest.
@@ -38,7 +38,7 @@ def _ctx(
     return DispatchContext(
         slot_manager=FakeSlotManager(slots or []),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name=caller_slot_name,
     )
 
@@ -85,7 +85,7 @@ async def test_generate_image_happy_path() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(ctx, "generate_image", {"prompt": "a cat"})
@@ -127,7 +127,7 @@ async def test_generate_image_passes_optional_size_and_n() -> None:
             [make_slot("img", type="image", model="sdxl", labels=("image",))]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     await dispatch_tool(ctx, "generate_image", {"prompt": "x", "size": "512x512", "n": 2})
@@ -154,7 +154,7 @@ async def test_edit_image_happy_path() -> None:
             [make_slot("img", type="image", model="sdxl-edit", labels=("image", "edit"))]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(
@@ -196,7 +196,7 @@ async def test_text_to_speech_happy_path() -> None:
             [make_slot("tts", type="tts", model="kokoro", labels=("tts",))]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(ctx, "text_to_speech", {"input": "hello"})
@@ -220,7 +220,7 @@ async def test_text_to_speech_binary_response_returns_metadata() -> None:
             [make_slot("tts", type="tts", model="kokoro", labels=("tts",))]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(ctx, "text_to_speech", {"input": "hello"})
@@ -258,7 +258,7 @@ async def test_transcribe_audio_happy_path() -> None:
             ]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(ctx, "transcribe_audio", {"audio": "data:base64..."})
@@ -309,7 +309,7 @@ async def test_analyze_image_happy_path() -> None:
             ]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(
@@ -354,7 +354,7 @@ async def test_embed_text_happy_path() -> None:
             [make_slot("embed", type="embedding", model="bge", labels=("embeddings",))]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(ctx, "embed_text", {"input": ["hello", "world"]})
@@ -398,7 +398,7 @@ async def test_rerank_documents_happy_path() -> None:
             ]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(
@@ -463,7 +463,7 @@ async def test_transport_failure_returns_error_envelope() -> None:
             [make_slot("embed", type="embedding", model="bge", labels=("embeddings",))]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(ctx, "embed_text", {"input": ["x"]})
@@ -481,7 +481,7 @@ async def test_upstream_5xx_returns_error_envelope() -> None:
             [make_slot("embed", type="embedding", model="bge", labels=("embeddings",))]
         ),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
     )
     result = await dispatch_tool(ctx, "embed_text", {"input": ["x"]})

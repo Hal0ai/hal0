@@ -9,7 +9,6 @@ Covers:
   * resolve_profile_flags MTP expansion
   * ContainerProvider.container_spec returns a ContainerSpec with correct
     image, command, mounts, and security opts
-  * _is_container_slot routing helper (schema.py fields)
   * load_sync / unload_sync call the right systemctl commands (mocked)
 """
 
@@ -29,7 +28,6 @@ from hal0.providers.container import (
     _resolve_model_path,
     resolved_command_for_slot,
 )
-from hal0.slots.manager import SlotManager
 
 # Use a fixed runtime bin for tests so _render_unit doesn't need podman/docker.
 _TEST_RUNTIME = "/usr/bin/docker"
@@ -483,35 +481,6 @@ class TestContainerSpec:
         """network_mode must be empty (not 'host') so loopback publish is used."""
         spec = self._build_spec()
         assert spec.network_mode == ""
-
-
-# ── _is_container_slot routing ───────────────────────────────────────────────
-
-
-class TestIsContainerSlot:
-    def test_profile_set_is_container(self) -> None:
-        cfg = {"name": "test", "port": 8095, "profile": "moe-rocmfp4"}
-        assert SlotManager._is_container_slot(cfg) is True
-
-    def test_runtime_container_is_container(self) -> None:
-        cfg = {"name": "test", "port": 8095, "runtime": "container"}
-        assert SlotManager._is_container_slot(cfg) is True
-
-    def test_default_is_lemonade(self) -> None:
-        cfg = {"name": "test", "port": 8081, "device": "gpu-rocm"}
-        assert SlotManager._is_container_slot(cfg) is False
-
-    def test_runtime_lemonade_is_not_container(self) -> None:
-        cfg = {"name": "test", "port": 8081, "runtime": "lemonade"}
-        assert SlotManager._is_container_slot(cfg) is False
-
-    def test_profile_none_not_container(self) -> None:
-        cfg = {"name": "test", "port": 8081, "profile": None}
-        assert SlotManager._is_container_slot(cfg) is False
-
-    def test_profile_empty_string_not_container(self) -> None:
-        cfg = {"name": "test", "port": 8081, "profile": ""}
-        assert SlotManager._is_container_slot(cfg) is False
 
 
 # ── load_sync / unload_sync systemd interaction ───────────────────────────────

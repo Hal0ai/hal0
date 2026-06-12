@@ -39,7 +39,7 @@ def _make_router(handler, slots: list[dict[str, Any]]) -> OmniRouter:
     return OmniRouter(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
     )
 
 
@@ -314,7 +314,7 @@ async def test_loop_forces_stream_false() -> None:
 @pytest.mark.asyncio
 async def test_loop_strips_omni_knob_from_outbound_body() -> None:
     """The dispatcher's opt-in field ``omni`` is hal0-internal; it
-    must NOT be forwarded to Lemonade."""
+    must NOT be forwarded upstream."""
     seen: list[dict[str, Any]] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -435,7 +435,7 @@ async def test_route_to_chat_depth_limit_through_loop() -> None:
     router = OmniRouter(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(handler),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
     )
     result = await router.run_loop(
         caller_slot_name="primary",

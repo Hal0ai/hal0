@@ -90,7 +90,6 @@ def mock_slot_manager(tmp_slots_dir: Path):
         mgr._last_used = {}
         mgr._sse_queues = []
         mgr._model_registry = None
-        mgr._lemonade_provider = None
         mgr._pull_runner = None
         mgr._fail_watchers = {}
         mgr._idle_monitor_tasks = {}

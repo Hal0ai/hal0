@@ -200,7 +200,7 @@ async def test_route_to_chat_happy_path() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=chat_completion,
     )
@@ -226,7 +226,7 @@ async def test_route_to_chat_target_not_found() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=chat_completion,
     )
@@ -247,7 +247,7 @@ async def test_route_to_chat_self_blocked() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=chat_completion,
     )
@@ -275,7 +275,7 @@ async def test_route_to_chat_npu_npu_blocked() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="agent",
         chat_completion=chat_completion,
     )
@@ -298,7 +298,7 @@ async def test_route_to_chat_depth_limit_enforced() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=chat_completion,
     )
@@ -328,7 +328,7 @@ async def test_route_to_chat_increments_depth_during_callback() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=chat_completion,
     )
@@ -347,7 +347,7 @@ async def test_route_to_chat_missing_prompt() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=lambda body: (_ for _ in ()).throw(  # pragma: no cover
             AssertionError("should not be called")
@@ -373,7 +373,7 @@ async def test_route_to_chat_context_appended() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=chat_completion,
     )
@@ -397,7 +397,7 @@ async def test_route_to_chat_no_callback_returns_error() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=None,
     )
@@ -421,7 +421,7 @@ async def test_route_to_chat_non_standard_response_passed_through() -> None:
     ctx = DispatchContext(
         slot_manager=FakeSlotManager(slots),
         http_client=make_http_client(lambda _: httpx.Response(200, json={})),
-        lemonade_base_url="http://test",
+        api_base_url="http://test",
         caller_slot_name="primary",
         chat_completion=chat_completion,
     )

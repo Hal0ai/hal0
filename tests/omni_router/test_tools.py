@@ -98,25 +98,29 @@ def test_required_fields_are_listed_in_properties() -> None:
 
 
 def test_pin_block_is_present() -> None:
-    """The ``_pin`` block — plan §7.5 — must accompany the tools list
-    so the drift-detection script can locate the upstream provenance.
+    """The ``_pin`` block — plan §7.5 — must accompany the tools list.
+
+    hal0 owns the definitions outright now (the upstream renderer
+    dependency was retired), so the pin carries only the review stamp —
+    no upstream_repo/upstream_path provenance keys.
     """
     raw_path = Path(__file__).parent.parent.parent
     raw_path = raw_path / "src" / "hal0" / "omni_router" / "tool_definitions.json"
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
     assert "_pin" in raw, "tool_definitions.json missing _pin block"
     pin = raw["_pin"]
-    for key in ("upstream_repo", "upstream_path", "last_reviewed"):
-        assert key in pin, key
+    assert "last_reviewed" in pin
+    assert "upstream_repo" not in pin
+    assert "upstream_path" not in pin
 
 
 def test_route_to_chat_has_no_endpoint() -> None:
-    """route_to_chat is internal — no Lemonade endpoint."""
+    """route_to_chat is internal — no HTTP endpoint."""
     assert tools_by_name()["route_to_chat"].endpoint is None
 
 
 def test_only_route_to_chat_has_no_endpoint() -> None:
-    """Every other tool MUST have a Lemonade endpoint."""
+    """Every other tool MUST have an HTTP endpoint."""
     missing = [t.name for t in TOOL_DEFINITIONS if t.endpoint is None]
     assert missing == ["route_to_chat"]
 
@@ -145,7 +149,7 @@ def test_label_tuples_are_tuples_not_lists() -> None:
 
 def test_to_openai_tool_omits_hal0_metadata() -> None:
     """The OpenAI wire shape must not leak hal0-internal fields like
-    ``source`` or ``target_slot_type`` — Lemonade would reject them."""
+    ``source`` or ``target_slot_type`` — the upstream would reject them."""
     rendered = tools_by_name()["embed_text"].to_openai_tool()
     fn = rendered["function"]
     assert "source" not in fn

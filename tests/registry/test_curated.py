@@ -27,13 +27,13 @@ def test_catalogue_entries_have_hf_coordinates() -> None:
     doesn't make it into a release.
 
     ``bundle_only`` entries (#500) are exempt from the extension check:
-    they are Lemonade-stock models loaded via their own recipe
+    they are bundled-stock models loaded via their own recipe
     (whispercpp/kokoro/sd-cpp) rather than hal0's hf pull layer, so they
     legitimately carry .bin / .onnx coordinates. hf_repo/hf_file are still
     required (informational), but the extension allowlist does not apply.
     """
     # .bin covers whisper.cpp ggml weights (#514 — whisper-large-v3-turbo is a
-    # visible STT default loaded via Lemonade's whispercpp recipe).
+    # visible STT default loaded via the whispercpp recipe).
     allowed_suffixes = (".gguf", ".safetensors", ".ckpt", ".bin")
     for m in CURATED_MODELS:
         assert m.hf_repo, f"{m.id}: hf_repo is required"

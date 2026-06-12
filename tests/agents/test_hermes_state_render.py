@@ -44,7 +44,7 @@ def test_state_template_renders_full_state():
         npu={"present": True, "model_id": "qwen3-it-4b-FLM"},
         igpu_sclk_mhz=2900,
         dashboard_url="https://hal0.thinmint.dev",
-        lemonade_base="http://127.0.0.1:13305",
+        inference_base="http://127.0.0.1:8080",
         daemon="reachable",
         as_of="2026-06-04T15:00:00+00:00",
     )
@@ -66,7 +66,7 @@ def test_state_template_degraded_no_primary():
         npu={"present": False, "model_id": None},
         igpu_sclk_mhz=None,
         dashboard_url="https://hal0.thinmint.dev",
-        lemonade_base="http://127.0.0.1:13305",
+        inference_base="http://127.0.0.1:8080",
         daemon="degraded",
         as_of="2026-06-04T15:00:00+00:00",
     )

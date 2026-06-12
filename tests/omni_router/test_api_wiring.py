@@ -67,18 +67,19 @@ def test_chat_completions_omni_false_unchanged(client: TestClient) -> None:
 def test_chat_completions_without_omni_field_unchanged(client: TestClient) -> None:
     """Bodies without ``omni`` field skip the OmniRouter loop.
 
-    Updated post-#277: dispatcher now falls through to lemonade_proxy
-    on NoRouteFound, so a no-upstream test no longer surfaces 404 —
-    it surfaces whatever the proxy returns (503 lemonade.unavailable
-    when lemond isn't reachable in tests). The KEY assertion is that
+    With no slots configured the dispatch path surfaces a structured
+    no-route / upstream-unavailable envelope. The KEY assertion is that
     OmniRouter is NOT triggered (no recursive loop, no tool calls).
     """
     r = client.post(
         "/v1/chat/completions",
         json={"model": "primary", "messages": [{"role": "user", "content": "hi"}]},
     )
-    # Status can be 404 (no proxy mock) or 503 (proxy → lemonade
-    # unreachable). Either is fine — what matters is OmniRouter didn't
-    # synthesize a successful tool-call loop.
+    # Status can be 404 (no route) or 503 (upstream unreachable).
+    # Either is fine — what matters is OmniRouter didn't synthesize a
+    # successful tool-call loop.
     assert r.status_code in (404, 503)
-    assert r.json()["error"]["code"] in ("dispatch.no_route", "lemonade.unavailable")
+    assert r.json()["error"]["code"] in (
+        "dispatch.no_route",
+        "dispatch.upstream_unavailable",
+    )

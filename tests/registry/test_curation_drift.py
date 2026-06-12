@@ -7,8 +7,8 @@ definition of every model any other surface references:
 - every ``model_name`` in the omni bundle manifests must be a curated id.
 
 The second test is expected to FAIL until #500 reconciles the manifests
-against ``CURATED_MODELS`` (today the manifests reference Lemonade
-``server_models.json`` ids that are not defined in ``curated.py``). It is
+against ``CURATED_MODELS`` (today the manifests reference legacy catalog
+ids that are not defined in ``curated.py``). It is
 the executable definition of "done" for the unify work and the seed of
 the CI drift check.
 """

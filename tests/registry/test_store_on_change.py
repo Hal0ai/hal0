@@ -1,16 +1,15 @@
-"""ModelRegistry.on_change post-mutation hook (catalog-regen wiring).
+"""ModelRegistry.on_change post-mutation hook.
 
-The hook lets create_app keep Lemonade's server_models.json in sync after any
-registry mutation (add/update/remove) without every call site remembering to
-regenerate it. See docs/superpowers/plans/2026-06-06-model-store-cleanup-hardening.md.
+A generic post-mutation callback: callers can regenerate downstream
+artifacts after any registry mutation (add/update/remove) without every
+call site remembering to do it.
+See docs/superpowers/plans/2026-06-06-model-store-cleanup-hardening.md.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from hal0.lemonade.server_models_gen import write_server_models
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
 
@@ -60,21 +59,3 @@ def test_no_hook_is_a_noop(tmp_path):
     reg = ModelRegistry(tmp_path)
     reg.add(_model(tmp_path))  # must not raise with on_change unset
     assert reg.has("m1")
-
-
-def test_closure_regenerates_server_models(tmp_path):
-    """The exact wiring create_app uses: on_change -> write_server_models."""
-    reg = ModelRegistry(tmp_path)
-    out = tmp_path / "server_models.json"
-    reg.on_change = lambda: write_server_models(reg.registry_file, out)
-    reg.add(
-        _model(
-            tmp_path,
-            mid="qwen3-4b-q4_k_m",
-            hf_repo="unsloth/Qwen3-4B-GGUF",
-            hf_filename="qwen3-4b.gguf",
-        )
-    )
-    assert out.exists()
-    catalog = json.loads(out.read_text())
-    assert any("qwen3-4b" in k.lower() for k in catalog), list(catalog)

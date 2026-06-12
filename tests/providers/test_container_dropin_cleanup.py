@@ -1,6 +1,6 @@
-"""Tests for stale lemonade-era drop-in cleanup in _write_and_start_unit (closes #694).
+"""Tests for stale legacy drop-in cleanup in _write_and_start_unit (closes #694).
 
-When a slot converts from lemonade to container the old drop-in dir
+When a slot converts from the legacy runtime to container the old drop-in dir
 (hal0-slot@<name>.service.d/override.conf) carries dead EnvironmentFile refs
 that make systemd fail with "Failed to load environment files".
 ContainerProvider._write_and_start_unit must remove the drop-in dir before
@@ -34,7 +34,7 @@ def _make_provider_with_tmp_unit(
 
 
 def test_stale_dropin_dir_removed_before_start(tmp_path: Path) -> None:
-    """A pre-existing lemonade drop-in dir is removed before the unit is written."""
+    """A pre-existing legacy drop-in dir is removed before the unit is written."""
     slot_name = "tts"
     provider = ContainerProvider()
     unit_path = tmp_path / f"hal0-slot@{slot_name}.service"

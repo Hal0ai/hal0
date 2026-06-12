@@ -349,8 +349,13 @@ async def handle_route_to_chat(ctx: DispatchContext, args: Mapping[str, Any]) ->
         prompt=str(args["prompt"]),
         context=str(args["context"]) if args.get("context") else None,
     )
+    # target_cfg is a CONFIG DICT (iter_configs shape), not a LoadedSlot —
+    # resolve the model id with the dict-shaped helper, else the body
+    # carries model="" and the gateway can't route the delegation.
+    from hal0.omni_router.route_to_chat import _model_of
+
     body = {
-        "model": _model_id_of(target_cfg),
+        "model": _model_of(target_cfg),
         "messages": messages,
     }
     token = DELEGATION_DEPTH.set(current_depth + 1)

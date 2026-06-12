@@ -172,7 +172,7 @@ class TestContainerCgroupMemBytes:
 
 class TestBuildPerSlotContainerPath:
     """Verify build_per_slot uses cgroup bytes for container slots
-    and falls back to file-size estimate for lemond slots."""
+    and falls back to file-size estimate when the cgroup probe is empty."""
 
     def _make_slot(self, name, state="ready", model_id="mymodel", backend="rocm"):
         slot = MagicMock()
@@ -180,7 +180,7 @@ class TestBuildPerSlotContainerPath:
         slot.state = state
         slot.model_id = model_id
         slot.backend = backend
-        slot.metadata = {"provider": "lemonade", "backend": backend}
+        slot.metadata = {"provider": "llama-server", "backend": backend}
         return slot
 
     @pytest.mark.asyncio
@@ -258,7 +258,7 @@ class TestBuildPerSlotContainerPath:
         assert row["mem_mb"] == expected_mb
 
     @pytest.mark.asyncio
-    async def test_lemond_slot_falls_back_to_registry(self):
+    async def test_empty_cgroup_probe_falls_back_to_registry(self):
         """When cgroup probe returns 0, build_per_slot uses registry file size."""
         slot = self._make_slot("primary")
         model_mock = MagicMock()

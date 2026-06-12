@@ -6,7 +6,7 @@ both gate on the helper :meth:`_check_npu_exclusivity` — these tests
 pin the contract.
 
 Conventions:
-  - Tests don't drive lemond (the validation runs before any HTTP I/O).
+  - Tests don't spawn containers (the validation runs before any I/O).
   - ``tmp_hal0_home`` isolates the writer's TOML to a tmp directory.
 """
 

@@ -183,7 +183,6 @@ def test_group_derivation() -> None:
     )
     assert gpu_exclusive_group({"device": "gpu-vulkan", "runtime": "container"}) == "llm"
     assert gpu_exclusive_group({"device": "npu", "runtime": "container"}) is None
-    assert gpu_exclusive_group({"device": "gpu-rocm", "runtime": "lemonade"}) is None
     # cpu container slots (tts) are never arbitrated
     assert gpu_exclusive_group({"device": "cpu", "runtime": "container"}) is None
     # img can be signalled by profile or type too
@@ -195,10 +194,10 @@ def test_group_derivation() -> None:
         gpu_exclusive_group({"device": "gpu-rocm", "runtime": "container", "type": "image"})
         == "img"
     )
-    # missing runtime + no profile defaults to lemonade → never arbitrated
-    assert gpu_exclusive_group({"device": "gpu-rocm"}) is None
-    # profile-only GPU slots ARE containers (mirrors _is_container_slot:
-    # profile is the primary signal, wins regardless of runtime) → arbitrated
+    # missing runtime defaults to container → GPU slots are arbitrated
+    assert gpu_exclusive_group({"device": "gpu-rocm"}) == "llm"
+    # profile-only GPU slots ARE containers (profile is the primary
+    # signal, wins regardless of runtime) → arbitrated
     assert gpu_exclusive_group({"device": "gpu-vulkan", "profile": "vulkan-std"}) == "llm"
     assert gpu_exclusive_group({"device": "gpu-rocm", "profile": "comfyui"}) == "img"
     # profile-only on a non-GPU device still never arbitrated

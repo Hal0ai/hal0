@@ -3,11 +3,11 @@
 The OmniRouter only talks to two collaborators in production:
 
   * :class:`SlotManager` — for ``iter_configs`` + ``route_for_request``.
-  * Lemonade's HTTP surface — for ``/v1/chat/completions`` and the
-    seven other tool endpoints.
+  * hal0-api's own ``/v1`` HTTP surface — for ``/v1/chat/completions``
+    and the seven other tool endpoints.
 
 We mock both with narrow, hand-rolled stubs so tests can drive
-specific slot configurations + Lemonade responses without standing up
+specific slot configurations + HTTP responses without standing up
 the real subsystems.
 """
 
@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from hal0.omni_router.filter import SlotManagerLike
+from hal0.slots.manager import LoadedSlot
 
 
 class FakeSlotManager(SlotManagerLike):
@@ -41,6 +42,15 @@ class FakeSlotManager(SlotManagerLike):
         *,
         required_labels: tuple[str, ...] = (),
     ) -> str | None:
+        slot = await self.resolve_for_request(slot_type, required_labels=required_labels)
+        return slot.name if slot is not None else None
+
+    async def resolve_for_request(
+        self,
+        slot_type: str,
+        *,
+        required_labels: tuple[str, ...] = (),
+    ) -> LoadedSlot | None:
         def labels_of(cfg: dict[str, Any]) -> set[str]:
             model = cfg.get("model") or {}
             if isinstance(model, dict):
@@ -60,15 +70,34 @@ class FakeSlotManager(SlotManagerLike):
             if not cfg.get("default"):
                 continue
             if cfg.get("enabled", True) and satisfies(cfg):
-                return str(cfg.get("name", ""))
+                return _loaded_slot_from_config(cfg)
         # Fall-through.
         for cfg in configs:
             if not cfg.get("enabled", True):
                 continue
             if not satisfies(cfg):
                 continue
-            return str(cfg.get("name", ""))
+            return _loaded_slot_from_config(cfg)
         return None
+
+
+def _loaded_slot_from_config(cfg: dict[str, Any]) -> LoadedSlot:
+    model = cfg.get("model") or {}
+    model_id = model.get("default", "") if isinstance(model, dict) else ""
+    labels = model.get("labels", ()) if isinstance(model, dict) else ()
+    return LoadedSlot(
+        name=str(cfg.get("name", "")),
+        model_id=str(model_id),
+        slot_type=str(cfg.get("type", "")),
+        device=str(cfg.get("device", "")),
+        enabled=cfg.get("enabled", True) is not False,
+        labels=frozenset(str(x) for x in labels)
+        if isinstance(labels, (list, tuple))
+        else frozenset(),
+        system_prompt=str(cfg.get("system_prompt", "")),
+        profile=str(cfg.get("profile")) if cfg.get("profile") else None,
+        default=cfg.get("default") is True,
+    )
 
 
 def make_slot(
@@ -99,7 +128,6 @@ def make_slot(
 def make_http_client(handler) -> httpx.AsyncClient:
     """Build an httpx.AsyncClient backed by ``httpx.MockTransport``.
 
-    Matches the helper pattern in ``tests/lemonade/test_client.py``.
     The ``handler`` callable receives an ``httpx.Request`` and returns
     an ``httpx.Response``.
     """

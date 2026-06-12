@@ -8,16 +8,11 @@ Covers:
     needed for no-prior / same-path / empty / missing.
   * execute_migration — moves entries, skips dot-entries, records
     per-entry failures without aborting the whole migration.
-  * propagate_lemonade_config — atomic write, no-op when value matches,
-    no-op when config.json missing, prior value surfaced.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-
-import pytest
 
 from hal0.config import paths as cfg_paths
 from hal0.registry.model_store import (
@@ -25,7 +20,6 @@ from hal0.registry.model_store import (
     describe_store_state,
     execute_migration,
     plan_migration,
-    propagate_lemonade_config,
 )
 
 # ── describe_store_state ──────────────────────────────────────────────────
@@ -207,52 +201,3 @@ def test_execute_noop_when_plan_says_not_needed(tmp_path: Path) -> None:
     result = execute_migration(plan)
     assert result.moved == []
     assert result.failed == []
-
-
-# ── propagate_lemonade_config ────────────────────────────────────────────
-
-
-def test_propagate_writes_new_value_and_reports_change(
-    tmp_hal0_home: str,
-) -> None:
-    cfg = cfg_paths.var_lib() / "lemonade" / "config.json"
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(
-        json.dumps({"extra_models_dir": "/var/lib/hal0/models", "port": 13305}),
-        encoding="utf-8",
-    )
-
-    changed, prev = propagate_lemonade_config("/mnt/ai-models")
-    assert changed is True
-    assert prev == "/var/lib/hal0/models"
-    on_disk = json.loads(cfg.read_text(encoding="utf-8"))
-    assert on_disk["extra_models_dir"] == "/mnt/ai-models"
-    # Other keys preserved verbatim.
-    assert on_disk["port"] == 13305
-
-
-def test_propagate_noop_when_value_matches(tmp_hal0_home: str) -> None:
-    cfg = cfg_paths.var_lib() / "lemonade" / "config.json"
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(
-        json.dumps({"extra_models_dir": "/mnt/ai-models"}),
-        encoding="utf-8",
-    )
-
-    changed, prev = propagate_lemonade_config("/mnt/ai-models")
-    assert changed is False
-    assert prev == "/mnt/ai-models"
-
-
-def test_propagate_noop_when_config_missing(tmp_hal0_home: str) -> None:
-    changed, prev = propagate_lemonade_config("/mnt/ai-models")
-    assert changed is False
-    assert prev is None
-
-
-def test_propagate_raises_on_malformed_json(tmp_hal0_home: str) -> None:
-    cfg = cfg_paths.var_lib() / "lemonade" / "config.json"
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text("not json", encoding="utf-8")
-    with pytest.raises(RuntimeError):
-        propagate_lemonade_config("/mnt/ai-models")

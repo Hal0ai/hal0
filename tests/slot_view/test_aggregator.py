@@ -5,14 +5,14 @@ Issue #698: each enrichment concern that used to live inline in
 fake stores — no HTTP, no five-piece app-state mock:
 
   1. slot-state serialization        → serialize_slot
-  2. lemonade enrichment + drift     → lemonade_enrichment
+  2. config-field lifting            → config_enrichment
   3. container systemctl/port probe  → container_enrichment
   4. per-slot memory accounting      → SlotViewAggregator.snapshot
   5. metric injection                → SlotViewAggregator.snapshot
 
 The /api/slots wire shape is pinned by the existing route-level suites
-(test_slots_routes / test_slots_lemonade_state / test_slots_container_state
-/ test_slots_npu_fields) which stay UNMODIFIED as the parity oracle.
+(test_slots_routes / test_slots_container_state / test_slots_npu_fields)
+which stay UNMODIFIED as the parity oracle.
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ import pytest
 from hal0.slot_view import (
     SlotView,
     SlotViewAggregator,
+    config_enrichment,
     container_enrichment,
-    lemonade_enrichment,
-    loaded_model_names,
+    loaded_model_names_from_slots,
     serialize_slot,
     synthesize_upstream_entries,
 )
@@ -53,19 +53,6 @@ class FakeSlotManager:
 
     async def iter_configs(self) -> list[dict[str, Any]]:
         return self._configs
-
-
-class FakeLemonadeShim:
-    """health() returns a canned payload — or raises when told to."""
-
-    def __init__(self, health: dict[str, Any] | None = None, raise_exc: bool = False) -> None:
-        self._health = health if health is not None else {}
-        self._raise = raise_exc
-
-    async def health(self) -> dict[str, Any]:
-        if self._raise:
-            raise RuntimeError("lemond down")
-        return self._health
 
 
 class FakeContainerProvider:
@@ -130,7 +117,6 @@ def _agg(
     sm: FakeSlotManager,
     *,
     metrics: Any = None,
-    shim: Any = None,
     container: Any = None,
     model_cache: dict[str, Any] | None = None,
     upstreams: Any = None,
@@ -145,7 +131,6 @@ def _agg(
         sm,
         registry=registry,
         metrics=metrics or _no_metrics,
-        lemonade_shim=shim or FakeLemonadeShim(),
         container_provider=container or FakeContainerProvider(active=False),
         model_cache=model_cache if model_cache is not None else {},
         upstreams=upstreams or FakeUpstreams([]),
@@ -180,11 +165,11 @@ class TestSerializeSlot:
 
     def test_backend_and_provider_lifted_from_metadata(self) -> None:
         out = serialize_slot(
-            _slot(backend=None, metadata={"backend": "vulkan", "provider": "lemonade"}),
+            _slot(backend=None, metadata={"backend": "vulkan", "provider": "llama-server"}),
             model_cache={},
         )
         assert out["backend"] == "vulkan"
-        assert out["provider"] == "lemonade"
+        assert out["provider"] == "llama-server"
 
     def test_explicit_backend_wins_over_metadata(self) -> None:
         out = serialize_slot(
@@ -205,7 +190,7 @@ class TestSerializeSlot:
         assert "models" not in out
 
 
-# ── concern 2: lemonade enrichment + drift detection ───────────────────────
+# ── concern 2: config-field lifting (pure TOML lift) ────────────────────────
 
 
 def _llm_cfg(name: str = "chat", **over: Any) -> dict[str, Any]:
@@ -220,64 +205,27 @@ def _llm_cfg(name: str = "chat", **over: Any) -> dict[str, Any]:
     return cfg
 
 
-class TestLemonadeEnrichment:
-    def test_idle_when_enabled_and_not_loaded(self) -> None:
-        out = lemonade_enrichment([_llm_cfg()], {"loaded": []})
-        assert out["chat"]["lemonade_state"] == "idle"
-        assert "backend_url" not in out["chat"]
-
-    def test_disabled_wins_over_loaded(self) -> None:
-        health = {"loaded": [{"model_name": "qwen3-4b"}]}
-        out = lemonade_enrichment([_llm_cfg(enabled=False)], health)
-        assert out["chat"]["lemonade_state"] == "disabled"
-
-    def test_loaded_lifts_backend_url(self) -> None:
-        health = {"loaded": [{"model_name": "qwen3-4b", "backend_url": "http://127.0.0.1:8001"}]}
-        out = lemonade_enrichment([_llm_cfg()], health)
-        assert out["chat"]["lemonade_state"] == "loaded"
-        assert out["chat"]["backend_url"] == "http://127.0.0.1:8001"
-
-    def test_drift_detection_declared_vs_actual(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "hal0.providers.lemonade.resolve_actual_backend",
-            lambda entry: "rocm",
+class TestConfigEnrichment:
+    def test_every_slot_gets_an_entry(self) -> None:
+        # No container skip — config fields are lifted for every slot,
+        # profile-backed or not.
+        out = config_enrichment(
+            [_llm_cfg(), _llm_cfg(name="gpu-chat", profile="vulkan-radv")],
         )
-        health = {"loaded": [{"model_name": "qwen3-4b", "backend_url": "http://127.0.0.1:8001"}]}
-        out = lemonade_enrichment([_llm_cfg(device="gpu-vulkan")], health)
+        assert set(out) == {"chat", "gpu-chat"}
+
+    def test_no_runtime_state_keys(self) -> None:
+        # config_enrichment is a pure TOML lift: live-state keys
+        # (backend_url / actual_backend / backend_mismatch) never appear.
+        out = config_enrichment([_llm_cfg(device="gpu-vulkan")])
         e = out["chat"]
-        assert e["declared_backend"] == "vulkan"
-        assert e["actual_backend"] == "rocm"
-        assert e["backend_mismatch"] is True
-
-    def test_no_drift_when_backends_match(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "hal0.providers.lemonade.resolve_actual_backend",
-            lambda entry: "vulkan",
-        )
-        health = {"loaded": [{"model_name": "qwen3-4b", "backend_url": "http://127.0.0.1:8001"}]}
-        out = lemonade_enrichment([_llm_cfg(device="gpu-vulkan")], health)
-        assert out["chat"]["backend_mismatch"] is False
-
-    def test_actual_backend_omitted_when_unintrospectable(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(
-            "hal0.providers.lemonade.resolve_actual_backend",
-            lambda entry: None,
-        )
-        health = {"loaded": [{"model_name": "qwen3-4b", "backend_url": "http://127.0.0.1:8001"}]}
-        out = lemonade_enrichment([_llm_cfg(device="gpu-vulkan")], health)
-        e = out["chat"]
+        assert "backend_url" not in e
         assert "actual_backend" not in e
         assert "backend_mismatch" not in e
-        assert e["declared_backend"] == "vulkan"
 
-    def test_container_slots_are_skipped(self) -> None:
-        out = lemonade_enrichment(
-            [_llm_cfg(name="gpu-chat", profile="vulkan-radv")],
-            {"loaded": []},
-        )
-        assert "gpu-chat" not in out
+    def test_declared_backend_from_device(self) -> None:
+        out = config_enrichment([_llm_cfg(device="gpu-vulkan")])
+        assert out["chat"]["declared_backend"] == "vulkan"
 
     def test_coresident_group_for_npu_trio(self) -> None:
         configs = [
@@ -290,7 +238,7 @@ class TestLemonadeEnrichment:
                 "model": {"default": "whisper-v3"},
             },
         ]
-        out = lemonade_enrichment(configs, {"loaded": []})
+        out = config_enrichment(configs)
         assert out["agent"]["coresident_group"] == "npu-flm-trio"
         assert out["stt-npu"]["coresident_group"] == "npu-flm-trio"
 
@@ -304,7 +252,7 @@ class TestLemonadeEnrichment:
                 "model": {"default": "whisper-v3"},
             },
         ]
-        out = lemonade_enrichment(configs, {"loaded": []})
+        out = config_enrichment(configs)
         assert "coresident_group" not in out["stt-npu"]
 
     def test_config_fields_surfaced(self) -> None:
@@ -318,7 +266,7 @@ class TestLemonadeEnrichment:
         cfg["model"]["n_gpu_layers"] = 24
         cfg["model"]["rope_freq_base"] = 10000.0
         cfg["model"]["labels"] = ["tool-calling"]
-        out = lemonade_enrichment([cfg], {"loaded": []})
+        out = config_enrichment([cfg])
         e = out["chat"]
         assert e["type"] == "llm"
         assert e["model_default"] == "qwen3-4b"
@@ -333,7 +281,7 @@ class TestLemonadeEnrichment:
         assert e["npu"] == {"asr": True, "embed": False}
 
     def test_absent_config_fields_surface_as_defaults(self) -> None:
-        out = lemonade_enrichment([_llm_cfg()], {"loaded": []})
+        out = config_enrichment([_llm_cfg()])
         e = out["chat"]
         assert e["enable_thinking"] is None
         assert e["n_gpu_layers"] == -1
@@ -342,6 +290,32 @@ class TestLemonadeEnrichment:
         assert e["workers"] is None
         assert e["llamacpp_args"] is None
         assert "npu" not in e
+
+
+# ── loaded-model derivation from slot snapshots ──────────────────────────────
+
+
+class TestLoadedModelNamesFromSlots:
+    def test_dispatchable_ready_set_counts(self) -> None:
+        slots = [
+            _slot(name="a", state=SlotState.READY, model_id="m-ready"),
+            _slot(name="b", state=SlotState.SERVING, model_id="m-serving"),
+            _slot(name="c", state=SlotState.IDLE, model_id="m-idle"),
+            _slot(name="d", state=SlotState.OFFLINE, model_id="m-offline"),
+            _slot(name="e", state=SlotState.ERROR, model_id="m-error"),
+        ]
+        assert loaded_model_names_from_slots(slots) == {"m-ready", "m-serving", "m-idle"}
+
+    def test_junk_entries_skipped(self) -> None:
+        slots = [
+            _slot(name="a", state=SlotState.READY, model_id=None),
+            _slot(name="b", state=SlotState.READY, model_id=""),
+            SimpleNamespace(state="ready", model_id=123),
+        ]
+        assert loaded_model_names_from_slots(slots) == set()
+
+    def test_empty_input(self) -> None:
+        assert loaded_model_names_from_slots([]) == set()
 
 
 # ── concern 3: container probe ──────────────────────────────────────────────
@@ -414,13 +388,15 @@ class TestContainerEnrichment:
         assert e["container_status"] == "stopped"
         assert e["container_health"] is False
 
-    async def test_lemonade_slots_are_skipped(self) -> None:
+    async def test_every_slot_is_probed(self) -> None:
+        # No container skip: a plain slot (no runtime/profile keys) is
+        # probed too — every slot runs as a container now.
         out = await container_enrichment(
             [_llm_cfg()],
             pull_jobs={},
-            provider=FakeContainerProvider(),
+            provider=FakeContainerProvider(active=True, healthy=True),
         )
-        assert out == {}
+        assert out["chat"]["container_status"] == "running"
 
     async def test_actual_image_surfaced(self) -> None:
         out = await container_enrichment(
@@ -627,17 +603,20 @@ class TestSnapshotComposition:
         keys = list(views[0].to_dict().keys())
         assert keys[-2:] == ["mem_mb", "metrics"]
 
-    async def test_lemonade_shim_failure_degrades_to_no_enrichment(self, no_mem: None) -> None:
+    async def test_config_enrichment_applied_to_real_slots(self, no_mem: None) -> None:
         agg = _agg(
             FakeSlotManager(
                 slots=[_slot()],
                 configs=[_llm_cfg()],
             ),
-            shim=FakeLemonadeShim(raise_exc=True),
         )
         views = await agg.snapshot()
-        # Health unreadable → slot still listed, enrichment degrades to idle.
-        assert views[0].to_dict()["lemonade_state"] == "idle"
+        payload = views[0].to_dict()
+        # Pure config lift lands on the wire payload.
+        assert payload["model_default"] == "qwen3-4b"
+        assert payload["enabled"] is True
+        # And NO legacy live-state key sneaks in.
+        assert "backend_url" not in payload
 
     async def test_snapshot_returns_typed_views(self, no_mem: None) -> None:
         agg = _agg(FakeSlotManager(slots=[_slot()]))
@@ -647,12 +626,3 @@ class TestSnapshotComposition:
         assert v.name == "chat"
         assert v.status == "ready"
         assert v.metrics.toks == 0.0
-
-    async def test_loaded_model_names_parses_both_health_keys(self) -> None:
-        health = {
-            "loaded": [{"model_name": "a"}],
-            "all_models_loaded": [{"model_name": "b"}, "junk", {"model_name": ""}],
-        }
-        assert loaded_model_names(health) == {"a", "b"}
-        assert loaded_model_names({}) == set()
-        assert loaded_model_names(None) == set()

@@ -1,9 +1,8 @@
 """Tests for SlotManager's push-driven failure detector.
 
-When a slot's model drops out of lemond's ``/v1/health.loaded[]`` while
-the slot is in a live state (READY / SERVING / IDLE), the manager
-must flip to ERROR and emit the SSE frame within ~1s — not on the next
-``status()`` poll.
+When a slot's container unit goes inactive while the slot is in a live
+state (READY / SERVING / IDLE), the manager must flip state and emit
+the SSE frame within ~1s — not on the next ``status()`` poll.
 
 These tests monkeypatch the fail-watch poll interval down to a few
 hundred milliseconds so they finish quickly while still exercising the
@@ -20,6 +19,7 @@ import pytest
 from hal0.slots import manager as mgr_mod
 from hal0.slots.manager import SlotManager
 from hal0.slots.state import SlotState
+from tests.slots.conftest import FakeContainerProvider
 
 
 @pytest.fixture
@@ -46,18 +46,18 @@ async def _wait_for_state(
     return rec.state if rec is not None else SlotState.OFFLINE
 
 
-async def test_fail_watcher_pushes_offline_when_model_drops_from_lemond(
+async def test_fail_watcher_pushes_offline_when_unit_stops(
     slot_root: Any,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
     fast_fail_watch: None,
 ) -> None:
-    """Model leaving lemond's loaded[] while slot is READY transitions to OFFLINE.
+    """The unit going inactive while the slot is READY transitions to OFFLINE.
 
-    Lemonade routinely evicts loaded models (idle-TTL, nuclear-evict on
-    a sibling load failure, max_models pressure). From the slot's
-    perspective this is a clean unload — the next inference request
-    hot-reloads the model. Reflected as OFFLINE (grey dot) per the
-    dot-state spec, reserving ERROR (red dot, "investigate") for real
+    Units stop legitimately out-of-band (GPU arbiter handoff, systemd
+    stop, OOM-kill with Restart= pending). From the slot's perspective
+    this is a clean not-loaded state — the next inference request
+    reloads it. Reflected as OFFLINE (grey dot) per the dot-state spec,
+    reserving ERROR (red dot, "investigate") for real
     spawn/health/load failures.
     """
     sm = SlotManager()
@@ -67,9 +67,9 @@ async def test_fail_watcher_pushes_offline_when_model_drops_from_lemond(
     assert "chat" in sm._fail_watchers
     assert not sm._fail_watchers["chat"].done()
 
-    # Simulate eviction: lemond no longer reports the model as loaded.
-    # No call to status() — the push-driven watcher is what should react.
-    lemonade_loaded_stub["loaded"] = []
+    # Simulate the unit stopping out-of-band. No call to status() —
+    # the push-driven watcher is what should react.
+    container_stub.active.clear()
 
     observed = await _wait_for_state(sm, "chat", SlotState.OFFLINE, timeout_s=5.0)
     assert observed == SlotState.OFFLINE, (
@@ -77,8 +77,8 @@ async def test_fail_watcher_pushes_offline_when_model_drops_from_lemond(
     )
 
     rec = sm._states["chat"]
-    assert "evict" in rec.message.lower() or "auto-reload" in rec.message.lower(), (
-        f"OFFLINE record should carry an eviction explanation (got {rec.message!r})"
+    assert "stopped" in rec.message.lower() or "auto-reload" in rec.message.lower(), (
+        f"OFFLINE record should explain the stopped unit (got {rec.message!r})"
     )
     # Watcher is one-shot — it should have exited after firing.
     watcher = sm._fail_watchers.get("chat")
@@ -92,7 +92,7 @@ async def test_fail_watcher_pushes_offline_when_model_drops_from_lemond(
 
 async def test_fail_watcher_emits_sse_frame_for_pushed_eviction(
     slot_root: Any,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
     fast_fail_watch: None,
 ) -> None:
     """The watcher-triggered OFFLINE transition must broadcast to SSE subscribers."""
@@ -102,7 +102,7 @@ async def test_fail_watcher_emits_sse_frame_for_pushed_eviction(
     # Subscribe before the failure so we observe the watcher-emitted frame.
     stream = sm.state_stream()
     # Trigger failure.
-    lemonade_loaded_stub["loaded"] = []
+    container_stub.active.clear()
 
     async def _next_offline() -> str:
         async for rec in stream:
@@ -114,12 +114,12 @@ async def test_fail_watcher_emits_sse_frame_for_pushed_eviction(
         msg = await asyncio.wait_for(_next_offline(), timeout=5.0)
     except TimeoutError:
         pytest.fail("watcher did not emit an OFFLINE SSE frame within 5s")
-    assert "evict" in msg.lower() or "auto-reload" in msg.lower()
+    assert "stopped" in msg.lower() or "auto-reload" in msg.lower()
 
 
 async def test_fail_watcher_does_not_fire_when_slot_unloads_cleanly(
     slot_root: Any,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
     fast_fail_watch: None,
 ) -> None:
     """A clean unload() must cancel the watcher; no spurious ERROR push."""

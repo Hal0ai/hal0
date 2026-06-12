@@ -7,7 +7,7 @@
 # Drives the actual production AgentManager class against a tmp
 # HAL0_HOME prefix — exercises real code paths (manager.py +
 # api/routes/agents.py) without requiring a real hermes wheel + venv +
-# Lemonade stack. The driver stubs in tests/agents/test_manager.py
+# inference stack. The driver stubs in tests/agents/test_manager.py
 # cover the same surface at the pure-unit tier; this tier covers the
 # end-to-end install-corrupt-uninstall flow + the install-uninstall
 # round-trip the issue's δ-harness acceptance criteria call out.

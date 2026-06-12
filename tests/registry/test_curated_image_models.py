@@ -44,7 +44,7 @@ def test_curated_image_entries_have_workflow_metadata() -> None:
         assert m.capability == "image", f"{m.id}: capability must be 'image'"
         assert m.model_class, f"{m.id}: model_class is required for image entries"
         assert m.comfyui_subdir, f"{m.id}: comfyui_subdir is required (drives pull-path routing)"
-        # bundle_only image entries (#500) are Lemonade-stock models loaded
+        # bundle_only image entries (#500) are bundled-stock models loaded
         # via the sd-cpp recipe (GGUF), not pulled into ComfyUI as
         # safetensors — exempt them from the ComfyUI-shipping-format check.
         if m.bundle_only:

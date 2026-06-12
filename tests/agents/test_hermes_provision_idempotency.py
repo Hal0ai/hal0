@@ -307,7 +307,7 @@ def test_config_yaml_contains_chat_slot_aliases(
         "embed slot leaked into chat aliases"
     )
     # Every alias routes through the STABLE gateway, NOT the slot's raw
-    # per-slot upstream port (:8001 in the fixture) — lemond reassigns
+    # per-slot upstream port (:8001 in the fixture) — the upstream can reassign
     # those on reload, so baked-in ports go stale.
     cfg = yaml.safe_load(config)
     for alias, entry in cfg["model_aliases"].items():

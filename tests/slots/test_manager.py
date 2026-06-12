@@ -1,9 +1,8 @@
-"""Tests for hal0.slots.manager.SlotManager (v0.2 — Lemonade-only).
+"""Tests for hal0.slots.manager.SlotManager (container-only dispatch).
 
-v0.2 (PR-10): SlotManager dispatches every lifecycle method through
-``LemonadeProvider``. The legacy docker/systemd path is gone. Tests
-mock the Lemonade HTTP surface via ``lemonade_stub`` /
-``lemonade_loaded_stub`` (see conftest.py).
+Phase E (#687): SlotManager dispatches every lifecycle method through
+``ContainerProvider`` (podman systemd unit per slot). Tests mock that
+boundary via ``container_stub`` (see conftest.py).
 
 Covers:
   - SEEDED_SLOTS + NPU_SEEDED_SLOTS constants and the
@@ -11,8 +10,8 @@ Covers:
   - default_slot_for / route_for_request routing helpers (§4.4)
   - add_slot / remove_slot validation rules (§4.3)
   - load / unload / restart / swap / status / create / delete /
-    update_config dispatch through Lemonade
-  - status() drift reconciliation against /v1/health.loaded[]
+    update_config dispatch through ContainerProvider
+  - status() drift reconciliation against the unit's is-active probe
   - HAL0_BACKEND env var has no effect (PR-10 retired the gate)
 """
 
@@ -21,9 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
 
-import httpx
 import pytest
 
 from hal0.slots.manager import (
@@ -35,12 +32,12 @@ from hal0.slots.state import (
     IllegalSlotTransition,
     SlotConfigError,
     SlotNotFound,
-    SlotSpawnFailed,
     SlotState,
 )
+from tests.slots.conftest import FakeContainerProvider
 
-# Shared fixtures (lemonade_stub, lemonade_loaded_stub, slot_root) live
-# in tests/slots/conftest.py so they can be reused across this file
+# Shared fixtures (container_stub, slot_root) live in
+# tests/slots/conftest.py so they can be reused across this file
 # and the other slot-suite modules.
 
 
@@ -110,7 +107,7 @@ def _write_typed_slot(
         f'name = "{name}"',
         f"port = {port}",
         f'type = "{slot_type}"',
-        'provider = "lemonade"',
+        'provider = "llama-server"',
         f"enabled = {str(enabled).lower()}",
     ]
     if default is not None:
@@ -189,70 +186,12 @@ async def test_route_for_request_returns_none_when_nothing_matches(
     assert await sm.route_for_request("llm") is None
 
 
-# ── idle_timeout_by_model (issue #414) ──────────────────────────────────────
-
-
-def _write_idle_slot(
-    root: Path,
-    name: str,
-    *,
-    model_default: str,
-    idle_timeout_s: int | None,
-    port: int = 8081,
-) -> None:
-    """Write a minimal slot TOML with an optional flat idle_timeout_s."""
-    lines = [
-        f'name = "{name}"',
-        f"port = {port}",
-        'provider = "lemonade"',
-        "enabled = true",
-    ]
-    if idle_timeout_s is not None:
-        lines.append(f"idle_timeout_s = {idle_timeout_s}")
-    lines.append("[model]")
-    lines.append(f'default = "{model_default}"')
-    (root / f"{name}.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def test_idle_timeout_by_model_maps_model_name_to_ttl(slot_root: Path) -> None:
-    """Each slot's [model] default maps to its configured idle_timeout_s."""
-    _write_idle_slot(slot_root, "a", model_default="model-a", idle_timeout_s=86400, port=8082)
-    _write_idle_slot(slot_root, "b", model_default="model-b", idle_timeout_s=120, port=8083)
-    sm = SlotManager()
-    m = sm.idle_timeout_by_model()
-    assert m["model-a"] == 86400.0
-    assert m["model-b"] == 120.0
-
-
-def test_idle_timeout_by_model_preserves_zero(slot_root: Path) -> None:
-    """idle_timeout_s == 0 (disable eviction) round-trips as 0.0, not dropped."""
-    _write_idle_slot(slot_root, "keep", model_default="pinned-model", idle_timeout_s=0, port=8082)
-    sm = SlotManager()
-    m = sm.idle_timeout_by_model()
-    assert m["pinned-model"] == 0.0
-
-
-def test_idle_timeout_by_model_skips_slots_without_model_default(slot_root: Path) -> None:
-    """A slot with an empty [model] default contributes no entry."""
-    _write_idle_slot(slot_root, "empty", model_default="", idle_timeout_s=300, port=8082)
-    sm = SlotManager()
-    m = sm.idle_timeout_by_model()
-    assert "" not in m
-
-
-def test_idle_timeout_by_model_tolerates_malformed_toml(slot_root: Path) -> None:
-    """A malformed slot TOML is skipped, not fatal — others still map."""
-    _write_idle_slot(slot_root, "good", model_default="good-model", idle_timeout_s=42, port=8082)
-    (slot_root / "broken.toml").write_text("name = \nport = ", encoding="utf-8")
-    sm = SlotManager()
-    m = sm.idle_timeout_by_model()
-    assert m["good-model"] == 42.0
-
-
 # ── add_slot / remove_slot (PR-10 §4.3) ─────────────────────────────────────
 
 
-async def test_add_slot_writes_toml(tmp_hal0_home: str) -> None:
+async def test_add_slot_writes_toml(
+    tmp_hal0_home: str, container_stub: FakeContainerProvider
+) -> None:
     sm = SlotManager()
     snap = await sm.add_slot(
         "scribe",
@@ -318,7 +257,9 @@ async def test_remove_slot_refuses_seeded(tmp_hal0_home: str) -> None:
         await sm.remove_slot("agent")
 
 
-async def test_remove_slot_deletes_user_slot(tmp_hal0_home: str) -> None:
+async def test_remove_slot_deletes_user_slot(
+    tmp_hal0_home: str, container_stub: FakeContainerProvider
+) -> None:
     sm = SlotManager()
     await sm.add_slot("scribe", type="transcription", model="whisper-base", port=8090)
     cfg_path = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "scribe.toml"
@@ -327,12 +268,12 @@ async def test_remove_slot_deletes_user_slot(tmp_hal0_home: str) -> None:
     assert not cfg_path.exists()
 
 
-# ── lifecycle dispatched through Lemonade ───────────────────────────────────
+# ── lifecycle dispatched through ContainerProvider ──────────────────────────
 
 
-async def test_load_dispatches_via_lemonade(
+async def test_load_dispatches_via_container_provider(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
     tmp_hal0_home: str,
 ) -> None:
     sm = SlotManager()
@@ -342,38 +283,40 @@ async def test_load_dispatches_via_lemonade(
     state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "chat" / "state.json"
     payload = json.loads(state_path.read_text(encoding="utf-8"))
     assert payload["state"] == "ready"
-    # POST /v1/load was invoked with the slot's model.
-    assert lemonade_loaded_stub["load_calls"], "expected at least one /v1/load call"
-    assert lemonade_loaded_stub["load_calls"][0]["model_name"] == "qwen3-4b-q4_k_m"
+    # ContainerProvider.load_sync was invoked with the slot's model.
+    assert container_stub.load_calls, "expected at least one load_sync dispatch"
+    cfg, model_info = container_stub.load_calls[0]
+    assert cfg["name"] == "chat"
+    assert model_info["_model_key"] == "qwen3-4b-q4_k_m"
 
 
 async def test_load_idempotent_when_ready(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     sm = SlotManager()
     await sm.load("chat")
-    calls_before = len(lemonade_loaded_stub["load_calls"])
+    calls_before = len(container_stub.load_calls)
     snap = await sm.load("chat")
     assert snap.state == SlotState.READY
-    # No extra /v1/load — already loaded.
-    assert len(lemonade_loaded_stub["load_calls"]) == calls_before
+    # No extra spawn — already loaded.
+    assert len(container_stub.load_calls) == calls_before
 
 
 async def test_unload_transitions_to_offline(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     sm = SlotManager()
     await sm.load("chat")
     snap = await sm.unload("chat")
     assert snap.state == SlotState.OFFLINE
-    assert lemonade_loaded_stub["unload_calls"], "expected /v1/unload"
+    assert container_stub.unload_calls, "expected unload_sync dispatch"
 
 
 async def test_restart_round_trip(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     sm = SlotManager()
     await sm.load("chat")
@@ -383,54 +326,62 @@ async def test_restart_round_trip(
 
 async def test_swap_replaces_model_id(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     sm = SlotManager()
     await sm.load("chat")
     snap = await sm.swap("chat", "llama-3.2-3b-q4_k_m")
     assert snap.model_id == "llama-3.2-3b-q4_k_m"
-    # Last /v1/load body carries the override model.
-    assert lemonade_loaded_stub["load_calls"][-1]["model_name"] == "llama-3.2-3b-q4_k_m"
+    # Last spawn carries the override model.
+    _cfg, model_info = container_stub.load_calls[-1]
+    assert model_info["_model_key"] == "llama-3.2-3b-q4_k_m"
 
 
-async def test_load_propagates_lemonade_error_as_slot_error(
+async def test_load_propagates_spawn_error_as_slot_error(
     slot_root: Path,
-    lemonade_stub,
+    container_stub: FakeContainerProvider,
 ) -> None:
-    """A 5xx from /v1/load lands the slot in ERROR via SlotSpawnFailed."""
+    """A spawn failure lands the slot in ERROR and re-raises."""
 
-    def h(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/v1/load":
-            return httpx.Response(500, json={"detail": "evict-all triggered"})
-        if req.url.path == "/v1/health":
-            return httpx.Response(200, json={"loaded": []})
-        return httpx.Response(404)
+    class SpawnBoom(RuntimeError):
+        pass
 
-    lemonade_stub(h)
+    container_stub.fail_load = SpawnBoom("podman exploded")
 
     sm = SlotManager()
-    with pytest.raises(SlotSpawnFailed):
+    with pytest.raises(SpawnBoom):
         await sm.load("chat")
     snap = await sm.status("chat")
     assert snap.state == SlotState.ERROR
 
 
+async def test_is_active_reflects_unit_state(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """_is_active reads the container unit's is-active probe."""
+    sm = SlotManager()
+    container_stub.active.add("chat")
+    assert await sm._is_active("chat") is True
+    container_stub.active.clear()
+    assert await sm._is_active("chat") is False
+
+
 async def test_status_reconciles_drift(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
-    """A persisted READY plus an empty lemond loaded[] transitions to OFFLINE.
+    """A persisted READY plus an inactive unit transitions to OFFLINE.
 
-    Was ERROR pre-issue-#275 (per-slot-systemd era treated drift as
-    slot-broken). Under Lemonade, eviction is normal (per-type LRU
-    budget + nuclear evict + idle-unload driver all evict without
-    breaking the slot config), so we demote to OFFLINE with a neutral
-    message that the dispatcher reloads on next request.
+    Was ERROR pre-issue-#275 (drift used to be treated as slot-broken).
+    Units stop legitimately (GPU arbiter handoff, systemd stop, OOM-kill
+    with Restart= pending), so we demote to OFFLINE with a neutral
+    message — the dispatcher reloads on next request.
     """
     sm = SlotManager()
     await sm.load("chat")
-    # Mutate the stub state so lemond no longer reports the model loaded.
-    lemonade_loaded_stub["loaded"] = []
+    # Simulate the unit stopping out-of-band.
+    container_stub.active.clear()
     snap = await sm.status("chat")
     assert snap.state == SlotState.OFFLINE
     # Drift transition message is operator-facing; only the state itself is contract
@@ -438,15 +389,15 @@ async def test_status_reconciles_drift(
     # assert snap.state == SlotState.OFFLINE is the contract.
 
 
-async def test_status_adopts_running_slot_when_lemond_holds_model(
+async def test_status_adopts_running_slot_when_unit_active(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
-    """state.json OFFLINE + lemond loaded[] non-empty → adopt to READY."""
+    """state.json OFFLINE + active container unit → adopt to READY."""
     sm = SlotManager()
-    # Bypass load(): write OFFLINE directly. lemonade_loaded_stub's default
-    # state advertises qwen3-4b-q4_k_m as loaded.
+    # Bypass load(): write OFFLINE directly, then mark the unit live.
     await sm._transition("chat", SlotState.OFFLINE, force=True)
+    container_stub.active.add("chat")
     snap = await sm.status("chat")
     assert snap.state == SlotState.READY
     # extras carry the adoption marker.
@@ -456,7 +407,7 @@ async def test_status_adopts_running_slot_when_lemond_holds_model(
 async def test_status_rehydrates_backend_from_toml(
     slot_root: Path,
     tmp_hal0_home: str,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """state.json without extra.backend should re-hydrate from TOML."""
     from hal0.slots.state import SlotStateRecord, write_state_atomic
@@ -466,8 +417,7 @@ async def test_status_rehydrates_backend_from_toml(
         state_path,
         SlotStateRecord(name="chat", state=SlotState.OFFLINE, port=8081, extra={}),
     )
-    # Empty out lemond's loaded[] so adoption can't fire.
-    lemonade_loaded_stub["loaded"] = []
+    # Unit inactive (default) so adoption can't fire.
 
     sm = SlotManager()
     snap = await sm.status("chat")
@@ -477,10 +427,9 @@ async def test_status_rehydrates_backend_from_toml(
 
 async def test_status_unloaded_slot_uses_toml_backend(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """Fresh TOML, no state.json — surface backend from TOML defaults."""
-    lemonade_loaded_stub["loaded"] = []  # OFFLINE — no adoption.
     sm = SlotManager()
     snap = await sm.status("chat")
     assert snap.state == SlotState.OFFLINE
@@ -490,7 +439,7 @@ async def test_status_unloaded_slot_uses_toml_backend(
 
 async def test_list_returns_all_configured_slots(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     (slot_root / "embed.toml").write_text(
         "\n".join(
@@ -498,7 +447,7 @@ async def test_list_returns_all_configured_slots(
                 'name = "embed"',
                 "port = 8082",
                 'backend = "vulkan"',
-                'provider = "lemonade"',
+                'provider = "llama-server"',
                 "[model]",
                 'default = "bge-small-en"',
                 "",
@@ -535,13 +484,15 @@ async def test_illegal_transition_blocked(slot_root: Path) -> None:
 # ── CRUD ────────────────────────────────────────────────────────────────────
 
 
-async def test_create_writes_config_and_state(tmp_hal0_home: str) -> None:
+async def test_create_writes_config_and_state(
+    tmp_hal0_home: str, container_stub: FakeContainerProvider
+) -> None:
     sm = SlotManager()
     cfg = {
         "name": "extra",
         "port": 8090,
         "backend": "vulkan",
-        "provider": "lemonade",
+        "provider": "llama-server",
         "model": {"default": "tiny-q4"},
     }
     snap = await sm.create("extra", cfg)
@@ -551,13 +502,15 @@ async def test_create_writes_config_and_state(tmp_hal0_home: str) -> None:
     assert state_path.exists()
 
 
-async def test_delete_removes_files_and_protects_seeded(tmp_hal0_home: str) -> None:
+async def test_delete_removes_files_and_protects_seeded(
+    tmp_hal0_home: str, container_stub: FakeContainerProvider
+) -> None:
     sm = SlotManager()
     cfg = {
         "name": "extra",
         "port": 8090,
         "backend": "vulkan",
-        "provider": "lemonade",
+        "provider": "llama-server",
         "model": {"default": "tiny-q4"},
     }
     await sm.create("extra", cfg)
@@ -567,7 +520,9 @@ async def test_delete_removes_files_and_protects_seeded(tmp_hal0_home: str) -> N
         await sm.delete("chat")
 
 
-async def test_update_config_rewrites_toml(slot_root: Path) -> None:
+async def test_update_config_rewrites_toml(
+    slot_root: Path, container_stub: FakeContainerProvider
+) -> None:
     sm = SlotManager()
     from hal0.slots.state import SlotState as _S
 
@@ -580,19 +535,18 @@ async def test_update_config_rewrites_toml(slot_root: Path) -> None:
 async def test_update_config_backend_invalidates_state_extras(
     slot_root: Path,
     tmp_hal0_home: str,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """Issue #359: changing ``backend`` via update_config() must clear
     the stale ``extra.backend`` mirror in state.json.
 
     Before the fix, ``status()`` short-circuited to the persisted record
-    while the model was in lemond's ``loaded[]`` and reported the old
-    backend forever. The adoption probe never re-ran because ``rec``
-    already existed.
+    while the unit was active and reported the old backend forever. The
+    adoption probe never re-ran because ``rec`` already existed.
     """
     from hal0.slots.state import SlotStateRecord, read_state, write_state_atomic
 
-    # Seed an adopted-style state.json: primary is READY with
+    # Seed an adopted-style state.json: chat is READY with
     # extra.backend=rocm (the boot-time adopted value).
     state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "chat" / "state.json"
     write_state_atomic(
@@ -602,17 +556,19 @@ async def test_update_config_backend_invalidates_state_extras(
             state=SlotState.READY,
             model_id="qwen3-4b-q4_k_m",
             port=8081,
-            extra={"backend": "rocm", "provider": "lemonade", "adopted": True},
+            extra={"backend": "rocm", "provider": "llama-server", "adopted": True},
         ),
     )
+    # Keep the unit "active" so the READY record isn't drift-demoted.
+    container_stub.active.add("chat")
 
     sm = SlotManager()
     snap_before = await sm.status("chat")
     # W3: the base ``backend`` field is now derived from the authoritative
-    # TOML ``device`` (what the next /v1/load will actually request), not the
-    # stale adopted ``extra.backend`` mirror — the primary fixture's device is
-    # gpu-vulkan. The adopted/runtime value remains visible via the separate
-    # ``actual_backend`` lemonade enrichment.
+    # TOML ``device`` (what the next spawn will actually request), not the
+    # stale adopted ``extra.backend`` mirror — the chat fixture's device is
+    # gpu-vulkan. The runtime value remains visible via the separate
+    # ``actual_image`` container enrichment.
     assert snap_before.backend == "vulkan"
 
     snap_after = await sm.update_config("chat", {"backend": "vulkan"})
@@ -633,7 +589,7 @@ async def test_update_config_backend_invalidates_state_extras(
     # Unrelated extras (adoption marker) are preserved — we only
     # invalidate the keys the operator actually changed.
     assert rec.extra.get("adopted") is True
-    assert rec.extra.get("provider") == "lemonade"
+    assert rec.extra.get("provider") == "llama-server"
 
 
 # ── SSE state stream ────────────────────────────────────────────────────────
@@ -641,7 +597,7 @@ async def test_update_config_backend_invalidates_state_extras(
 
 async def test_state_stream_broadcasts_transitions(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     sm = SlotManager()
 
@@ -678,7 +634,7 @@ def test_bump_last_used_records_timestamp() -> None:
 
 async def test_status_surfaces_last_used_at(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
     tmp_hal0_home: str,
 ) -> None:
     """Slot snapshots expose last_used_at so /api/slots can render the
@@ -706,10 +662,10 @@ async def test_status_surfaces_last_used_at(
 # ── HAL0_BACKEND env var is a no-op (PR-10) ─────────────────────────────────
 
 
-@pytest.mark.parametrize("value", ["", "lemonade", "legacy", "TOOLBOX"])
+@pytest.mark.parametrize("value", ["", "container", "legacy", "TOOLBOX"])
 async def test_hal0_backend_env_var_is_ignored(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
     monkeypatch: pytest.MonkeyPatch,
     value: str,
 ) -> None:
@@ -723,7 +679,9 @@ async def test_hal0_backend_env_var_is_ignored(
     assert snap.state == SlotState.READY
 
 
-async def test_update_config_preserves_sibling_model_keys(slot_root: Path) -> None:
+async def test_update_config_preserves_sibling_model_keys(
+    slot_root: Path, container_stub: FakeContainerProvider
+) -> None:
     """Regression: a partial ``{"model": {...}}`` update must not clobber siblings.
 
     ``PATCH /api/slots/{name}/defaults`` sends only the model sub-keys it
@@ -748,7 +706,7 @@ async def test_update_config_preserves_sibling_model_keys(slot_root: Path) -> No
 
 
 async def test_update_config_normalizes_ctx_size_to_context_size(
-    slot_root: Path,
+    slot_root: Path, container_stub: FakeContainerProvider
 ) -> None:
     """#585: the dashboard writes the legacy ``ctx_size`` alias; persist it as
     the canonical ``context_size`` so the two keys never diverge on disk.
@@ -765,7 +723,7 @@ async def test_update_config_normalizes_ctx_size_to_context_size(
 
 
 async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
-    slot_root: Path,
+    slot_root: Path, container_stub: FakeContainerProvider
 ) -> None:
     """A fresh dashboard write (``ctx_size``) must override a stale
     ``context_size`` seed, then collapse to the single canonical key.
@@ -778,7 +736,7 @@ async def test_update_config_ctx_size_alias_wins_over_stale_context_size(
             [
                 'name = "chat"',
                 "port = 8081",
-                'provider = "lemonade"',
+                'provider = "llama-server"',
                 "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',

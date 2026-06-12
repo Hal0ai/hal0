@@ -1,7 +1,7 @@
 """NPU FLM trio *shadow* handling in SlotManager (shape-consolidation Unit 0).
 
 The NPU runs a single FLM process (the chat anchor, ``device=npu type=llm``)
-that also serves transcription/embedding via lemond-global ``--asr/--embed``.
+that also serves transcription/embedding via FLM's ``--asr/--embed`` flags.
 The ``stt``/``embed`` slots are therefore **shadows** of that anchor, NOT
 independently loadable: a standalone ``/v1/load`` for whisper/embed on the
 busy single-tenant NPU returns HTTP 500.
@@ -101,7 +101,7 @@ def patched_spawn(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Record _spawn_locked calls and stub _await_ready so load() needs no I/O.
 
     The behaviour under test is load()'s *routing decision* (does it spawn
-    for this slot?), so the lemond/HTTP seams are the things to stub.
+    for this slot?), so the spawn/HTTP seams are the things to stub.
     """
     spawned: list[str] = []
 

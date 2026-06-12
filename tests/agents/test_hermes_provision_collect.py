@@ -58,8 +58,8 @@ def test_collect_chat_slots_aliases_use_stable_gateway_base_url() -> None:
     """Alias base_url must be the STABLE hal0 gateway, NOT the slot's raw
     per-slot upstream port.
 
-    lemond reassigns the slot's backend_url port (:8001/:8002/…) on every
-    model reload, so a baked-in alias port goes stale and could point at a
+    The slot's raw backend_url port (:8001/:8002/…) can change across
+    reloads, so a baked-in alias port goes stale and could point at a
     port now serving a different co-resident model. The gateway resolves
     the model_id to the right slot, so model_id + :8080/v1 is stable.
     """
@@ -84,7 +84,8 @@ def test_collect_chat_slots_skips_non_llm_capabilities() -> None:
     for s in slots:
         s["state"] = "ready"
         s["status"] = "ready"
-        s["lemonade_state"] = "loaded"
+        s["container_status"] = "running"
+        s["container_health"] = True
     collected = hp._collect_chat_slots(slots)
     aliases = {s["alias"] for s in collected}
     assert "embed" not in aliases

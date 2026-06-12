@@ -1,8 +1,8 @@
 """Pytest fixtures and marker registration for the slots subtree.
 
-v0.2 (PR-10): SlotManager dispatches every state change through
-Lemonade. The fixtures here mock that boundary — there is no
-systemctl-stub fixture any more.
+Phase E (#687): SlotManager dispatches every state change through
+ContainerProvider (podman systemd units). The fixtures here mock that
+boundary with an in-memory provider double.
 """
 
 from __future__ import annotations
@@ -10,115 +10,92 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 
-from hal0.lemonade.client import LemonadeClient
-from hal0.providers.lemonade import LemonadeProvider
 from hal0.slots.manager import SlotManager
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register the integration marker so --strict-markers stays clean.
 
-    The integration suite needs a real lemond daemon reachable on
-    127.0.0.1:13305 and is intended for CI / release-gate runs only.
+    The integration suite needs real podman + systemd on the host and is
+    intended for CI / release-gate runs only.
     """
     config.addinivalue_line(
         "markers",
-        "integration: end-to-end slot lifecycle tests requiring a real lemond daemon on the host",
+        "integration: end-to-end slot lifecycle tests requiring real podman/systemd on the host",
     )
-
-
-@pytest.fixture(autouse=True)
-def _disable_health_coalesce(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Disable the FIX-C /v1/health coalescing cache for slot tests.
-
-    SlotManager reconcile tests drive distinct logical phases in a tight
-    loop (e.g. load() then mutate the lemond stub's loaded[] then
-    status()), all within the 0.5s TTL window. The cache would serve the
-    pre-mutation body and mask the transition. In production each
-    reconcile pass / idle tick is spaced far beyond the TTL, so disabling
-    coalescing here restores the per-call freshness those tests assert
-    without weakening the production optimisation (exercised directly in
-    tests/lemonade/test_client.py).
-    """
-    import hal0.lemonade.client as client_mod
-
-    monkeypatch.setattr(client_mod, "_HEALTH_CACHE_TTL_S", 0.0)
 
 
 # ── shared fixtures ─────────────────────────────────────────────────────────
 
 
-def _mock_provider(handler) -> LemonadeProvider:
-    """Build a LemonadeProvider backed by httpx.MockTransport."""
-    transport = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler),
-        base_url="http://test",
+class FakeContainerProvider:
+    """In-memory ContainerProvider double for SlotManager dispatch tests.
+
+    Mirrors the surface SlotManager touches: ``load_sync`` /
+    ``unload_sync`` (executor-run sync calls), ``is_active`` (systemctl
+    probe), and the async ``wait_ready`` / ``health`` readiness probes.
+
+    State is mutable so tests can drive drift scenarios:
+      * ``active`` — set of slot names whose unit is "running". Clear or
+        ``discard()`` an entry to simulate the unit stopping out-of-band.
+      * ``load_calls`` / ``unload_calls`` — recorded dispatches.
+      * ``fail_load`` — when set, ``load_sync`` raises it (spawn failure).
+    """
+
+    def __init__(self) -> None:
+        self.active: set[str] = set()
+        self.load_calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        self.unload_calls: list[dict[str, Any]] = []
+        self.fail_load: Exception | None = None
+
+    # — SlotManager._spawn_locked / terminate (sync, executor-run) —
+
+    def load_sync(self, cfg: dict[str, Any], model_info: dict[str, Any]) -> None:
+        if self.fail_load is not None:
+            raise self.fail_load
+        self.load_calls.append((dict(cfg), dict(model_info)))
+        self.active.add(str(cfg.get("name")))
+
+    def unload_sync(self, cfg: dict[str, Any]) -> None:
+        self.unload_calls.append(dict(cfg))
+        self.active.discard(str(cfg.get("name")))
+
+    # — probes —
+
+    def is_active(self, slot_name: str) -> bool:
+        return slot_name in self.active
+
+    async def wait_ready(self, port: int, timeout_s: float | None = None) -> None:
+        return None
+
+    async def health(self, port: int) -> dict[str, Any]:
+        return {"ok": True}
+
+    # — slot_view container_enrichment extras —
+
+    def running_image(self, slot_name: str) -> str | None:
+        return None
+
+    def image_present(self, image: str) -> bool:
+        return False
+
+
+@pytest.fixture
+def container_stub(monkeypatch: pytest.MonkeyPatch) -> FakeContainerProvider:
+    """Replace the process-wide ContainerProvider with the in-memory fake.
+
+    SlotManager imports ``container_provider`` lazily from
+    ``hal0.providers.container`` inside each method, so patching the
+    module attribute covers every dispatch site.
+    """
+    fake = FakeContainerProvider()
+    monkeypatch.setattr(
+        "hal0.providers.container.container_provider",
+        lambda: fake,
     )
-    return LemonadeProvider(client=LemonadeClient(http_client=transport))
-
-
-@pytest.fixture
-def lemonade_stub(monkeypatch: pytest.MonkeyPatch):
-    """Replace the singleton LemonadeProvider with an httpx-mock-backed one.
-
-    Tests pass the handler they want to drive Lemonade's HTTP responses
-    with; the fixture installs the mock provider into
-    ``hal0.providers._PROVIDERS`` so SlotManager's
-    ``lemonade_provider()`` lookup finds it.
-
-    Yields a factory: ``provider = lemonade_stub(handler)``.
-    """
-    import hal0.providers as providers_mod
-
-    original = providers_mod._PROVIDERS["lemonade"]
-
-    def _install(handler) -> LemonadeProvider:
-        provider = _mock_provider(handler)
-        providers_mod._PROVIDERS["lemonade"] = provider
-        return provider
-
-    yield _install
-
-    providers_mod._PROVIDERS["lemonade"] = original
-
-
-@pytest.fixture
-def lemonade_loaded_stub(lemonade_stub):
-    """Convenience: install a Lemonade stub that fakes a happy-path lifecycle.
-
-    The default state advertises ``[{model_name: "qwen3-4b-q4_k_m"}]``
-    in ``/v1/health.loaded[]`` — matches the model the ``slot_root``
-    fixture writes into ``chat.toml``. Tests can mutate the
-    returned ``state`` dict to drive eviction / drift scenarios.
-    """
-    state: dict[str, Any] = {
-        "loaded": [{"model_name": "qwen3-4b-q4_k_m"}],
-        "load_calls": [],
-        "unload_calls": [],
-    }
-
-    def h(req: httpx.Request) -> httpx.Response:
-        import json as _json
-
-        if req.url.path == "/v1/load":
-            body = _json.loads(req.content.decode() or "{}")
-            state["load_calls"].append(body)
-            state["loaded"] = [{"model_name": body.get("model_name", "")}]
-            return httpx.Response(200, json={"status": "loaded"})
-        if req.url.path == "/v1/unload":
-            body = _json.loads(req.content.decode() or "{}")
-            state["unload_calls"].append(body)
-            state["loaded"] = []
-            return httpx.Response(200, json={"status": "unloaded"})
-        if req.url.path == "/v1/health":
-            return httpx.Response(200, json={"loaded": state["loaded"]})
-        return httpx.Response(404, json={"detail": f"unmocked {req.url.path}"})
-
-    lemonade_stub(h)
-    return state
+    return fake
 
 
 @pytest.fixture
@@ -132,7 +109,7 @@ def slot_root(tmp_hal0_home: str) -> Path:
                 'name = "chat"',
                 "port = 8081",
                 'backend = "vulkan"',
-                'provider = "lemonade"',
+                'provider = "llama-server"',
                 "enabled = true",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
@@ -148,4 +125,4 @@ def slot_root(tmp_hal0_home: str) -> Path:
 # reach into the module-level namespace (e.g. monkeypatching) don't
 # have to re-import. Tests use it via the fixture above; the public
 # symbol is exported for ergonomics.
-__all__ = ["SlotManager", "lemonade_loaded_stub", "lemonade_stub", "slot_root"]
+__all__ = ["FakeContainerProvider", "SlotManager", "container_stub", "slot_root"]

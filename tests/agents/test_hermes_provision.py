@@ -522,8 +522,7 @@ def test_resolve_primary_slot_picks_named_primary_slot() -> None:
     assert out["model"] == "qwen3:8b"
     # Slot's llama-server URL (8001) is rewritten to the hal0 OpenAI
     # proxy so prompt-cache + dispatch stay in the loop. hal0-api
-    # exposes the OpenAI surface at `/v1` — Lemonade's native
-    # `/api/v1` prefix is dropped at the wrapper.
+    # exposes the OpenAI surface at `/v1`.
     assert out["base_url"] == "http://127.0.0.1:8080/v1"
     assert out["context_length"] == 16384
 
@@ -532,7 +531,7 @@ def test_resolve_primary_slot_fallback_when_no_slots() -> None:
     out = hp._resolve_primary_slot(slots_fetcher=lambda: [])
     assert out["model"] == "primary"
     assert out["context_length"] == 32768
-    # Placeholder points at hal0-api on 8080/v1, not the pre-Lemonade
+    # Placeholder points at hal0-api on 8080/v1, not the legacy
     # phantom on 8000.
     assert out["base_url"] == "http://127.0.0.1:8080/v1"
 
@@ -560,10 +559,8 @@ def test_render_config_yaml_includes_primary_block() -> None:
 def test_render_config_yaml_no_primary_emits_safe_placeholder() -> None:
     rendered = hp._render_config_yaml(primary=None, agent_id="hermes-agent")
     assert 'default: ""' in rendered
-    # Placeholder URL points at hal0-api (8080/v1) — pre-Lemonade this
-    # was a phantom 8000 with no daemon behind it; the wrong-prefix
-    # variant `/api/v1` exists on Lemonade but is dropped at hal0's
-    # wrapper.
+    # Placeholder URL points at hal0-api (8080/v1) — historically this
+    # was a phantom 8000 with no daemon behind it.
     assert "127.0.0.1:8080/v1" in rendered
 
 

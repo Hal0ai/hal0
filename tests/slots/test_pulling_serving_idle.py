@@ -9,27 +9,28 @@ Covers PLAN.md §5 state machine:
   - **IDLE**     — the background sweeper demotes READY → IDLE after the
     configured idle timeout, and serving() resets the clock.
 
-All systemctl + health-probe calls are stubbed via the shared fixtures in
-``tests/slots/conftest.py`` so the suite is hermetic.
+All systemctl + health-probe calls are stubbed via the shared
+``container_stub`` fixture in ``tests/slots/conftest.py`` so the suite
+is hermetic.
 """
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from hal0.slots.manager import SlotManager
 from hal0.slots.state import SlotState
+from tests.slots.conftest import FakeContainerProvider
 
 # ── PULLING ──────────────────────────────────────────────────────────────────
 
 
 async def test_load_transitions_through_pulling_when_not_cached(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """A pull_runner + cache-miss inserts PULLING before STARTING."""
     pulls: list[str] = []
@@ -64,7 +65,7 @@ async def test_load_transitions_through_pulling_when_not_cached(
 
 async def test_load_skips_pulling_when_model_cached(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """A pull_runner with a cached model goes straight offline → starting."""
     pulls: list[str] = []
@@ -97,7 +98,7 @@ async def test_load_skips_pulling_when_model_cached(
 
 async def test_load_without_pull_runner_never_enters_pulling(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """No pull_runner wired → legacy offline → starting → warming → ready."""
     sm = SlotManager()  # no pull_runner
@@ -118,7 +119,7 @@ async def test_load_without_pull_runner_never_enters_pulling(
 
 async def test_pull_runner_failure_flips_to_error(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """A raising pull_runner surfaces as ERROR + the exception propagates."""
 
@@ -132,9 +133,8 @@ async def test_pull_runner_failure_flips_to_error(
         pull_runner=pull_runner,
         model_cache_check=lambda _mid: False,
     )
-    # Empty lemond's loaded[] so status() can't adopt to READY — the
-    # model never made it into Lemonade because the pull aborted first.
-    lemonade_loaded_stub["loaded"] = []
+    # The unit never started — the pull aborted first — so status()
+    # can't adopt to READY (container_stub starts with no active units).
 
     with pytest.raises(PullBoom):
         await sm.load("chat")
@@ -147,7 +147,7 @@ async def test_pull_runner_failure_flips_to_error(
 
 async def test_serving_context_flips_ready_to_serving_and_back(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     sm = SlotManager()
     await sm.load("chat")
@@ -163,7 +163,7 @@ async def test_serving_context_flips_ready_to_serving_and_back(
 
 async def test_serving_concurrent_requests_keep_state_serving(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """N concurrent requests must NOT toggle READY↔SERVING mid-flight."""
     sm = SlotManager()
@@ -192,7 +192,7 @@ async def test_serving_concurrent_requests_keep_state_serving(
 
 async def test_serving_from_idle_returns_to_ready(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """A request that lands on an IDLE slot wakes it to SERVING → READY."""
     sm = SlotManager()
@@ -214,7 +214,7 @@ async def test_serving_from_idle_returns_to_ready(
 
 async def test_idle_monitor_demotes_ready_to_idle(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """READY slots past the idle window flip to IDLE on the next sweep."""
     sm = SlotManager(idle_after_s=0.05, idle_monitor_interval_s=0.02)
@@ -235,7 +235,7 @@ async def test_idle_monitor_demotes_ready_to_idle(
 
 async def test_idle_monitor_skips_serving_slots(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """An in-flight request must not be demoted to IDLE under the sweeper."""
     sm = SlotManager(idle_after_s=0.05, idle_monitor_interval_s=0.02)
@@ -254,7 +254,7 @@ async def test_idle_monitor_skips_serving_slots(
 
 async def test_serving_resets_idle_clock(
     slot_root: Path,
-    lemonade_loaded_stub: dict[str, Any],
+    container_stub: FakeContainerProvider,
 ) -> None:
     """serving() exit bumps last_used so the slot doesn't immediately re-idle."""
     sm = SlotManager(idle_after_s=10.0, idle_monitor_interval_s=10.0)

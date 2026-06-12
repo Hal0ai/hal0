@@ -35,7 +35,7 @@ def test_npu_table_off_means_chat_only() -> None:
 
 
 def test_legacy_defaults_load_asr_still_honoured() -> None:
-    # Back-compat: old lemond-era shape, removed in Phase E.
+    # Back-compat: legacy defaults-table shape still honoured.
     spec = FLMProvider().container_spec(_slot_cfg(defaults={"load_asr": "1"}), _model_info())
     assert "--asr" in spec.command
 
@@ -60,7 +60,7 @@ def test_default_models_dir_is_flm_cache() -> None:
 def test_model_table_context_size_drives_ctx_len() -> None:
     """[model].context_size (SlotConfig shape) must reach --ctx-len.
 
-    Regression: build_env read only the lemond-era ctx_size/defaults shapes
+    Regression: build_env read only the legacy ctx_size/defaults shapes
     and silently fell back to 8192 for container slots (live repro on CT105,
     Phase A deploy).
     """
