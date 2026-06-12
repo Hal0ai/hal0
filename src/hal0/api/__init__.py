@@ -880,7 +880,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # GpuArbiter idle-restore loop (Phase D, Task D6). Auto-restores the
     # saved LLM set after the img (ComfyUI) slot idles out — window from the
-    # img slot's ``[image].idle_restore_minutes`` (default 5; 0 = manual-only).
+    # img slot's ``[image].idle_restore_minutes`` (default 60; 0 = manual-only).
     # Mirrors the refresh_task pattern above: created at startup, cancelled +
     # awaited on shutdown via the AsyncExitStack. Guarded so an arbiter
     # construction failure never blocks API startup (omni-router precedent).
