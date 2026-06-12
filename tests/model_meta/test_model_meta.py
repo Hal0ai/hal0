@@ -4,7 +4,7 @@ One parametrized table per function. These tables capture the EXACT
 behaviour of the five prior copies before consolidation:
 
   * ``classify``                  ← ``routes/models.py:_classify_type``
-  * ``device_to_backend``         ← ``providers/lemonade.py:device_to_backend``
+  * ``device_to_backend``         ← the legacy provider's device mapping
   * ``is_resolvable``             ← ``routes/slots.py:_model_resolvable``
   * ``canonical_device``          ← ``orchestrator._canonical_device_id`` /
                                     ``_canonical_backend_id`` /
@@ -116,7 +116,7 @@ def test_classify(model_id: str, capabilities: Any, expected: str) -> None:
         ("cpu", (None, "cpu")),
         # NPU uses the FLM recipe; no llamacpp_backend.
         ("npu", ("flm", None)),
-        # Empty / None → let Lemonade pick its own defaults.
+        # Empty / None → let the load path pick its own defaults.
         ("", (None, None)),
         (None, (None, None)),
         # Unknown devices fall back to (None, None) rather than us

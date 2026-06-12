@@ -1,6 +1,6 @@
-"""Tests for ``hal0 registry import`` — PR-21 of v0.2 Lemonade migration.
+"""Tests for ``hal0 registry import`` (v0.2 PR-21).
 
-Covers the behaviour contract from lemonade-adoption-plan §9 + §11 PR-21:
+Covers the behaviour contract from the adoption plan §9 + §11 PR-21:
 
 * Happy path: tarball with ``registry/registry.toml`` → imported, success
   message printed.

@@ -39,8 +39,7 @@ class TestSlotConfig:
         assert s.name == "primary"
         assert s.port == 8081
         assert s.backend == "vulkan"
-        # Phase E: provider is a deprecated round-trip label; default
-        # "llama-server" (lemonade no longer exists).
+        # provider is a deprecated round-trip label; default "llama-server".
         assert s.provider == "llama-server"
         assert s.enabled is True
         assert isinstance(s.model, ModelConfig)
@@ -99,7 +98,7 @@ class TestSlotConfig:
             SlotConfig(name="x", port=8081, backend=b)
 
     def test_all_valid_providers(self) -> None:
-        for p in ("lemonade", "llama-server", "flm", "moonshine", "kokoro", "comfyui"):
+        for p in ("llama-server", "flm", "moonshine", "kokoro", "comfyui"):
             SlotConfig(name="x", port=8081, provider=p)
 
     def test_workers_must_be_positive(self) -> None:
@@ -316,8 +315,8 @@ _SEEDED_SLOTS_DIR = Path(__file__).resolve().parents[2] / "installer" / "etc-hal
 def _declared_provider(toml_path: Path) -> str | None:
     """Pull the provider a seeded slot TOML declares, if any.
 
-    Container slots (e.g. img.toml) hold fields at the top level; lemonade
-    slots nest them under ``[slot]``. Either placement is accepted.
+    Container slots (e.g. img.toml) hold fields at the top level; legacy
+    seeds nest them under ``[slot]``. Either placement is accepted.
     """
     raw = tomllib.loads(toml_path.read_text())
     slot = raw.get("slot") if isinstance(raw.get("slot"), dict) else {}

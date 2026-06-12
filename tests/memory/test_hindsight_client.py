@@ -24,7 +24,7 @@ async def test_retain_recall_delete_hit_v1_bank_paths():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177") as http:
-        client = HindsightRestClient(http_client=http, api_key="lemonade-local-noauth")
+        client = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
         await client.retain(bank_id="shared", content="x", document_id="d1")
         await client.recall(bank_id="shared", query="x")
         await client.delete_document(bank_id="shared", document_id="d1")
@@ -61,7 +61,7 @@ async def test_list_memories_hits_list_endpoint_and_returns_json():
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177") as http:
-        client = HindsightRestClient(http_client=http, api_key="lemonade-local-noauth")
+        client = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
         result = await client.list_memories(bank_id="shared", limit=50, offset=0)
 
     assert ("GET", "/v1/default/banks/shared/memories/list") in seen

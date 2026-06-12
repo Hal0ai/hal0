@@ -6,7 +6,7 @@ which degrade gracefully (the pane polls it every few seconds and must never
 crash on a dead container):
 
   - docker container state (``comfyui`` running / exited / absent)
-  - systemd state of the LLM stack (lemonade + hermes) — to show which mode
+  - systemd state of the agent stack (hermes) — to show which mode
     currently owns the single iGPU
   - ComfyUI's own HTTP API (``/system_stats`` + ``/queue``) for live telemetry
 
@@ -52,7 +52,7 @@ _QUEUE_BUSY = {
 _QUEUE_IDLE = {"queue_running": [], "queue_pending": []}
 
 
-def _patch(container: str, lemonade: bool, hermes: bool, fetch):
+def _patch(container: str, hermes: bool, fetch):
     """Patch the three status seams on the comfyui route module."""
     base = "hal0.api.routes.comfyui"
     return (
@@ -60,7 +60,7 @@ def _patch(container: str, lemonade: bool, hermes: bool, fetch):
         patch(
             f"{base}._systemd_active",
             new_callable=AsyncMock,
-            side_effect=lambda unit: hermes if "hermes" in unit else lemonade,
+            side_effect=lambda unit: hermes,
         ),
         patch(f"{base}._fetch_json", new_callable=AsyncMock, side_effect=fetch),
     )
@@ -80,7 +80,7 @@ async def _fetch_down(path: str):
 
 def test_status_generating_when_container_running_and_queue_busy(client: TestClient) -> None:
     _install_arbiter(client, mode="img")  # arbiter is the mode source of truth
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_busy)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_busy)
     with c, s, f:
         r = client.get("/api/comfyui/status")
     assert r.status_code == 200
@@ -100,7 +100,7 @@ def test_status_generating_when_container_running_and_queue_busy(client: TestCli
 
 
 def test_status_running_idle_when_container_up_but_queue_empty(client: TestClient) -> None:
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         r = client.get("/api/comfyui/status")
     body = r.json()
@@ -110,7 +110,7 @@ def test_status_running_idle_when_container_up_but_queue_empty(client: TestClien
 
 def test_status_starting_when_container_running_but_http_unreachable(client: TestClient) -> None:
     # Container is up but ComfyUI hasn't bound :8188 yet — fail soft, not a 500.
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_down)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_down)
     with c, s, f:
         r = client.get("/api/comfyui/status")
     assert r.status_code == 200
@@ -122,7 +122,7 @@ def test_status_starting_when_container_running_but_http_unreachable(client: Tes
 
 def test_status_stopped_and_inference_mode_when_container_absent(client: TestClient) -> None:
     # ComfyUI down, LLM stack up → inference owns the GPU.
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.get("/api/comfyui/status")
     body = r.json()
@@ -144,7 +144,7 @@ def test_status_reports_model_inventory_from_the_share(
         for i in range(n):
             (d / f"m{i}.safetensors").touch()
     monkeypatch.setenv("COMFYUI_MODELS_DIR", str(models))
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         r = client.get("/api/comfyui/status")
     inv = r.json()["inventory"]
@@ -161,7 +161,7 @@ def test_status_inventory_is_none_when_share_absent(client: TestClient, tmp_path
 
     _os.environ.pop("COMFYUI_MODELS_DIR", None)
     with patch.dict(_os.environ, {"COMFYUI_MODELS_DIR": str(tmp_path / "nope")}):
-        c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+        c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
         with c, s, f:
             r = client.get("/api/comfyui/status")
     assert r.json()["inventory"] is None
@@ -201,7 +201,7 @@ def _install_arbiter(client: TestClient, mode: str = "llm") -> _StubArbiter:
     ``mode`` is the arbiter's reported GPU mode ("llm" | "img"). The arbiter is
     the source of truth for the current mode — the docker/systemd probes are
     only a legacy fallback (post-D9 the docker container is gone while
-    hal0-lemonade stays active, so they lie).
+    the daemon era is over, so they lie).
     """
     arb = _StubArbiter(mode=mode)
     client.app.state.slot_manager = SimpleNamespace(arbiter=arb)
@@ -215,7 +215,7 @@ def test_switchover_generation_calls_arbiter(
     # shell-script seam is gone from the module entirely.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client)
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code == 202
@@ -232,7 +232,7 @@ def test_switchover_inference_calls_restore(
 ) -> None:
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client, mode="img")
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 202
@@ -244,7 +244,7 @@ def test_switchover_pin_param(client: TestClient, monkeypatch: pytest.MonkeyPatc
     # {"pin": true} rides along to ensure_img so generation can hold the GPU.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client)
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation", "pin": True})
     assert r.status_code == 202
@@ -258,7 +258,7 @@ def test_switchover_force_passes_to_restore(
     # over the busy queue AND propagates to restore_llm (pin override).
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client, mode="img")
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_busy)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_busy)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference", "force": True})
     assert r.status_code == 202
@@ -276,7 +276,7 @@ def test_switchover_refused_while_another_switch_in_flight(
     comfyui_mod._switch["active"] = True
     comfyui_mod._switch["target"] = "generation"
     arb = _install_arbiter(client)
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 409
@@ -291,7 +291,7 @@ def test_switchover_noop_when_already_in_generation_mode(
     # Arbiter already reports img mode → target reached; never re-drive it.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client, mode="img")
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code == 200
@@ -302,10 +302,10 @@ def test_switchover_noop_when_already_in_generation_mode(
 def test_switchover_noop_when_already_in_inference_mode(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Container down AND lemonade up → inference already owns the GPU.
+    # Container down → inference already owns the GPU.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client)
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 200
@@ -320,7 +320,7 @@ def test_switchover_to_inference_refused_while_queue_busy(
     # unless the caller explicitly forces it (the UI confirm dialog is the force).
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client, mode="img")
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_busy)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_busy)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 409
@@ -331,13 +331,13 @@ def test_switchover_to_inference_refused_while_queue_busy(
 def test_switchover_post_migration_inference_uses_arbiter_truth(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Post-D9 reality: docker container gone ("absent") AND hal0-lemonade stays
+    # Post-D9 reality: docker container gone ("absent") while inference stays
     # active through Phase D — the legacy probe would call this "already in
     # inference" forever, locking restore_llm out of the API (pinned img mode =
     # permanent lockout). Arbiter says img → the switch MUST run.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client, mode="img")
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "inference"})
     assert r.status_code == 202
@@ -345,10 +345,10 @@ def test_switchover_post_migration_inference_uses_arbiter_truth(
 
 
 def test_status_mode_is_arbiter_truth_post_migration(client: TestClient) -> None:
-    # Same post-migration shape on the read path: docker absent + lemonade up
+    # Same post-migration shape on the read path: docker absent + inference up
     # used to render mode "inference"/endpoint null while img owned the GPU.
     _install_arbiter(client, mode="img")
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_idle)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_idle)
     with c, s, f:
         body = client.get("/api/comfyui/status").json()
     assert body["mode"] == "generation"
@@ -358,7 +358,7 @@ def test_status_mode_is_arbiter_truth_post_migration(client: TestClient) -> None
 def test_status_mode_legacy_fallback_when_arbiter_missing(client: TestClient) -> None:
     # Arbiter unwired → fall back to the docker/systemd-derived mode.
     client.app.state.slot_manager = None
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         body = client.get("/api/comfyui/status").json()
     assert body["mode"] == "generation"
@@ -373,7 +373,7 @@ def test_switchover_503_when_arbiter_unwired(
     # explicit 503, never a dangling 202 that can't do anything.
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     client.app.state.slot_manager = None
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
     assert r.status_code == 503
@@ -395,7 +395,7 @@ def test_pin_503_when_manager_has_no_arbiter(
 def test_status_exposes_switchover_state(client: TestClient, _reset_comfyui_module_state) -> None:
     # The pane's 4s poll drives the "switching…" UI from this block.
     comfyui_mod = _reset_comfyui_module_state
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         idle = client.get("/api/comfyui/status").json()["switchover"]
         comfyui_mod._switch.update(active=True, target="generation", error=None)
@@ -413,7 +413,7 @@ def test_switchover_arbiter_error_recorded(
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     arb = _install_arbiter(client)
     arb.ensure_img.side_effect = RuntimeError("img slot failed to load")
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
         assert r.status_code == 202
@@ -462,7 +462,7 @@ def test_status_carries_arbiter_block(client: TestClient) -> None:
         "saved_llm_slots": ["primary", "utility"],
         "idle_restore_at": None,
     }
-    c, s, f = _patch(container="running", lemonade=False, hermes=False, fetch=_fetch_idle)
+    c, s, f = _patch(container="running", hermes=False, fetch=_fetch_idle)
     with c, s, f:
         r = client.get("/api/comfyui/status")
     assert r.status_code == 200
@@ -479,7 +479,7 @@ def test_status_arbiter_fail_soft(client: TestClient) -> None:
     # "arbiter": null, the rest of the pane keeps rendering.
     arb = _install_arbiter(client)
     arb.status.side_effect = RuntimeError("state file corrupt")
-    c, s, f = _patch(container="absent", lemonade=True, hermes=True, fetch=_fetch_down)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
     with c, s, f:
         r = client.get("/api/comfyui/status")
     assert r.status_code == 200

@@ -1,6 +1,6 @@
 """Unit tests for the profile catalog — schema, loader, and flag resolver.
 
-Targeted file run only (full suite hangs due to lemond health waits):
+Targeted file run:
     ~/dev/hal0/.venv/bin/python -m pytest tests/config/test_profiles.py -q
 """
 

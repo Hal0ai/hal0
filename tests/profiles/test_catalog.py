@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig
+from hal0.errors import Conflict
+from hal0.profiles import ProfileCatalog, ProfilePatch
+
+
+def test_resolve_seed_profile_includes_runtime_facts(tmp_hal0_home: str) -> None:
+    profile = ProfileCatalog().resolve("flm-npu")
+
+    assert profile.seed is True
+    assert profile.runtime_family == "flm"
+    assert profile.supported_slot_types == ("llm", "embedding", "transcription")
+
+
+def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+
+    created = catalog.create(
+        "my-rocm",
+        ProfileConfig(
+            image="ghcr.io/x/y:z",
+            flags="-fa on",
+            mtp=True,
+            device_class="gpu",
+        ),
+    )
+    assert created.seed is False
+    assert created.runtime_family == "llama-server"
+    assert MTP_FLAG_BUNDLE in created.resolved_flags
+
+    updated = catalog.update("my-rocm", ProfilePatch(flags="-fa off", mtp=False))
+    assert updated.flags == "-fa off"
+    assert updated.resolved_flags == "-fa off"
+
+    catalog.delete("my-rocm")
+    assert all(profile.name != "my-rocm" for profile in catalog.list())
+
+
+def test_delete_profile_in_use_raises_conflict(tmp_hal0_home: str) -> None:
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "chat.toml").write_text(
+        "\n".join(
+            [
+                "[slot]",
+                'name = "chat"',
+                "port = 8081",
+                'profile = "my-rocm"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    catalog = ProfileCatalog()
+    catalog.create("my-rocm", ProfileConfig(image="ghcr.io/x/y:z"))
+
+    with pytest.raises(Conflict) as exc:
+        catalog.delete("my-rocm")
+
+    assert exc.value.code == "profiles.in_use"
+    assert exc.value.details["slots"] == ["chat"]

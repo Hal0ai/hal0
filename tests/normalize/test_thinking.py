@@ -4,7 +4,7 @@ from hal0.normalize.thinking import apply_thinking_policy
 def test_injects_chat_template_kwargs_enable_thinking_false_by_default():
     out = apply_thinking_policy({"model": "m", "messages": []})
     assert out["chat_template_kwargs"]["enable_thinking"] is False
-    # never sets the top-level field (lemond would /no_think-inject, ineffective)
+    # never sets the top-level field (legacy /no_think injection was ineffective)
     assert "enable_thinking" not in out
 
 
@@ -17,8 +17,8 @@ def test_top_level_enable_thinking_true_translated_to_kwarg():
 
 
 def test_top_level_enable_thinking_false_translated_to_kwarg():
-    # The bug this fixes: top-level enable_thinking:false used to pass through
-    # to lemond's ineffective /no_think; now it suppresses via the kwarg.
+    # The bug this fixes: top-level enable_thinking:false used to pass
+    # through to an ineffective /no_think; now it suppresses via the kwarg.
     out = apply_thinking_policy({"enable_thinking": False})
     assert out["chat_template_kwargs"]["enable_thinking"] is False
     assert "enable_thinking" not in out

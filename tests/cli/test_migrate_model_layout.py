@@ -1,6 +1,6 @@
-"""Tests for ``hal0 migrate model-layout`` — PR-7 of v0.2 Lemonade migration.
+"""Tests for ``hal0 migrate model-layout`` (v0.2 PR-7).
 
-Covers the behaviour contract from lemonade-adoption-plan §11 PR-7:
+Covers the behaviour contract from the adoption plan §11 PR-7:
 
 * Default is dry-run; ``--apply`` mutates.
 * Idempotent: second ``--apply`` is a no-op.
