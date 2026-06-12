@@ -4,13 +4,14 @@
 // at rest; the API only ever returns masked previews.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiDelete, apiGet, apiPost } from '../client'
+import { apiDelete, apiGet, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 export interface SecretEntry {
   name: string
   set: boolean
   masked?: string
+  updated_at?: string | null
 }
 
 export function useSecrets() {
@@ -26,8 +27,9 @@ export function useSecrets() {
 export function useSecretSet() {
   const qc = useQueryClient()
   return useMutation({
+    // Contract: PUT /api/secrets/{name} { value } → 204 (non-empty value)
     mutationFn: ({ name, value }: { name: string; value: string }) =>
-      apiPost(ENDPOINTS.secret(name), { value }),
+      apiPut(ENDPOINTS.secret(name), { value }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['secrets'] }),
   })
 }

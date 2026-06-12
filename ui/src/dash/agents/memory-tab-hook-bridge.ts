@@ -12,6 +12,7 @@ import {
   useMemoryList,
   useUpdateMemoryGraph,
 } from '@/api/hooks/useMemory'
+import { useFeatures } from '@/api/hooks/useFeatures'
 
 ;(window as unknown as {
   __hal0UseMemoryGraphStatus?: typeof useMemoryGraphStatus
@@ -40,3 +41,7 @@ import {
 ;(window as unknown as {
   __hal0UseMemoryEnabledPending?: typeof useMemoryEnabledPending
 }).__hal0UseMemoryEnabledPending = useMemoryEnabledPending
+// /api/features — memory_engine is the live engine name for the tab label.
+;(window as unknown as {
+  __hal0UseFeatures?: typeof useFeatures
+}).__hal0UseFeatures = useFeatures

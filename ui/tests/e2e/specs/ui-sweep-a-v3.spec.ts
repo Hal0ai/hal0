@@ -216,9 +216,13 @@ test.describe('MemoryTab live wiring', () => {
       json(route, { enabled: false, route: 'upstream' })
     )
     await page.route('**/api/memory/search', (route) => json(route, { items: [] }))
+    // Stub /api/features so the engine label is deterministic across all tests
+    await page.route('**/api/features', (route) =>
+      json(route, { memory: true, memory_engine: 'Hindsight', npu: true, comfyui_switchover: false, mcp_supervisor: false })
+    )
   })
 
-  test('engine label says "memory engine" not "Cognee"', async ({ page }) => {
+  test('engine label uses memory_engine from /api/features, not "Cognee"', async ({ page }) => {
     await page.route('**/api/agents/hermes/memory/stats', (route) =>
       json(route, {
         agent_id: 'hermes',
@@ -233,7 +237,8 @@ test.describe('MemoryTab live wiring', () => {
 
     await page.goto('/#agent/memory')
     await expect(page.locator('[data-testid="memory-engine-label"]')).toBeVisible({ timeout: FIVE_S })
-    await expect(page.locator('[data-testid="memory-engine-label"]')).toContainText('memory engine')
+    // Shows the live engine name from /api/features, not a hardcoded "Cognee"
+    await expect(page.locator('[data-testid="memory-engine-label"]')).toContainText('Hindsight')
     await expect(page.locator('[data-testid="memory-engine-label"]')).not.toContainText('Cognee')
   })
 

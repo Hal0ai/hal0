@@ -21,9 +21,14 @@ function MemoryTab({ subsection } = {}) {
   // Live hooks injected via memory-tab-hook-bridge.ts
   const useMemoryList = window.__hal0UseMemoryList;
   const useAgentMemoryStats = window.__hal0UseAgentMemoryStats;
+  // /api/features supplies the live engine name (memory_engine).
+  // Fall back to "memory engine" if unavailable.
+  const useFeaturesHook = window.__hal0UseFeatures;
 
   const statsQuery = useAgentMemoryStats ? useAgentMemoryStats("hermes") : { isLoading: false, isError: false, data: null };
   const listQuery = useMemoryList ? useMemoryList({ dataset: "shared", limit: 10 }) : { isLoading: false, isError: false, data: null };
+  const featuresQuery = useFeaturesHook ? useFeaturesHook() : { data: null };
+  const engineLabel = featuresQuery.data?.memory_engine || "memory engine";
 
   const stats = statsQuery.data;
   const records = listQuery.data?.items ?? [];
@@ -60,7 +65,7 @@ function MemoryTab({ subsection } = {}) {
           {!statsQuery.isLoading && !statsQuery.isError && (
             <>
               <div style={{display: "flex", alignItems: "center", gap: 12, marginBottom: 14}}>
-                <span data-testid="memory-engine-label" className="mono" style={{fontSize: 10, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.1em"}}>memory engine · shared</span>
+                <span data-testid="memory-engine-label" className="mono" style={{fontSize: 10, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.1em"}}>{engineLabel} · shared</span>
                 <span className="mono num" style={{fontSize: 24, color: "var(--fg)", letterSpacing: "-0.02em"}}>{stats?.writes ?? 0}</span>
                 <span className="mono" style={{fontSize: 12, color: "var(--fg-3)"}}>records</span>
                 <span style={{marginLeft: "auto"}} className={`chip ${stats?.available ? "ok" : ""}`}>
@@ -74,7 +79,7 @@ function MemoryTab({ subsection } = {}) {
               )}
               {!stats?.available && (
                 <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", marginTop: 6}}>
-                  memory engine not configured or unavailable
+                  {engineLabel} not configured or unavailable
                 </div>
               )}
             </>

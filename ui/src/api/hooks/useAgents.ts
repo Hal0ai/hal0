@@ -33,7 +33,7 @@
 // 5s tick.
 
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
-import { apiGet, apiPost, Hal0Error } from '../client'
+import { apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -451,19 +451,30 @@ export function useDenyApproval() {
 // PUT /api/agents/{id}/personas/{pid} — built by backend-dev (#task7).
 // 404 degrades gracefully: hook throws so the modal can show an error toast.
 
+// Partial-patch body for PUT /api/agents/{id}/personas/{pid} (PR #736).
+// id is immutable; all other fields are optional.
 export interface PersonaUpdateBody {
-  name?: string
-  slot?: string
-  tone?: string
+  display_name?: string
+  summary?: string
   system_prompt?: string
+  tools_allowed?: string[]
+  memory_namespace?: string
+  preferred_upstream?: string
+  preferred_model?: string
+  approval?: {
+    default_policy?: string
+    auto_approve?: string[]
+    require_approval?: string[]
+  }
 }
 
 export function usePersonaUpdate(agentId: string) {
   const qc = useQueryClient()
   return useMutation({
+    // Contract: PUT /api/agents/{id}/personas/{pid} → 200 full persona detail
     // TODO endpoints.ts (ui-sweep-b owns) — inline path for now
     mutationFn: ({ pid, body }: { pid: string; body: PersonaUpdateBody }) =>
-      apiPost<unknown>(
+      apiPut<unknown>(
         `/api/agents/${encodeURIComponent(agentId)}/personas/${encodeURIComponent(pid)}`,
         body as unknown as Record<string, unknown>,
       ),
