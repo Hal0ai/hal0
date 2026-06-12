@@ -129,6 +129,47 @@ export const ENDPOINTS = {
     `/api/agent/approvals/${encodeURIComponent(id)}/deny`,
   // Memory list endpoint (ADR-0014, PR #736 backend surface).
   memoryList: '/api/memory/list',
+  // ── Hindsight engine admin surface (memory_admin routes) ─────────
+  // Fail-soft engine card + allowlisted bank-scoped passthrough.
+  memoryEngine: '/api/memory/engine',
+  memoryBanks: '/api/memory/banks',
+  memoryBank: (bank: string) => `/api/memory/banks/${encodeURIComponent(bank)}`,
+  memoryBankStats: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/stats`,
+  memoryBankTimeseries: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/stats/timeseries`,
+  memoryBankProfile: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/profile`,
+  memoryBankGraph: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/graph`,
+  memoryBankEntityGraph: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/entities/graph`,
+  memoryBankEntities: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/entities`,
+  memoryBankEntity: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/entities/${encodeURIComponent(id)}`,
+  memoryBankMemories: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/memories`,
+  memoryBankDocuments: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/documents`,
+  memoryBankDocument: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/documents/${encodeURIComponent(id)}`,
+  memoryBankTags: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/tags`,
+  memoryBankRecall: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/recall`,
+  memoryBankReflect: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/reflect`,
+  memoryBankMentalModels: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/mental-models`,
+  memoryBankDirectives: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/directives`,
+  memoryBankOperations: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/operations`,
+  memoryBankOperationRetry: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/operations/${encodeURIComponent(id)}/retry`,
+  memoryBankConsolidate: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/consolidate`,
   // Per-agent memory stats — parameterised by agent id. Previously a
   // hardcoded "/api/agents/hermes/memory/stats" placeholder; now generic.
   agentMemoryStats: (id: string) =>

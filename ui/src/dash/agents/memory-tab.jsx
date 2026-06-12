@@ -71,6 +71,14 @@ function MemoryTab({ subsection } = {}) {
                 <span style={{marginLeft: "auto"}} className={`chip ${stats?.available ? "ok" : ""}`}>
                   {stats?.available ? "healthy" : "offline"}
                 </span>
+                <button
+                  className="btn ghost xs"
+                  data-testid="memory-open-view"
+                  onClick={() => { window.location.hash = "#memory"; }}
+                  title="Banks, graph and operations on the Memory page"
+                >
+                  Open Memory →
+                </button>
               </div>
               {stats?.last_write && (
                 <div className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>

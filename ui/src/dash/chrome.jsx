@@ -65,6 +65,8 @@ const Icons = {
   // issue #549 — two linked rings echo the "remote ↔ local" connection metaphor.
   connections: <Icon><circle cx="6" cy="8" r="2.5"/><circle cx="11" cy="11" r="1.5" fill="currentColor" stroke="none"/><path d="M8 9.5l2 1M3.5 4.5h4M3.5 6.5h3"/></Icon>,
   agent:     <Icon><circle cx="8" cy="6" r="2.5"/><path d="M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5"/><circle cx="13" cy="3" r="1.5"/></Icon>,
+  // Hindsight memory — stacked store with an orbiting fact node.
+  memory:    <Icon><ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v5c0 1.1 2.2 2 5 2s5-.9 5-2V4"/><path d="M3 6.5c0 1.1 2.2 2 5 2s5-.9 5-2"/><circle cx="13" cy="12.5" r="1.5"/></Icon>,
   settings:  <Icon><circle cx="8" cy="8" r="2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></Icon>,
   bell:      <Icon d="M4 11h8c-1 0-1.5-0.5-1.5-2V6.5a2.5 2.5 0 0 0-5 0V9c0 1.5-0.5 2-1.5 2zM6.5 13a1.5 1.5 0 0 0 3 0"/>,
   search:    <Icon><circle cx="7" cy="7" r="4"/><path d="M10 10l3 3"/></Icon>,
@@ -178,6 +180,7 @@ function useNavItems() {
     { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
     { id: "logs",      label: "Logs",      icon: Icons.logs },
     ...(memoryEnabled ? [{ id: "agent", label: "Agent", icon: Icons.agent }] : []),
+    ...(memoryEnabled ? [{ id: "memory", label: "Memory", icon: Icons.memory }] : []),
     // Issue #206 — MCP page wired to /api/mcp/*. Lives under "Agents"
     // conceptually but kept as a sibling so the URL is discoverable.
     { id: "mcp",       label: "MCP",       icon: Icons.agent },
@@ -201,6 +204,7 @@ function Sidebar({ route, onGo }) {
           <div
             key={it.id}
             className={"sb-row" + (route === it.id ? " active" : "")}
+            data-testid={"nav-" + it.id}
             onClick={() => onGo(it.id)}
           >
             {it.icon}

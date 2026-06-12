@@ -241,13 +241,13 @@ export function useAgentMemoryWrites(): UseQueryResult<number | null> {
     queryKey: ['agents', 'memory', 'writes'],
     queryFn: async () => {
       try {
-        const body = await apiGet<MemoryStats>(ENDPOINTS.agentMemoryStats)
+        const body = await apiGet<MemoryStats>(ENDPOINTS.agentMemoryStats('hermes'))
         if (body && typeof body.writes === 'number') return body.writes
         if (body && typeof body.items === 'number') return body.items
         return null
       } catch (err) {
         if (_isMissing(err)) {
-          _warnMissing(ENDPOINTS.agentMemoryStats, err)
+          _warnMissing(ENDPOINTS.agentMemoryStats('hermes'), err)
           // Fall through to /api/memory/list count — already wired in
           // useMemory.ts but we hit the raw endpoint here to keep this
           // hook self-contained.

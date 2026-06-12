@@ -13,7 +13,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "firstrun", "slots", "profiles", "models", "logs", "agent", "settings", "mcp", "connections"];
+const ROUTES = ["dashboard", "firstrun", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -204,6 +204,15 @@ function App() {
         }
         if (memoryStatusPending) return null; // loading — render nothing briefly
         return <AgentView />;
+      case "memory":
+        // Same gate as #agent — Hindsight surface only exists when the
+        // memory subsystem is live.
+        if (!memoryEnabled && !memoryStatusPending) {
+          if (typeof window !== "undefined") window.location.hash = "#dashboard";
+          return null;
+        }
+        if (memoryStatusPending) return null;
+        return <MemoryView />;
       case "profiles":  return <ProfilesView />;
       case "mcp":      return <McpView />;
       case "settings": return <SettingsView />;
