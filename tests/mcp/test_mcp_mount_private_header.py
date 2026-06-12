@@ -92,6 +92,7 @@ class _RecordingWrapper:
         source: str,
         metadata: dict[str, Any],
         client_id: str | None = None,
+        document_id: str | None = None,
     ) -> dict[str, Any]:
         self.add_calls.append(
             {"text": text, "dataset": dataset, "source": source, "client_id": client_id}

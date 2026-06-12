@@ -48,9 +48,18 @@ class PgVectorProvider(MemoryProvider):
         return out
 
     async def add(
-        self, text, dataset=_SHARED, tags=None, source=None, metadata=None, client_id=None
+        self,
+        text,
+        dataset=_SHARED,
+        tags=None,
+        source=None,
+        metadata=None,
+        client_id=None,
+        document_id=None,
     ):
-        item_id = str(uuid.uuid4())
+        # No document semantics on this engine — a caller-supplied
+        # document_id just becomes the item id so delete round-trips.
+        item_id = document_id or str(uuid.uuid4())
         ts = _now()
         self._rows.append(
             {
@@ -101,7 +110,9 @@ class PgVectorProvider(MemoryProvider):
             "next_cursor": None,
         }
 
-    async def delete(self, ids, *, client_id=None):
+    async def delete(self, ids, *, client_id=None, dataset=None):
+        # dataset narrowing is a Hindsight-bank concept; rows here carry
+        # their namespace inline, so the id match is already scoped.
         before = len(self._rows)
         self._rows = [r for r in self._rows if r["id"] not in set(ids)]
         return {"deleted": before - len(self._rows)}

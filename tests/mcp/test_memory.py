@@ -35,6 +35,7 @@ class _FakeWrapper:
         source: str,
         metadata: dict[str, Any],
         client_id: str | None = None,
+        document_id: str | None = None,
     ) -> dict[str, Any]:
         self.add_calls.append(
             {
@@ -44,10 +45,11 @@ class _FakeWrapper:
                 "source": source,
                 "metadata": metadata,
                 "client_id": client_id,
+                "document_id": document_id,
             }
         )
         self._counter += 1
-        return {"id": f"id-{self._counter}", "timestamp": "2026-05-22T00:00:00Z"}
+        return {"id": document_id or f"id-{self._counter}", "timestamp": "2026-05-22T00:00:00Z"}
 
     async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
         self.search_calls.append(kwargs)
@@ -57,8 +59,14 @@ class _FakeWrapper:
         self.list_calls.append(kwargs)
         return {"items": [{"id": "id-1"}], "next_cursor": None}
 
-    async def delete(self, *, ids: list[str], client_id: str | None = None) -> dict[str, Any]:
-        self.delete_calls.append({"ids": ids, "client_id": client_id})
+    async def delete(
+        self,
+        *,
+        ids: list[str],
+        client_id: str | None = None,
+        dataset: str | list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.delete_calls.append({"ids": ids, "client_id": client_id, "dataset": dataset})
         return {"deleted": len(ids)}
 
 
@@ -233,3 +241,109 @@ async def test_standalone_server_tools_carry_annotations(wrapper: _FakeWrapper) 
     # memory_search + memory_list are reads.
     assert by_name["memory_search"].annotations.readOnlyHint is True
     assert by_name["memory_list"].annotations.readOnlyHint is True
+
+
+# ── PR: MCP hardening (typed schemas, document_id, delete dataset, scrub) ───
+
+
+@pytest.mark.asyncio
+async def test_memory_add_document_id_passthrough(wrapper: _FakeWrapper, dispatcher: Any) -> None:
+    """A caller-supplied document_id reaches the wrapper (conversation upsert)."""
+    out = await dispatcher("memory_add", {"text": "turn 2", "document_id": "conv-abc_1"})
+    assert out["status"] == "ok"
+    assert out["id"] == "conv-abc_1"
+    assert wrapper.add_calls[0]["document_id"] == "conv-abc_1"
+
+
+@pytest.mark.asyncio
+async def test_memory_add_document_id_grammar_enforced(
+    wrapper: _FakeWrapper, dispatcher: Any
+) -> None:
+    """document_id becomes an engine URL path segment — bad grammar is a schema error."""
+    out = await dispatcher("memory_add", {"text": "x", "document_id": "../../etc/passwd"})
+    assert out["status"] == "error"
+    assert out["error"]["code"] == "mcp.memory_schema"
+    assert not wrapper.add_calls
+
+
+@pytest.mark.asyncio
+async def test_memory_add_surfaces_async_operation_id(dispatcher_factory: Any = None) -> None:
+    """Engines that ingest asynchronously return operation_id — it must
+    survive to the caller so ingestion can be polled."""
+
+    class _AsyncEngineWrapper(_FakeWrapper):
+        async def add(self, **kwargs: Any) -> dict[str, Any]:
+            self.add_calls.append(kwargs)
+            return {"id": "doc-1", "timestamp": "t", "operation_id": "op-42"}
+
+    wrapper = _AsyncEngineWrapper()
+    disp = memory.make_dispatcher(wrapper, client_id_resolver=lambda: "a", private_resolver=None)
+    out = await disp("memory_add", {"text": "x"})
+    assert out["status"] == "ok"
+    assert out["operation_id"] == "op-42"
+
+
+@pytest.mark.asyncio
+async def test_memory_delete_dataset_directs_sweep(wrapper: _FakeWrapper, dispatcher: Any) -> None:
+    """An explicit dataset narrows/widens the engine's bank sweep (e.g.
+    project items live outside the default shared+own-private sweep)."""
+    out = await dispatcher("memory_delete", {"ids": ["d1"], "dataset": "project:apollo"})
+    assert out["status"] == "ok"
+    assert wrapper.delete_calls[0]["dataset"] == "project:apollo"
+
+
+@pytest.mark.asyncio
+async def test_memory_failed_error_scrubs_engine_urls() -> None:
+    """httpx repeats the internal engine URL in error messages — the MCP
+    envelope must not leak it to remote callers."""
+
+    class _Resp:
+        status_code = 404
+
+    class _EngineError(Exception):
+        def __init__(self) -> None:
+            super().__init__(
+                "Client error '404 Not Found' for url 'http://127.0.0.1:9177/v1/default/banks/x'"
+            )
+            self.response = _Resp()
+
+    class _BoomWrapper(_FakeWrapper):
+        async def delete(self, **kwargs: Any) -> dict[str, Any]:
+            raise _EngineError()
+
+    disp = memory.make_dispatcher(
+        _BoomWrapper(), client_id_resolver=lambda: "a", private_resolver=None
+    )
+    out = await disp("memory_delete", {"ids": ["x"]})
+    assert out["status"] == "error"
+    assert out["error"]["code"] == "mcp.memory_failed"
+    assert "127.0.0.1" not in out["error"]["detail"]
+    assert "9177" not in out["error"]["detail"]
+    assert "404" in out["error"]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_standalone_server_publishes_typed_schemas(wrapper: _FakeWrapper) -> None:
+    """Tools must advertise real parameter schemas — the old single
+    ``args: object`` param made every client guess the call shape."""
+    server = memory.build_server(wrapper=wrapper)
+    tools = await server.list_tools()
+    props = {t.name: set((t.inputSchema or {}).get("properties", {})) for t in tools}
+    assert {"text", "dataset", "tags", "metadata", "document_id"} <= props["memory_add"]
+    assert {"query", "limit", "dataset", "tags", "before", "after"} <= props["memory_search"]
+    assert {"ids", "dataset"} <= props["memory_delete"]
+    assert {"query", "max_tokens", "types", "dataset", "tags"} <= props["memory_recall"]
+
+
+@pytest.mark.asyncio
+async def test_standalone_server_legacy_args_envelope_still_works(
+    wrapper: _FakeWrapper,
+) -> None:
+    """Pre-schema clients sent {"args": {...}} — that envelope keeps working,
+    with explicit params winning over same-named args keys."""
+    server = memory.build_server(wrapper=wrapper)
+    result = await server.call_tool("memory_add", {"args": {"text": "legacy shape"}})
+    # FastMCP returns (content, structured) — the structured payload carries the envelope.
+    structured = result[1] if isinstance(result, tuple) else result
+    assert structured["status"] == "ok"
+    assert wrapper.add_calls[0]["text"] == "legacy shape"

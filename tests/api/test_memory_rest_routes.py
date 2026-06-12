@@ -58,6 +58,7 @@ class StubWrapper:
         source: str | None,
         metadata: dict[str, Any],
         client_id: str | None = None,
+        document_id: str | None = None,
     ) -> dict[str, Any]:
         self.add_calls.append(
             {
@@ -67,10 +68,11 @@ class StubWrapper:
                 "source": source,
                 "metadata": metadata,
                 "client_id": client_id,
+                "document_id": document_id,
             }
         )
         self._counter += 1
-        return {"id": f"id-{self._counter}", "timestamp": "2026-05-28T00:00:00Z"}
+        return {"id": document_id or f"id-{self._counter}", "timestamp": "2026-05-28T00:00:00Z"}
 
     async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
         self.search_calls.append(kwargs)
@@ -80,8 +82,14 @@ class StubWrapper:
         self.list_calls.append(kwargs)
         return {"items": [{"id": "id-1"}], "next_cursor": None}
 
-    async def delete(self, *, ids: list[str], client_id: str | None = None) -> dict[str, Any]:
-        self.delete_calls.append({"ids": list(ids), "client_id": client_id})
+    async def delete(
+        self,
+        *,
+        ids: list[str],
+        client_id: str | None = None,
+        dataset: str | list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.delete_calls.append({"ids": list(ids), "client_id": client_id, "dataset": dataset})
         return {"deleted": len(ids)}
 
 
@@ -292,7 +300,9 @@ def test_delete_passes_ids_unchanged(client: TestClient, stub_wrapper: StubWrapp
         headers={"X-hal0-Agent": "hermes-agent", "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
-    assert stub_wrapper.delete_calls == [{"ids": ["a", "b"], "client_id": "hermes-agent"}]
+    assert stub_wrapper.delete_calls == [
+        {"ids": ["a", "b"], "client_id": "hermes-agent", "dataset": None}
+    ]
     assert r.json() == {"deleted": 2}
 
 
@@ -492,3 +502,62 @@ def test_anonymous_call_passes_no_client_id(client: TestClient, stub_wrapper: St
     assert r.status_code == 200, r.text
     ac = stub_wrapper.add_calls[-1]
     assert ac["client_id"] is None
+
+
+# ── PR: document_id upsert, delete dataset sweep, closed namespaces ─────────
+
+
+def test_add_document_id_passes_through(client: TestClient, stub_wrapper: StubWrapper) -> None:
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "turn 2", "document_id": "conv-42"},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 200, r.text
+    assert stub_wrapper.add_calls[0]["document_id"] == "conv-42"
+    assert r.json()["id"] == "conv-42"
+
+
+def test_add_document_id_bad_grammar_rejected(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "x", "document_id": "../escape"},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 400, r.text
+    assert not stub_wrapper.add_calls
+
+
+def test_add_unknown_namespace_rejected(client: TestClient, stub_wrapper: StubWrapper) -> None:
+    """Free-form dataset names no longer pass through to arbitrary engine banks."""
+    r = client.post(
+        "/api/memory/add",
+        json={"text": "x", "dataset": "smoke-gemma4-e4b-v2"},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 400, r.text
+    assert not stub_wrapper.add_calls
+
+
+def test_delete_dataset_directs_sweep(client: TestClient, stub_wrapper: StubWrapper) -> None:
+    r = client.post(
+        "/api/memory/delete",
+        json={"ids": ["d1"], "dataset": "project:apollo"},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 200, r.text
+    assert stub_wrapper.delete_calls[0]["dataset"] == "project:apollo"
+
+
+def test_delete_without_dataset_keeps_default_sweep(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    r = client.post(
+        "/api/memory/delete",
+        json={"ids": ["d1"]},
+        headers={"X-hal0-Agent": "hermes-agent"},
+    )
+    assert r.status_code == 200, r.text
+    assert stub_wrapper.delete_calls[0]["dataset"] is None

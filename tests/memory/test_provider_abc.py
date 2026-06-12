@@ -43,7 +43,16 @@ def test_add_signature_matches_cognee_call_sites():
     sig = inspect.signature(MemoryProvider.add)
     params = list(sig.parameters)
     # Mirrors CogneeWrapper.add + the REST/MCP callers.
-    assert params == ["self", "text", "dataset", "tags", "source", "metadata", "client_id"]
+    assert params == [
+        "self",
+        "text",
+        "dataset",
+        "tags",
+        "source",
+        "metadata",
+        "client_id",
+        "document_id",
+    ]
 
 
 def test_cognee_wrapper_is_a_memory_provider():

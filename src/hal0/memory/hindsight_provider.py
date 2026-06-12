@@ -82,6 +82,23 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _http_status(exc: Exception) -> int | None:
+    """Status code of an httpx.HTTPStatusError-shaped exception, else None.
+
+    Duck-typed (``exc.response.status_code``) so the fake clients in tests
+    don't need httpx to exercise the 404-sweep behavior."""
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    return int(code) if isinstance(code, int) else None
+
+
+# Hindsight recall defaults to world+experience when ``types`` is omitted,
+# which silently hides the consolidated observation layer — the highest-value
+# tier (deduplicated, evidence-grounded beliefs). hal0's default includes it;
+# callers can still narrow with an explicit ``types``.
+_DEFAULT_RECALL_TYPES = ("world", "experience", "observation")
+
+
 class HindsightProvider(MemoryProvider):
     def __init__(
         self,
@@ -140,14 +157,18 @@ class HindsightProvider(MemoryProvider):
         source: str | None = None,
         metadata: dict[str, Any] | None = None,
         client_id: str | None = None,
+        document_id: str | None = None,
     ) -> dict[str, str]:
         ns = self._write_namespace(dataset, client_id)
         bank = namespace_to_bank(ns)
-        document_id = str(uuid.uuid4())  # the join key
+        # The join key. Caller-supplied → Hindsight upserts the same
+        # logical document across adds (conversation evolution); absent →
+        # fresh document per call.
+        document_id = document_id or str(uuid.uuid4())
         meta = dict(metadata or {})
         if source:
             meta["source"] = source
-        await self._client.retain(
+        resp = await self._client.retain(
             bank_id=bank,
             content=text,
             document_id=document_id,
@@ -156,7 +177,14 @@ class HindsightProvider(MemoryProvider):
             tags=list(tags or []),
             timestamp=None,
         )
-        return {"id": document_id, "timestamp": _now()}
+        out = {"id": document_id, "timestamp": _now()}
+        # retain is async on this engine — surface the operation id so
+        # callers (dashboard ingestion indicator, CLI) can poll instead of
+        # wondering why list doesn't show the item yet.
+        operation_id = (resp or {}).get("operation_id") if isinstance(resp, dict) else None
+        if operation_id:
+            out["operation_id"] = str(operation_id)
+        return out
 
     async def search(
         self,
@@ -215,14 +243,31 @@ class HindsightProvider(MemoryProvider):
             "type": fact.get("fact_type"),
         }
 
-    async def delete(self, ids: list[str], *, client_id: str | None = None) -> dict[str, int]:
+    async def delete(
+        self,
+        ids: list[str],
+        *,
+        client_id: str | None = None,
+        dataset: str | list[str] | None = None,
+    ) -> dict[str, int]:
         deleted = 0
-        # We don't know which bank each document_id lives in without a lookup;
-        # try the caller's allowed banks. delete_document is idempotent.
-        banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(_SHARED, client_id)]
+        # We don't know which bank each document_id lives in without a
+        # lookup; try the caller's allowed banks. Hindsight 404s a missing
+        # document (NOT idempotent-200), so a per-bank probe that misses
+        # must continue the sweep — previously the first 404 aborted the
+        # whole call, which made every private-bank item undeletable
+        # (the shared bank is probed first and always 404'd).
+        banks = [
+            namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset or _SHARED, client_id)
+        ]
         for document_id in ids:
             for bank in banks:
-                res = await self._client.delete_document(bank_id=bank, document_id=document_id)
+                try:
+                    res = await self._client.delete_document(bank_id=bank, document_id=document_id)
+                except Exception as exc:
+                    if _http_status(exc) == 404:
+                        continue  # not in this bank — keep sweeping
+                    raise
                 if int(res.get("memory_units_deleted", 0)) > 0:
                     deleted += 1
                     break
@@ -250,10 +295,11 @@ class HindsightProvider(MemoryProvider):
         banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
         if not banks:
             return []
+        effective_types = list(types) if types else list(_DEFAULT_RECALL_TYPES)
 
         async def _one(bank: str) -> list[dict[str, Any]]:
             resp = await self._client.recall(
-                bank_id=bank, query=query, types=types, max_tokens=max_tokens, tags=tags
+                bank_id=bank, query=query, types=effective_types, max_tokens=max_tokens, tags=tags
             )
             return [self._fact_to_item(f, bank) for f in resp.get("results", [])]
 

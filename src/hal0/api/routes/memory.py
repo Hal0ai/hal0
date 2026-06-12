@@ -309,7 +309,11 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
 
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
-    """Add a memory item. Body: ``{text, dataset?, tags?, metadata?}``.
+    """Add a memory item. Body: ``{text, dataset?, tags?, metadata?, document_id?}``.
+
+    Returns ``{id, timestamp}`` plus ``operation_id`` when the engine
+    ingests asynchronously (Hindsight retain). Reuse ``document_id``
+    across calls to upsert one logical document.
 
     Identity headers (issue #317):
 
@@ -353,6 +357,15 @@ async def memory_add(request: Request) -> dict[str, Any]:
     except MemoryNamespaceError as exc:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
+    document_id = body.get("document_id")
+    if document_id is not None and (
+        not isinstance(document_id, str) or not _AGENT_ID_PATTERN.match(document_id)
+    ):
+        raise BadRequest(
+            "memory_add 'document_id' must match the identity grammar (alnum/-/_ ≤64 chars)",
+            details={"path": "/api/memory/add"},
+        )
+
     wrapper = _wrapper(request)
     return await wrapper.add(
         text=text,
@@ -361,6 +374,7 @@ async def memory_add(request: Request) -> dict[str, Any]:
         source=agent_id,
         metadata=body.get("metadata") or {},
         client_id=agent_id if agent_id != "anonymous" else None,
+        document_id=document_id,
     )
 
 
@@ -486,12 +500,14 @@ async def memory_list(
 
 @router.post("/delete")
 async def memory_delete(request: Request) -> dict[str, int]:
-    """Delete by id. Body: ``{ids: [...]}``. Returns ``{deleted: int}``.
+    """Delete by id. Body: ``{ids: [...], dataset?}``. Returns ``{deleted: int}``.
 
-    Identity headers are not consulted: id-scoped delete bypasses the
-    namespace surface entirely (the wrapper's audit log still stamps
-    the call with the agent identity for forensics — see
-    :meth:`CogneeWrapper._audit`).
+    ``dataset`` optionally directs the engine's bank sweep (e.g.
+    ``project:<id>`` items live outside the default shared + own-private
+    sweep). Identity headers otherwise are not consulted: id-scoped
+    delete bypasses the namespace surface entirely (the wrapper's audit
+    log still stamps the call with the agent identity for forensics —
+    see :meth:`CogneeWrapper._audit`).
     """
     body = await _read_json_body(request)
     ids = body.get("ids")
@@ -501,10 +517,27 @@ async def memory_delete(request: Request) -> dict[str, int]:
             details={"path": "/api/memory/delete"},
         )
     agent_id = _agent_id(request)
+    private = _is_private(request)
+    requested = body.get("dataset")
+    dataset: str | list[str] | None
+    if requested is None or (isinstance(requested, str) and not requested.strip()):
+        dataset = None
+    elif isinstance(requested, list):
+        dataset = [str(d) for d in requested]
+    else:
+        try:
+            dataset = resolve_write_dataset(
+                str(requested),
+                private=private,
+                client_id=agent_id if agent_id != "anonymous" else None,
+            )
+        except MemoryNamespaceError as exc:
+            raise MemoryNamespaceInvalid(str(exc)) from exc
     wrapper = _wrapper(request)
     return await wrapper.delete(
         ids=ids,
         client_id=agent_id if agent_id != "anonymous" else None,
+        dataset=dataset,
     )
 
 

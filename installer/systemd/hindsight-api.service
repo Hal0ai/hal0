@@ -29,22 +29,24 @@ Environment=HF_HOME=/var/lib/hal0/memory/hindsight/hf-cache
 # A NON-EMPTY key is required even for a no-auth endpoint (spike gotcha #1).
 Environment=HINDSIGHT_API_LLM_PROVIDER=openai
 Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
-# [Q5'] RESOLVED on the NPU (frees the iGPU; no in-tree wrap-patch). History:
+# [Q5''] Moved NPU -> utility slot. The [Q5'] NPU rationale (below) predates
+# the podman container runtime: it freed a Lemonade-era iGPU that evicted
+# models on contention. Slots are resident containers now — `utility`
+# (gemma-4-12b-it, iGPU) is always loaded, so routing Hindsight there adds
+# no GTT pressure, and the Memory dashboard (#748) made reflect / mental
+# models / consolidation user-facing: ~2s/turn on utility vs 77-160s on the
+# NPU (FLM serializes, so memory ops also queued behind NPU chat traffic).
+# [Q5'] history, kept for the record:
 #  - qwen3-it-4b-FLM (NPU): ignores response_format -> bare JSON *list* -> rejected.
-#  - gemma-4-26b-a4b-it-q4kxl (iGPU GGUF): returns {"facts":[...]} but contends
-#    with the 35B primary on the iGPU (eviction risk).
-#  - gemma4-it:e2b/e4b (NPU): BLOCKED — amdxdna HWCTX alloc fails (err=-22) on
-#    NPU FW 1.1.2.65 / amdxdna 0.7; Gemma-3n NPU2 arch unsupported by this driver.
-# CHOSEN: gemma3 4B on the NPU (FLM). gemma3 arch loads on this NPU; emits a
-# ```json-fenced {"facts":[...]} which Hindsight's fact_extraction strips +
-# parses. Verified live: retain+recall end-to-end green. Runs on the NPU ->
-# iGPU stays free for the primary (removes the P2-6 eviction risk). Slower
-# (~160s/extract) but retain is async/background so it doesn't block.
-# `hal0/npu` is hal0-api's virtual model name for the npu slot (falls back
-# utility -> chat if the NPU slot is unavailable).
-Environment=HINDSIGHT_API_LLM_MODEL=hal0/npu
+#  - gemma-4-26b-a4b-it-q4kxl (iGPU GGUF): {"facts":[...]} ok but Lemonade-era
+#    eviction risk vs the 35B primary (obsolete under container runtime).
+#  - gemma4-it:e2b/e4b (NPU): BLOCKED — amdxdna HWCTX alloc fails (err=-22).
+#  - gemma3 4B NPU (FLM): worked but ~160s/extract + reflect timeouts.
+# `hal0/utility` is hal0-api's virtual model name for the utility slot
+# (falls back chat if unavailable).
+Environment=HINDSIGHT_API_LLM_MODEL=hal0/utility
 Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
-# NPU extraction is slow (~160s incl. first-call trio load). Generous timeout.
+# Generous timeout retained: covers utility-slot cold starts + long reflects.
 Environment=HINDSIGHT_API_LLM_TIMEOUT=300
 
 # Embeddings + reranker are LOCAL (bundled BGE 384-d + MiniLM cross-encoder) —

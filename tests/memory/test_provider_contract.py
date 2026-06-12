@@ -118,7 +118,8 @@ def _hindsight_factory():
 async def test_hindsight_conforms_to_contract():
     p = _hindsight_factory()
     res = await p.add("hs note", dataset="shared")
-    assert set(res) == {"id", "timestamp"}
+    # operation_id is optional contract surface (async-ingest engines).
+    assert {"id", "timestamp"} <= set(res) <= {"id", "timestamp", "operation_id"}
     # Foreign-private read → empty.
     out = await p.search("note", dataset="private:bob", client_id="bob")
     assert out == []

@@ -43,10 +43,16 @@ class FakeHindsightClient:
                 "mentioned_at": "2026-06-06T00:00:00+00:00",
             }
         )
-        return {"success": True, "bank_id": bank_id, "items_count": 1}
+        return {
+            "success": True,
+            "bank_id": bank_id,
+            "items_count": 1,
+            "async": True,
+            "operation_id": "op-test",
+        }
 
     async def recall(self, *, bank_id, query, types=None, max_tokens=4096, tags=None):
-        self.recalled.append({"bank_id": bank_id, "query": query})
+        self.recalled.append({"bank_id": bank_id, "query": query, "types": types})
         return {"results": list(self._facts_by_bank.get(bank_id, []))}
 
     async def delete_document(self, *, bank_id, document_id):
@@ -84,10 +90,12 @@ async def test_add_routes_to_retain_under_mapped_bank():
     fake = FakeHindsightClient()
     p = HindsightProvider(client=fake, client_id="hermes")
     res = await p.add("Alice works at Google", dataset="private:hermes", client_id="hermes")
-    assert set(res) == {"id", "timestamp"}
+    assert set(res) == {"id", "timestamp", "operation_id"}
     assert fake.retained[0]["bank_id"] == "private__hermes"
     # The returned id IS the document_id (the join key), not a fact id.
     assert fake.retained[0]["document_id"] == res["id"]
+    # retain is async on this engine — the operation id surfaces for polling.
+    assert res["operation_id"] == "op-test"
 
 
 class FakeReranker:
@@ -206,3 +214,105 @@ async def test_list_items_fans_out_real_endpoint():
     ids = {item["id"] for item in result["items"]}
     assert "d-shared" in ids
     assert "d-hermes" in ids
+
+
+# ── PR: delete 404-sweep, add upsert/operation_id, recall type defaults ──────
+
+
+class Fake404HindsightClient(FakeHindsightClient):
+    """Models the REAL Hindsight delete contract: a document missing from a
+    bank is a 404 (httpx raise_for_status), not an idempotent zero-count."""
+
+    class _Resp:
+        status_code = 404
+
+    class NotFound(Exception):
+        def __init__(self) -> None:
+            super().__init__("Client error '404 Not Found' for url 'http://127.0.0.1:9177/...'")
+            self.response = Fake404HindsightClient._Resp()
+
+    async def delete_document(self, *, bank_id, document_id):
+        facts = self._facts_by_bank.get(bank_id, [])
+        if not any(f["document_id"] == document_id for f in facts):
+            raise Fake404HindsightClient.NotFound()
+        return await super().delete_document(bank_id=bank_id, document_id=document_id)
+
+
+@pytest.mark.asyncio
+async def test_delete_sweep_survives_404_and_reaches_private_bank():
+    """The shared bank is probed first and 404s for a private-bank item —
+    the sweep must continue, not abort (the abort made every private item
+    undeletable in production)."""
+    fake = Fake404HindsightClient()
+    await fake.retain(bank_id="private__hermes", content="secret", document_id="d-priv", tags=[])
+
+    p = HindsightProvider(client=fake, client_id="hermes")
+    res = await p.delete(["d-priv"], client_id="hermes")
+    assert res == {"deleted": 1}
+    assert not fake._facts_by_bank["private__hermes"]
+
+
+@pytest.mark.asyncio
+async def test_delete_missing_everywhere_counts_zero():
+    fake = Fake404HindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+    res = await p.delete(["nope"], client_id="hermes")
+    assert res == {"deleted": 0}
+
+
+@pytest.mark.asyncio
+async def test_delete_non_404_engine_errors_still_raise():
+    """Only the missing-document 404 is swallowed; a real engine failure
+    (5xx, connection refused) must propagate."""
+
+    class _Resp:
+        status_code = 503
+
+    class _Boom(Exception):
+        response = _Resp()
+
+    class _BoomClient(FakeHindsightClient):
+        async def delete_document(self, *, bank_id, document_id):
+            raise _Boom()
+
+    p = HindsightProvider(client=_BoomClient(), client_id="hermes")
+    with pytest.raises(_Boom):
+        await p.delete(["d1"], client_id="hermes")
+
+
+@pytest.mark.asyncio
+async def test_delete_dataset_directs_sweep_to_project_bank():
+    """An explicit dataset reaches banks outside the default sweep."""
+    fake = Fake404HindsightClient()
+    await fake.retain(bank_id="project__apollo", content="x", document_id="d-proj", tags=[])
+
+    p = HindsightProvider(client=fake, client_id="hermes")
+    res = await p.delete(["d-proj"], client_id="hermes", dataset="project:apollo")
+    assert res == {"deleted": 1}
+
+
+@pytest.mark.asyncio
+async def test_add_caller_document_id_upserts_same_document():
+    """Reusing a document_id pins the engine join key (conversation upsert)."""
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+    r1 = await p.add("turn 1", dataset="shared", client_id="hermes", document_id="conv-1")
+    r2 = await p.add("turn 1+2", dataset="shared", client_id="hermes", document_id="conv-1")
+    assert r1["id"] == r2["id"] == "conv-1"
+    assert [r["document_id"] for r in fake.retained] == ["conv-1", "conv-1"]
+
+
+@pytest.mark.asyncio
+async def test_recall_default_types_include_observations():
+    """Hindsight's own default (world+experience) hides the consolidated
+    observation layer; hal0's default must request it explicitly."""
+    fake = FakeHindsightClient()
+    await fake.retain(bank_id="shared", content="x", document_id="d1", tags=[])
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    await p.recall("anything", dataset="shared", client_id="hermes")
+    assert fake.recalled[0]["types"] == ["world", "experience", "observation"]
+
+    fake.recalled.clear()
+    await p.recall("anything", dataset="shared", client_id="hermes", types=["world"])
+    assert fake.recalled[0]["types"] == ["world"]

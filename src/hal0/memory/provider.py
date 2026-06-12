@@ -130,8 +130,16 @@ class MemoryProvider(ABC):
         source: str | None = None,
         metadata: dict[str, Any] | None = None,
         client_id: str | None = None,
+        document_id: str | None = None,
     ) -> dict[str, str]:
-        """Add a memory item. Returns ``{id, timestamp}``."""
+        """Add a memory item. Returns ``{id, timestamp}`` plus
+        ``operation_id`` when the engine processes asynchronously (poll
+        it via the engine-admin operations surface).
+
+        ``document_id`` lets a caller pin the engine's grouping key —
+        re-using one id across adds upserts the same logical document
+        (conversation evolution). ``None`` → a fresh id per call.
+        Engines without document semantics ignore it."""
 
     @abstractmethod
     async def search(
@@ -158,8 +166,18 @@ class MemoryProvider(ABC):
         """Paginated list. Returns ``{items, next_cursor}``."""
 
     @abstractmethod
-    async def delete(self, ids: list[str], *, client_id: str | None = None) -> dict[str, int]:
-        """Delete by id. Returns ``{deleted: int}``."""
+    async def delete(
+        self,
+        ids: list[str],
+        *,
+        client_id: str | None = None,
+        dataset: str | list[str] | None = None,
+    ) -> dict[str, int]:
+        """Delete by id. Returns ``{deleted: int}``.
+
+        ``dataset`` optionally narrows (or widens, e.g. ``project:<id>``)
+        the namespaces swept for each id; ``None`` keeps the default
+        sweep of ``shared`` + the caller's own private namespace."""
 
     @abstractmethod
     def graph_status(self) -> dict[str, Any]:

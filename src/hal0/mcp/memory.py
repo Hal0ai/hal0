@@ -20,12 +20,14 @@ Tool catalog (ADR-0005 §2)
 Per ADR-0005 §2 the v0.2 schema is rich from day 1 so we don't pay a
 schema-versioning tax in Phase 9::
 
-    memory_add(text, dataset="shared", tags=[], metadata={})
-        → {id: str, timestamp: iso8601}
+    memory_add(text, dataset="shared", tags=[], metadata={},
+               document_id=null)
+        → {id: str, timestamp: iso8601, operation_id?: str}
         # `source` is auto-extracted server-side from the caller's
         # client_id (Bearer-derived). Clients CANNOT pass `source`
         # themselves — that's how ADR-0005 §5 keeps the audit trail
-        # forensically grounded.
+        # forensically grounded. `document_id` reuse upserts one
+        # logical document; `operation_id` surfaces async ingestion.
 
     memory_search(query, limit=10, dataset="shared"|list, tags=[],
                   before=null, after=null)
@@ -35,7 +37,7 @@ schema-versioning tax in Phase 9::
     memory_list(dataset="shared", cursor=null, limit=50)
         → {items: [...], next_cursor: str | null}
 
-    memory_delete(ids: list[str])
+    memory_delete(ids: list[str], dataset=null)
         → {deleted: int}
 
 Namespace rule (ADR-0005 §3): writes default to dataset ``shared``;
@@ -61,6 +63,7 @@ mounts at ``/mcp/memory`` via ``app.mount()``.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -96,6 +99,11 @@ log = structlog.get_logger(__name__)
 
 class MemorySchemaError(ValueError):
     """Raised when a memory tool call's args don't match the ADR-0005 §2 schema."""
+
+
+# document_id becomes a URL path segment on the engine's documents API —
+# same bounded grammar as agent ids (ADR-0005 §5) keeps it traversal-free.
+_AGENT_ID_LIKE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
 
 def _require(args: dict[str, Any], key: str, type_: type) -> Any:
@@ -174,7 +182,8 @@ async def _memory_add(
     client_id: str | None,
     private: bool,
 ) -> dict[str, Any]:
-    """memory_add(text, dataset?, tags?, metadata?) → {id, timestamp}.
+    """memory_add(text, dataset?, tags?, metadata?, document_id?)
+    → {id, timestamp, operation_id?}.
 
     ADR-0005 §2 schema:
       - ``text``: required, non-empty str.
@@ -182,14 +191,15 @@ async def _memory_add(
         to ``private:<client_id>``.
       - ``tags``: defaults to ``[]``.
       - ``metadata``: defaults to ``{}``.
+      - ``document_id``: optional engine grouping key — reuse one id
+        across adds to upsert the same logical document (conversation
+        evolution). Same identity grammar as agent ids.
       - ``source``: NOT accepted from the caller. Server-injected from
         ``client_id`` so callers cannot lie about their identity
         (ADR-0005 §5 audit grounding).
 
-    CogneeWrapper contract::
-
-        await wrapper.add(text, dataset, tags, source, metadata)
-            -> {"id": str, "timestamp": iso8601_str}
+    ``operation_id`` appears when the engine ingests asynchronously
+    (Hindsight retain) — poll it via the engine-admin operations surface.
     """
     text = _require(args, "text", str)
     if not text.strip():
@@ -206,6 +216,9 @@ async def _memory_add(
         raise MemorySchemaError(
             "source is server-injected from client_id and cannot be supplied by callers"
         )
+    document_id = _optional(args, "document_id", str)
+    if document_id is not None and not _AGENT_ID_LIKE.match(document_id):
+        raise MemorySchemaError("document_id must match the identity grammar (alnum/-/_ ≤64 chars)")
     source = client_id or "anonymous"
     result = await wrapper.add(
         text=text,
@@ -214,11 +227,15 @@ async def _memory_add(
         source=source,
         metadata=metadata_raw,
         client_id=client_id,
+        document_id=document_id,
     )
-    return {
+    out = {
         "id": result["id"],
         "timestamp": result.get("timestamp") or _iso_now(),
     }
+    if result.get("operation_id"):
+        out["operation_id"] = result["operation_id"]
+    return out
 
 
 async def _memory_search(
@@ -303,18 +320,30 @@ async def _memory_delete(
     client_id: str | None,
     private: bool,
 ) -> dict[str, Any]:
-    """memory_delete(ids) → {deleted: int}.
+    """memory_delete(ids, dataset?) → {deleted: int}.
 
     Returns the count of deleted rows per ADR-0005 §2. ``ids`` must be
-    non-empty. Approval-gating for bulk deletes (>1 id) lives in
-    :mod:`hal0.mcp.admin`; by the time we get here it has already been
-    approved (or is a single-id autonomous call).
+    non-empty. ``dataset`` optionally directs the engine's bank sweep
+    (e.g. ``project:<id>`` items live outside the default
+    shared + own-private sweep). Approval-gating for bulk deletes
+    (>1 id) lives in :mod:`hal0.mcp.admin`; by the time we get here it
+    has already been approved (or is a single-id autonomous call).
     """
     ids_raw = args.get("ids")
     if not isinstance(ids_raw, list) or not ids_raw:
         raise MemorySchemaError("ids must be a non-empty list[str]")
     ids = [str(i) for i in ids_raw]
-    result = await wrapper.delete(ids=ids, client_id=client_id)
+    requested = args.get("dataset")
+    dataset: str | list[str] | None
+    if requested is None or (isinstance(requested, str) and not requested.strip()):
+        dataset = None
+    elif isinstance(requested, list):
+        dataset = [str(d) for d in requested]
+    elif isinstance(requested, str):
+        dataset = _resolve_dataset(requested, private=private, client_id=client_id)
+    else:
+        raise MemorySchemaError("dataset must be str | list[str] | null")
+    result = await wrapper.delete(ids=ids, client_id=client_id, dataset=dataset)
     deleted_raw = result.get("deleted", len(ids))
     # Accept either a count or the list of deleted ids from the wrapper
     # so we're forgiving of either contract while still returning the
@@ -423,14 +452,28 @@ def make_dispatcher(
                 "status": "error",
                 "error": {"code": "mcp.memory_schema", "detail": str(exc)},
             }
-        except Exception as exc:  # pragma: no cover — surfaced to client
+        except Exception as exc:
             log.warning("mcp.memory.failed", tool=tool, error=str(exc))
             return {
                 "status": "error",
-                "error": {"code": "mcp.memory_failed", "detail": str(exc)},
+                "error": {"code": "mcp.memory_failed", "detail": _scrub_detail(exc)},
             }
 
     return _dispatch
+
+
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _scrub_detail(exc: Exception) -> str:
+    """Client-safe error detail: engine URLs (httpx repeats the full
+    internal request URL in HTTPStatusError messages) are not the
+    caller's business — redact them, keep the rest of the message."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return f"memory engine returned HTTP {status}"
+    return _URL_RE.sub("<engine>", str(exc))
 
 
 # ── Tool annotations (mcp-builder Phase 2.3) ─────────────────────────────────
@@ -489,26 +532,134 @@ def build_server(
         private_resolver=private_resolver,
     )
 
-    def _register(tool: str, description: str) -> None:
-        async def _tool(args: dict[str, Any] | None = None) -> dict[str, Any]:
-            return await dispatcher(tool, args or {})
+    # Typed signatures so FastMCP publishes real parameter schemas —
+    # the old single ``args: dict`` param advertised an opaque object
+    # and every client had to guess the call shape from docs. The
+    # trailing ``args`` param keeps the legacy envelope working:
+    # explicit params win over same-named ``args`` keys.
 
-        _tool.__name__ = tool
-        _tool.__doc__ = description
-        annotations = _ANNOTATIONS.get(tool)
-        server.tool(name=tool, description=description, annotations=annotations)(_tool)
+    def _merged(args: dict[str, Any] | None, **explicit: Any) -> dict[str, Any]:
+        merged = dict(args or {})
+        merged.update({k: v for k, v in explicit.items() if v is not None})
+        return merged
 
-    _register("memory_add", "Add an item to long-term memory.")
-    _register("memory_search", "Search long-term memory.")
-    _register("memory_list", "Page through long-term memory items.")
-    _register(
-        "memory_delete",
-        "Delete one or more memory items by id (bulk deletes gate at admin layer).",
+    @server.tool(
+        name="memory_add",
+        description=(
+            "Add an item to long-term memory. Returns {id, timestamp} plus "
+            "operation_id when ingestion is asynchronous. Reuse document_id "
+            "across calls to upsert one logical document (e.g. a conversation)."
+        ),
+        annotations=_ANNOTATIONS["memory_add"],
     )
-    _register(
-        "memory_recall",
-        "Recall token-budgeted, consolidated memory (preferred over search).",
+    async def memory_add(
+        text: str | None = None,
+        dataset: str | None = None,
+        tags: list[str] | str | None = None,
+        metadata: dict[str, Any] | None = None,
+        document_id: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_add",
+            _merged(
+                args,
+                text=text,
+                dataset=dataset,
+                tags=tags,
+                metadata=metadata,
+                document_id=document_id,
+            ),
+        )
+
+    @server.tool(
+        name="memory_search",
+        description="Search long-term memory. Returns {results: [...]}.",
+        annotations=_ANNOTATIONS["memory_search"],
     )
+    async def memory_search(
+        query: str | None = None,
+        limit: int | None = None,
+        dataset: str | list[str] | None = None,
+        tags: list[str] | str | None = None,
+        before: str | None = None,
+        after: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_search",
+            _merged(
+                args,
+                query=query,
+                limit=limit,
+                dataset=dataset,
+                tags=tags,
+                before=before,
+                after=after,
+            ),
+        )
+
+    @server.tool(
+        name="memory_list",
+        description="Page through long-term memory items. Returns {items, next_cursor}.",
+        annotations=_ANNOTATIONS["memory_list"],
+    )
+    async def memory_list(
+        dataset: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_list",
+            _merged(args, dataset=dataset, cursor=cursor, limit=limit),
+        )
+
+    @server.tool(
+        name="memory_delete",
+        description=(
+            "Delete one or more memory items by id (bulk deletes gate at admin "
+            "layer). dataset optionally directs the sweep (e.g. project:<id>)."
+        ),
+        annotations=_ANNOTATIONS["memory_delete"],
+    )
+    async def memory_delete(
+        ids: list[str] | None = None,
+        dataset: str | list[str] | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_delete",
+            _merged(args, ids=ids, dataset=dataset),
+        )
+
+    @server.tool(
+        name="memory_recall",
+        description=(
+            "Recall token-budgeted, consolidated memory (preferred over search). "
+            "types defaults to world+experience+observation."
+        ),
+        annotations=_ANNOTATIONS["memory_recall"],
+    )
+    async def memory_recall(
+        query: str | None = None,
+        max_tokens: int | None = None,
+        types: list[str] | None = None,
+        dataset: str | list[str] | None = None,
+        tags: list[str] | str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await dispatcher(
+            "memory_recall",
+            _merged(
+                args,
+                query=query,
+                max_tokens=max_tokens,
+                types=types,
+                dataset=dataset,
+                tags=tags,
+            ),
+        )
 
     return server
 

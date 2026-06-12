@@ -522,8 +522,13 @@ class CogneeWrapper(MemoryProvider):
         source: str | None = None,
         metadata: dict[str, Any] | None = None,
         client_id: str | None = None,
+        document_id: str | None = None,
     ) -> dict[str, str]:
         """Add a memory item. Returns ``{id, timestamp}``.
+
+        ``document_id`` (engine-neutral upsert key) has no Cognee
+        equivalent — accepted for ABC parity, used as the item id when
+        supplied so delete round-trips.
 
         ``dataset`` is the caller-requested namespace; when
         ``private_mode=True`` is on the instance, ANY value here is
@@ -549,7 +554,7 @@ class CogneeWrapper(MemoryProvider):
         effective_client_id = client_id or self._client_id
         effective_dataset = self._effective_write_dataset(dataset)
         effective_source = source or effective_client_id
-        item_id = str(uuid.uuid4())
+        item_id = document_id or str(uuid.uuid4())
         timestamp = _now_iso()
 
         cognee = _cognee()
@@ -974,8 +979,17 @@ class CogneeWrapper(MemoryProvider):
         )
         return {"items": items, "next_cursor": next_cursor}
 
-    async def delete(self, ids: list[str], *, client_id: str | None = None) -> dict[str, int]:
+    async def delete(
+        self,
+        ids: list[str],
+        *,
+        client_id: str | None = None,
+        dataset: str | list[str] | None = None,
+    ) -> dict[str, int]:
         """Delete by sidecar id. Returns ``{deleted: int}``.
+
+        ``dataset`` is accepted for ABC parity (Hindsight bank-sweep
+        narrowing); sidecar rows are id-addressed here so it is unused.
 
         We delete from BOTH the sidecar AND Cognee's own dataset rows
         (via ``cognee.datasets.delete_data``) — but only wipe a Cognee
