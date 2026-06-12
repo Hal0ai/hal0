@@ -17,18 +17,13 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import hal0.providers as providers_mod
 from hal0.api import create_app
-from hal0.lemonade.client import LemonadeClient
-from hal0.providers.lemonade import LemonadeProvider
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -57,33 +52,7 @@ def _fake_profile_catalog():
 
 
 @pytest.fixture
-def lemonade_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Minimal Lemonade stub so list_slots doesn't error on lemond health."""
-    state: dict[str, Any] = {"loaded": []}
-
-    def h(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/v1/health":
-            return httpx.Response(200, json={"loaded": state["loaded"]})
-        return httpx.Response(200, json={"status": "ok"})
-
-    transport = httpx.AsyncClient(
-        transport=httpx.MockTransport(h),
-        base_url="http://test",
-    )
-    provider = LemonadeProvider(client=LemonadeClient(http_client=transport))
-    original = providers_mod._PROVIDERS["lemonade"]
-    providers_mod._PROVIDERS["lemonade"] = provider
-    try:
-        yield state
-    finally:
-        providers_mod._PROVIDERS["lemonade"] = original
-
-
-@pytest.fixture
-def container_app(
-    tmp_hal0_home: str,
-    lemonade_stub: dict[str, Any],
-) -> FastAPI:
+def container_app(tmp_hal0_home: str) -> FastAPI:
     """App with one container slot (gpu-chat)."""
     _seed_slot_toml(
         tmp_hal0_home,
@@ -120,7 +89,6 @@ def test_image_status_present(container_client: TestClient) -> None:
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.providers.container.ContainerProvider.image_present", return_value=True),
     ):
         r = container_client.get("/api/slots")
@@ -139,7 +107,6 @@ def test_image_status_missing(container_client: TestClient) -> None:
             new_callable=AsyncMock,
             return_value={"ok": False},
         ),
-        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.providers.container.ContainerProvider.image_present", return_value=False),
     ):
@@ -168,7 +135,6 @@ def test_image_status_pulling_when_job_active(
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
     ):
         r = container_client.get("/api/slots")
     assert r.status_code == 200, r.text
@@ -193,7 +159,6 @@ def test_pull_start_returns_202(container_client: TestClient) -> None:
             new_callable=AsyncMock,
             return_value={"ok": False},
         ),
-        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.api.routes.slots._run_image_pull", side_effect=_noop),
     ):
@@ -225,7 +190,6 @@ def test_pull_start_idempotent(
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
     ):
         r = container_client.post("/api/slots/gpu-chat/pull")
     assert r.status_code == 202, r.text
@@ -252,7 +216,6 @@ def test_pull_stream_present_when_no_job(container_client: TestClient) -> None:
             return_value={"ok": False},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
-        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.providers.container.ContainerProvider.image_present", return_value=True),
         container_client.stream("GET", "/api/slots/gpu-chat/pull/stream") as resp,
     ):
@@ -273,7 +236,6 @@ def test_pull_stream_missing_when_no_job(container_client: TestClient) -> None:
             new_callable=AsyncMock,
             return_value={"ok": False},
         ),
-        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
         patch("hal0.providers.container.ContainerProvider.image_present", return_value=False),
         container_client.stream("GET", "/api/slots/gpu-chat/pull/stream") as resp,

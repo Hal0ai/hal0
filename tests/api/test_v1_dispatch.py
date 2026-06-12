@@ -19,37 +19,32 @@ def test_v1_models_returns_empty_list_with_no_upstreams(client: TestClient) -> N
     assert body["data"] == []
 
 
-def test_v1_chat_completions_no_route_falls_through_to_lemonade(client: TestClient) -> None:
-    """POST /v1/chat/completions with no upstreams → falls through to Lemonade proxy.
+def test_v1_chat_completions_no_route_returns_typed_404(client: TestClient) -> None:
+    """POST /v1/chat/completions with no upstreams → 404 dispatch.no_route.
 
-    Pre-#277 this returned 404 dispatch.no_route. Post-#277 the
-    dispatcher catches NoRouteFound and delegates to the lemonade_proxy
-    catch-all so models pulled via lemond /v1/pull (but not in hal0's
-    registry) round-trip correctly. In tests where no lemond runs, the
-    proxy surfaces as 503 + lemonade.unavailable.
+    The catch-all proxy fall-through is gone (epic #687): NoRouteFound
+    from the dispatcher surfaces directly as its typed error envelope.
     """
     r = client.post(
         "/v1/chat/completions",
         json={"model": "primary", "messages": [{"role": "user", "content": "hi"}]},
     )
-    # Either dispatcher's 404 (if the proxy isn't installed) or proxy's
-    # 503 (when lemond is unreachable). Both are valid post-fall-through.
-    assert r.status_code in (404, 503)
+    assert r.status_code == 404
     body = r.json()
     assert "error" in body
-    assert body["error"]["code"] in ("dispatch.no_route", "lemonade.unavailable")
+    assert body["error"]["code"] == "dispatch.no_route"
 
 
-def test_v1_completions_no_route_falls_through_to_lemonade(client: TestClient) -> None:
+def test_v1_completions_no_route_returns_typed_404(client: TestClient) -> None:
     r = client.post("/v1/completions", json={"model": "primary", "prompt": "hi"})
-    assert r.status_code in (404, 503)
-    assert r.json()["error"]["code"] in ("dispatch.no_route", "lemonade.unavailable")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "dispatch.no_route"
 
 
-def test_v1_embeddings_no_route_falls_through_to_lemonade(client: TestClient) -> None:
+def test_v1_embeddings_no_route_returns_typed_404(client: TestClient) -> None:
     r = client.post("/v1/embeddings", json={"model": "embed", "input": "test"})
-    assert r.status_code in (404, 503)
-    assert r.json()["error"]["code"] in ("dispatch.no_route", "lemonade.unavailable")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "dispatch.no_route"
 
 
 def test_v1_models_specific_404_envelope(client: TestClient) -> None:

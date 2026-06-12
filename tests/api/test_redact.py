@@ -1,6 +1,6 @@
 """Tests for hal0.api._redact — shared config-echo redaction (#553).
 
-Every config-echoing endpoint (settings, lemonade config, upstreams,
+Every config-echoing endpoint (settings, upstreams,
 secrets) routes its response through :func:`redact_config` so a key
 whose NAME matches a sensitive regex is returned masked, with a ``set``
 flag carrying the "is it configured" bit. This file pins down that

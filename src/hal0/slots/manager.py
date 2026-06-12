@@ -716,9 +716,18 @@ class SlotManager:
 
         from hal0.providers.container import container_provider
 
-        return await asyncio.get_event_loop().run_in_executor(
-            None, container_provider().is_active, slot_name
-        )
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, container_provider().is_active, slot_name
+            )
+        except Exception as exc:
+            # The docstring contract: probe errors coerce to False so the
+            # status() drift reconciler runs instead of 500ing /api/slots.
+            log.warning(
+                "slot.is_active_probe_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return False
 
     async def container_readiness_check(self, slot_name: str) -> tuple[bool, str]:
         """Check whether a container-backed slot is ready to serve requests.

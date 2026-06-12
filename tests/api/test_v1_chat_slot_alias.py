@@ -1,15 +1,14 @@
 """Chat-slot alias → model-id translation (hermes-role-slots).
 
 Co-resident chat slots (``primary`` / ``agent-hermes`` / ``utility``) are
-addressable by their ALIAS (= slot name). Lemonade serves chat models by
-name on lemond, so the ``/v1`` route layer rewrites a chat-slot alias to
-that slot's configured model id BEFORE routing, then the request flows
-down the normal path (for these models, the lemonade fall-through). This
-is a thin translation — NOT per-slot upstream routing.
+addressable by their ALIAS (= slot name). The ``/v1`` route layer rewrites
+a chat-slot alias to that slot's configured model id BEFORE routing, then
+the request flows down the normal dispatch path. This is a thin
+translation — NOT per-slot upstream routing.
 
 These tests cover the translation map builders + the route-layer rewrite
-(including the cached-body overwrite that the lemonade proxy fall-through
-re-reads), without depending on a live backend.
+(including the cached-body overwrite that downstream consumers re-reading
+``request.body()`` observe), without depending on a live backend.
 """
 
 from __future__ import annotations
@@ -126,8 +125,8 @@ async def test_rewrite_translates_alias_to_model_id_and_body() -> None:
 
     # Returned dict carries the model id, not the alias.
     assert body["model"] == "qwen3-coder-next-reap-40b-a3b-q4kxl"
-    # Cached request body (read verbatim by the lemonade proxy fall-through)
-    # is overwritten with the rewritten model name.
+    # Cached request body (re-read verbatim by any downstream consumer of
+    # request.body()) is overwritten with the rewritten model name.
     assert json.loads(req._body)["model"] == "qwen3-coder-next-reap-40b-a3b-q4kxl"
 
 
@@ -149,7 +148,7 @@ async def test_rewrite_each_alias_maps_to_its_distinct_model() -> None:
 @pytest.mark.asyncio
 async def test_rewrite_is_noop_for_bare_model_id() -> None:
     """A request already keyed on a model id (not an alias) is untouched —
-    it flows straight through to the lemonade fall-through by name."""
+    it dispatches by name unchanged."""
     from hal0.api.routes.v1 import _rewrite_chat_slot_alias
 
     req = _FakeRequest(_FakeSlotManager(_three_chat_slots()))
@@ -167,15 +166,15 @@ async def test_rewrite_is_noop_without_slot_manager() -> None:
     assert body["model"] == "primary"
 
 
-# ── dispatcher / proxy non-regression ───────────────────────────────────────
+# ── dispatcher non-regression ───────────────────────────────────────────────
 
 
-def test_resolve_slot_primary_still_falls_through_to_lemonade() -> None:
-    """``resolve_slot`` keeps the ``m != "primary"`` carve-out: a chat
-    request that reaches the legacy fallback selects ``primary`` and
-    (absent a real primary slot upstream) raises the typed legacy error,
-    which the dispatcher converts to NoRouteFound → lemonade fall-through.
-    No per-slot chat upstream is matched."""
+def test_resolve_slot_chat_default_raises_typed_legacy_error() -> None:
+    """A chat request that reaches the legacy fallback selects the ``chat``
+    default and (absent a real chat slot upstream) raises the typed legacy
+    error, which the dispatcher converts to NoRouteFound — surfaced to the
+    client as the 404 ``dispatch.no_route`` envelope. No per-slot chat
+    upstream is matched."""
     from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
     from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
@@ -192,7 +191,7 @@ def test_resolve_slot_primary_still_falls_through_to_lemonade() -> None:
     )
     with pytest.raises(LegacyResolutionFailed):
         # model id form — not an alias, not a registered slot name → falls
-        # to the "primary" default which has no slot upstream → legacy error.
+        # to the "chat" default which has no slot upstream → legacy error.
         resolve_slot(
             "/v1/chat/completions",
             {"model": "hermes-4-14b-q5km", "messages": []},
@@ -211,35 +210,20 @@ def _patch_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hal0_api, "hal0_chat_slot_alias_map", _fake)
 
 
-def test_chat_alias_reaches_lemonade_with_model_name(
+def test_chat_alias_is_rewritten_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
 ) -> None:
     """End-to-end: POST /v1/chat/completions with model="primary" rewrites
-    to the model id and falls through to the lemonade proxy carrying that
-    model name (not the bare alias). We stub the proxy to capture the body
-    it would forward to lemond."""
+    to the model id BEFORE the dispatcher routes. With nothing serving the
+    model the dispatcher raises NoRouteFound, whose details carry the
+    REWRITTEN model name (not the bare alias) — proving the rewrite ran
+    ahead of routing."""
     from fastapi.testclient import TestClient
 
     from hal0.api import create_app
-    from hal0.api.routes import v1 as v1_module
 
     _patch_alias(monkeypatch)
-
-    captured: dict[str, Any] = {}
-
-    async def _fake_proxy(request: Any, path: str) -> Any:
-        from fastapi.responses import Response
-
-        body = await request.body()
-        captured["path"] = path
-        captured["body"] = json.loads(body) if body else {}
-        return Response(content=b'{"ok": true}', media_type="application/json")
-
-    # Patch the symbol the handler imports lazily from the proxy module.
-    import hal0.api.routes.lemonade_proxy as lp
-
-    monkeypatch.setattr(lp, "_proxy", _fake_proxy)
-    _ = v1_module  # imported for clarity that the route lives there
 
     with TestClient(create_app()) as client:
         r = client.post(
@@ -247,8 +231,9 @@ def test_chat_alias_reaches_lemonade_with_model_name(
             json={"model": "primary", "messages": [{"role": "user", "content": "hi"}]},
         )
 
-    assert r.status_code == 200, r.text
-    assert captured["path"] == "chat/completions"
-    # The body forwarded to lemond carries the rewritten model NAME, not
-    # the alias — so lemond serves qwen3-coder, not "primary".
-    assert captured["body"]["model"] == "qwen3-coder-next-reap-40b-a3b-q4kxl"
+    # No upstream serves the model and there is no proxy fall-through —
+    # the typed envelope surfaces, keyed on the rewritten model NAME.
+    assert r.status_code == 404, r.text
+    body = r.json()
+    assert body["error"]["code"] == "dispatch.no_route"
+    assert body["error"]["details"]["model"] == "qwen3-coder-next-reap-40b-a3b-q4kxl"

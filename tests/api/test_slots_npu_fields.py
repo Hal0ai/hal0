@@ -2,7 +2,9 @@
 
 Verifies:
   - ``npu`` dict (with ``asr`` / ``embed`` bools) appears on container
-    slots that carry a ``[npu]`` TOML section.
+    slots that carry a ``[npu]`` TOML section. The toggles are lifted by
+    the slot_view enrichment (``config_enrichment`` /
+    ``container_enrichment``) from the slot TOML's ``[npu]`` table.
   - Slots without a ``[npu]`` table do NOT have a ``npu`` key in the
     response (absent preferred over null for clean JSON contracts).
 """
@@ -11,18 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import hal0.providers as providers_mod
 from hal0.api import create_app
-from hal0.lemonade.client import LemonadeClient
-from hal0.providers.lemonade import LemonadeProvider
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -39,33 +36,7 @@ def _seed_slot_toml(home: str, name: str, lines: list[str]) -> Path:
 
 
 @pytest.fixture
-def lemonade_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Minimal Lemonade stub so Lemonade-enrichment doesn't 500."""
-    state: dict[str, Any] = {"loaded": []}
-
-    def h(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/v1/health":
-            return httpx.Response(200, json={"loaded": state["loaded"]})
-        return httpx.Response(200, json={"status": "ok"})
-
-    transport = httpx.AsyncClient(
-        transport=httpx.MockTransport(h),
-        base_url="http://test",
-    )
-    provider = LemonadeProvider(client=LemonadeClient(http_client=transport))
-    original = providers_mod._PROVIDERS["lemonade"]
-    providers_mod._PROVIDERS["lemonade"] = provider
-    try:
-        yield state
-    finally:
-        providers_mod._PROVIDERS["lemonade"] = original
-
-
-@pytest.fixture
-def app_with_npu_slots(
-    tmp_hal0_home: str,
-    lemonade_stub: dict[str, Any],
-) -> FastAPI:
+def app_with_npu_slots(tmp_hal0_home: str) -> FastAPI:
     """App with one NPU container slot (has [npu] table) and one plain chat slot."""
     # NPU container slot with [npu] toggles
     _seed_slot_toml(
@@ -156,7 +127,6 @@ def test_slot_without_npu_table_omits_field(
 
 def test_put_config_npu_roundtrip(
     tmp_hal0_home: str,
-    lemonade_stub: dict[str, Any],
 ) -> None:
     """PUT /api/slots/npu/config {npu: {asr: true}} -> GET shows asr=true."""
 

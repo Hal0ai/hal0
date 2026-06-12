@@ -5,16 +5,6 @@ import pytest
 from hal0.api.routes import v1
 
 
-class _Health:
-    def __init__(self, loaded):
-        self.loaded_models = tuple(loaded)
-
-
-class _Shim:
-    def __init__(self, loaded):
-        self._health = _Health(loaded)
-
-
 class _SlotManager:
     def __init__(self, cfgs):
         self._cfgs = cfgs
@@ -32,11 +22,22 @@ class _Upstreams:
 
 
 def _make_request(*, cfgs=None, loaded=None, upstreams=None, upstream_models=None):
+    """Build a minimal request stand-in.
+
+    ``loaded`` materialises as a container-backed remote upstream
+    (kind="remote" + slot_name) whose cached catalog carries the given
+    model ids — that is how `_normalize_loaded_models` derives the loaded
+    set post-container-cutover (#662): there is no separate health probe.
+    """
+    ups = list(upstreams or [])
+    models = dict(upstream_models or {})
+    if loaded:
+        ups.append(SimpleNamespace(name="_container", kind="remote", slot_name="_container"))
+        models["_container"] = sorted(loaded)
     state = SimpleNamespace(
         slot_manager=_SlotManager(cfgs or []),
-        lemonade_metrics_shim=_Shim(loaded or set()),
-        upstreams=_Upstreams(upstreams or []),
-        upstream_models=upstream_models or {},
+        upstreams=_Upstreams(ups),
+        upstream_models=models,
     )
     return SimpleNamespace(app=SimpleNamespace(state=state), _body=b"")
 
@@ -84,7 +85,7 @@ async def test_caller_top_level_thinking_translated_to_kwarg():
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
     out = await v1._normalize_chat_body(req, {"model": "hal0/primary", "enable_thinking": True})
     # #487: top-level enable_thinking is translated to the chat-template lever
-    # (lemond's /no_think is ineffective on abliterated Qwen3), not passed through.
+    # (a bare /no_think marker is ineffective on abliterated Qwen3), not passed through.
     assert out["chat_template_kwargs"]["enable_thinking"] is True
     assert "enable_thinking" not in out
 
@@ -118,12 +119,13 @@ async def test_per_slot_default_overridden_by_request():
 
 
 @pytest.mark.asyncio
-async def test_request_body_rewritten_for_proxy_fallthrough():
+async def test_request_body_rewritten_for_downstream_consumers():
     import json
 
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
     await v1._normalize_chat_body(req, {"model": "hal0/primary", "messages": []})
-    # the proxy fall-through reads request._body, so it must carry the normalized body
+    # any downstream consumer re-reading request.body() must observe the
+    # normalized body, so request._body carries the rewrite
     assert json.loads(req._body)["model"] == "big"
     assert json.loads(req._body)["chat_template_kwargs"]["enable_thinking"] is False
 
@@ -140,11 +142,13 @@ class _OmniRequest:
     def __init__(self, raw: bytes):
         self._raw = raw
         self.headers = _Headers()
+        # "big" is loaded via a container-backed remote's cached catalog.
         state = SimpleNamespace(
             slot_manager=_SlotManager(_PRIMARY),
-            lemonade_metrics_shim=_Shim({"big"}),
-            upstreams=_Upstreams([]),
-            upstream_models={},
+            upstreams=_Upstreams(
+                [SimpleNamespace(name="_container", kind="remote", slot_name="_container")]
+            ),
+            upstream_models={"_container": ["big"]},
         )
         self.app = SimpleNamespace(state=state)
 
@@ -244,17 +248,23 @@ async def test_chat_template_kwargs_opt_out_through_seam():
 
 
 def test_normalize_loaded_models_uses_cache_no_rpc():
-    class _RaisingShim:
-        def __init__(self, loaded):
-            self._health = _Health(loaded)
+    """The loaded set is read from the cached upstream catalogs only —
+    no live /v1/models fetch on the request hot path."""
 
-        async def health(self):  # if this were called, the test would fail
-            raise AssertionError("must not poll lemond")
+    class _NoFetchUpstreams:
+        def list(self):
+            return [SimpleNamespace(name="chat", kind="remote", slot_name="chat")]
 
-    from types import SimpleNamespace
+        async def fetch_models(self, name):  # if this were called, the test would fail
+            raise AssertionError("must not fetch live catalogs")
 
     req = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(lemonade_metrics_shim=_RaisingShim({"big"})))
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                upstreams=_NoFetchUpstreams(),
+                upstream_models={"chat": ["big"]},
+            )
+        )
     )
     assert v1._normalize_loaded_models(req) == {"big"}
 
@@ -279,12 +289,11 @@ async def test_dispatch_and_forward_does_not_normalize_non_chat(monkeypatch):
 
 
 def test_loaded_models_includes_ready_container_slots():
-    """Container slots aren't lemond-managed, so their models never appear in
-    the lemond health snapshot. The resolver chain treats a role as available
-    only when its model is 'loaded', so container-slot models must be unioned
-    in — else hal0/agent falls back to the configured primary (cutover #662)."""
+    """The loaded set derives from container-backed remotes (kind='remote' +
+    slot_name): those upstreams advertise their served model only while up,
+    so their cached catalog IS the loaded set (cutover #662). Genuine
+    external remotes (slot_name=None) are not local slots and never count."""
     req = _make_request(
-        loaded={"lemond-model"},
         upstreams=[
             SimpleNamespace(name="agent", kind="remote", slot_name="agent"),
             SimpleNamespace(name="or", kind="remote", slot_name=None),  # real remote
@@ -292,7 +301,6 @@ def test_loaded_models_includes_ready_container_slots():
         upstream_models={"agent": ["chadrock-35b-ace-saber"], "or": ["gpt-x"]},
     )
     loaded = v1._normalize_loaded_models(req)
-    assert "lemond-model" in loaded
     assert "chadrock-35b-ace-saber" in loaded
     # A genuine external remote (no slot_name) is NOT a local container slot.
     assert "gpt-x" not in loaded

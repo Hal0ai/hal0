@@ -1,15 +1,17 @@
 """R4 H2 regression — single composite ``hal0`` upstream + TTL cache.
 
 The bug: ``_autoregister_slot_upstreams`` previously registered one
-Upstream per slot. Lemonade serialises chat loading on a single port
-(typically 8001), so ``primary`` and ``agent-hermes`` both produced
-``Upstream(url="http://127.0.0.1:8001/v1")``. ``/v1/models`` deduped on
-id and credited whichever entry iterated first, leaving the dashboard
-showing a duplicate provider that looked empty.
+Upstream per slot. The pre-container gateway serialised chat loading on a
+single shared port (typically 8001), so ``primary`` and ``agent-hermes``
+both produced ``Upstream(url="http://127.0.0.1:8001/v1")``. ``/v1/models``
+deduped on id and credited whichever entry iterated first, leaving the
+dashboard showing a duplicate provider that looked empty.
 
 PR-1-bundle fix: replace per-slot registration with one composite
 ``hal0`` upstream pointed at hal0-api's own /v1, and aggregate the
-chat-capable slot models behind a 5s TTL cache.
+chat-capable slot models behind a 5s TTL cache. The composite exists for
+``/v1/models`` aggregation only — it is never forwarded to (container
+slots register their own ``kind="remote"`` upstreams for dispatch).
 """
 
 from __future__ import annotations
@@ -43,28 +45,28 @@ class _FakeSlotManager:
 
 
 def _two_chat_slots() -> list[dict[str, Any]]:
-    """Two chat-capable slots on the same Lemonade port (mirrors the live
+    """Two chat-capable slots sharing one port (mirrors the historical
     bug at ``port=8001`` for both ``primary`` and ``agent-hermes``)."""
     return [
         {
             "name": "primary",
             "type": "llm",
             "port": 8001,
-            "provider": "lemonade",
+            "provider": "llama-server",
             "model_default": "qwen3-coder-next-reap-40b-a3b-q4kxl",
         },
         {
             "name": "agent-hermes",
             "type": "llm",
             "port": 8001,
-            "provider": "lemonade",
+            "provider": "llama-server",
             "model_default": "qwen3-coder-reap-25b-a3b-q5km",
         },
         {
             "name": "embed",
             "type": "embedding",
             "port": 0,
-            "provider": "lemonade",
+            "provider": "llama-server",
             "model_default": "Qwen3-Embedding-0.6B-GGUF",
         },
     ]
@@ -81,12 +83,13 @@ async def test_autoregister_creates_single_hal0_upstream() -> None:
     """Exactly one upstream named ``hal0`` lands in the registry — no
     per-chat-slot upstreams pointed at the (shared / dead) TOML ports.
 
-    hermes-role-slots: Lemonade-managed chat slots are NOT independently
-    addressable on their TOML ports (``primary`` + ``agent-hermes`` both
-    pin ``port=8001``; ``utility`` pins a dead ``:8081``). They are served
-    by name on lemond, so we register only the composite ``hal0`` upstream
-    and translate slot aliases → model ids in the dispatch path. No
-    per-slot routing upstreams are auto-registered.
+    hermes-role-slots: chat slots are NOT independently addressable on
+    their TOML ports (``primary`` + ``agent-hermes`` both pin
+    ``port=8001``; ``utility`` pins a dead ``:8081``), so the
+    autoregister step adds only the composite ``hal0`` upstream and slot
+    aliases → model ids are translated in the dispatch path. No per-slot
+    routing upstreams are auto-registered here (container slots register
+    their own ``kind="remote"`` upstreams at load time).
     """
     registry = UpstreamRegistry()
     slot_mgr = _FakeSlotManager(_two_chat_slots())

@@ -2,9 +2,12 @@
 
 Exercises:
   * GET returns suggestions + current state + effective fallback.
-  * POST happy path with no prior data → sets hal0.toml + lemonade config.
+  * POST happy path with no prior data → persists hal0.toml; response is
+    the ``{status, config, state, migration}`` envelope (slot containers
+    observe the new path on their next restart — no extra propagation
+    block rides along).
   * POST dry-run when prior path has data → returns ``needs_migration``.
-  * POST migrate=true → moves files, propagates, persists, surfaces result.
+  * POST migrate=true → moves files, persists, surfaces result.
   * Validation: relative path, missing, file-not-dir, non-writable.
   * Round-trip: getter reflects effective fallback when only legacy
     pull_root is set (PR-#313 compat).
@@ -12,7 +15,6 @@ Exercises:
 
 from __future__ import annotations
 
-import json
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,16 +32,6 @@ def isolated_client(tmp_hal0_home: str) -> Iterator[TestClient]:
     app: FastAPI = create_app()
     with TestClient(app) as c:
         yield c
-
-
-def _seed_lemonade_config(tmp_hal0_home: str, value: str) -> Path:
-    cfg = cfg_paths.var_lib() / "lemonade" / "config.json"
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(
-        json.dumps({"extra_models_dir": value, "port": 13305}),
-        encoding="utf-8",
-    )
-    return cfg
 
 
 def test_get_store_returns_suggestions_and_effective_fallback(
@@ -62,7 +54,6 @@ def test_set_store_happy_path_no_prior_data(
 ) -> None:
     target = tmp_path / "new-store"
     target.mkdir()
-    _seed_lemonade_config(tmp_hal0_home, "/var/lib/hal0/models")
 
     r = isolated_client.post(
         "/api/settings/models/store",
@@ -75,23 +66,41 @@ def test_set_store_happy_path_no_prior_data(
     assert body["state"]["effective"] == str(target)
     # No migration needed → migration block is None.
     assert body["migration"] is None
-    # Lemonade config was updated.
-    assert body["lemonade"]["changed"] is True
-    assert body["lemonade"]["previous_extra_models_dir"] == "/var/lib/hal0/models"
-    # In tests HAL0_HOME is set → restart_lemonade_service returns None
-    # → response surfaces "unavailable".
-    assert body["lemonade"]["restart"] == "unavailable"
+    # The response envelope is exactly the four documented keys — the
+    # old external-propagation block is gone (slot containers pick up
+    # the new mount on their next restart; nothing else to report).
+    assert set(body.keys()) == {"status", "config", "state", "migration"}
 
     # hal0.toml persisted.
     toml_path = cfg_paths.hal0_toml()
     parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     assert parsed["models"]["store"] == str(target)
 
-    # Lemonade config.json on disk now points at the new path.
-    lemonade_cfg = json.loads(
-        (cfg_paths.var_lib() / "lemonade" / "config.json").read_text(encoding="utf-8")
+
+def test_set_store_emits_config_save_event_with_store_data(
+    isolated_client: TestClient, tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    """The store change surfaces a ``system.config_save`` footer chip
+    whose data carries the new path + migrated-file count — and
+    nothing else (no external-service propagation keys)."""
+    target = tmp_path / "evt-store"
+    target.mkdir()
+
+    r = isolated_client.post(
+        "/api/settings/models/store",
+        json={"path": str(target)},
     )
-    assert lemonade_cfg["extra_models_dir"] == str(target)
+    assert r.status_code == 200, r.text
+
+    events = isolated_client.get("/api/events?limit=1000").json().get("events", [])
+    saves = [
+        ev
+        for ev in events
+        if ev["type"] == "system.config_save" and ev["data"].get("store") == str(target)
+    ]
+    assert saves, f"expected a system.config_save event for the store change, got {events}"
+    data = saves[-1]["data"]
+    assert data == {"store": str(target), "migrated_files": 0}
 
 
 def test_set_store_dry_run_when_prior_path_has_data(
@@ -134,7 +143,6 @@ def test_set_store_migrate_true_moves_files(
     default_store.mkdir(parents=True, exist_ok=True)
     (default_store / "Model").mkdir()
     (default_store / "Model" / "x.gguf").write_bytes(b"x" * 1024)
-    _seed_lemonade_config(tmp_hal0_home, str(default_store))
 
     target = tmp_path / "new-store"
     target.mkdir()
@@ -247,23 +255,5 @@ def test_set_store_idempotent_when_path_unchanged(
     assert r2.status_code == 200
     body = r2.json()
     assert body["status"] == "ok"
-    # No move + lemonade already updated → changed=False on second hit.
+    # Same path → no move needed on the second hit.
     assert body["migration"] is None
-
-
-def test_lemonade_admin_locked_value_follows_store(
-    isolated_client: TestClient, tmp_hal0_home: str, tmp_path: Path
-) -> None:
-    """The Lemonade admin endpoint's locked value should track effective_store."""
-    from hal0.api.routes.lemonade_admin import _locked_extra_models_dir
-
-    target = tmp_path / "new-store"
-    target.mkdir()
-
-    isolated_client.post(
-        "/api/settings/models/store",
-        json={"path": str(target)},
-    )
-    # The locked value the admin validator now refuses to diverge from
-    # is the new store path.
-    assert _locked_extra_models_dir() == str(target)

@@ -13,72 +13,67 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import json
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import hal0.providers as providers_mod
 from hal0.api import create_app
-from hal0.lemonade.client import LemonadeClient
-from hal0.providers.lemonade import LemonadeProvider
+from hal0.providers.container import ContainerProvider
 
-# ── Lemonade stub (PR-10) ────────────────────────────────────────────────────
+# ── Container-provider stub ──────────────────────────────────────────────────
 
 
 @pytest.fixture
-def systemctl_stub() -> Iterator[dict[str, Any]]:
-    """Compatibility shim — installs a Lemonade stub provider.
+def container_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Stub out ContainerProvider's systemd/podman surface.
 
-    PR-10 retired systemctl dispatch; the fixture name is kept so the
-    existing tests don't have to be re-signed. The returned dict
-    carries a ``_lemonade`` key with the underlying Lemonade state
-    dict so tests can mutate it if needed.
+    SlotManager dispatches every slot lifecycle call through the
+    container provider (write + start the ``hal0-slot@<name>`` unit).
+    Tests can't touch systemd, so the stub keeps an in-memory "active
+    units" set: ``load_sync`` marks the slot active, ``unload_sync``
+    clears it, and ``is_active`` answers from the set — which keeps
+    ``status()``'s drift reconciler honest (a loaded slot stays READY,
+    an unloaded one reads OFFLINE).
     """
     state: dict[str, Any] = {
-        "loaded": [{"model_name": "qwen3-4b-q4_k_m"}],
+        "active": set(),
         "load_calls": [],
         "unload_calls": [],
     }
 
-    def h(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/v1/load":
-            body = json.loads(req.content.decode() or "{}")
-            state["load_calls"].append(body)
-            state["loaded"] = [{"model_name": body.get("model_name", "")}]
-            return httpx.Response(200, json={"status": "loaded"})
-        if req.url.path == "/v1/unload":
-            body = json.loads(req.content.decode() or "{}")
-            state["unload_calls"].append(body)
-            state["loaded"] = []
-            return httpx.Response(200, json={"status": "unloaded"})
-        if req.url.path == "/v1/health":
-            return httpx.Response(200, json={"loaded": state["loaded"]})
-        return httpx.Response(404, json={"detail": f"unmocked {req.url.path}"})
+    def load_sync(
+        self: ContainerProvider,
+        slot_cfg: dict[str, Any],
+        model_info: dict[str, Any],
+    ) -> None:
+        state["load_calls"].append({"cfg": dict(slot_cfg), "model_info": dict(model_info)})
+        state["active"].add(slot_cfg.get("name"))
 
-    transport = httpx.AsyncClient(
-        transport=httpx.MockTransport(h),
-        base_url="http://test",
-    )
-    provider = LemonadeProvider(client=LemonadeClient(http_client=transport))
-    original = providers_mod._PROVIDERS["lemonade"]
-    providers_mod._PROVIDERS["lemonade"] = provider
+    def unload_sync(self: ContainerProvider, slot_cfg: dict[str, Any]) -> None:
+        state["unload_calls"].append(dict(slot_cfg))
+        state["active"].discard(slot_cfg.get("name"))
 
-    yield {"calls": [], "is_active_state": "active", "_lemonade": state}
+    def is_active(self: ContainerProvider, slot_name: str) -> bool:
+        return slot_name in state["active"]
 
-    providers_mod._PROVIDERS["lemonade"] = original
+    async def health(self: ContainerProvider, port: int) -> dict[str, Any]:
+        return {"ok": True, "status": 200}
 
+    async def wait_ready(self: ContainerProvider, port: int) -> None:
+        return None
 
-@pytest.fixture(autouse=False)
-def stub_await_ready() -> None:
-    """No-op (PR-10): _await_ready is Lemonade-aware and short-circuits."""
-    return None
+    monkeypatch.setattr(ContainerProvider, "load_sync", load_sync)
+    monkeypatch.setattr(ContainerProvider, "unload_sync", unload_sync)
+    monkeypatch.setattr(ContainerProvider, "is_active", is_active)
+    monkeypatch.setattr(ContainerProvider, "health", health)
+    monkeypatch.setattr(ContainerProvider, "wait_ready", wait_ready)
+
+    return state
 
 
 # ── isolated app fixture (lifespan resolves under tmp_hal0_home) ────────────
@@ -363,8 +358,7 @@ def test_delete_cascade_clears_slot_default_and_emits_model_deleted_last(
     crud_app: FastAPI,
     crud_client: TestClient,
     slot_referencing_model: tuple[Path, str],
-    systemctl_stub: dict[str, Any],
-    stub_await_ready: None,
+    container_stub: dict[str, Any],
 ) -> None:
     """Cascade ordering: slot.state events fire BEFORE model.deleted.
 

@@ -1,8 +1,8 @@
 """Lifespan wiring for the GpuArbiter idle-restore loop (Phase D, Task D6).
 
 The api lifespan owns long-running background tasks (model-cache refresh,
-lemond log bridge, …): created via ``asyncio.create_task`` at startup and
-cancelled + awaited on shutdown. The arbiter idle-restore loop follows the
+arbiter idle-restore, …): created via ``asyncio.create_task`` at startup
+and cancelled + awaited on shutdown. The arbiter idle-restore loop follows the
 same pattern — this pins that it starts with the app (exposed on
 ``app.state.gpu_arbiter_idle_task``) and is cancelled cleanly at shutdown.
 

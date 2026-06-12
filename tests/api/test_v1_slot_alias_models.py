@@ -5,8 +5,8 @@ addressed by its alias (= slot name), carrying a human display name and
 the slot's context length. Unloaded / disabled slots are hidden.
 
 These tests exercise the :func:`hal0.api.hal0_slot_alias_models` helper
-directly with a faked lemond health probe so they don't depend on a live
-backend.
+directly with a faked loaded-model set (normally derived from dispatchable
+container-slot state) so they don't depend on a live backend.
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ async def test_all_loaded_chat_slots_emit_alias_entries(
 
 @pytest.mark.asyncio
 async def test_unloaded_slots_are_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only slots whose model is in lemond's loaded set appear."""
+    """Only slots whose model is in the dispatchable loaded set appear."""
     _patch_loaded(monkeypatch, {"hermes-4-14b-q5km"})
     entries = await hal0_slot_alias_models(
         _FakeSlotManager(_three_chat_slots()), _registry(), now=1000
@@ -174,11 +174,12 @@ async def test_disabled_slots_are_hidden(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_no_entries_when_health_probe_unavailable(
+async def test_no_entries_when_loaded_set_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If lemond health can't be read at all, no alias entries are emitted
-    rather than advertising slots we can't confirm are serving."""
+    """If slot state can't be read at all (loaded set is None), no alias
+    entries are emitted rather than advertising slots we can't confirm
+    are serving."""
     _patch_loaded(monkeypatch, None)
     entries = await hal0_slot_alias_models(
         _FakeSlotManager(_three_chat_slots()), _registry(), now=1000

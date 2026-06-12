@@ -1,23 +1,47 @@
-"""Tests for ``GET /api/metrics/prometheus`` (PR-12).
+"""Tests for ``GET /api/metrics/prometheus`` (Phase E rewrite, #687).
 
-Validates the integration between the route, the lifespan-attached
-metrics shim, and the text-exposition renderer. The shim itself is
-unit-tested in ``tests/lemonade/test_metrics_shim.py`` — these tests
-focus on the surface contract:
+The route renders :func:`hal0.slots.metrics.render_slot_metrics` over the
+SlotManager's snapshots — no polling shim, no external daemon. Surface
+contract under test:
 
   * The route returns ``text/plain; version=0.0.4`` per Prometheus spec.
-  * A missing shim (lifespan never attached one, e.g. Lemonade
-    unreachable at boot) returns 200 with an empty body — scrapers
-    treat that as "no series".
-  * Synthetic snapshot data round-trips through the route exactly.
+  * Missing SlotManager (lifespan bypassed) → 200 with an empty body —
+    scrapers treat that as "no series".
+  * Slot snapshots render as ``hal0_slot_up`` (1 for the dispatchable
+    ready-set READY/SERVING/IDLE, else 0), one-hot ``hal0_slot_state``,
+    and ``hal0_slots_ready_total``, with HELP/TYPE headers and a
+    trailing newline.
+  * An empty slot list still emits the headers + a zero total.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi.testclient import TestClient
 
-from hal0.lemonade.client import LemonadeClient
-from hal0.lemonade.metrics_shim import MetricsShim
+from hal0.slots.state import SlotState
+
+
+class _FakeSlot:
+    """Minimal slot snapshot — render_slot_metrics only reads name + state."""
+
+    def __init__(self, name: str, state: Any) -> None:
+        self.name = name
+        self.state = state
+
+
+class _FakeSlotManager:
+    def __init__(self, slots: list[Any]) -> None:
+        self._slots = slots
+
+    async def list(self) -> list[Any]:
+        return self._slots
+
+
+class _RaisingSlotManager:
+    async def list(self) -> list[Any]:
+        raise RuntimeError("state dir unreadable")
 
 
 def test_route_returns_prometheus_content_type(client: TestClient) -> None:
@@ -34,54 +58,97 @@ def test_route_returns_prometheus_content_type(client: TestClient) -> None:
     assert "version=0.0.4" in content_type
 
 
-def test_route_with_no_shim_returns_empty_body(client: TestClient) -> None:
-    """Lemonade unreachable at boot → no shim on app.state → 200 with
-    empty body. Empty Prometheus exposition = "no series", which is the
-    correct first-boot signal."""
-    # Force the shim off if the lifespan happened to attach one.
-    if hasattr(client.app.state, "lemonade_metrics_shim"):
-        client.app.state.lemonade_metrics_shim = None
+def test_route_with_no_slot_manager_returns_empty_body(client: TestClient) -> None:
+    """No SlotManager on app.state (lifespan bypassed / boot failure) →
+    200 with empty body. Empty Prometheus exposition = "no series",
+    which is the correct "no data yet" signal."""
+    client.app.state.slot_manager = None
     resp = client.get("/api/metrics/prometheus")
     assert resp.status_code == 200
     assert resp.text == ""
 
 
-def test_route_renders_attached_shim_snapshot(client: TestClient) -> None:
-    """When the lifespan attached a working shim, the route serialises its
-    snapshot. We inject a synthetic shim so the test doesn't depend on
-    a live lemond — the integration boundary is "route reads .snapshot()
-    and renders text", which is exactly what we exercise here.
-    """
-    shim = MetricsShim(LemonadeClient())
-    shim._stats = shim._stats.__class__(  # type: ignore[misc]
-        time_to_first_token=0.2,
-        tokens_per_second=42.0,
-        prompt_tokens=128,
-        output_tokens=32,
-        input_tokens=128,
-    )
-    shim._health = shim._health.__class__(  # type: ignore[misc]
-        loaded_models=("qwen3:4b",),
-        max_models={"llm": 1},
-    )
-    shim.record_flm_metrics("agent", "gemma3:1b", {"kv_token_occupancy_rate_percentage": 50.0})
+def test_route_renders_slot_state_exposition(client: TestClient) -> None:
+    """Synthetic slot snapshots round-trip through the route exactly.
 
-    client.app.state.lemonade_metrics_shim = shim
+    Covers both plain-string and SlotState-enum ``state`` values — the
+    renderer normalises via ``getattr(state, "value", state)``.
+    """
+    client.app.state.slot_manager = _FakeSlotManager(
+        [
+            _FakeSlot("chat", SlotState.READY),
+            _FakeSlot("embed", "serving"),
+            _FakeSlot("npu", "idle"),
+            _FakeSlot("img", SlotState.OFFLINE),
+            _FakeSlot("stt", "error"),
+        ]
+    )
     resp = client.get("/api/metrics/prometheus")
     assert resp.status_code == 200
     body = resp.text
-    assert 'hal0_lemonade_ttft_seconds{source="last_request"} 0.2' in body
-    assert 'hal0_lemonade_decode_tokens_per_second{source="last_request"} 42' in body
-    assert 'hal0_lemonade_models_loaded{model_name="qwen3:4b"} 1' in body
-    assert 'hal0_lemonade_max_models{type="llm"} 1' in body
-    assert 'hal0_lemonade_kv_occupancy_ratio{model_name="gemma3:1b",slot_name="agent"} 50' in body
+
+    # HELP/TYPE headers for every series family.
+    assert "# HELP hal0_slot_up" in body
+    assert "# TYPE hal0_slot_up gauge" in body
+    assert "# HELP hal0_slot_state" in body
+    assert "# TYPE hal0_slot_state gauge" in body
+    assert "# HELP hal0_slots_ready_total" in body
+    assert "# TYPE hal0_slots_ready_total gauge" in body
+
+    # hal0_slot_up: 1 for the dispatchable ready-set, 0 otherwise.
+    assert 'hal0_slot_up{slot="chat"} 1' in body
+    assert 'hal0_slot_up{slot="embed"} 1' in body
+    assert 'hal0_slot_up{slot="npu"} 1' in body
+    assert 'hal0_slot_up{slot="img"} 0' in body
+    assert 'hal0_slot_up{slot="stt"} 0' in body
+
+    # One-hot state indicators.
+    assert 'hal0_slot_state{slot="chat",state="ready"} 1' in body
+    assert 'hal0_slot_state{slot="embed",state="serving"} 1' in body
+    assert 'hal0_slot_state{slot="npu",state="idle"} 1' in body
+    assert 'hal0_slot_state{slot="img",state="offline"} 1' in body
+    assert 'hal0_slot_state{slot="stt",state="error"} 1' in body
+
+    # Ready total counts READY + SERVING + IDLE only.
+    assert "hal0_slots_ready_total 3" in body
+
+    # Exposition is always newline-terminated.
+    assert body.endswith("\n")
+
+
+def test_route_with_empty_slot_list_emits_headers_and_zero_total(
+    client: TestClient,
+) -> None:
+    """No slots is "up and empty", not "no data" — headers + zero total."""
+    client.app.state.slot_manager = _FakeSlotManager([])
+    resp = client.get("/api/metrics/prometheus")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "# HELP hal0_slot_up" in body
+    assert "# TYPE hal0_slot_up gauge" in body
+    assert "# HELP hal0_slot_state" in body
+    assert "# HELP hal0_slots_ready_total" in body
+    assert "hal0_slots_ready_total 0" in body
+    assert body.endswith("\n")
+    # And no per-slot series.
+    assert "hal0_slot_up{" not in body
+    assert "hal0_slot_state{" not in body
+
+
+def test_route_degrades_to_empty_exposition_when_list_fails(client: TestClient) -> None:
+    """A SlotManager.list() failure renders the empty exposition rather
+    than 500-ing the scrape."""
+    client.app.state.slot_manager = _RaisingSlotManager()
+    resp = client.get("/api/metrics/prometheus")
+    assert resp.status_code == 200
+    assert "hal0_slots_ready_total 0" in resp.text
 
 
 def test_route_is_public(client: TestClient) -> None:
     """Like /api/status + /api/metrics, the Prometheus surface is public.
 
     Auth-gating would block standard Prometheus scrapers that don't
-    speak hal0's bearer-token auth. Operators harden via a reverse
+    speak hal0's agent-identity headers. Operators harden via a reverse
     proxy if they want to limit scraper access. Verified by hitting
     the route without any Authorization header.
     """

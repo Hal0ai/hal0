@@ -2,14 +2,14 @@
 
 A model requested **by name** through the ``:8080`` gateway must be loaded
 under its owning slot's DECLARED backend (e.g. ``device=gpu-vulkan``)
-before lemond ever sees it — otherwise lemond auto-loads it under its
-GLOBAL ``config.json`` default (``rocm``).
+before any routing decision is taken.
 
 There are several routing paths a by-name request can take depending on
 cache/registry state:
-  * composite ``hal0`` passthrough → lemond gateway (PR #424),
+  * container-slot preemption / passthrough on a warm cache,
   * registry / real-slot upstream → ``forward()`` (B1),
-  * no route → lemonade-proxy catch-all.
+  * no route → the dispatcher's typed NoRouteFound 404 envelope (the
+    catch-all proxy fall-through was removed in epic #687).
 
 To be correct on ALL of them, the backend-aware load runs at the route
 layer **before** ``dispatcher.dispatch()`` — so the model is already loaded
@@ -60,8 +60,8 @@ def _run_chat(
 ) -> tuple[Any, list[Any]]:
     """POST /v1/chat/completions for ``model``; return (response, order).
 
-    ``order`` interleaves the backend-aware load, dispatch entry, and the
-    proxy fall-through so tests can assert load happens BEFORE dispatch.
+    ``order`` interleaves the backend-aware load and the dispatch entry so
+    tests can assert load happens BEFORE dispatch.
     """
     from fastapi.testclient import TestClient
 
@@ -81,8 +81,9 @@ def _run_chat(
 
     slot_manager.load = _load  # type: ignore[assignment]
 
-    # Record dispatch entry (it raises NoRouteFound here — no upstreams — but
-    # the point is WHEN it is entered relative to the load).
+    # Record dispatch entry (it raises NoRouteFound here — no upstreams
+    # serve the model, and there is no proxy fall-through — but the point
+    # is WHEN it is entered relative to the load).
     orig_dispatch = Dispatcher.dispatch
 
     async def _spy_dispatch(self: Any, request: Any, body: Any = None) -> Any:
@@ -90,17 +91,6 @@ def _run_chat(
         return await orig_dispatch(self, request, body=body)
 
     monkeypatch.setattr(Dispatcher, "dispatch", _spy_dispatch)
-
-    # Stub the catch-all proxy (reached after NoRouteFound).
-    async def _fake_proxy(request: Any, path: str) -> Any:
-        from fastapi.responses import Response
-
-        order.append("proxy")
-        return Response(content=b'{"ok": true}', media_type="application/json")
-
-    import hal0.api.routes.lemonade_proxy as lp
-
-    monkeypatch.setattr(lp, "_proxy", _fake_proxy)
 
     app = create_app()
     with TestClient(app) as client:
@@ -114,16 +104,20 @@ def _run_chat(
 
 def test_slot_backed_model_loads_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
 ) -> None:
     """A by-name request for a model whose owning slot declares a device
     backend drives ``SlotManager.load(owning_slot)`` BEFORE dispatch — so
-    whatever path dispatch then takes (composite gateway, real slot, or
-    proxy fall-through), the model is already loaded under the right
-    backend."""
+    whatever path dispatch then takes (container preemption, real slot,
+    or the typed no-route 404), the model is already loaded under the
+    right backend."""
     sm = _RecordingSlotManager()
     r, order = _run_chat(monkeypatch, sm, "qwen3-zero-coder-v2-0.8b-f16")
 
-    assert r.status_code == 200, r.text
+    # No upstream serves the model → typed NoRouteFound envelope (the
+    # routing outcome is irrelevant to the load-ordering contract).
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "dispatch.no_route"
     assert sm.loaded == ["utility"]
     # The load precedes dispatch (and therefore every routing outcome).
     assert order[0] == ("load", "utility")
@@ -132,26 +126,29 @@ def test_slot_backed_model_loads_before_dispatch(
 
 def test_unbacked_model_does_not_load(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
 ) -> None:
-    """A by-name request for a model with NO backing slot is left to
-    lemond's global default — no backend-aware load is kicked."""
+    """A by-name request for a model with NO backing slot kicks no
+    backend-aware load — it dispatches as-is."""
     sm = _RecordingSlotManager()
     r, order = _run_chat(monkeypatch, sm, "some-bare-pulled-model")
 
-    assert r.status_code == 200, r.text
+    assert r.status_code == 404, r.text  # nothing serves it; no fall-through
     assert sm.loaded == []
     assert "dispatch" in order  # routing still ran
 
 
 def test_dispatch_proceeds_even_if_backend_aware_load_fails(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
 ) -> None:
-    """A failing backend-aware load is swallowed: dispatch still runs
-    (preserving today's behavior — lemond auto-loads), rather than 500ing
-    on the new code path."""
+    """A failing backend-aware load is swallowed: dispatch still runs and
+    decides the client-facing outcome, rather than 500ing on the new code
+    path."""
     sm = _RecordingSlotManager(raises=True)
     r, order = _run_chat(monkeypatch, sm, "hermes-4-14b-q5km")
 
-    assert r.status_code == 200, r.text
+    assert r.status_code == 404, r.text  # dispatch ran and found no route
+    assert r.json()["error"]["code"] == "dispatch.no_route"
     assert sm.loaded == ["agent-hermes"]  # load was attempted
     assert order.index(("load", "agent-hermes")) < order.index("dispatch")

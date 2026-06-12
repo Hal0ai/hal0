@@ -330,7 +330,7 @@ def test_v1_audio_speech_kokoro_v1_reaches_tts_upstream(client: TestClient) -> N
     assert r.status_code == 200, r.text
     assert r.content == fake_wav
     # The forward MUST target the tts container remote's port — not the
-    # lemonade gateway (13305) and not the chat slot.
+    # chat slot or any other upstream.
     assert captured.get("url") is not None, "handler never called — dispatch failed"
     assert "127.0.0.1:8084" in str(captured["url"]), captured["url"]
     assert str(captured["url"]).endswith("/audio/speech")

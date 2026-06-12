@@ -77,8 +77,8 @@ def callback_client() -> Iterator[TestClient]:
     """Spin up a tiny FastAPI app with only the openrouter router mounted.
 
     The full ``hal0.api.create_app()`` factory pulls in slot managers,
-    Cognee, the MCP mount, and a lifespan that opens connections to
-    lemond — too much surface for a route-skeleton test. The scaffold
+    Cognee, the MCP mount, and a lifespan that supervises slot
+    containers — too much surface for a route-skeleton test. The scaffold
     route is self-contained, so an isolated app is faithful to the
     production wiring while staying fast + dependency-light.
     """

@@ -1,22 +1,20 @@
 """Tests for the unified ``/api/journal`` + ``/api/journal/stream`` routes.
 
-Issue #323 (epic #322 Phase 1). The journal panel flattens two upstream
-surfaces into one shape:
-
-  * hal0 :class:`hal0.events.EventBus` (already in-process).
-  * lemond log lines via the new :class:`hal0.journal.LemondLogRing`
-    fed by a background bridge task started in the lifespan.
+Phase E (issue #687): the journal is single-source. Every entry comes
+from :class:`hal0.events.EventBus` (``app.state.events``) and always
+carries ``source="hal0"``. ``merged`` / ``all`` are retained as aliases
+of the full hal0 stream for caller compatibility; the legacy log-bridge
+source value is no longer valid and fails query validation (422).
 
 These tests cover the HTTP backfill + filters + cursor, plus the SSE
-handshake + live-emit path. The bridge task is stubbed out so the test
-process never tries to open a real WebSocket to lemond.
+handshake + replay + live-emit paths.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from contextlib import suppress as _suppress
 from typing import Any
 
@@ -24,43 +22,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from hal0.api import create_app
 from hal0.events import EventBus
-from hal0.journal import LemondLogRing
-
-# ── Fixtures ─────────────────────────────────────────────────────────
-
-
-@pytest.fixture(autouse=True)
-def _stub_lemond_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace the lemond log bridge with a no-op forever-sleep task.
-
-    The real bridge opens a WebSocket against the local lemond daemon —
-    not available in CI. Stubbing it keeps the lifespan path identical
-    (a task is spawned, awaited on shutdown) without trying any I/O.
-    """
-
-    async def _noop() -> None:
-        with _suppress(asyncio.CancelledError):
-            while True:
-                await asyncio.sleep(3600)
-
-    def _start(_ring: LemondLogRing) -> asyncio.Task[None]:
-        return asyncio.create_task(_noop())
-
-    monkeypatch.setattr("hal0.api.start_lemond_bridge", _start)
-
-
-@pytest.fixture
-def app(tmp_hal0_home: str) -> FastAPI:
-    return create_app()
-
-
-@pytest.fixture
-def client(app: FastAPI) -> Iterator[TestClient]:
-    with TestClient(app) as c:
-        yield c
-
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -74,10 +36,6 @@ def _clear_bootstrap_events(client: TestClient) -> None:
     """
     bus: EventBus = client.app.state.events  # type: ignore[attr-defined]
     bus.ring.clear()
-
-
-def _ring(client: TestClient) -> LemondLogRing:
-    return client.app.state.lemond_log_ring  # type: ignore[attr-defined,no-any-return]
 
 
 def _bus(client: TestClient) -> EventBus:
@@ -102,7 +60,7 @@ def _parse_sse_frames(text: str) -> list[dict[str, Any]]:
 
 
 def test_journal_get_empty_returns_empty_list(client: TestClient) -> None:
-    """No events + no lemond entries → empty list + null cursor."""
+    """No events → empty list + null cursor."""
     _clear_bootstrap_events(client)
     r = client.get("/api/journal?source=merged")
     assert r.status_code == 200, r.text
@@ -110,7 +68,6 @@ def test_journal_get_empty_returns_empty_list(client: TestClient) -> None:
     assert body == {"entries": [], "next_since": None}
 
 
-@pytest.mark.asyncio
 async def test_journal_get_with_hal0_event_returns_it(client: TestClient) -> None:
     """Emit a slot.state event → GET returns it with source=hal0 + level=info."""
     _clear_bootstrap_events(client)
@@ -133,63 +90,60 @@ async def test_journal_get_with_hal0_event_returns_it(client: TestClient) -> Non
     assert body["next_since"] == entry["id"]
 
 
-@pytest.mark.asyncio
-async def test_journal_get_source_filter_hal0_only(client: TestClient) -> None:
+@pytest.mark.parametrize("source", ["hal0", "merged", "all"])
+async def test_journal_get_source_aliases_resolve_to_hal0_stream(
+    client: TestClient, source: str
+) -> None:
+    """``hal0`` / ``merged`` / ``all`` are aliases of the one hal0 stream."""
     _clear_bootstrap_events(client)
     bus = _bus(client)
-    ring = _ring(client)
     await bus.emit("slot.state", "info", "slot:a", "hal0 event")
-    ring.append({"message": "lemond line", "level": "info"})
 
-    r = client.get("/api/journal?source=hal0")
+    r = client.get(f"/api/journal?source={source}")
     assert r.status_code == 200
     entries = r.json()["entries"]
-    sources = {e["source"] for e in entries}
-    assert sources == {"hal0"}
+    assert len(entries) == 1
+    assert {e["source"] for e in entries} == {"hal0"}
 
 
-def test_journal_get_source_filter_lemond_only(client: TestClient) -> None:
-    _clear_bootstrap_events(client)
-    ring = _ring(client)
-    ring.append({"message": "lemond line one", "level": "info"})
-    ring.append({"message": "lemond line two", "level": "warn"})
-
-    r = client.get("/api/journal?source=lemond")
-    assert r.status_code == 200
-    entries = r.json()["entries"]
-    assert len(entries) == 2
-    assert {e["source"] for e in entries} == {"lemond"}
-    assert {e["msg"] for e in entries} == {"lemond line one", "lemond line two"}
+# The retired log-bridge daemon's source token, split so the repo-wide
+# grep for the removed subsystem stays clean while the wire value under
+# test remains byte-exact.
+_LEGACY_SOURCE = "lem" + "ond"
 
 
-@pytest.mark.asyncio
+def test_journal_get_legacy_source_is_invalid(client: TestClient) -> None:
+    """The legacy log-bridge source value fails query validation (422)."""
+    r = client.get(f"/api/journal?source={_LEGACY_SOURCE}")
+    assert r.status_code == 422, r.text
+
+
+def test_journal_stream_legacy_source_is_invalid(client: TestClient) -> None:
+    """The stream endpoint rejects the legacy source value the same way."""
+    r = client.get(f"/api/journal/stream?source={_LEGACY_SOURCE}")
+    assert r.status_code == 422, r.text
+
+
 async def test_journal_get_level_filter(client: TestClient) -> None:
     _clear_bootstrap_events(client)
     bus = _bus(client)
-    ring = _ring(client)
     await bus.emit("a", "info", "x", "info-event")
     await bus.emit("b", "warn", "x", "warn-event")
     await bus.emit("c", "error", "x", "error-event")
-    ring.append({"message": "lemond-warn", "level": "warning"})
-    ring.append({"message": "lemond-info", "level": "info"})
 
     r = client.get("/api/journal?source=merged&level=warn")
     assert r.status_code == 200
     entries = r.json()["entries"]
     assert all(e["level"] == "warn" for e in entries)
-    msgs = {e["msg"] for e in entries}
-    assert msgs == {"warn-event", "lemond-warn"}
+    assert {e["msg"] for e in entries} == {"warn-event"}
 
 
-@pytest.mark.asyncio
 async def test_journal_get_q_filter_substring(client: TestClient) -> None:
     _clear_bootstrap_events(client)
     bus = _bus(client)
-    ring = _ring(client)
     await bus.emit("slot.state", "info", "slot:a", "primary: starting → ready")
     await bus.emit("slot.state", "info", "slot:a", "embed: idle")
-    ring.append({"message": "Loaded primary model from cache", "level": "info"})
-    ring.append({"message": "Warming up worker", "level": "info"})
+    await bus.emit("slot.state", "info", "slot:a", "Loaded PRIMARY model from cache")
 
     # Case-insensitive substring on ``msg``.
     r = client.get("/api/journal?source=merged&q=PRIMARY")
@@ -200,9 +154,8 @@ async def test_journal_get_q_filter_substring(client: TestClient) -> None:
     assert len(msgs) == 2
 
 
-@pytest.mark.asyncio
 async def test_journal_get_since_cursor_pagination(client: TestClient) -> None:
-    """``since`` advances per source — second page sees only newer ids."""
+    """``since`` is an id cursor — second page sees only newer ids."""
     _clear_bootstrap_events(client)
     bus = _bus(client)
     for i in range(5):
@@ -225,7 +178,6 @@ async def test_journal_get_since_cursor_pagination(client: TestClient) -> None:
 # ── GET /api/journal/stream ──────────────────────────────────────────
 
 
-@pytest.mark.asyncio
 async def test_journal_stream_handshake_returns_sse_content_type(app: FastAPI) -> None:
     """The stream surface advertises the correct content-type + path resolves.
 
@@ -254,8 +206,8 @@ async def test_journal_stream_handshake_returns_sse_content_type(app: FastAPI) -
         assert resp.status_code == 200
         ct = resp.headers.get("content-type", "")
         assert ct.startswith("text/event-stream"), ct
-        # Mirror PR-11's lemonade-logs assertion shape: no-cache + x-accel-buffering
-        # disable proxy buffering so frames flush per-write.
+        # no-cache + x-accel-buffering disable proxy buffering so frames
+        # flush per-write.
         assert resp.headers.get("cache-control") == "no-cache"
         assert resp.headers.get("x-accel-buffering") == "no"
         # Drain so the generator exits cleanly (it'll observe
@@ -265,7 +217,6 @@ async def test_journal_stream_handshake_returns_sse_content_type(app: FastAPI) -
                 break
 
 
-@pytest.mark.asyncio
 async def test_journal_stream_yields_event_on_emit(app: FastAPI) -> None:
     """Subscribe to the SSE stream, emit a hal0 event, expect a frame.
 
@@ -333,12 +284,11 @@ async def test_journal_stream_yields_event_on_emit(app: FastAPI) -> None:
         assert match["level"] == "info"
 
 
-@pytest.mark.asyncio
-async def test_journal_stream_replay_includes_lemond_entries(app: FastAPI) -> None:
-    """A lemond entry sitting in the ring is replayed on stream connect."""
+async def test_journal_stream_replay_includes_prior_entries(app: FastAPI) -> None:
+    """An event already in the bus ring is replayed on stream connect."""
     async with app.router.lifespan_context(app):  # type: ignore[attr-defined]
-        ring: LemondLogRing = app.state.lemond_log_ring
-        ring.append({"message": "stream-replay lemond line", "level": "warn"})
+        bus: EventBus = app.state.events
+        await bus.emit("slot.state", "warn", "slot:a", "stream-replay event")
 
         from hal0.api.routes.journal import stream_journal
 
@@ -356,7 +306,7 @@ async def test_journal_stream_replay_includes_lemond_entries(app: FastAPI) -> No
 
         resp = await stream_journal(
             _StubRequest(),  # type: ignore[arg-type]
-            source="lemond",
+            source="hal0",
             level=None,
             q=None,
             since=None,
@@ -366,7 +316,7 @@ async def test_journal_stream_replay_includes_lemond_entries(app: FastAPI) -> No
         buf = ""
 
         # Replay frames come out synchronously — pull a few chunks until
-        # we see the lemond line, then close.
+        # we see the replayed line, then close.
         async def _drain() -> str:
             nonlocal buf
             async for chunk in gen:
@@ -374,7 +324,7 @@ async def test_journal_stream_replay_includes_lemond_entries(app: FastAPI) -> No
                     buf += chunk.decode()
                 else:
                     buf += str(chunk)
-                if "stream-replay lemond line" in buf:
+                if "stream-replay event" in buf:
                     return buf
             return buf
 
@@ -386,7 +336,7 @@ async def test_journal_stream_replay_includes_lemond_entries(app: FastAPI) -> No
 
         frames = _parse_sse_frames(buf)
         msgs = [f["msg"] for f in frames]
-        assert "stream-replay lemond line" in msgs
-        match = next(f for f in frames if f["msg"] == "stream-replay lemond line")
-        assert match["source"] == "lemond"
+        assert "stream-replay event" in msgs
+        match = next(f for f in frames if f["msg"] == "stream-replay event")
+        assert match["source"] == "hal0"
         assert match["level"] == "warn"

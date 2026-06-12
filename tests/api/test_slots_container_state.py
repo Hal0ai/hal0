@@ -1,30 +1,27 @@
-"""Tests for container-slot state fields on /api/slots (Issue #656).
+"""Tests for container-slot state fields on /api/slots (Issue #656, Phase E #687).
 
 Verifies:
   - ``container_status`` (running|stopped|starting|crashed) and
-    ``container_health`` (bool) appear on container slot entries.
-  - Lemonade slots are unaffected — no ``container_*`` keys, and
-    ``lemonade_state`` is still present as before.
-  - Container slots are skipped by Lemonade enrichment (no spurious
-    ``lemonade_state`` field on a container slot entry).
+    ``container_health`` (bool) appear on slot entries.
+  - The container probe runs for EVERY slot — profile-backed and
+    profile-less alike all carry ``container_status`` /
+    ``container_health`` / ``runtime`` / ``profile`` / ``image`` /
+    ``image_status`` keys.
+  - ``runtime``/``profile``/``image``/``resolved_command`` enrichment
+    (issue #658) and ``actual_image``/``image_mismatch`` (#663).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import hal0.providers as providers_mod
 from hal0.api import create_app
-from hal0.lemonade.client import LemonadeClient
-from hal0.providers.lemonade import LemonadeProvider
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -41,35 +38,9 @@ def _seed_slot_toml(home: str, name: str, lines: list[str]) -> Path:
 
 
 @pytest.fixture
-def lemonade_stub(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Install a minimal Lemonade stub so Lemonade slots still enrich correctly."""
-    state: dict[str, Any] = {"loaded": []}
-
-    def h(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/v1/health":
-            return httpx.Response(200, json={"loaded": state["loaded"]})
-        return httpx.Response(200, json={"status": "ok"})
-
-    transport = httpx.AsyncClient(
-        transport=httpx.MockTransport(h),
-        base_url="http://test",
-    )
-    provider = LemonadeProvider(client=LemonadeClient(http_client=transport))
-    original = providers_mod._PROVIDERS["lemonade"]
-    providers_mod._PROVIDERS["lemonade"] = provider
-    try:
-        yield state
-    finally:
-        providers_mod._PROVIDERS["lemonade"] = original
-
-
-@pytest.fixture
-def app_with_container_slot(
-    tmp_hal0_home: str,
-    lemonade_stub: dict[str, Any],
-) -> FastAPI:
-    """App with one container slot (gpu-chat) and one Lemonade slot (chat)."""
-    # Container slot: profile set → _is_container_slot returns True
+def app_with_container_slot(tmp_hal0_home: str) -> FastAPI:
+    """App with one profile-backed slot (gpu-chat) and one profile-less slot (chat)."""
+    # Profile-backed container slot.
     _seed_slot_toml(
         tmp_hal0_home,
         "gpu-chat",
@@ -82,7 +53,7 @@ def app_with_container_slot(
             'default = "llama-3b"',
         ],
     )
-    # Lemonade slot
+    # Profile-less slot — still probed, but has no image/resolved_command.
     _seed_slot_toml(
         tmp_hal0_home,
         "chat",
@@ -203,12 +174,11 @@ def test_container_slot_status_starting_when_active_but_unhealthy(
     assert slot["container_health"] is False
 
 
-def test_lemonade_slot_unaffected_no_container_keys(
+def test_every_slot_gets_container_state_fields(
     client_with_container_slot: TestClient,
-    lemonade_stub: dict[str, Any],
 ) -> None:
-    """Lemonade slot (chat) has lemonade_state but no container_status/container_health keys."""
-    lemonade_stub["loaded"] = [{"model_name": "qwen3-4b"}]
+    """The container probe covers EVERY slot — the profile-less chat slot
+    carries container_status / container_health / runtime too."""
     with (
         patch(
             "hal0.providers.container.ContainerProvider.is_active",
@@ -223,36 +193,11 @@ def test_lemonade_slot_unaffected_no_container_keys(
         r = client_with_container_slot.get("/api/slots")
     assert r.status_code == 200, r.text
     by_name = {e["name"]: e for e in r.json()}
-    primary = by_name["chat"]
-    # Lemonade enrichment must still fire
-    assert "lemonade_state" in primary
-    # Container enrichment must NOT apply
-    assert "container_status" not in primary
-    assert "container_health" not in primary
-
-
-def test_container_slot_has_no_lemonade_state(
-    client_with_container_slot: TestClient,
-) -> None:
-    """Container slot must NOT have a lemonade_state key (skip in Lemonade enrichment)."""
-    with (
-        patch(
-            "hal0.providers.container.ContainerProvider.is_active",
-            return_value=True,
-        ),
-        patch(
-            "hal0.providers.container.ContainerProvider.health",
-            new_callable=AsyncMock,
-            return_value={"ok": True, "status": "healthy"},
-        ),
-    ):
-        r = client_with_container_slot.get("/api/slots")
-    assert r.status_code == 200, r.text
-    by_name = {e["name"]: e for e in r.json()}
-    gpu_slot = by_name["gpu-chat"]
-    assert "lemonade_state" not in gpu_slot, (
-        "container slots must not receive a spurious lemonade_state"
-    )
+    for name in ("gpu-chat", "chat"):
+        slot = by_name[name]
+        assert slot["container_status"] == "running", f"{name} missing container_status"
+        assert slot["container_health"] is True, f"{name} missing container_health"
+        assert slot["runtime"] == "container", f"{name} must report runtime=container"
 
 
 def test_get_slot_container_state_fields(
@@ -302,12 +247,8 @@ def test_container_slot_has_runtime_profile_image_fields(
             new_callable=AsyncMock,
             return_value={"ok": True, "status": "healthy"},
         ),
-        # slots.py inline-imports load_profiles_config for the image field
-        patch(
-            "hal0.config.loader.load_profiles_config",
-            return_value=fake_catalog,
-        ),
-        # container.py module-level import used by resolved_command_for_slot
+        # slot_view inline-imports load_profiles_config for the image field;
+        # container.py's resolved_command_for_slot uses the same loader.
         patch(
             "hal0.config.loader.load_profiles_config",
             return_value=fake_catalog,
@@ -354,12 +295,6 @@ def test_container_slot_resolved_command_includes_flags(
             "subprocess.run",
             return_value=MagicMock(stdout=b"inactive", returncode=3),
         ),
-        # slots.py inline-imports load_profiles_config for the image field
-        patch(
-            "hal0.config.loader.load_profiles_config",
-            return_value=fake_catalog,
-        ),
-        # container.py module-level import used by resolved_command_for_slot
         patch(
             "hal0.config.loader.load_profiles_config",
             return_value=fake_catalog,
@@ -377,11 +312,11 @@ def test_container_slot_resolved_command_includes_flags(
     assert "-ngl" in joined, "profile flags must appear in resolved_command"
 
 
-def test_lemonade_slot_has_no_runtime_container_fields(
+def test_profileless_slot_has_null_image_and_command(
     client_with_container_slot: TestClient,
-    lemonade_stub: dict[str, Any],
 ) -> None:
-    """Lemonade slots must not have runtime='container' or profile/image/resolved_command."""
+    """A profile-less slot is still probed but carries no image facts:
+    profile='', image=None, resolved_command=None, image_status=missing."""
     with (
         patch(
             "hal0.providers.container.ContainerProvider.is_active",
@@ -396,11 +331,13 @@ def test_lemonade_slot_has_no_runtime_container_fields(
         r = client_with_container_slot.get("/api/slots")
     assert r.status_code == 200, r.text
     by_name = {e["name"]: e for e in r.json()}
-    lemond_slot = by_name["chat"]
+    chat = by_name["chat"]
 
-    # Lemonade slots must not inherit container enrichment fields
-    assert lemond_slot.get("runtime") != "container"
-    assert "resolved_command" not in lemond_slot
+    assert chat["runtime"] == "container"
+    assert chat["profile"] == ""
+    assert chat["image"] is None
+    assert chat["resolved_command"] is None
+    assert chat["image_status"] == "missing"
 
 
 # ── #663: actual_image + image_mismatch via running_image (podman inspect) ──────
@@ -430,7 +367,6 @@ def test_container_actual_image_no_mismatch_when_running_matches_profile(
             return_value={"ok": True, "status": "healthy"},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=cat),
-        patch("hal0.config.loader.load_profiles_config", return_value=cat),
         patch(
             "hal0.providers.container.ContainerProvider.running_image",
             return_value=_VULKAN_IMG,
@@ -456,7 +392,6 @@ def test_container_image_mismatch_when_running_differs_from_profile(
             return_value={"ok": True, "status": "healthy"},
         ),
         patch("hal0.config.loader.load_profiles_config", return_value=cat),
-        patch("hal0.config.loader.load_profiles_config", return_value=cat),
         patch(
             "hal0.providers.container.ContainerProvider.running_image",
             return_value=_ROCM_IMG,  # stale: still running the old rocm image
@@ -469,10 +404,12 @@ def test_container_image_mismatch_when_running_differs_from_profile(
     assert slot["image_mismatch"] is True
 
 
-def test_lemonade_slot_has_no_image_mismatch_fields(
+def test_profileless_slot_actual_image_without_mismatch_key(
     client_with_container_slot: TestClient,
 ) -> None:
-    """#663: lemond slots keep existing behavior - no actual_image / image_mismatch keys."""
+    """#663: a slot with no declared profile image still surfaces actual_image
+    (the probe is universal) but carries NO image_mismatch key — there is no
+    declared image to compare against."""
     with (
         patch("hal0.providers.container.ContainerProvider.is_active", return_value=True),
         patch(
@@ -488,5 +425,5 @@ def test_lemonade_slot_has_no_image_mismatch_fields(
         r = client_with_container_slot.get("/api/slots")
     assert r.status_code == 200, r.text
     chat = {e["name"]: e for e in r.json()}["chat"]
-    assert "actual_image" not in chat
+    assert chat["actual_image"] == _VULKAN_IMG
     assert "image_mismatch" not in chat

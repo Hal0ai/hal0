@@ -1,91 +1,46 @@
-"""Tests for the runtime-backend control endpoint (ADR-0022 B3).
+"""Tests for the runtime-backend control endpoint (ADR-0022 B3, Phase E).
 
 POST /api/slots/{name}/backend switches a slot's runtime backend by
 writing the slot's ``device`` field to TOML (rocm→gpu-rocm,
 vulkan→gpu-vulkan, cpu→cpu, auto→clear) and restarting the slot when it
-is currently loaded so the model reloads under the new backend.
+is currently loaded so the container re-renders under the new backend.
+
+Phase E (#687) semantics under test:
+  - "loaded" is the SlotManager's own truth (``is_ready_for_dispatch``) —
+    no external daemon is consulted.
+  - ``actual_backend`` is always ``None``: per-process backend
+    introspection retired with the legacy runtime (#663 — the running
+    image is the backend-of-record, surfaced as ``actual_image``).
+  - Backend builds ship inside the container images, so
+    ``_BACKEND_BUILD_BIN`` is empty and ``_backend_build_present`` always
+    returns True; it is kept as a monkeypatchable seam, and the 409
+    ``backend.build_missing`` path is exercised through that seam.
 
 Validation:
-  - rocm/vulkan → 409 ``backend.build_missing`` when the build dir's
-    ``llama-server`` binary is absent.
   - cpu / auto → always valid.
   - flm/npu → 400 ``backend.not_selectable``.
 
-Idempotent: same backend already declared (and, when loaded, already the
-actual backend) → no-op, ``reloaded: false``.
+Idempotent: same backend already declared → no-op, ``reloaded: false``.
 
 Response 200 carries the standard ``_slot_to_dict`` payload PLUS
 ``requested_backend`` / ``declared_backend`` / ``actual_backend`` /
 ``reloaded``.
-
-Mocks Lemonade's HTTP surface (same pattern as test_slots_routes.py) and
-monkeypatches the build-presence check + resolve_actual_backend so the
-tests don't depend on the host's installed llama.cpp builds.
 """
 
 from __future__ import annotations
 
-import json
 import tomllib
-from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
-import httpx
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import hal0.api.routes.slots as slots_mod
-import hal0.providers as providers_mod
-import hal0.providers.lemonade as lemonade_mod
-from hal0.api import create_app
-from hal0.lemonade.client import LemonadeClient
-from hal0.providers.lemonade import LemonadeProvider
-
-
-@pytest.fixture
-def lemonade_stub(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
-    """Install a Lemonade stub provider; return its mutable state dict."""
-    state: dict[str, Any] = {
-        "loaded": [{"model_name": "qwen3-4b", "backend_url": "http://127.0.0.1:14002/v1"}],
-        "load_calls": [],
-        "unload_calls": [],
-    }
-
-    def h(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/v1/load":
-            body = json.loads(req.content.decode() or "{}")
-            state["load_calls"].append(body)
-            state["loaded"] = [
-                {
-                    "model_name": body.get("model_name", ""),
-                    "backend_url": "http://127.0.0.1:14002/v1",
-                }
-            ]
-            return httpx.Response(200, json={"status": "loaded"})
-        if req.url.path == "/v1/unload":
-            body = json.loads(req.content.decode() or "{}")
-            state["unload_calls"].append(body)
-            state["loaded"] = []
-            return httpx.Response(200, json={"status": "unloaded"})
-        if req.url.path == "/v1/health":
-            return httpx.Response(200, json={"loaded": state["loaded"]})
-        return httpx.Response(404, json={"detail": f"unmocked {req.url.path}"})
-
-    transport = httpx.AsyncClient(transport=httpx.MockTransport(h), base_url="http://test")
-    provider = LemonadeProvider(client=LemonadeClient(http_client=transport))
-    original = providers_mod._PROVIDERS["lemonade"]
-    providers_mod._PROVIDERS["lemonade"] = provider
-    try:
-        yield state
-    finally:
-        providers_mod._PROVIDERS["lemonade"] = original
 
 
 @pytest.fixture
 def slot_toml(tmp_hal0_home: str) -> Path:
-    """Write a chat.toml declaring device=gpu-vulkan."""
+    """Write a chat.toml declaring device=gpu-vulkan (container runtime)."""
     root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     root.mkdir(parents=True, exist_ok=True)
     path = root / "chat.toml"
@@ -93,10 +48,11 @@ def slot_toml(tmp_hal0_home: str) -> Path:
         "\n".join(
             [
                 'name = "chat"',
-                "port = 8081",
+                'type = "llm"',
                 'device = "gpu-vulkan"',
-                'provider = "lemonade"',
+                'runtime = "container"',
                 "enabled = true",
+                "port = 8081",
                 "[model]",
                 'default = "qwen3-4b"',
                 "",
@@ -107,22 +63,27 @@ def slot_toml(tmp_hal0_home: str) -> Path:
     return path
 
 
-@pytest.fixture
-def all_builds_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pretend both rocm + vulkan llama-server binaries are installed."""
-    monkeypatch.setattr(slots_mod, "_backend_build_present", lambda _b: True)
-
-
-@pytest.fixture
-def isolated_client(tmp_hal0_home: str) -> Iterator[TestClient]:
-    app: FastAPI = create_app()
-    with TestClient(app) as c:
-        yield c
-
-
 def _read_device(slot_toml: Path) -> str | None:
     with slot_toml.open("rb") as fh:
         return tomllib.load(fh).get("device")
+
+
+def _patch_loaded(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, *, loaded: bool
+) -> list[str]:
+    """Force is_ready_for_dispatch + capture restart calls on the live SM."""
+    sm = client.app.state.slot_manager
+    restarts: list[str] = []
+    monkeypatch.setattr(sm, "is_ready_for_dispatch", lambda _name: loaded)
+
+    real_status = sm.status
+
+    async def _restart(name: str) -> object:
+        restarts.append(name)
+        return await real_status(name)
+
+    monkeypatch.setattr(sm, "restart", _restart)
+    return restarts
 
 
 # ── happy path: switch vulkan → rocm (loaded → restart) ─────────────────────
@@ -130,14 +91,11 @@ def _read_device(slot_toml: Path) -> str | None:
 
 def test_switch_to_rocm_writes_device_and_restarts_when_loaded(
     slot_toml: Path,
-    lemonade_stub: dict[str, Any],
-    all_builds_present: None,
-    isolated_client: TestClient,
+    client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # After the restart the child runs rocm — make resolve_actual_backend say so.
-    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: "rocm")
-    r = isolated_client.post("/api/slots/chat/backend", json={"backend": "rocm"})
+    restarts = _patch_loaded(client, monkeypatch, loaded=True)
+    r = client.post("/api/slots/chat/backend", json={"backend": "rocm"})
     assert r.status_code == 200, r.text
     body = r.json()
     # device persisted to TOML.
@@ -145,12 +103,28 @@ def test_switch_to_rocm_writes_device_and_restarts_when_loaded(
     # response contract.
     assert body["requested_backend"] == "rocm"
     assert body["declared_backend"] == "rocm"
+    # Phase E: per-process backend introspection retired — always None.
+    assert body["actual_backend"] is None
     assert body["reloaded"] is True
     # standard slot payload still present.
     assert body["name"] == "chat"
-    # a restart cycle issued an unload + load.
-    assert lemonade_stub["unload_calls"], "restart should issue an unload"
-    assert lemonade_stub["load_calls"], "restart should issue a load"
+    # a loaded slot is restarted so the container re-renders from TOML.
+    assert restarts == ["chat"]
+
+
+def test_switch_backend_while_unloaded_skips_restart(
+    slot_toml: Path,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offline slot → TOML write only, no restart, reloaded=false."""
+    restarts = _patch_loaded(client, monkeypatch, loaded=False)
+    r = client.post("/api/slots/chat/backend", json={"backend": "rocm"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert _read_device(slot_toml) == "gpu-rocm"
+    assert body["reloaded"] is False
+    assert not restarts, "unloaded slot must not be restarted"
 
 
 # ── device alias + gpu- normalization ───────────────────────────────────────
@@ -158,30 +132,42 @@ def test_switch_to_rocm_writes_device_and_restarts_when_loaded(
 
 def test_accepts_device_alias_and_normalizes_gpu_form(
     slot_toml: Path,
-    lemonade_stub: dict[str, Any],
-    all_builds_present: None,
-    isolated_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
 ) -> None:
-    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: "rocm")
-    r = isolated_client.post("/api/slots/chat/backend", json={"device": "gpu-rocm"})
+    r = client.post("/api/slots/chat/backend", json={"device": "gpu-rocm"})
     assert r.status_code == 200, r.text
     assert r.json()["requested_backend"] == "rocm"
     assert _read_device(slot_toml) == "gpu-rocm"
 
 
-# ── 409 build_missing ────────────────────────────────────────────────────────
+# ── build presence: container images always carry the build ─────────────────
 
 
-def test_rocm_build_missing_returns_409(
+def test_build_presence_defaults_to_true_no_409(
     slot_toml: Path,
-    lemonade_stub: dict[str, Any],
-    isolated_client: TestClient,
+    client: TestClient,
+) -> None:
+    """Backend builds ship inside container images — no host-side check.
+
+    ``_BACKEND_BUILD_BIN`` is empty and ``_backend_build_present`` always
+    returns True, so an unpatched rocm switch succeeds.
+    """
+    assert slots_mod._BACKEND_BUILD_BIN == {}
+    assert slots_mod._backend_build_present("rocm") is True
+    assert slots_mod._backend_build_present("vulkan") is True
+    r = client.post("/api/slots/chat/backend", json={"backend": "rocm"})
+    assert r.status_code == 200, r.text
+    assert _read_device(slot_toml) == "gpu-rocm"
+
+
+def test_rocm_build_missing_returns_409_via_seam(
+    slot_toml: Path,
+    client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # rocm build absent, vulkan present.
+    """The monkeypatchable seam still gates the switch (future host builds)."""
     monkeypatch.setattr(slots_mod, "_backend_build_present", lambda b: b != "rocm")
-    r = isolated_client.post("/api/slots/chat/backend", json={"backend": "rocm"})
+    r = client.post("/api/slots/chat/backend", json={"backend": "rocm"})
     assert r.status_code == 409, r.text
     assert r.json()["error"]["code"] == "backend.build_missing"
     # device must NOT have changed.
@@ -195,10 +181,18 @@ def test_rocm_build_missing_returns_409(
 def test_flm_npu_rejected_400(
     bad: str,
     slot_toml: Path,
-    lemonade_stub: dict[str, Any],
-    isolated_client: TestClient,
+    client: TestClient,
 ) -> None:
-    r = isolated_client.post("/api/slots/chat/backend", json={"backend": bad})
+    r = client.post("/api/slots/chat/backend", json={"backend": bad})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "backend.not_selectable"
+
+
+def test_unknown_backend_rejected_400(
+    slot_toml: Path,
+    client: TestClient,
+) -> None:
+    r = client.post("/api/slots/chat/backend", json={"backend": "cuda"})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "backend.not_selectable"
 
@@ -208,12 +202,9 @@ def test_flm_npu_rejected_400(
 
 def test_auto_clears_device(
     slot_toml: Path,
-    lemonade_stub: dict[str, Any],
-    isolated_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
 ) -> None:
-    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: None)
-    r = isolated_client.post("/api/slots/chat/backend", json={"backend": "auto"})
+    r = client.post("/api/slots/chat/backend", json={"backend": "auto"})
     assert r.status_code == 200, r.text
     # device cleared (empty string written).
     dev = _read_device(slot_toml)
@@ -226,21 +217,21 @@ def test_auto_clears_device(
 
 def test_idempotent_same_backend_no_reload(
     slot_toml: Path,
-    lemonade_stub: dict[str, Any],
-    all_builds_present: None,
-    isolated_client: TestClient,
+    client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Requesting the already-declared backend (and matching actual) is a no-op."""
-    # Declared is vulkan; the live child is also vulkan → fully idempotent.
-    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: "vulkan")
-    r = isolated_client.post("/api/slots/chat/backend", json={"backend": "vulkan"})
+    """Requesting the already-declared backend is a no-op, even when loaded
+    (actual_backend is always None post-#663, so the declared device is
+    the only idempotency input)."""
+    restarts = _patch_loaded(client, monkeypatch, loaded=True)
+    r = client.post("/api/slots/chat/backend", json={"backend": "vulkan"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["reloaded"] is False
     assert body["declared_backend"] == "vulkan"
+    assert body["actual_backend"] is None
     # No restart cycle.
-    assert not lemonade_stub["unload_calls"], "idempotent no-op must not restart"
+    assert not restarts, "idempotent no-op must not restart"
     # device unchanged.
     assert _read_device(slot_toml) == "gpu-vulkan"
 
@@ -250,10 +241,9 @@ def test_idempotent_same_backend_no_reload(
 
 def test_missing_backend_field_400(
     slot_toml: Path,
-    lemonade_stub: dict[str, Any],
-    isolated_client: TestClient,
+    client: TestClient,
 ) -> None:
-    r = isolated_client.post("/api/slots/chat/backend", json={})
+    r = client.post("/api/slots/chat/backend", json={})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "backend.missing"
 
@@ -263,15 +253,11 @@ def test_missing_backend_field_400(
 
 def test_legacy_primary_name_resolves_to_chat_slot(
     slot_toml: Path,
-    lemonade_stub: dict[str, Any],
-    all_builds_present: None,
-    isolated_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
 ) -> None:
     """POST /api/slots/primary/backend resolves via the hidden alias to the
     chat slot's chat.toml — proves old names still work post-rename."""
-    monkeypatch.setattr(lemonade_mod, "resolve_actual_backend", lambda _e: "rocm")
-    r = isolated_client.post("/api/slots/primary/backend", json={"backend": "rocm"})
+    r = client.post("/api/slots/primary/backend", json={"backend": "rocm"})
     assert r.status_code == 200, r.text
     # The alias wrote to the canonical chat.toml fixture.
     assert _read_device(slot_toml) == "gpu-rocm"
