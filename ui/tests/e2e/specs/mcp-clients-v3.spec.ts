@@ -48,34 +48,49 @@ const MOCK_LIST = {
 }
 
 test.describe('MCP Clients view (ADR-0013 §8)', () => {
-  test.skip('mode toggle renders both Servers and Clients', async ({ page }) => {
-    await page.route('**/api/agents/mcp/clients', (route) => json(route, MOCK_LIST))
-    await page.goto('/#agents/mcp')
+  // Minimal servers response (clients tests focus on the Clients tab, but the
+  // MCP view also fetches servers — register a stub so it doesn't hang).
+  const STUB_SERVERS = { servers: [] }
+
+  // Helper: navigate, wait for both servers + clients to load, confirm structure.
+  async function gotoMcpWithClients(page: any) {
+    await page.route('**/api/mcp/servers', (route) => json(route, STUB_SERVERS))
+    await page.route('**/api/mcp/clients', (route) => json(route, MOCK_LIST))
+    await page.route('**/api/mcp/stream', (route) => route.abort())
+    await page.route('**/api/mcp/catalog', (route) => json(route, { items: [] }))
+    await Promise.all([
+      page.waitForResponse('**/api/mcp/servers', { timeout: 15_000 }),
+      page.waitForResponse('**/api/mcp/clients', { timeout: 15_000 }),
+      page.goto('/#agents/mcp', { waitUntil: 'domcontentloaded' }),
+    ])
+    // Tabs (Servers | Clients) should appear once the view renders.
+    await expect(page.locator('.mcp-tab').first()).toBeVisible({ timeout: 5_000 })
+  }
+
+  test('mode toggle renders both Servers and Clients', async ({ page }) => {
+    await gotoMcpWithClients(page)
     await expect(page.locator('.mcp-tab', { hasText: 'Servers' })).toBeVisible()
     await expect(page.locator('.mcp-tab', { hasText: 'Clients' })).toBeVisible()
   })
 
-  test.skip('clients tab shows hermes card + servers', async ({ page }) => {
-    await page.route('**/api/agents/mcp/clients', (route) => json(route, MOCK_LIST))
-    await page.goto('/#agents/mcp')
+  test('clients tab shows hermes card + servers', async ({ page }) => {
+    await gotoMcpWithClients(page)
     await page.locator('.mcp-tab', { hasText: 'Clients' }).click()
     await expect(page.locator('.view')).toContainText('Hermes-Agent')
     await expect(page.locator('.view')).toContainText('hal0-admin')
     await expect(page.locator('.view')).toContainText('github')
   })
 
-  test.skip('tool chips render with allow/gated/blocked verdicts', async ({ page }) => {
-    await page.route('**/api/agents/mcp/clients', (route) => json(route, MOCK_LIST))
-    await page.goto('/#agents/mcp')
+  test('tool chips render with allow/gated/blocked verdicts', async ({ page }) => {
+    await gotoMcpWithClients(page)
     await page.locator('.mcp-tab', { hasText: 'Clients' }).click()
     await expect(page.locator('.chip', { hasText: 'list_issues' })).toBeVisible()
     await expect(page.locator('.chip', { hasText: 'create_pr' })).toBeVisible()
     await expect(page.locator('.chip', { hasText: 'delete_repo' })).toBeVisible()
   })
 
-  test.skip('bearer auth shown without rendering token value', async ({ page }) => {
-    await page.route('**/api/agents/mcp/clients', (route) => json(route, MOCK_LIST))
-    await page.goto('/#agents/mcp')
+  test('bearer auth shown without rendering token value', async ({ page }) => {
+    await gotoMcpWithClients(page)
     await page.locator('.mcp-tab', { hasText: 'Clients' }).click()
     // Token value never appears; just the env-var name (in title attr)
     // and the status word.
