@@ -3,10 +3,77 @@
 // Wraps /api/memory/graph/{status} + PUT /api/memory/graph so the
 // Memory tab can render the current gate state and flip it without
 // reaching for the raw fetch client.
+//
+// Also exposes:
+//   useMemoryList      — GET /api/memory/list (paginated records)
+//   useAgentMemoryStats — GET /api/agents/{id}/memory/stats (per-agent counts)
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPut } from '../client'
 import { ENDPOINTS } from '../endpoints'
+
+// ── Memory list ────────────────────────────────────────────────────────────
+
+export interface MemoryRecord {
+  id: string
+  text: string
+  timestamp: string
+  dataset: string
+  tags: string[]
+  source: string | null
+  metadata: Record<string, unknown>
+  score: number | null
+}
+
+export interface MemoryListResponse {
+  items: MemoryRecord[]
+  next_cursor: string | null
+}
+
+export function useMemoryList(options?: {
+  dataset?: string
+  limit?: number
+  enabled?: boolean
+}) {
+  const dataset = options?.dataset ?? 'shared'
+  const limit = options?.limit ?? 10
+  return useQuery<MemoryListResponse>({
+    queryKey: ['memory', 'list', dataset, limit],
+    // TODO endpoints.ts (ui-sweep-b owns) — inline path
+    queryFn: () =>
+      apiGet<MemoryListResponse>(
+        `/api/memory/list?dataset=${encodeURIComponent(dataset)}&limit=${limit}`,
+      ),
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+    enabled: options?.enabled ?? true,
+  })
+}
+
+// ── Agent memory stats ──────────────────────────────────────────────────────
+
+export interface AgentMemoryStats {
+  agent_id: string
+  namespace: string
+  writes: number
+  reads: number
+  last_write: string | null
+  available: boolean
+}
+
+export function useAgentMemoryStats(agentId: string | null | undefined) {
+  // TODO endpoints.ts (ui-sweep-b owns) — inline path
+  return useQuery<AgentMemoryStats>({
+    queryKey: ['agents', agentId, 'memory', 'stats'],
+    queryFn: () =>
+      apiGet<AgentMemoryStats>(
+        `/api/agents/${encodeURIComponent(agentId as string)}/memory/stats`,
+      ),
+    enabled: !!agentId,
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+  })
+}
 
 export type GraphRoute = 'upstream' | 'primary' | 'agent'
 
@@ -76,4 +143,18 @@ export function useMemoryEnabled(): boolean {
     refetchInterval: 30_000,
   })
   return q.data?.memory_enabled === true
+}
+
+// Companion to useMemoryEnabled() — returns true while the /api/status
+// query is still in-flight. Same cache key → zero extra requests.
+// main.jsx reads this to guard the #agent→#dashboard redirect so the
+// redirect doesn't fire during the transient loading window.
+export function useMemoryEnabledPending(): boolean {
+  const q = useQuery<{ memory_enabled?: boolean }>({
+    queryKey: ['status', 'memory_enabled'],
+    queryFn: () => apiGet<{ memory_enabled?: boolean }>(ENDPOINTS.status),
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  })
+  return q.isPending
 }

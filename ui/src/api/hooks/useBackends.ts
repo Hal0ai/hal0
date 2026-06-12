@@ -64,3 +64,23 @@ export function useBackendUninstall() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['backends'] }),
   })
 }
+
+// ── NPU load / unload (POST /api/backends/npu/{load,unload}) ──────────────
+// The only install-adjacent backend operations the server exposes today.
+// TODO endpoints.ts (ui-sweep-b owns) — inline paths for now.
+
+export function useNpuLoad() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiPost<unknown>('/api/backends/npu/load'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['backends'] }),
+  })
+}
+
+export function useNpuUnload() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiPost<unknown>('/api/backends/npu/unload'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['backends'] }),
+  })
+}
