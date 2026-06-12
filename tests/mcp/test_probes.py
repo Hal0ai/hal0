@@ -141,6 +141,29 @@ def test_model_store_probe_nfs_not_uma_aware(
     assert out["is_uma_aware"] is False
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [
+        OSError(19, "No such device"),  # ENODEV — pve NFS export dropped
+        OSError(116, "Stale file handle"),  # ESTALE — server restarted under us
+    ],
+    ids=["enodev", "estale"],
+)
+def test_model_store_probe_stale_mount_degrades(
+    monkeypatch: pytest.MonkeyPatch, exc: OSError
+) -> None:
+    """#718: Path.exists() RAISES on a stale NFS mount instead of returning
+    False — the probe must degrade to an unavailable envelope, not crash."""
+
+    def _stale(self: Path) -> bool:
+        raise exc
+
+    monkeypatch.setattr(Path, "exists", _stale)
+    out = probes.model_store_probe("/mnt/ai-models")
+    assert out["exists"] is False
+    assert exc.strerror in out["reason"]
+
+
 # ── env_report ───────────────────────────────────────────────────────────────
 
 

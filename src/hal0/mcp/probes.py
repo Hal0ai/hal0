@@ -199,7 +199,20 @@ def model_store_probe(path: str) -> dict[str, Any]:
     response stays JSON-serialisable.
     """
     p = Path(path)
-    if not p.exists():
+    # On a stale NFS mount exists() does not return False — it raises
+    # OSError (ENODEV when the export drops, ESTALE when the server
+    # restarts under us). /mnt/ai-models is NFS from pve, and that
+    # instability is a known recurring condition (#718) — the probe
+    # exists precisely to report store health, so degrade, don't raise.
+    try:
+        path_exists = p.exists()
+    except OSError as exc:
+        return {
+            "path": str(p),
+            "exists": False,
+            "reason": f"stat failed: {exc}",
+        }
+    if not path_exists:
         return {
             "path": str(p),
             "exists": False,
