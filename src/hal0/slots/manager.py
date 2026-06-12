@@ -1928,7 +1928,7 @@ class SlotManager:
         State persists under the same var-lib root the slot state files
         use (``paths.var_lib()``, HAL0_HOME-redirected in tests).
         ``idle_restore_minutes`` comes from the img slot's ``[image]``
-        section when one is configured (D1), default 5.
+        section when one is configured (D1), default 60.
         """
         if self._arbiter is None:
             from hal0.slots.arbiter import GpuArbiter
@@ -1946,7 +1946,7 @@ class SlotManager:
         Synchronous direct TOML scan, mirroring ``idle_timeout_by_model``
         (the ``arbiter`` property can't await). The first slot whose config
         derives to the ``img`` exclusive group wins; missing/invalid values
-        (negatives, bools, non-ints) fall back to the spec default of 5
+        (negatives, bools, non-ints) fall back to the default of 60
         minutes. ``0`` is VALID and means manual-only restore (#599 schema)
         — the arbiter's idle loop never auto-restores on a zero window.
         """
@@ -1967,8 +1967,8 @@ class SlotManager:
             val = image.get("idle_restore_minutes") if isinstance(image, dict) else None
             if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
                 return val
-            return 5
-        return 5
+            return 60
+        return 60
 
     # ── IDLE monitor ─────────────────────────────────────────────────────────
 

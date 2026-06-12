@@ -16,8 +16,10 @@ and a dead container must surface as "stopped", never a 500.
 
 The switchover *write* path (``POST /api/comfyui/switchover``) drives the
 SlotManager's :class:`~hal0.slots.arbiter.GpuArbiter` (Phase D): generation →
-``ensure_img(pin=...)`` (drain the llm GPU group, load the img slot), inference
-→ ``restore_llm(force=...)`` (unload img, reload the saved llm slots). It runs
+``ensure_img(pin=...)`` (drain + unload the llm GPU group; the resident
+ComfyUI container is only cold-started when it is down), inference →
+``restore_llm(force=...)`` (free ComfyUI's models via POST /free — the
+container and its web UI stay up — then reload the saved llm slots). It runs
 in the background behind a 202; the ``switchover`` block on /status tracks the
 transition. The API no longer shells out — the ``/opt/comfyui`` control scripts
 stay on disk for manual ops only. ``POST /api/comfyui/pin`` toggles the
@@ -341,7 +343,9 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "reachable": reachable,
         "engine": engine,
         "container": {"name": container_name, "state": container},
-        "endpoint": ":8188" if mode == "generation" else None,
+        # Resident container: the web UI is usable whenever ComfyUI answers,
+        # regardless of which mode owns the GPU memory.
+        "endpoint": ":8188" if (reachable or mode == "generation") else None,
         "memory": _parse_memory(stats),
         "queue": counts,
         "inference": {"hermes": hermes},
@@ -460,9 +464,10 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
         already_there = container == "running" if mode == "generation" else container != "running"
     if already_there:
         return JSONResponse(status_code=200, content={"status": "noop", "mode": mode})
-    # Mid-render guard: switching to inference stops the container, dropping any
-    # running/pending renders. Refuse unless the caller forces it — the dashboard
-    # confirm dialog states the blast radius and passes force on user confirm.
+    # Mid-render guard: switching to inference frees ComfyUI's models from GPU
+    # memory, killing any running/pending renders (the container itself stays
+    # up). Refuse unless the caller forces it — the dashboard confirm dialog
+    # states the blast radius and passes force on user confirm.
     force = bool(body.get("force")) if isinstance(body, dict) else False
     if mode == "inference" and not force:
         counts = _queue_counts(await _fetch_json("/queue"))

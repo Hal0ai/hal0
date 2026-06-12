@@ -1,6 +1,9 @@
 # hal0 image-generation slot — ComfyUI in a podman container (hal0-slot@img).
-# Exclusive-GPU slot: the GpuArbiter stops LLM GPU slots while img runs and
-# restores them after [image].idle_restore_minutes with no jobs (spec §7).
+# Resident container: once loaded it stays up across modes so the web UI is
+# always reachable for workflow building. The GpuArbiter only swaps what
+# holds GPU memory — LLM slots are unloaded while generation is active, and
+# ComfyUI's models are freed (POST /free) when LLM slots come back after
+# [image].idle_restore_minutes with no jobs (spec §7).
 
 name = "img"
 type = "image"
@@ -15,6 +18,6 @@ port = 8188
 default = "sdxl-turbo"
 
 [image]                       # persisted image-gen settings (#599)
-idle_restore_minutes = 5
+idle_restore_minutes = 60
 default_size = "1024x1024"
 default_steps = 0

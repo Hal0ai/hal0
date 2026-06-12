@@ -29,6 +29,7 @@ from hal0.slots.arbiter import (
     ArbiterPinned,
     GpuArbiter,
     GpuImageMode,
+    GpuInferenceMode,
     GpuMode,
     gpu_exclusive_group,
 )
@@ -169,6 +170,28 @@ def _fast_drain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(arbiter_mod, "_DRAIN_POLL_S", 0.01)
 
 
+@pytest.fixture(autouse=True)
+def comfyui_http(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Stub the arbiter's ComfyUI HTTP seams (resident-container design).
+
+    ``free`` counts /free calls (restore_llm frees models instead of
+    unloading the container); ``queue`` scripts the (running, pending)
+    counts the idle tick reads from /queue — ``None`` = unreachable.
+    """
+    rec: dict[str, Any] = {"free": 0, "queue": None}
+
+    async def _fake_free() -> bool:
+        rec["free"] += 1
+        return True
+
+    async def _fake_queue() -> tuple[int, int] | None:
+        return rec["queue"]
+
+    monkeypatch.setattr(arbiter_mod, "_comfyui_free", _fake_free, raising=False)
+    monkeypatch.setattr(arbiter_mod, "_comfyui_queue_counts", _fake_queue, raising=False)
+    return rec
+
+
 def _read_state(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -264,6 +287,40 @@ async def test_ensure_img_noop_when_already_img(fake_mgr: FakeManager, state_pat
     assert _read_state(state_path)["pinned"] is True
 
 
+async def test_ensure_img_skips_load_when_img_already_running(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """Resident-container design: the ComfyUI container stays up across
+    modes, so when the img slot is already dispatchable the switch only
+    unloads the LLM set — no container load, no readiness poll."""
+    fake_mgr.ready.add("img")
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    await arb.ensure_img()
+
+    assert fake_mgr.calls == [("unload", "chat"), ("unload", "agent")]
+    assert arb.mode is GpuMode.IMG
+    assert isinstance(_read_state(state_path)["last_img_activity"], float)
+
+
+async def test_ensure_img_restamps_activity_at_completion(
+    fake_mgr: FakeManager, state_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The idle window must start when the switch COMPLETES, not when it
+    begins — a slow container start used to eat most of the window."""
+    fake_mgr.slot_states = {"img": ["warming", "warming", "ready"]}
+    monkeypatch.setattr(arbiter_mod, "_READY_POLL_S", 0.05)
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+
+    stamps: list[float] = []
+    fake_mgr.on_unload = lambda _name: stamps.append(_read_state(state_path)["last_img_activity"])
+
+    await arb.ensure_img()
+
+    final = _read_state(state_path)["last_img_activity"]
+    assert final > stamps[0], "activity must be re-stamped after readiness"
+
+
 async def test_drain_timeout_proceeds(
     fake_mgr: FakeManager,
     state_path: Path,
@@ -315,7 +372,7 @@ async def test_img_load_failure_rolls_back_llm_set(
     assert final["mode"] == "llm"
     assert final["saved_llm_slots"] == []
     # guard must NOT be wedged
-    arb.guard_llm_dispatch("chat")
+    arb.guard_dispatch("chat")
 
     # a retried image request re-attempts the FULL switch (no IMG no-op
     # short-circuit against a dead img port)
@@ -346,22 +403,27 @@ async def test_img_load_failure_rollback_load_also_fails(
     assert any("rollback_load_failed" in rec.message for rec in caplog.records)
     assert arb.mode is GpuMode.LLM
     assert _read_state(state_path)["mode"] == "llm"
-    arb.guard_llm_dispatch("chat")  # not wedged
+    arb.guard_dispatch("chat")  # not wedged
 
 
 # ── restore_llm ──────────────────────────────────────────────────────────────
 
 
-async def test_restore_llm_reloads_saved_set(fake_mgr: FakeManager, state_path: Path) -> None:
+async def test_restore_llm_frees_comfyui_and_reloads_saved_set(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     await arb.ensure_img()
     fake_mgr.calls.clear()
 
     await arb.restore_llm()
 
-    # img unloaded FIRST, then the saved set reloaded (default models)
-    assert fake_mgr.calls[0] == ("unload", "img")
-    assert fake_mgr.calls[1:] == [("load", "chat", None), ("load", "agent", None)]
+    # ComfyUI models freed via POST /free FIRST — the container itself is
+    # NEVER unloaded (resident design: the web UI stays up in llm mode) —
+    # then the saved set reloaded (default models).
+    assert comfyui_http["free"] == 1
+    assert ("unload", "img") not in fake_mgr.calls
+    assert fake_mgr.calls == [("load", "chat", None), ("load", "agent", None)]
     assert arb.mode is GpuMode.LLM
     final = _read_state(state_path)
     assert final["mode"] == "llm"
@@ -392,7 +454,7 @@ async def test_restore_blocked_when_pinned_unless_force(
     await arb.restore_llm(force=True)
     assert arb.mode is GpuMode.LLM
     assert arb.pinned is False  # force-restore clears the pin
-    assert fake_mgr.calls[0] == ("unload", "img")
+    assert fake_mgr.calls[0] == ("load", "chat", None)  # container never unloaded
 
 
 # ── concurrency: one lock, no interleaved flips ──────────────────────────────
@@ -415,7 +477,6 @@ async def test_concurrent_ensure_img_and_restore_serialize(
         ("unload", "chat"),
         ("unload", "agent"),
         ("load", "img", "sdxl-turbo"),
-        ("unload", "img"),
         ("load", "chat", None),
         ("load", "agent", None),
     ]
@@ -439,7 +500,7 @@ async def test_state_survives_restart(fake_mgr: FakeManager, state_path: Path) -
     assert set(arb2.saved_llm_slots) == {"chat", "agent"}
 
     await arb2.restore_llm()
-    assert ("unload", "img") in fake2.calls
+    assert ("unload", "img") not in fake2.calls  # resident container stays up
     assert ("load", "chat", None) in fake2.calls
     assert ("load", "agent", None) in fake2.calls
     assert arb2.mode is GpuMode.LLM
@@ -469,7 +530,6 @@ async def test_partial_crash_recovery_via_restore(state_path: Path) -> None:
     await arb.restore_llm()
 
     assert mgr.calls == [
-        ("unload", "img"),
         ("load", "chat", None),
         ("load", "agent", None),
     ]
@@ -482,10 +542,10 @@ def test_corrupt_state_file_falls_back_to_llm(fake_mgr: FakeManager, state_path:
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     assert arb.mode is GpuMode.LLM
     assert arb.saved_llm_slots == ()
-    arb.guard_llm_dispatch("chat")  # must not raise
+    arb.guard_dispatch("chat")  # must not raise
 
 
-# ── guard_llm_dispatch ───────────────────────────────────────────────────────
+# ── guard_dispatch ───────────────────────────────────────────────────────
 
 
 def _write_img_state(path: Path, *, last_activity: float | None = None) -> None:
@@ -502,28 +562,28 @@ def _write_img_state(path: Path, *, last_activity: float | None = None) -> None:
     )
 
 
-def test_guard_llm_dispatch_raises_in_img_mode(
+def test_guard_dispatch_raises_in_img_mode(
     fake_mgr: FakeManager, state_path: Path, tmp_hal0_home: str
 ) -> None:
     _write_img_state(state_path)
     arb = GpuArbiter(fake_mgr, state_path=state_path)
 
     with pytest.raises(GpuImageMode) as ei:
-        arb.guard_llm_dispatch("chat")
+        arb.guard_dispatch("chat")
     assert ei.value.code == "gpu.image_mode"
     assert ei.value.status == 503
     assert ei.value.details["retry_after_s"] >= 15
     assert ei.value.details["slot"] == "chat"
 
     # non-llm-group slots always pass
-    arb.guard_llm_dispatch("npu")
-    arb.guard_llm_dispatch("tts")
+    arb.guard_dispatch("npu")
+    arb.guard_dispatch("tts")
 
     # mode LLM → everything passes
     llm_path = state_path.parent / "llm_state.json"
     arb_llm = GpuArbiter(fake_mgr, state_path=llm_path)
-    arb_llm.guard_llm_dispatch("chat")
-    arb_llm.guard_llm_dispatch("npu")
+    arb_llm.guard_dispatch("chat")
+    arb_llm.guard_dispatch("npu")
 
 
 def test_guard_retry_after_floor(
@@ -533,7 +593,7 @@ def test_guard_retry_after_floor(
     _write_img_state(state_path, last_activity=time.time() - 10_000)
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     with pytest.raises(GpuImageMode) as ei:
-        arb.guard_llm_dispatch("agent")
+        arb.guard_dispatch("agent")
     assert ei.value.details["retry_after_s"] == 15
 
 
@@ -562,7 +622,43 @@ def test_guard_uses_derived_group_from_slot_toml(
     _write_img_state(state_path)
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     with pytest.raises(GpuImageMode):
-        arb.guard_llm_dispatch("utility")
+        arb.guard_dispatch("utility")
+
+
+def test_guard_dispatch_blocks_img_slot_in_llm_mode(
+    fake_mgr: FakeManager, state_path: Path, tmp_hal0_home: str
+) -> None:
+    """Resident img container: the slot stays READY in llm mode, so the
+    dispatch guard is the only thing stopping an image generation from
+    running while the LLM set holds the GPU — refuse with a typed 503
+    telling the caller to flip the switch first."""
+    slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "img.toml").write_text(
+        "\n".join(
+            [
+                'name = "img"',
+                'type = "image"',
+                'provider = "comfyui"',
+                'device = "gpu-rocm"',
+                'runtime = "container"',
+                "port = 8188",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    arb = GpuArbiter(fake_mgr, state_path=state_path)  # default llm mode
+
+    with pytest.raises(GpuInferenceMode) as ei:
+        arb.guard_dispatch("img")
+    assert ei.value.code == "gpu.inference_mode"
+    assert ei.value.status == 503
+    assert ei.value.details["slot"] == "img"
+
+    # llm-group + non-arbitrated slots pass untouched in llm mode
+    arb.guard_dispatch("npu")
+    arb.guard_dispatch("tts")
 
 
 # ── activity / pin / status ──────────────────────────────────────────────────
@@ -624,8 +720,8 @@ async def test_idle_restore_fires_after_window(fake_mgr: FakeManager, state_path
     task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
     try:
         await asyncio.sleep(0.3)
-        assert fake_mgr.calls.count(("unload", "img")) == 1
-        assert ("load", "chat", None) in fake_mgr.calls
+        assert ("unload", "img") not in fake_mgr.calls  # container stays up
+        assert fake_mgr.calls.count(("load", "chat", None)) == 1  # restored ONCE
         assert ("load", "agent", None) in fake_mgr.calls
         assert arb.mode is GpuMode.LLM
         assert not task.done(), "loop must stay alive after restoring"
@@ -679,15 +775,41 @@ async def test_in_flight_img_job_defers_restore(fake_mgr: FakeManager, state_pat
     task = asyncio.create_task(arb.run_idle_loop(interval_s=0.01))
     try:
         await asyncio.sleep(0.2)
-        assert ("unload", "img") not in fake_mgr.calls
+        assert fake_mgr.calls == []  # restore deferred
         assert arb.mode is GpuMode.IMG
 
         fake_mgr.in_flight = {"img": 0}  # render finished
         await asyncio.sleep(0.2)
-        assert fake_mgr.calls.count(("unload", "img")) == 1
+        assert fake_mgr.calls.count(("load", "chat", None)) == 1
         assert arb.mode is GpuMode.LLM
     finally:
         await _cancel_loop(task)
+
+
+async def test_idle_tick_defers_and_restamps_when_comfyui_queue_busy(
+    fake_mgr: FakeManager, state_path: Path, comfyui_http: dict[str, Any]
+) -> None:
+    """Renders queued straight into ComfyUI's web UI never pass through the
+    dispatcher (in_flight_count can't see them), so the idle tick must also
+    consult ComfyUI's /queue: busy → defer the restore AND restart the idle
+    window; drained → restore on the next eligible tick."""
+    arb = await _img_mode_arbiter(fake_mgr, state_path)
+
+    comfyui_http["queue"] = (1, 0)
+    arb._load_state()["last_img_activity"] = time.time() - 10_000
+    arb._persist()
+    await arb._idle_tick()
+    assert arb.mode is GpuMode.IMG
+    assert fake_mgr.calls == []
+    # busy queue re-stamped the activity → idle window restarted
+    assert _read_state(state_path)["last_img_activity"] > time.time() - 5
+
+    comfyui_http["queue"] = (0, 0)
+    arb._load_state()["last_img_activity"] = time.time() - 10_000
+    arb._persist()
+    await arb._idle_tick()
+    assert arb.mode is GpuMode.LLM
+    assert comfyui_http["free"] == 1
 
 
 async def test_idle_loop_survives_restore_exception(
@@ -755,7 +877,12 @@ def test_manager_arbiter_defaults_without_img_slot(tmp_hal0_home: str) -> None:
     from hal0.slots.manager import SlotManager
 
     sm = SlotManager()
-    assert sm.arbiter.idle_restore_minutes == 5
+    assert sm.arbiter.idle_restore_minutes == 60
+
+
+def test_arbiter_default_idle_window_is_60(fake_mgr: FakeManager, state_path: Path) -> None:
+    """Resident design default: an hour of UI time before auto-restore."""
+    assert GpuArbiter(fake_mgr, state_path=state_path).idle_restore_minutes == 60
 
 
 def _write_img_toml(tmp_hal0_home: str, idle_restore_minutes: str) -> None:
@@ -783,20 +910,20 @@ def _write_img_toml(tmp_hal0_home: str, idle_restore_minutes: str) -> None:
 
 def test_manager_arbiter_accepts_zero_window_from_toml(tmp_hal0_home: str) -> None:
     """TOML ``[image].idle_restore_minutes = 0`` reaches the arbiter as 0
-    (manual-only restore, #599 schema) — NOT coerced to the default 5.
-    Negatives/garbage still fall back to 5."""
+    (manual-only restore, #599 schema) — NOT coerced to the default 60.
+    Negatives/garbage still fall back to 60."""
     from hal0.slots.manager import SlotManager
 
     _write_img_toml(tmp_hal0_home, "0")
     assert SlotManager().arbiter.idle_restore_minutes == 0
 
-    # invalid values still fall back to 5 (fresh managers: arbiter is cached)
+    # invalid values still fall back to 60 (fresh managers: arbiter is cached)
     _write_img_toml(tmp_hal0_home, "-3")
-    assert SlotManager().arbiter.idle_restore_minutes == 5
+    assert SlotManager().arbiter.idle_restore_minutes == 60
     _write_img_toml(tmp_hal0_home, "true")
-    assert SlotManager().arbiter.idle_restore_minutes == 5
+    assert SlotManager().arbiter.idle_restore_minutes == 60
     _write_img_toml(tmp_hal0_home, '"soon"')
-    assert SlotManager().arbiter.idle_restore_minutes == 5
+    assert SlotManager().arbiter.idle_restore_minutes == 60
 
 
 async def test_zero_window_from_toml_never_auto_restores(tmp_hal0_home: str) -> None:
@@ -869,7 +996,7 @@ async def test_img_never_ready_rolls_back_on_timeout(
     assert final["pinned"] is False
 
     # guard is not wedged
-    arb.guard_llm_dispatch("chat")
+    arb.guard_dispatch("chat")
 
     # retry after rollback re-attempts the full switch
     fake_mgr.slot_states = {}  # next time img goes ready immediately via load()
@@ -933,7 +1060,7 @@ async def test_img_terminal_error_rolls_back_immediately(
     assert ("unload", "img") in fake_mgr.calls
     assert ("load", "chat", None) in fake_mgr.calls
     assert ("load", "agent", None) in fake_mgr.calls
-    arb.guard_llm_dispatch("chat")  # not wedged
+    arb.guard_dispatch("chat")  # not wedged
 
 
 async def test_existing_load_raises_rollback_still_works(
@@ -957,4 +1084,4 @@ async def test_existing_load_raises_rollback_still_works(
     assert arb.mode is GpuMode.LLM
     assert _read_state(state_path)["mode"] == "llm"
     assert _read_state(state_path)["saved_llm_slots"] == []
-    arb.guard_llm_dispatch("chat")
+    arb.guard_dispatch("chat")

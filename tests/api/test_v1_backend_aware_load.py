@@ -157,7 +157,7 @@ def test_dispatch_proceeds_even_if_backend_aware_load_fails(
 class _ImageModeArbiter:
     """Stands in for GpuArbiter while mode == img."""
 
-    def guard_llm_dispatch(self, slot_name: str) -> None:
+    def guard_dispatch(self, slot_name: str) -> None:
         from hal0.slots.arbiter import GpuImageMode
 
         raise GpuImageMode(

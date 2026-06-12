@@ -11,6 +11,20 @@ Groups are DERIVED from slot configs (:func:`gpu_exclusive_group`), never
 declared: a slot is arbitrated iff it runs on the GPU (``gpu-rocm`` /
 ``gpu-vulkan``) AND in a container. NPU and CPU slots are never arbitrated.
 
+Resident-container design: what is exclusive is the GPU **memory** (LLM
+weights vs diffusion models), NOT the ComfyUI process — an idle ComfyUI
+holds ~0 GTT on unified memory, and its web UI must stay reachable in llm
+mode so users can build workflows before flipping the switch. So the
+arbiter never stops the img container once it is up:
+
+  - ``ensure_img``  — drain + unload the llm set; the img container is only
+    (cold-)started when it isn't already dispatchable.
+  - ``restore_llm`` — ``POST /free`` to ComfyUI (drop its models from GTT),
+    then reload the saved llm set. The container keeps serving the UI.
+  - actually *running* a generation in llm mode is refused at three gates:
+    the dispatch guard (``guard_dispatch``), and ComfyUI's own ``/prompt``
+    via the host-mounted ``hal0_gpu_gate`` custom node (403).
+
 Crash-recovery ordering (locked): the arbiter persists its target state to
 ``/var/lib/hal0/gpu_arbiter.json`` BEFORE the first unload, so an api
 restart mid-switch can still restore the saved LLM set.
@@ -19,7 +33,7 @@ Concurrency model (single asyncio event loop):
 
   - ``ensure_img()`` / ``restore_llm()`` — the only mutating switches —
     serialize on one ``asyncio.Lock``; concurrent flips are impossible.
-  - ``guard_llm_dispatch()`` / ``status()`` / ``touch_img_activity()`` /
+  - ``guard_dispatch()`` / ``status()`` / ``touch_img_activity()`` /
     ``set_pin()`` are synchronous and lock-free. This is safe because they
     contain no ``await`` points: on a single event loop a sync method runs
     to completion atomically relative to the (async) switch methods, which
@@ -71,6 +85,74 @@ _RETRY_AFTER_FLOOR_S = 15
 _IMG_READY_TIMEOUT_S = 120.0
 _READY_POLL_S = 0.5
 
+#: Slot states that can take a dispatch / mean "the img container is up".
+_DISPATCHABLE: frozenset[SlotState] = frozenset(
+    {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
+)
+#: Terminal states that abort the readiness poll immediately.
+_TERMINAL: frozenset[SlotState] = frozenset({SlotState.ERROR, SlotState.OFFLINE})
+
+#: ComfyUI HTTP budget — short connect so a dead engine surfaces fast.
+_COMFYUI_HTTP_TIMEOUT_S = 5.0
+_COMFYUI_CONNECT_TIMEOUT_S = 1.5
+
+
+def _comfyui_base_url() -> str:
+    """Operational ComfyUI HTTP base (mirrors api/routes/comfyui.py).
+
+    Duplicated on purpose: the slots layer must not import the API layer.
+    """
+    return os.environ.get("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
+
+
+async def _comfyui_free() -> bool:
+    """Best-effort ``POST /free`` — drop ComfyUI's models from GTT.
+
+    True on a 200; False on any HTTP/connect failure (an unreachable
+    ComfyUI holds no GPU memory, so the restore proceeds either way).
+    """
+    import httpx
+
+    timeout = httpx.Timeout(_COMFYUI_HTTP_TIMEOUT_S, connect=_COMFYUI_CONNECT_TIMEOUT_S)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                f"{_comfyui_base_url()}/free",
+                json={"unload_models": True, "free_memory": True},
+            )
+            return resp.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+async def _comfyui_queue_counts() -> tuple[int, int] | None:
+    """ComfyUI ``GET /queue`` → (running, pending), or None when unreachable.
+
+    The idle loop needs this because renders queued straight into the web
+    UI never pass through the dispatcher — ``in_flight_count`` can't see
+    them.
+    """
+    import httpx
+
+    timeout = httpx.Timeout(_COMFYUI_HTTP_TIMEOUT_S, connect=_COMFYUI_CONNECT_TIMEOUT_S)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{_comfyui_base_url()}/queue")
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    running = data.get("queue_running")
+    pending = data.get("queue_pending")
+    return (
+        len(running) if isinstance(running, list) else 0,
+        len(pending) if isinstance(pending, list) else 0,
+    )
+
+
 _DEFAULT_STATE: dict[str, Any] = {
     "mode": "llm",
     "pinned": False,
@@ -121,6 +203,18 @@ class GpuImageMode(Hal0Error):
     status = 503
 
 
+class GpuInferenceMode(Hal0Error):
+    """Image dispatch refused — the GPU is serving the LLM set.
+
+    The resident ComfyUI container stays READY in llm mode (its web UI is
+    always up), so this guard is what stops a generation from grabbing GTT
+    under the loaded LLM weights. Flip the switch first.
+    """
+
+    code = "gpu.inference_mode"
+    status = 503
+
+
 class ArbiterPinned(Hal0Error):
     """Restore refused — image mode is manually pinned (force to override)."""
 
@@ -149,7 +243,7 @@ class GpuArbiter:
         manager: SlotManager,
         *,
         state_path: Path,
-        idle_restore_minutes: int = 5,
+        idle_restore_minutes: int = 60,
     ) -> None:
         self._manager = manager
         self.state_path = Path(state_path)
@@ -317,7 +411,9 @@ class GpuArbiter:
 
         Order (locked): snapshot running llm slots → persist target state
         FIRST → drain in-flight requests (bounded) → unload llm slots →
-        load the img slot's default model → poll for readiness → stamp activity.
+        cold-start the img container ONLY when it isn't already dispatchable
+        (resident design: restore_llm never stops it) → re-stamp activity at
+        completion so a slow cold start can't eat the idle window.
         """
         async with self._switch_lock:
             st = self._load_state()
@@ -371,81 +467,97 @@ class GpuArbiter:
                 await self._manager.unload(slot)
 
             img_name = str(img_cfg.get("name") or "img")
-            model_section = img_cfg.get("model")
-            model_default = (
-                str(model_section.get("default") or "") if isinstance(model_section, dict) else ""
-            )
-            try:
-                await self._manager.load(img_name, model_default or None)
-            except Exception:
-                # D5 quality-gate I1: load() raised — rollback, then re-raise
-                # the ORIGINAL load exception so callers see the root cause.
-                await self._rollback_to_llm(llm_slots, img_name, unload_img=False)
-                raise
+            # Resident container: when the img slot is already dispatchable
+            # the switch is just the llm unloads above — no load, no poll.
+            if self._manager.state(img_name) not in _DISPATCHABLE:
+                await self._cold_start_img(img_cfg, img_name, llm_slots)
 
-            # #714: load() only waits for systemd start, not health-probe
-            # completion (containers go STARTING → WARMING → READY async).
-            # Poll until the slot reaches a dispatchable state or we time out.
-            # Call state() exactly once per iteration — terminal states
-            # (ERROR/OFFLINE) abort the poll immediately so we don't burn the
-            # full 120s on a crash-at-start.
-            _TERMINAL: frozenset[SlotState] = frozenset({SlotState.ERROR, SlotState.OFFLINE})
-            _DISPATCHABLE: frozenset[SlotState] = frozenset(
-                {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
-            )
-            ready_deadline = time.monotonic() + _IMG_READY_TIMEOUT_S
-            img_slot_state: SlotState | str = SlotState.WARMING
-            while True:
-                img_slot_state = self._manager.state(img_name)
-                if img_slot_state in _DISPATCHABLE:
-                    break
-                if img_slot_state in _TERMINAL:
-                    log.warning(
-                        "gpu_arbiter.img_terminal_state_during_readiness",
-                        extra={"img_slot": img_name, "state": str(img_slot_state)},
-                    )
-                    await self._rollback_to_llm(llm_slots, img_name, unload_img=True)
-                    raise GpuImgNotReady(
-                        f"img slot {img_name!r} reached terminal state "
-                        f"{img_slot_state!r} after load; rolled back to LLM mode",
-                        details={"slot": img_name, "state": str(img_slot_state)},
-                    )
-                if time.monotonic() >= ready_deadline:
-                    log.warning(
-                        "gpu_arbiter.img_readiness_timeout",
-                        extra={
-                            "img_slot": img_name,
-                            "timeout_s": _IMG_READY_TIMEOUT_S,
-                            "state": str(img_slot_state),
-                        },
-                    )
-                    await self._rollback_to_llm(llm_slots, img_name, unload_img=True)
-                    raise GpuImgNotReady(
-                        f"img slot {img_name!r} did not become ready within "
-                        f"{_IMG_READY_TIMEOUT_S}s (last state: {img_slot_state!r}); "
-                        f"rolled back to LLM mode",
-                        details={
-                            "slot": img_name,
-                            "timeout_s": _IMG_READY_TIMEOUT_S,
-                            "state": str(img_slot_state),
-                        },
-                    )
-                await asyncio.sleep(_READY_POLL_S)
-
-            # last_img_activity was stamped in the pre-unload persist above;
-            # no second persist needed here (spec-review tidy).
+            # Re-stamp at COMPLETION: the idle window must start when the
+            # switch finishes, not when it began — a slow cold start used to
+            # eat most of the window (the pre-unload stamp only exists for
+            # crash-recovery ordering).
+            st = self._load_state()
+            st["last_img_activity"] = time.time()
+            self._persist()
             log.info(
                 "gpu_arbiter.img_mode",
                 extra={"saved_llm_slots": llm_slots, "img_slot": img_name},
             )
 
+    async def _cold_start_img(
+        self, img_cfg: dict[str, Any], img_name: str, llm_slots: list[str]
+    ) -> None:
+        """Load the img container and poll it to a dispatchable state.
+
+        Only runs when the resident container is down (first boot, crash,
+        deploy restart). Rollback semantics unchanged from Phase D.
+        """
+        model_section = img_cfg.get("model")
+        model_default = (
+            str(model_section.get("default") or "") if isinstance(model_section, dict) else ""
+        )
+        try:
+            await self._manager.load(img_name, model_default or None)
+        except Exception:
+            # D5 quality-gate I1: load() raised — rollback, then re-raise
+            # the ORIGINAL load exception so callers see the root cause.
+            await self._rollback_to_llm(llm_slots, img_name, unload_img=False)
+            raise
+
+        # #714: load() only waits for systemd start, not health-probe
+        # completion (containers go STARTING → WARMING → READY async).
+        # Poll until the slot reaches a dispatchable state or we time out.
+        # Call state() exactly once per iteration — terminal states
+        # (ERROR/OFFLINE) abort the poll immediately so we don't burn the
+        # full 120s on a crash-at-start.
+        ready_deadline = time.monotonic() + _IMG_READY_TIMEOUT_S
+        img_slot_state: SlotState | str = SlotState.WARMING
+        while True:
+            img_slot_state = self._manager.state(img_name)
+            if img_slot_state in _DISPATCHABLE:
+                return
+            if img_slot_state in _TERMINAL:
+                log.warning(
+                    "gpu_arbiter.img_terminal_state_during_readiness",
+                    extra={"img_slot": img_name, "state": str(img_slot_state)},
+                )
+                await self._rollback_to_llm(llm_slots, img_name, unload_img=True)
+                raise GpuImgNotReady(
+                    f"img slot {img_name!r} reached terminal state "
+                    f"{img_slot_state!r} after load; rolled back to LLM mode",
+                    details={"slot": img_name, "state": str(img_slot_state)},
+                )
+            if time.monotonic() >= ready_deadline:
+                log.warning(
+                    "gpu_arbiter.img_readiness_timeout",
+                    extra={
+                        "img_slot": img_name,
+                        "timeout_s": _IMG_READY_TIMEOUT_S,
+                        "state": str(img_slot_state),
+                    },
+                )
+                await self._rollback_to_llm(llm_slots, img_name, unload_img=True)
+                raise GpuImgNotReady(
+                    f"img slot {img_name!r} did not become ready within "
+                    f"{_IMG_READY_TIMEOUT_S}s (last state: {img_slot_state!r}); "
+                    f"rolled back to LLM mode",
+                    details={
+                        "slot": img_name,
+                        "timeout_s": _IMG_READY_TIMEOUT_S,
+                        "state": str(img_slot_state),
+                    },
+                )
+            await asyncio.sleep(_READY_POLL_S)
+
     async def restore_llm(self, *, force: bool = False) -> None:
         """Restore the saved LLM set (no-op in LLM mode).
 
         Refuses while pinned unless ``force=True`` (which also clears the
-        pin). Order: unload img FIRST, then reload the saved set, then
-        persist ``mode=llm`` — a crash mid-restore leaves mode IMG on disk
-        so the restore can simply be retried.
+        pin). Order: free ComfyUI's models FIRST (``POST /free`` — the
+        resident container is never unloaded, its web UI stays up), then
+        reload the saved set, then persist ``mode=llm`` — a crash
+        mid-restore leaves mode IMG on disk so the restore can simply be
+        retried.
         """
         async with self._switch_lock:
             st = self._load_state()
@@ -459,13 +571,12 @@ class GpuArbiter:
 
             cfgs = await self._manager.iter_configs()
             self._refresh_group_cache(cfgs)
-            img_name = next(
-                (str(c.get("name") or "") for c in cfgs if gpu_exclusive_group(c) == "img"),
-                "img",
-            )
             saved = list(st["saved_llm_slots"])
 
-            await self._manager.unload(img_name)
+            # Best-effort: an unreachable ComfyUI holds no GPU memory, so a
+            # failed /free never blocks the restore.
+            if not await _comfyui_free():
+                log.warning("gpu_arbiter.comfyui_free_failed")
             for slot in saved:
                 await self._manager.load(slot, None)
 
@@ -519,6 +630,13 @@ class GpuArbiter:
         )
         if img_name is not None and self._manager.in_flight_count(img_name) > 0:
             return  # in-flight img job — defer until it completes
+        # Renders queued straight into ComfyUI's web UI bypass the
+        # dispatcher, so also ask ComfyUI itself: busy → defer AND restart
+        # the idle window (the user is actively generating).
+        counts = await _comfyui_queue_counts()
+        if counts is not None and (counts[0] + counts[1]) > 0:
+            self.touch_img_activity()
+            return
         await self.restore_llm()
         log.info(
             "gpu_arbiter.idle_restored",
@@ -527,23 +645,36 @@ class GpuArbiter:
 
     # ── sync surface (lock-free; see module docstring for why safe) ─────────
 
-    def guard_llm_dispatch(self, slot_name: str) -> None:
-        """Raise :class:`GpuImageMode` when *slot_name* can't dispatch.
+    def guard_dispatch(self, slot_name: str) -> None:
+        """Raise when *slot_name* can't dispatch in the current GPU mode.
 
-        Cheap in the hot path: a single in-memory mode check in LLM mode;
-        group derivation only happens while the GPU is in image mode.
+        Both directions of the exclusive split:
+
+          - img mode + llm-group slot → :class:`GpuImageMode` (the arbiter
+            unloaded the slot to hand the GPU to ComfyUI);
+          - llm mode + img-group slot → :class:`GpuInferenceMode` (the
+            resident ComfyUI container is READY but must not grab GTT under
+            the loaded LLM weights — flip the switch first).
+
+        Cheap in the hot path: group lookups are cache-first and the cache
+        is warmed by every switch / first lookup.
         """
         st = self._load_state()
-        if st["mode"] != GpuMode.IMG.value:
-            return
         name = self._resolve_alias(slot_name)
-        if self._slot_group(name) != "llm":
-            return
-        raise GpuImageMode(
-            f"GPU is in exclusive image mode; LLM slot {name!r} is unavailable "
-            f"until image mode ends",
-            details={"slot": name, "retry_after_s": self._retry_after_s(st)},
-        )
+        group = self._slot_group(name)
+        if st["mode"] == GpuMode.IMG.value and group == "llm":
+            raise GpuImageMode(
+                f"GPU is in exclusive image mode; LLM slot {name!r} is unavailable "
+                f"until image mode ends",
+                details={"slot": name, "retry_after_s": self._retry_after_s(st)},
+            )
+        if st["mode"] == GpuMode.LLM.value and group == "img":
+            raise GpuInferenceMode(
+                f"GPU is in inference mode; switch to image generation first "
+                f"(POST /api/comfyui/switchover mode=generation) before "
+                f"dispatching to slot {name!r}",
+                details={"slot": name},
+            )
 
     def _retry_after_s(self, st: dict[str, Any]) -> int:
         """Remaining idle-restore window, floored at 15s (D6 owns the loop)."""

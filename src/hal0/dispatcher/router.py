@@ -716,7 +716,7 @@ class Dispatcher:
     def _guard_gpu_image_mode(self, call: UpstreamCall) -> None:
         """Refuse llm-group dispatch while the GPU is in exclusive image mode.
 
-        Delegates to :meth:`GpuArbiter.guard_llm_dispatch`, which raises the
+        Delegates to :meth:`GpuArbiter.guard_dispatch`, which raises the
         typed ``GpuImageMode`` (503, code ``gpu.image_mode``, details carry
         ``retry_after_s``) for llm-group slots and no-ops for everything
         else (img slot itself, NPU/CPU slots, remote upstreams).
@@ -730,7 +730,7 @@ class Dispatcher:
         arbiter = getattr(self._slot_manager, "arbiter", None)
         if arbiter is None:
             return
-        arbiter.guard_llm_dispatch(call.slot_name or call.container_slot_name)
+        arbiter.guard_dispatch(call.slot_name or call.container_slot_name)
 
     async def _ensure_slot_loaded_backend_aware(self, call: UpstreamCall) -> None:
         """Kick a backend-aware load on a cold miss before forwarding.
@@ -854,7 +854,7 @@ class Dispatcher:
             # Raises GpuImageMode for llm-group slots while mode == img;
             # no-op otherwise. Covers the race where the arbiter flipped
             # to img (and force-killed the container) mid-request.
-            arbiter.guard_llm_dispatch(call.slot_name)
+            arbiter.guard_dispatch(call.slot_name)
 
     def _build_loading_response(
         self,

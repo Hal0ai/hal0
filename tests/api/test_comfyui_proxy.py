@@ -355,6 +355,18 @@ def test_status_mode_is_arbiter_truth_post_migration(client: TestClient) -> None
     assert body["endpoint"] == ":8188"
 
 
+def test_status_endpoint_exposed_in_inference_mode_when_reachable(client: TestClient) -> None:
+    # Resident container: the ComfyUI web UI stays up in inference mode so
+    # users can build workflows/prompts before flipping the switch — /status
+    # must advertise the endpoint whenever the UI is actually reachable.
+    _install_arbiter(client, mode="llm")
+    c, s, f = _patch(container="running", hermes=True, fetch=_fetch_idle)
+    with c, s, f:
+        body = client.get("/api/comfyui/status").json()
+    assert body["mode"] == "inference"
+    assert body["endpoint"] == ":8188"
+
+
 def test_status_mode_legacy_fallback_when_arbiter_missing(client: TestClient) -> None:
     # Arbiter unwired → fall back to the docker/systemd-derived mode.
     client.app.state.slot_manager = None

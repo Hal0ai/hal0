@@ -395,7 +395,7 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     # swallowed by the best-effort block below — the guard is the outcome.
     arbiter = getattr(slot_manager, "arbiter", None)
     if arbiter is not None:
-        arbiter.guard_llm_dispatch(slot_name)
+        arbiter.guard_dispatch(slot_name)
     try:
         await slot_manager.load(slot_name)
     except Exception as exc:
