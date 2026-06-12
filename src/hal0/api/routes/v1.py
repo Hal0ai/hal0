@@ -387,6 +387,15 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     if slot_name is None:
         # No backing chat slot — nothing to honor.
         return
+    # D4 (route-level): NEVER lazy-load an LLM back onto the GPU while the
+    # arbiter holds exclusive image mode — that fights the arbiter and
+    # resurrects the slot it just drained. Raise the structured
+    # ``gpu.image_mode`` 503 (Retry-After via the error middleware), the
+    # same envelope the dispatch guard emits for raw model ids. NOT
+    # swallowed by the best-effort block below — the guard is the outcome.
+    arbiter = getattr(slot_manager, "arbiter", None)
+    if arbiter is not None:
+        arbiter.guard_llm_dispatch(slot_name)
     try:
         await slot_manager.load(slot_name)
     except Exception as exc:

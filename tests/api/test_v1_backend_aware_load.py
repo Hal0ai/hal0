@@ -152,3 +152,39 @@ def test_dispatch_proceeds_even_if_backend_aware_load_fails(
     assert r.json()["error"]["code"] == "dispatch.no_route"
     assert sm.loaded == ["agent-hermes"]  # load was attempted
     assert order.index(("load", "agent-hermes")) < order.index("dispatch")
+
+
+class _ImageModeArbiter:
+    """Stands in for GpuArbiter while mode == img."""
+
+    def guard_llm_dispatch(self, slot_name: str) -> None:
+        from hal0.slots.arbiter import GpuImageMode
+
+        raise GpuImageMode(
+            f"GPU is in exclusive image mode; LLM slot {slot_name!r} is "
+            "unavailable until image mode ends",
+            details={"slot": slot_name, "retry_after_s": 300},
+        )
+
+
+def test_alias_load_refused_during_image_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4 (route-level): the backend-aware lazy-load must NEVER pull an LLM
+    back onto the GPU while the arbiter holds exclusive image mode.
+
+    An alias-addressed chat request during image mode surfaces the
+    structured ``gpu.image_mode`` 503 — same envelope dispatch emits for
+    raw model ids — instead of kicking ``SlotManager.load`` into a fight
+    with the arbiter.
+    """
+    sm = _RecordingSlotManager()
+    sm.arbiter = _ImageModeArbiter()
+
+    r, order = _run_chat(monkeypatch, sm, model="utility")
+
+    assert r.status_code == 503, r.text
+    body = r.json()
+    assert body["error"]["code"] == "gpu.image_mode", body
+    assert sm.loaded == [], f"load must not fire during image mode: {sm.loaded}"
+    assert "dispatch" not in order, "dispatch must not be entered either"
