@@ -160,11 +160,27 @@ async def list_secrets() -> dict[str, Any]:
     return {"secrets": entries}
 
 
+def _validate_value(value: str, key: str) -> None:
+    """Reject empty / control-char values.
+
+    A control character — most dangerously ``\\n`` / ``\\r`` — would let a
+    value break out of its quoted line in api.env and inject a new
+    ``KEY=value`` env-var (the file is an unauthenticated, LAN-writable
+    systemd ``EnvironmentFile``). Refuse any char ``< 0x20`` or ``0x7f``.
+    """
+    if not value:
+        raise SecretValueInvalid("secret value must be non-empty", details={"name": key})
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        raise SecretValueInvalid(
+            "control characters not allowed in secret value",
+            details={"name": key},
+        )
+
+
 async def _set_secret(name: str, body: SecretBody, request: Request) -> Response:
     """Shared set/overwrite implementation for POST + PUT."""
     key = _validate_name(name)
-    if not body.value:
-        raise SecretValueInvalid("secret value must be non-empty", details={"name": key})
+    _validate_value(body.value, key)
 
     api_env = _api_env()
     try:

@@ -138,6 +138,25 @@ def test_credential_write_rejects_malformed_keys(
     assert response.status_code in (400, 422), response.text
 
 
+@pytest.mark.parametrize("payload", ["live\nEVIL=pwned", "live\rEVIL=pwned"])
+def test_credential_write_rejects_newline_value(
+    client: TestClient,
+    tmp_hal0_home: str,
+    payload: str,
+) -> None:
+    """A newline/CR in the VALUE must 400 (same env-var injection guard as
+    the secrets router — both share the api.env writer) and not inject a
+    line into api.env."""
+    response = client.post(
+        "/api/providers/openrouter/credentials",
+        json={"key": "OPENROUTER_API_KEY", "value": payload},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "provider.credential_write_failed"
+    api_env = _api_env_path(tmp_hal0_home)
+    assert not api_env.exists() or "EVIL" not in api_env.read_text(encoding="utf-8")
+
+
 def test_credential_write_sets_in_process_env(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

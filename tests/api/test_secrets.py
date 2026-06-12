@@ -113,6 +113,39 @@ def test_invalid_names_rejected(client: TestClient, name: str) -> None:
     assert r.json()["error"]["code"] == "secret.name_invalid"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    ["line1\nEVIL=pwned", "x\rEVIL=pwned", "tab\there", "bell\x07x", "del\x7fx"],
+)
+def test_set_rejects_control_chars_in_value(
+    client: TestClient,
+    tmp_hal0_home: str,
+    payload: str,
+) -> None:
+    """Newline/CR/control chars in a value must 400 (env-var injection guard)
+    and leave api.env untouched."""
+    r = client.post("/api/secrets/INJECT", json={"value": payload})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "secret.value_invalid"
+    # File must NOT have been created/modified — no injected line.
+    api_env = _api_env_path(tmp_hal0_home)
+    assert not api_env.exists() or "EVIL" not in api_env.read_text(encoding="utf-8")
+    assert "INJECT" not in os.environ
+
+
+def test_writer_guard_rejects_newline(tmp_path: Path) -> None:
+    """Defense-in-depth: the shared writer itself refuses \\n / \\r."""
+    from hal0.api._env_store import upsert_env_value
+
+    target = tmp_path / "api.env"
+    with pytest.raises(ValueError, match="newline"):
+        upsert_env_value(target, "KEY", "a\nEVIL=x")
+    with pytest.raises(ValueError, match="newline"):
+        upsert_env_value(target, "KEY", "a\rEVIL=x")
+    # Nothing written.
+    assert not target.exists()
+
+
 def test_set_coexists_with_provider_credentials(client: TestClient, tmp_hal0_home: str) -> None:
     """Secrets share api.env with provider creds — both lines survive."""
     api_env = _api_env_path(tmp_hal0_home)

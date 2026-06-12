@@ -78,7 +78,19 @@ def upsert_env_value(api_env: Path, key: str, value: str) -> None:
     If a line for ``key`` exists (commented or not) it is replaced in
     place; otherwise the line is appended. Raises :class:`OSError` on any
     read/write failure — callers wrap it in their own error envelope.
+
+    Writer-level guard (defense-in-depth): a ``\\n`` / ``\\r`` in ``value``
+    would terminate the quoted env-file line and let everything after it
+    parse as a *new* ``KEY=value`` entry — i.e. arbitrary env-var
+    injection into api.env. We escape backslash + double-quote (so the
+    secret round-trips), but escaping can't neutralise a raw newline, so
+    we refuse it outright. Route-level validation should reject control
+    chars before reaching here; this guard ensures no future caller can
+    reintroduce the hole.
     """
+    if "\n" in value or "\r" in value:
+        raise ValueError("env value must not contain newline or carriage-return characters")
+
     existing = ""
     with contextlib.suppress(FileNotFoundError):
         existing = api_env.read_text(encoding="utf-8")

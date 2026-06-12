@@ -190,6 +190,13 @@ def _write_credential_to_api_env(api_env: Path, key: str, value: str) -> None:
     """
     try:
         upsert_env_value(api_env, key, value)
+    except ValueError as exc:
+        # Writer-level guard tripped (e.g. newline in value) — surface as
+        # a 400 rather than a 500.
+        raise ProviderCredentialError(
+            str(exc),
+            details={"path": str(api_env), "error": str(exc)},
+        ) from exc
     except OSError as exc:
         raise ProviderCredentialError(
             f"could not write {api_env}: {exc}",
@@ -245,6 +252,17 @@ async def write_provider_credential(
             f"auth_value_env={expected_env!r}; refusing to write a "
             "credential the upstream won't read",
             details={"name": name, "key": key, "expected": expected_env},
+        )
+
+    # Reject control chars in the value — a newline would break out of the
+    # quoted api.env line and inject an arbitrary env-var (the file is an
+    # unauthenticated, LAN-writable systemd EnvironmentFile). The shared
+    # writer guards \n/\r too; this catches the wider control-char set with
+    # a clear 400 before we touch the file.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in body.value):
+        raise ProviderCredentialError(
+            "control characters not allowed in credential value",
+            details={"name": name, "key": key},
         )
 
     api_env = paths.etc() / "api.env"
