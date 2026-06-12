@@ -207,7 +207,7 @@ class ImageGenConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     idle_restore_minutes: int = Field(
-        default=5,
+        default=60,
         ge=0,
         description=(
             "Minutes of img-slot job inactivity before the GpuArbiter "

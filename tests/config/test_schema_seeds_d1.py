@@ -29,7 +29,7 @@ def test_seed_img_toml_validates() -> None:
     assert cfg.provider == "comfyui"
     assert cfg.port == 8188
     assert cfg.device == "gpu-rocm"
-    assert cfg.image_gen.idle_restore_minutes == 5  # #599 [image] section
+    assert cfg.image_gen.idle_restore_minutes == 60  # #599 [image] section
 
 
 def test_seed_profiles_toml_has_comfyui_parity() -> None:
@@ -47,7 +47,7 @@ def test_port_range_admits_comfyui_stock_port() -> None:
 
 def test_image_gen_section_defaults() -> None:
     s = ImageGenConfig()
-    assert (s.idle_restore_minutes, s.default_size, s.default_steps) == (5, "1024x1024", 0)
+    assert (s.idle_restore_minutes, s.default_size, s.default_steps) == (60, "1024x1024", 0)
 
 
 def test_string_image_override_still_validates_and_round_trips() -> None:
