@@ -7,18 +7,11 @@
 Description=hal0 agent (%i)
 Documentation=https://github.com/Hal0ai/hal0/blob/main/docs/agents/hermes/SERVICE.md
 
-# Soft-link to lemonade — `Wants=` not `Requires=` / `BindsTo=` per
-# DA-sec-ops MUST-FIX #5 in docs/internal/hermes-research-2026-05-28.
-# Lemonade has a known GPU-cleanup-after-unload deadlock (see
-# auto-memory `hal0_lemonade_unload_gpu_cleanup_hang`): NRestarts=0,
-# port stays open, /api/v1/health times out forever.
-#
-# With `BindsTo=` the agent would stay "active (running)" forever even
-# though chat is dead. With `Wants=` we still START with lemonade but
-# survive its later death — and our own `WatchdogSec=` below lets
+# No hard dependency on the inference layer: the agent talks to
+# hal0-api over HTTP and tolerates it being down (per-slot podman
+# units come and go independently). Our own `WatchdogSec=` below lets
 # systemd notice when the AGENT process is the one that's hung.
-Wants=hal0-lemonade.service
-After=hal0-lemonade.service network-online.target
+After=network-online.target
 
 # Throttle the restart loop. 5 starts in 120s = a real persistent
 # failure; back off rather than burn cycles.
@@ -32,9 +25,9 @@ StartLimitBurst=5
 # See `src/hal0/cli/agent_shim.py` `cmd_serve` for the impl.
 Type=notify
 
-# Same posture as hal0-api / hal0-lemonade — run as the hal0 user
-# created by the installer. `User=` is overridable via drop-in for
-# agents that need different privileges (none today).
+# Same posture as the other hal0 system services — run as the hal0
+# user created by the installer. `User=` is overridable via drop-in
+# for agents that need different privileges (none today).
 User=hal0
 Group=hal0
 

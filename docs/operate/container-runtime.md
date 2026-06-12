@@ -1,233 +1,182 @@
 ---
-title: Lemonade runtime
-description: The AMD-blessed Lemonade Server is hal0's unified inference runtime — one daemon, all modalities, supervised by hal0-lemonade.service on 127.0.0.1:13305.
+title: Container runtime
+description: hal0's inference runtime is per-slot podman containers supervised by hal0-slot@<name>.service units, fronted by hal0-api on :8080.
 sidebar:
   order: 6
 ---
 
 > This file is the **repo-native canonical** copy. The Starlight-rendered
-> version at <https://hal0.dev/docs/operate/lemonade/> is mirrored from
-> here by the docs-sync workflow. Edit this file; do not hand-edit the
+> version at <https://hal0.dev/docs/operate/container-runtime/> is mirrored
+> from here by the docs-sync workflow. Edit this file; do not hand-edit the
 > `.mdx` mirror in `Hal0ai/hal0-web`.
 
-As of **v0.2** (the Lemonade migration, ADR-0008), hal0 ships a single
-runtime daemon: **AMD's Lemonade Server**. One process supervises every
-modality hal0 exposes — chat, embeddings, rerank, STT, TTS, image
-generation — across every backend the host hardware supports (Vulkan
-llama.cpp, ROCm, CUDA, FastFlowLM on XDNA NPUs, sd.cpp, whisper.cpp).
-The six per-modality toolbox container images from v0.1 are gone.
+hal0 runs every inference slot as its **own podman container**,
+supervised by a per-slot systemd unit (`hal0-slot@<name>.service`).
+There is no shared inference daemon: chat, embeddings, rerank, STT,
+TTS, the NPU trio, and image generation each get a dedicated process
+with its own image, flags, port, and lifecycle. `hal0-api` on `:8080`
+is the control plane — it owns the slot state machines, dispatches
+OpenAI-compatible `/v1/*` requests to the right slot port, and serves
+the dashboard.
 
-This page is the operator's reference: what Lemonade is, how hal0 wires
-it up, where its state lives, how slots map onto its model registry,
-and the known caveats you'll hit in production.
+This page is the operator's reference: where the moving parts live,
+how slots map to containers, and the day-2 operations you'll actually
+run.
 
-## What Lemonade is
+## Where everything lives
 
-[Lemonade Server](https://github.com/lemonade-sdk/lemonade) is AMD's
-vendor-blessed local-inference daemon, purpose-built for Strix Halo
-(Ryzen AI Max+ 395, Radeon 8060S iGPU, XDNA NPU, unified memory). It
-exposes an OpenAI-compatible HTTP surface (`/v1/chat/completions`,
-`/v1/embeddings`, `/v1/audio/transcriptions`, `/v1/images/generations`,
-etc.) plus a small control plane (`/v1/load`, `/v1/unload`,
-`/v1/health`, `/v1/stats`, `/v1/models`, `/v1/pull`) for managing the
-in-memory model set.
+| Component                | Location                                                  |
+|--------------------------|-----------------------------------------------------------|
+| Control plane            | `hal0-api.service` (`0.0.0.0:8080`)                       |
+| Per-slot units           | `hal0-slot@<name>.service` (one podman container each)    |
+| Slot definitions         | `/etc/hal0/slots/<name>.toml`                             |
+| Backend profiles         | `/etc/hal0/profiles.toml`                                 |
+| Capability selection     | `/etc/hal0/capabilities.toml`                             |
+| Slot runtime state       | `/var/lib/hal0/slots/<name>/state.json`                   |
+| GPU arbiter state        | `/var/lib/hal0/gpu_arbiter.json`                          |
+| Model catalog            | `/var/lib/hal0/registry/registry.toml`                    |
+| Models on disk           | `/mnt/ai-models` (or `[models].pull_root` in `hal0.toml`) |
+| Logs                     | journald (`hal0-api`, `hal0-slot@<name>`)                 |
 
-hal0 uses Lemonade as the only thing that talks to the GPU/NPU. Slots
-are now thin configuration rows that point at a registered Lemonade
-`model_name`; the dispatcher resolves a request to a slot, the slot
-resolves to a `model_name`, and Lemonade does the work.
+Slot containers bind **loopback ports** (assigned from the
+`[slots]` port range in `/etc/hal0/hal0.toml`, default 8081–8099, plus
+fixed seeds like `img` on 8188). External access goes through
+`hal0-api`, which aggregates every ready slot behind one OpenAI-style
+surface on `:8080`.
 
-## Where it lives
+## Slots, profiles, and the catalog
 
-| Component                 | Location                                                       |
-|---------------------------|----------------------------------------------------------------|
-| Systemd unit              | `hal0-lemonade.service`                                        |
-| Process name              | `lemond`                                                       |
-| Listen address            | `127.0.0.1:13305` (loopback only)                              |
-| Cache dir                 | `/var/lib/hal0/lemonade/`                                      |
-| Daemon config             | `/var/lib/hal0/lemonade/config.json`                           |
-| Registered models         | `/var/lib/hal0/lemonade/resources/server_models.json`          |
-| User-pulled models        | `/var/lib/hal0/lemonade/user_models.json`                      |
-| HuggingFace cache         | `${HAL0_VAR_DIR}/.cache/huggingface/` (chowned `hal0:hal0`)    |
-| Models on disk            | `/var/lib/hal0/models/` (or `$HAL0_MODELS_DIR` if set)         |
-| Pinned versions           | `manifest.json` at the repo root                               |
+A **slot** (`/etc/hal0/slots/<name>.toml`) is a configuration row:
+a name, a port, a device class (`gpu-vulkan` / `gpu-rocm` / `cpu` /
+`npu` / `img`), `runtime = "container"`, a **profile** reference, and a
+`[model]` table (default model + `context_size`).
 
-Lemonade binds **loopback only**. External access goes through hal0's
-own FastAPI server on `:8080`, which reverse-proxies the un-routed
-`/v1/*` surface to `127.0.0.1:13305` (see below).
+A **profile** (`/etc/hal0/profiles.toml`) is a bench-tuned backend
+template: container image + flag bundle + an `mtp` switch. The seed
+catalog ships:
 
-## The `/v1/*` proxy
+- `moe-rocmfp4` / `dense-mtp-rocmfp4` — ROCm FP4 images for Strix Halo
+  (the FP4-capable `llama-server` fork is baked into the image; MTP
+  expands to the full `--spec-type draft-mtp` bundle at resolve time).
+- `vulkan-std` — fallback for non-FP4 GGUFs.
+- `flm-npu` — FastFlowLM on the XDNA NPU.
+- `kokoro-cpu` — CPU TTS.
+- `comfyui` — image generation (exclusive GPU, see arbiter below).
 
-hal0-api at `:8080` serves two `/v1/*` tiers:
+Loading a slot resolves slot → profile → (image, flags), starts the
+`hal0-slot@<name>` unit, and polls the container's `/health` until
+READY. Swapping a model on a container slot is a **container restart**
+with the new model mounted — state passes through
+`/var/lib/hal0/slots/<name>/state.json`.
 
-1. **Curated, dispatcher-backed routes.** Chat, completions, embeddings,
-   rerank, audio, images, models. These aggregate across every
-   registered slot so OpenAI clients see one unified catalogue. The
-   dispatcher picks the slot that owns the model and forwards to
-   Lemonade with the slot's tuned arguments. Implemented in
-   `src/hal0/api/routes/v1.py`.
+The **model catalog is `registry.toml`** —
+`/var/lib/hal0/registry/registry.toml` is the only place HuggingFace
+coordinates, SHA-256 digests, and curated filenames live. Edit it via
+`hal0 model`/the dashboard rather than hand-splicing TOML (a malformed
+file triggers a destructive auto-rescan). There is no secondary
+runtime catalog to regenerate or sync.
 
-2. **Lemonade control plane (catch-all).** Anything *not* matched by
-   the curated routes falls through to a reverse-proxy at
-   `/v1/{path:path}` and is forwarded verbatim to Lemonade. That covers
-   `/v1/health`, `/v1/stats`, `/v1/load`, `/v1/unload`,
-   `/v1/system-info`, `/v1/params`, and anything else Lemonade adds in
-   a future release without hal0 needing a code change. Implemented in
-   `src/hal0/api/routes/lemonade_proxy.py`; mounted last so FastAPI's
-   first-match-wins routing leaves curated handlers intact. Shipped in
-   PR #248 (closes #212), in v0.3.0-alpha.1.
+## NPU slot (FastFlowLM trio)
 
-The dispatcher itself also falls through to the Lemonade proxy on
-`NoRouteFound` (PR #277): if a request shape is OpenAI-shaped but no
-slot claims it, hal0 hands it to Lemonade directly rather than 404'ing.
+The `npu` slot runs FLM in the `hal0-toolbox-flm` image. One FLM
+process can serve up to three modalities at once — LLM chat plus ASR
+(Whisper) and embeddings — toggled per slot:
 
-> Lemonade also opens a second HTTP port on `127.0.0.1:9000` for its
-> own embedded OpenAI surface. hal0 does not use it. All hal0 traffic
-> targets `:13305`; `:9000` is incidental and safe to ignore.
+```toml
+# /etc/hal0/slots/npu.toml
+[npu]
+asr = false     # add --asr 1 (Whisper-V3-Turbo on the NPU)
+embed = false   # add --embed 1 (embedding endpoint on the NPU)
+```
 
-## Slots ↔ Lemonade models
+The NPU is **single-tenant**: one FLM process per NPU, and a model (or
+trio-toggle) swap is a container restart, not a hot reload. The ASR and
+embed models inside the trio are fixed by FLM — the request `model`
+field is ignored for those two surfaces. The host-side `flm` package
+(installed by the installer on AMDXDNA hosts) is only used for device
+sanity probes (`flm validate`); inference runs in the container.
 
-A slot is a row in hal0's config (`/etc/hal0/slots/<name>.toml`) that
-binds a slot **name** (e.g. `primary`, `embed`, `stt`) to a registered
-Lemonade `model_name`. Loading the slot is `POST /v1/load` to Lemonade
-with the slot's tuned `args`; unloading is `POST /v1/unload`. The
-slot's lifecycle state machine (OFFLINE → LOADING → READY) is driven
-by polling `/v1/health` and `/v1/stats` for that model_name.
+## Image mode and the GPU arbiter
 
-Two registries feed Lemonade's `/v1/models`:
+The `img` slot (ComfyUI) needs the iGPU to itself. When image mode
+turns on, the **GPU arbiter** stops every LLM GPU slot, records what it
+stopped in `/var/lib/hal0/gpu_arbiter.json`, and hands the GPU to the
+ComfyUI container. While image mode is active:
 
-- **`server_models.json`** — generated by `hal0 capabilities sync` from
-  `/var/lib/hal0/registry/registry.toml` (the canonical hal0 registry,
-  the only place HuggingFace coordinates + SHA256 + curated filenames
-  live). Edit `registry.toml` directly to add or pin a model, then
-  `hal0 capabilities sync`. Going through the CLI's `register` subcommand
-  loses the HF coordinates by design — use the TOML.
-- **`user_models.json`** — written by `POST /v1/pull` (the dashboard's
-  "add model" flow). Lemonade scans `extra_models_dir` for compatible
-  files; the result is appended here so they survive restart.
+- LLM requests that need a GPU slot get **503** from the dispatcher
+  (`gpu.image_mode`) — clients should retry after image mode ends.
+- CPU and NPU slots are unaffected.
 
-Slots created via `hal0 slot create --type <X>` derive the Lemonade
-device flag from the slot type (PR #282). Slot creation also accepts
-the Lemonade-shape model name directly and auto-picks a free port (PR
-#281, with the import fix in PR #320).
-
-## The 8-model cap
-
-Lemonade's `config.json` ships with `max_loaded_models: 8` (set by
-`installer/install.sh:977`, raised from upstream's default of 4 per
-PR #283). When loading a 9th model, Lemonade evicts the
-least-recently-used model **of the same type** (chat-vs-embed-vs-stt
-have separate LRU pools per ADR-0008 §3 — this supersedes the
-nuclear-evict-all behavior described in the obsolete ADR-0007). The
-slot whose model got evicted drifts to **OFFLINE** (not ERROR), and
-the next request that needs it re-loads it on demand. The OFFLINE-on-
-eviction behavior is PR #276.
-
-If you need a larger working set, raise the cap in
-`/var/lib/hal0/lemonade/config.json` and restart `hal0-lemonade`. The
-practical ceiling is unified-memory pressure, not the integer in the
-config.
-
-## Daemon config
-
-`/var/lib/hal0/lemonade/config.json` is the persisted daemon config.
-Lemonade reads it on start; hal0's `/internal/set` writes mutate it
-atomically. Fields hal0 cares about:
-
-| Key                  | What it does                                                                       |
-|----------------------|------------------------------------------------------------------------------------|
-| `port`               | Bind port. Stays `13305` unless you have a conflict.                               |
-| `host`               | Bind address. Stays `127.0.0.1` — external access is hal0-api's job.               |
-| `max_loaded_models`  | LRU cap (see above). Default 8.                                                    |
-| `extra_models_dir`   | Where Lemonade looks for compatible model files. Set to `$HAL0_MODELS_DIR`.        |
-| `llamacpp.args`      | Extra argv for every llama.cpp child. Default `--parallel 1 --threads N` (N = (cores − 2) / 4, min 2). |
-| `llamacpp.backend`   | `vulkan` / `rocm` / `cuda` / `cpu`. The installer probes hardware and writes this. |
-| `flm.args`           | Extra argv for FastFlowLM NPU children. Default `--asr 1 --embed 1`.               |
-
-The `--parallel 1 --threads N` line is **load-bearing**. Lemonade's
-upstream default omits `--threads`, which on a 12-core LXC lets two
-concurrent llama-server children oversubscribe the CPU and starve
-Vulkan dispatch — observable as a ~30-second deadlock the first time
-two slots load at once. Set the `llamacpp.args` line before the first
-multi-slot load.
+When image mode goes idle, the arbiter restores the slots it stopped.
+If the dashboard shows GPU slots stuck OFFLINE after an image session,
+check the arbiter file and the `img` slot state first.
 
 ## Operating it
 
 ```sh
-# Daemon status + recent logs
-systemctl status hal0-lemonade
-journalctl -u hal0-lemonade -f
+# What's running
+systemctl status hal0-api
+systemctl list-units 'hal0-slot@*'
+curl -s http://127.0.0.1:8080/api/slots | python3 -m json.tool
 
-# Health (curated through hal0-api at :8080)
-curl http://127.0.0.1:8080/v1/health
+# Logs
+journalctl -fu hal0-api
+journalctl -fu 'hal0-slot@*'        # every slot container
+journalctl -fu hal0-slot@chat      # one slot
 
-# Currently loaded models + per-model stats
-curl http://127.0.0.1:8080/v1/stats
+# Restart a slot (recovery hammer for a wedged container)
+systemctl restart hal0-slot@chat
 
-# Restart (the recovery hammer for most ops issues)
-systemctl restart hal0-lemonade
+# Readiness: hal0-api view + the container's own health endpoint
+curl -s http://127.0.0.1:8080/api/slots/chat
+curl -s http://127.0.0.1:8081/health     # slot port from the slot TOML / state.json
 
-# Round-trip a chat request against the primary slot
+# Swap a model on a slot (drives an unload → restart → load cycle)
+hal0 slot load chat --model <model-id>
+
+# Round-trip a chat request through the control plane
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "primary", "messages": [{"role": "user", "content": "hi"}]}'
+  -d '{"model": "chat", "messages": [{"role": "user", "content": "hi"}]}'
 ```
 
-`hal0 doctor` wraps daemon reachability, the FLM `.deb` install state
-(NPU hosts), and HF-cache sanity into one check; run it first when
-something is off.
+Notes:
 
-## Known caveats (v0.3.0-alpha.1)
+- **First load pulls the image.** A slot's first start can block on a
+  multi-GB container image pull; watch `journalctl -fu
+  hal0-slot@<name>` rather than assuming a hang.
+- **Slot edits are picked up on next load.** Editing
+  `/etc/hal0/slots/<name>.toml` or `profiles.toml` does not restart a
+  running container — `systemctl restart hal0-slot@<name>` (or an
+  unload/load from the dashboard) applies it.
+- `hal0 doctor` wraps API health, FLM host-probe state (NPU hosts),
+  and config sanity into one check; run it first when something is
+  off.
 
-These are real, in production, deferred to follow-up issues. None of
-them block normal operation — but if you trip one, the symptom is
-recognizable.
+## Troubleshooting quick hits
 
-### 1. llama-vulkan does not emit a KV-cache metric
-
-The bundled `/opt/llama-vulkan/llama-server` is built without the
-`llamacpp:kv_cache_usage_ratio` Prometheus metric. The scrape silently
-returns nothing for that gauge and the dashboard's KV% chip stays `—`
-on Vulkan slots. PR #124 added a workaround that derives KV% locally
-from `n_prompt_tokens / n_ctx` polled from `/slots`. Fully fixed when
-the toolbox tracks an llama.cpp release that emits the gauge natively;
-in the meantime, the derived value is what shows up on the dashboard.
-
-### 2. Whisper bundle ships a broken `RUNPATH`
-
-Lemonade ≤ 10.6 packages `whispercpp/vulkan` with `RUNPATH=/home/runner`
-(a CI builder leftover). `whisper-server` exits 127 on load, which in
-older Lemonade tripped the nuclear-evict-all path and wiped every other
-slot. hal0 ships `/usr/local/sbin/hal0-patchelf-whisper` and runs it
-via an `ExecStartPre=` drop-in on `hal0-lemonade.service` to re-apply
-`patchelf --set-rpath '$ORIGIN'` on every start. If you swap in a
-hand-built Lemonade tree, the drop-in becomes a no-op as long as the
-binary has a sane `RUNPATH`; no action required.
-
-### 3. Unload can deadlock in GPU cleanup
-
-Lemonade 10.6.0 can deadlock inside `ProcessManager` GPU cleanup after
-a model unload. Symptoms: the port stays open, `/v1/health` returns
-500 / times out, `systemctl show hal0-lemonade` reports `NRestarts=0`
-(the watchdog hasn't tripped because the process is still alive). This
-is distinct from the nuclear-evict-all behavior in (2). Recovery:
-
-```sh
-systemctl restart hal0-lemonade
-```
-
-The slot manager observes the restart, drifts every loaded slot to
-OFFLINE, and re-loads on next request. Tracking issue
-[lemonade-sdk/lemonade#TBD](https://github.com/lemonade-sdk/lemonade).
+- **Slot stuck LOADING** — image pull in progress, or the model file
+  named in the slot TOML isn't on disk / in `registry.toml`. Check the
+  slot journal, then `hal0 model list`.
+- **`model.not_found` on swap** — the requested id isn't in the
+  catalog; check `GET /api/models` before blaming the slot.
+- **GPU slots all OFFLINE** — image mode probably owns the GPU; check
+  `/var/lib/hal0/gpu_arbiter.json` and the `img` slot.
+- **NPU slot dead, GPU fine** — run `flm validate` on the host; if the
+  XRT runtime or NPU firmware is unhappy the container can't claim the
+  device either.
+- **state.json disagrees with the TOML** — state is written by
+  hal0-api on lifecycle transitions; a hand-edited TOML doesn't
+  back-propagate. Reload the slot to reconcile.
 
 ## See also
 
-- [Dashboard v3 tour](/docs/dashboard/v3/) — visual inspection of every
-  panel that scrapes the Lemonade surface.
+- [Dashboard v3 tour](/docs/dashboard/v3/) — visual inspection of the
+  slot panels.
 - [Configuration](/docs/operate/config/) — TOML layout for
   `/etc/hal0/` and the slot files.
 - [Logs](/docs/operate/logs/) — journalctl recipes and the SSE log tail.
 - [Slots](/docs/slots/what-is-a-slot/) — the slot lifecycle state
-  machine and how it talks to Lemonade.
-- ADR-0008 in `docs/internal/adr/` — the canonical decision record for
-  the v0.2 Lemonade migration and the eviction model.
+  machine.
+- The container-runtime design doc in `docs/internal/` — layering
+  rationale for slots ↔ profiles ↔ images.

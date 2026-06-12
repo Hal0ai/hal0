@@ -18,54 +18,54 @@ sudo bash installer/install.sh --models-dir=/mnt/ai-models
 > and hands off to this `install.sh`. `git clone` + `sudo bash` still
 > works for development against a checkout.
 
-> **v0.1.x users:** `install.sh` will detect existing v0.1.x state
-> (`/etc/hal0/slots/*.toml` AND no `/var/lib/hal0/lemonade/config.json`)
-> and refuse to overwrite it. See
-> [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade) for the backup +
-> wipe + reinstall procedure and the `hal0 registry import` recovery
-> command.
-
-As of v0.2, hal0 ships **AMD's Lemonade Server** as the unified
-inference runtime. The installer adds the `lemonade-team/stable`
-PPA, installs system prerequisites (libxrt-npu2, ffmpeg6, boost1.83,
-fftw3, FastFlowLM `.deb` on AMDXDNA NPU hosts), writes
-`/var/lib/hal0/lemonade/config.json` with a computed
-`--parallel 1 --threads N` line, and supervises one `lemond` daemon
-via `hal0-lemonade.service`. The six v0.1.x toolbox container images
-are no longer required, built, or pulled.
+hal0's inference runtime is **container-based**: every inference slot
+runs as its own podman container supervised by a per-slot systemd unit
+(`hal0-slot@<name>.service`). The installer seeds the slot definitions
+(`/etc/hal0/slots/*.toml`) and the backend profile catalog
+(`/etc/hal0/profiles.toml`), installs `hal0-api.service` (the control
+plane + dashboard on `:8080`), and installs the FastFlowLM host `.deb`
+on AMDXDNA NPU hosts for device sanity probes. The model catalog is
+`/var/lib/hal0/registry/registry.toml` — there is no separate runtime
+catalog to sync.
 
 ## What the installer does
 
-1. **Pre-flight checks** — confirms Python 3.11–3.14 is on `$PATH`, systemd is present (skipped in `--dev`).
-2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed). The `lemond` daemon runs under the `hal0` system user written into `hal0-lemonade.service`. Override with `HAL0_USER=...` if you want a different unit user, but the default is intentional.
-3. **v0.1.x detection** — refuses to overwrite a v0.1.x install (`/etc/hal0/slots/*.toml` present, `/var/lib/hal0/lemonade/config.json` absent). Prints backup + wipe instructions and exits non-zero. See [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade).
-4. **Layout** — creates `/opt/hal0/` (code + venv), `/etc/hal0/` (config), `/var/lib/hal0/{models,registry,lemonade,openwebui,cache}` (state). In `--dev` everything lands under `$PWD/.hal0ai/` instead.
-5. **Lemonade prerequisites** — installs the `lemonade-team/stable` PPA, the Lemonade embeddable tarball pinned in `manifest.json`, system libs (libxrt-npu2, ffmpeg6, boost1.83, fftw3), and (on AMDXDNA NPU hosts) the pinned FastFlowLM `.deb`.
-6. **Installs hal0** — creates a venv at `/opt/hal0/.venv/` and `pip install -e`'s the checkout into it. There is no versioned install dir or `current` symlink yet — the venv tracks the checkout in editable mode.
-7. **Builds the dashboard UI** — runs `npm install && npm run build` in `ui/` if `ui/dist/` is missing and `npm` is available. Skipped (with a warning) when `npm` is absent.
-8. **Config defaults** — writes `/etc/hal0/hal0.toml`, `api.env`, `openwebui.env`, and `/var/lib/hal0/lemonade/config.json` with computed `llamacpp.args = "--parallel 1 --threads N"` (N = `(cores − 2) / 4`, min 2) plus `flm.args = "--asr 1 --embed 1"`. `capabilities.toml` ships empty by design — the first-run dashboard renders the bundle picker. Existing files are **never clobbered** on re-run.
-9. **systemd units** — writes `hal0-api.service`, copies `hal0-lemonade.service` and `hal0-openwebui.service` from `packaging/systemd/` to `/etc/systemd/system/`, reloads the daemon, enables and starts `hal0-api` + `hal0-lemonade` + `hal0-openwebui` (unless `--no-start`).
-10. **Hardware probe + final summary** — prints detected backends, the FLM `.deb` install state (NPU only), and reachable URLs. Skip the probe with `HAL0_NO_PROBE=1`.
+1. **Pre-flight checks** — confirms Python 3.11–3.14 is on `$PATH`, systemd is present (skipped in `--dev`), x86_64 arch, disk space, and free ports.
+2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed). `hal0-api` runs as `HAL0_USER` (default `root`; the podman container is the sandbox boundary for slots). A dedicated `hal0` system user runs the non-root services (agents, hermes-gateway, hindsight-api).
+3. **Layout** — code under `/usr/lib/hal0/hal0-<version>` with a `current` symlink and a shared venv (`hal0 update` swaps the symlink atomically); config in `/etc/hal0/`; state in `/var/lib/hal0/{models,registry,slots,openwebui,cache}`. In `--dev` everything lands under `$PWD/.hal0ai/` instead.
+4. **Installs hal0** — creates the shared venv and `pip install`s the release tree into it (editable in `--dev`), then links `/usr/local/bin/hal0` + `/usr/local/bin/hal0-agent`.
+5. **Builds the dashboard UI** — runs `npm install && npm run build` in `ui/` if `ui/dist/` is missing and `npm` is available. Skipped (with a warning) when `npm` is absent.
+6. **Config defaults** — writes `/etc/hal0/hal0.toml`, `api.env`, `upstreams.toml`, and `openwebui.env`. `capabilities.toml` ships empty by design — the first-run dashboard renders the bundle picker. Existing files are **never clobbered** on re-run.
+7. **systemd units** — writes `hal0-api.service`, copies `hal0-openwebui.service` and the `hal0-agent@.service` template (+ hermes drop-in), reloads the daemon, enables and starts `hal0-api` + `hal0-openwebui` (unless `--no-start`). Per-slot `hal0-slot@<name>.service` units are managed by hal0 itself when slots are loaded.
+8. **Hardware probe** — writes `/etc/hal0/hardware.json`, prints detected backends, and seeds a recommended `slots/chat.toml` (disabled until you pull a model). Skip with `HAL0_NO_PROBE=1`.
+9. **NPU prerequisites** — installs the FLM runtime libs (ffmpeg6, boost1.83, fftw3), `libxrt-npu2` when the host's apt sources provide it, and the pinned FastFlowLM `.deb` (SHA-256 verified). All fail-soft: a GPU-only host still installs fine.
+10. **Container slot seeds** — copies `installer/etc-hal0/slots/{npu,tts,rerank,utility,img}.toml` into `/etc/hal0/slots/` (never overwriting operator edits). Each slot gates on its own runtime validation at load time.
 
 The installer is **idempotent** — safe to re-run after a partial failure or to update configuration defaults.
 
-### Lemonade daemon
+### Container runtime
 
-The `lemond` process is the only runtime hal0 supervises in v0.2. It
-listens loopback-only on `127.0.0.1:13305`; the hal0-api service on
-8080 fronts external access. The daemon's cache directory at
-`/var/lib/hal0/lemonade/` holds:
+Each enabled slot runs one podman container built from a **profile** —
+a named (image, flags, mtp) template in `/etc/hal0/profiles.toml`
+(seeded from `installer/etc-hal0/profiles.toml`; hal0-api falls back to
+the built-in seed profiles when the file is absent). The slot TOML
+picks a profile via `profile = "<name>"`; per-slot state lives at
+`/var/lib/hal0/slots/<name>/state.json`. Logs go to journald:
 
-- `config.json` — the persisted daemon config (read by `lemond` on
-  start, written atomically by hal0's `/internal/set` calls).
-- `resources/server_models.json` — generated by `hal0 capabilities sync`
-  from `/var/lib/hal0/registry/registry.toml`.
-- `user_models.json` — user-pulled models via `POST /v1/pull`.
+```sh
+journalctl -fu hal0-api
+journalctl -fu 'hal0-slot@*'          # all slot containers
+journalctl -fu hal0-slot@chat         # one slot
+```
 
-The pinned Lemonade and FastFlowLM versions are tracked in
-[`manifest.json`](../manifest.json) and refreshed per release. Run
-`hal0 doctor` to verify daemon reachability and (on NPU hosts) FLM
-install state.
+The image-generation slot (`img`, ComfyUI) runs in **exclusive GPU
+mode**: the GPU arbiter (`/var/lib/hal0/gpu_arbiter.json`) stops LLM
+GPU slots while image mode is active and restores them when it goes
+idle. See `docs/operate/container-runtime.md` for the full ops guide.
+
+Pinned FLM and container image versions are tracked per release; run
+`hal0 doctor` to verify API health and (on NPU hosts) FLM install
+state.
 
 ## Environment variables
 
@@ -73,17 +73,14 @@ These are the variables `installer/install.sh` actually reads:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HAL0_PREFIX` | `/opt/hal0` (or `$PWD/.hal0ai` in `--dev`) | Installation root (venv + code) |
+| `HAL0_PREFIX` | `/usr/lib/hal0` (or `$PWD/.hal0ai` in `--dev`) | Installation root (versioned code + shared venv) |
 | `HAL0_PORT` | `8080` | hal0 API port |
-| `HAL0_USER` | `root` | systemd unit user (see §What the installer does) |
+| `HAL0_USER` | `root` | systemd unit user for hal0-api (see §What the installer does) |
 | `HAL0_PYTHON` | `python3` | Python interpreter used to build the venv |
-| `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where model pulls land (Lemonade's `extra_models_dir`); same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
+| `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where model pulls land; same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
+| `HAL0_SKIP_FLM_SHA` | _(unset)_ | Set to `1` to accept an unpinned FastFlowLM `.deb` checksum (placeholder pin only — a real mismatch always refuses) |
 | `HAL0_OPENWEBUI_PORT` † | `3001` | OpenWebUI host port — **dev mode only** |
-| `HAL0_ENABLE_ROCMFP4` | _(unset)_ | Set to `1` to opt into the ROCmFP4 + MTP power pack; same as `--rocmfp4`. See [ROCmFP4 power pack (opt-in)](#rocmfp4-power-pack-opt-in). |
-| `HAL0_ROCMFP4_BIN` | `/opt/hal0/rocmfp4-llama/build/bin/llama-server` | Path to the prebuilt `charlie12345/rocmfp4-llama` fork binary (or its wrapper) wired in as Lemonade's `rocm_bin`. Only read when the power pack is enabled. |
-| `HAL0_ROCMFP4_MODEL` | `Qwen3.6-27B-MTP-GGUF` | Model id seeded into the `gpu-rocmfp4` slot. Power pack only. |
-| `HAL0_ROCMFP4_HSA_OVERRIDE` | `11.5.1` | `HSA_OVERRIDE_GFX_VERSION` tag (gfx1151) referenced in the seeded slot's guard note. Power pack only. |
 
 † `HAL0_OPENWEBUI_PORT` is honored by `scripts/dev-bootstrap.sh` (the dev-mode launcher). The installed `hal0-openwebui.service` hardcodes `:3001`; to change it post-install, edit `/etc/systemd/system/hal0-openwebui.service` and reload.
 
@@ -121,11 +118,11 @@ Use `scripts/dev-bootstrap.sh` to actually start services during development.
 
 ### `--dev` mode limitations
 
-`--dev` is a contributor convenience, not a runtime path. The installer writes the same systemd units (`hal0-api.service`, `hal0-lemonade.service`, `hal0-openwebui.service`) into the dev tree, but it does **not** register them with the host's systemd. Concretely:
+`--dev` is a contributor convenience, not a runtime path. The installer writes the same systemd units (`hal0-api.service`, `hal0-openwebui.service`) into the dev tree, but it does **not** register them with the host's systemd. Concretely:
 
 - Units land in `$PWD/.hal0ai/etc/systemd/system/`.
 - The host's `systemctl` only searches `/etc/systemd/system/` and `/usr/lib/systemd/system/`, so it cannot see them.
-- Any flow that ends in `systemctl start hal0-lemonade` will fail with `Unit hal0-lemonade.service not found.` In particular, `hal0 slot create` + `hal0 model pull` requests routed through the capability dispatcher will fail because there is no `lemond` daemon for the dispatcher to call.
+- Slot loads that end in `systemctl start hal0-slot@<name>` will fail because the per-slot units aren't registered — the dispatcher has no container supervisor to call.
 
 Two ways to resolve this, depending on what you're trying to do:
 
@@ -135,102 +132,36 @@ Two ways to resolve this, depending on what you're trying to do:
    sudo bash installer/install.sh
    ```
 
-   Real install puts units under `/etc/systemd/system/`, runs `systemctl daemon-reload`, and the full Lemonade pipeline works end-to-end.
+   Real install puts units under `/etc/systemd/system/`, runs `systemctl daemon-reload`, and the full container slot pipeline works end-to-end.
 
 2. **Or link the dev units into the system search path.** Keeps the dev tree as the source of truth, but tells the host systemd where to find the units:
 
    ```sh
-   sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-lemonade.service"
    sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-api.service"
    sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-openwebui.service"
    sudo systemctl daemon-reload
    ```
 
-   After that, slot operations work against the dev tree. Edits to the linked unit files take effect after another `systemctl daemon-reload`.
+   After that, service operations work against the dev tree. Edits to the linked unit files take effect after another `systemctl daemon-reload`.
 
 The installer prints the same warning block at the end of every `--dev` run as a reminder.
 
-## ROCmFP4 power pack (opt-in)
+## ROCmFP4 + MTP (container profiles)
 
-The **ROCmFP4 + MTP power pack** wires a custom `charlie12345/rocmfp4-llama`
-fork of llama.cpp behind Lemonade so FP4 GGUFs with a baked-in multi-token-
-prediction (MTP) head can self-speculate. Where it applies it is a big win
-(measured: 27B at 12.9 → 22.8 tok/s, ~1.77× with MTP).
+FP4 GGUFs with a baked-in multi-token-prediction (MTP) head are served
+by the `rocm-7.2.4-rocmfp4-server` toolbox image — the fork
+`llama-server` that loads the FP4 quant types is **inside the
+container**, no host-side build or binary wiring required. Two seed
+profiles use it (see `/etc/hal0/profiles.toml`):
 
-It is **off by default and is NOT auto-enabled by the `hal0-max` bundle**
-(locked decision D5). It is deliberately opt-in because it is fragile:
+- `moe-rocmfp4` — A3B MoE models (~52.8 tok/s gen, 131k ctx).
+- `dense-mtp-rocmfp4` — dense chat with MTP (`mtp = true`, ~2× non-MTP).
 
-- **gfx1151-only / ROCm-only** — Strix Halo iGPU under AMD ROCm. No effect on
-  Vulkan, CPU, NPU, or any other GPU arch.
-- **out-of-band binary** — the fork ships new ggml quant types
-  (`Q4_0_ROCMFP4*`) that **stock llama.cpp cannot load**, so the fork binary
-  (~7.8 GB with its bundled ROCm libs) is built separately, not by this
-  installer.
-- **HSA override dependency** — it needs `HSA_OVERRIDE_GFX_VERSION` (gfx1151 →
-  `11.5.1`), carried by the fork wrapper binary. A *stale* override after a
-  Lemonade ROCm-bundle upgrade is a known crash mode (see below).
-
-### Prerequisite — build the fork binary out-of-band
-
-The installer only *wires in* an existing binary; build it first:
-
-1. Clone `github.com/charlie12345/rocmfp4-llama` (branch `mtp-rocmfp4-strix`).
-2. Build inside a `rocm/dev-ubuntu-24.04:7.2.1-complete` container. On an LXC
-   host, `docker run --security-opt apparmor=unconfined` (docker *build* is
-   apparmor-blocked in an LXC, but *run* works with that flag).
-3. Install the resulting `llama-server` (plus its ROCm libs) somewhere stable.
-   The installer defaults to `/opt/hal0/rocmfp4-llama/build/bin/llama-server`;
-   point `HAL0_ROCMFP4_BIN` elsewhere if you put it somewhere else. A wrapper
-   that sets `LD_LIBRARY_PATH` + `HSA_OVERRIDE_GFX_VERSION` + execs the real
-   binary is a valid target too.
-
-### Enable it
-
-```sh
-# flag form
-sudo bash installer/install.sh --rocmfp4
-
-# env form (equivalent), with a custom binary path + slot model
-HAL0_ENABLE_ROCMFP4=1 \
-HAL0_ROCMFP4_BIN=/opt/hal0/rocmfp4-llama/build/bin/llama-server \
-HAL0_ROCMFP4_MODEL=Qwen3.6-27B-MTP-GGUF \
-  sudo bash installer/install.sh
-```
-
-When enabled on an eligible host with the binary present, the installer:
-
-1. sets `llamacpp.rocm_bin` in `/var/lib/hal0/lemonade/config.json` to the fork
-   binary (global to the ROCm backend; every other hal0 slot runs Vulkan, so
-   isolation is clean). **Restart `hal0-lemonade` for it to take effect** —
-   `rocm_bin` is not a live `/v1/params` key.
-2. seeds `/etc/hal0/slots/gpu-rocmfp4.toml` (device `gpu-rocm`, the MTP /
-   self-speculative `extra_args`, and the HSA-override guard documented
-   inline). An existing slot file is left untouched.
-
-If the host is **not** gfx1151 / ROCm, or the fork binary is **absent**, the
-installer **warns and skips cleanly** — the rest of the install is unaffected.
-`--rocmfp4` is also a no-op under `--dev`.
-
-### Repair — stale `HSA_OVERRIDE_GFX_VERSION` crash
-
-Lemonade's weekly-breaking-release cadence changes the bundled ROCm/rocBLAS
-layout. A `HSA_OVERRIDE_GFX_VERSION` written for an *older* bundle can become
-actively harmful once the new bundle adds native gfx1151 kernels: rocBLAS then
-looks up the wrong arch and crashes `llama-server` on the **first inference**
-(`Cannot read TensileLibrary.dat ... gfx1100`), surfacing as a chat **502**.
-
-Fix:
-
-```sh
-ls /var/lib/hal0/lemonade/bin/therock/    # look for a gfx1151-* dir
-```
-
-- If `gfx1151-*` exists, the override is no longer needed — disable any stale
-  `/etc/systemd/system/hal0-lemonade.service.d/rocm-gfx-override.conf` (rename
-  to `.disabled-<date>`), then `systemctl daemon-reload && systemctl restart
-  hal0-lemonade`.
-- If still needed but for a different arch tag, set `HSA_OVERRIDE_GFX_VERSION`
-  to match (e.g. `11.5.1` for gfx1151).
+Point a slot at one of them (`profile = "dense-mtp-rocmfp4"`) or let
+the device default pick it (`device = "gpu-rocm"` resolves to
+`moe-rocmfp4`). gfx1151 (Strix Halo) + ROCm hosts only; non-eligible
+hosts should stay on `vulkan-std`. The old `--rocmfp4` installer flag
+and host-side fork binary are gone.
 
 ## Uninstall
 
@@ -244,6 +175,10 @@ sudo bash installer/uninstall.sh --keep-data
 # No confirmation prompt (CI / scripted teardown)
 HAL0_FORCE=1 sudo bash installer/uninstall.sh
 ```
+
+The uninstaller also sweeps state left behind by pre-Phase-E installs
+(the retired Lemonade daemon runtime, its unit, and its apt source) —
+see the labelled "legacy Lemonade cleanup" blocks in `uninstall.sh`.
 
 ## Troubleshooting
 
@@ -262,25 +197,22 @@ HAL0_PORT=8090 sudo bash installer/install.sh
 
 After changing the port, update `/etc/hal0/api.env` and `/etc/hal0/openwebui.env` to match, then `systemctl restart hal0-api hal0-openwebui`.
 
-### Lemonade daemon not reachable
+### A slot won't load
 
-```
-hal0 doctor: lemond unreachable on 127.0.0.1:13305
-```
-
-Check the unit:
+Check the slot unit and the API's view of it:
 
 ```sh
-systemctl status hal0-lemonade
-journalctl -fu hal0-lemonade
+systemctl status hal0-slot@<name>
+journalctl -u hal0-slot@<name> -n 60
+curl -s http://127.0.0.1:8080/api/slots | python3 -m json.tool
 ```
 
-Common causes: the Lemonade prerequisites failed to install (re-run
-`installer/install.sh`), `llamacpp.args` was hand-edited to an
-unbounded value and the daemon crashed on first multi-LLM load (revert
-to `--parallel 1 --threads N`; see `hal0_lemonade_threads_deadlock`
-memory), or a port conflict on 13305 (override via
-`/var/lib/hal0/lemonade/config.json` `port` key).
+Common causes: the container image hasn't been pulled yet (first load
+blocks on a multi-GB pull — watch the journal), the model file named in
+`/etc/hal0/slots/<name>.toml` isn't in the registry
+(`hal0 model list`), or the GPU is held by image mode (the dispatcher
+returns 503 while the `img` slot owns the GPU; stop image mode or wait
+for idle-restore).
 
 ### FLM .deb missing (NPU host only)
 
@@ -288,10 +220,13 @@ memory), or a port conflict on 13305 (override via
 hal0 doctor: AMDXDNA NPU detected but FastFlowLM not installed
 ```
 
-The Lemonade `flm:npu` recipe needs the FastFlowLM `.deb` package.
+The npu slot's host sanity probe needs the FastFlowLM `.deb` package.
 The installer handles this automatically on AMDXDNA hosts, but if you
 installed on a non-NPU host and later added the hardware, re-run
-`installer/install.sh` to pick up the FLM prerequisites.
+`installer/install.sh` to pick up the FLM prerequisites. If
+`flm validate` fails because `libxrt-npu2` is unavailable from your
+apt sources, the npu **container** slot still works — it bundles its
+own XRT runtime.
 
 ### Not enough disk space
 
@@ -314,9 +249,9 @@ Check logs:
 
 ```sh
 journalctl -fu hal0-api
-journalctl -fu hal0-lemonade
 journalctl -fu hal0-openwebui
-systemctl status hal0-api hal0-lemonade hal0-openwebui
+journalctl -fu 'hal0-slot@*'
+systemctl status hal0-api hal0-openwebui
 ```
 
 ### OpenWebUI can't reach the API

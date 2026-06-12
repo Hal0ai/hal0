@@ -84,8 +84,8 @@ preflight_python() {
     return 1
 }
 
-# CPU architecture — hal0 ships x86_64-only binaries (Lemonade embeddable,
-# FastFlowLM .deb, toolbox images). On ARM the install gets deep into apt
+# CPU architecture — hal0 ships x86_64-only binaries (FastFlowLM .deb,
+# toolbox container images). On ARM the install gets deep into apt
 # before failing cryptically, so refuse up front.
 preflight_arch() {
     local m
@@ -94,7 +94,7 @@ preflight_arch() {
         info "arch: ${m}"
         return 0
     fi
-    err "unsupported architecture '${m}' — hal0 requires x86_64 (Lemonade/FLM/toolboxes are amd64-only)"
+    err "unsupported architecture '${m}' — hal0 requires x86_64 (FLM/toolbox images are amd64-only)"
     return 1
 }
 
@@ -146,7 +146,7 @@ preflight_network() {
         info "network: reachable (${url})"
     else
         warn "network: could not reach ${url} — check connectivity/proxy (http_proxy/https_proxy)"
-        warn "  downloads (release, Lemonade, FLM, models, images) will fail if this host is offline"
+        warn "  downloads (release, FLM, models, container images) will fail if this host is offline"
     fi
     return 0
 }

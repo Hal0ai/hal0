@@ -1,8 +1,9 @@
 [Unit]
 Description=hal0 shared Hindsight memory engine (platform brain)
-# lemond provides the extraction LLM (qwen3-it-4b-FLM). Soft ordering: an
-# unknown unit name here is ignored by systemd, so this is best-effort.
-After=network-online.target hal0-lemonade.service
+# hal0-api fronts the extraction LLM (routed to the npu slot container).
+# Soft ordering: an unknown unit name here is ignored by systemd, so
+# this is best-effort.
+After=network-online.target hal0-api.service
 Wants=network-online.target
 
 [Service]
@@ -22,31 +23,33 @@ Environment=HOME=/var/lib/hal0/memory/hindsight
 # local BGE embedder; point HF_HOME at this hal0-writable dir.
 Environment=HF_HOME=/var/lib/hal0/memory/hindsight/hf-cache
 
-# --- extraction / consolidation / reflect LLM -> lemond (OpenAI-compatible) ---
+# --- extraction / consolidation / reflect LLM -> hal0-api (OpenAI-compatible) ---
 # Provider value is `openai` for any OpenAI-compatible endpoint; base_url MUST
 # include the /v1 suffix (verified: hindsight-docs models.md examples).
-# A NON-EMPTY key is required even for no-auth lemond (spike gotcha #1).
+# A NON-EMPTY key is required even for a no-auth endpoint (spike gotcha #1).
 Environment=HINDSIGHT_API_LLM_PROVIDER=openai
-Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:13305/v1
+Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
 # [Q5'] RESOLVED on the NPU (frees the iGPU; no in-tree wrap-patch). History:
 #  - qwen3-it-4b-FLM (NPU): ignores response_format -> bare JSON *list* -> rejected.
 #  - gemma-4-26b-a4b-it-q4kxl (iGPU GGUF): returns {"facts":[...]} but contends
 #    with the 35B primary on the iGPU (eviction risk).
 #  - gemma4-it:e2b/e4b (NPU): BLOCKED — amdxdna HWCTX alloc fails (err=-22) on
 #    NPU FW 1.1.2.65 / amdxdna 0.7; Gemma-3n NPU2 arch unsupported by this driver.
-# CHOSEN: gemma3-4b-FLM (NPU). gemma3 arch loads on this NPU; emits a ```json-
-# fenced {"facts":[...]} which Hindsight's fact_extraction strips + parses.
-# Verified live: retain+recall end-to-end green. Runs on the NPU -> iGPU stays
-# free for the primary (removes the P2-6 eviction risk). Slower (~160s/extract)
-# but retain is async/background so it doesn't block.
-Environment=HINDSIGHT_API_LLM_MODEL=gemma3-4b-FLM
-Environment=HINDSIGHT_API_LLM_API_KEY=lemonade-local-noauth
+# CHOSEN: gemma3 4B on the NPU (FLM). gemma3 arch loads on this NPU; emits a
+# ```json-fenced {"facts":[...]} which Hindsight's fact_extraction strips +
+# parses. Verified live: retain+recall end-to-end green. Runs on the NPU ->
+# iGPU stays free for the primary (removes the P2-6 eviction risk). Slower
+# (~160s/extract) but retain is async/background so it doesn't block.
+# `hal0/npu` is hal0-api's virtual model name for the npu slot (falls back
+# utility -> chat if the NPU slot is unavailable).
+Environment=HINDSIGHT_API_LLM_MODEL=hal0/npu
+Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
 # NPU extraction is slow (~160s incl. first-call trio load). Generous timeout.
 Environment=HINDSIGHT_API_LLM_TIMEOUT=300
 
 # Embeddings + reranker are LOCAL (bundled BGE 384-d + MiniLM cross-encoder) —
 # the full `hindsight-api` package default. No external embed/rerank config needed.
-# (P2-5 may repoint the reranker at lemond's bge-reranker-v2-m3 for §4b.)
+# (P2-5 may repoint the reranker at the rerank slot's bge-reranker-v2-m3 for §4b.)
 # CT 105 has no NVIDIA GPU (Strix Halo iGPU only) — force CPU so torch/onnx don't
 # probe for CUDA. The bundled CUDA torch wheels are unused dead weight on this box.
 Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU=true

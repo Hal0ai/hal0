@@ -9,19 +9,22 @@
 #   HAL0_FORCE=1 sudo bash uninstall.sh # equivalent to --force
 #
 # What it removes (system mode): the hal0-api / hal0-openwebui /
-# hal0-lemonade / hal0-agent@ / hermes-gateway units (+ their drop-in
-# dirs), the install PREFIX (/opt/hal0), the Lemonade runtime
-# (/opt/lemonade — gated behind a separate confirmation unless --force),
-# the hal0 system user AND group, the ppa:lemonade-team/stable apt source,
-# and the fastflowlm .deb. Config + state (/etc/hal0, /var/lib/hal0) go too
-# unless --keep-data. Idempotent — never hard-fails on an already-gone
-# target.
+# hal0-slot@ / hal0-agent@ / hermes-gateway units (+ their drop-in
+# dirs), the install PREFIX (/opt/hal0), the hal0 system user AND group,
+# and the fastflowlm .deb. Config + state (/etc/hal0, /var/lib/hal0) go
+# too unless --keep-data. Idempotent — never hard-fails on an
+# already-gone target.
+#
+# Legacy Lemonade cleanup: pre-Phase-E installs shipped a hal0-lemonade
+# daemon (/opt/lemonade bundle + ppa:lemonade-team/stable apt source).
+# The labelled "legacy Lemonade cleanup" blocks below keep removing that
+# state from upgraded boxes; they are no-ops on fresh installs.
 #
 # Env overrides:
 #   HAL0_PREFIX        installation root (default /opt/hal0; --dev defaults
 #                      to $PWD/.hal0ai). When set, --dev path layout is used
 #                      so the uninstall mirrors the matching install.sh run.
-#   HAL0_LEMONADE_PREFIX  Lemonade runtime root to remove (default
+#   HAL0_LEMONADE_PREFIX  legacy Lemonade runtime root to remove (default
 #                      /opt/lemonade; ignored in --dev mode)
 #   HAL0_PATH_LINK     PATH symlink to remove (default /usr/local/bin/hal0;
 #                      ignored in --dev mode)
@@ -103,12 +106,9 @@ trap 'error "Uninstall failed at line ${LINENO}."; exit 1' ERR
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     step "Stopping services"
 
-    # Static units the installer writes. hal0-lemonade + hal0-agent@hermes +
-    # hermes-gateway were missed before #508 — install.sh enables all three
-    # (the lemonade daemon, the per-agent runner instance, and the
-    # Telegram/Discord gateway hermes_cli lays down), so they must be torn
-    # down here too. hal0-caddy is legacy (pre-v0.3 auth/Caddy removal) but
-    # kept for old-install cleanup.
+    # Static units the installer writes, plus legacy units kept for
+    # old-install cleanup: hal0-caddy (pre-v0.3 auth/Caddy removal) and
+    # hal0-lemonade (── legacy Lemonade cleanup (pre-Phase-E installs) ──).
     UNITS=(hal0-api hal0-openwebui hal0-caddy hal0-lemonade \
            hal0-agent@hermes hermes-gateway)
 
@@ -200,6 +200,9 @@ uninstall_agents
 # ── Remove unit files ─────────────────────────────────────────────────────────
 step "Removing systemd units"
 
+# hal0-caddy + hal0-lemonade entries are legacy: not written by the
+# current installer, swept so upgraded boxes come clean.
+# (hal0-lemonade: ── legacy Lemonade cleanup (pre-Phase-E installs) ──)
 for UNIT_FILE in \
     "${UNIT_DIR}/hal0-api.service" \
     "${UNIT_DIR}/hal0-openwebui.service" \
@@ -217,9 +220,10 @@ do
 done
 
 # Drop-in directories the installer creates alongside the units:
-#   hal0-lemonade.service.d/      — kfd-perms.conf + 20-vulkan-radv.conf
 #   hal0-agent@hermes.service.d/  — override.conf (hermes-specific env)
 #   hermes-gateway.service.d/     — 10-hal0-secrets.conf (bootstrap secrets)
+#   hal0-lemonade.service.d/      — kfd-perms.conf + 20-vulkan-radv.conf
+#     (── legacy Lemonade cleanup (pre-Phase-E installs) ──)
 for DROPIN_DIR in \
     "${UNIT_DIR}/hal0-lemonade.service.d" \
     "${UNIT_DIR}/hal0-agent@hermes.service.d" \
@@ -263,16 +267,17 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     fi
 fi
 
-# ── Lemonade runtime tree (/opt/lemonade) ─────────────────────────────────────
-# The embeddable lemond + lemonade CLI + resources/ (hundreds of MB, plus
-# any lazily-pulled llama.cpp / ROCm backend binaries). Expensive to
-# re-fetch, so we gate it behind its own confirmation unless --force /
-# HAL0_FORCE=1. System mode only — install.sh --dev never touches
-# /opt/lemonade. The cache dir under ${VAR_DIR}/lemonade rides along with
-# the data-dir removal below (respecting --keep-data).
+# ── legacy Lemonade cleanup (pre-Phase-E installs): /opt/lemonade ─────────────
+# The current installer never writes this tree; pre-Phase-E installs
+# extracted the Lemonade embeddable bundle (lemond + lemonade CLI +
+# resources/, hundreds of MB plus lazily-pulled llama.cpp / ROCm backend
+# binaries) here. Expensive to re-fetch, so we gate removal behind its
+# own confirmation unless --force / HAL0_FORCE=1. System mode only. The
+# legacy cache dir under ${VAR_DIR}/lemonade rides along with the
+# data-dir removal below (respecting --keep-data).
 LEMONADE_PREFIX="${HAL0_LEMONADE_PREFIX:-/opt/lemonade}"
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    step "Lemonade runtime"
+if [[ "${DEV_MODE}" -eq 0 && -d "${LEMONADE_PREFIX}" ]]; then
+    step "Legacy Lemonade runtime"
     if [[ -d "${LEMONADE_PREFIX}" ]]; then
         REMOVE_LEMONADE=1
         if [[ "${HAL0_FORCE}" -ne 1 ]]; then
@@ -410,14 +415,14 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     fi
 fi
 
-# ── Lemonade apt sources + FLM .deb (apt hosts only) ──────────────────────────
-# install.sh adds ppa:lemonade-team/stable and installs the `fastflowlm`
-# .deb on Debian/Ubuntu hosts (NPU runtime path). Reverse both. Guarded by
-# `command -v apt-get` so non-apt hosts skip cleanly, and every step is
-# fail-soft — a stale PPA or leftover package must never abort the
-# uninstall. dev mode never touched apt, so it skips this entirely.
+# ── FLM .deb (apt hosts only) ─────────────────────────────────────────────────
+# install.sh installs the `fastflowlm` .deb on Debian/Ubuntu hosts (NPU
+# host probe + device sanity). Reverse it. Guarded by `command -v apt-get`
+# so non-apt hosts skip cleanly, and every step is fail-soft — a leftover
+# package must never abort the uninstall. dev mode never touched apt, so
+# it skips this entirely.
 if [[ "${DEV_MODE}" -eq 0 ]] && command -v apt-get &>/dev/null 2>&1; then
-    step "Lemonade apt sources + FLM package"
+    step "FLM package"
 
     if dpkg-query -W -f='${Status}' fastflowlm 2>/dev/null | grep -q "install ok installed"; then
         if apt-get remove -y fastflowlm &>/dev/null; then
@@ -429,14 +434,23 @@ if [[ "${DEV_MODE}" -eq 0 ]] && command -v apt-get &>/dev/null 2>&1; then
         info "fastflowlm package not installed"
     fi
 
-    if command -v add-apt-repository &>/dev/null 2>&1; then
-        if add-apt-repository --remove -y ppa:lemonade-team/stable &>/dev/null; then
-            info "Removed ppa:lemonade-team/stable"
+    # ── legacy Lemonade cleanup (pre-Phase-E installs): apt PPA ──────────────
+    # Pre-Phase-E installs added ppa:lemonade-team/stable for libxrt-npu2.
+    # The current installer never adds it; remove it from upgraded boxes.
+    # Cheap existence guard: only call add-apt-repository when a matching
+    # sources entry is actually present.
+    if compgen -G "/etc/apt/sources.list.d/*lemonade*" >/dev/null 2>&1; then
+        if command -v add-apt-repository &>/dev/null 2>&1; then
+            if add-apt-repository --remove -y ppa:lemonade-team/stable &>/dev/null; then
+                info "Removed legacy ppa:lemonade-team/stable"
+            else
+                warn "Could not remove legacy ppa:lemonade-team/stable (may already be gone)"
+            fi
         else
-            warn "Could not remove ppa:lemonade-team/stable (may already be gone)"
+            warn "add-apt-repository not present — leaving the legacy Lemonade PPA in place"
         fi
     else
-        info "add-apt-repository not present — leaving any Lemonade PPA in place"
+        info "no legacy Lemonade PPA present"
     fi
 fi
 

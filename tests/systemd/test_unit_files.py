@@ -9,8 +9,8 @@ presence — they don't shell out to ``systemd-analyze`` because:
    reliably available on macOS or non-systemd Linux dev boxes.
 
 The directives we assert here are the ones that PROTECT a real
-operator outcome (Lemonade-deadlock survival, watchdog-on-hang,
-sandboxing) — drift on any of them should fail loudly.
+operator outcome (watchdog-on-hang, restart posture, sandboxing) —
+drift on any of them should fail loudly.
 """
 
 from __future__ import annotations
@@ -48,32 +48,22 @@ def override_text() -> str:
 
 
 class TestDependencyWiring:
-    """Lemonade is `Wants=`, not `Requires=` — survives the unload deadlock."""
+    """Soft dependency posture: ordering only, never a hard service pin."""
 
-    def test_wants_lemonade(self, template_text: str) -> None:
-        # `Wants=hal0-lemonade.service` is the single most important line:
-        # `Requires=` or `BindsTo=` would pin the agent in "active" forever
-        # when lemonade hits its GPU-cleanup-after-unload deadlock.
-        # See auto-memory `hal0_lemonade_unload_gpu_cleanup_hang`.
-        assert re.search(r"^Wants=hal0-lemonade\.service\b", template_text, re.MULTILINE), (
-            "Template MUST use `Wants=hal0-lemonade.service` (NOT Requires=/BindsTo=)"
-            " — see DA-sec-ops MUST-FIX #5."
-        )
-
-    def test_after_lemonade_and_network(self, template_text: str) -> None:
-        # `After=` controls start ordering; lemonade must boot first so
+    def test_after_network(self, template_text: str) -> None:
+        # `After=` controls start ordering; the network must be up before
         # the agent's hal0 provider plugin can probe /api/v1/health.
-        assert re.search(r"^After=.*\bhal0-lemonade\.service\b", template_text, re.MULTILINE)
         assert re.search(r"^After=.*\bnetwork-online\.target\b", template_text, re.MULTILINE)
 
     def test_no_requires_or_bindsto(self, template_text: str) -> None:
-        # If anyone ever swaps Wants= back to Requires=/BindsTo=, this
-        # catches it before CI green-merges through.
-        assert not re.search(r"^Requires=.*hal0-lemonade", template_text, re.MULTILINE), (
-            "Requires=hal0-lemonade reintroduces the deadlock-pin failure mode"
+        # Hard pins (`Requires=`/`BindsTo=`) on peer services would hold
+        # the agent "active" forever when a peer wedges. Ordering-only
+        # (`After=`/`Wants=`) is the contract — see DA-sec-ops MUST-FIX #5.
+        assert not re.search(r"^Requires=", template_text, re.MULTILINE), (
+            "Requires= reintroduces the deadlock-pin failure mode"
         )
-        assert not re.search(r"^BindsTo=.*hal0-lemonade", template_text, re.MULTILINE), (
-            "BindsTo=hal0-lemonade reintroduces the deadlock-pin failure mode"
+        assert not re.search(r"^BindsTo=", template_text, re.MULTILINE), (
+            "BindsTo= reintroduces the deadlock-pin failure mode"
         )
 
 
@@ -226,10 +216,11 @@ class TestHermesOverride:
         # argv is ever stripped (e.g. operator drops a custom ExecStart).
         assert re.search(r'^Environment="HERMES_DASHBOARD_TUI=1"', override_text, re.MULTILINE)
 
-    def test_lemonade_base_default(self, override_text: str) -> None:
-        # 127.0.0.1:13305 matches `installer/install.sh`'s lemond bind.
+    def test_inference_base_default(self, override_text: str) -> None:
+        # Hermes's hal0 model-provider plugin discovers the OpenAI-compatible
+        # base from HAL0_INFERENCE_BASE — hal0-api's own /v1 surface on 8080.
         assert re.search(
-            r'^Environment="HAL0_LEMONADE_BASE=http://127\.0\.0\.1:13305"',
+            r'^Environment="HAL0_INFERENCE_BASE=http://127\.0\.0\.1:8080"',
             override_text,
             re.MULTILINE,
         )

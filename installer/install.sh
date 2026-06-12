@@ -33,15 +33,15 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"
 # shellcheck source=lib/preflight.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/preflight.sh"
 
-# Non-interactive apt for every apt-get call in this installer (PPA add,
-# software-properties-common, Lemonade prereqs, FLM .deb) — without this a
-# debconf prompt can hang a tty install or fail a CI/non-tty run.
+# Non-interactive apt for every apt-get call in this installer (FLM
+# runtime libs, FLM .deb) — without this a debconf prompt can hang a
+# tty install or fail a CI/non-tty run.
 export DEBIAN_FRONTEND=noninteractive
 
 # Poll `systemctl is-active` for up to `timeout` seconds. Returns 0 the
 # moment the unit reports active, 1 on timeout. Use instead of a flat
 # `sleep N; is-active` so slow first boots (OpenWebUI pulling images,
-# Lemonade backend init) don't get falsely flagged as failures.
+# slot container image pulls) don't get falsely flagged as failures.
 wait_active() {
     local unit="$1"
     # `local` evaluates all RHS *before* any name binds, so a one-liner
@@ -58,18 +58,12 @@ wait_active() {
 
 DEV_MODE=0
 NO_START=0
-# ROCmFP4 + MTP "power pack" (issue #516, locked decision D5). OPT-IN only:
-# never default, never auto-enabled by the hal0-max bundle. Scaffolds the
-# gfx1151-only / ROCm-only fork path (charlie12345/rocmfp4-llama) — a global
-# `rocm_bin` override + a `gpu-rocmfp4` slot + the HSA_OVERRIDE_GFX_VERSION
-# guard. Toggle with `--rocmfp4` or HAL0_ENABLE_ROCMFP4=1. The actual fork
-# binary is built out-of-band (see installer/README.md "ROCmFP4 power pack");
-# this flag only wires an EXISTING binary in, warning + skipping if it or the
-# host eligibility is missing. Default install is byte-for-byte unaffected.
-ENABLE_ROCMFP4=0
-if [[ "${HAL0_ENABLE_ROCMFP4:-0}" == "1" ]]; then
-    ENABLE_ROCMFP4=1
-fi
+# ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
+# binary wired into the retired daemon runtime) is gone. FP4/MTP now
+# ships as container profiles (`moe-rocmfp4` / `dense-mtp-rocmfp4` in
+# installer/etc-hal0/profiles.toml) — the fork llama-server is baked
+# into the rocm-7.2.4-rocmfp4-server toolbox image and selected per
+# slot via `profile = "..."`.
 # TLS posture: hal0-api binds 0.0.0.0:8080 directly. TLS termination,
 # DNS, and any per-host certs are the responsibility of an upstream
 # reverse proxy (Traefik, nginx, Cloudflare Tunnel) — hal0 does not ship
@@ -83,20 +77,12 @@ for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
         --no-start) NO_START=1 ;;
-        --rocmfp4) ENABLE_ROCMFP4=1 ;;
         --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
         --help|-h)
             cat <<EOF
-Usage: install.sh [--dev] [--no-start] [--rocmfp4] [--models-dir=PATH]
+Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
   --dev               install under \$PWD/.hal0ai/, no systemd setup
   --no-start          set up everything but don't enable/start the API
-  --rocmfp4           opt-in ROCmFP4 + MTP "power pack": wires a prebuilt
-                      charlie12345/rocmfp4-llama fork binary as Lemonade's
-                      global rocm_bin and seeds a gpu-rocmfp4 slot. gfx1151 +
-                      ROCm only; warns + skips cleanly on ineligible hosts or
-                      if the fork binary is absent. Same as HAL0_ENABLE_ROCMFP4=1.
-                      The fork binary is built out-of-band — see
-                      installer/README.md "ROCmFP4 power pack (opt-in)".
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
@@ -107,50 +93,6 @@ EOF
         *) warn "unknown flag: ${arg} (ignored)" ;;
     esac
 done
-
-# ── v0.1.x state detection ─────────────────────────────────────────────────
-# v0.2 is a breaking change: slot architecture, model layout, and runtime have
-# all changed (see lemonade-adoption-plan §9). The installer refuses to run
-# over a v0.1.x state — there is no migration path beyond the registry, and
-# the only safe option is back-up + wipe.
-#
-# Detection criterion (plan §9):
-#   /etc/hal0/slots/*.toml exists  AND  /var/lib/hal0/lemonade/config.json absent.
-#
-# Both conditions matter: the slots dir is the v0.1.x fingerprint, and the
-# absence of the Lemonade config is what tells us this isn't a previously
-# completed v0.2 install with leftover v0.1.x slot files (PR-9 will retire
-# /etc/hal0/slots/ but until then a partial v0.2 box could still have files
-# there).
-#
-# Runs BEFORE the DEV_MODE check on purpose: dev mode does NOT bypass the
-# refusal. Escape hatch is HAL0_SKIP_V01_DETECT=1 (CI + worktree tests).
-# Idempotent — only checks two paths, no side effects.
-if [[ "${HAL0_SKIP_V01_DETECT:-0}" != "1" ]]; then
-    v01_slots_found=0
-    if compgen -G "/etc/hal0/slots/*.toml" >/dev/null 2>&1; then
-        v01_slots_found=1
-    fi
-    if [[ "${v01_slots_found}" -eq 1 && ! -f "/var/lib/hal0/lemonade/config.json" ]]; then
-        cat <<'V01_EOF' >&2
-hal0 v0.1.x detected. v0.2 is a breaking change — slot architecture, model layout,
-and runtime have all changed. The installer will not overwrite a v0.1.x state.
-
-To preserve your configuration:
-  sudo tar czf hal0-v0.1-backup-$(date +%F).tar.gz /etc/hal0 /var/lib/hal0/registry
-
-To wipe v0.1.x and start fresh:
-  sudo systemctl stop 'hal0-slot@*' hal0-api
-  sudo systemctl disable 'hal0-slot@*' hal0-api
-  sudo rm -rf /etc/hal0 /var/lib/hal0 /opt/hal0
-  # then re-run this installer
-
-Or read the v0.2 migration notes: https://hal0.dev/docs/v0.2-upgrade
-V01_EOF
-        exit 1
-    fi
-    unset v01_slots_found
-fi
 
 # Banner first — before any info/warn so the brand greets the user
 # rather than hiding behind a "Dev mode …" line.
@@ -253,7 +195,7 @@ info "Pull destination: ${MODELS_DIR}"
 
 # Step total. Kept here so editors who add or remove a ui_step bump the
 # visible counter in the same diff.
-UI_STEP_TOTAL=10                                    # +1 for "Lemonade daemon" (PR-5)
+UI_STEP_TOTAL=11
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
@@ -270,11 +212,6 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
         "Hardware probe")
             warn "Recovery: rerun with HAL0_NO_PROBE=1 and file an issue with"
             warn "         /etc/hal0/hardware.json (if present) attached." ;;
-        "Lemonade daemon")
-            warn "Recovery: check /opt/lemonade/ ownership + free space under /opt"
-            warn "         (embeddable tarball is ~200 MB extracted)."
-            warn "         Set HAL0_SKIP_LEMONADE_SHA=1 if the placeholder SHA-256"
-            warn "         is blocking on a fresh upstream tarball." ;;
     esac
     exit 1' ERR
 
@@ -294,7 +231,7 @@ fi
 info "system: $(uname -srm)"
 
 # Architecture is a hard requirement in every mode — all shipped binaries
-# (Lemonade embeddable, FastFlowLM .deb, toolbox images) are amd64-only.
+# (FastFlowLM .deb, toolbox container images) are amd64-only.
 preflight_arch || die "hal0 requires an x86_64 host (see the message above)"
 
 # Single up-front connectivity probe (soft) so a network/proxy problem
@@ -337,7 +274,7 @@ preflight_docker
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     pf_rc=0
     preflight_writable "${PREFIX}" /usr/lib/hal0 "${ETC_DIR}" "${UNIT_DIR}" \
-        "${VAR_DIR}" /opt/lemonade /usr/local/bin || pf_rc=$?
+        "${VAR_DIR}" /usr/local/bin || pf_rc=$?
     preflight_disk 20 "${VAR_DIR}"            || pf_rc=$?
     preflight_ports "${HAL0_PORT}" 3001       || pf_rc=$?
     if (( pf_rc != 0 )); then
@@ -784,42 +721,37 @@ else
     warn "skipping probe (HAL0_NO_PROBE=1)"
 fi
 
-# ── Lemonade system prerequisites (PR-4) ──────────────────────────────────
-# Install the system-level packages Lemonade + FLM need BEFORE PR-5 drops
-# the lemond binary, config.json, and systemd unit. Three pieces:
+# ── NPU prerequisites (FastFlowLM) ─────────────────────────────────────────
+# The npu container slot runs FLM inside the hal0-toolbox-flm image, but a
+# HOST FLM install is still required for the device-sanity probe
+# (`flm validate`) and model cache management. Three pieces:
 #
-#   1. Lemonade PPA (ppa:lemonade-team/stable) — provides libxrt-npu2,
-#      the AMDXDNA NPU runtime FLM dlopen()s at start. Without it,
-#      `flm serve` fails with "cannot open shared object libxrt_coreutil.so.2"
-#      and the NPU stays unreachable. PPA add is an apt key + sources.list
-#      drop; idempotent via add-apt-repository's built-in dedup.
+#   1. libxrt-npu2 — the AMDXDNA NPU runtime the host `flm` binary
+#      dlopen()s at start. Best-effort from the host's configured apt
+#      sources (hal0 no longer adds a third-party apt source for it);
+#      missing libxrt only degrades the host probe — the container image
+#      bundles its own runtime.
 #
 #   2. FLM transitive runtime libs (apt) —
-#        * libxrt-npu2                   NPU runtime (from PPA)
 #        * libavformat60/libavcodec60/   ffmpeg6 — FLM's audio transcribe
 #          libavutil58/libswscale7/        path (Whisper-V3-Turbo on NPU)
 #          libswresample4
 #        * libboost-program-options1.83.0  FLM CLI flag parsing
 #        * libfftw3-single3              FLM signal processing
 #
-#   3. FastFlowLM .deb v0.9.42 — pinned URL + SHA-256, fetched from upstream
+#   3. FastFlowLM .deb — pinned URL + SHA-256, fetched from upstream
 #      releases. Verified BEFORE dpkg install; fail-soft if unreachable
 #      (NPU-less hal0 still ships — FLM trio gates on `flm validate`).
 #
-# Refs: ADR-0008 (Lemonade adoption), ADR-0009 (FLM trio NPU packing),
-#       lemonade-adoption-plan §3 (service topology) + §11 (PR-4 scope),
-#       memory `hal0_lemonade_flm_npu_install` (the manual install recipe
-#       this section automates).
-ui_step "Lemonade system prerequisites"
+# Refs: ADR-0009 (FLM trio NPU packing).
+ui_step "NPU prerequisites (FastFlowLM)"
 
-# Pinned FLM .deb — bump in lockstep with ADR-0009 / lemonade-adoption-plan
-# §5. v0.9.43 revalidated 2026-06-03 (LXC 105, Strix Halo NPU passthrough):
-# flm validate ok (NPU FW 1.1.2.65), embed-gemma-300m-FLM → 768-dim,
-# gemma3-1b-FLM chat ok. NOTE: 0.9.43 tightened CLI arg parsing — it now
-# rejects a flag passed twice. lemond auto-injects the requested model's
-# mode flag (e.g. --embed 1 for an embedding model), so flm.args must NOT
-# repeat it. Hence flm.args = "--asr 1" below (was "--asr 1 --embed 1",
-# which produced a duplicate --embed and crashed flm-server on 0.9.43).
+# Pinned FLM .deb — bump in lockstep with ADR-0009. v0.9.43 revalidated
+# 2026-06-03 (LXC 105, Strix Halo NPU passthrough): flm validate ok
+# (NPU FW 1.1.2.65), embed-gemma-300m-FLM → 768-dim, gemma3-1b-FLM chat
+# ok. NOTE: 0.9.43 tightened CLI arg parsing — it rejects a flag passed
+# twice, so FLMProvider.container_spec must never repeat a mode flag
+# (--asr/--embed) the model already implies.
 FLM_DEB_VERSION="0.9.43"
 FLM_DEB_URL="https://github.com/FastFlowLM/FastFlowLM/releases/download/v${FLM_DEB_VERSION}/fastflowlm_${FLM_DEB_VERSION}_ubuntu24.04_amd64.deb"
 # SHA-256 of the upstream ubuntu24.04 artefact at v0.9.43 (verified on
@@ -832,40 +764,37 @@ if [[ "${DEV_MODE}" -eq 1 ]]; then
     # sources — devs install once manually (see installer/README.md).
     # We still log what *would* have happened so the dev knows the gap
     # exists for production installs.
-    info "dev mode — skipping Lemonade prereqs (apt PPA + libxrt-npu2 + ffmpeg6 + boost1.83 + fftw3 + FLM .deb v${FLM_DEB_VERSION})"
+    info "dev mode — skipping NPU prereqs (libxrt-npu2 + ffmpeg6 + boost1.83 + fftw3 + FLM .deb v${FLM_DEB_VERSION})"
     info "          install manually if exercising NPU paths: see installer/README.md"
 elif ! command -v apt-get >/dev/null 2>&1; then
     # Non-Debian host (e.g., the maintainer's CachyOS dev box). FLM
-    # upstream only ships .deb + Windows .msi as of v0.9.42; we cannot
-    # auto-install on pacman/dnf/zypper. Surface the gap, keep going —
-    # GPU paths still work without FLM.
-    warn "apt-get not found — skipping Lemonade NPU prereqs (FLM .deb is Ubuntu-only upstream)"
+    # upstream only ships .deb + Windows .msi; we cannot auto-install
+    # on pacman/dnf/zypper. Surface the gap, keep going — GPU paths
+    # still work without FLM.
+    warn "apt-get not found — skipping NPU prereqs (FLM .deb is Ubuntu-only upstream)"
     warn "  GPU paths (Vulkan/ROCm) still work; NPU paths will be unavailable until FLM is installed manually"
 else
-    # 1. PPA. `add-apt-repository -y` is idempotent — re-adding an
-    #    existing PPA is a no-op + warning, not a failure. We DO surface
-    #    what's about to happen so the operator isn't surprised by a
-    #    third-party apt source landing on their host.
-    info "adding ppa:lemonade-team/stable (provides libxrt-npu2 — NPU runtime)"
-    if ! command -v add-apt-repository >/dev/null 2>&1; then
-        ui_spinner_run "Installing software-properties-common (for add-apt-repository)" \
-            apt-get install -y software-properties-common
-    fi
-    # `add-apt-repository -y` prints to stderr on re-add; wrap so a
-    # double-run looks clean. Failure here IS fatal — without the PPA
-    # libxrt-npu2 is unavailable and the NPU surface won't work.
-    ui_spinner_run "Adding ppa:lemonade-team/stable" \
-        add-apt-repository -y ppa:lemonade-team/stable
-    ui_spinner_run "apt-get update (refresh PPA index)" \
+    ui_spinner_run "apt-get update (refresh package index)" \
         apt-get update -qq
+
+    # 1. libxrt-npu2 — best-effort. Available only when the host's apt
+    #    sources carry an XRT NPU build (e.g. a pre-existing vendor repo
+    #    on upgraded boxes). The FLM container image bundles its own
+    #    runtime, so a miss here only disables the HOST `flm validate`
+    #    probe, not the npu slot itself.
+    if apt-get install -y libxrt-npu2 >/dev/null 2>&1; then
+        info "libxrt-npu2 installed (AMDXDNA NPU runtime for the host flm probe)"
+    else
+        warn "libxrt-npu2 not available from configured apt sources — host 'flm validate' may fail"
+        warn "  the npu container slot bundles its own XRT runtime and is unaffected"
+    fi
 
     # 2. Runtime libs. apt is naturally idempotent — already-installed
     #    packages are a no-op. Listed explicitly (not via a metapackage)
     #    so a future libavformat ABI bump is a visible single-line edit
     #    rather than a silent metapackage drift.
-    ui_spinner_run "Installing FLM runtime libs (libxrt-npu2 + ffmpeg6 + boost1.83 + fftw3)" \
+    ui_spinner_run "Installing FLM runtime libs (ffmpeg6 + boost1.83 + fftw3)" \
         apt-get install -y \
-            libxrt-npu2 \
             libavformat60 libavcodec60 libavutil58 libswscale7 libswresample4 \
             libboost-program-options1.83.0 \
             libfftw3-single3
@@ -887,12 +816,10 @@ else
         # install tree. -o to a deterministic path so the SHA-256 check
         # below can find it.
         if curl -fsSL -o "${FLM_DEB_TMP}" "${FLM_DEB_URL}"; then
-            # SHA-256 verify BEFORE dpkg installs it. A real pin is
-            # required here in a follow-up — for the POC the placeholder
-            # is all-zeroes and `--lemonade-skip-flm-sha` (env var
-            # HAL0_SKIP_FLM_SHA=1) bypasses the check so CI can land
-            # the section without blocking on the lookup. Operators
-            # who set the env explicitly accept the trust trade.
+            # SHA-256 verify BEFORE dpkg installs it. An all-zeroes
+            # placeholder pin means the digest was never looked up;
+            # HAL0_SKIP_FLM_SHA=1 bypasses the check for that case only.
+            # Operators who set the env explicitly accept the trust trade.
             ACTUAL_SHA="$(sha256sum "${FLM_DEB_TMP}" | awk '{print $1}')"
             if [[ "${FLM_DEB_SHA256}" == "0000000000000000000000000000000000000000000000000000000000000000" ]]; then
                 warn "FLM_DEB_SHA256 is the placeholder — pin the real checksum in install.sh before v0.2 ships"
@@ -973,122 +900,22 @@ for seed_slot in npu tts rerank utility img; do
     fi
 done
 
-# ── Lemonade daemon bootstrap (PR-5) ──────────────────────────────────────
-# Drops the lemond binary, baseline config.json with the mandatory
-# `--threads N` guard, and the hal0-lemonade.service systemd unit. After
-# PR-4 (system prereqs) and before PR-6 (server_models.json), so the
-# resources/ directory the next step writes into exists. Three pieces:
-#
-#   1. Embeddable tarball (lemond + lemonade CLI + resources/) extracted
-#      to /opt/lemonade/. AMD ships this from
-#      github.com/lemonade-sdk/lemonade/releases — version-pinned, sha256
-#      verified, --strip-components=1 so /opt/lemonade/{lemond,lemonade,
-#      resources}/ land flat. Idempotent via a marker file
-#      (/opt/lemonade/.installed-version) — re-running with the same
-#      LEMONADE_VERSION skips download + extract.
-#
-#   2. /var/lib/hal0/lemonade/config.json — written atomically every run
-#      (tempfile + mv), so a config bump propagates without a manual
-#      delete. Locked baseline from lemonade-adoption-plan-2026-05-22 §3:
-#      config_version=1, port 13305 loopback, max_loaded_models=4,
-#      rocm_channel=stable, llamacpp.args="--parallel 1 --threads N",
-#      flm.args="--asr 1 --embed 1", kokoro.cpu_bin=builtin. The
-#      --threads N value is the load-bearing guard against the multi-
-#      model CPU-oversubscription deadlock from spike #2 (memory
-#      `hal0_lemonade_threads_deadlock`): with 2+ concurrent child
-#      llama-servers each spawning all cores, Vulkan dispatch starves
-#      and inference hangs at 30 s timeouts / load avg 25. Formula:
-#      N = max(2, (nproc - 2) / 4). The "-2" leaves headroom for
-#      hal0-api + system; "/4" splits across the typical four-process
-#      capability rollup (primary + embed + rerank + voice).
-#
-#   3. /etc/systemd/system/hal0-lemonade.service — Type=simple, runs as
-#      a dedicated `hal0` system user (per ADR-0008 §1: loopback-only
-#      internal runtime). LimitMEMLOCK=infinity for FLM/NPU; CPUQuota=80%
-#      leaves 20% for hal0-api + system. Enabled here; the Service start
-#      block at the end of install.sh starts it alongside hal0-api.
-#
-# Refs: ADR-0008 §1 (single lemond, loopback), §3 (per-type LRU), §4
-#       (mandatory --threads N); lemonade-adoption-plan §3 (service
-#       topology + verbatim config.json + unit baseline), §11 PR-5,
-#       §12.2 (port 13305), §12.3 (version pinning); memory
-#       `hal0_lemonade_threads_deadlock` (non-negotiable operational
-#       constraint).
-ui_step "Lemonade daemon"
-
-# Pinned Lemonade embeddable tarball — bump in lockstep with hal0
-# releases. v10.6.0 is the build the v0.2 spike #2 validated against
-# on 2026-05-22.
-LEMONADE_VERSION="v10.6.0"
-LEMONADE_VERSION_BARE="${LEMONADE_VERSION#v}"
-LEMONADE_TARBALL="lemonade-embeddable-${LEMONADE_VERSION_BARE}-ubuntu-x64.tar.gz"
-LEMONADE_URL="https://github.com/lemonade-sdk/lemonade/releases/download/${LEMONADE_VERSION}/${LEMONADE_TARBALL}"
-# SHA-256 of the upstream artefact (the ${LEMONADE_TARBALL} asset on the
-# lemonade-sdk/lemonade ${LEMONADE_VERSION} GitHub release). When bumping
-# LEMONADE_VERSION, re-pin this from the release's published digest:
-#   gh api repos/lemonade-sdk/lemonade/releases/tags/${LEMONADE_VERSION} \
-#     --jq '.assets[] | select(.name=="'"${LEMONADE_TARBALL}"'") | .digest'
-# (equivalently: curl -fsSL "${LEMONADE_URL}" | sha256sum). HAL0_SKIP_LEMONADE_SHA=1
-# lets CI / dev installs proceed without a matching checksum explicitly.
-LEMONADE_SHA256="3b50b5cc5a9695f970b85f5cf3023297bde215f2230c993134e670baab2474a1"
-
-LEMONADE_PREFIX="/opt/lemonade"
-LEMONADE_CACHE_DIR="${VAR_DIR}/lemonade"
-LEMONADE_CONFIG_JSON="${LEMONADE_CACHE_DIR}/config.json"
-LEMONADE_UNIT="${UNIT_DIR}/hal0-lemonade.service"
-LEMONADE_MARKER="${LEMONADE_PREFIX}/.installed-version"
-
-# Compute --threads N at install time. See memory
-# `hal0_lemonade_threads_deadlock` + ADR-0008 §4: this flag is the
-# difference between the Vulkan deadlock spike and a happy 4-concurrent
-# Phase B.3 run. NEVER skip it.
-#
-# Formula: N = max(2, (nproc - 2) / 4). The "/4" assumes the typical
-# v0.2 capability rollup (primary + embed + rerank + voice = 4
-# concurrent child llama-servers). The "-2" leaves headroom for the
-# hal0-api process + system. The min-of-2 is a hard floor for hosts
-# small enough that the formula would otherwise underflow (a 4-core box
-# computes (4 - 2) / 4 = 0; we bump to 2 so llama-server has at least a
-# producer/consumer pair).
-#
-# If nproc is unavailable or returns a non-positive integer (broken
-# containers, exotic minimal hosts), we default to 2 + warn rather than
-# omit the flag entirely. Per the deadlock memory, an omitted --threads
-# is the failure mode we are guarding against.
-if command -v nproc >/dev/null 2>&1; then
-    LEMONADE_CORES="$(nproc 2>/dev/null || echo 0)"
-else
-    LEMONADE_CORES=0
-fi
-if ! [[ "${LEMONADE_CORES}" =~ ^[0-9]+$ ]] || (( LEMONADE_CORES < 1 )); then
-    warn "nproc unavailable or returned '${LEMONADE_CORES}' — defaulting --threads 2"
-    LEMONADE_THREADS=2
-else
-    LEMONADE_THREADS=$(( (LEMONADE_CORES - 2) / 4 ))
-    if (( LEMONADE_THREADS < 2 )); then
-        LEMONADE_THREADS=2
-    fi
-fi
-info "Lemonade --threads ${LEMONADE_THREADS} (nproc=${LEMONADE_CORES}, formula=max(2,(n-2)/4))"
+# ── hal0 system user ────────────────────────────────────────────────────────
+# A dedicated `hal0` system user/group runs the non-root hal0 services:
+# hal0-agent@<id> (the Hermes runner), hermes-gateway, and the shared
+# hindsight-api memory engine. It also owns the HF cache under
+# ${VAR_DIR}/.cache so agent-side HuggingFace pulls work without
+# escalating. Slot inference itself runs in podman containers supervised
+# by hal0-slot@<name>.service — no daemon user needed there.
+ui_step "System user"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    # Dev installs don't touch /opt/lemonade, /var/lib/hal0/lemonade, or
-    # systemd. Surface what the production install would do so the dev
-    # knows the gap exists; the rest of v0.2 wiring (PR-6 server_models,
-    # capability dispatch) still exercises in dev mode against a manually
-    # started lemond.
-    info "dev mode — skipping Lemonade daemon bootstrap"
-    info "          would install: tarball ${LEMONADE_TARBALL} → ${LEMONADE_PREFIX}"
-    info "          would write:   ${LEMONADE_CONFIG_JSON} (threads ${LEMONADE_THREADS})"
-    info "          would enable:  ${LEMONADE_UNIT}"
+    # Dev installs never create system users or touch systemd.
+    info "dev mode — skipping hal0 system user creation"
 else
-    # 1. hal0 system user/group. The unit runs lemond as `hal0` (per
-    #    plan §3 + ADR-0008 §1 "internal runtime, never exposed
-    #    off-box"). The user owns /opt/lemonade and /var/lib/hal0/lemonade
-    #    so lemond can write runtime state (user_models.json, logs).
-    #    System user (UID < 1000), no login shell, home at ${VAR_DIR}
-    #    so any stray `~`-relative lemond writes land somewhere sane.
-    #    Idempotent via `getent passwd`.
+    # 1. hal0 system user/group. System user (UID < 1000), no login
+    #    shell, home at ${VAR_DIR} so any stray `~`-relative writes from
+    #    agent processes land somewhere sane. Idempotent via `getent`.
     if ! getent group hal0 >/dev/null 2>&1; then
         groupadd --system hal0
         info "created group hal0"
@@ -1096,17 +923,17 @@ else
     if ! getent passwd hal0 >/dev/null 2>&1; then
         useradd --system --gid hal0 --home-dir "${VAR_DIR}" \
             --shell /usr/sbin/nologin \
-            --comment "hal0 Lemonade daemon" \
+            --comment "hal0 service user" \
             hal0
         info "created user hal0 (system, no login)"
     fi
 
-    # GPU device access (issue #420). lemond's ROCm/Vulkan backends need
-    # the `hal0` user in `render` (for /dev/kfd + /dev/dri/renderD*) and
-    # `video` (for /dev/dri/card*/amdgpu). Without it ROCm reports "no
-    # ROCm-capable device is detected" and silently falls back to CPU.
-    # Idempotent; only adds groups that actually exist on the host (a
-    # non-GPU box / CI runner simply has neither).
+    # GPU device access (issue #420). Keeps hal0-user processes (agents,
+    # diagnostics) able to read /dev/kfd + /dev/dri/renderD* when they
+    # probe the GPU. Slot containers get their devices from podman
+    # directly and don't depend on this. Idempotent; only adds groups
+    # that actually exist on the host (a non-GPU box / CI runner simply
+    # has neither).
     KFD_GROUPS=""
     for _g in render video; do
         if getent group "${_g}" >/dev/null 2>&1; then
@@ -1118,469 +945,16 @@ else
         info "added hal0 to groups: ${KFD_GROUPS}"
     fi
 
-    # 2. Embeddable tarball. Idempotent: a marker file pinned to
-    #    LEMONADE_VERSION lets re-runs skip the multi-hundred-MB
-    #    download when the binary on disk already matches. Operators
-    #    who want to force a re-extract can `rm /opt/lemonade/.installed-version`.
-    NEED_LEMONADE_EXTRACT=1
-    if [[ -x "${LEMONADE_PREFIX}/lemond" && -f "${LEMONADE_MARKER}" ]]; then
-        INSTALLED_VERSION="$(cat "${LEMONADE_MARKER}" 2>/dev/null || true)"
-        if [[ "${INSTALLED_VERSION}" == "${LEMONADE_VERSION}" ]]; then
-            info "Lemonade ${LEMONADE_VERSION} already extracted at ${LEMONADE_PREFIX} — skipping download"
-            NEED_LEMONADE_EXTRACT=0
-        else
-            info "Lemonade marker reports ${INSTALLED_VERSION:-unknown}, target ${LEMONADE_VERSION} — re-extracting"
-        fi
-    fi
-
-    if [[ "${NEED_LEMONADE_EXTRACT}" -eq 1 ]]; then
-        LEMONADE_TARBALL_TMP="/tmp/${LEMONADE_TARBALL}"
-        # `curl -fsSL` — fail on HTTP error, silent, follow redirects.
-        # Tarball lands in /tmp so a re-run doesn't keep a stale copy in
-        # the install tree.  A failed download is a hard error: the hal0
-        # API will start but all Lemonade-backed slots (chat, STT, embed)
-        # will be unavailable, leaving the install broken.  Set
-        # HAL0_SKIP_LEMONADE_SHA=1 to opt out of the SHA gate only; there
-        # is no opt-out for a failed download (fix the network and rerun).
-        if ! curl -fsSL -o "${LEMONADE_TARBALL_TMP}" "${LEMONADE_URL}"; then
-            rm -f "${LEMONADE_TARBALL_TMP}"
-            die "Lemonade tarball download failed (${LEMONADE_URL}).
-  hal0 requires Lemonade for all inference slots — a missing binary is not
-  a degraded install, it is a broken one.  Fix the network and rerun, or
-  file an issue at https://github.com/Hal0ai/hal0/issues."
-        fi
-    fi
-
-    if [[ "${NEED_LEMONADE_EXTRACT}" -eq 1 ]]; then
-        # SHA-256 verify BEFORE extracting.  A placeholder SHA (all-zeroes)
-        # means install.sh was shipped without pinning the real digest —
-        # HAL0_SKIP_LEMONADE_SHA=1 is the explicit, documented opt-out for
-        # that case only.  A real-SHA mismatch is always fatal: never extract
-        # a tarball that doesn't match its published digest.
-        ACTUAL_SHA="$(sha256sum "${LEMONADE_TARBALL_TMP}" | awk '{print $1}')"
-        if [[ "${LEMONADE_SHA256}" == "0000000000000000000000000000000000000000000000000000000000000000" ]]; then
-            warn "LEMONADE_SHA256 is the all-zeroes placeholder — release pipeline must pin the real digest"
-            warn "  # TODO: pin via: gh api repos/lemonade-sdk/lemonade/releases/tags/${LEMONADE_VERSION} \\"
-            warn "  #   --jq '.assets[] | select(.name==\"${LEMONADE_TARBALL}\") | .digest'"
-            warn "  observed SHA-256: ${ACTUAL_SHA}"
-            if [[ "${HAL0_SKIP_LEMONADE_SHA:-0}" != "1" ]]; then
-                rm -f "${LEMONADE_TARBALL_TMP}"
-                die "Refusing to extract Lemonade: SHA-256 is the all-zeroes placeholder.
-  Set HAL0_SKIP_LEMONADE_SHA=1 to accept the unverified tarball (not recommended)
-  or pin the real digest in install.sh before shipping."
-            fi
-        elif [[ "${ACTUAL_SHA}" != "${LEMONADE_SHA256}" ]]; then
-            rm -f "${LEMONADE_TARBALL_TMP}"
-            die "Lemonade tarball SHA-256 mismatch — refusing to extract.
-  expected: ${LEMONADE_SHA256}
-  observed: ${ACTUAL_SHA}
-  The downloaded tarball does not match the pinned digest.  This may indicate
-  a corrupted download or a tampered release asset — rerun to retry, or file
-  an issue at https://github.com/Hal0ai/hal0/issues."
-        fi
-    fi
-
-    if [[ "${NEED_LEMONADE_EXTRACT}" -eq 1 ]]; then
-        # The upstream tarball has a single top-level
-        # `lemonade-embeddable-<VER>/` directory; --strip-components=1
-        # lands {lemond, lemonade, LICENSE, resources}/ flat in
-        # /opt/lemonade/.
-        mkdir -p "${LEMONADE_PREFIX}"
-        if ui_spinner_run "Extracting ${LEMONADE_TARBALL} → ${LEMONADE_PREFIX}" \
-            tar -xzf "${LEMONADE_TARBALL_TMP}" -C "${LEMONADE_PREFIX}" --strip-components=1; then
-            rm -f "${LEMONADE_TARBALL_TMP}"
-            printf '%s\n' "${LEMONADE_VERSION}" > "${LEMONADE_MARKER}"
-            info "extracted Lemonade ${LEMONADE_VERSION} → ${LEMONADE_PREFIX}"
-        else
-            rm -f "${LEMONADE_TARBALL_TMP}"
-            die "tar extract failed for ${LEMONADE_TARBALL}.
-  hal0 requires Lemonade for all inference slots.  Check free space under /opt
-  (embeddable tarball extracts to ~200 MB) and rerun."
-        fi
-    fi
-
-    # Ownership: lemond reads from /opt/lemonade/{resources,bin} and may
-    # update entries under resources/server_models.json on backend
-    # install. Owned by hal0:hal0 so the daemon can write its own state
-    # without escalating. Always runs (idempotent + cheap), so a
-    # download-skipped re-install still corrects perms after, e.g., an
-    # operator manually extracted as root.
-    if [[ -d "${LEMONADE_PREFIX}" ]]; then
-        chown -R hal0:hal0 "${LEMONADE_PREFIX}"
-    fi
-
-    # 2b. Pin llama.cpp backend builds (ADR-0023, issue #438). Lemonade
-    #     bundles a *frozen* default in resources/backend_versions.json
-    #     (10.6.0 ships vulkan=b9253 / rocm-stable=b9247). b9253 predates
-    #     the qwen3next Vulkan kernels → our primary coding model runs an
-    #     unoptimised fallback (~4× slower gen). lemond restores whatever
-    #     matches this pin on every model load, so a hand-swapped binary
-    #     does NOT stick — the pin is the only durable lever. We pin BOTH
-    #     backends to the same official ggml-org build (b9496 ships both
-    #     ubuntu-vulkan-x64 and ubuntu-rocm-7.2-x64 assets) so they share
-    #     a build era and stay comparable. lemond downloads the matching
-    #     binary lazily on first load of each backend. rocm-nightly is
-    #     left alone (needs kernel ≥6.18.4; 64 GB alloc cap — TheRock
-    #     #4645). Bump LLAMACPP_PIN as ggml-org advances + re-run install.
-    LLAMACPP_PIN="b9496"
-    LEMONADE_BACKEND_VERSIONS="${LEMONADE_PREFIX}/resources/backend_versions.json"
-    if [[ -f "${LEMONADE_BACKEND_VERSIONS}" ]]; then
-        if "${PY}" - "${LEMONADE_BACKEND_VERSIONS}" "${LLAMACPP_PIN}" <<'PYPIN'
-import json, sys
-path, pin = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    cfg = json.load(f)
-lc = cfg.setdefault("llamacpp", {})
-changed = False
-for key in ("vulkan", "rocm-stable"):
-    if lc.get(key) != pin:
-        lc[key] = pin
-        changed = True
-if changed:
-    with open(path, "w") as f:
-        json.dump(cfg, f, indent=2)
-print("pinned" if changed else "already-pinned",
-      "vulkan/rocm-stable =", pin)
-PYPIN
-        then
-            chown hal0:hal0 "${LEMONADE_BACKEND_VERSIONS}"
-            info "pinned llamacpp vulkan + rocm-stable → ${LLAMACPP_PIN} (${LEMONADE_BACKEND_VERSIONS})"
-        else
-            warn "failed to pin backend_versions.json — Lemonade will use its bundled (slower) default builds"
-        fi
-    else
-        warn "${LEMONADE_BACKEND_VERSIONS} not present — skipping backend pin (Lemonade extract may have failed)"
-    fi
-
-    # HuggingFace hub cache for /v1/pull downloads (#275 bug 4). The hal0
-    # user's HOME is ${VAR_DIR} (per useradd above), so HF's default
-    # cache lands at ${VAR_DIR}/.cache/huggingface/hub. Without this,
-    # the first POST /v1/pull fails with "Permission denied" because
-    # ${VAR_DIR} is created by this script as root and never reassigned
-    # to hal0. Pre-create the leaf dir + give hal0 ownership of the
-    # cache tree (NOT the whole VAR_DIR — slot state.json + registry
-    # are written by hal0-api which runs as ${HAL0_USER}, default root).
+    # HuggingFace hub cache (#275 bug 4). The hal0 user's HOME is
+    # ${VAR_DIR} (per useradd above), so HF's default cache lands at
+    # ${VAR_DIR}/.cache/huggingface/hub. Pre-create the leaf dir + give
+    # hal0 ownership of the cache tree (NOT the whole VAR_DIR — slot
+    # state.json + registry are written by hal0-api which runs as
+    # ${HAL0_USER}, default root) so hal0-user processes can download
+    # HF assets without a PermissionError on first use.
     mkdir -p "${VAR_DIR}/.cache/huggingface/hub"
     chown -R hal0:hal0 "${VAR_DIR}/.cache"
 
-    # 3. Cache dir + config.json. Atomic write (tempfile in the same
-    #    directory + mv) so a crash mid-write doesn't leave lemond
-    #    parsing a half-written JSON file on next start. Overwrite on
-    #    every install run — a baseline bump (port move, new key, etc.)
-    #    should propagate without the operator having to delete the file.
-    #
-    #    llamacpp.args carries --no-mmap deliberately. Models live on a
-    #    ZFS dataset and the iGPU is UMA, so mmap loading is doubly bad:
-    #    (1) ZFS + mmap page-faults bypass ARC prefetch and double-buffer
-    #        → cold loads crawl (~200 MB/s vs ~1.6 GB/s with read()), and
-    #    (2) on a UMA iGPU the mmap'd file sits in the page cache AND the
-    #        GTT GPU buffer simultaneously → a 47 GB model needs ~94 GB
-    #        RAM and OOM-crashes the host. --no-mmap reads into a transient
-    #        buffer, uploads to GTT, frees it → ~1× RAM + fast sequential.
-    mkdir -p "${LEMONADE_CACHE_DIR}"
-    chown hal0:hal0 "${LEMONADE_CACHE_DIR}"
-    LEMONADE_CONFIG_TMP="$(mktemp "${LEMONADE_CONFIG_JSON}.XXXXXX")"
-    cat > "${LEMONADE_CONFIG_TMP}" <<JSON
-{
-  "config_version": 1,
-  "host": "127.0.0.1",
-  "port": 13305,
-  "ctx_size": 4096,
-  "max_loaded_models": 8,
-  "extra_models_dir": "/var/lib/hal0/models",
-  "global_timeout": 900,
-  "no_broadcast": true,
-  "log_level": "info",
-  "rocm_channel": "stable",
-  "llamacpp": {
-    "args": "--parallel 1 -fa on --threads ${LEMONADE_THREADS} --no-mmap",
-    "backend": "vulkan",
-    "prefer_system": false
-  },
-  "flm":        { "args": "--asr 1" },
-  "kokoro":     { "cpu_bin": "builtin" },
-  "whispercpp": { "backend": "vulkan" },
-  "sdcpp":      { "backend": "rocm", "steps": 20, "cfg_scale": 7.0, "width": 512, "height": 512 }
-}
-JSON
-    chown hal0:hal0 "${LEMONADE_CONFIG_TMP}"
-    chmod 0644 "${LEMONADE_CONFIG_TMP}"
-    mv "${LEMONADE_CONFIG_TMP}" "${LEMONADE_CONFIG_JSON}"
-    info "wrote ${LEMONADE_CONFIG_JSON} (threads=${LEMONADE_THREADS})"
-
-    # 4. Systemd unit — verbatim from lemonade-adoption-plan §3. Always
-    #    rewritten so a unit bump propagates without manual `rm`. The
-    #    ExecStop curl lets lemond drain in-flight requests cleanly;
-    #    on hosts where /usr/bin/curl doesn't exist systemd will log
-    #    the failure but `Restart=on-failure` still kicks in correctly.
-    cat > "${LEMONADE_UNIT}" <<UNIT
-[Unit]
-Description=hal0 Lemonade backend (lemond)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${LEMONADE_PREFIX}/lemond ${LEMONADE_CACHE_DIR}
-ExecStop=/usr/bin/curl -s -X POST http://127.0.0.1:13305/internal/shutdown
-Restart=on-failure
-RestartSec=5s
-User=hal0
-Group=hal0
-LimitMEMLOCK=infinity
-CPUQuota=80%
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-    info "wrote ${LEMONADE_UNIT}"
-
-    # 4b. /dev/kfd group-access drop-in (issue #420). The GPU compute
-    #     node resets to root:root 0660 on every boot — no udev rule
-    #     fires for the host-passed node inside the LXC — so the `hal0`
-    #     user loses access after a reboot even though it's in `render`.
-    #     ROCm then can't see the iGPU and lemond silently runs on CPU
-    #     (a 40B load blows past the hal0-api proxy 120s read timeout →
-    #     chat 502s). This ExecStartPre re-chgrp's the node to `render`
-    #     before lemond starts, every boot. The leading `+` runs it as
-    #     root despite User=hal0; the `-` makes it non-fatal so non-GPU
-    #     hosts (no /dev/kfd) still start lemond. Mirrors the
-    #     whisper-patchelf drop-in. Always rewritten so a bump propagates.
-    LEMONADE_DROPIN_DIR="${UNIT_DIR}/hal0-lemonade.service.d"
-    mkdir -p "${LEMONADE_DROPIN_DIR}"
-    cat > "${LEMONADE_DROPIN_DIR}/kfd-perms.conf" <<'DROPIN'
-[Service]
-ExecStartPre=+-/usr/bin/chgrp render /dev/kfd
-ExecStartPre=+-/usr/bin/chmod 0660 /dev/kfd
-DROPIN
-    info "wrote ${LEMONADE_DROPIN_DIR}/kfd-perms.conf"
-
-    # 4c. Vulkan ICD pin (ADR-0023). gfx1151 (Strix Halo) runs the open
-    #     Mesa RADV driver markedly faster than AMD's closed AMDVLK for
-    #     llama.cpp Vulkan. Both ICDs are typically installed; without
-    #     this, loader order picks AMDVLK on some images. Pinning RADV is
-    #     the load-bearing half of the qwen3next Vulkan perf path (the
-    #     other half is the b9496 backend pin set earlier, step 2b).
-    #     Harmless on ROCm-only loads. Always rewritten so a bump propagates.
-    cat > "${LEMONADE_DROPIN_DIR}/20-vulkan-radv.conf" <<'DROPIN'
-[Service]
-Environment=AMD_VULKAN_ICD=RADV
-DROPIN
-    info "wrote ${LEMONADE_DROPIN_DIR}/20-vulkan-radv.conf"
-
-    # daemon-reload is idempotent — always safe to call. enable (no
-    # --now) so the unit auto-starts on boot; the Service start block at
-    # the end of install.sh handles the first start in lockstep with
-    # hal0-api / hal0-openwebui.
-    systemctl daemon-reload
-    if [[ -x "${LEMONADE_PREFIX}/lemond" ]]; then
-        systemctl enable hal0-lemonade.service >/dev/null 2>&1 || \
-            warn "systemctl enable hal0-lemonade failed — check 'systemctl status hal0-lemonade'"
-    else
-        warn "${LEMONADE_PREFIX}/lemond missing — leaving hal0-lemonade.service disabled"
-    fi
-fi
-
-# ── ROCmFP4 + MTP power pack (issue #516, opt-in) ──────────────────────────
-# Locked decision D5: the ROCmFP4 + MTP fork path (charlie12345/rocmfp4-llama)
-# is NOT default and NOT auto-enabled by the hal0-max bundle. It is gfx1151-only
-# (Strix Halo) + ROCm-only, ~7.8 GB of ROCm libs, and depends on a stale-prone
-# HSA_OVERRIDE_GFX_VERSION — too fragile for out-of-box. When it applies it is a
-# big win (27B 12.9 → 22.8 tok/s, 1.77x MTP, verified) so we ship it as an
-# explicit power pack: `--rocmfp4` or HAL0_ENABLE_ROCMFP4=1.
-#
-# This block ONLY runs when explicitly requested. It:
-#   1. checks host eligibility (gfx1151 / AMD ROCm) — warns + skips otherwise,
-#   2. wires Lemonade's GLOBAL rocm_bin override to a PREBUILT fork binary taken
-#      from HAL0_ROCMFP4_BIN (default /opt/hal0/rocmfp4-llama/build/bin), warning
-#      + skipping with build instructions if the path is absent,
-#   3. seeds a gpu-rocmfp4 slot TOML (with the HSA_OVERRIDE_GFX_VERSION guard
-#      documented inline),
-#   4. leaves a guard/repair note for the known stale-HSA-override crash after a
-#      ROCm bundle upgrade.
-# Every failure mode here is a `warn` + `continue past` — NEVER fatal — so the
-# rest of the install is unaffected. Skipped entirely on --dev (no system
-# Lemonade config to patch).
-if [[ "${ENABLE_ROCMFP4}" -eq 1 && "${DEV_MODE}" -eq 0 ]]; then
-    info "ROCmFP4 power pack requested (--rocmfp4 / HAL0_ENABLE_ROCMFP4=1) — opt-in, not default"
-
-    # Default fork binary location. Built out-of-band (see installer/README.md
-    # "ROCmFP4 power pack (opt-in)"); override with HAL0_ROCMFP4_BIN. May be the
-    # real llama-server or the LD_LIBRARY_PATH + HSA-override wrapper that execs it.
-    ROCMFP4_BIN="${HAL0_ROCMFP4_BIN:-/opt/hal0/rocmfp4-llama/build/bin/llama-server}"
-    # gfx1151 maps to HSA_OVERRIDE_GFX_VERSION=11.5.1. Overridable in case a
-    # future ROCm bundle wants a different tag (see the stale-override note below).
-    ROCMFP4_HSA_OVERRIDE="${HAL0_ROCMFP4_HSA_OVERRIDE:-11.5.1}"
-    ROCMFP4_SLOT_MODEL="${HAL0_ROCMFP4_MODEL:-Qwen3.6-27B-MTP-GGUF}"
-
-    rocmfp4_eligible=1
-    # Eligibility: AMD ROCm + gfx1151 (Strix Halo). Best-effort, never fatal.
-    # rocminfo is the authoritative probe; fall back to the Lemonade ROCm
-    # bundle's per-arch dir (bin/therock/gfx1151-*) which only exists on a
-    # gfx1151 ROCm host. If neither signal is present we warn + skip.
-    rocmfp4_gfx_seen=""
-    if command -v rocminfo >/dev/null 2>&1; then
-        if rocminfo 2>/dev/null | grep -qi "gfx1151"; then
-            rocmfp4_gfx_seen="rocminfo:gfx1151"
-        fi
-    fi
-    if [[ -z "${rocmfp4_gfx_seen}" ]] \
-        && compgen -G "${LEMONADE_PREFIX}/bin/therock/gfx1151-*" >/dev/null 2>&1; then
-        rocmfp4_gfx_seen="lemonade-bundle:gfx1151"
-    fi
-    if [[ -z "${rocmfp4_gfx_seen}" ]]; then
-        rocmfp4_eligible=0
-        warn "ROCmFP4 power pack: host does not look gfx1151 / ROCm-eligible"
-        warn "  (no rocminfo gfx1151 and no ${LEMONADE_PREFIX}/bin/therock/gfx1151-* bundle)"
-        warn "  This pack is Strix Halo (gfx1151) + ROCm only — skipping cleanly."
-    fi
-
-    if [[ "${rocmfp4_eligible}" -eq 1 ]]; then
-        if [[ ! -x "${ROCMFP4_BIN}" ]]; then
-            warn "ROCmFP4 power pack: fork binary not found / not executable at ${ROCMFP4_BIN}"
-            warn "  The charlie12345/rocmfp4-llama fork is built OUT-OF-BAND (it ships new"
-            warn "  ggml quant types stock llama.cpp cannot load). Build it, then re-run with"
-            warn "  --rocmfp4 (or set HAL0_ROCMFP4_BIN=/path/to/llama-server):"
-            warn "    1. clone github.com/charlie12345/rocmfp4-llama (branch mtp-rocmfp4-strix)"
-            warn "    2. build in a rocm/dev-ubuntu-24.04:7.2.1-complete container (docker run"
-            warn "       --security-opt apparmor=unconfined on an LXC host)"
-            warn "    3. install the binary (+ its ROCm libs) under ${ROCMFP4_BIN%/*}"
-            warn "  Skipping the power pack — the rest of the install is unaffected."
-        else
-            info "ROCmFP4 power pack: using fork binary ${ROCMFP4_BIN}"
-
-            # 1. Wire the GLOBAL rocm_bin override into the Lemonade config we
-            #    just wrote. rocm_bin is global to the rocm backend, but every
-            #    OTHER hal0 slot runs Vulkan (backend=vulkan), so isolation is
-            #    clean — only gpu-rocm slots pick up the fork. Patch in place via
-            #    an atomic tempfile + rename so a crash mid-write can't leave
-            #    lemond parsing half-written JSON. Idempotent.
-            if [[ -f "${LEMONADE_CONFIG_JSON}" ]]; then
-                ROCMFP4_CFG_TMP="$(mktemp "${LEMONADE_CONFIG_JSON}.XXXXXX")"
-                if "${PY}" - "${LEMONADE_CONFIG_JSON}" "${ROCMFP4_BIN}" "${ROCMFP4_CFG_TMP}" <<'PYROCMFP4'
-import json, sys
-src, rocm_bin, dst = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(src) as f:
-    cfg = json.load(f)
-lc = cfg.setdefault("llamacpp", {})
-lc["rocm_bin"] = rocm_bin
-with open(dst, "w") as f:
-    json.dump(cfg, f, indent=2)
-    f.write("\n")
-print("set llamacpp.rocm_bin =", rocm_bin)
-PYROCMFP4
-                then
-                    chown hal0:hal0 "${ROCMFP4_CFG_TMP}" 2>/dev/null || true
-                    chmod 0644 "${ROCMFP4_CFG_TMP}"
-                    mv "${ROCMFP4_CFG_TMP}" "${LEMONADE_CONFIG_JSON}"
-                    info "wired llamacpp.rocm_bin → ${ROCMFP4_BIN} in ${LEMONADE_CONFIG_JSON}"
-                    info "  restart hal0-lemonade for it to take effect (not a live /v1/params key)"
-                else
-                    rm -f "${ROCMFP4_CFG_TMP}"
-                    warn "ROCmFP4 power pack: failed to patch rocm_bin into ${LEMONADE_CONFIG_JSON} — skipped"
-                fi
-            else
-                warn "ROCmFP4 power pack: ${LEMONADE_CONFIG_JSON} absent — cannot set rocm_bin, skipped"
-            fi
-
-            # 2. Seed the gpu-rocmfp4 slot. Never overwrite an existing one (an
-            #    operator may have tuned extra_args / picked a different FP4
-            #    model). The slot loads via device=gpu-rocm → llamacpp_backend=rocm,
-            #    so it inherits the global rocm_bin fork. extra_args carries the
-            #    MTP / self-speculative flags; --parallel 1 (mandatory for MTP) and
-            #    -fa on / --no-mmap come from the global llamacpp.args.
-            ROCMFP4_SLOT_TOML="${ETC_DIR}/slots/gpu-rocmfp4.toml"
-            if [[ -f "${ROCMFP4_SLOT_TOML}" ]]; then
-                info "ROCmFP4 power pack: ${ROCMFP4_SLOT_TOML} exists — left alone"
-            else
-                mkdir -p "${ETC_DIR}/slots"
-                cat > "${ROCMFP4_SLOT_TOML}" <<ROCMFP4SLOT
-# hal0 ROCmFP4 + MTP slot — OPT-IN power pack (issue #516, decision D5).
-#
-# Seeded ONLY when install.sh is run with --rocmfp4 / HAL0_ENABLE_ROCMFP4=1 on a
-# gfx1151 + ROCm host with the charlie12345/rocmfp4-llama fork binary present.
-# NOT part of the default install and NOT auto-enabled by the hal0-max bundle.
-#
-# Requires the global rocm_bin override (llamacpp.rocm_bin in
-# /var/lib/hal0/lemonade/config.json → ${ROCMFP4_BIN}) — the stock Lemonade
-# llama-server cannot load these FP4 GGUFs (new ggml quant types).
-#
-# HSA_OVERRIDE_GFX_VERSION guard: this path needs HSA_OVERRIDE_GFX_VERSION set
-# (gfx1151 → ${ROCMFP4_HSA_OVERRIDE}). It is carried by the fork wrapper binary,
-# NOT by this slot. KNOWN CRASH MODE: after a Lemonade ROCm-bundle upgrade that
-# adds native gfx1151 kernels, a STALE override (e.g. an old gfx1100 / 11.0.0
-# drop-in) makes rocBLAS look up the wrong arch and crash llama-server on first
-# inference ("Cannot read TensileLibrary.dat ... gfx1100"), surfacing as a chat
-# 502. REPAIR: ls /var/lib/hal0/lemonade/bin/therock/ — if gfx1151-* exists, the
-# override is no longer needed; disable any stale
-# /etc/systemd/system/hal0-lemonade.service.d/rocm-gfx-override.conf (rename to
-# .disabled-<date>), systemctl daemon-reload, systemctl restart hal0-lemonade.
-# If still needed for a different arch tag, set it to match (e.g. ${ROCMFP4_HSA_OVERRIDE}).
-
-name = "gpu-rocmfp4"
-provider = "lemonade"
-port = 8188
-device = "gpu-rocm"
-backend = "rocm"
-
-[model]
-default = "${ROCMFP4_SLOT_MODEL}"
-context_size = 8192
-
-[server]
-# MTP / self-speculative decoding flags (the NextN head is baked into the GGUF
-# — no separate draft model). Global llamacpp.args already supplies
-# --parallel 1 -fa on --no-mmap --threads N. For a vision FP4 model, append
-# --mmproj /path/to/mmproj (vision runs WITHOUT mtp per the fork author).
-extra_args = "--spec-type draft-mtp -ctk q4_0 -ctv q4_0 -b 512 -ub 512"
-ROCMFP4SLOT
-                chmod 0644 "${ROCMFP4_SLOT_TOML}"
-                info "seeded ROCmFP4 slot → ${ROCMFP4_SLOT_TOML} (model ${ROCMFP4_SLOT_MODEL})"
-                info "  HSA_OVERRIDE_GFX_VERSION guard + stale-override repair documented inline"
-            fi
-        fi
-    fi
-fi
-
-# ── Lemonade server_models.json generation (issue #141) ───────────────────
-# Convert hal0's registry.toml into the curated catalog Lemonade Server
-# loads from ``resources/server_models.json``. Must run BEFORE
-# ``systemctl enable --now lemond`` so the daemon picks up our entries on
-# first start (Lemonade re-reads the file on probe, so a later sync
-# does not strictly require a restart).
-#
-# Guarded by the presence of the Lemonade resources directory: installs
-# that have not yet bundled Lemonade (issue #140 lands the tarball) are
-# skipped silently. Once #140 lands, this block becomes the canonical
-# install-time wiring without further changes here.
-#
-# Idempotent: re-running install.sh overwrites server_models.json via
-# atomic tempfile + rename. See ADR-0006 §4 + ``src/hal0/lemonade/server_models_gen.py``.
-ui_step "Lemonade server_models.json"
-
-LEMONADE_RESOURCES="/opt/lemonade/resources"
-LEMONADE_SERVER_MODELS="${LEMONADE_RESOURCES}/server_models.json"
-REGISTRY_TOML="${VAR_DIR}/registry/registry.toml"
-
-if [[ "${DEV_MODE}" -eq 0 && -d "${LEMONADE_RESOURCES}" ]]; then
-    if [[ ! -f "${REGISTRY_TOML}" ]]; then
-        info "registry.toml not found at ${REGISTRY_TOML}; writing curated stock catalog (#210)"
-    fi
-    if "${VENV_DIR}/bin/python" -m hal0.lemonade.server_models_gen \
-        --registry "${REGISTRY_TOML}" \
-        --output "${LEMONADE_SERVER_MODELS}"; then
-        # Issue #211: the file lands 0644 (set by the generator) but is
-        # owned by root because the dir-wide `chown -R hal0:hal0
-        # ${LEMONADE_PREFIX}` above ran BEFORE this file was created.
-        # Re-chown the file we just wrote so hal0-lemonade can update
-        # entries (e.g. add backend versions) without escalating.
-        chown hal0:hal0 "${LEMONADE_SERVER_MODELS}" 2>/dev/null || true
-        info "wrote ${LEMONADE_SERVER_MODELS}"
-    else
-        warn "server_models_gen failed; Lemonade will fall back to its bundled catalog"
-    fi
-else
-    info "skipping (Lemonade resources dir ${LEMONADE_RESOURCES} not present yet)"
 fi
 
 # ── Bundle picker manifests (ADR-0010 / PR-17) ────────────────────────────
@@ -1617,53 +991,6 @@ if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
     warn "  start manually: ${HAL0_BIN} serve --host ${API_BIND_HOST} --port ${HAL0_PORT}"
 else
-    # Lemonade FIRST — hal0-api may resolve capability state from
-    # /v1/health on its own boot, and the lemond start is the slowest
-    # of the three (ROCm/Vulkan backend init). Soft on failure: hal0-api
-    # still serves the dashboard and surfaces the dead-lemond banner
-    # rather than the installer aborting.
-    if [[ -f "${UNIT_DIR}/hal0-lemonade.service" ]]; then
-        systemctl enable --now hal0-lemonade
-        if wait_active hal0-lemonade 30; then
-            info "hal0-lemonade is running (loopback :13305)"
-
-            # Pre-warm the default (Vulkan) backend binary. lemond pulls
-            # the build matching the b9496 pin lazily on first model load
-            # — without this, the user's first chat after install blocks
-            # on a ~33 MB download + extract. Eagerly fetching it here
-            # (only ~33 MB; ROCm + its 4.9 GB therock libs stay lazy,
-            # pulled only if a ROCm slot is selected) makes the first
-            # load instant. Fail-soft: a download miss just defers the
-            # pull to first load, exactly as before. systemd-active does
-            # not mean the REST API is listening yet, so poll health
-            # first. Skipped if curl is unavailable.
-            if command -v curl >/dev/null 2>&1; then
-                LEMONADE_READY=0
-                for _ in $(seq 1 20); do
-                    if curl -fsS -m 2 http://127.0.0.1:13305/api/v1/health >/dev/null 2>&1; then
-                        LEMONADE_READY=1
-                        break
-                    fi
-                    sleep 1
-                done
-                if [[ "${LEMONADE_READY}" -eq 1 ]]; then
-                    if ui_spinner_run "Pre-warming Vulkan backend (${LLAMACPP_PIN:-pinned} build)" \
-                        curl -fsS -m 300 -X POST http://127.0.0.1:13305/api/v1/install \
-                            -H 'Content-Type: application/json' \
-                            -d '{"recipe":"llamacpp","backend":"vulkan"}'; then
-                        info "Vulkan backend ready (first model load won't wait on a download)"
-                    else
-                        warn "Vulkan pre-warm failed — lemond will pull the binary on first load instead"
-                    fi
-                else
-                    warn "lemond REST not ready in time — skipping pre-warm (binary pulls on first load)"
-                fi
-            fi
-        else
-            warn "hal0-lemonade not yet active; check 'journalctl -u hal0-lemonade -n 60'"
-        fi
-    fi
-
     systemctl enable --now hal0-api
     if wait_active hal0-api 15; then
         info "hal0-api is running"

@@ -46,9 +46,9 @@ dev:
 
 # ── Test tiers (PLAN §10) ────────────────────────────────────────────────────
 # α — unit. Pure pytest. No systemd, no docker. ~3s.
-# β — integration. Retired in v0.2 — lemond is supervised by systemd
-#     directly; per-slot template + toolbox containers are gone (ADR-0008 §2).
-#     Replacement integration shape lands with PR-8 / PR-10.
+# β — integration. Retired in v0.2 — runtime services are plain systemd
+#     units (hal0-api + per-slot hal0-slot@<name> podman units), exercised
+#     by the γ gate + tests/harness instead of a dedicated β tier.
 # γ — release-gate. NPU + ROCm + Vulkan on hal0-test LXC. Not per-commit.
 
 test: test-unit
