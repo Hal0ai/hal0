@@ -29,17 +29,8 @@ dependencies = [
   "pydantic-settings>=2.6",
   "typer>=0.15",
   "structlog>=24.4",
-  "sse-starlette>=2.1",
   "tomli-w>=1.0",
   "rich>=13.9",
-  # Argon2id hashing for the bearer-token store at /etc/hal0/tokens.toml.
-  "argon2-cffi>=23.1",
-  # Owner password is bcrypt-hashed (ADR-0001 Child A, #55).
-  "bcrypt>=4.0",
-  # ADR-0001 Child A (#55): session cookie carries a signed JWT (HS256)
-  # so a process restart doesn't sign every browser session out. The
-  # signing key lives under HAL0_HOME and is generated on first use.
-  "PyJWT>=2.8",
   # ADR-0005 (Phase 8): Cognee is hal0's embedded memory engine.
   # Apache 2.0; pulls aiosqlite + lancedb + kuzu underneath. Verified
   # 2026-05-22 to NOT pull torch / nvidia / cuda wheels on a CPU-only

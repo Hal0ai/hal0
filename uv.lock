@@ -1383,8 +1383,6 @@ name = "hal0"
 version = "0.3.2a1"
 source = { editable = "." }
 dependencies = [
-    { name = "argon2-cffi" },
-    { name = "bcrypt" },
     { name = "cognee" },
     { name = "fastapi" },
     { name = "fastembed" },
@@ -1393,10 +1391,8 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "pyjwt" },
     { name = "pyyaml" },
     { name = "rich" },
-    { name = "sse-starlette" },
     { name = "structlog" },
     { name = "tomli-w" },
     { name = "typer" },
@@ -1418,8 +1414,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "argon2-cffi", specifier = ">=23.1" },
-    { name = "bcrypt", specifier = ">=4.0" },
     { name = "cognee", specifier = "==1.0.7" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastembed", specifier = ">=0.8,<1.0" },
@@ -1431,7 +1425,6 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pyjwt", specifier = ">=2.8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
@@ -1440,7 +1433,6 @@ requires-dist = [
     { name = "rich", specifier = ">=13.9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "soundfile", marker = "extra == 'dev'", specifier = ">=0.12" },
-    { name = "sse-starlette", specifier = ">=2.1" },
     { name = "structlog", specifier = ">=24.4" },
     { name = "tomli-w", specifier = ">=1.0" },
     { name = "typer", specifier = ">=0.15" },
