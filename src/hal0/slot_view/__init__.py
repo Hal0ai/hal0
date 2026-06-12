@@ -244,6 +244,19 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             entry["labels"] = model_labels
         entry["enabled"] = enabled
 
+        # ctx_max: the configured context window. The canonical TOML key is
+        # ``[model].context_size`` (the dashboard's ``ctx_size`` alias is
+        # folded to it on write — see slots.manager). Surfaced so the
+        # Inference engine pane can render "ctx used / max" without a
+        # per-slot /config fetch. Absent → key omitted; the UI shows an
+        # em-dash rather than a fabricated number.
+        if isinstance(model_section, dict):
+            ctx_max = model_section.get("context_size")
+            if ctx_max is None:
+                ctx_max = model_section.get("ctx_size")
+            if isinstance(ctx_max, int):
+                entry["ctx_max"] = ctx_max
+
         # Spec 1 / Component 1: surface the three edit-panel config fields so
         # the card + drawer seed their controls without a per-slot /config
         # fetch. ``enable_thinking`` is tri-valued on disk (true/false/absent);

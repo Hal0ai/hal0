@@ -77,6 +77,11 @@ export interface Slot {
   /** GPU offload layer count for the slot's model (-1 = all). Seeds the
    *  drawer's Advanced n_gpu_layers input. */
   n_gpu_layers?: number
+  /** Configured context window ([model].context_size). Surfaced by
+   *  config_enrichment so the Inference engine pane can render "ctx
+   *  used / max". Absent when the slot configures no context window —
+   *  the UI shows an em-dash, never a fabricated number. */
+  ctx_max?: number
   /** Wall-clock epoch (seconds) of the most recent request served by
    *  this slot. ``null``/undefined means hal0-api has not seen a request
    *  for this slot since startup. Used by the slots view to render the

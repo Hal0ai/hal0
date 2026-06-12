@@ -280,6 +280,22 @@ class TestConfigEnrichment:
         assert e["llamacpp_args"] == "--flash-attn on"
         assert e["npu"] == {"asr": True, "embed": False}
 
+    def test_ctx_max_from_context_size(self) -> None:
+        # The Inference engine pane reads ctx_max to render "ctx used / max".
+        # Canonical key is [model].context_size.
+        cfg = _llm_cfg()
+        cfg["model"]["context_size"] = 32768
+        out = config_enrichment([cfg])
+        assert out["chat"]["ctx_max"] == 32768
+
+    def test_ctx_max_from_ctx_size_alias(self) -> None:
+        # The dashboard write-path alias ``ctx_size`` is honoured as a
+        # fallback (it is folded to context_size on disk, but tolerate both).
+        cfg = _llm_cfg()
+        cfg["model"]["ctx_size"] = 16384
+        out = config_enrichment([cfg])
+        assert out["chat"]["ctx_max"] == 16384
+
     def test_absent_config_fields_surface_as_defaults(self) -> None:
         out = config_enrichment([_llm_cfg()])
         e = out["chat"]
@@ -290,6 +306,8 @@ class TestConfigEnrichment:
         assert e["workers"] is None
         assert e["llamacpp_args"] is None
         assert "npu" not in e
+        # ctx_max is omitted when the slot configures no context window.
+        assert "ctx_max" not in e
 
 
 # ── loaded-model derivation from slot snapshots ──────────────────────────────
