@@ -25,6 +25,13 @@ import os
 import tempfile
 from pathlib import Path
 
+# Every character ``str.splitlines()`` treats as a line boundary. The file
+# is re-read with ``.splitlines()`` (see ``list_env_keys`` / the upsert
+# rewrite), so any of these inside a value could split the stored line into
+# a phantom ``KEY=value`` entry on round-trip — even the higher-codepoint
+# ones (NEL/LS/PS) that a ``< 0x20`` byte check misses. We refuse them all.
+_LINE_BREAK_CHARS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
 
 def _escape(value: str) -> str:
     """Escape a secret for a double-quoted ``EnvironmentFile`` value.
@@ -79,17 +86,19 @@ def upsert_env_value(api_env: Path, key: str, value: str) -> None:
     place; otherwise the line is appended. Raises :class:`OSError` on any
     read/write failure — callers wrap it in their own error envelope.
 
-    Writer-level guard (defense-in-depth): a ``\\n`` / ``\\r`` in ``value``
-    would terminate the quoted env-file line and let everything after it
-    parse as a *new* ``KEY=value`` entry — i.e. arbitrary env-var
+    Writer-level guard (defense-in-depth): a line-break character in
+    ``value`` would terminate the quoted env-file line and let everything
+    after it parse as a *new* ``KEY=value`` entry — i.e. arbitrary env-var
     injection into api.env. We escape backslash + double-quote (so the
-    secret round-trips), but escaping can't neutralise a raw newline, so
-    we refuse it outright. Route-level validation should reject control
-    chars before reaching here; this guard ensures no future caller can
+    secret round-trips), but escaping can't neutralise a raw line break, so
+    we refuse the whole ``str.splitlines()`` set outright (not just
+    ``\\n``/``\\r`` — also NEL/LS/PS, which the file's own ``.splitlines()``
+    re-read would split on). Route-level validation should reject these
+    before reaching here; this guard ensures no future caller can
     reintroduce the hole.
     """
-    if "\n" in value or "\r" in value:
-        raise ValueError("env value must not contain newline or carriage-return characters")
+    if _LINE_BREAK_CHARS.intersection(value):
+        raise ValueError("env value must not contain line-break characters")
 
     existing = ""
     with contextlib.suppress(FileNotFoundError):

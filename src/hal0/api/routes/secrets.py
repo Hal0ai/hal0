@@ -161,16 +161,23 @@ async def list_secrets() -> dict[str, Any]:
 
 
 def _validate_value(value: str, key: str) -> None:
-    """Reject empty / control-char values.
+    """Reject empty / non-printable values.
 
     A control character — most dangerously ``\\n`` / ``\\r`` — would let a
     value break out of its quoted line in api.env and inject a new
     ``KEY=value`` env-var (the file is an unauthenticated, LAN-writable
-    systemd ``EnvironmentFile``). Refuse any char ``< 0x20`` or ``0x7f``.
+    systemd ``EnvironmentFile``). We reject any non-printable character via
+    ``str.isprintable()``: this covers the C0 controls + ``0x7f`` *and* the
+    higher-codepoint line separators (NEL ``U+0085``, LS ``U+2028``, PS
+    ``U+2029``) that an ``ord(ch) < 0x20`` test misses but Python's
+    ``str.splitlines()`` — which ``_env_store`` uses to re-read api.env —
+    splits on, so they could still inject a phantom line on round-trip.
+    Regular space is printable and allowed; every secret value we expect
+    (tokens, keys, URLs) is printable.
     """
     if not value:
         raise SecretValueInvalid("secret value must be non-empty", details={"name": key})
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+    if not value.isprintable():
         raise SecretValueInvalid(
             "control characters not allowed in secret value",
             details={"name": key},

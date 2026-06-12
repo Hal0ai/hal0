@@ -115,7 +115,19 @@ def test_invalid_names_rejected(client: TestClient, name: str) -> None:
 
 @pytest.mark.parametrize(
     "payload",
-    ["line1\nEVIL=pwned", "x\rEVIL=pwned", "tab\there", "bell\x07x", "del\x7fx"],
+    [
+        "line1\nEVIL=pwned",
+        "x\rEVIL=pwned",
+        "tab\there",
+        "bell\x07x",
+        "del\x7fx",
+        # higher-codepoint line separators an `ord < 0x20` check misses but
+        # str.splitlines() (used to re-read api.env) splits on — these are
+        # the real env-injection vector once the carrier line is rewritten.
+        "x\x85INJECT=evil",  # NEL  U+0085
+        "x\u2028INJECT=evil",  # LS   U+2028
+        "x\u2029INJECT=evil",  # PS   U+2029
+    ],
 )
 def test_set_rejects_control_chars_in_value(
     client: TestClient,
@@ -133,15 +145,15 @@ def test_set_rejects_control_chars_in_value(
     assert "INJECT" not in os.environ
 
 
-def test_writer_guard_rejects_newline(tmp_path: Path) -> None:
-    """Defense-in-depth: the shared writer itself refuses \\n / \\r."""
+def test_writer_guard_rejects_line_breaks(tmp_path: Path) -> None:
+    """Defense-in-depth: the shared writer refuses the full str.splitlines()
+    set — \\n / \\r AND the higher-codepoint NEL/LS/PS separators."""
     from hal0.api._env_store import upsert_env_value
 
     target = tmp_path / "api.env"
-    with pytest.raises(ValueError, match="newline"):
-        upsert_env_value(target, "KEY", "a\nEVIL=x")
-    with pytest.raises(ValueError, match="newline"):
-        upsert_env_value(target, "KEY", "a\rEVIL=x")
+    for payload in ("a\nEVIL=x", "a\rEVIL=x", "a\x85EVIL=x", "a\u2028EVIL=x", "a\u2029EVIL=x"):
+        with pytest.raises(ValueError, match="line-break"):
+            upsert_env_value(target, "KEY", payload)
     # Nothing written.
     assert not target.exists()
 
