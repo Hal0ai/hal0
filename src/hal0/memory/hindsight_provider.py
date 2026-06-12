@@ -89,12 +89,17 @@ class HindsightProvider(MemoryProvider):
         client: Any,
         client_id: str = "anonymous",
         reranker: Any = None,
+        graph_enabled: bool = False,
+        graph_route: str = "upstream",
     ) -> None:
         self._client = client
         self._client_id = client_id
         self._reranker = reranker
-        self._graph_enabled = False
-        self._graph_route = "upstream"
+        # ADR-0014 gate — reporting-only on this engine (Hindsight builds its
+        # graph natively); seeded from [memory.graph] so graph_status() agrees
+        # with hal0.toml instead of always reading disabled.
+        self._graph_enabled = bool(graph_enabled)
+        self._graph_route = graph_route
         self._rerank_enabled = reranker is not None
 
     @property

@@ -73,3 +73,20 @@ def test_factory_default_engine_is_hindsight_after_cutover():
     ):
         provider_from_config(cfg)
         assert mock_cls.called
+
+
+def test_factory_seeds_hindsight_graph_gate_from_config():
+    """hal0.toml [memory.graph] must reach the provider — the dashboard's
+    graph panel reads graph_status() and previously always saw enabled=False
+    regardless of config (config/runtime drift on CT105)."""
+    from hal0.memory.hindsight_provider import HindsightProvider
+
+    cfg = _cfg("hindsight")
+    cfg.memory.graph = SimpleNamespace(enabled=True, route="upstream")
+    with patch("hal0.memory._build_hindsight_client", return_value=object()):
+        provider = provider_from_config(cfg)
+
+    assert isinstance(provider, HindsightProvider)
+    status = provider.graph_status()
+    assert status["enabled"] is True
+    assert status["route"] == "upstream"

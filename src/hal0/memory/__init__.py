@@ -95,7 +95,12 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
             connect_timeout_s=float(embed.rerank_connect_timeout_s),
             read_timeout_s=float(embed.rerank_read_timeout_s),
         )
-        return HindsightProvider(client=client, reranker=reranker)
+        return HindsightProvider(
+            client=client,
+            reranker=reranker,
+            graph_enabled=bool(graph.enabled),
+            graph_route=str(graph.route),
+        )
 
     if engine == "pgvector":
         return PgVectorProvider()
