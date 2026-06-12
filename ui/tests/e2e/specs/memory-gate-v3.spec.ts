@@ -8,7 +8,8 @@
  * pins the UI half of that contract for the OFF state:
  *
  *   - the sidebar drops the "Agent" nav item entirely
- *   - a deep link to #agent shows a "disabled" notice, not the Memory tab
+ *   - a deep link to #agent redirects to #dashboard (stale deep links bounce,
+ *     no dead-text "disabled" notice)
  *   - the sidebar Runtime widget carries no dead-end "Memory →" link
  *     (the widget consolidated the old SidebarAgentBlock; its agent row now
  *     deep-links to the Hermes dashboard, never the gated Memory route)
@@ -42,11 +43,15 @@ test.describe('memory gate OFF (HAL0_MEMORY_ENABLED unset)', () => {
     await expect(navList.getByText('Agent', { exact: true })).toHaveCount(0)
   })
 
-  test('deep link to #agent shows the disabled notice, not the Memory tab', async ({ page }) => {
+  test('deep link to #agent redirects to #dashboard when memory is disabled', async ({ page }) => {
     await page.goto('/#agent')
-    await expect(page.getByText('The memory surface is disabled in this release.')).toBeVisible({
-      timeout: FIVE_S,
-    })
+    // 0.4: stale deep links bounce to #dashboard instead of showing a
+    // dead-text disabled notice. Wait for the hash to leave #agent.
+    await page.waitForFunction(
+      () => !window.location.hash.startsWith('#agent'),
+      { timeout: FIVE_S }
+    )
+    // Neither memory surface element should ever appear
     await expect(page.locator('[data-testid="memory-tab"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="agent-tab-nav"]')).toHaveCount(0)
   })
