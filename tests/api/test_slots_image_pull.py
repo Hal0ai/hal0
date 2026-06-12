@@ -246,6 +246,54 @@ def test_pull_stream_missing_when_no_job(container_client: TestClient) -> None:
     assert payload["state"] == "missing"
 
 
+# ── GET /api/slots/{name}/pull/status tests (poll fallback, recon-api #9) ─────
+
+
+def test_pull_status_returns_job_snapshot_when_active(
+    container_client: TestClient,
+    container_app: FastAPI,
+) -> None:
+    """GET /pull/status returns the in-flight job snapshot when a pull is active."""
+    from hal0.api.routes.slots import _ImagePullJob
+
+    job = _ImagePullJob("gpu-chat", "ghcr.io/hal0ai/test:tag")
+    job.layer = 2
+    job.total_layers = 5
+    container_app.state.slot_pull_jobs = {"gpu-chat": job}
+
+    r = container_client.get("/api/slots/gpu-chat/pull/status")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["slot_name"] == "gpu-chat"
+    assert body["state"] == "pulling"
+    assert body["layer"] == 2
+    assert body["total_layers"] == 5
+
+
+def test_pull_status_present_when_no_job(container_client: TestClient) -> None:
+    """GET /pull/status with no active job + image present → state=present."""
+    fake_catalog, _ = _fake_profile_catalog()
+    with (
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.providers.container.ContainerProvider.image_present", return_value=True),
+    ):
+        r = container_client.get("/api/slots/gpu-chat/pull/status")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "present"
+
+
+def test_pull_status_missing_when_no_job(container_client: TestClient) -> None:
+    """GET /pull/status with no active job + image absent → state=missing."""
+    fake_catalog, _ = _fake_profile_catalog()
+    with (
+        patch("hal0.config.loader.load_profiles_config", return_value=fake_catalog),
+        patch("hal0.providers.container.ContainerProvider.image_present", return_value=False),
+    ):
+        r = container_client.get("/api/slots/gpu-chat/pull/status")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "missing"
+
+
 # ── ContainerProvider.image_present() unit tests ──────────────────────────────
 
 

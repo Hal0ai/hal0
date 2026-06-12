@@ -1539,3 +1539,69 @@ async def pull_slot_image_stream(name: str, request: Request) -> StreamingRespon
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/{name}/pull/status")
+async def pull_slot_image_status(name: str, request: Request) -> dict[str, object]:
+    """Poll fallback for container image-pull progress (mirror of #9).
+
+    The SSE stream (``/{name}/pull/stream``) is the live path; this is the
+    one-shot poll equivalent for clients that can't hold an EventSource
+    open. Returns the in-flight job snapshot when a pull is active,
+    otherwise inspects the slot's image and reports ``present`` |
+    ``missing`` — the same terminal vocabulary the stream's no-job branch
+    emits, so a poller and a streamer converge on the same states.
+
+    Frame shape::
+
+        {"slot_name": "...", "image": "...", "state": "...",
+         "layer": N, "total_layers": M, "error": null}
+
+    States: ``pulling`` | ``completed`` | ``failed`` | ``present`` |
+    ``missing``.
+    """
+    slot_pull_jobs: dict[str, Any] = getattr(request.app.state, "slot_pull_jobs", {})
+    job = slot_pull_jobs.get(name)
+    if job is not None:
+        return job.as_dict()
+
+    # No active pull — resolve the slot's image + inspect presence so the
+    # poller gets the same present|missing terminal the SSE stream emits.
+    image: str | None = None
+    try:
+        sm = _get_slot_manager(request)
+        configs = await sm.iter_configs()
+        for cfg in configs:
+            if str(cfg.get("name", "")) == name:
+                profile_name = str(cfg.get("profile") or "")
+                if profile_name:
+                    from hal0.config.loader import load_profiles_config
+
+                    catalog = load_profiles_config()
+                    prof = catalog.profile.get(profile_name)
+                    if prof:
+                        image = prof.image
+                break
+    except Exception:
+        pass
+
+    state = "missing"
+    if image:
+        try:
+            from hal0.providers.container import container_provider
+
+            present = await asyncio.get_event_loop().run_in_executor(
+                None, container_provider().image_present, image
+            )
+            state = "present" if present else "missing"
+        except Exception:
+            state = "missing"
+
+    return {
+        "slot_name": name,
+        "image": image,
+        "state": state,
+        "layer": 0,
+        "total_layers": 0,
+        "error": None,
+    }
