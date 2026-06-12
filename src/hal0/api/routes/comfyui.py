@@ -276,11 +276,14 @@ def _model_inventory() -> dict[str, int] | None:
 
 
 def _engine_state(container: str, reachable: bool, running_jobs: int) -> str:
-    if container != "running":
-        return "stopped"
-    if not reachable:
+    # A reachable ComfyUI IS the engine truth — the docker name probe can't
+    # see the podman hal0-slot-img container (post-D9 it reports "absent"
+    # forever), and the resident container must not render as "stopped".
+    if reachable:
+        return "generating" if running_jobs > 0 else "running"
+    if container == "running":
         return "starting"  # container up but ComfyUI hasn't bound the port yet
-    return "generating" if running_jobs > 0 else "running"
+    return "stopped"
 
 
 def _get_arbiter(request: Request) -> Any | None:

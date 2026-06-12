@@ -120,6 +120,19 @@ def test_status_starting_when_container_running_but_http_unreachable(client: Tes
     assert body["memory"] is None
 
 
+def test_status_engine_running_when_reachable_but_container_probe_blind(
+    client: TestClient,
+) -> None:
+    # Post-D9 the docker probe can't see the podman hal0-slot-img container
+    # ("absent" forever) — a reachable ComfyUI IS the engine truth. Without
+    # this, the resident container renders engine "stopped" 24/7 in the pane.
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_idle)
+    with c, s, f:
+        body = client.get("/api/comfyui/status").json()
+    assert body["reachable"] is True
+    assert body["engine"] == "running"
+
+
 def test_status_stopped_and_inference_mode_when_container_absent(client: TestClient) -> None:
     # ComfyUI down, LLM stack up → inference owns the GPU.
     c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
