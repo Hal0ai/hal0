@@ -15,10 +15,8 @@ TOML files as the source of truth; a fully reactive editor lands later.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import re
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +24,7 @@ import structlog
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+from hal0.api._env_store import upsert_env_value
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
@@ -183,73 +182,19 @@ async def list_providers(request: Request) -> list[dict[str, Any]]:
 def _write_credential_to_api_env(api_env: Path, key: str, value: str) -> None:
     """Upsert ``key=<quoted-value>`` in ``api_env`` atomically.
 
-    Mirrors the tmp-file + ``os.replace`` posture used by
-    ``hal0.api.routes.auth._set_auth_disabled_in_env``: if a line for
-    ``key`` exists (commented or not) it is replaced in place;
-    otherwise the line is appended. Values are double-quoted with
-    embedded quotes/backslashes escaped so systemd's EnvironmentFile
-    parser sees the literal secret.
+    Thin wrapper over :func:`hal0.api._env_store.upsert_env_value` — the
+    atomic tmp-file + ``os.replace`` + mode-0600 writer now lives in the
+    shared env store so the ``/api/secrets`` router writes to the same
+    file with identical posture. Read/write failures surface as
+    :class:`ProviderCredentialError` so the route's envelope is unchanged.
     """
-    api_env.parent.mkdir(parents=True, exist_ok=True)
-    existing = ""
     try:
-        existing = api_env.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        pass
+        upsert_env_value(api_env, key, value)
     except OSError as exc:
         raise ProviderCredentialError(
-            f"could not read {api_env}: {exc}",
+            f"could not write {api_env}: {exc}",
             details={"path": str(api_env), "error": str(exc)},
         ) from exc
-
-    # systemd EnvironmentFile= treats double-quoted values as a single
-    # token with the outer quotes stripped. Escape backslash + double
-    # quote so the secret round-trips verbatim.
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    new_line = f'{key}="{escaped}"\n'
-
-    lines = existing.splitlines(keepends=True) if existing else []
-    rewritten: list[str] = []
-    replaced = False
-    prefix_plain = f"{key}="
-    prefix_commented = f"# {key}="
-    prefix_commented_tight = f"#{key}="
-    for line in lines:
-        stripped = line.lstrip()
-        if (
-            stripped.startswith(prefix_plain)
-            or stripped.startswith(prefix_commented)
-            or stripped.startswith(prefix_commented_tight)
-        ):
-            if not replaced:
-                rewritten.append(new_line)
-                replaced = True
-            continue
-        rewritten.append(line)
-    if not replaced:
-        if rewritten and not rewritten[-1].endswith("\n"):
-            rewritten.append("\n")
-        rewritten.append(new_line)
-
-    fd, tmp_str = tempfile.mkstemp(
-        prefix=f".{api_env.name}.",
-        suffix=".tmp",
-        dir=str(api_env.parent),
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("".join(rewritten))
-            f.flush()
-            os.fsync(f.fileno())
-        # Mode 0600 — this file now holds a secret. Tighter than the
-        # auth.env defaults because provider keys are higher-value than
-        # the toggle line that lives next to them.
-        os.chmod(tmp_str, 0o600)
-        os.replace(tmp_str, api_env)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_str)
-        raise
 
 
 @router.post("/providers/{name}/credentials")

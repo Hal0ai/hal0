@@ -87,6 +87,9 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     proxmox as proxmox_routes,
 )
+from hal0.api.routes import (
+    secrets as secrets_routes,
+)
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
 from hal0.dispatcher.router import Dispatcher
@@ -1024,6 +1027,15 @@ def create_app() -> FastAPI:
         settings.router,
         prefix="/api/settings",
         tags=["settings"],
+    )
+    # Operator-managed secrets store (Settings → Secrets). Persists to the
+    # same /etc/hal0/api.env file the provider-credential writer targets,
+    # via the shared atomic mode-0600 writer in hal0.api._env_store. Values
+    # are write-only — never returned, never logged.
+    app.include_router(
+        secrets_routes.router,
+        prefix="/api/secrets",
+        tags=["secrets"],
     )
     # Proxmox integration sub-router (config file at /etc/hal0/proxmox.json).
     # Mounted as a sibling under /api/settings/proxmox so the dashboard's
