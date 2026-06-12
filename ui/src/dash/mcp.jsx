@@ -170,7 +170,9 @@ function CopyField({ value, monoClass = "mono" }) {
 //
 // Supervisor capability flag — v0.3 alpha ships the registry layer
 // (#305) but not yet the process supervisor: ``POST /api/mcp/{id}/{action}``
-// returns 501 ``mcp.not_implemented``. Until ADR-0015 supervisor lands,
+// returns 501 ``mcp.supervisor_unavailable`` (renamed from ``mcp.not_implemented``
+// pre-ADR-0015; both codes are tolerated during the transition window).
+// Until ADR-0015 supervisor lands,
 // lifecycle buttons for user-installed servers are rendered disabled with
 // an honest tooltip. No fake success toasts are shown for disabled actions.
 const SUPERVISOR_AVAILABLE = false;

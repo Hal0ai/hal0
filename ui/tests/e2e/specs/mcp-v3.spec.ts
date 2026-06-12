@@ -127,4 +127,67 @@ test.describe('MCP v3 (/agents/mcp)', () => {
     const title = await startBtn.getAttribute('title')
     expect(title).toContain('Supervisor pending')
   })
+
+  test('bundled stopped server Start returning mcp.supervisor_unavailable shows ADR-0015 toast', async ({ page }) => {
+    // The new code name is mcp.supervisor_unavailable (renamed from
+    // mcp.not_implemented in backend-dev task #7); both are tolerated.
+    // Bundled servers bypass SUPERVISOR_AVAILABLE and call the real endpoint;
+    // useMcpRestart fires POST /api/mcp/{id}/restart for the start action.
+    // We test via a stopped bundled server so the Start button is visible
+    // (the Restart icon on running servers has no onClick wired — that is
+    // a follow-up to ADR-0015; the mutation is reachable via Start today).
+    const SERVERS_WITH_STOPPED_BUNDLED = [
+      ...MOCK_SERVERS,
+      {
+        id: 'hal0-memory',
+        name: 'hal0-memory',
+        bundled: true,
+        state: 'stopped',
+        version: '1.0.0',
+        provider: 'hal0',
+        description: 'Memory MCP server (bundled)',
+        url: null,
+        transport: 'sse',
+        pid: null,
+        since: '—',
+        tools: 4,
+        resources: 0,
+        prompts: 0,
+        env: {},
+        auto_start: false,
+      },
+    ]
+    // Override the servers route with the extended list.
+    await page.route('**/api/mcp/servers', (route) =>
+      json(route, { servers: SERVERS_WITH_STOPPED_BUNDLED }),
+    )
+    await page.route('**/api/mcp/hal0-memory/restart', (route) =>
+      route.fulfill({
+        status: 501,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'mcp.supervisor_unavailable',
+            message: 'process supervisor not implemented (pending ADR-0015)',
+          },
+        }),
+      }),
+    )
+    await Promise.all([
+      page.waitForResponse('**/api/mcp/servers', { timeout: 15_000 }),
+      page.goto('/#mcp', { waitUntil: 'domcontentloaded' }),
+    ])
+    await expect(page.locator('.mcp-kpi')).toBeVisible({ timeout: 5_000 })
+
+    const memoryRow = page.locator('.mcp-row', { hasText: 'hal0-memory' })
+    // Bundled stopped servers have Start enabled (canRunSupervisorAction=true).
+    const startBtn = memoryRow.locator('button', { hasText: 'Start' })
+    await expect(startBtn).not.toBeDisabled()
+    await startBtn.click()
+    // useMcpRestart catches the mcp.supervisor_unavailable 501 and shows a
+    // warn toast with ADR-0015 reference. The dashboard toast is .hal0-toast.
+    await expect(
+      page.locator('.hal0-toast').filter({ hasText: /ADR-0015|supervisor/i }),
+    ).toBeVisible({ timeout: 5_000 })
+  })
 })

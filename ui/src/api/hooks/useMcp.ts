@@ -447,9 +447,17 @@ export function useMcpRestart() {
           raw: true,
         })
       } catch (err) {
-        if (err instanceof Hal0Error && err.status === 501) {
+        // Tolerate both the original code and the ADR-0015 rename so the
+        // transition window is seamless — backend ships the rename first,
+        // then this guard handles both sides until the old code is gone.
+        const isSupervisorPending =
+          err instanceof Hal0Error &&
+          err.status === 501 &&
+          (err.code === 'mcp.supervisor_unavailable' ||
+            err.code === 'mcp.not_implemented')
+        if (isSupervisorPending) {
           _toast(
-            'MCP restart pending supervisor follow-up to #305',
+            'Process supervisor not yet implemented (pending ADR-0015)',
             'warn',
           )
           return null

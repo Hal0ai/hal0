@@ -65,6 +65,9 @@ export const ENDPOINTS = {
   backendInstall: (id: string) => `/api/backends/${encodeURIComponent(id)}/install`,
   backendNpuLoad: '/api/backends/npu/load',
   backendNpuUnload: '/api/backends/npu/unload',
+  // Alias spelling used in ui-sweep-a hook files (PR #741 TODOs).
+  backendsNpuLoad: '/api/backends/npu/load',
+  backendsNpuUnload: '/api/backends/npu/unload',
 
   // ── Capabilities ─────────────────────────────────────────────────
   capabilities: '/api/capabilities',
@@ -117,10 +120,22 @@ export const ENDPOINTS = {
   agentActivity: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/activity`,
   agentApprovals: '/api/agent/approvals',
-  // The path below DOES NOT exist yet in any merged backend PR (the
-  // sidebar component degrades gracefully with "—" + warn). Recorded
-  // here so the wiring is single-place when the route lands.
-  agentMemoryStats: '/api/agents/hermes/memory/stats',
+  // Approval CRUD — list is an alias of agentApprovals; approve/deny are
+  // the action endpoints added by backend-dev task #7 (PR #741 TODOs).
+  agentApprovalsList: '/api/agent/approvals',
+  agentApprovalApprove: (id: string) =>
+    `/api/agent/approvals/${encodeURIComponent(id)}/approve`,
+  agentApprovalDeny: (id: string) =>
+    `/api/agent/approvals/${encodeURIComponent(id)}/deny`,
+  // Memory list endpoint (ADR-0014, PR #736 backend surface).
+  memoryList: '/api/memory/list',
+  // Per-agent memory stats — parameterised by agent id. Previously a
+  // hardcoded "/api/agents/hermes/memory/stats" placeholder; now generic.
+  agentMemoryStats: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/memory/stats`,
+  // Persona update — PATCH/PUT /api/agents/{agentId}/personas/{pid}.
+  agentPersonaUpdate: (agentId: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(agentId)}/personas/${encodeURIComponent(pid)}`,
 
   // ── MCP host introspection (issue #206) ──────────────────────────
   // Read-only view of hosted MCP servers, connected clients, the
