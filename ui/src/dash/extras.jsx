@@ -104,15 +104,17 @@ function LogsView() {
       setPendingCount(0);
     }
   };
-  // simulate new lines arriving while user has scrolled up
+  // Keep pending count in sync with actual buffered live lines when
+  // the user has scrolled up. Count real unread lines rather than
+  // simulating arrivals with a fake interval.
   React.useEffect(() => {
     if (!followTail) {
-      const t = setInterval(() => setPendingCount(c => c + 1), 1800);
-      return () => clearInterval(t);
+      // Count live SSE lines not yet in view as "pending".
+      setPendingCount(live.ring?.length ?? 0);
     } else {
       setPendingCount(0);
     }
-  }, [followTail]);
+  }, [followTail, live.ring]);
 
   const allSlots = [...new Set(buf.map(e => e.slot).filter(Boolean))];
 
@@ -158,7 +160,30 @@ function LogsView() {
             <span>{followTail ? "follow tail" : "paused tail"}</span>
           </span>
           <button className="btn ghost sm" onClick={() => setPaused(p => !p)}>{paused ? "Resume" : "Pause"}</button>
-          <button className="btn ghost sm" onClick={() => window.__hal0Toast && window.__hal0Toast("Exporting .log — stubbed", "info")}>{Icons.download}</button>
+          <button className="btn ghost sm" title="Export current journal buffer as .log" onClick={async () => {
+            try {
+              // Fetch the current journal buffer (up to 5000 lines) and
+              // trigger a client-side blob download — no server-side export
+              // endpoint needed.
+              const resp = await fetch('/api/journal?limit=5000', { headers: { Accept: 'application/json' } });
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+              const data = await resp.json();
+              const entries = data?.entries ?? [];
+              const text = entries.length > 0
+                ? entries.map(e => `${e.ts || ''} [${e.level || 'info'}] ${e.source ? '[' + e.source + '] ' : ''}${e.msg || ''}`.trim()).join('\n')
+                : lines.map(e => `${e.ts || ''} [${e.level || 'info'}] ${e.msg || ''}`.trim()).join('\n');
+              const blob = new Blob([text], { type: 'text/plain' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `hal0-journal-${new Date().toISOString().slice(0,19).replace(/[T:]/g,'-')}.log`;
+              a.click();
+              URL.revokeObjectURL(url);
+              window.__hal0Toast && window.__hal0Toast('Journal exported', 'ok');
+            } catch (err) {
+              window.__hal0Toast && window.__hal0Toast(`Export failed — ${err?.message || 'see console'}`, 'err');
+            }
+          }}>{Icons.download}</button>
         </div>
 
         <div

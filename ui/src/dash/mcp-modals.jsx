@@ -203,11 +203,20 @@ function InstallFromUrl({ onInstall }) {
 // ─── Edit config modal ──────────────────────────────────────────────
 function EditConfigModal({ open, server, onClose }) {
   const [env, setEnv] = useStateMM({});
-  // Config-write hook — backend currently 501s pending ADR-0013; the
-  // mutation hook surfaces the toast for us so the Save button looks
-  // alive instead of silently failing.
+  // Seed autoStart from the server record (auto_start field from the backend;
+  // also tolerate camelCase from older payloads). Defaults to false so freshly
+  // installed servers don't silently auto-start before the supervisor lands.
+  const [autoStart, setAutoStart] = useStateMM(false);
+  // Config-write hook — PATCH /api/mcp/{id}/config accepts {env, enabled}.
+  // We also include auto_start in the payload; the backend ignores unknown
+  // keys, and a future supervisor extension will pick it up.
   const configMut = useMcpConfigPatch();
-  useEffectMM(() => { if (server) setEnv({ ...(server.env || {}) }); }, [server]);
+  useEffectMM(() => {
+    if (server) {
+      setEnv({ ...(server.env || {}) });
+      setAutoStart(!!(server.auto_start ?? server.autoStart ?? false));
+    }
+  }, [server]);
   if (!server) return null;
 
   return (
@@ -223,7 +232,7 @@ function EditConfigModal({ open, server, onClose }) {
           <span style={{display: "inline-flex", gap: 8}}>
             <button className="btn ghost sm" onClick={onClose}>Cancel</button>
             <button className="btn sm" onClick={() => {
-              configMut.mutate({ id: server.id, body: { env } });
+              configMut.mutate({ id: server.id, body: { env, auto_start: autoStart } });
               onClose();
             }}>Save</button>
           </span>
@@ -266,16 +275,14 @@ function EditConfigModal({ open, server, onClose }) {
 
         <div className="mcp-cfg-sec mono">Auto-start</div>
         <label className="mcp-cfg-toggle mono">
-          <input type="checkbox" defaultChecked style={{accentColor: "var(--accent)"}} />
+          <input
+            type="checkbox"
+            checked={autoStart}
+            onChange={e => setAutoStart(e.target.checked)}
+            style={{accentColor: "var(--accent)"}}
+          />
           <span>Restart this server when hal0 restarts</span>
         </label>
-
-        <div className="mcp-cfg-sec mono">Allowed clients</div>
-        <div className="mcp-cfg-allow mono">
-          <span className="mcp-cfg-allow-pill on">any local client</span>
-          <span className="mcp-cfg-allow-pill">claude-code only</span>
-          <span className="mcp-cfg-allow-pill">require token</span>
-        </div>
       </div>
     </Modal>
   );
@@ -332,7 +339,10 @@ function LogsDrawer({ open, server, onClose }) {
             following tail
           </span>
           <span style={{display: "inline-flex", gap: 8}}>
-            <button className="btn ghost sm">Open full logs →</button>
+            <button className="btn ghost sm" onClick={() => {
+              onClose();
+              window.location.hash = "logs";
+            }}>Open full logs →</button>
             <button className="btn ghost sm" onClick={onClose}>Close</button>
           </span>
         </>

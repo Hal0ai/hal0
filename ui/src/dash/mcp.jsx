@@ -170,11 +170,11 @@ function CopyField({ value, monoClass = "mono" }) {
 //
 // Supervisor capability flag — v0.3 alpha ships the registry layer
 // (#305) but not yet the process supervisor: ``POST /api/mcp/{id}/{action}``
-// returns 501 ``mcp.not_implemented``. Until the supervisor lands, the
-// row's Start / Restart buttons must be disabled with a "pending"
-// tooltip so the operator isn't surprised by a no-op click.
+// returns 501 ``mcp.not_implemented``. Until ADR-0015 supervisor lands,
+// lifecycle buttons for user-installed servers are rendered disabled with
+// an honest tooltip. No fake success toasts are shown for disabled actions.
 const SUPERVISOR_AVAILABLE = false;
-const SUPERVISOR_PENDING_HINT = "Supervisor not yet implemented — pending #305 follow-up";
+const SUPERVISOR_PENDING_HINT = "Supervisor pending (ADR-0015) — start/stop not yet implemented";
 
 function McpServerRow({ server, calls, now, clients, onMenuOpen, menuOpen, onCloseMenu, onConfig, onLogs, onConfirmUninstall, onToggle }) {
   const isBundled = server.bundled;
@@ -216,7 +216,6 @@ function McpServerRow({ server, calls, now, clients, onMenuOpen, menuOpen, onClo
               <button className="btn ghost sm" onClick={() => onLogs(server)} title="View logs">{Icons.logs}</button>
               <button
                 className="btn ghost sm"
-                onClick={() => window.__hal0Toast && window.__hal0Toast(`Restarting ${server.name}…`, "info")}
                 title={supervisorTitle || "Restart"}
                 disabled={!canRunSupervisorAction}
               >{Icons.restart}</button>
@@ -258,11 +257,16 @@ function McpServerRow({ server, calls, now, clients, onMenuOpen, menuOpen, onClo
                     disabled: !canRunSupervisorAction,
                     hint: supervisorTitle,
                   },
-                  { label: "Open in browser", icon: Icons.ext, onClick: () => window.__hal0Toast && window.__hal0Toast(`Opening ${server.url}…`, "info") },
+                  {
+                    label: "Open in browser",
+                    icon: Icons.ext,
+                    onClick: () => server.url && window.open(server.url, '_blank'),
+                    disabled: !server.url,
+                    hint: server.url ? undefined : "No URL for this server",
+                  },
                   {
                     label: "Restart",
                     icon: Icons.restart,
-                    onClick: () => window.__hal0Toast && window.__hal0Toast(`Restarting ${server.name}…`, "info"),
                     disabled: !canRunSupervisorAction,
                     hint: supervisorTitle,
                   },
@@ -441,17 +445,23 @@ function McpView() {
     { id: "issues",   label: "Issues",     count: servers.filter(s => s.state === "failed" || s.state === "installing").length },
   ];
 
+  // Returns true when the supervisor is available for this server.
+  // Bundled servers run in-process (no supervisor needed); user-installed
+  // servers require ADR-0015 supervisor work before start/stop/restart work.
+  const isSupervisorReady = (s) => !s || !!s.bundled || SUPERVISOR_AVAILABLE;
+
   const toggleServer = (s, next) => {
-    // Backend route stubs 501 for stop/start (ADR-0013 follow-up); the
-    // mutation hook catches the 501 and shows the toast for us, so we
-    // just fire the restart mutation and let the polling refresh the
-    // server list when the action actually does something.
+    // Backend POST /api/mcp/{id}/{action} returns 501 pending ADR-0015.
+    // Show an honest message instead of fake progress, and never call
+    // uninstallMut for a stop action (stop ≠ uninstall).
+    if (!isSupervisorReady(s)) {
+      window.__hal0Toast && window.__hal0Toast(SUPERVISOR_PENDING_HINT, "warn");
+      return;
+    }
     if (next) {
       restartMut.mutate(s.id);
-    } else {
-      uninstallMut.mutate(s.id);
     }
-    window.__hal0Toast && window.__hal0Toast(`${s.name} ${next ? "starting…" : "stopping…"}`, "info");
+    // stop: no stop endpoint until supervisor lands — hint text already explains.
   };
 
   const noClients = clients.length === 0;

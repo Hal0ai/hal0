@@ -160,10 +160,20 @@ function FirstRunPicker({ onPick, onSkip, layout }) {
         <h1 className="fr-title">Welcome to <span className="accent">hal0</span></h1>
         <p className="fr-lede">Pick a starting configuration. You can customise any slot later — or skip and configure manually.</p>
         <div className="fr-detect">
-          <span className="seg"><span className="k">RAM</span><b>128 GB</b> unified</span>
-          <span className="seg"><span className="k">GPU</span><b>Strix Halo</b> gfx1151</span>
-          <span className="seg"><span className="k">NPU</span><b>XDNA2</b><span className="ok">●</span></span>
-          <span className="seg"><span className="k">disk</span><b>412 GB</b> free</span>
+          <span className="seg">
+            <span className="k">RAM</span>
+            <b>{hwQuery.data?.ram?.total ?? HAL0_DATA.host?.ram?.total ?? '—'} GB</b>
+            {(hwQuery.data?.memoryKind ?? HAL0_DATA.host?.memory_kind) === 'unified' ? ' unified' : ''}
+          </span>
+          <span className="seg">
+            <span className="k">GPU</span>
+            <b>{hwQuery.data?.gpu || HAL0_DATA.host?.gpu || '—'}</b>
+          </span>
+          <span className="seg">
+            <span className="k">NPU</span>
+            <b>{hwQuery.data?.npu?.name || HAL0_DATA.host?.npu?.name || '—'}</b>
+            {(hwQuery.data?.npu?.present ?? HAL0_DATA.host?.npu?.present) && <span className="ok">●</span>}
+          </span>
         </div>
       </div>
 
@@ -311,7 +321,10 @@ function FirstRunConfirm({ bundleId, onBack, onInstall }) {
   const installM = useFirstRunInstall();
   const bundles = bundlesQuery.data?.bundles ?? HAL0_DATA.bundles;
   const bundle = bundles.find(b => b.id === bundleId) || HAL0_DATA.bundles.find(b => b.id === bundleId);
-  const det = HAL0_DATA.bundleDetails.pro; // detail-level data not yet over /api/firstrun
+  // Key into bundleDetails by the selected bundle id so pro/default/lite/max
+  // all show their own model list. Fall back to 'pro' when the id isn't in
+  // the static fixture (shouldn't happen on a fresh install).
+  const det = HAL0_DATA.bundleDetails[bundleId] ?? HAL0_DATA.bundleDetails.pro;
   return (
     <div className="fr-inner">
       <span className="fr-confirm-back mono" onClick={onBack}>← back to picker</span>
@@ -485,10 +498,12 @@ function FirstRunProgress({ onDone, bundleId, modelIds }) {
         )}
       </div>
 
-      <div className="fr-actions" style={{justifyContent: "space-between"}}>
-        <button className="btn ghost lg">Pause all</button>
+      <div className="fr-actions" style={{justifyContent: "flex-end"}}>
         <div style={{display: "flex", gap: 12}}>
-          <button className="btn ghost lg">View logs</button>
+          {/* No backend pause-all endpoint exists — remove button rather than fake it */}
+          <button className="btn ghost lg" onClick={() => {
+            window.location.hash = "logs";
+          }}>View logs</button>
           <button className="btn lg" onClick={() => {
             completeM.mutate();
             onDone();

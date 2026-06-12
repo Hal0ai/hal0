@@ -57,7 +57,14 @@ export const ENDPOINTS = {
   // ── Backends ─────────────────────────────────────────────────────
   backends: '/api/backends',
   backend: (id: string) => `/api/backends/${encodeURIComponent(id)}`,
+  // NOTE: backendInstall has no generic backend route. The only install-
+  // like operation available is NPU: POST /api/backends/npu/load (and
+  // /api/backends/npu/unload). The UI flow-modals.jsx BackendInstallModal
+  // should route the NPU case to backendNpuLoad; remove this constant once
+  // ui-sweep-a's BackendInstallModal migration is complete.
   backendInstall: (id: string) => `/api/backends/${encodeURIComponent(id)}/install`,
+  backendNpuLoad: '/api/backends/npu/load',
+  backendNpuUnload: '/api/backends/npu/unload',
 
   // ── Capabilities ─────────────────────────────────────────────────
   capabilities: '/api/capabilities',
@@ -81,9 +88,12 @@ export const ENDPOINTS = {
   agentPersonaEnums: '/api/agents/persona-enums',
 
   // ── Agents — MCP-client allow-list (ADR-0013) ────────────────────
-  agentMcpClients: '/api/agents/mcp/clients',
+  // Backend: GET /api/mcp/clients (mcp.py:469) — note the prefix is
+  // /api/mcp, NOT /api/agents/mcp.  The original constant had the wrong
+  // prefix which caused the Clients tab to 404 on every real install.
+  agentMcpClients: '/api/mcp/clients',
   agentMcpClient: (name: string) =>
-    `/api/agents/mcp/clients/${encodeURIComponent(name)}`,
+    `/api/mcp/clients/${encodeURIComponent(name)}`,
 
   // ── Agents — bundled lifecycle + sidebar rollup (v0.3 PR-6) ──────
   // `agents` lives in the catalogue block above (one entry, used by
@@ -187,11 +197,18 @@ export const ENDPOINTS = {
   profiles: '/api/profiles',
   profile: (name: string) => `/api/profiles/${encodeURIComponent(name)}`,
 
-  // Install / FirstRun
+  // Install / FirstRun — all routes are under /api/install/* (installer.py).
+  // The old /api/firstrun/* prefix was a stale artifact; the backend mounts
+  // the router at /api/install (verified in src/hal0/api/routes/installer.py).
   installState: '/api/install/state',
-  firstrunState: '/api/firstrun/state',
-  firstrunCuratedModels: '/api/firstrun/curated-models',
-  firstrunPickDefault: '/api/firstrun/pick-default',
-  firstrunInstall: '/api/firstrun/install',
-  firstrunComplete: '/api/firstrun/complete',
+  installCuratedModels: '/api/install/curated-models',
+  installPickDefault: '/api/install/pick-default',
+  // NOTE: there is no single /api/install/install (bundle-level) endpoint.
+  // The wizard "install" step maps to POST /api/install/pick-default per model.
+  // The hook (useFirstRunInstall) calls pick-default; the UI handles graceful
+  // degradation on any error so progress stage still renders.
+  installComplete: '/api/install/complete',
+  // PUT /api/install/slots/{slot}/model — assign a model to a slot post-pick.
+  installSlotModel: (slot: string) =>
+    `/api/install/slots/${encodeURIComponent(slot)}/model`,
 } as const
