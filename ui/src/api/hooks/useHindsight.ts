@@ -192,6 +192,11 @@ export interface GraphPayload {
   total_units?: number
   total_entities?: number
   total_edges?: number
+  returned_nodes?: number
+  returned_edges?: number
+  truncated?: boolean
+  mode?: 'ego' | 'top'
+  center?: string | null
   limit?: number
 }
 
@@ -213,6 +218,41 @@ export function useBankGraph(
     queryKey: ['memory', 'banks', bank, 'graph', query],
     queryFn: () => apiGet<GraphPayload>(`${ENDPOINTS.memoryBankGraph(bank as string)}${query}`),
     enabled: !!bank,
+    staleTime: 15_000,
+  })
+}
+
+export function useBankSubgraph(
+  bank: string | null,
+  opts?: {
+    kind?: 'memories' | 'entities'
+    mode?: 'ego' | 'top'
+    node?: string
+    depth?: 1 | 2
+    top_k?: number
+    by?: 'degree' | 'recency'
+    limit?: number
+    type?: string
+    q?: string
+    enabled?: boolean
+  },
+) {
+  const query = qs({
+    kind: opts?.kind,
+    mode: opts?.mode,
+    node: opts?.node,
+    depth: opts?.depth,
+    top_k: opts?.top_k,
+    by: opts?.by,
+    limit: opts?.limit,
+    type: opts?.type,
+    q: opts?.q,
+  })
+  return useQuery<GraphPayload>({
+    queryKey: ['memory', 'banks', bank, 'subgraph', query],
+    queryFn: () =>
+      apiGet<GraphPayload>(`${ENDPOINTS.memoryBankSubgraph(bank as string)}${query}`),
+    enabled: !!bank && opts?.enabled !== false && (opts?.mode !== 'ego' || !!opts?.node),
     staleTime: 15_000,
   })
 }
