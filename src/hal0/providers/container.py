@@ -46,13 +46,43 @@ from typing import Any
 
 import httpx
 
-# Aliased to the old private name so existing test patch targets
-# (``hal0.providers.container._resolve_profile``) keep working.
-from hal0.config.loader import resolve_profile as _resolve_profile
-from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
 from hal0.config.schema import resolve_profile_flags
+from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
-from hal0.providers.base import ContainerSpec, Provider
+from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+
+# ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
+# callers/tests still import the old name from this module.
+ContainerSpec = RuntimeLaunchPlan
+
+
+def _resolve_profile(name: str) -> Any:
+    """Resolve a profile name to a :class:`~hal0.profiles.ResolvedProfile`.
+
+    Kept as a module-level indirection so it stays the single patch point
+    for tests (``hal0.providers.container._resolve_profile``).  The default
+    implementation goes through :class:`~hal0.profiles.ProfileCatalog`, so
+    providers consume one profile interface instead of re-parsing
+    profiles.toml — :func:`_profile_image_and_flags` accepts either a
+    ``ResolvedProfile`` or a bare ``ProfileConfig`` (what tests inject).
+    """
+    return ProfileCatalog().resolve(name)
+
+
+def _profile_image_and_flags(profile: Any) -> tuple[str, str]:
+    """Extract ``(image, resolved_flags)`` from a profile object.
+
+    Works for both :class:`~hal0.profiles.ResolvedProfile` (whose
+    ``resolved_flags`` is already MTP-expanded) and a plain ``ProfileConfig``
+    (resolve the flags here).  This is what lets the default profile
+    interface be ProfileCatalog while test-injected ``ProfileConfig`` objects
+    keep working.
+    """
+    flags = getattr(profile, "resolved_flags", None)
+    if flags is None:
+        flags = resolve_profile_flags(profile)
+    return str(profile.image), str(flags)
+
 
 log = logging.getLogger(__name__)
 
@@ -62,10 +92,7 @@ log = logging.getLogger(__name__)
 # template.  Writing a complete file means the manager never has to
 # know whether the base exists.
 _SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
-# Back-compat alias for the historic default. The *effective* mount root is
-# resolved per-render via model_store_root() ([models].store / HAL0_MODEL_STORE
-# / this default) so a custom model directory actually reaches the container.
-_MODEL_STORE_MOUNT = DEFAULT_MODEL_STORE
+_MODEL_STORE_MOUNT = "/mnt/ai-models"
 
 
 # Container runtime binary.  Prefer podman (rootless, no daemon);
@@ -150,6 +177,86 @@ def _unit_skeleton(slot_name: str, runtime: str, exec_start: str) -> str:
     )
 
 
+def _render_unit_from_plan(
+    slot_name: str,
+    plan: RuntimeLaunchPlan,
+    *,
+    runtime_bin: str | None = None,
+) -> str:
+    """Render a complete self-contained systemd unit from a launch plan.
+
+    This is the ONE argv builder for every container slot — GPU/llama-server,
+    FLM NPU, Kokoro TTS, and ComfyUI all flow through here.  It is the
+    systemd/podman *adapter*: the plan carries the launch facts, this turns
+    them into ``hal0-slot@<name>.service`` unit text.  Producing a single
+    self-contained unit means the manager never needs a parent
+    ``hal0-slot@.service`` template (retired in the v0.2 migration, PR-9).
+
+    Args:
+        slot_name:   Slot identifier; used in the container name,
+                     SyslogIdentifier, and the unit name.
+        plan:        :class:`RuntimeLaunchPlan` produced by a provider's
+                     ``container_spec``.
+        runtime_bin: Override the container runtime binary.  Defaults to
+                     :func:`_container_runtime`.  Pass explicitly in tests to
+                     avoid requiring podman/docker in the test environment.
+    """
+    runtime = runtime_bin or _container_runtime()
+    container_name = f"hal0-slot-{slot_name}"
+
+    argv: list[str] = [
+        runtime,
+        "run",
+        "--rm",
+        f"--name={container_name}",
+        # Unclean shutdown leaves a stale same-name container record (--rm
+        # never ran) → exit 125 "name already in use" at next boot (#721).
+        # --replace removes it first; no-op when no stale record exists.
+        "--replace",
+    ]
+    if plan.network_mode:
+        argv.append(f"--network={plan.network_mode}")
+    # Explicit device nodes (podman won't recurse the /dev/dri directory, #674).
+    for dev in plan.devices:
+        argv.append(f"--device={dev}")
+    # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
+    for gid in plan.group_add:
+        argv.append(f"--group-add={gid}")
+    for cap in plan.cap_add:
+        argv.append(f"--cap-add={cap}")
+    for opt in plan.security_opt:
+        argv.append(f"--security-opt={opt}")
+    # Read-only is a first-class Mount flag (no more ":ro" target smuggling);
+    # legacy (src, dst) tuples are coerced — a ":ro" target suffix still maps
+    # to read_only so older callers keep rendering correctly.
+    for mount in plan.mounts:
+        argv.append(f"--volume={Mount.coerce(mount).render()}")
+    for k, v in plan.env.items():
+        argv.append(f"--env={k}={v}")
+    # Loopback publish derived from plan.port (declarative — plans no longer
+    # hand-roll "-p ..." in extra_args).  Skipped under host networking where
+    # port publishing is meaningless.
+    if plan.port and plan.network_mode != "host":
+        argv.append(f"--publish=127.0.0.1:{plan.port}:{plan.port}")
+    # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK that
+    # probes a hardcoded port, but a slot runs its server on its own port — so
+    # the image check fails forever and `podman ps` shows a permanent
+    # unhealthy. The plan carries the override so it renders before the image
+    # (health flags are podman-run options). hal0's own ContainerProvider.health()
+    # remains the dashboard truth.
+    if plan.health is not None:
+        argv.extend(plan.health.render_flags())
+    # extra_args escape hatch (e.g. "--ulimit memlock=-1")
+    for extra in plan.extra_args:
+        argv.extend(shlex.split(extra))
+    argv.append(plan.image)
+    argv.extend(plan.command)
+
+    # ExecStart is a single long line; systemd accepts bare argv tokens.
+    exec_start = " ".join(shlex.quote(a) if " " in a else a for a in argv)
+    return _unit_skeleton(slot_name, runtime, exec_start)
+
+
 def _render_unit(
     slot_name: str,
     image: str,
@@ -162,193 +269,139 @@ def _render_unit(
     extra_args: str | None = None,
     model_alias: str | None = None,
 ) -> str:
-    """Render a complete (non-drop-in) systemd unit for a container slot.
+    """Render a GPU/llama-server slot unit (back-compat scalar-arg shim).
 
-    Produces a self-contained unit that does NOT require a parent
-    ``hal0-slot@.service`` template (retired in the v0.2 migration, PR-9).
-    Written to ``/etc/systemd/system/hal0-slot@<name>.service``.
+    Retained for callers/tests that pass scalar launch parameters.  Builds a
+    :class:`RuntimeLaunchPlan` from those scalars and delegates to the single
+    builder :func:`_render_unit_from_plan`, so the legacy llama path and the
+    spec path render through identical code.
 
-    ``runtime_bin``: override the container runtime binary (default: auto-detect
-    via :func:`_container_runtime`).  Pass explicitly in tests to avoid
-    depending on podman/docker being installed in the test environment.
-
-    ``device_paths``: explicit GPU device nodes to pass via ``--device=``
-    (default: auto-detect via :func:`resolve_gpu_device_paths`). Podman cannot
-    recurse a ``--device=/dev/dri`` directory, so we pass each node explicitly.
-
-    ``context_size``: slot context window → ``--ctx-size``.  Without it the
-    container boots at llama-server's 4096 default regardless of the slot TOML.
-
-    ``extra_args``: ``[server].extra_args`` passthrough, appended after the
-    profile flags so slot-level overrides win.
+    ``device_paths`` defaults to :func:`resolve_gpu_device_paths`; ``context_size``
+    and ``extra_args`` (``[server].extra_args``) are appended after the profile
+    flags so slot-level overrides win.
     """
-    runtime = runtime_bin or _container_runtime()
     devices = device_paths if device_paths is not None else resolve_gpu_device_paths()
-    container_name = f"hal0-slot-{slot_name}"
-    # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
-    # default /mnt/ai-models). Mounted identical-path so the absolute GGUF path
-    # the registry hands llama-server resolves unchanged inside the container.
-    model_store = model_store_root()
-    # Split the profile flags string into tokens for ExecStart quoting.
-    flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
-    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
-
-    # Build the container run argv list.
-    argv: list[str] = [
-        runtime,
-        "run",
-        "--rm",
-        f"--name={container_name}",
-        # Unclean shutdown leaves a stale same-name container record (--rm
-        # never ran) → exit 125 "name already in use" at next boot (#721).
-        # --replace removes it first; no-op when no stale record exists.
-        "--replace",
-    ]
-    # Explicit GPU device nodes (podman won't recurse the /dev/dri directory).
-    for dev in devices:
-        argv.append(f"--device={dev}")
-    # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
-    for gid in resolve_gpu_group_ids():
-        argv.append(f"--group-add={gid}")
-    argv.extend(
-        [
-            "--security-opt=apparmor=unconfined",
-            "--security-opt=seccomp=unconfined",
-            # ``z`` relabels the bind for SELinux-enforcing hosts (Fedora);
-            # it is a shared relabel (multiple slot containers read the store)
-            # and a harmless no-op where SELinux is disabled.
-            f"--volume={model_store}:{model_store}:ro,z",
-            # Loopback publish: expose slot port on 127.0.0.1 only.
-            f"--publish=127.0.0.1:{port}:{port}",
-            # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK
-            # that probes a hardcoded :8080, but hal0 runs llama-server on the
-            # slot's own port — so the image check fails forever and `podman ps`
-            # shows a permanent false (unhealthy) even while the server is fine.
-            # Re-point it at the real slot port. ``--health-start-period`` covers
-            # model load so probes don't trip before llama-server is listening.
-            # (hal0's own ContainerProvider.health() remains the dashboard truth.)
-            f"--health-cmd=curl -fsS http://127.0.0.1:{port}/health || exit 1",
-            "--health-start-period=180s",
-            "--health-interval=30s",
-            "--health-retries=3",
-            "--health-timeout=5s",
-            # Container image.
-            image,
-            # llama-server args follow the image (space-separated, not --key=val).
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(port),
-            "--model",
-            model_path,
-        ]
+    plan = _llama_launch_plan(
+        image=image,
+        port=port,
+        model_path=model_path,
+        flags_str=flags_str,
+        devices=list(devices),
+        group_ids=[str(g) for g in resolve_gpu_group_ids()],
+        context_size=context_size,
+        extra_args=extra_args,
+        model_alias=model_alias,
     )
-    # Advertise the hal0 registry model id (else llama-server reports the raw
-    # GGUF basename, which the dispatcher can't match to hal0/* virtual names).
-    if model_alias:
-        argv.extend(["--alias", model_alias])
-    # Slot context window (else llama-server defaults to 4096).
-    if context_size is not None:
-        argv.extend(["--ctx-size", str(context_size)])
-    # Append bench-tuned profile flags, then [server].extra_args (slot wins).
-    argv.extend(flag_tokens)
-    argv.extend(extra_tokens)
-
-    # ExecStart is a single long line; systemd accepts bare argv tokens.
-    exec_start = " ".join(shlex.quote(a) if " " in a else a for a in argv)
-    return _unit_skeleton(slot_name, runtime, exec_start)
+    return _render_unit_from_plan(slot_name, plan, runtime_bin=runtime_bin)
 
 
 def _render_unit_from_spec(
     slot_name: str,
-    spec: ContainerSpec,
+    spec: RuntimeLaunchPlan,
     *,
     runtime_bin: str | None = None,
 ) -> str:
-    """Render a complete self-contained systemd unit from a :class:`ContainerSpec`.
+    """Back-compat alias for :func:`_render_unit_from_plan`.
 
-    This is the generic renderer used by non-llama-server backends (FLM NPU,
-    ComfyUI, …). It mirrors the ``[Unit]/[Service]`` skeleton of
-    :func:`_render_unit` but sources all container-run arguments from ``spec``
-    instead of profil flags + model path.
-
-    Args:
-        slot_name:   Slot identifier; used in container name, SyslogIdentifier,
-                     and the ``hal0-slot@<name>.service`` unit name.
-        spec:        :class:`ContainerSpec` produced by the backend's provider
-                     (e.g. :meth:`FLMProvider.container_spec`).
-        runtime_bin: Override the container runtime binary.  Defaults to
-                     :func:`_container_runtime`.  Pass explicitly in tests to
-                     avoid requiring podman/docker in the test environment.
-
-    Returns:
-        Complete systemd unit text ready to be written to
-        ``/etc/systemd/system/hal0-slot@<name>.service``.
+    A ``ContainerSpec``/``RuntimeLaunchPlan`` *is* the launch plan, so this is
+    a straight delegation kept for callers/tests that still import the old
+    name.
     """
-    runtime = runtime_bin or _container_runtime()
-    container_name = f"hal0-slot-{slot_name}"
+    return _render_unit_from_plan(slot_name, spec, runtime_bin=runtime_bin)
 
-    argv: list[str] = [
-        runtime,
-        "run",
-        "--rm",
-        f"--name={container_name}",
-        # Stale same-name record after unclean shutdown → exit 125 (#721).
-        "--replace",
-    ]
-    if spec.network_mode:
-        argv.append(f"--network={spec.network_mode}")
-    for dev in spec.devices:
-        argv.append(f"--device={dev}")
-    for gid in spec.group_add:
-        argv.append(f"--group-add={gid}")
-    for cap in spec.cap_add:
-        argv.append(f"--cap-add={cap}")
-    for opt in spec.security_opt:
-        argv.append(f"--security-opt={opt}")
-    for src, dst in spec.mounts:
-        argv.append(f"--volume={src}:{dst}")
-    for k, v in spec.env.items():
-        argv.append(f"--env={k}={v}")
-    # Loopback publish derived from spec.port (declarative — specs no longer
-    # hand-roll "-p ..." in extra_args).  Skipped under host networking where
-    # port publishing is meaningless.
-    if spec.port and spec.network_mode != "host":
-        argv.append(f"--publish=127.0.0.1:{spec.port}:{spec.port}")
-    # extra_args escape hatch (e.g. "--ulimit memlock=-1")
-    for extra in spec.extra_args:
-        argv.extend(shlex.split(extra))
-    argv.append(spec.image)
-    argv.extend(spec.command)
 
-    exec_start = " ".join(shlex.quote(a) if " " in a else a for a in argv)
-    return _unit_skeleton(slot_name, runtime, exec_start)
+def _llama_launch_plan(
+    *,
+    image: str,
+    port: int,
+    model_path: str,
+    flags_str: str,
+    devices: list[str],
+    group_ids: list[str],
+    context_size: int | None = None,
+    extra_args: str | None = None,
+    model_alias: str | None = None,
+) -> RuntimeLaunchPlan:
+    """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
+
+    Single source of the llama-server launch shape — used by both
+    :meth:`ContainerProvider.container_spec` (the load path) and the
+    :func:`_render_unit` scalar shim.  llama-server takes space-separated
+    args (``--host HOST``), so they go in ``command`` after the image.
+    """
+    flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
+    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
+
+    command: list[str] = ["--host", "0.0.0.0", "--port", str(port), "--model", model_path]
+    # Advertise the hal0 registry model id (else llama-server reports the raw
+    # GGUF basename, which the dispatcher can't match to hal0/* virtual names).
+    if model_alias:
+        command += ["--alias", model_alias]
+    # Slot context window (else llama-server defaults to 4096).
+    if context_size is not None:
+        command += ["--ctx-size", str(context_size)]
+    # Bench-tuned profile flags, then [server].extra_args (slot wins).
+    command += flag_tokens
+    command += extra_tokens
+
+    return RuntimeLaunchPlan(
+        image=image,
+        command=command,
+        mounts=[Mount(_MODEL_STORE_MOUNT, _MODEL_STORE_MOUNT, read_only=True)],
+        devices=list(devices),
+        group_add=list(group_ids),
+        security_opt=["apparmor=unconfined", "seccomp=unconfined"],
+        port=port,
+        # Empty network_mode → loopback publish derived from port by the renderer.
+        network_mode="",
+        health=HealthCheck(cmd=f"curl -fsS http://127.0.0.1:{port}/health || exit 1"),
+    )
 
 
 def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
-    """Spec-building provider for non-llama container slots, or None.
+    """Provider for a slot, or None for the GPU/llama-server default.
 
-    llama-server slots (GPU profiles) use the flag-bundle _render_unit path.
-    FLM (NPU), Kokoro (CPU TTS), and ComfyUI (image gen) know their own
-    argv; they build a ContainerSpec rendered by _render_unit_from_spec.
+    The runtime family is the authoritative discriminator: a slot's profile
+    resolves through :class:`~hal0.profiles.ProfileCatalog` to a
+    ``runtime_family`` (flm / kokoro / comfyui / llama-server), so the
+    family/quirk knowledge lives in one place instead of being string-matched
+    here.  Device/type/provider remain as fallbacks for profile-less slots
+    (e.g. a bare ``device=npu`` with no profile set yet).
     """
-    if str(slot_cfg.get("device", "")) == "npu":
+    family = _profile_runtime_family(slot_cfg)
+    device = str(slot_cfg.get("device", ""))
+    slot_type = str(slot_cfg.get("type", ""))
+    provider = str(slot_cfg.get("provider", ""))
+
+    if family == "flm" or device == "npu":
         from hal0.providers.flm import FLMProvider
 
         return FLMProvider()
-    if str(slot_cfg.get("type", "")) == "tts" or str(slot_cfg.get("profile", "")) == "tts":
+    if family == "kokoro" or slot_type == "tts":
         from hal0.providers.kokoro import KokoroProvider
 
         return KokoroProvider()
-    if (
-        str(slot_cfg.get("provider", "")) == "comfyui"
-        or str(slot_cfg.get("profile", "")) == "comfyui"
-        or str(slot_cfg.get("type", "")) == "image"
-    ):
+    if family == "comfyui" or provider == "comfyui" or slot_type == "image":
         from hal0.providers.comfyui import ComfyUIProvider
 
         return ComfyUIProvider()
     return None
+
+
+def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
+    """Return the slot profile's ``runtime_family`` via ProfileCatalog, or None.
+
+    None when the slot has no profile or the lookup fails — callers fall back
+    to device/type discriminators.  Never raises: a malformed or missing
+    profile must not break slot dispatch.
+    """
+    name = str(slot_cfg.get("profile") or slot_cfg.get("slot", {}).get("profile") or "")
+    if not name:
+        return None
+    try:
+        return ProfileCatalog().resolve(name).runtime_family
+    except Exception:
+        return None
 
 
 class ContainerProvider(Provider):
@@ -388,42 +441,44 @@ class ContainerProvider(Provider):
             resp.raise_for_status()
             return resp.json()  # type: ignore[no-any-return]
 
-    def container_spec(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> ContainerSpec:
-        """Build the ContainerSpec (satisfies ABC; used by render_systemd_override).
+    def container_spec(
+        self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+    ) -> RuntimeLaunchPlan:
+        """Build the GPU/llama-server :class:`RuntimeLaunchPlan` for a slot.
 
-        NOTE: ContainerProvider uses _render_unit() for its own unit rendering
-        rather than the inherited render_systemd_override(), because the base
-        template (hal0-slot@.service) was retired in the v0.2 migration.
-        This method is kept for ABC compliance and test helpers.
+        This is the load path for GPU slots: :meth:`load_sync` resolves the
+        provider, calls ``container_spec``, and hands the plan to the single
+        renderer.  The plan is complete — registry alias, slot ``context_size``,
+        ``[server].extra_args``, the read-only model-store mount, and the
+        health-check override are all included, so what loads matches what the
+        plan describes (no GPU-special argv assembly elsewhere).
         """
         profile_name = slot_cfg.get("profile") or ""
-        profile = _resolve_profile(profile_name)
-        flags_str = resolve_profile_flags(profile)
-        flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
+        image, flags_str = _profile_image_and_flags(_resolve_profile(profile_name))
 
         model_path = _resolve_model_path(model_info)
         port = int(slot_cfg.get("port", 0))
-        model_store = model_store_root()
 
-        return ContainerSpec(
-            image=profile.image,
-            command=[
-                # llama-server uses space-separated args (--host HOST, not --host=HOST).
-                "--host",
-                "0.0.0.0",
-                "--port",
-                str(port),
-                "--model",
-                model_path,
-                *flag_tokens,
-            ],
-            mounts=[(model_store, f"{model_store}:ro,z")],
-            devices=resolve_gpu_device_paths(),
-            group_add=[str(g) for g in resolve_gpu_group_ids()],
-            security_opt=["apparmor=unconfined", "seccomp=unconfined"],
+        model_table = slot_cfg.get("model") or {}
+        context_size = model_table.get("context_size") if isinstance(model_table, dict) else None
+        server_table = slot_cfg.get("server") or {}
+        extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
+        # Registry model id → llama-server --alias so the container advertises
+        # the hal0 id (not the raw GGUF basename) for dispatcher matching.
+        model_alias = model_info.get("_model_key") or (
+            model_table.get("default") if isinstance(model_table, dict) else None
+        )
+
+        return _llama_launch_plan(
+            image=image,
             port=port,
-            network_mode="",
-            extra_args=[f"--publish=127.0.0.1:{port}:{port}"],
+            model_path=model_path,
+            flags_str=flags_str,
+            devices=list(resolve_gpu_device_paths()),
+            group_ids=[str(g) for g in resolve_gpu_group_ids()],
+            context_size=context_size,
+            extra_args=extra_args,
+            model_alias=model_alias,
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
@@ -542,78 +597,47 @@ class ContainerProvider(Provider):
         asyncio.to_thread-friendly path — SlotManager awaits the slot spawn
         via ``await self._spawn_locked(...)``).
 
-        Spec-provider dispatch: :func:`_spec_provider_for` maps NPU→FLM and
-        TTS/tts→Kokoro slots to their respective providers, which build a
-        :class:`ContainerSpec` rendered by :func:`_render_unit_from_spec`.
-        GPU/llama-server slots fall through to the flag-bundle :func:`_render_unit`
-        path.
+        Single launch path: :func:`_spec_provider_for` resolves the slot's
+        runtime family to a provider (FLM/NPU, Kokoro/TTS, ComfyUI/img, or this
+        provider for GPU/llama-server); the provider builds a
+        :class:`RuntimeLaunchPlan` via ``container_spec``; and the one renderer
+        :func:`_render_unit_from_plan` turns it into the systemd unit.  GPU is
+        no longer a special argv branch here.
         """
         slot_name: str = str(slot_cfg.get("name", ""))
 
-        # ── Spec-provider dispatch (NPU/FLM, TTS/Kokoro, …) ───────────────────
-        spec_provider = _spec_provider_for(slot_cfg)
-        if spec_provider is not None:
+        provider = _spec_provider_for(slot_cfg)
+        if provider is None:
+            provider = self  # GPU / llama-server
+        elif str(slot_cfg.get("device", "")) == "npu":
             # Loud-fail for NPU slots only: a missing FLM tag must not silently
-            # fall through to FLM's legacy build_env default. Kokoro is
-            # self-managed and needs no
-            # registry tag — the tag check fires ONLY when device == "npu".
-            if str(slot_cfg.get("device", "")) == "npu":
-                model_table = slot_cfg.get("model") or {}
-                tag = (
-                    model_info.get("flm_tag")
-                    or model_info.get("_model_key")
-                    or (model_table.get("default") if isinstance(model_table, dict) else None)
-                )
-                if not tag:
-                    raise ValueError("npu slot has no FLM model tag — set [model].default")
-
-            spec = spec_provider.container_spec(slot_cfg, model_info)
-            unit_text = _render_unit_from_spec(
-                slot_name,
-                spec,
-                runtime_bin=_container_runtime(),
+            # fall through to FLM's legacy build_env default. Kokoro/ComfyUI are
+            # self-managed and need no registry tag — the check fires ONLY when
+            # device == "npu".
+            model_table = slot_cfg.get("model") or {}
+            tag = (
+                model_info.get("flm_tag")
+                or model_info.get("_model_key")
+                or (model_table.get("default") if isinstance(model_table, dict) else None)
             )
-            self._write_and_start_unit(slot_name, unit_text)
-            return
+            if not tag:
+                raise ValueError("npu slot has no FLM model tag — set [model].default")
 
-        # ── GPU / llama-server branch ──────────────────────────────────────────
-        port: int = int(slot_cfg.get("port", 0))
-        profile_name: str = str(slot_cfg.get("profile") or "")
-
-        profile = _resolve_profile(profile_name)
-        flags_str = resolve_profile_flags(profile)
-        model_path = _resolve_model_path(model_info)
-
-        model_table = slot_cfg.get("model") or {}
-        context_size = model_table.get("context_size") if isinstance(model_table, dict) else None
-        server_table = slot_cfg.get("server") or {}
-        extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
-        # Registry model id → llama-server --alias so the container advertises
-        # the hal0 id (not the raw GGUF basename) for dispatcher matching.
-        model_alias = model_info.get("_model_key") or (
-            model_table.get("default") if isinstance(model_table, dict) else None
-        )
-
-        unit_text = _render_unit(
-            slot_name,
-            profile.image,
-            port,
-            model_path,
-            flags_str,
-            context_size=context_size,
-            extra_args=extra_args,
-            model_alias=model_alias,
-        )
-
+        plan = provider.container_spec(slot_cfg, model_info)
         log.info(
             "container.unit_render",
             extra={
                 "slot": slot_name,
                 "unit_path": str(self._unit_path(slot_name)),
-                "image": profile.image,
-                "port": port,
-                "model_path": model_path,
+                "image": plan.image,
+                "port": plan.port,
+                "provider": getattr(provider, "name", type(provider).__name__),
             },
+        )
+        unit_text = _render_unit_from_plan(
+            slot_name,
+            plan,
+            runtime_bin=_container_runtime(),
         )
         self._write_and_start_unit(slot_name, unit_text)
 
@@ -798,11 +822,10 @@ def resolved_command_for_slot(
     if not profile_name:
         return None
     try:
-        profile = _resolve_profile(profile_name)
-    except (KeyError, Exception):
+        image, flags_str = _profile_image_and_flags(_resolve_profile(profile_name))
+    except Exception:
         return None
 
-    flags_str = resolve_profile_flags(profile)
     flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
 
     # port: may be at top-level or nested under [slot]
@@ -819,7 +842,7 @@ def resolved_command_for_slot(
     extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
 
     argv: list[str] = [
-        profile.image,
+        image,
         "--host",
         "0.0.0.0",
         "--port",
@@ -838,6 +861,7 @@ def resolved_command_for_slot(
 
 __all__ = [
     "ContainerProvider",
+    "_render_unit_from_plan",
     "_render_unit_from_spec",
     "_spec_provider_for",
     "container_provider",

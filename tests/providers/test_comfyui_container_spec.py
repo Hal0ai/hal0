@@ -54,11 +54,12 @@ def test_comfyui_spec_matches_live_deployment() -> None:
     # Devices via resolve_gpu_device_paths() — explicit nodes (podman, #674).
     assert spec.devices and "/dev/kfd" in spec.devices
     assert spec.devices == _GPU_NODES
-    # Data mounts mirror docker inspect on CT105.
-    assert ("/mnt/ai-models/comfyui/models", "/root/comfy-models") in spec.mounts
+    # Data mounts mirror docker inspect on CT105 (first-class Mount objects).
+    pairs = {(m.source, m.target) for m in spec.mounts}
+    assert ("/mnt/ai-models/comfyui/models", "/root/comfy-models") in pairs
     for sub in ("output", "input", "user", "custom_nodes"):
-        assert (f"/mnt/ai-models/comfyui/{sub}", f"/opt/ComfyUI/{sub}") in spec.mounts
-    assert any("extra_model_paths.yaml" in src for src, _ in spec.mounts)
+        assert (f"/mnt/ai-models/comfyui/{sub}", f"/opt/ComfyUI/{sub}") in pairs
+    assert any("extra_model_paths.yaml" in m.source for m in spec.mounts)
     # Wan/Hunyuan video models need shared memory.
     assert "--ipc=host" in spec.extra_args
     # podman 125s on --shm-size with --ipc=host ("cannot set shmsize when
@@ -87,23 +88,27 @@ def test_comfyui_argv_uses_opt_comfyui_workdir() -> None:
 
 
 def test_comfyui_extra_model_paths_mount_is_read_only() -> None:
-    """:ro suffix on dst is how ContainerSpec expresses read-only mounts."""
+    """extra_model_paths.yaml is read-only via the first-class Mount flag; the
+    bare target carries no ":ro" (the renderer appends it)."""
     spec = ComfyUIProvider().container_spec(_img_cfg(), {})
-    yaml_mounts = [(s, d) for s, d in spec.mounts if "extra_model_paths.yaml" in s]
-    assert yaml_mounts == [
-        (
-            "/mnt/ai-models/comfyui/extra_model_paths.yaml",
-            "/opt/ComfyUI/extra_model_paths.yaml:ro",
-        )
-    ]
+    yaml_mounts = [m for m in spec.mounts if "extra_model_paths.yaml" in m.source]
+    assert len(yaml_mounts) == 1
+    yaml_mount = yaml_mounts[0]
+    assert yaml_mount.source == "/mnt/ai-models/comfyui/extra_model_paths.yaml"
+    assert yaml_mount.target == "/opt/ComfyUI/extra_model_paths.yaml"
+    assert yaml_mount.read_only is True
+    assert yaml_mount.render() == (
+        "/mnt/ai-models/comfyui/extra_model_paths.yaml:/opt/ComfyUI/extra_model_paths.yaml:ro"
+    )
 
 
 def test_comfyui_data_root_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", "/srv/comfy-data")
     spec = ComfyUIProvider().container_spec(_img_cfg(), {})
-    assert ("/srv/comfy-data/models", "/root/comfy-models") in spec.mounts
-    assert ("/srv/comfy-data/output", "/opt/ComfyUI/output") in spec.mounts
-    assert not any(src.startswith("/mnt/ai-models/comfyui") for src, _ in spec.mounts)
+    pairs = {(m.source, m.target) for m in spec.mounts}
+    assert ("/srv/comfy-data/models", "/root/comfy-models") in pairs
+    assert ("/srv/comfy-data/output", "/opt/ComfyUI/output") in pairs
+    assert not any(m.source.startswith("/mnt/ai-models/comfyui") for m in spec.mounts)
 
 
 def test_comfyui_profile_flags_fallback_without_profile() -> None:

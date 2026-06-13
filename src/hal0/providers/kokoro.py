@@ -37,11 +37,8 @@ from typing import Any
 
 import httpx
 
-from hal0.config.loader import resolve_profile
-from hal0.config.paths import model_store_root
-from hal0.config.schema import resolve_profile_flags
 from hal0.errors import Hal0Error
-from hal0.providers.base import ContainerSpec, Provider
+from hal0.providers.base import ContainerSpec, Mount, Provider
 
 # Default image tag (overridable via HAL0_TOOLBOX_IMAGE_KOKORO for dev/test).
 _DEFAULT_KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
@@ -49,11 +46,13 @@ _DEFAULT_KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "tts"
 
-# Model store is mounted identical-path so the profile-baked
-# ``--model_path <store>/local/kokoro-v1/kokoro-onnx`` resolves inside the
-# container without path translation. The root is resolved per-render via
-# model_store_root(); ":ro,z" is encoded into the dst because
-# _render_unit_from_spec renders mounts as --volume={src}:{dst} verbatim.
+# Model store: the same absolute path is used inside the container so that
+# ``--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx`` (baked into the
+# profile flags) resolves correctly without any path translation.
+_MODEL_STORE_HOST = "/mnt/ai-models"
+# Read-only is expressed via Mount(read_only=True) at the call site, so the
+# container target is the bare path (the renderer appends ":ro").
+_MODEL_STORE_CONTAINER = "/mnt/ai-models"
 
 # Providers whose model weights are pre-staged by the operator (not hal0 registry).
 SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "comfyui"})
@@ -138,12 +137,13 @@ class KokoroProvider(Provider):
         Security opts (apparmor/seccomp=unconfined) are required for
         Proxmox LXC deployments (same rationale as FLMProvider).
         """
+        from hal0.profiles import ProfileCatalog
+
         port = int(slot_cfg.get("port") or 8084)
         profile_name: str = str(slot_cfg.get("profile") or _DEFAULT_PROFILE)
-        profile = resolve_profile(profile_name)
-        flags_str = resolve_profile_flags(profile)
-        # Split profile flags; these include --model_path from the profile.
-        flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
+        profile = ProfileCatalog().resolve(profile_name)
+        # ``resolved_flags`` is already MTP-expanded; these include --model_path.
+        flag_tokens = shlex.split(profile.resolved_flags) if profile.resolved_flags.strip() else []
 
         # command = profile flags + mandatory server binding args.
         # The ENTRYPOINT (tini -- kokoro-server) receives these as argv.
@@ -157,21 +157,13 @@ class KokoroProvider(Provider):
             str(port),
         ]
 
-        # Effective model-store root ([models].store / HAL0_MODEL_STORE,
-        # default /mnt/ai-models).
-        store_root = model_store_root()
-
         return ContainerSpec(
             image=profile.image,
             command=command,
             env={},
-            # Mount the model store read-only. ``:ro,z`` is encoded into the
-            # container path (dst) since _render_unit_from_spec emits
-            # --volume={src}:{dst} verbatim; ``z`` relabels for SELinux hosts.
-            # NOTE: Kokoro weights are profile-baked at <store>/local/kokoro-v1
-            # (profiles.toml --model_path). A non-default [models].store moves
-            # the mount but not that flag yet — tracked as a follow-up.
-            mounts=[(store_root, f"{store_root}:ro,z")],
+            # Model store mounted read-only — read_only is a first-class Mount
+            # flag, so the renderer adds ":ro" (no target-string smuggling).
+            mounts=[Mount(_MODEL_STORE_HOST, _MODEL_STORE_CONTAINER, read_only=True)],
             # CPU-only: no GPU devices or supplementary groups required.
             devices=[],
             cap_add=[],

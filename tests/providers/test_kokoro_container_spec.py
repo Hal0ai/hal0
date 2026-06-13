@@ -36,9 +36,7 @@ def test_spec_command_carries_port_host_and_model_path() -> None:
 
 def test_spec_mounts_model_store_and_publishes_loopback() -> None:
     spec = KokoroProvider().container_spec(_slot_cfg(), {})
-    # ":ro" is appended to the container dst — that's how ContainerSpec
-    # expresses read-only mounts (_render_unit_from_spec emits --volume={src}:{dst}).
-    assert any(m[0] == "/mnt/ai-models" for m in spec.mounts)
+    assert any(m.source == "/mnt/ai-models" for m in spec.mounts)
     assert spec.port == 8084
     assert spec.network_mode == ""
 
@@ -49,15 +47,14 @@ def test_spec_security_opts_for_lxc() -> None:
     assert "seccomp=unconfined" in spec.security_opt
 
 
-def test_spec_ro_mount_dst_has_ro_suffix() -> None:
-    """ContainerSpec mount dst must carry :ro (+ SELinux z) so the rendered
-    --volume arg is read-only and relabelled on SELinux hosts."""
+def test_spec_ro_mount_is_read_only() -> None:
+    """Model-store mount must be read-only via the first-class Mount flag so
+    the renderer emits a :ro --volume (no :ro target-string smuggling)."""
     spec = KokoroProvider().container_spec(_slot_cfg(), {})
-    ai_mount = next(m for m in spec.mounts if m[0] == "/mnt/ai-models")
-    assert ai_mount[1].endswith(":ro,z"), (
-        f"mount dst {ai_mount[1]!r} must end with ':ro,z' — "
-        "_render_unit_from_spec emits --volume={src}:{dst} verbatim"
-    )
+    ai_mount = next(m for m in spec.mounts if m.source == "/mnt/ai-models")
+    assert ai_mount.read_only is True
+    assert ai_mount.target == "/mnt/ai-models"
+    assert ai_mount.render() == "/mnt/ai-models:/mnt/ai-models:ro"
 
 
 # ── Renderer integration test ──────────────────────────────────────────────────

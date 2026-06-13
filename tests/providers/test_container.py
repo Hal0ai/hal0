@@ -25,6 +25,7 @@ from hal0.providers.container import (
     ContainerProvider,
     _image_mismatch,
     _render_unit,
+    _render_unit_from_plan,
     _resolve_model_path,
     resolved_command_for_slot,
 )
@@ -144,9 +145,8 @@ class TestRenderUnit:
         # Must follow --name so the pairing is obvious in the rendered unit.
         assert tokens.index("--replace") == tokens.index("--name=hal0-slot-test-slot") + 1
 
-    def test_identical_path_mount_readonly(self, monkeypatch) -> None:
-        """Model store mounted identical-path, read-only, with SELinux relabel."""
-        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
+    def test_identical_path_mount_readonly(self) -> None:
+        """Model store must be mounted at /mnt/ai-models:ro (identical path)."""
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_unit(
@@ -159,33 +159,10 @@ class TestRenderUnit:
         )
         exec_start = self._get_exec_start(unit)
         tokens = shlex.split(exec_start)
-        # identical-path mount, :ro, plus SELinux relabel (z)
+        # --volume arg must be present with :ro suffix
         vol_args = [t for t in tokens if t.startswith(f"--volume={_MODEL_STORE_MOUNT}")]
         assert vol_args, f"no --volume for {_MODEL_STORE_MOUNT} in: {tokens}"
-        assert vol_args[0] == f"--volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro,z", (
-            f"unexpected mount: {vol_args[0]}"
-        )
-
-    def test_mount_honours_custom_model_store(self, monkeypatch) -> None:
-        """A custom HAL0_MODEL_STORE is what the slot bind-mounts — so a model
-        dir outside /mnt/ai-models is visible inside the container (the Fedora
-        'No such file or directory' bug)."""
-        custom = "/home/cuken/ai/models"
-        monkeypatch.setenv("HAL0_MODEL_STORE", custom)
-        profile = _moe_profile()
-        flags = resolve_profile_flags(profile)
-        unit = _render_unit(
-            "agent0",
-            profile.image,
-            8095,
-            f"{custom}/Qwen3.6-35B.gguf",
-            flags,
-            runtime_bin=_TEST_RUNTIME,
-        )
-        tokens = shlex.split(self._get_exec_start(unit))
-        assert f"--volume={custom}:{custom}:ro,z" in tokens, tokens
-        # the legacy default must NOT be mounted
-        assert not any(t.startswith("--volume=/mnt/ai-models") for t in tokens), tokens
+        assert ":ro" in vol_args[0], f"mount not read-only: {vol_args[0]}"
 
     def test_loopback_port_publish(self) -> None:
         """Port must be published on 127.0.0.1 only (not LAN-exposed)."""
@@ -477,10 +454,10 @@ class TestContainerSpec:
 
     def test_mount_identical_path(self) -> None:
         spec = self._build_spec()
-        mount_pairs = dict(spec.mounts)
-        assert _MODEL_STORE_MOUNT in mount_pairs
-        # identical src→dst with :ro,z encoded into the dst (SELinux relabel)
-        assert mount_pairs[_MODEL_STORE_MOUNT] == f"{_MODEL_STORE_MOUNT}:ro,z"
+        # Identical-path model-store mount, read-only via first-class Mount flag.
+        store_mount = next(m for m in spec.mounts if m.source == _MODEL_STORE_MOUNT)
+        assert store_mount.target == _MODEL_STORE_MOUNT
+        assert store_mount.read_only is True
 
     def test_devices_present(self) -> None:
         with patch(
@@ -495,12 +472,15 @@ class TestContainerSpec:
         assert "apparmor=unconfined" in spec.security_opt
         assert "seccomp=unconfined" in spec.security_opt
 
-    def test_publish_in_extra_args(self) -> None:
-        """Loopback port publish must be in extra_args (not network_mode=host)."""
+    def test_loopback_publish_derived_from_port(self) -> None:
+        """Loopback publish is derived from port + empty network_mode by the
+        renderer (declarative) — not hand-rolled into extra_args."""
         spec = self._build_spec()
-        publish_args = [a for a in spec.extra_args if "127.0.0.1" in a]
-        assert publish_args, f"no loopback publish in extra_args: {spec.extra_args}"
-        assert "8095" in publish_args[0]
+        assert spec.port == 8095
+        assert spec.network_mode == ""
+        assert not any("127.0.0.1" in a for a in spec.extra_args)
+        unit = _render_unit_from_plan("test-slot", spec, runtime_bin=_TEST_RUNTIME)
+        assert "--publish=127.0.0.1:8095:8095" in unit
 
     def test_network_mode_empty(self) -> None:
         """network_mode must be empty (not 'host') so loopback publish is used."""

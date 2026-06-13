@@ -40,7 +40,7 @@ import httpx
 
 from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
-from hal0.providers.base import ContainerSpec, Provider
+from hal0.providers.base import ContainerSpec, Mount, Provider
 from hal0.providers.comfyui_workflows import build_workflow
 
 log = logging.getLogger(__name__)
@@ -55,16 +55,14 @@ _HAL0_COMFYUI_IMAGE = "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
 # In-container app + working-data layout. The kyuz0 image has ComfyUI
 # checked out at /opt/ComfyUI (venv at /opt/venv). Host-side working data
 # (models / output / input / user / custom_nodes + extra_model_paths.yaml)
-# lives under "<model-store>/comfyui" and is bind-mounted in so weights and
+# lives under _COMFYUI_DATA_ROOT and is bind-mounted in so weights and
 # custom nodes persist across container restarts.
 _COMFYUI_APP_DIR = "/opt/ComfyUI"
 _COMFYUI_BASE_DIR = "/var/lib/hal0/comfyui"
 
-# ComfyUI's working data lives under "<model-store>/comfyui" so it tracks the
-# configured model store ([models].store / HAL0_MODEL_STORE, default
-# /mnt/ai-models) — resolved per-render in container_spec(). Still directly
-# overridable via HAL0_COMFYUI_DATA_ROOT for tests / non-standard installs.
-_COMFYUI_DATA_SUBDIR = "comfyui"
+# Host data root for the bind mounts. Overridable for tests / non-standard
+# installs via HAL0_COMFYUI_DATA_ROOT.
+_COMFYUI_DATA_ROOT = "/mnt/ai-models/comfyui"
 
 # Live-validated flag bundle (matches the "comfyui" seed profile). Used
 # when the slot has no resolvable profile.
@@ -192,19 +190,18 @@ class ComfyUIProvider(Provider):
     def _profile_flags(self, slot_cfg: dict[str, Any]) -> str:
         """Resolve the slot's profile to its flag bundle.
 
-        Same lookup as the llama-server path in
-        :mod:`hal0.providers.container` (resolve_profile +
-        resolve_profile_flags). Falls back to the live-validated default
-        bundle when the slot has no profile or the lookup fails — the img
-        slot must always come up with the bench-tuned flags.
+        Resolves through :class:`~hal0.profiles.ProfileCatalog` (one profile
+        interface, ``resolved_flags`` already MTP-expanded). Falls back to the
+        live-validated default bundle when the slot has no profile or the
+        lookup fails — the img slot must always come up with the bench-tuned
+        flags.
         """
         profile_name = str(slot_cfg.get("profile") or slot_cfg.get("slot", {}).get("profile") or "")
         if profile_name:
             try:
-                from hal0.config.loader import resolve_profile
-                from hal0.config.schema import resolve_profile_flags
+                from hal0.profiles import ProfileCatalog
 
-                flags = resolve_profile_flags(resolve_profile(profile_name)).strip()
+                flags = ProfileCatalog().resolve(profile_name).resolved_flags.strip()
                 if flags:
                     return flags
             except Exception:
@@ -247,23 +244,19 @@ class ComfyUIProvider(Provider):
         ).strip()
         command: list[str] = ["bash", "-lc", payload]
 
-        from hal0.config.paths import model_store_root
-
-        data_root = (
-            os.environ.get("HAL0_COMFYUI_DATA_ROOT", "").strip()
-            or f"{model_store_root()}/{_COMFYUI_DATA_SUBDIR}"
-        )
-        # ":ro" suffix on the dst is how ContainerSpec expresses read-only
-        # mounts (_render_unit_from_spec emits --volume={src}:{dst} verbatim).
-        mounts: list[tuple[str, str]] = [
-            (f"{data_root}/models", "/root/comfy-models"),
-            (f"{data_root}/output", f"{_COMFYUI_APP_DIR}/output"),
-            (f"{data_root}/input", f"{_COMFYUI_APP_DIR}/input"),
-            (f"{data_root}/user", f"{_COMFYUI_APP_DIR}/user"),
-            (f"{data_root}/custom_nodes", f"{_COMFYUI_APP_DIR}/custom_nodes"),
-            (
+        data_root = os.environ.get("HAL0_COMFYUI_DATA_ROOT", "").strip() or _COMFYUI_DATA_ROOT
+        # read_only is a first-class Mount flag; extra_model_paths.yaml is the
+        # only read-only mount (the renderer appends ":ro").
+        mounts: list[Mount] = [
+            Mount(f"{data_root}/models", "/root/comfy-models"),
+            Mount(f"{data_root}/output", f"{_COMFYUI_APP_DIR}/output"),
+            Mount(f"{data_root}/input", f"{_COMFYUI_APP_DIR}/input"),
+            Mount(f"{data_root}/user", f"{_COMFYUI_APP_DIR}/user"),
+            Mount(f"{data_root}/custom_nodes", f"{_COMFYUI_APP_DIR}/custom_nodes"),
+            Mount(
                 f"{data_root}/extra_model_paths.yaml",
-                f"{_COMFYUI_APP_DIR}/extra_model_paths.yaml:ro",
+                f"{_COMFYUI_APP_DIR}/extra_model_paths.yaml",
+                read_only=True,
             ),
         ]
 

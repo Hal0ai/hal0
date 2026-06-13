@@ -248,9 +248,14 @@ def test_container_slot_has_runtime_profile_image_fields(
             return_value={"ok": True, "status": "healthy"},
         ),
         # slot_view inline-imports load_profiles_config for the image field;
-        # container.py's resolved_command_for_slot uses the same loader.
+        # resolved_command_for_slot resolves via ProfileCatalog, which binds
+        # load_profiles_config in the hal0.profiles namespace — patch both seams.
         patch(
             "hal0.config.loader.load_profiles_config",
+            return_value=fake_catalog,
+        ),
+        patch(
+            "hal0.profiles.load_profiles_config",
             return_value=fake_catalog,
         ),
     ):
@@ -297,6 +302,10 @@ def test_container_slot_resolved_command_includes_flags(
         ),
         patch(
             "hal0.config.loader.load_profiles_config",
+            return_value=fake_catalog,
+        ),
+        patch(
+            "hal0.profiles.load_profiles_config",
             return_value=fake_catalog,
         ),
     ):
