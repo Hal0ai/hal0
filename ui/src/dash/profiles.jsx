@@ -20,15 +20,19 @@ import {
   useProfileUpdate,
   useProfileDelete,
 } from '@/api/hooks/useProfiles'
+import { prettyProfile } from './profile-names.js'
 
-// Seed profile intent labels, mapped by slug.
-// Tok/s from hal0-container-bench-2026-06-08.md.
+// Seed profile intent labels, mapped by slug. Slugs are the lowercase
+// backend-agnostic names (rocm/rocm-mtp/vulkan/flm/tts/comfyui); the backend
+// (ROCm vs Vulkan) lives on the profile's explicit `backend` field, not the
+// slug. Tok/s from hal0-container-bench-2026-06-08.md.
 const PROFILE_INTENT = {
-  'moe-rocmfp4':       'MoE agents · ROCmFP4 · ~52.8 tok/s',
-  'dense-mtp-rocmfp4': 'Dense chat + MTP · ~24.4 tok/s',
-  'vulkan-std':        'Vulkan std (fallback)',
-  'flm-npu':           'FLM NPU inference',
-  'kokoro-cpu':        'TTS · Kokoro CPU',
+  'rocm':     'MoE agents · ROCmFP4 · ~52.8 tok/s',
+  'rocm-mtp': 'Dense chat + MTP · ~24.4 tok/s',
+  'vulkan':   'Vulkan std (fallback)',
+  'flm':      'FLM NPU inference',
+  'tts':      'TTS · Kokoro CPU',
+  'comfyui':  'ComfyUI image generation',
 };
 
 // Mirrors the API name regex ^[a-z0-9][a-z0-9_-]{0,31}$ — lowercase alnum
@@ -37,7 +41,7 @@ const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 function profileIntent(p) {
   if (PROFILE_INTENT[p.name]) return PROFILE_INTENT[p.name];
-  const base = p.image ? p.image.split(':').pop() : p.name;
+  const base = p.image ? p.image.split(':').pop() : prettyProfile(p.name);
   return p.mtp ? `${base} · MTP` : base;
 }
 
