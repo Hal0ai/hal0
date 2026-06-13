@@ -113,3 +113,7 @@ graphify-out/.rebuild.lock
 # knowledge graph — local-only, regenerated + served to Hermes via graphify MCP on CT105 (not committed; was 100k-line PR churn)
 graphify-out/
 .claude/branch-status.json
+
+# never track node_modules anywhere (incl. symlinks)
+node_modules
+**/node_modules
