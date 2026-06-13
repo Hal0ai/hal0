@@ -121,6 +121,26 @@ async def get_status(request: Request) -> dict[str, Any]:
     }
 
 
+@router.get("/health")
+async def health() -> dict[str, Any]:
+    """Lightweight liveness probe.
+
+    Returns 200 the moment the API event loop is serving — deliberately
+    does NO slot-manager, upstream, or disk work, so first-run consumers
+    can poll it during the bootstrap window before any slot exists. Three
+    of them hit ``/api/health``: the post-install hello in
+    ``installer/install.sh``, the agent readiness wait in
+    :mod:`hal0.cli.agent_shim`, and the ``hal0-agent@`` systemd watchdog.
+    Until this route existed they all got a 404 (the API only served
+    ``/api/status``), which surfaced to operators as a false
+    "API not responding" at the end of every install.
+
+    Deep health (disk / slots / event bus) lives at ``/api/health/system``;
+    the dashboard summary at ``/api/status``.
+    """
+    return {"status": "ok", "name": "hal0", "version": __version__}
+
+
 @router.get("/health/system")
 async def health_system(request: Request) -> dict[str, Any]:
     """Deep health: disk headroom, slot manager, event bus.

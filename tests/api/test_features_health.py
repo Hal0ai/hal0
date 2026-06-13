@@ -43,6 +43,23 @@ def test_features_memory_reflects_state(client: TestClient) -> None:
     assert client.get("/api/features").json()["memory"] is expected
 
 
+def test_health_liveness_ok(client: TestClient) -> None:
+    """Bare /api/health is a cheap 200 liveness probe.
+
+    Regression guard: the route used to be absent (only /api/status +
+    /api/health/system existed), so the installer hello, agent_shim
+    readiness wait, and the systemd watchdog — all of which poll
+    /api/health — got a 404 that surfaced as a false "API not responding"
+    at the end of every install.
+    """
+    r = client.get("/api/health")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["name"] == "hal0"
+    assert "version" in body
+
+
 def test_health_system_ok_payload(client: TestClient) -> None:
     r = client.get("/api/health/system")
     assert r.status_code == 200, r.text  # always 200, honest payload
