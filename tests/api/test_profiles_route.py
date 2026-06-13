@@ -48,15 +48,15 @@ class TestListProfiles:
         assert len(data) == 6
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
-        """Phase A added the flm-npu container profile to the seeds."""
+        """Phase A added the flm container profile to the seeds."""
         data = client.get("/api/profiles").json()
-        flm = next(item for item in data if item["name"] == "flm-npu")
+        flm = next(item for item in data if item["name"] == "flm")
         assert flm["mtp"] is False
 
     def test_kokoro_cpu_seed_present(self, client: TestClient) -> None:
-        """Phase B added the kokoro-cpu TTS profile to the seeds."""
+        """Phase B added the tts TTS profile to the seeds."""
         data = client.get("/api/profiles").json()
-        kokoro = next(item for item in data if item["name"] == "kokoro-cpu")
+        kokoro = next(item for item in data if item["name"] == "tts")
         assert kokoro["mtp"] is False
         assert "--model_path" in kokoro["flags"]
 
@@ -79,47 +79,58 @@ class TestListProfiles:
     def test_seed_flag_true_for_seeds(self, client: TestClient) -> None:
         """Phase C6: the UI keys immutability off the serialized seed flag."""
         data = client.get("/api/profiles").json()
-        vulkan = next(item for item in data if item["name"] == "vulkan-std")
+        vulkan = next(item for item in data if item["name"] == "vulkan")
         assert vulkan["seed"] is True
 
     def test_device_class_values(self, client: TestClient) -> None:
         """Phase C: device_class surfaces in the route response."""
         data = client.get("/api/profiles").json()
-        flm = next(item for item in data if item["name"] == "flm-npu")
+        flm = next(item for item in data if item["name"] == "flm")
         assert flm["device_class"] == "npu"
-        kokoro = next(item for item in data if item["name"] == "kokoro-cpu")
+        kokoro = next(item for item in data if item["name"] == "tts")
         assert kokoro["device_class"] == "cpu"
-        vulkan = next(item for item in data if item["name"] == "vulkan-std")
+        vulkan = next(item for item in data if item["name"] == "vulkan")
         assert vulkan["device_class"] == "gpu"
+
+    def test_backend_values(self, client: TestClient) -> None:
+        """backend surfaces in the route response (rocm|vulkan|None)."""
+        data = client.get("/api/profiles").json()
+        by_name = {item["name"]: item for item in data}
+        assert by_name["rocm"]["backend"] == "rocm"
+        assert by_name["rocm-mtp"]["backend"] == "rocm"
+        assert by_name["vulkan"]["backend"] == "vulkan"
+        assert by_name["flm"]["backend"] is None
+        assert by_name["tts"]["backend"] is None
+        assert by_name["comfyui"]["backend"] is None
 
     def test_moe_rocmfp4_mtp_false(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        moe = next(item for item in data if item["name"] == "moe-rocmfp4")
+        moe = next(item for item in data if item["name"] == "rocm")
         assert moe["mtp"] is False
 
     def test_dense_mtp_rocmfp4_mtp_true(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "dense-mtp-rocmfp4")
+        dense = next(item for item in data if item["name"] == "rocm-mtp")
         assert dense["mtp"] is True
 
     def test_vulkan_std_image_contains_vulkan(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        vulkan = next(item for item in data if item["name"] == "vulkan-std")
+        vulkan = next(item for item in data if item["name"] == "vulkan")
         assert "vulkan" in vulkan["image"]
 
     def test_mtp_true_resolved_flags_contains_spec_type(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "dense-mtp-rocmfp4")
+        dense = next(item for item in data if item["name"] == "rocm-mtp")
         assert "--spec-type draft-mtp" in dense["resolved_flags"]
 
     def test_mtp_true_resolved_flags_contains_bundle(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "dense-mtp-rocmfp4")
+        dense = next(item for item in data if item["name"] == "rocm-mtp")
         assert MTP_FLAG_BUNDLE in dense["resolved_flags"]
 
     def test_mtp_false_resolved_flags_no_spec_type(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        moe = next(item for item in data if item["name"] == "moe-rocmfp4")
+        moe = next(item for item in data if item["name"] == "rocm")
         assert "--spec-type" not in moe["resolved_flags"]
 
     def test_mtp_false_resolved_flags_equals_flags(self, client: TestClient) -> None:

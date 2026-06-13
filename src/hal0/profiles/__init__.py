@@ -53,6 +53,7 @@ class ResolvedProfile:
     seed: bool
     runtime_family: RuntimeFamily
     supported_slot_types: tuple[SlotType, ...]
+    backend: str | None = None
     cloned_from: str | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -62,6 +63,7 @@ class ResolvedProfile:
             "flags": self.flags,
             "mtp": self.mtp,
             "device_class": self.device_class,
+            "backend": self.backend,
             "resolved_flags": self.resolved_flags,
             "seed": self.seed,
             "runtime_family": self.runtime_family,
@@ -78,13 +80,16 @@ class ProfilePatch:
     flags: str | None = None
     mtp: bool | None = None
     device_class: Literal["gpu", "cpu", "npu", "img"] | None = None
+    backend: Literal["rocm", "vulkan"] | None = None
 
 
 def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
+    # Classify by device_class/image (robust to slug renames); the legacy
+    # name literals are kept as a belt-and-suspenders hint.
     image = profile.image.lower()
-    if name == "flm-npu" or profile.device_class == "npu" or "flm" in image:
+    if name == "flm" or profile.device_class == "npu" or "flm" in image:
         return "flm"
-    if name == "kokoro-cpu" or "kokoro" in image:
+    if name == "tts" or "kokoro" in image:
         return "kokoro"
     if name == "comfyui" or profile.device_class == "img" or "comfyui" in image:
         return "comfyui"
@@ -158,6 +163,7 @@ class ProfileCatalog:
                 device_class=(
                     patch.device_class if patch.device_class is not None else existing.device_class
                 ),
+                backend=patch.backend if patch.backend is not None else existing.backend,
                 cloned_from=existing.cloned_from,
             )
             catalog.profile[name] = updated
@@ -205,6 +211,7 @@ class ProfileCatalog:
             flags=profile.flags,
             mtp=profile.mtp,
             device_class=profile.device_class,
+            backend=profile.backend,
             resolved_flags=resolve_profile_flags(profile),
             seed=name in SEED_PROFILES,
             runtime_family=runtime,

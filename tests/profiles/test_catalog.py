@@ -10,11 +10,24 @@ from hal0.profiles import ProfileCatalog, ProfilePatch
 
 
 def test_resolve_seed_profile_includes_runtime_facts(tmp_hal0_home: str) -> None:
-    profile = ProfileCatalog().resolve("flm-npu")
+    profile = ProfileCatalog().resolve("flm")
 
     assert profile.seed is True
     assert profile.runtime_family == "flm"
     assert profile.supported_slot_types == ("llm", "embedding", "transcription")
+
+
+def test_resolve_exposes_backend(tmp_hal0_home: str) -> None:
+    catalog = ProfileCatalog()
+    assert catalog.resolve("rocm").backend == "rocm"
+    assert catalog.resolve("rocm-mtp").backend == "rocm"
+    assert catalog.resolve("vulkan").backend == "vulkan"
+    # non-GPU seeds carry no backend
+    assert catalog.resolve("flm").backend is None
+    assert catalog.resolve("tts").backend is None
+    assert catalog.resolve("comfyui").backend is None
+    # backend round-trips through to_dict for the API/UI
+    assert catalog.resolve("rocm").to_dict()["backend"] == "rocm"
 
 
 def test_create_update_delete_profile(tmp_hal0_home: str) -> None:
