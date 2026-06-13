@@ -321,6 +321,7 @@ function GraphLensed({ graph, source, query, width, height, banner }) {
                   key={n.id}
                   data-node
                   data-node-id={n.id}
+                  data-testid="mem-graph-node"
                   tabIndex={0}
                   transform={`translate(${n.x || 0},${n.y || 0})`}
                   style={{ cursor: 'pointer', opacity: op, transition: window.reducedMotion() ? undefined : 'opacity .25s var(--ease)' }}
@@ -408,6 +409,10 @@ function MemGraphExplorer() {
   const [typeFilter, setTypeFilter] = useState('');
   const [qDraft, setQDraft] = useState('');
   const [q, setQ] = useState('');
+  // FU2: how many "expand" clicks — each bumps the top-K window by 200.
+  const [expandLevel, setExpandLevel] = useState(0);
+  // FU2: center node for Direction-C ego fetch (server-side BFS when big).
+  const [egoCenter, setEgoCenter] = useState(null);
 
   const stageRef = useRef(null);
   const { width, height } = window.useSize(stageRef);
@@ -418,6 +423,8 @@ function MemGraphExplorer() {
 
   function chooseBank(id) {
     setBankSel(id);
+    setExpandLevel(0);
+    setEgoCenter(null);
     try { localStorage.setItem('hal0.mem.bank', id); } catch { /* ignore */ }
   }
   function chooseDir(id) {
@@ -434,8 +441,49 @@ function MemGraphExplorer() {
     ? window.__hal0UseEntityGraph(bank, { min_count: 1, limit: 500 })
     : { data: null, isLoading: false };
 
-  const factGraph = useMemo(() => window.normalizeGraph(factQuery.data, 'memories'), [factQuery.data]);
-  const entityGraph = useMemo(() => window.normalizeGraph(entQuery.data, 'entities'), [entQuery.data]);
+  // FU2: a bank is "big" when its metadata fact_count clears the layout
+  // threshold OR the loaded full graph does. Metadata gates the subgraph
+  // fetch without waiting on a full-graph round-trip.
+  const bankMeta = banks.find((b) => b.bank_id === bank);
+  const metaBig = (bankMeta?.fact_count ?? 0) > 240;
+
+  // FU2: server-side bounded slice — only fetched/preferred when big.
+  const subKind = source === 'entities' ? 'entities' : 'memories';
+  const topK = 200 + expandLevel * 200;
+  const subQuery = window.__hal0UseBankSubgraph
+    ? window.__hal0UseBankSubgraph(bank, {
+        kind: subKind,
+        mode: 'top',
+        by: source === 'entities' ? 'degree' : 'recency',
+        top_k: topK,
+        limit: topK,
+        type: typeFilter || undefined,
+        q: q || undefined,
+        enabled: metaBig,
+      })
+    : { data: null, isLoading: false };
+
+  // FU2: Direction-C ego slice — center-anchored BFS, gated behind big.
+  const egoQuery = window.__hal0UseBankSubgraph
+    ? window.__hal0UseBankSubgraph(bank, {
+        mode: 'ego',
+        node: egoCenter || undefined,
+        depth: 1,
+        limit: 240,
+        enabled: metaBig && direction === 'c' && !!egoCenter,
+      })
+    : { data: null, isLoading: false };
+
+  // Prefer the subgraph payload over the full graph when big; small banks
+  // keep today's full-graph behaviour (instant local layout).
+  const factSource = metaBig && subKind === 'memories' && subQuery.data ? subQuery.data : factQuery.data;
+  const entSource = metaBig && subKind === 'entities' && subQuery.data ? subQuery.data : entQuery.data;
+  // Direction C feeds the ego slice when available, else the (sub)fact graph.
+  const egoSource = metaBig && egoQuery.data ? egoQuery.data : factSource;
+
+  const factGraph = useMemo(() => window.normalizeGraph(factSource, 'memories'), [factSource]);
+  const entityGraph = useMemo(() => window.normalizeGraph(entSource, 'entities'), [entSource]);
+  const egoGraph = useMemo(() => window.normalizeGraph(egoSource, 'memories'), [egoSource]);
 
   // active graph drives the meta line + scale banner
   const activeSource = direction === 'a' ? source : 'memories';
@@ -446,11 +494,28 @@ function MemGraphExplorer() {
 
   const nodeCount = activeGraph.nodes.length;
   const edgeCount = activeGraph.links.length;
-  const big = nodeCount > 240;
+  const big = metaBig || nodeCount > 240;
+
+  // Scope numbers come from the subgraph payload (N-of-M); fall back to the
+  // active full-graph payload's totals when the sub hasn't resolved.
+  const sub = subQuery.data;
+  const scopeReturned = sub?.returned_nodes ?? nodeCount;
+  const scopeTotal = sub?.total_units ?? sub?.total_entities ?? payload?.total_units ?? payload?.total_entities ?? bankMeta?.fact_count;
+  const scopeTruncated = sub?.truncated ?? (scopeTotal != null && scopeReturned < scopeTotal);
 
   const banner = big ? (
-    <div className="mg-scalewarn mono">
-      <Icon name="layers" size={12} /> {nodeCount} nodes · large bank — use <b>Structured</b> or <b>Ego</b> for clarity at this scale
+    <div className="mg-scalewarn mono" data-testid="mem-graph-scalebanner">
+      <Icon name="layers" size={12} />{' '}
+      showing top {scopeReturned} of {scopeTotal ?? '…'} nodes
+      {scopeTruncated && (
+        <button
+          className="mg-seg"
+          data-testid="mem-graph-expand"
+          onClick={() => setExpandLevel((n) => n + 1)}
+        >
+          {' '}expand
+        </button>
+      )}
     </div>
   ) : null;
 
@@ -476,14 +541,14 @@ function MemGraphExplorer() {
           <div className="mg-source">
             <button
               className={'mg-seg' + (source === 'memories' ? ' on' : '')}
-              onClick={() => setSource('memories')}
+              onClick={() => { setSource('memories'); setExpandLevel(0); }}
               data-testid="mem-graph-source-memories"
             >
               Memories
             </button>
             <button
               className={'mg-seg' + (source === 'entities' ? ' on' : '')}
-              onClick={() => setSource('entities')}
+              onClick={() => { setSource('entities'); setExpandLevel(0); }}
               data-testid="mem-graph-source-entities"
             >
               Entities
@@ -583,7 +648,7 @@ function MemGraphExplorer() {
           )
         ) : (
           window.GraphEgo ? (
-            <window.GraphEgo graph={factGraph} query={q} width={width} height={height} banner={banner} />
+            <window.GraphEgo graph={egoGraph} query={q} width={width} height={height} banner={banner} onCenter={metaBig ? setEgoCenter : undefined} />
           ) : (
             <div className="empty mono mem-graph-empty">loading…</div>
           )

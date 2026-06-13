@@ -337,9 +337,211 @@ function buildMemEntityGraph(facts: MemFact[] = MEM_FACTS, minCount = 1) {
   return { nodes, edges, total_entities: nodes.length }
 }
 
-// banks list — one rich primary + 3 supporting banks
+// ─── FU2: large synthetic bank + server-side subgraph port ──────────
+// `big` exercises the subgraph endpoint: ~600 fact nodes, a handful of
+// high-degree hubs, varied timestamps. The wrapper swaps to the subgraph
+// hook when nodeCount > 240, so this bank must clear that threshold.
+const BIG_NODE_COUNT = 600
+const BIG_HUBS = ['big-hub-0', 'big-hub-1', 'big-hub-2', 'big-hub-3']
+const BIG_TOPICS = ['power', 'thermal', 'storage', 'models', 'network', 'agents']
+const BIG_LINK_TYPES: MemLinkType[] = ['semantic', 'causal', 'temporal', 'semantic']
+
+let _bigGraphCache: { nodes: { data: Record<string, unknown> }[]; edges: { data: Record<string, unknown> }[] } | null = null
+
+function buildBigMemFactGraph() {
+  if (_bigGraphCache) return _bigGraphCache
+  const nodes: { data: Record<string, unknown> }[] = []
+  // hubs first (high degree), then leaves. Timestamps fan across ~120 days
+  // so recency ranking has something to sort.
+  const baseTs = Date.parse('2026-02-01T00:00:00Z')
+  for (let i = 0; i < BIG_NODE_COUNT; i++) {
+    const id = i < BIG_HUBS.length ? BIG_HUBS[i] : `big-n${i}`
+    const topic = BIG_TOPICS[i % BIG_TOPICS.length]
+    // spread timestamps: newer ids are more recent (and hubs are oldest)
+    const ts = new Date(baseTs + i * 6 * 3600 * 1000).toISOString()
+    nodes.push({
+      data: {
+        id,
+        label: `${topic} fact ${i}`,
+        text: `Synthetic ${topic} memory unit ${i} for subgraph scale testing.`,
+        type: ['world', 'experience', 'observation'][i % 3],
+        topic,
+        date: ts,
+        created_at: ts,
+        entities: [topic],
+        color: MEM_TOPIC_COLORS[topic] ?? '#7FB8FF',
+      },
+    })
+  }
+  const edges: { data: Record<string, unknown> }[] = []
+  const seen = new Set<string>()
+  const add = (s: string, t: string, linkType: MemLinkType, weight = 1) => {
+    if (s === t) return
+    const id = `${linkType}:${s}>${t}`
+    if (seen.has(id)) return
+    seen.add(id)
+    edges.push({ data: { id, source: s, target: t, linkType, weight } })
+  }
+  // each non-hub leaf attaches to one hub (round-robin) → hubs get huge degree
+  for (let i = BIG_HUBS.length; i < BIG_NODE_COUNT; i++) {
+    const hub = BIG_HUBS[i % BIG_HUBS.length]
+    add(hub, `big-n${i}`, BIG_LINK_TYPES[i % BIG_LINK_TYPES.length], 1 + (i % 3))
+  }
+  // a temporal chain through every 10th leaf so depth-2 ego has reach
+  for (let i = BIG_HUBS.length + 10; i < BIG_NODE_COUNT; i += 10) {
+    add(`big-n${i - 10}`, `big-n${i}`, 'temporal', 1)
+  }
+  // hub-to-hub causal bridges (keep the hubs salient)
+  for (let i = 1; i < BIG_HUBS.length; i++) add(BIG_HUBS[i - 1], BIG_HUBS[i], 'causal', 3)
+  _bigGraphCache = { nodes, edges }
+  return _bigGraphCache
+}
+
+// JS port of the backend graph-math (degree / recency / ego / induce).
+const _SUB_TYPE_WEIGHT: Record<string, number> = { causal: 4, temporal: 3, cooccurrence: 2, semantic: 1 }
+const _subTypeWeight = (t: string | undefined) => _SUB_TYPE_WEIGHT[t ?? 'semantic'] ?? 1
+const _edgeEnds = (e: { data: Record<string, unknown> }) => {
+  const d = e.data
+  return {
+    s: String(d.source ?? d.from ?? ''),
+    t: String(d.target ?? d.to ?? ''),
+    lt: String(d.linkType ?? d.type ?? 'semantic'),
+    w: typeof d.weight === 'number' ? d.weight : 1,
+  }
+}
+const _nid = (n: { data: Record<string, unknown> }) => String(n.data.id)
+
+function _subAdjacency(graph: { nodes: { data: Record<string, unknown> }[]; edges: { data: Record<string, unknown> }[] }) {
+  const ids = new Set(graph.nodes.map(_nid))
+  const adj = new Map<string, { t: string; lt: string; w: number }[]>()
+  for (const e of graph.edges) {
+    const { s, t, lt, w } = _edgeEnds(e)
+    if (s === t || !ids.has(s) || !ids.has(t)) continue
+    ;(adj.get(s) ?? adj.set(s, []).get(s)!).push({ t, lt, w })
+    ;(adj.get(t) ?? adj.set(t, []).get(t)!).push({ t: s, lt, w })
+  }
+  return adj
+}
+
+function _subRankByDegree(graph: { nodes: { data: Record<string, unknown> }[]; edges: { data: Record<string, unknown> }[] }) {
+  const adj = _subAdjacency(graph)
+  const ids = graph.nodes.map(_nid)
+  const order = new Map(ids.map((id, k) => [id, k]))
+  const score = new Map(ids.map((id) => [id, (adj.get(id) ?? []).reduce((a, e) => a + _subTypeWeight(e.lt) * e.w, 0)]))
+  return [...ids].sort((a, b) => (score.get(b)! - score.get(a)!) || (order.get(a)! - order.get(b)!))
+}
+
+function _subTs(n: { data: Record<string, unknown> }) {
+  const d = n.data
+  for (const k of ['t', 'created_at', 'timestamp', 'updated_at', 'date']) {
+    const v = d[k]
+    if (v) return String(v)
+  }
+  return ''
+}
+
+function _subRankByRecency(graph: { nodes: { data: Record<string, unknown> }[]; edges: { data: Record<string, unknown> }[] }) {
+  const order = new Map(graph.nodes.map((n, k) => [_nid(n), k]))
+  return [...graph.nodes]
+    .sort((a, b) => {
+      const ta = _subTs(a)
+      const tb = _subTs(b)
+      if ((ta === '') !== (tb === '')) return ta === '' ? 1 : -1 // missing last
+      if (ta !== tb) return ta < tb ? 1 : -1 // newest first
+      return order.get(_nid(a))! - order.get(_nid(b))!
+    })
+    .map(_nid)
+}
+
+function _subEgoBfs(
+  graph: { nodes: { data: Record<string, unknown> }[]; edges: { data: Record<string, unknown> }[] },
+  center: string,
+  depth: number,
+  limit: number,
+) {
+  const adj = _subAdjacency(graph)
+  const ids = new Set(graph.nodes.map(_nid))
+  if (!ids.has(center)) return new Set<string>()
+  const reached = new Set([center])
+  let frontier = [center]
+  for (let d = 0; d < Math.max(1, depth); d++) {
+    const nxt: string[] = []
+    for (const cur of frontier) {
+      const nbrs = [...(adj.get(cur) ?? [])].sort((x, y) => _subTypeWeight(y.lt) * y.w - _subTypeWeight(x.lt) * x.w)
+      for (const { t } of nbrs) {
+        if (!reached.has(t)) {
+          reached.add(t)
+          nxt.push(t)
+          if (reached.size >= limit) return reached
+        }
+      }
+    }
+    frontier = nxt
+  }
+  return reached
+}
+
+function _subInduce(
+  graph: { nodes: { data: Record<string, unknown> }[]; edges: { data: Record<string, unknown> }[] },
+  keep: Set<string>,
+) {
+  const nodes = graph.nodes.filter((n) => keep.has(_nid(n)))
+  const edges = graph.edges.filter((e) => {
+    const { s, t } = _edgeEnds(e)
+    return keep.has(s) && keep.has(t) && s !== t
+  })
+  return { nodes, edges }
+}
+
+// Resolve the source graph for a bank+kind. Only `big` uses the large
+// synthetic graph; every other bank reuses the existing primary fixtures.
+function graphForBank(bank: string, kind: 'memories' | 'entities') {
+  if (kind === 'entities') return buildMemEntityGraph()
+  return bank === 'big' ? buildBigMemFactGraph() : buildMemFactGraph()
+}
+
+function buildBankSubgraphRoute(url: string, match: RegExpMatchArray) {
+  const bank = bankFrom(match)
+  let params = new URLSearchParams()
+  try {
+    params = new URL(url, 'http://x').searchParams
+  } catch {
+    /* path-only */
+  }
+  const kind = params.get('kind') === 'entities' ? 'entities' : 'memories'
+  const mode = params.get('mode') === 'ego' ? 'ego' : 'top'
+  const limit = Math.min(Number(params.get('limit') ?? 240) || 240, 500)
+  const graph = graphForBank(bank, kind)
+  const totalNodes = graph.nodes.length
+  const totalEdges = graph.edges.length
+
+  let keep: Set<string>
+  if (mode === 'ego') {
+    const node = params.get('node') ?? ''
+    const depth = Math.min(Number(params.get('depth') ?? 1) || 1, 2)
+    keep = _subEgoBfs(graph, node, depth, limit)
+  } else {
+    const by = params.get('by') || (kind === 'entities' ? 'degree' : 'recency')
+    const ranked = by === 'degree' ? _subRankByDegree(graph) : _subRankByRecency(graph)
+    const topK = Math.min(Number(params.get('top_k') ?? 200) || 200, 500)
+    keep = new Set(ranked.slice(0, Math.min(topK, limit)))
+  }
+  const sub = _subInduce(graph, keep)
+  const out: Record<string, unknown> = { nodes: sub.nodes, edges: sub.edges }
+  out.total_edges = totalEdges
+  out[kind === 'entities' ? 'total_entities' : 'total_units'] = totalNodes
+  out.returned_nodes = sub.nodes.length
+  out.returned_edges = sub.edges.length
+  out.truncated = sub.nodes.length < totalNodes
+  out.mode = mode
+  out.center = params.get('node')
+  return out
+}
+
+// banks list — one rich primary + 3 supporting banks + the `big` scale bank
 const MEM_BANKS = [
   { bank_id: 'primary', name: 'primary', mission: 'memory of the strix-halo-01 operator', fact_count: MEM_FACTS.length },
+  { bank_id: 'big', name: 'big', mission: 'large synthetic bank for subgraph scale testing', fact_count: BIG_NODE_COUNT },
   { bank_id: 'hermes', name: 'hermes', mission: 'the bundled home agent', fact_count: 612 },
   { bank_id: 'scratch', name: 'scratch', mission: 'ephemeral working memory', fact_count: 88 },
   { bank_id: 'ingest', name: 'ingest', mission: 'raw document drop', fact_count: 4310 },
@@ -512,8 +714,10 @@ function buildBankOperations(_url: string, match: RegExpMatchArray) {
 // filters handle type/q narrowing, and the prototype keeps every mentioned
 // entity (min_count defaults to 1), so the unfiltered payload is the right
 // forced-mock shape.
-function buildMemFactGraphRoute() {
-  return buildMemFactGraph()
+function buildMemFactGraphRoute(_url: string, match: RegExpMatchArray) {
+  const bank = bankFrom(match)
+  const g = graphForBank(bank, 'memories')
+  return { ...g, total_units: g.nodes.length }
 }
 
 function buildMemEntityGraphRoute() {
@@ -601,6 +805,7 @@ export const MOCK_ALLOWLIST: ReadonlyArray<{ re: RegExp; build: Builder }> = Obj
   { re: /^\/api\/memory\/banks$/, build: buildMemoryBanks },
   { re: /^\/api\/memory\/banks\/([^/]+)\/stats\/timeseries$/, build: buildBankTimeseries },
   { re: /^\/api\/memory\/banks\/([^/]+)\/stats$/, build: buildBankStats },
+  { re: /^\/api\/memory\/banks\/([^/]+)\/graph\/subgraph$/, build: buildBankSubgraphRoute },
   { re: /^\/api\/memory\/banks\/([^/]+)\/entities\/graph$/, build: buildMemEntityGraphRoute },
   { re: /^\/api\/memory\/banks\/([^/]+)\/graph$/, build: buildMemFactGraphRoute },
   { re: /^\/api\/memory\/banks\/([^/]+)\/documents$/, build: buildBankDocuments },
@@ -633,6 +838,32 @@ function parsePath(url: string | URL | Request): string | null {
   return q >= 0 ? s.slice(0, q) : s
 }
 
+// Like parsePath but keeps the query string so builders can read params
+// (the allowlist matches on the stripped path, but some builders — recall,
+// subgraph — need ?mode=/?top_k=/etc). Forced-mock short-circuits
+// page.route, so this is the only place those params survive.
+function pathWithSearch(url: string | URL | Request): string | null {
+  let s: string
+  if (typeof url === 'string') s = url
+  else if (url instanceof URL) s = url.pathname + url.search
+  else {
+    try {
+      s = (url as Request).url
+    } catch {
+      return null
+    }
+  }
+  if (s.startsWith('http')) {
+    try {
+      const u = new URL(s)
+      return u.pathname + u.search
+    } catch {
+      return null
+    }
+  }
+  return s
+}
+
 function matchAllowlist(path: string) {
   for (const row of MOCK_ALLOWLIST) {
     const m = path.match(row.re)
@@ -661,9 +892,11 @@ export async function mockFetch(
   if (!path) return fetch(url as any, options)
 
   const hit = matchAllowlist(path)
+  // builders receive the query-bearing path (subgraph/recall read params)
+  const builderUrl = pathWithSearch(url) ?? path
 
   if (FORCED && hit) {
-    return jsonResponse(hit.row.build(path, hit.match))
+    return jsonResponse(hit.row.build(builderUrl, hit.match))
   }
 
   let res: Response
@@ -672,12 +905,12 @@ export async function mockFetch(
   } catch (e) {
     if (hit) {
       // network-level failure on a mocked path — fall back
-      return jsonResponse(hit.row.build(path, hit.match))
+      return jsonResponse(hit.row.build(builderUrl, hit.match))
     }
     throw e
   }
   if (res.status === 404 && hit) {
-    return jsonResponse(hit.row.build(path, hit.match))
+    return jsonResponse(hit.row.build(builderUrl, hit.match))
   }
   return res
 }

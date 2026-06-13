@@ -142,6 +142,9 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/profile`,
   memoryBankGraph: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/graph`,
+  // FU2: server-side ego / top-K subgraph slice for large banks.
+  memoryBankSubgraph: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/graph/subgraph`,
   memoryBankEntityGraph: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/entities/graph`,
   memoryBankEntities: (bank: string) =>

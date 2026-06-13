@@ -19,7 +19,7 @@
 
 const { useState, useRef, useEffect, useMemo } = React;
 
-function GraphEgo({ graph, query, width, height, banner }) {
+function GraphEgo({ graph, query, width, height, banner, onCenter }) {
   const W = width, H = height;
   const nodes = (graph && graph.nodes) || [];
   const links = (graph && graph.links) || [];
@@ -49,6 +49,12 @@ function GraphEgo({ graph, query, width, height, banner }) {
   const [trail, setTrail] = useState([]);
   const [hover, setHover] = useState(null);
   const center = (centerId && byId[centerId]) ? centerId : defaultCenter;
+
+  // FU2: surface the active center to the parent so it can fetch a
+  // server-side ego slice (Direction-C, big banks). Fires on center change.
+  useEffect(() => {
+    if (onCenter && center) onCenter(center);
+  }, [center, onCenter]);
 
   // ── layout for current center ──────────────────────────────────────────────
   const layout = useMemo(() => {
