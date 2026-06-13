@@ -139,19 +139,21 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       type,
       runtime: "container",
       profile,
-      // C7: derive device from the selected profile's device_class.
-      // Interim heuristic — may promote device onto ProfileConfig directly.
-      //   npu/cpu → pass through verbatim
-      //   img     → "gpu-rocm" (ComfyUI image runtime, ROCm-only for now)
-      //   gpu     → check profile image tag: vulkan → "gpu-vulkan", else "gpu-rocm"
+      // Derive device from the selected profile's explicit `backend` field
+      // (authoritative ROCm-vs-Vulkan selector) with device_class as the
+      // fallback for non-GPU profiles:
+      //   backend "vulkan" → "gpu-vulkan"; backend "rocm" → "gpu-rocm"
+      //   else by device_class: npu → "npu", cpu → "cpu",
+      //                         img → "gpu-rocm" (ComfyUI, ROCm-only for now),
+      //                         gpu/other → "gpu-rocm"
       device: (() => {
         const meta = allProfiles.find(p => p.name === profile);
+        if (meta?.backend === "vulkan") return "gpu-vulkan";
+        if (meta?.backend === "rocm") return "gpu-rocm";
         const dc = meta?.device_class || "gpu";
         if (dc === "npu") return "npu";
         if (dc === "cpu") return "cpu";
-        if (dc === "img") return "gpu-rocm";
-        // dc === "gpu": distinguish vulkan vs rocm by image tag
-        return (meta?.image || "").includes("vulkan") ? "gpu-vulkan" : "gpu-rocm";
+        return "gpu-rocm";
       })(),
       group,
       ...(model ? { model } : {}),
