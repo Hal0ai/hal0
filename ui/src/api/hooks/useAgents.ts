@@ -67,7 +67,8 @@ export interface ApprovalEntry {
   tool: string
   args: Record<string, unknown>
   client_id?: string
-  enqueued_at?: string
+  /** Epoch seconds (float) from ApprovalEntry.as_dict() — NOT an ISO string. */
+  enqueued_at?: number
   state?: string
 }
 

@@ -1,6 +1,21 @@
 // hal0 dashboard — root App, hash routing, tweaks panel, keyboard shortcuts
 const { useState: useStateA, useEffect: useEffectA } = React;
 
+// ApprovalEntry.as_dict() emits ``enqueued_at`` as epoch seconds (a float),
+// not an ISO string — calling .slice() on it threw "enqueued_at.slice is not
+// a function" and black-screened the whole dashboard whenever an approval was
+// queued. Format defensively: epoch float → UTC HH:MM:SS, tolerate an ISO
+// string (mock fixtures) and missing values.
+function fmtApprovalTs(v) {
+  if (v == null) return "—";
+  if (typeof v === "number") {
+    const d = new Date(v * 1000);
+    return Number.isNaN(d.getTime()) ? "—" : d.toISOString().slice(11, 19);
+  }
+  if (typeof v === "string" && v.length >= 19) return v.slice(11, 19);
+  return "—";
+}
+
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "slotVariant": "instrument",
   "showHero": true,
@@ -91,7 +106,7 @@ function App() {
   // Map ApprovalEntry → shape expected by ApprovalModal
   const approvalItems = (approvalQuery.data?.approvals ?? []).map(e => ({
     id: e.id,
-    ts: e.enqueued_at ? e.enqueued_at.slice(11, 19) : "—",
+    ts: fmtApprovalTs(e.enqueued_at),
     agent: e.client_id || "hermes",
     tool: e.tool,
     arg: e.args ? JSON.stringify(e.args).slice(0, 120) : "—",
