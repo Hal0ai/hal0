@@ -366,6 +366,31 @@ class TestContainerEnrichment:
         assert e["image"] is None
         assert e["resolved_command"] is None
 
+    async def test_device_class_and_backend_lifted_from_profile(
+        self, tmp_hal0_home: str
+    ) -> None:
+        # A profile-backed GPU slot surfaces device_class + backend from the
+        # resolved profile so the UI groups/colours without re-deriving.
+        out = await container_enrichment(
+            [_container_cfg(profile="rocm")],
+            pull_jobs={},
+            provider=FakeContainerProvider(active=True, healthy=True),
+        )
+        e = out["gpu-chat"]
+        assert e["device_class"] == "gpu"
+        assert e["backend"] == "rocm"
+
+    async def test_device_class_for_non_gpu_profile(self, tmp_hal0_home: str) -> None:
+        # Non-GPU profile: device_class drives display; backend is None.
+        out = await container_enrichment(
+            [_container_cfg(name="tts-slot", profile="tts")],
+            pull_jobs={},
+            provider=FakeContainerProvider(active=True, healthy=True),
+        )
+        e = out["tts-slot"]
+        assert e["device_class"] == "cpu"
+        assert e["backend"] is None
+
     async def test_active_but_unhealthy_is_starting(self) -> None:
         out = await container_enrichment(
             [_container_cfg()],

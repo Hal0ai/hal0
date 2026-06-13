@@ -437,6 +437,14 @@ async def container_enrichment(
                 prof = catalog.profile.get(profile_name)
                 image = prof.image if prof else None
                 entry["image"] = image
+                # Lift device_class + backend from the resolved profile so the
+                # UI groups by silicon class and colours by GPU runtime without
+                # re-deriving. backend is None for non-GPU profiles (the card
+                # then falls back to device_class). Merged via setdefault, so a
+                # backend already lifted from slot metadata still wins.
+                if prof is not None:
+                    entry["device_class"] = prof.device_class
+                    entry["backend"] = prof.backend
                 # resolved_command = llama-server argv starting from the image
                 from hal0.providers.container import resolved_command_for_slot
 
