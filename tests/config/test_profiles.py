@@ -38,6 +38,20 @@ class TestProfileConfigValidation:
         p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar")
         assert p.flags == ""
 
+    def test_backend_default_none(self) -> None:
+        p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar")
+        assert p.backend is None
+
+    def test_backend_accepts_rocm_and_vulkan(self) -> None:
+        assert ProfileConfig(image="x", backend="rocm").backend == "rocm"
+        assert ProfileConfig(image="x", backend="vulkan").backend == "vulkan"
+
+    def test_backend_rejects_unknown(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ProfileConfig(image="x", backend="cuda")
+
     def test_empty_image_raises(self) -> None:
         with pytest.raises(Exception, match="image"):
             ProfileConfig(image="")
@@ -142,25 +156,34 @@ class TestLoadProfilesConfig:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
         assert (
             len(cfg.profile) == 6
-        )  # moe-rocmfp4, dense-mtp-rocmfp4, vulkan-std, flm-npu, kokoro-cpu, comfyui
+        )  # rocm, rocm-mtp, vulkan, flm, tts, comfyui
 
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert "moe-rocmfp4" in cfg.profile
-        assert "dense-mtp-rocmfp4" in cfg.profile
-        assert "vulkan-std" in cfg.profile
+        assert "rocm" in cfg.profile
+        assert "rocm-mtp" in cfg.profile
+        assert "vulkan" in cfg.profile
 
-    def test_seed_moe_rocmfp4_mtp_false(self, tmp_path: Path) -> None:
+    def test_seed_rocm_mtp_false(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["moe-rocmfp4"].mtp is False
+        assert cfg.profile["rocm"].mtp is False
 
-    def test_seed_dense_mtp_rocmfp4_mtp_true(self, tmp_path: Path) -> None:
+    def test_seed_rocm_mtp_mtp_true(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.profile["dense-mtp-rocmfp4"].mtp is True
+        assert cfg.profile["rocm-mtp"].mtp is True
 
-    def test_seed_vulkan_std_correct_image(self, tmp_path: Path) -> None:
+    def test_seed_vulkan_correct_image(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert "vulkan-radv-server" in cfg.profile["vulkan-std"].image
+        assert "vulkan-radv-server" in cfg.profile["vulkan"].image
+
+    def test_seed_gpu_profiles_have_backend(self, tmp_path: Path) -> None:
+        cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
+        assert cfg.profile["rocm"].backend == "rocm"
+        assert cfg.profile["rocm-mtp"].backend == "rocm"
+        assert cfg.profile["vulkan"].backend == "vulkan"
+        assert cfg.profile["flm"].backend is None
+        assert cfg.profile["tts"].backend is None
+        assert cfg.profile["comfyui"].backend is None
 
     def test_load_valid_file(self, tmp_path: Path) -> None:
         toml_content = (
@@ -233,17 +256,17 @@ class TestSeedFileParity:
             )
 
 
-# ── kokoro-cpu seed profile ───────────────────────────────────────────────────
+# ── tts (kokoro) seed profile ─────────────────────────────────────────────────
 
 
-def test_kokoro_cpu_seed_profile() -> None:
-    prof = SEED_PROFILES["kokoro-cpu"]
+def test_tts_seed_profile() -> None:
+    prof = SEED_PROFILES["tts"]
     assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
     assert "--model_path" in prof["flags"]
     assert prof["mtp"] is False
 
 
-# ── device_class + DEVICE_DEFAULT_PROFILES ────────────────────────────────────
+# ── device_class + backend + DEVICE_DEFAULT_PROFILES ──────────────────────────
 
 
 def test_profile_device_class_defaults_gpu() -> None:
@@ -251,19 +274,30 @@ def test_profile_device_class_defaults_gpu() -> None:
 
 
 def test_seed_device_classes() -> None:
-    assert SEED_PROFILES["vulkan-std"]["device_class"] == "gpu"
-    assert SEED_PROFILES["moe-rocmfp4"]["device_class"] == "gpu"
-    assert SEED_PROFILES["dense-mtp-rocmfp4"]["device_class"] == "gpu"
-    assert SEED_PROFILES["flm-npu"]["device_class"] == "npu"
-    assert SEED_PROFILES["kokoro-cpu"]["device_class"] == "cpu"
+    assert SEED_PROFILES["vulkan"]["device_class"] == "gpu"
+    assert SEED_PROFILES["rocm"]["device_class"] == "gpu"
+    assert SEED_PROFILES["rocm-mtp"]["device_class"] == "gpu"
+    assert SEED_PROFILES["flm"]["device_class"] == "npu"
+    assert SEED_PROFILES["tts"]["device_class"] == "cpu"
+    assert SEED_PROFILES["comfyui"]["device_class"] == "img"
+
+
+def test_seed_backends() -> None:
+    assert SEED_PROFILES["rocm"]["backend"] == "rocm"
+    assert SEED_PROFILES["rocm-mtp"]["backend"] == "rocm"
+    assert SEED_PROFILES["vulkan"]["backend"] == "vulkan"
+    # non-GPU profiles carry no backend (device_class drives display)
+    assert SEED_PROFILES["flm"].get("backend") is None
+    assert SEED_PROFILES["tts"].get("backend") is None
+    assert SEED_PROFILES["comfyui"].get("backend") is None
 
 
 def test_device_default_profiles_map() -> None:
     from hal0.config.schema import DEVICE_DEFAULT_PROFILES
 
     assert DEVICE_DEFAULT_PROFILES == {
-        "gpu-rocm": "moe-rocmfp4",
-        "gpu-vulkan": "vulkan-std",
-        "cpu": "kokoro-cpu",
-        "npu": "flm-npu",
+        "gpu-rocm": "rocm",
+        "gpu-vulkan": "vulkan",
+        "cpu": "tts",
+        "npu": "flm",
     }

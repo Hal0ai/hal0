@@ -685,32 +685,40 @@ MTP_FLAG_BUNDLE = (
 #: Seed profiles shipped with hal0.  Returned by ``load_profiles_config()``
 #: when ``/etc/hal0/profiles.toml`` is absent so ``GET /api/profiles`` is
 #: always populated on a fresh install.
+#: Seed profile catalog.  Slugs are backend-agnostic workload names — the
+#: ``backend`` field (not the slug) carries the ROCm/Vulkan choice, and the
+#: card chip renders the backend as colour, so the slug no longer repeats it.
+#: GPU profiles set ``backend``; non-GPU profiles (npu/cpu/img) omit it and
+#: let ``device_class`` drive display.
 SEED_PROFILES: dict[str, dict[str, object]] = {
-    "moe-rocmfp4": {
+    "rocm": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
+        "backend": "rocm",
     },
-    "dense-mtp-rocmfp4": {
+    "rocm-mtp": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         "mtp": True,
         "device_class": "gpu",
+        "backend": "rocm",
     },
-    "vulkan-std": {
+    "vulkan": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
         "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         "mtp": False,
         "device_class": "gpu",
+        "backend": "vulkan",
     },
-    "flm-npu": {
+    "flm": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
         "flags": "",
         "mtp": False,
         "device_class": "npu",
     },
-    "kokoro-cpu": {
+    "tts": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
         "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
         "mtp": False,
@@ -729,10 +737,10 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
 #: gpu-vulkan, cpu, npu); values are seed profile names that best represent
 #: each device class.
 DEVICE_DEFAULT_PROFILES: dict[str, str] = {
-    "gpu-rocm": "moe-rocmfp4",
-    "gpu-vulkan": "vulkan-std",
-    "cpu": "kokoro-cpu",
-    "npu": "flm-npu",
+    "gpu-rocm": "rocm",
+    "gpu-vulkan": "vulkan",
+    "cpu": "tts",
+    "npu": "flm",
 }
 
 
@@ -771,6 +779,15 @@ class ProfileConfig(BaseModel):
             "Device class this profile targets.  Drives drawer profile filtering "
             "and create-modal device defaults.  ``'img'`` is reserved for Phase D "
             "(ComfyUI image-generation slots) and is not yet used."
+        ),
+    )
+    backend: Literal["rocm", "vulkan"] | None = Field(
+        default=None,
+        description=(
+            "GPU runtime this profile targets — the authoritative source for the "
+            "ROCm-vs-Vulkan choice (replaces sniffing the image tag).  ``None`` for "
+            "non-GPU profiles (npu/cpu/img), where ``device_class`` drives display "
+            "and slot-card colour."
         ),
     )
     cloned_from: str | None = Field(

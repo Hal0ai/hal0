@@ -1,43 +1,49 @@
 # hal0 profile catalog — bench-tuned backend templates.
-# A profile = (image, flags, mtp).  Slots reference a profile by name;
-# the profile supplies the container image + flag bundle.
+# A profile = (image, flags, mtp, device_class, backend).  Slots reference a
+# profile by name; the profile supplies the container image + flag bundle and
+# the GPU runtime (backend = rocm|vulkan).  Slugs are backend-agnostic workload
+# names — the `backend` field, not the slug, carries the ROCm/Vulkan choice.
 # See the container-runtime design doc (§1) for the layering rationale.
 #
-# NOTE: this file is OPTIONAL.  hal0-api returns these three seed profiles
-# as built-in defaults when the file is absent (SEED_PROFILES in schema.py).
+# NOTE: this file is OPTIONAL.  hal0-api returns these seed profiles as built-in
+# defaults when the file is absent (SEED_PROFILES in schema.py).
 # Keep this file identical to SEED_PROFILES to avoid silent drift.
 
-[profile.moe-rocmfp4]
-# A3B MoE agents (ace-saber). ~52.8 tok/s gen, 131k ctx.
+[profile.rocm]
+# Standard ROCm GPU template (ace-saber A3B MoE etc). ~52.8 tok/s gen, 131k ctx.
+# Broad-compatibility "std" — must-have defaults (-fa, KV quant, --no-mmap).
 image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
 flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
 mtp          = false
 device_class = "gpu"
+backend      = "rocm"
 
-[profile.dense-mtp-rocmfp4]
-# Dense chat (qwopus 27B). ~24.4 tok/s gen with MTP (~2x non-MTP). 131k ctx.
+[profile.rocm-mtp]
+# ROCm + MTP draft speculation (dense chat, qwopus 27B). ~24.4 tok/s (~2x non-MTP).
 # mtp=true expands to the full --spec-type draft-mtp bundle at resolve time.
 image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
 flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
 mtp          = true
 device_class = "gpu"
+backend      = "rocm"
 
-[profile.vulkan-std]
-# Fallback / non-FP4 models. Vulkan-radv, no FP4/MTP.
+[profile.vulkan]
+# Standard Vulkan GPU template (fallback / non-FP4 models). Vulkan-radv, no FP4/MTP.
 image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
 flags        = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
 mtp          = false
 device_class = "gpu"
+backend      = "vulkan"
 
-[profile.flm-npu]
+[profile.flm]
 # NPU LLM/trio slot (FastFlowLM). Flags are built by FLMProvider.container_spec,
-# not by this profile — image pin only.
+# not by this profile — image pin only. No backend (device_class drives display).
 image        = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
 flags        = ""
 mtp          = false
 device_class = "npu"
 
-[profile.kokoro-cpu]
+[profile.tts]
 # CPU TTS slot (kokoro-onnx). No GPU devices. Flags feed kokoro_server.py;
 # --model_path points at the shared model store so no download on start.
 image        = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
