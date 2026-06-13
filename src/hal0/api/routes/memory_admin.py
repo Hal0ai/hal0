@@ -33,8 +33,9 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Request
 
+from hal0.api.routes import _memory_subgraph as _sg
 from hal0.api.routes.memory import MemoryUnavailable
-from hal0.errors import BadRequest, Hal0Error
+from hal0.errors import BadRequest, Hal0Error, NotFound, UnprocessableEntity
 
 router = APIRouter()
 
@@ -175,6 +176,75 @@ async def engine_status(request: Request) -> dict[str, Any]:
         "features": (version or {}).get("features"),
         "banks_total": len(banks.get("banks", [])) if isinstance(banks, dict) else None,
     }
+
+
+# ── composed subgraph endpoint (NOT a passthrough) ─────────────────────────────
+#
+# Server-side ego / top-K slice so the graph explorer renders a bounded, connected
+# view of large banks instead of pulling+normalising the whole graph client-side.
+# Mirrors the /engine aggregator: pulls the bank graph once (per-bank TTL cache),
+# computes the slice with the pure helpers in _memory_subgraph, and returns the
+# existing Cytoscape GraphPayload shape so the client adapter stays unchanged.
+# Registered explicitly BEFORE the _FORWARDS loop — never via the table.
+
+#: Module-level per-bank TTL cache singleton (rebound in tests).
+_GRAPH_CACHE = _sg.GraphCache()
+
+
+@router.get("/banks/{bank_id}/graph/subgraph")
+async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    qp = request.query_params
+    kind = qp.get("kind", "memories")
+    mode = qp.get("mode", "top")
+    if kind not in ("memories", "entities"):
+        raise UnprocessableEntity(f"invalid kind: {kind!r}", code="memory.invalid_query")
+    if mode not in ("ego", "top"):
+        raise UnprocessableEntity(f"invalid mode: {mode!r}", code="memory.invalid_query")
+    limit = min(int(qp.get("limit", 240)), 500)
+
+    upstream = (
+        f"/v1/default/banks/{bank_id}/entities/graph"
+        if kind == "entities"
+        else f"/v1/default/banks/{bank_id}/graph"
+    )
+    # narrow the source fetch with forwarded type/q; cache by (bank,kind,type,q)
+    src_params: dict[str, str] = {k: qp[k] for k in ("type", "q") if qp.get(k)}
+    src_params.setdefault("limit", "2000")  # pull a generous source slab
+    cache_key = f"{bank_id}:{kind}:{qp.get('type', '')}:{qp.get('q', '')}"
+    graph = _GRAPH_CACHE.peek(cache_key)
+    if graph is None:
+        graph = await _forward(client, "GET", upstream, params=src_params)
+        _GRAPH_CACHE.put(cache_key, graph)
+
+    total_nodes = len(graph.get("nodes", []))
+    total_edges = len(graph.get("edges", []))
+
+    if mode == "ego":
+        node = qp.get("node")
+        if not node:
+            raise UnprocessableEntity("ego mode requires ?node=", code="memory.invalid_query")
+        depth = min(int(qp.get("depth", 1)), 2)
+        keep = _sg.ego_bfs(graph, node, depth=depth, limit=limit)
+        if not keep:
+            raise NotFound(f"node {node!r} not in bank graph", code="memory.node_not_found")
+    else:
+        by = qp.get("by") or ("degree" if kind == "entities" else "recency")
+        ranked = _sg.rank_by_degree(graph) if by == "degree" else _sg.rank_by_recency(graph)
+        top_k = min(int(qp.get("top_k", 200)), 500)
+        keep = set(ranked[: min(top_k, limit)])
+
+    sub = _sg.induce_subgraph(graph, keep)
+    out: dict[str, Any] = dict(sub)
+    out["total_edges"] = total_edges
+    out["total_entities" if kind == "entities" else "total_units"] = total_nodes
+    out["returned_nodes"] = len(sub["nodes"])
+    out["returned_edges"] = len(sub["edges"])
+    out["truncated"] = len(sub["nodes"]) < total_nodes
+    out["mode"] = mode
+    out["center"] = qp.get("node")
+    return out
 
 
 # ── allowlisted passthrough table ──────────────────────────────────────────────
