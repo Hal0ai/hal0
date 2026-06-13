@@ -137,7 +137,7 @@ function SlotCard({
   errorMsg,
   busy,
 }) {
-  const { type, device, model, state, isDefault, coresident, cpuOnly, metrics } = slot;
+  const { type, device, model, state, isDefault, coresident, metrics } = slot;
   // Spec 1 / C3: a slot is enabled unless explicitly off. Disabled slots fade,
   // hide lifecycle buttons, and sort to the end of the grid (SlotsView).
   const enabled = slot.enabled !== false;
@@ -272,7 +272,7 @@ function SlotCard({
             yet serialise in /api/slots — tracked in #658 (backend: emit runtime
             + image + profile in slot serialisation). The chip degrades gracefully
             to "no image" until that lands. container_status is always present. */}
-        {isContainer ? (() => {
+        {(() => {
           const imgFull = slot.image || slot.profile || null;
           const imgShort = imgFull ? imgFull.split("/").pop() : null;
           // #663: surface running-vs-configured image drift on the container
@@ -301,23 +301,19 @@ function SlotCard({
               {imgMismatch && <span style={{color: "var(--warn)", marginLeft: 4}}>≠ running {runShort}</span>}
             </span>
           );
-        })() : (
-          <>
-            <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
-            {cpuOnly && <span className="chip">[CPU]</span>}
-            {/* Backend mismatch (ADR-0022): amber chip surfaces the ACTUAL
-                runtime backend when it differs from the declared one. Render
-                only on the backend-computed flag + a present actual_backend. */}
-            {slot.backend_mismatch && slot.actual_backend && (
-              <span
-                className={"chip dev-" + String(slot.actual_backend)}
-                style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)"}}
-                title={`Declared ${slot.declared_backend || device} but running ${slot.actual_backend} — switch backend to reload`}
-              >
-                {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
-              </span>
-            )}
-          </>
+        })()}
+        {/* Backend mismatch (ADR-0022): amber chip surfaces the ACTUAL runtime
+            backend when it differs from the declared one. Container slots are
+            the only real slots, so this now renders alongside the image-tag
+            chip (previously trapped in the dead non-container branch). */}
+        {slot.backend_mismatch && slot.actual_backend && (
+          <span
+            className={"chip dev-" + String(slot.actual_backend)}
+            style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)"}}
+            title={`Declared ${slot.declared_backend || slot.backend || device} but running ${slot.actual_backend} — switch backend to reload`}
+          >
+            {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
+          </span>
         )}
         {(() => {
           // Colour aligned to the slotIndicatorFromPhase() vocabulary
@@ -605,7 +601,7 @@ function NpuModalityCard({ icon, label, slot, on, fixed, models, busy, onToggle,
 // modalities, and load/unload the whole stack — keyed off device=="npu"
 // (never literal slot names).
 function NpuFlmStack({ slots }) {
-  const npuSlots = slots.filter(s => s.device === "npu");
+  const npuSlots = slots.filter(s => (s.device_class || s.device) === "npu");
   // Hooks must run unconditionally (rules-of-hooks) — gate render below.
   const modelsQuery = useModels();
   const swapMut = useSlotSwap();
@@ -859,6 +855,13 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   const slots = slotsQuery.data || [];
   const slotsLoading = slotsQuery.isLoading && !slotsQuery.data;
   const slotsEmpty = Array.isArray(slotsQuery.data) && slotsQuery.data.length === 0;
+  // Card-grid source: only real slots (kind === "local"). /api/slots also
+  // merges synthetic upstream pseudo-entries (kind:"slot", e.g. the `hal0`
+  // router with no profile/runtime) — they belong to the upstream-visibility
+  // feature consumed by the sidebar, NOT the SlotCard grid, where they'd
+  // render as broken phantom cards. Pure render filter; the payload is
+  // unchanged (sidebar widgets still see the full `slots`).
+  const cardSlots = slots.filter(s => (s.kind ?? "local") === "local" && !s._synthetic);
   const [createOpen, setCreateOpen] = useStateS(false);
   const [createDefaults, setCreateDefaults] = useStateS({});
   const [editName, setEditName] = useStateS(null);
@@ -935,11 +938,22 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     return () => document.removeEventListener("click", off);
   }, []);
 
+  // Section assignment is derived from the slot's device_class (now always
+  // emitted by the serializer) rather than the legacy null `group` field:
+  //   gpu  → Chat
+  //   npu  → NPU/FLM stack (rendered by NpuFlmStack, excluded here)
+  //   img  → Image-Gen tab (ComfyUI pane)
+  //   else (embedding/reranking/transcription/tts capability slots) →
+  //         Capabilities. GPU-backed embed/rerank slots are LLM-adjacent
+  //         capabilities, so the Capabilities bucket is keyed off type, not
+  //         device_class, for the non-chat/non-npu/non-img remainder.
+  const dc = (s) => s.device_class || s.device || "";
   const groups = {
-    chat:  slots.filter(s => s.group === "chat"),
-    embed: slots.filter(s => s.group === "embed"),
-    voice: slots.filter(s => s.group === "voice"),
-    img:   slots.filter(s => s.group === "img"),
+    chat:  cardSlots.filter(s => dc(s) === "gpu" && s.type === "llm"),
+    caps:  cardSlots.filter(s =>
+             dc(s) !== "npu" && dc(s) !== "img" &&
+             ["embedding", "reranking", "transcription", "tts"].includes(s.type)),
+    img:   cardSlots.filter(s => dc(s) === "img" || s.type === "image"),
   };
 
   const editSlot = (slots || []).find(s => s.name === editName);
@@ -1212,7 +1226,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           onClick={() => setTab("inference")}
         >
           <span>Inference</span>
-          <span className="slot-tab-ct num">{slots.length - groups.img.length}</span>
+          <span className="slot-tab-ct num">{cardSlots.length - groups.img.length}</span>
         </button>
         <button
           role="tab"
@@ -1242,14 +1256,16 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
               {/* Capabilities (C7): embedding/reranking/transcription/tts cards are
                   content-light, so they render in a denser 4-up quarter-width grid
                   instead of two separate full-width Embed/Voice sections. NPU
-                  modalities (group "npu") are excluded by grouping — they live in
-                  the dedicated NPU/FLM stack engine pane below. */}
-              {renderGroup("Capabilities", [...groups.embed, ...groups.voice], { quarter: true })}
+                  modalities (device_class "npu") are excluded by grouping — they
+                  live in the dedicated NPU/FLM stack engine pane below. */}
+              {renderGroup("Capabilities", groups.caps, { quarter: true })}
 
               {/* NPU · FLM stack — its own engine-shell pane (purple accent),
                   parallel to the Inference + ComfyUI panes. No section h2: the
-                  pane supplies its own sec-label + engine header. */}
-              {slots.some(s => s.device === "npu") && <NpuFlmStack slots={slots} />}
+                  pane supplies its own sec-label + engine header. Keyed off
+                  device_class "npu" (serializer-emitted), with the legacy
+                  device === "npu" kept as a fallback. */}
+              {cardSlots.some(s => dc(s) === "npu") && <NpuFlmStack slots={cardSlots} />}
             </>
           )}
         </div>
