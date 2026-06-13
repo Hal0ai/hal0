@@ -140,7 +140,7 @@ class TestLoadSyncNpuBranch:
             "port": 8088,
             "device": "npu",
             "runtime": "container",
-            "profile": "flm-npu",
+            "profile": "flm",
             "model": {"default": "gemma3:4b"},
             "npu": {"asr": True, "embed": False},
         }
@@ -243,7 +243,7 @@ class TestLoadSyncNpuBranch:
                 {
                     "name": "chat",
                     "port": 8095,
-                    "profile": "moe-rocmfp4",
+                    "profile": "rocm",
                     "device": "gpu-rocm",
                 },
                 {"path": "/mnt/ai-models/model.gguf", "_model_key": "my-model"},

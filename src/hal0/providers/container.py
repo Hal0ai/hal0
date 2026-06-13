@@ -325,7 +325,7 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
         from hal0.providers.flm import FLMProvider
 
         return FLMProvider()
-    if str(slot_cfg.get("type", "")) == "tts" or str(slot_cfg.get("profile", "")) == "kokoro-cpu":
+    if str(slot_cfg.get("type", "")) == "tts" or str(slot_cfg.get("profile", "")) == "tts":
         from hal0.providers.kokoro import KokoroProvider
 
         return KokoroProvider()
@@ -531,7 +531,7 @@ class ContainerProvider(Provider):
         via ``await self._spawn_locked(...)``).
 
         Spec-provider dispatch: :func:`_spec_provider_for` maps NPU→FLM and
-        TTS/kokoro-cpu→Kokoro slots to their respective providers, which build a
+        TTS/tts→Kokoro slots to their respective providers, which build a
         :class:`ContainerSpec` rendered by :func:`_render_unit_from_spec`.
         GPU/llama-server slots fall through to the flag-bundle :func:`_render_unit`
         path.

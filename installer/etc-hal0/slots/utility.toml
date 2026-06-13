@@ -3,7 +3,7 @@ name = "utility"
 type = "llm"
 device = "gpu-vulkan"
 runtime = "container"
-profile = "vulkan-std"
+profile = "vulkan"
 enabled = true
 port = 8081
 

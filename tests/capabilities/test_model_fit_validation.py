@@ -64,7 +64,7 @@ def test_validate_model_fit_blocks_profile_unsupported_slot_type(
         _orch()._validate_model_in_catalog("embed", "rerank", "reranker", "npu")
 
     assert exc.value.code == "capability.illegal_model_fit"
-    assert exc.value.details["profile"] == "flm-npu"
+    assert exc.value.details["profile"] == "flm"
     assert exc.value.details["fit_reasons"][0] == "profile.unsupported_slot_type"
 
 

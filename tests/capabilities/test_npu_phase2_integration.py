@@ -137,7 +137,7 @@ async def test_npu_phase2_embed_enable_end_to_end(
                 "name": "npu",
                 "type": "llm",
                 "device": "npu",
-                "profile": "flm-npu",
+                "profile": "flm",
                 "enabled": True,
             }
         ]

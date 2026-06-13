@@ -53,7 +53,7 @@ async def test_loaded_slot_returns_typed_slot(slot_root: Path) -> None:
         "chat",
         labels=("tool-calling", "vision"),
         default=True,
-        profile="moe-rocmfp4",
+        profile="rocm",
         system_prompt="You are Chat.",
     )
 
@@ -67,7 +67,7 @@ async def test_loaded_slot_returns_typed_slot(slot_root: Path) -> None:
         enabled=True,
         labels=frozenset({"tool-calling", "vision"}),
         system_prompt="You are Chat.",
-        profile="moe-rocmfp4",
+        profile="rocm",
         default=True,
     )
 

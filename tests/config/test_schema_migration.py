@@ -421,7 +421,7 @@ class TestLegacyRuntimeRejected:
             name="chat",
             port=8081,
             runtime="container",
-            profile="vulkan-std",
+            profile="vulkan",
         )
         assert s.runtime == "container"
-        assert s.profile == "vulkan-std"
+        assert s.profile == "vulkan"

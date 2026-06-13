@@ -55,7 +55,7 @@ def _slot_cfg(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "name": "test-container",
         "port": 8095,
-        "profile": "moe-rocmfp4",
+        "profile": "rocm",
         "runtime": "container",
         "device": "gpu-rocm",
         "model": {"default": "chadrock-35b-ace-saber-imatrix-q4_k_xl-00001-of-00002.gguf"},
@@ -348,7 +348,7 @@ class TestRenderUnit:
             runtime_bin=_TEST_RUNTIME,
         )
         exec_start = self._get_exec_start(unit)
-        # Key profile flags from seed moe-rocmfp4
+        # Key profile flags from seed rocm
         assert "-fa" in exec_start
         assert "--no-mmap" in exec_start
         assert "-ctk" in exec_start
@@ -507,7 +507,7 @@ class TestLoadSync:
             patch.object(provider, "_unit_path", return_value=tmp_path / "test.service"),
         ):
             provider.load_sync(
-                {"name": "test-container", "port": 8095, "profile": "moe-rocmfp4"},
+                {"name": "test-container", "port": 8095, "profile": "rocm"},
                 {"path": "/mnt/ai-models/model.gguf", "_model_key": "model"},
             )
 
@@ -541,7 +541,7 @@ class TestLoadSync:
                 {
                     "name": "test-container",
                     "port": 8095,
-                    "profile": "moe-rocmfp4",
+                    "profile": "rocm",
                     "model": {"default": "model", "context_size": 131072},
                     "server": {"extra_args": "--override-kv k=bool:false"},
                 },
@@ -574,7 +574,7 @@ class TestLoadSync:
             patch.object(provider, "_unit_path", return_value=unit_file),
         ):
             provider.load_sync(
-                {"name": "agent", "port": 8101, "profile": "moe-rocmfp4"},
+                {"name": "agent", "port": 8101, "profile": "rocm"},
                 {
                     "path": "/mnt/ai-models/m.gguf",
                     "_model_key": "chadrock-35b-ace-saber",
@@ -588,7 +588,7 @@ class TestLoadSync:
         what actually launches."""
         profile = _moe_profile()
         cfg = {
-            "profile": "moe-rocmfp4",
+            "profile": "rocm",
             "port": 8095,
             "model": {"default": "m", "context_size": 131072},
         }
@@ -602,7 +602,7 @@ class TestLoadSync:
         """resolved_command shows --alias <model id> so it matches the unit."""
         profile = _moe_profile()
         cfg = {
-            "profile": "moe-rocmfp4",
+            "profile": "rocm",
             "port": 8095,
             "model": {"default": "chadrock-35b-ace-saber", "context_size": 131072},
         }

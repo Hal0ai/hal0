@@ -3,7 +3,7 @@ name = "tts"
 type = "tts"
 device = "cpu"
 runtime = "container"
-profile = "kokoro-cpu"
+profile = "tts"
 enabled = true
 port = 8084
 

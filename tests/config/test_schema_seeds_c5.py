@@ -13,7 +13,7 @@ def test_seed_rerank_toml_validates() -> None:
     raw = tomllib.loads((_SEEDED_SLOTS_DIR / "rerank.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
-    assert slot.profile == "vulkan-std"
+    assert slot.profile == "vulkan"
     assert slot.device == "gpu-vulkan"
     assert slot.port == 8083
     assert "--reranking" in (slot.server.extra_args or "")
@@ -24,7 +24,7 @@ def test_seed_utility_toml_validates() -> None:
     raw = tomllib.loads((_SEEDED_SLOTS_DIR / "utility.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
-    assert slot.profile == "vulkan-std"
+    assert slot.profile == "vulkan"
     assert slot.device == "gpu-vulkan"
     assert slot.port == 8081
     assert slot.model.default == "gemma-4-12b-it"

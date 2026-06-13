@@ -83,15 +83,15 @@ def test_cloned_from_persists_and_round_trips(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
 
     created = catalog.create(
-        "vulkan-std-custom",
-        ProfileConfig(image="ghcr.io/x/y:z", flags="-fa on", cloned_from="vulkan-std"),
+        "vulkan-custom",
+        ProfileConfig(image="ghcr.io/x/y:z", flags="-fa on", cloned_from="vulkan"),
     )
-    assert created.cloned_from == "vulkan-std"
-    assert created.to_dict()["cloned_from"] == "vulkan-std"
+    assert created.cloned_from == "vulkan"
+    assert created.to_dict()["cloned_from"] == "vulkan"
 
     # Survives the profiles.toml round trip on a fresh catalog instance.
-    reloaded = ProfileCatalog().resolve("vulkan-std-custom")
-    assert reloaded.cloned_from == "vulkan-std"
+    reloaded = ProfileCatalog().resolve("vulkan-custom")
+    assert reloaded.cloned_from == "vulkan"
 
 
 def test_cloned_from_defaults_to_none_and_survives_update(tmp_hal0_home: str) -> None:

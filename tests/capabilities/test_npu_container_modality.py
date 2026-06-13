@@ -87,7 +87,7 @@ def _container_anchor(name: str = "npu") -> dict[str, Any]:
         "name": name,
         "type": "llm",
         "device": "npu",
-        "profile": "flm-npu",
+        "profile": "flm",
         "enabled": True,
     }
 

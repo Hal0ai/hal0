@@ -4,7 +4,7 @@ name = "npu"
 port = 8088
 device = "npu"
 runtime = "container"
-profile = "flm-npu"
+profile = "flm"
 type = "llm"
 
 [model]

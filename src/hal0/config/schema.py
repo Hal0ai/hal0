@@ -812,7 +812,7 @@ class ProfilesConfig(BaseModel):
 
     Each key under ``[profile]`` becomes an entry in ``profile``:
 
-        [profile.moe-rocmfp4]
+        [profile.rocm]
         image = "ghcr.io/..."
         flags = "-fa on ..."
         mtp   = false

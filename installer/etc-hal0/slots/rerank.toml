@@ -3,7 +3,7 @@ name = "rerank"
 type = "reranking"
 device = "gpu-vulkan"
 runtime = "container"
-profile = "vulkan-std"
+profile = "vulkan"
 enabled = true
 port = 8083
 

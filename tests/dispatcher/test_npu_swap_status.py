@@ -31,7 +31,7 @@ def _make_slot(state: str) -> MagicMock:
 def _container_npu_cfg(
     model: str = "gemma3:4b",
     *,
-    profile: str = "flm-npu",
+    profile: str = "flm",
     runtime: str | None = None,
     enabled: bool = True,
     name: str = "npu",
@@ -309,7 +309,7 @@ def test_swap_status_endpoint_observes_npu_slot(
         'device = "npu"\n'
         'type = "llm"\n'
         "enabled = true\n"
-        'profile = "flm-npu"\n'
+        'profile = "flm"\n'
         "[model]\n"
         'default = "gemma3:4b"\n',
         encoding="utf-8",

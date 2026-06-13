@@ -39,7 +39,7 @@ def test_spec_provider_tts_type_returns_kokoro() -> None:
 def test_spec_provider_kokoro_profile_returns_kokoro() -> None:
     from hal0.providers.kokoro import KokoroProvider
 
-    result = _spec_provider_for({"device": "cpu", "profile": "kokoro-cpu"})
+    result = _spec_provider_for({"device": "cpu", "profile": "tts"})
     assert isinstance(result, KokoroProvider)
 
 
@@ -56,7 +56,7 @@ def test_spec_provider_comfyui_returns_comfyui() -> None:
 
 
 def test_spec_provider_gpu_returns_none() -> None:
-    result = _spec_provider_for({"device": "gpu-rocm", "profile": "moe-rocmfp4"})
+    result = _spec_provider_for({"device": "gpu-rocm", "profile": "rocm"})
     assert result is None
 
 
@@ -77,7 +77,7 @@ def test_tts_kokoro_slot_renders_spec_unit() -> None:
         "device": "cpu",
         "type": "tts",
         "runtime": "container",
-        "profile": "kokoro-cpu",
+        "profile": "tts",
         "model": {"default": "kokoro-v1"},
     }
 
@@ -145,7 +145,7 @@ def test_kokoro_path_does_not_require_registry_model_path() -> None:
         "device": "cpu",
         "type": "tts",
         "runtime": "container",
-        "profile": "kokoro-cpu",
+        "profile": "tts",
     }
 
     unit_captured: list[str] = []
@@ -167,7 +167,7 @@ def test_kokoro_path_does_not_require_registry_model_path() -> None:
 
 
 def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
-    """device=gpu-rocm, profile=moe-rocmfp4 → llama _render_unit path.
+    """device=gpu-rocm, profile=rocm → llama _render_unit path.
 
     Mirrors TestLoadSyncNpuBranch.test_gpu_slot_unaffected_by_npu_branch style
     from test_container_npu.py: patches _resolve_profile + GPU helpers, then
@@ -205,7 +205,7 @@ def test_gpu_slot_unaffected_still_takes_llama_path(tmp_path: Any) -> None:
             {
                 "name": "chat",
                 "port": 8095,
-                "profile": "moe-rocmfp4",
+                "profile": "rocm",
                 "device": "gpu-rocm",
             },
             {"path": "/mnt/ai-models/model.gguf", "_model_key": "my-model"},

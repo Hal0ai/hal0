@@ -60,7 +60,7 @@ DEV_MODE=0
 NO_START=0
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
 # binary wired into the retired daemon runtime) is gone. FP4/MTP now
-# ships as container profiles (`moe-rocmfp4` / `dense-mtp-rocmfp4` in
+# ships as container profiles (`rocm` / `rocm-mtp` in
 # installer/etc-hal0/profiles.toml) — the fork llama-server is baked
 # into the rocm-7.2.4-rocmfp4-server toolbox image and selected per
 # slot via `profile = "..."`.

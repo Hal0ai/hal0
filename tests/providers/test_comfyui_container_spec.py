@@ -177,6 +177,6 @@ def test_image_section_dict_is_not_an_image_override(monkeypatch) -> None:
 def test_llama_image_section_dict_not_override() -> None:
     from hal0.providers.llama_server import LlamaServerProvider
 
-    cfg = {"name": "x", "port": 8081, "profile": "vulkan-std", "image": {"idle_restore_minutes": 0}}
+    cfg = {"name": "x", "port": 8081, "profile": "vulkan", "image": {"idle_restore_minutes": 0}}
     ref = LlamaServerProvider().image_ref(cfg)
     assert isinstance(ref, str) and "idle_restore_minutes" not in ref

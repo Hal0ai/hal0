@@ -221,10 +221,10 @@ def test_group_derivation() -> None:
     assert gpu_exclusive_group({"device": "gpu-rocm"}) == "llm"
     # profile-only GPU slots ARE containers (profile is the primary
     # signal, wins regardless of runtime) → arbitrated
-    assert gpu_exclusive_group({"device": "gpu-vulkan", "profile": "vulkan-std"}) == "llm"
+    assert gpu_exclusive_group({"device": "gpu-vulkan", "profile": "vulkan"}) == "llm"
     assert gpu_exclusive_group({"device": "gpu-rocm", "profile": "comfyui"}) == "img"
     # profile-only on a non-GPU device still never arbitrated
-    assert gpu_exclusive_group({"device": "npu", "profile": "flm-npu"}) is None
+    assert gpu_exclusive_group({"device": "npu", "profile": "flm"}) is None
 
 
 # ── ensure_img ───────────────────────────────────────────────────────────────

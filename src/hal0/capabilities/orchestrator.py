@@ -640,7 +640,7 @@ class CapabilityOrchestrator:
         elif device in {"gpu-rocm", "gpu-vulkan"}:
             profile_name = DEVICE_DEFAULT_PROFILES.get(device)
         elif capability == "tts":
-            profile_name = "kokoro-cpu"
+            profile_name = "tts"
         elif capability == "image":
             profile_name = "comfyui"
         if not profile_name:

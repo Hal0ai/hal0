@@ -350,17 +350,17 @@ def test_create_with_cloned_from_201_and_listed(client: TestClient) -> None:
     r = client.post(
         "/api/profiles",
         json={
-            "name": "vulkan-std-custom",
+            "name": "vulkan-custom",
             "image": "ghcr.io/x/y:z",
-            "cloned_from": "vulkan-std",
+            "cloned_from": "vulkan",
         },
     )
     assert r.status_code == 201
-    assert r.json()["cloned_from"] == "vulkan-std"
+    assert r.json()["cloned_from"] == "vulkan"
 
     listed = client.get("/api/profiles").json()
-    item = next(p for p in listed if p["name"] == "vulkan-std-custom")
-    assert item["cloned_from"] == "vulkan-std"
+    item = next(p for p in listed if p["name"] == "vulkan-custom")
+    assert item["cloned_from"] == "vulkan"
 
 
 def test_seed_profiles_have_null_cloned_from(client: TestClient) -> None:

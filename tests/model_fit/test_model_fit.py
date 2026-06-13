@@ -15,7 +15,7 @@ class FakeRegistry:
 
 def test_allows_matching_llm_gpu_profile(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
-    profile = catalog.resolve("moe-rocmfp4")
+    profile = catalog.resolve("rocm")
 
     fit = evaluate_model_fit(
         model_id="qwen3-4b",
@@ -31,7 +31,7 @@ def test_allows_matching_llm_gpu_profile(tmp_hal0_home: str) -> None:
 
 
 def test_blocks_model_slot_type_mismatch(tmp_hal0_home: str) -> None:
-    profile = ProfileCatalog().resolve("moe-rocmfp4")
+    profile = ProfileCatalog().resolve("rocm")
 
     fit = evaluate_model_fit(
         model_id="nomic-embed",
@@ -46,7 +46,7 @@ def test_blocks_model_slot_type_mismatch(tmp_hal0_home: str) -> None:
 
 
 def test_blocks_profile_slot_type_mismatch(tmp_hal0_home: str) -> None:
-    profile = ProfileCatalog().resolve("kokoro-cpu")
+    profile = ProfileCatalog().resolve("tts")
 
     fit = evaluate_model_fit(
         model_id="qwen3-4b",
@@ -61,7 +61,7 @@ def test_blocks_profile_slot_type_mismatch(tmp_hal0_home: str) -> None:
 
 
 def test_blocks_npu_profile_device_mismatch(tmp_hal0_home: str) -> None:
-    profile = ProfileCatalog().resolve("flm-npu")
+    profile = ProfileCatalog().resolve("flm")
 
     fit = evaluate_model_fit(
         model_id="gemma3:1b",

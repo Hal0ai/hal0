@@ -7,7 +7,7 @@ Image API surface:
 
   Because the server is already the ENTRYPOINT, ``container_spec.command``
   carries flags only — no binary path or subcommand prefix needed.
-  Flags come from the resolved ``kokoro-cpu`` profile (profiles.toml), which
+  Flags come from the resolved ``tts`` profile (profiles.toml), which
   bakes ``--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx``.
 
 Weights:
@@ -46,7 +46,7 @@ from hal0.providers.base import ContainerSpec, Provider
 _DEFAULT_KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 
 # Default profile name if the slot TOML omits one.
-_DEFAULT_PROFILE = "kokoro-cpu"
+_DEFAULT_PROFILE = "tts"
 
 # Model store: the same absolute path is used inside the container so that
 # ``--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx`` (baked into the
@@ -130,7 +130,7 @@ class KokoroProvider(Provider):
         The toolbox image ENTRYPOINT is ``tini -- kokoro-server``, so
         ``command`` carries only flags (no binary path / subcommand).
 
-        Flags come from the resolved profile (``kokoro-cpu`` by default),
+        Flags come from the resolved profile (``tts`` by default),
         which bakes ``--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx``
         plus any future bench-tuned additions.  ``--host`` and ``--port`` are
         always appended so the operator cannot accidentally omit them.

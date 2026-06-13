@@ -1,4 +1,4 @@
-"""Tests for the [npu] slot table and the flm-npu seed profile (Phase A)."""
+"""Tests for the [npu] slot table and the flm seed profile (Phase A)."""
 
 import tomllib
 from pathlib import Path
@@ -21,7 +21,7 @@ def test_slot_config_accepts_npu_table() -> None:
             "port": 8088,
             "device": "npu",
             "runtime": "container",
-            "profile": "flm-npu",
+            "profile": "flm",
             "model": {"default": "gemma3:4b"},
             "npu": {"asr": True, "embed": True},
         }
@@ -62,7 +62,7 @@ def test_npu_tucked_into_extra_on_dump() -> None:
 
 
 def test_flm_npu_seed_profile() -> None:
-    prof = SEED_PROFILES["flm-npu"]
+    prof = SEED_PROFILES["flm"]
     assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
     assert prof["flags"] == ""
     assert prof["mtp"] is False
@@ -72,7 +72,7 @@ def test_seed_npu_toml_validates() -> None:
     raw = tomllib.loads((_SEEDED_SLOTS_DIR / "npu.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
-    assert slot.profile == "flm-npu"
+    assert slot.profile == "flm"
     assert slot.device == "npu"
     assert slot.npu is not None and slot.npu.asr is False
 
@@ -81,6 +81,6 @@ def test_seed_tts_toml_validates() -> None:
     raw = tomllib.loads((_SEEDED_SLOTS_DIR / "tts.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
-    assert slot.profile == "kokoro-cpu"
+    assert slot.profile == "tts"
     assert slot.device == "cpu"
     assert slot.port == 8084

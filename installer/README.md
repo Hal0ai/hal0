@@ -154,13 +154,13 @@ by the `rocm-7.2.4-rocmfp4-server` toolbox image — the fork
 container**, no host-side build or binary wiring required. Two seed
 profiles use it (see `/etc/hal0/profiles.toml`):
 
-- `moe-rocmfp4` — A3B MoE models (~52.8 tok/s gen, 131k ctx).
-- `dense-mtp-rocmfp4` — dense chat with MTP (`mtp = true`, ~2× non-MTP).
+- `rocm` — A3B MoE models (~52.8 tok/s gen, 131k ctx).
+- `rocm-mtp` — dense chat with MTP (`mtp = true`, ~2× non-MTP).
 
-Point a slot at one of them (`profile = "dense-mtp-rocmfp4"`) or let
+Point a slot at one of them (`profile = "rocm-mtp"`) or let
 the device default pick it (`device = "gpu-rocm"` resolves to
-`moe-rocmfp4`). gfx1151 (Strix Halo) + ROCm hosts only; non-eligible
-hosts should stay on `vulkan-std`. The old `--rocmfp4` installer flag
+`rocm`). gfx1151 (Strix Halo) + ROCm hosts only; non-eligible
+hosts should stay on `vulkan`. The old `--rocmfp4` installer flag
 and host-side fork binary are gone.
 
 ## Uninstall

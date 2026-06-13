@@ -11,7 +11,7 @@ def _slot_cfg(**overrides: Any) -> dict[str, Any]:
         "port": 8088,
         "device": "npu",
         "runtime": "container",
-        "profile": "flm-npu",
+        "profile": "flm",
         "model": {"default": "gemma3:4b", "context_size": 16384},
     }
     base.update(overrides)

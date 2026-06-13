@@ -480,7 +480,7 @@ def npu_orchestrator(
 
     Bypasses catalog validation (downstream of the path under test). The
     anchor is seeded as a container slot (type=llm, device=npu,
-    profile=flm-npu — the ``profile`` key is what makes
+    profile=flm — the ``profile`` key is what makes
     ``is_container_npu_cfg`` true), so trio toggles land as ``[npu]``
     TOML writes via ``update_config`` on the anchor.
     """
@@ -496,7 +496,7 @@ def npu_orchestrator(
                 "name": "npu",
                 "type": "llm",
                 "device": "npu",
-                "profile": "flm-npu",
+                "profile": "flm",
                 "enabled": True,
             }
         ]
@@ -845,7 +845,7 @@ async def test_npu_embed_enable_container_anchor_without_external_runtime(
 ) -> None:
     """Phase E (#687): the trio fork engages with NO external runtime client.
 
-    A container NPU anchor (profile=flm-npu) plus a device=npu embed enable
+    A container NPU anchor (profile=flm) plus a device=npu embed enable
     must take the trio path — ``[npu]`` TOML toggle via update_config on the
     anchor, pending_reload=True, zero load/swap/unload on the embed slot —
     with the container path as the only wiring.
@@ -862,7 +862,7 @@ async def test_npu_embed_enable_container_anchor_without_external_runtime(
                 "name": "npu",
                 "type": "llm",
                 "device": "npu",
-                "profile": "flm-npu",
+                "profile": "flm",
                 "enabled": True,
             }
         ]

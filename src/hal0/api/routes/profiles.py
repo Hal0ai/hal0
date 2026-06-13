@@ -107,7 +107,7 @@ def list_profiles() -> list[dict[str, Any]]:
     Each item shape::
 
         {
-            "name":           "moe-rocmfp4",
+            "name":           "rocm",
             "image":          "ghcr.io/hal0ai/...:rocm-7.2.4-rocmfp4-server",
             "flags":          "-fa on ...",
             "mtp":            false,

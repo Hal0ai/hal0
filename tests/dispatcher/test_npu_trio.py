@@ -30,7 +30,7 @@ def _slot_manager_with_container_npu(
     state: str = "ready",
     *,
     enabled: bool = True,
-    profile: str = "flm-npu",
+    profile: str = "flm",
     runtime: str | None = None,
     port: int | None = 8088,
 ) -> MagicMock:
@@ -196,7 +196,7 @@ async def test_is_ready_for_dispatch_raises_resolves_none() -> None:
             "name": "npu",
             "port": 8088,
             "device": "npu",
-            "profile": "flm-npu",
+            "profile": "flm",
             "enabled": True,
         }
     )

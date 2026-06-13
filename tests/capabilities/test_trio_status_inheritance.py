@@ -76,7 +76,7 @@ def _anchor_cfg(**over: Any) -> dict[str, Any]:
         "name": "npu",
         "type": "llm",
         "device": "npu",
-        "profile": "flm-npu",
+        "profile": "flm",
         "enabled": True,
     }
     cfg.update(over)
