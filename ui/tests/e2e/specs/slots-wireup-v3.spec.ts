@@ -57,7 +57,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
       .locator('.modal-shell .form-row', { hasText: 'Profile' })
       .locator('select')
     await expect(profileSel).toBeVisible()
-    await profileSel.selectOption('moe-rocmfp4')
+    await profileSel.selectOption('rocm')
     const createBtn = page.locator('.modal-shell button:has-text("Create slot")')
     await expect(createBtn).toBeEnabled()
     const postReq = page.waitForRequest(

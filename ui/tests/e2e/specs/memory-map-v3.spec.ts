@@ -199,10 +199,11 @@ test.describe('Memory map — sidebar', () => {
     // before data.jsx sets window.HAL0_DATA, so the mock harness picks it up.
     const containerSlot = {
       name: 'primary-container', type: 'llm', device: 'gpu-rocm',
+      device_class: 'gpu', backend: 'rocm',
       model: 'qwen3.6-35b-a3b-q4_k_m', model_id: 'qwen3.6-35b-a3b',
       group: 'chat', state: 'ready', port: 8096,
       runtime: 'container',
-      profile: 'rocmfp4-mtp',
+      profile: 'rocm-mtp',
       image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
       image_status: 'present',
       container_status: 'running',

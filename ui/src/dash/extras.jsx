@@ -41,7 +41,7 @@ function LogsView() {
   // collapsing) so the screenshot suite has something to point at even
   // when the dev backend has no journal entries yet.
   const demoLines = [
-    { ts: "14:01:58.330", source: "hal0", level: "ok",   slot: "primary", msg: "slot:primary container start · profile=moe-rocmfp4" },
+    { ts: "14:01:58.330", source: "hal0", level: "ok",   slot: "primary", msg: "slot:primary container start · profile=rocm" },
     { ts: "14:01:58.341", source: "hal0", level: "info", slot: "primary", msg: "ggml_init_cublas: found 1 ROCm device gfx1151" },
     { ts: "14:02:00.812", source: "hal0", level: "info", slot: "primary", msg: "llm_load_tensors: offloaded 49/49 layers to GPU" },
     { ts: "14:02:11.290", source: "hal0", level: "ok",   slot: "primary", msg: "slot:primary state loading → ready · 13.1s" },

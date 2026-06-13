@@ -28,7 +28,7 @@ const CUSTOM_PROFILE = {
   resolved_flags: '--flash-attn on',
   device_class: 'gpu',
   seed: false,
-  cloned_from: 'vulkan-std',
+  cloned_from: 'vulkan',
 }
 
 const PROFILES_WITH_CUSTOM = [...MOCK_DATA.profiles, CUSTOM_PROFILE]
@@ -137,24 +137,24 @@ test.describe('Profiles CRUD — Phase C6', () => {
 
   // ── Seed cards ───────────────────────────────────────────────────────────────
 
-  test('vulkan-std: seed badge, Delete disabled, single enabled "Edit a copy"', async ({ page }) => {
+  test('vulkan: seed badge, Delete disabled, single enabled "Edit a copy"', async ({ page }) => {
     await gotoProfiles(page)
 
-    const vulkanCard = cardBySlug(page, 'vulkan-std')
+    const vulkanCard = cardBySlug(page, 'vulkan')
     await expect(vulkanCard).toBeVisible()
 
     // Seed badge.
     await expect(vulkanCard.locator('.pf-badge.immutable')).toBeVisible()
 
     // "Edit a copy" replaces both the disabled Edit and the Clone button.
-    const editCopyBtn = vulkanCard.locator('[data-testid="pf-btn-editcopy-vulkan-std"]')
+    const editCopyBtn = vulkanCard.locator('[data-testid="pf-btn-editcopy-vulkan"]')
     await expect(editCopyBtn).toBeVisible()
     await expect(editCopyBtn).not.toBeDisabled()
-    await expect(vulkanCard.locator('[data-testid="pf-btn-edit-vulkan-std"]')).toHaveCount(0)
-    await expect(vulkanCard.locator('[data-testid="pf-btn-clone-vulkan-std"]')).toHaveCount(0)
+    await expect(vulkanCard.locator('[data-testid="pf-btn-edit-vulkan"]')).toHaveCount(0)
+    await expect(vulkanCard.locator('[data-testid="pf-btn-clone-vulkan"]')).toHaveCount(0)
 
     // Delete button should be disabled.
-    const deleteBtn = vulkanCard.locator('[data-testid="pf-btn-delete-vulkan-std"]')
+    const deleteBtn = vulkanCard.locator('[data-testid="pf-btn-delete-vulkan"]')
     await expect(deleteBtn).toBeDisabled()
   })
 
@@ -172,16 +172,16 @@ test.describe('Profiles CRUD — Phase C6', () => {
 
     await gotoProfiles(page)
 
-    const vulkanCard = cardBySlug(page, 'vulkan-std')
-    await vulkanCard.locator('[data-testid="pf-btn-editcopy-vulkan-std"]').click()
+    const vulkanCard = cardBySlug(page, 'vulkan')
+    await vulkanCard.locator('[data-testid="pf-btn-editcopy-vulkan"]').click()
     await expect(page.locator('.pf-form-panel')).toBeVisible()
 
     // Form is the create flow titled as an edit-a-copy of the seed.
-    await expect(page.locator('.pf-form-title')).toHaveText('Edit a copy · vulkan-std')
+    await expect(page.locator('.pf-form-title')).toHaveText('Edit a copy · vulkan')
 
     // Name prefilled as "<seed>-custom", editable; image carried over.
     const nameInput = page.locator('[data-testid="pf-input-name"]')
-    await expect(nameInput).toHaveValue('vulkan-std-custom')
+    await expect(nameInput).toHaveValue('vulkan-custom')
     await expect(nameInput).not.toBeDisabled()
     const imageInput = page.locator('[data-testid="pf-input-image"]')
     await expect(imageInput).toHaveValue('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
@@ -190,9 +190,9 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await expect(page.locator('.pf-form-panel')).not.toBeVisible({ timeout: 5_000 })
 
     expect(posts).toHaveLength(1)
-    expect(posts[0].name).toBe('vulkan-std-custom')
+    expect(posts[0].name).toBe('vulkan-custom')
     expect(posts[0].image).toBe('ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server')
-    expect(posts[0].cloned_from).toBe('vulkan-std')
+    expect(posts[0].cloned_from).toBe('vulkan')
   })
 
   // ── Clone flow (custom cards) ────────────────────────────────────────────────
@@ -237,10 +237,10 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await gotoProfiles(page)
 
     const customCard = cardBySlug(page, 'my-custom')
-    await expect(customCard.locator('.pf-based')).toHaveText(/based on\s+vulkan-std/)
+    await expect(customCard.locator('.pf-based')).toHaveText(/based on\s+vulkan/)
 
     // Seeds have no provenance line.
-    const vulkanCard = cardBySlug(page, 'vulkan-std')
+    const vulkanCard = cardBySlug(page, 'vulkan')
     await expect(vulkanCard.locator('.pf-based')).toHaveCount(0)
   })
 

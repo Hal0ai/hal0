@@ -52,13 +52,13 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
 
   test('profile pill surfaces the runtime profile name (slot.profile)', async ({ page }) => {
     await page.goto('/#slots')
-    // primary carries profile "moe-rocmfp4" in the seed; the [ device |
+    // primary carries profile "rocm" in the seed; the [ device |
     // PROFILE ] provider tag renders it on the compact card too.
     const pill = page
       .getByTestId('infer-strip')
       .getByTestId('infer-profile-primary')
     await expect(pill).toBeVisible()
-    await expect(pill).toContainText('moe-rocmfp4')
+    await expect(pill).toContainText('rocm')
   })
 
   test('NPU/FLM slots are cordoned off to the NPU pane', async ({ page }) => {

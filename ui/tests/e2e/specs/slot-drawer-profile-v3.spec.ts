@@ -4,21 +4,21 @@
  * Covers drawer-editable profile for GPU container slots + create-modal
  * device derivation from selected profile's device_class.
  *
- *   C7a. GPU container slot (chat, profile dense-mtp-rocmfp4):
+ *   C7a. GPU container slot (chat, profile rocm-mtp):
  *          - drawer shows profile <select> listing ONLY device_class==="gpu" profiles
- *          - kokoro-cpu (cpu) and flm-npu (npu) absent from options
- *          - current profile (dense-mtp-rocmfp4) preselected
- *   C7b. Change profile to vulkan-std + Save:
- *          - PUT /api/slots/chat/config body contains { profile: "vulkan-std" }
+ *          - tts (cpu) and flm (npu) absent from options
+ *          - current profile (rocm-mtp) preselected
+ *   C7b. Change profile to vulkan + Save:
+ *          - PUT /api/slots/chat/config body contains { profile: "vulkan" }
  *          - followed by POST /api/slots/chat/restart
  *   C7c. Save WITHOUT profile change:
  *          - PUT body does NOT contain `profile` key (no gratuitous restart)
  *          - restart endpoint NOT called
  *   C7d. NPU slot: profile rendered as fixed text (no <select>)
  *   C7e. TTS slot: profile rendered as fixed text (no <select>)
- *   C7f. Create modal: device derivation from selected profile:
- *          - vulkan-std (image contains "vulkan") → device "gpu-vulkan"
- *          - dense-mtp-rocmfp4 (no "vulkan" in image) → device "gpu-rocm"
+ *   C7f. Create modal: device derivation from selected profile's backend:
+ *          - vulkan (backend "vulkan") → device "gpu-vulkan"
+ *          - rocm-mtp (backend "rocm")  → device "gpu-rocm"
  */
 import { test, expect, MOCK_DATA, type Page } from '../fixtures/apiMock'
 
@@ -62,17 +62,17 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await expect(sel).toBeVisible()
 
     // Current profile is preselected
-    await expect(sel).toHaveValue('dense-mtp-rocmfp4')
+    await expect(sel).toHaveValue('rocm-mtp')
 
     // GPU profiles present
-    const gpuOptions = ['moe-rocmfp4', 'dense-mtp-rocmfp4', 'vulkan-std']
+    const gpuOptions = ['rocm', 'rocm-mtp', 'vulkan']
     for (const name of gpuOptions) {
       await expect(sel.locator(`option[value="${name}"]`)).toHaveCount(1)
     }
 
     // Non-GPU profiles absent from options
-    await expect(sel.locator('option[value="kokoro-cpu"]')).toHaveCount(0)
-    await expect(sel.locator('option[value="flm-npu"]')).toHaveCount(0)
+    await expect(sel.locator('option[value="tts"]')).toHaveCount(0)
+    await expect(sel.locator('option[value="flm"]')).toHaveCount(0)
   })
 
   // C7b — profile change Save: PUT with profile + restart fires
@@ -98,15 +98,15 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await page.goto('/#slots/chat')
     await expect(page.locator('.drawer')).toBeVisible()
 
-    // Change profile to vulkan-std
+    // Change profile to vulkan
     const profileRow = page.locator('.drawer .form-row', { hasText: 'Profile' })
-    await profileRow.locator('select').selectOption('vulkan-std')
+    await profileRow.locator('select').selectOption('vulkan')
 
     await page.locator('.drawer button:has-text("Save")').click()
 
-    // PUT /config must include profile: "vulkan-std"
+    // PUT /config must include profile: "vulkan"
     await expect.poll(() => configPuts.length).toBeGreaterThan(0)
-    expect(configPuts[0].profile).toBe('vulkan-std')
+    expect(configPuts[0].profile).toBe('vulkan')
 
     // Restart must fire after the config PUT
     await expect.poll(() => restartCalls.length).toBeGreaterThan(0)
@@ -174,8 +174,8 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await expect(profileRow.locator('select')).toHaveCount(0)
   })
 
-  // C7f — Create modal: device derivation from profile device_class / image tag
-  test('C7f — create modal: vulkan-std profile → device gpu-vulkan', async ({ page }) => {
+  // C7f — Create modal: device derivation from profile backend
+  test('C7f — create modal: vulkan profile → device gpu-vulkan', async ({ page }) => {
     const createBodies: any[] = []
 
     await page.route('**/api/slots', async (route) => {
@@ -207,8 +207,8 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     // Profile row appears after switching to container runtime
     const profileRowSel = page.locator('.modal-shell .form-row', { hasText: 'Profile' }).locator('select')
     await expect(profileRowSel).toBeVisible()
-    // Select vulkan-std (image contains "vulkan" → device="gpu-vulkan")
-    await profileRowSel.selectOption('vulkan-std')
+    // Select vulkan (backend "vulkan" → device="gpu-vulkan")
+    await profileRowSel.selectOption('vulkan')
 
     // Fill required name field
     const nameInput = page.locator('.modal-shell input').first()
@@ -217,6 +217,6 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await page.locator('.modal-shell button:has-text("Create slot")').click()
     await expect.poll(() => createBodies.length).toBeGreaterThan(0)
     expect(createBodies[0].device).toBe('gpu-vulkan')
-    expect(createBodies[0].profile).toBe('vulkan-std')
+    expect(createBodies[0].profile).toBe('vulkan')
   })
 })

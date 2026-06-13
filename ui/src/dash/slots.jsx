@@ -246,18 +246,26 @@ function SlotCard({
       </div>
       <div className="slot-chips">
         {/* Primary identity chip: the pretty profile name (ROCm / Vulkan /
-            ROCm-MTP / FLM / TTS / ComfyUI), coloured by the slot's GPU
-            backend (rocm/vulkan) and falling back to device_class
-            (npu/cpu/img) for non-GPU slots. Reuses the dev-* colour classes.
+            ROCm-MTP / FLM / TTS / ComfyUI), coloured by silicon class.
+            GPU slots colour by their backend (rocm/vulkan); non-GPU slots
+            colour by device_class (npu/cpu/img). Using backend directly
+            would mis-colour non-GPU slots — the serializer lifts a broad
+            backend token onto every slot (e.g. img reports backend "rocm",
+            flm reports "flm"), so device_class is the correct key off-GPU.
             Replaces the redundant gpu-rocm device-tag string. */}
-        {slot.profile && (
-          <span
-            className={"chip dev-" + String((slot.backend || slot.device_class || "cpu")).replace("gpu-", "")}
-            title={`Profile: ${slot.profile}`}
-          >
-            {prettyProfile(slot.profile)}
-          </span>
-        )}
+        {slot.profile && (() => {
+          const colorKey = slot.device_class === "gpu"
+            ? (slot.backend || "rocm")
+            : (slot.device_class || "cpu");
+          return (
+            <span
+              className={"chip dev-" + String(colorKey).replace("gpu-", "")}
+              title={`Profile: ${slot.profile}`}
+            >
+              {prettyProfile(slot.profile)}
+            </span>
+          );
+        })()}
         <span className="chip">{type}</span>
         {/* N5: runtime micro-tag — model swap on a container slot is a
             cold restart, not a hot swap. */}

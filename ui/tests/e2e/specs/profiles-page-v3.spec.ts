@@ -21,13 +21,15 @@ const CONTAINER_SLOT = {
   name: 'gpu-chat',
   type: 'llm',
   device: 'gpu-rocm',
+  device_class: 'gpu',
+  backend: 'rocm',
   model: 'qwen3.6-35b-a3b-q4_k_m',
   model_id: 'qwen3.6-35b-a3b',
   group: 'chat',
   state: 'ready',
   port: 8096,
   runtime: 'container',
-  profile: 'moe-rocmfp4',
+  profile: 'rocm',
   image: 'ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server',
   image_status: 'present',
   container_status: 'running',
@@ -52,14 +54,16 @@ const CONTAINER_SLOT = {
 const BASIC_CONTAINER_SLOT = {
   name: 'chat',
   type: 'llm',
-  device: 'gpu-rocm',
+  device: 'gpu-vulkan',
+  device_class: 'gpu',
+  backend: 'vulkan',
   model: 'qwen3.6-27b',
   model_id: 'qwen3.6-27b',
   group: 'chat',
   state: 'serving',
   port: 8092,
   runtime: 'container',
-  profile: 'vulkan-std',
+  profile: 'vulkan',
   container_status: 'running',
   container_health: true,
   enabled: true,
@@ -110,9 +114,11 @@ test.describe('Profiles page (#658)', () => {
     await expect(firstCard).toContainText('rocm-7.2.4-rocmfp4-server')
   })
 
-  test('vulkan-std profile shows fallback intent label', async ({ page }) => {
+  test('vulkan profile shows fallback intent label', async ({ page }) => {
     await page.waitForSelector('.pf-card', { timeout: 10_000 })
-    const vulkanCard = page.locator('.pf-card', { hasText: 'vulkan-std' })
+    const vulkanCard = page.locator('.pf-card', {
+      has: page.locator('.pf-slug', { hasText: /^vulkan$/ }),
+    })
     await expect(vulkanCard.locator('.pf-intent')).toContainText('Vulkan std (fallback)')
   })
 })
@@ -163,7 +169,7 @@ test.describe('Container slot edit drawer (#658)', () => {
       const slot = {
         name: 'gpu-chat',
         runtime: 'container',
-        profile: 'moe-rocmfp4',
+        profile: 'rocm',
       }
       return slot.runtime === 'container'
     })
