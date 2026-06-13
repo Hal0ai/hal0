@@ -103,3 +103,54 @@ def test_cloned_from_defaults_to_none_and_survives_update(tmp_hal0_home: str) ->
     catalog.create("my-copy", ProfileConfig(image="ghcr.io/x/y:z", cloned_from="my-rocm"))
     updated = catalog.update("my-copy", ProfilePatch(flags="-fa off"))
     assert updated.cloned_from == "my-rocm"
+
+
+# ── profiles overhaul: bench / quant / intent / used_by ─────────────────────────
+
+
+def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
+    by_name = {p.name: p for p in ProfileCatalog().list()}
+    assert by_name["rocm"].tps == 52.8
+    assert by_name["rocm-mtp"].tps == 24.4
+    # TTS is synth — reported as a real-time factor, not tok/s.
+    assert by_name["tts"].tps is None
+    assert by_name["tts"].rtf == 0.18
+
+
+def test_seed_intent_and_quant_exposed(tmp_hal0_home: str) -> None:
+    by_name = {p.name: p for p in ProfileCatalog().list()}
+    assert by_name["rocm"].intent == "MoE agents"
+    assert by_name["rocm"].quant == "FP4"
+    assert by_name["vulkan"].quant == "Q4_K_M"
+
+
+def test_custom_profile_has_no_bench_and_round_trips_intent_quant(
+    tmp_hal0_home: str,
+) -> None:
+    catalog = ProfileCatalog()
+    created = catalog.create(
+        "my-tuned",
+        ProfileConfig(image="ghcr.io/x/y:z", intent="My workload", quant="Q5_K_M"),
+    )
+    assert created.intent == "My workload"
+    assert created.quant == "Q5_K_M"
+    assert created.tps is None
+    assert created.rtf is None
+
+    reloaded = ProfileCatalog().resolve("my-tuned")
+    assert reloaded.intent == "My workload"
+    assert reloaded.quant == "Q5_K_M"
+
+
+def test_used_by_lists_bound_slots(tmp_hal0_home: str) -> None:
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    for slot in ("primary", "agent"):
+        (root / f"{slot}.toml").write_text(
+            "\n".join(["[slot]", f'name = "{slot}"', "port = 8081", 'profile = "rocm"', ""]),
+            encoding="utf-8",
+        )
+    by_name = {p.name: p for p in ProfileCatalog().list()}
+    assert sorted(by_name["rocm"].used_by) == ["agent", "primary"]
+    assert by_name["vulkan"].used_by == ()
+    assert by_name["rocm"].to_dict()["used_by"] == ["agent", "primary"]

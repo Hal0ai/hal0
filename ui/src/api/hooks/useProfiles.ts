@@ -21,6 +21,20 @@ export interface Profile {
   /** Emitted by the API: true when the profile is one of the immutable
    *  SEED_PROFILES (server rejects PUT/DELETE with 409 seed_immutable). */
   seed?: boolean
+  /** GPU runtime (rocm|vulkan); null for non-GPU profiles (#751). */
+  backend?: 'rocm' | 'vulkan' | null
+  /** Provenance: profile this one was cloned from (clone / edit-a-copy). */
+  cloned_from?: string | null
+  /** Human label shown as the card headline (e.g. "MoE agents"). */
+  intent?: string
+  /** Weight quant shown as a card chip (e.g. "FP4", "Q4_K_M"). */
+  quant?: string
+  /** Bench tok/s hero metric — null when un-benched (custom profiles). */
+  tps?: number | null
+  /** Real-time factor for synth slots (e.g. TTS) — null when n/a. */
+  rtf?: number | null
+  /** Slot names currently bound to this profile. */
+  used_by?: string[]
 }
 
 export interface ProfileBody {
@@ -29,6 +43,10 @@ export interface ProfileBody {
   flags?: string
   mtp?: boolean
   device_class?: string
+  backend?: 'rocm' | 'vulkan' | null
+  cloned_from?: string | null
+  intent?: string
+  quant?: string
 }
 
 export function useProfiles() {

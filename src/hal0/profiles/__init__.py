@@ -29,7 +29,12 @@ from hal0.config.loader import (
     load_slot_config,
     save_profiles_config,
 )
-from hal0.config.schema import SEED_PROFILES, ProfileConfig, resolve_profile_flags
+from hal0.config.schema import (
+    PROFILE_BENCH,
+    SEED_PROFILES,
+    ProfileConfig,
+    resolve_profile_flags,
+)
 from hal0.errors import Conflict, NotFound
 
 log = logging.getLogger(__name__)
@@ -55,6 +60,14 @@ class ResolvedProfile:
     supported_slot_types: tuple[SlotType, ...]
     backend: str | None = None
     cloned_from: str | None = None
+    #: Card display facts (profiles overhaul). The bench metrics are static
+    #: for seeds and ``None`` for custom; ``used_by`` is the set of slots
+    #: that reference this profile.
+    intent: str = ""
+    quant: str = ""
+    tps: float | None = None
+    rtf: float | None = None
+    used_by: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -69,6 +82,11 @@ class ResolvedProfile:
             "runtime_family": self.runtime_family,
             "supported_slot_types": list(self.supported_slot_types),
             "cloned_from": self.cloned_from,
+            "intent": self.intent,
+            "quant": self.quant,
+            "tps": self.tps,
+            "rtf": self.rtf,
+            "used_by": list(self.used_by),
         }
 
 
@@ -81,6 +99,8 @@ class ProfilePatch:
     mtp: bool | None = None
     device_class: Literal["gpu", "cpu", "npu", "img"] | None = None
     backend: Literal["rocm", "vulkan"] | None = None
+    intent: str | None = None
+    quant: str | None = None
 
 
 def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
@@ -118,7 +138,11 @@ class ProfileCatalog:
 
     def list(self) -> list[ResolvedProfile]:
         cfg = load_profiles_config(self._path)
-        return [self._resolve_item(name, profile) for name, profile in cfg.profile.items()]
+        used_by = self._used_by_index()
+        return [
+            self._resolve_item(name, profile, used_by=tuple(used_by.get(name, ())))
+            for name, profile in cfg.profile.items()
+        ]
 
     def resolve(self, name: str) -> ResolvedProfile:
         cfg = load_profiles_config(self._path)
@@ -165,6 +189,8 @@ class ProfileCatalog:
                 ),
                 backend=patch.backend if patch.backend is not None else existing.backend,
                 cloned_from=existing.cloned_from,
+                intent=patch.intent if patch.intent is not None else existing.intent,
+                quant=patch.quant if patch.quant is not None else existing.quant,
             )
             catalog.profile[name] = updated
             save_profiles_config(catalog, self._path)
@@ -192,19 +218,41 @@ class ProfileCatalog:
 
     def slots_using(self, name: str) -> list[str]:
         """Return slot names whose TOML references ``name``."""
-        using: list[str] = []
+        return [slot for slot, profile in self._slot_profiles() if profile == name]
+
+    def _slot_profiles(self) -> list[tuple[str, str | None]]:
+        """Return ``(slot_name, profile_name)`` for every slot, in one pass.
+
+        Malformed slot TOMLs are logged and skipped so a single bad slot
+        never breaks the whole profile listing.
+        """
+        out: list[tuple[str, str | None]] = []
         for slot_name in list_slots():
             try:
                 cfg = load_slot_config(slot_name)
             except Exception as exc:
                 log.warning("profiles.in_use_scan_error slot=%s error=%s", slot_name, exc)
                 continue
-            if cfg.profile == name:
-                using.append(slot_name)
-        return using
+            out.append((slot_name, cfg.profile))
+        return out
 
-    def _resolve_item(self, name: str, profile: ProfileConfig) -> ResolvedProfile:
+    def _used_by_index(self) -> dict[str, list[str]]:
+        """Map ``profile_name -> [slot names]`` from a single slot scan."""
+        index: dict[str, list[str]] = {}
+        for slot_name, profile_name in self._slot_profiles():
+            if profile_name:
+                index.setdefault(profile_name, []).append(slot_name)
+        return index
+
+    def _resolve_item(
+        self,
+        name: str,
+        profile: ProfileConfig,
+        *,
+        used_by: tuple[str, ...] = (),
+    ) -> ResolvedProfile:
         runtime = _runtime_family(name, profile)
+        bench = PROFILE_BENCH.get(name, {})
         return ResolvedProfile(
             name=name,
             image=profile.image,
@@ -217,6 +265,11 @@ class ProfileCatalog:
             runtime_family=runtime,
             supported_slot_types=_supported_slot_types(runtime),
             cloned_from=profile.cloned_from,
+            intent=profile.intent,
+            quant=profile.quant,
+            tps=bench.get("tps"),
+            rtf=bench.get("rtf"),
+            used_by=used_by,
         )
 
     def _guard_custom(self, name: str) -> None:

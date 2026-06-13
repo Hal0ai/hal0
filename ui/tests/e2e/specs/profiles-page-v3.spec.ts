@@ -119,7 +119,17 @@ test.describe('Profiles page (#658)', () => {
     const vulkanCard = page.locator('.pf-card', {
       has: page.locator('.pf-slug', { hasText: /^vulkan$/ }),
     })
-    await expect(vulkanCard.locator('.pf-intent')).toContainText('Vulkan std (fallback)')
+    await expect(vulkanCard.locator('.pf-intent')).toContainText('Vulkan std · fallback')
+  })
+
+  test('overhaul: summary strip + sectioned cards + backend chip + bench metric', async ({ page }) => {
+    await page.waitForSelector('.pf-card', { timeout: 10_000 })
+    await expect(page.locator('.pf-summary')).toBeVisible()
+    const seedSection = page.locator('.pf-section', { hasText: 'Seed templates' })
+    await expect(seedSection.locator('.pf-card')).toHaveCount(MOCK_DATA.profiles.length)
+    const rocm = page.locator('.pf-card', { has: page.locator('.pf-slug', { hasText: /^rocm$/ }) })
+    await expect(rocm.locator('.pf-chip.backend')).toContainText('ROCm')
+    await expect(rocm.locator('.pf-tps')).toHaveText('52.8')
   })
 })
 

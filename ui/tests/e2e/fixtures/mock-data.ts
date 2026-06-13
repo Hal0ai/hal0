@@ -256,6 +256,11 @@ export const MOCK_DATA = {
       device_class: 'gpu',
       backend: 'rocm',
       seed: true,
+      intent: 'MoE agents',
+      quant: 'FP4',
+      tps: 52.8,
+      rtf: null,
+      used_by: ['primary'],
     },
     {
       name: 'rocm-mtp',
@@ -266,6 +271,11 @@ export const MOCK_DATA = {
       device_class: 'gpu',
       backend: 'rocm',
       seed: true,
+      intent: 'Dense chat + MTP',
+      quant: 'FP4',
+      tps: 24.4,
+      rtf: null,
+      used_by: [],
     },
     {
       name: 'vulkan',
@@ -276,6 +286,11 @@ export const MOCK_DATA = {
       device_class: 'gpu',
       backend: 'vulkan',
       seed: true,
+      intent: 'Vulkan std · fallback',
+      quant: 'Q4_K_M',
+      tps: 41.0,
+      rtf: null,
+      used_by: [],
     },
     // Phase A seed — NPU container slot (FLM toolbox).
     {
@@ -287,6 +302,11 @@ export const MOCK_DATA = {
       device_class: 'npu',
       backend: null,
       seed: true,
+      intent: 'FLM NPU inference',
+      quant: 'W4ABF16',
+      tps: 38.6,
+      rtf: null,
+      used_by: [],
     },
     // Phase B5 seed — TTS container slot (kokoro-onnx, CPU-only).
     {
@@ -298,6 +318,11 @@ export const MOCK_DATA = {
       device_class: 'cpu',
       backend: null,
       seed: true,
+      intent: 'TTS · Kokoro',
+      quant: '',
+      tps: null,
+      rtf: 0.18,
+      used_by: ['tts'],
     },
     // ComfyUI image-generation seed (Phase D).
     {
@@ -309,6 +334,11 @@ export const MOCK_DATA = {
       device_class: 'img',
       backend: null,
       seed: true,
+      intent: 'Image generation',
+      quant: '',
+      tps: null,
+      rtf: null,
+      used_by: [],
     },
   ],
 }

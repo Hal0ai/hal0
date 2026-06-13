@@ -1,125 +1,338 @@
-// hal0 dashboard — Profiles view (issue #658, Phase C6 CRUD).
+// hal0 dashboard — Profiles view (issue #658; overhaul 2026-06-13).
 //
-// Lists container-slot profiles from GET /api/profiles.
-// Each profile is a named image + bench-tuned flag bundle that backs
-// one or more container slots. The UI labels them by intent (what they're
-// for) rather than by slug, so operators see "MoE agents · ROCmFP4 ·
-// ~52.8 tok/s" rather than "rocm".
+// A profile is a named container image + bench-tuned flag bundle that backs
+// one or more inference slots. This view replaces the flat card grid with a
+// structured surface: a summary strip, seed/custom grouping, richer cards
+// (bench tok/s hero metric, backend-hued accent + chip, quant chip, the
+// "used by" slot binding), a slide-in form drawer, and a styled delete
+// confirm with an in-use guard.
 //
-// Phase C6: CRUD — New profile button + create/edit form (inline drawer),
-// per-card Edit/Delete for custom profiles, Clone for custom (prefills form
-// with <name>-copy). Seeds are immutable: badge shown, Delete disabled, and
-// Edit becomes "Edit a copy" — opens the create form prefilled from the seed
-// (name <seed>-custom) so editing forks a custom profile instead of mutating
-// the seed. Clones carry cloned_from provenance, shown as "based on <source>".
+// Data comes from GET /api/profiles (useProfiles). Cards read the explicit
+// `backend` field (#751) plus the overhaul's intent/quant/tps/rtf/used_by.
+//
+// Seeds are immutable: Edit becomes "Edit a copy" (forks <seed>-custom with
+// cloned_from set); Delete is disabled. Custom profiles get Clone/Edit/Delete.
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import {
   useProfiles,
   useProfileCreate,
   useProfileUpdate,
   useProfileDelete,
 } from '@/api/hooks/useProfiles'
-import { prettyProfile } from './profile-names.js'
+import { prettyProfile } from './profile-names'
 
-// Seed profile intent labels, mapped by slug. Slugs are the lowercase
-// backend-agnostic names (rocm/rocm-mtp/vulkan/flm/tts/comfyui); the backend
-// (ROCm vs Vulkan) lives on the profile's explicit `backend` field, not the
-// slug. Tok/s from hal0-container-bench-2026-06-08.md.
-const PROFILE_INTENT = {
-  'rocm':     'MoE agents · ROCmFP4 · ~52.8 tok/s',
-  'rocm-mtp': 'Dense chat + MTP · ~24.4 tok/s',
-  'vulkan':   'Vulkan std (fallback)',
-  'flm':      'FLM NPU inference',
-  'tts':      'TTS · Kokoro CPU',
-  'comfyui':  'ComfyUI image generation',
+// Backend runtime hue. Keys are the display backends shown on the card +
+// drawer; colors reference shared dashboard tokens. `backendField` is the
+// value persisted to ProfileConfig.backend (null for non-GPU paths, where
+// device_class carries the hardware intent — see #751).
+const BACKEND_META = {
+  rocm:   { label: 'ROCm',      color: 'var(--dev-rocm)',   device_class: 'gpu', backendField: 'rocm' },
+  vulkan: { label: 'Vulkan',    color: 'var(--dev-vulkan)', device_class: 'gpu', backendField: 'vulkan' },
+  npu:    { label: 'FLM · NPU', color: 'var(--dev-npu)',    device_class: 'npu', backendField: null },
+  cpu:    { label: 'CPU',       color: 'var(--dev-cpu)',    device_class: 'cpu', backendField: null },
 };
 
-// Mirrors the API name regex ^[a-z0-9][a-z0-9_-]{0,31}$ — lowercase alnum
-// start, hyphens/underscores allowed after, 32 chars max.
+// Mirrors the API name regex ^[a-z0-9][a-z0-9_-]{0,31}$.
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
-function profileIntent(p) {
-  if (PROFILE_INTENT[p.name]) return PROFILE_INTENT[p.name];
-  const base = p.image ? p.image.split(':').pop() : prettyProfile(p.name);
-  return p.mtp ? `${base} · MTP` : base;
+const BLANK = { name: '', intent: '', image: '', backend: 'rocm', quant: '', flags: '', mtp: false };
+
+function bk(name) { return BACKEND_META[name] || BACKEND_META.cpu; }
+
+// Display backend for a profile: the explicit GPU backend (rocm|vulkan) when
+// set, otherwise mapped from device_class so npu/cpu/img still get a hue.
+function backendOf(p) {
+  if (p.backend && BACKEND_META[p.backend]) return p.backend;
+  if (p.device_class === 'npu') return 'npu';
+  if (p.device_class === 'cpu') return 'cpu';
+  if ((p.image || '').toLowerCase().includes('vulkan')) return 'vulkan';
+  return 'rocm';
 }
 
-function imageTag(image) {
-  if (!image) return '—';
-  const parts = image.split(':');
-  return parts.length > 1 ? parts[parts.length - 1] : image;
+// Card headline. Prefer the server-authored intent; fall back to a pretty
+// profile name (#751 shared map) so un-labelled custom profiles read well.
+function intentOf(p) {
+  if (p.intent) return p.intent;
+  const base = p.image ? p.image.split(':').pop() : prettyProfile(p.name);
+  return p.mtp ? `${base} · MTP` : base;
 }
 
 function toast(msg, kind = 'info') {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind);
 }
 
-// ── Profile Form (create / edit) ──────────────────────────────────────────────
+// ── slot binding pill ─────────────────────────────────────────────────────────
 
-const BLANK_FORM = { name: '', image: '', flags: '', mtp: false, device_class: '' };
+function SlotPill({ name }) {
+  return (
+    <span className="pf-slot">
+      <span className="pf-slot-dot" />
+      <span className="mono">{name}</span>
+    </span>
+  );
+}
 
-function ProfileForm({ initial, isEdit, title, onClose, onSaved }) {
-  const [form, setForm] = useState(initial ?? BLANK_FORM);
-  const [errors, setErrors] = useState({});
+// ── Profile card ──────────────────────────────────────────────────────────────
+
+function ProfileCard({ p, index, onEdit, onClone, onDelete }) {
+  const meta = bk(backendOf(p));
+  const isSeed = !!p.seed;
+  const usedBy = p.used_by || [];
+  const inUse = usedBy.length;
+
+  return (
+    <div className="pf-card" style={{ '--bk': meta.color, animationDelay: (index * 34) + 'ms' }}>
+      <span className="pf-accent" />
+      <div className="pf-card-top">
+        <div className="pf-headline">
+          <div className="pf-intent">{intentOf(p)}</div>
+          <div className="pf-slug-row mono">
+            <span className="pf-slug">{p.name}</span>
+            {p.cloned_from && <span className="pf-based">↳ {p.cloned_from}</span>}
+          </div>
+        </div>
+        <div className="pf-metric">
+          {p.tps != null ? (
+            <>
+              <span className="pf-tps num">{p.tps.toFixed(1)}</span>
+              <span className="pf-tps-u mono">tok/s · bench</span>
+            </>
+          ) : p.rtf != null ? (
+            <>
+              <span className="pf-tps num">{p.rtf.toFixed(2)}×</span>
+              <span className="pf-tps-u mono">RTF · synth</span>
+            </>
+          ) : (
+            <span className="pf-tps-u mono">—</span>
+          )}
+        </div>
+      </div>
+
+      <div className="pf-chips">
+        <span className="pf-chip backend" style={{ '--bk': meta.color }}>
+          <span className="pf-chip-dot" />{meta.label}
+        </span>
+        {p.quant && <span className="pf-chip">{p.quant}</span>}
+        {p.mtp && <span className="pf-chip mtp">{Icons.zap} MTP</span>}
+        <span className="pf-grow" />
+        {isSeed
+          ? <span className="pf-chip seed immutable" title="Seed profiles are read-only">{Icons.lock} seed</span>
+          : <span className="pf-chip custom">custom</span>}
+      </div>
+
+      <div className="pf-image mono">
+        <span className="pf-image-lbl">image</span>
+        <span className="pf-image-uri">{p.image}</span>
+      </div>
+
+      {p.resolved_flags && (
+        <div className="pf-flags">
+          <span className="pf-flags-lbl mono">flags</span>
+          <code className="pf-flags-code">{p.resolved_flags}</code>
+        </div>
+      )}
+
+      <div className="pf-foot">
+        <div className="pf-usage">
+          {inUse ? (
+            <>
+              <span className="pf-usage-lbl mono">used by</span>
+              <span className="pf-slots">{usedBy.map(s => <SlotPill key={s} name={s} />)}</span>
+            </>
+          ) : (
+            <span className="pf-unused mono">unused · safe to delete</span>
+          )}
+        </div>
+        <div className="pf-actions">
+          {isSeed ? (
+            <button
+              className="pf-btn"
+              onClick={() => onClone(p)}
+              title="Seeds are immutable — fork a custom copy"
+              data-testid={`pf-btn-editcopy-${p.name}`}
+            >
+              {Icons.copy} Edit a copy
+            </button>
+          ) : (
+            <>
+              <button
+                className="pf-btn"
+                onClick={() => onClone(p)}
+                title="Clone this profile"
+                data-testid={`pf-btn-clone-${p.name}`}
+              >
+                {Icons.copy}
+              </button>
+              <button
+                className="pf-btn"
+                onClick={() => onEdit(p)}
+                title="Edit"
+                data-testid={`pf-btn-edit-${p.name}`}
+              >
+                {Icons.edit} Edit
+              </button>
+            </>
+          )}
+          <button
+            className="pf-btn danger"
+            onClick={() => onDelete(p)}
+            disabled={isSeed}
+            title={isSeed ? 'Seed profiles cannot be deleted' : inUse ? 'In use — detach slots first' : 'Delete'}
+            data-testid={`pf-btn-delete-${p.name}`}
+          >
+            {Icons.trash}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Section ───────────────────────────────────────────────────────────────────
+
+function Section({ title, count, hint, children }) {
+  return (
+    <div className="pf-section">
+      <div className="sec">
+        <h2>{title}<span className="ct num">{count}</span></h2>
+        {hint && <span className="pf-sec-hint mono">{hint}</span>}
+        <span className="rule" />
+      </div>
+      <div className="pf-grid">{children}</div>
+    </div>
+  );
+}
+
+// ── Form drawer (create / edit / clone) ─────────────────────────────────────────
+
+function FormRow({ label, sub, req, children, error, warn, ok, counter }) {
+  return (
+    <div className={'pf-row' + (error ? ' has-err' : '')}>
+      <div className="pf-row-lbl">
+        <span>{label}{req && <span className="pf-req" title="required">*</span>}</span>
+        {sub && <span className="pf-row-sub mono">{sub}</span>}
+      </div>
+      <div className="pf-row-ctl">
+        <div className={'pf-field' + (ok ? ' ok' : '') + (error ? ' err' : '')}>
+          {children}
+          {ok && <span className="pf-field-ok" aria-hidden="true">{Icons.check}</span>}
+        </div>
+        {(error || warn || counter) && (
+          <div className="pf-row-foot">
+            {error
+              ? <span className="pf-msg err mono hint err">{Icons.alert}{error}</span>
+              : warn
+              ? <span className="pf-msg warn mono">{Icons.alert}{warn}</span>
+              : <span />}
+            {counter && <span className={'pf-counter mono' + (counter.warn ? ' warn' : '')}>{counter.text}</span>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function validateForm(form, existing) {
+  const errs = {};
+  const name = (form.name || '').trim();
+  if (!name) errs.name = 'Name is required';
+  else if (!NAME_RE.test(name)) errs.name = 'lowercase · digits · - · _ · must start alphanumeric';
+  else if (existing.includes(name)) errs.name = `“${name}” already exists`;
+  if (!(form.image || '').trim()) errs.image = 'Image is required';
+  return errs;
+}
+
+function warnForm(form) {
+  const warns = {};
+  const img = (form.image || '').trim();
+  // A tag is the part after the last ':' that isn't part of a host:port.
+  if (img && !/:[\w][\w.-]*$/.test(img)) warns.image = 'no tag — will resolve to :latest';
+  return warns;
+}
+
+function Drawer({ mode, source, existing = [], onClose, onSaved }) {
+  const isEdit = mode === 'edit';
+  const initial = (() => {
+    if (mode === 'create') return { ...BLANK };
+    const base = {
+      name: source.name,
+      intent: source.intent || '',
+      image: source.image || '',
+      backend: backendOf(source),
+      quant: source.quant || '',
+      flags: source.flags || '',
+      mtp: !!source.mtp,
+    };
+    if (mode === 'clone') {
+      const suffix = source.seed ? '-custom' : '-copy';
+      return { ...base, name: (source.name + suffix).slice(0, 32), cloned_from: source.name };
+    }
+    return base;
+  })();
+
+  const [form, setForm] = useState(initial);
+  const [touched, setTouched] = useState({});
+  const [submitted, setSubmitted] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const create = useProfileCreate();
   const update = useProfileUpdate();
 
-  // Sync form when initial changes (e.g. switching from clone to edit).
-  useEffect(() => {
-    setForm(initial ?? BLANK_FORM);
-    setErrors({});
-  }, [initial]);
+  useEffect(() => { setForm(initial); setTouched({}); setSubmitted(false); /* eslint-disable-next-line */ }, [mode, source]);
 
-  const set = useCallback((field, val) => {
-    setForm(f => ({ ...f, [field]: val }));
-    setErrors(e => ({ ...e, [field]: undefined }));
-  }, []);
+  const meta = bk(form.backend);
 
-  function validate() {
-    const errs = {};
-    if (!form.name.trim()) {
-      errs.name = 'Name is required';
-    } else if (!NAME_RE.test(form.name.trim())) {
-      errs.name = 'Lowercase letters, digits, hyphens, underscores · max 32 chars';
-    }
-    if (!form.image.trim()) {
-      errs.image = 'Image is required';
-    }
-    return errs;
-  }
+  const taken = existing.filter(n => !(isEdit && n === source.name));
+  const errs = validateForm(form, taken);
+  const warns = warnForm(form);
+  const blocking = Object.keys(errs).length > 0;
+  const show = (f) => submitted || touched[f];
+  const nameValid = !errs.name && (form.name || '').trim().length > 0;
 
-  async function handleSubmit(e) {
+  const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setTouched(t => ({ ...t, [k]: true })); };
+  const touch = (k) => setTouched(t => ({ ...t, [k]: true }));
+  const close = () => { setClosing(true); setTimeout(onClose, 200); };
+
+  async function submit(e) {
     e.preventDefault();
-    const errs = validate();
-    if (Object.keys(errs).length) { setErrors(errs); return; }
+    setSubmitted(true);
+    if (blocking) {
+      const first = document.querySelector('.pf-field.err input');
+      if (first) first.focus();
+      return;
+    }
     setSubmitting(true);
+    const choice = bk(form.backend);
     const body = {
       name: form.name.trim(),
       image: form.image.trim(),
       flags: form.flags ?? '',
       mtp: !!form.mtp,
-      ...(form.device_class ? { device_class: form.device_class } : {}),
+      device_class: choice.device_class,
+      backend: choice.backendField,
+      intent: form.intent ?? '',
+      quant: form.quant ?? '',
       ...(form.cloned_from ? { cloned_from: form.cloned_from } : {}),
     };
     try {
       if (isEdit) {
         const { name, ...rest } = body;
-        await update.mutateAsync({ name: initial.name, body: rest });
-        toast(`Profile ${initial.name} updated`, 'ok');
+        await update.mutateAsync({ name: source.name, body: rest });
+        toast(`Profile ${source.name} updated`, 'ok');
       } else {
         await create.mutateAsync(body);
         toast(`Profile ${body.name} created`, 'ok');
       }
-      onSaved?.();
+      onSaved();
     } catch (err) {
       const code = err?.code || '';
       if (code === 'profiles.exists') {
-        setErrors({ name: 'A profile with this name already exists' });
+        setTouched(t => ({ ...t, name: true }));
+        toast(`A profile named ${body.name} already exists`, 'err');
       } else if (code === 'profiles.seed_immutable') {
-        setErrors({ name: 'Seed profiles cannot be modified' });
+        toast('Seed profiles cannot be modified', 'err');
       } else {
         toast(err?.message || 'Save failed', 'err');
       }
@@ -128,140 +341,117 @@ function ProfileForm({ initial, isEdit, title, onClose, onSaved }) {
     }
   }
 
-  const fallbackTitle = isEdit ? `Edit · ${initial?.name}` : 'New profile';
-  const panelTitle = title || fallbackTitle;
+  const title = isEdit ? `Edit · ${source.name}`
+    : mode === 'clone' ? (source.seed ? `Edit a copy · ${source.name}` : `Clone · ${source.name}`)
+    : 'New profile';
+  const eyebrow = mode === 'create' ? 'CREATE' : mode === 'clone' ? (source.seed ? 'EDIT A COPY' : 'CLONE') : 'EDIT';
+  const nameLen = (form.name || '').length;
 
   return (
-    <div className="pf-form-panel" role="dialog" aria-label={panelTitle}>
-      <div className="pf-form-head">
-        <span className="pf-form-title mono">{panelTitle}</span>
-        <button className="btn ghost sm pf-form-close" onClick={onClose} aria-label="Close">×</button>
-      </div>
-      <form onSubmit={handleSubmit} className="pf-form-body">
-        {/* Name */}
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>Name <span className="req">*</span></span>
-            <span className="sub">lowercase · hyphens/underscores · ≤32 chars</span>
+    <div className={'pf-scrim' + (closing ? ' out' : '')} onMouseDown={close}>
+      <div
+        className={'pf-drawer pf-form-panel' + (closing ? ' out' : '')}
+        onMouseDown={e => e.stopPropagation()}
+        role="dialog"
+        aria-label={title}
+      >
+        <div className="pf-drawer-head">
+          <div>
+            <div className="pf-drawer-eye mono">{eyebrow}</div>
+            <div className="pf-drawer-title pf-form-title mono">{title}</div>
           </div>
-          <div className="form-ctl">
-            <input
-              className={`input mono${errors.name ? ' err' : ''}`}
-              value={form.name}
-              onChange={e => set('name', e.target.value)}
-              placeholder="my-profile"
-              maxLength={32}
-              disabled={isEdit}
-              data-testid="pf-input-name"
-            />
-            {errors.name && <div className="hint err">{errors.name}</div>}
-          </div>
+          <button className="pf-x" onClick={close} aria-label="Close">{Icons.close}</button>
         </div>
 
-        {/* Image */}
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>Image <span className="req">*</span></span>
-            <span className="sub">container image URI</span>
-          </div>
-          <div className="form-ctl">
-            <input
-              className={`input mono${errors.image ? ' err' : ''}`}
-              value={form.image}
-              onChange={e => set('image', e.target.value)}
-              placeholder="ghcr.io/hal0ai/…:tag"
-              data-testid="pf-input-image"
-            />
-            {errors.image && <div className="hint err">{errors.image}</div>}
-          </div>
-        </div>
+        <form className="pf-drawer-body" onSubmit={submit} noValidate>
+          <FormRow label="Name" req sub="lowercase · - _ · ≤32"
+            error={show('name') ? errs.name : null}
+            ok={!isEdit && nameValid}
+            counter={!isEdit ? { text: nameLen + '/32', warn: nameLen >= 28 } : null}>
+            <input className={'pf-input mono' + (show('name') && errs.name ? ' err' : '')} value={form.name}
+              onChange={e => set('name', e.target.value)} onBlur={() => touch('name')}
+              placeholder="my-profile" maxLength={32} disabled={isEdit}
+              aria-invalid={!!(show('name') && errs.name)} data-testid="pf-input-name" />
+          </FormRow>
 
-        {/* Flags */}
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>Flags</span>
-            <span className="sub">extra CLI flags appended to the run command</span>
-          </div>
-          <div className="form-ctl">
-            <input
-              className="input mono"
-              value={form.flags}
-              onChange={e => set('flags', e.target.value)}
-              placeholder="--flash-attn on -ngl 999"
-              data-testid="pf-input-flags"
-            />
-          </div>
-        </div>
+          <FormRow label="Intent" sub="what it's for">
+            <input className="pf-input" value={form.intent} onChange={e => set('intent', e.target.value)}
+              placeholder="MoE agents · long-ctx" data-testid="pf-input-intent" />
+          </FormRow>
 
-        {/* Device class */}
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>Device class</span>
-            <span className="sub">gpu · npu · cpu · auto</span>
-          </div>
-          <div className="form-ctl">
-            <select
-              className="input mono"
-              value={form.device_class || ''}
-              onChange={e => set('device_class', e.target.value)}
-              data-testid="pf-select-device"
-            >
-              <option value="">auto</option>
-              <option value="gpu">gpu</option>
-              <option value="npu">npu</option>
-              <option value="cpu">cpu</option>
-            </select>
-          </div>
-        </div>
+          <FormRow label="Image" req sub="container image URI"
+            error={show('image') ? errs.image : null}
+            warn={!errs.image ? warns.image : null}
+            ok={!!(form.image || '').trim() && !errs.image && !warns.image}>
+            <input className={'pf-input mono' + (show('image') && errs.image ? ' err' : '')} value={form.image}
+              onChange={e => set('image', e.target.value)} onBlur={() => touch('image')}
+              placeholder="ghcr.io/hal0ai/…:tag" aria-invalid={!!(show('image') && errs.image)}
+              data-testid="pf-input-image" />
+          </FormRow>
 
-        {/* MTP */}
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>MTP</span>
-            <span className="sub">Multi-Token Prediction speculative decoding</span>
-          </div>
-          <div className="form-ctl">
-            <label className="pf-toggle-label">
-              <input
-                type="checkbox"
-                checked={!!form.mtp}
-                onChange={e => set('mtp', e.target.checked)}
-                data-testid="pf-check-mtp"
-              />
-              <span className="mono" style={{ fontSize: 11, marginLeft: 6 }}>
-                {form.mtp ? 'enabled' : 'disabled'}
-              </span>
-            </label>
-          </div>
-        </div>
+          <FormRow label="Backend" sub="runtime path">
+            <div className="pf-seg" data-testid="pf-seg-backend">
+              {Object.keys(BACKEND_META).map(k => (
+                <button type="button" key={k} className={'pf-seg-btn' + (form.backend === k ? ' on' : '')}
+                  style={{ '--bk': BACKEND_META[k].color }} onClick={() => set('backend', k)}>
+                  <span className="pf-chip-dot" />{BACKEND_META[k].label}
+                </button>
+              ))}
+            </div>
+          </FormRow>
 
-        <div className="pf-form-foot">
-          <button type="button" className="btn ghost sm" onClick={onClose}>Cancel</button>
-          <button
-            type="submit"
-            className="btn sm"
-            disabled={submitting}
-            data-testid="pf-btn-submit"
-          >
-            {submitting ? 'Saving…' : isEdit ? 'Save' : 'Create'}
+          <FormRow label="Quant" sub="weight format">
+            <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}
+              placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
+          </FormRow>
+
+          <FormRow label="Flags" sub="appended to the run command">
+            <textarea className="pf-input mono pf-textarea" value={form.flags || ''}
+              onChange={e => set('flags', e.target.value)} rows={3} placeholder="--flash-attn on -ngl 999"
+              data-testid="pf-input-flags" />
+          </FormRow>
+
+          <FormRow label="MTP" sub="Multi-Token Prediction speculative decode">
+            <button type="button" className={'pf-switch' + (form.mtp ? ' on' : '')} onClick={() => set('mtp', !form.mtp)}
+              role="switch" aria-checked={form.mtp} data-testid="pf-check-mtp">
+              <span className="pf-switch-knob" />
+              <span className="pf-switch-lbl mono">{form.mtp ? 'enabled' : 'disabled'}</span>
+            </button>
+          </FormRow>
+        </form>
+
+        <div className="pf-drawer-foot">
+          <div className="pf-drawer-preview mono" style={{ '--bk': meta.color }}>
+            <span className="pf-chip-dot" />{meta.label}{form.mtp ? ' · MTP' : ''}
+          </div>
+          <span className="pf-grow" />
+          {submitted && blocking && (
+            <span className="pf-foot-err mono">{Icons.alert}Fix {Object.keys(errs).length} field{Object.keys(errs).length > 1 ? 's' : ''}</span>
+          )}
+          <button className="pf-btn" onClick={close} type="button">Cancel</button>
+          <button className={'pf-btn primary' + (submitted && blocking ? ' is-blocked' : '')}
+            onClick={submit} disabled={submitting} data-testid="pf-btn-submit">
+            {submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Create profile'}
           </button>
         </div>
-      </form>
+      </div>
     </div>
   );
 }
 
-// ── Delete confirm ────────────────────────────────────────────────────────────
+// ── Delete confirm ──────────────────────────────────────────────────────────────
 
-function DeleteConfirm({ profile, onCancel, onConfirmed }) {
+function DeleteConfirm({ p, onCancel, onConfirmed }) {
   const del = useProfileDelete();
   const [busy, setBusy] = useState(false);
+  const usedBy = p.used_by || [];
+  const inUse = usedBy.length;
 
   async function handleDelete() {
     setBusy(true);
     try {
-      await del.mutateAsync(profile.name);
-      toast(`Profile ${profile.name} deleted`, 'ok');
+      await del.mutateAsync(p.name);
+      toast(`Profile ${p.name} deleted`, 'ok');
       onConfirmed();
     } catch (err) {
       const code = err?.code || '';
@@ -281,181 +471,60 @@ function DeleteConfirm({ profile, onCancel, onConfirmed }) {
   }
 
   return (
-    <div className="pf-confirm-scrim" onClick={onCancel} role="dialog" aria-label="Confirm delete">
-      <div className="pf-confirm" onClick={e => e.stopPropagation()}>
-        <div className="pf-confirm-title mono">Delete profile · {profile.name}?</div>
-        <div className="pf-confirm-body mono">
-          This removes the profile permanently. Slots using it will revert to defaults.
-        </div>
-        <div className="pf-confirm-foot">
-          <button className="btn ghost sm" onClick={onCancel}>Cancel</button>
-          <button
-            className="btn danger sm"
-            onClick={handleDelete}
-            disabled={busy}
-            data-testid="pf-btn-delete-confirm"
-          >
-            {busy ? 'Deleting…' : 'Delete'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Profile card ──────────────────────────────────────────────────────────────
-
-function ProfileCard({ profile, onEdit, onClone, onDelete }) {
-  const intent = profileIntent(profile);
-  const tag = imageTag(profile.image);
-  const isSeed = !!profile.seed;
-
-  return (
-    <div className="pf-card">
-      <div className="pf-card-head">
-        <div className="pf-intent">{intent}</div>
-        <div className="pf-card-badges">
-          {isSeed && <span className="pf-badge immutable" title="Seed profiles are read-only">seed</span>}
-          {profile.mtp && <span className="pf-badge">MTP</span>}
-          {profile.device_class && profile.device_class !== 'gpu' && (
-            <span className="pf-badge device">{profile.device_class}</span>
-          )}
-        </div>
-      </div>
-      <div className="pf-meta mono">
-        <span className="pf-slug">{profile.name}</span>
-        <span className="pf-sep">·</span>
-        <span className="pf-tag">{tag}</span>
-      </div>
-      {profile.cloned_from && (
-        <div className="pf-based mono">based on {profile.cloned_from}</div>
-      )}
-      {profile.resolved_flags && (
-        <div className="pf-flags mono">{profile.resolved_flags}</div>
-      )}
-      <div className="pf-card-actions">
-        {isSeed ? (
-          <button
-            className="btn ghost xs"
-            onClick={() => onClone(profile)}
-            title="Seed profiles are immutable — edit a custom copy instead"
-            data-testid={`pf-btn-editcopy-${profile.name}`}
-          >
-            Edit a copy
-          </button>
+    <div className="pf-scrim center pf-confirm-scrim" onMouseDown={onCancel}>
+      <div className="pf-confirm" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Confirm delete">
+        <div className="pf-confirm-h pf-confirm-title mono">{Icons.trash} Delete · {p.name}?</div>
+        {inUse ? (
+          <div className="pf-confirm-b">
+            <div className="pf-warn mono">In use by {inUse} slot{inUse > 1 ? 's' : ''}.</div>
+            <div className="pf-slots" style={{ margin: '8px 0 2px' }}>{usedBy.map(s => <SlotPill key={s} name={s} />)}</div>
+            <div className="pf-confirm-sub">Detach these slots before deleting — they'd revert to defaults.</div>
+          </div>
         ) : (
-          <>
-            <button
-              className="btn ghost xs"
-              onClick={() => onClone(profile)}
-              title="Clone this profile"
-              data-testid={`pf-btn-clone-${profile.name}`}
-            >
-              Clone
-            </button>
-            <button
-              className="btn ghost xs"
-              onClick={() => onEdit(profile)}
-              title="Edit"
-              data-testid={`pf-btn-edit-${profile.name}`}
-            >
-              Edit
-            </button>
-          </>
+          <div className="pf-confirm-b">
+            <div className="pf-confirm-sub">This removes the profile permanently. This cannot be undone.</div>
+          </div>
         )}
-        <button
-          className="btn ghost xs danger"
-          onClick={() => onDelete(profile)}
-          disabled={isSeed}
-          title={isSeed ? 'Seed profiles cannot be deleted' : 'Delete'}
-          data-testid={`pf-btn-delete-${profile.name}`}
-        >
-          Delete
-        </button>
+        <div className="pf-confirm-foot">
+          <button className="pf-btn" onClick={onCancel}>Cancel</button>
+          <button className="pf-btn danger solid" onClick={handleDelete} disabled={!!inUse || busy}
+            data-testid="pf-btn-delete-confirm">
+            {inUse ? 'In use' : busy ? 'Deleting…' : 'Delete profile'}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
-// ── Main view ─────────────────────────────────────────────────────────────────
+// ── Summary cell ─────────────────────────────────────────────────────────────────
+
+function Stat({ value, label, accent }) {
+  return (
+    <div className="pf-stat">
+      <span className="pf-stat-v num" style={accent ? { color: accent } : null}>{value}</span>
+      <span className="pf-stat-l mono">{label}</span>
+    </div>
+  );
+}
+
+// ── Main view ────────────────────────────────────────────────────────────────────
 
 function ProfilesView() {
   const query = useProfiles();
   const profiles = query.data ?? [];
 
-  // Drawer state: null = closed, {mode:'create'} or {mode:'edit',profile} or {mode:'clone',profile}
-  const [drawer, setDrawer] = useState(null);
-  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [drawer, setDrawer] = useState(null);   // {mode, source}
+  const [confirm, setConfirm] = useState(null);
 
-  function openCreate() {
-    setDrawer({ mode: 'create' });
-  }
-
-  function openEdit(profile) {
-    setDrawer({ mode: 'edit', profile });
-  }
-
-  function openClone(profile) {
-    setDrawer({ mode: 'clone', profile });
-  }
-
-  function openDelete(profile) {
-    setConfirmDelete(profile);
-  }
-
-  function closeDrawer() {
-    setDrawer(null);
-  }
-
-  function onSaved() {
-    setDrawer(null);
-  }
-
-  function onDeleted() {
-    setConfirmDelete(null);
-  }
-
-  // Build initial form values for the drawer
-  let formInitial = null;
-  let isEdit = false;
-  let formTitle = null;
-  if (drawer) {
-    if (drawer.mode === 'create') {
-      formInitial = { ...BLANK_FORM };
-      isEdit = false;
-    } else if (drawer.mode === 'edit' && drawer.profile) {
-      formInitial = {
-        name: drawer.profile.name,
-        image: drawer.profile.image || '',
-        flags: drawer.profile.flags || '',
-        mtp: !!drawer.profile.mtp,
-        device_class: drawer.profile.device_class || '',
-      };
-      isEdit = true;
-    } else if (drawer.mode === 'clone' && drawer.profile) {
-      // Seeds fork via "Edit a copy" (<seed>-custom); custom profiles clone
-      // as <name>-copy. Both record cloned_from provenance on the new profile.
-      const isSeed = !!drawer.profile.seed;
-      const suffix = isSeed ? '-custom' : '-copy';
-      formInitial = {
-        name: `${drawer.profile.name}${suffix}`.slice(0, 32),
-        image: drawer.profile.image || '',
-        flags: drawer.profile.flags || '',
-        mtp: !!drawer.profile.mtp,
-        device_class: drawer.profile.device_class || '',
-        cloned_from: drawer.profile.name,
-      };
-      isEdit = false;
-      if (isSeed) formTitle = `Edit a copy · ${drawer.profile.name}`;
-    }
-  }
+  const seeds = profiles.filter(p => p.seed);
+  const custom = profiles.filter(p => !p.seed);
+  const inUseCount = profiles.filter(p => (p.used_by || []).length).length;
 
   if (query.isLoading) {
     return (
       <div className="view">
-        <div className="view-head">
-          <h2>Profiles</h2>
-        </div>
+        <div className="vh"><span className="vh-eye mono">RUNTIME</span><h1>Profiles</h1></div>
         <div className="empty mono">Loading profiles…</div>
       </div>
     );
@@ -464,10 +533,8 @@ function ProfilesView() {
   if (query.isError) {
     return (
       <div className="view">
-        <div className="view-head">
-          <h2>Profiles</h2>
-        </div>
-        <div className="empty mono" style={{color: 'var(--err)'}}>
+        <div className="vh"><span className="vh-eye mono">RUNTIME</span><h1>Profiles</h1></div>
+        <div className="empty mono" style={{ color: 'var(--err)' }}>
           Failed to load profiles: {query.error?.message || 'unknown error'}
         </div>
       </div>
@@ -476,55 +543,66 @@ function ProfilesView() {
 
   return (
     <div className="view">
-      <div className="view-head">
-        <h2>Profiles</h2>
-        <div className="view-sub mono">
-          Container-slot templates — image + bench-tuned flags per inference workload.
-        </div>
+      <div className="vh">
+        <span className="vh-eye mono">RUNTIME</span>
+        <h1>Profiles</h1>
+        <div className="vh-spacer" />
+        <span className="hint mono">image + bench-tuned flags per workload</span>
+        <button className="pf-btn primary lg" onClick={() => setDrawer({ mode: 'create' })} data-testid="pf-btn-new">
+          {Icons.plus} New profile
+        </button>
       </div>
 
-      <div className="pf-toolbar">
-        <button
-          className="btn sm"
-          onClick={openCreate}
-          data-testid="pf-btn-new"
-        >
-          + New profile
-        </button>
+      <div className="pf-summary">
+        <Stat value={profiles.length} label="profiles" />
+        <span className="pf-stat-div" />
+        <Stat value={seeds.length} label="seed templates" />
+        <Stat value={custom.length} label="custom" accent="var(--accent)" />
+        <span className="pf-stat-div" />
+        <Stat value={`${inUseCount}/${profiles.length}`} label="bound to slots" accent="var(--ok)" />
+        <span className="pf-grow" />
+        <div className="pf-legend mono">
+          {Object.entries(BACKEND_META).map(([k, m]) => (
+            <span className="pf-legend-i" key={k} style={{ '--bk': m.color }}><span className="pf-chip-dot" />{m.label}</span>
+          ))}
+        </div>
       </div>
 
       {profiles.length === 0 ? (
         <div className="empty mono">No profiles configured.</div>
       ) : (
-        <div className="pf-list">
-          {profiles.map(p => (
-            <ProfileCard
-              key={p.name}
-              profile={p}
-              onEdit={openEdit}
-              onClone={openClone}
-              onDelete={openDelete}
-            />
-          ))}
-        </div>
+        <>
+          <Section title="Seed templates" count={seeds.length} hint="immutable · ship with hal0">
+            {seeds.map((p, i) => (
+              <ProfileCard key={p.name} p={p} index={i}
+                onEdit={pp => setDrawer({ mode: 'edit', source: pp })}
+                onClone={pp => setDrawer({ mode: 'clone', source: pp })}
+                onDelete={pp => setConfirm(pp)} />
+            ))}
+          </Section>
+
+          <Section title="Custom profiles" count={custom.length} hint="forked or authored on this box">
+            {custom.map((p, i) => (
+              <ProfileCard key={p.name} p={p} index={i}
+                onEdit={pp => setDrawer({ mode: 'edit', source: pp })}
+                onClone={pp => setDrawer({ mode: 'clone', source: pp })}
+                onDelete={pp => setConfirm(pp)} />
+            ))}
+          </Section>
+        </>
       )}
 
       {drawer && (
-        <ProfileForm
-          initial={formInitial}
-          isEdit={isEdit}
-          title={formTitle}
-          onClose={closeDrawer}
-          onSaved={onSaved}
+        <Drawer
+          mode={drawer.mode}
+          source={drawer.source}
+          existing={profiles.map(p => p.name)}
+          onClose={() => setDrawer(null)}
+          onSaved={() => setDrawer(null)}
         />
       )}
-
-      {confirmDelete && (
-        <DeleteConfirm
-          profile={confirmDelete}
-          onCancel={() => setConfirmDelete(null)}
-          onConfirmed={onDeleted}
-        />
+      {confirm && (
+        <DeleteConfirm p={confirm} onCancel={() => setConfirm(null)} onConfirmed={() => setConfirm(null)} />
       )}
     </div>
   );

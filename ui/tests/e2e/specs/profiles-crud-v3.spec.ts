@@ -27,8 +27,15 @@ const CUSTOM_PROFILE = {
   mtp: false,
   resolved_flags: '--flash-attn on',
   device_class: 'gpu',
+  backend: 'rocm',
   seed: false,
   cloned_from: 'vulkan',
+  intent: 'Custom workload',
+  quant: 'FP4',
+  tps: null,
+  rtf: null,
+  // Unbound — keeps the card's Delete action enabled so the confirm flow runs.
+  used_by: [],
 }
 
 const PROFILES_WITH_CUSTOM = [...MOCK_DATA.profiles, CUSTOM_PROFILE]
@@ -84,17 +91,21 @@ test.describe('Profiles CRUD — Phase C6', () => {
     }
 
     // Intercept POST — capture body, respond 201 with the new profile.
+    // The GET only includes the new profile AFTER the POST fires; before
+    // that it must be absent so the form's client-side duplicate guard
+    // doesn't flag the name the user is typing.
+    let created = false
     await page.route('**/api/profiles', async (route) => {
       if (route.request().method() === 'POST') {
         try { posts.push(JSON.parse(route.request().postData() || '{}')) } catch { posts.push({}) }
+        created = true
         return route.fulfill({
           status: 201,
           contentType: 'application/json',
           body: JSON.stringify(NEW_PROFILE),
         })
       }
-      // GET returns updated list after create.
-      return json(route, [...PROFILES_WITH_CUSTOM, NEW_PROFILE])
+      return json(route, created ? [...PROFILES_WITH_CUSTOM, NEW_PROFILE] : PROFILES_WITH_CUSTOM)
     })
 
     await gotoProfiles(page)
@@ -144,7 +155,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await expect(vulkanCard).toBeVisible()
 
     // Seed badge.
-    await expect(vulkanCard.locator('.pf-badge.immutable')).toBeVisible()
+    await expect(vulkanCard.locator('.pf-chip.seed.immutable')).toBeVisible()
 
     // "Edit a copy" replaces both the disabled Edit and the Clone button.
     const editCopyBtn = vulkanCard.locator('[data-testid="pf-btn-editcopy-vulkan"]')
@@ -237,7 +248,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await gotoProfiles(page)
 
     const customCard = cardBySlug(page, 'my-custom')
-    await expect(customCard.locator('.pf-based')).toHaveText(/based on\s+vulkan/)
+    await expect(customCard.locator('.pf-based')).toHaveText(/vulkan/)
 
     // Seeds have no provenance line.
     const vulkanCard = cardBySlug(page, 'vulkan')

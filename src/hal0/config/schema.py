@@ -697,6 +697,8 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "rocm",
+        "intent": "MoE agents",
+        "quant": "FP4",
     },
     "rocm-mtp": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
@@ -704,6 +706,8 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
+        "intent": "Dense chat + MTP",
+        "quant": "FP4",
     },
     "vulkan": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
@@ -711,25 +715,45 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "mtp": False,
         "device_class": "gpu",
         "backend": "vulkan",
+        "intent": "Vulkan std · fallback",
+        "quant": "Q4_K_M",
     },
     "flm": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
         "flags": "",
         "mtp": False,
         "device_class": "npu",
+        "intent": "FLM NPU inference",
+        "quant": "W4ABF16",
     },
     "tts": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
         "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
         "mtp": False,
         "device_class": "cpu",
+        "intent": "TTS · Kokoro",
+        "quant": "",
     },
     "comfyui": {
         "image": "docker.io/kyuz0/amd-strix-halo-comfyui:latest",
         "flags": "--disable-mmap --bf16-vae --cache-none",
         "mtp": False,
         "device_class": "img",
+        "intent": "Image generation",
+        "quant": "",
     },
+}
+
+#: Static bench numbers for seed profiles, surfaced as the card hero metric.
+#: ``tps`` = tokens/sec (LLM throughput); ``rtf`` = real-time factor (synth,
+#: e.g. TTS).  Grounded in hal0-container-bench-2026-06-08.md.  Custom
+#: profiles have no entry → the card shows "—" until benched.
+PROFILE_BENCH: dict[str, dict[str, float]] = {
+    "rocm": {"tps": 52.8},
+    "rocm-mtp": {"tps": 24.4},
+    "vulkan": {"tps": 41.0},
+    "flm": {"tps": 38.6},
+    "tts": {"rtf": 0.18},
 }
 
 #: Preselect map for the create-modal device picker and legacy-slot
@@ -796,6 +820,22 @@ class ProfileConfig(BaseModel):
             "Provenance: name of the profile this one was cloned from "
             "(set by the dashboard clone / edit-a-copy flow).  Informational "
             "only — never resolved or validated against the catalog."
+        ),
+    )
+    intent: str = Field(
+        default="",
+        description=(
+            "Human label for what this profile is for, shown as the card "
+            "headline in the dashboard (e.g. 'MoE agents · long-ctx').  "
+            "Informational only."
+        ),
+    )
+    quant: str = Field(
+        default="",
+        description=(
+            "Weight quantization format shown as a card chip (e.g. 'FP4', "
+            "'Q4_K_M', 'W4ABF16').  Informational only — the runtime reads "
+            "the quant from the model, not this field."
         ),
     )
 
@@ -1822,6 +1862,7 @@ __all__ = [
     "DEFAULT_DEVICE",
     "DEVICE_DEFAULT_PROFILES",
     "MTP_FLAG_BUNDLE",
+    "PROFILE_BENCH",
     "SEED_PROFILES",
     "AgentAuthConfig",
     "AgentAuthKindLiteral",

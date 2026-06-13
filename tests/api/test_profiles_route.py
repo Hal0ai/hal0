@@ -157,3 +157,33 @@ class TestListProfiles:
         assert names == {"custom-only"}
         custom = next(item for item in data if item["name"] == "custom-only")
         assert custom["seed"] is False
+
+
+# ── profiles overhaul: enriched card fields ─────────────────────────────────────
+
+
+class TestEnrichedFields:
+    def test_seed_items_expose_intent_quant_bench(self, client: TestClient) -> None:
+        data = client.get("/api/profiles").json()
+        by_name = {p["name"]: p for p in data}
+        rocm = by_name["rocm"]
+        assert rocm["intent"] == "MoE agents"
+        assert rocm["quant"] == "FP4"
+        assert rocm["tps"] == 52.8
+        assert rocm["rtf"] is None
+        assert rocm["used_by"] == []
+        assert by_name["tts"]["rtf"] == 0.18
+
+    def test_create_round_trips_intent_and_quant(self, client: TestClient) -> None:
+        body = {
+            "name": "my-tuned",
+            "image": "ghcr.io/x/y:z",
+            "intent": "My workload",
+            "quant": "Q5_K_M",
+        }
+        created = client.post("/api/profiles", json=body).json()
+        assert created["intent"] == "My workload"
+        assert created["quant"] == "Q5_K_M"
+        assert created["tps"] is None
+        listed = {p["name"]: p for p in client.get("/api/profiles").json()}
+        assert listed["my-tuned"]["intent"] == "My workload"

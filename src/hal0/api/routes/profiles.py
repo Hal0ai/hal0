@@ -56,6 +56,8 @@ class ProfileBody(BaseModel):
         default=None,
         description="Provenance: profile this one was cloned from (informational).",
     )
+    intent: str = Field(default="", description="Human label for the card headline.")
+    quant: str = Field(default="", description="Weight quant shown as a card chip.")
 
     @field_validator("name")
     @classmethod
@@ -88,6 +90,8 @@ class ProfileUpdateBody(BaseModel):
         default=None,
         description="GPU runtime (rocm|vulkan); None for non-GPU profiles.",
     )
+    intent: str | None = Field(default=None, description="Human label for the card headline.")
+    quant: str | None = Field(default=None, description="Weight quant shown as a card chip.")
 
     @field_validator("image")
     @classmethod
@@ -111,8 +115,14 @@ def list_profiles() -> list[dict[str, Any]]:
             "image":          "ghcr.io/hal0ai/...:rocm-7.2.4-rocmfp4-server",
             "flags":          "-fa on ...",
             "mtp":            false,
-            "device_class":   "gpu",         # gpu | cpu | npu | img
-            "resolved_flags": "-fa on ..."   # flags + MTP bundle when mtp=true
+            "device_class":   "gpu",          # gpu | cpu | npu | img
+            "backend":        "rocm",         # rocm | vulkan | null (non-GPU)
+            "resolved_flags": "-fa on ...",   # flags + MTP bundle when mtp=true
+            "intent":         "MoE agents",   # card headline label
+            "quant":          "FP4",          # weight quant chip
+            "tps":            52.8,           # bench tok/s (null when un-benched)
+            "rtf":            null,           # real-time factor for synth slots
+            "used_by":        ["primary"]     # slots bound to this profile
         }
 
     Raises:
@@ -140,6 +150,8 @@ def create_profile(body: ProfileBody) -> dict[str, Any]:
             device_class=body.device_class,
             backend=body.backend,
             cloned_from=body.cloned_from,
+            intent=body.intent,
+            quant=body.quant,
         ),
     )
     return profile.to_dict()
@@ -164,6 +176,8 @@ def update_profile(name: str, body: ProfileUpdateBody) -> dict[str, Any]:
             mtp=body.mtp,
             device_class=body.device_class,
             backend=body.backend,
+            intent=body.intent,
+            quant=body.quant,
         ),
     )
     return profile.to_dict()

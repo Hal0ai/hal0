@@ -17,6 +17,8 @@ flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads
 mtp          = false
 device_class = "gpu"
 backend      = "rocm"
+intent       = "MoE agents"
+quant        = "FP4"
 
 [profile.rocm-mtp]
 # ROCm + MTP draft speculation (dense chat, qwopus 27B). ~24.4 tok/s (~2x non-MTP).
@@ -26,6 +28,8 @@ flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads
 mtp          = true
 device_class = "gpu"
 backend      = "rocm"
+intent       = "Dense chat + MTP"
+quant        = "FP4"
 
 [profile.vulkan]
 # Standard Vulkan GPU template (fallback / non-FP4 models). Vulkan-radv, no FP4/MTP.
@@ -34,6 +38,8 @@ flags        = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
 mtp          = false
 device_class = "gpu"
 backend      = "vulkan"
+intent       = "Vulkan std · fallback"
+quant        = "Q4_K_M"
 
 [profile.flm]
 # NPU LLM/trio slot (FastFlowLM). Flags are built by FLMProvider.container_spec,
@@ -42,6 +48,8 @@ image        = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
 flags        = ""
 mtp          = false
 device_class = "npu"
+intent       = "FLM NPU inference"
+quant        = "W4ABF16"
 
 [profile.tts]
 # CPU TTS slot (kokoro-onnx). No GPU devices. Flags feed kokoro_server.py;
@@ -50,6 +58,8 @@ image        = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 flags        = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
 mtp          = false
 device_class = "cpu"
+intent       = "TTS · Kokoro"
+quant        = ""
 
 [profile.comfyui]
 # Image-gen slot (ComfyUI on ROCm, kyuz0 Strix Halo build). Exclusive-GPU:
@@ -58,3 +68,6 @@ image        = "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
 flags        = "--disable-mmap --bf16-vae --cache-none"
 mtp          = false
 device_class = "img"
+intent       = "Image generation"
+quant        = ""
+
