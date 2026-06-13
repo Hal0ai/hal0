@@ -2168,6 +2168,16 @@ class SlotManager:
                 f"slot config {path} is not valid TOML: {exc}",
                 details={"slot": slot_name, "path": str(path)},
             ) from exc
+        # PR #754 follow-up: the on-disk slot TOML nests fields under a
+        # [slot] table (the shape config.loader / capabilities / profiles
+        # consume). The flat readers in this module (load_sync, _cfg_*
+        # helpers) expect those keys at the top level, so hoist the [slot]
+        # table up while leaving the sibling [model]/[image]/[npu]/[server]
+        # tables in place. A no-op for already-flat configs.
+        slot_tbl = data.pop("slot", None)
+        if isinstance(slot_tbl, dict):
+            for _k, _v in slot_tbl.items():
+                data[_k] = _v
         if "name" not in data:
             data["name"] = slot_name
         return data
