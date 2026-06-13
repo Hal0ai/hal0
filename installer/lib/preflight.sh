@@ -76,7 +76,7 @@ preflight_python() {
     local py="${HAL0_PY:-${HAL0_PYTHON:-python3}}"
     if ! command -v "${py}" >/dev/null 2>&1; then
         err "python interpreter '${py}' not found"
-        warn "  install with 'apt install python3 python3-venv' or set HAL0_PYTHON=..."
+        warn "  install with: $(python_venv_hint)  (or set HAL0_PYTHON=...)"
         return 1
     fi
     local ver
@@ -116,7 +116,7 @@ preflight_venv() {
         return 0
     fi
     err "'${py} -m venv' is unavailable (missing ensurepip/venv)"
-    warn "  install the venv module, e.g. 'apt install python3-venv'"
+    warn "  install the venv stdlib, e.g.: $(python_venv_hint)"
     return 1
 }
 
