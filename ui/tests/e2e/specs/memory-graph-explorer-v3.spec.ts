@@ -109,10 +109,36 @@ test.describe('Memory graph explorer', () => {
 
     const bankSel = page.locator('[data-testid="mem-graph-bank"]')
     await expect(bankSel).toBeVisible()
-    // baked banks: primary / hermes / scratch / ingest.
+    // baked banks: primary / big / hermes / scratch / ingest.
     await page.selectOption('[data-testid="mem-graph-bank"]', 'hermes')
     await expect(bankSel).toHaveValue('hermes')
     // the explorer re-fetches + re-renders for the new bank.
     await expect(page.locator('[data-testid="mem-graph-svg"]')).toBeVisible()
+  })
+
+  // FU2: server-side subgraph slice for large banks. The `big` mock bank
+  // (~600 fact nodes, fact_count > 240) trips the subgraph path: the wrapper
+  // fetches /graph/subgraph top-K and shows an actionable "top N of M" banner.
+  test('large bank shows top-N-of-M and expand raises the count', async ({ page }) => {
+    await gotoGraph(page)
+
+    await page.selectOption('[data-testid="mem-graph-bank"]', 'big')
+    await expect(page.locator('[data-testid="mem-graph-bank"]')).toHaveValue('big')
+
+    // scale banner is actionable: "showing top N of M nodes" + expand button.
+    const banner = page.locator('[data-testid="mem-graph-scalebanner"]')
+    await expect(banner).toBeVisible({ timeout: 10_000 })
+    await expect(banner).toContainText(/showing top \d+ of \d+ nodes/)
+
+    // baseline rendered node count (bounded slice, < 600 total).
+    const nodes = page.locator('[data-testid="mem-graph-svg"] g[data-node]')
+    await expect.poll(async () => nodes.count(), { timeout: 10_000 }).toBeGreaterThan(0)
+    const before = await nodes.count()
+
+    // expand bumps top_k by 200 → a strictly larger slice renders. The banner
+    // sits under the floating graph controls, so dispatch the click directly on
+    // the button (its onClick handler) rather than relying on a positional hit.
+    await page.locator('[data-testid="mem-graph-expand"]').dispatchEvent('click')
+    await expect.poll(async () => nodes.count(), { timeout: 10_000 }).toBeGreaterThan(before)
   })
 })
