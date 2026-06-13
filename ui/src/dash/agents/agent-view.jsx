@@ -1,20 +1,18 @@
 // hal0 — AgentView shell.
 //
-// AgentView is the `#agent` route. v0.4 reduced it to the Memory
-// capability only. The web-chat surface (HermesChatTab) was abandoned in
-// favour of the `hermes chat` TUI, and the Personas / Skills / Plugins tabs
-// were removed (they showed fixtures rather than live data). The single-
-// tab nav is kept so the route + deep-link shape stay stable.
+// AgentView is the `#agent` route. Per design §7 (Agent → Memory fold)
+// it is now a THIN POINTER: memory's canonical home is the `#memory`
+// route (Overview · Graph · Tools). The single Memory tab here renders
+// MemoryTab, which is a pointer card plus the ADR-0014 graph-extraction
+// gate (the one live agent-level control).
 //
-// Tab inventory:
-//   - MemoryTab      (Cognee stats + "Peer memory" subsection folded
-//                     in from the old Peers tab)
+// The web-chat surface (HermesChatTab) was abandoned in favour of the
+// `hermes chat` TUI, and the Personas / Skills / Plugins tabs were
+// removed (they showed fixtures rather than live data).
 //
 // Hash routes supported (parsed by main.jsx parseRoute):
-//   #agent              → memory tab (default)
-//   #agent/memory       → memory tab
-//   #agent/memory?subsection=peer → memory tab scrolled to Peer memory
-//   #peers (legacy)     → redirected to #agent/memory?subsection=peer
+//   #agent          → memory pointer view (default)
+//   #agent/memory   → memory pointer view
 //
 // Window-globals build shim: components register on `window` and read
 // each other via the same. Don't add ES module imports across dash/*
@@ -22,49 +20,25 @@
 
 const { useState: useStateAV, useEffect: useEffectAV } = React;
 
-// v0.4: the Agent view is reduced to the Memory capability only. Web
-// chat (HermesChatTab) plus the Personas / Skills / Plugins tabs were
-// removed — web chat is abandoned in favour of the `hermes chat` TUI, and
-// the other tabs surfaced fixtures rather than live data. The tab nav is
-// kept (single tab) so the route + deep-link shape stay stable.
+// Single-tab nav kept so the route + deep-link shape stay stable.
 const AGENT_TABS = [
   { id: "memory",   label: "Memory" },
 ];
 
-function _parseAgentSubroute() {
+function _parseAgentTab() {
   const raw = (window.location.hash || "").replace(/^#/, "");
-  // Support legacy #peers → memory?subsection=peer.
-  if (raw === "peers" || raw.startsWith("peers/") || raw.startsWith("peers?")) {
-    window.location.hash = "#agent/memory?subsection=peer";
-    return { tab: "memory", subsection: "peer" };
-  }
-  const [path, qs] = raw.split("?");
+  const path = raw.split("?")[0];
   const parts = path.split("/");
-  if (parts[0] !== "agent") return { tab: "memory", subsection: null };
+  if (parts[0] !== "agent") return "memory";
   const sub = parts[1] || "memory";
-  const tab = AGENT_TABS.find(t => t.id === sub) ? sub : "memory";
-  let subsection = null;
-  if (qs) {
-    for (const kv of qs.split("&")) {
-      const [k, v = ""] = kv.split("=");
-      if (k === "subsection") subsection = decodeURIComponent(v);
-    }
-  }
-  return { tab, subsection };
+  return AGENT_TABS.find(t => t.id === sub) ? sub : "memory";
 }
 
 function AgentView() {
-  const initial = _parseAgentSubroute();
-  const [tab, setTab] = useStateAV(initial.tab);
-  const [subsection, setSubsection] = useStateAV(initial.subsection);
-  const noAgent = window.__hal0Banners && window.__hal0Banners.get && window.__hal0Banners.get()["no-agent"];
+  const [tab, setTab] = useStateAV(_parseAgentTab());
 
   useEffectAV(() => {
-    const onHash = () => {
-      const { tab: t, subsection: s } = _parseAgentSubroute();
-      setTab(t);
-      setSubsection(s);
-    };
+    const onHash = () => setTab(_parseAgentTab());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -108,7 +82,7 @@ function AgentView() {
         ))}
       </div>
 
-      {tab === "memory"   && window.MemoryTab     && <window.MemoryTab subsection={subsection} />}
+      {tab === "memory" && window.MemoryTab && <window.MemoryTab />}
     </div>
   );
 }

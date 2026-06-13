@@ -11,6 +11,8 @@ import {
   forceLink,
   forceManyBody,
   forceSimulation,
+  forceX,
+  forceY,
 } from 'd3-force'
 
 import {
@@ -64,5 +66,5 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseDirectiveUpdate: useDirectiveUpdate,
   __hal0UseDirectiveDelete: useDirectiveDelete,
   // d3-force layout primitives for the graph explorer (no-ES-imports .jsx).
-  __hal0D3Force: { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide },
+  __hal0D3Force: { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide, forceX, forceY },
 })

@@ -13,7 +13,6 @@
  *   - the removed tabs (chat / personas / skills / plugins / inbox /
  *     peers / overview) are ABSENT from the nav
  *   - the header carries the `hermes chat` terminal hint
- *   - the Memory tab exposes the "Peer memory" subsection
  *   - hash routes `#agent`, `#agent/memory`, and legacy `#peers` all land
  *     on the Memory tab
  */
@@ -66,14 +65,6 @@ test.describe('AgentView v3 (#agent — v0.4 Memory-only)', () => {
   }) => {
     await page.goto('/#agent')
     await expect(page.locator('.view .vh')).toContainText('hermes chat', { timeout: FIVE_S })
-  })
-
-  test('Memory tab shows the "Peer memory" subsection', async ({ page }) => {
-    await page.goto('/#agent/memory')
-    await expect(page.locator('[data-testid="memory-tab"]')).toBeVisible({ timeout: FIVE_S })
-    const peer = page.locator('[data-testid="peer-memory-section"]')
-    await expect(peer).toBeVisible()
-    await expect(peer).toContainText('Peer memory')
   })
 
   test('#agent/memory hash routes to the Memory tab', async ({ page }) => {

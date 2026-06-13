@@ -31,6 +31,7 @@ import './dashboard.css'
 import './mcp.css'
 import './dash/comfyui-pane.css'
 import './dash/engine-panes.css'
+import './dash/memory-overhaul.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'
@@ -77,6 +78,9 @@ import './dash/mcp.jsx'
 // Hindsight Memory view (#memory) — bridge installs the TanStack-Query
 // hooks on window.__hal0Use* BEFORE memory.jsx evaluates.
 import './dash/memory-hook-bridge'
+import './dash/memory-graph-engine.jsx'
+import './dash/memory-graph-structured.jsx'
+import './dash/memory-graph-ego.jsx'
 import './dash/memory-graph.jsx'
 import './dash/memory-tools.jsx'
 import './dash/memory.jsx'

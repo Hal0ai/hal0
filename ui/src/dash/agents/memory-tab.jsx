@@ -1,161 +1,82 @@
-// hal0 v0.3 PR-8 — MemoryTab.
+// hal0 — MemoryTab (design §7: Agent → Memory fold).
 //
-// Composes:
-//   - GraphExtractionPanel (ADR-0014 — graph build status + route picker)
-//   - Memory engine stats card (live: /api/agents/hermes/memory/stats)
-//   - Recent records card (live: GET /api/memory/list)
-//   - Namespaces side card (derived from live stats)
-//   - "Peer memory" subsection (folded in from the old Peers tab)
+// The #agent route's Memory tab is now a THIN POINTER to the canonical
+// Memory home (#memory → Overview · Graph · Tools). It renders:
+//   - A pointer card directing the operator to the Memory section.
+//   - The ADR-0014 graph-extraction gate (MemoryGraphPanel) — the one
+//     live agent-level control kept here.
 //
-// The Peer memory subsection consumes the live MCP search at
-// /api/memory/search (dataset=agents, tag=agent-identity) — the only
-// fully-live surface from the original Peers tab. v0.3 keeps it
-// read-only per ADR-0011 §2.
+// Everything else that used to live here (peer memory cards, the
+// Namespaces side card, hardcoded Cognee stats + Recent records
+// fixtures) was removed when memory moved to its own #memory route.
 //
-// `subsection` prop scrolls the page to #peer-memory on mount when set
-// (parses #agent/memory?subsection=peer in agent-view.jsx).
+// The `subsection` prop is accepted for route-shape compatibility but
+// is no longer used (the old #peer-memory scroll target is gone).
 
-const { useState: useStateMT, useEffect: useEffectMT } = React;
+const { useState: useStateMT } = React;
 
-function MemoryTab({ subsection } = {}) {
-  // Live hooks injected via memory-tab-hook-bridge.ts
-  const useMemoryList = window.__hal0UseMemoryList;
-  const useAgentMemoryStats = window.__hal0UseAgentMemoryStats;
-  // /api/features supplies the live engine name (memory_engine).
-  // Fall back to "memory engine" if unavailable.
-  const useFeaturesHook = window.__hal0UseFeatures;
-
-  const statsQuery = useAgentMemoryStats ? useAgentMemoryStats("hermes") : { isLoading: false, isError: false, data: null };
-  const listQuery = useMemoryList ? useMemoryList({ dataset: "shared", limit: 10 }) : { isLoading: false, isError: false, data: null };
-  const featuresQuery = useFeaturesHook ? useFeaturesHook() : { data: null };
-  const engineLabel = featuresQuery.data?.memory_engine || "memory engine";
-
-  const stats = statsQuery.data;
-  const records = listQuery.data?.items ?? [];
-
-  useEffectMT(() => {
-    if (subsection === "peer") {
-      const el = document.getElementById("peer-memory");
-      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-  }, [subsection]);
-
-  // Namespace list derived from live stats
-  const namespaces = [];
-  if (stats) {
-    namespaces.push({ name: "shared", desc: "default · all agents", recs: null, active: true });
-    if (stats.available) {
-      namespaces.push({ name: stats.namespace, desc: "agent · private", recs: stats.writes, active: false });
-    }
-  }
+function MemoryTab({ subsection } = {}) { // eslint-disable-line no-unused-vars
+  // Live engine summary for the pointer card's mini-stat. Optional —
+  // omitted gracefully when the hook isn't present.
+  const useMemoryEngine = window.__hal0UseMemoryEngine;
+  const engineQuery = useMemoryEngine ? useMemoryEngine() : { data: null };
+  const engine = engineQuery.data;
 
   return (
-    <div data-testid="memory-tab" style={{display: "grid", gridTemplateColumns: "1fr 320px", gap: 16}}>
-      <div>
-        <MemoryGraphPanel />
-
-        {/* ── Memory engine stats card ── */}
-        <div className="card" style={{padding: 18, marginBottom: 14}}>
-          {statsQuery.isLoading && (
-            <div className="mono" style={{fontSize: 12, color: "var(--fg-4)"}}>Loading memory stats…</div>
-          )}
-          {statsQuery.isError && (
-            <div className="mono" style={{fontSize: 12, color: "var(--err, #c66)"}}>Memory stats unavailable</div>
-          )}
-          {!statsQuery.isLoading && !statsQuery.isError && (
-            <>
-              <div style={{display: "flex", alignItems: "center", gap: 12, marginBottom: 14}}>
-                <span data-testid="memory-engine-label" className="mono" style={{fontSize: 10, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.1em"}}>{engineLabel} · shared</span>
-                <span className="mono num" style={{fontSize: 24, color: "var(--fg)", letterSpacing: "-0.02em"}}>{stats?.writes ?? 0}</span>
-                <span className="mono" style={{fontSize: 12, color: "var(--fg-3)"}}>records</span>
-                <span style={{marginLeft: "auto"}} className={`chip ${stats?.available ? "ok" : ""}`}>
-                  {stats?.available ? "healthy" : "offline"}
-                </span>
-                <button
-                  className="btn ghost xs"
-                  data-testid="memory-open-view"
-                  onClick={() => { window.location.hash = "#memory"; }}
-                  title="Banks, graph and operations on the Memory page"
-                >
-                  Open Memory →
-                </button>
-              </div>
-              {stats?.last_write && (
-                <div className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
-                  last write: {stats.last_write}
-                </div>
-              )}
-              {!stats?.available && (
-                <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", marginTop: 6}}>
-                  {engineLabel} not configured or unavailable
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* ── Recent records ── */}
-        <div className="sec"><h2>Recent records</h2><div className="rule" /></div>
-        <div className="card" style={{overflow: "hidden", marginBottom: 24}}>
-          {listQuery.isLoading && (
-            <div style={{padding: "16px 18px", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>Loading records…</div>
-          )}
-          {listQuery.isError && (
-            <div style={{padding: "16px 18px", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--err, #c66)"}}>Could not load records</div>
-          )}
-          {!listQuery.isLoading && !listQuery.isError && records.length === 0 && (
-            <div data-testid="memory-records-empty" style={{padding: "24px 18px", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)", textAlign: "center"}}>
-              no records yet
-            </div>
-          )}
-          {records.map((r, i) => (
-            <div key={r.id || i} style={{padding: "12px 18px", borderBottom: "1px solid var(--line-soft)", fontFamily: "var(--jbm)", fontSize: 12}}>
-              <div style={{display: "flex", gap: 10, marginBottom: 4}}>
-                <span style={{color: "var(--fg-5)"}}>{r.timestamp ? r.timestamp.slice(11, 19) : "—"}</span>
-                <span style={{color: "var(--accent)"}}>{r.source || r.dataset || "—"}</span>
-                {r.tags && r.tags[0] && <span className="chip">{r.tags[0]}</span>}
-              </div>
-              <div style={{color: "var(--fg-2)", paddingLeft: 0}}>{r.text}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* ── Peer memory (folded in from the old Peers tab) ─────────── */}
-        <div id="peer-memory" className="sec" data-testid="peer-memory-section">
-          <h2>Peer memory</h2>
-          <div className="rule" />
-        </div>
-        <p className="mono" style={{fontSize: 11.5, color: "var(--fg-4)", margin: "4px 0 12px", lineHeight: 1.55}}>
-          Agent identity cards published by other hal0 instances (ADR-0011). Cards are immutable; this view is read-only.
-        </p>
-        <PeerMemoryList />
-      </div>
-
-      <div>
-        <div className="side-card">
-          <div className="side-card-h"><span>Namespaces</span></div>
-          <div className="side-card-b">
-            {statsQuery.isLoading && (
-              <div className="mono" style={{fontSize: 11, color: "var(--fg-4)", padding: "10px 0"}}>Loading…</div>
-            )}
-            {!statsQuery.isLoading && namespaces.length === 0 && (
-              <div data-testid="namespaces-empty" className="mono" style={{fontSize: 11, color: "var(--fg-4)", padding: "10px 0"}}>no namespaces available</div>
-            )}
-            {namespaces.map(n => (
-              <div key={n.name} style={{padding: "10px 0", borderBottom: "1px solid var(--line-soft)", display: "flex", alignItems: "center", gap: 10, fontFamily: "var(--jbm)", fontSize: 12}}>
-                <span className={"dot " + (n.active ? "ready" : "idle")} />
-                <div>
-                  <div style={{color: "var(--fg)", fontWeight: 500}}>{n.name}</div>
-                  <div style={{color: "var(--fg-4)", fontSize: 10}}>{n.desc}</div>
-                </div>
-                {n.recs != null && (
-                  <span style={{marginLeft: "auto", color: "var(--fg-3)"}} className="num">{n.recs}</span>
-                )}
-              </div>
-            ))}
+    <div data-testid="memory-tab">
+      <div className="ag-pointer card">
+        <div className="ag-ptr-ic">{Icons.memory}</div>
+        <div className="ag-ptr-body">
+          <div className="ag-ptr-h mono">Memory</div>
+          <p>
+            Agent memory now lives in the dedicated <b className="mono">Memory</b> section —
+            bank Overview, the knowledge-graph explorer, and Tools (recall, reflect,
+            documents and directives) all live in one home there.
+          </p>
+          <div className="ag-ptr-actions">
+            <button
+              className="btn primary sm"
+              data-testid="memory-open-view"
+              onClick={() => { window.location.hash = "#memory"; }}
+            >
+              {Icons.memory} Open in Memory
+            </button>
+            <button
+              className="btn ghost sm"
+              data-testid="memory-open-graph"
+              onClick={() => { window.location.hash = "#memory/graph"; }}
+            >
+              Open graph
+            </button>
           </div>
         </div>
+        {engine && (
+          <div className="ag-ptr-stat mono" data-testid="memory-ptr-stat">
+            <div>
+              <span className="k">engine</span>
+              <span className="v">{engine.reachable ? "reachable" : "offline"}</span>
+            </div>
+            {engine.banks_total != null && (
+              <div>
+                <span className="k">banks</span>
+                <span className="v num">{engine.banks_total}</span>
+              </div>
+            )}
+            {engine.version && (
+              <div>
+                <span className="k">version</span>
+                <span className="v">{engine.version}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
+
+      <div className="sec" style={{marginTop: 18}}>
+        <h2>Graph extraction</h2>
+        <div className="rule" />
+      </div>
+      <MemoryGraphPanel />
     </div>
   );
 }
@@ -365,136 +286,4 @@ function MemoryGraphPanel() {
   );
 }
 
-// ── PeerMemoryList (folded in from old AgentPeers / #247) ───────────
-// Reads identity cards from the `agents` Cognee dataset via the
-// hal0-memory MCP. One card per peer with a TCP-ping reachability dot
-// (not stored; pinged on render). Cards immutable per ADR-0011 §2.
-function PeerMemoryList() {
-  const [cards, setCards] = useStateMT([]);
-  const [loading, setLoading] = useStateMT(true);
-  const [err, setErr] = useStateMT(null);
-
-  useEffectMT(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        // #302: REST shim at /api/memory/search instead of /mcp/memory.
-        // The streamable-HTTP MCP transport at /mcp/memory/mcp requires
-        // the initialize handshake — not doable from a fetch() oneshot.
-        const resp = await fetch("/api/memory/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-hal0-Agent": "hal0-dashboard" },
-          body: JSON.stringify({
-            query: "agent identity",
-            tags: ["agent-identity"],
-            dataset: "agents",
-            limit: 50,
-          }),
-        });
-        const data = await resp.json();
-        if (cancelled) return;
-        const items = (data && data.items) || [];
-        setCards(items);
-        setLoading(false);
-      } catch (e) {
-        if (!cancelled) {
-          setErr(String(e));
-          setLoading(false);
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  if (loading) {
-    return <div className="card" style={{padding: 20, color: "var(--fg-3)"}}>Loading peers…</div>;
-  }
-  if (err) {
-    return <div className="card" style={{padding: 20, color: "var(--err)"}}>memory MCP unreachable: {err}</div>;
-  }
-  if (!cards.length) {
-    return (
-      <div className="card" style={{padding: 40, textAlign: "center", borderStyle: "dashed"}}>
-        <div className="mono" style={{fontSize: 14, color: "var(--fg-3)", marginBottom: 6}}>No agent identity cards published yet.</div>
-        <div className="mono" style={{fontSize: 11, color: "var(--fg-5)"}}>Cards appear here when a bundled agent finishes <code>hal0 agent bootstrap</code>.</div>
-      </div>
-    );
-  }
-  return (
-    <div style={{display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12}}>
-      {cards.map((c, i) => <PeerCard key={i} card={c} />)}
-    </div>
-  );
-}
-
-function PeerCard({ card }) {
-  const md = (card && card.metadata) || {};
-  const endpoint = md.endpoint || {};
-  const hs = md.hal0_state || {};
-  const roles = md.roles || [];
-  const [reach, setReach] = useStateMT("checking");
-  const [expanded, setExpanded] = useStateMT(false);
-
-  useEffectMT(() => {
-    let cancelled = false;
-    const url = endpoint.url;
-    if (!url) { setReach("none"); return; }
-    const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 5000);
-    (async () => {
-      try {
-        await fetch(url, { method: "HEAD", signal: ctrl.signal, mode: "no-cors" });
-        if (!cancelled) setReach("ok");
-      } catch (e) {
-        if (cancelled) return;
-        setReach(e.name === "AbortError" ? "timeout" : "error");
-      } finally {
-        clearTimeout(tid);
-      }
-    })();
-    return () => { cancelled = true; ctrl.abort(); };
-  }, [endpoint.url]);
-
-  const dotColor = reach === "ok" ? "var(--ok)" : reach === "timeout" ? "var(--warn)" : reach === "error" ? "var(--err)" : "var(--fg-5)";
-
-  return (
-    <div className="card" style={{padding: 16, display: "flex", flexDirection: "column", gap: 8}}>
-      <div style={{display: "flex", alignItems: "center", gap: 10}}>
-        <span style={{width: 8, height: 8, borderRadius: "50%", background: dotColor}} aria-label={`endpoint ${reach}`} />
-        <div className="mono" style={{fontSize: 14, fontWeight: 500}}>{md.display_name || md.agent_id || "(unnamed)"}</div>
-      </div>
-      <div className="mono" style={{fontSize: 11, color: "var(--fg-3)"}}>{md.agent_id || "—"}</div>
-      {roles.length > 0 && (
-        <div style={{display: "flex", flexWrap: "wrap", gap: 4}}>
-          {roles.map((r, i) => <span key={i} className="chip">{r}</span>)}
-        </div>
-      )}
-      <div className="mono" style={{fontSize: 10.5, color: "var(--fg-4)"}}>
-        endpoint: {endpoint.url || "(none)"}<br />
-        registered: {hs.registered_at || "—"}
-      </div>
-      <button
-        onClick={() => setExpanded(e => !e)}
-        className="mono"
-        style={{
-          marginTop: 4,
-          padding: "4px 8px",
-          fontSize: 10,
-          background: "transparent",
-          border: "1px solid var(--line)",
-          borderRadius: 4,
-          color: "var(--fg-3)",
-          cursor: "pointer",
-          alignSelf: "flex-start",
-        }}
-      >{expanded ? "hide" : "show"} metadata</button>
-      {expanded && (
-        <pre className="mono" style={{fontSize: 10, color: "var(--fg-3)", overflow: "auto", maxHeight: 220, margin: 0, padding: 8, background: "var(--bg-2)", borderRadius: 4}}>
-          {JSON.stringify(md, null, 2)}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-Object.assign(window, { MemoryTab, PeerMemoryList, PeerCard });
+Object.assign(window, { MemoryTab, MemoryGraphPanel });

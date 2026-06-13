@@ -8,11 +8,32 @@
 //   - Directives (create / toggle / delete)
 //
 // Hooks via window.__hal0Use* (memory-hook-bridge.ts).
+// Visual skin: memory-overhaul.css mt-* classes (bankbar/grid/card/head/…).
 
 const { useState: useStateMTl } = React;
 
 function mtToast(msg, kind = 'info') {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind);
+}
+
+// fact-type → dot/swatch color (shared with the graph engine).
+function mtFactColor(t) {
+  const c = window.MEM_FACT_COLORS;
+  return (c && c[t]) || 'var(--info)';
+}
+
+// ── Tool card shell (matches prototype ToolCard) ────────────────────────────────
+
+function MtCard({ title, action, wide, testid, children }) {
+  return (
+    <div className={'card mt-card' + (wide ? ' wide' : '')} data-testid={testid}>
+      <div className="mt-head mono">
+        {title}
+        {action}
+      </div>
+      {children}
+    </div>
+  );
 }
 
 // ── Recall console ────────────────────────────────────────────────────────────
@@ -45,9 +66,8 @@ function MemRecallConsole({ bank }) {
   }
 
   return (
-    <div className="card mem-tool" data-testid="mem-recall">
-      <div className="mem-tool-head mono">recall console</div>
-      <div className="mem-tool-row">
+    <MtCard title="recall console" testid="mem-recall">
+      <div className="mt-row">
         <input
           className="input mono"
           value={q}
@@ -57,7 +77,8 @@ function MemRecallConsole({ bank }) {
           data-testid="mem-recall-q"
         />
         <select
-          className="input mono mem-graph-select"
+          className="input mono"
+          style={{ width: 78 }}
           value={budget}
           onChange={e => setBudget(e.target.value)}
           data-testid="mem-recall-budget"
@@ -71,22 +92,23 @@ function MemRecallConsole({ bank }) {
           {busy ? 'Recalling…' : 'Recall'}
         </button>
       </div>
-      <div className="mem-tool-row mono mem-recall-types">
+      <div className="mt-types mono">
         {['world', 'experience', 'observation'].map(t => (
-          <label key={t} className="mem-type-check">
+          <label key={t} className="mt-check">
             <input type="checkbox" checked={types.includes(t)} onChange={() => toggleType(t)} />
+            <i style={{ background: mtFactColor(t) }} />
             {t}
           </label>
         ))}
       </div>
       {results && (
-        <div className="mem-recall-results" data-testid="mem-recall-results">
+        <div className="mt-results" data-testid="mem-recall-results">
           {results.length === 0 && <div className="empty mono">No matches.</div>}
           {results.map(r => (
-            <div className="mem-recall-row" key={r.id}>
-              <span className={'mem-fact-dot ' + r.type} title={r.type} />
-              <span className="mem-recall-text">{r.text}</span>
-              <span className="mem-recall-meta mono">
+            <div className="mt-result" key={r.id}>
+              <span className="mt-fact-dot" style={{ background: mtFactColor(r.type) }} title={r.type} />
+              <span className="mt-result-text">{r.text}</span>
+              <span className="mt-result-meta mono">
                 {r.type}
                 {r.tags?.length ? ` · ${r.tags.join(', ')}` : ''}
               </span>
@@ -94,7 +116,7 @@ function MemRecallConsole({ bank }) {
           ))}
         </div>
       )}
-    </div>
+    </MtCard>
   );
 }
 
@@ -122,9 +144,8 @@ function MemReflectPlayground({ bank }) {
 
   const basedOn = out?.based_on || null;
   return (
-    <div className="card mem-tool" data-testid="mem-reflect">
-      <div className="mem-tool-head mono">reflect playground</div>
-      <div className="mem-tool-row">
+    <MtCard title="reflect playground" testid="mem-reflect">
+      <div className="mt-row">
         <input
           className="input mono"
           value={q}
@@ -138,17 +159,17 @@ function MemReflectPlayground({ bank }) {
         </button>
       </div>
       {out && (
-        <div className="mem-reflect-out" data-testid="mem-reflect-out">
-          <div className="mem-reflect-text">{out.text}</div>
+        <div className="mt-reflect" data-testid="mem-reflect-out">
+          <div className="mt-reflect-text">{out.text}</div>
           {basedOn && (
-            <div className="mem-reflect-based mono">
+            <div className="mt-reflect-based mono">
               based on {basedOn.memories ?? 0} memories · {basedOn.mental_models ?? 0} mental
               models · {basedOn.directives ?? 0} directives
             </div>
           )}
         </div>
       )}
-    </div>
+    </MtCard>
   );
 }
 
@@ -185,35 +206,34 @@ function MemDocuments({ bank }) {
   }
 
   return (
-    <div className="card mem-tool" data-testid="mem-documents">
-      <div className="mem-tool-head mono">documents · {docsQuery.data?.total ?? '—'}</div>
+    <MtCard title={`documents · ${docsQuery.data?.total ?? '—'}`} testid="mem-documents">
       {items.length === 0 ? (
         <div className="empty mono">No documents in this bank.</div>
       ) : (
         items.map(d => (
-          <div className="mem-doc-row" key={d.id} data-testid={`mem-doc-${d.id}`}>
-            <span className="mem-doc-text">{(d.original_text || d.id).slice(0, 90)}</span>
-            <span className="mem-doc-meta mono">
+          <div className="mt-doc" key={d.id} data-testid={`mem-doc-${d.id}`}>
+            <span className="mt-doc-text">{(d.original_text || d.id).slice(0, 90)}</span>
+            <span className="mt-doc-meta mono">
               {d.memory_unit_count ?? 0} facts{d.tags?.length ? ` · ${d.tags.join(', ')}` : ''}
             </span>
-            <span className="mem-op-actions">
-              <button className="btn ghost xs" onClick={() => doReprocess(d.id)} data-testid="mem-doc-reprocess">
-                Reprocess
+            <span className="mt-doc-actions">
+              <button className="btn ghost xs" onClick={() => doReprocess(d.id)} data-testid="mem-doc-reprocess" title="Reprocess">
+                <Icon name="refresh" size={12} />
               </button>
               {confirmId === d.id ? (
                 <button className="btn danger xs" onClick={() => doDelete(d.id)} data-testid="mem-doc-delete-confirm">
                   Confirm
                 </button>
               ) : (
-                <button className="btn ghost xs danger" onClick={() => setConfirmId(d.id)} data-testid="mem-doc-delete">
-                  Delete
+                <button className="btn ghost xs danger" onClick={() => setConfirmId(d.id)} data-testid="mem-doc-delete" title="Delete">
+                  <Icon name="trash" size={12} />
                 </button>
               )}
             </span>
           </div>
         ))
       )}
-    </div>
+    </MtCard>
   );
 }
 
@@ -236,26 +256,25 @@ function MemMentalModels({ bank }) {
   }
 
   return (
-    <div className="card mem-tool" data-testid="mem-mental-models">
-      <div className="mem-tool-head mono">mental models</div>
+    <MtCard title="mental models" testid="mem-mental-models">
       {items.length === 0 ? (
         <div className="empty mono">No mental models defined.</div>
       ) : (
         items.map(m => (
-          <div className="mem-mm-row" key={m.id} data-testid={`mem-mm-${m.id}`}>
-            <div className="mem-mm-main">
-              <span className="mono mem-mm-name">{m.name}</span>
-              {m.is_stale && <span className="mem-badge warn">stale</span>}
-              <button className="btn ghost xs" onClick={() => doRefresh(m.id)} data-testid="mem-mm-refresh">
-                Refresh
+          <div className="mt-mm" key={m.id} data-testid={`mem-mm-${m.id}`}>
+            <div className="mt-mm-main">
+              <span className="mono mt-mm-name">{m.name}</span>
+              {m.is_stale && <span className="mo-badge warn mono">stale</span>}
+              <button className="btn ghost xs" onClick={() => doRefresh(m.id)} data-testid="mem-mm-refresh" title="Refresh">
+                <Icon name="refresh" size={12} />
               </button>
             </div>
-            <div className="mem-mm-q mono">{m.source_query}</div>
-            {m.content && <div className="mem-mm-content">{m.content.slice(0, 200)}</div>}
+            <div className="mt-mm-q mono">{m.source_query}</div>
+            {m.content && <div className="mt-mm-content">{m.content.slice(0, 200)}</div>}
           </div>
         ))
       )}
-    </div>
+    </MtCard>
   );
 }
 
@@ -307,16 +326,16 @@ function MemDirectives({ bank }) {
     }
   }
 
+  const newBtn = (
+    <button className="btn ghost xs" onClick={() => setCreating(c => !c)} data-testid="mem-dir-new">
+      + New
+    </button>
+  );
+
   return (
-    <div className="card mem-tool" data-testid="mem-directives">
-      <div className="mem-tool-head mono">
-        directives
-        <button className="btn ghost xs" onClick={() => setCreating(c => !c)} data-testid="mem-dir-new">
-          + New
-        </button>
-      </div>
+    <MtCard title="directives" action={newBtn} wide testid="mem-directives">
       {creating && (
-        <form className="mem-dir-form" onSubmit={submit}>
+        <form className="mt-row" onSubmit={submit} style={{ marginBottom: 8 }}>
           <input
             className="input mono"
             value={name}
@@ -338,19 +357,19 @@ function MemDirectives({ bank }) {
         <div className="empty mono">No directives.</div>
       ) : (
         items.map(d => (
-          <div className="mem-dir-row" key={d.id} data-testid={`mem-dir-${d.id}`}>
-            <label className="mem-type-check mono" title="active">
+          <div className="mt-dir" key={d.id} data-testid={`mem-dir-${d.id}`}>
+            <label className="mt-check mono" title="active">
               <input type="checkbox" checked={!!d.is_active} onChange={() => toggleActive(d)} />
               {d.name}
             </label>
-            <span className="mem-dir-content-preview">{d.content}</span>
-            <button className="btn ghost xs danger" onClick={() => doDelete(d.id)} data-testid="mem-dir-delete">
-              Delete
+            <span className="mt-dir-content">{d.content}</span>
+            <button className="btn ghost xs danger" onClick={() => doDelete(d.id)} data-testid="mem-dir-delete" title="Delete">
+              <Icon name="trash" size={12} />
             </button>
           </div>
         ))
       )}
-    </div>
+    </MtCard>
   );
 }
 
@@ -360,17 +379,27 @@ function MemToolsPanel() {
   const useMemoryBanks = window.__hal0UseMemoryBanks;
   const banksQuery = useMemoryBanks ? useMemoryBanks() : { data: null };
   const banks = banksQuery.data?.banks || [];
-  const [bankSel, setBankSel] = useStateMTl(null);
-  const bank = bankSel || banks[0]?.bank_id || null;
+
+  // bank selection persisted + shared with Overview/Graph via localStorage.
+  const [bankSel, setBankSel] = useStateMTl(() => {
+    try { return localStorage.getItem('hal0.mem.bank') || null; } catch { return null; }
+  });
+  const bankValid = bankSel && banks.some(b => b.bank_id === bankSel);
+  const bank = (bankValid ? bankSel : banks[0]?.bank_id) || null;
+
+  function chooseBank(id) {
+    setBankSel(id);
+    try { localStorage.setItem('hal0.mem.bank', id); } catch { /* ignore */ }
+  }
 
   return (
-    <div className="mem-tools" data-testid="mem-tools">
-      <div className="mem-graph-toolbar">
-        <span className="mono" style={{ fontSize: 11, color: 'var(--fg-4)' }}>bank</span>
+    <div className="mt" data-testid="mem-tools">
+      <div className="mt-bankbar mono">
+        <span style={{ color: 'var(--fg-4)' }}>bank</span>
         <select
-          className="input mono mem-graph-select"
+          className="input mono"
           value={bank || ''}
-          onChange={e => setBankSel(e.target.value)}
+          onChange={e => chooseBank(e.target.value)}
           data-testid="mem-tools-bank"
           aria-label="Bank"
         >
@@ -378,8 +407,9 @@ function MemToolsPanel() {
             <option key={b.bank_id} value={b.bank_id}>{b.bank_id}</option>
           ))}
         </select>
+        <span className="mt-hint">recall &amp; reflect run against the live Hindsight bank</span>
       </div>
-      <div className="mem-tools-grid">
+      <div className="mt-grid">
         <MemRecallConsole bank={bank} />
         <MemReflectPlayground bank={bank} />
         <MemDocuments bank={bank} />

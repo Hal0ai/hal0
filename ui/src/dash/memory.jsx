@@ -10,7 +10,9 @@
 // Hooks arrive via memory-hook-bridge.ts (window.__hal0Use*) — this file
 // stays a no-ES-imports dash/*.jsx prototype module.
 
-const { useState: useStateMem, useMemo: useMemoMem } = React;
+const { useState: useStateMem, useEffect: useEffectMem } = React;
+
+const MEM_BANK_LS_KEY = 'hal0.mem.bank';
 
 function memToast(msg, kind = 'info') {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind);
@@ -38,62 +40,85 @@ function fmtWhen(iso) {
 
 // ── Engine card ───────────────────────────────────────────────────────────────
 
-function MemEngineCard({ engine, isLoading }) {
+function MemEngineCard({ engine, isLoading, onOpenGraph }) {
   if (isLoading) {
     return (
-      <div className="card mem-engine" data-testid="mem-engine-card">
-        <div className="mem-engine-head mono">memory engine</div>
+      <div className="card mo-engine" data-testid="mem-engine-card">
+        <div className="mo-engine-head">
+          <span className="mono mo-engine-name"><Icon name="brain" size={15} /> memory engine</span>
+        </div>
         <div className="empty mono">Probing engine…</div>
       </div>
     );
   }
   const e = engine || {};
+  const enabled = e.enabled !== false;
   const reachable = !!e.reachable;
   const features = e.features || {};
+  const featureNames = Object.keys(features);
+  const graphOn = !!features.graph;
   return (
-    <div className="card mem-engine" data-testid="mem-engine-card">
-      <div className="mem-engine-head">
-        <span className="mono mem-engine-name">{e.engine || 'no engine'}</span>
-        <span className={'chip ' + (reachable ? 'ok' : 'err')}>
+    <div className="card mo-engine" data-testid="mem-engine-card">
+      <div className="mo-engine-head">
+        <span className="mono mo-engine-name">
+          <Icon name="brain" size={15} /> {e.engine || (enabled ? 'no engine' : 'disabled')}
+        </span>
+        <span className={'chip ' + (reachable ? 'ok' : 'warn')}>
           {reachable ? 'reachable' : 'unreachable'}
         </span>
       </div>
-      <div className="mem-engine-meta mono">
-        {e.version ? <span className="mem-engine-ver">v{e.version}</span> : <span>version unknown</span>}
+      <div className="mo-engine-meta mono">
+        <span>{e.version ? `v${e.version}` : 'version unknown'}</span>
         <span className="pf-sep">·</span>
         <span>{e.banks_total != null ? `${e.banks_total} banks` : '— banks'}</span>
       </div>
-      <div className="mem-feature-row">
-        {Object.entries(features)
-          .filter(([, on]) => !!on)
-          .map(([name]) => (
-            <span key={name} className="pf-badge" title={`engine feature: ${name}`}>{name}</span>
-          ))}
+      <div className="mo-feature-row">
+        {featureNames.length === 0 ? (
+          <span className="mo-badge mono">no features</span>
+        ) : (
+          featureNames.map((name) => {
+            const on = !!features[name];
+            return (
+              <span
+                key={name}
+                className={'mo-badge mono' + (on ? ' on' : '')}
+                title={`engine feature: ${name} (${on ? 'on' : 'off'})`}
+              >
+                {on && <span className="dot ready" />}{name}
+              </span>
+            );
+          })
+        )}
+      </div>
+      <div className="mo-graphline">
+        <span className="mono">
+          <span className={'dot' + (graphOn ? ' ready' : '')} /> graph extraction ·{' '}
+          <b style={{ color: graphOn ? 'var(--ok)' : 'var(--fg-4)' }}>{graphOn ? 'on' : 'off'}</b>
+        </span>
+        <button className="btn ghost xs" onClick={onOpenGraph} data-testid="mem-btn-open-graph">
+          Open graph <Icon name="arrow" size={11} />
+        </button>
       </div>
     </div>
   );
 }
 
-// ── Timeseries chart (hand-rolled SVG, house style) ───────────────────────────
+// ── Timeseries chart (stacked spark-bars, mo- house style) ────────────────────
 
 function MemTimeseries({ bank, period, setPeriod }) {
   const useBankTimeseries = window.__hal0UseBankTimeseries;
   const query = useBankTimeseries ? useBankTimeseries(bank, period) : { data: null };
   const buckets = query.data?.buckets || [];
 
-  const W = 600, H = 150, PAD = 24;
-  const maxVal = Math.max(1, ...buckets.flatMap(b => MEM_FACT_TYPES.map(t => b[t] || 0)));
-  const x = (i) => buckets.length <= 1 ? W / 2 : PAD + (i * (W - PAD * 2)) / (buckets.length - 1);
-  const y = (v) => H - PAD - (v / maxVal) * (H - PAD * 2);
-
-  const pathFor = (type) =>
-    buckets.map((b, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(b[type] || 0).toFixed(1)}`).join(' ');
+  // total per bucket drives bar height; segments stack the three fact types.
+  const totals = buckets.map(b => MEM_FACT_TYPES.reduce((s, t) => s + (b[t] || 0), 0));
+  const maxVal = Math.max(1, ...totals);
 
   return (
-    <div className="card mem-ts" data-testid="mem-timeseries">
-      <div className="mem-ts-head">
+    <div className="card mo-ts" data-testid="mem-timeseries">
+      <div className="mo-ts-head">
         <span className="mono">memories retained · {bank || '—'}</span>
-        <div className="mem-ts-periods">
+        <div className="mo-ts-periods">
           {['1d', '7d', '30d', '90d'].map(p => (
             <button
               key={p}
@@ -108,17 +133,38 @@ function MemTimeseries({ bank, period, setPeriod }) {
       {buckets.length === 0 ? (
         <div className="empty mono">No retain activity in this window.</div>
       ) : (
-        <svg viewBox={`0 0 ${W} ${H}`} className="mem-ts-svg" role="img" aria-label="memories timeseries">
-          {MEM_FACT_TYPES.map(t => (
-            <path key={t} className="mem-series" d={pathFor(t)} fill="none"
-              stroke={MEM_FACT_COLORS[t]} strokeWidth="1.5" />
-          ))}
-          {MEM_FACT_TYPES.map(t =>
-            buckets.map((b, i) => (
-              <circle key={t + i} cx={x(i)} cy={y(b[t] || 0)} r="2" fill={MEM_FACT_COLORS[t]} />
-            ))
-          )}
-        </svg>
+        <div className="mo-spark" role="img" aria-label="memories timeseries">
+          {buckets.map((b, i) => {
+            const total = totals[i];
+            return (
+              <i
+                key={b.time || i}
+                style={{
+                  height: `${(total / maxVal) * 100}%`,
+                  display: 'flex',
+                  flexDirection: 'column-reverse',
+                  background: 'transparent',
+                }}
+                title={`${b.time || ''} · ${total} facts`}
+              >
+                {MEM_FACT_TYPES.map(t => {
+                  const v = b[t] || 0;
+                  if (!v || !total) return null;
+                  return (
+                    <span
+                      key={t}
+                      style={{
+                        display: 'block',
+                        height: `${(v / total) * 100}%`,
+                        background: MEM_FACT_COLORS[t],
+                      }}
+                    />
+                  );
+                })}
+              </i>
+            );
+          })}
+        </div>
       )}
       <div className="mem-legend mono">
         {MEM_FACT_TYPES.map(t => (
@@ -138,27 +184,33 @@ function MemBankCard({ bank, selected, onSelect }) {
   const useBankStats = window.__hal0UseBankStats;
   const stats = (useBankStats ? useBankStats(bank.bank_id) : { data: null }).data;
   const byType = stats?.nodes_by_fact_type || {};
+  const pending = stats?.pending_operations || 0;
+  const failed = stats?.failed_operations || 0;
+  function onKey(ev) {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onSelect(bank); }
+  }
   return (
     <div
-      className={'mem-bank-card' + (selected ? ' selected' : '')}
+      className={'mo-bank' + (selected ? ' active' : '')}
       data-testid={`mem-bank-${bank.bank_id}`}
       onClick={() => onSelect(bank)}
+      onKeyDown={onKey}
       role="button"
       tabIndex={0}
     >
-      <div className="mem-bank-head">
-        <span className="mono mem-bank-id">{bank.bank_id}</span>
+      <div className="mo-bank-head">
+        <span className="mono mo-bank-id">{bank.bank_id}</span>
         <div className="mem-bank-badges">
-          {stats?.pending_operations > 0 && (
-            <span className="mem-badge warn" title="pending operations">{stats.pending_operations}</span>
+          {pending > 0 && (
+            <span className="mo-badge warn mono" title="pending operations">{pending} pending</span>
           )}
-          {stats?.failed_operations > 0 && (
-            <span className="mem-badge err" title="failed operations">{stats.failed_operations}</span>
+          {failed > 0 && (
+            <span className="mo-badge warn mono" style={{ color: 'var(--err)', borderColor: 'var(--err-line)' }} title="failed operations">{failed} failed</span>
           )}
         </div>
       </div>
-      {bank.mission && <div className="mem-bank-mission">{bank.mission}</div>}
-      <div className="mem-bank-counts mono">
+      {bank.mission && <div className="mo-bank-mission">{bank.mission}</div>}
+      <div className="mo-bank-counts mono">
         {MEM_FACT_TYPES.map(t => (
           <span key={t} className="mem-count" title={`${t} facts`}>
             <span className="mem-swatch" style={{ background: MEM_FACT_COLORS[t] }} />
@@ -166,10 +218,10 @@ function MemBankCard({ bank, selected, onSelect }) {
           </span>
         ))}
       </div>
-      <div className="mem-bank-meta mono">
-        <span>{stats?.total_documents ?? '—'} docs</span>
+      <div className="mo-bank-meta mono">
+        <span><span className="num">{stats?.total_documents ?? '—'}</span> docs</span>
         <span className="pf-sep">·</span>
-        <span>{stats?.total_links ?? '—'} links</span>
+        <span><span className="num">{stats?.total_links ?? '—'}</span> links</span>
         <span className="pf-sep">·</span>
         <span title="last consolidated">cons. {fmtWhen(stats?.last_consolidated_at)}</span>
       </div>
@@ -385,12 +437,26 @@ function MemoryView({ param } = {}) {
   const banksQuery = useMemoryBanks ? useMemoryBanks() : { data: null, isLoading: false };
 
   const banks = banksQuery.data?.banks || [];
-  const [selectedId, setSelectedId] = useStateMem(null);
+  const [selectedId, setSelectedId] = useStateMem(() => {
+    try { return localStorage.getItem(MEM_BANK_LS_KEY) || null; } catch { return null; }
+  });
   const [creating, setCreating] = useStateMem(false);
   const [period, setPeriod] = useStateMem('7d');
 
+  // Persist selection to the shared key the Graph/Tools tabs read.
+  useEffectMem(() => {
+    if (!selectedId) return;
+    try { localStorage.setItem(MEM_BANK_LS_KEY, selectedId); } catch { /* ignore */ }
+  }, [selectedId]);
+
   const selected = banks.find(b => b.bank_id === selectedId) || null;
   const chartBank = selected?.bank_id || banks[0]?.bank_id || null;
+
+  function selectBank(bankId) {
+    const next = bankId === selectedId ? null : bankId;
+    setSelectedId(next);
+    if (next) { try { localStorage.setItem(MEM_BANK_LS_KEY, next); } catch { /* ignore */ } }
+  }
 
   return (
     <div className="view">
@@ -430,14 +496,18 @@ function MemoryView({ param } = {}) {
       ) : section === 'tools' ? (
         <MemToolsPanel />
       ) : (
-      <>
-      <div className="mem-top">
-        <MemEngineCard engine={engineQuery.data} isLoading={engineQuery.isLoading} />
+      <div className="mo">
+      <div className="mo-top">
+        <MemEngineCard
+          engine={engineQuery.data}
+          isLoading={engineQuery.isLoading}
+          onOpenGraph={() => { window.location.hash = '#memory/graph'; }}
+        />
         <MemTimeseries bank={chartBank} period={period} setPeriod={setPeriod} />
       </div>
 
       <div className="sec">
-        <h2>Banks</h2>
+        <h2>Banks {banks.length > 0 && <span className="ct">{banks.length}</span>}</h2>
         <div className="rule" />
         <div className="pf-toolbar">
           <button className="btn sm" onClick={() => setCreating(true)} data-testid="mem-btn-new-bank">
@@ -449,13 +519,13 @@ function MemoryView({ param } = {}) {
         ) : banks.length === 0 ? (
           <div className="empty mono">No memory banks yet.</div>
         ) : (
-          <div className="mem-grid">
+          <div className="mo-grid">
             {banks.map(b => (
               <MemBankCard
                 key={b.bank_id}
                 bank={b}
                 selected={b.bank_id === selectedId}
-                onSelect={(bank) => setSelectedId(bank.bank_id === selectedId ? null : bank.bank_id)}
+                onSelect={(bank) => selectBank(bank.bank_id)}
               />
             ))}
           </div>
@@ -471,7 +541,7 @@ function MemoryView({ param } = {}) {
           onDeleted={() => setSelectedId(null)}
         />
       )}
-      </>
+      </div>
       )}
     </div>
   );

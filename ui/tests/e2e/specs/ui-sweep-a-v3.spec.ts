@@ -208,96 +208,10 @@ test.describe('ApprovalModal live wiring', () => {
   })
 })
 
-// ─── 6. memory-tab: engine-neutral label, live stats/records ────────────
-
-test.describe('MemoryTab live wiring', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.route('**/api/memory/graph/status', (route) =>
-      json(route, { enabled: false, route: 'upstream' })
-    )
-    await page.route('**/api/memory/search', (route) => json(route, { items: [] }))
-    // Stub /api/features so the engine label is deterministic across all tests
-    await page.route('**/api/features', (route) =>
-      json(route, { memory: true, memory_engine: 'Hindsight', npu: true, comfyui_switchover: false, mcp_supervisor: false })
-    )
-  })
-
-  test('engine label uses memory_engine from /api/features, not "Cognee"', async ({ page }) => {
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      json(route, {
-        agent_id: 'hermes',
-        namespace: 'private:hermes',
-        writes: 42,
-        reads: 100,
-        last_write: '2026-06-12T09:00:00Z',
-        available: true,
-      })
-    )
-    await page.route('**/api/memory/list**', (route) => json(route, { items: [], next_cursor: null }))
-
-    await page.goto('/#agent/memory')
-    await expect(page.locator('[data-testid="memory-engine-label"]')).toBeVisible({ timeout: FIVE_S })
-    // Shows the live engine name from /api/features, not a hardcoded "Cognee"
-    await expect(page.locator('[data-testid="memory-engine-label"]')).toContainText('Hindsight')
-    await expect(page.locator('[data-testid="memory-engine-label"]')).not.toContainText('Cognee')
-  })
-
-  test('live write count renders in stats card', async ({ page }) => {
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      json(route, {
-        agent_id: 'hermes',
-        namespace: 'private:hermes',
-        writes: 999,
-        reads: 0,
-        last_write: null,
-        available: true,
-      })
-    )
-    await page.route('**/api/memory/list**', (route) => json(route, { items: [], next_cursor: null }))
-
-    await page.goto('/#agent/memory')
-    await expect(page.locator('[data-testid="memory-tab"]')).toBeVisible({ timeout: FIVE_S })
-    await expect(page.locator('[data-testid="memory-tab"]')).toContainText('999')
-  })
-
-  test('shows empty state when no memory records', async ({ page }) => {
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      json(route, { agent_id: 'hermes', namespace: 'shared', writes: 0, reads: 0, last_write: null, available: true })
-    )
-    await page.route('**/api/memory/list**', (route) => json(route, { items: [], next_cursor: null }))
-
-    await page.goto('/#agent/memory')
-    await expect(page.locator('[data-testid="memory-records-empty"]')).toBeVisible({ timeout: FIVE_S })
-  })
-
-  test('renders live memory records', async ({ page }) => {
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      json(route, { agent_id: 'hermes', namespace: 'shared', writes: 1, reads: 0, last_write: null, available: true })
-    )
-    await page.route('**/api/memory/list**', (route) =>
-      json(route, {
-        items: [
-          { id: 'rec-1', text: 'user prefers tabs over spaces', timestamp: '2026-06-12T10:00:00Z', dataset: 'shared', tags: ['preference'], source: 'hermes', metadata: {}, score: 1 },
-        ],
-        next_cursor: null,
-      })
-    )
-
-    await page.goto('/#agent/memory')
-    await expect(page.locator('[data-testid="memory-tab"]')).toContainText('user prefers tabs over spaces', { timeout: FIVE_S })
-    await expect(page.locator('[data-testid="memory-records-empty"]')).toHaveCount(0)
-  })
-
-  test('namespaces empty state when stats unavailable', async ({ page }) => {
-    await page.route('**/api/agents/hermes/memory/stats', (route) =>
-      json(route, null, 404)
-    )
-    await page.route('**/api/memory/list**', (route) => json(route, { items: [], next_cursor: null }))
-
-    await page.goto('/#agent/memory')
-    await expect(page.locator('[data-testid="namespaces-empty"]')).toBeVisible({ timeout: FIVE_S })
-  })
-})
+// ─── 6. (removed) memory-tab live-wiring describe — the Agent → Memory fold
+//        replaced the live stats/records/namespaces surface with a thin
+//        pointer card (design §7). Those tests were deleted; the memory
+//        surface is covered by memory-view/-tools/-graph specs instead.
 
 // ─── 7. Dashboard: no hardcoded "halo" username ─────────────────────────
 

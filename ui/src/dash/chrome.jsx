@@ -50,9 +50,45 @@ function Wordmark({ size = 16, mono = false }) {
 }
 
 // ─── Icons (consistent stroke style, 16x16 viewBox) ───
-const Icon = ({ d, size = 16, fill = "none", stroke = "currentColor", sw = 1.5, children }) => (
-  <svg width={size} height={size} viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
-    {d ? <path d={d} /> : children}
+// GLYPHS — named glyph set for the `<Icon name="…" />` form used by the
+// Memory graph engine + directions (memory-graph*.jsx). Coexists with the
+// legacy `Icons` map (d/children form) below.
+const GLYPHS = {
+  dashboard: <g><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="9" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/></g>,
+  slots: <g><rect x="2" y="3" width="12" height="3" rx="0.5"/><rect x="2" y="7" width="12" height="3" rx="0.5"/><rect x="2" y="11" width="12" height="3" rx="0.5"/></g>,
+  models: <g><path d="M2 4l6-2 6 2-6 2-6-2z"/><path d="M2 8l6 2 6-2"/><path d="M2 12l6 2 6-2"/></g>,
+  memory: <g><circle cx="4" cy="4" r="1.8"/><circle cx="12" cy="5" r="1.8"/><circle cx="7.5" cy="12" r="1.8"/><path d="M5.4 4.7l5.2 0.4M5.2 5.6l1.6 4.7M10.6 6.5l-2.4 4.2"/></g>,
+  agent: <g><circle cx="8" cy="6" r="2.5"/><path d="M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5"/><circle cx="13" cy="3" r="1.5"/></g>,
+  connections: <g><circle cx="6" cy="8" r="2.5"/><circle cx="11" cy="11" r="1.5" fill="currentColor" stroke="none"/><path d="M8 9.5l2 1M3.5 4.5h4M3.5 6.5h3"/></g>,
+  logs: <path d="M3 3h10M3 6h10M3 9h7M3 12h5"/>,
+  settings: <g><circle cx="8" cy="8" r="2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></g>,
+  search: <g><circle cx="7" cy="7" r="4"/><path d="M10 10l3 3"/></g>,
+  close: <path d="M4 4l8 8M12 4l-8 8"/>,
+  plus: <path d="M8 3v10M3 8h10"/>,
+  minus: <path d="M3 8h10"/>,
+  fit: <path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2"/>,
+  overview: <g><rect x="2" y="2.5" width="12" height="4" rx="1"/><rect x="2" y="9" width="5.5" height="4.5" rx="1"/><rect x="8.5" y="9" width="5.5" height="4.5" rx="1"/></g>,
+  graph: <g><circle cx="4" cy="11" r="1.7"/><circle cx="11.5" cy="4" r="1.7"/><circle cx="12" cy="12" r="1.7"/><path d="M5.4 9.9l4.8-4.2M5.7 11.3l4.6 0.6"/></g>,
+  tools: <g><path d="M9.5 2.5a3 3 0 0 0 3.9 3.9l-2 2L6 13.8a1.6 1.6 0 0 1-2.3-2.3l5.4-5.4z"/></g>,
+  clock: <g><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></g>,
+  focus: <g><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2"/></g>,
+  path: <g><circle cx="3.5" cy="12.5" r="1.5"/><circle cx="12.5" cy="3.5" r="1.5"/><path d="M4.8 11.4C7 9 6 6 9 5.2"/></g>,
+  pin: <path d="M8 1.5l1.8 4.2 4.2 0.4-3.2 2.8 1 4.1L8 10.9 4.2 13l1-4.1L2 6.1l4.2-0.4z"/>,
+  layers: <g><path d="M8 2l6 3-6 3-6-3 6-3z"/><path d="M2 9l6 3 6-3"/></g>,
+  scrub: <g><path d="M2 8h12"/><circle cx="6" cy="8" r="2.2" fill="currentColor" stroke="none"/></g>,
+  refresh: <g><path d="M14 8a6 6 0 1 1-2-4.5"/><path d="M14 1v3.5h-3.5"/></g>,
+  hide: <g><path d="M2 8s2.4-4.2 6-4.2S14 8 14 8s-2.4 4.2-6 4.2S2 8 2 8z"/><circle cx="8" cy="8" r="1.6"/></g>,
+  arrow: <path d="M3 8h9M8.5 4.5L12 8l-3.5 3.5"/>,
+  ext: <g><path d="M6 3H3v10h10v-3"/><path d="M9 3h4v4M13 3l-6 6"/></g>,
+  dot: <circle cx="8" cy="8" r="3" fill="currentColor" stroke="none"/>,
+  spark: <path d="M8 1.5l1.4 4.6L14 7.5l-4.6 1.4L8 13.5l-1.4-4.6L2 7.5l4.6-1.4z"/>,
+  doc: <g><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></g>,
+  brain: <g><path d="M6 2.5A2.5 2.5 0 0 0 3.5 5v.2A2.3 2.3 0 0 0 3 9.5 2.4 2.4 0 0 0 6 13.5V2.5z"/><path d="M10 2.5A2.5 2.5 0 0 1 12.5 5v.2A2.3 2.3 0 0 1 13 9.5a2.4 2.4 0 0 1-3 4V2.5z"/></g>,
+  trash: <g><path d="M3 4h10M6 4V2.5h4V4M5 4l.5 9h5L11 4"/></g>,
+};
+const Icon = ({ name, d, size = 16, fill = "none", stroke = "currentColor", sw = 1.5, children }) => (
+  <svg width={size} height={size} viewBox="0 0 16 16" fill={fill} stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {name ? (GLYPHS[name] || GLYPHS.dot) : (d ? <path d={d} /> : children)}
   </svg>
 );
 const Icons = {
@@ -694,7 +730,7 @@ function NavDrawer({ open, route, onGo, onClose, onCmdK }) {
   );
 }
 
-Object.assign(window, { Wordmark, Icons, Icon, TopBar, Sidebar, Footer, ApprovalModal, NavDrawer });
+Object.assign(window, { Wordmark, Icons, GLYPHS, Icon, TopBar, Sidebar, Footer, ApprovalModal, NavDrawer });
 
 // Bridge approval hooks so main.jsx (strict no-ES-imports prototype) can call
 // them via window globals — same pattern as memory-tab-hook-bridge.ts.
