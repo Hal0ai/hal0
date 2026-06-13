@@ -19,6 +19,12 @@
 
 const { useState, useRef, useEffect, useMemo } = React;
 
+// Ring-1 is capped to keep high-degree nodes legible (Hindsight's semantic
+// graph is far denser than curated banks — a single node can have dozens–
+// hundreds of neighbours). "+K more" steps the cap up; nothing is hidden
+// silently. Salience keeps the storyline edges (causal/temporal) on top.
+const RING1_CAP_STEP = 24;
+
 function GraphEgo({ graph, query, width, height, banner }) {
   const W = width, H = height;
   const nodes = (graph && graph.nodes) || [];
@@ -48,7 +54,11 @@ function GraphEgo({ graph, query, width, height, banner }) {
   const [centerId, setCenterId] = useState(null);
   const [trail, setTrail] = useState([]);
   const [hover, setHover] = useState(null);
+  const [ringCap, setRingCap] = useState(RING1_CAP_STEP);
   const center = (centerId && byId[centerId]) ? centerId : defaultCenter;
+
+  // reset the ring cap whenever the centre changes (each node starts collapsed)
+  useEffect(() => { setRingCap(RING1_CAP_STEP); }, [center]);
 
   // ── layout for current center ──────────────────────────────────────────────
   const layout = useMemo(() => {
@@ -60,19 +70,34 @@ function GraphEgo({ graph, query, width, height, banner }) {
     all.forEach(({ id, link, dir }) => {
       (map[id] = map[id] || { id, links: [] }).links.push({ link, dir });
     });
-    const ring1 = Object.values(map);
-    // order by dominant link type then time
-    const order = { causal: 0, temporal: 1, semantic: 2, cooccurrence: 3 };
-    ring1.sort((a, b) =>
-      (order[a.links[0].link.linkType] - order[b.links[0].link.linkType]) ||
-      ((byId[a.id]?.t || 0) - (byId[b.id]?.t || 0)));
+    const fullRing1 = Object.values(map);
+    // salience order: link-type priority (causal > temporal > cooccurrence >
+    // semantic), then strongest edge weight, then most recent. Keeps the
+    // storyline edges on top and sheds the noisy bulk-semantic fan first.
+    const order = { causal: 0, temporal: 1, cooccurrence: 2, semantic: 3 };
+    const rank = (lks) => Math.min(...lks.map((x) => order[x.link.linkType] ?? 9));
+    const maxW = (lks) => Math.max(...lks.map((x) => x.link.weight || 1));
+    fullRing1.sort((a, b) =>
+      (rank(a.links) - rank(b.links)) ||
+      (maxW(b.links) - maxW(a.links)) ||
+      ((byId[b.id]?.t || 0) - (byId[a.id]?.t || 0)));
+    const totalNbrs = fullRing1.length;
+    const ring1 = fullRing1.slice(0, ringCap);
+    const hidden = Math.max(0, totalNbrs - ring1.length);
     const R1 = Math.min(W * 0.26, H * 0.34, 200);
     const pos = { [center]: { x: cx, y: cy } };
-    const n1 = ring1.length;
+    const slots = ring1.length + (hidden > 0 ? 1 : 0); // reserve one slot for "+K more"
     ring1.forEach((nb, i) => {
-      const ang = -Math.PI / 2 + (i / Math.max(1, n1)) * Math.PI * 2;
+      const ang = -Math.PI / 2 + (i / Math.max(1, slots)) * Math.PI * 2;
       pos[nb.id] = { x: cx + Math.cos(ang) * R1, y: cy + Math.sin(ang) * R1, ang };
     });
+    let more = null;
+    if (hidden > 0) {
+      const ang = -Math.PI / 2 + (ring1.length / Math.max(1, slots)) * Math.PI * 2;
+      const mx = cx + Math.cos(ang) * R1, my = cy + Math.sin(ang) * R1;
+      more = { count: hidden, x: mx, y: my, ang };
+      pos.__more__ = { x: mx, y: my, ang };
+    }
     // ring2 (2-hop context), capped + faded
     const seen = new Set([center, ...ring1.map((r) => r.id)]);
     const outer = [];
@@ -89,8 +114,8 @@ function GraphEgo({ graph, query, width, height, banner }) {
       const ang = parentAng + spread;
       pos[o.id] = { x: cx + Math.cos(ang) * R2, y: cy + Math.sin(ang) * R2 };
     });
-    return { pos, ring1, ring2: cap, R1, R2, cx, cy };
-  }, [center, links, byId, W, H]);
+    return { pos, ring1, ring2: cap, R1, R2, cx, cy, more, totalNbrs };
+  }, [center, links, byId, W, H, ringCap]);
 
   // ── tween between centres (rAF cubic-ease ~560ms; instant if reduced-motion) ─
   const [pos, setPos] = useState(layout.pos);
@@ -133,6 +158,9 @@ function GraphEgo({ graph, query, width, height, banner }) {
     const i = sortedByTime.findIndex((n) => n.id === center);
     const j = Math.max(0, Math.min(sortedByTime.length - 1, i + dir));
     if (sortedByTime[j] && sortedByTime[j].id !== center) goTo(sortedByTime[j].id);
+  }
+  function expandRing() {
+    setRingCap((c) => Math.min(layout.totalNbrs, c + RING1_CAP_STEP));
   }
 
   // ── empty state ─────────────────────────────────────────────────────────────
@@ -234,6 +262,20 @@ function GraphEgo({ graph, query, width, height, banner }) {
             );
           })}
 
+          {/* "+K more" ring slot — expands the cap (nothing hidden silently) */}
+          {layout.more && pos.__more__ && (
+            <g
+              data-testid="mem-ego-more" transform={`translate(${pos.__more__.x},${pos.__more__.y})`}
+              style={{ cursor: 'pointer' }} onClick={expandRing}
+              role="button" tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); expandRing(); } }}
+            >
+              <title>{`Show ${Math.min(RING1_CAP_STEP, layout.more.count)} more of ${layout.more.count} hidden neighbours`}</title>
+              <circle r="11" fill="var(--bg-3)" stroke="var(--line-strong)" strokeWidth="1.2" />
+              <text textAnchor="middle" dy="3.4" className="mono" style={{ fontSize: 9.5, fill: 'var(--fg-2)' }}>+{layout.more.count}</text>
+            </g>
+          )}
+
           {/* center node */}
           {(() => {
             const p = pos[center]; if (!p || !centerNode) return null;
@@ -258,6 +300,10 @@ function GraphEgo({ graph, query, width, height, banner }) {
               {centerNode.date && <span className="mg-ego-when">{window.fmtMemDate(centerNode.date, true)}</span>}
             </div>
             <div className="mg-ego-text">{centerNode.text || centerNode.label}</div>
+            <div className="mono" data-testid="mem-ego-nbr-count" style={{ fontSize: 10, color: 'var(--fg-4)', marginBottom: 8 }}>
+              neighbours · <b style={{ color: 'var(--fg-2)' }}>{layout.totalNbrs}</b>
+              {layout.more ? ` · showing ${layout.ring1.length}` : ''}
+            </div>
             <div className="mg-ego-deg">
               {Object.entries(deg).filter(([, n]) => n > 0).map(([k, n]) => (
                 <span key={k} className="mono"><i style={{ background: window.MEM_LINK_COLORS[k] }} />{k} <b>{n}</b></span>

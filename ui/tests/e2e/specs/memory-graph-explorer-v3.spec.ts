@@ -115,4 +115,28 @@ test.describe('Memory graph explorer', () => {
     // the explorer re-fetches + re-renders for the new bank.
     await expect(page.locator('[data-testid="mem-graph-svg"]')).toBeVisible()
   })
+
+  test('direction C (Ego) caps the ring on a high-degree node and "+K more" expands it', async ({ page }) => {
+    await gotoGraph(page)
+    // the baked `ingest` bank returns a dense star: a hub with 40 neighbours.
+    await page.selectOption('[data-testid="mem-graph-bank"]', 'ingest')
+    await page.locator('.mg-dirswitch button', { hasText: 'Ego' }).click()
+    // Ego renders its own .mg-svg (the mem-graph-svg testid is Direction-A only).
+    await expect(page.locator('.mg-ego-card')).toBeVisible()
+
+    // ring-1 is capped (RING1_CAP_STEP=24): the "+K more" slot appears and the
+    // card reports more total neighbours than are currently shown.
+    const more = page.locator('[data-testid="mem-ego-more"]')
+    await expect(more).toBeVisible()
+    const countText = page.locator('[data-testid="mem-ego-nbr-count"]')
+    await expect(countText).toContainText('neighbours · 40')
+    await expect(countText).toContainText('showing 24')
+
+    // expanding bumps the cap (24→48 ≥ 40) → all 40 shown, the "+K more" slot
+    // disappears and the "showing" qualifier drops (nothing hidden anymore).
+    await more.click()
+    await expect(more).toHaveCount(0)
+    await expect(countText).toContainText('neighbours · 40')
+    await expect(countText).not.toContainText('showing')
+  })
 })

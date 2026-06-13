@@ -512,7 +512,34 @@ function buildBankOperations(_url: string, match: RegExpMatchArray) {
 // filters handle type/q narrowing, and the prototype keeps every mentioned
 // entity (min_count defaults to 1), so the unfiltered payload is the right
 // forced-mock shape.
-function buildMemFactGraphRoute() {
+// A deliberately dense star graph for the `ingest` bank: one hub fact with
+// 40 semantic neighbours (+ a couple causal/temporal) so the Direction-C ego
+// ring-cap (>24 neighbours → "+K more") is exercisable in mock-mode e2e.
+function buildDenseFactGraph() {
+  const FT = ['world', 'experience', 'observation']
+  const nodes = [
+    { data: { id: 'hub', label: 'ingest hub note', text: 'Central note that many ingested chunks reference.', type: 'world', date: '2026-06-01T09:00', entities: 'ingest, hal0', color: '#7fb8ff' } },
+  ]
+  const edges: { data: Record<string, unknown> }[] = []
+  for (let i = 0; i < 40; i++) {
+    const id = 'leaf' + i
+    nodes.push({
+      data: {
+        id, label: 'ingested chunk ' + i, text: 'Ingested document chunk #' + i + ' referencing the hub.',
+        type: FT[i % 3], date: '2026-06-0' + (1 + (i % 7)) + 'T1' + (i % 9) + ':00',
+        entities: 'ingest', color: '#7fb8ff',
+      },
+    })
+    // most are semantic (the noisy bulk); a few causal/temporal stay salient.
+    const linkType = i < 2 ? 'causal' : i < 5 ? 'temporal' : 'cooccurrence'
+    edges.push({ data: { id: 'e' + i, source: 'hub', target: id, linkType: i < 8 ? linkType : 'semantic', weight: i < 8 ? 3 : 1 } })
+  }
+  return { nodes, edges, total_units: nodes.length }
+}
+
+function buildMemFactGraphRoute(_url: string, match: RegExpMatchArray) {
+  const bank = match && match[1]
+  if (bank === 'ingest') return buildDenseFactGraph()
   return buildMemFactGraph()
 }
 
