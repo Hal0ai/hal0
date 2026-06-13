@@ -154,9 +154,7 @@ class TestLoadProfilesConfig:
 
     def test_seed_count(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert (
-            len(cfg.profile) == 6
-        )  # rocm, rocm-mtp, vulkan, flm, tts, comfyui
+        assert len(cfg.profile) == 6  # rocm, rocm-mtp, vulkan, flm, tts, comfyui
 
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")

@@ -366,9 +366,7 @@ class TestContainerEnrichment:
         assert e["image"] is None
         assert e["resolved_command"] is None
 
-    async def test_device_class_and_backend_lifted_from_profile(
-        self, tmp_hal0_home: str
-    ) -> None:
+    async def test_device_class_and_backend_lifted_from_profile(self, tmp_hal0_home: str) -> None:
         # A profile-backed GPU slot surfaces device_class + backend from the
         # resolved profile so the UI groups/colours without re-deriving.
         out = await container_enrichment(

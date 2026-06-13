@@ -254,9 +254,14 @@ function SlotCard({
             flm reports "flm"), so device_class is the correct key off-GPU.
             Replaces the redundant gpu-rocm device-tag string. */}
         {slot.profile && (() => {
-          const colorKey = slot.device_class === "gpu"
+          // device_class is profile-derived and may be absent; normalise the
+          // `device` enum (gpu-rocm/gpu-vulkan → gpu) as a fallback so a
+          // profile-less GPU slot still colours by its backend, not "cpu".
+          const cls = slot.device_class
+            || ((slot.device || "").startsWith("gpu") ? "gpu" : (slot.device || ""));
+          const colorKey = cls === "gpu"
             ? (slot.backend || "rocm")
-            : (slot.device_class || "cpu");
+            : (cls || "cpu");
           return (
             <span
               className={"chip dev-" + String(colorKey).replace("gpu-", "")}
@@ -955,7 +960,14 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   //         Capabilities. GPU-backed embed/rerank slots are LLM-adjacent
   //         capabilities, so the Capabilities bucket is keyed off type, not
   //         device_class, for the non-chat/non-npu/non-img remainder.
-  const dc = (s) => s.device_class || s.device || "";
+  // device_class is profile-derived and may be absent (no profile, or a
+  // legacy device-only slot); fall back to the `device` enum, normalising
+  // its gpu-rocm/gpu-vulkan variants down to the bare "gpu" class.
+  const dc = (s) => {
+    if (s.device_class) return s.device_class;
+    const d = s.device || "";
+    return d.startsWith("gpu") ? "gpu" : d;
+  };
   const groups = {
     chat:  cardSlots.filter(s => dc(s) === "gpu" && s.type === "llm"),
     caps:  cardSlots.filter(s =>
