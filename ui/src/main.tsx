@@ -28,7 +28,6 @@ import './globals-install'
 //    `hal0 v2 dashboard.html`. Each module installs its components on
 //    `window` via `Object.assign(window, …)`.
 import './dashboard.css'
-import './mcp.css'
 import './dash/comfyui-pane.css'
 import './dash/engine-panes.css'
 import './dash/memory-overhaul.css'

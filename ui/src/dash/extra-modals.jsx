@@ -1,9 +1,9 @@
-// hal0 dashboard — Add-Secret modal + Onboarding tour
-// Curated dropdown with auto-detect by token prefix; tour = 3-step coachmark overlay.
+// hal0 dashboard — Add-Secret modal
+// Curated dropdown with auto-detect by token prefix.
 
 import { useSecretSet } from '@/api/hooks/useSecrets'
 
-const { useState: useStateAS, useEffect: useEffectAS, useRef: useRefAS } = React;
+const { useState: useStateAS, useEffect: useEffectAS } = React;
 
 // ─── Add Secret modal ───────────────────────────────────────────
 const SECRET_PRESETS = [
@@ -155,115 +155,4 @@ function AddSecretModal({ open, onClose }) {
   );
 }
 
-// ─── Onboarding Tour (anchored coachmarks) ───────────────────────
-function OnboardingTour({ open, onClose, steps }) {
-  const [idx, setIdx] = useStateAS(0);
-  const [pos, setPos] = useStateAS(null);
-  const stepRef = useRefAS(null);
-
-  useEffectAS(() => { if (open) setIdx(0); }, [open]);
-
-  useEffectAS(() => {
-    if (!open) return;
-    const place = () => {
-      const sel = steps[idx]?.selector;
-      const el = sel ? document.querySelector(sel) : null;
-      if (!el) { setPos({ centered: true }); return; }
-      const rect = el.getBoundingClientRect();
-      setPos({
-        targetTop: rect.top,
-        targetLeft: rect.left,
-        targetWidth: rect.width,
-        targetHeight: rect.height,
-        side: rect.top > window.innerHeight / 2 ? "above" : "below",
-      });
-    };
-    place();
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
-  }, [open, idx, steps]);
-
-  if (!open) return null;
-  const step = steps[idx];
-  if (!step) { onClose(); return null; }
-
-  const last = idx === steps.length - 1;
-  const halo = pos && !pos.centered ? (
-    <div
-      className="tour-halo"
-      style={{
-        top: pos.targetTop - 6,
-        left: pos.targetLeft - 6,
-        width: pos.targetWidth + 12,
-        height: pos.targetHeight + 12,
-      }}
-    />
-  ) : null;
-
-  let cardStyle;
-  if (!pos || pos.centered) {
-    cardStyle = { top: "50%", left: "50%", transform: "translate(-50%, -50%)" };
-  } else if (pos.side === "above") {
-    cardStyle = { bottom: window.innerHeight - pos.targetTop + 14, left: Math.min(Math.max(pos.targetLeft, 16), window.innerWidth - 360) };
-  } else {
-    cardStyle = { top: pos.targetTop + pos.targetHeight + 14, left: Math.min(Math.max(pos.targetLeft, 16), window.innerWidth - 360) };
-  }
-
-  return (
-    <div className="tour-backdrop" onClick={(e) => { if (e.target.classList.contains("tour-backdrop")) onClose(); }}>
-      {halo}
-      <div className="tour-card" style={cardStyle} ref={stepRef}>
-        <div className="tour-card-h mono">
-          <span>Tour · step {idx + 1} of {steps.length}</span>
-          <button onClick={onClose} aria-label="Close" style={{background: "transparent", border: "none", color: "var(--fg-4)", cursor: "pointer", padding: 2}}>{Icons.close}</button>
-        </div>
-        <div className="tour-card-title mono">{step.title}</div>
-        <div className="tour-card-body">{step.body}</div>
-        <div className="tour-card-foot">
-          <div className="tour-dots">
-            {steps.map((_, i) => (
-              <span key={i} className={"tour-dot" + (i === idx ? " on" : "")} />
-            ))}
-          </div>
-          <div style={{display: "inline-flex", gap: 6}}>
-            <button className="btn ghost sm" onClick={onClose}>Skip</button>
-            {idx > 0 && <button className="btn ghost sm" onClick={() => setIdx(i => i - 1)}>← Back</button>}
-            <button
-              className="btn sm"
-              onClick={() => { if (last) onClose(); else setIdx(i => i + 1); }}
-            >{last ? "Finish" : "Next →"}</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const TOUR_STEPS = [
-  {
-    title: "Persona dropdown",
-    body: <span>Open the dropdown to swap which slot serves the next message. Changes are session-only by default.</span>,
-    selector: ".persona",
-  },
-  {
-    title: "Slot snapshot",
-    body: <span>The strip is your at-a-glance status for every configured slot. Click any row to jump straight into its edit drawer.</span>,
-    selector: ".snap",
-  },
-  {
-    title: "Attach + voice",
-    body: <span>Drop a file or hold the mic to send audio. OmniRouter routes the tool call to the right slot automatically — image goes to <span className="mono">img</span>, audio to <span className="mono">stt</span>, etc.</span>,
-    selector: ".composer-bar",
-  },
-  {
-    title: "Command palette",
-    body: <span>Press <kbd className="kbd">⌘K</kbd> anywhere to jump between routes, slots, and models — or run actions like "Restart a slot" without leaving the keyboard.</span>,
-    selector: ".tb-cmdk",
-  },
-];
-
-Object.assign(window, { AddSecretModal, OnboardingTour, TOUR_STEPS });
+Object.assign(window, { AddSecretModal });

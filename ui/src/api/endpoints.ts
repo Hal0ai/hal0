@@ -181,23 +181,12 @@ export const ENDPOINTS = {
   agentPersonaUpdate: (agentId: string, pid: string) =>
     `/api/agents/${encodeURIComponent(agentId)}/personas/${encodeURIComponent(pid)}`,
 
-  // ── MCP host introspection (issue #206) ──────────────────────────
-  // Read-only view of hosted MCP servers, connected clients, the
-  // installable catalog, and an SSE tail of mcp.tool.* events.
-  // Lifecycle mutations (install/uninstall/restart/config) stub 501
-  // pending ADR-0013 mcp_client.py work.
+  // ── MCP host introspection ───────────────────────────────────────
+  // Read-only list of hosted MCP servers (+ their tool_details), backing
+  // the MCP section of the Connections view and the sidebar status pip.
+  // The standalone MCP page (clients / catalog / install / SSE stream /
+  // lifecycle mutations) was removed, so only the server list remains.
   mcpServers: '/api/mcp/servers',
-  mcpClients: '/api/mcp/clients',
-  mcpCatalog: '/api/mcp/catalog',
-  mcpStream: '/api/mcp/stream',
-  mcpResolve: '/api/mcp/resolve',
-  mcpInstall: '/api/mcp/install',
-  mcpServer: (id: string) => `/api/mcp/${encodeURIComponent(id)}`,
-  mcpServerLogs: (id: string) => `/api/mcp/${encodeURIComponent(id)}/logs`,
-  mcpServerAction: (id: string, action: string) =>
-    `/api/mcp/${encodeURIComponent(id)}/${encodeURIComponent(action)}`,
-  mcpServerConfig: (id: string) =>
-    `/api/mcp/${encodeURIComponent(id)}/config`,
 
   // ── Memory (ADR-0014 graph-extraction gate) ──────────────────────
   memoryGraphStatus: '/api/memory/graph/status',
@@ -239,18 +228,6 @@ export const ENDPOINTS = {
   // request host, so links work on any install (localhost / LAN IP /
   // hal0.local / custom domain) without hardcoding. See routes/config.py.
   configUrls: '/api/config/urls',
-
-  // ── Connections (issue #549) — providers + upstreams + reachability test
-  // ``/api/providers`` is the alias of ``/api/upstreams`` filtered to remote
-  // (kind != "slot"); ``/api/upstreams`` returns every routing target. The
-  // POST /test probe is what the dashboard's per-upstream Test button calls.
-  providers: '/api/providers',
-  providersCatalog: '/api/providers/catalog',
-  upstreams: '/api/upstreams',
-  upstream: (name: string) =>
-    `/api/upstreams/${encodeURIComponent(name)}`,
-  upstreamTest: (name: string) =>
-    `/api/upstreams/${encodeURIComponent(name)}/test`,
 
   // ── Profiles (container slot templates) ─────────────────────────
   profiles: '/api/profiles',

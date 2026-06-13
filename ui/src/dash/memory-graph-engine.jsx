@@ -37,11 +37,6 @@ const MEM_LINK_LABEL = {
   cooccurrence: 'mentioned together',
 };
 const MEM_FACT_COLORS = { world: 'var(--info)', experience: 'var(--accent)', observation: '#6fcf97' };
-const MEM_FACT_DESC = {
-  world: 'stable fact / config',
-  experience: 'episodic — something that happened',
-  observation: 'a noticed pattern',
-};
 // Okabe–Ito colourblind-safe palette for derived topic clusters + entity kinds.
 const MG_PALETTE = ['#5B9BD5', '#E69F00', '#009E73', '#CC79A7', '#F0E442', '#D55E00', '#56B4E9', '#B39DDB'];
 // Static topic fallback (used only if a derived topic id collides with one of
@@ -501,7 +496,7 @@ function NodeDetail({ node, graph, onClose, onFocus, onPathFrom, source }) {
 }
 
 Object.assign(window, {
-  MEM_LINK_COLORS, MEM_LINK_LABEL, MEM_FACT_COLORS, MEM_FACT_DESC, TOPICS, MG_PALETTE,
+  MEM_LINK_COLORS, MEM_LINK_LABEL, MEM_FACT_COLORS, TOPICS, MG_PALETTE,
   fmtMemDate, normalizeGraph, reducedMotion,
   neighborsOf, degreeByType, shortestPath, pathEdges, edgeArc,
   useForce, usePanZoom, makeNodeDrag, useTween, useSize,
