@@ -23,7 +23,19 @@ const BASE_SLOTS = [
     group: 'chat', state: 'serving', port: 8092, isDefault: true,
     metrics: { ctx: 8192, toks: 42, ttft: 180, kv: 35 },
   },
+  // Chat/LLM slots render in the InferencePane now; the swap/restart/unload
+  // card interactions target a capability slot (the Capabilities SlotCard grid).
+  {
+    name: 'embed', type: 'embedding', device: 'gpu-rocm',
+    model: 'nomic-embed', model_id: 'nomic-embed',
+    group: 'embed', state: 'serving', port: 8082, runtime: 'container',
+    container_status: 'running', container_health: true, metrics: {},
+  },
 ]
+
+// Exact-name card locator (avoids matching model text that contains the name).
+const cardByName = (page: any, name: string) =>
+  page.locator('.slot', { has: page.locator('.slot-name .nm', { hasText: new RegExp(`^${name}$`) }) }).first()
 
 test.describe('Slots v3 wire-up (/slots)', () => {
   test('Create slot — modal POSTs /api/slots with form body', async ({ page }) => {
@@ -125,7 +137,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
 
   test('Swap model — inline popover POSTs /api/slots/{name}/swap', async ({ page }) => {
     const swaps: any[] = []
-    await page.route('**/api/slots/primary/swap', async (route) => {
+    await page.route('**/api/slots/embed/swap', async (route) => {
       swaps.push(JSON.parse(route.request().postData() || '{}'))
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
@@ -138,7 +150,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots')
-    const card = page.locator('.slot', { hasText: 'primary' }).first()
+    const card = cardByName(page, 'embed')
     await card.locator('.slot-model').click()
     const pick = page.locator('.swap-pop-item').first()
     await expect(pick).toBeVisible()
@@ -149,7 +161,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
 
   test('Restart slot — card button POSTs /api/slots/{name}/restart', async ({ page }) => {
     const restarts: string[] = []
-    await page.route('**/api/slots/primary/restart', async (route) => {
+    await page.route('**/api/slots/embed/restart', async (route) => {
       restarts.push(route.request().url())
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
@@ -162,14 +174,14 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots')
-    const card = page.locator('.slot', { hasText: 'primary' }).first()
+    const card = cardByName(page, 'embed')
     await card.locator('button:has-text("Restart")').click()
     await expect.poll(() => restarts.length).toBeGreaterThan(0)
   })
 
   test('Unload slot — card button POSTs /api/slots/{name}/unload', async ({ page }) => {
     const unloads: string[] = []
-    await page.route('**/api/slots/primary/unload', async (route) => {
+    await page.route('**/api/slots/embed/unload', async (route) => {
       unloads.push(route.request().url())
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
@@ -182,7 +194,7 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots')
-    const card = page.locator('.slot', { hasText: 'primary' }).first()
+    const card = cardByName(page, 'embed')
     await card.locator('button:has-text("Stop")').click()
     await expect.poll(() => unloads.length).toBeGreaterThan(0)
   })

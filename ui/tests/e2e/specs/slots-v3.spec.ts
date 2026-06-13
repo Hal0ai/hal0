@@ -35,17 +35,34 @@ test.describe('Slots v3 (/slots)', () => {
   })
 
   test('enabled-first sort (C6): a disabled slot sinks to the end of its section', async ({ page }) => {
+    // The Chat SlotCard grid was removed (chat/LLM slots now live in the
+    // InferencePane). The enabled-first sort still runs via renderGroup for the
+    // Capabilities section, so assert it there. Inject capability slots with a
+    // disabled one mid-order; the sort must render it last.
+    await page.addInitScript((slots) => {
+      let real: any
+      Object.defineProperty(window, 'HAL0_DATA', {
+        configurable: true,
+        get() { return real },
+        set(v) { real = v; if (v && typeof v === 'object') v.slots = slots },
+      })
+    }, [
+      { name: 'embed', type: 'embedding', device: 'gpu-rocm', group: 'embed', state: 'ready', enabled: true, runtime: 'container', port: 8082 },
+      { name: 'legacy-cap', type: 'reranking', device: 'gpu-rocm', group: 'embed', state: 'idle', enabled: false, runtime: 'container', port: 8083 },
+      { name: 'rerank', type: 'reranking', device: 'gpu-rocm', group: 'embed', state: 'ready', enabled: true, runtime: 'container', port: 8084 },
+    ])
     await page.goto('/#slots')
-    // The Chat section: HAL0_DATA declares a disabled "legacy" slot early in
-    // source order; the enabled-first sort must render it last.
-    const chatSection = page.locator('.view section', {
-      has: page.locator('.sec h2', { hasText: 'Chat' }),
+    const capSection = page.locator('.view section', {
+      has: page.locator('.sec h2', { hasText: 'Capabilities' }),
     })
-    const names = await chatSection.locator('.slot .slot-name .nm').allInnerTexts()
+    // Wait for all three cards to render before reading order (allInnerTexts
+    // does not auto-wait, so assert the count first to avoid a render race).
+    await expect(capSection.locator('.slot .slot-name .nm')).toHaveCount(3)
+    const names = await capSection.locator('.slot .slot-name .nm').allInnerTexts()
     expect(names.length).toBeGreaterThan(1)
-    expect(names).toContain('legacy')
-    expect(names[names.length - 1]).toBe('legacy') // disabled → last
-    expect(names[0]).not.toBe('legacy') // enabled slots come first
+    expect(names).toContain('legacy-cap')
+    expect(names[names.length - 1]).toBe('legacy-cap') // disabled → last
+    expect(names[0]).not.toBe('legacy-cap') // enabled slots come first
   })
 
   test('NPU rollup section renders when an NPU slot is present', async ({ page }) => {

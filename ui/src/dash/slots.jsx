@@ -1271,8 +1271,11 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
                   to the full slot list with per-slot lifecycle controls + a
                   model picker + a by-device throughput split. The per-group
                   SlotCard grids below stay the authoritative per-slot surface. */}
+              {/* Chat/LLM (gpu) slots are rendered inside the InferencePane's
+                  expanded slot list (model picker + per-slot lifecycle), so the
+                  former standalone "Chat" SlotCard grid is dropped — it only
+                  duplicated agent/chat below the pane. */}
               <InferencePane />
-              {renderGroup("Chat", groups.chat)}
               {/* Capabilities (C7): embedding/reranking/transcription/tts cards are
                   content-light, so they render in a denser 4-up quarter-width grid
                   instead of two separate full-width Embed/Voice sections. NPU

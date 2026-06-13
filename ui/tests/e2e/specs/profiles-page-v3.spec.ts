@@ -150,7 +150,15 @@ test.describe('Container slot edit drawer (#658)', () => {
         },
         configurable: true,
       })
-    }, [CONTAINER_SLOT, BASIC_CONTAINER_SLOT])
+      // gpu-chat / chat are LLM slots — they render in the InferencePane now.
+      // Add a capability container slot so the card-open test has a `.slot` card
+      // (the Capabilities SlotCard grid) to click.
+    }, [CONTAINER_SLOT, BASIC_CONTAINER_SLOT, {
+      name: 'embed-cap', type: 'embedding', device: 'gpu-rocm',
+      model: 'nomic-embed', model_id: 'nomic-embed', group: 'embed',
+      state: 'ready', port: 8082, runtime: 'container', profile: 'vulkan',
+      container_status: 'running', container_health: true, enabled: true,
+    }])
 
     await page.route('**/api/profiles', (route) =>
       json(route, MOCK_DATA.profiles),
@@ -161,15 +169,14 @@ test.describe('Container slot edit drawer (#658)', () => {
   })
 
   test('container slot card opens edit drawer', async ({ page }) => {
-    // Click the settings/edit button on the container slot card
-    const card = page.locator('.slot', { has: page.locator('[data-slot-name="gpu-chat"]') })
-      .or(page.locator('.slot').filter({ hasText: 'gpu-chat' }))
-    // If no data-slot-name, find the card by text and click settings gear
-    await page.locator('.slot').filter({ hasText: 'gpu-chat' }).locator('.slot-settings, .btn-icon, button').first().click()
-    // Drawer should open
-    await expect(page.locator('.drawer, [data-testid="slot-drawer"]').or(page.locator('.slot-drawer'))).toBeVisible({ timeout: 5000 }).catch(() => {
-      // Drawer may render differently — verify any modal/overlay opened
-    })
+    // The capability container card's Edit button routes to #slots/<name>,
+    // which opens the EditSlotDrawer.
+    const card = page.locator('.slot', {
+      has: page.locator('.slot-name .nm', { hasText: /^embed-cap$/ }),
+    }).first()
+    await expect(card).toBeVisible()
+    await card.locator('button:has-text("Edit")').click()
+    await expect(page.locator('.drawer')).toBeVisible({ timeout: 5000 })
   })
 
   test('container slot shows "defined by profile" hint for n_gpu_layers', async ({ page }) => {

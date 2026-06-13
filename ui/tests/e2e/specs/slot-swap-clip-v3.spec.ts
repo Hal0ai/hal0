@@ -15,8 +15,10 @@ const cardByName = (page: Page, name: string) =>
 
 test.describe('Slot swap dropdown — not clipped by card', () => {
   test('card stops clipping (overflow-y visible) while the swap dropdown is open', async ({ page }) => {
+    // Chat/LLM slots moved into the InferencePane; the overflow-clip behaviour
+    // is a `.slot` SlotCard concern, exercised on a Capabilities card (embed).
     await page.goto('/#slots')
-    const card = cardByName(page, 'primary')
+    const card = cardByName(page, 'embed')
 
     // Closed: card clips its content (rounded-corner aesthetic).
     expect(await card.evaluate((el) => getComputedStyle(el).overflowY)).toBe('hidden')

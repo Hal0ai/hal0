@@ -25,13 +25,6 @@ const PRIMARY = {
   enabled: true, enable_thinking: false, n_gpu_layers: -1,
   metrics: { ctx: 8192, toks: 42, ttft: 180, kv: 35 },
 }
-const CODER = {
-  name: 'coder', type: 'llm', device: 'gpu-rocm',
-  model: 'qwen3-coder-30b', model_id: 'qwen3-coder-30b', modelLong: 'qwen3-coder-30b',
-  group: 'chat', state: 'idle', port: 8094,
-  enabled: false, enable_thinking: null, n_gpu_layers: 20,
-  metrics: { ctx: 4096 },
-}
 const EMBED = {
   name: 'embed', type: 'embedding', device: 'gpu-rocm',
   model: 'nomic-embed', model_id: 'nomic-embed', modelLong: 'nomic-embed',
@@ -68,18 +61,20 @@ const card = (page: Page, name: string) =>
     .first()
 
 test.describe('Slot edit controls (/slots)', () => {
+  // Chat/LLM slots moved into the InferencePane; the enabled toggle + fade are
+  // SlotCard-grid features, now exercised on the Capabilities grid (embed/rerank).
   test('C3 — card enabled toggle PUTs /config { enabled:false }', async ({ page }) => {
     const puts: any[] = []
-    await page.route('**/api/slots/primary/config', async (route) => {
+    await page.route('**/api/slots/embed/config', async (route) => {
       if (route.request().method() === 'PUT') {
         puts.push(JSON.parse(route.request().postData() || '{}'))
       }
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-    await seedSlots(page, [PRIMARY, EMBED])
+    await seedSlots(page, [EMBED, PRIMARY])
 
     await page.goto('/#slots')
-    const toggle = card(page, 'primary').locator('.slot-enable-toggle')
+    const toggle = card(page, 'embed').locator('.slot-enable-toggle')
     await expect(toggle).toBeVisible()
     await toggle.click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
@@ -87,10 +82,14 @@ test.describe('Slot edit controls (/slots)', () => {
   })
 
   test('C3 — disabled slot card carries the fade modifier class', async ({ page }) => {
-    await seedSlots(page, [PRIMARY, CODER])
+    const RERANK_OFF = {
+      name: 'rerank-off', type: 'reranking', device: 'gpu-rocm',
+      group: 'embed', state: 'idle', enabled: false, runtime: 'container', port: 8096,
+    }
+    await seedSlots(page, [EMBED, RERANK_OFF])
     await page.goto('/#slots')
-    await expect(card(page, 'coder')).toHaveClass(/slot--disabled/)
-    await expect(card(page, 'primary')).not.toHaveClass(/slot--disabled/)
+    await expect(card(page, 'rerank-off')).toHaveClass(/slot--disabled/)
+    await expect(card(page, 'embed')).not.toHaveClass(/slot--disabled/)
   })
 
   test('C4 — drawer thinking toggle PUTs /config { enable_thinking:true }', async ({ page }) => {
@@ -151,13 +150,19 @@ test.describe('Slot edit controls (/slots)', () => {
   })
 
   test('C6 — enabled slots sort before disabled ones', async ({ page }) => {
-    // Disabled-first input order: only a real enabled-first sort makes
-    // primary (enabled) render ahead of coder (disabled).
-    await seedSlots(page, [CODER, PRIMARY, EMBED])
+    // Chat/LLM slots moved into the InferencePane; the standalone Chat grid was
+    // removed. The enabled-first sort still runs via renderGroup for the
+    // Capabilities grid. Disabled-first input order: only a real enabled-first
+    // sort makes the enabled embed render ahead of the disabled rerank.
+    const RERANK_OFF = {
+      name: 'rerank-off', type: 'reranking', device: 'gpu-rocm',
+      group: 'embed', state: 'idle', enabled: false, runtime: 'container', port: 8096,
+    }
+    await seedSlots(page, [RERANK_OFF, EMBED])
     await page.goto('/#slots')
-    const chatCards = page.locator('section', { hasText: 'Chat' }).locator('.slot')
-    await expect(chatCards.first()).toContainText('primary')
-    await expect(chatCards.nth(1)).toContainText('coder')
+    const capCards = page.locator('section', { hasText: 'Capabilities' }).locator('.slot')
+    await expect(capCards.first()).toContainText('embed')
+    await expect(capCards.nth(1)).toContainText('rerank-off')
   })
 
   // #587: the slot-edit drawer used to seed idle_timeout_s / workers /
