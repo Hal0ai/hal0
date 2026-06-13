@@ -21,6 +21,7 @@ import { MemoryMap } from './memory-map'
 import { ComfyuiPane } from './comfyui-pane.jsx'
 import { InferencePane } from './inference-pane.jsx'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
+import { prettyProfile } from './profile-names.js'
 
 const { useState: useStateS } = React;
 
@@ -244,6 +245,19 @@ function SlotCard({
         )}
       </div>
       <div className="slot-chips">
+        {/* Primary identity chip: the pretty profile name (ROCm / Vulkan /
+            ROCm-MTP / FLM / TTS / ComfyUI), coloured by the slot's GPU
+            backend (rocm/vulkan) and falling back to device_class
+            (npu/cpu/img) for non-GPU slots. Reuses the dev-* colour classes.
+            Replaces the redundant gpu-rocm device-tag string. */}
+        {slot.profile && (
+          <span
+            className={"chip dev-" + String((slot.backend || slot.device_class || "cpu")).replace("gpu-", "")}
+            title={`Profile: ${slot.profile}`}
+          >
+            {prettyProfile(slot.profile)}
+          </span>
+        )}
         <span className="chip">{type}</span>
         {/* N5: runtime micro-tag — model swap on a container slot is a
             cold restart, not a hot swap. */}
