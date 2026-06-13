@@ -48,7 +48,10 @@ import './dash/slots.jsx'
 import './dash/slot-modals.jsx'
 import './dash/models.jsx'
 import './dash/model-modals.jsx'
-// issue #549 — Connections surface: providers + upstreams list + per-row test.
+// Connections surface: local OpenAI endpoints + folded-in MCP servers
+// (connections-overhaul). The old standalone MCP page is removed; #mcp aliases
+// to this view.
+import './dash/connections.css'
 import './dash/connections.jsx'
 // issue #658 — Profiles: container-slot template catalog + iGPU intent labels.
 import './dash/profiles.jsx'
@@ -66,13 +69,6 @@ import './dash/extras.jsx'
 import './dash/agents/memory-tab-hook-bridge'
 import './dash/agents/memory-tab.jsx'
 import './dash/agents/agent-view.jsx'
-
-// v0.3 MCP additions — see `hal0 v3 mcp.html` for the original entry. We
-// pull them into the main SPA so `#mcp` (and the equivalent `#agents/mcp`)
-// renders the McpView inside the shared chrome rather than a separate page.
-import './dash/mcp-data.jsx'
-import './dash/mcp-modals.jsx'
-import './dash/mcp.jsx'
 
 // Hindsight Memory view (#memory) — bridge installs the TanStack-Query
 // hooks on window.__hal0Use* BEFORE memory.jsx evaluates.

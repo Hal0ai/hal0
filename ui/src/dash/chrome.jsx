@@ -13,7 +13,6 @@ import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useSidebarAgentRollup, useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useHardware } from '@/api/hooks/useHardware'
-import { useUpstreams } from '@/api/hooks/useConnections'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -159,12 +158,8 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
 function useNavItems() {
   const slotsQuery  = useSlots();
   const modelsQuery = useModels();
-  const upstreamsQuery = useUpstreams();
   const slotCount   = slotsQuery.data?.length  ?? 0;
   const modelCount  = modelsQuery.data?.length ?? 0;
-  // #549 — badge the Connections nav with the total upstream count so
-  // the operator can see "I have N routing targets" at a glance.
-  const upCount     = upstreamsQuery.data?.length ?? 0;
   // 0.4 gate: the Agent route is reduced to the Memory tab, so when the
   // memory subsystem is disabled (HAL0_MEMORY_ENABLED!=1) there is nothing
   // to show — drop the nav item entirely. Driven by /api/status so the UI
@@ -181,15 +176,11 @@ function useNavItems() {
     { id: "logs",      label: "Logs",      icon: Icons.logs },
     ...(memoryEnabled ? [{ id: "agent", label: "Agent", icon: Icons.agent }] : []),
     ...(memoryEnabled ? [{ id: "memory", label: "Memory", icon: Icons.memory }] : []),
-    // Issue #206 — MCP page wired to /api/mcp/*. Lives under "Agents"
-    // conceptually but kept as a sibling so the URL is discoverable.
-    { id: "mcp",       label: "MCP",       icon: Icons.agent },
     { id: "settings",  label: "Settings",  icon: Icons.settings },
-    // Issue #549 — Connections surface (read-only providers/upstreams rollup
-    // with per-row reachability test). Sits between Settings and the end so
-    // the operator-configure feel reads "settings, then look at your
-    // wiring".
-    { id: "connections", label: "Connections", icon: Icons.connections, cnt: upCount },
+    // Connections surface — local OpenAI endpoints + folded-in MCP servers
+    // (connections-overhaul). The MCP page was removed from the sidebar; its
+    // servers are now a section here. Badged with the local endpoint count.
+    { id: "connections", label: "Connections", icon: Icons.connections, cnt: slotCount },
   ];
 }
 

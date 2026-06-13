@@ -214,8 +214,10 @@ function App() {
         if (memoryStatusPending) return null;
         return <MemoryView param={param} />;
       case "profiles":  return <ProfilesView />;
-      case "mcp":      return <McpView />;
       case "settings": return <SettingsView />;
+      // MCP folded into Connections (connections-overhaul) — #mcp + #agents/mcp
+      // stay as aliases so old deep-links resolve to the new surface.
+      case "mcp":
       case "connections": return <ConnectionsView />;
       default:         return <div className="view">Not found.</div>;
     }

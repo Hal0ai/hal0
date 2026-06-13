@@ -32,7 +32,7 @@ test.describe('Mobile nav drawer (≤720px)', () => {
     await expect(page.locator('.nav-drawer-backdrop.open')).toBeVisible()
 
     // full nav — including the destinations the dead bottom tabs never reached
-    for (const label of ['Dashboard', 'Slots', 'Models', 'Logs', 'MCP', 'Settings']) {
+    for (const label of ['Dashboard', 'Slots', 'Models', 'Logs', 'Connections', 'Settings']) {
       await expect(drawer.locator('.sb-row .lbl', { hasText: label })).toBeVisible()
     }
     // command palette folded into the drawer on mobile

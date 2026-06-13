@@ -1,168 +1,166 @@
 /**
- * connections-v3 — `#connections` renders ConnectionsView.
+ * connections-v3 — `#connections` renders the overhauled ConnectionsView.
  *
- * Covers the P1 γ-suite gap: zero coverage of
- * ConnectionsView / useProviders / useUpstreams / useTestUpstream.
+ * The page is now two stacked "engine-block" panes (connections-overhaul):
+ *   1. Local endpoints — the OpenAI-compatible API, one row per slot, each
+ *      row expands to a cURL builder + a real health-check "Test" ping.
+ *   2. MCP servers — the bundled FastMCP servers folded in from the old MCP
+ *      page, each expandable with add-to-client config + a tool manifest
+ *      (name · args · gated / destructive / read-only badges).
  *
- * Three sections tested:
- *   1. View heading + count chip render from mocked provider+upstream data.
- *   2. Test button fires POST /api/upstreams/{name}/test via page.route and
- *      the success result (latency badge) renders inline.
- *   3. Test failure shows the error state inline.
- *
- * Scoping notes:
- *   MOCK_UPSTREAMS spreads MOCK_PROVIDERS, so openrouter appears in both
- *   the "Providers (remote)" card and the "All upstreams" card. Selectors
- *   for openrouter/openai-direct are scoped to the providers section to
- *   avoid Playwright strict-mode violations (2 matching elements).
+ * Data is wired to useSlots() (/api/slots) + useMcpServers() (/api/mcp/servers)
+ * + useConfigUrls() (/api/config/urls). The Test button fires a real request
+ * through the gateway; we stub /v1/chat/completions with an SSE body.
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
-// ── Mock data ────────────────────────────────────────────────────────
-
-const MOCK_PROVIDERS = [
+// ── Mock MCP servers (matches GET /api/mcp/servers shape) ─────────────
+const MOCK_MCP_SERVERS = [
   {
-    name: 'openrouter',
-    kind: 'remote',
-    url: 'https://openrouter.ai/api/v1',
-    auth_style: 'bearer',
-    auth_value_env: 'HAL0_OPENROUTER_KEY',
-    auth_configured: false,
-    timeout_seconds: 30,
-    models: [],
-    advertise_models: ['gpt-4o', 'claude-3-5-sonnet'],
+    id: 'hal0-admin',
+    name: 'hal0-admin',
+    bundled: true,
+    state: 'running',
+    transport: 'streamable-http',
+    connect_url: 'http://localhost/mcp/admin',
+    pid: null,
+    version: '0.4.0',
+    tools: 2,
+    tool_details: [
+      {
+        name: 'slot_list',
+        description: 'List every slot known to hal0 (local + remote).',
+        args: '—',
+        read_only: true,
+        destructive: false,
+        idempotent: true,
+        open_world: false,
+        gated: false,
+      },
+      {
+        name: 'slot_delete',
+        description: 'Delete a slot (gated).',
+        args: 'args?: object',
+        read_only: false,
+        destructive: true,
+        idempotent: true,
+        open_world: false,
+        gated: true,
+      },
+    ],
+    resources: 0,
+    prompts: 0,
+    activity: { rpm: 0 },
+    connected: ['claude-code'],
+    description: 'hal0 bundled admin MCP server.',
+    provider: 'hal0',
   },
   {
-    name: 'openai-direct',
-    kind: 'remote',
-    url: 'https://api.openai.com/v1',
-    auth_style: 'bearer',
-    auth_value_env: 'OPENAI_API_KEY',
-    auth_configured: true,
-    timeout_seconds: 30,
-    models: ['gpt-4o'],
-    advertise_models: ['gpt-4o'],
+    id: 'hal0-memory',
+    name: 'hal0-memory',
+    bundled: true,
+    state: 'running',
+    transport: 'streamable-http',
+    connect_url: 'http://localhost/mcp/memory',
+    pid: null,
+    version: '0.4.0',
+    tools: 1,
+    tool_details: [
+      {
+        name: 'memory_recall',
+        description: 'Retrieve the top-k memories for a query.',
+        args: 'args?: object',
+        read_only: true,
+        destructive: false,
+        idempotent: true,
+        open_world: false,
+        gated: false,
+      },
+    ],
+    resources: 0,
+    prompts: 0,
+    activity: { rpm: 0 },
+    connected: [],
+    description: 'hal0 bundled memory MCP server.',
+    provider: 'hal0',
   },
 ]
 
-const MOCK_UPSTREAMS = [
-  ...MOCK_PROVIDERS,
-  {
-    name: 'primary',
-    kind: 'slot',
-    url: 'http://127.0.0.1:8081',
-    auth_style: 'none',
-    auth_value_env: null,
-    auth_configured: true,
-    slot_name: 'primary',
-    timeout_seconds: 30,
-    models: [],
-    advertise_models: [],
-  },
-]
-
-// ── Tests ─────────────────────────────────────────────────────────────
+const CHAT_SSE =
+  'data: {"choices":[{"delta":{"content":"pong"}}]}\n\n' +
+  'data: {"choices":[{"delta":{}}],"usage":{"completion_tokens":1}}\n\n' +
+  'data: [DONE]\n\n'
 
 test.describe('Connections view (#connections)', () => {
   test.beforeEach(async ({ page }) => {
-    // Register mocks before navigation so page.route fires on first fetch.
-    await page.route('**/api/providers', (route) => json(route, MOCK_PROVIDERS))
-    await page.route('**/api/upstreams', (route) => json(route, MOCK_UPSTREAMS))
-    // Navigate + wait for BOTH API responses in parallel.
-    // waitForResponse must be set up before goto so it catches the first request.
-    // Timeout 15s covers cold-vite compilation + font CDN blocking.
+    await page.route('**/api/mcp/servers', (route) =>
+      json(route, { servers: MOCK_MCP_SERVERS, count: MOCK_MCP_SERVERS.length }),
+    )
     await Promise.all([
-      page.waitForResponse('**/api/providers', { timeout: 15_000 }),
-      page.waitForResponse('**/api/upstreams', { timeout: 15_000 }),
+      page.waitForResponse('**/api/mcp/servers', { timeout: 15_000 }),
       page.goto('/#connections', { waitUntil: 'domcontentloaded' }),
     ])
-    // Confirm rows are rendered (data is in React state).
-    await expect(page.locator('.cn-row').first()).toBeVisible({ timeout: 5_000 })
+    await expect(page.locator('.eprow').first()).toBeVisible({ timeout: 5_000 })
   })
 
-  test('renders Connections view heading', async ({ page }) => {
+  test('renders the Connections heading + two engine panes', async ({ page }) => {
     await expect(page.locator('.view .vh h1')).toHaveText('Connections')
+    await expect(page.locator('.cpane.live')).toBeVisible()
+    await expect(page.locator('.cpane-title', { hasText: 'Local endpoints' })).toBeVisible()
+    await expect(page.locator('.cpane-title', { hasText: 'MCP servers' })).toBeVisible()
   })
 
-  test('providers section shows remote provider rows', async ({ page }) => {
-    // Section card with "Providers (remote)" label
-    const section = page.locator('.card').filter({ hasText: 'Providers (remote)' })
-    await expect(section).toBeVisible()
-    // At least one cn-row for "openrouter"
-    await expect(section.locator('.cn-row').filter({ hasText: 'openrouter' })).toBeVisible()
-    await expect(section.locator('.cn-row').filter({ hasText: 'openai-direct' })).toBeVisible()
+  test('local endpoints list one row per slot', async ({ page }) => {
+    // The default mock state carries 11 slots.
+    await expect(page.locator('.eplist .eprow')).toHaveCount(11)
+    const primary = page.locator('.eprow').filter({ hasText: 'primary' }).first()
+    await expect(primary.locator('.ep-dot.serving')).toBeVisible()
+    await expect(primary.locator('.star')).toBeVisible() // default slot
   })
 
-  test('auth chip shows configured vs unconfigured', async ({ page }) => {
-    // Scope to providers section: openrouter also appears in "All upstreams"
-    // section (MOCK_UPSTREAMS spreads MOCK_PROVIDERS), so page-wide selectors
-    // would resolve to 2 elements → strict-mode violation.
-    const provSection = page.locator('.card').filter({ hasText: 'Providers (remote)' })
-    // openrouter has auth_configured: false → "chip warn"
-    await expect(
-      provSection.locator('.cn-row').filter({ hasText: 'openrouter' }).locator('.chip.warn'),
-    ).toBeVisible()
-    // openai-direct has auth_configured: true → "chip ok"
-    await expect(
-      provSection.locator('.cn-row').filter({ hasText: 'openai-direct' }).locator('.chip.ok'),
-    ).toBeVisible()
+  test('expanding an endpoint row reveals the gateway-targeted cURL', async ({ page }) => {
+    const primary = page.locator('.eprow').filter({ hasText: 'primary' }).first()
+    await primary.locator('.eprow-main').click()
+    const curl = primary.locator('.curl-code pre')
+    await expect(curl).toBeVisible()
+    // Targets /v1 on the gateway, model id selects the slot — NOT a slot port.
+    await expect(curl).toContainText('/v1/chat/completions')
+    await expect(curl).toContainText('qwen3.6-27b-mtp')
+    // No auth header — open on the LAN.
+    await expect(curl).not.toContainText('Authorization')
   })
 
-  test('upstreams section shows all rows (providers + slot)', async ({ page }) => {
-    // "All upstreams" section should have 3 rows (2 remote + 1 slot)
-    const section = page.locator('.card').filter({ hasText: 'All upstreams' })
-    await expect(section).toBeVisible()
-    await expect(section.locator('.cn-row')).toHaveCount(3)
-  })
-
-  test('slot upstream shows slot kind chip', async ({ page }) => {
-    const slotRow = page.locator('.cn-row').filter({ hasText: 'primary' })
-    await expect(slotRow.locator('.chip', { hasText: 'slot' })).toBeVisible()
-  })
-
-  test('test button fires POST /api/upstreams/{name}/test and shows latency', async ({ page }) => {
-    // Intercept the test probe before clicking
-    await page.route('**/api/upstreams/openrouter/test', (route) =>
-      json(route, { ok: true, latency_ms: 142, models_count: 2 }),
+  test('Test fires a real ping and renders the result metrics', async ({ page }) => {
+    await page.route('**/v1/chat/completions', (route) =>
+      route.fulfill({ status: 200, contentType: 'text/event-stream', body: CHAT_SSE }),
     )
-
-    // Scope to providers section to avoid strict-mode on the duplicate openrouter row.
-    const provSection = page.locator('.card').filter({ hasText: 'Providers (remote)' })
-    const openrouterRow = provSection.locator('.cn-row').filter({ hasText: 'openrouter' })
-    await openrouterRow.locator('button', { hasText: 'Test' }).click()
-
-    // Inline ok result with latency should appear
-    await expect(openrouterRow.locator('.cn-test-ok')).toBeVisible({ timeout: 5_000 })
-    await expect(openrouterRow.locator('.cn-test-ok')).toContainText('142 ms')
+    const primary = page.locator('.eprow').filter({ hasText: 'primary' }).first()
+    await primary.locator('.eprow-main').click()
+    await primary.locator('button', { hasText: 'Test endpoint' }).click()
+    const result = primary.locator('.ep-result')
+    await expect(result).toBeVisible({ timeout: 5_000 })
+    await expect(result.locator('.status')).toContainText('200 OK')
+    await expect(result.locator('.ep-metrics .m', { hasText: 'tok/s' })).toBeVisible()
   })
 
-  test('failed test shows error state inline', async ({ page }) => {
-    await page.route('**/api/upstreams/openrouter/test', (route) =>
-      json(route, { ok: false, error: 'connection refused', status: 503 }),
-    )
-
-    const provSection = page.locator('.card').filter({ hasText: 'Providers (remote)' })
-    const openrouterRow = provSection.locator('.cn-row').filter({ hasText: 'openrouter' })
-    await openrouterRow.locator('button', { hasText: 'Test' }).click()
-
-    await expect(openrouterRow.locator('.cn-test-err')).toBeVisible({ timeout: 5_000 })
-    await expect(openrouterRow.locator('.cn-test-err')).toContainText('connection refused')
+  test('MCP servers fold in as expandable rows with a tool manifest', async ({ page }) => {
+    const mcpPane = page.locator('.cpane').filter({ hasText: 'MCP servers' })
+    await expect(mcpPane.locator('.mcprow')).toHaveCount(2)
+    const admin = page.locator('.mcprow').filter({ hasText: 'hal0-admin' })
+    await expect(admin.locator('.path')).toContainText('/mcp/admin')
+    await admin.locator('.mcprow-main').click()
+    // Tool grid renders name + the gated / destructive blast-radius badges.
+    await expect(admin.locator('.mcp-tool').filter({ hasText: 'slot_list' })).toBeVisible()
+    const del = admin.locator('.mcp-tool').filter({ hasText: 'slot_delete' })
+    await expect(del.locator('.mt-badge.gated')).toBeVisible()
+    await expect(del.locator('.mt-badge.destructive')).toBeVisible()
   })
 
-  test('pending state shows testing indicator', async ({ page }) => {
-    // Delay the test response to observe the pending state
-    await page.route('**/api/upstreams/openrouter/test', async (route) => {
-      await new Promise((r) => setTimeout(r, 300))
-      return json(route, { ok: true, latency_ms: 88 })
-    })
-
-    const provSection = page.locator('.card').filter({ hasText: 'Providers (remote)' })
-    const openrouterRow = provSection.locator('.cn-row').filter({ hasText: 'openrouter' })
-    await openrouterRow.locator('button', { hasText: 'Test' }).click()
-
-    // Pending state appears briefly (TestCell shows cn-test-pending while pending=true)
-    await expect(openrouterRow.locator('.cn-test-pending')).toBeVisible({ timeout: 2_000 })
-    // Then resolves to ok
-    await expect(openrouterRow.locator('.cn-test-ok')).toBeVisible({ timeout: 5_000 })
+  test('MCP server exposes add-to-client config quick links', async ({ page }) => {
+    const admin = page.locator('.mcprow').filter({ hasText: 'hal0-admin' })
+    await admin.locator('.mcprow-main').click()
+    await expect(admin.locator('.clientchip', { hasText: 'Claude Desktop' })).toBeVisible()
+    await expect(admin.locator('.clientchip', { hasText: 'Codex' })).toBeVisible()
+    await expect(admin.locator('.clientchip', { hasText: 'Cursor' })).toBeVisible()
   })
 })

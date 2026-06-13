@@ -327,6 +327,81 @@ def _activity_rpm(events: list[dict[str, Any]], server_id: str) -> int:
     return n
 
 
+def _gated_tool_names() -> frozenset[str]:
+    """Names of tools the hal0-admin server gates behind owner approval.
+
+    Lazy-imported so a host without the ``mcp`` SDK (stubbed test envs that
+    never mount the FastMCP servers) still serves the route — gating just
+    reads as ``False`` for everything in that case. The set is the
+    authoritative approval policy from :mod:`hal0.mcp.admin`; the MCP
+    annotation hints (read-only / destructive) are advisory and live on
+    each tool object.
+    """
+    try:
+        from hal0.mcp.admin import GATED_TOOLS
+
+        return frozenset(GATED_TOOLS)
+    except Exception:  # pragma: no cover — SDK absent / import error
+        return frozenset()
+
+
+def _args_signature(input_schema: Any) -> str:
+    """Render a one-line ``name?: type, …`` signature from a JSON Schema.
+
+    Returns ``"—"`` when the tool takes no structured properties (the
+    dashboard renders that as "no args"). ``?`` marks optional params.
+    """
+    if not isinstance(input_schema, dict):
+        return "—"
+    props = input_schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return "—"
+    required = set(input_schema.get("required") or [])
+    parts: list[str] = []
+    for key, spec in props.items():
+        typ = spec.get("type", "any") if isinstance(spec, dict) else "any"
+        opt = "" if key in required else "?"
+        parts.append(f"{key}{opt}: {typ}")
+    return ", ".join(parts)
+
+
+def _annotation_hint(annotations: Any, attr: str) -> bool | None:
+    """Read one camelCase hint off a ToolAnnotations model or dict.
+
+    Returns ``None`` when the server declares no annotations for the tool
+    (the dashboard then shows no behavioural badge rather than guessing).
+    """
+    if annotations is None:
+        return None
+    value = getattr(annotations, attr, None)
+    if value is None and isinstance(annotations, dict):
+        value = annotations.get(attr)
+    return value
+
+
+def _tool_detail(tool: Any, gated_names: frozenset[str]) -> dict[str, Any]:
+    """Project one ``mcp.types.Tool`` into the dashboard's tool-detail shape.
+
+    Surfaces what an operator needs to reason about *before* wiring the
+    server into an agent: the tool name + description (the contract), an
+    args signature, the MCP behavioural hints, and the hal0 ``gated`` flag
+    (does invoking it land in the owner-approval queue) — i.e. the
+    blast radius, not just a count.
+    """
+    name = getattr(tool, "name", None)
+    annotations = getattr(tool, "annotations", None)
+    return {
+        "name": name,
+        "description": getattr(tool, "description", "") or "",
+        "args": _args_signature(getattr(tool, "inputSchema", None)),
+        "read_only": _annotation_hint(annotations, "readOnlyHint"),
+        "destructive": _annotation_hint(annotations, "destructiveHint"),
+        "idempotent": _annotation_hint(annotations, "idempotentHint"),
+        "open_world": _annotation_hint(annotations, "openWorldHint"),
+        "gated": bool(name and name in gated_names),
+    }
+
+
 def _connect_url(request: Request, mount: str) -> str:
     """Build the connect URL the dashboard renders next to each server.
 
@@ -352,6 +427,7 @@ async def list_servers(request: Request) -> dict[str, Any]:
     """
     servers_state: dict[str, Any] = getattr(request.app.state, "mcp_servers", {}) or {}
     audit = await _read_audit_events(limit=500)
+    gated_names = _gated_tool_names()
 
     items: list[dict[str, Any]] = []
     # ── Bundled servers (live FastMCP introspection) ─────────────────────────
@@ -359,9 +435,11 @@ async def list_servers(request: Request) -> dict[str, Any]:
         # SDK contract: ``list_tools/resources/prompts`` are async on
         # FastMCP. Wrap each in a try-block so a misbehaving server
         # doesn't fail the whole list — we surface ``-1`` instead.
+        tool_details: list[dict[str, Any]] = []
         try:
             tools = await server.list_tools()
             tools_count = len(tools)
+            tool_details = [_tool_detail(t, gated_names) for t in tools]
         except Exception:
             tools_count = -1
         try:
@@ -398,6 +476,7 @@ async def list_servers(request: Request) -> dict[str, Any]:
                 "pid": None,
                 "version": __version__,
                 "tools": tools_count,
+                "tool_details": tool_details,
                 "resources": resources_count,
                 "prompts": prompts_count,
                 "activity": {"rpm": _activity_rpm(audit, sid)},
@@ -445,6 +524,9 @@ async def list_servers(request: Request) -> dict[str, Any]:
                 "pid": None,
                 "version": "0.0.0",
                 "tools": record.tools,
+                # No live FastMCP instance to introspect (registry-only until
+                # the supervisor lands) — only the count is known.
+                "tool_details": [],
                 "resources": record.resources,
                 "prompts": record.prompts,
                 "activity": {"rpm": _activity_rpm(audit, record.id)},

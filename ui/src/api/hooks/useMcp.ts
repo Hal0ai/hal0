@@ -26,6 +26,25 @@ export interface McpServerActivity {
   rpm: number
 }
 
+// Per-tool detail surfaced by GET /api/mcp/servers (connections-overhaul).
+// The Connections page renders this as a capability / blast-radius manifest:
+// what an agent wired to this server could actually do. `gated` is the hal0
+// approval policy (does invoking it land in the owner-approval queue); the
+// read_only / destructive / idempotent / open_world hints are the advisory
+// MCP annotations declared by the server. Hints are null when the server
+// declares none for that tool.
+export interface McpTool {
+  name: string
+  description: string
+  /** One-line `name?: type, …` signature, or "—" when the tool takes no args. */
+  args: string
+  read_only: boolean | null
+  destructive: boolean | null
+  idempotent: boolean | null
+  open_world: boolean | null
+  gated: boolean
+}
+
 export interface McpServer {
   id: string
   name: string
@@ -36,6 +55,8 @@ export interface McpServer {
   pid: number | null
   version: string
   tools: number
+  /** Live per-tool detail for bundled servers; [] for registry-only installs. */
+  tool_details?: McpTool[]
   resources: number
   prompts: number
   activity: McpServerActivity

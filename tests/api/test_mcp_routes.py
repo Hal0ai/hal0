@@ -30,8 +30,47 @@ from hal0.api.middleware import error_codes
 from hal0.api.routes import mcp as mcp_routes
 
 
+class _FakeAnn:
+    """Stand-in for ``mcp.types.ToolAnnotations`` (camelCase hint attrs)."""
+
+    def __init__(
+        self,
+        *,
+        readOnlyHint: bool | None = None,
+        destructiveHint: bool | None = None,
+        idempotentHint: bool | None = None,
+        openWorldHint: bool | None = None,
+    ) -> None:
+        self.readOnlyHint = readOnlyHint
+        self.destructiveHint = destructiveHint
+        self.idempotentHint = idempotentHint
+        self.openWorldHint = openWorldHint
+
+
+class _FakeTool:
+    """Stand-in for an ``mcp.types.Tool`` returned by ``list_tools()``."""
+
+    def __init__(
+        self,
+        name: str,
+        description: str = "",
+        input_schema: dict[str, Any] | None = None,
+        annotations: _FakeAnn | None = None,
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.inputSchema = input_schema or {}
+        self.annotations = annotations
+
+
 class _FakeMcpServer:
-    """Minimal FastMCP stand-in — list_tools/resources/prompts return lists."""
+    """Minimal FastMCP stand-in — list_tools/resources/prompts return lists.
+
+    Pass ``tool_objs`` to return tool-shaped objects (name/description/
+    inputSchema/annotations) so the tool-detail introspection path can be
+    exercised; otherwise ``tools`` bare ``object()`` placeholders keep the
+    count-only tests untouched.
+    """
 
     def __init__(
         self,
@@ -39,8 +78,9 @@ class _FakeMcpServer:
         tools: int = 3,
         resources: int = 1,
         prompts: int = 0,
+        tool_objs: list[_FakeTool] | None = None,
     ) -> None:
-        self._tools = [object()] * tools
+        self._tools = list(tool_objs) if tool_objs is not None else [object()] * tools
         self._resources = [object()] * resources
         self._prompts = [object()] * prompts
 
@@ -117,6 +157,50 @@ def test_servers_empty_when_state_absent(tmp_hal0_home: str) -> None:
         response = client.get("/api/mcp/servers")
     assert response.status_code == 200
     assert response.json() == {"servers": [], "count": 0}
+
+
+def test_servers_surfaces_tool_details(tmp_hal0_home: str) -> None:
+    """Bundled servers carry a ``tool_details`` array — name + description +
+    args signature + MCP annotation hints + the hal0 gating flag — so the
+    Connections page can render the capability/blast-radius manifest, not
+    just a tool count. (Connections-overhaul.)"""
+    app = FastAPI()
+    error_codes.install(app)
+    app.include_router(mcp_routes.router, prefix="/api/mcp", tags=["mcp"])
+    app.state.mcp_servers = {
+        "hal0-admin": _FakeMcpServer(
+            tool_objs=[
+                _FakeTool(
+                    "slot_list",
+                    "List every slot known to hal0 (local + remote).",
+                    {"type": "object", "properties": {}},
+                    _FakeAnn(readOnlyHint=True, destructiveHint=False, idempotentHint=True),
+                ),
+                _FakeTool(
+                    "slot_delete",
+                    "Delete a slot (gated).",
+                    {"type": "object", "properties": {"args": {"type": "object"}}},
+                    _FakeAnn(readOnlyHint=False, destructiveHint=True),
+                ),
+            ],
+        ),
+    }
+    with TestClient(app) as client:
+        body = client.get("/api/mcp/servers").json()
+
+    admin = {s["id"]: s for s in body["servers"]}["hal0-admin"]
+    assert admin["tools"] == 2
+    td = {t["name"]: t for t in admin["tool_details"]}
+
+    assert "List every slot" in td["slot_list"]["description"]
+    assert td["slot_list"]["read_only"] is True
+    assert td["slot_list"]["destructive"] is False
+    # slot_list is not in hal0.mcp.admin.GATED_TOOLS → autonomous.
+    assert td["slot_list"]["gated"] is False
+
+    # slot_delete is gated (always-approval) and destructive.
+    assert td["slot_delete"]["gated"] is True
+    assert td["slot_delete"]["destructive"] is True
 
 
 def test_servers_surfaces_recent_rpm(

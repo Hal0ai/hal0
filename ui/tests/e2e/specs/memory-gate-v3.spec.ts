@@ -38,7 +38,7 @@ test.describe('memory gate OFF (HAL0_MEMORY_ENABLED unset)', () => {
     await expect(navList).toBeVisible({ timeout: FIVE_S })
     // Control: a sibling nav item is still present...
     await expect(navList.getByText('Models', { exact: true })).toBeVisible()
-    await expect(navList.getByText('MCP', { exact: true })).toBeVisible()
+    await expect(navList.getByText('Connections', { exact: true })).toBeVisible()
     // ...but the Agent (Memory) item is gone.
     await expect(navList.getByText('Agent', { exact: true })).toHaveCount(0)
   })

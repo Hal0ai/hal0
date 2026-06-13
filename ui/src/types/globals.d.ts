@@ -16,13 +16,6 @@ declare global {
     parseSizeGB: (s: string) => number
     slotsUsingModel: (id: string) => any[]
 
-    // dash/mcp-data.jsx
-    MCP_SERVERS: any[]
-    MCP_CLIENTS: any[]
-    MCP_CATALOG: any[]
-    MCP_CATEGORIES: any[]
-    MCP_HOST_BASE: string
-
     // dash/primitives.jsx, chrome.jsx, dashboard.jsx, slots.jsx, models.jsx, etc.
     [key: string]: any
   }
