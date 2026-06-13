@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 _TYPE_WEIGHT = {"causal": 4.0, "temporal": 3.0, "cooccurrence": 2.0, "semantic": 1.0}
 _TS_KEYS = ("t", "created_at", "timestamp", "updated_at")

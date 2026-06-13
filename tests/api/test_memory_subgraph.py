@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from hal0.api.routes import _memory_subgraph as sg
 from hal0.memory.hindsight_client import HindsightRestClient
-from tests.api.test_memory_admin_routes import (  # noqa: F401 — harness reuse
+from tests.api.test_memory_admin_routes import (
     _build_app,
     _HindsightStubProvider,
     _Recorder,
