@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from hal0.agents.hermes import HermesDriver
-from hal0.agents.manager import AgentError, HermesUpstreamMissingError
+from hal0.agents.manager import HermesUpstreamMissingError
 
 # ── Fake subprocess ──────────────────────────────────────────────────────────
 
@@ -63,12 +63,12 @@ class _FakeRunner:
 
 
 def _prober_ok() -> bool:
-    """Prober that reports upstream ``hermes`` on PATH."""
+    """Prober that reports Hermes provisioned in the managed venv."""
     return True
 
 
 def _prober_missing() -> bool:
-    """Prober that reports upstream ``hermes`` NOT on PATH."""
+    """Prober that reports Hermes NOT provisioned (no managed venv)."""
     return False
 
 
@@ -89,59 +89,67 @@ def driver(tmp_hal0_home: str) -> HermesDriver:
     return HermesDriver(prober=_prober_ok)
 
 
-# ── install: upstream-missing short-circuit ──────────────────────────────────
+# ── install: not-provisioned short-circuit ───────────────────────────────────
 
 
-def test_install_raises_when_upstream_hermes_missing(
+def test_install_raises_when_not_provisioned(
     tmp_hal0_home: str,
 ) -> None:
-    """If upstream ``hermes`` isn't on PATH, driver.install() raises
-    HermesUpstreamMissingError BEFORE invoking the installer script
-    (no point shipping a wrapper around a missing binary). Injected
+    """The API/dashboard install path is thin: it registers an
+    already-provisioned agent. If the managed venv isn't there yet it
+    raises HermesUpstreamMissingError WITHOUT shelling out — and never
+    tries to run the multi-minute provisioning over HTTP. Injected
     runner records calls — it should record zero."""
     runner = _FakeRunner()
     drv = HermesDriver(runner=runner, prober=_prober_missing)
 
-    with pytest.raises(HermesUpstreamMissingError, match="Upstream `hermes`"):
+    with pytest.raises(HermesUpstreamMissingError, match="not provisioned"):
         drv.install(bearer_token="hal0_tok_xyz")
 
-    assert runner.calls == [], "installer script must NOT shell out when upstream hermes is missing"
+    assert runner.calls == [], "install must NOT shell out when Hermes is not provisioned"
 
 
-def test_install_error_message_points_to_pipx_install(
+def test_install_error_message_points_to_cli_provision(
     tmp_hal0_home: str,
 ) -> None:
-    """Error message must give the operator an actionable install
-    command (pipx / pip). Avoids the 'Hermes is incompatible' vague
-    Slack thread."""
+    """Regression for the clean-install 409 loop: the old gate ran
+    ``shutil.which`` against the daemon PATH and told the operator to
+    ``pipx install`` — a location the daemon could never see, so the
+    advice looped forever. The new message must point at the foreground
+    CLI that actually provisions the managed venv, and name the venv
+    path so the operator knows what's missing."""
     drv = HermesDriver(runner=_FakeRunner(), prober=_prober_missing)
     with pytest.raises(HermesUpstreamMissingError) as exc:
         drv.install(bearer_token=None)
     msg = str(exc.value)
-    assert "pipx install hermes-agent" in msg or "pip install" in msg
     assert "hal0 agent install hermes" in msg
+    assert "/var/lib/hal0/venvs/hermes" in msg
+    # The dead-end remedy must be gone: never tell the operator that a
+    # bare ``pipx install hermes-agent`` is the fix.
+    assert "pipx install hermes-agent" not in msg
 
 
-# ── install: happy path ──────────────────────────────────────────────────────
+# ── install: happy path (thin register) ──────────────────────────────────────
 
 
-def test_install_shells_out_to_installer_script_when_wrapper_present(
+def test_install_writes_env_file_without_shelling_out_when_provisioned(
     driver: HermesDriver,
     tmp_hal0_home: str,
 ) -> None:
+    """When the managed venv is present, the API install path only
+    registers the agent (writes the env file). It must NOT shell out to
+    any installer script — provisioning is the CLI's job."""
     runner = _FakeRunner()
     driver._runner = runner  # type: ignore[assignment]
 
     driver.install(bearer_token="hal0_tok_xyz")
 
-    assert len(runner.calls) == 1
-    argv = runner.calls[0]["argv"]
-    assert argv[0] == "bash"
-    assert argv[1].endswith("/installer/agents/hermes-agent.sh")
-    env = runner.calls[0]["env"]
-    assert env["HAL0_BEARER_TOKEN"] == "hal0_tok_xyz"
-    assert env["HAL0_AGENT_DATA_DIR"].endswith("/agents/hermes")
-    assert env["HAL0_API_URL"].startswith("http")
+    assert runner.calls == [], "thin register must not shell out"
+    env_file = Path(tmp_hal0_home) / "etc" / "hal0" / "agents" / "hermes.env"
+    assert env_file.exists()
+    body = env_file.read_text(encoding="utf-8")
+    assert "HAL0_BEARER_TOKEN=hal0_tok_xyz" in body
+    assert "HAL0_API_URL=http" in body
 
 
 def test_install_writes_env_file_with_expected_keys(
@@ -176,18 +184,6 @@ def test_install_omits_bearer_when_no_token_passed(
     env_file = Path(tmp_hal0_home) / "etc" / "hal0" / "agents" / "hermes.env"
     body = env_file.read_text(encoding="utf-8")
     assert "HAL0_BEARER_TOKEN" not in body
-
-
-# ── install: subprocess failure surfaces as AgentError ───────────────────────
-
-
-def test_install_subprocess_failure_raises_agent_error(
-    driver: HermesDriver,
-    tmp_hal0_home: str,
-) -> None:
-    driver._runner = _FakeRunner(fail=True)  # type: ignore[assignment]
-    with pytest.raises(AgentError, match="hermes-agent install failed"):
-        driver.install(bearer_token="tok")
 
 
 # ── install: idempotency ─────────────────────────────────────────────────────

@@ -10,4 +10,8 @@
 # at which Hermes moves — operators don't get surprised by `hermes setup`
 # rewriting their config.yaml.
 
-hermes-agent==0.14.0
+# The `web` extra pulls fastapi + uvicorn[standard], which the hal0 agent
+# unit needs: it runs `hermes serve` in web/dashboard mode (HERMES_WEB_DIST
+# + HERMES_DASHBOARD_TUI in the unit drop-in). Without it the unit
+# crash-loops on `No module named 'fastapi'`.
+hermes-agent[web]==0.14.0

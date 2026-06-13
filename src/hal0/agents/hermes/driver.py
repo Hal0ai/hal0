@@ -8,19 +8,22 @@ sources ``/etc/hal0/agents/hermes.env`` and ``exec``s the upstream
 
 This driver's responsibilities:
 
-1. Probe whether the ``hal0-hermes`` wrapper is installed and
-   functional (``--hal0-ready`` sentinel returns 0).
-2. Shell out to ``installer/agents/hermes-agent.sh`` to install the
-   wrapper if the user invokes this path manually.
-3. Write the canonical env file at ``/etc/hal0/agents/hermes.env``
-   that the wrapper sources on every hermes invocation.
+1. Probe whether Hermes is provisioned in the hal0-managed venv
+   (``_probe_hermes_provisioned``) and whether the ``hal0-hermes``
+   wrapper is installed and functional (``--hal0-ready`` returns 0).
+2. On the API/dashboard install path, register an already-provisioned
+   agent by writing the canonical env file at
+   ``/etc/hal0/agents/hermes.env`` that the wrapper sources on every
+   hermes invocation. Provisioning itself (venv create + pip install
+   hermes-agent + ``/usr/local/bin/hermes`` shim) lives in the
+   bootstrap pipeline (:mod:`hal0.agents.hermes_provision`), run in
+   the foreground by ``hal0 agent install hermes``.
 
-The "hal0-awareness" probe shifted: previously it checked the upstream
-binary for a ``--hal0-config`` flag that was never going to ship.
-Now it checks that the hal0-owned wrapper is on PATH and answers the
-``--hal0-ready`` probe. The shell script
-``installer/agents/hermes-agent.sh`` mirrors this gate at the shell
-level so a curl|bash invocation also short-circuits cleanly.
+The pre-install gate shifted (see :func:`_probe_hermes_provisioned`):
+the old gate ran ``shutil.which("hermes")`` against the daemon's
+minimal PATH, which a ``pipx``/``pip --user`` install can never
+satisfy — so the recommended remedy looped forever. The gate now
+keys off the concrete managed-venv artifacts instead.
 """
 
 from __future__ import annotations
@@ -35,46 +38,54 @@ from typing import Any
 
 from hal0.agents.manager import (
     AgentDriver,
-    AgentError,
     HermesUpstreamMissingError,
 )
 from hal0.config import paths as _paths
 
-# Hermes's installer script lives at ``installer/agents/hermes-agent.sh``
-# (not ``hermes.sh``) — kept as-is to avoid breaking the curl|bash
-# invocation contract the dashboard uses. We resolve it ourselves
-# rather than via :func:`installer_script_path`, which assumes
-# ``{name}.sh``.
-_INSTALLER_SCRIPT_REL = "installer/agents/hermes-agent.sh"
+# NOTE: provisioning (venv create + pip install hermes-agent + wrapper
+# shim) moved wholesale into the bootstrap pipeline
+# (``hal0.agents.hermes_provision``), driven by the foreground CLI
+# ``hal0 agent install hermes`` (which first ensures the OS toolchain
+# via ``installer/agents/hermes-prereqs.sh``). This driver no longer
+# shells out to a per-agent installer script; on the API path it only
+# registers an already-provisioned agent (writes the env file).
 
 
-def _installer_script_path() -> Path:
-    # parents[0]=hermes, [1]=agents, [2]=hal0, [3]=src, [4]=repo root.
-    # Bumped by one when driver.py moved from src/hal0/agents/hermes.py
-    # to src/hal0/agents/hermes/driver.py to make room for the vendored
-    # plugin tree (memory_hindsight etc.).
-    repo_root = Path(__file__).resolve().parents[4]
-    return repo_root / _INSTALLER_SCRIPT_REL
-
-
-# The wrapper binary name. Installed by installer/agents/hermes-agent.sh
-# to /usr/local/bin (root) or ~/.local/bin (user). Sourcing the env
-# file + exec'ing upstream `hermes` is the whole job.
+# The wrapper binary name. Installed by the bootstrap pipeline's
+# install phase to /usr/local/bin. Sourcing the env file + exec'ing
+# the venv ``hermes`` is the whole job.
 _WRAPPER_BIN_NAME = "hal0-hermes"
 _WRAPPER_READY_FLAG = "--hal0-ready"
-_UPSTREAM_BIN_NAME = "hermes"
+
+# Managed-venv layout — keep in sync with
+# ``hal0.agents.hermes_provision`` (BootstrapState.venv default +
+# HERMES_CLI_INSTALL_PATH). Mirrored here as plain constants so the
+# probe stays cheap and doesn't import the heavy provisioning module
+# at driver-import time.
+_MANAGED_VENV = Path("/var/lib/hal0/venvs/hermes")
+_MANAGED_VENV_HERMES = _MANAGED_VENV / "bin" / "hermes"
+_HERMES_CLI_SHIM = Path("/usr/local/bin/hermes")
 
 
-def _probe_hermes_upstream() -> bool:
-    """Return True iff upstream ``hermes`` is on PATH.
+def _probe_hermes_provisioned() -> bool:
+    """Return True iff Hermes is provisioned in the hal0-managed venv.
 
-    This is the **pre-install** gate — the wrapper's whole job is to
-    source the env file and exec upstream ``hermes``, so installing
-    the wrapper without upstream Hermes is pointless. Mirrors the
-    `command -v hermes` check at the top of
-    ``installer/agents/hermes-agent.sh``.
+    This is the **pre-register** gate for the API/dashboard install
+    path. Upstream Hermes no longer lives wherever the operator's
+    interactive ``pipx``/``pip`` happened to drop it (a location a
+    systemd daemon's minimal PATH can't see, and the ``hal0`` agent
+    user can't read under 0700 ``/root``). Instead ``hal0 agent
+    install hermes`` provisions it into ``/var/lib/hal0/venvs/hermes``
+    (world-traversable, runnable by the ``hal0`` user) with a thin
+    ``/usr/local/bin/hermes`` shim on the system PATH.
+
+    We check the concrete artifacts the bootstrap install phase
+    writes — the venv interpreter's ``hermes`` entry point and the
+    canonical CLI shim — rather than ``shutil.which`` against the
+    daemon's incidental PATH (the bug that made the old gate
+    unsatisfiable for a pipx install).
     """
-    return shutil.which(_UPSTREAM_BIN_NAME) is not None
+    return _MANAGED_VENV_HERMES.exists() or _HERMES_CLI_SHIM.exists()
 
 
 def _probe_wrapper_installed() -> bool:
@@ -150,49 +161,33 @@ class HermesDriver(AgentDriver):
         # fake subprocess. ``prober`` lets tests force the upstream
         # pre-install gate without needing a real ``hermes`` on PATH.
         self._runner = runner if runner is not None else subprocess
-        self._prober = prober if prober is not None else _probe_hermes_upstream
+        self._prober = prober if prober is not None else _probe_hermes_provisioned
 
     # ── AgentDriver protocol ────────────────────────────────────────────
 
     def install(self, *, bearer_token: str | None = None) -> None:
-        # Pre-flight: upstream ``hermes`` must be on PATH. The wrapper
-        # we're about to install just sources the env file and execs
-        # upstream hermes — installing it without the binary is
-        # pointless. Mirror of `command -v hermes` in
-        # installer/agents/hermes-agent.sh.
+        # API/dashboard install is the THIN path: it registers an
+        # already-provisioned Hermes by writing the env file the
+        # wrapper sources. It does NOT provision — creating the venv +
+        # pip-installing hermes-agent is a multi-minute job that can't
+        # run inside a single HTTP request, so provisioning lives in
+        # the foreground CLI (`hal0 agent install hermes`, which runs
+        # the bootstrap pipeline). If the managed venv isn't there yet,
+        # point the operator at the CLI rather than looping forever on
+        # a pipx hint the daemon's minimal PATH can never satisfy.
         if not self._prober():
             raise HermesUpstreamMissingError(
-                "Upstream `hermes` binary not found on PATH. Install it "
-                "first: `pipx install hermes-agent` (recommended) or "
-                "`pip install --user hermes-agent`. Then retry "
-                "`hal0 agent install hermes`."
-            )
-
-        script = _installer_script_path()
-        if not script.is_file():
-            raise AgentError(
-                f"installer script missing at {script}. This hal0 install looks "
-                "packaged without the bundled-agent scripts — reinstall hal0 "
-                "from a release tarball or git clone."
+                "Hermes is not provisioned — the managed venv at "
+                f"{_MANAGED_VENV} does not exist. Run `hal0 agent install "
+                "hermes` on the host: it installs the python/venv/pipx "
+                "toolchain, creates the venv, and provisions Hermes into "
+                "it. (The hal0 daemon can't run the multi-minute "
+                "provisioning over HTTP, so the dashboard/API install only "
+                "registers an already-provisioned agent.)"
             )
 
         data_dir = self._data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
-
-        env = os.environ.copy()
-        env["HAL0_AGENT_DATA_DIR"] = str(data_dir)
-        env["HAL0_API_URL"] = os.environ.get("HAL0_API_URL", "http://127.0.0.1:8080")
-        if bearer_token:
-            env["HAL0_BEARER_TOKEN"] = bearer_token
-
-        try:
-            self._runner.run(  # type: ignore[attr-defined]
-                ["bash", str(script)],
-                env=env,
-                check=True,
-            )
-        except Exception as exc:
-            raise AgentError(f"hermes-agent install failed ({type(exc).__name__}: {exc}).") from exc
 
         # Write the env file the wrapper sources on every hermes
         # invocation. Single source of truth for the API URL + Bearer

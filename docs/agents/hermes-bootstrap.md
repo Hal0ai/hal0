@@ -163,7 +163,8 @@ Common patterns:
 
 | Symptom | Likely phase | First place to look |
 |---------|--------------|---------------------|
-| `upstream hermes not found on PATH` | `preflight` | `command -v hermes`; install upstream Hermes first (`pip install --user hermes-agent`). |
+| `Hermes is not provisioned` (API/dashboard install) | n/a | The dashboard/API only registers an already-provisioned agent. Run `hal0 agent install hermes` on the host — it installs the toolchain (python·venv·pip·pipx), creates the managed venv, and provisions Hermes into it. |
+| toolchain missing (`python3 -m venv` fails, no `pipx`) | prereqs | `hal0 agent install hermes` runs `installer/agents/hermes-prereqs.sh` automatically; to install by hand see `python_venv_hint` for your distro (Debian/Ubuntu need the separate `python3-venv` package). |
 | `Permission denied` on venv create | `install` | Re-run as the hal0 service user, or check `/var/lib/hal0/venvs/` perms. |
 | MCP round-trip 404 | `mcp_wire` | hal0 API up? `curl http://127.0.0.1:8080/api/status`. |
 | Identity card not visible to peers | `namespace_register` | See [issue #317](https://github.com/Hal0ai/hal0/issues/317) — `private:*` namespaces are currently flattened to `shared`; identity cards still write to `agents` and work. |

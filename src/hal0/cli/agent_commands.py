@@ -67,7 +67,19 @@ def agent_install(
         ),
     ),
 ) -> None:
-    """Install a bundled agent."""
+    """Install a bundled agent.
+
+    Hermes provisions into a hal0-managed venv (toolchain + venv create +
+    pip-install hermes-agent + wrapper shim). That multi-minute work can't
+    run inside a single HTTP request, so for hermes ``install`` runs the
+    bootstrap pipeline locally in the foreground (streaming progress) and
+    only consults the daemon at the end to honour ``--switch``. Other
+    agents keep the thin API-driven path.
+    """
+    if name == "hermes":
+        _install_hermes(switch=switch)
+        return
+
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
@@ -84,6 +96,136 @@ def agent_install(
             border_style="green",
         )
     )
+
+
+def _install_hermes(*, switch: bool) -> None:
+    """Foreground provision of Hermes into the hal0-managed venv.
+
+    Three steps, all local + foreground:
+
+    1. **Toolchain** — ``installer/agents/hermes-prereqs.sh`` ensures
+       python3 (>=3.11), python3-venv (the clean-Ubuntu trap), python3-pip
+       and pipx via the distro helper. Idempotent.
+    2. **Provision** — the bootstrap pipeline creates the venv,
+       pip-installs hermes-agent into it, installs the
+       ``/usr/local/bin/hermes`` shim, and writes the manager seed
+       (registers the agent).
+    3. **Switch** — best-effort daemon call so ``--switch`` still does the
+       atomic single-pick swap; provisioning already registered hermes, so
+       a daemon hiccup here doesn't un-provision it.
+    """
+    import subprocess as _subprocess
+
+    from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER, bootstrap_cli
+
+    prereqs = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes-prereqs.sh"
+    if prereqs.is_file():
+        console.print("[bold]Ensuring toolchain[/bold] (python · venv · pip · pipx)…")
+        rc = _subprocess.run(  # nosec B603 B607 — fixed argv, repo-anchored script
+            ["bash", str(prereqs)], check=False
+        ).returncode
+        if rc != 0:
+            die("toolchain prerequisites failed — see the output above.")
+            return
+    else:
+        console.print(
+            f"[yellow]prereq script missing at {prereqs}; assuming toolchain present.[/yellow]"
+        )
+
+    console.print("[bold]Provisioning Hermes[/bold] → /var/lib/hal0/venvs/hermes …")
+    rc = bootstrap_cli(repair=False, dry_run=False, skip_phases=(), verbose=False)
+    if rc != 0:
+        die(
+            "Hermes provisioning failed — inspect `hal0 agent status hermes` / `hal0 agent log hermes`."
+        )
+        return
+
+    # Bootstrap ran as the installing user (root on a system install) but the
+    # agent unit runs as `hal0` and must WRITE $HERMES_HOME at runtime — hand
+    # the provisioned trees to the agent user. No-op off-root / no such user.
+    _chown_hermes_trees_to_agent_user()
+
+    # Register + honour --switch via the daemon (venv now present → gate passes).
+    url = _api_base()
+    if not _api_unreachable(url):
+        try:
+            api_post("/api/agents/install", json={"name": "hermes", "switch": switch})
+        except CliApiError as exc:
+            console.print(f"[yellow]Provisioned, but daemon register/switch hint:[/yellow] {exc}")
+
+    # Bring the unit up so the agent actually runs (and survives reboot).
+    _enable_and_start_hermes_unit()
+
+    console.print(
+        Panel(
+            "[bold green]Installed[/bold green] hermes  "
+            "[dim](managed venv: /var/lib/hal0/venvs/hermes)[/dim]",
+            border_style="green",
+        )
+    )
+
+
+# The agent unit runs as this user (User= in installer/systemd/hal0-agent@.service).
+_AGENT_RUNTIME_USER = "hal0"
+# Trees the bootstrap creates as the installing user that the agent must own to
+# run: the venv (exec), HERMES_HOME (read+write at runtime), bootstrap state.
+_HERMES_AGENT_TREES = (
+    "/var/lib/hal0/venvs/hermes",
+    "/var/lib/hal0/.hermes",
+    "/var/lib/hal0/state/agents/hermes",
+)
+
+
+def _chown_hermes_trees_to_agent_user() -> None:
+    """Recursively chown the provisioned trees to the agent runtime user.
+
+    Only acts when we're root AND the agent user exists — off-root installs
+    (dev / `--dev`) already own everything, and a missing user means a
+    non-standard layout we shouldn't second-guess. Skipping is silent and safe.
+    """
+    import os as _os
+    import pwd as _pwd
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+
+    if _os.geteuid() != 0:
+        return
+    try:
+        _pwd.getpwnam(_AGENT_RUNTIME_USER)
+    except KeyError:
+        console.print(
+            f"[yellow]agent user '{_AGENT_RUNTIME_USER}' not found — skipping chown; "
+            "the agent unit may not be able to write $HERMES_HOME.[/yellow]"
+        )
+        return
+    for tree in _HERMES_AGENT_TREES:
+        if _Path(tree).exists():
+            _subprocess.run(  # nosec B603 B607 — fixed argv, known paths
+                ["chown", "-R", f"{_AGENT_RUNTIME_USER}:{_AGENT_RUNTIME_USER}", tree],
+                check=False,
+            )
+
+
+def _enable_and_start_hermes_unit() -> None:
+    """`systemctl enable --now hal0-agent@hermes` so the agent runs + persists.
+
+    No-op when systemd isn't present (containers / dev). A non-zero rc is
+    surfaced as a hint rather than failing the install — the agent is
+    provisioned either way and can be started manually.
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    if _shutil.which("systemctl") is None:
+        return
+    rc = _subprocess.run(  # nosec B603 B607 — fixed argv
+        ["systemctl", "enable", "--now", "hal0-agent@hermes"], check=False
+    ).returncode
+    if rc != 0:
+        console.print(
+            "[yellow]Hermes provisioned, but the agent unit didn't start cleanly — "
+            "check `systemctl status hal0-agent@hermes` / `hal0 agent log hermes`.[/yellow]"
+        )
 
 
 @app.command("uninstall")

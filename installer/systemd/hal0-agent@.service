@@ -76,6 +76,16 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 
+# Create the run + log dirs systemd-managed and owned by User= BEFORE the
+# sandbox namespace is built. Without these, `ReadWritePaths=… /run/hal0
+# /var/log/hal0` references non-existent paths and the unit dies with
+# `status=226/NAMESPACE` on a clean install (nothing else creates them).
+# RuntimeDirectoryPreserve keeps /run/hal0 across the agent's auto-restarts
+# and across hal0-api ↔ agent so the shared socket/lock dir is stable.
+RuntimeDirectory=hal0
+RuntimeDirectoryPreserve=yes
+LogsDirectory=hal0
+
 # Carve out the exact paths Hermes + hal0 need to write to under the
 # `ProtectSystem=strict` lockdown. /run/hal0 is for sockets, lock
 # files, and the agent's NOTIFY_SOCKET helpers.

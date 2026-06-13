@@ -213,7 +213,42 @@ WRAPPER_INSTALL_PATH = Path("/usr/local/bin/hal0-hermes")
 # /var/lib/hal0/.hermes for the hal0 user). ``hal0-hermes`` stays as a
 # back-compat symlink to this.
 HERMES_CLI_INSTALL_PATH = Path("/usr/local/bin/hermes")
-REPO_ROOT_FOR_INSTALLER = Path(__file__).resolve().parents[3]
+
+
+def _resolve_installer_root(*, module_file: Path | None = None, prefix: str | None = None) -> Path:
+    """Locate the tree that contains ``installer/agents`` for both layouts.
+
+    **Dev / editable:** the repo root is an ancestor of this module
+    (``…/src/hal0/agents/hermes_provision.py`` → repo root at
+    ``parents[3]``), and the top-level ``installer/`` lives there.
+
+    **Prod / non-editable FHS install:** ``install.sh`` pip-installs hal0
+    non-editable, so the hal0 package is a *copy* under the venv's
+    site-packages and ``parents[3]`` lands inside the venv
+    (``…/venv/lib/pythonX.Y``) — where the top-level ``installer/`` is
+    absent (it is NOT shipped in the wheel). The versioned source tree
+    that ``install.sh`` lays down sits next to the venv:
+    ``…/hal0/venv`` (``sys.prefix``) ↔ ``…/hal0/current/installer``.
+
+    We probe candidates in order and return the first that actually
+    holds ``installer/agents``; falling back to the editable heuristic so
+    a downstream "file missing" error names a concrete path rather than
+    crashing here. ``module_file`` / ``prefix`` are injectable for tests.
+    """
+    mod = (module_file or Path(__file__)).resolve()
+    pfx = Path(prefix if prefix is not None else sys.prefix)
+    candidates = [
+        mod.parents[3],  # editable repo root
+        pfx.parent / "current",  # FHS: …/hal0/current (symlink)
+        pfx.parent,  # FHS without the `current` symlink
+    ]
+    for cand in candidates:
+        if (cand / "installer" / "agents").is_dir():
+            return cand
+    return candidates[0]
+
+
+REPO_ROOT_FOR_INSTALLER = _resolve_installer_root()
 
 # ── Install artifacts (issue #432) ───────────────────────────────────────────
 #

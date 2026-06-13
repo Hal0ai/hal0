@@ -1763,3 +1763,37 @@ def test_install_phase_installs_both_wrappers(
     # Details record both entry points.
     assert out.details["hermes_cli"] == str(hermes_cli_dst)
     assert out.details["wrapper"] == str(wrapper_dst)
+
+
+# ── installer-root resolution (editable vs non-editable FHS install) ──────────
+
+
+def test_resolve_installer_root_prefers_editable_repo_root(tmp_path):
+    """When the package sits in a repo (parents[3] has installer/agents),
+    that repo root wins — preserves dev/editable behaviour."""
+    repo = tmp_path / "repo"
+    (repo / "installer" / "agents").mkdir(parents=True)
+    # …/repo/src/hal0/agents/hermes_provision.py → parents[3] == repo
+    mod = repo / "src" / "hal0" / "agents" / "hermes_provision.py"
+    mod.parent.mkdir(parents=True)
+    mod.write_text("# stub\n")
+
+    got = hp._resolve_installer_root(module_file=mod, prefix=str(tmp_path / "irrelevant"))
+    assert got == repo
+
+
+def test_resolve_installer_root_falls_back_to_fhs_current(tmp_path):
+    """Non-editable FHS install: the package copy lives under the venv
+    (parents[3] has no installer/), so the resolver finds the versioned
+    source tree next to the venv at …/hal0/current/installer."""
+    fhs = tmp_path / "usr" / "lib" / "hal0"
+    venv = fhs / "venv"
+    (venv).mkdir(parents=True)
+    (fhs / "current" / "installer" / "agents").mkdir(parents=True)
+    # site-packages copy: …/venv/lib/python3.12/site-packages/hal0/agents/<mod>
+    mod = venv / "lib" / "python3.12" / "site-packages" / "hal0" / "agents" / "hermes_provision.py"
+    mod.parent.mkdir(parents=True)
+    mod.write_text("# stub\n")
+
+    got = hp._resolve_installer_root(module_file=mod, prefix=str(venv))
+    assert got == fhs / "current"
