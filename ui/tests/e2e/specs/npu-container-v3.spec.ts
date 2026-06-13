@@ -68,13 +68,12 @@ test.describe('NPU container mode — NpuFlmStack (#Phase-A)', () => {
     const stack = page.locator('.npu-stack')
     await expect(stack).toBeVisible()
 
-    // ASR switch must be on (aria-checked="true")
-    const asrSwitch = stack.locator('.npu-trio .npu-mod').nth(1).locator('.npu-switch')
-    await expect(asrSwitch).toHaveAttribute('aria-checked', 'true')
-
-    // Embed switch must be off (aria-checked="false")
-    const embedSwitch = stack.locator('.npu-trio .npu-mod').nth(2).locator('.npu-switch')
-    await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
+    // The trio now renders as slot cards (SlotScard). A coresident modality's
+    // on/off maps to the card's Start/Stop control: ON → Stop shown, OFF →
+    // Start shown. Card order is chat (0) · asr (1) · embed (2).
+    const cards = stack.locator('.scards .scard')
+    await expect(cards.nth(1).locator('.sctrl.stop')).toHaveCount(1)  // asr ON
+    await expect(cards.nth(2).locator('.sctrl.start')).toHaveCount(1) // embed OFF
 
     // Footer echoes the TOML [npu] section state.
     await expect(stack.locator('.npu-stack-foot .npu-args')).toHaveText('npu = asr:on · embed:off')
@@ -122,12 +121,13 @@ test.describe('NPU container mode — NpuFlmStack (#Phase-A)', () => {
     // click needs the control un-clipped.
     await page.getByTestId('npu-qcaret').click()
 
-    // Confirm embed starts unchecked (state from slot.npu.embed=false)
-    const embedSwitch = stack.locator('.npu-trio .npu-mod').nth(2).locator('.npu-switch')
-    await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
+    // Confirm embed starts off (state from slot.npu.embed=false) — the card
+    // shows the Start control. Clicking it enables the modality.
+    const embedCard = stack.locator('.scards .scard').nth(2)
+    await expect(embedCard.locator('.sctrl.start')).toHaveCount(1)
 
-    // Click the embed toggle (currently off → toggling on)
-    await embedSwitch.click()
+    // Click the embed Start control (off → toggling on)
+    await embedCard.locator('.sctrl.start').click()
 
     // PUT /config must carry npu.embed: true
     await expect.poll(() => configPuts.length, { timeout: 5_000 }).toBeGreaterThan(0)
@@ -175,10 +175,10 @@ test.describe('NPU container mode — NpuFlmStack (#Phase-A)', () => {
     await expect(stack).toBeVisible()
 
     // No [npu] section → asr + embed both off (never inferred from flags).
-    const asrSwitch = stack.locator('.npu-trio .npu-mod').nth(1).locator('.npu-switch')
-    await expect(asrSwitch).toHaveAttribute('aria-checked', 'false')
-    const embedSwitch = stack.locator('.npu-trio .npu-mod').nth(2).locator('.npu-switch')
-    await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
+    // Both modality cards show the Start control (off state).
+    const cards = stack.locator('.scards .scard')
+    await expect(cards.nth(1).locator('.sctrl.start')).toHaveCount(1)
+    await expect(cards.nth(2).locator('.sctrl.start')).toHaveCount(1)
     await expect(stack.locator('.npu-stack-foot .npu-args')).toHaveText('npu = asr:off · embed:off')
   })
 })

@@ -150,15 +150,8 @@ test.describe('Container slot edit drawer (#658)', () => {
         },
         configurable: true,
       })
-      // gpu-chat / chat are LLM slots — they render in the InferencePane now.
-      // Add a capability container slot so the card-open test has a `.slot` card
-      // (the Capabilities SlotCard grid) to click.
-    }, [CONTAINER_SLOT, BASIC_CONTAINER_SLOT, {
-      name: 'embed-cap', type: 'embedding', device: 'gpu-rocm',
-      model: 'nomic-embed', model_id: 'nomic-embed', group: 'embed',
-      state: 'ready', port: 8082, runtime: 'container', profile: 'vulkan',
-      container_status: 'running', container_health: true, enabled: true,
-    }])
+      // gpu-chat / chat are LLM slots — they render in the InferencePane.
+    }, [CONTAINER_SLOT, BASIC_CONTAINER_SLOT])
 
     await page.route('**/api/profiles', (route) =>
       json(route, MOCK_DATA.profiles),
@@ -169,13 +162,15 @@ test.describe('Container slot edit drawer (#658)', () => {
   })
 
   test('container slot card opens edit drawer', async ({ page }) => {
-    // The capability container card's Edit button routes to #slots/<name>,
-    // which opens the EditSlotDrawer.
-    const card = page.locator('.slot', {
-      has: page.locator('.slot-name .nm', { hasText: /^embed-cap$/ }),
-    }).first()
+    // The InferencePane slot card's Edit control routes to #slots/<name>,
+    // which opens the EditSlotDrawer. Expand the pane to reveal full controls.
+    await page.getByTestId('infer-qcaret').click()
+    // The full card (with Logs/Edit controls) lives in the expanded engine body;
+    // the collapsed strip also shows a compact card for the same slot, so scope
+    // to the body to avoid matching both.
+    const card = page.locator('.infer-pane .engine-body [data-testid="infer-slot-gpu-chat"]')
     await expect(card).toBeVisible()
-    await card.locator('button:has-text("Edit")').click()
+    await card.locator('.sctrl[title="Edit"]').click()
     await expect(page.locator('.drawer')).toBeVisible({ timeout: 5000 })
   })
 

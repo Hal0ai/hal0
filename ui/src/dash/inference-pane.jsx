@@ -210,7 +210,9 @@ function MemGtt({ mm, full }) {
           <i className="free" style={{ width: Math.max(0, 100 - pct(usedGb)) + '%' }} />
         </div>
       </div>
-      {full && (
+      {/* Legend is always visible — the memory bar is meaningless without it,
+          even in the collapsed pane (was previously gated on `full`). */}
+      {(
         <div className="mem-legend">
           {segs.map((s) => (
             <div className="ln" key={s.key}>
@@ -310,7 +312,7 @@ function DevCell({ s, onProfile }) {
 
 // full cards get a real model picker (a styled <select> wired to useModels);
 // non-LLM slots keep their static model line.
-function ModelPicker({ s, models, disabled, onSwap }) {
+export function ModelPicker({ s, models, disabled, onSwap }) {
   if (s.type !== 'llm')
     return (
       <div className="smodel" title={s.model || ''}>
@@ -345,7 +347,7 @@ function ModelPicker({ s, models, disabled, onSwap }) {
 
 // per-slot controls — Start/Stop are mutually exclusive by running state;
 // compact (collapsed) cards get the minimal set (no Logs/Edit).
-function SlotControls({ phase, busy, compact, onStart, onStop, onRestart, onLogs, onEdit }) {
+export function SlotControls({ phase, busy, compact, onStart, onStop, onRestart, onLogs, onEdit }) {
   const running = phase !== 'off'
   return (
     <span className="slot-ctrls" onClick={(e) => e.stopPropagation()}>
@@ -387,7 +389,7 @@ function SlotControls({ phase, busy, compact, onStart, onStop, onRestart, onLogs
 
 // classify a slot into the lifecycle phase the controls key off (mirrors the
 // SlotCard logic so Start/Stop/Restart match the per-slot card).
-function slotCtrlPhase(slot) {
+export function slotCtrlPhase(slot) {
   if (slot.container_status != null) {
     const cs = String(slot.container_status)
     const health = !!slot.container_health
@@ -402,22 +404,84 @@ function slotCtrlPhase(slot) {
   return 'off'
 }
 
+// One slot card — the canonical "latest slot card" surface. Shared by the
+// InferencePane slot list and the NPU·FLM stack so the two never drift.
+//   modelNode — the model row (a <ModelPicker> for swappable LLM slots, or a
+//               static label for fixed-model roles like FLM ASR/embed).
+//   controls  — a <SlotControls> node (the caller wires the lifecycle verbs;
+//               for the NPU trio these map to stack-load / modality-toggle).
+//   phase     — overrides the lifecycle phase (NPU coresident roles derive it
+//               from their modality toggle, not the slot's own state).
+export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) {
+  const dot = dotCls(ind)
+  const ph = phase || slotCtrlPhase(s)
+  const memGb = typeof s.mem_mb === 'number' && s.mem_mb > 0 ? round1(s.mem_mb / 1024) : null
+  const tps = typeof s.metrics?.toks === 'number' && s.metrics.toks > 0 ? s.metrics.toks : null
+  const ttft = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
+  const spill = dot === 'serving' ? (tps ? `${tps} tok/s` : 'serving') : dot
+  return (
+    <div
+      className={'scard ' + dot + (ph === 'off' ? ' dim' : '')}
+      data-testid={`infer-slot-${s.name}`}
+    >
+      <div className="scard-h">
+        <span className={'sdot ' + dot} title={ind.tooltip} />
+        <span className="snm">{s.name}</span>
+        <span className={'spill ' + dot}>{spill}</span>
+      </div>
+      <div className="scard-b">
+        {modelNode}
+        {full && (
+          <div className="scard-meta">
+            <div className="m">
+              <div className="l">tok/s</div>
+              <div className={'v' + (tps ? ' acc' : ' muted')}>{tps || '—'}</div>
+            </div>
+            <div className="m">
+              <div className="l">ttft</div>
+              <div className={'v' + (ttft ? '' : ' muted')}>{ttft ? ttft + 'ms' : '—'}</div>
+            </div>
+            <div className="m">
+              <div className="l">ctx</div>
+              <div className={'v' + (s.ctx_max ? '' : ' muted')} style={{ fontSize: 12 }}>
+                {ctxText(s)}
+              </div>
+            </div>
+          </div>
+        )}
+        <div className={'scard-foot' + (full ? '' : ' bare')}>
+          <DevCell s={s} onProfile={onEdit} />
+          {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
+          <span className="grow" />
+          {controls}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SlotCards({ rows, full, models, busyName, handlers }) {
   if (!rows.length)
     return <div className="scards-empty">no active slots — expand to start one</div>
   return (
     <div className={'scards ' + (full ? 'full' : 'compact')}>
       {rows.map(({ s, ind }) => {
-        const phase = slotCtrlPhase(s)
-        const dot = dotCls(ind)
-        const memGb = typeof s.mem_mb === 'number' && s.mem_mb > 0 ? round1(s.mem_mb / 1024) : null
-        const tps = typeof s.metrics?.toks === 'number' && s.metrics.toks > 0 ? s.metrics.toks : null
-        const ttft = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
         const busy = busyName === s.name
-        const spill = dot === 'serving' ? (tps ? `${tps} tok/s` : 'serving') : dot
-        const ctrls = (
+        const modelNode = full ? (
+          <ModelPicker
+            s={s}
+            models={models}
+            disabled={busy}
+            onSwap={(id) => handlers.onSwap(s, id)}
+          />
+        ) : (
+          <div className="smodel" title={s.model || ''}>
+            {s.model || '—'}
+          </div>
+        )
+        const controls = (
           <SlotControls
-            phase={phase}
+            phase={slotCtrlPhase(s)}
             busy={busy}
             compact={!full}
             onStart={() => handlers.onStart(s)}
@@ -428,58 +492,15 @@ function SlotCards({ rows, full, models, busyName, handlers }) {
           />
         )
         return (
-          <div
-            className={'scard ' + dot + (phase === 'off' ? ' dim' : '')}
+          <SlotScard
             key={s.name}
-            data-testid={`infer-slot-${s.name}`}
-          >
-            <div className="scard-h">
-              <span className={'sdot ' + dot} title={ind.tooltip} />
-              <span className="snm">{s.name}</span>
-              <span className={'spill ' + dot}>{spill}</span>
-            </div>
-            <div className="scard-b">
-              {full ? (
-                <ModelPicker
-                  s={s}
-                  models={models}
-                  disabled={busy}
-                  onSwap={(id) => handlers.onSwap(s, id)}
-                />
-              ) : (
-                <div className="smodel" title={s.model || ''}>
-                  {s.model || '—'}
-                </div>
-              )}
-              {full && (
-                <div className="scard-meta">
-                  <div className="m">
-                    <div className="l">tok/s</div>
-                    <div className={'v' + (tps ? ' acc' : ' muted')}>{tps || '—'}</div>
-                  </div>
-                  <div className="m">
-                    <div className="l">ttft</div>
-                    <div className={'v' + (ttft ? '' : ' muted')}>{ttft ? ttft + 'ms' : '—'}</div>
-                  </div>
-                  <div className="m">
-                    <div className="l">ctx</div>
-                    <div
-                      className={'v' + (s.ctx_max ? '' : ' muted')}
-                      style={{ fontSize: 12 }}
-                    >
-                      {ctxText(s)}
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div className={'scard-foot' + (full ? '' : ' bare')}>
-                <DevCell s={s} onProfile={() => handlers.onEdit(s)} />
-                {full && memGb != null && <span className="tag-chip">{memGb} GB</span>}
-                <span className="grow" />
-                {ctrls}
-              </div>
-            </div>
-          </div>
+            s={s}
+            ind={ind}
+            full={full}
+            modelNode={modelNode}
+            controls={controls}
+            onEdit={() => handlers.onEdit(s)}
+          />
         )
       })}
     </div>

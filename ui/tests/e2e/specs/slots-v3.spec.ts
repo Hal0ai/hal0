@@ -1,68 +1,26 @@
 /**
- * slots-v3 — `#slots` route renders grouped sections (Chat / Capabilities /
- * Image / NPU rollup) + slot cards + the "New slot" CTA. The embedding,
- * reranking, transcription and tts slots are merged into one denser
- * "Capabilities" section rendered as a 4-up quarter-width grid (C7).
+ * slots-v3 — `#slots` route. The standalone Chat + Capabilities SlotCard grids
+ * were retired: the InferencePane is now the single per-slot surface for all
+ * iGPU/CPU inference slots, with the NPU·FLM stack in its own pane. (Per-slot
+ * lifecycle/swap coverage lives in inference-pane-v3.)
  */
 import { test, expect } from '../fixtures/apiMock'
 
 test.describe('Slots v3 (/slots)', () => {
-  test('renders grouped sections + slot cards', async ({ page }) => {
+  test('renders the Inference engine pane with slot cards', async ({ page }) => {
     await page.goto('/#slots')
     await expect(page.locator('.view .vh h1')).toHaveText('Slots')
-    // at least one group section h2 (chat/capabilities/image) renders
-    await expect(page.locator('.view .sec h2').first()).toBeVisible()
-    // slot cards or list rows present
-    const cards = page.locator('.slots-grid > *, .slots-list > *')
-    expect(await cards.count()).toBeGreaterThan(0)
-  })
-
-  test('Capabilities section (C7) renders the utility slots in a 4-up quarter grid', async ({ page }) => {
-    await page.goto('/#slots')
-    // The embedding/reranking/transcription/tts slots collapse into one
-    // "Capabilities" section heading (replacing the old Embed + Voice sections).
-    await expect(page.locator('.view .sec h2', { hasText: 'Capabilities' })).toBeVisible()
-    // ...and that section's grid carries the quarter-width modifier.
-    const quarterGrid = page.locator('.slots-grid.quarter')
-    await expect(quarterGrid.first()).toBeVisible()
-    expect(await quarterGrid.locator('> *').count()).toBeGreaterThan(0)
+    // The InferencePane is the single per-slot surface (no group grids).
+    await expect(page.locator('.infer-pane').first()).toBeVisible()
+    expect(await page.locator('.infer-pane .scard').count()).toBeGreaterThan(0)
+    // The legacy group grids are gone.
+    await expect(page.locator('.slots-grid')).toHaveCount(0)
   })
 
   test('exposes New-slot button (create modal trigger)', async ({ page }) => {
     await page.goto('/#slots')
     const newBtn = page.locator('.view .vh button:has-text("New slot")')
     await expect(newBtn).toBeVisible()
-  })
-
-  test('enabled-first sort (C6): a disabled slot sinks to the end of its section', async ({ page }) => {
-    // The Chat SlotCard grid was removed (chat/LLM slots now live in the
-    // InferencePane). The enabled-first sort still runs via renderGroup for the
-    // Capabilities section, so assert it there. Inject capability slots with a
-    // disabled one mid-order; the sort must render it last.
-    await page.addInitScript((slots) => {
-      let real: any
-      Object.defineProperty(window, 'HAL0_DATA', {
-        configurable: true,
-        get() { return real },
-        set(v) { real = v; if (v && typeof v === 'object') v.slots = slots },
-      })
-    }, [
-      { name: 'embed', type: 'embedding', device: 'gpu-rocm', group: 'embed', state: 'ready', enabled: true, runtime: 'container', port: 8082 },
-      { name: 'legacy-cap', type: 'reranking', device: 'gpu-rocm', group: 'embed', state: 'idle', enabled: false, runtime: 'container', port: 8083 },
-      { name: 'rerank', type: 'reranking', device: 'gpu-rocm', group: 'embed', state: 'ready', enabled: true, runtime: 'container', port: 8084 },
-    ])
-    await page.goto('/#slots')
-    const capSection = page.locator('.view section', {
-      has: page.locator('.sec h2', { hasText: 'Capabilities' }),
-    })
-    // Wait for all three cards to render before reading order (allInnerTexts
-    // does not auto-wait, so assert the count first to avoid a render race).
-    await expect(capSection.locator('.slot .slot-name .nm')).toHaveCount(3)
-    const names = await capSection.locator('.slot .slot-name .nm').allInnerTexts()
-    expect(names.length).toBeGreaterThan(1)
-    expect(names).toContain('legacy-cap')
-    expect(names[names.length - 1]).toBe('legacy-cap') // disabled → last
-    expect(names[0]).not.toBe('legacy-cap') // enabled slots come first
   })
 
   test('NPU rollup section renders when an NPU slot is present', async ({ page }) => {
@@ -79,10 +37,9 @@ test.describe('Slots v3 (/slots)', () => {
     await page.goto('/#slots')
     const stack = page.locator('.npu-stack')
     await expect(stack).toBeVisible()
-    // Chat (the FLM anchor) keeps a real <select> model picker.
-    await expect(stack.locator('.npu-sel')).toHaveCount(1)
-    // ASR + embed serve coresident off that one process with the model fixed
-    // by the --asr/--embed flags, so they render read-only labels, not pickers.
+    // Chat (the FLM anchor) keeps a real <select> model picker (the shared
+    // slot-card ModelPicker); ASR/embed render an FLM-fixed read-only label.
+    await expect(stack.locator('.model-picker')).toHaveCount(1)
     await expect(stack.locator('.npu-mod-fixed')).toHaveCount(2)
     await expect(stack.locator('.npu-mod-fixed .npu-fixed-tag')).toHaveCount(2)
   })

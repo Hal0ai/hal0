@@ -275,20 +275,10 @@ test.describe('SlotCard container variant (#657)', () => {
     expect(ind.label).toBe('serving')
   })
 
-  test('slot cards carry the container runtime micro-tag (HAL0_DATA default)', async ({ page }) => {
-    // Every slot is a podman container now — the Capabilities section cards all
-    // render the .slot-runtime-tag micro-chip. (Chat/LLM slots moved into the
-    // InferencePane; the standalone Chat grid was removed.)
-    const capSection = page.locator('.view section', {
-      has: page.locator('.sec h2', { hasText: 'Capabilities' }),
-    })
-    await expect(capSection).toBeVisible()
-    await expect(capSection.locator('.slots-grid > .slot').first()).toBeVisible()
-    const cardCount = await capSection.locator('.slots-grid > .slot').count()
-    const containerTagCount = await capSection.locator('.slot-runtime-tag').count()
-    expect(cardCount).toBeGreaterThan(0)
-    expect(containerTagCount).toBe(cardCount)
-  })
+  // NOTE: the ".slot-runtime-tag on every grid card" test was removed with the
+  // SlotCard grids (Chat + Capabilities). The InferencePane slot cards surface
+  // the runtime via the device chip; lifecycle dot classification stays covered
+  // by the slotIndicator() unit-style tests above.
 
   test('starting container card renders warming dot via slotIndicator', async ({ page }) => {
     // Verify warming dot for a starting container slot

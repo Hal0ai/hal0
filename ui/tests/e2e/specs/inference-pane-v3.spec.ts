@@ -104,6 +104,50 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     await expect.poll(() => unloads.length).toBeGreaterThan(0)
   })
 
+  test('expanded Restart control POSTs /restart for a running slot', async ({ page }) => {
+    const restarts: string[] = []
+    await page.route('**/api/slots/primary/restart', async (route) => {
+      restarts.push(route.request().url())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.goto('/#slots')
+    await page.getByTestId('infer-qcaret').click()
+    await body(page).getByTestId('infer-slot-primary').locator('.sctrl.restart').click()
+    await expect.poll(() => restarts.length).toBeGreaterThan(0)
+  })
+
+  test('expanded Start control POSTs /load for an off slot', async ({ page }) => {
+    const loads: string[] = []
+    await page.route('**/api/slots/legacy/load', async (route) => {
+      loads.push(route.request().url())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.goto('/#slots')
+    await page.getByTestId('infer-qcaret').click()
+    // `legacy` is the disabled (off) seed slot — only in the expanded body.
+    await body(page).getByTestId('infer-slot-legacy').locator('.sctrl.start').click()
+    await expect.poll(() => loads.length).toBeGreaterThan(0)
+  })
+
+  test('full-card model-picker change POSTs /swap with model_id', async ({ page }) => {
+    const swaps: any[] = []
+    await page.route('**/api/slots/primary/swap', async (route) => {
+      try { swaps.push(JSON.parse(route.request().postData() || '{}')) } catch { swaps.push({}) }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.goto('/#slots')
+    const picker = body(page).getByTestId('infer-slot-primary').locator('select.model-picker')
+    const opts = await picker.locator('option').evaluateAll((els) =>
+      els.map((e) => (e as HTMLOptionElement).value).filter(Boolean),
+    )
+    const cur = await picker.inputValue()
+    const next = opts.find((v) => v !== cur)
+    test.skip(!next, 'need ≥2 llm models in the catalog to swap')
+    await picker.selectOption(next!)
+    await expect.poll(() => swaps.length).toBeGreaterThan(0)
+    expect(typeof swaps[0].model_id).toBe('string')
+  })
+
   test('full card exposes a real model-picker <select> (useModels)', async ({ page }) => {
     await page.goto('/#slots')
     // The full-card model picker lives in the (collapsible) engine body; it is
@@ -124,13 +168,14 @@ test.describe('NPU · FLM engine pane (/slots · Inference tab)', () => {
     await expect(page.getByTestId('npu-strip')).toBeVisible()
   })
 
-  test('caret toggles the trio open (Chat / ASR / Embed)', async ({ page }) => {
+  test('caret toggles the trio open (chat / asr / embed as slot cards)', async ({ page }) => {
     await page.goto('/#slots')
     const npuEngine = page.locator('.npu-pane .engine').first()
     await expect(npuEngine).not.toHaveClass(/\bopen\b/)
     await page.getByTestId('npu-qcaret').click()
     await expect(npuEngine).toHaveClass(/\bopen\b/)
-    await expect(page.locator('.npu-pane .engine-body .npu-mod')).toHaveCount(3)
+    // The trio now renders as the canonical slot cards (SlotScard), one per role.
+    await expect(page.locator('.npu-pane .engine-body .scard')).toHaveCount(3)
   })
 })
 

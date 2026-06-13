@@ -19,7 +19,13 @@ import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { MemoryMap } from './memory-map'
 import { ComfyuiPane } from './comfyui-pane.jsx'
-import { InferencePane } from './inference-pane.jsx'
+import {
+  InferencePane,
+  SlotScard,
+  ModelPicker,
+  SlotControls,
+  slotCtrlPhase,
+} from './inference-pane.jsx'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 import { prettyProfile } from './profile-names.js'
 
@@ -520,28 +526,6 @@ function slotIsLoaded(slot) {
   return state === "serving" || state === "ready";
 }
 
-// A small native-looking select for the FLM model pickers.
-function NpuModelSelect({ value, models, disabled, onChange }) {
-  const opts = Array.isArray(models) ? models : [];
-  const hasCurrent = value && opts.some(m => m.id === value);
-  return (
-    <select
-      className="input mono npu-sel"
-      value={value || ""}
-      disabled={disabled}
-      onChange={e => onChange && onChange(e.target.value)}
-    >
-      {/* Keep the live model selectable even if the catalog hasn't
-          surfaced it (offline /api/models, un-catalogued FLM tag). */}
-      {value && !hasCurrent && <option value={value}>{value}</option>}
-      {!value && <option value="">—</option>}
-      {opts.map(m => (
-        <option key={m.id} value={m.id}>{m.longName || m.id}</option>
-      ))}
-    </select>
-  );
-}
-
 // A11y-friendly on/off switch (matches the prototype's visual language).
 function NpuSwitch({ on, disabled, label, onClick }) {
   return (
@@ -557,52 +541,6 @@ function NpuSwitch({ on, disabled, label, onClick }) {
     >
       <span className="knob" />
     </button>
-  );
-}
-
-// One modality mini-card inside the bracketed trio.
-//
-// `readOnlyModel` modalities (ASR/embed) render the served model as a
-// read-only label instead of a picker: the FLM trio serves all three
-// roles from one `flm serve` process and the asr/embed model is fixed by
-// the --asr/--embed flags — the request `model` field is ignored by FLM
-// (verified 2026-06-06), so a picker there would be cosmetic. Chat (the
-// anchor) stays a real picker.
-function NpuModalityCard({ icon, label, slot, on, fixed, models, busy, onToggle, onPickModel, readOnlyModel }) {
-  return (
-    <div className="slot npu-mod" data-on={on ? "1" : "0"}>
-      <div className="slot-h">
-        <span className="npu-mod-icon" aria-hidden="true">{icon}</span>
-        <div className="slot-name"><span className="nm">{label}</span></div>
-        <div className="right">
-          {fixed
-            ? <span className="chip" style={{...NPU_CHIP, fontSize: 10}}>always</span>
-            : <NpuSwitch on={on} disabled={busy} label={`Toggle ${label}`} onClick={onToggle} />}
-        </div>
-      </div>
-      <div className="npu-mod-body">
-        {readOnlyModel ? (
-          <div
-            className="npu-mod-fixed mono"
-            title="Served by the FLM trio — the model is fixed by the --asr/--embed flags on this FLM build, not separately selectable."
-          >
-            {/* Prefer the slot's CONFIGURED model (model_default) over the live
-                model_id: an NPU-trio modality is never loaded as its own
-                process, so its live model_id stays stale on the pre-trio GGUF.
-                The configured FLM tag is what the anchor actually serves. */}
-            <span className="npu-fixed-model">{slot?.modelDefault || slot?.model || "—"}</span>
-            <span className="npu-fixed-tag" aria-hidden="true">FLM</span>
-          </div>
-        ) : (
-          <NpuModelSelect
-            value={slot?.model || ""}
-            models={models}
-            disabled={!on || busy || !slot}
-            onChange={onPickModel}
-          />
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -700,6 +638,67 @@ function NpuFlmStack({ slots }) {
   // No onPickAsr/onPickEmbed: those modalities are read-only labels (the
   // FLM trio fixes their model via flags). Chat keeps onPickChat above.
 
+  // ── trio rendered as the canonical slot card (SlotScard, shared with the
+  //    InferencePane). The trio reality is preserved: chat is the loadable
+  //    anchor (model picker + stack load/unload/restart); asr/embed are
+  //    coresident roles whose Start/Stop maps to the modality toggle (the
+  //    "drop embedding" affordance) with an FLM-fixed model label. ──
+  const dispatchLogs = (name) =>
+    name && window.dispatchEvent(new CustomEvent("hal0:slot-logs", { detail: { name } }));
+  const goEdit = (name) => { if (name) window.location.hash = "#slots/" + name; };
+
+  const chatCardNode = chat && (
+    <SlotScard
+      key="chat" s={chat} ind={slotIndicator(chat)} full
+      modelNode={<ModelPicker s={chat} models={chatModels} disabled={busy || !chat} onSwap={onPickChat} />}
+      controls={
+        <SlotControls
+          phase={slotCtrlPhase(chat)} busy={busy} compact={false}
+          onStart={() => run(() => loadMut.mutateAsync(chat.name))}
+          onStop={() => run(() => unloadMut.mutateAsync(chat.name))}
+          onRestart={() => run(() => restartMutNpu.mutateAsync(chat.name))}
+          onLogs={() => dispatchLogs(chat.name)}
+          onEdit={() => goEdit(chat.name)}
+        />
+      }
+      onEdit={() => goEdit(chat.name)}
+    />
+  );
+
+  const modalityCardNode = (which, slot) => {
+    const on = !!parsed[which];
+    const phase = (loaded && on) ? "running" : "off";
+    const ind = !loaded
+      ? { cls: "offline", label: "off", tooltip: "NPU stack not loaded" }
+      : on
+      ? { cls: "stale", label: "coresident", tooltip: "Served coresident by the FLM trio" }
+      : { cls: "offline", label: "off", tooltip: `${which} modality disabled` };
+    const s = slot || { name: which, type: which === "asr" ? "transcription" : "embedding", metrics: {} };
+    const tgt = slot?.name || chat?.name;
+    return (
+      <SlotScard
+        key={which} s={s} ind={ind} phase={phase} full
+        modelNode={
+          <div className="smodel mono npu-mod-fixed" title="Model fixed by the FLM build (--asr/--embed flags) — not separately selectable.">
+            <span className="npu-fixed-model">{slot?.modelDefault || slot?.model || "—"}</span>
+            <span className="npu-fixed-tag">FLM</span>
+          </div>
+        }
+        controls={
+          <SlotControls
+            phase={phase} busy={busy} compact={false}
+            onStart={() => onToggleModality(which)}
+            onStop={() => onToggleModality(which)}
+            onRestart={() => run(() => restartMutNpu.mutateAsync(chat?.name))}
+            onLogs={() => dispatchLogs(tgt)}
+            onEdit={() => goEdit(tgt)}
+          />
+        }
+        onEdit={() => goEdit(tgt)}
+      />
+    );
+  };
+
   // ── derived display fields for the engine shell ──
   // Combined NPU resident memory — sum of per-slot mem_mb (the trio shares one
   // FLM process, so its weight shows on the loaded anchor). Em-dash, never a
@@ -787,29 +786,16 @@ function NpuFlmStack({ slots }) {
             </div>
           </div>
 
-          {/* expandable body — the existing bracketed trio, moved verbatim */}
+          {/* expandable body — the FLM trio rendered as canonical slot cards
+              (SlotScard, shared with the InferencePane). */}
           <div className="engine-body">
             <div className="inner">
               <div className="engine-b">
                 <div className="npu-stack">
-                  <div className="npu-bracket">
-                    <div className="npu-bracket-rail" aria-hidden="true" />
-                    <div className="npu-trio">
-                      <NpuModalityCard
-                        icon="💬" label="Chat" slot={chat} on fixed
-                        models={chatModels} busy={busy} onPickModel={onPickChat}
-                      />
-                      <NpuModalityCard
-                        icon="🎙" label="ASR" slot={asr} on={parsed.asr} readOnlyModel
-                        busy={busy}
-                        onToggle={() => onToggleModality("asr")}
-                      />
-                      <NpuModalityCard
-                        icon="🧬" label="Embed" slot={embed} on={parsed.embed} readOnlyModel
-                        busy={busy}
-                        onToggle={() => onToggleModality("embed")}
-                      />
-                    </div>
+                  <div className="scards full npu-scards">
+                    {chatCardNode}
+                    {modalityCardNode("asr", asr)}
+                    {modalityCardNode("embed", embed)}
                   </div>
 
                   <div className="npu-stack-foot mono">
@@ -1269,19 +1255,12 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
                   over the whole LLM/capability slot stack: collapsed hero
                   (memory map + active slots + combined throughput) that expands
                   to the full slot list with per-slot lifecycle controls + a
-                  model picker + a by-device throughput split. The per-group
-                  SlotCard grids below stay the authoritative per-slot surface. */}
-              {/* Chat/LLM (gpu) slots are rendered inside the InferencePane's
-                  expanded slot list (model picker + per-slot lifecycle), so the
-                  former standalone "Chat" SlotCard grid is dropped — it only
-                  duplicated agent/chat below the pane. */}
+                  model picker + a by-device throughput split. The InferencePane
+                  is now the single per-slot surface for every iGPU/CPU inference
+                  slot (chat/LLM + embedding/reranking/transcription/tts) — the
+                  standalone "Chat" and "Capabilities" SlotCard grids are dropped;
+                  they only duplicated rows the pane already lists. */}
               <InferencePane />
-              {/* Capabilities (C7): embedding/reranking/transcription/tts cards are
-                  content-light, so they render in a denser 4-up quarter-width grid
-                  instead of two separate full-width Embed/Voice sections. NPU
-                  modalities (device_class "npu") are excluded by grouping — they
-                  live in the dedicated NPU/FLM stack engine pane below. */}
-              {renderGroup("Capabilities", groups.caps, { quarter: true })}
 
               {/* NPU · FLM stack — its own engine-shell pane (purple accent),
                   parallel to the Inference + ComfyUI panes. No section h2: the

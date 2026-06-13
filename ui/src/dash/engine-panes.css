@@ -708,45 +708,45 @@
 }
 
 /* ─── Slot cards (P2) ───────────────────────────────────────────────── */
-.infer-pane .scards {
+:is(.infer-pane, .npu-pane) .scards {
   display: grid;
   gap: 12px;
 }
-.infer-pane .scards.compact {
+:is(.infer-pane, .npu-pane) .scards.compact {
   grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
 }
-.infer-pane .scards.full {
+:is(.infer-pane, .npu-pane) .scards.full {
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
 }
-.infer-pane .scards-empty {
+:is(.infer-pane, .npu-pane) .scards-empty {
   font-family: var(--jbm);
   font-size: 11px;
   color: var(--fg-4);
   padding: 8px 2px;
 }
-.infer-pane .scard {
+:is(.infer-pane, .npu-pane) .scard {
   border: 1px solid var(--line);
   border-radius: var(--rad);
   background: var(--bg);
   overflow: hidden;
   transition: border-color 0.14s var(--ease);
 }
-.infer-pane .scard:hover {
+:is(.infer-pane, .npu-pane) .scard:hover {
   border-color: var(--line-strong);
 }
-.infer-pane .scard.serving {
+:is(.infer-pane, .npu-pane) .scard.serving {
   border-left: 2px solid var(--comfy);
 }
-.infer-pane .scard.warming {
+:is(.infer-pane, .npu-pane) .scard.warming {
   border-left: 2px solid var(--warn);
 }
-.infer-pane .scard.error {
+:is(.infer-pane, .npu-pane) .scard.error {
   border-left: 2px solid var(--err);
 }
-.infer-pane .scard.dim {
+:is(.infer-pane, .npu-pane) .scard.dim {
   opacity: 0.55;
 }
-.infer-pane .scard-h {
+:is(.infer-pane, .npu-pane) .scard-h {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -754,7 +754,7 @@
   border-bottom: 1px solid var(--line-soft);
   background: var(--bg-1);
 }
-.infer-pane .scard-h .snm {
+:is(.infer-pane, .npu-pane) .scard-h .snm {
   font-family: var(--jbm);
   font-size: 13px;
   font-weight: 500;
@@ -763,34 +763,34 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.infer-pane .sdot {
+:is(.infer-pane, .npu-pane) .sdot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--fg-5);
   flex-shrink: 0;
 }
-.infer-pane .sdot.serving {
+:is(.infer-pane, .npu-pane) .sdot.serving {
   background: var(--comfy);
   box-shadow: 0 0 7px var(--comfy);
   animation: pulse 1.4s ease-in-out infinite;
 }
-.infer-pane .sdot.ready {
+:is(.infer-pane, .npu-pane) .sdot.ready {
   background: var(--ok);
 }
-.infer-pane .sdot.warming {
+:is(.infer-pane, .npu-pane) .sdot.warming {
   background: var(--warn);
   box-shadow: 0 0 7px var(--warn);
   animation: pulse 1.4s ease-in-out infinite;
 }
-.infer-pane .sdot.error {
+:is(.infer-pane, .npu-pane) .sdot.error {
   background: var(--err);
 }
-.infer-pane .sdot.offline {
+:is(.infer-pane, .npu-pane) .sdot.offline {
   background: var(--fg-5);
 }
 /* status pill — serving shows live tok/s, others the state word */
-.infer-pane .spill {
+:is(.infer-pane, .npu-pane) .spill {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
@@ -804,36 +804,36 @@
   white-space: nowrap;
   flex-shrink: 0;
 }
-.infer-pane .spill.serving {
+:is(.infer-pane, .npu-pane) .spill.serving {
   color: var(--comfy);
   border-color: var(--comfy-line);
   background: var(--comfy-soft);
 }
-.infer-pane .spill.ready {
+:is(.infer-pane, .npu-pane) .spill.ready {
   color: var(--ok);
   border-color: var(--ok-line);
   background: var(--ok-soft);
 }
-.infer-pane .spill.warming {
+:is(.infer-pane, .npu-pane) .spill.warming {
   color: var(--warn);
   border-color: var(--warn-line);
   background: var(--warn-soft);
 }
-.infer-pane .spill.error {
+:is(.infer-pane, .npu-pane) .spill.error {
   color: var(--err);
   border-color: var(--err-line);
   background: var(--err-soft);
 }
-.infer-pane .spill.offline {
+:is(.infer-pane, .npu-pane) .spill.offline {
   color: var(--fg-4);
 }
-.infer-pane .scard-b {
+:is(.infer-pane, .npu-pane) .scard-b {
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 9px;
 }
-.infer-pane .scard .smodel {
+:is(.infer-pane, .npu-pane) .scard .smodel {
   font-family: var(--jbm);
   font-size: 11.5px;
   color: var(--fg-2);
@@ -842,14 +842,14 @@
   white-space: nowrap;
 }
 /* meta row — tok/s · ttft · ctx (full cards) */
-.infer-pane .scard-meta {
+:is(.infer-pane, .npu-pane) .scard-meta {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   padding-top: 9px;
   border-top: 1px solid var(--line-soft);
 }
-.infer-pane .scard-meta .m .l {
+:is(.infer-pane, .npu-pane) .scard-meta .m .l {
   font-family: var(--jbm);
   font-size: 8px;
   text-transform: uppercase;
@@ -857,18 +857,18 @@
   color: var(--fg-4);
   margin-bottom: 2px;
 }
-.infer-pane .scard-meta .m .v {
+:is(.infer-pane, .npu-pane) .scard-meta .m .v {
   font-family: var(--jbm);
   font-size: 13px;
   color: var(--fg);
 }
-.infer-pane .scard-meta .m .v.acc {
+:is(.infer-pane, .npu-pane) .scard-meta .m .v.acc {
   color: var(--comfy);
 }
-.infer-pane .scard-meta .m .v.muted {
+:is(.infer-pane, .npu-pane) .scard-meta .m .v.muted {
   color: var(--fg-5);
 }
-.infer-pane .scard-foot {
+:is(.infer-pane, .npu-pane) .scard-foot {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -876,14 +876,14 @@
   padding-top: 9px;
   border-top: 1px solid var(--line-soft);
 }
-.infer-pane .scard-foot.bare {
+:is(.infer-pane, .npu-pane) .scard-foot.bare {
   border-top: none;
   padding-top: 0;
 }
-.infer-pane .scard-foot .grow {
+:is(.infer-pane, .npu-pane) .scard-foot .grow {
   flex: 1;
 }
-.infer-pane .tag-chip {
+:is(.infer-pane, .npu-pane) .tag-chip {
   display: inline-flex;
   align-items: center;
   padding: 2px 7px;
@@ -897,7 +897,7 @@
 
 /* model picker (full cards) — a real <select> styled as the design's
    full-width bordered control */
-.infer-pane .model-picker {
+:is(.infer-pane, .npu-pane) .model-picker {
   appearance: none;
   -webkit-appearance: none;
   width: 100%;
@@ -919,16 +919,16 @@
   background-size: 11px;
   transition: border-color var(--dur-fast) var(--ease);
 }
-.infer-pane .model-picker:hover {
+:is(.infer-pane, .npu-pane) .model-picker:hover {
   border-color: var(--comfy-line);
 }
-.infer-pane .model-picker:disabled {
+:is(.infer-pane, .npu-pane) .model-picker:disabled {
   opacity: 0.6;
   cursor: default;
 }
 
 /* expanded-body status line — right-aligned mono */
-.infer-pane .body-status {
+:is(.infer-pane, .npu-pane) .body-status {
   display: flex;
   justify-content: flex-end;
   font-family: var(--jbm);
@@ -937,7 +937,7 @@
 }
 
 /* device chip + profile pill */
-.infer-pane .dchip {
+:is(.infer-pane, .npu-pane) .dchip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -950,28 +950,28 @@
   color: var(--fg-3);
   white-space: nowrap;
 }
-.infer-pane .dchip .d {
+:is(.infer-pane, .npu-pane) .dchip .d {
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: currentColor;
 }
-.infer-pane .dchip.vulkan {
+:is(.infer-pane, .npu-pane) .dchip.vulkan {
   color: var(--dev-vulkan);
   border-color: rgba(127, 184, 255, 0.3);
 }
-.infer-pane .dchip.rocm {
+:is(.infer-pane, .npu-pane) .dchip.rocm {
   color: var(--dev-rocm);
   border-color: rgba(215, 107, 107, 0.3);
 }
-.infer-pane .dchip.npu {
+:is(.infer-pane, .npu-pane) .dchip.npu {
   color: var(--dev-npu);
   border-color: rgba(200, 150, 255, 0.3);
 }
-.infer-pane .dchip.cpu {
+:is(.infer-pane, .npu-pane) .dchip.cpu {
   color: var(--fg-3);
 }
-.infer-pane .flm-chip {
+:is(.infer-pane, .npu-pane) .flm-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -984,16 +984,16 @@
   border: 1px solid rgba(200, 150, 255, 0.3);
   background: rgba(200, 150, 255, 0.06);
 }
-.infer-pane .prov {
+:is(.infer-pane, .npu-pane) .prov {
   display: inline-flex;
   align-items: stretch;
 }
-.infer-pane .prov .dchip,
-.infer-pane .prov .flm-chip {
+:is(.infer-pane, .npu-pane) .prov .dchip,
+:is(.infer-pane, .npu-pane) .prov .flm-chip {
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
-.infer-pane .profile-pill {
+:is(.infer-pane, .npu-pane) .profile-pill {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1009,22 +1009,22 @@
   letter-spacing: 0.04em;
   cursor: pointer;
 }
-.infer-pane .profile-pill:hover {
+:is(.infer-pane, .npu-pane) .profile-pill:hover {
   color: var(--comfy);
   border-color: var(--comfy-line);
 }
-.infer-pane .profile-pill svg {
+:is(.infer-pane, .npu-pane) .profile-pill svg {
   color: var(--fg-4);
 }
 
 /* per-slot control icons */
-.infer-pane .slot-ctrls {
+:is(.infer-pane, .npu-pane) .slot-ctrls {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
 }
-.infer-pane .sctrl {
+:is(.infer-pane, .npu-pane) .sctrl {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1040,34 +1040,34 @@
     border-color 0.12s,
     color 0.12s;
 }
-.infer-pane .sctrl:hover {
+:is(.infer-pane, .npu-pane) .sctrl:hover {
   border-color: var(--line-strong);
   background: var(--bg-2);
   color: var(--fg-2);
 }
-.infer-pane .sctrl:disabled {
+:is(.infer-pane, .npu-pane) .sctrl:disabled {
   opacity: 0.4;
   cursor: default;
 }
-.infer-pane .sctrl.start {
+:is(.infer-pane, .npu-pane) .sctrl.start {
   color: var(--ok);
   border-color: var(--ok-line);
 }
-.infer-pane .sctrl.start:hover {
+:is(.infer-pane, .npu-pane) .sctrl.start:hover {
   background: var(--ok-soft);
 }
-.infer-pane .sctrl.stop {
+:is(.infer-pane, .npu-pane) .sctrl.stop {
   color: var(--err);
   border-color: var(--err-line);
 }
-.infer-pane .sctrl.stop:hover {
+:is(.infer-pane, .npu-pane) .sctrl.stop:hover {
   background: var(--err-soft);
 }
-.infer-pane .sctrl.restart {
+:is(.infer-pane, .npu-pane) .sctrl.restart {
   color: var(--comfy);
   border-color: var(--comfy-line);
 }
-.infer-pane .sctrl.restart:hover {
+:is(.infer-pane, .npu-pane) .sctrl.restart:hover {
   background: var(--comfy-soft);
 }
 
