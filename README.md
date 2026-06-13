@@ -186,10 +186,10 @@ pins the container image and flag bundle for each backend.
 
 | Capability               | Profile / image                  | Device              | Notes                                                        |
 |--------------------------|----------------------------------|---------------------|--------------------------------------------------------------|
-| chat + embed + rerank    | `moe-rocmfp4` / `dense-mtp-rocmfp4` / `vulkan-std` | ROCm / Vulkan / CPU | ROCm FP4 fork baked into the image; MTP via `--spec-type draft-mtp` |
-| chat + STT + embed (NPU) | `flm-npu` (`hal0-toolbox-flm`)  | AMD XDNA (opt-in)   | FLM trio: one container, `[npu] asr/embed` toggles, ~2 GB NPU mem |
+| chat + embed + rerank    | `rocm` / `rocm-mtp` / `vulkan` | ROCm / Vulkan / CPU | ROCm FP4 fork baked into the image; MTP via `--spec-type draft-mtp` |
+| chat + STT + embed (NPU) | `flm` (`hal0-toolbox-flm`)  | AMD XDNA (opt-in)   | FLM trio: one container, `[npu] asr/embed` toggles, ~2 GB NPU mem |
 | transcription            | whisper.cpp in toolbox image     | Vulkan / CPU        | `stt` slot                                                   |
-| TTS                      | `kokoro-cpu` (`hal0-toolbox-kokoro`) | CPU             | `[CPU]` chip + tooltip in dashboard                          |
+| TTS                      | `tts` (`hal0-toolbox-kokoro`) | CPU             | `[CPU]` chip + tooltip in dashboard                          |
 | image                    | `comfyui` (`hal0-toolbox-comfyui`) | ROCm              | Exclusive GPU via arbiter; SD Turbo / Flux-2-Klein-9B        |
 
 The NPU path is opt-in: the installer places a FastFlowLM `.deb` on
@@ -211,9 +211,9 @@ are not in scope for v1.
 |-----------------|---------------------------------------------------------------------------|--------|
 | **First-class** | AMD Ryzen AI Max+ 395 ("Strix Halo") with iGPU + XDNA NPU + 128 GB unified | Reference deployment. All published perf numbers come from this box. |
 | **First-class** | AMD Ryzen AI Max 385 / 390 with 64 GB unified                              | Same path; small + mid tiers fit, 70B Q4 with shorter context. |
-| **Supported**   | NVIDIA RTX 30/40/50 (10–32 GB)                                            | CUDA-backed llama-server in the `vulkan-std` container profile. Same slot lifecycle, dedicated VRAM instead of UMA. |
+| **Supported**   | NVIDIA RTX 30/40/50 (10–32 GB)                                            | CUDA-backed llama-server in the `vulkan` container profile. Same slot lifecycle, dedicated VRAM instead of UMA. |
 | **Supported**   | AMD Radeon RX 7000 / discrete (16–24 GB)                                  | ROCm or Vulkan container profiles; same `hal0-slot@<name>` lifecycle. |
-| **Fallback**    | CPU-only x86_64                                                            | `vulkan-std` profile, CPU path. Usable for tiny models / smoke tests, not the headline experience. |
+| **Fallback**    | CPU-only x86_64                                                            | `vulkan` profile, CPU path. Usable for tiny models / smoke tests, not the headline experience. |
 
 ## Project layout
 

@@ -83,7 +83,7 @@ src/hal0/
 ├── installer/       # first-run wizard backend, hardware probe writer
 ├── voice/           # emptied in #620 (in-process Moonshine/Kokoro
 │                    #   providers deleted); STT runs in the npu FLM
-│                    #   container, TTS in the kokoro-cpu container
+│                    #   container, TTS in the tts container
 ├── openwebui/       # companion service env file writer
 └── cli/             # `hal0` Typer CLI (incl. `capabilities migrate`)
 ```
@@ -164,7 +164,7 @@ namespace drift.
   config/capability layer (`SlotConfig.provider`, `capabilities/config.py`,
   `capabilities/catalog.py`, the backend/model classification in
   `api/routes`); the actual inference is served by the FLM NPU container
-  (`--asr` role of the npu trio) for STT and the `kokoro-cpu` container
+  (`--asr` role of the npu trio) for STT and the `tts` container
   for TTS, not by an in-process hal0 provider class.
 - **The registry is the only source of truth for "what models exist."**
   Atomic TOML files under `/var/lib/hal0/registry/`. mtime-cached. Slot

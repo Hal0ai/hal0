@@ -752,7 +752,7 @@ Channels:
 
 - GitHub Actions Linux runner pulls a tiny model (Qwen3 0.5B GGUF) cached
   across runs
-- Pulls the `vulkan-std` container profile image (CPU-only Vulkan baseline)
+- Pulls the `vulkan` container profile image (CPU-only Vulkan baseline)
 - Starts `hal0-api` + `hal0-slot@ci-test` (ContainerProvider) in a netns; runs through:
   - load → verify ready
   - `/v1/chat/completions` round-trip

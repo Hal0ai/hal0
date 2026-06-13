@@ -64,7 +64,7 @@ Overloaded THREE ways. Default to sense (3) in hal0 product context.
 
 ## device
 
-Per-slot hardware preference. Field on `SlotConfig` replacing v0.1.x's overloaded `backend` field (which mixed providers and backends). Enum: `gpu-rocm` | `gpu-vulkan` | `cpu` | `npu`. Default for new installs: `gpu-rocm`. `model_meta.device_to_backend(device)` maps it to a `(recipe, llamacpp)` pair, and the device selects the container profile (`config/schema.DEVICE_DEFAULT_PROFILES`): `gpu-rocm` → `moe-rocmfp4` (ROCm-FP4 llama-server toolbox), `gpu-vulkan` → `vulkan-std`, `cpu` → `kokoro-cpu`, `npu` → `flm-npu` (the FLM NPU toolbox).
+Per-slot hardware preference. Field on `SlotConfig` replacing v0.1.x's overloaded `backend` field (which mixed providers and backends). Enum: `gpu-rocm` | `gpu-vulkan` | `cpu` | `npu`. Default for new installs: `gpu-rocm`. `model_meta.device_to_backend(device)` maps it to a `(recipe, llamacpp)` pair, and the device selects the container profile (`config/schema.DEVICE_DEFAULT_PROFILES`): `gpu-rocm` → `rocm` (ROCm-FP4 llama-server toolbox), `gpu-vulkan` → `vulkan`, `cpu` → `tts`, `npu` → `flm` (the FLM NPU toolbox).
 
 Note: spike data showed `gpu-vulkan` is much slower than `gpu-rocm` for Strix Halo — the user-facing UI should advise `gpu-rocm` as the recommended default and label `gpu-vulkan` as fallback.
 
@@ -91,7 +91,7 @@ The seeded set is `SlotManager.SEEDED_SLOTS = (chat, embed, rerank, stt, tts, im
 | `embed` | `embedding` | embed | seeded, empty |
 | `rerank` | `reranking` | embed | seeded, empty |
 | `stt` | `transcription` | voice | seeded, empty |
-| `tts` | `tts` | voice | seeded, empty (kokoro-cpu container) |
+| `tts` | `tts` | voice | seeded, empty (tts container) |
 | `img` | `image` | img | seeded, empty (ComfyUI container) |
 | `vision` | `llm` | chat | seeded, empty |
 
@@ -116,7 +116,7 @@ Removing a user-defined slot is a no-side-effect operation (`hal0 slot remove NA
 
 The Strix Halo NPU enforces ONE AMDXDNA hardware context per host — so only one `flm serve` process can run at a time. **But that one process can host three model roles simultaneously** via FLM's `--asr 1 --embed 1` flags: chat + transcription + embedding. Verified empirically 2026-05-22 (gemma3:1b + Whisper-V3-Turbo + Embedding-Gemma-300M loaded in one FLM process, ~2 GB NPU memory total, chat at 40 tok/s).
 
-hal0 leverages this with the `flm-npu` profile (`flm serve --asr 1 --embed 1`) running in the `npu` slot's container (`hal0-slot@npu`), which answers `/v1/chat/completions`, `/v1/audio/transcriptions`, and `/v1/embeddings` on one static port. Three slot records ride that one container:
+hal0 leverages this with the `flm` profile (`flm serve --asr 1 --embed 1`) running in the `npu` slot's container (`hal0-slot@npu`), which answers `/v1/chat/completions`, `/v1/audio/transcriptions`, and `/v1/embeddings` on one static port. Three slot records ride that one container:
 
 | Slot | type | device | Backing |
 |---|---|---|---|

@@ -91,8 +91,8 @@ embeddable tarball is layer-cached via GHA so cold-cache runs are
 ### γ — release-gate (`make release-test`)
 
 SSHes into the hal0-test LXC and walks a matrix of seven rows:
-**llamacpp-vulkan, llamacpp-rocm, flm-npu (chat + trio asr/embed),
-whispercpp (STT), kokoro-cpu (TTS), sd-cpp (image), updater,
+**llamacpp-vulkan, llamacpp-rocm, flm (chat + trio asr/embed),
+whispercpp (STT), tts (TTS), sd-cpp (image), updater,
 openwebui**. Each row produces a structured record; the full report
 lands in `tests/release-gate-report.json`.
 

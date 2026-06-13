@@ -55,12 +55,12 @@ A **profile** (`/etc/hal0/profiles.toml`) is a bench-tuned backend
 template: container image + flag bundle + an `mtp` switch. The seed
 catalog ships:
 
-- `moe-rocmfp4` / `dense-mtp-rocmfp4` — ROCm FP4 images for Strix Halo
+- `rocm` / `rocm-mtp` — ROCm FP4 images for Strix Halo
   (the FP4-capable `llama-server` fork is baked into the image; MTP
   expands to the full `--spec-type draft-mtp` bundle at resolve time).
-- `vulkan-std` — fallback for non-FP4 GGUFs.
-- `flm-npu` — FastFlowLM on the XDNA NPU.
-- `kokoro-cpu` — CPU TTS.
+- `vulkan` — fallback for non-FP4 GGUFs.
+- `flm` — FastFlowLM on the XDNA NPU.
+- `tts` — CPU TTS.
 - `comfyui` — image generation (exclusive GPU, see arbiter below).
 
 Loading a slot resolves slot → profile → (image, flags), starts the
