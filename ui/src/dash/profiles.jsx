@@ -4,7 +4,7 @@
 // Each profile is a named image + bench-tuned flag bundle that backs
 // one or more container slots. The UI labels them by intent (what they're
 // for) rather than by slug, so operators see "MoE agents · ROCmFP4 ·
-// ~52.8 tok/s" rather than "moe-rocmfp4".
+// ~52.8 tok/s" rather than "rocm".
 //
 // Phase C6: CRUD — New profile button + create/edit form (inline drawer),
 // per-card Edit/Delete for custom profiles, Clone for custom (prefills form
