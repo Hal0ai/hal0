@@ -53,6 +53,14 @@ if ! declare -F info >/dev/null 2>&1; then
     source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ui.sh"
 fi
 
+# Distro / package-manager detection for the install hints below. Guarded
+# (the helper no-ops on a second source), so this is safe whether install.sh
+# already sourced it or `hal0 doctor` runs preflight.sh standalone.
+if ! declare -F pkg_install_cmd >/dev/null 2>&1; then
+    # shellcheck source=distro.sh
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/distro.sh"
+fi
+
 # ── individual checks ───────────────────────────────────────────────────────
 
 preflight_systemd() {
@@ -215,19 +223,17 @@ preflight_docker() {
         return 1
     fi
 
-    # Non-apt host: emit the right one-liner for the package manager we
-    # can see, then hard-fail. Operator runs it, reruns install.sh.
+    # Non-apt host: emit the right one-liner for the detected package
+    # manager (via lib/distro.sh), then hard-fail. Operator runs it, reruns
+    # install.sh. Alpine uses OpenRC, not systemd, so its enable step differs.
     err "docker not installed — hal0 requires docker for OpenWebUI + slot containers"
-    if command -v dnf >/dev/null 2>&1; then
-        warn "  install with: sudo dnf install -y docker && sudo systemctl enable --now docker"
-    elif command -v yum >/dev/null 2>&1; then
-        warn "  install with: sudo yum install -y docker && sudo systemctl enable --now docker"
-    elif command -v pacman >/dev/null 2>&1; then
-        warn "  install with: sudo pacman -S --noconfirm docker && sudo systemctl enable --now docker"
-    elif command -v zypper >/dev/null 2>&1; then
-        warn "  install with: sudo zypper install -y docker && sudo systemctl enable --now docker"
-    elif command -v apk >/dev/null 2>&1; then
-        warn "  install with: sudo apk add docker && sudo rc-update add docker default && sudo service docker start"
+    local docker_install
+    if docker_install="$(pkg_install_cmd docker)"; then
+        if [[ "$(pkg_mgr)" == "apk" ]]; then
+            warn "  install with: ${docker_install} && sudo rc-update add docker default && sudo service docker start"
+        else
+            warn "  install with: ${docker_install} && sudo systemctl enable --now docker"
+        fi
     else
         warn "  no recognised package manager — install docker from https://docs.docker.com/engine/install/ then re-run install.sh"
     fi

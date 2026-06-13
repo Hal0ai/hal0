@@ -25,6 +25,14 @@ IFS=$'\n\t'
 # shellcheck source=lib/ui.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"
 
+# Distro / package-manager detection (distro_id / pkg_mgr / pkg_install_cmd /
+# python_venv_hint). One place knows "what distro is this and how do I name an
+# install command" so the apt-centric assumptions below degrade into honest,
+# distro-correct messages on Fedora/Arch/openSUSE/Alpine instead of "apt not
+# found". Sourced before preflight.sh, which re-sources it (guarded no-op).
+# shellcheck source=lib/distro.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/distro.sh"
+
 # Re-runnable pre-flight checks (preflight_systemd / preflight_python /
 # preflight_docker / preflight_disk / preflight_ports / preflight_all).
 # Sourcing only loads the functions — the installer dispatches the
@@ -35,8 +43,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/preflight.sh"
 
 # Non-interactive apt for every apt-get call in this installer (FLM
 # runtime libs, FLM .deb) — without this a debconf prompt can hang a
-# tty install or fail a CI/non-tty run.
-export DEBIAN_FRONTEND=noninteractive
+# tty install or fail a CI/non-tty run. Only meaningful on apt hosts;
+# guarded so it isn't exported as dead state on Fedora/Arch/etc.
+if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+fi
 
 # Poll `systemctl is-active` for up to `timeout` seconds. Returns 0 the
 # moment the unit reports active, 1 on timeout. Use instead of a flat
@@ -251,7 +262,7 @@ fi
 # because pip may still work. We disambiguate by re-checking PATH.
 if ! preflight_python; then
     if ! command -v "${PY}" >/dev/null 2>&1; then
-        die "python interpreter '${PY}' not found — install with 'apt install python3 python3-venv'"
+        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
     fi
     # Version warning already printed; keep going.
 fi
@@ -259,7 +270,7 @@ fi
 # `python3 -m venv` capability is a hard requirement — the install always
 # creates a venv. Catches the common Debian "python3 present, python3-venv
 # missing" case before it fails with an opaque ensurepip error.
-preflight_venv || die "python venv module missing — install python3-venv (see above)"
+preflight_venv || die "python venv module missing — install with: $(python_venv_hint)"
 
 # preflight_docker is soft (always returns 0 with a warning when
 # Docker is absent), so we don't need to guard the call.
@@ -767,12 +778,16 @@ if [[ "${DEV_MODE}" -eq 1 ]]; then
     info "dev mode — skipping NPU prereqs (libxrt-npu2 + ffmpeg6 + boost1.83 + fftw3 + FLM .deb v${FLM_DEB_VERSION})"
     info "          install manually if exercising NPU paths: see installer/README.md"
 elif ! command -v apt-get >/dev/null 2>&1; then
-    # Non-Debian host (e.g., the maintainer's CachyOS dev box). FLM
-    # upstream only ships .deb + Windows .msi; we cannot auto-install
-    # on pacman/dnf/zypper. Surface the gap, keep going — GPU paths
-    # still work without FLM.
-    warn "apt-get not found — skipping NPU prereqs (FLM .deb is Ubuntu-only upstream)"
-    warn "  GPU paths (Vulkan/ROCm) still work; NPU paths will be unavailable until FLM is installed manually"
+    # Non-Debian host (Fedora, Arch/CachyOS, openSUSE…). FastFlowLM upstream
+    # ships only an Ubuntu .deb + a Windows .msi — there is no dnf/pacman/
+    # zypper artefact and the libxrt-npu2 runtime is Debian-packaged too — so
+    # the NPU prereqs genuinely can't be auto-installed here. This is an
+    # upstream packaging limit, not a hal0 one: GPU (Vulkan/ROCm) and CPU
+    # paths are fully supported on this distro; only the NPU/FLM trio waits
+    # on a manual FastFlowLM install. Surface it honestly and keep going.
+    warn "$(distro_pretty): skipping NPU prereqs — FastFlowLM ships an Ubuntu .deb only (upstream)"
+    warn "  GPU (Vulkan/ROCm) + CPU paths work normally; NPU/FLM slots stay disabled until you install"
+    warn "  FastFlowLM ${FLM_DEB_VERSION} manually (see installer/README.md). 'flm validate' gates the NPU trio."
 else
     ui_spinner_run "apt-get update (refresh package index)" \
         apt-get update -qq
