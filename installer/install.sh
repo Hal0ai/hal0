@@ -970,6 +970,20 @@ else
     mkdir -p "${VAR_DIR}/.cache/huggingface/hub"
     chown -R hal0:hal0 "${VAR_DIR}/.cache"
 
+    # Shared STATE.md (#766). The hermes agent runs as hal0 and its
+    # render-context (re)writes ${VAR_DIR}/STATE.md — the live snapshot the
+    # Claude session-start hook cats — via a tmp+rename that needs *directory*
+    # write on ${VAR_DIR}. Grant the hal0 group write on the top dir ONLY
+    # (setgid so new entries inherit group hal0; sticky so hal0 can only
+    # remove/rename files it owns — root-owned slots/registry/models stay
+    # protected). Ownership stays root; this preserves the ".cache NOT the
+    # whole VAR_DIR" posture above. Pre-create STATE.md hal0-owned so the
+    # rename-over works under the sticky bit even on a re-install.
+    chgrp hal0 "${VAR_DIR}"
+    chmod 3775 "${VAR_DIR}"
+    touch "${VAR_DIR}/STATE.md"
+    chown hal0:hal0 "${VAR_DIR}/STATE.md"
+
 fi
 
 # ── Bundle picker manifests (ADR-0010 / PR-17) ────────────────────────────
