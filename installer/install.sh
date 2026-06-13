@@ -1014,14 +1014,32 @@ else
     fi
 
     if [[ -f "${OPENWEBUI_UNIT_DST}" ]]; then
-        systemctl enable --now hal0-openwebui
-        # OpenWebUI can take a moment to come up while it pulls the
-        # image / initialises its sqlite db. Don't fail the installer
-        # on a slow first boot; just surface the status.
-        if wait_active hal0-openwebui 30; then
-            info "hal0-openwebui is running (chat at :3001)"
+        # OpenWebUI runs as a docker container (ExecStart=docker run …).
+        # Without a reachable docker daemon the unit just restart-loops
+        # with status=203/EXEC ("docker: No such file or directory"), so
+        # gate the enable/start on docker actually being usable — the
+        # same fail-soft posture as the hermes agent gating below. The
+        # dashboard/API are unaffected; the operator installs docker and
+        # then enables the unit. preflight already warned about the gap.
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            systemctl enable --now hal0-openwebui
+            # OpenWebUI can take a moment to come up while it pulls the
+            # image / initialises its sqlite db. Don't fail the installer
+            # on a slow first boot; just surface the status.
+            if wait_active hal0-openwebui 30; then
+                info "hal0-openwebui is running (chat at :3001)"
+            else
+                warn "hal0-openwebui not yet active; check 'journalctl -u hal0-openwebui -n 40'"
+            fi
         else
-            warn "hal0-openwebui not yet active; check 'journalctl -u hal0-openwebui -n 40'"
+            # A prior install on a box that has since lost docker (or an
+            # upgrade where openwebui was enabled) may have left the unit
+            # restart-looping with 203/EXEC. Actively quiesce it so the
+            # status reflects reality (inactive, not failed/looping).
+            systemctl disable --now hal0-openwebui >/dev/null 2>&1 || true
+            systemctl reset-failed hal0-openwebui >/dev/null 2>&1 || true
+            info "hal0-openwebui not started — docker is unavailable"
+            info "  install docker, then: systemctl enable --now hal0-openwebui  (chat at :3001)"
         fi
     fi
 
@@ -1114,7 +1132,19 @@ fi
 HELLO_RESULT=""
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && -z "${HAL0_NO_HELLO:-}" ]]; then
     HELLO_BASE="http://127.0.0.1:${HAL0_PORT}"
-    if curl -sf --max-time 3 "${HELLO_BASE}/api/health" >/dev/null 2>&1; then
+    # `wait_active hal0-api` only proves systemd marked the unit active —
+    # uvicorn may still be importing the app and not yet bound to the
+    # port. A single probe here races that cold start and prints a false
+    # "API not responding"; poll /api/health for a few seconds first.
+    HELLO_API_UP=0
+    for _ in $(seq 1 15); do
+        if curl -sf --max-time 2 "${HELLO_BASE}/api/health" >/dev/null 2>&1; then
+            HELLO_API_UP=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ "${HELLO_API_UP}" -eq 1 ]]; then
         # Find a pulled model. `hal0 model list --installed` returns one
         # id per line. We pick the first; on a fresh install this is
         # empty and we skip with a hint.

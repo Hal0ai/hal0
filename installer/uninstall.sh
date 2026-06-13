@@ -99,9 +99,13 @@ trap 'error "Uninstall failed at line ${LINENO}."; exit 1' ERR
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     step "Stopping services"
 
-    # Static units the installer writes, plus hal0-caddy kept for
-    # old-install cleanup (pre-v0.3 auth/Caddy removal).
-    UNITS=(hal0-api hal0-openwebui hal0-caddy \
+    # Static units the installer writes, plus two legacy units kept for
+    # old-install cleanup: hal0-caddy (pre-v0.3 auth/Caddy removal) and
+    # hal0-lemonade (pre lemonade-removal epic). The current installer
+    # writes neither, but an install that predates those changes still
+    # has the unit on disk — and a stale hal0-lemonade restart-loops with
+    # 203/EXEC once its placeholder binary is gone, so tear it down too.
+    UNITS=(hal0-api hal0-openwebui hal0-caddy hal0-lemonade \
            hal0-agent@hermes hermes-gateway)
 
     # Discover any running slot instances
@@ -192,12 +196,14 @@ uninstall_agents
 # ── Remove unit files ─────────────────────────────────────────────────────────
 step "Removing systemd units"
 
-# The hal0-caddy entry is legacy: not written by the current installer,
-# swept so old boxes come clean (pre-v0.3 auth/Caddy removal).
+# The hal0-caddy + hal0-lemonade entries are legacy: not written by the
+# current installer, swept so old boxes come clean (pre-v0.3 auth/Caddy
+# removal; pre lemonade-removal epic).
 for UNIT_FILE in \
     "${UNIT_DIR}/hal0-api.service" \
     "${UNIT_DIR}/hal0-openwebui.service" \
     "${UNIT_DIR}/hal0-caddy.service" \
+    "${UNIT_DIR}/hal0-lemonade.service" \
     "${UNIT_DIR}/hal0-agent@.service" \
     "${UNIT_DIR}/hermes-gateway.service"
 do
