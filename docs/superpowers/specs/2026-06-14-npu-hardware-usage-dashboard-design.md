@@ -62,10 +62,10 @@ Verified on CT105 (kernel 7.0.6, XDNA2 "RyzenAI-npu5", `amdxdna` 0.7.0). Both an
 New **`NpuPane`** = the third accordion section on the slots page, parallel to Inference and Image Gen (single-open mutual exclusion preserved). It **absorbs** `NpuFlmStack`: the FLM trio controls (chat model picker, asr/embed toggles, master load/unload) move into the pane's lower half.
 
 ### 4.2 Layout
-**Collapsed strip:** `NPU ● active · 3/8 cols · duty 35% · 41 tok/s · 7.2 GB ▾`
+**Collapsed strip:** `NPU ● active · 8/8 cols (claimed) · duty 35% · 41 tok/s · 7.2 GB ▾`
 
 **Expanded — hardware header (new):**
-- **Hero: 4×8 AIE grid.** 8 columns × 4 rows; allocated columns lit `--dev-npu`, free columns dim. Caption: "AIE array · 4×8 · *allocated* (not utilized)" and "headroom: N / 8 free". (Allocation is per-column, so a column lights whole.)
+- **Hero: 4×8 AIE grid.** 8 columns × 4 rows; allocated columns lit `--dev-npu`, free columns dim. Caption: "AIE array · 4×8 · *allocated* (not utilized)". (Allocation is per-column, so a column lights whole.) **NOTE (verified, see §4.5): an FLM model claims all 8 columns → in practice the grid is all-lit-or-all-dark. Frame headroom as binary ("NPU free" vs "claimed by `<slot>`"), not "N/8 free". The 4×8 grid is still the right honest visual — it shows the whole array going hot when FLM loads.**
 - **Stat cluster:** tri-state dot (idle/loaded/active) + "1 process · 3 roles"; **duty-cycle** bar (labelled "runtime_active_time — real, coarse"); **throughput** bar (tok/s, "serving layer"); **Model RAM** and **Unified free** tiles.
 
 **Expanded — absorbed FLM trio:** chat (model picker) · asr (on/off) · embed (on/off) + master load/unload, as today.
@@ -97,6 +97,63 @@ New **`NpuPane`** = the third accordion section on the slots page, parallel to I
 - Accordion wiring in the slots-page container (alongside `inference-pane.jsx` / `comfyui-pane.jsx`).
 - Consume extended `npu_status` via the existing `useStatsHardware()` hook (2.5 s).
 - Colors from `dashboard.css` device palette (`--dev-npu` #c896ff); reuse `engine-panes.css` accent + `.subcard` styling.
+
+### 4.5 Data layer — verified access (proven live on CT105 2026-06-14)
+
+The three signals come from **three different places** — there is no single NPU
+telemetry endpoint. All verified against a live `flm serve gemma3:1b` on the
+`ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43` image (the rebuilt image is the
+prerequisite — `:v1` cannot run `xrt-smi`, missing `libboost-filesystem`).
+
+**Signal 1 — Column allocation + contexts (`xrt-smi`, in the running FLM container).**
+The hal0 API runs on the host and can `podman exec` the live FLM slot container
+(`hal0-slot-<npu-slot>`), which already holds `/dev/accel/accel0` and has
+`xrt-smi` + `LD_LIBRARY_PATH` baked:
+```bash
+podman exec <flm-slot-container> \
+  /opt/xilinx/xrt/bin/unwrapped/xrt-smi examine -r aie-partitions -f JSON -o /dev/stdout
+# fallback if /dev/stdout rejected: -o /tmp/aie.json then `podman exec ... cat /tmp/aie.json`
+```
+Use the **`unwrapped`** binary (wrapped `xrt-smi` is a python shim needing `setup.sh`).
+JSON contract:
+```
+devices[0].aie_partitions.partitions[] → { start_col, num_cols, partition_index,
+  hw_contexts[] → { pid, context_id, status, command_submissions, command_completions, ... } }
+```
+- `allocated = sum(num_cols)`, `total = 8`. **Proven: one FLM model takes
+  `num_cols:8` → NPU is single-tenant. Render headroom as binary (free vs.
+  wholly claimed), NOT "N/8".** (Confirms ADR-0009 / `hal0_npu_flm_trio`.)
+- `contexts = len(hw_contexts)`; `active = count(status=="Active")`.
+- `command_submissions` **increments with inference** (observed 0→26) — usable as
+  a coarse activity rate (Δ/interval).
+- **`gops`/`egops`/`fps`/`latency` are always `"N/A"` on this part — do not surface.**
+- **Cost:** `podman exec` ~hundreds of ms → cache; refresh on slot load/unload +
+  ~30 s periodic, **never** on the 2.5 s path (reuse the ComfyUI status-aggregator
+  cache pattern, PR #686).
+
+**Signal 2 — Duty-cycle + state (host sysfs, ~0 ms, no sudo, safe at 2.5 s).**
+```
+/sys/class/accel/accel0/device/power/runtime_status      # "active" | "suspended"
+/sys/class/accel/accel0/device/power/runtime_active_time  # ms accumulator
+```
+`duty_pct = clamp(Δactive_time_ms / Δwall_ms, 0, 1) * 100` between polls.
+
+**Signal 3 — Throughput / TTFT / KV (FLM `usage`, serving layer).** FLM has **no
+`/metrics` endpoint**; values arrive in each `/v1/chat/completions` response
+`usage` block (verified):
+```json
+"usage": { "decoding_speed_tps":39.7, "prefill_speed_tps":18.6,
+  "prefill_duration_ttft":0.70, "kv_token_occupancy_rate_percentage":0.049 }
+```
+hal0 already proxies FLM completions — capture `usage` per NPU-slot request and
+keep the last-seen `decoding_speed_tps` (+ ttft, kv occupancy).
+
+**Signal 4 — Model RAM.** `_npu_status().model_mb` already wired — keep.
+
+**Degraded-safe (must):** if the NPU slot isn't loaded or the `xrt-smi` exec
+fails (e.g., slot still on `:v1`), set `columns/contexts = null` and still emit
+`state`, `duty_pct`, `model_mb`. Pane never blanks. Label columns **"allocated,"
+not "utilized"**; no busy-%/power/temp (not available pre-Linux-7.1).
 
 ---
 
