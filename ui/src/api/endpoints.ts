@@ -254,11 +254,15 @@ export const ENDPOINTS = {
   installState: '/api/install/state',
   installCuratedModels: '/api/install/curated-models',
   installPickDefault: '/api/install/pick-default',
-  // NOTE: there is no single /api/install/install (bundle-level) endpoint.
-  // The wizard "install" step maps to POST /api/install/pick-default per model.
-  // The hook (useFirstRunInstall) calls pick-default; the UI handles graceful
-  // degradation on any error so progress stage still renders.
+  // FirstRun v2 (design D3): one orchestrated endpoint that pulls every
+  // bundle slot, derives device+profile, and creates the slots OFFLINE. The
+  // legacy per-model pick-default route stays for ad-hoc single assignments.
+  installApply: '/api/install/apply',
   installComplete: '/api/install/complete',
+  // FirstRun v2 services step (design D5): verify + one-click repair.
+  installServices: '/api/install/services',
+  installServiceRepair: (unit: string) =>
+    `/api/install/services/${encodeURIComponent(unit)}/repair`,
   // PUT /api/install/slots/{slot}/model — assign a model to a slot post-pick.
   installSlotModel: (slot: string) =>
     `/api/install/slots/${encodeURIComponent(slot)}/model`,
