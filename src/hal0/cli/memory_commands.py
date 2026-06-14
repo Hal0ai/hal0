@@ -193,8 +193,8 @@ _DEFAULT_COGNEE_DIR = "/var/lib/hal0/memory/cognee"
 def migrate_cmd(
     dry_run: bool = typer.Option(
         True,
-        "--dry-run/--apply",
-        help="Report migration without touching Hindsight (--apply not yet implemented).",
+        "--dry-run",
+        help="Report the migration plan without writing. Dry-run only — apply/write mode is not yet implemented.",
     ),
     cognee_dir: str = typer.Option(
         _DEFAULT_COGNEE_DIR,

@@ -5,7 +5,7 @@ const HAL0_DATA = {
   // Flat /api/hardware response shape (mirrors hal0.api.routes.hardware
   // _flatten_for_ui). useHardware.normalizeHardware reads these flat keys;
   // the legacy display keys (name/uptime/cpu/cores/gpu/ram) are kept so
-  // direct HAL0_DATA.host.* readers (chrome.jsx, mcp-main.jsx, flow-modals,
+  // direct HAL0_DATA.host.* readers (chrome.jsx, flow-modals,
   // firstrun) keep working without a hook.
   host: {
     hostname: "hal0",
