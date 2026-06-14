@@ -5,7 +5,7 @@ Covers all four resolution paths from PLAN.md §3:
     1. registry            — exact ModelRegistry binding
     2. passthrough         — upstream's cached /v1/models already has the id
     3. cold-cache prefetch — fanout + recheck (Tier 2 timeout + Tier 3 single-flight)
-    4. legacy fallback     — path/name heuristics in proxy.py
+    4. legacy fallback     — path/name heuristics in router.resolve_by_capability
 
 Plus the structured-envelope assertions for every ``dispatch.*`` error code
 (PLAN.md §5 Tier 1 — no silent swallowing).
@@ -23,9 +23,9 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from hal0.api.middleware import error_codes
-from hal0.dispatcher.proxy import LegacyResolutionFailed
 from hal0.dispatcher.router import (
     Dispatcher,
+    LegacyResolutionFailed,
     NoRouteFound,
     RegistryLoadFailed,
     UnknownUpstream,
@@ -300,6 +300,27 @@ async def test_legacy_fallback_routes_embeddings_to_embed_slot() -> None:
     )
     assert call.resolution_path == "legacy_slot:embed"
     assert call.upstream_name == "embed"
+
+
+@pytest.mark.asyncio
+async def test_legacy_fallback_routes_colon_model_to_npu_slot() -> None:
+    """Rule 5: an FLM tag-style ``name:tag`` model id routes to the npu slot.
+
+    Locks the capability/path heuristic that pins ``qwen3:0.6b`` (and any
+    ``name:tag`` id) to the ``npu`` slot when the registry and warm caches
+    have nothing to say — the last-resort step in ``dispatch()``.
+    """
+    npu = make_slot("npu", "http://127.0.0.1:8089/v1")
+    upstreams = FakeUpstreamRegistry([npu])
+    models = FakeModelRegistry(routes={})
+
+    dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
+    call = await dispatcher.dispatch(
+        make_request(),
+        body={"model": "qwen3:0.6b"},
+    )
+    assert call.resolution_path == "legacy_slot:npu"
+    assert call.upstream_name == "npu"
 
 
 @pytest.mark.asyncio

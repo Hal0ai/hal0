@@ -326,7 +326,7 @@ def test_image_defaults_do_not_override_explicit_values(
 def test_llm_request_in_img_mode_503_retry_after(client: TestClient, tmp_hal0_home: str) -> None:
     """Chat request while mode==img → 503 gpu.image_mode + Retry-After ≥ 15."""
     # Legacy fallback resolves model "primary" via the back-compat alias to
-    # the "chat" slot (proxy.resolve_slot rule 8), so seed "chat".
+    # the "chat" slot (resolve_by_capability rule 8), so seed "chat".
     _seed_chat_upstream(client, "chat")
     _write_img_mode_state(
         Path(tmp_hal0_home) / "var-lib" / "hal0" / "gpu_arbiter.json",

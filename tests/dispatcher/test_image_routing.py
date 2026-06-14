@@ -1,7 +1,7 @@
-"""Routing rules for image-gen requests in the legacy fallback proxy.
+"""Routing rules for image-gen requests in capability/path routing (Step 4).
 
 These tests cover the new ``/v1/images/*`` path pin + the SDXL/SD/Flux
-model-id prefix pin Team K added to ``hal0.dispatcher.proxy.resolve_slot``.
+model-id prefix pin Team K added to ``hal0.dispatcher.router.resolve_by_capability``.
 The chat / embed / NPU rules are intentionally not re-tested here — they
 have coverage in :mod:`tests.dispatcher.test_router`.
 """
@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
-from hal0.dispatcher.router import Dispatcher
+from hal0.dispatcher.router import Dispatcher, LegacyResolutionFailed, resolve_by_capability
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 
@@ -49,14 +48,14 @@ class _FakeModelRegistry:
 
 def test_images_generations_path_routes_to_img_slot() -> None:
     reg = _registry_with_slots("chat", "img")
-    upstream = resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
+    upstream = resolve_by_capability("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
     assert upstream.name == "img"
 
 
 def test_sdxl_model_id_routes_to_img_even_without_image_path() -> None:
     """A bare /v1/chat/completions with model='sdxl-turbo' must NOT hit primary."""
     reg = _registry_with_slots("chat", "img")
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         "/v1/chat/completions",
         {"model": "sdxl-turbo", "messages": [{"role": "user", "content": "hi"}]},
         reg,
@@ -66,7 +65,7 @@ def test_sdxl_model_id_routes_to_img_even_without_image_path() -> None:
 
 def test_sd15_model_prefix_routes_to_img() -> None:
     reg = _registry_with_slots("chat", "img")
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         "/v1/images/generations",
         {"model": "sd-1.5-pruned-emaonly", "prompt": "x"},
         reg,
@@ -76,7 +75,7 @@ def test_sd15_model_prefix_routes_to_img() -> None:
 
 def test_flux_model_prefix_routes_to_img() -> None:
     reg = _registry_with_slots("chat", "img")
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         "/v1/images/generations",
         {"model": "Flux-2-Klein-9B-GGUF", "prompt": "x"},
         reg,
@@ -87,7 +86,7 @@ def test_flux_model_prefix_routes_to_img() -> None:
 def test_chat_model_id_still_routes_to_primary() -> None:
     """The image rules must not regress chat routing."""
     reg = _registry_with_slots("chat", "img")
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         "/v1/chat/completions",
         {"model": "qwen3-4b", "messages": []},
         reg,
@@ -99,7 +98,7 @@ def test_image_path_without_img_slot_raises_typed_error() -> None:
     """Path pin selects 'img', missing 'img' upstream → typed legacy error."""
     reg = _registry_with_slots("chat")
     with pytest.raises(LegacyResolutionFailed) as exc:
-        resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
+        resolve_by_capability("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
     assert exc.value.code == "dispatch.legacy_unresolved"
 
 
@@ -111,7 +110,7 @@ def test_image_path_accepts_container_remote() -> None:
     upstream — same acceptance as the embed/tts/rerank path pins."""
     reg = _registry_with_slots("chat")
     reg.upsert(_container_remote_img())
-    upstream = resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
+    upstream = resolve_by_capability("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
     assert upstream.name == "img"
     assert upstream.kind == "remote"
 
@@ -121,7 +120,7 @@ def test_image_model_prefix_accepts_container_remote() -> None:
     accept the container-backed img remote."""
     reg = _registry_with_slots("chat")
     reg.upsert(_container_remote_img())
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         "/v1/chat/completions",
         {"model": "sdxl-turbo", "messages": [{"role": "user", "content": "hi"}]},
         reg,
@@ -144,7 +143,7 @@ def test_genuine_external_remote_still_rejected() -> None:
         )
     )
     with pytest.raises(LegacyResolutionFailed) as exc:
-        resolve_slot("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
+        resolve_by_capability("/v1/images/generations", {"model": "sdxl-turbo"}, reg)
     assert exc.value.code == "dispatch.legacy_unresolved"
 
 

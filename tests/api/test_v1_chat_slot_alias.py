@@ -169,13 +169,13 @@ async def test_rewrite_is_noop_without_slot_manager() -> None:
 # ── dispatcher non-regression ───────────────────────────────────────────────
 
 
-def test_resolve_slot_chat_default_raises_typed_legacy_error() -> None:
+def test_resolve_by_capability_chat_default_raises_typed_legacy_error() -> None:
     """A chat request that reaches the legacy fallback selects the ``chat``
     default and (absent a real chat slot upstream) raises the typed legacy
     error, which the dispatcher converts to NoRouteFound — surfaced to the
     client as the 404 ``dispatch.no_route`` envelope. No per-slot chat
     upstream is matched."""
-    from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
+    from hal0.dispatcher.router import LegacyResolutionFailed, resolve_by_capability
     from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
     reg = UpstreamRegistry()
@@ -192,7 +192,7 @@ def test_resolve_slot_chat_default_raises_typed_legacy_error() -> None:
     with pytest.raises(LegacyResolutionFailed):
         # model id form — not an alias, not a registered slot name → falls
         # to the "chat" default which has no slot upstream → legacy error.
-        resolve_slot(
+        resolve_by_capability(
             "/v1/chat/completions",
             {"model": "hermes-4-14b-q5km", "messages": []},
             reg,

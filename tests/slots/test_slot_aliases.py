@@ -4,7 +4,7 @@ Verifies:
   1. Old names ("primary", "agent-hermes") resolve to canonical slots.
   2. Aliases do NOT appear in SlotManager.list() or iter_configs().
   3. hal0/primary virtual name resolves via the resolver layer.
-  4. dispatcher/proxy Rule 6 + 7 handle the renamed slot.
+  4. dispatcher/router Rule 6 + 7 handle the renamed slot.
   5. hal0_chat_slot_alias_map injects back-compat aliases.
 """
 
@@ -163,41 +163,41 @@ def test_resolve_chain_hal0_primary_resolves():
     assert r.fallback is False
 
 
-# ── 6. dispatcher/proxy rule 7 fallback uses "chat" ──────────────────────────
+# ── 6. dispatcher/router rule 7 fallback uses "chat" ──────────────────────────
 
 
 def test_proxy_fallback_uses_chat():
-    from hal0.dispatcher.proxy import resolve_slot
+    from hal0.dispatcher.router import resolve_by_capability
     from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
     reg = UpstreamRegistry()
     reg.add(Upstream(name="chat", kind="slot", url="http://127.0.0.1:13305/v1"))
-    upstream = resolve_slot("/v1/chat/completions", None, reg)
+    upstream = resolve_by_capability("/v1/chat/completions", None, reg)
     assert upstream.name == "chat"
 
 
 def test_proxy_rule6_primary_alias_resolves_to_chat():
     """model=primary in body resolves to chat slot via alias (Rule 6 path)."""
-    from hal0.dispatcher.proxy import resolve_slot
+    from hal0.dispatcher.router import resolve_by_capability
     from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
     reg = UpstreamRegistry()
     reg.add(Upstream(name="chat", kind="slot", url="http://127.0.0.1:13305/v1"))
     # "primary" is an alias for "chat"; Rule 6 resolves the alias → chat
     # then the Rule 6 guard (m_resolved != "chat") drops it to Rule 7 fallback
-    upstream = resolve_slot("/v1/chat/completions", {"model": "primary"}, reg)
+    upstream = resolve_by_capability("/v1/chat/completions", {"model": "primary"}, reg)
     assert upstream.name == "chat"
 
 
 def test_proxy_rule6_agent_hermes_alias_resolves_to_agent():
     """model=agent-hermes resolves to the agent slot via alias."""
-    from hal0.dispatcher.proxy import resolve_slot
+    from hal0.dispatcher.router import resolve_by_capability
     from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
     reg = UpstreamRegistry()
     reg.add(Upstream(name="agent", kind="slot", url="http://127.0.0.1:13305/v1"))
     reg.add(Upstream(name="chat", kind="slot", url="http://127.0.0.1:13305/v1"))
-    upstream = resolve_slot("/v1/chat/completions", {"model": "agent-hermes"}, reg)
+    upstream = resolve_by_capability("/v1/chat/completions", {"model": "agent-hermes"}, reg)
     assert upstream.name == "agent"
 
 

@@ -2,8 +2,8 @@
 
 Phase C task C4 — ``/v1/rerankings`` (and ``/v1/rerank``) path-routes to the
 dedicated ``rerank`` slot (vulkan llama-server, --reranking, port 8083) at
-both the router (_default_for_path / _RERANK_DEFAULT) and proxy (legacy
-fallback rule 2) layers.
+both the router (_default_for_path / _RERANK_DEFAULT) and resolve_by_capability
+(Step 4) layers.
 
 Key seam: llama-server serves ``POST /rerank`` and ``POST /v1/rerank``
 natively — NOT ``/v1/rerankings``.  The dispatcher rewrites the outgoing
@@ -18,8 +18,13 @@ from __future__ import annotations
 import pytest
 from starlette.requests import Request
 
-from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
-from hal0.dispatcher.router import Dispatcher, NoRouteFound, UpstreamCall
+from hal0.dispatcher.router import (
+    Dispatcher,
+    LegacyResolutionFailed,
+    NoRouteFound,
+    UpstreamCall,
+    resolve_by_capability,
+)
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 # ── test doubles (same pattern as test_tts_path_routing.py) ──────────────────
@@ -82,7 +87,7 @@ def make_remote_rerank(port: int = 8083) -> Upstream:
     )
 
 
-# ── proxy.resolve_slot (legacy fallback Rule 2) ───────────────────────────────
+# ── resolve_by_capability — capability/path routing (Rule 2) ──────────────────
 
 
 def test_rerankings_path_pins_to_rerank_slot() -> None:
@@ -94,7 +99,7 @@ def test_rerankings_path_pins_to_rerank_slot() -> None:
     rerank = make_slot("rerank", "http://127.0.0.1:8083/v1")
     upstreams = FakeUpstreamRegistry([rerank])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/rerankings",
         body={"model": "bge-reranker-v2-m3", "query": "foo", "documents": ["bar"]},
         upstreams=upstreams,
@@ -113,7 +118,7 @@ def test_rerank_fragment_no_longer_pins_embed() -> None:
     embed = make_slot("embed", "http://127.0.0.1:8086/v1")
     upstreams = FakeUpstreamRegistry([rerank, embed])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/rerankings",
         body={"model": "bge-reranker-v2-m3", "query": "foo", "documents": ["bar"]},
         upstreams=upstreams,
@@ -127,7 +132,7 @@ def test_embeddings_still_pin_to_embed() -> None:
     embed = make_slot("embed", "http://127.0.0.1:8086/v1")
     upstreams = FakeUpstreamRegistry([embed])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/embeddings",
         body={"input": "hello", "model": "bge-large-en"},
         upstreams=upstreams,
@@ -258,7 +263,7 @@ async def test_no_rerank_slot_falls_back_to_no_route_found() -> None:
 
 
 def test_proxy_rerankings_path_pin_resolves_container_remote() -> None:
-    """resolve_slot: /v1/rerankings + rerank registered kind=remote → returned.
+    """resolve_by_capability: /v1/rerankings + rerank registered kind=remote → returned.
 
     Container slots register as kind='remote' with slot_name set.  The
     path_pinned acceptance gate must accept them (same as tts/embed containers).
@@ -266,7 +271,7 @@ def test_proxy_rerankings_path_pin_resolves_container_remote() -> None:
     container_rerank = make_remote_rerank(port=8083)
     upstreams = FakeUpstreamRegistry([container_rerank])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/rerankings",
         body={"model": "bge-reranker-v2-m3", "query": "foo", "documents": ["bar"]},
         upstreams=upstreams,

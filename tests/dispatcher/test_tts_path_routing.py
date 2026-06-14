@@ -1,7 +1,7 @@
 """Tests for TTS path-based routing to the ``tts`` slot.
 
 Phase B task B4 — ``/audio/speech`` path-routes to the ``tts`` slot at
-both the router (_default_for_path) and proxy (legacy fallback Rule 2)
+both the router (_default_for_path) and resolve_by_capability (Step 4)
 layers.  Model-id matching is intentionally bypassed because the kokoro
 container advertises ``"kokoro"`` while callers send ``"kokoro-v1"``,
 ``"tts"``, etc.
@@ -14,8 +14,12 @@ from __future__ import annotations
 import pytest
 from starlette.requests import Request
 
-from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
-from hal0.dispatcher.router import Dispatcher, UpstreamCall
+from hal0.dispatcher.router import (
+    Dispatcher,
+    LegacyResolutionFailed,
+    UpstreamCall,
+    resolve_by_capability,
+)
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 # ── test doubles (same pattern as test_router.py) ────────────────────────────
@@ -141,7 +145,7 @@ async def test_audio_speech_kokoro_v1_reaches_tts_slot() -> None:
     assert call.resolution_path == "legacy_slot:tts"
 
 
-# ── proxy.resolve_slot (legacy fallback) ─────────────────────────────────────
+# ── resolve_by_capability (capability/path routing) ──────────────────────────
 
 
 def test_proxy_audio_speech_path_pins_to_tts() -> None:
@@ -149,7 +153,7 @@ def test_proxy_audio_speech_path_pins_to_tts() -> None:
     tts = make_slot("tts")
     upstreams = FakeUpstreamRegistry([tts])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/audio/speech",
         body={"model": "kokoro-v1", "input": "hi", "voice": "af_bella"},
         upstreams=upstreams,
@@ -162,7 +166,7 @@ def test_proxy_audio_speech_no_model_pins_to_tts() -> None:
     tts = make_slot("tts")
     upstreams = FakeUpstreamRegistry([tts])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/audio/speech",
         body={"input": "hi", "voice": "af_bella"},
         upstreams=upstreams,
@@ -176,7 +180,7 @@ def test_proxy_audio_speech_unknown_model_still_pins_to_tts() -> None:
     chat = make_slot("chat", "http://127.0.0.1:8081/v1")
     upstreams = FakeUpstreamRegistry([tts, chat])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/audio/speech",
         body={"model": "some-unknown-tts-model", "input": "hello", "voice": "af_bella"},
         upstreams=upstreams,
@@ -190,7 +194,7 @@ def test_proxy_audio_speech_missing_tts_slot_raises_typed_error() -> None:
     upstreams = FakeUpstreamRegistry([chat])  # no tts
 
     with pytest.raises(LegacyResolutionFailed) as exc:
-        resolve_slot(
+        resolve_by_capability(
             path="/v1/audio/speech",
             body={"model": "kokoro-v1", "input": "hi", "voice": "af_bella"},
             upstreams=upstreams,
@@ -246,7 +250,7 @@ def test_proxy_audio_transcriptions_not_routed_to_tts() -> None:
     chat = make_slot("chat", "http://127.0.0.1:8081/v1")
     upstreams = FakeUpstreamRegistry([chat])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/audio/transcriptions",
         body={"model": "moonshine-small", "language": "en"},
         upstreams=upstreams,
@@ -273,7 +277,7 @@ async def test_router_audio_transcriptions_not_default_to_tts() -> None:
 # ── C1: path-pin must resolve container-backed remote upstreams ───────────────
 #
 # Container slots register as kind="remote" (manager._register_container_upstream)
-# with slot_name set. resolve_slot's old kind=="slot" gate rejected them, so
+# with slot_name set. resolve_by_capability's old kind=="slot" gate rejected them, so
 # kokoro-v1 requests raised LegacyResolutionFailed → NoRouteFound instead of
 # reaching the live container-backed tts slot.
 
@@ -314,11 +318,11 @@ async def test_dispatch_kokoro_v1_resolves_container_remote_tts() -> None:
 
 
 def test_proxy_tts_path_pin_resolves_container_remote() -> None:
-    """resolve_slot: /audio/speech + tts registered kind=remote → returned."""
+    """resolve_by_capability: /audio/speech + tts registered kind=remote → returned."""
     container_tts = make_remote_tts(port=8084)
     upstreams = FakeUpstreamRegistry([container_tts])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/audio/speech",
         body={"model": "kokoro-v1", "input": "hi", "voice": "af_bella"},
         upstreams=upstreams,
@@ -342,7 +346,7 @@ def test_proxy_embed_path_pin_resolves_container_remote() -> None:
     )
     upstreams = FakeUpstreamRegistry([container_embed])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/embeddings",
         body={"input": "x"},
         upstreams=upstreams,
@@ -367,7 +371,7 @@ def test_proxy_genuine_remote_not_accepted_by_path_pin() -> None:
     upstreams = FakeUpstreamRegistry([genuine_remote])
 
     with pytest.raises(LegacyResolutionFailed):
-        resolve_slot(
+        resolve_by_capability(
             path="/v1/audio/speech",
             body={"model": "kokoro-v1", "input": "hi", "voice": "af_bella"},
             upstreams=upstreams,
@@ -385,7 +389,7 @@ def test_proxy_model_name_rule_does_not_resolve_container_remote() -> None:
     chat = make_slot("chat", "http://127.0.0.1:8081/v1")
     upstreams = FakeUpstreamRegistry([container_tts, chat])
 
-    upstream = resolve_slot(
+    upstream = resolve_by_capability(
         path="/v1/chat/completions",
         body={"model": "tts", "messages": []},
         upstreams=upstreams,

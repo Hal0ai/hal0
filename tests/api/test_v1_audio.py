@@ -56,7 +56,7 @@ def _pin_slot_ready(client: TestClient, slot_name: str = "chat") -> None:
 def _seed_stt_upstream(client: TestClient, port: int = 8089) -> None:
     """Register a fake STT slot the dispatcher's legacy fallback will land on.
 
-    The legacy heuristics in ``hal0.dispatcher.proxy`` don't have a rule for
+    The legacy heuristics in ``hal0.dispatcher.router`` don't have a rule for
     ``/v1/audio/transcriptions`` model ids that aren't FLM tag-style, so an
     arbitrary STT model name falls through to the ``chat`` slot (renamed from
     ``primary`` in #654). We register under that name so the dispatch resolves
@@ -80,7 +80,7 @@ def _seed_tts_upstream(client: TestClient, port: int = 8084) -> None:
     POST /v1/audio/speech is path-routed to the ``tts`` slot (B4).  The kokoro
     container registers via ``SlotManager._register_container_upstream`` as
     ``kind="remote"`` with ``slot_name="tts"`` — the path-pin rules in
-    ``hal0.dispatcher.proxy`` accept that container-backed remote (C1 fix), so
+    ``hal0.dispatcher.router`` accept that container-backed remote (C1 fix), so
     tests must exercise the same shape rather than a kind="slot" stand-in.
 
     The container readiness gate in ``Dispatcher.forward`` probes systemctl +
