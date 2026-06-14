@@ -518,6 +518,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         <ReadOnlyStrip k="image status" v={slot.image_status || "present"} />
       </div>
 
+      <FieldGroup label="Slot" hint="this instance">
       <div className="form-row">
         <div className="form-lbl"><span>Name</span><span className="sub">seeded slots can't be renamed</span></div>
         <div className="form-ctl"><input className="input mono" value={slot.name} disabled /></div>
@@ -599,6 +600,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
         );
       })()}
 
+      </FieldGroup>
+
+      <FieldGroup label="Model" hint="what it loads">
       {/* Task 1: live model swap — mirrors the card's ModelPicker but with the
           full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
           Swap is its own POST /slots/{name}/swap (not part of the batched
@@ -671,6 +675,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
         );
       })()}
 
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>ctx_size</span>
+          <span className="warn">⟳ restarts the container (~model-load seconds)</span>
+        </div>
+        <div className="form-ctl">
+          <input
+            className={"input mono" + (fieldErrs.ctx ? " input-err" : "")}
+            value={ctx}
+            onChange={e => { setCtx(e.target.value); setFieldErrs(p => ({...p, ctx: undefined})); }}
+          />
+          {fieldErrs.ctx && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ctx}</div>}
+        </div>
+      </div>
+      </FieldGroup>
+
+      <FieldGroup label="Inference" hint="behavior">
       {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
           own PUT /config), no restart: _slot_thinking_default reads it live
           on the next request. */}
@@ -706,27 +727,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         </div>
       )}
+      </FieldGroup>
 
       {/* Task 4: Advanced fields (mostly read-only, profile-owned) are
           collapsed by default — minimal native <details> disclosure (no
           disclosure primitive exists in primitives.jsx). */}
       <details className="adv-disclosure">
       <summary className="form-section" style={{cursor: "pointer", listStyle: "revert"}}>Advanced</summary>
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>ctx_size</span>
-          <span className="warn">⟳ restarts the container (~model-load seconds)</span>
-        </div>
-        <div className="form-ctl">
-          <input
-            className={"input mono" + (fieldErrs.ctx ? " input-err" : "")}
-            value={ctx}
-            onChange={e => { setCtx(e.target.value); setFieldErrs(p => ({...p, ctx: undefined})); }}
-          />
-          {fieldErrs.ctx && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ctx}</div>}
-        </div>
-      </div>
 
       {/* C5: GPU offload tuning — read-only, defined by the profile. */}
       <div className="form-row">

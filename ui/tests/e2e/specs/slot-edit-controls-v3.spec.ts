@@ -111,8 +111,7 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    // ctx_size lives in the collapsed Advanced section — expand it first.
-    await page.locator('.drawer details.adv-disclosure summary').click()
+    // ctx_size is now in the Model group (directly visible, not inside Advanced).
     const row = page.locator('.drawer .form-row', { hasText: 'ctx_size' })
     await expect(row).toBeVisible()
     await row.locator('input').fill('16384')
@@ -199,6 +198,19 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0].enable_thinking).toBe(true)
     await expect(pill).toHaveAttribute('aria-checked', 'true')
+  })
+
+  test('drawer fields are grouped under SLOT / MODEL / INFERENCE', async ({ page }) => {
+    await seedSlots(page, [PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+    await expect(page.locator('.drawer')).toBeVisible()
+    for (const label of ['Slot', 'Model', 'Inference']) {
+      await expect(page.locator('.field-group-label', { hasText: new RegExp(`^${label}$`, 'i') })).toHaveCount(1)
+    }
+    const modelGroup = page.locator('.field-group', { has: page.locator('.field-group-label', { hasText: /^Model$/i }) })
+    await expect(modelGroup.locator('.form-row', { hasText: 'Model' }).locator('select')).toBeVisible()
+    const infGroup = page.locator('.field-group', { has: page.locator('.field-group-label', { hasText: /^Inference$/i }) })
+    await expect(infGroup.locator('.form-row', { hasText: 'Reasoning' })).toBeVisible()
   })
 
   test('default-for-type row is gone from the edit drawer and Save omits default', async ({ page }) => {
