@@ -1835,6 +1835,21 @@ class ModelsConfig(BaseModel):
         return self.pull_root
 
 
+class ActivityConfig(BaseModel):
+    """``[activity]`` — the durable audit/activity store (see hal0.activity).
+
+    Records every config-mutating action and system state change to a SQLite
+    table that survives restarts. ``retention_days`` and ``max_rows`` keep the
+    DB bounded without losing recent history. ``HAL0_ACTIVITY_RETENTION_DAYS``
+    overrides retention at the env layer.
+    """
+
+    enabled: bool = True
+    retention_days: int = Field(default=30, ge=1)
+    # None disables the row cap (retention_days still applies).
+    max_rows: int | None = Field(default=50_000, ge=100)
+
+
 class Hal0Config(BaseModel):
     """Top-level hal0.toml pydantic model.
 
@@ -1854,6 +1869,7 @@ class Hal0Config(BaseModel):
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    activity: ActivityConfig = Field(default_factory=ActivityConfig)
 
 
 __all__ = [
@@ -1867,6 +1883,7 @@ __all__ = [
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
     "SEED_PROFILES",
+    "ActivityConfig",
     "AgentAuthConfig",
     "AgentAuthKindLiteral",
     "AgentConfig",

@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import os
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -35,6 +36,9 @@ from hal0.api.agents.chat_proxy import router as chat_proxy_router
 from hal0.api.middleware import error_codes, log_scrub, request_id
 from hal0.api.openrouter import router as openrouter_auth_router
 from hal0.api.plugins import router as plugin_manifest_router
+from hal0.api.routes import (
+    activity as activity_routes,
+)
 from hal0.api.routes import (
     agents as agents_routes,
 )
@@ -93,8 +97,10 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     secrets as secrets_routes,
 )
+from hal0.activity import AuditStore
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
+from hal0.config.paths import activity_db
 from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
@@ -745,11 +751,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model_cache[u.name] = merged
         return merged
 
+    # Durable audit/activity store — the source of truth surfaced by
+    # /api/activity. Constructed before the event bus so the bus can forward
+    # every emitted event into it (the durable mirror). High-frequency
+    # pull.progress is filtered out of the mirror so it can't evict
+    # lifecycle history; the explicit audit_action() path carries the richer
+    # user-action records with before/after + outcome.
+    audit_store: AuditStore | None = None
+    audit_epoch = uuid.uuid4().hex
+    if hal0_cfg.activity.enabled:
+        retention = int(
+            os.environ.get("HAL0_ACTIVITY_RETENTION_DAYS")
+            or hal0_cfg.activity.retention_days
+        )
+        audit_store = AuditStore(
+            activity_db(),
+            retention_days=retention,
+            max_rows=hal0_cfg.activity.max_rows,
+        )
+        try:
+            audit_store.init_schema()
+            await audit_store.prune()
+        except Exception as exc:  # init must never block startup
+            log.warning("activity.init_failed", error=str(exc))
+            audit_store = None
+
+    async def _audit_sink(event: dict[str, Any]) -> None:
+        if audit_store is None or event.get("type") == "pull.progress":
+            return
+        await audit_store.record_event(event)
+
     # SlotManager owns slot state.  Built before Dispatcher so it can be
     # threaded in and forward() can flip slots into SERVING per request.
     # Construct the event bus first so the SlotManager can side-channel
     # every transition through it — the footer subscribes to /api/events.
-    event_bus = EventBus()
+    event_bus = EventBus(sink=_audit_sink if audit_store is not None else None)
     slot_manager = SlotManager(event_bus=event_bus, upstreams_registry=upstreams)
 
     dispatcher = Dispatcher(
@@ -828,6 +864,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # be wired with the same instance); published on app.state here so
     # request handlers can reach it via ``request.app.state.events``.
     app.state.events = event_bus
+    # Durable audit/activity store + a per-process epoch so the ActivityLog
+    # can detect a restart and reset its cursor (events ids restart at 1).
+    app.state.audit = audit_store
+    app.state.audit_epoch = audit_epoch
     await event_bus.emit(
         "system.restart",
         "info",
@@ -1153,6 +1193,11 @@ def create_app() -> FastAPI:
     # reason as /api/status: the footer renders during first-run before
     # any credential exists. No mutating endpoints live on this router.
     app.include_router(events_routes.router, prefix="/api/events", tags=["events"])
+
+    # Durable activity / audit surface — the source of truth for config
+    # changes + state transitions, backing the slots-page ActivityLog.
+    # Read-only + public for the same first-run reason as /api/events.
+    app.include_router(activity_routes.router, prefix="/api/activity", tags=["activity"])
 
     # Unified journal panel (issue #323, epic #322 Phase 1). Serves
     # /api/events in the journal envelope for the dashboard's journal

@@ -26,13 +26,16 @@ import asyncio
 import contextlib
 import fnmatch
 import itertools
+import logging
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
 __all__ = ["EventBus", "Severity", "make_event"]
+
+_log = logging.getLogger("hal0.events")
 
 Severity = str  # "info" | "warn" | "error" — kept loose to avoid Literal import noise
 
@@ -86,11 +89,17 @@ class EventBus:
         *,
         ring_maxlen: int = _RING_MAXLEN,
         subscriber_maxsize: int = _SUBSCRIBER_MAXSIZE,
+        sink: "Callable[[dict[str, Any]], Awaitable[Any]] | None" = None,
     ) -> None:
         self.ring: deque[dict[str, Any]] = deque(maxlen=ring_maxlen)
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._next_id: itertools.count[int] = itertools.count(1)
         self._subscriber_maxsize = subscriber_maxsize
+        # Optional durable forwarder (the "future enrichment" hook noted in
+        # the class docstring). When set, every emitted event is also handed
+        # to ``sink`` — e.g. the AuditStore, which persists it. A sink that
+        # raises must never break emit, so we swallow + log its failures.
+        self._sink = sink
 
     # ── Emit ──────────────────────────────────────────────────────────
 
@@ -121,6 +130,11 @@ class EventBus:
         # (subscribers exit on task cancel) doesn't raise RuntimeError.
         for q in list(self.subscribers):
             self._enqueue(q, event)
+        if self._sink is not None:
+            try:
+                await self._sink(event)
+            except Exception:  # noqa: BLE001 — durability is best-effort
+                _log.warning("events.sink_failed", exc_info=True)
         return event
 
     def _enqueue(self, q: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:

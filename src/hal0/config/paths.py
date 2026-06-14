@@ -122,6 +122,17 @@ def models_dir() -> Path:
     return var_lib() / "models"
 
 
+def activity_db() -> Path:
+    """Return the durable activity/audit store path (/var/lib/hal0/activity.db).
+
+    SQLite file (plus its -wal/-shm siblings) holding the audit trail of
+    every config-mutating user action and system state change. Preserved
+    across updates like the rest of ``var_lib()``. Under HAL0_HOME it lands
+    in the tmp tree, so tests are auto-isolated.
+    """
+    return var_lib() / "activity.db"
+
+
 #: Conventional external model-store mount and the historic default for slot
 #: container bind-mounts. Most hal0 deployments target an NFS / fast-disk
 #: mount here; overridable per-install via ``[models].store`` or the
