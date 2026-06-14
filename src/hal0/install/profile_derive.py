@@ -28,9 +28,14 @@ def derive_device(capability: str, hw: HardwareInfo, *, npu_opt_in: bool) -> str
     if capability in NPU_TRIO_CAPS:
         return "npu" if (hw.npu.present and npu_opt_in) else None
     if capability == "tts":
+        # kokoro runs on CPU (the `tts` seed profile, backend-None → coherent).
         return "cpu"
     if capability == "stt":
-        return "npu" if (hw.npu.present and npu_opt_in) else "cpu"
+        # No CPU llama profile exists for Whisper in the seed set, so STT is
+        # only provisioned on the NPU (opt-in). Otherwise skip it cleanly —
+        # the §8 "needs upstream routing" case — rather than create an
+        # incoherent cpu/gpu-profile slot that #807 would reject.
+        return "npu" if (hw.npu.present and npu_opt_in) else None
     # chat / coder / embed → GPU lane. platform=="strix-halo" is the canonical
     # FP4 signal; compute_capable means a ROCm/CUDA runtime was detected.
     if hw.platform == "strix-halo" or any(g.compute_capable for g in hw.gpus):
