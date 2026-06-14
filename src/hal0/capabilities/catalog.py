@@ -92,7 +92,7 @@ _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
 # ── Backends ──────────────────────────────────────────────────────────────────
 
 
-_FLM_TOOLBOX_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
+_FLM_TOOLBOX_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
 
 
 # FLM tags hidden from the dashboard catalog because of upstream FLM
