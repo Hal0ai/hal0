@@ -16,7 +16,16 @@
  */
 import { test, expect } from '../fixtures/apiMock'
 
-test.describe('System card (dashboard sidebar)', () => {
+// RETIRED: dashboard overhaul has no identity card (handoff registry);
+// identity moved off main page — flagged to user for ratification.
+//
+// (feat/dashboard-overhaul) The dashboard route renders DashboardOverhaulView
+// — the widget board — whose card registry intentionally contains no host/
+// cpu/gpu/npu identity widget. The SystemCard component still lives in
+// dashboard.jsx but is no longer mounted on any route, so these assertions
+// cannot pass. The file is kept (describe.skip) as a historical record of the
+// retired surface rather than deleted.
+test.describe.skip('System card (dashboard sidebar)', () => {
   test('renders the condensed host/os/cpu/gpu/npu/ram rows', async ({ page }) => {
     await page.goto('/#dashboard')
     const card = page.locator('.sys-card')

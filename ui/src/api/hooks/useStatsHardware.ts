@@ -34,6 +34,9 @@ export interface StatsHardware {
   gpu_util?: number | null
   gpu_vram_used_mb?: number | null
   gpu_vram_total_mb?: number | null
+  // §2b new fields — backend adds cpu_util; npu_util only if NPU-telemetry spike lands
+  cpu_util?: number | null
+  npu_util?: number | null
   npu_status?: { ok: boolean; model_mb: number }
   host?: StatsHardwareHost
   per_upstream?: Record<string, unknown>

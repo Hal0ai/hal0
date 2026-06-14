@@ -432,6 +432,49 @@ function StorageSection() {
   );
 }
 
+// Dedicated, discoverable HuggingFace-token field (P4). Wraps the existing
+// /api/secrets store under the fixed name HF_TOKEN — set/delete update os.environ
+// live (no restart), so the next gated/large pull authenticates immediately.
+function HfTokenField() {
+  const secretsQuery = useSecrets();
+  const setSecret = useSecretSet();
+  const delSecret = useSecretDelete();
+  const [val, setVal] = useStateSet("");
+  const isSet = (secretsQuery.data ?? []).some(s => s.name === "HF_TOKEN" && s.set);
+  return (
+    <div className="s-panel" style={{padding: 16, marginBottom: 16}}>
+      <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6}}>HuggingFace token</div>
+      <p className="desc" style={{margin: "0 0 10px"}}>
+        Needed for gated / large model pulls. Stored encrypted; applied live (no restart).
+        Status: {isSet ? <span style={{color: "var(--ok)"}}>set ✓</span> : <span style={{color: "var(--fg-4)"}}>not set</span>}
+      </p>
+      <div style={{display: "flex", gap: 8}}>
+        <input
+          type="password"
+          className="input mono"
+          aria-label="HuggingFace token"
+          value={val}
+          onChange={e => setVal(e.target.value)}
+          placeholder={isSet ? "•••••••• (set) — enter to replace" : "hf_…"}
+          style={{flex: 1, padding: "8px 10px", fontSize: 13}}
+        />
+        <button
+          className="btn"
+          disabled={!val.trim() || setSecret.isPending}
+          onClick={() => setSecret.mutate({ name: "HF_TOKEN", value: val.trim() }, { onSuccess: () => setVal("") })}
+        >
+          {setSecret.isPending ? "Saving…" : "Save"}
+        </button>
+        {isSet && (
+          <button className="btn ghost" disabled={delSecret.isPending} onClick={() => delSecret.mutate("HF_TOKEN")}>
+            {delSecret.isPending ? "Clearing…" : "Clear"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SecretsSection() {
   const [addOpen, setAddOpen] = useStateSet(false);
   const secretsQuery = useSecrets();
@@ -441,6 +484,7 @@ function SecretsSection() {
     <div className="s-section">
       <h2>Secrets</h2>
       <p className="desc">Encrypted at rest. Used for gated HF repos and provider auth.</p>
+      <HfTokenField />
       {secretsQuery.isLoading && (
         <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading…</div>
       )}
