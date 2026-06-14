@@ -254,7 +254,9 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
 // ─── Recipe editor (per-model defaults) ────────────────────────
 function RecipeEditorModal({ open, onClose, model }) {
   const update = useModelUpdate();
-  const templates = useChatTemplates();
+  // Gate on `open` — the modal is mounted while a model is merely selected,
+  // so an ungated fetch would fire on the models list and detach row controls.
+  const templates = useChatTemplates(open);
   const init = model?.defaults || {};
   const [ctx, setCtx] = useStateMM("");
   const [ngl, setNgl] = useStateMM("");
@@ -284,7 +286,9 @@ function RecipeEditorModal({ open, onClose, model }) {
       if (Number.isFinite(n)) defaults.n_gpu_layers = n;
     }
     if (extra.trim()) defaults.extra_args = extra;
-    defaults.chat_template = chatTemplate;
+    // Only persist a real template choice — 'auto' means GGUF-embedded, which
+    // is the absence of an override, so don't pollute defaults with it.
+    if (chatTemplate && chatTemplate !== "auto") defaults.chat_template = chatTemplate;
     try {
       await update.mutateAsync({ id: model.id, body: { defaults } });
       window.__hal0Toast && window.__hal0Toast(`Updated ${model.longName || model.id}`, "ok");
@@ -354,7 +358,7 @@ function RecipeEditorModal({ open, onClose, model }) {
             onChange={e => setChatTemplate(e.target.value)}
           >
             <option value="auto">Auto (GGUF embedded)</option>
-            {(templates.data || []).filter(t => t.id !== "auto").map(t => (
+            {(Array.isArray(templates.data) ? templates.data : []).filter(t => t.id !== "auto").map(t => (
               <option key={t.id} value={t.id}>{t.label}</option>
             ))}
           </select>

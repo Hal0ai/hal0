@@ -331,7 +331,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const swapMut = useSlotSwap();
   const profilesQuery = useProfiles();
   const modelsQuery = useModels();
-  const chatTemplatesQuery = useChatTemplates();
+  const chatTemplatesQuery = useChatTemplates(open);
 
   // Seed from the slot list payload when available (PR #587 — same fix
   // class as #584). llamacpp_args / n_gpu_layers / rope_freq_base are
@@ -717,7 +717,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         const cur = slot.model_id || slot.model || "";
         const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
         const modelTemplate = m?.defaults?.chat_template || "auto";
-        const templates = chatTemplatesQuery.data ?? [];
+        const templates = Array.isArray(chatTemplatesQuery.data) ? chatTemplatesQuery.data : [];
         return (
           <div className="form-row">
             <div className="form-lbl">
