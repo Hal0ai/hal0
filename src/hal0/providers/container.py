@@ -47,7 +47,7 @@ from typing import Any
 import httpx
 
 from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
-from hal0.config.schema import resolve_profile_flags
+from hal0.config.schema import resolve_chat_template, resolve_profile_flags
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
@@ -346,6 +346,7 @@ def _llama_launch_plan(
     context_size: int | None = None,
     extra_args: str | None = None,
     model_alias: str | None = None,
+    chat_template_path: str | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -365,8 +366,12 @@ def _llama_launch_plan(
     # Slot context window (else llama-server defaults to 4096).
     if context_size is not None:
         command += ["--ctx-size", str(context_size)]
-    # Bench-tuned profile flags, then [server].extra_args (slot wins).
+    # Bench-tuned profile flags, then chat-template (resolved from slot/model),
+    # then [server].extra_args (slot wins — a manual --chat-template-file in
+    # extra_args can override the resolved one since it follows).
     command += flag_tokens
+    if chat_template_path:
+        command += ["--chat-template-file", chat_template_path]
     command += extra_tokens
 
     # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
@@ -501,6 +506,17 @@ class ContainerProvider(Provider):
             model_table.get("default") if isinstance(model_table, dict) else None
         )
 
+        # Resolve chat template: slot override > model defaults.chat_template > None.
+        # None/'auto' = use GGUF-embedded template (no --chat-template-file flag).
+        # Templates live at <model_store_root>/chat-templates/<id>.jinja and are
+        # mounted identical-path into the container, so the host path == container path.
+        tmpl_id = resolve_chat_template(slot_cfg, model_info)
+        chat_template_path = (
+            str(Path(model_store_root()) / "chat-templates" / f"{tmpl_id}.jinja")
+            if tmpl_id
+            else None
+        )
+
         return _llama_launch_plan(
             image=image,
             port=port,
@@ -511,6 +527,7 @@ class ContainerProvider(Provider):
             context_size=context_size,
             extra_args=extra_args,
             model_alias=model_alias,
+            chat_template_path=chat_template_path,
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
