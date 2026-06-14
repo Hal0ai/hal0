@@ -68,14 +68,27 @@ class Mount:
     source: str
     target: str
     read_only: bool = False
+    #: SELinux relabel option ("z" shared, "Z" private) appended to the mount
+    #: opts. Required on SELinux-enforcing hosts (Fedora) so the container can
+    #: read the bind; a harmless no-op where SELinux is disabled. Empty = none.
+    selinux: str = ""
 
     def render(self) -> str:
-        """Return the ``{src}:{dst}[:ro]`` value for ``--volume=``."""
-        # Tolerate a target that already carries ``:ro`` (legacy callers /
-        # coerced tuples) so we never emit a doubled ``:ro:ro``.
-        if self.read_only and not self.target.endswith(":ro"):
-            return f"{self.source}:{self.target}:ro"
-        return f"{self.source}:{self.target}"
+        """Return the ``{src}:{dst}[:ro[,z]]`` value for ``--volume=``."""
+        target = self.target
+        read_only = self.read_only
+        # Tolerate a target that already smuggles ``:ro`` (legacy callers /
+        # coerced tuples) so we never emit a doubled ``:ro``.
+        if target.endswith(":ro"):
+            target = target[: -len(":ro")]
+            read_only = True
+        opts: list[str] = []
+        if read_only:
+            opts.append("ro")
+        if self.selinux:
+            opts.append(self.selinux)
+        suffix = (":" + ",".join(opts)) if opts else ""
+        return f"{self.source}:{target}{suffix}"
 
     @classmethod
     def coerce(cls, mount: Mount | tuple[str, str]) -> Mount:

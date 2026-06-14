@@ -54,7 +54,8 @@ def test_spec_ro_mount_is_read_only() -> None:
     ai_mount = next(m for m in spec.mounts if m.source == "/mnt/ai-models")
     assert ai_mount.read_only is True
     assert ai_mount.target == "/mnt/ai-models"
-    assert ai_mount.render() == "/mnt/ai-models:/mnt/ai-models:ro"
+    assert ai_mount.selinux == "z"  # SELinux relabel for enforcing hosts (Fedora)
+    assert ai_mount.render() == "/mnt/ai-models:/mnt/ai-models:ro,z"
 
 
 # ── Renderer integration test ──────────────────────────────────────────────────

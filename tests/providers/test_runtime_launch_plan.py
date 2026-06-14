@@ -50,6 +50,12 @@ class TestMount:
         # A target that already carries ":ro" must not become ":ro:ro".
         assert Mount("/a", "/b:ro", read_only=True).render() == "/a:/b:ro"
 
+    def test_selinux_relabel_appended(self) -> None:
+        # SELinux relabel is a first-class flag (Fedora/enforcing hosts).
+        assert Mount("/a", "/b", read_only=True, selinux="z").render() == "/a:/b:ro,z"
+        assert Mount("/a", "/b", selinux="z").render() == "/a:/b:z"
+        assert Mount("/a", "/b:ro", read_only=True, selinux="z").render() == "/a:/b:ro,z"
+
     def test_coerce_passes_mount_through(self) -> None:
         m = Mount("/a", "/b", read_only=True)
         assert Mount.coerce(m) is m
@@ -161,7 +167,7 @@ def test_render_unit_shim_matches_equivalent_plan() -> None:
             "131072",
             *shlex.split(flags),
         ],
-        mounts=[Mount(_MODEL_STORE_MOUNT, _MODEL_STORE_MOUNT, read_only=True)],
+        mounts=[Mount(_MODEL_STORE_MOUNT, _MODEL_STORE_MOUNT, read_only=True, selinux="z")],
         devices=["/dev/kfd", "/dev/dri/renderD128"],
         security_opt=["apparmor=unconfined", "seccomp=unconfined"],
         port=8095,

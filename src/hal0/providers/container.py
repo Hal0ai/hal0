@@ -46,6 +46,7 @@ from typing import Any
 
 import httpx
 
+from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
 from hal0.config.schema import resolve_profile_flags
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
@@ -92,7 +93,10 @@ log = logging.getLogger(__name__)
 # template.  Writing a complete file means the manager never has to
 # know whether the base exists.
 _SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
-_MODEL_STORE_MOUNT = "/mnt/ai-models"
+# Back-compat alias for the historic default. The *effective* mount root is
+# resolved per-render via model_store_root() ([models].store / HAL0_MODEL_STORE
+# / this default) so a custom model directory actually reaches the container.
+_MODEL_STORE_MOUNT = DEFAULT_MODEL_STORE
 
 
 # Container runtime binary.  Prefer podman (rootless, no daemon);
@@ -344,10 +348,15 @@ def _llama_launch_plan(
     command += flag_tokens
     command += extra_tokens
 
+    # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
+    # default /mnt/ai-models). Mounted identical-path, read-only, with an
+    # SELinux relabel so it works on enforcing hosts (Fedora).
+    model_store = model_store_root()
+
     return RuntimeLaunchPlan(
         image=image,
         command=command,
-        mounts=[Mount(_MODEL_STORE_MOUNT, _MODEL_STORE_MOUNT, read_only=True)],
+        mounts=[Mount(model_store, model_store, read_only=True, selinux="z")],
         devices=list(devices),
         group_add=list(group_ids),
         security_opt=["apparmor=unconfined", "seccomp=unconfined"],

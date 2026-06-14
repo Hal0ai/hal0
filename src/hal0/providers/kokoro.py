@@ -37,6 +37,7 @@ from typing import Any
 
 import httpx
 
+from hal0.config.paths import model_store_root
 from hal0.errors import Hal0Error
 from hal0.providers.base import ContainerSpec, Mount, Provider
 
@@ -46,13 +47,13 @@ _DEFAULT_KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "tts"
 
-# Model store: the same absolute path is used inside the container so that
-# ``--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx`` (baked into the
-# profile flags) resolves correctly without any path translation.
-_MODEL_STORE_HOST = "/mnt/ai-models"
-# Read-only is expressed via Mount(read_only=True) at the call site, so the
-# container target is the bare path (the renderer appends ":ro").
-_MODEL_STORE_CONTAINER = "/mnt/ai-models"
+# Model store is mounted identical-path so the profile-baked
+# ``--model_path <store>/local/kokoro-v1/kokoro-onnx`` resolves inside the
+# container without translation. The root is resolved per-render via
+# model_store_root(); read-only + SELinux relabel are first-class Mount flags.
+# NOTE: the weights path is still profile-baked under the default store
+# (profiles.toml); a non-default [models].store moves the mount but not that
+# flag yet — tracked as a follow-up.
 
 # Providers whose model weights are pre-staged by the operator (not hal0 registry).
 SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "comfyui"})
@@ -157,13 +158,17 @@ class KokoroProvider(Provider):
             str(port),
         ]
 
+        # Effective model-store root ([models].store / HAL0_MODEL_STORE,
+        # default /mnt/ai-models).
+        store_root = model_store_root()
+
         return ContainerSpec(
             image=profile.image,
             command=command,
             env={},
-            # Model store mounted read-only — read_only is a first-class Mount
-            # flag, so the renderer adds ":ro" (no target-string smuggling).
-            mounts=[Mount(_MODEL_STORE_HOST, _MODEL_STORE_CONTAINER, read_only=True)],
+            # Model store mounted read-only with an SELinux relabel — both are
+            # first-class Mount flags (no target-string smuggling).
+            mounts=[Mount(store_root, store_root, read_only=True, selinux="z")],
             # CPU-only: no GPU devices or supplementary groups required.
             devices=[],
             cap_add=[],
