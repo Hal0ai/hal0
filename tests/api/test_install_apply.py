@@ -87,3 +87,43 @@ def test_apply_unknown_tier_400(isolated_app_client):
     _app, client = isolated_app_client
     r = client.post("/api/install/apply", json={"tier": "nope", "storage_dir": "/tmp"})
     assert r.status_code in (400, 404)
+
+
+def test_apply_honors_per_slot_override(isolated_app_client, tmp_hal0_home, monkeypatch):
+    """The Advanced-drawer overrides (model_id + profile + device) win over the
+    auto-derived defaults and land in the slot TOML."""
+    app, client = isolated_app_client
+    app.state.hardware_probe = _FakeProbe()
+
+    import hal0.api.routes.installer as inst
+
+    async def _fake_run_pull(job, **kw):
+        job.state = "completed"
+
+    monkeypatch.setattr(inst, "run_pull", _fake_run_pull)
+
+    r = client.post(
+        "/api/install/apply",
+        json={
+            "tier": "hal0-default",
+            "storage_dir": tmp_hal0_home,
+            "npu_opt_in": False,
+            # Override chat: a different curated model + the vulkan profile/device
+            # (coherent pair) instead of the auto-derived rocm-mtp.
+            "overrides": {
+                "chat": {"model_id": "qwen3.6-27b", "profile": "vulkan", "device": "gpu-vulkan"}
+            },
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    chat = next(s for s in body["slots"] if s["slot"] == "chat")
+    assert chat["model_id"] == "qwen3.6-27b"
+    assert chat["profile"] == "vulkan"
+    assert chat["device"] == "gpu-vulkan"
+    assert "qwen3.6-27b" in body["model_ids"]
+
+    cfg = tomllib.loads((Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "chat.toml").read_text())
+    assert cfg["model"]["default"] == "qwen3.6-27b"
+    assert cfg["profile"] == "vulkan"
+    assert cfg["device"] == "gpu-vulkan"

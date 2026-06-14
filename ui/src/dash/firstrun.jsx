@@ -8,6 +8,7 @@
 import { useCuratedBundles, useInstallApply, useFirstRunComplete, useInstallServices, useServiceRepair } from '@/api/hooks/useFirstRun'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModelStore, useModelStoreSet, useModelStoreMigrate } from '@/api/hooks/useSettings'
+import { useProfiles } from '@/api/hooks/useProfiles'
 import { usePullJob, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 
 const { useState: useStateF, useEffect: useEffectF } = React;
@@ -18,6 +19,48 @@ function _frFmtBytes(n) {
   if (n < 1024 ** 2) return (n / 1024).toFixed(1) + " KB";
   if (n < 1024 ** 3) return (n / 1024 ** 2).toFixed(1) + " MB";
   return (n / 1024 ** 3).toFixed(2) + " GB";
+}
+
+// Canonical slots the Advanced drawer can override. The /apply backend only
+// reads an override for a slot that the chosen tier's manifest actually
+// installs, so listing the full set here is safe — extra rows are ignored.
+const _FR_OVERRIDE_SLOTS = [
+  { slot: "chat",  label: "Chat" },
+  { slot: "coder", label: "Coder" },
+  { slot: "embed", label: "Embed" },
+  { slot: "stt",   label: "Speech-to-text" },
+  { slot: "tts",   label: "Text-to-speech" },
+];
+
+// Derive the DeviceLiteral that matches a profile's backend so an override
+// pair stays #807-coherent (a vulkan-device + rocm-profile slot is rejected
+// by SlotManager.create). Returns undefined for img/unknown profiles (their
+// backend is null → the create-time reconcile leaves device untouched).
+function _frDeviceForProfile(p) {
+  if (!p) return undefined;
+  if (p.backend === "rocm") return "gpu-rocm";
+  if (p.backend === "vulkan") return "gpu-vulkan";
+  if (p.device_class === "cpu") return "cpu";
+  if (p.device_class === "npu") return "npu";
+  return undefined;
+}
+
+// Build the { "<slot>": {model_id?, profile?, device?} } map for POST /apply
+// from the drawer's per-slot edits. Only slots with a real edit are included;
+// when a profile is chosen we send its coherent device alongside it.
+function _frBuildOverrides(ovr, profiles) {
+  const out = {};
+  for (const [slot, v] of Object.entries(ovr || {})) {
+    const o = {};
+    if (v.model_id && v.model_id.trim()) o.model_id = v.model_id.trim();
+    if (v.profile) {
+      o.profile = v.profile;
+      const dev = _frDeviceForProfile((profiles || []).find(p => p.name === v.profile));
+      if (dev) o.device = dev;
+    }
+    if (Object.keys(o).length) out[slot] = o;
+  }
+  return out;
 }
 
 // ─── Storage step (state 1.5 — between picker and confirm) ───
@@ -421,9 +464,11 @@ function FirstRunQuick({ onInstalled, onSkip, layout }) {
   const hwQuery = useHardware();
   const storeQuery = useModelStore();
   const storeSet = useModelStoreSet();
+  const profilesQuery = useProfiles();
   const applyM = useInstallApply();
 
   const bundles = bundlesQuery.data?.bundles ?? HAL0_DATA.bundles;
+  const profiles = profilesQuery.data ?? [];
   const ram = hwQuery.data?.ram?.total ?? HAL0_DATA.host?.ram?.total ?? 0;
   const fit = bundles.filter(b => b.ram <= ram);
   const recId = fit.length ? fit[fit.length - 1].id : (bundles[0]?.id ?? null);
@@ -432,6 +477,10 @@ function FirstRunQuick({ onInstalled, onSkip, layout }) {
   const [npu, setNpu] = useStateF(false);
   const [path, setPath] = useStateF("");
   const [advanced, setAdvanced] = useStateF(false);
+  // Per-slot Advanced-drawer overrides: { "<slot>": { model_id, profile } }.
+  const [ovr, setOvr] = useStateF({});
+  const setSlotOverride = (slot, key, value) =>
+    setOvr(prev => ({ ...prev, [slot]: { ...prev[slot], [key]: value } }));
 
   useEffectF(() => { if (tier == null && recId) setTier(recId); }, [recId]);
   useEffectF(() => { if (!path && storeQuery.data?.effective) setPath(storeQuery.data.effective); }, [storeQuery.data]);
@@ -446,7 +495,8 @@ function FirstRunQuick({ onInstalled, onSkip, layout }) {
       if (path && path !== storeQuery.data?.effective) {
         try { await storeSet.mutateAsync({ path, migrate: false }); } catch (_e) { /* non-fatal */ }
       }
-      const res = await applyM.mutateAsync({ tier: tierName, storageDir: path, npuOptIn: npu });
+      const overrides = _frBuildOverrides(ovr, profiles);
+      const res = await applyM.mutateAsync({ tier: tierName, storageDir: path, npuOptIn: npu, overrides });
       onInstalled(Array.isArray(res?.model_ids) ? res.model_ids : [], tierName);
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Install failed — ${e?.message || "see logs"}`, "err");
@@ -487,10 +537,41 @@ function FirstRunQuick({ onInstalled, onSkip, layout }) {
             <input type="checkbox" checked={npu} onChange={e => setNpu(e.target.checked)} style={{accentColor: "var(--accent)"}} />
             Enable NPU trio (agent + stt/embed passengers) — requires an NPU
           </label>
-          <p style={{fontSize: 11.5, color: "var(--fg-4)", marginTop: 10, lineHeight: 1.5}}>
-            The installer auto-derives each slot's device + profile from the hardware probe
-            (GPU → ROCm/Vulkan, NPU when opted in). Per-slot model + profile overrides land here in a follow-up.
+          <p style={{fontSize: 11.5, color: "var(--fg-4)", margin: "10px 0 14px", lineHeight: 1.5}}>
+            Each slot auto-derives its device + profile from the hardware probe
+            (GPU → ROCm/Vulkan, NPU when opted in). Override a model or profile below —
+            blank rows keep the smart default. Overrides only apply to slots the chosen tier installs.
           </p>
+          <div className="fr-ovr" data-testid="fr-overrides">
+            <div className="fr-ovr-row fr-ovr-head mono" style={{display: "grid", gridTemplateColumns: "110px 1fr 160px", gap: 8, fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.08em", paddingBottom: 6}}>
+              <span>slot</span><span>model id (curated)</span><span>profile</span>
+            </div>
+            {_FR_OVERRIDE_SLOTS.map(({ slot, label }) => (
+              <div key={slot} className="fr-ovr-row" data-slot={slot} style={{display: "grid", gridTemplateColumns: "110px 1fr 160px", gap: 8, alignItems: "center", padding: "5px 0"}}>
+                <span className="mono" style={{fontSize: 12, color: "var(--fg-2)"}}>{label}</span>
+                <input
+                  className="input mono"
+                  aria-label={`${slot} model override`}
+                  value={ovr[slot]?.model_id ?? ""}
+                  onChange={e => setSlotOverride(slot, "model_id", e.target.value)}
+                  placeholder="auto"
+                  style={{padding: "6px 9px", fontSize: 12}}
+                />
+                <select
+                  className="input mono"
+                  aria-label={`${slot} profile override`}
+                  value={ovr[slot]?.profile ?? ""}
+                  onChange={e => setSlotOverride(slot, "profile", e.target.value)}
+                  style={{padding: "6px 9px", fontSize: 12}}
+                >
+                  <option value="">auto (derive)</option>
+                  {profiles.map(p => (
+                    <option key={p.name} value={p.name}>{p.name}{p.intent ? ` · ${p.intent}` : ""}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
         </div>
       </details>
 

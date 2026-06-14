@@ -74,6 +74,12 @@ test.describe('FirstRun v2 — quick install', () => {
     await page.route('**/api/install/curated-models', (r) => json(r, { models: [], custom_allowed: true }))
     await page.route('**/api/settings/models/store', (r) => json(r, MODEL_STORE))
     await page.route('**/api/hardware', (r) => json(r, HARDWARE))
+    await page.route('**/api/profiles', (r) =>
+      json(r, [
+        { name: 'rocm-mtp', backend: 'rocm', device_class: 'gpu', intent: 'Dense chat + MTP' },
+        { name: 'vulkan', backend: 'vulkan', device_class: 'gpu', intent: 'Vulkan std' },
+      ]),
+    )
     await page.route('**/api/install/complete', (r) => json(r, { first_run: false }))
   })
 
@@ -108,6 +114,38 @@ test.describe('FirstRun v2 — quick install', () => {
     // onInstalled fired with the returned model_ids → progress would mount.
     const installed = await page.evaluate(() => (window as any).__frInstalled)
     expect(installed.ids).toContain('qwen3.5-9b')
+  })
+
+  test('Advanced drawer per-slot overrides are sent (model + profile + coherent device)', async ({ page }) => {
+    let capturedBody: any = null
+    await page.route('**/api/install/apply', async (r) => {
+      capturedBody = await r.request().postDataJSON()
+      return json(r, { tier: 'hal0-Default', model_ids: ['my-chat'], slots: [], next: '' })
+    })
+
+    await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
+    await mountQuick(page)
+
+    // Open the Advanced drawer.
+    await page.locator('summary', { hasText: /Advanced/ }).click()
+    await expect(page.locator('[data-testid="fr-overrides"]')).toBeVisible()
+
+    // Override the chat slot: a custom model id + the rocm-mtp profile.
+    await page.getByLabel('chat model override').fill('my-chat')
+    await page.getByLabel('chat profile override').selectOption('rocm-mtp')
+
+    await Promise.all([
+      page.waitForResponse('**/api/install/apply', { timeout: 10_000 }),
+      page.locator('button', { hasText: /Install/ }).click(),
+    ])
+
+    expect(capturedBody?.overrides?.chat).toEqual({
+      model_id: 'my-chat',
+      profile: 'rocm-mtp',
+      device: 'gpu-rocm', // derived from the rocm profile → #807-coherent
+    })
+    // Slots left on "auto" are omitted entirely.
+    expect(capturedBody?.overrides?.embed).toBeUndefined()
   })
 })
 
