@@ -70,7 +70,9 @@ def _resolve_profile(name: str) -> Any:
     return ProfileCatalog().resolve(name)
 
 
-def _profile_image_and_flags(profile: Any) -> tuple[str, str]:
+def _profile_image_and_flags(
+    profile: Any, mtp_override: bool | None = None
+) -> tuple[str, str]:
     """Extract ``(image, resolved_flags)`` from a profile object.
 
     Works for both :class:`~hal0.profiles.ResolvedProfile` (whose
@@ -78,10 +80,23 @@ def _profile_image_and_flags(profile: Any) -> tuple[str, str]:
     (resolve the flags here).  This is what lets the default profile
     interface be ProfileCatalog while test-injected ``ProfileConfig`` objects
     keep working.
+
+    When ``mtp_override`` is not None (i.e. a slot-level MTP override is set),
+    the flags are always recomputed from the profile's raw ``.flags`` and
+    ``.mtp`` so that the override wins over any pre-expanded ``resolved_flags``
+    baked into a :class:`~hal0.profiles.ResolvedProfile`.  Both
+    ``ResolvedProfile`` and ``ProfileConfig`` expose ``.flags`` and ``.mtp``,
+    so this path works for both types.
     """
-    flags = getattr(profile, "resolved_flags", None)
-    if flags is None:
-        flags = resolve_profile_flags(profile)
+    if mtp_override is not None:
+        # Slot override wins over any pre-expanded resolved_flags: recompute
+        # from the profile's raw flags (both ResolvedProfile and ProfileConfig
+        # expose .flags and .mtp).
+        flags = resolve_profile_flags(profile, mtp_override)
+    else:
+        flags = getattr(profile, "resolved_flags", None)
+        if flags is None:
+            flags = resolve_profile_flags(profile)
     return str(profile.image), str(flags)
 
 
@@ -471,7 +486,9 @@ class ContainerProvider(Provider):
         plan describes (no GPU-special argv assembly elsewhere).
         """
         profile_name = slot_cfg.get("profile") or ""
-        image, flags_str = _profile_image_and_flags(_resolve_profile(profile_name))
+        image, flags_str = _profile_image_and_flags(
+            _resolve_profile(profile_name), slot_cfg.get("mtp")
+        )
 
         model_path = _resolve_model_path(model_info)
         port = int(slot_cfg.get("port", 0))

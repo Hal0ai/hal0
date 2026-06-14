@@ -332,6 +332,15 @@ class SlotConfig(BaseModel):
             "enable_thinking / chat_template_kwargs. See normalize/thinking.py."
         ),
     )
+    mtp: bool | None = Field(
+        default=None,
+        description=(
+            "Per-slot MTP (multi-token-prediction speculative decoding) override. "
+            "true → force on; false → force off; None → inherit the profile's mtp. "
+            "Only effective on rocmfp4 profiles with an MTP-capable model. "
+            "See resolve_profile_flags and MTP_FLAG_BUNDLE."
+        ),
+    )
 
     # [model] section (nested)
     model: ModelConfig = Field(default_factory=ModelConfig)
@@ -863,22 +872,30 @@ class ProfilesConfig(BaseModel):
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
 
 
-def resolve_profile_flags(profile: ProfileConfig) -> str:
+def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = None) -> str:
     """Return the full flag string for *profile*, expanding MTP when set.
 
-    When ``profile.mtp`` is ``True``, ``MTP_FLAG_BUNDLE`` is appended
-    after ``profile.flags`` (separated by a single space).  The model
-    path, port, and context size are the slot's concern — they are NOT
-    included here.
+    When the effective MTP setting is ``True``, ``MTP_FLAG_BUNDLE`` is
+    appended after ``profile.flags`` (separated by a single space).  The
+    model path, port, and context size are the slot's concern — they are
+    NOT included here.
+
+    The effective MTP value is resolved as follows:
+      - ``mtp_override=True``  → force MTP on regardless of profile.mtp.
+      - ``mtp_override=False`` → force MTP off regardless of profile.mtp.
+      - ``mtp_override=None``  → inherit ``profile.mtp`` (default behaviour).
 
     Args:
         profile: A validated :class:`ProfileConfig`.
+        mtp_override: Per-slot override from :attr:`SlotConfig.mtp`.
+            ``None`` means "inherit from profile".
 
     Returns:
         The complete flag string ready to pass to llama-server.
     """
     base = profile.flags.strip()
-    if profile.mtp:
+    effective_mtp = mtp_override if mtp_override is not None else profile.mtp
+    if effective_mtp:
         return f"{base} {MTP_FLAG_BUNDLE}".strip()
     return base
 
