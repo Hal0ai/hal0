@@ -117,3 +117,6 @@ graphify-out/
 # never track node_modules anywhere (incl. symlinks)
 node_modules
 **/node_modules
+
+# superpowers brainstorm/visual-companion scratch (mockups, server state)
+.superpowers/
