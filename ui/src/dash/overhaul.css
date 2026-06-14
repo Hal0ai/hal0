@@ -1,0 +1,1329 @@
+/* ─── overhaul.css — dashboard overhaul styles (feat/dashboard-overhaul) ─── */
+/* Imported in main.tsx after dashboard.css. Do NOT redefine @keyframes pulse  */
+/* (already defined in dashboard.css line 673). This file appends to that base. */
+
+/* ─── design tokens added for the overhaul ─────────────────────────────────── */
+/* --warming is NEW — not in dashboard.css. Amber-orange for warming/starting.  */
+:root {
+  --warming: #F2792B;
+  --warming-glow: rgba(242, 121, 43, 0.35);
+  --ok-glow:  rgba(111, 207, 151, 0.35);
+}
+
+/* ─── DCard shell primitive ──────────────────────────────────────────────────── */
+.dcard {
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg, 10px);
+  background: var(--bg-1);
+  display: flex;
+  flex-direction: column;
+}
+
+.dcard-h {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-family: var(--jbm);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dcard-h-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--fg-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dcard-h-title {
+  color: var(--fg-2);
+  font-weight: 500;
+}
+
+.dcard-h-spacer {
+  flex: 1;
+}
+
+.dcard-h-note {
+  color: var(--fg-5);
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0;
+}
+
+.dcard-h-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dcard-b {
+  padding: 14px;
+}
+
+.dcard-b.no-pad {
+  padding: 0;
+}
+
+/* ─── StatusDot ──────────────────────────────────────────────────────────────── */
+/* §3 four-state language from CONTRACTS.md. Classes set by slotIndicatorFromPhase */
+/* cls values: serving | stale | warming | error | offline                       */
+
+.sdot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--fg-5);
+  /* size override via CSS custom prop set inline by the component */
+}
+
+.sdot.serving {
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok-glow, rgba(111, 207, 151, 0.35));
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* stale = ready (container healthy, not actively serving) */
+.sdot.stale {
+  background: var(--hal0-accent);
+  /* static — no animation */
+}
+
+.sdot.warming {
+  background: var(--warming);
+  box-shadow: 0 0 8px var(--warming-glow, rgba(242, 121, 43, 0.35));
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.sdot.error {
+  background: var(--err);
+  /* static */
+}
+
+.sdot.offline {
+  background: var(--fg-5);
+  /* static */
+}
+
+/* A11y: kill all dot animations for users who prefer reduced motion.           */
+/* Colour signal (green/amber/orange/red/grey) remains intact.                  */
+@media (prefers-reduced-motion: reduce) {
+  .sdot { animation: none !important; }
+}
+
+/* ─── slot-list (W2) ─── */
+/* SlotList anchor card — dense table inside a noPad DCard.                     */
+/* Grid column template matches CONTRACTS.md §1 exactly:                        */
+/*   10px 88px minmax(120px,1fr) auto 58px 52px 56px 74px 26px                 */
+
+.sl-card {
+  /* The card itself — DCard handles border/bg/radius. No extra shell needed.   */
+}
+
+/* The inner table wrapper — removes DCard body padding (noPad) so the table   */
+/* sits flush to the card edges.                                                */
+.sl-table {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Shared grid layout — applied to both .sh (header) and .sr (data rows).      */
+.sh,
+.sr {
+  display: grid;
+  grid-template-columns: 10px 88px minmax(120px, 1fr) auto 58px 52px 56px 74px 26px;
+  align-items: center;
+  gap: 0 8px;
+  padding: 0 14px;
+  min-height: 0;
+}
+
+/* ── Header row ────────────────────────────────────────────────────────────── */
+.sh {
+  height: 28px;
+  font-family: var(--jbm);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--fg-4);
+  border-bottom: 1px solid var(--line);
+}
+
+/* ── Data rows ─────────────────────────────────────────────────────────────── */
+.sr {
+  height: 36px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line-soft);
+  transition: background 0.12s var(--ease, ease);
+  position: relative;
+}
+
+.sr:last-of-type {
+  border-bottom: none;
+}
+
+.sr:hover {
+  background: var(--bg-2);
+}
+
+/* Dimmed rows (idle / offline) */
+.sr.dim {
+  opacity: 0.45;
+}
+
+.sr:focus-visible {
+  outline: 1px solid var(--hal0-accent);
+  outline-offset: -1px;
+  border-radius: 2px;
+}
+
+/* ── Dot cell ──────────────────────────────────────────────────────────────── */
+.sl-dot-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Slot name ─────────────────────────────────────────────────────────────── */
+.snm {
+  font-family: var(--jbm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Default-route star — sodium yellow (--yellow / --comfy), NOT --comfy which  */
+/* is blue in this codebase. The handoff says --comfy but the real token is     */
+/* blue. We use var(--yellow, #E5B84F) as the sodium-yellow per design tokens. */
+.sl-star {
+  font-size: 9px;
+  color: var(--yellow, #E5B84F);
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* ── Model cell ────────────────────────────────────────────────────────────── */
+.smodel {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Device chips ──────────────────────────────────────────────────────────── */
+.sl-dchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--jbm);
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: var(--rad-sm, 4px);
+  white-space: nowrap;
+  letter-spacing: 0.03em;
+}
+
+/* FLM · npu chip */
+.sl-flm {
+  background: rgba(200, 150, 255, 0.12);
+  color: var(--dev-npu, #C896FF);
+  border: 1px solid rgba(200, 150, 255, 0.22);
+}
+
+/* Device dot (the colored circle inside the device chip) */
+.sl-dd {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* rocm */
+.sl-dev-rocm {
+  background: rgba(215, 107, 107, 0.10);
+  color: var(--dev-rocm, #D76B6B);
+  border: 1px solid rgba(215, 107, 107, 0.20);
+}
+.sl-dev-rocm .sl-dd { background: var(--dev-rocm, #D76B6B); }
+
+/* vulkan */
+.sl-dev-vulkan {
+  background: rgba(127, 184, 255, 0.10);
+  color: var(--dev-vulkan, #7FB8FF);
+  border: 1px solid rgba(127, 184, 255, 0.20);
+}
+.sl-dev-vulkan .sl-dd { background: var(--dev-vulkan, #7FB8FF); }
+
+/* cpu */
+.sl-dev-cpu {
+  background: rgba(156, 156, 149, 0.10);
+  color: var(--dev-cpu, #9C9C95);
+  border: 1px solid rgba(156, 156, 149, 0.20);
+}
+.sl-dev-cpu .sl-dd { background: var(--dev-cpu, #9C9C95); }
+
+/* npu (non-FLM — rare but valid) */
+.sl-dev-npu {
+  background: rgba(200, 150, 255, 0.10);
+  color: var(--dev-npu, #C896FF);
+  border: 1px solid rgba(200, 150, 255, 0.20);
+}
+.sl-dev-npu .sl-dd { background: var(--dev-npu, #C896FF); }
+
+/* ── Metric cells ──────────────────────────────────────────────────────────── */
+/* Each metric has a tiny label (sl-ml) stacked above the value (sl-mv).        */
+.sl-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  font-family: var(--jbm);
+}
+
+.sl-ml {
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-5);
+  line-height: 1;
+}
+
+.sl-mv {
+  font-size: 11px;
+  color: var(--fg-2);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* tok/s value: amber-yellow when serving, muted em-dash otherwise */
+.sl-mv.sl-acc {
+  color: var(--yellow, #E5B84F);
+  font-weight: 500;
+}
+
+.sl-mv.sl-muted {
+  color: var(--fg-5);
+}
+
+/* ctx cell: slightly smaller to fit "<used>/<max>k" in 74px */
+.sl-mv.sl-ctx {
+  font-size: 10px;
+}
+
+/* ── Pin button ────────────────────────────────────────────────────────────── */
+.pinbtn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  border-radius: var(--rad-sm, 4px);
+  cursor: pointer;
+  color: var(--fg-5);
+  /* Hidden until row hover — revealed by .sr:hover .pinbtn */
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+  flex-shrink: 0;
+}
+
+.sr:hover .pinbtn {
+  opacity: 1;
+}
+
+.pinbtn:hover {
+  background: var(--bg-3);
+  color: var(--fg-3);
+}
+
+/* Pinned state: filled amber, always visible */
+.pinbtn.pinned {
+  opacity: 1;
+  color: var(--yellow, #E5B84F);
+}
+
+.pinbtn.pinned:hover {
+  color: var(--fg);
+}
+
+/* ── Skeleton / loading state ──────────────────────────────────────────────── */
+.sl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.sr-skeleton {
+  pointer-events: none;
+  opacity: 0.3;
+}
+
+.sl-skel-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--fg-5);
+  display: block;
+  width: 70%;
+}
+
+.sl-skel-wide {
+  width: 90%;
+}
+
+.sl-loading-hint,
+.sl-empty-hint {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-5);
+  padding: 10px 14px;
+}
+
+/* ── Footer ────────────────────────────────────────────────────────────────── */
+.slist-foot {
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-5);
+  padding: 8px 14px;
+  border-top: 1px solid var(--line-soft);
+  letter-spacing: 0.03em;
+}
+
+/* ─── grid + edit-mode (W3) ─── */
+/* W3 worker: append grid layout + edit-mode styles below this comment.         */
+
+/* ─── DashboardOverhaulView shell ───────────────────────────────────────────── */
+.dash-overhaul-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px 40px;
+  max-width: var(--view-max, 1600px);
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* ─── Hero strip ─────────────────────────────────────────────────────────────── */
+.dash-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 8px;
+}
+.dash-hero-greeting {
+  font-size: 13px;
+  color: var(--fg-2);
+  font-family: var(--geist, sans-serif);
+}
+.dash-hero-spacer { flex: 1; }
+.dash-hero-meta {
+  font-family: var(--jbm, monospace);
+  font-size: 11px;
+  color: var(--fg-4);
+  letter-spacing: 0.02em;
+}
+
+/* ─── Customize / Done button ────────────────────────────────────────────────── */
+.dash-customize-btn {
+  font-family: var(--jbm, monospace);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-3);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-sm, 4px);
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.dash-customize-btn:hover {
+  color: var(--fg);
+  border-color: var(--line-strong);
+}
+.dash-customize-btn.active {
+  color: var(--yellow, #E5B84F);
+  border-color: rgba(229, 184, 79, 0.34);
+  background: rgba(229, 184, 79, 0.06);
+}
+
+/* ─── Local controls (standalone test only) ──────────────────────────────────── */
+.dash-grid-local-controls {
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 4px;
+}
+
+/* ─── Masonry grid ───────────────────────────────────────────────────────────── */
+.dash-grid-root {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  grid-auto-rows: 8px;
+  gap: 16px;
+  grid-auto-flow: row dense;
+  align-items: start;
+}
+
+/* <1200px: single-column (each cell forced to span 6 of the 6-col grid) */
+@media (max-width: 1199px) {
+  .dash-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+  .dash-cell {
+    grid-column: span 6 !important;
+  }
+}
+
+/* ─── Grid cell ──────────────────────────────────────────────────────────────── */
+.dash-cell {
+  position: relative;
+  min-width: 0;
+}
+.dash-cell.editing {
+  outline: 1px dashed var(--line-strong);
+  border-radius: var(--rad-lg, 10px);
+}
+.dash-cell.editing[draggable="true"]:active {
+  opacity: 0.4;
+}
+
+/* ─── Edit overlay (grip / span badge / remove / resize) ─────────────────────── */
+.cell-edit-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 10;
+  border-radius: var(--rad-lg, 10px);
+}
+.cell-edit-overlay > * { pointer-events: all; }
+
+.cell-grip {
+  position: absolute;
+  top: 8px; left: 8px;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--fg-4);
+  cursor: grab;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-sm, 4px);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.dash-cell.editing:hover .cell-grip { opacity: 1; }
+.cell-grip:active { cursor: grabbing; }
+
+.cell-span-badge {
+  position: absolute;
+  top: 8px; left: 34px;
+  font-family: var(--jbm, monospace);
+  font-size: 9px;
+  color: var(--fg-4);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-xs, 2px);
+  padding: 2px 5px;
+  letter-spacing: 0.04em;
+  opacity: 0;
+  transition: opacity 0.12s;
+  pointer-events: none;
+}
+.dash-cell.editing:hover .cell-span-badge { opacity: 1; }
+
+.cell-remove {
+  position: absolute;
+  top: 6px; right: 6px;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--fg-4);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+  padding: 0;
+}
+.dash-cell.editing:hover .cell-remove { opacity: 1; }
+.cell-remove:hover {
+  color: var(--err, #EF6B6B);
+  border-color: rgba(239, 107, 107, 0.4);
+}
+
+.cell-resize-handle {
+  position: absolute;
+  top: 0; right: -4px; bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 11;
+}
+.cell-resize-handle::after {
+  content: '';
+  display: block;
+  width: 3px; height: 32px;
+  background: var(--yellow, #E5B84F);
+  border-radius: 2px;
+  opacity: 0.6;
+}
+.dash-cell.editing:hover .cell-resize-handle { opacity: 1; }
+
+/* ─── Card library panel ─────────────────────────────────────────────────────── */
+.card-library {
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg, 10px);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.card-library-h {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.card-library-title {
+  font-family: var(--jbm, monospace);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3);
+  font-weight: 500;
+}
+.card-library-spacer { flex: 1; }
+
+.lib-btn {
+  font-family: var(--jbm, monospace);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: var(--rad-sm, 4px);
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+.lib-btn-reset {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg-4);
+}
+.lib-btn-reset:hover { color: var(--fg-2); border-color: var(--line-strong); }
+.lib-btn-done {
+  background: var(--yellow, #E5B84F);
+  border: 1px solid rgba(229, 184, 79, 0.34);
+  color: #000;
+  font-weight: 600;
+}
+.lib-btn-done:hover { background: #F2CE74; }
+
+.card-library-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 14px;
+}
+.lib-card {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px;
+  border-radius: var(--rad-base, 6px);
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--fg-4);
+  font-family: var(--jbm, monospace);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.lib-card:hover:not(:disabled) { color: var(--fg-2); border-color: var(--line-strong); }
+.lib-card.lib-card-on {
+  color: var(--fg-2);
+  border-color: rgba(229, 184, 79, 0.34);
+  background: rgba(229, 184, 79, 0.06);
+}
+.lib-card.lib-card-locked { cursor: default; opacity: 0.7; }
+.lib-card-badge { font-size: 9px; color: var(--fg-5); letter-spacing: 0.04em; }
+.lib-card-on .lib-card-badge { color: var(--yellow, #E5B84F); }
+
+/* ─── Grid footer (edit mode) ────────────────────────────────────────────────── */
+.dash-grid-footer {
+  padding: 6px 0;
+  font-family: var(--jbm, monospace);
+  font-size: 10px;
+  color: var(--fg-5);
+  letter-spacing: 0.03em;
+}
+
+/* ─── Placeholder cards ──────────────────────────────────────────────────────── */
+.dash-placeholder {
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg, 10px);
+  background: var(--bg-1);
+  padding: 14px;
+  font-family: var(--jbm, monospace);
+  font-size: 10px;
+  color: var(--fg-5);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.dash-placeholder-body {
+  font-family: var(--jbm, monospace);
+  font-size: 11px;
+  color: var(--fg-5);
+  padding: 20px 0;
+  text-align: center;
+}
+
+/* ─── metric cards (W4) ─── */
+/* ThroughputCard2 + UtilizationCard styles.                                    */
+/* Token refs: --yellow (sodium-yellow, .hot bars), --dev-vulkan/cpu/npu.       */
+/* Device colors: --dev-vulkan #7FB8FF · --dev-cpu #9C9C95 · --dev-npu #C896FF */
+
+/* ── "source pending" gate ── */
+.mc-pending {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px 14px;
+  min-height: 80px;
+}
+
+.mc-pending-label {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mc-pending-sub {
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-5);
+}
+
+/* ── ThroughputCard2 hero number ── */
+.mc-hero-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 0 8px;
+}
+
+.mc-hero-num {
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--yellow, #E5B84F);
+  letter-spacing: -0.02em;
+}
+
+.mc-hero-unit {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-4);
+  text-transform: lowercase;
+}
+
+/* ── Spark-bar strip ── */
+.mc-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 36px;
+  margin-bottom: 8px;
+}
+
+.mc-spark-bar {
+  display: block;
+  flex: 1;
+  min-width: 3px;
+  border-radius: 2px 2px 0 0;
+  background: var(--fg-5);
+  transition: height 0.18s var(--ease, cubic-bezier(0.22,1,0.36,1));
+}
+
+/* hot = most recent 4 bars: amber-yellow --yellow (sodium-yellow) */
+.mc-spark-bar.hot {
+  background: var(--yellow, #E5B84F);
+}
+
+/* pad = empty left-fill bars before first real sample */
+.mc-spark-bar.pad {
+  background: var(--bg-3);
+  opacity: 0.4;
+}
+
+/* ── Sub-row (slots serving count) ── */
+.mc-sub-row {
+  display: flex;
+  gap: 10px;
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  margin-top: 2px;
+}
+
+.mc-sub-serving {
+  color: var(--fg-3);
+}
+
+/* ── UtilizationCard rows ── */
+.uc-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.uc-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.uc-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.uc-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.uc-label {
+  font-family: var(--jbm);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  min-width: 32px;
+}
+
+.uc-sublabel {
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  flex: 1;
+}
+
+.uc-pct {
+  font-family: var(--jbm);
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Thin progress bar — 6px height, 3px radius per spec */
+.uc-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+
+.uc-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.22s var(--ease, cubic-bezier(0.22,1,0.36,1));
+}
+
+/* Note text under a row (e.g. "pending driver") */
+.uc-note {
+  font-family: var(--jbm);
+  font-size: 9px;
+  color: var(--fg-5);
+  letter-spacing: 0.04em;
+}
+
+/* NPU pill: active / idle */
+.uc-npu-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.uc-pill {
+  display: inline-block;
+  font-family: var(--jbm);
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.uc-pill.active {
+  background: rgba(200, 150, 255, 0.12);
+  color: var(--dev-npu, #C896FF);
+  border: 1px solid rgba(200, 150, 255, 0.28);
+}
+
+.uc-pill.idle {
+  background: var(--bg-3);
+  color: var(--fg-4);
+  border: 1px solid var(--line);
+}
+
+/* ─── quickchat + services (W5) ─── */
+
+/* ── Slot picker ──────────────────────────────────────────────────────────── */
+.qc-picker {
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-3);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-sm, 4px);
+  padding: 2px 6px;
+  cursor: pointer;
+  outline: none;
+  max-width: 160px;
+}
+.qc-picker:disabled { opacity: 0.5; cursor: default; }
+.qc-picker:focus { border-color: var(--line-strong); }
+
+/* ── Output area ──────────────────────────────────────────────────────────── */
+.qc-output {
+  min-height: 92px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg-sunken, #070707);
+  border: 1px solid var(--line-soft, #1C1C1C);
+  border-radius: var(--rad-base, 6px);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg-3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.qc-hint { color: var(--fg-5); font-size: 11px; font-style: italic; }
+
+/* Thinking spinner */
+.qc-thinking { display: flex; align-items: center; gap: 8px; color: var(--fg-5); font-size: 11px; }
+.qc-spinner {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border: 1.5px solid var(--fg-5);
+  border-top-color: var(--fg-3);
+  border-radius: 50%;
+  animation: qc-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@media (prefers-reduced-motion: reduce) { .qc-spinner { animation: none; border-top-color: var(--fg-5); } }
+@keyframes qc-spin { to { transform: rotate(360deg); } }
+
+/* Streaming message */
+.qc-message { display: flex; flex-direction: column; gap: 4px; }
+.qc-role-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--yellow, var(--accent, #FFB000));
+  font-weight: 500;
+}
+.qc-text {
+  color: var(--fg-2);
+  font-family: var(--geist, sans-serif);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Blinking caret — pulse is the only looping animation (design spec) */
+.qc-caret {
+  display: inline-block;
+  width: 1px; height: 0.9em;
+  background: var(--yellow, var(--accent, #FFB000));
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .qc-caret { animation: none; opacity: 1; } }
+.qc-error { color: var(--err, #EF6B6B); font-size: 11px; }
+
+/* ── Metrics row ──────────────────────────────────────────────────────────── */
+.qc-metrics {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  margin-bottom: 8px;
+}
+.qc-met-item { display: flex; align-items: center; gap: 3px; }
+.qc-met-val { color: var(--fg-3); }
+.qc-met-accent { color: var(--yellow, var(--accent, #FFB000)); }
+.qc-met-sep { color: var(--fg-5); }
+.qc-met-spacer { flex: 1; }
+.qc-met-route { color: var(--fg-5); font-size: 9px; letter-spacing: 0.03em; }
+
+/* ── Input row ────────────────────────────────────────────────────────────── */
+.qc-input-row { display: flex; gap: 8px; align-items: flex-end; }
+.qc-textarea {
+  flex: 1;
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg-2);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-base, 6px);
+  padding: 7px 10px;
+  resize: none;
+  outline: none;
+  line-height: 1.45;
+  transition: border-color 0.12s;
+}
+.qc-textarea:focus { border-color: var(--line-strong); }
+.qc-textarea:disabled { opacity: 0.45; }
+.qc-textarea::placeholder { color: var(--fg-5); }
+.qc-send {
+  flex-shrink: 0;
+  width: 38px; height: 38px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-base, 6px);
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.qc-send:hover:not(:disabled) { background: var(--bg-4); border-color: var(--line-strong); color: var(--fg); }
+.qc-send:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Services card ────────────────────────────────────────────────────────── */
+.svc-pending {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-5);
+  padding: 10px 0;
+}
+.svc-list { display: flex; flex-direction: column; }
+
+/* Service row */
+.svc-row { border-bottom: 1px solid var(--line-soft); }
+.svc-row:last-child { border-bottom: none; }
+.svc-row-expanded .svc-row-main { border-bottom: 1px solid var(--line-soft); }
+.svc-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  min-height: 40px;
+}
+
+/* Icon tile */
+.svc-icon-tile {
+  width: 28px; height: 28px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-base, 6px);
+  color: var(--fg-3);
+}
+.svc-info { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.svc-name { font-family: var(--jbm); font-size: 11px; font-weight: 500; color: var(--fg-2); }
+
+/* Status pill */
+.svc-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--jbm); font-size: 9px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: var(--rad-pill, 999px);
+  border: 1px solid;
+}
+.svc-pill-up {
+  color: var(--ok, #6FCF97);
+  border-color: rgba(111,207,151,0.30);
+  background: rgba(111,207,151,0.06);
+  box-shadow: 0 0 6px rgba(111,207,151,0.15);
+}
+.svc-pill-idle { color: var(--fg-4); border-color: var(--line); background: transparent; }
+
+/* Detail sub-line */
+.svc-detail {
+  font-family: var(--jbm); font-size: 10px; color: var(--fg-5);
+  flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Right stat */
+.svc-stat { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; }
+.svc-stat-val { font-family: var(--jbm); font-size: 11px; font-weight: 500; color: var(--fg-2); }
+.svc-stat-label { font-family: var(--jbm); font-size: 9px; color: var(--fg-5); text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* Action buttons */
+.svc-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.svc-btn {
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-sm, 4px);
+  color: var(--fg-4); cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.svc-btn:hover { background: var(--bg-3); color: var(--fg-2); }
+.svc-btn.active, .svc-expand-btn.active { background: var(--bg-3); border-color: var(--line-strong); color: var(--fg-2); }
+
+/* ── ComfyUI job queue drawer ─────────────────────────────────────────────── */
+.svc-comfy-drawer {
+  padding: 8px 0 8px 38px;
+  display: flex; flex-direction: column; gap: 5px;
+  font-family: var(--jbm); font-size: 10px;
+}
+.svc-comfy-offline,
+.svc-comfy-loading,
+.svc-comfy-empty { color: var(--fg-5); font-style: italic; }
+.svc-comfy-offline { display: flex; align-items: center; gap: 5px; }
+
+/* Per-job row */
+.svc-job { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+.svc-job-name { color: var(--fg-3); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.svc-job-pct { color: var(--fg-4); font-size: 9px; flex-shrink: 0; width: 30px; text-align: right; }
+.svc-job-track { width: 60px; height: 3px; background: var(--bg-4); border-radius: 2px; flex-shrink: 0; overflow: hidden; }
+.svc-job-fill { height: 100%; background: var(--info, #7FB8FF); border-radius: 2px; transition: width 0.3s; }
+.svc-job-node { color: var(--fg-5); font-size: 9px; max-width: 80px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.svc-job-status { font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
+.svc-job-status.running { color: var(--ok, #6FCF97); }
+.svc-job-status.queued  { color: var(--fg-5); }
+.svc-job-status.done    { color: var(--info, #7FB8FF); }
+
+/* Done-job dot — blue (--info; --comfy is blue for ComfyUI, per LANDMINE note) */
+.sdot.svc-done {
+  background: var(--info, #7FB8FF);
+  box-shadow: none;
+}
+
+/* ─── opt-in cards (W6) ─────────────────────────────────────────────────── */
+
+/* ── PowerCard ── */
+.pw-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 0;
+}
+.pw-hero-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-bottom: 4px;
+}
+.pw-hero-num {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1;
+}
+.pw-hero-unit {
+  font-family: var(--jbm);
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.pw-hero-label {
+  font-size: 10px;
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-left: 2px;
+}
+.pw-metric-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--jbm);
+  font-size: 11px;
+}
+.pw-label { color: var(--fg-4); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.pw-value { color: var(--fg-2); }
+.pw-unit  { color: var(--fg-4); font-size: 10px; }
+
+/* ── SlotTrackCard ── */
+.st-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.st-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--jbm);
+  font-size: 10px;
+}
+.st-name  { color: var(--fg-2); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-spark { width: 48px; height: 20px; flex-shrink: 0; }
+.st-toks  { font-size: 11px; font-weight: 500; flex-shrink: 0; }
+.st-toks-unit { color: var(--fg-5); font-size: 9px; flex-shrink: 0; }
+.st-ttft  { color: var(--fg-4); font-size: 9px; flex-shrink: 0; min-width: 36px; text-align: right; }
+
+/* ── ApprovalsCard ── */
+.ap-empty {
+  color: var(--fg-5);
+  font-size: 11px;
+  font-style: italic;
+  padding: 4px 0;
+}
+.ap-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ap-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ap-row:last-child { border-bottom: none; }
+.ap-row-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.ap-agent {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-2);
+}
+.ap-tool {
+  font-size: 10px;
+  color: var(--fg-3);
+  background: var(--bg-3);
+  border-radius: var(--rad-sm, 4px);
+  padding: 1px 5px;
+}
+.ap-args {
+  font-size: 9px;
+  color: var(--fg-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ap-actions {
+  display: flex;
+  gap: 5px;
+  margin-top: 2px;
+}
+.ap-btn {
+  font-family: var(--jbm);
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: var(--rad-sm, 4px);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.ap-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ap-btn-deny {
+  background: transparent;
+  color: var(--fg-3);
+  border-color: var(--line);
+}
+.ap-btn-deny:hover:not(:disabled) {
+  background: var(--err-soft, rgba(239,107,107,0.10));
+  border-color: var(--err, #EF6B6B);
+  color: var(--err, #EF6B6B);
+}
+.ap-btn-approve {
+  background: transparent;
+  color: var(--ok, #6FCF97);
+  border-color: var(--ok-line, rgba(111,207,151,0.30));
+}
+.ap-btn-approve:hover:not(:disabled) {
+  background: var(--ok-soft, rgba(111,207,151,0.10));
+  border-color: var(--ok, #6FCF97);
+}
+
+/* ── AttentionCard ── */
+.attn-calm {
+  color: var(--fg-5);
+  font-size: 11px;
+  font-style: italic;
+  padding: 4px 0;
+}
+.attn-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.attn-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--jbm);
+  font-size: 11px;
+}
+.attn-dot-placeholder {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+}
+.attn-name  { color: var(--fg-2); flex: 1; }
+.attn-state { font-size: 10px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.05em; }
+.attn-approvals .attn-dot-placeholder { background: var(--warn, #E8B94E); border-radius: 50%; }
+
+/* ── SchedulerCard ── */
+.sched-no-source {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 4px 0;
+  opacity: 0.55;
+}
+.sched-no-source-label {
+  font-size: 11px;
+  color: var(--fg-4);
+  font-style: italic;
+}
+.sched-no-source-sub {
+  font-size: 10px;
+  color: var(--fg-5);
+  line-height: 1.4;
+}
