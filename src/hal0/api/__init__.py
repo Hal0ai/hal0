@@ -56,6 +56,9 @@ from hal0.api.routes import (
     capabilities as capabilities_routes,
 )
 from hal0.api.routes import (
+    chat_templates as chat_templates_routes,
+)
+from hal0.api.routes import (
     comfyui,
     hardware,
     health,
@@ -1187,6 +1190,21 @@ def create_app() -> FastAPI:
     # from /etc/hal0/profiles.toml (falling back to the built-in seeds on a
     # fresh install). Profiles are P1 container-runtime templates (issue #653).
     app.include_router(profiles_routes.router, prefix="/api/profiles", tags=["profiles"])
+
+    # Chat-template catalog — bundled templates seeded into the model store at
+    # startup; operator can add custom templates via POST. Read + write, public
+    # (same rationale as profiles: admin-only by network convention, no creds).
+    from hal0.templates import seed_chat_templates
+
+    try:
+        seed_chat_templates()
+    except Exception as exc:  # pragma: no cover — defensive, store may be absent
+        log.warning("hal0.chat_templates.seed_failed", error=str(exc))
+    app.include_router(
+        chat_templates_routes.router,
+        prefix="/api/chat-templates",
+        tags=["chat-templates"],
+    )
 
     # Dashboard footer event surface — read-only, public for the same
     # reason as /api/status: the footer renders during first-run before
