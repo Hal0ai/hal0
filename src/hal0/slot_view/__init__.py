@@ -263,6 +263,10 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # absent → null (effective OFF). ``n_gpu_layers`` falls back to the
         # ModelConfig default sentinel (-1 = all layers) when unset.
         entry["enable_thinking"] = cfg.get("enable_thinking")
+        # MTP per-slot override (tri-valued like enable_thinking: true/false/
+        # absent → null). Surfaced so the edit-drawer MTP pill seeds its on/off
+        # state from disk instead of defaulting to off after a reopen.
+        entry["mtp"] = cfg.get("mtp")
         n_gpu = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
         entry["n_gpu_layers"] = n_gpu if isinstance(n_gpu, int) else -1
         # Issue #548: expose rope_freq_base so the Edit drawer can dirty-track
