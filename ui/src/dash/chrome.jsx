@@ -140,6 +140,11 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
   // while the first response is in flight so the layout stays stable.
   const hw = useHardware();
   const hostName = hw.data?.name || "hal0";
+  // Brand-bar version badge — live from /api/updates/state (hal0.current,
+  // sourced from hal0.__version__) so it never goes stale; the static fallback
+  // keeps it correct before the first response lands.
+  const verState = useUpdateState();
+  const appVer = verState.data?.hal0?.current;
   const labels = {
     dashboard: ["Overview", "Dashboard"],
     firstrun:  ["Setup",   "FirstRun"],
@@ -156,7 +161,7 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
     <div className="topbar">
       <div className="tb-brand">
         <Wordmark size={18} />
-        <span className="ver mono">v0.2.1</span>
+        <span className="ver mono">{appVer ? "v" + appVer : "v0.5.0-alpha.1"}</span>
       </div>
       {route !== "firstrun" && (
         <div className="tb-eyebrow mono">

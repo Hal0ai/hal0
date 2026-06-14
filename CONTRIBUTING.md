@@ -1,6 +1,6 @@
 # Contributing to hal0
 
-hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.3.2-alpha.1** — the
+hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.5.0-alpha.1** — the
 Lemonade Server adoption release. The contribution model is still
 being decided (see [`PLAN.md`](./PLAN.md) §16).
 <!-- TODO(human): flip the next line to open the external-PR merge window

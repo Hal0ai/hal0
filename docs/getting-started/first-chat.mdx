@@ -28,9 +28,10 @@ that makes the chat tab work with no setup. See
 
 On first launch, OpenWebUI asks you to create a local admin account.
 That account lives in OpenWebUI's own SQLite database under
-`/var/lib/hal0/openwebui/`. It has nothing to do with hal0's own auth
-(which is, in v1, "trust your LAN or sit behind your reverse proxy",
-plus `--auth=basic` for a Caddy + basic_auth + Bearer token POC).
+`/var/lib/hal0/openwebui/`. It has nothing to do with hal0-api's
+posture, which in v1 is simply "trust your LAN, or front it with your
+own reverse proxy" — hal0 ships no built-in auth and no bundled TLS
+(see [Authentication & Security](/docs/operate/auth/)).
 
 ## Send a message
 

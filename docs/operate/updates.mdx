@@ -11,7 +11,7 @@ hal0 updates itself in one atomic symlink swap, backed by
 cosign-verified release tarballs. If an update goes wrong, one
 command rolls back to the previous version.
 
-The current release (as of 2026-05-22) is `v0.1.0-alpha.1`.
+The current release is `v0.5.0-alpha.1`.
 
 ## The layout
 
@@ -20,8 +20,8 @@ separates the code from the data:
 
 ```
 /usr/lib/hal0/current/                 # symlink → /usr/lib/hal0-<version>/
-/usr/lib/hal0-0.1.0-alpha.1/           # versioned install
-/usr/lib/hal0-0.1.0-alpha.2/           # versioned install (next)
+/usr/lib/hal0-0.5.0-alpha.1/           # versioned install
+/usr/lib/hal0-0.5.0-alpha.2/           # versioned install (next)
 /etc/hal0/                             # config, preserved across updates
 /var/lib/hal0/                         # models, registry, OpenWebUI state
 ```

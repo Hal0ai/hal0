@@ -174,9 +174,10 @@ picks the right backend based on the `model` field.
 
 <Aside type="note">
   Authentication: by default hal0 binds `:8080` with **no API key
-  required**. That's the trusted-LAN posture. For remote access or
-  anything internet-facing, run `install.sh --auth=basic` to bring up
-  the Caddy reverse proxy with HTTPS, basic_auth at the edge, and
-  bearer tokens for the OpenAI API. See
-  [Authentication & HTTPS](/docs/operate/auth/) for the full setup.
+  required** — there is no built-in auth and no bundled TLS. That's the
+  trusted-LAN posture. For remote access or anything internet-facing,
+  front hal0-api with **your own reverse proxy** (Traefik, Caddy,
+  nginx, or a Cloudflare Tunnel) that owns HTTPS and authentication.
+  See [Authentication & Security](/docs/operate/auth/) for worked
+  examples.
 </Aside>

@@ -65,20 +65,20 @@ overwritten on `hal0 update`.
 
 <Aside type="note">
   `:3001` binds public interfaces by default with no auth, which is
-  fine on a trusted LAN. For remote access, run
-  `install.sh --auth=basic` to bring up the bundled Caddy reverse
-  proxy. OpenWebUI gets single-sign-on through Caddy's basic_auth
-  identity (no second login), and the bundled bearer-token auth gates
-  the OpenAI API surface. See
-  [Authentication & HTTPS](/docs/operate/auth/) for the full flow.
+  fine on a trusted LAN. hal0 ships **no built-in auth and no bundled
+  TLS** ([ADR-0012](https://github.com/Hal0ai/hal0/blob/main/docs/internal/adr/0012-remove-auth-and-caddy.md)
+  removed the old bundled Caddy edge). For remote access, front
+  OpenWebUI with **your own reverse proxy** (Traefik, Caddy, nginx)
+  that owns auth and HTTPS — see "Behind your existing reverse proxy"
+  below and [Authentication & Security](/docs/operate/auth/).
 </Aside>
 
 ## Behind your existing reverse proxy
 
-If your homelab already runs Traefik or Caddy in front of `*.lan` or
-`*.thinmint.dev` services, point it at OpenWebUI directly instead of
-using hal0's bundled Caddy. **Always give OpenWebUI its own hostname
-(e.g. `hal0-chat.lan`, `hal0-chat.thinmint.dev`) or its own port.**
+If your homelab already runs Traefik, Caddy, or nginx in front of
+`*.lan` or `*.thinmint.dev` services, point it at OpenWebUI directly.
+**Always give OpenWebUI its own hostname (e.g. `hal0-chat.lan`,
+`hal0-chat.thinmint.dev`) or its own port.**
 OpenWebUI emits root-absolute asset URLs and has no base-path config,
 so a `PathPrefix` rule under your dashboard's hostname will 404 every
 asset. There is no workaround in OWUI today — this is a hard
@@ -102,11 +102,12 @@ http:
 ```
 
 Do auth at the proxy (forward-auth, OIDC middleware, basic_auth,
-whatever you already trust). OpenWebUI's `WEBUI_AUTH_TRUSTED_EMAIL_HEADER`
-will pick up the forwarded identity exactly like it does with hal0's
-bundled Caddy. If you want OpenWebUI to be reachable only through the
-proxy and not directly on `:3001`, firewall the port at the host or
-front it with the proxy on a different interface.
+whatever you already trust). Set OpenWebUI's
+`WEBUI_AUTH_TRUSTED_EMAIL_HEADER` to the header your proxy forwards and
+it will pick up the authenticated identity (no second login). If you
+want OpenWebUI reachable only through the proxy and not directly on
+`:3001`, firewall the port at the host or front it with the proxy on a
+different interface.
 
 ## Turning it off
 

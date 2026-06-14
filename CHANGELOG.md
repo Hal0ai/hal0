@@ -10,6 +10,36 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.5.0-alpha.1] — 2026-06-14
+
+Pre-Alpha. Zero-boot install + FirstRun v2: a fresh install now stands up the
+memory engine, agents, and Hermes with no manual steps, and the FirstRun wizard
+orchestrates a full multi-slot bring-up from a single bundle pick.
+
+### Added
+- **FirstRun v2** — quick-path wizard + orchestrated multi-slot install from a
+  single bundle/kit pick (#809), with an Advanced drawer exposing per-slot
+  model/profile overrides (#812).
+- **Slot config UX** — Phase 2 per-slot MTP override + capability-gated MTP pill
+  (#800); Phase 3 non-manual chat templates, model-level and per-slot (#802).
+- **Zero-boot installer** — stands up a local Hindsight memory engine + seed
+  banks (#806), ships the hal0 agent skills + drop-in dirs (#805), and
+  provisions Hermes on a fresh install (#804).
+- **NPU telemetry** — live column / duty / tok-s / KV surface, repointed to
+  `hal0-toolbox-flm:0.9.43` (#813).
+- **Settings** — HuggingFace token field + `api.env` hint for gated pulls
+  (#816); standalone `/pull` uses capability-grouped paths (#815).
+
+### Fixed
+- Non-blocking slot controls + NPU/image-gen toggles; cancel mid-load (#801).
+- Slot edit drawer shows profile intent in its dropdown (#811).
+- Enforce device↔profile backend coherence on slot create/update (#807).
+
+### Internal
+- Recolor the device palette — free red for errors/stop (#803).
+- CI tests against the latest supported Python (3.12) only (#808).
+- gitignore `.superpowers/` brainstorm scratch (#810).
+
 ## [v0.4.1-alpha.1] — 2026-06-14
 
 Pre-Alpha. First release carrying the clean-install hardening proven end-to-end

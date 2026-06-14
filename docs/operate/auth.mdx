@@ -18,6 +18,14 @@ hostname — **put a reverse proxy in front of it**. hal0 has no
 built-in account system and does not enforce credentials at the API
 layer; the proxy is where authentication and TLS termination live.
 
+hal0 used to bundle a Caddy edge (basic_auth + a minted Bearer token,
+via an `install.sh --auth=basic` flag). That is **gone**:
+[ADR-0012](https://github.com/Hal0ai/hal0/blob/main/docs/internal/adr/0012-remove-auth-and-caddy.md)
+(which supersedes ADR-0001) removed both the built-in auth and the
+bundled TLS, on the principle that a homelab appliance should not try
+to out-engineer the edge proxy you already run. There is no `--auth`
+installer flag — bring your own proxy using one of the patterns below.
+
 <Aside type="caution" title="No built-in network gate">
 hal0-api does not authenticate HTTP requests. Any client that can
 reach `:8080` can issue completions, read slot state, and trigger

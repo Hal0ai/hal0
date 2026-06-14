@@ -209,22 +209,21 @@ then `/var/lib/hal0/models`. The path is persisted as
 `[models].pull_root` and auto-included in `[models].roots` so a fresh
 install scans the existing tree on first boot.
 
-## Authentication & HTTPS (optional)
+## Authentication & HTTPS
 
-The default install has no auth in front. Fine on a trusted home LAN
-behind your Traefik or Caddy. For exposed deployments add
-`--auth=basic`:
+hal0 ships with **no built-in auth and no bundled TLS**. `hal0-api`
+binds `0.0.0.0:8080` open on the LAN and treats every request as
+authenticated by virtue of network reachability — the right posture
+for a homelab appliance on a trusted network
+([ADR-0012](https://github.com/Hal0ai/hal0/blob/main/docs/internal/adr/0012-remove-auth-and-caddy.md)
+removed the old built-in auth and the bundled Caddy edge).
 
-```sh frame="terminal"
-sudo bash installer/install.sh --auth=basic
-```
-
-The installer prompts for an admin user and password, installs Caddy,
-generates a TLS cert (self-signed for `.local` hostnames, Let's
-Encrypt for real domains), mints a Bearer token, and round-trips
-`https://${HAL0_HOSTNAME}/api/health` as a self-test before exiting.
-See [Authentication & HTTPS](/docs/operate/auth/) for the full flow
-including client-side cert trust and ACME setup.
+If hal0 will be reachable from anything outside that trust boundary —
+a port-forward, a cloud VM, a shared Tailscale network, a public
+hostname — front it with **your own reverse proxy** (Traefik, Caddy,
+nginx, or a Cloudflare Tunnel) that owns authentication and HTTPS. See
+[Authentication & Security](/docs/operate/auth/) for worked Traefik,
+nginx, and Cloudflare Tunnel examples.
 
 ## From a clone
 
@@ -266,7 +265,7 @@ kernel upgrade, a Docker daemon swap, or whenever something feels off.
   <LinkCard
     title="Load your first model"
     href="/docs/getting-started/first-model/"
-    description="The eight-step FirstRun wizard: hardware, model, capabilities, pull." />
+    description="The FirstRun wizard: pick a bundle, set storage, run an orchestrated multi-slot install." />
   <LinkCard
     title="Send your first chat"
     href="/docs/getting-started/first-chat/"

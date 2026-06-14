@@ -1,6 +1,6 @@
 ---
 title: Load your first model
-description: Walk through the FirstRun wizard — hardware, model, capabilities, license, pull. Watch the primary slot come up.
+description: Walk through the FirstRun wizard — pick a pre-built bundle, set storage, optionally override per-slot models, then watch an orchestrated multi-slot install come up.
 sidebar:
   order: 2
 ---
@@ -9,89 +9,117 @@ import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components'
 
 A fresh hal0 install boots into the **FirstRun wizard**. Open the
 dashboard at `http://localhost:8080` and the wizard owns the screen
-until the `primary` slot has a model and reaches `ready`.
+until you've either installed a bundle or chosen to skip and configure
+slots by hand.
 
 ## What the wizard does
 
-The wizard is a guarded route at `/firstrun`. Until the API reports
-`first_run: false` every other dashboard navigation redirects back to
-it. There's no point operating an empty box.
+The wizard is a guarded route. Until the API reports `first_run: false`
+every other dashboard navigation redirects back to it. There's no point
+operating an empty box.
 
-It owns a linear sequence: confirm the password, confirm the detected
-hardware and model storage, pick a primary chat model, pick which
-capabilities to bring up (embed, voice, image), accept any
-click-through licenses, then stream the pulls into their slots. When
-`primary` reaches `ready` the wizard hands you the rest of the
-dashboard.
+It is a **bundle picker**, not a single-model sequence. Instead of
+walking you model-by-model through chat → embed → voice, it offers a
+handful of curated **bundles** (read live from `/api/install/bundles`
+via `useCuratedBundles()`). Each bundle is a hardware-tiered loadout —
+pick one and hal0 runs an **orchestrated multi-slot install**: it
+registers the slots that tier defines and pulls every model they need
+in one pass.
 
 ## The steps
 
 <Steps>
-1. **Password.** Optional. Auto-skips when
-   `/api/auth/status.password_set` is already true.
+1. **Pick a bundle.** The picker detects your **RAM, GPU, and NPU** and
+   highlights the highest tier that fits as ★ recommended; tiers that
+   need more memory than you have are marked `needs ≥ N GB` and
+   disabled. Each card (or column, in the table layout) shows the RAM
+   floor, the download size, and how many of the 8 slots it brings up.
+   You can switch tiers freely — the recommended one is just
+   pre-selected.
 
-2. **Hardware + storage.** Confirms what the probe wrote to
-   `/etc/hal0/hardware.json` and which directories the registry will
-   scan and pull into.
+2. **Set model storage.** A storage field below the picker decides
+   **where models live** before any pull starts. It is pre-filled with
+   the effective store (e.g. `/var/lib/hal0/models`) and offers
+   suggestion chips for detected candidates. Every slot container
+   points at this one path, so you pick it once. (If you point it at a
+   directory that already holds models, the wizard offers to migrate
+   them.)
 
-3. **Primary chat model.** A curated list, hardware-aware. Fit
-   warnings appear inline next to anything that would offload
-   heavily. The default highlight is `Phi-3-mini-4k-instruct-q4` — a
-   2.4 GB Q4 GGUF that pulls in roughly 10 seconds on a decent
-   connection and fits anywhere hal0 runs. Strix Halo operators
-   should jump straight to a Q4 7B-class chat model or a Q4 MoE 30B;
-   see [recommended loadouts](/docs/hardware/strix-halo/#recommended-loadouts).
+3. **(Optional) Advanced — NPU & per-slot.** An **Advanced** drawer
+   ([PR #812](https://github.com/Hal0ai/hal0/pull/812)) lets you tune
+   the install before it runs:
+   - **Enable NPU trio** — bring up the agent + STT/embed passengers on
+     the NPU (requires an NPU).
+   - **Per-slot overrides** — a small table with one row per slot
+     (Chat, Coder, Embed, Speech-to-text, Text-to-speech). For each you
+     can type a **curated model id** and/or pick a **profile** from the
+     dropdown. Blank rows keep the bundle's smart default. The chosen
+     profile carries a coherent device (a ROCm profile installs a ROCm
+     device, etc.), and overrides only apply to slots the chosen tier
+     actually installs.
 
-4. **Capabilities.** Embed, voice (STT + TTS), and image generation,
-   each with smart defaults. Rerank is a sub-disclosure inside the
-   embed row, locked off by default.
+4. **Install.** Hitting **Install &lt;tier&gt;** POSTs to
+   `/api/install/apply` with the tier, storage dir, NPU opt-in, and any
+   overrides. The wizard advances to a progress view.
 
-5. **Hugging Face token.** Conditional. Only renders when at least
-   one selected model is gated.
+5. **Watch the pulls.** Each model the install kicked off gets a
+   download row that reattaches to its live SSE stream — bytes,
+   percent, speed, ETA, with per-row **Retry** on failure. Downloads
+   continue in the background, so you can hit **Continue** without
+   waiting on multi-GB pulls to finish.
 
-6. **License acceptance.** Aggregated across every selected model.
-   Skipped if nothing requires it.
-
-7. **Install.** Parallel pulls plus capability registration, with
-   per-row retry. Progress streams over SSE: bytes, percent, and the
-   slot state walking through
-   `pulling → starting → warming → ready`.
-
-8. **Done.** Links to the dashboard, OpenWebUI, and settings.
+6. **Verify services.** The final step confirms the **agent** and
+   **chat UI** are running (with a one-click **Retry** if a unit is
+   down), and offers a quickstart card for **ComfyUI** image
+   generation. **Open dashboard** marks FirstRun complete and hands you
+   the rest of the UI.
 </Steps>
 
-<Aside type="note" title="Skipping the wizard from the CLI">
-The CLI gets you to the same place without a browser:
+## Pre-built kits
+
+Below the tier picker is a **Pre-built kits** section: vendor-blessed,
+AMD-curated loadouts that come up with multiple slots ready out of the
+box. The flagship is **LMX-Omni-52B-Halo** — a Strix Halo kit (≥ 100 GB
+unified RAM) that wires four slots in one shot (a 35B chat model,
+Whisper-Large STT, kokoro TTS, and Flux-2-Klein image gen), roughly a
+75 GB download. Picking a kit runs the same orchestrated multi-slot
+install as a tier.
+
+<Aside type="note" title="Skipping the wizard">
+You don't have to use the wizard. Hit **Skip — configure manually** to
+go straight to an empty dashboard and wire slots yourself, or drive it
+from the CLI:
 
 ```sh
-hal0 slot load primary --model phi-3-mini-4k-instruct-q4
+hal0 slot load chat --model phi-3-mini-4k-instruct-q4
 ```
 
 The slot manager handles the pull, the systemd unit, and the health
 probe. `hal0 status` shows the same state machine the wizard streams.
 </Aside>
 
-## When the pull fails
+## When a pull fails
 
-The wizard surfaces errors inline. Common ones:
+Each download row surfaces its own error inline and offers **Retry** to
+re-fetch. Common causes:
 
-- **No disk space.** `/var/lib/hal0/models/` ran out mid-pull. Free
+- **No disk space.** The storage path you chose ran out mid-pull. Free
   the space and retry — partial downloads resume.
 - **Hugging Face rate-limit.** Anonymous pulls hit a rate cap on
-  popular weights. Export `HF_TOKEN` (or set it in
-  `/etc/hal0/api.env`) and retry.
+  popular weights. Set `HF_TOKEN` (in the dashboard under Settings →
+  Secrets, or in `/etc/hal0/api.env`) and retry.
 - **License not accepted on Hugging Face.** Some gated models require
-  acceptance on the HF side before the API will serve the files. The
-  error message links out to the model page.
+  acceptance on the HF side before the API will serve the files. Accept
+  on the model page, then retry the row.
 
-The slot stays in `error` with details in
-`/var/lib/hal0/slots/primary/state.json` until you retry. Nothing
-hidden.
+A failed pull leaves its slot in `error` with details until you retry;
+nothing is hidden, and the other slots in the bundle continue
+independently.
 
-## Picking something other than the default
+## Picking something other than the bundle
 
-The wizard's curated list is a starting point. After it's done the
-**Models** page in the dashboard is where you live:
+The bundle is a starting point. After FirstRun the **Models** page in
+the dashboard is where you live:
 
 <img
   src="/screenshots/models-registry.png"
@@ -107,7 +135,7 @@ model to a slot, or hand the same job to the CLI:
 
 ```sh frame="terminal"
 hal0 model list
-hal0 slot swap primary --model qwen2.5-coder-7b-instruct-q4_k_m
+hal0 slot swap chat --model qwen2.5-coder-7b-instruct-q4_k_m
 ```
 
 See [recommended loadouts](/docs/hardware/strix-halo/#recommended-loadouts)
@@ -120,7 +148,7 @@ for a hardware-by-hardware breakdown of what fits where.
   <LinkCard
     title="Send your first chat"
     href="/docs/getting-started/first-chat/"
-    description="OpenWebUI is already pointed at your primary slot." />
+    description="OpenWebUI is already pointed at your chat slot." />
   <LinkCard
     title="Slot lifecycle"
     href="/docs/slots/what-is-a-slot/"

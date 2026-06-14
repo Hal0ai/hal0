@@ -7,7 +7,7 @@ one-line install) and re-architected around the things that make hal0
 different from "a wrapper around llama-server": hardware-aware slots,
 clean lifecycle, and a real reliability bar.
 
-**Status (2026-06-12):** **v0.3.2-alpha.1** — container-runtime era.
+**Status (2026-06-14):** **v0.5.0-alpha.1** — container-runtime era.
 Every slot runs as a dedicated podman container under
 `hal0-slot@<name>.service` (ContainerProvider + `profiles.toml`).
 The v0.2 Lemonade daemon epoch is over — see Phase 9 (historical

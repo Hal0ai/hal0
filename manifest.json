@@ -1,7 +1,7 @@
 {
   "_schema": "hal0.manifest.v1",
   "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, flm, moonshine, kokoro, comfyui) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release \u2014 the runtime then pulls by tag and emits a warning. Run `scripts/update-toolbox-digests.sh` on main before cutting a release: it queries ghcr.io for each image's published content digest and patches this file in place so the pinned digests track the published images. Schema versioned via `_schema`; bump it when the shape changes. Toolbox images are public on `ghcr.io/hal0ai/`; the installer pulls them anonymously and `hal0 doctor toolbox-pull` asserts that contract holds. See PLAN.md \u00a712 (toolbox images) and \u00a717 (Risks).",
-  "version": "0.4.1-alpha.1",
+  "version": "0.5.0-alpha.1",
   "channel": "dev",
   "toolbox_images": {
     "vulkan": {
