@@ -809,6 +809,25 @@ def _default_mcp_servers() -> list[dict[str, Any]]:
     ]
 
 
+def _live_resolve_enabled() -> bool:
+    """Single source of truth for live-resolve mode.
+
+    Live-resolve is the hal0 default: ``model.default`` → the virtual
+    ``hal0/primary`` and ``providers.custom`` → the hal0-api gateway
+    (:8080/v1) with ``discover_models`` + an api_key, so Hermes' model picker
+    live-discovers every loaded slot (responsive, auto-updating, context-aware)
+    instead of pinning one physical backend. hal0-api always serves
+    ``/v1/models`` with the ``hal0/*`` virtuals + ``context_length``, so this is
+    correct even before a model is pulled. Set ``HAL0_HERMES_LIVE_RESOLVE=0`` to
+    opt back into single-backend pinning.
+
+    BOTH config_write (Phase 5) and model_automap (Phase 9) must read this so
+    their renders stay byte-identical (#245 idempotency) — otherwise the
+    automap re-render silently clobbers config_write's live-resolve output.
+    """
+    return os.environ.get("HAL0_HERMES_LIVE_RESOLVE", "1") == "1"
+
+
 def _render_config_yaml(
     *,
     primary: dict[str, Any] | None,
@@ -1053,7 +1072,7 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
             }
         )
     system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
-    live_resolve_enabled = os.environ.get("HAL0_HERMES_LIVE_RESOLVE", "0") == "1"
+    live_resolve_enabled = _live_resolve_enabled()
     rendered = _render_config_yaml(
         primary=primary,
         chat_slots=chat_slots,
@@ -2546,6 +2565,9 @@ def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
             delegation=delegation,
             custom_providers=custom_providers,
             auxiliary_tasks=auxiliary_tasks,
+            # Must match config_write (Phase 5) or this re-render clobbers the
+            # live-resolve provider block. Single source of truth.
+            live_resolve_enabled=_live_resolve_enabled(),
         )
         rendered = _apply_overrides(rendered, OVERRIDES_PATH)
     except Exception as exc:

@@ -1533,6 +1533,12 @@ class SlotManager:
         cfg_dict = _cfg_to_dict(slot_cfg)
         # #585: canonicalize a ctx_size alias from the create modal too.
         _normalize_ctx_key(cfg_dict)
+        # Reject (or normalize) an incoherent device/profile backend pairing
+        # before it ever lands on disk — the door the dashboard left open for
+        # the utility slot (vulkan device + rocm-mtp profile). Every field is
+        # "new" at create time, so a conflicting device+profile is an explicit
+        # operator error and raises.
+        _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         cfg_path = self._config_file(slot_name)
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1625,6 +1631,14 @@ class SlotManager:
         # context_size so the two keys can't diverge on disk.
         _normalize_ctx_key(cfg_dict)
 
+        # Keep device↔profile backend coherent: a profile switch re-derives
+        # device (the drawer path that previously left a vulkan device under a
+        # rocm-mtp profile), a cross-backend device flip re-points the profile
+        # (the POST /backend path, which writes device only), and an explicit
+        # conflicting pair raises. Only the field(s) the caller changed drive
+        # reconciliation.
+        _reconcile_device_profile(cfg_dict, set(updates.keys()))
+
         # PR-11: re-run the NPU exclusivity guard whenever the merged
         # config could land a second device=npu, type=llm anchor (plan
         # §5.3). Cheap when no NPU LLM is involved — the helper short-
@@ -1663,8 +1677,11 @@ class SlotManager:
             # ``backend``) must re-derive the mirrored ``extra.backend`` token
             # too, or state.json keeps advertising the stale seeded backend
             # forever. Without this the chip thrashes back to the old value
-            # on the next status read that trusts the mirror.
-            if "device" in updates:
+            # on the next status read that trusts the mirror. A ``profile``
+            # change can also move the effective backend now (it re-derives
+            # ``device`` via _reconcile_device_profile), so refresh the mirror
+            # for either trigger off the reconciled cfg.
+            if "device" in updates or "profile" in updates:
                 eff = _cfg_effective_backend(cfg_dict)
                 if eff is not None:
                     new_extra["backend"] = eff
@@ -2394,6 +2411,91 @@ def _cfg_effective_backend(cfg: SlotConfig | dict[str, Any]) -> str | None:
     recipe, llamacpp_backend = device_to_backend(str(device))
     # NPU → recipe="flm" with no llamacpp_backend; surface "flm".
     return llamacpp_backend or (recipe if recipe == "flm" else None)
+
+
+def _base_profile_for_backend(catalog: Any, backend: str) -> str:
+    """Pick the canonical (non-MTP) seed profile name for a GPU backend.
+
+    Prefers the seed profile named after the backend (``rocm`` / ``vulkan``);
+    falls back to any non-MTP then any profile that declares ``backend``.
+    """
+    named = catalog.profile.get(backend)
+    if named is not None and getattr(named, "backend", None) == backend:
+        return backend
+    for name, prof in catalog.profile.items():
+        if getattr(prof, "backend", None) == backend and not getattr(prof, "mtp", False):
+            return str(name)
+    for name, prof in catalog.profile.items():
+        if getattr(prof, "backend", None) == backend:
+            return str(name)
+    return backend
+
+
+def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> None:
+    """Keep a GPU slot's ``device`` and ``profile.backend`` coherent in place.
+
+    A GPU slot implies its backend twice: ``device`` (``gpu-rocm`` /
+    ``gpu-vulkan``) drives the llama-server backend, while ``profile`` selects
+    the container image + flags. They must agree — a vulkan device under a
+    rocm-mtp profile launches a Vulkan binary with ROCm-only MTP draft flags
+    (issue: utility slot). The field the operator changed wins; the stale side
+    is re-derived. Both changed to conflicting backends → operator error.
+
+    No-ops for slots without a GPU profile (npu/cpu/img profiles declare
+    ``backend=None``) and for ``auto`` device (empty) unless the profile
+    itself changed. Mutates ``cfg_dict`` in place.
+    """
+    profile_name = cfg_dict.get("profile")
+    if not isinstance(profile_name, str) or not profile_name:
+        return
+
+    from hal0.config.loader import load_profiles_config
+
+    prof = load_profiles_config().profile.get(profile_name)
+    prof_backend = getattr(prof, "backend", None) if prof is not None else None
+    if not prof_backend:
+        # Non-GPU profile (or unknown profile with no backend) — leave alone.
+        return
+
+    from hal0.config.schema import map_backend_to_device
+    from hal0.model_meta import device_to_backend
+
+    device = cfg_dict.get("device")
+    dev_backend = device_to_backend(str(device))[1] if device else None
+    if dev_backend == prof_backend:
+        return  # already coherent
+
+    prof_changed = "profile" in changed
+    dev_changed = "device" in changed
+
+    if not device:
+        # ``auto``/unset device: only adopt the profile's backend when the
+        # operator explicitly (re)selected the profile; otherwise leave auto.
+        if prof_changed:
+            cfg_dict["device"] = map_backend_to_device(prof_backend)
+        return
+
+    if prof_changed and not dev_changed:
+        cfg_dict["device"] = map_backend_to_device(prof_backend)
+    elif dev_changed and not prof_changed and dev_backend is not None:
+        catalog = load_profiles_config()
+        cfg_dict["profile"] = _base_profile_for_backend(catalog, dev_backend)
+    elif prof_changed and dev_changed:
+        raise SlotConfigError(
+            f"slot device {device!r} (backend {dev_backend!r}) conflicts with "
+            f"profile {profile_name!r} (backend {prof_backend!r}); "
+            "pick a device and profile with the same backend",
+            details={
+                "device": device,
+                "profile": profile_name,
+                "device_backend": dev_backend,
+                "profile_backend": prof_backend,
+            },
+        )
+    # neither changed (pre-existing on-disk drift surfaced by an unrelated
+    # update): leave both fields untouched so the unrelated edit doesn't
+    # silently mutate hardware intent. Drift heals on the next device/profile
+    # edit.
 
 
 __all__ = [

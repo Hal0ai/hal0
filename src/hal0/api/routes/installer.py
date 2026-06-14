@@ -27,6 +27,7 @@ import contextlib
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -35,11 +36,13 @@ from fastapi import APIRouter, BackgroundTasks, Request
 
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.bundles import store as bundle_store
+from hal0.bundles import tiers as bundle_tiers
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
+from hal0.install.profile_derive import derive_device, derive_profile
 from hal0.registry.curated import CURATED_MODELS, get_curated
 from hal0.registry.model import Model
-from hal0.registry.pull import make_job, run_pull
+from hal0.registry.pull import get_job, make_job, run_pull
 from hal0.registry.store import ModelAlreadyExists
 
 # Auth was removed in ADR-0012. All endpoints are open on the local
@@ -413,6 +416,175 @@ def _assign_to_slot(slot: str, model_id: str) -> Path:
     return slot_path
 
 
+# ── FirstRun v2: orchestrated multi-slot install (design D3) ────────────────
+
+
+def _build_slot_cfg(
+    *,
+    slot: str,
+    model_id: str,
+    device: str,
+    profile: str,
+    port: int,
+    context_size: int = 4096,
+) -> dict[str, Any]:
+    """Podman-aware slot config dict (design D4/D7).
+
+    Sets the v0.2 ``device`` + ``profile`` fields (NOT the deprecated
+    ``backend``) so :meth:`SlotManager.create` writes a TOML the container
+    runtime can launch. The (device, profile) pair must be backend-coherent
+    per #807 — :func:`derive_profile` guarantees that for derived pairs.
+    """
+    return {
+        "name": slot,
+        "port": port,
+        "device": device,
+        "profile": profile,
+        "enabled": True,
+        "model": {"default": model_id, "context_size": context_size},
+    }
+
+
+#: Map a manifest ``ModelEntry.slot`` → (capability, slot_name, port). The
+#: capability drives both the on-disk store group (design D2) and the
+#: device/profile derivation (design D4).
+_SLOT_META: dict[str, tuple[str, str, int]] = {
+    "chat.primary": ("chat", "chat", 8081),
+    "chat.coder": ("coder", "coder", 8082),
+    "embed": ("embed", "embed", 8083),
+    "stt": ("stt", "stt", 8084),
+    "tts": ("tts", "tts", 8085),
+    "img": ("img", "img", 8186),
+}
+
+
+def _resolve_tier(name: str) -> str:
+    """Map a tier name (any case) to its canonical key, or raise 404."""
+    if name in bundle_tiers.BUNDLES:
+        return name
+    lower = name.lower()
+    for canonical in bundle_tiers.BUNDLES:
+        if canonical.lower() == lower:
+            return canonical
+    raise CuratedModelNotFound(
+        f"unknown tier {name!r}",
+        details={"tier": name, "valid": list(bundle_tiers.BUNDLES)},
+    )
+
+
+@router.post("/apply")
+async def install_apply(request: Request, background: BackgroundTasks) -> dict[str, Any]:
+    """Orchestrated FirstRun install (design D3).
+
+    Body::
+
+        { "tier": "hal0-Default", "storage_dir": "/srv/models",
+          "npu_opt_in": false, "overrides": { "<slot>": {model_id, profile, ...} } }
+
+    For each manifest member: derive device+profile from the hardware probe,
+    create the slot OFFLINE (``SlotManager.create`` — not started, design D7),
+    and seed a pull job reusing ``run_pull`` (capability-grouped path, D2).
+    Best-effort, non-aborting per row (ADR-0010): a member that fails or has no
+    curated/coherent mapping is reported with a ``skipped``/``error`` reason and
+    the walk continues. The UI reattaches per model via the existing
+    ``/api/models/{id}/pull/stream`` SSE.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise PickDefaultError(f"body must be valid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise PickDefaultError("body must be a JSON object")
+    tier = body.get("tier")
+    if not isinstance(tier, str) or not tier.strip():
+        raise PickDefaultError("body.tier is required (non-empty string)")
+    npu_opt_in = bool(body.get("npu_opt_in", False))
+    overrides = body.get("overrides") or {}
+    if not isinstance(overrides, dict):
+        raise PickDefaultError("body.overrides must be an object")
+
+    canonical = _resolve_tier(tier.strip())
+    manifest = bundle_tiers.load_bundle(canonical)
+    bundle = manifest.bundle
+
+    hw = request.app.state.hardware_probe.probe()
+    registry = request.app.state.model_registry
+    jobs = request.app.state.model_pull_jobs
+    slot_manager = request.app.state.slot_manager
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+    entries = [e for e in (bundle.primary, bundle.coder, *bundle.aux) if e is not None]
+    model_ids: list[str] = []
+    slot_results: list[dict[str, Any]] = []
+
+    for entry in entries:
+        cap, slot_name, port = _SLOT_META.get(entry.slot, (entry.slot, entry.slot, 8090))
+        ov = overrides.get(slot_name) if isinstance(overrides.get(slot_name), dict) else {}
+        model_id = ov.get("model_id") or entry.model_name
+        rec: dict[str, Any] = {"slot": slot_name, "model_id": model_id, "created": False}
+
+        device = ov.get("device") or derive_device(cap, hw, npu_opt_in=npu_opt_in)
+        if device is None:
+            # NPU/STT lane not provisioned on this box — skip cleanly (§8).
+            rec["skipped"] = "not_applicable_on_this_hardware"
+            slot_results.append(rec)
+            continue
+        profile = ov.get("profile") or derive_profile(cap, device)
+        rec["device"], rec["profile"] = device, profile
+
+        curated = get_curated(model_id)
+        if curated is None:
+            # Manifest references a non-pullable pick (multi-file ONNX, etc.).
+            rec["skipped"] = "needs_upstream_routing"
+            slot_results.append(rec)
+            continue
+
+        _ensure_registry_entry(registry, model_id)
+        ctx = int(curated.context_length or 0) or 4096
+        cfg = _build_slot_cfg(
+            slot=slot_name,
+            model_id=model_id,
+            device=device,
+            profile=profile,
+            port=port,
+            context_size=ctx,
+        )
+        try:
+            await slot_manager.create(slot_name, cfg)
+            rec["created"] = True
+        except Exception as exc:  # best-effort, non-aborting (ADR-0010)
+            rec["error"] = str(exc)
+            slot_results.append(rec)
+            continue
+
+        existing = get_job(jobs, model_id)
+        if existing is not None and existing.state in ("queued", "running"):
+            job = existing
+        else:
+            job = make_job(model_id)
+            jobs[model_id] = job
+            background.add_task(
+                run_pull,
+                job,
+                hf_repo=curated.hf_repo,
+                hf_file=curated.hf_file,
+                registry=registry,
+                hf_token=hf_token,
+                comfyui_subdir=curated.comfyui_subdir or None,
+                capability=cap,
+            )
+        rec["pull_job_id"] = job.job_id
+        model_ids.append(model_id)
+        slot_results.append(rec)
+
+    return {
+        "tier": canonical,
+        "model_ids": model_ids,
+        "slots": slot_results,
+        "next": "reattach /api/models/{id}/pull/stream per model_id",
+    }
+
+
 @router.post("/pick-default")
 async def pick_default(
     request: Request,
@@ -534,3 +706,77 @@ async def set_slot_default_model(slot: str, request: Request) -> dict[str, Any]:
         "slot_path": str(slot_path),
         "persisted": True,
     }
+
+
+# ── FirstRun v2: services step — verify + one-click repair (design D5) ───────
+
+#: Units the repair button is allowed to restart. Kept to a known allowlist so
+#: a crafted ``{unit}`` can't restart arbitrary system services.
+_REPAIRABLE_UNITS = {
+    "hal0-openwebui.service",
+    "hal0-api.service",
+    "hindsight-api.service",
+    "hal0-agent@hermes.service",
+}
+
+
+def _unit_active(unit: str) -> bool:
+    """True when ``systemctl is-active <unit>`` reports ``active``."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return out.stdout.strip() == "active"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+@router.get("/services")
+async def install_services() -> dict[str, Any]:
+    """Verify post-install services for the FirstRun services step (design D5).
+
+    Reports Hermes + OpenWebUI health so the wizard can show honest dots and
+    offer the one-click repair below when a unit is down.
+    """
+    owui = "hal0-openwebui.service"
+    hermes_active = bool(os.environ.get("HAL0_HERMES_PUBLIC_URL")) or _unit_active(
+        "hal0-agent@hermes.service"
+    )
+    services = [
+        {
+            "unit": owui,
+            "label": "OpenWebUI",
+            "active": _unit_active(owui),
+            "repairable": owui in _REPAIRABLE_UNITS,
+        },
+        {
+            "unit": "hal0-agent@hermes.service",
+            "label": "Hermes agent",
+            "active": hermes_active,
+            "repairable": True,
+        },
+    ]
+    return {"services": services}
+
+
+@router.post("/services/{unit}/repair")
+async def service_repair(unit: str) -> dict[str, Any]:
+    """Restart a known unit (design D5 one-click repair).
+
+    Restricted to :data:`_REPAIRABLE_UNITS` so the ``{unit}`` path segment
+    can't be used to restart arbitrary system services.
+    """
+    if unit not in _REPAIRABLE_UNITS:
+        raise BadRequest(
+            f"unit {unit!r} is not repairable",
+            details={"unit": unit, "allowed": sorted(_REPAIRABLE_UNITS)},
+            code="install.unit_not_repairable",
+        )
+    try:
+        subprocess.run(["systemctl", "restart", unit], check=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PickDefaultError(f"restart failed: {exc}", details={"unit": unit}) from exc
+    return {"unit": unit, "active": _unit_active(unit)}

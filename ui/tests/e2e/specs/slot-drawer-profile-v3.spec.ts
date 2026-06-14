@@ -75,6 +75,19 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await expect(sel.locator('option[value="flm"]')).toHaveCount(0)
   })
 
+  // C7a2 — profile options surface the intent label so custom profiles
+  // (auto-named e.g. "rocm-custom") are recognizable, not just the bare name.
+  test('C7a2 — GPU profile options show name · intent', async ({ page }) => {
+    await seedSlots(page, [CHAT_CONTAINER])
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    const sel = page.locator('.drawer .form-row', { hasText: 'Profile' }).first().locator('select')
+    // The rocm-mtp option carries its intent ("Dense chat + MTP") in the label.
+    await expect(sel.locator('option[value="rocm-mtp"]')).toContainText('Dense chat + MTP')
+    await expect(sel.locator('option[value="vulkan"]')).toContainText('Vulkan std · fallback')
+  })
+
   // C7b — profile change Save: PUT with profile + restart fires
   test('C7b — profile change: PUT includes profile + restart fires', async ({ page }) => {
     const configPuts: any[] = []

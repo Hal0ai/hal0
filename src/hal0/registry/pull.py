@@ -192,17 +192,60 @@ def _final_path_for_entry(
     model_id: str,
     filename: str,
     comfyui_subdir: str | None,
+    capability: str | None = None,
 ) -> Path:
     """Pick the final on-disk path based on whether this is a ComfyUI asset.
 
     Image-gen entries (``comfyui_subdir`` set) land under
     ``/var/lib/hal0/comfyui/models/<subdir>/<filename>`` so ComfyUI's
-    own model loaders pick them up without a per-id rename. Everything
-    else uses the default ``/var/lib/hal0/models/<id>/<filename>`` layout.
+    own model loaders pick them up without a per-id rename.
+
+    When ``capability`` is set (the FirstRun v2 install engine, design D2),
+    the model lands in a capability-grouped tree with one canonical
+    ``model.gguf`` filename: ``<pull_root>/<capability>/<id>/model.gguf``.
+    This keeps the store self-documenting by role and gives the slot config
+    a stable path that never chases a HF-specific filename. A sidecar
+    ``meta.json`` (written by :func:`write_model_meta`) preserves provenance.
+
+    Everything else uses the default ``/var/lib/hal0/models/<id>/<filename>``
+    layout (back-compat for the standalone ``/api/models/{id}/pull`` path).
     """
     if comfyui_subdir:
         return _comfyui_models_dir(comfyui_subdir) / filename
+    if capability:
+        return _pull_root() / _sanitise_id(capability) / _sanitise_id(model_id) / "model.gguf"
     return _final_path(model_id, filename)
+
+
+def write_model_meta(
+    dest: Path,
+    *,
+    curated_id: str,
+    hf_repo: str,
+    hf_file: str,
+    sha256: str | None,
+    size_bytes: int,
+    quant: str | None,
+    capability: str | None,
+) -> None:
+    """Write a ``meta.json`` sidecar next to a capability-grouped model file.
+
+    Preserves the HuggingFace provenance (repo/file/sha) that the grouped
+    ``model.gguf`` filename drops, so the store layout (design D2) stays both
+    clean to browse and fully traceable back to the source artefact.
+    """
+    import json as _json
+
+    meta = {
+        "curated_id": curated_id,
+        "hf_repo": hf_repo,
+        "hf_file": hf_file,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+        "quant": quant,
+        "capability": capability,
+    }
+    (dest.parent / "meta.json").write_text(_json.dumps(meta, indent=2) + "\n")
 
 
 def _tmp_dir() -> Path:
@@ -254,6 +297,7 @@ async def run_pull(
     hf_token: str | None = None,
     client: httpx.AsyncClient | None = None,
     comfyui_subdir: str | None = None,
+    capability: str | None = None,
 ) -> None:
     """Background-task body: stream the file, hash it, install it, register it.
 
@@ -349,7 +393,7 @@ async def run_pull(
                         job._signal()
 
         # Download complete — atomic install.
-        final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir)
+        final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
         final.parent.mkdir(parents=True, exist_ok=True)
         os.replace(tmp_path, final)
         tmp_path = final  # so the cleanup `finally` doesn't unlink the installed file
@@ -366,6 +410,20 @@ async def run_pull(
             hf_repo=hf_repo,
             hf_filename=hf_file,
         )
+
+        # Capability-grouped pulls (FirstRun v2, design D2) get a meta.json
+        # sidecar preserving HF provenance the canonical model.gguf name drops.
+        if capability:
+            write_model_meta(
+                final,
+                curated_id=job.model_id,
+                hf_repo=hf_repo,
+                hf_file=hf_file,
+                sha256=digest,
+                size_bytes=size_bytes,
+                quant=None,
+                capability=capability,
+            )
 
         job.path = str(final)
         job.sha256 = digest

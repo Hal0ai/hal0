@@ -206,7 +206,7 @@ info "Pull destination: ${MODELS_DIR}"
 
 # Step total. Kept here so editors who add or remove a ui_step bump the
 # visible counter in the same diff.
-UI_STEP_TOTAL=11
+UI_STEP_TOTAL=12
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
@@ -1044,6 +1044,37 @@ else
     warn "bundle manifest source ${BUNDLES_SRC} not found; picker will fall back to in-tree defaults"
 fi
 
+# ── Bundled agent skills (drop-in skill library) ──────────────────────────
+# Ship hal0's own agent skills to /usr/share/hal0/skills (read-only source).
+# The hermes provision's context_link phase (_mirror_bundled_skills) symlinks
+# each one into /etc/hal0/agent-skills, which the rendered config.yaml lists in
+# skills.external_dirs — so a fresh agent comes up with the bundled skills
+# already loaded. Also create a writable drop-in dir at /var/lib/hal0/skills
+# (also on external_dirs): new skills install just by dropping a folder in, and
+# editing is a plain file edit. This must run BEFORE the hermes provision in
+# "Service start" so the mirror finds the shipped source. Idempotent.
+ui_step "Bundled agent skills"
+
+SKILLS_SRC="${REPO_ROOT}/installer/agent-skills"
+SKILLS_SHIP="/usr/share/hal0/skills"
+SKILLS_DROPIN="${VAR_DIR}/skills"
+AGENT_SKILLS_MIRROR="${ETC_DIR}/agent-skills"
+
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    mkdir -p "${SKILLS_SHIP}" "${AGENT_SKILLS_MIRROR}" "${SKILLS_DROPIN}"
+    if [[ -d "${SKILLS_SRC}" ]] && compgen -G "${SKILLS_SRC}/*" >/dev/null; then
+        cp -rf "${SKILLS_SRC}"/* "${SKILLS_SHIP}/"
+        info "shipped $(find "${SKILLS_SRC}" -mindepth 1 -maxdepth 1 -type d | wc -l) hal0 skill(s) → ${SKILLS_SHIP}"
+    else
+        info "no bundled skills at ${SKILLS_SRC} — drop-in dirs still created"
+    fi
+    # Writable drop-in (agent runs as hal0): add/edit skills at runtime here.
+    chown -R hal0:hal0 "${SKILLS_DROPIN}" 2>/dev/null || true
+    info "skill drop-in: ${SKILLS_DROPIN} (drop a folder here to add a skill; editable)"
+else
+    info "dev mode — skipping system skill install (/usr/share/hal0/skills)"
+fi
+
 ui_step "Service start"
 
 if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
@@ -1055,6 +1086,66 @@ else
         info "hal0-api is running"
     else
         warn "hal0-api failed to start; check 'journalctl -u hal0-api -n 40'"
+    fi
+
+    # ── Memory engine (Hindsight) ─────────────────────────────────────────────
+    # Stand up the local hindsight-api daemon (the shared memory brain) and seed
+    # the global shared bank + the hermes private bank. The unit ships in
+    # installer/systemd/ but was never installed before, so a fresh box had
+    # HAL0_MEMORY_ENABLED=1 (api.env above) pointing at a dead engine. The daemon
+    # runs in its own venv at ${VAR_DIR}/memory/hindsight/.venv (pinned to the
+    # version CT105 runs) with an embedded postgres + local BGE/MiniLM models;
+    # its extraction/reflection LLM is hal0/utility on :8080 (used lazily — the
+    # unit sets HINDSIGHT_API_SKIP_LLM_VERIFICATION so it binds without a loaded
+    # model). Escape hatch: HAL0_SKIP_HINDSIGHT=1.
+    HS_DIR="${VAR_DIR}/memory/hindsight"
+    HINDSIGHT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hindsight-api.service"
+    if [[ "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 && -f "${HINDSIGHT_UNIT_SRC}" ]]; then
+        info "setting up Hindsight memory engine (venv + daemon) — this can take a few minutes…"
+        mkdir -p "${HS_DIR}/hf-cache" "${HS_DIR}/.cache"
+        if [[ ! -x "${HS_DIR}/.venv/bin/hindsight-api" ]]; then
+            "${PY}" -m venv "${HS_DIR}/.venv"
+            "${HS_DIR}/.venv/bin/pip" install --upgrade pip wheel -q 2>/dev/null || true
+            if ! "${HS_DIR}/.venv/bin/pip" install "hindsight-api==0.7.2" -q; then
+                warn "hindsight-api install failed — memory engine will be unavailable"
+            fi
+        else
+            info "hindsight-api venv already present — skipping pip install"
+        fi
+        # The unit runs as hal0 with HOME=${HS_DIR}; hand it the whole tree.
+        chown -R hal0:hal0 "${VAR_DIR}/memory" 2>/dev/null || true
+        if [[ -x "${HS_DIR}/.venv/bin/hindsight-api" ]]; then
+            install -m644 "${HINDSIGHT_UNIT_SRC}" /etc/systemd/system/hindsight-api.service
+            systemctl daemon-reload
+            systemctl enable --now hindsight-api
+            # First boot: embedded pg0 init + local embed/rerank model load can
+            # take ~30-60s. Skip-LLM-verification means it binds without a model.
+            hs_up=0
+            for _ in $(seq 1 40); do
+                if curl -fsS "http://127.0.0.1:9177/health" >/dev/null 2>&1; then hs_up=1; break; fi
+                sleep 3
+            done
+            if [[ "${hs_up}" -eq 1 ]]; then
+                info "hindsight-api is running (memory engine on 127.0.0.1:9177)"
+                # Seed banks through hal0-api (idempotent import, config-by-field):
+                # `shared` = the global cross-agent brain; `private__hermes-agent`
+                # = hermes' private store. Other private/project banks lazy-create.
+                _seed_bank() {
+                    curl -fsS -m 20 -X POST \
+                        "http://127.0.0.1:${HAL0_PORT}/api/memory/banks/$1/import" \
+                        -H "Content-Type: application/json" -H "X-hal0-Agent: installer" \
+                        -d "$2" >/dev/null 2>&1
+                }
+                if _seed_bank shared '{"version":"1","bank":{"retain_mission":"Extract technical decisions and rationale, gotchas and fixes, PRs and status changes, conventions, commands, endpoints, flags, incidents and resolutions, and cross-session coordination facts. Ignore routine edits, transient state, secrets, and anything already in git.","enable_observations":true,"disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":1}}' \
+                    && _seed_bank private__hermes-agent '{"version":"1","bank":{"retain_mission":"This agent private working notes, scratch decisions, and per-task state. Never store shared facts here.","disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":2}}'; then
+                    info "seeded memory banks: shared (global) + private__hermes-agent"
+                else
+                    warn "memory bank seeding incomplete — banks also lazy-create on first write"
+                fi
+            else
+                warn "hindsight-api not healthy yet; check 'journalctl -u hindsight-api -n 40'"
+            fi
+        fi
     fi
 
     if [[ -f "${OPENWEBUI_UNIT_DST}" ]]; then
@@ -1085,12 +1176,37 @@ else
         fi
     fi
 
-    # hal0-agent@hermes — gated on the hermes venv existing. PR-3 owns the
-    # actual `hal0 agent bootstrap hermes` invocation; until that lands,
-    # this branch is a no-op on fresh installs (correct — there's no
-    # agent to run yet). On upgrade installs where the venv is already
-    # present from a previous bootstrap, this enables the unit so the
-    # agent comes back up after the upgrade.
+    # hal0-agent@hermes — provision Hermes end-to-end on a FRESH install so the
+    # box comes up with a fully-configured agent (config.yaml + MCP wiring +
+    # personas + skills + install artifacts) WITHOUT a manual bootstrap step.
+    # `hal0 agent install hermes` runs the toolchain (python·venv·pip·pipx)
+    # then the full bootstrap pipeline in the foreground, chowns the
+    # provisioned trees to the hal0 runtime user, and enables the unit. It is
+    # multi-minute (pip-installs hermes-agent), so it streams into the install
+    # log. Escape hatch: HAL0_SKIP_HERMES=1 for operators who don't want the
+    # bundled agent. On UPGRADE installs the venv already exists, so the
+    # provision is skipped and the block below just (re)enables the unit.
+    # hal0-api is already up at this point (enabled + wait_active above), which
+    # the bootstrap preflight requires.
+    if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
+        if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
+            info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"
+        else
+            info "provisioning Hermes agent (toolchain + bootstrap) — this can take a few minutes…"
+            if "${HAL0_BIN}" agent install hermes; then
+                info "hermes provisioned — config.yaml + MCP servers + skills wired"
+            else
+                warn "hermes provisioning failed — run '${HAL0_BIN} agent install hermes' manually"
+                warn "  diagnose with '${HAL0_BIN} agent log hermes' / '${HAL0_BIN} agent status hermes'"
+            fi
+        fi
+    fi
+
+    # Enable the unit + gateway for both fresh (just-provisioned) and upgrade
+    # installs. `hal0 agent install hermes` already enables the agent unit, so
+    # the enable here is idempotent; it also covers the upgrade path where no
+    # provision ran, plus the system-scope gateway (which the provision does
+    # not install).
     if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         systemctl enable --now hal0-agent@hermes.service
         if wait_active hal0-agent@hermes.service 20; then
@@ -1116,7 +1232,9 @@ else
             warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
         fi
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
-        info "hal0-agent@hermes not enabled — run 'hal0 agent bootstrap hermes' first"
+        # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)
+        # or failed. The warnings above already explain; this is the summary line.
+        info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
     fi
 
 fi

@@ -19,8 +19,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from hal0.api import _hal0_model_cache_clear
+from hal0.api import _hal0_model_cache_clear, create_app
 
 
 @pytest.fixture(autouse=True)
@@ -29,3 +31,19 @@ def _reset_hal0_composite_model_cache() -> Iterator[None]:
     _hal0_model_cache_clear()
     yield
     _hal0_model_cache_clear()
+
+
+@pytest.fixture
+def isolated_client(tmp_hal0_home: str) -> Iterator[TestClient]:
+    """TestClient whose lifespan resolves paths under tmp_hal0_home."""
+    app: FastAPI = create_app()
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.fixture
+def isolated_app_client(tmp_hal0_home: str) -> Iterator[tuple[FastAPI, TestClient]]:
+    """Like isolated_client, but also yields the app for state inspection."""
+    app: FastAPI = create_app()
+    with TestClient(app) as c:
+        yield app, c

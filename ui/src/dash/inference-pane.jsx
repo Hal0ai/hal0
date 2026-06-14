@@ -355,7 +355,6 @@ export function SlotControls({ phase, busy, compact, onStart, onStop, onRestart,
         <button
           className="sctrl stop"
           title="Stop"
-          disabled={busy || phase === 'transitional'}
           onClick={onStop}
         >
           <Ic name="stop" size={13} />
@@ -564,24 +563,26 @@ export function InferencePane() {
   const gttCapGb = mm.pool?.totalGb || 0
   const gttFreeGb = Math.max(0, Math.round(gttCapGb - (mm.self?.gttUsedGb || 0)))
 
-  const run = async (name, mut, args, okMsg) => {
+  // Fire-and-forget lifecycle action (mirrors SlotsView/PR #781): fire the
+  // mutation, toast immediately, and let the slots poll reflect the phase.
+  // `busy` marks the in-flight action to gate Start against a double-trigger;
+  // Stop is never gated (see SlotControls) so a slow load stays cancelable.
+  const run = (name, mut, args, okMsg) => {
     setBusyName(name)
-    try {
-      await mut.mutateAsync(args)
-      toast(okMsg, 'ok')
-    } catch (err) {
-      toast(err?.message ? `${name}: ${err.message}` : `${name}: action failed`, 'warn')
-    } finally {
-      setBusyName(null)
-    }
+    mut.mutate(args, {
+      onError: (err) =>
+        toast(err?.message ? `${name}: ${err.message}` : `${name}: action failed`, 'warn'),
+      onSettled: () => setBusyName(null),
+    })
+    toast(okMsg, 'info')
   }
 
   const handlers = {
-    onStart: (s) => run(s.name, loadMut, s.name, `Starting ${s.name}`),
-    onStop: (s) => run(s.name, unloadMut, s.name, `Unloaded ${s.name}`),
-    onRestart: (s) => run(s.name, restartMut, s.name, `Restarting ${s.name}`),
+    onStart: (s) => run(s.name, loadMut, s.name, `Starting ${s.name}…`),
+    onStop: (s) => run(s.name, unloadMut, s.name, `Stopping ${s.name}…`),
+    onRestart: (s) => run(s.name, restartMut, s.name, `Restarting ${s.name}…`),
     onSwap: (s, model_id) =>
-      run(s.name, swapMut, { name: s.name, model_id }, `Swapping ${s.name}`),
+      run(s.name, swapMut, { name: s.name, model_id }, `Swapping ${s.name}…`),
     onEdit: (s) => {
       window.location.hash = '#slots/' + s.name
     },

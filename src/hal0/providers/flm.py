@@ -43,7 +43,7 @@ from hal0.providers.base import ContainerSpec, Provider
 # ── Toolbox image ─────────────────────────────────────────────────────────────
 # Default tag. Override via HAL0_TOOLBOX_IMAGE_FLM in api.env when running
 # on hal0-test before the GHCR org is provisioned (PLAN §17).
-_DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
+_DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
 
 # ── On-disk layout ────────────────────────────────────────────────────────────
 # The toolbox image is self-contained: it bundles FLM at /opt/fastflowlm/

@@ -60,61 +60,77 @@ export function useFirstRunPickDefault() {
   })
 }
 
-// Static mapping: wizard tier ids → curated model ids accepted by
-// POST /api/install/pick-default.
-//
-// Source: installer/manifests/omni/*.json primary.model_name, cross-verified
-// against GET /api/install/curated-models (which exposes the curated catalogue
-// filtered to recommended_slot in ("chat","primary")).
-//
-// Max and LMX manifests reference Qwen3.6-35B-A3B-MTP-GGUF which is NOT
-// currently in the curated catalogue — both degrade to the 27B model.
-// Log a backend follow-up to add the 35B entry so Max/LMX can use their
-// intended primary.
-const BUNDLE_CHAT_MODELS: Record<string, string> = {
-  lite:    'qwen3.5-0.8b',  // manifest: qwen3.5-0.8b ✓
-  default: 'qwen3.5-9b',    // manifest: qwen3.5-9b ✓
-  pro:     'qwen3.6-27b',   // manifest: Qwen3.6-27B-MTP-GGUF → curated id qwen3.6-27b ✓
-  max:     'qwen3.6-27b',   // manifest 35B not curated yet — degrade to 27b
-  lmx:     'qwen3.6-27b',   // LMX 35B not curated yet — degrade to 27b
+// FirstRun v2 (design D3): one orchestrated install. The backend resolves
+// the per-slot models from the bundle manifest and derives device+profile
+// from the hardware probe, so the UI no longer maps tiers → chat models
+// (the old BUNDLE_CHAT_MODELS table is gone — it only ever covered chat).
+
+export interface InstallApplySlot {
+  slot: string
+  model_id: string
+  created: boolean
+  device?: string
+  profile?: string
+  pull_job_id?: string
+  skipped?: string
+  error?: string
 }
 
-export interface PickDefaultResponse {
-  model_id: string
-  slot: string
-  pull_job_id: string
+export interface InstallApplyResult {
+  tier: string
+  model_ids: string[]
+  slots: InstallApplySlot[]
   next: string
 }
 
-export function useFirstRunInstall() {
+export interface InstallApplyArgs {
+  tier: string
+  storageDir: string
+  npuOptIn?: boolean
+  overrides?: Record<string, unknown>
+}
+
+export function useInstallApply() {
   const qc = useQueryClient()
   return useMutation({
-    // Call POST /api/install/pick-default with the REAL curated model id
-    // for the bundle's primary chat slot — NOT the bundle string itself.
-    // Bundle ids like "pro" are not valid curated model ids and 404 on the
-    // backend (CuratedModelNotFound).
-    //
-    // The progress pane (FirstRunProgress) receives { model_ids: [id] } so
-    // FrDownloadRow can reattach to the in-flight SSE pull stream immediately.
-    mutationFn: async ({ bundle, withNpu: _withNpu }: { bundle: string; withNpu?: boolean }) => {
-      const modelId = BUNDLE_CHAT_MODELS[bundle]
-      if (!modelId) {
-        // Surface unknown bundle clearly — don't silently 404 and show fake
-        // "Install started" when nothing was actually triggered.
-        throw new Error(`No curated model mapping for bundle "${bundle}" — check BUNDLE_CHAT_MODELS`)
-      }
-      const resp = await apiPost<PickDefaultResponse>(ENDPOINTS.installPickDefault, {
-        model_id: modelId,
-        slot: 'chat',
-      })
-      // Normalise to the model_ids array shape the confirm → progress handoff
-      // reads (res?.model_ids) so FrDownloadRow mounts with the real id.
-      return { model_ids: [resp.model_id] }
-    },
+    // POST /api/install/apply — pulls every bundle slot, creates the slots
+    // OFFLINE, and returns model_ids[] so FirstRunProgress can reattach the
+    // per-model SSE pull streams via usePullJob.reattach().
+    mutationFn: ({ tier, storageDir, npuOptIn, overrides }: InstallApplyArgs) =>
+      apiPost<InstallApplyResult>(ENDPOINTS.installApply, {
+        tier,
+        storage_dir: storageDir,
+        npu_opt_in: !!npuOptIn,
+        overrides: overrides ?? {},
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['firstrun'] })
       qc.invalidateQueries({ queryKey: ['models'] })
+      qc.invalidateQueries({ queryKey: ['slots'] })
     },
+  })
+}
+
+export interface InstallService {
+  unit: string
+  label: string
+  active: boolean
+  repairable: boolean
+}
+
+export function useInstallServices() {
+  return useQuery({
+    queryKey: ['firstrun', 'services'],
+    queryFn: () => apiGet<{ services: InstallService[] }>(ENDPOINTS.installServices),
+    refetchInterval: 5000,
+  })
+}
+
+export function useServiceRepair() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (unit: string) => apiPost(ENDPOINTS.installServiceRepair(unit), {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['firstrun', 'services'] }),
   })
 }
 
