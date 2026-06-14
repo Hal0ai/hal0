@@ -816,15 +816,28 @@ else
         warn "  the npu container slot bundles its own XRT runtime and is unaffected"
     fi
 
-    # 2. Runtime libs. apt is naturally idempotent — already-installed
-    #    packages are a no-op. Listed explicitly (not via a metapackage)
-    #    so a future libavformat ABI bump is a visible single-line edit
-    #    rather than a silent metapackage drift.
-    ui_spinner_run "Installing FLM runtime libs (ffmpeg6 + boost1.83 + fftw3)" \
+    # 2. Runtime libs — BEST-EFFORT, same rationale as libxrt-npu2 above:
+    #    the FLM container image bundles these, so a host-side miss only
+    #    disables the HOST `flm validate` probe, not the npu slot itself.
+    #    Listed explicitly (not a metapackage) so a future libavformat ABI
+    #    bump is a visible single-line edit rather than silent drift. apt is
+    #    idempotent, so already-installed packages are a no-op.
+    #
+    #    Must NOT be fatal: a transient apt hiccup (a stale `universe` index
+    #    where these ffmpeg6 libs momentarily resolve to "no installation
+    #    candidate", a mirror flake) used to abort the entire hal0 install
+    #    here — over optional host-side NPU libs the containerized slot
+    #    doesn't even need. Warn + continue, mirroring libxrt-npu2.
+    if ui_spinner_run "Installing FLM runtime libs (ffmpeg6 + boost1.83 + fftw3)" \
         apt-get install -y \
             libavformat60 libavcodec60 libavutil58 libswscale7 libswresample4 \
             libboost-program-options1.83.0 \
-            libfftw3-single3
+            libfftw3-single3; then
+        :
+    else
+        warn "FLM runtime libs not fully available from configured apt sources — host 'flm validate' may fail"
+        warn "  the npu container slot bundles its own runtime and is unaffected"
+    fi
 
     # 3. FLM .deb. Fail-soft: if upstream is unreachable or the SHA-256
     #    doesn't match, warn + skip. NPU paths gate on `flm validate`
