@@ -18,7 +18,7 @@ import { test, expect } from '../fixtures/apiMock'
 
 const BASE_SLOTS = [
   {
-    name: 'primary', type: 'llm', device: 'gpu-rocm',
+    name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
     model: 'qwen3.6-27b-mtp-q4_k_m', model_id: 'qwen3.6-27b-mtp',
     group: 'chat', state: 'serving', port: 8092, isDefault: true,
     metrics: { ctx: 8192, toks: 42, ttft: 180, kv: 35 },
@@ -97,6 +97,8 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots/primary')
+    // ctx_size lives in the now-collapsed Advanced section — expand it first.
+    await page.locator('.drawer details.adv-disclosure summary').click()
     const ctxInput = page.locator('.drawer .form-row', { hasText: 'ctx_size' }).locator('input')
     await expect(ctxInput).toBeVisible()
     await ctxInput.fill('16384')
