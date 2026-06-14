@@ -574,7 +574,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
                       the Save guard then rejects (mirrors the create modal). */}
                   {!selectedProfile && <option value="">— select a profile —</option>}
                   {gpuProfiles.map(p => (
-                    <option key={p.name} value={p.name}>{p.name}</option>
+                    <option key={p.name} value={p.name}>
+                      {p.intent ? `${p.name} · ${p.intent}` : p.name}
+                    </option>
                   ))}
                 </select>
               ) : (
