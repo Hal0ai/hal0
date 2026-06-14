@@ -7,7 +7,7 @@ name = "hal0"
 version = "0.4.1-alpha.1"
 description = "Open-source home AI inference platform"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "hal0 contributors" }]
 keywords = ["ai", "llm", "inference", "openai-compatible", "homeai"]
@@ -16,7 +16,6 @@ classifiers = [
   "Intended Audience :: End Users/Desktop",
   "Intended Audience :: System Administrators",
   "Operating System :: POSIX :: Linux",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -99,7 +98,7 @@ packages = ["src/hal0"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -121,7 +120,7 @@ markers = [
 ]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
