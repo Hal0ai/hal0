@@ -17,7 +17,7 @@ import {
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
-import { MemoryMap } from './memory-map'
+import { ActivityLog } from './activity-log.jsx'
 import { ComfyuiPane } from './comfyui-pane.jsx'
 import {
   InferencePane,

@@ -198,6 +198,21 @@ export const ENDPOINTS = {
   journal: '/api/journal',
   journalStream: '/api/journal/stream',
 
+  // ── Activity log (durable structured audit trail) ────────────────
+  // Backfill + SSE tail + export, all honouring the same filter set
+  // (since/category/action/severity/outcome/actor/kind/search/limit).
+  // `epoch` rides every payload: a per-process id that, when it CHANGES
+  // between polls, means the backend restarted → reset the `since`
+  // cursor to 0 (fixes the footer-blank-after-restart bug).
+  activity: '/api/activity',
+  activityStream: '/api/activity/stream',
+  activityExport: '/api/activity/export',
+
+  // ── System health (honest degraded probe) ───────────────────────
+  // {status:"ok"|"degraded", checks:{...}} — drives the runtime chip
+  // colour + a tooltip listing failing checks (B12).
+  healthSystem: '/api/health/system',
+
   // ── Settings (hal0.toml read/write) ──────────────────────────────
   settings: '/api/settings',
   settingsReload: '/api/settings/reload',

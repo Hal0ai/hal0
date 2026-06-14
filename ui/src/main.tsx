@@ -31,6 +31,7 @@ import './dashboard.css'
 import './dash/comfyui-pane.css'
 import './dash/engine-panes.css'
 import './dash/memory-overhaul.css'
+import './dash/activity-log.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'

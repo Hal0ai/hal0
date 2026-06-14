@@ -31,6 +31,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 
+from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Conflict, Hal0Error
 from hal0.model_meta import device_to_backend, is_resolvable
 from hal0.slot_view import (
@@ -324,7 +325,11 @@ async def create_slot(request: Request) -> dict[str, object]:
         )
 
     body = _normalize_create_body(body)
-    snap = await sm.create(name, body)
+    async with record_action(
+        request, category="slot", action="slot.create", target=name,
+    ) as _rec:
+        snap = await sm.create(name, body)
+        _rec.after = {"config": body}
     return _slot_to_dict(snap, request)
 
 
@@ -813,6 +818,21 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         raise
 
 
+def _state_value(snap: Any) -> str | None:
+    """Extract a serialisable state string from a slot snapshot for audit."""
+    state = getattr(snap, "state", None)
+    return getattr(state, "value", None) or (str(state) if state is not None else None)
+
+
+async def _safe_config(sm: Any, name: str) -> dict[str, Any] | None:
+    """Best-effort current config snapshot for an audit before-image."""
+    try:
+        cfg = await sm.get_config(name)
+        return cfg if isinstance(cfg, dict) else None
+    except Exception:
+        return None
+
+
 @router.delete("/{name}")
 async def delete_slot(name: str, request: Request) -> dict[str, object]:
     """Delete a slot. If the slot is running, it is stopped first.
@@ -822,7 +842,8 @@ async def delete_slot(name: str, request: Request) -> dict[str, object]:
     surfaces as 4xx.
     """
     sm = _get_slot_manager(request)
-    await sm.delete(name)
+    async with record_action(request, category="slot", action="slot.delete", target=name):
+        await sm.delete(name)
     return {"name": name, "deleted": True}
 
 
@@ -848,7 +869,12 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
-    snap = await sm.update_config(name, body)
+    before = await _safe_config(sm, name)
+    async with record_action(
+        request, category="slot", action="slot.edit_config", target=name, before=before
+    ) as _rec:
+        snap = await sm.update_config(name, body)
+        _rec.after = body
     # Spec 1 / Component 2: an explicit ``enabled: false`` write must take a
     # running slot actually offline so the faded card matches reality. The
     # config write alone only flips the on-disk flag; without this a disabled
@@ -888,7 +914,12 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
         ) from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
-    snap = await sm.update_config(name, {"model": body})
+    before = await _safe_config(sm, name)
+    async with record_action(
+        request, category="slot", action="slot.edit_defaults", target=name, before=before
+    ) as _rec:
+        snap = await sm.update_config(name, {"model": body})
+        _rec.after = {"model": body}
     return _slot_to_dict(snap, request)
 
 
@@ -1044,14 +1075,19 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
 
     # Persist the new device. ``auto`` clears the device field entirely so
     # the load path falls back to its default on the next load.
-    await sm.update_config(name, {"device": target_device or ""})
+    async with record_action(
+        request, category="slot", action="slot.set_backend", target=name,
+        before={"device": current_declared}, message=f"backend → {backend}",
+    ) as _rec:
+        await sm.update_config(name, {"device": target_device or ""})
 
-    reloaded = False
-    if is_loaded:
-        # Restart so the model reloads under the new backend (the
-        # container unit re-renders from the updated TOML).
-        await sm.restart(name)
-        reloaded = True
+        reloaded = False
+        if is_loaded:
+            # Restart so the model reloads under the new backend (the
+            # container unit re-renders from the updated TOML).
+            await sm.restart(name)
+            reloaded = True
+        _rec.after = {"backend": backend, "device": target_device}
 
     snap = await sm.status(name)
     out = _slot_to_dict(snap, request)
@@ -1103,21 +1139,30 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
                 f"not an installed FLM model (slot {name!r} not touched)",
                 details={"model_id": model_id, "slot": name},
             )
-    snap = await sm.load(name, model_id=model_id)
+    async with record_action(
+        request, category="slot", action="slot.load", target=name,
+        message=f"load {model_id or 'default'}",
+    ) as _rec:
+        snap = await sm.load(name, model_id=model_id)
+        _rec.after = {"model_id": model_id, "state": _state_value(snap)}
     return _slot_to_dict(snap, request)
 
 
 @router.post("/{name}/unload")
 async def unload_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
-    snap = await sm.unload(name)
+    async with record_action(request, category="slot", action="slot.unload", target=name) as _rec:
+        snap = await sm.unload(name)
+        _rec.after = {"state": _state_value(snap)}
     return _slot_to_dict(snap, request)
 
 
 @router.post("/{name}/restart")
 async def restart_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
-    snap = await sm.restart(name)
+    async with record_action(request, category="slot", action="slot.restart", target=name) as _rec:
+        snap = await sm.restart(name)
+        _rec.after = {"state": _state_value(snap)}
     return _slot_to_dict(snap, request)
 
 
@@ -1153,7 +1198,12 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
             f"not an installed FLM model (slot {name!r} not touched)",
             details={"model_id": model_id, "slot": name},
         )
-    snap = await sm.swap(name, model_id)
+    async with record_action(
+        request, category="slot", action="slot.swap", target=name,
+        message=f"swap → {model_id}",
+    ) as _rec:
+        snap = await sm.swap(name, model_id)
+        _rec.after = {"model_id": model_id, "state": _state_value(snap)}
     return _slot_to_dict(snap, request)
 
 

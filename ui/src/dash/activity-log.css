@@ -1,0 +1,235 @@
+/* hal0 v3 dashboard — ActivityLog sidebar pane.
+ *
+ * Plain global `.act-*` classes (imported from main.tsx, mirroring the
+ * comfyui-pane.css / engine-panes.css side-effect pattern). Reuses the
+ * dashboard.css severity vars (--ok/--warn/--err/--accent/--fg-*) and the
+ * `.side-card` shell. Bounded scroll body + sticky filter bar at the top.
+ */
+
+.act-card {
+  display: flex;
+  flex-direction: column;
+  /* The card never grows unbounded — the body owns the scroll. */
+  max-height: 560px;
+}
+
+/* ── header ─────────────────────────────────────────────────────── */
+.act-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-family: var(--jbm);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-3);
+}
+.act-title { color: var(--fg-3); }
+.act-ct {
+  color: var(--fg-4);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.act-conn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ok);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 10.5px;
+}
+.act-conn.off { color: var(--warn); }
+.act-conn .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.act-conn .dot.ready { box-shadow: 0 0 7px var(--ok); }
+
+/* ── sticky filter bar ──────────────────────────────────────────── */
+.act-filters {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line-soft);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.act-chips {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  width: fit-content;
+}
+.act-chip {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--line);
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.act-chip:last-child { border-right: none; }
+.act-chip:hover { color: var(--fg); }
+/* On-state uses the chip's OWN severity tone so the active filter reads
+   as the colour it selects. */
+.act-chip.on { color: var(--accent); background: var(--accent-soft); }
+.act-chip-ok.on { color: var(--ok); background: var(--ok-soft); }
+.act-chip-info.on { color: var(--fg-2); background: rgba(255, 255, 255, 0.04); }
+.act-chip-warn.on { color: var(--warn); background: var(--warn-soft); }
+.act-chip-error.on { color: var(--err); background: var(--err-soft); }
+
+.act-filters-row {
+  display: flex;
+  gap: 7px;
+}
+.act-cat,
+.act-search {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 11px;
+  padding: 4px 8px;
+  outline: none;
+}
+.act-cat { flex: 0 0 auto; }
+.act-search { flex: 1 1 auto; min-width: 0; }
+.act-cat:focus,
+.act-search:focus { border-color: var(--accent-line); }
+.act-search::placeholder { color: var(--fg-4); }
+
+/* ── bounded scroll body ────────────────────────────────────────── */
+.act-body {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: 420px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  font-family: var(--jbm);
+}
+/* Hover-pause indicator (subtle — the auto-scroll logic lives in JS, this
+   just hints the pane is "held"). */
+.act-body.paused { scroll-behavior: auto; }
+
+.act-empty {
+  padding: 22px 16px;
+  text-align: center;
+  color: var(--fg-4);
+  font-size: 11.5px;
+}
+.act-clear {
+  appearance: none;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+
+/* ── a row ──────────────────────────────────────────────────────── */
+.act-line {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 12px 4px 10px;
+  border-left: 2px solid transparent;
+  font-size: 11px;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--line-soft);
+}
+.act-line:hover { background: rgba(255, 255, 255, 0.02); }
+.act-line.ok { border-left-color: var(--ok); }
+.act-line.warn { border-left-color: var(--warn); }
+.act-line.error { border-left-color: var(--err); background: var(--err-soft); }
+.act-line.info { border-left-color: var(--line-strong); }
+
+.act-ts {
+  color: var(--fg-5);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.act-glyph {
+  font-weight: 700;
+  text-align: center;
+  width: 1em;
+}
+.act-glyph.ok { color: var(--ok); }
+.act-glyph.warn { color: var(--warn); }
+.act-glyph.error { color: var(--err); }
+.act-glyph.info { color: var(--fg-4); }
+
+.act-actor {
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 90px;
+}
+/* The action + target + message wrap onto the grid's 4th (flex) column so
+   the meta columns stay aligned and only the prose truncates. */
+.act-action {
+  grid-column: 4;
+  color: var(--fg-2);
+  font-size: 10.5px;
+}
+.act-target {
+  grid-column: 4;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.act-msg {
+  grid-column: 4;
+  color: var(--fg-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.act-line.error .act-msg { color: var(--err); }
+.act-line.ok .act-msg { color: var(--fg-2); }
+
+/* ── export footer ──────────────────────────────────────────────── */
+.act-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 10.5px;
+}
+.act-foot-label {
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.act-export {
+  color: var(--fg-3);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 2px 9px;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.act-export:hover {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
