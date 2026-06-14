@@ -200,4 +200,21 @@ test.describe('Slot edit controls (/slots)', () => {
     expect(puts[0].enable_thinking).toBe(true)
     await expect(pill).toHaveAttribute('aria-checked', 'true')
   })
+
+  test('default-for-type row is gone from the edit drawer and Save omits default', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/primary/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }))
+    await seedSlots(page, [PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+    await expect(page.locator('.drawer')).toBeVisible()
+    await expect(page.locator('.drawer .form-row', { hasText: 'Default for type' })).toHaveCount(0)
+    await page.locator('.drawer button:has-text("Save")').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0]).not.toHaveProperty('default')
+  })
 })

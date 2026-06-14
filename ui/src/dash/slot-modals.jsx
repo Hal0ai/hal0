@@ -350,7 +350,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
     slot?.rope_freq_base != null ? String(slot.rope_freq_base) : "0"
   );
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
-  const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
   const [submitErr, setSubmitErr] = useStateSM(null);
   // Inline error for the instant-apply thinking toggle (task 3): surface the
   // failure next to the control instead of only reverting state silently.
@@ -370,7 +369,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setThinkingPending(false);
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
       setRopeFreqBase(slot.rope_freq_base != null ? String(slot.rope_freq_base) : "0");
-      setMakeDefault(!!slot.isDefault);
       // #587: re-seed from the slot prop so the drawer tracks the real
       // on-disk values.
       setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
@@ -421,9 +419,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       const ctxBody = {
         ctx_size: ctxNum,
       };
-      const slotBody = {
-        default: makeDefault,
-      };
+      const slotBody = {};
       if (profileChanged) {
         slotBody.profile = selectedProfile;
       }
@@ -668,23 +664,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         );
       })()}
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Default for type {slot.type}?</span>
-          <span className="sub">{slot.isDefault ? "currently default" : "another slot is default"}</span>
-        </div>
-        <div className="form-ctl">
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={makeDefault}
-              onChange={e => setMakeDefault(e.target.checked)}
-            />
-            <span>Set as default</span>
-          </label>
-        </div>
-      </div>
 
       {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
           own PUT /config), no restart: _slot_thinking_default reads it live
