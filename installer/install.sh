@@ -982,14 +982,19 @@ else
     # Shared STATE.md (#766). The hermes agent runs as hal0 and its
     # render-context (re)writes ${VAR_DIR}/STATE.md — the live snapshot the
     # Claude session-start hook cats — via a tmp+rename that needs *directory*
-    # write on ${VAR_DIR}. Grant the hal0 group write on the top dir ONLY
-    # (setgid so new entries inherit group hal0; sticky so hal0 can only
-    # remove/rename files it owns — root-owned slots/registry/models stay
-    # protected). Ownership stays root; this preserves the ".cache NOT the
-    # whole VAR_DIR" posture above. Pre-create STATE.md hal0-owned so the
-    # rename-over works under the sticky bit even on a re-install.
+    # write on ${VAR_DIR}. Grant the hal0 group write on the top dir
+    # (setgid so new entries inherit group hal0). Ownership stays root, so
+    # root-owned slots/registry/models are untouched; this preserves the
+    # ".cache NOT the whole VAR_DIR" posture above.
+    #
+    # NOT sticky (#766 follow-up): render runs as root during provisioning
+    # (creating a root-owned STATE.md) but as hal0 at runtime — the hal0
+    # rename-over of a root-owned STATE.md needs plain directory write, which
+    # the sticky bit would deny (it'd require owning the existing file). The
+    # group-write grant is what systemd's `ReadWritePaths=/var/lib/hal0`
+    # already assumes, so this just makes the filesystem agree.
     chgrp hal0 "${VAR_DIR}"
-    chmod 3775 "${VAR_DIR}"
+    chmod 2775 "${VAR_DIR}"
     touch "${VAR_DIR}/STATE.md"
     chown hal0:hal0 "${VAR_DIR}/STATE.md"
 
