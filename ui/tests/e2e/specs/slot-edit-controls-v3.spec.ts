@@ -62,7 +62,7 @@ async function seedSlots(page: Page, slots: any[]) {
 // slot *edit drawer* (opened via the #slots/:name route), which is unchanged.
 
 test.describe('Slot edit controls (/slots)', () => {
-  test('C4 — drawer thinking toggle PUTs /config { enable_thinking:true }', async ({ page }) => {
+  test('C4 — drawer reasoning pill PUTs /config { enable_thinking:true }', async ({ page }) => {
     const puts: any[] = []
     await page.route('**/api/slots/primary/config', async (route) => {
       if (route.request().method() === 'PUT') {
@@ -73,18 +73,18 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
-    const row = page.locator('.drawer .form-row', { hasText: 'Thinking' })
+    const row = page.locator('.drawer .form-row', { hasText: 'Reasoning' })
     await expect(row).toBeVisible()
-    await row.locator('input[type="checkbox"]').click()
+    await row.locator('button[role="switch"]').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0].enable_thinking).toBe(true)
   })
 
-  test('C4 — thinking toggle is hidden for non-llm slots', async ({ page }) => {
+  test('C4 — reasoning pill is hidden for non-llm slots', async ({ page }) => {
     await seedSlots(page, [PRIMARY, EMBED])
     await page.goto('/#slots/embed')
     await expect(page.locator('.drawer')).toBeVisible()
-    await expect(page.locator('.drawer .form-row', { hasText: 'Thinking' })).toHaveCount(0)
+    await expect(page.locator('.drawer .form-row', { hasText: 'Reasoning' })).toHaveCount(0)
   })
 
   test('C5 — n_gpu_layers is read-only, owned by the profile', async ({ page }) => {
@@ -178,5 +178,26 @@ test.describe('Slot edit controls (/slots)', () => {
     await expect(page.locator('.drawer')).toBeVisible()
     await expect(page.locator('.drawer .form-row', { hasText: 'idle_timeout_s' })).toHaveCount(0)
     await expect(page.locator('.drawer .form-row', { hasText: 'workers' })).toHaveCount(0)
+  })
+
+  test('C4 — reasoning pill toggles enable_thinking and keeps a fixed label', async ({ page }) => {
+    const puts: any[] = []
+    await page.route('**/api/slots/primary/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await seedSlots(page, [PRIMARY, EMBED])
+    await page.goto('/#slots/primary')
+
+    const row = page.locator('.drawer .form-row', { hasText: 'Reasoning' })
+    await expect(row).toBeVisible()
+    await expect(row.locator('.form-lbl span').first()).toHaveText('Reasoning')
+    const pill = row.locator('button[role="switch"]')
+    await expect(pill).toHaveAttribute('aria-checked', 'false')
+
+    await pill.click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0].enable_thinking).toBe(true)
+    await expect(pill).toHaveAttribute('aria-checked', 'true')
   })
 })

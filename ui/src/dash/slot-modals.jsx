@@ -692,47 +692,32 @@ function EditSlotDrawer({ open, slot, onClose }) {
       {slot.type === "llm" && (
         <div className="form-row">
           <div className="form-lbl">
-            <span>Thinking</span>
-            <span className="sub">Stream reasoning before the answer. Off = faster, direct replies.</span>
-            {/* Task 3: make the instant-apply contract explicit — unlike the
-                ctx_size/profile fields, this saves on toggle, not on Save. */}
-            <span className="sub">applies immediately (no Save needed)</span>
+            <span>Reasoning</span>
+            <span className="sub">Stream reasoning before the answer. Off = faster, direct replies. Applies to the next message.</span>
           </div>
           <div className="form-ctl">
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={thinking}
-                disabled={thinkingPending}
-                onChange={async (e) => {
-                  const next = e.target.checked;
-                  setThinking(next);
-                  setThinkingPending(true);
-                  setThinkingErr(null);
-                  try {
-                    await editMut.mutateAsync({
-                      name: slot.name,
-                      body: { enable_thinking: next },
-                    });
-                    window.__hal0Toast && window.__hal0Toast(
-                      `${slot.name} thinking ${next ? "on" : "off"} — applies to next message`,
-                      "ok",
-                    );
-                  } catch (err) {
-                    setThinking(!next); // revert on failure
-                    // Task 3: surface the failure inline near the toggle, not
-                    // only via the silent revert above.
-                    setThinkingErr(err?.message || "thinking toggle failed");
-                  } finally {
-                    setThinkingPending(false);
-                  }
-                }}
-              />
-              <span>{thinking ? "Reasoning on" : "Reasoning off"}</span>
-            </label>
-            {thinkingErr && (
-              <div className="hint" style={{color: "var(--err)"}}>{thinkingErr}</div>
-            )}
+            <PillToggle
+              on={thinking}
+              disabled={thinkingPending}
+              label="Reasoning"
+              stateText={thinking ? "On" : "Off"}
+              onToggle={async (next) => {
+                setThinking(next);
+                setThinkingPending(true);
+                setSubmitErr(null);
+                setThinkingErr(null);
+                try {
+                  await editMut.mutateAsync({ name: slot.name, body: { enable_thinking: next } });
+                  window.__hal0Toast && window.__hal0Toast(`${slot.name} reasoning ${next ? "on" : "off"} — applies to next message`, "ok");
+                } catch (err) {
+                  setThinking(!next);
+                  setThinkingErr(err?.message || "reasoning toggle failed");
+                } finally {
+                  setThinkingPending(false);
+                }
+              }}
+            />
+            {thinkingErr && <div className="hint" style={{ color: "var(--err)" }}>{thinkingErr}</div>}
           </div>
         </div>
       )}
