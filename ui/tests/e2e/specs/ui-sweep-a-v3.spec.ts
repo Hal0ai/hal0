@@ -233,22 +233,21 @@ test.describe('Dashboard hero strip', () => {
 
 // ─── 8. Agent route redirect when memory disabled ───────────────────────
 
-test.describe('Agent route — memory disabled redirect', () => {
-  test('redirects #agent to #dashboard when memory is disabled', async ({ page }) => {
+test.describe('Agent route — memory disabled fallback', () => {
+  test('#agent falls back to the MCP tab when memory is disabled (no redirect)', async ({ page }) => {
     // Use window seam documented in mock.ts to flip memory to disabled
     await page.addInitScript(() => {
       ;(window as any).__hal0MockMemoryEnabled = false
     })
     await page.goto('/#agent')
-    // Should bounce to dashboard — the dead-text page must not appear
+    // No dead "memory disabled" page — the v0.5 Agent shell stays usable.
     await expect(page.locator('body')).not.toContainText(
       'The memory surface is disabled',
       { timeout: FIVE_S }
     )
-    // Hash should resolve to dashboard, not agent
-    await page.waitForFunction(
-      () => !window.location.hash.startsWith('#agent'),
-      { timeout: FIVE_S }
-    )
+    // v0.5 nav: Agent is a tabbed shell; memory off → default MCP tab, the
+    // Memory tab is hidden, and there is NO redirect away from #agent.
+    await expect(page.locator('[data-testid="agent-tab-mcp"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="agent-tab-memory"]')).toHaveCount(0)
   })
 })

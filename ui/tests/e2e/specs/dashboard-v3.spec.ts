@@ -24,8 +24,8 @@ test.describe('Dashboard v3 (/)', () => {
     await expect(page.locator('.sdot').first()).toBeVisible()
     // … and the dashboard exposes the Customize (edit-mode) toggle.
     await expect(page.getByRole('button', { name: /customize/i }).first()).toBeVisible()
-    // sidebar active row should be Dashboard
-    await expect(page.locator('.sb-row.active .lbl')).toHaveText('Dashboard')
+    // sidebar active row should be the dashboard (labeled "Overview" in v0.5 nav)
+    await expect(page.locator('.sb-row.active .lbl')).toHaveText('Overview')
   })
 
   test('topbar exposes brand + command-palette button + bell', async ({ page }) => {
