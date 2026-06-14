@@ -173,3 +173,18 @@ def test_set_coexists_with_provider_credentials(client: TestClient, tmp_hal0_hom
     # The list surfaces both (every api.env key is a secret).
     names = sorted(e["name"] for e in client.get("/api/secrets").json()["secrets"])
     assert names == ["EXTRA_TOKEN", "OPENROUTER_API_KEY"]
+
+
+def test_hf_token_secret_roundtrip(client: TestClient) -> None:
+    """P4: HF_TOKEN behaves like any secret — set → listed + live in os.environ;
+    delete clears both. This is the storage the Settings HuggingFace-token field
+    and every pull path (os.environ reads) rely on."""
+    r = client.put("/api/secrets/HF_TOKEN", json={"value": "hf_abc123"})
+    assert r.status_code == 204, r.text
+    assert os.environ.get("HF_TOKEN") == "hf_abc123"
+    names = [s["name"] for s in client.get("/api/secrets").json()["secrets"]]
+    assert "HF_TOKEN" in names
+
+    r = client.delete("/api/secrets/HF_TOKEN")
+    assert r.status_code == 204
+    assert os.environ.get("HF_TOKEN") is None
