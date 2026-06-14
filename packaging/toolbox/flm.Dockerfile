@@ -39,7 +39,10 @@
 FROM ubuntu:24.04 AS xrt-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG XDNA_REF=main
+# Pinned to the Ryzen AI 1.7.1 stable pairing (xdna-driver 2.21.75 ↔ XRT
+# 2.21.75), matching the CT105 host's libxrt. Was `main` (unreproducible,
+# drifted to XRT 2.23.0). Tag verified to exist upstream.
+ARG XDNA_REF=2.21.75
 
 # Minimal bootstrap deps — just enough to clone the repo and run XRT's
 # own dependency installer. After three rounds of whack-a-mole with
@@ -54,8 +57,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-RUN git clone --recurse-submodules \
-        https://github.com/amd/xdna-driver.git . \
+# NOTE: clone WITHOUT --recurse-submodules, then init submodules AFTER the
+# tag checkout. When pinning XDNA_REF to a release tag, the bundled XRT
+# submodule points at a specific commit; a recursive clone would first
+# populate xrt/ at the default-branch commit, and the later
+# `submodule update` then fails to switch it ("Unable to checkout <sha> in
+# submodule path 'xrt'"). Initialising submodules post-checkout fetches the
+# tag's pinned XRT commit cleanly.
+RUN git clone https://github.com/amd/xdna-driver.git . \
     && git checkout "${XDNA_REF}" \
     && git submodule update --init --recursive
 
@@ -100,7 +109,9 @@ RUN mkdir -p build && cd build \
 FROM ubuntu:24.04 AS flm-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG FLM_REF=main
+# Pinned to v0.9.43 (latest, 2026-05-26) — matches the host model cache and
+# clears the "0.9.43 > 0.9.42" incompatibility warning the old image emitted.
+ARG FLM_REF=v0.9.43
 
 # Pull the freshly-built XRT in so FLM can link against it.
 COPY --from=xrt-builder /opt/xilinx/xrt /opt/xilinx/xrt
