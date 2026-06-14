@@ -45,6 +45,10 @@ class ModelDefaults(BaseModel):
         default=None,
         description="Freeform CLI flag string appended after merge with slot extra_args.",
     )
+    chat_template: str | None = Field(
+        default=None,
+        description="Chat template id from /api/chat-templates, or 'auto'/None for the GGUF-embedded template.",
+    )
 
 
 class Model(BaseModel):
