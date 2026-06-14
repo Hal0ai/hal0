@@ -317,3 +317,23 @@ def test_pick_default_preserves_existing_slot_port_and_backend(
     assert cfg["port"] == 9999
     assert cfg["backend"] == "rocm"
     assert cfg["model"]["default"] == "qwen3-4b"
+
+
+def test_pull_threads_capability_to_run_pull(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    """P3: the standalone /pull resolves a curated model's capability and passes
+    it to run_pull so the file lands in the capability-grouped layout."""
+    r = client_isolated.post("/api/models/qwen3-4b/pull")
+    assert r.status_code == 202, r.text
+    assert len(fake_run_pull) == 1
+    assert fake_run_pull[0]["capability"] == "chat"
+
+
+def test_pull_body_capability_overrides(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    """An explicit body.capability wins over the curated default."""
+    r = client_isolated.post("/api/models/qwen3-4b/pull", json={"capability": "embed"})
+    assert r.status_code == 202, r.text
+    assert fake_run_pull[0]["capability"] == "embed"

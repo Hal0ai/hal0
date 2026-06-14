@@ -1143,6 +1143,8 @@ async def _run_pull_with_events(
     registry: Any,
     hf_token: str | None,
     event_bus: Any | None,
+    capability: str | None = None,
+    comfyui_subdir: str | None = None,
 ) -> None:
     """Wrap ``run_pull`` so footer-visible progress events fan out.
 
@@ -1151,9 +1153,20 @@ async def _run_pull_with_events(
     attr) plus terminal events on success / failure / cancellation. The
     HF download itself is untouched; we listen to the same progress
     signal SSE listens to so the byte counts stay authoritative.
+
+    ``capability``/``comfyui_subdir`` (P3) route the download into the
+    capability-grouped store layout; both default to None → legacy flat layout.
     """
     if event_bus is None:
-        await run_pull(job, hf_repo=hf_repo, hf_file=hf_file, registry=registry, hf_token=hf_token)
+        await run_pull(
+            job,
+            hf_repo=hf_repo,
+            hf_file=hf_file,
+            registry=registry,
+            hf_token=hf_token,
+            capability=capability,
+            comfyui_subdir=comfyui_subdir,
+        )
         return
 
     async def _emit_progress() -> None:
@@ -1189,7 +1202,15 @@ async def _run_pull_with_events(
 
     progress_task = asyncio.create_task(_emit_progress())
     try:
-        await run_pull(job, hf_repo=hf_repo, hf_file=hf_file, registry=registry, hf_token=hf_token)
+        await run_pull(
+            job,
+            hf_repo=hf_repo,
+            hf_file=hf_file,
+            registry=registry,
+            hf_token=hf_token,
+            capability=capability,
+            comfyui_subdir=comfyui_subdir,
+        )
     finally:
         progress_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1345,6 +1366,9 @@ async def pull_model(
 
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     registry = request.app.state.model_registry
+    # P3: route the download into the capability-grouped store layout when the
+    # capability is resolvable (body → registry → curated); None → flat fallback.
+    capability, comfyui_subdir = _resolve_pull_capability(request, model_id, body)
     background.add_task(
         _run_pull_with_events,
         job,
@@ -1353,6 +1377,8 @@ async def pull_model(
         registry=registry,
         hf_token=hf_token,
         event_bus=event_bus,
+        capability=capability,
+        comfyui_subdir=comfyui_subdir,
     )
     return {
         "id": job.job_id,
