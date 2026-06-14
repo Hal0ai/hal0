@@ -350,6 +350,10 @@ export function usePullJob(): PullSnapshot {
       await apiPost(ENDPOINTS.modelPullCancel(modelId))
       setState('cancelled')
       closeStream()
+      // Cancelling via the POST bypasses the SSE terminal path that
+      // normally refetches the catalog, so invalidate here too — the
+      // registry row may flip back to its pre-pull state.
+      qc.invalidateQueries({ queryKey: ['models'] })
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('hal0:pull-ended', { detail: { modelId } }))
       }
