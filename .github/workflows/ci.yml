@@ -15,7 +15,10 @@ jobs:
       FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed-cache
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        # Test against the latest supported Python only (matches the 3.12
+        # runtime on CT105/CT132 and the other workflows). Re-add older
+        # versions here if we need to support them again.
+        python-version: ["3.12"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
