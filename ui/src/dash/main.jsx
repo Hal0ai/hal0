@@ -194,13 +194,27 @@ function App() {
   const renderView = () => {
     switch (route) {
       case "dashboard":
+        // Dashboard overhaul (feat/dashboard-overhaul): the customizable
+        // widget board (DashboardOverhaulView, dash-grid.jsx) replaces the
+        // old static DashboardView. It owns its own edit-mode state and a
+        // Customize/Done toggle in the hero, so it drops in without topbar
+        // threading. Falls back to the legacy view if the global hasn't
+        // registered (e.g. a stale bundle) so the route never blanks.
         return (
-          <DashboardView
-            slots={HAL0_DATA.slots}
-            onGo={go}
-            showHero={tweaks.showHero && !heroDismissed}
-            onDismissHero={() => setHeroDismissed(true)}
-          />
+          typeof DashboardOverhaulView === "function" ? (
+            <DashboardOverhaulView
+              onGo={go}
+              showHero={tweaks.showHero && !heroDismissed}
+              onDismissHero={() => setHeroDismissed(true)}
+            />
+          ) : (
+            <DashboardView
+              slots={HAL0_DATA.slots}
+              onGo={go}
+              showHero={tweaks.showHero && !heroDismissed}
+              onDismissHero={() => setHeroDismissed(true)}
+            />
+          )
         );
       case "firstrun":
         return (

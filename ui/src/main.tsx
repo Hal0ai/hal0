@@ -32,6 +32,7 @@ import './dash/comfyui-pane.css'
 import './dash/engine-panes.css'
 import './dash/memory-overhaul.css'
 import './dash/activity-log.css'
+import './dash/overhaul.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'
@@ -40,10 +41,25 @@ import './dash/tweaks-panel.jsx'
 // chrome.jsx, which imports useSidebarAgentRollup directly via ES modules.
 import './dash/chrome.jsx'
 import './dash/primitives.jsx'
+import './dash/cards-shell.jsx'
+// Dashboard-overhaul card modules — each registers a window global the grid
+// (dash-grid.jsx) wires by name (SlotList, ThroughputCard2, UtilizationCard,
+// QuickChatCard, ServicesCard). MUST load after cards-shell (they use DCard/
+// StatusDot) and before dash-grid so the globals exist when the grid renders.
+import './dash/slot-list.jsx'
+import './dash/metric-cards.jsx'
+import './dash/quickchat-card.jsx'
+import './dash/services-card.jsx'
+import './dash/optin-cards.jsx'
 import './dash/command-palette.jsx'
 import './dash/flow-modals.jsx'
 import './dash/extra-modals.jsx'
 import './dash/dashboard.jsx'
+// W3: masonry grid + edit mode + layout persistence (DashGrid, DashboardOverhaulView)
+// Bridge must come BEFORE dash-grid.jsx so window.__hal0Use* are set when the
+// .jsx module evaluates. dash-grid.jsx must come after cards-shell (W1).
+import './dash/dash-grid-hook-bridge'
+import './dash/dash-grid.jsx'
 import './dash/install-state-bridge'
 import './dash/firstrun.jsx'
 import './dash/slots.jsx'

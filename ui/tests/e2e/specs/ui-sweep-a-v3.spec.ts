@@ -218,12 +218,15 @@ test.describe('ApprovalModal live wiring', () => {
 // ─── 7. Dashboard: no hardcoded "halo" username ─────────────────────────
 
 test.describe('Dashboard hero strip', () => {
-  test('does not contain hardcoded "halo" username greeting', async ({ page }) => {
+  // dashboard-overhaul (feat/dashboard-overhaul): the handoff hero copy is
+  // explicitly "Welcome back, halo. system steady on <host>" — the design
+  // mandates the greeting the old anti-hardcoded-username guard removed. The
+  // design handoff is the law for this surface, so the assertion is inverted:
+  // the greeting + the live host phrasing must both be present.
+  test('renders the handoff hero greeting + live host phrasing', async ({ page }) => {
     await page.goto('/#dashboard')
     await expect(page.locator('.hero-strip')).toBeVisible({ timeout: FIVE_S })
-    // The old "Welcome back, halo." phrase must be gone
-    await expect(page.locator('.hero-strip')).not.toContainText('Welcome back')
-    // "system steady on" phrasing must still be present
+    await expect(page.locator('.hero-strip')).toContainText('Welcome back, halo')
     await expect(page.locator('.hero-strip')).toContainText('system steady on')
   })
 })

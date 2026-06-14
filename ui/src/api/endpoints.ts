@@ -80,6 +80,11 @@ export const ENDPOINTS = {
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',
   statsHardware: '/api/stats/hardware',
+  statsThroughputHistory: '/api/stats/throughput/history',
+  // W6 opt-in cards: power/thermal (§5 spike confirmed amdgpu hwmon).
+  statsPower: '/api/stats/power',
+  // W6: agent approvals SSE stream (polled list hook is primary; SSE for future).
+  agentApprovalsStream: '/api/agent/approvals/events',
 
   // ── Agents — list + dashboard catalogues ─────────────────────────
   // ``agents`` is the installed-bundled list (#207). ``agentSkills`` +
@@ -243,6 +248,23 @@ export const ENDPOINTS = {
   // request host, so links work on any install (localhost / LAN IP /
   // hal0.local / custom domain) without hardcoding. See routes/config.py.
   configUrls: '/api/config/urls',
+
+  // ── Services health (§2d — NEW endpoint, fail soft on 404) ─────
+  servicesHealth: '/api/services/health',
+
+  // ── ComfyUI native queue + history (proxy-reachable via :8188) ──
+  // These are NOT under /api — ComfyUI's own HTTP server at :8188 is
+  // reachable directly from the browser (same LAN). Build the base URL
+  // with comfyNativeBase() helper in the consuming component.
+  // comfyNativeQueue and comfyNativeHistory are path suffixes only:
+  comfyNativeQueue: '/queue',
+  comfyNativeHistory: '/history',
+
+  // ── Dashboard layout persistence (§2c, DashLayout store) ────────
+  // GET → 200 DashLayout | 200 {} (no saved layout yet)
+  // PUT <DashLayout> → 204
+  // Fail-soft: 404 treated as "no layout saved" by useDashLayout hook.
+  dashboardLayout: '/api/user/dashboard-layout',
 
   // ── Chat templates (per-model default template catalogue) ────────
   // GET /api/chat-templates → [{id, label}] list of known template ids

@@ -1,28 +1,29 @@
 /**
  * dashboard-v3 — root `#dashboard` route renders the topbar, sidebar, and
- * the system-overview layout. Home-redesign (2026-06-05): the main column
- * now leads with the live surface — a 50/50 Memory-map | Throughput row
- * (.dash-5050) above the full-width slot snapshot (.snap) — while the
- * sidebar holds the condensed SystemCard (.sys-card). The verbose Hardware
- * spread (.hw-section) was demoted into that card and no longer renders.
+ * the dashboard surface.
+ *
+ * dashboard-overhaul (feat/dashboard-overhaul): the static system-overview
+ * (the .dash-5050 Memory|Throughput row + .snap slot snapshot + sidebar
+ * .sys-card) was REPLACED by the customizable widget board
+ * (DashboardOverhaulView, dash-grid.jsx). The slot list is now the in-grid
+ * anchor card and the page exposes a Customize toggle. The detailed grid /
+ * edit-mode / dot-state coverage lives in dashboard-overhaul-v3.spec.ts;
+ * this spec pins the chrome + that the overhaul surface mounts on the route.
  */
 import { test, expect } from '../fixtures/apiMock'
 
 test.describe('Dashboard v3 (/)', () => {
-  test('renders chrome + live surface + snapshot + system card', async ({ page }) => {
+  test('renders chrome + the overhaul widget board surface', async ({ page }) => {
     await page.goto('/')
     // wait for React mount (Sidebar is route-aware, only renders after App)
     await expect(page.locator('.topbar')).toBeVisible()
     await expect(page.locator('.sidebar')).toBeVisible()
     await expect(page.locator('.main .view')).toBeVisible()
-    // main column leads with the 50/50 Memory | Throughput row …
-    await expect(page.locator('.dash-main .dash-5050')).toBeVisible()
-    // … above the full-width slot snapshot
-    await expect(page.locator('.dash-main .snap')).toBeVisible()
-    // condensed System identity card lives in the sidebar
-    await expect(page.locator('.dash-side .sys-card')).toBeVisible()
-    // the verbose hardware spread is demoted — no longer in the main area
-    await expect(page.locator('.hw-section')).toHaveCount(0)
+    // The overhaul board renders the slot-list anchor (its StatusDots are the
+    // clearest, data-independent marker that the new surface mounted) …
+    await expect(page.locator('.sdot').first()).toBeVisible()
+    // … and the dashboard exposes the Customize (edit-mode) toggle.
+    await expect(page.getByRole('button', { name: /customize/i }).first()).toBeVisible()
     // sidebar active row should be Dashboard
     await expect(page.locator('.sb-row.active .lbl')).toHaveText('Dashboard')
   })
