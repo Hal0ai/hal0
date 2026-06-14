@@ -409,20 +409,21 @@ function EditSlotDrawer({ open, slot, onClose }) {
       return;
     }
     setFieldErrs({});
+    // C7: include profile only when changed; restart after save
+    // (profile swap = cold restart, same semantics as model swap).
+    const profileChanged = !!selectedProfile && selectedProfile !== (slot.profile || "");
     try {
       // Two-step: defaults (ctx_size lives under [model]) + slot config
       // for the top-level keys (default, profile). n_gpu_layers /
       // rope_freq_base / llamacpp_args are owned by the profile — never
-      // include them in a save.
+      // include them in a save. These are fast on-disk writes, so we await
+      // them and keep the drawer open to surface any write error.
       const ctxBody = {
         ctx_size: ctxNum,
       };
       const slotBody = {
         default: makeDefault,
       };
-      // C7: include profile only when changed; restart after save
-      // (profile swap = cold restart, same semantics as model swap).
-      const profileChanged = !!selectedProfile && selectedProfile !== (slot.profile || "");
       if (profileChanged) {
         slotBody.profile = selectedProfile;
       }
@@ -434,22 +435,34 @@ function EditSlotDrawer({ open, slot, onClose }) {
         name: slot.name,
         body: slotBody,
       });
-      if (profileChanged) {
-        await restartMut.mutateAsync(slot.name);
-        window.__hal0Toast && window.__hal0Toast(
-          `Slot "${slot.name}" profile changed — restarting`,
-          "warn",
-        );
-      } else {
-        window.__hal0Toast && window.__hal0Toast(
-          `Slot "${slot.name}" saved — restart required for ctx_size`,
-          "warn",
-        );
-      }
-      onClose();
     } catch (err) {
       setSubmitErr(err?.message || "save failed");
+      return;
     }
+    // Non-blocking apply: a profile change requires a cold restart that can
+    // take model-load seconds-to-minutes. Fire it in the BACKGROUND (do NOT
+    // await) and close the drawer immediately — the slots list polls every 5s
+    // and reflects the transitional → running phase as the restart progresses.
+    // Restart failures surface via toast since the drawer is already gone.
+    if (profileChanged) {
+      restartMut.mutate(slot.name, {
+        onError: (err) =>
+          window.__hal0Toast && window.__hal0Toast(
+            `Slot "${slot.name}" restart failed — ${err?.message || "see logs"}`,
+            "err",
+          ),
+      });
+      window.__hal0Toast && window.__hal0Toast(
+        `Slot "${slot.name}" saved — restarting in the background`,
+        "info",
+      );
+    } else {
+      window.__hal0Toast && window.__hal0Toast(
+        `Slot "${slot.name}" saved — restart required for ctx_size`,
+        "warn",
+      );
+    }
+    onClose();
   }
 
   async function onDeleteClick() {
@@ -464,7 +477,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
     }
   }
 
-  const saving = editMut.isPending || defaultsMut.isPending || restartMut.isPending;
+  // `saving` gates the Save button on the fast config writes only — the
+  // restart is fired in the background (see onSaveClick) and must not keep the
+  // drawer in a blocked "Saving…" state for the whole model-load.
+  const saving = editMut.isPending || defaultsMut.isPending;
   const deleting = deleteMut.isPending;
 
   return (
@@ -604,6 +620,8 @@ function EditSlotDrawer({ open, slot, onClose }) {
           );
         const cur = slot.model_id || slot.model || "";
         const has = compatible.some(m => m.id === cur);
+        // A background swap is in flight — the select stays usable, but show a
+        // "Swapping…" hint so the operator knows the load is happening.
         const swapping = swapMut.isPending;
         return (
           <div className="form-row">
@@ -617,30 +635,26 @@ function EditSlotDrawer({ open, slot, onClose }) {
               <select
                 className="input mono"
                 value={cur}
-                disabled={swapping || saving}
+                disabled={saving}
                 aria-label={`Model for ${slot.name}`}
-                onChange={async (e) => {
+                onChange={(e) => {
                   const id = e.target.value;
                   if (!id || id === cur) return;
                   setSubmitErr(null);
                   const picked = compatible.find(m => m.id === id);
                   const label = picked?.longName || id;
-                  try {
-                    await swapMut.mutateAsync({ name: slot.name, model_id: id });
-                    if (isContainer) {
-                      window.__hal0Toast && window.__hal0Toast(
-                        `Restarting ${slot.name} to load ${label} — ~model-load seconds`,
-                        "info",
-                      );
-                    } else {
-                      window.__hal0Toast && window.__hal0Toast(
-                        `${slot.name} → ${label}`,
-                        "ok",
-                      );
-                    }
-                  } catch (err) {
-                    setSubmitErr(err?.message || "model swap failed");
-                  }
+                  // Non-blocking: a swap cold-restarts container slots to load
+                  // the model (slow). Fire it and let the slots poll reflect the
+                  // transitional phase — never freeze the drawer on the load.
+                  swapMut.mutate({ name: slot.name, model_id: id }, {
+                    onError: (err) => setSubmitErr(err?.message || "model swap failed"),
+                  });
+                  window.__hal0Toast && window.__hal0Toast(
+                    isContainer
+                      ? `Restarting ${slot.name} to load ${label} — loading in the background`
+                      : `${slot.name} → ${label}`,
+                    "info",
+                  );
                 }}
               >
                 {cur && !has && <option value={cur}>{slot.modelLong || slot.model || cur}</option>}
