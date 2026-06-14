@@ -5,7 +5,7 @@
 // HAL0_DATA.host because /api/hardware lands separately; flip when
 // useHardware is universally cheap.
 
-import { useCuratedBundles, useFirstRunInstall, useFirstRunComplete } from '@/api/hooks/useFirstRun'
+import { useCuratedBundles, useInstallApply, useFirstRunComplete, useInstallServices, useServiceRepair } from '@/api/hooks/useFirstRun'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModelStore, useModelStoreSet, useModelStoreMigrate } from '@/api/hooks/useSettings'
 import { usePullJob, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
@@ -311,102 +311,6 @@ function BundleTable({ bundles, recId, onPick, ram }) {
   );
 }
 
-// ─── Bundle confirmation (state 2) ───
-function FirstRunConfirm({ bundleId, onBack, onInstall }) {
-  const [withNpu, setWithNpu] = useStateF(false);
-  // Phase B1: bundles + install mutation. Pull the install trigger
-  // through the real hook; main.jsx's setFrStage('progress') still
-  // drives the progress view.
-  const bundlesQuery = useCuratedBundles();
-  const installM = useFirstRunInstall();
-  const bundles = bundlesQuery.data?.bundles ?? HAL0_DATA.bundles;
-  const bundle = bundles.find(b => b.id === bundleId) || HAL0_DATA.bundles.find(b => b.id === bundleId);
-  // Key into bundleDetails by the selected bundle id so pro/default/lite/max
-  // all show their own model list. Fall back to 'pro' when the id isn't in
-  // the static fixture (shouldn't happen on a fresh install).
-  const det = HAL0_DATA.bundleDetails[bundleId] ?? HAL0_DATA.bundleDetails.pro;
-  return (
-    <div className="fr-inner">
-      <span className="fr-confirm-back mono" onClick={onBack}>← back to picker</span>
-      <div className="fr-confirm-h">
-        <h2>hal0-{bundle.name}</h2>
-        <span className="sub">{bundle.ram} GB+ unified · ~{bundle.sizeGB} GB download · est 12 min</span>
-      </div>
-      <p className="fr-confirm-sub">{bundle.desc} You can change any slot after install.</p>
-
-      <div className="fr-confirm-card">
-        <div className="fr-confirm-card-h mono">
-          <span>What gets installed</span>
-          <b>{det.models.length} slots</b>
-          <span style={{color: "var(--fg-4)"}}>· {det.models.reduce((a, m) => a + parseFloat(m.size), 0).toFixed(1)} GB total</span>
-          <span className="right">capabilities.toml</span>
-        </div>
-        {det.models.map(m => (
-          <div key={m.slot} className="fr-confirm-row">
-            <span className="nm">{m.slot}</span>
-            <span className="ml">{m.model}</span>
-            <span className="sz">{m.size}</span>
-            <span className="tag">
-              {m.tag.split(" ").map((t, i) => <span key={i} className={"chip" + (t === "cpu" ? " dev-cpu" : t === "default" ? " amber outlined" : "")}>{t}</span>)}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <div className="fr-confirm-card">
-        <div className="fr-confirm-card-h mono" style={{justifyContent: "space-between"}}>
-          <div style={{display: "flex", alignItems: "center", gap: 14}}>
-            <span style={{display: "inline-flex", alignItems: "center", gap: 8}}>
-              <span style={{width: 18, height: 18, borderRadius: 3, border: "1px solid rgba(200,150,255,0.40)", background: "rgba(200,150,255,0.08)", color: "var(--dev-npu)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 9, letterSpacing: "0.05em", fontWeight: 600}}>NPU</span>
-              FLM trio
-            </span>
-            <span style={{color: "var(--fg-4)"}}>· optional</span>
-          </div>
-          <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
-            <input type="checkbox" checked={withNpu} onChange={e => setWithNpu(e.target.checked)} style={{accentColor: "var(--accent)"}} />
-            <span>Enable on install</span>
-          </label>
-        </div>
-        {det.npu.map(m => (
-          <div key={m.slot} className="fr-confirm-row" style={{opacity: withNpu ? 1 : 0.55}}>
-            <span className="nm" style={{color: "var(--dev-npu)"}}>{m.slot}</span>
-            <span className="ml">{m.model}</span>
-            <span className="sz">{m.size}</span>
-            <span className="tag">{m.tag.split(" ").map((t, i) => <span key={i} className="chip">{t}</span>)}</span>
-          </div>
-        ))}
-        <div className="fr-confirm-foot">
-          <span>~2 GB NPU memory · ~14s swap penalty on chat-model change · stt-npu + embed-npu are passengers</span>
-        </div>
-      </div>
-
-      <div className="card" style={{padding: 16, fontSize: 12.5, color: "var(--fg-3)", marginBottom: 24, background: "var(--bg)"}}>
-        <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8}}>Notes</div>
-        <ul style={{margin: 0, paddingLeft: 18, lineHeight: 1.7}}>
-          <li>TTS runs on CPU only on Linux (kokoro:cpu). ~1s per sentence.</li>
-          <li><span className="mono" style={{color: "var(--fg-2)"}}>coder</span> shares the iGPU with <span className="mono" style={{color: "var(--fg-2)"}}>primary</span> — the GPU arbiter stops one container to start the other when memory is tight.</li>
-          <li>HF_TOKEN is not required for this bundle. Configure later in Settings if you want gated repos.</li>
-        </ul>
-      </div>
-
-      <div className="fr-actions">
-        <button className="btn ghost lg" onClick={onBack}>Cancel</button>
-        <button className="btn lg" onClick={async () => {
-          // Best-effort backend kick — advance the UI regardless.
-          // Capture model_ids from the response so the progress pane
-          // can reattach per-row SSE streams via usePullJob.reattach().
-          let ids = [];
-          try {
-            const res = await installM.mutateAsync({ bundle: bundleId, withNpu });
-            if (Array.isArray(res?.model_ids)) ids = res.model_ids;
-          } catch (_e) { /* best-effort — progress stage renders graceful empty */ }
-          onInstall(ids);
-        }} disabled={installM.isPending}>{Icons.download} {installM.isPending ? "Starting…" : `Install hal0-${bundle.name}`}</button>
-      </div>
-    </div>
-  );
-}
-
 // ─── Per-model download row backed by usePullJob (SSE reattach) ───
 //
 // Mirrors DownloadRow in model-modals.jsx but uses the existing
@@ -470,10 +374,9 @@ function FrDownloadRow({ modelId }) {
 
 // ─── Install progress (state 3) ───
 function FirstRunProgress({ onDone, bundleId, modelIds }) {
-  // modelIds comes from the install mutation response (model_ids[]).
+  // modelIds comes from POST /api/install/apply (model_ids[]).
   // Each FrDownloadRow reattaches to the in-flight SSE stream for that
   // model via usePullJob.reattach(id). Empty array = graceful empty state.
-  const completeM = useFirstRunComplete();
   const bundlesQuery = useCuratedBundles();
   const bundle = (bundlesQuery.data?.bundles ?? HAL0_DATA.bundles).find(b => b.id === bundleId)
               || HAL0_DATA.bundles.find(b => b.id === bundleId);
@@ -500,53 +403,175 @@ function FirstRunProgress({ onDone, bundleId, modelIds }) {
 
       <div className="fr-actions" style={{justifyContent: "flex-end"}}>
         <div style={{display: "flex", gap: 12}}>
-          {/* No backend pause-all endpoint exists — remove button rather than fake it */}
           <button className="btn ghost lg" onClick={() => {
             window.location.hash = "logs";
           }}>View logs</button>
-          <button className="btn lg" onClick={() => {
-            completeM.mutate();
-            onDone();
-          }}>Open dashboard</button>
+          {/* Pulls continue in the background — advance to the services step
+              rather than blocking on multi-GB downloads. */}
+          <button className="btn lg" onClick={() => onDone()}>Continue →</button>
         </div>
       </div>
     </div>
   );
 }
 
+// ─── Quick path: recommended tier + storage + Advanced drawer (state 1, D1) ───
+function FirstRunQuick({ onInstalled, onSkip, layout }) {
+  const bundlesQuery = useCuratedBundles();
+  const hwQuery = useHardware();
+  const storeQuery = useModelStore();
+  const storeSet = useModelStoreSet();
+  const applyM = useInstallApply();
+
+  const bundles = bundlesQuery.data?.bundles ?? HAL0_DATA.bundles;
+  const ram = hwQuery.data?.ram?.total ?? HAL0_DATA.host?.ram?.total ?? 0;
+  const fit = bundles.filter(b => b.ram <= ram);
+  const recId = fit.length ? fit[fit.length - 1].id : (bundles[0]?.id ?? null);
+
+  const [tier, setTier] = useStateF(null);
+  const [npu, setNpu] = useStateF(false);
+  const [path, setPath] = useStateF("");
+  const [advanced, setAdvanced] = useStateF(false);
+
+  useEffectF(() => { if (tier == null && recId) setTier(recId); }, [recId]);
+  useEffectF(() => { if (!path && storeQuery.data?.effective) setPath(storeQuery.data.effective); }, [storeQuery.data]);
+
+  const tierObj = bundles.find(b => b.id === tier) || null;
+  const tierName = tierObj?.name || tier || "hal0";
+
+  const install = async () => {
+    try {
+      // Persist the chosen storage dir first so pulls land there. Non-fatal:
+      // /apply still pulls to the effective store if this save fails.
+      if (path && path !== storeQuery.data?.effective) {
+        try { await storeSet.mutateAsync({ path, migrate: false }); } catch (_e) { /* non-fatal */ }
+      }
+      const res = await applyM.mutateAsync({ tier: tierName, storageDir: path, npuOptIn: npu });
+      onInstalled(Array.isArray(res?.model_ids) ? res.model_ids : [], tierName);
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Install failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  return (
+    <div className="fr-inner">
+      <div className="fr-head">
+        <div className="fr-eyebrow"><span className="blip" />FirstRun · install</div>
+        <h1 className="fr-title">Welcome to <span className="accent">hal0</span></h1>
+        <p className="fr-lede">We picked a configuration for your hardware. Install in one click — or open Advanced to tune any slot.</p>
+        <div className="fr-detect">
+          <span className="seg"><span className="k">RAM</span><b>{hwQuery.data?.ram?.total ?? HAL0_DATA.host?.ram?.total ?? '—'} GB</b></span>
+          <span className="seg"><span className="k">GPU</span><b>{hwQuery.data?.gpu || HAL0_DATA.host?.gpu || '—'}</b></span>
+          <span className="seg"><span className="k">NPU</span><b>{hwQuery.data?.npu?.name || HAL0_DATA.host?.npu?.name || '—'}</b></span>
+        </div>
+      </div>
+
+      {layout === "table"
+        ? <BundleTable bundles={bundles} recId={tier} onPick={setTier} ram={ram} />
+        : <BundleGrid bundles={bundles} recId={tier} onPick={setTier} ram={ram} />}
+
+      <div className="card" style={{padding: 16, margin: "16px 0"}}>
+        <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 10}}>Model storage</div>
+        <input className="input mono" value={path} onChange={e => setPath(e.target.value)} placeholder="/var/lib/hal0/models" style={{width: "100%", padding: "10px 12px", fontSize: 14}} />
+        <div style={{display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10}}>
+          {(storeQuery.data?.suggestions ?? []).map(s => (
+            <button key={s.path} className={"chip" + (s.path === path ? " amber" : "")} style={{cursor: "pointer", fontFamily: "var(--jbm)"}} onClick={() => setPath(s.path)}>{s.path}</button>
+          ))}
+        </div>
+      </div>
+
+      <details className="fr-advanced" open={advanced} onToggle={e => setAdvanced(e.target.open)} style={{marginBottom: 16}}>
+        <summary style={{cursor: "pointer", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-2)"}}>Advanced — NPU &amp; per-slot</summary>
+        <div className="card" style={{padding: 16, marginTop: 10}}>
+          <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)", fontSize: 12}}>
+            <input type="checkbox" checked={npu} onChange={e => setNpu(e.target.checked)} style={{accentColor: "var(--accent)"}} />
+            Enable NPU trio (agent + stt/embed passengers) — requires an NPU
+          </label>
+          <p style={{fontSize: 11.5, color: "var(--fg-4)", marginTop: 10, lineHeight: 1.5}}>
+            The installer auto-derives each slot's device + profile from the hardware probe
+            (GPU → ROCm/Vulkan, NPU when opted in). Per-slot model + profile overrides land here in a follow-up.
+          </p>
+        </div>
+      </details>
+
+      <div className="fr-actions">
+        <button className="fr-skip" onClick={onSkip}>Skip — configure manually</button>
+        <button className="btn lg" disabled={applyM.isPending || !tier || !path.trim()} onClick={install}>
+          {Icons.download} {applyM.isPending ? "Installing…" : `Install ${tierName}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Services step (state 4, D5): verify + repair + ComfyUI card ───
+function FirstRunServices({ onDone }) {
+  const svc = useInstallServices();
+  const repair = useServiceRepair();
+  const completeM = useFirstRunComplete();
+  const services = svc.data?.services ?? [];
+  return (
+    <div className="fr-inner">
+      <div className="fr-head">
+        <div className="fr-eyebrow"><span className="blip" />FirstRun · services</div>
+        <h1 className="fr-title">Almost there</h1>
+        <p className="fr-lede">Verify the agent + chat UI. Image generation can be set up any time.</p>
+      </div>
+      <div className="card" style={{padding: 8, marginBottom: 16}}>
+        {services.map(s => (
+          <div key={s.unit} className="fr-confirm-row">
+            <span className="nm" style={{display: "inline-flex", alignItems: "center", gap: 8}}>
+              <span className={"dot " + (s.active ? "up" : "down")} /> {s.label}
+            </span>
+            <span className="ml mono">{s.active ? "running" : "off"}</span>
+            <span className="tag">
+              {!s.active && s.repairable && (
+                <button className="btn ghost sm" disabled={repair.isPending} onClick={() => repair.mutate(s.unit)}>
+                  {Icons.restart} {repair.isPending ? "Restarting…" : "Retry"}
+                </button>
+              )}
+            </span>
+          </div>
+        ))}
+        {/* ComfyUI quickstart — visible now, wired later (design D5). */}
+        <div className="fr-confirm-row">
+          <span className="nm" style={{display: "inline-flex", alignItems: "center", gap: 8}}>
+            <span className="dot" style={{background: "var(--fg-5)"}} /> ComfyUI (image gen)
+          </span>
+          <span className="ml mono">not configured</span>
+          <span className="tag">
+            <button className="btn ghost sm" onClick={() => { window.location.hash = "slots"; }}>Set up →</button>
+          </span>
+        </div>
+      </div>
+      <div className="fr-actions" style={{justifyContent: "flex-end"}}>
+        <button className="btn lg" onClick={() => { completeM.mutate(); onDone(); }}>Open dashboard</button>
+      </div>
+    </div>
+  );
+}
+
 // ─── FirstRun view shell ───
-function FirstRunView({ frStage, setFrStage, frBundle, setFrBundle, onComplete, layout }) {
+function FirstRunView({ frStage, setFrStage, onComplete, layout }) {
   const [skipOpen, setSkipOpen] = useStateF(false);
-  // Capture model IDs returned by the install mutation so the progress
-  // pane can reattach live SSE streams per model via FrDownloadRow.
+  // model IDs + tier name returned by /apply so the progress pane can reattach
+  // live SSE streams per model and label the heading.
   const [frModelIds, setFrModelIds] = useStateF([]);
+  const [frTierName, setFrTierName] = useStateF(null);
   return (
     <div className="fr">
       {frStage === "pick" && (
-        <FirstRunPicker
-          // Route through the new "storage" stage before confirming the
-          // bundle — the operator decides WHERE models live before any
-          // pulls start so the bundle's downloads land in the right place.
-          onPick={b => { setFrBundle(b); setFrStage("storage"); }}
-          onSkip={() => setSkipOpen(true)}
+        <FirstRunQuick
           layout={layout}
-        />
-      )}
-      {frStage === "storage" && (
-        <FirstRunStorage
-          onBack={() => setFrStage("pick")}
-          onContinue={() => setFrStage("confirm")}
-        />
-      )}
-      {frStage === "confirm" && (
-        <FirstRunConfirm
-          bundleId={frBundle}
-          onBack={() => setFrStage("storage")}
-          onInstall={ids => { setFrModelIds(ids || []); setFrStage("progress"); }}
+          onInstalled={(ids, tierName) => { setFrModelIds(ids || []); setFrTierName(tierName || null); setFrStage("progress"); }}
+          onSkip={() => setSkipOpen(true)}
         />
       )}
       {frStage === "progress" && (
-        <FirstRunProgress bundleId={frBundle} modelIds={frModelIds} onDone={() => onComplete()} />
+        <FirstRunProgress bundleId={frTierName} modelIds={frModelIds} onDone={() => setFrStage("services")} />
+      )}
+      {frStage === "services" && (
+        <FirstRunServices onDone={() => onComplete()} />
       )}
       <SkipBundleDialog
         open={skipOpen}
@@ -557,4 +582,4 @@ function FirstRunView({ frStage, setFrStage, frBundle, setFrBundle, onComplete, 
   );
 }
 
-Object.assign(window, { FirstRunView, FirstRunPicker, FirstRunStorage, FirstRunConfirm, FirstRunProgress, BundleGrid, BundleTable });
+Object.assign(window, { FirstRunView, FirstRunQuick, FirstRunStorage, FirstRunServices, FirstRunProgress, FirstRunPicker, BundleGrid, BundleTable });
