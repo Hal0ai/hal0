@@ -440,6 +440,43 @@ function GpuImageModeBanner() {
   );
 }
 
+// ─── FieldGroup — a labeled config section ───────────────────────────────
+// Groups fields by owner (slot/model/…).
+function FieldGroup({ label, hint, children }) {
+  return (
+    <div className="field-group">
+      <div className="field-group-head">
+        <span className="field-group-label">{label}</span>
+        {hint && <span className="field-group-hint">{hint}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ─── PillToggle — two-state sliding pill ─────────────────────────────────
+// Generalized from slots.jsx NpuSwitch.
+// Fixed label; the on/off STATE is shown by the pill, never by a changing label.
+function PillToggle({ on, disabled, label, stateText, onToggle }) {
+  return (
+    <div className="pill-toggle-row">
+      <button
+        type="button"
+        className="npu-switch"
+        role="switch"
+        aria-checked={!!on}
+        aria-label={label}
+        disabled={disabled}
+        data-on={on ? "1" : "0"}
+        onClick={() => onToggle(!on)}
+      >
+        <span className="knob" />
+      </button>
+      {stateText && <span className="pill-toggle-state mono">{stateText}</span>}
+    </div>
+  );
+}
+
 // ─── Dropdown menu ───────────────────────────────────────────────────────
 function Menu({ anchor = "right", items, onClose, style }) {
   return (
@@ -472,4 +509,4 @@ function Menu({ anchor = "right", items, onClose, style }) {
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner });
+Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FieldGroup, PillToggle });

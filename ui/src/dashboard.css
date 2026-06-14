@@ -1534,6 +1534,13 @@ select.npu-sel {
 }
 .npu-switch[data-on="1"] .knob { left: 20px; }
 
+.field-group { margin: 18px 0 4px; }
+.field-group-head { display: flex; align-items: baseline; gap: 8px; padding: 0 0 6px; border-bottom: 1px solid var(--line-soft); margin-bottom: 8px; }
+.field-group-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-4); font-weight: 600; }
+.field-group-hint { font-size: 10.5px; color: var(--fg-5); }
+.pill-toggle-row { display: flex; align-items: center; gap: 10px; }
+.pill-toggle-state { font-size: 12px; color: var(--fg-3); }
+
 .npu-stack-foot {
   display: flex;
   align-items: center;
