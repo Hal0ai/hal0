@@ -267,6 +267,10 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # absent → null). Surfaced so the edit-drawer MTP pill seeds its on/off
         # state from disk instead of defaulting to off after a reopen.
         entry["mtp"] = cfg.get("mtp")
+        # Per-slot chat_template override (tri-valued: string/None/absent → null).
+        # Surfaced so the edit-drawer Template row seeds its override select
+        # from disk instead of defaulting to "auto" on every reopen.
+        entry["chat_template"] = cfg.get("chat_template")
         n_gpu = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
         entry["n_gpu_layers"] = n_gpu if isinstance(n_gpu, int) else -1
         # Issue #548: expose rope_freq_base so the Edit drawer can dirty-track

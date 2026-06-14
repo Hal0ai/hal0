@@ -266,6 +266,13 @@ export const ENDPOINTS = {
   // Fail-soft: 404 treated as "no layout saved" by useDashLayout hook.
   dashboardLayout: '/api/user/dashboard-layout',
 
+  // ── Chat templates (per-model default template catalogue) ────────
+  // GET /api/chat-templates → [{id, label}] list of known template ids
+  // that can be pinned as model.defaults.chat_template. The "auto"
+  // sentinel (use the GGUF's embedded template) is not emitted by the
+  // backend — the UI prepends it as the first <option>.
+  chatTemplates: '/api/chat-templates',
+
   // ── Profiles (container slot templates) ─────────────────────────
   profiles: '/api/profiles',
   profile: (name: string) => `/api/profiles/${encodeURIComponent(name)}`,

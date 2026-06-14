@@ -380,7 +380,6 @@ function SlotCard({
           <>
             <button
               className="btn ghost sm"
-              disabled={!!busy || phase === "transitional"}
               onClick={() => onUnload && onUnload()}
             >{Icons.unload} Stop</button>
             <button
@@ -406,19 +405,15 @@ function SlotListRow({ slot, onEdit }) {
   // restart mutation and the Edit drawer (via the #slots/:name route, the
   // same path SlotCard uses). `onEdit` is optional; fall through to hash.
   const restartMut = useSlotRestart();
-  const [busy, setBusy] = useStateS(false);
   const goEdit = onEdit || (() => { window.location.hash = "#slots/" + slot.name; });
-  const onRestart = async () => {
-    setBusy(true);
-    try {
-      await restartMut.mutateAsync(slot.name);
-      window.__hal0Toast && window.__hal0Toast(`Restarting ${slot.name}`, "ok");
-    } catch (err) {
-      window.__hal0Toast && window.__hal0Toast(
-        err?.message ? `${slot.name}: ${err.message}` : `${slot.name}: restart failed`, "warn");
-    } finally {
-      setBusy(false);
-    }
+  // Fire-and-forget restart — never block the row on the model reload.
+  const onRestart = () => {
+    restartMut.mutate(slot.name, {
+      onError: (err) =>
+        window.__hal0Toast && window.__hal0Toast(
+          err?.message ? `${slot.name}: ${err.message}` : `${slot.name}: restart failed`, "warn"),
+    });
+    window.__hal0Toast && window.__hal0Toast(`Restarting ${slot.name}…`, "info");
   };
   const tps = type === "llm" ? `${metrics.toks || 0} t/s` :
               type === "embedding" ? `${metrics.rpm} r/m` :
@@ -446,7 +441,6 @@ function SlotListRow({ slot, onEdit }) {
         <button
           className="btn ghost sm"
           title="Restart"
-          disabled={busy}
           onClick={e => { e.stopPropagation(); onRestart(); }}
         >{Icons.restart}</button>
         <button
@@ -560,7 +554,6 @@ function NpuFlmStack({ slots }) {
   const unloadMut = useSlotUnload();
   const editMut = useSlotEdit();
   const restartMutNpu = useSlotRestart();
-  const [busy, setBusy] = useStateS(false);
   const [npuOpen, setNpuOpen] = useStateS(false);
 
   if (!npuSlots.length) return null;
@@ -590,32 +583,35 @@ function NpuFlmStack({ slots }) {
   const toast = (msg, kind = "warn") =>
     window.__hal0Toast && window.__hal0Toast(msg, kind);
 
-  const run = async (fn) => {
-    setBusy(true);
-    try {
-      await fn();
-    } catch (err) {
-      toast(err?.message ? err.message : "NPU action failed", "warn");
-    } finally {
-      setBusy(false);
-    }
+  // Fire-and-forget NPU action — the FLM load/restart blocks for the whole
+  // stack warm-up (seconds), so awaiting it froze the trio's controls and the
+  // master switch for the entire load. Fire it, toast immediately, and let the
+  // 5s slots poll reflect the transition. (Mirrors the SlotsView/PR #781
+  // non-blocking pattern.)
+  const fire = (mut, args, msg) => {
+    mut.mutate(args, {
+      onError: (err) => toast(err?.message ? err.message : "NPU action failed", "warn"),
+    });
+    toast(msg, "info");
   };
 
   // Master power — load/unload the whole stack via the chat (anchor) slot.
+  // Flip-to-cancel: if the stack is loaded OR mid-load (transitional), the
+  // master fires an unload so a slow warm-up can be aborted without waiting.
   const onMaster = () => {
     if (!chat) { toast("No NPU chat slot to load", "warn"); return; }
-    run(async () => {
-      if (loaded) {
-        await unloadMut.mutateAsync(chat.name);
-      } else {
-        await loadMut.mutateAsync(chat.name);
-      }
-    });
+    const p = slotCtrlPhase(chat);
+    const stopping = loaded || p === "running" || p === "transitional";
+    fire(
+      stopping ? unloadMut : loadMut,
+      chat.name,
+      stopping ? "Unloading NPU stack…" : "Loading NPU stack…",
+    );
   };
 
   const onPickChat = (model_id) => {
     if (!chat || !model_id || model_id === chat.model) return;
-    run(() => swapMut.mutateAsync({ name: chat.name, model_id }));
+    fire(swapMut, { name: chat.name, model_id }, "Swapping NPU chat model…");
   };
 
   // Toggle a coresident modality (Phase A): write the flip to TOML via
@@ -626,13 +622,23 @@ function NpuFlmStack({ slots }) {
   const onToggleModality = (which) => {
     if (!chat) { toast("No NPU chat slot", "warn"); return; }
     const nextVal = !(parsed[which]);
-    run(async () => {
-      await editMut.mutateAsync({
-        name: chat.name,
-        body: { npu: { [which]: nextVal } },
-      });
-      await restartMutNpu.mutateAsync(chat.name);
-    });
+    // Await only the fast config write (surfaces a TOML/validation error
+    // inline); then FIRE the cold restart that picks up the new modality —
+    // never block the trio on the FLM reload.
+    editMut.mutate(
+      { name: chat.name, body: { npu: { [which]: nextVal } } },
+      {
+        onSuccess: () => {
+          fire(
+            restartMutNpu,
+            chat.name,
+            `${which} ${nextVal ? "enabled" : "disabled"} — restarting NPU stack…`,
+          );
+        },
+        onError: (err) =>
+          toast(err?.message ? err.message : "NPU config write failed", "warn"),
+      },
+    );
   };
 
   // No onPickAsr/onPickEmbed: those modalities are read-only labels (the
@@ -650,13 +656,13 @@ function NpuFlmStack({ slots }) {
   const chatCardNode = chat && (
     <SlotScard
       key="chat" s={chat} ind={slotIndicator(chat)} full
-      modelNode={<ModelPicker s={chat} models={chatModels} disabled={busy || !chat} onSwap={onPickChat} />}
+      modelNode={<ModelPicker s={chat} models={chatModels} disabled={!chat} onSwap={onPickChat} />}
       controls={
         <SlotControls
-          phase={slotCtrlPhase(chat)} busy={busy} compact={false}
-          onStart={() => run(() => loadMut.mutateAsync(chat.name))}
-          onStop={() => run(() => unloadMut.mutateAsync(chat.name))}
-          onRestart={() => run(() => restartMutNpu.mutateAsync(chat.name))}
+          phase={slotCtrlPhase(chat)} busy={false} compact={false}
+          onStart={() => fire(loadMut, chat.name, `Starting ${chat.name}…`)}
+          onStop={() => fire(unloadMut, chat.name, `Stopping ${chat.name}…`)}
+          onRestart={() => fire(restartMutNpu, chat.name, `Restarting ${chat.name}…`)}
           onLogs={() => dispatchLogs(chat.name)}
           onEdit={() => goEdit(chat.name)}
         />
@@ -686,10 +692,10 @@ function NpuFlmStack({ slots }) {
         }
         controls={
           <SlotControls
-            phase={phase} busy={busy} compact={false}
+            phase={phase} busy={false} compact={false}
             onStart={() => onToggleModality(which)}
             onStop={() => onToggleModality(which)}
-            onRestart={() => run(() => restartMutNpu.mutateAsync(chat?.name))}
+            onRestart={() => fire(restartMutNpu, chat?.name, "Restarting NPU stack…")}
             onLogs={() => dispatchLogs(tgt)}
             onEdit={() => goEdit(tgt)}
           />
@@ -756,7 +762,7 @@ function NpuFlmStack({ slots }) {
             <span className="grow" style={{flex: 1}} />
             <span className="eh-right">
               <span className="npu-master-lbl">master</span>
-              <NpuSwitch on={loaded} disabled={busy || !chat} label="Load/unload FLM stack" onClick={onMaster} />
+              <NpuSwitch on={loaded} disabled={!chat} label="Load/unload FLM stack" onClick={onMaster} />
             </span>
           </div>
 
@@ -886,19 +892,27 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   const toast = (msg, kind = "info") =>
     window.__hal0Toast && window.__hal0Toast(msg, kind);
 
-  const runMutation = async (name, mut, args, okMsg) => {
+  // Fire-and-forget lifecycle action. The backend load/restart/unload/swap
+  // POST blocks for the whole model-load (seconds-to-minutes); awaiting it
+  // froze the card AND left Stop disabled for the entire load, so a user
+  // couldn't cancel a slow-loading slot. Instead we FIRE the mutation (mutate,
+  // not mutateAsync), toast immediately, and let the 5s slots poll drive the
+  // transitional → running phase. `busy` marks the action in-flight (gates
+  // Start/Restart against a double-trigger) but never gates Stop — see
+  // SlotCard — so cancel stays live throughout the load. Errors surface via
+  // toast since there's no spinner to clear. (Mirrors the non-blocking
+  // save/swap from PR #781.)
+  const runMutation = (name, mut, args, okMsg) => {
     setBusyName(name);
-    try {
-      await mut.mutateAsync(args);
-      toast(okMsg, "ok");
-    } catch (err) {
-      toast(
-        err?.message ? `${name}: ${err.message}` : `${name}: action failed`,
-        "warn",
-      );
-    } finally {
-      setBusyName(null);
-    }
+    mut.mutate(args, {
+      onError: (err) =>
+        toast(
+          err?.message ? `${name}: ${err.message}` : `${name}: action failed`,
+          "warn",
+        ),
+      onSettled: () => setBusyName(null),
+    });
+    toast(okMsg, "info");
   };
 
   // Open Edit drawer when route is #slots/:name
@@ -1004,20 +1018,20 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       }}
       onEdit={() => { window.location.hash = "#slots/" + s.name; }}
       onRestart={() =>
-        runMutation(s.name, restartMut, s.name, `Restarting ${s.name}`)
+        runMutation(s.name, restartMut, s.name, `Restarting ${s.name}…`)
       }
       onUnload={() =>
-        runMutation(s.name, unloadMut, s.name, `Unloaded ${s.name}`)
+        runMutation(s.name, unloadMut, s.name, `Stopping ${s.name}…`)
       }
       onStart={() =>
-        runMutation(s.name, loadMut, s.name, `Starting ${s.name}`)
+        runMutation(s.name, loadMut, s.name, `Starting ${s.name}…`)
       }
       onSwapPick={(m) =>
         runMutation(
           s.name,
           swapMut,
           { name: s.name, model_id: m.id },
-          `Swapping ${s.name} → ${m.longName || m.id}`,
+          `Swapping ${s.name} → ${m.longName || m.id}…`,
         )
       }
       onViewLogs={() => { setLogsForSlot(s.name); }}

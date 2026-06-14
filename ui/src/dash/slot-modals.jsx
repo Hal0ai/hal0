@@ -17,6 +17,7 @@ import {
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
+import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { ENDPOINTS } from '@/api/endpoints'
 import { stateChipClassForSlot } from './slot-status.js'
 
@@ -330,6 +331,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const swapMut = useSlotSwap();
   const profilesQuery = useProfiles();
   const modelsQuery = useModels();
+  const chatTemplatesQuery = useChatTemplates(open);
 
   // Seed from the slot list payload when available (PR #587 — same fix
   // class as #584). llamacpp_args / n_gpu_layers / rope_freq_base are
@@ -361,6 +363,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // profile-change save the slot is restarted (model swap semantics — same
   // cold-restart contract as profile image change).
   const [selectedProfile, setSelectedProfile] = useStateSM(slot?.profile || "");
+  // Task 5: per-slot chat_template override.
+  // chatTemplate seeds from slot.chat_template (empty = no override).
+  // overrideOpen tracks whether the user has clicked [Override] to reveal the select.
+  const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
+  const [overrideOpen, setOverrideOpen] = useStateSM(!!(slot?.chat_template));
 
   useEffectSM(() => {
     if (slot) {
@@ -377,6 +384,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setFieldErrs({});
       // C7: re-seed profile from the (possibly-updated) slot prop.
       setSelectedProfile(slot.profile || "");
+      // Task 5: re-seed chat_template override from the slot prop.
+      setChatTemplate(slot.chat_template || "");
+      setOverrideOpen(!!(slot.chat_template));
     }
   }, [slot?.name]);
 
@@ -410,6 +420,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
     // C7: include profile only when changed; restart after save
     // (profile swap = cold restart, same semantics as model swap).
     const profileChanged = !!selectedProfile && selectedProfile !== (slot.profile || "");
+    // Task 5: include chat_template only when the user has set/changed an override.
+    // Dirty-track against slot.chat_template (mirrors profileChanged pattern).
+    const chatTemplateChanged = overrideOpen && chatTemplate !== (slot.chat_template || "");
     try {
       // Two-step: defaults (ctx_size lives under [model]) + slot config
       // for the top-level keys (default, profile). n_gpu_layers /
@@ -423,6 +436,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
       if (profileChanged) {
         slotBody.profile = selectedProfile;
       }
+      if (chatTemplateChanged) {
+        slotBody.chat_template = chatTemplate;
+      }
       await defaultsMut.mutateAsync({
         name: slot.name,
         body: ctxBody,
@@ -435,12 +451,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setSubmitErr(err?.message || "save failed");
       return;
     }
-    // Non-blocking apply: a profile change requires a cold restart that can
-    // take model-load seconds-to-minutes. Fire it in the BACKGROUND (do NOT
-    // await) and close the drawer immediately — the slots list polls every 5s
-    // and reflects the transitional → running phase as the restart progresses.
-    // Restart failures surface via toast since the drawer is already gone.
-    if (profileChanged) {
+    // Non-blocking apply: a profile or chat_template change requires a cold
+    // restart that can take model-load seconds-to-minutes. Fire it in the
+    // BACKGROUND (do NOT await) and close the drawer immediately — the slots
+    // list polls every 5s and reflects the transitional → running phase as
+    // the restart progresses. Restart failures surface via toast since the
+    // drawer is already gone.
+    if (profileChanged || chatTemplateChanged) {
       restartMut.mutate(slot.name, {
         onError: (err) =>
           window.__hal0Toast && window.__hal0Toast(
@@ -691,6 +708,60 @@ function EditSlotDrawer({ open, slot, onClose }) {
           {fieldErrs.ctx && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ctx}</div>}
         </div>
       </div>
+
+      {/* Task 5: per-slot chat_template override.
+          Shows the model-level default template (from model.defaults.chat_template)
+          read-only, with an [Override] button to reveal a select for a per-slot
+          override. Override is dirty-tracked against slot.chat_template and
+          included in the config PUT only when changed. A template change requires
+          a cold restart (it changes llama-server --chat-template arg). */}
+      {(() => {
+        const cur = slot.model_id || slot.model || "";
+        const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
+        const modelTemplate = m?.defaults?.chat_template || "auto";
+        const templates = Array.isArray(chatTemplatesQuery.data) ? chatTemplatesQuery.data : [];
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Template</span>
+              <span className="sub warn">⟳ restart required on change</span>
+            </div>
+            <div className="form-ctl">
+              {!overrideOpen ? (
+                <div style={{display: "flex", alignItems: "center", gap: 8}}>
+                  <span className="input mono" style={{flex: 1, padding: "6px 10px", background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", fontSize: 12, color: "var(--fg-3)"}}>
+                    {modelTemplate} <span style={{color: "var(--fg-5)", fontSize: 11}}>(from model)</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => { setChatTemplate(chatTemplate || modelTemplate); setOverrideOpen(true); }}
+                  >Override</button>
+                </div>
+              ) : (
+                <>
+                  <select
+                    className="input mono"
+                    value={chatTemplate}
+                    onChange={e => setChatTemplate(e.target.value)}
+                  >
+                    <option value="auto">Auto (GGUF embedded)</option>
+                    {templates.map(t => (
+                      <option key={t.id} value={t.id}>{t.label || t.id}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    style={{marginTop: 4}}
+                    onClick={() => { setChatTemplate(""); setOverrideOpen(false); }}
+                  >Clear override</button>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
       </FieldGroup>
 
       <FieldGroup label="Inference" hint="behavior">

@@ -267,6 +267,7 @@ class TestConfigEnrichment:
         cfg["model"]["rope_freq_base"] = 10000.0
         cfg["model"]["labels"] = ["tool-calling"]
         cfg["mtp"] = True
+        cfg["chat_template"] = "chatml"
         out = config_enrichment([cfg])
         e = out["chat"]
         assert e["type"] == "llm"
@@ -275,6 +276,7 @@ class TestConfigEnrichment:
         assert e["enabled"] is True
         assert e["enable_thinking"] is True
         assert e["mtp"] is True
+        assert e["chat_template"] == "chatml"
         assert e["n_gpu_layers"] == 24
         assert e["rope_freq_base"] == 10000.0
         assert e["idle_timeout_s"] == 900
@@ -303,6 +305,7 @@ class TestConfigEnrichment:
         e = out["chat"]
         assert e["enable_thinking"] is None
         assert e["mtp"] is None
+        assert e["chat_template"] is None
         assert e["n_gpu_layers"] == -1
         assert e["rope_freq_base"] is None
         assert e["idle_timeout_s"] is None

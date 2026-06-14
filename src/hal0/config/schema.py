@@ -341,6 +341,14 @@ class SlotConfig(BaseModel):
             "See resolve_profile_flags and MTP_FLAG_BUNDLE."
         ),
     )
+    chat_template: str | None = Field(
+        default=None,
+        description=(
+            "Per-slot chat-template override (id from /api/chat-templates, or "
+            "'auto'/None for the GGUF-embedded template). Wins over the model's "
+            "default. See resolve_chat_template."
+        ),
+    )
 
     # [model] section (nested)
     model: ModelConfig = Field(default_factory=ModelConfig)
@@ -898,6 +906,21 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
     if effective_mtp:
         return f"{base} {MTP_FLAG_BUNDLE}".strip()
     return base
+
+
+def resolve_chat_template(slot_cfg: dict, model_info: dict) -> str | None:
+    """Effective chat-template id: slot override > model default > None (auto).
+
+    'auto' (or empty/None) means use the GGUF-embedded template (no
+    ``--chat-template-file``). Returns the template id string otherwise.
+    """
+    for val in (
+        slot_cfg.get("chat_template"),
+        (model_info.get("defaults") or {}).get("chat_template"),
+    ):
+        if val and val != "auto":
+            return str(val)
+    return None
 
 
 # ── UpstreamsConfig ────────────────────────────────────────────────────────────

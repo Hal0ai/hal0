@@ -314,6 +314,74 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await expect(page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^MTP$/ }) })).toHaveCount(0)
   })
 
+  // ─── Chat-template override (Task 5) ────────────────────────────────────────
+
+  // C7k — Template row appears in the Model group; clicking [Override] reveals a
+  // select; choosing chatml + Save writes chat_template:'chatml' in the config PUT
+  // and fires a non-blocking restart (mirrors MTP toggle pattern).
+  test('C7k — chat-template override: [Override] reveals select, Save writes chat_template + restart', async ({ page }) => {
+    const CT_SLOT = {
+      name: 'chat', type: 'llm', device: 'gpu-rocm', profile: 'rocm-mtp', backend: 'rocm',
+      model_id: 'qwen-ct', model: 'qwen-ct', state: 'serving', port: 8092,
+      runtime: 'container', enabled: true,
+      // No chat_template override on disk — starts in read-only mode.
+    }
+    const CT_MODEL = { id: 'qwen-ct', name: 'qwen-ct', capabilities: ['chat'], tags: [], defaults: { chat_template: 'chatml' } }
+
+    const puts: any[] = []
+    let restarted = false
+
+    await page.route('**/api/slots/chat/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/chat/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await page.route('**/api/slots/chat/restart', async (route) => {
+      restarted = true
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/chat-templates', (route) =>
+      route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify([{ id: 'chatml', label: 'ChatML' }, { id: 'llama3', label: 'Llama 3' }]),
+      }),
+    )
+
+    await seedSlotsAndModels(page, [CT_SLOT], [CT_MODEL])
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    // Template row is visible in the Model group (read-only display)
+    const tmplRow = page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^Template$/ }) })
+    await expect(tmplRow).toBeVisible()
+
+    // [Override] button is present initially (no override active)
+    const overrideBtn = tmplRow.locator('button', { hasText: 'Override' })
+    await expect(overrideBtn).toBeVisible()
+
+    // Click [Override] to reveal the select
+    await overrideBtn.click()
+
+    // The override select should now be visible
+    const tmplSelect = tmplRow.locator('select')
+    await expect(tmplSelect).toBeVisible()
+
+    // Choose chatml
+    await tmplSelect.selectOption('chatml')
+
+    // Save
+    await page.locator('.drawer button:has-text("Save")').click()
+
+    // PUT body must include chat_template: 'chatml'
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0].chat_template).toBe('chatml')
+
+    // Non-blocking restart must have fired
+    await expect.poll(() => restarted).toBe(true)
+  })
+
   // C7h — model options re-filter from the SELECTED profile, not the persisted one
   test('C7h — model options re-filter from the SELECTED profile, not the persisted one', async ({ page }) => {
     // The dashboard uses mockFetch (VITE_MOCK_HAL0=1) which short-circuits
