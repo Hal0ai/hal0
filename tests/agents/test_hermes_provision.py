@@ -355,7 +355,9 @@ def test_preflight_passes_when_inputs_meet_minimums(
     var_lib = tmp_path / "var" / "lib" / "hal0"
     var_lib.mkdir(parents=True)
     venv = var_lib / "venvs" / "hermes"
-    state = hp.BootstrapState(venv=str(venv))
+    # Pin hermes_home under the tmp tree too — preflight now write-probes the
+    # real $HERMES_HOME, and the default points at the live /var/lib/hal0/.hermes.
+    state = hp.BootstrapState(venv=str(venv), hermes_home=str(var_lib / ".hermes"))
     monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
     io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
     out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
@@ -369,7 +371,9 @@ def test_preflight_fails_on_unreachable_daemon(
 ) -> None:
     var_lib = tmp_path / "var" / "lib" / "hal0"
     var_lib.mkdir(parents=True)
-    state = hp.BootstrapState(venv=str(var_lib / "venvs" / "hermes"))
+    state = hp.BootstrapState(
+        venv=str(var_lib / "venvs" / "hermes"), hermes_home=str(var_lib / ".hermes")
+    )
     io = hp.PhaseIO(http_get=lambda *_a, **_kw: 0)
     out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
@@ -381,9 +385,50 @@ def test_preflight_fails_on_var_lib_not_writable(
 ) -> None:
     io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
     state = hp.BootstrapState(venv=str(tmp_path / "nope" / "venvs" / "hermes"))
+    # /var/lib (nearest existing ancestor of the default $HERMES_HOME) isn't
+    # writable to a normal user — stub the probe so the test is deterministic
+    # regardless of the runner's uid (CI may run as root).
+    monkeypatch.setattr(hp, "path_is_writable", lambda _p: False)
     out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
     assert out.status == hp.PhaseStatus.FAIL
     assert "not writable" in (out.reason or "")
+
+
+def test_preflight_fails_when_hermes_home_unwritable_but_var_lib_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Fedora bug: /var/lib/hal0 is writable (venv provisions fine) but a
+    pre-existing root-owned $HERMES_HOME isn't — a var_lib-only check sailed
+    past this and detonated at env_probe. Preflight must now catch it."""
+    var_lib = tmp_path / "var" / "lib" / "hal0"
+    var_lib.mkdir(parents=True)
+    venv = var_lib / "venvs" / "hermes"
+    hermes_home = var_lib / ".hermes"
+    hermes_home.mkdir()  # exists, "owned by root" → unwritable to us
+    state = hp.BootstrapState(venv=str(venv), hermes_home=str(hermes_home))
+    monkeypatch.setattr(hp, "MIN_FREE_GIB", 0)
+    io = hp.PhaseIO(http_get=lambda *_a, **_kw: 200)
+
+    real = hp.path_is_writable
+    monkeypatch.setattr(
+        hp,
+        "path_is_writable",
+        lambda p: False if str(p) == str(hermes_home) else real(p),
+    )
+    out = hp._phase_preflight(hp.context_for("preflight", state, io=io))
+    assert out.status == hp.PhaseStatus.FAIL
+    assert "not writable" in (out.reason or "")
+    assert str(hermes_home) in (out.reason or "")
+
+
+def test_path_is_writable_probes_real_filesystem(tmp_path: Path) -> None:
+    """Unit-cover the probe helper: writable dir → True; non-existent target
+    resolves to its nearest existing ancestor."""
+    writable = tmp_path / "writable"
+    writable.mkdir()
+    assert hp.path_is_writable(writable) is True
+    # A target that doesn't exist yet resolves up to tmp_path (writable).
+    assert hp.path_is_writable(writable / "deep" / "nested" / "venv") is True
 
 
 def test_home_init_creates_layout_with_marker(tmp_path: Path) -> None:

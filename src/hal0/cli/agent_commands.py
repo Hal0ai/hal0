@@ -118,6 +118,11 @@ def _install_hermes(*, switch: bool) -> None:
 
     from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER, bootstrap_cli
 
+    # Bail out cleanly (before the toolchain shell-out) when we can't write the
+    # provisioning trees — otherwise the bootstrap crashes several phases deep
+    # with a raw PermissionError and leaves half-owned dirs behind.
+    _ensure_hermes_writable_or_die()
+
     prereqs = REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes-prereqs.sh"
     if prereqs.is_file():
         console.print("[bold]Ensuring toolchain[/bold] (python · venv · pip · pipx)…")
@@ -174,6 +179,41 @@ _HERMES_AGENT_TREES = (
     "/var/lib/hal0/.hermes",
     "/var/lib/hal0/state/agents/hermes",
 )
+
+
+def _ensure_hermes_writable_or_die() -> None:
+    """Abort with a sudo hint when provisioning can't write its trees.
+
+    ``hal0 agent install hermes`` provisions into root-owned ``/var/lib/hal0``
+    and is built to run as root on a system install — it chowns the result to
+    the ``hal0`` agent user afterwards (:func:`_chown_hermes_trees_to_agent_user`).
+    Run as a normal login user it used to crash several phases into the
+    bootstrap with a raw ``PermissionError`` and leave half-owned trees behind
+    (observed on a Fedora install). Catch the privilege mismatch up front, before
+    the toolchain shell-out, so we abort cleanly with no side effects.
+
+    No-op when we're root (root writes anywhere; the post-provision chown hands
+    the trees to ``hal0``) or on a dev / rootless install that already owns the
+    trees (the probe passes).
+    """
+    import os as _os
+
+    from hal0.agents.hermes_provision import path_is_writable
+
+    if _os.geteuid() == 0:
+        return
+    blocked = [t for t in _HERMES_AGENT_TREES if not path_is_writable(t)]
+    if not blocked:
+        return
+    die(
+        "Hermes provisioning needs write access to "
+        + ", ".join(blocked)
+        + f", but you're running as uid={_os.getuid()} and those live under "
+        "root-owned /var/lib/hal0.\n\n"
+        "Re-run as root:\n    sudo hal0 agent install hermes\n\n"
+        f"(Provisioning runs as root, then hands the trees to the "
+        f"'{_AGENT_RUNTIME_USER}' agent user automatically.)"
+    )
 
 
 def _chown_hermes_trees_to_agent_user() -> None:

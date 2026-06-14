@@ -50,8 +50,11 @@ def test_install_hermes_runs_prereqs_then_bootstrap_then_register(
     monkeypatch.setattr(ac, "api_post", _fake_api_post)
     monkeypatch.setattr(ac, "_api_unreachable", lambda _url: False)
     # Isolate the core sequence: no systemctl (skip enable/start). chown is
-    # geteuid-guarded so it no-ops under the test runner anyway.
+    # geteuid-guarded so it no-ops under the test runner anyway. The
+    # privilege/writability guard is its own concern (tested below) — neutralise
+    # it here so this test exercises only the toolchain→bootstrap→register order.
     monkeypatch.setattr("shutil.which", lambda _n: None)
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
 
     ac._install_hermes(switch=True)
 
@@ -95,6 +98,7 @@ def test_install_hermes_aborts_when_provisioning_fails(monkeypatch) -> None:
     monkeypatch.setattr("hal0.agents.hermes_provision.bootstrap_cli", _fail_bootstrap, raising=True)
     monkeypatch.setattr(ac, "api_post", _fake_api_post)
     monkeypatch.setattr(ac, "_api_unreachable", lambda _url: False)
+    monkeypatch.setattr(ac, "_ensure_hermes_writable_or_die", lambda: None)
 
     with pytest.raises((SystemExit, typer.Exit)):
         ac._install_hermes(switch=False)
@@ -134,3 +138,57 @@ def test_enable_and_start_unit_noops_without_systemd(monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", _fake_run)
     ac._enable_and_start_hermes_unit()
     assert called["ran"] is False
+
+
+# ── privilege/writability guard (issue: Fedora non-root `agent install`) ─────
+#
+# `hal0 agent install hermes` provisions into root-owned /var/lib/hal0 and is
+# built to run as root on a system install (it chowns the trees to the `hal0`
+# agent user afterwards). Run as a normal login user it used to crash several
+# phases deep with a raw PermissionError and leave half-owned trees behind.
+# The guard must abort BEFORE the toolchain/bootstrap steps, with a sudo hint.
+
+
+def test_install_hermes_guard_aborts_non_root_when_unwritable(monkeypatch) -> None:
+    import os
+
+    import pytest
+
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr("hal0.agents.hermes_provision.path_is_writable", lambda _p: False)
+
+    ran = {"toolchain": False, "bootstrap": False}
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: ran.__setitem__("toolchain", True))
+    monkeypatch.setattr(
+        "hal0.agents.hermes_provision.bootstrap_cli",
+        lambda **_k: ran.__setitem__("bootstrap", True),
+        raising=True,
+    )
+
+    with pytest.raises(SystemExit):
+        ac._install_hermes(switch=False)
+
+    # The guard fired first: no toolchain shell-out, no bootstrap, no half-state.
+    assert ran == {"toolchain": False, "bootstrap": False}
+
+
+def test_install_hermes_guard_noop_when_root(monkeypatch) -> None:
+    """Root writes anywhere — the guard must not even probe the filesystem."""
+    import os
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+    def _boom(_p):  # pragma: no cover - must never be called
+        raise AssertionError("path_is_writable probed despite running as root")
+
+    monkeypatch.setattr("hal0.agents.hermes_provision.path_is_writable", _boom)
+    ac._ensure_hermes_writable_or_die()  # returns cleanly, no raise
+
+
+def test_install_hermes_guard_noop_when_writable(monkeypatch) -> None:
+    """Dev / rootless install already owns the trees — proceed silently."""
+    import os
+
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr("hal0.agents.hermes_provision.path_is_writable", lambda _p: True)
+    ac._ensure_hermes_writable_or_die()  # no raise

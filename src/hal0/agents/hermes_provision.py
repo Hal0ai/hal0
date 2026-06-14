@@ -297,6 +297,36 @@ def _http_get(url: str, *, timeout: float = 3.0) -> int:
         return 0
 
 
+def path_is_writable(target: str | Path) -> bool:
+    """Whether we can actually create a file at (or under) ``target``.
+
+    Walks up to ``target``'s nearest existing ancestor — the directory the
+    bootstrap will start creating things in — and attempts a real
+    ``touch``/``unlink`` there. We probe rather than calling
+    :func:`os.access` because ``os.access`` reports stale answers under
+    SELinux, POSIX ACLs and NFS root-squash, and because it can't see that an
+    *existing* root-owned ``$HERMES_HOME`` (created by the root daemon before
+    ``agent install`` runs) is unwritable to a non-root installer — exactly
+    the case that detonated several phases deep on a Fedora install.
+    """
+    anchor = Path(target)
+    while not anchor.exists():
+        parent = anchor.parent
+        if parent == anchor:  # reached the filesystem root with nothing existing
+            return False
+        anchor = parent
+    if not anchor.is_dir():
+        return False
+    probe = anchor / f".hal0-writeprobe-{os.getpid()}"
+    try:
+        probe.touch()
+    except OSError:
+        return False
+    with contextlib.suppress(OSError):  # created but cleanup may fail — still writable
+        probe.unlink()
+    return True
+
+
 def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
     """Hard-fail when the host can't host Hermes.
 
@@ -307,8 +337,9 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
       we can re-use ``sys.executable`` instead of hunting PATH.
     * ``hal0`` daemon reachable at ``/api/status`` — agents that can't
       reach hal0 are useless. Catch it now instead of during config_write.
-    * ``/var/lib/hal0/`` writable — we'll be writing the venv + HERMES_HOME
-      there in the next phase.
+    * venv tree + ``$HERMES_HOME`` write-probed — we create both in later
+      phases; a real touch/unlink catches a root-owned ``$HERMES_HOME`` (or
+      SELinux/ACL block) that an ``os.access`` check on ``/var/lib/hal0`` misses.
     * ≥ 4 GiB free under ``/var/lib/hal0/`` — Hermes deps + a typical
       memory cache run ~3 GiB; 4 GiB leaves headroom for venv rebuild.
     """
@@ -334,12 +365,30 @@ def _phase_preflight(ctx: PhaseContext) -> PhaseResult:
 
     var_lib = Path(state.venv).parent.parent  # /var/lib/hal0/
     details["var_lib_path"] = str(var_lib)
-    if not var_lib.exists() or not os.access(var_lib, os.W_OK):
-        failures.append(
-            f"{var_lib} not writable — run `sudo install -d -o hal0 -g hal0 -m 0755 {var_lib}`",
+
+    # Write-probe the ACTUAL targets — the venv tree and $HERMES_HOME — not
+    # just os.access() on /var/lib/hal0. A root-owned $HERMES_HOME created by
+    # the (root) daemon before `agent install` sails past a var_lib-only check,
+    # then env_probe detonates with a raw EACCES several phases deep (observed
+    # on Fedora: hermes provisioned as a non-root login user against root-owned
+    # /var/lib/hal0). os.access() also lies under SELinux / ACLs / NFS.
+    blocked = sorted(
+        str(p) for p in (Path(state.venv), Path(state.hermes_home)) if not path_is_writable(p)
+    )
+    details["write_blocked"] = blocked
+    if blocked:
+        hint = (
+            f"run `sudo install -d -o hal0 -g hal0 -m 0755 {var_lib}`"
+            if os.geteuid() == 0
+            else "re-run as root: `sudo hal0 agent install hermes`"
         )
+        failures.append(f"not writable: {', '.join(blocked)} — {hint}")
     else:
-        st = os.statvfs(var_lib)
+        # var_lib's nearest existing ancestor (it exists if the probe passed).
+        anchor = var_lib
+        while not anchor.exists():
+            anchor = anchor.parent
+        st = os.statvfs(anchor)
         free_gib = st.f_bavail * st.f_frsize / (1024**3)
         details["free_gib"] = round(free_gib, 2)
         if free_gib < MIN_FREE_GIB:
