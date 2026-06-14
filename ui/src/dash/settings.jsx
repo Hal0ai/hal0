@@ -461,11 +461,19 @@ function SecretsSection() {
             actions={s.set
               ? (<>
                   <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Update</button>
-                  <button className="btn danger sm" onClick={() => {
-                    delSecret.mutate(s.name, {
-                      onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${s.name} removed`, "warn"),
-                    });
-                  }}>Remove</button>
+                  <button
+                    className="btn danger sm"
+                    disabled={delSecret.isPending && delSecret.variables === s.name}
+                    onClick={() => {
+                      delSecret.mutate(s.name, {
+                        onSuccess: () => window.__hal0Toast && window.__hal0Toast(`${s.name} removed`, "warn"),
+                        onError: (err) => window.__hal0Toast && window.__hal0Toast(
+                          `Remove failed — ${err?.message || "see logs"}`,
+                          "err",
+                        ),
+                      });
+                    }}
+                  >{delSecret.isPending && delSecret.variables === s.name ? "Removing…" : "Remove"}</button>
                 </>)
               : <button className="btn ghost sm" onClick={() => setAddOpen(true)}>Add</button>}
           />
@@ -699,7 +707,8 @@ function VoiceSection() {
       await applyCapability.mutateAsync({ slot: "voice", child: "tts", body: { model: ttsModel, enabled: ttsEnabled } });
       // Persist default_voice via slot config if changed
       const origVoice = ttsCfg.default_voice ? String(ttsCfg.default_voice) : "";
-      if (ttsVoice !== origVoice && ttsVoice) {
+      if (ttsVoice !== origVoice) {
+        // ttsVoice === "" intentionally clears default_voice back to the server default
         await editSlot.mutateAsync({ name: "tts", body: { default_voice: ttsVoice } });
       }
       window.__hal0Toast && window.__hal0Toast("TTS settings saved", "ok");
