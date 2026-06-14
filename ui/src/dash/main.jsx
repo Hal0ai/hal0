@@ -40,6 +40,24 @@ function parseRoute() {
     head = "mcp";
     rest = rest.slice(1);
   }
+  // v0.5 nav: the Connections page was dissolved — its Local-endpoints section
+  // moved to Slots ▸ Endpoints and its MCP section to Agent ▸ MCP. Redirect old
+  // #connections deep-links to the Endpoints tab.
+  if (head === "connections") {
+    if (typeof window !== "undefined" && window.location.hash !== "#slots/endpoints") {
+      window.location.hash = "#slots/endpoints";
+    }
+    head = "slots";
+    rest = ["endpoints"];
+  }
+  // v0.5 nav: Profiles moved into a Slots tab. Redirect old #profiles links.
+  if (head === "profiles") {
+    if (typeof window !== "undefined" && window.location.hash !== "#slots/profiles") {
+      window.location.hash = "#slots/profiles";
+    }
+    head = "slots";
+    rest = ["profiles"];
+  }
   // v0.3 PR-8: legacy #peers route redirects to the Peer memory
   // subsection inside the Memory tab on the agent route. We mutate
   // the hash here so deep links from older docs / bookmarks land on
@@ -224,33 +242,16 @@ function App() {
         );
       case "models":   return <ModelsView />;
       case "logs":     return <LogsView />;
+      // v0.5 nav: Agent is a tabbed shell hosting Memory + MCP. #memory and
+      // #mcp are kept as routes that resolve to their tab inside AgentView (so
+      // MemoryView's internal #memory/<section> nav round-trips and old
+      // deep-links still land on the right surface). The memory gate is
+      // enforced inside AgentView — the Memory tab only renders when enabled.
       case "agent":
-        // 0.4: hidden from the sidebar when memory is off. Stale deep links
-        // / bookmarks bounce to dashboard rather than showing a dead-text page.
-        // Guard: memoryStatusPending prevents redirect during the transient
-        // loading window (useMemoryEnabled returns false while the /api/status
-        // query is in-flight; we must not redirect until it settles).
-        if (!memoryEnabled && !memoryStatusPending) {
-          if (typeof window !== "undefined") window.location.hash = "#dashboard";
-          return null;
-        }
-        if (memoryStatusPending) return null; // loading — render nothing briefly
-        return <AgentView />;
       case "memory":
-        // Same gate as #agent — Hindsight surface only exists when the
-        // memory subsystem is live.
-        if (!memoryEnabled && !memoryStatusPending) {
-          if (typeof window !== "undefined") window.location.hash = "#dashboard";
-          return null;
-        }
-        if (memoryStatusPending) return null;
-        return <MemoryView param={param} />;
-      case "profiles":  return <ProfilesView />;
-      case "settings": return <SettingsView param={param} />;
-      // MCP folded into Connections (connections-overhaul) — #mcp + #agents/mcp
-      // stay as aliases so old deep-links resolve to the new surface.
       case "mcp":
-      case "connections": return <ConnectionsView />;
+        return <AgentView />;
+      case "settings": return <SettingsView param={param} />;
       default:         return <div className="view">Not found.</div>;
     }
   };
@@ -273,7 +274,7 @@ function App() {
           menuOpen={navOpen}
           approvals={approvalItems.length}
         />
-        {!isFirstrun && <Sidebar route={route} onGo={go} />}
+        {!isFirstrun && <Sidebar route={route} param={param} onGo={go} />}
         <div className="main">
           <div className="view-banners">
             {/* Phase 2 of #322: UpdateBanner self-renders when the
@@ -307,6 +308,7 @@ function App() {
         <NavDrawer
           open={navOpen}
           route={route}
+          param={param}
           onGo={(id) => { setNavOpen(false); go(id); }}
           onClose={() => setNavOpen(false)}
           onCmdK={() => { setNavOpen(false); setPaletteOpen(true); }}

@@ -209,41 +209,67 @@ function useNavItems() {
   // route guard for deep links.
   const memoryEnabled = useMemoryEnabled();
   return [
-    { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
-    { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount },
-    // issue #658 — Profiles: container-slot templates (image + bench flags).
-    // Sits under Slots as the natural companion for container runtime config.
-    { id: "profiles",  label: "Profiles",  icon: Icons.hardware },
-    { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
-    { id: "logs",      label: "Logs",      icon: Icons.logs },
-    ...(memoryEnabled ? [{ id: "agent", label: "Agent", icon: Icons.agent }] : []),
-    ...(memoryEnabled ? [{ id: "memory", label: "Memory", icon: Icons.memory }] : []),
-    { id: "settings",  label: "Settings",  icon: Icons.settings },
-    // Connections surface — local OpenAI endpoints + folded-in MCP servers
-    // (connections-overhaul). The MCP page was removed from the sidebar; its
-    // servers are now a section here. Badged with the local endpoint count.
-    { id: "connections", label: "Connections", icon: Icons.connections, cnt: slotCount },
+    { id: "dashboard", label: "Overview", icon: Icons.dashboard },
+    // v0.5 nav: Slots hosts Endpoints (local OpenAI endpoints, from the old
+    // Connections page) and Profiles (container-slot templates, #658) as tabs.
+    { id: "slots", label: "Slots", icon: Icons.slots, cnt: slotCount, children: [
+      { id: "slots/endpoints", label: "Endpoints" },
+      { id: "slots/profiles",  label: "Profiles" },
+    ] },
+    { id: "models", label: "Models", icon: Icons.models, cnt: modelCount },
+    // v0.5 nav: Agent hosts Memory (full Hindsight page, gated on the memory
+    // subsystem) and MCP (bundled FastMCP servers, from the old Connections
+    // page) as tabs. MCP is always shown; Memory follows the gate.
+    { id: "agent", label: "Agent", icon: Icons.agent, children: [
+      ...(memoryEnabled ? [{ id: "memory", label: "Memory" }] : []),
+      { id: "mcp", label: "MCP" },
+    ] },
+    { id: "logs", label: "Logs", icon: Icons.logs },
+    { id: "settings", label: "Settings", icon: Icons.settings },
   ];
 }
 
+// Active-state for sidebar/drawer rows. `id` is the row's hash target
+// ("slots", "slots/endpoints", "agent", "memory", "mcp"). A parent row
+// highlights across its whole section; a child row highlights for its exact
+// sub-path. The Agent parent groups the agent/memory/mcp routes.
+function _navActive(route, param, id) {
+  const cur = route + (param ? "/" + param : "");
+  if (cur === id) return true;
+  if (id === route) return true;
+  if (id === "agent" && (route === "agent" || route === "memory" || route === "mcp")) return true;
+  return false;
+}
+
 // ─── Sidebar ───
-function Sidebar({ route, onGo }) {
+function Sidebar({ route, param, onGo }) {
   const items = useNavItems();
   return (
     <div className="sidebar">
       <div className="sb-section">Navigate</div>
       <div className="sb-list">
         {items.map(it => (
-          <div
-            key={it.id}
-            className={"sb-row" + (route === it.id ? " active" : "")}
-            data-testid={"nav-" + it.id}
-            onClick={() => onGo(it.id)}
-          >
-            {it.icon}
-            <span className="lbl">{it.label}</span>
-            {it.cnt !== undefined && <span className="cnt num">{it.cnt}</span>}
-          </div>
+          <React.Fragment key={it.id}>
+            <div
+              className={"sb-row" + (_navActive(route, param, it.id) ? " active" : "")}
+              data-testid={"nav-" + it.id.replace(/\//g, "-")}
+              onClick={() => onGo(it.id)}
+            >
+              {it.icon}
+              <span className="lbl">{it.label}</span>
+              {it.cnt !== undefined && <span className="cnt num">{it.cnt}</span>}
+            </div>
+            {it.children && it.children.map(ch => (
+              <div
+                key={ch.id}
+                className={"sb-row sb-sub" + (_navActive(route, param, ch.id) ? " active" : "")}
+                data-testid={"nav-" + ch.id.replace(/\//g, "-")}
+                onClick={() => onGo(ch.id)}
+              >
+                <span className="lbl">{ch.label}</span>
+              </div>
+            ))}
+          </React.Fragment>
         ))}
       </div>
       <div className="sb-spacer" />
@@ -696,7 +722,7 @@ if (typeof document !== "undefined" && !document.getElementById("hal0-modal-css"
 // from the topbar on mobile), the full nav (useNavItems), and the runtime
 // status widget. Opened from the topbar hamburger; closed via backdrop,
 // the X, Esc, or navigating.
-function NavDrawer({ open, route, onGo, onClose, onCmdK }) {
+function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
   const items = useNavItems();
   return (
     <>
@@ -722,15 +748,27 @@ function NavDrawer({ open, route, onGo, onClose, onCmdK }) {
         </button>
         <div className="sb-list">
           {items.map(it => (
-            <div
-              key={it.id}
-              className={"sb-row" + (route === it.id ? " active" : "")}
-              onClick={() => onGo(it.id)}
-            >
-              {it.icon}
-              <span className="lbl">{it.label}</span>
-              {it.cnt !== undefined && <span className="cnt num">{it.cnt}</span>}
-            </div>
+            <React.Fragment key={it.id}>
+              <div
+                className={"sb-row" + (_navActive(route, param, it.id) ? " active" : "")}
+                data-testid={"nav-drawer-" + it.id.replace(/\//g, "-")}
+                onClick={() => onGo(it.id)}
+              >
+                {it.icon}
+                <span className="lbl">{it.label}</span>
+                {it.cnt !== undefined && <span className="cnt num">{it.cnt}</span>}
+              </div>
+              {it.children && it.children.map(ch => (
+                <div
+                  key={ch.id}
+                  className={"sb-row sb-sub" + (_navActive(route, param, ch.id) ? " active" : "")}
+                  data-testid={"nav-drawer-" + ch.id.replace(/\//g, "-")}
+                  onClick={() => onGo(ch.id)}
+                >
+                  <span className="lbl">{ch.label}</span>
+                </div>
+              ))}
+            </React.Fragment>
           ))}
         </div>
         <div className="sb-spacer" />

@@ -1,16 +1,23 @@
 /**
- * connections-v3 — `#connections` renders the overhauled ConnectionsView.
+ * connections-v3 — the dissolved Connections page split into two new homes.
  *
- * The page is now two stacked "engine-block" panes (connections-overhaul):
- *   1. Local endpoints — the OpenAI-compatible API, one row per slot, each
- *      row expands to a cURL builder + a real health-check "Test" ping.
- *   2. MCP servers — the bundled FastMCP servers folded in from the old MCP
- *      page, each expandable with add-to-client config + a tool manifest
+ * v0.5 nav: the standalone #connections page (its `<h1>Connections</h1>` +
+ * "Network" eyebrow) is GONE. Its two engine-block panes were repointed:
+ *   1. Local endpoints — now the Slots ▸ Endpoints tab (#slots/endpoints),
+ *      rendered via window.LocalEndpointsPanel. The OpenAI-compatible API,
+ *      one row per slot, each row expands to a cURL builder + a real
+ *      health-check "Test" ping.
+ *   2. MCP servers — now the Agent ▸ MCP tab (#mcp / #agent/mcp), rendered
+ *      via window.McpServersPanel. The bundled FastMCP servers, each
+ *      expandable with add-to-client config + a tool manifest
  *      (name · args · gated / destructive / read-only badges).
  *
- * Data is wired to useSlots() (/api/slots) + useMcpServers() (/api/mcp/servers)
- * + useConfigUrls() (/api/config/urls). The Test button fires a real request
- * through the gateway; we stub /v1/chat/completions with an SSE body.
+ * The inner markup (.cpane / .eplist / .eprow / EndpointRow; .mcplist /
+ * .mcprow / McpServerRow) is IDENTICAL to the old page — only the page
+ * wrapper/heading changed. Data is still wired to useSlots() (/api/slots) +
+ * useMcpServers() (/api/mcp/servers) + useConfigUrls() (/api/config/urls).
+ * The Test button fires a real request through the gateway; we stub
+ * /v1/chat/completions with an SSE body.
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
@@ -91,23 +98,19 @@ const CHAT_SSE =
   'data: {"choices":[{"delta":{}}],"usage":{"completion_tokens":1}}\n\n' +
   'data: [DONE]\n\n'
 
-test.describe('Connections view (#connections)', () => {
+// ── Local endpoints — now the Slots ▸ Endpoints tab (#slots/endpoints) ──
+test.describe('Local endpoints (Slots ▸ Endpoints, #slots/endpoints)', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('**/api/mcp/servers', (route) =>
-      json(route, { servers: MOCK_MCP_SERVERS, count: MOCK_MCP_SERVERS.length }),
-    )
-    await Promise.all([
-      page.waitForResponse('**/api/mcp/servers', { timeout: 15_000 }),
-      page.goto('/#connections', { waitUntil: 'domcontentloaded' }),
-    ])
+    await page.goto('/#slots/endpoints', { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.eprow').first()).toBeVisible({ timeout: 5_000 })
   })
 
-  test('renders the Connections heading + two engine panes', async ({ page }) => {
-    await expect(page.locator('.view .vh h1')).toHaveText('Connections')
+  test('renders the Local endpoints engine pane on the Endpoints tab', async ({ page }) => {
+    // v0.5: the standalone "Connections" heading is gone — the Slots page
+    // header sits above, and the Endpoints tab hosts only the endpoints pane.
+    await expect(page.locator('.view .vh h1')).toHaveText('Slots')
     await expect(page.locator('.cpane.live')).toBeVisible()
     await expect(page.locator('.cpane-title', { hasText: 'Local endpoints' })).toBeVisible()
-    await expect(page.locator('.cpane-title', { hasText: 'MCP servers' })).toBeVisible()
   })
 
   test('local endpoints list one row per slot', async ({ page }) => {
@@ -141,6 +144,28 @@ test.describe('Connections view (#connections)', () => {
     await expect(result).toBeVisible({ timeout: 5_000 })
     await expect(result.locator('.status')).toContainText('200 OK')
     await expect(result.locator('.ep-metrics .m', { hasText: 'tok/s' })).toBeVisible()
+  })
+
+})
+
+// ── MCP servers — now the Agent ▸ MCP tab (#mcp / #agent/mcp) ──
+test.describe('MCP servers (Agent ▸ MCP, #mcp)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/mcp/servers', (route) =>
+      json(route, { servers: MOCK_MCP_SERVERS, count: MOCK_MCP_SERVERS.length }),
+    )
+    await Promise.all([
+      page.waitForResponse('**/api/mcp/servers', { timeout: 15_000 }),
+      page.goto('/#mcp', { waitUntil: 'domcontentloaded' }),
+    ])
+    await expect(page.locator('.mcprow').first()).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('renders the MCP servers engine pane inside the Agent shell', async ({ page }) => {
+    // v0.5: MCP lives under the Agent tabbed page (header "Agent", eyebrow
+    // "Tools"); the "Connections" heading is gone.
+    await expect(page.locator('.view .vh h1')).toHaveText('Agent')
+    await expect(page.locator('.cpane-title', { hasText: 'MCP servers' })).toBeVisible()
   })
 
   test('MCP servers fold in as expandable rows with a tool manifest', async ({ page }) => {

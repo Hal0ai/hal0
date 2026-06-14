@@ -31,10 +31,21 @@ test.describe('Mobile nav drawer (≤720px)', () => {
     await expect(burger).toHaveAttribute('aria-expanded', 'true')
     await expect(page.locator('.nav-drawer-backdrop.open')).toBeVisible()
 
-    // full nav — including the destinations the dead bottom tabs never reached
-    for (const label of ['Dashboard', 'Slots', 'Models', 'Logs', 'Connections', 'Settings']) {
-      await expect(drawer.locator('.sb-row .lbl', { hasText: label })).toBeVisible()
+    // full nav — including the destinations the dead bottom tabs never reached.
+    // v0.5 nav: "Dashboard" relabelled "Overview"; Connections dissolved into
+    // the Slots ▸ Endpoints + Agent ▸ MCP sub-links.
+    for (const label of ['Overview', 'Slots', 'Models', 'Agent', 'Logs', 'Settings']) {
+      await expect(
+        drawer.locator('.sb-row', { has: page.locator('.lbl') }).filter({ hasText: label }).first(),
+      ).toBeVisible()
     }
+    // v0.5 sub-link rows now carry data-testids (the drawer rows had none before).
+    await expect(drawer.locator('[data-testid="nav-drawer-slots-endpoints"]')).toBeVisible()
+    await expect(drawer.locator('[data-testid="nav-drawer-slots-profiles"]')).toBeVisible()
+    await expect(drawer.locator('[data-testid="nav-drawer-memory"]')).toBeVisible()
+    await expect(drawer.locator('[data-testid="nav-drawer-mcp"]')).toBeVisible()
+    // the removed top-level items are gone from the drawer too.
+    await expect(drawer.locator('.sb-row .lbl', { hasText: 'Connections' })).toHaveCount(0)
     // command palette folded into the drawer on mobile
     await expect(drawer.locator('.nav-drawer-cmdk')).toBeVisible()
     // runtime widget re-shown inside the drawer (despite the 1080px global hide)
