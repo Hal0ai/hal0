@@ -93,6 +93,13 @@ function App() {
   const useMemEnabledPending = (typeof window !== "undefined" && window.__hal0UseMemoryEnabledPending) || null;
   const memoryStatusPending = useMemEnabledPending ? useMemEnabledPending() : true;
 
+  // FirstRun auto-route (design D6): on the first dashboard visit of a fresh
+  // install (/api/install/state.first_run), drop the operator straight into
+  // the wizard instead of an empty dashboard. Read via the window bridge to
+  // stay inside the no-ES-imports dash/*.jsx contract.
+  const useInstallStateBridge = (typeof window !== "undefined" && window.__hal0UseInstallState) || null;
+  const installState = useInstallStateBridge ? useInstallStateBridge() : { firstRun: false, pending: true };
+
   // Live approval queue — bridges installed by chrome.jsx (loaded before main.jsx).
   // TODO endpoints.ts (ui-sweep-b owns) — inline paths live in useAgents.ts hooks.
   const useApprovalListHook = (typeof window !== "undefined" && window.__hal0UseApprovalList) || null;
@@ -166,6 +173,16 @@ function App() {
   const go = (id) => {
     window.location.hash = "#" + id;
   };
+
+  // FirstRun auto-route (design D6): redirect into the wizard on a fresh
+  // install once /api/install/state has settled. Guard on `pending` so we
+  // don't bounce during the transient loading window, and only when not
+  // already on the firstrun route (so the manual Back/Skip can leave it).
+  useEffectA(() => {
+    if (!installState.pending && installState.firstRun && route !== "firstrun") {
+      go("firstrun");
+    }
+  }, [installState.pending, installState.firstRun, route]);
 
   const onFirstRunComplete = () => {
     setFrStage("pick");
