@@ -407,11 +407,19 @@ export function useSlotCreate() {
  * for the single-field backend switch.
  */
 export function useSlotEdit() {
+  const qc = useQueryClient()
   const invalidate = useSlotsInvalidator()
   return useMutation({
     mutationFn: ({ name, body }: { name: string; body: Record<string, unknown> }) =>
       slotPut(ENDPOINTS.slotConfig(name), body),
-    onSuccess: invalidate,
+    // Refetch the slot list AND the per-slot config read. The Settings →
+    // Voice section reflects fields that only live in the slot TOML (e.g.
+    // default_voice) via useSlotConfig(['slot-config', name]); without this
+    // the dropdown stays stale after a save and reverts on reopen.
+    onSuccess: (_data, { name }) => {
+      invalidate()
+      qc.invalidateQueries({ queryKey: ['slot-config', name] })
+    },
   })
 }
 
