@@ -206,7 +206,7 @@ info "Pull destination: ${MODELS_DIR}"
 
 # Step total. Kept here so editors who add or remove a ui_step bump the
 # visible counter in the same diff.
-UI_STEP_TOTAL=11
+UI_STEP_TOTAL=12
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
@@ -1042,6 +1042,37 @@ if [[ -d "${BUNDLES_SRC}" ]]; then
     fi
 else
     warn "bundle manifest source ${BUNDLES_SRC} not found; picker will fall back to in-tree defaults"
+fi
+
+# ── Bundled agent skills (drop-in skill library) ──────────────────────────
+# Ship hal0's own agent skills to /usr/share/hal0/skills (read-only source).
+# The hermes provision's context_link phase (_mirror_bundled_skills) symlinks
+# each one into /etc/hal0/agent-skills, which the rendered config.yaml lists in
+# skills.external_dirs — so a fresh agent comes up with the bundled skills
+# already loaded. Also create a writable drop-in dir at /var/lib/hal0/skills
+# (also on external_dirs): new skills install just by dropping a folder in, and
+# editing is a plain file edit. This must run BEFORE the hermes provision in
+# "Service start" so the mirror finds the shipped source. Idempotent.
+ui_step "Bundled agent skills"
+
+SKILLS_SRC="${REPO_ROOT}/installer/agent-skills"
+SKILLS_SHIP="/usr/share/hal0/skills"
+SKILLS_DROPIN="${VAR_DIR}/skills"
+AGENT_SKILLS_MIRROR="${ETC_DIR}/agent-skills"
+
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    mkdir -p "${SKILLS_SHIP}" "${AGENT_SKILLS_MIRROR}" "${SKILLS_DROPIN}"
+    if [[ -d "${SKILLS_SRC}" ]] && compgen -G "${SKILLS_SRC}/*" >/dev/null; then
+        cp -rf "${SKILLS_SRC}"/* "${SKILLS_SHIP}/"
+        info "shipped $(find "${SKILLS_SRC}" -mindepth 1 -maxdepth 1 -type d | wc -l) hal0 skill(s) → ${SKILLS_SHIP}"
+    else
+        info "no bundled skills at ${SKILLS_SRC} — drop-in dirs still created"
+    fi
+    # Writable drop-in (agent runs as hal0): add/edit skills at runtime here.
+    chown -R hal0:hal0 "${SKILLS_DROPIN}" 2>/dev/null || true
+    info "skill drop-in: ${SKILLS_DROPIN} (drop a folder here to add a skill; editable)"
+else
+    info "dev mode — skipping system skill install (/usr/share/hal0/skills)"
 fi
 
 ui_step "Service start"
