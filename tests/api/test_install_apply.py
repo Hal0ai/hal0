@@ -38,7 +38,11 @@ def _gpu_hardware():
         ram_mb=131072,
         unified_memory_mb=131072,
         platform="strix-halo",
-        gpus=[GPUInfo(vendor="amd", name="g", vram_mb=80000, compute_capable=True, vulkan_capable=True)],
+        gpus=[
+            GPUInfo(
+                vendor="amd", name="g", vram_mb=80000, compute_capable=True, vulkan_capable=True
+            )
+        ],
         npu=NPUInfo(present=False),
     )
 
@@ -80,6 +84,6 @@ def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, 
 
 
 def test_apply_unknown_tier_400(isolated_app_client):
-    app, client = isolated_app_client
+    _app, client = isolated_app_client
     r = client.post("/api/install/apply", json={"tier": "nope", "storage_dir": "/tmp"})
     assert r.status_code in (400, 404)
