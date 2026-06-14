@@ -536,6 +536,10 @@ HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
 # with memory dark. Needs the shared hindsight-api daemon (installer/systemd/
 # hindsight-api.service); set [memory] engine = "cognee" to fall back.
 HAL0_MEMORY_ENABLED=1
+# HF_TOKEN — HuggingFace token for gated / large model pulls. Easiest path:
+# set it in the dashboard (Settings -> Secrets -> HuggingFace token) for a live,
+# no-restart update. Or uncomment below and \`systemctl restart hal0-api\`.
+# HF_TOKEN=
 # HAL0_TOOLBOX_IMAGE_VULKAN / HAL0_TOOLBOX_IMAGE_ROCM — optional overrides for
 # the per-backend container image refs used by providers/llama_server.py.
 # Unset = use the image pinned in the provider at release time.
