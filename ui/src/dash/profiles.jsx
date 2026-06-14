@@ -293,7 +293,7 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
 
   const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setTouched(t => ({ ...t, [k]: true })); };
   const touch = (k) => setTouched(t => ({ ...t, [k]: true }));
-  const close = () => { setClosing(true); setTimeout(onClose, 200); };
+  const close = () => { if (submitting) return; setClosing(true); setTimeout(onClose, 200); };
 
   async function submit(e) {
     e.preventDefault();
@@ -354,13 +354,14 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
         onMouseDown={e => e.stopPropagation()}
         role="dialog"
         aria-label={title}
+        aria-busy={submitting}
       >
         <div className="pf-drawer-head">
           <div>
             <div className="pf-drawer-eye mono">{eyebrow}</div>
             <div className="pf-drawer-title pf-form-title mono">{title}</div>
           </div>
-          <button className="pf-x" onClick={close} aria-label="Close">{Icons.close}</button>
+          <button className="pf-x" onClick={close} aria-label="Close" disabled={submitting}>{Icons.close}</button>
         </div>
 
         <form className="pf-drawer-body" onSubmit={submit} noValidate>
@@ -428,7 +429,7 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
           {submitted && blocking && (
             <span className="pf-foot-err mono">{Icons.alert}Fix {Object.keys(errs).length} field{Object.keys(errs).length > 1 ? 's' : ''}</span>
           )}
-          <button className="pf-btn" onClick={close} type="button">Cancel</button>
+          <button className="pf-btn" onClick={close} type="button" disabled={submitting}>Cancel</button>
           <button className={'pf-btn primary' + (submitted && blocking ? ' is-blocked' : '')}
             onClick={submit} disabled={submitting} data-testid="pf-btn-submit">
             {submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Create profile'}
@@ -471,8 +472,8 @@ function DeleteConfirm({ p, onCancel, onConfirmed }) {
   }
 
   return (
-    <div className="pf-scrim center pf-confirm-scrim" onMouseDown={onCancel}>
-      <div className="pf-confirm" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Confirm delete">
+    <div className="pf-scrim center pf-confirm-scrim" onMouseDown={() => { if (!busy) onCancel(); }}>
+      <div className="pf-confirm" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Confirm delete" aria-busy={busy}>
         <div className="pf-confirm-h pf-confirm-title mono">{Icons.trash} Delete · {p.name}?</div>
         {inUse ? (
           <div className="pf-confirm-b">
@@ -486,7 +487,7 @@ function DeleteConfirm({ p, onCancel, onConfirmed }) {
           </div>
         )}
         <div className="pf-confirm-foot">
-          <button className="pf-btn" onClick={onCancel}>Cancel</button>
+          <button className="pf-btn" onClick={onCancel} disabled={busy}>Cancel</button>
           <button className="pf-btn danger solid" onClick={handleDelete} disabled={!!inUse || busy}
             data-testid="pf-btn-delete-confirm">
             {inUse ? 'In use' : busy ? 'Deleting…' : 'Delete profile'}
