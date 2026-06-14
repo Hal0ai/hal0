@@ -1020,6 +1020,38 @@ def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
     )
 
 
+def _resolve_pull_capability(
+    request: Request,
+    model_id: str,
+    body: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Resolve ``(capability, comfyui_subdir)`` for a pull (P3 grouped layout).
+
+    Priority for capability: explicit ``body.capability`` → the registry row's
+    first capability → the curated entry's capability. ``comfyui_subdir`` comes
+    from the curated entry only. Returns ``(None, None)`` for an unknown ad-hoc
+    model so :func:`run_pull` falls back to the legacy flat layout.
+    """
+    if isinstance(body, dict):
+        cap_raw = body.get("capability")
+        if isinstance(cap_raw, str) and cap_raw.strip():
+            return cap_raw.strip(), None
+
+    try:
+        existing = request.app.state.model_registry.get(model_id)
+        caps = getattr(existing, "capabilities", None) or []
+        if caps:
+            return str(caps[0]), None
+    except Exception:
+        pass
+
+    curated = get_curated(model_id)
+    if curated is not None:
+        subdir = (getattr(curated, "comfyui_subdir", "") or "").strip() or None
+        return (curated.capability or None), subdir
+    return None, None
+
+
 def _seed_registry_from_body(
     request: Request,
     model_id: str,
