@@ -43,8 +43,10 @@ test.describe('AddSecretModal — real save', () => {
     // Wait for modal to open
     await expect(page.locator('.modal-shell')).toBeVisible({ timeout: FIVE_S })
 
-    // Fill in a value that matches HF_TOKEN prefix
-    const valueInput = page.locator('input[type="password"]')
+    // Fill in a value that matches HF_TOKEN prefix. Scope to the modal — the
+    // Secrets section also renders a password input (the dedicated HuggingFace
+    // token field, #816), so an unscoped selector is now ambiguous.
+    const valueInput = page.locator('.modal-shell input[type="password"]')
     await valueInput.fill('hf_teststub1234567890ABCDEFGHIJKLMNOPQRSTUVWxyz')
 
     // The "Add secret" save button should be enabled
