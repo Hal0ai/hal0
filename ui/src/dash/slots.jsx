@@ -877,7 +877,9 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // generation engine pane). ComfyUI is one container engine, not per-model
   // slots, and is mutually exclusive with the LLM stack — so it gets its own
   // tab instead of a SlotCard in the Image group.
-  const [tab, setTab] = useStateS("inference");
+  const [tab, setTab] = useStateS(
+    slotParam === "endpoints" || slotParam === "profiles" ? slotParam : "inference",
+  );
   const comfyQuery = useComfyui({ active: tab === "image" });
   const comfyLive = comfyQuery.data?.container?.state === "running";
   const { active: activeBanners } = useBanners();
@@ -924,6 +926,14 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       setEditName(null);
     }
   }, [slotParam, slots]);
+
+  // v0.5 nav: sidebar sub-links #slots/endpoints and #slots/profiles select the
+  // matching tab; navigating back to bare #slots (or a slot-name param) drops
+  // out of a sub-tab back to Inference.
+  React.useEffect(() => {
+    if (slotParam === "endpoints" || slotParam === "profiles") setTab(slotParam);
+    else setTab((t) => (t === "endpoints" || t === "profiles" ? "inference" : t));
+  }, [slotParam]);
 
   // Listen for the N hotkey via global event (wired by main.jsx)
   React.useEffect(() => {
@@ -1236,7 +1246,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           role="tab"
           aria-selected={tab === "inference"}
           className={"slot-tab infer" + (tab === "inference" ? " on" : "")}
-          onClick={() => setTab("inference")}
+          onClick={() => { setTab("inference"); if (slotParam) window.location.hash = "#slots"; }}
         >
           <span>Inference</span>
           <span className="slot-tab-ct num">{cardSlots.length - groups.img.length}</span>
@@ -1245,13 +1255,36 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           role="tab"
           aria-selected={tab === "image"}
           className={"slot-tab comfy" + (tab === "image" ? " on" : "")}
-          onClick={() => setTab("image")}
+          onClick={() => { setTab("image"); if (slotParam) window.location.hash = "#slots"; }}
         >
           <span className={"slot-tab-dot" + (comfyLive ? " live" : "")} />
           <span>Image Gen</span>
         </button>
+        <button
+          role="tab"
+          aria-selected={tab === "endpoints"}
+          className={"slot-tab" + (tab === "endpoints" ? " on" : "")}
+          onClick={() => { window.location.hash = "#slots/endpoints"; }}
+        >
+          <span>Endpoints</span>
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === "profiles"}
+          className={"slot-tab" + (tab === "profiles" ? " on" : "")}
+          onClick={() => { window.location.hash = "#slots/profiles"; }}
+        >
+          <span>Profiles</span>
+        </button>
       </div>
 
+      {tab === "endpoints" ? (
+        <div className="conn">
+          {window.LocalEndpointsPanel ? <window.LocalEndpointsPanel /> : null}
+        </div>
+      ) : tab === "profiles" ? (
+        window.ProfilesView ? <window.ProfilesView /> : null
+      ) : (
       <div className="dash">
         <div className="dash-main">
           {tab === "image" ? (
@@ -1282,6 +1315,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           <ActivityLog />
         </div>
       </div>
+      )}
 
       <CreateSlotModal
         open={createOpen}

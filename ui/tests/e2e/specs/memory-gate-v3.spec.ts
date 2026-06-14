@@ -2,14 +2,19 @@
  * memory-gate-v3 — 0.4 release gate for the memory subsystem.
  *
  * The memory engine (Cognee), its MCP server, the REST surface, and the
- * dashboard's Agent → Memory tab ship DISABLED by default and return in a
+ * dashboard's Agent ▸ Memory tab ship DISABLED by default and return in a
  * later release. The backend gates them behind HAL0_MEMORY_ENABLED and
- * reports the resulting state via /api/status `memory_enabled`. This spec
- * pins the UI half of that contract for the OFF state:
+ * reports the resulting state via /api/status `memory_enabled`.
  *
- *   - the sidebar drops the "Agent" nav item entirely
- *   - a deep link to #agent redirects to #dashboard (stale deep links bounce,
- *     no dead-text "disabled" notice)
+ * v0.5 nav: Memory is no longer a top-level page — it is a tab inside the
+ * Agent page, alongside MCP. The Agent nav item itself ALWAYS renders (the
+ * MCP sub-link is ungated); only the Memory surface follows the gate. This
+ * spec pins the UI half of that contract for the OFF state:
+ *
+ *   - the sidebar keeps the Agent nav item but drops its "Memory" sub-link
+ *     (nav-memory absent); the MCP sub-link stays
+ *   - the Agent page renders an MCP-only tab bar (the Memory tab is hidden),
+ *     and a deep link to #memory falls back to the MCP tab
  *   - the sidebar Runtime widget carries no dead-end "Memory →" link
  *     (the widget consolidated the old SidebarAgentBlock; its agent row now
  *     deep-links to the Hermes dashboard, never the gated Memory route)
@@ -32,28 +37,29 @@ test.describe('memory gate OFF (HAL0_MEMORY_ENABLED unset)', () => {
     })
   })
 
-  test('sidebar omits the Agent nav item', async ({ page }) => {
+  test('sidebar keeps Agent but drops its Memory sub-link', async ({ page }) => {
     await page.goto('/#dashboard')
     const navList = page.locator('.sb-list')
     await expect(navList).toBeVisible({ timeout: FIVE_S })
-    // Control: a sibling nav item is still present...
+    // Control: sibling nav items are still present...
     await expect(navList.getByText('Models', { exact: true })).toBeVisible()
-    await expect(navList.getByText('Connections', { exact: true })).toBeVisible()
-    // ...but the Agent (Memory) item is gone.
-    await expect(navList.getByText('Agent', { exact: true })).toHaveCount(0)
+    // v0.5: the Agent nav item ALWAYS renders (the MCP sub-link is ungated).
+    await expect(navList.locator('[data-testid="nav-agent"]')).toBeVisible()
+    await expect(navList.locator('[data-testid="nav-mcp"]')).toBeVisible()
+    // ...but its gated Memory sub-link is gone.
+    await expect(navList.locator('[data-testid="nav-memory"]')).toHaveCount(0)
   })
 
-  test('deep link to #agent redirects to #dashboard when memory is disabled', async ({ page }) => {
-    await page.goto('/#agent')
-    // 0.4: stale deep links bounce to #dashboard instead of showing a
-    // dead-text disabled notice. Wait for the hash to leave #agent.
-    await page.waitForFunction(
-      () => !window.location.hash.startsWith('#agent'),
-      { timeout: FIVE_S }
-    )
-    // Neither memory surface element should ever appear
-    await expect(page.locator('[data-testid="memory-tab"]')).toHaveCount(0)
-    await expect(page.locator('[data-testid="agent-tab-nav"]')).toHaveCount(0)
+  test('deep link to #memory falls back to the MCP-only Agent tab bar', async ({ page }) => {
+    await page.goto('/#memory')
+    // v0.5: Memory is a gated tab inside the Agent page. With memory disabled,
+    // #memory resolves to AgentView with the MCP tab active — the Agent tab bar
+    // renders, but the Memory tab button is absent.
+    await expect(page.locator('[data-testid="agent-tab-nav"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="agent-tab-mcp"]')).toBeVisible()
+    await expect(page.locator('[data-testid="agent-tab-memory"]')).toHaveCount(0)
+    // The Memory surface (engine card) never renders under the gate.
+    await expect(page.locator('[data-testid="mem-engine-card"]')).toHaveCount(0)
   })
 
   test('Runtime widget renders with no dead-end Memory link', async ({ page }) => {

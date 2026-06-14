@@ -460,13 +460,8 @@ function MemoryView({ param } = {}) {
 
   return (
     <div className="view">
-      <div className="view-head">
-        <h2>Memory</h2>
-        <div className="view-sub mono">
-          Hindsight memory engine — banks, retained facts, consolidation and operations.
-        </div>
-      </div>
-
+      {/* Heading intentionally omitted — MemoryView renders inside the Agent ▸
+          Memory tab, which already supplies the page header. */}
       <div className="mem-tabs">
         <button
           className={'btn ghost xs' + (section === 'overview' ? ' active' : '')}

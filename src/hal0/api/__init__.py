@@ -60,6 +60,7 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     comfyui,
+    dashboard_layout,
     hardware,
     health,
     hf,
@@ -68,9 +69,12 @@ from hal0.api.routes import (
     logs,
     models,
     npu,
+    power,
     providers,
+    services_health,
     settings,
     slots,
+    throughput,
     updater,
     v1,
 )
@@ -1092,6 +1096,14 @@ def create_app() -> FastAPI:
     # variants) than this search proxy (free-text → coord candidates).
     app.include_router(hf.router, prefix="/api/hf", tags=["hf"])
     app.include_router(hardware.router, prefix="/api", tags=["hardware"])
+    # Dashboard-overhaul backend endpoints (CONTRACTS.md §2):
+    #   throughput.router → GET /api/stats/throughput/history (bucketed tps_events)
+    #   services_health.router → GET /api/services/health
+    #   dashboard_layout.router → GET/PUT /api/user/dashboard-layout (file-backed)
+    app.include_router(throughput.router, prefix="/api", tags=["stats"])
+    app.include_router(power.router, prefix="/api", tags=["stats"])
+    app.include_router(services_health.router, prefix="/api/services", tags=["services"])
+    app.include_router(dashboard_layout.router, prefix="/api/user", tags=["user"])
     app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
     app.include_router(
         settings.router,

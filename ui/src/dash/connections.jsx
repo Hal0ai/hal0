@@ -821,14 +821,18 @@ function toMcpRow(s) {
   }
 }
 
-// ─── the view ────────────────────────────────────────────────────────
-function ConnectionsView() {
+// ─── extracted panels (embedded as tabs on Slots / Agents) ────────────
+// v0.5 nav: the Connections page was dissolved. Its "Local endpoints"
+// section now renders as the Slots ▸ Endpoints tab, and its "MCP servers"
+// section as the Agents ▸ MCP tab. Each panel owns its own data hooks so
+// the host tab can render it standalone; both reuse the EnginePane /
+// EndpointRow / McpServerRow primitives defined above.
+
+function LocalEndpointsPanel() {
   const slotsQuery = useSlots()
-  const mcpQuery = useMcpServers()
   const cfg = useConfigUrls()
 
   const slots = slotsQuery.data ?? []
-  const servers = (mcpQuery.data ?? []).map(toMcpRow)
 
   // Gateway base — prefer the backend-derived API URL (request-host aware),
   // fall back to the browser origin. Slot ports bind loopback inside the
@@ -847,157 +851,180 @@ function ConnectionsView() {
 
   const serving = slots.filter((s) => epState(s) === 'serving').length
   const reachable = slots.filter((s) => epState(s) !== 'offline').length
+
+  return (
+    <EnginePane
+      live
+      glyph="connections"
+      eyebrow={
+        <>
+          <b>local endpoints</b>
+          <span className="dim">·</span>
+          <span className="meta">openai-compatible</span>
+          <span className="dim">·</span>
+          <span className="mono" style={{ color: 'var(--fg-3)' }}>
+            {slots.length} ports
+          </span>
+          <span className="grow" />
+          <span className="meta">gateway · :{port}</span>
+        </>
+      }
+      title="Local endpoints"
+      sub="openai-compatible · /v1/*"
+      pill={{ tone: 'live', text: serving + ' serving · ' + reachable + ' reachable' }}
+      headRight={<CopyBtn text={gatewayV1} label="Base URL" icon="link" />}
+      strip={
+        <>
+          <span className="ss-summary">
+            <b>{serving}</b> serving · {reachable} reachable · {slots.length} local ports
+          </span>
+          <span className="grow" />
+          <span className="ss-summary" style={{ fontFamily: 'var(--jbm)', color: 'var(--fg-4)' }}>
+            {gatewayV1}
+          </span>
+        </>
+      }
+      foot={
+        <>
+          <span className="k">gateway</span>
+          <span className="v amber">:{port}</span>
+          <span className="sep">·</span>
+          <span className="k">host</span>
+          <span className="v">{host}</span>
+          <span className="sep">·</span>
+          <span className="k">tls</span>
+          <span className="v">{tls ? 'on' : 'off · lan only'}</span>
+          <span className="sep">·</span>
+          <span className="k">auth</span>
+          <span className="v">open · lan</span>
+        </>
+      }
+    >
+      <div className="eplist">
+        <div className="ep-head">
+          <span />
+          <span>slot</span>
+          <span>model</span>
+          <span>device</span>
+          <span>port</span>
+          <span>tok/s</span>
+          <span />
+        </div>
+        {slotsQuery.isPending && <div className="cn-empty mono">Loading endpoints…</div>}
+        {!slotsQuery.isPending && slots.length === 0 && (
+          <div className="cn-empty mono">No slots configured. Create one from Slots.</div>
+        )}
+        {slots.map((s) => (
+          <EndpointRow key={s.name} slot={s} apiBase={apiBase} />
+        ))}
+      </div>
+    </EnginePane>
+  )
+}
+
+function McpServersPanel() {
+  const mcpQuery = useMcpServers()
+  const cfg = useConfigUrls()
+
+  const servers = (mcpQuery.data ?? []).map(toMcpRow)
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8080'
+  void (cfg.data?.api || origin)
+  const host = typeof window !== 'undefined' ? window.location.hostname : 'hal0'
+  const port =
+    typeof window !== 'undefined' && window.location.port
+      ? window.location.port
+      : typeof window !== 'undefined' && window.location.protocol === 'https:'
+        ? '443'
+        : '80'
+
   const toolTotal = servers.reduce((a, m) => a + (m.tools.length || m.toolCount || 0), 0)
   const mcpUp = servers.filter((m) => m.up).length
 
+  return (
+    <EnginePane
+      glyph="agent"
+      eyebrow={
+        <>
+          <b>mcp</b>
+          <span className="dim">·</span>
+          <span className="meta">model context protocol</span>
+          <span className="dim">·</span>
+          <span className="mono" style={{ color: 'var(--fg-3)' }}>
+            {servers.length} servers
+          </span>
+          <span className="grow" />
+          <span className="meta">
+            {host}:{port}/mcp/*
+          </span>
+        </>
+      }
+      title="MCP servers"
+      sub="model context protocol · bundled"
+      pill={{ tone: 'ok', text: mcpUp + ' up · ' + toolTotal + ' tools' }}
+      headRight={
+        servers.length > 0 ? (
+          <CopyBtn text={buildClientConfig('claude', servers)} label="Copy config" icon="copy" />
+        ) : null
+      }
+      strip={
+        <>
+          <span className="ss-summary">
+            <b>{mcpUp}</b> servers up · {toolTotal} tools exposed
+          </span>
+          <span className="grow" />
+          {servers.length > 0 && (
+            <div className="mcp-links">
+              <span className="lbl">add all to</span>
+              <AddTo client="claude" servers={servers} />
+              <AddTo client="codex" servers={servers} />
+              <AddTo client="cursor" servers={servers} />
+            </div>
+          )}
+        </>
+      }
+      foot={
+        <>
+          <span className="k">mount</span>
+          <span className="v">/mcp/*</span>
+          <span className="sep">·</span>
+          <span className="k">servers</span>
+          <span className="v">{servers.length}</span>
+          <span className="sep">·</span>
+          <span className="k">tools</span>
+          <span className="v amber">{toolTotal}</span>
+        </>
+      }
+    >
+      <div className="mcplist">
+        {mcpQuery.isPending && <div className="cn-empty mono">Loading MCP servers…</div>}
+        {!mcpQuery.isPending && servers.length === 0 && (
+          <div className="cn-empty mono">No MCP servers hosted.</div>
+        )}
+        {servers.map((m, i) => (
+          <McpServerRow key={m.name} srv={m} defaultOpen={i === 0} />
+        ))}
+      </div>
+    </EnginePane>
+  )
+}
+
+// ─── the view (legacy #connections → redirected to #slots/endpoints) ──
+// Kept as a composed fallback so any direct render still works; the route
+// alias in main.jsx means users no longer land here.
+function ConnectionsView() {
   return (
     <div className="view">
       <div className="vh">
         <span className="vh-eye mono">Network</span>
         <h1>Connections</h1>
-        <span className="vh-spacer" />
-        <span className="mono" style={{ fontSize: 11, color: 'var(--fg-4)' }}>
-          openai-compatible · all local · gateway :{port}
-        </span>
       </div>
-
       <div className="conn">
-        {/* ── Local endpoints ── */}
-        <EnginePane
-          live
-          glyph="connections"
-          eyebrow={
-            <>
-              <b>local endpoints</b>
-              <span className="dim">·</span>
-              <span className="meta">openai-compatible</span>
-              <span className="dim">·</span>
-              <span className="mono" style={{ color: 'var(--fg-3)' }}>
-                {slots.length} ports
-              </span>
-              <span className="grow" />
-              <span className="meta">gateway · :{port}</span>
-            </>
-          }
-          title="Local endpoints"
-          sub="openai-compatible · /v1/*"
-          pill={{ tone: 'live', text: serving + ' serving · ' + reachable + ' reachable' }}
-          headRight={<CopyBtn text={gatewayV1} label="Base URL" icon="link" />}
-          strip={
-            <>
-              <span className="ss-summary">
-                <b>{serving}</b> serving · {reachable} reachable · {slots.length} local ports
-              </span>
-              <span className="grow" />
-              <span className="ss-summary" style={{ fontFamily: 'var(--jbm)', color: 'var(--fg-4)' }}>
-                {gatewayV1}
-              </span>
-            </>
-          }
-          foot={
-            <>
-              <span className="k">gateway</span>
-              <span className="v amber">:{port}</span>
-              <span className="sep">·</span>
-              <span className="k">host</span>
-              <span className="v">{host}</span>
-              <span className="sep">·</span>
-              <span className="k">tls</span>
-              <span className="v">{tls ? 'on' : 'off · lan only'}</span>
-              <span className="sep">·</span>
-              <span className="k">auth</span>
-              <span className="v">open · lan</span>
-            </>
-          }
-        >
-          <div className="eplist">
-            <div className="ep-head">
-              <span />
-              <span>slot</span>
-              <span>model</span>
-              <span>device</span>
-              <span>port</span>
-              <span>tok/s</span>
-              <span />
-            </div>
-            {slotsQuery.isPending && <div className="cn-empty mono">Loading endpoints…</div>}
-            {!slotsQuery.isPending && slots.length === 0 && (
-              <div className="cn-empty mono">No slots configured. Create one from Slots.</div>
-            )}
-            {slots.map((s) => (
-              <EndpointRow key={s.name} slot={s} apiBase={apiBase} />
-            ))}
-          </div>
-        </EnginePane>
-
-        {/* ── MCP servers ── */}
-        <EnginePane
-          glyph="agent"
-          eyebrow={
-            <>
-              <b>mcp</b>
-              <span className="dim">·</span>
-              <span className="meta">model context protocol</span>
-              <span className="dim">·</span>
-              <span className="mono" style={{ color: 'var(--fg-3)' }}>
-                {servers.length} servers
-              </span>
-              <span className="grow" />
-              <span className="meta">
-                {host}:{port}/mcp/*
-              </span>
-            </>
-          }
-          title="MCP servers"
-          sub="model context protocol · bundled"
-          pill={{ tone: 'ok', text: mcpUp + ' up · ' + toolTotal + ' tools' }}
-          headRight={
-            servers.length > 0 ? (
-              <CopyBtn text={buildClientConfig('claude', servers)} label="Copy config" icon="copy" />
-            ) : null
-          }
-          strip={
-            <>
-              <span className="ss-summary">
-                <b>{mcpUp}</b> servers up · {toolTotal} tools exposed
-              </span>
-              <span className="grow" />
-              {servers.length > 0 && (
-                <div className="mcp-links">
-                  <span className="lbl">add all to</span>
-                  <AddTo client="claude" servers={servers} />
-                  <AddTo client="codex" servers={servers} />
-                  <AddTo client="cursor" servers={servers} />
-                </div>
-              )}
-            </>
-          }
-          foot={
-            <>
-              <span className="k">mount</span>
-              <span className="v">/mcp/*</span>
-              <span className="sep">·</span>
-              <span className="k">servers</span>
-              <span className="v">{servers.length}</span>
-              <span className="sep">·</span>
-              <span className="k">tools</span>
-              <span className="v amber">{toolTotal}</span>
-            </>
-          }
-        >
-          <div className="mcplist">
-            {mcpQuery.isPending && <div className="cn-empty mono">Loading MCP servers…</div>}
-            {!mcpQuery.isPending && servers.length === 0 && (
-              <div className="cn-empty mono">No MCP servers hosted.</div>
-            )}
-            {servers.map((m, i) => (
-              <McpServerRow key={m.name} srv={m} defaultOpen={i === 0} />
-            ))}
-          </div>
-        </EnginePane>
+        <LocalEndpointsPanel />
+        <McpServersPanel />
       </div>
     </div>
   )
 }
 
-Object.assign(window, { ConnectionsView, EnginePane, EndpointRow, McpServerRow })
+Object.assign(window, { ConnectionsView, LocalEndpointsPanel, McpServersPanel, EnginePane, EndpointRow, McpServerRow })

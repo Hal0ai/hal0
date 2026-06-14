@@ -43,8 +43,10 @@ test.describe('AddSecretModal — real save', () => {
     // Wait for modal to open
     await expect(page.locator('.modal-shell')).toBeVisible({ timeout: FIVE_S })
 
-    // Fill in a value that matches HF_TOKEN prefix
-    const valueInput = page.locator('input[type="password"]')
+    // Fill in a value that matches HF_TOKEN prefix. Scope to the modal — the
+    // Secrets section also renders a password input (the dedicated HuggingFace
+    // token field, #816), so an unscoped selector is now ambiguous.
+    const valueInput = page.locator('.modal-shell input[type="password"]')
     await valueInput.fill('hf_teststub1234567890ABCDEFGHIJKLMNOPQRSTUVWxyz')
 
     // The "Add secret" save button should be enabled
@@ -216,34 +218,36 @@ test.describe('ApprovalModal live wiring', () => {
 // ─── 7. Dashboard: no hardcoded "halo" username ─────────────────────────
 
 test.describe('Dashboard hero strip', () => {
-  test('does not contain hardcoded "halo" username greeting', async ({ page }) => {
+  // dashboard-overhaul (feat/dashboard-overhaul): the handoff hero copy is
+  // explicitly "Welcome back, halo. system steady on <host>" — the design
+  // mandates the greeting the old anti-hardcoded-username guard removed. The
+  // design handoff is the law for this surface, so the assertion is inverted:
+  // the greeting + the live host phrasing must both be present.
+  test('renders the handoff hero greeting + live host phrasing', async ({ page }) => {
     await page.goto('/#dashboard')
     await expect(page.locator('.hero-strip')).toBeVisible({ timeout: FIVE_S })
-    // The old "Welcome back, halo." phrase must be gone
-    await expect(page.locator('.hero-strip')).not.toContainText('Welcome back')
-    // "system steady on" phrasing must still be present
+    await expect(page.locator('.hero-strip')).toContainText('Welcome back, halo')
     await expect(page.locator('.hero-strip')).toContainText('system steady on')
   })
 })
 
 // ─── 8. Agent route redirect when memory disabled ───────────────────────
 
-test.describe('Agent route — memory disabled redirect', () => {
-  test('redirects #agent to #dashboard when memory is disabled', async ({ page }) => {
+test.describe('Agent route — memory disabled fallback', () => {
+  test('#agent falls back to the MCP tab when memory is disabled (no redirect)', async ({ page }) => {
     // Use window seam documented in mock.ts to flip memory to disabled
     await page.addInitScript(() => {
       ;(window as any).__hal0MockMemoryEnabled = false
     })
     await page.goto('/#agent')
-    // Should bounce to dashboard — the dead-text page must not appear
+    // No dead "memory disabled" page — the v0.5 Agent shell stays usable.
     await expect(page.locator('body')).not.toContainText(
       'The memory surface is disabled',
       { timeout: FIVE_S }
     )
-    // Hash should resolve to dashboard, not agent
-    await page.waitForFunction(
-      () => !window.location.hash.startsWith('#agent'),
-      { timeout: FIVE_S }
-    )
+    // v0.5 nav: Agent is a tabbed shell; memory off → default MCP tab, the
+    // Memory tab is hidden, and there is NO redirect away from #agent.
+    await expect(page.locator('[data-testid="agent-tab-mcp"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="agent-tab-memory"]')).toHaveCount(0)
   })
 })

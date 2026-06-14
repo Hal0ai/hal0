@@ -39,8 +39,10 @@ test.describe('AgentView v3 (#agent — v0.4 Memory-only)', () => {
     await expect(memoryTabBtn).toBeVisible()
     await expect(memoryTabBtn).toHaveText('Memory')
 
-    // Memory tab content renders by default.
-    await expect(page.locator('[data-testid="memory-tab"]')).toBeVisible()
+    // Memory tab content renders by default. The v0.5 nav embeds the full
+    // MemoryView (memory.jsx) here, not the legacy agents/memory-tab.jsx — so
+    // assert MemoryView's own marker (its overview sub-tab) is present.
+    await expect(page.locator('[data-testid="mem-tab-overview"]')).toBeVisible()
 
     // All removed tabs MUST be gone — web chat + personas/skills/plugins
     // (and the older inbox/peers/overview tabs) no longer exist.
@@ -69,7 +71,7 @@ test.describe('AgentView v3 (#agent — v0.4 Memory-only)', () => {
 
   test('#agent/memory hash routes to the Memory tab', async ({ page }) => {
     await page.goto('/#agent/memory')
-    await expect(page.locator('[data-testid="memory-tab"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="mem-tab-overview"]')).toBeVisible({ timeout: FIVE_S })
   })
 
   test('legacy #peers route redirects to #agent/memory?subsection=peer', async ({ page }) => {
@@ -77,6 +79,6 @@ test.describe('AgentView v3 (#agent — v0.4 Memory-only)', () => {
     // The redirect happens client-side via hashchange handling inside
     // agent-view.jsx. Wait for the URL to land on the new shape.
     await expect(page).toHaveURL(/#agent\/memory\?subsection=peer/, { timeout: FIVE_S })
-    await expect(page.locator('[data-testid="memory-tab"]')).toBeVisible()
+    await expect(page.locator('[data-testid="mem-tab-overview"]')).toBeVisible()
   })
 })
