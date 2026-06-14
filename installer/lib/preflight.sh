@@ -116,8 +116,51 @@ preflight_venv() {
         info "python venv: available"
         return 0
     fi
-    err "'${py} -m venv' is unavailable (missing ensurepip/venv)"
-    warn "  install the venv stdlib, e.g.: $(python_venv_hint)"
+
+    # Missing venv/ensurepip. Debian/Ubuntu ship the venv stdlib as the
+    # separate python3-venv package (the classic clean-Ubuntu trap), so a
+    # `python3` that's present still can't `-m venv`. Two modes, mirroring
+    # preflight_container_runtime:
+    #
+    #   HAL0_VENV_REQUIRED=1 (set by install.sh) — auto-install the venv
+    #     stdlib via the detected package manager, hard-fail if that doesn't
+    #     resolve it. The install ALWAYS builds a venv, so dying with a hint
+    #     and making the operator hand-install + re-run is pure friction.
+    #
+    #   Unset (default, e.g. `hal0 doctor`) — soft: warn + return 1 so a
+    #     read-only report finishes without mutating the system.
+    if [[ "${HAL0_VENV_REQUIRED:-0}" != "1" ]]; then
+        err "'${py} -m venv' is unavailable (missing ensurepip/venv)"
+        warn "  install the venv stdlib, e.g.: $(python_venv_hint)"
+        return 1
+    fi
+
+    local pm
+    if pm="$(pkg_mgr)"; then
+        info "installing the python venv stdlib (required to build hal0's venv)"
+        local ok=1
+        case "$(distro_family)" in
+            debian)
+                DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-venv python3-pip || ok=0
+                ;;
+            fedora) "${pm}" install -y python3 python3-pip || ok=0 ;;
+            suse) zypper install -y python3 python3-pip || ok=0 ;;
+            arch) pacman -S --noconfirm python python-pip || ok=0 ;;
+            alpine) apk add python3 py3-pip || ok=0 ;;
+            *) ok=0 ;;
+        esac
+        if [[ "${ok}" -eq 1 ]] && "${py}" -c 'import ensurepip, venv' >/dev/null 2>&1; then
+            info "python venv: available"
+            return 0
+        fi
+        err "python venv stdlib install did not resolve '${py} -m venv' — see output above"
+        warn "  install manually: $(python_venv_hint)"
+        return 1
+    fi
+
+    err "'${py} -m venv' is unavailable and no package manager was detected"
+    warn "  install the venv stdlib manually: $(python_venv_hint)"
     return 1
 }
 

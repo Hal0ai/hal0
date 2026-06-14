@@ -268,9 +268,12 @@ if ! preflight_python; then
 fi
 
 # `python3 -m venv` capability is a hard requirement — the install always
-# creates a venv. Catches the common Debian "python3 present, python3-venv
-# missing" case before it fails with an opaque ensurepip error.
-preflight_venv || die "python venv module missing — install with: $(python_venv_hint)"
+# creates a venv. HAL0_VENV_REQUIRED=1 flips preflight_venv into
+# install-the-venv-stdlib-or-fail mode (the common clean-Debian/Ubuntu
+# "python3 present, python3-venv missing" case auto-installs via the
+# detected package manager), mirroring preflight_container_runtime above.
+HAL0_VENV_REQUIRED=1 preflight_venv \
+    || die "python venv module missing and could not be installed — $(python_venv_hint), then re-run install.sh"
 
 # Every inference slot runs in a container, so a container runtime is a hard
 # requirement. HAL0_CONTAINER_REQUIRED=1 flips preflight_container_runtime into
