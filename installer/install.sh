@@ -1085,12 +1085,37 @@ else
         fi
     fi
 
-    # hal0-agent@hermes — gated on the hermes venv existing. PR-3 owns the
-    # actual `hal0 agent bootstrap hermes` invocation; until that lands,
-    # this branch is a no-op on fresh installs (correct — there's no
-    # agent to run yet). On upgrade installs where the venv is already
-    # present from a previous bootstrap, this enables the unit so the
-    # agent comes back up after the upgrade.
+    # hal0-agent@hermes — provision Hermes end-to-end on a FRESH install so the
+    # box comes up with a fully-configured agent (config.yaml + MCP wiring +
+    # personas + skills + install artifacts) WITHOUT a manual bootstrap step.
+    # `hal0 agent install hermes` runs the toolchain (python·venv·pip·pipx)
+    # then the full bootstrap pipeline in the foreground, chowns the
+    # provisioned trees to the hal0 runtime user, and enables the unit. It is
+    # multi-minute (pip-installs hermes-agent), so it streams into the install
+    # log. Escape hatch: HAL0_SKIP_HERMES=1 for operators who don't want the
+    # bundled agent. On UPGRADE installs the venv already exists, so the
+    # provision is skipped and the block below just (re)enables the unit.
+    # hal0-api is already up at this point (enabled + wait_active above), which
+    # the bootstrap preflight requires.
+    if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
+        if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
+            info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"
+        else
+            info "provisioning Hermes agent (toolchain + bootstrap) — this can take a few minutes…"
+            if "${HAL0_BIN}" agent install hermes; then
+                info "hermes provisioned — config.yaml + MCP servers + skills wired"
+            else
+                warn "hermes provisioning failed — run '${HAL0_BIN} agent install hermes' manually"
+                warn "  diagnose with '${HAL0_BIN} agent log hermes' / '${HAL0_BIN} agent status hermes'"
+            fi
+        fi
+    fi
+
+    # Enable the unit + gateway for both fresh (just-provisioned) and upgrade
+    # installs. `hal0 agent install hermes` already enables the agent unit, so
+    # the enable here is idempotent; it also covers the upgrade path where no
+    # provision ran, plus the system-scope gateway (which the provision does
+    # not install).
     if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         systemctl enable --now hal0-agent@hermes.service
         if wait_active hal0-agent@hermes.service 20; then
@@ -1116,7 +1141,9 @@ else
             warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
         fi
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
-        info "hal0-agent@hermes not enabled — run 'hal0 agent bootstrap hermes' first"
+        # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)
+        # or failed. The warnings above already explain; this is the summary line.
+        info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
     fi
 
 fi
