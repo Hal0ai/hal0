@@ -16,8 +16,8 @@
     },
     "flm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
-      "digest": "sha256:7e975f49f4385ef9cc7cc008972ddb2d9f6b66a5fe8687eb4dba66fe1609e3a1",
-      "_notes": "FastFlowLM v0.9.43 on AMD XDNA2 NPU; requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. NOTE: digest is the local build digest — re-confirm with the value printed by `podman push` once the image is pushed to GHCR."
+      "digest": "sha256:5f4c8a08a269077d8d24b1a93cfa39aebd1bfa10c868048796e8d2e5f589fcad",
+      "_notes": "FastFlowLM v0.9.43 on AMD XDNA2 NPU; requires amdxdna driver on the host (kernel >= 6.14 in-tree, or >= 6.10 via amdxdna-dkms) + NPU firmware >= 1.1.0.0. Digest is the GHCR registry digest (confirmed post-push 2026-06-14)."
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
