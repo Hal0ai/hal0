@@ -164,7 +164,7 @@ jobs:
 
       # ── 3. cosign keyless-sign the tarball via GH Actions OIDC ──────────────
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v3
 
       - name: cosign sign-blob (keyless OIDC, legacy raw .sig + .crt)
         id: sign
