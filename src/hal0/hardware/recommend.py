@@ -20,7 +20,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from hal0.config.schema import HardwareInfo, map_backend_to_device
+from hal0.config.schema import (
+    DEVICE_DEFAULT_PROFILES,
+    HardwareInfo,
+    map_backend_to_device,
+)
 from hal0.registry.curated import get_curated
 
 # Curated chat models suitable for the primary slot, ordered from
@@ -164,7 +168,8 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     dict
         Slot config keyed in TOML order::
 
-          name, port, backend, provider, enabled, [model], [meta]
+          name, port, backend, device, runtime, profile, provider,
+          enabled, [model], [meta]
     """
     backend, backend_why = _backend_for(hw)
     # RAM-gate the GPU pick on total/unified host RAM (the same signal the
@@ -189,11 +194,21 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
     # v0.1.x can still read the file before re-running the recommender.
     device = map_backend_to_device(backend)
 
+    # Container-runtime era: a slot resolves its image + tuned flags from a
+    # named profile, not from ``backend``. Without this the seeded chat slot
+    # loads with ``profile = None`` and the resolver rejects it with
+    # "profile '' not found in catalog", so the primary slot is born broken
+    # on every fresh install. Map the device to its default profile using
+    # the same table the create-modal + legacy-slot migration use.
+    profile = DEVICE_DEFAULT_PROFILES.get(device)
+
     return {
         "name": "chat",
         "port": 8081,
         "backend": backend,
         "device": device,
+        "runtime": "container",
+        "profile": profile,
         "provider": "llama-server",
         "enabled": False,  # operator runs `hal0 model pull <id>` first
         "model": {

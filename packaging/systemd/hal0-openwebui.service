@@ -1,16 +1,13 @@
 [Unit]
 Description=hal0 OpenWebUI companion (ghcr.io/open-webui/open-webui)
 Documentation=https://github.com/open-webui/open-webui
-# Docker must be up before we try to run a container. 'Wants' (not
-# 'Requires') so a transient docker restart doesn't force-kill this
-# unit before the on-failure restart loop gets a chance.
-After=docker.service
-Wants=docker.service
-# The API should be reachable so OpenWebUI's OPENAI_API_BASE_URLS health
-# check on first boot finds a live endpoint, but it is not strictly
-# required — OpenWebUI will retry the upstream on its own.
-After=hal0-api.service
-Wants=hal0-api.service
+# Runs as a podman container (daemonless) — the same runtime as the
+# inference slots, so the box needs no docker. The API should be reachable
+# so OpenWebUI's OPENAI_API_BASE_URLS health check on first boot finds a
+# live endpoint, but it is not strictly required — OpenWebUI retries the
+# upstream on its own.
+After=network-online.target hal0-api.service
+Wants=network-online.target hal0-api.service
 
 [Service]
 Type=simple
@@ -22,24 +19,27 @@ Type=simple
 EnvironmentFile=/etc/hal0/openwebui.env
 
 # Pre-pull on first start so the unit doesn't sit in 'activating' for
-# minutes the first time. Idempotent — Docker reuses the cached image.
+# minutes the first time. Idempotent — podman reuses the cached image.
 # pin per release (#79) — sha256 digest is deterministic; bump on each
 # hal0 release after a smoke test.
-ExecStartPre=-/usr/bin/docker pull ghcr.io/open-webui/open-webui@sha256:d05c6ff8baf5ae701d86a3332c0db4ebb2802ca3d0d341be7fd157fa730306ab
+ExecStartPre=-/usr/bin/podman pull ghcr.io/open-webui/open-webui@sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e
 
 # Best-effort cleanup of any stale container from a previous start that
 # didn't shut down cleanly. The leading `-` makes systemd ignore the
 # exit code so a missing container isn't a failure.
-ExecStartPre=-/usr/bin/docker rm -f hal0-openwebui
+ExecStartPre=-/usr/bin/podman rm -f hal0-openwebui
 
 # --rm so the container is cleaned up on any exit (normal or crash).
 # The container name is stable so ExecStop can target it by name.
 # Data lives in /var/lib/hal0/openwebui/ which survives container
 # restarts and hal0 updates. The host port :3001 binds 0.0.0.0 by
 # default (PLAN §2 "public" tier).
+# --add-host host.docker.internal:host-gateway: podman (>=4.0) honours the
+# host-gateway magic value, so OPENAI_API_BASE_URLS can reach hal0-api on
+# the host the same way it did under docker.
 # pin per release (#79) — sha256 digest is deterministic; bump the
 # digest on each hal0 release (match install.sh OPENWEBUI_IMAGE).
-ExecStart=/usr/bin/docker run \
+ExecStart=/usr/bin/podman run \
   --rm \
   --name hal0-openwebui \
   --env-file /etc/hal0/openwebui.env \
@@ -47,14 +47,13 @@ ExecStart=/usr/bin/docker run \
   -p 0.0.0.0:3001:8080 \
   --add-host=host.docker.internal:host-gateway \
   --security-opt apparmor=unconfined \
-  ghcr.io/open-webui/open-webui@sha256:d05c6ff8baf5ae701d86a3332c0db4ebb2802ca3d0d341be7fd157fa730306ab
+  ghcr.io/open-webui/open-webui@sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e
 
-# Graceful stop: tell the named container to stop (SIGTERM + 10s timeout
-# is docker's default). systemd will SIGKILL ExecStart if it doesn't
-# exit within TimeoutStopSec.
-ExecStop=/usr/bin/docker stop hal0-openwebui
+# Graceful stop: tell the named container to stop (SIGTERM + 10s timeout).
+# systemd will SIGKILL ExecStart if it doesn't exit within TimeoutStopSec.
+ExecStop=/usr/bin/podman stop hal0-openwebui
 
-# Always restart — even on a clean exit. If a user runs `docker stop`
+# Always restart — even on a clean exit. If a user runs `podman stop`
 # manually we still want the unit back up.
 Restart=always
 RestartSec=5

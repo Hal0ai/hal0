@@ -141,11 +141,16 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         fi
     done
 
-    # Stop OpenWebUI container explicitly in case docker didn't get the memo
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^hal0-openwebui$'; then
-        docker stop hal0-openwebui &>/dev/null || true
-        info "Stopped Docker container hal0-openwebui"
-    fi
+    # Stop the OpenWebUI container explicitly in case the unit stop didn't get
+    # the memo. It runs under podman now; check docker too so docker-era
+    # installs are cleaned up on the same pass.
+    for _rt in podman docker; do
+        if command -v "${_rt}" >/dev/null 2>&1 \
+            && "${_rt}" ps --format '{{.Names}}' 2>/dev/null | grep -q '^hal0-openwebui$'; then
+            "${_rt}" stop hal0-openwebui &>/dev/null || true
+            info "Stopped ${_rt} container hal0-openwebui"
+        fi
+    done
 else
     step "Skipping systemd / docker stop (dev mode)"
 fi

@@ -126,3 +126,36 @@ def test_cpu_host_gets_small_conservative_model() -> None:
     rec = recommend_primary_slot(_cpu_only_host(64))
     assert rec["model"]["default"] != "Qwen3.6-35B-A3B-MTP-GGUF"
     assert rec["backend"] == "cpu"
+
+
+# ── seeded chat slot must resolve a profile (container-runtime era) ──────────
+# Regression: recommend_primary_slot used to emit no ``profile``/``runtime``,
+# so the seeded chat.toml loaded with profile=None and the resolver rejected
+# it ("profile '' not found in catalog") — the primary slot was born broken on
+# every fresh install.
+
+
+def test_seeded_slot_carries_container_runtime_and_profile() -> None:
+    rec = recommend_primary_slot(_amd_uma_host(96))
+    assert rec["runtime"] == "container"
+    # Strix-Halo-class AMD UMA → vulkan device → vulkan profile.
+    assert rec["device"] == "gpu-vulkan"
+    assert rec["profile"] == "vulkan"
+
+
+def test_seeded_slot_profile_is_a_known_seed_profile() -> None:
+    from hal0.config.schema import DEVICE_DEFAULT_PROFILES
+
+    rec = recommend_primary_slot(_amd_uma_host(96))
+    assert rec["profile"], "seeded chat slot must name a profile, not None"
+    assert rec["profile"] in set(DEVICE_DEFAULT_PROFILES.values())
+
+
+def test_seeded_slot_validates_as_slotconfig() -> None:
+    from hal0.config.schema import SlotConfig
+
+    rec = recommend_primary_slot(_amd_uma_host(96))
+    rec.pop("_meta", None)
+    slot = SlotConfig.model_validate(rec)
+    assert slot.profile == "vulkan"
+    assert slot.runtime == "container"

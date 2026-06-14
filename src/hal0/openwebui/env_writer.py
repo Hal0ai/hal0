@@ -65,12 +65,12 @@ write_env_atomic = _load_write_env_atomic()
 #
 # OPENAI_API_BASE_URLS:
 #   PLAN.md §8 documents "http://127.0.0.1:8080/v1" but that's the
-#   *host's* loopback — and OpenWebUI runs inside a Docker container,
-#   where 127.0.0.1 is the container itself (serving OpenWebUI on
-#   :8080).  ``host.docker.internal`` is the conventional Docker name
-#   for the host gateway; the unit injects it via
-#   ``--add-host=host.docker.internal:host-gateway`` so this works on
-#   Linux too (Docker only auto-resolves the name on Mac/Windows).
+#   *host's* loopback — and OpenWebUI runs inside a container, where
+#   127.0.0.1 is the container itself (serving OpenWebUI on :8080).
+#   ``host.docker.internal`` is the conventional name for the host
+#   gateway; the unit injects it via
+#   ``--add-host=host.docker.internal:host-gateway``. podman (>=4.0)
+#   honours the host-gateway magic value just like Docker does on Linux.
 _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
     "DATA_DIR": "/app/backend/data",
     "DEFAULT_LOCALE": "en",

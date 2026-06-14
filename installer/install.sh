@@ -34,7 +34,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/distro.sh"
 
 # Re-runnable pre-flight checks (preflight_systemd / preflight_python /
-# preflight_docker / preflight_disk / preflight_ports / preflight_all).
+# preflight_container_runtime / preflight_disk / preflight_ports / preflight_all).
 # Sourcing only loads the functions — the installer dispatches the
 # subset it cares about below. `hal0 doctor` shells the same file in
 # executable mode to run preflight_all post-install.
@@ -272,9 +272,14 @@ fi
 # missing" case before it fails with an opaque ensurepip error.
 preflight_venv || die "python venv module missing — install with: $(python_venv_hint)"
 
-# preflight_docker is soft (always returns 0 with a warning when
-# Docker is absent), so we don't need to guard the call.
-preflight_docker
+# Every inference slot runs in a container, so a container runtime is a hard
+# requirement. HAL0_CONTAINER_REQUIRED=1 flips preflight_container_runtime into
+# install-podman-or-fail mode (podman auto-installed via the detected package
+# manager; hard-fail with the exact one-liner otherwise). Without this a fresh
+# box finishes "successfully" but every slot sits in error "no container runtime
+# found". `hal0 doctor` leaves the flag unset and stays soft/report-only.
+HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
+    || die "no container runtime — install podman (see above), then re-run install.sh"
 
 # Disk + port-collision checks only matter for the live install — dev
 # mode lays files under $PWD/.hal0ai and never binds 8080/3001. We
@@ -606,7 +611,11 @@ OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
 # pulled by the background job below and referenced by the systemd unit.
 # Bump the sha256 digest here on each hal0 release; update the matching
 # digest in packaging/systemd/hal0-openwebui.service at the same time.
-OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui@sha256:d05c6ff8baf5ae701d86a3332c0db4ebb2802ca3d0d341be7fd157fa730306ab"
+# IMPORTANT: this MUST be the multi-arch *manifest list* (index) digest, NOT a
+# per-arch sub-manifest — a sub-manifest digest pins one architecture on every
+# host (the prior arm64 pin died on amd64 with "exec ... Exec format error").
+# Verify with: podman manifest inspect <ref> (mediaType ...manifest.list...).
+OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui@sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e"
 if [[ -f "${OPENWEBUI_UNIT_SRC}" ]]; then
     cp "${OPENWEBUI_UNIT_SRC}" "${OPENWEBUI_UNIT_DST}"
     info "wrote ${OPENWEBUI_UNIT_DST}"
@@ -662,14 +671,14 @@ fi
 
 # Kick off a background pull of the OpenWebUI image so the unit start
 # below isn't blocked by a multi-hundred-MB download on first install.
-# The unit also has ExecStartPre=docker pull (idempotent), so a missed
+# The unit also has ExecStartPre=podman pull (idempotent), so a missed
 # background pull never breaks correctness — only first-boot latency.
-if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v podman >/dev/null 2>&1; then
     # Background the actual pull, but spin briefly so the user sees we
-    # kicked it off. The hal0-openwebui unit also has ExecStartPre=docker
+    # kicked it off. The hal0-openwebui unit also has ExecStartPre=podman
     # pull (idempotent), so missing this background pull only costs first
     # -boot latency, not correctness.
-    (docker pull "${OPENWEBUI_IMAGE}" >/dev/null 2>&1 || true) &
+    (podman pull "${OPENWEBUI_IMAGE}" >/dev/null 2>&1 || true) &
     disown
     ui_spinner_run "Pulling ${OPENWEBUI_IMAGE} in background" sleep 3
 fi
@@ -1028,14 +1037,12 @@ else
     fi
 
     if [[ -f "${OPENWEBUI_UNIT_DST}" ]]; then
-        # OpenWebUI runs as a docker container (ExecStart=docker run …).
-        # Without a reachable docker daemon the unit just restart-loops
-        # with status=203/EXEC ("docker: No such file or directory"), so
-        # gate the enable/start on docker actually being usable — the
-        # same fail-soft posture as the hermes agent gating below. The
-        # dashboard/API are unaffected; the operator installs docker and
-        # then enables the unit. preflight already warned about the gap.
-        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        # OpenWebUI runs as a podman container (ExecStart=podman run …) — the
+        # same runtime as the slots, so the preflight that installed podman
+        # already satisfies it. Without a usable runtime the unit would
+        # restart-loop with status=203/EXEC, so guard the enable anyway — the
+        # dashboard/API are unaffected and the built-in chat works without it.
+        if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
             systemctl enable --now hal0-openwebui
             # OpenWebUI can take a moment to come up while it pulls the
             # image / initialises its sqlite db. Don't fail the installer
@@ -1046,14 +1053,14 @@ else
                 warn "hal0-openwebui not yet active; check 'journalctl -u hal0-openwebui -n 40'"
             fi
         else
-            # A prior install on a box that has since lost docker (or an
+            # A prior install on a box that has since lost its runtime (or an
             # upgrade where openwebui was enabled) may have left the unit
             # restart-looping with 203/EXEC. Actively quiesce it so the
             # status reflects reality (inactive, not failed/looping).
             systemctl disable --now hal0-openwebui >/dev/null 2>&1 || true
             systemctl reset-failed hal0-openwebui >/dev/null 2>&1 || true
-            info "hal0-openwebui not started — docker is unavailable"
-            info "  install docker, then: systemctl enable --now hal0-openwebui  (chat at :3001)"
+            info "hal0-openwebui not started — no usable container runtime"
+            info "  install podman, then: systemctl enable --now hal0-openwebui  (chat at :3001)"
         fi
     fi
 

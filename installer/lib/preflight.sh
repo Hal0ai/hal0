@@ -10,20 +10,20 @@
 # none of them exit the calling shell):
 #   preflight_systemd          — systemctl on PATH
 #   preflight_python           — `${PY:-python3}` resolvable + version 3.11–3.14
-#   preflight_docker           — `docker info` reachable. Soft by default
-#                                (returns 0 with a warning, since the API
-#                                can run without Docker until a slot is
-#                                launched and `hal0 doctor` should report
-#                                the full picture rather than abort). Set
-#                                HAL0_DOCKER_REQUIRED=1 to flip it hard:
-#                                on apt-based hosts the function then
-#                                auto-installs docker.io + enables the
-#                                docker.service; on rpm/pacman/etc. it
-#                                emits the exact one-liner to run and
-#                                returns non-zero. install.sh sets the
-#                                flag so a fresh box doesn't end up with
-#                                hal0-openwebui.service restart-looping
-#                                with status=203/EXEC.
+#   preflight_container_runtime — a usable container runtime (podman
+#                                preferred, docker accepted). Soft by
+#                                default (returns 0 with a warning, since
+#                                the API/dashboard come up without a runtime
+#                                and `hal0 doctor` should report the full
+#                                picture rather than abort). Set
+#                                HAL0_CONTAINER_REQUIRED=1 to flip it hard:
+#                                the function then auto-installs podman via
+#                                the detected package manager (lib/distro.sh)
+#                                and hard-fails with the exact one-liner if
+#                                that's not possible. install.sh sets the
+#                                flag so a fresh box never finishes with every
+#                                slot dead ("no container runtime found").
+#                                `preflight_docker` is a back-compat alias.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
 #   preflight_all              — run all of the above; aggregate non-zero
@@ -36,10 +36,11 @@
 #                        when running `hal0 doctor` on a fresh container)
 #   HAL0_DOCTOR_PORTS  — space-separated port list for preflight_ports
 #                        (default "8080 3001")
-#   HAL0_DOCKER_REQUIRED — when "1", preflight_docker auto-installs
-#                        docker.io on apt hosts and hard-fails (returns
-#                        non-zero) elsewhere. Default empty → soft mode
-#                        for `hal0 doctor`.
+#   HAL0_CONTAINER_REQUIRED — when "1", preflight_container_runtime
+#                        auto-installs podman (via the detected package
+#                        manager) and hard-fails (returns non-zero) when it
+#                        can't. Default empty → soft mode for `hal0 doctor`.
+#                        Legacy HAL0_DOCKER_REQUIRED is still honoured.
 
 # shellcheck shell=bash
 
@@ -159,86 +160,101 @@ preflight_network() {
     return 0
 }
 
-preflight_docker() {
-    # Fast path: docker is on PATH and the daemon answers. Same as before.
+# Resolve a usable container runtime. Mirrors providers/container.py's
+# _container_runtime(), which prefers /usr/bin/podman over /usr/bin/docker —
+# podman is daemonless + rootless-capable and is what the hal0 slot stack
+# standardises on. `<rt> info` is the functional probe (docker: daemon up;
+# podman: storage/conf usable). Echoes the runtime name; non-zero on failure.
+_resolve_container_runtime() {
+    if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+        echo podman
+        return 0
+    fi
     if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-        info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+        echo docker
+        return 0
+    fi
+    return 1
+}
+
+preflight_container_runtime() {
+    # Fast path: a runtime is already installed and working.
+    local rt
+    if rt="$(_resolve_container_runtime)"; then
+        if [[ "${rt}" == podman ]]; then
+            info "podman: $(podman version --format '{{.Version}}' 2>/dev/null || echo unknown)"
+        else
+            info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+        fi
         return 0
     fi
 
-    # Docker is missing or the daemon is unreachable. Two modes:
+    # No usable runtime. Two modes:
     #
-    #   HAL0_DOCKER_REQUIRED=1 (set by install.sh) — try to fix it on apt
-    #     hosts, hard-fail with remediation elsewhere. hal0-openwebui
-    #     and the slot containers genuinely need docker; letting the
-    #     installer finish "successfully" only to have systemd restart-
-    #     loop the unit with status=203/EXEC is worse than refusing to
-    #     proceed (real fallout: LXC 105 burned ~191 restarts before a
-    #     human noticed).
+    #   HAL0_CONTAINER_REQUIRED=1 (set by install.sh; legacy HAL0_DOCKER_REQUIRED
+    #     honoured) — install podman, hard-fail with remediation if that's not
+    #     possible. Every inference slot runs in a container; letting the install
+    #     finish "successfully" only to have every slot sit in `error` with
+    #     "no container runtime found" is worse than refusing to proceed.
     #
-    #   Unset (default, e.g. `hal0 doctor`) — keep the legacy soft
-    #     behaviour: warn and return 0 so the rest of the report runs.
-    if [[ "${HAL0_DOCKER_REQUIRED:-0}" != "1" ]]; then
-        warn "docker is not available — slot launches will fail until it is installed"
+    #   Unset (default, e.g. `hal0 doctor`) — soft: warn and return 0 so the
+    #     rest of the report runs.
+    if [[ "${HAL0_CONTAINER_REQUIRED:-${HAL0_DOCKER_REQUIRED:-0}}" != "1" ]]; then
+        warn "no container runtime (podman/docker) — slot launches will fail until one is installed"
         return 0
     fi
 
     # ── required mode ───────────────────────────────────────────────────
-    # If the binary is there but the daemon isn't reachable, we don't
-    # try to "fix" it by reinstalling — surfacing a clear "daemon down"
-    # message is more honest than an apt-get that won't help.
+    # A binary present but failing its probe is a real config problem (podman
+    # storage/subuid, or docker daemon down). Reinstalling won't help — surface
+    # it rather than churn the package manager.
+    if command -v podman >/dev/null 2>&1; then
+        err "podman present but 'podman info' failed — inspect 'podman info' output"
+        warn "  (in an unprivileged container this often needs newuidmap/subuid setup)"
+        return 1
+    fi
     if command -v docker >/dev/null 2>&1; then
         err "docker binary present but 'docker info' failed — is the daemon running?"
         warn "  start it with: systemctl enable --now docker"
         return 1
     fi
 
-    # Apt-based host → auto-install docker.io. The package name is
-    # deliberate: Debian/Ubuntu ship the upstream-maintained docker.io
-    # in main, which is what our docs already point operators at. We
-    # don't add Docker Inc.'s third-party repo here — it's a heavier
-    # change that an operator can opt into manually.
-    if command -v apt-get >/dev/null 2>&1; then
-        info "installing docker.io (required for OpenWebUI + ComfyUI containers)"
-        # -q to keep apt's per-line progress chatter out of the spinner-
-        # less preflight phase; -y for non-interactive. We don't pipe to
-        # /dev/null — if the install fails the operator needs to see why.
-        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io; then
-            err "apt-get install docker.io failed — see output above"
-            return 1
-        fi
-        # Enable + start the daemon so the very next step (which may be
-        # `docker pull` for OpenWebUI) actually has something to talk to.
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl enable --now docker >/dev/null 2>&1 || \
-                warn "could not 'systemctl enable --now docker' — start it manually if the daemon isn't running"
-        fi
-        # Re-probe. If the daemon still isn't reachable (e.g. inside an
-        # unprivileged container) we surface that rather than press on.
-        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-            info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+    # Auto-install podman via the detected package manager (lib/distro.sh).
+    # podman is daemonless, so unlike docker there is nothing to enable.
+    local pm
+    if pm="$(pkg_mgr)"; then
+        info "installing podman (required for hal0 inference slots)"
+        local ok=1
+        case "${pm}" in
+            apt-get) DEBIAN_FRONTEND=noninteractive apt-get install -y -q podman || ok=0 ;;
+            dnf) dnf install -y podman || ok=0 ;;
+            yum) yum install -y podman || ok=0 ;;
+            zypper) zypper install -y podman || ok=0 ;;
+            pacman) pacman -S --noconfirm podman || ok=0 ;;
+            apk) apk add podman || ok=0 ;;
+            *) ok=0 ;;
+        esac
+        if [[ "${ok}" -eq 1 ]] && rt="$(_resolve_container_runtime)" && [[ "${rt}" == podman ]]; then
+            info "podman: $(podman version --format '{{.Version}}' 2>/dev/null || echo unknown)"
             return 0
         fi
-        err "docker installed but daemon still unreachable — check 'systemctl status docker' and 'journalctl -u docker -n 40'"
+        err "podman install/initialisation failed — see output above; check 'podman info'"
         return 1
     fi
 
-    # Non-apt host: emit the right one-liner for the detected package
-    # manager (via lib/distro.sh), then hard-fail. Operator runs it, reruns
-    # install.sh. Alpine uses OpenRC, not systemd, so its enable step differs.
-    err "docker not installed — hal0 requires docker for OpenWebUI + slot containers"
-    local docker_install
-    if docker_install="$(pkg_install_cmd docker)"; then
-        if [[ "$(pkg_mgr)" == "apk" ]]; then
-            warn "  install with: ${docker_install} && sudo rc-update add docker default && sudo service docker start"
-        else
-            warn "  install with: ${docker_install} && sudo systemctl enable --now docker"
-        fi
+    # No recognised package manager → hard-fail with the best hint available.
+    err "no container runtime — hal0 requires podman (or docker) for inference slots"
+    local podman_install
+    if podman_install="$(pkg_install_cmd podman)"; then
+        warn "  install with: ${podman_install}"
     else
-        warn "  no recognised package manager — install docker from https://docs.docker.com/engine/install/ then re-run install.sh"
+        warn "  install podman from https://podman.io/docs/installation then re-run install.sh"
     fi
     return 1
 }
+
+# Back-compat alias: older docs / `hal0 doctor` builds call preflight_docker.
+preflight_docker() { preflight_container_runtime "$@"; }
 
 preflight_disk() {
     local min_gb="${1:-${HAL0_DISK_MIN_GB:-20}}"
@@ -330,7 +346,7 @@ preflight_all() {
     preflight_venv    || rc=$?
     preflight_writable || rc=$?
     preflight_network || rc=$?
-    preflight_docker  || rc=$?
+    preflight_container_runtime || rc=$?
     preflight_disk    || rc=$?
     preflight_ports   || rc=$?
     if (( rc == 0 )); then
