@@ -22,7 +22,6 @@ from fastapi.testclient import TestClient
 import hal0.api.routes.power as power_mod
 from hal0.api.routes.power import router as power_router
 
-
 # ── fixture: isolated app ────────────────────────────────────────────────────
 
 
@@ -137,7 +136,7 @@ class TestPowerPartialAmdgpu:
         assert r.status_code == 200, r.text
         body = r.json()
 
-        assert body["gpu_power_w"] is None          # missing file -> null
+        assert body["gpu_power_w"] is None  # missing file -> null
         assert body["gpu_temp_c"] == pytest.approx(52.0)
         assert body["gpu_sclk_mhz"] == pytest.approx(800.0)
         assert body["cpu_temp_c"] == pytest.approx(61.0)

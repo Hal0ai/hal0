@@ -16,7 +16,6 @@ from fastapi.testclient import TestClient
 
 import hal0.api.routes.hardware as hw_mod
 
-
 # ── shared stub that satisfies _cached_snapshot ───────────────────────────────
 
 

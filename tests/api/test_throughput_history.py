@@ -138,7 +138,7 @@ def test_seeded_events_produce_correct_buckets(app: FastAPI, client: TestClient)
 def test_events_outside_window_excluded(app: FastAPI, client: TestClient) -> None:
     """Events older than window_s must not appear in output."""
     now_mono = time.monotonic()
-    ts_inside = now_mono - 5.0    # within 30s window
+    ts_inside = now_mono - 5.0  # within 30s window
     ts_outside = now_mono - 200.0  # outside 30s window
 
     _seed_store(

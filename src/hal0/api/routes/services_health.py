@@ -170,14 +170,16 @@ async def services_health() -> dict[str, Any]:
         log.warning("services_health.comfyui_probe_error", exc=repr(exc))
         cu_up, cu_detail, cu_stat, cu_url = False, type(exc).__name__, None, None
 
-    services.append({
-        "id": "comfyui",
-        "name": "ComfyUI",
-        "up": cu_up,
-        "detail": cu_detail,
-        "url": cu_url,
-        "stat": cu_stat,
-    })
+    services.append(
+        {
+            "id": "comfyui",
+            "name": "ComfyUI",
+            "up": cu_up,
+            "detail": cu_detail,
+            "url": cu_url,
+            "stat": cu_stat,
+        }
+    )
 
     # ── hermes ───────────────────────────────────────────────────────────────
     try:
@@ -186,14 +188,16 @@ async def services_health() -> dict[str, Any]:
         log.warning("services_health.hermes_probe_error", exc=repr(exc))
         h_up, h_detail = False, type(exc).__name__
 
-    services.append({
-        "id": "hermes",
-        "name": "Hermes",
-        "up": h_up,
-        "detail": h_detail,
-        "url": None,  # loopback-only, no browser-reachable URL
-        "stat": None,
-    })
+    services.append(
+        {
+            "id": "hermes",
+            "name": "Hermes",
+            "up": h_up,
+            "detail": h_detail,
+            "url": None,  # loopback-only, no browser-reachable URL
+            "stat": None,
+        }
+    )
 
     # ── openwebui ─────────────────────────────────────────────────────────────
     try:
@@ -202,14 +206,16 @@ async def services_health() -> dict[str, Any]:
         log.warning("services_health.openwebui_probe_error", exc=repr(exc))
         ow_up, ow_detail = False, type(exc).__name__
 
-    services.append({
-        "id": "openwebui",
-        "name": "OpenWebUI",
-        "up": ow_up,
-        "detail": ow_detail,
-        "url": _openwebui_url(),
-        "stat": None,
-    })
+    services.append(
+        {
+            "id": "openwebui",
+            "name": "OpenWebUI",
+            "up": ow_up,
+            "detail": ow_detail,
+            "url": _openwebui_url(),
+            "stat": None,
+        }
+    )
 
     # ── n8n ──────────────────────────────────────────────────────────────────
     try:
@@ -218,14 +224,16 @@ async def services_health() -> dict[str, Any]:
         log.warning("services_health.n8n_probe_error", exc=repr(exc))
         n8n_up, n8n_detail = False, type(exc).__name__
 
-    services.append({
-        "id": "n8n",
-        "name": "n8n",
-        "up": n8n_up,
-        "detail": n8n_detail,
-        "url": _n8n_url(),
-        "stat": None,
-    })
+    services.append(
+        {
+            "id": "n8n",
+            "name": "n8n",
+            "up": n8n_up,
+            "detail": n8n_detail,
+            "url": _n8n_url(),
+            "stat": None,
+        }
+    )
 
     return {"services": services}
 

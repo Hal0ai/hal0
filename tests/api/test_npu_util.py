@@ -11,13 +11,10 @@ Covers:
 
 from __future__ import annotations
 
-import types
-
 import pytest
 from fastapi.testclient import TestClient
 
 import hal0.api.routes.hardware as hw_mod
-
 
 # ── fixture helpers (mirrors test_cpu_util.py pattern) ───────────────────────
 

@@ -21,8 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
-from pydantic import ValidationError, field_validator, model_validator
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.dashboard import layout_store
@@ -68,7 +67,7 @@ class DashLayout(BaseModel):
     pinned: list[str]
 
     @model_validator(mode="after")
-    def _check_version(self) -> "DashLayout":
+    def _check_version(self) -> DashLayout:
         if self.v != 2:
             raise ValueError(f"layout version must be 2, got {self.v!r}")
         return self

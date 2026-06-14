@@ -65,12 +65,10 @@ def _npu_residency_util() -> float | None:
     samples for a delta), on any I/O / parse error, or when the counter
     denominator is zero / a reset is detected.
     """
-    global _npu_pm_prev  # noqa: PLW0603
+    global _npu_pm_prev
     try:
         active_ms = int((_NPU_PM_ROOT / "runtime_active_time").read_text().strip())
-        suspended_ms = int(
-            (_NPU_PM_ROOT / "runtime_suspended_time").read_text().strip()
-        )
+        suspended_ms = int((_NPU_PM_ROOT / "runtime_suspended_time").read_text().strip())
     except Exception:
         # Missing path, permission error, or non-integer content — honest None.
         return None

@@ -15,7 +15,6 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.api.routes import dashboard_layout as dashboard_layout_routes
 
-
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
 

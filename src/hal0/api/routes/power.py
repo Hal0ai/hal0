@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
-from typing import Optional
 
 import structlog
 from fastapi import APIRouter
@@ -27,7 +26,7 @@ _HWMON_ROOT = Path("/sys/class/hwmon")
 # ── sysfs helpers ─────────────────────────────────────────────────────────────
 
 
-def _find_hwmon(name: str) -> Optional[Path]:
+def _find_hwmon(name: str) -> Path | None:
     """Return the first hwmon directory whose ``name`` file matches *name*.
 
     Returns None if no match or if the root does not exist.
@@ -46,7 +45,7 @@ def _find_hwmon(name: str) -> Optional[Path]:
     return None
 
 
-def _read_float(path: Path) -> Optional[float]:
+def _read_float(path: Path) -> float | None:
     """Read a single numeric sysfs file, returning None on any error."""
     try:
         return float(path.read_text().strip())
@@ -54,7 +53,7 @@ def _read_float(path: Path) -> Optional[float]:
         return None
 
 
-def _parse_pp_dpm_sclk(card_glob_root: Path) -> Optional[float]:
+def _parse_pp_dpm_sclk(card_glob_root: Path) -> float | None:
     """Scan /sys/class/drm/card*/device/pp_dpm_sclk for the active (*) clock.
 
     Returns MHz as float, or None if not found/parseable.
@@ -86,10 +85,10 @@ def _probe_power() -> dict:
 
     All fields are independently nullable.
     """
-    gpu_power_w: Optional[float] = None
-    gpu_temp_c: Optional[float] = None
-    gpu_sclk_mhz: Optional[float] = None
-    cpu_temp_c: Optional[float] = None
+    gpu_power_w: float | None = None
+    gpu_temp_c: float | None = None
+    gpu_sclk_mhz: float | None = None
+    cpu_temp_c: float | None = None
 
     # ── amdgpu ────────────────────────────────────────────────────────────────
     amdgpu_dir = _find_hwmon("amdgpu")

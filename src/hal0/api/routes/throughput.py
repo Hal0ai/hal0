@@ -41,9 +41,9 @@ def throughput_history(
     Query params
     ------------
     buckets : int
-        Number of equal-width bins (clamped to 1–120, default 20).
+        Number of equal-width bins (clamped to 1-120, default 20).
     window_s : int
-        Look-back window in seconds (clamped to 5–3600, default 100).
+        Look-back window in seconds (clamped to 5-3600, default 100).
 
     Response shape
     --------------
