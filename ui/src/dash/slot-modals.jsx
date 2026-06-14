@@ -727,6 +727,47 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         </div>
       )}
+      {/* Task 2: MTP pill — capability-gated, rocm-only.
+          Renders ONLY when the slot's loaded model has the "mtp" tag AND
+          the slot's device starts with "gpu-rocm". Toggle is instant-apply
+          via PUT /config (editMut) + non-blocking restart (mirrors the
+          profile-change pattern above). */}
+      {(() => {
+        const cur = slot.model_id || slot.model || "";
+        const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
+        const mtpCapable = Array.isArray(m?.tags) && m.tags.includes("mtp");
+        const isRocm = String(slot.device || "").startsWith("gpu-rocm");
+        if (!mtpCapable || !isRocm) return null;
+        const mtpOn = slot.mtp === true;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>MTP</span>
+              <span className="sub">Multi-token speculative decoding — dense models only (MoE runs slower). Restarts the container.</span>
+            </div>
+            <div className="form-ctl">
+              <PillToggle
+                on={mtpOn}
+                disabled={saving}
+                label="MTP"
+                stateText={mtpOn ? "On" : "Off"}
+                onToggle={async (next) => {
+                  setSubmitErr(null);
+                  try {
+                    await editMut.mutateAsync({ name: slot.name, body: { mtp: next } });
+                    restartMut.mutate(slot.name, {
+                      onError: (err) => window.__hal0Toast && window.__hal0Toast(`MTP restart failed — ${err?.message || "see logs"}`, "err"),
+                    });
+                    window.__hal0Toast && window.__hal0Toast(`${slot.name} MTP ${next ? "on" : "off"} — restarting in the background`, "info");
+                  } catch (err) {
+                    setSubmitErr(err?.message || "MTP toggle failed");
+                  }
+                }}
+              />
+            </div>
+          </div>
+        );
+      })()}
       </FieldGroup>
 
       {/* Task 4: Advanced fields (mostly read-only, profile-owned) are

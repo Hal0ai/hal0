@@ -259,6 +259,48 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     expect(createBodies[0].profile).toBe('vulkan')
   })
 
+  // ─── MTP pill (Task 2) ───────────────────────────────────────────────────
+
+  const MTP_SLOT = { name: 'chat', type: 'llm', device: 'gpu-rocm', profile: 'rocm-mtp', backend: 'rocm',
+    model_id: 'qwen-mtp', model: 'qwen-mtp', state: 'serving', port: 8092, runtime: 'container', enabled: true, mtp: false }
+
+  async function seedSlotsAndModels(page: Page, slots: any[], models: any[]) {
+    await page.addInitScript(({ slots, models }: { slots: any[]; models: any[] }) => {
+      let real: any
+      Object.defineProperty(window, 'HAL0_DATA', {
+        configurable: true, get() { return real },
+        set(v) { real = v; if (v && typeof v === 'object') { v.slots = slots; v.models = models } },
+      })
+    }, { slots, models })
+  }
+
+  test('C7i — MTP pill shows for rocm slot + MTP-capable model and writes mtp:true + restart', async ({ page }) => {
+    const puts: any[] = []
+    let restarted = false
+    await page.route('**/api/slots/chat/config', async (route) => {
+      if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.route('**/api/slots/chat/restart', async (route) => { restarted = true; await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }) })
+    await seedSlotsAndModels(page, [MTP_SLOT], [{ id: 'qwen-mtp', name: 'qwen-mtp', capabilities: ['chat'], tags: ['rocmfp4', 'mtp'] }])
+    await page.goto('/#slots/chat')
+    // Use the exact label span text to avoid false-matches on "qwen-mtp" / "rocm-mtp" substrings
+    const row = page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^MTP$/ }) })
+    await expect(row).toBeVisible()
+    await row.locator('button[role="switch"]').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(0)
+    expect(puts[0].mtp).toBe(true)
+    await expect.poll(() => restarted).toBe(true)
+  })
+
+  test('C7j — MTP pill hidden when the model is not MTP-capable', async ({ page }) => {
+    await seedSlotsAndModels(page, [MTP_SLOT], [{ id: 'qwen-mtp', name: 'qwen-mtp', capabilities: ['chat'], tags: ['rocmfp4'] }])
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+    // Expect no .form-row whose label span reads exactly "MTP"
+    await expect(page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^MTP$/ }) })).toHaveCount(0)
+  })
+
   // C7h — model options re-filter from the SELECTED profile, not the persisted one
   test('C7h — model options re-filter from the SELECTED profile, not the persisted one', async ({ page }) => {
     // The dashboard uses mockFetch (VITE_MOCK_HAL0=1) which short-circuits
