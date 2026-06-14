@@ -19,7 +19,7 @@
 import { test, expect, type Page } from '../fixtures/apiMock'
 
 const PRIMARY = {
-  name: 'primary', type: 'llm', device: 'gpu-rocm',
+  name: 'primary', type: 'llm', device: 'gpu-rocm', profile: 'rocm',
   model: 'qwen3.6-27b', model_id: 'qwen3.6-27b', modelLong: 'qwen3.6-27b',
   group: 'chat', state: 'serving', port: 8092, isDefault: true,
   enabled: true, enable_thinking: false, n_gpu_layers: -1,
@@ -91,6 +91,8 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
+    // The Advanced section is collapsed by default — open the disclosure.
+    await page.locator('.drawer details.adv-disclosure summary').click()
     const row = page.locator('.drawer .form-row', { hasText: 'n_gpu_layers' })
     await expect(row).toBeVisible()
     await expect(row.locator('.form-lbl .sub')).toContainText('defined by profile')
@@ -109,6 +111,8 @@ test.describe('Slot edit controls (/slots)', () => {
     await seedSlots(page, [PRIMARY, EMBED])
 
     await page.goto('/#slots/primary')
+    // ctx_size lives in the collapsed Advanced section — expand it first.
+    await page.locator('.drawer details.adv-disclosure summary').click()
     const row = page.locator('.drawer .form-row', { hasText: 'ctx_size' })
     await expect(row).toBeVisible()
     await row.locator('input').fill('16384')

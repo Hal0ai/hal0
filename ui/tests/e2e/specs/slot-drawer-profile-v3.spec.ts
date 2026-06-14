@@ -146,6 +146,45 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     expect(restartCalled).toBe(false)
   })
 
+  // C7g — non-blocking save: a profile change kicks off the cold restart in
+  // the BACKGROUND. The drawer must close immediately after the (fast) config
+  // writes land, WITHOUT waiting for the slow POST /restart to resolve. This
+  // is the fix for "save/edit hangs the dash" — restart can take model-load
+  // seconds-to-minutes and must never block the UI.
+  test('C7g — profile-change Save closes the drawer without awaiting restart', async ({ page }) => {
+    let restartStarted = false
+    let releaseRestart: () => void = () => {}
+    const restartGate = new Promise<void>((resolve) => { releaseRestart = resolve })
+
+    await page.route('**/api/slots/chat/config', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    await page.route('**/api/slots/chat/defaults', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+    )
+    // Hold the restart request open for the whole assertion window — it stays
+    // "in flight" so we can prove the drawer does not wait on it.
+    await page.route('**/api/slots/chat/restart', async (route) => {
+      restartStarted = true
+      await restartGate
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+
+    await seedSlots(page, [CHAT_CONTAINER])
+    await page.goto('/#slots/chat')
+    await expect(page.locator('.drawer')).toBeVisible()
+
+    await page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select').selectOption('vulkan')
+    await page.locator('.drawer button:has-text("Save")').click()
+
+    // The restart must have been kicked off…
+    await expect.poll(() => restartStarted).toBe(true)
+    // …but the drawer must close while it is STILL pending (non-blocking).
+    await expect(page.locator('.drawer')).toBeHidden()
+
+    releaseRestart() // let the held request settle for clean teardown
+  })
+
   // C7d — NPU slot: profile is fixed text (no select)
   test('C7d — NPU slot: profile rendered as fixed text, no select', async ({ page }) => {
     await seedSlots(page, [NPU_SLOT])

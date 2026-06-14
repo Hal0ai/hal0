@@ -12,6 +12,7 @@ import {
   useSlotImagePull,
   useSlotRestart,
   useSlotLoad,
+  useSlotSwap,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModels } from '@/api/hooks/useModels'
@@ -326,7 +327,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const defaultsMut = useSlotDefaults();
   const deleteMut = useSlotDelete();
   const restartMut = useSlotRestart();
+  const swapMut = useSlotSwap();
   const profilesQuery = useProfiles();
+  const modelsQuery = useModels();
 
   // Seed from the slot list payload when available (PR #587 — same fix
   // class as #584). llamacpp_args / n_gpu_layers / rope_freq_base are
@@ -349,6 +352,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
   const [submitErr, setSubmitErr] = useStateSM(null);
+  // Inline error for the instant-apply thinking toggle (task 3): surface the
+  // failure next to the control instead of only reverting state silently.
+  const [thinkingErr, setThinkingErr] = useStateSM(null);
   // Per-field validation errors for numeric inputs (#548).
   const [fieldErrs, setFieldErrs] = useStateSM({});
   // C7: profile swap for GPU container slots.
@@ -369,6 +375,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       // on-disk values.
       setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
       setSubmitErr(null);
+      setThinkingErr(null);
       setFieldErrs({});
       // C7: re-seed profile from the (possibly-updated) slot prop.
       setSelectedProfile(slot.profile || "");
@@ -386,25 +393,37 @@ function EditSlotDrawer({ open, slot, onClose }) {
     if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
       errs.ctx = "Must be an integer ≥ 128";
     }
+    // Task 5: GPU-class slots have an editable profile select; mirror the
+    // create-slot modal's guard and block Save when it's been cleared. NPU/CPU
+    // slots render fixed text (no select) so they can never hit this.
+    const allProfiles = profilesQuery.data ?? [];
+    const currentProfileMeta = allProfiles.find(p => p.name === (slot.profile || ""));
+    const slotDeviceIsGpu = !["npu", "cpu"].includes(slot.device || "");
+    const profileDeviceClass = currentProfileMeta?.device_class
+      ?? (slotDeviceIsGpu ? "gpu" : slot.device === "npu" ? "npu" : "cpu");
+    if (profileDeviceClass === "gpu" && !selectedProfile) {
+      errs.profile = "Profile is required";
+    }
     if (Object.keys(errs).length > 0) {
       setFieldErrs(errs);
       return;
     }
     setFieldErrs({});
+    // C7: include profile only when changed; restart after save
+    // (profile swap = cold restart, same semantics as model swap).
+    const profileChanged = !!selectedProfile && selectedProfile !== (slot.profile || "");
     try {
       // Two-step: defaults (ctx_size lives under [model]) + slot config
       // for the top-level keys (default, profile). n_gpu_layers /
       // rope_freq_base / llamacpp_args are owned by the profile — never
-      // include them in a save.
+      // include them in a save. These are fast on-disk writes, so we await
+      // them and keep the drawer open to surface any write error.
       const ctxBody = {
         ctx_size: ctxNum,
       };
       const slotBody = {
         default: makeDefault,
       };
-      // C7: include profile only when changed; restart after save
-      // (profile swap = cold restart, same semantics as model swap).
-      const profileChanged = !!selectedProfile && selectedProfile !== (slot.profile || "");
       if (profileChanged) {
         slotBody.profile = selectedProfile;
       }
@@ -416,22 +435,34 @@ function EditSlotDrawer({ open, slot, onClose }) {
         name: slot.name,
         body: slotBody,
       });
-      if (profileChanged) {
-        await restartMut.mutateAsync(slot.name);
-        window.__hal0Toast && window.__hal0Toast(
-          `Slot "${slot.name}" profile changed — restarting`,
-          "warn",
-        );
-      } else {
-        window.__hal0Toast && window.__hal0Toast(
-          `Slot "${slot.name}" saved — restart required for ctx_size`,
-          "warn",
-        );
-      }
-      onClose();
     } catch (err) {
       setSubmitErr(err?.message || "save failed");
+      return;
     }
+    // Non-blocking apply: a profile change requires a cold restart that can
+    // take model-load seconds-to-minutes. Fire it in the BACKGROUND (do NOT
+    // await) and close the drawer immediately — the slots list polls every 5s
+    // and reflects the transitional → running phase as the restart progresses.
+    // Restart failures surface via toast since the drawer is already gone.
+    if (profileChanged) {
+      restartMut.mutate(slot.name, {
+        onError: (err) =>
+          window.__hal0Toast && window.__hal0Toast(
+            `Slot "${slot.name}" restart failed — ${err?.message || "see logs"}`,
+            "err",
+          ),
+      });
+      window.__hal0Toast && window.__hal0Toast(
+        `Slot "${slot.name}" saved — restarting in the background`,
+        "info",
+      );
+    } else {
+      window.__hal0Toast && window.__hal0Toast(
+        `Slot "${slot.name}" saved — restart required for ctx_size`,
+        "warn",
+      );
+    }
+    onClose();
   }
 
   async function onDeleteClick() {
@@ -446,7 +477,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
     }
   }
 
-  const saving = editMut.isPending || defaultsMut.isPending || restartMut.isPending;
+  // `saving` gates the Save button on the fast config writes only — the
+  // restart is fired in the background (see onSaveClick) and must not keep the
+  // drawer in a blocked "Saving…" state for the whole model-load.
+  const saving = editMut.isPending || defaultsMut.isPending;
   const deleting = deleteMut.isPending;
 
   return (
@@ -535,10 +569,13 @@ function EditSlotDrawer({ open, slot, onClose }) {
             <div className="form-ctl">
               {isGpuProfile ? (
                 <select
-                  className="input mono"
+                  className={"input mono" + (fieldErrs.profile ? " input-err" : "")}
                   value={selectedProfile}
-                  onChange={e => setSelectedProfile(e.target.value)}
+                  onChange={e => { setSelectedProfile(e.target.value); setFieldErrs(p => ({...p, profile: undefined})); }}
                 >
+                  {/* Task 5: an empty option lets the field be cleared, which
+                      the Save guard then rejects (mirrors the create modal). */}
+                  {!selectedProfile && <option value="">— select a profile —</option>}
                   {gpuProfiles.map(p => (
                     <option key={p.name} value={p.name}>{p.name}</option>
                   ))}
@@ -546,20 +583,91 @@ function EditSlotDrawer({ open, slot, onClose }) {
               ) : (
                 <input className="input mono" value={slot.profile || "—"} readOnly />
               )}
+              {fieldErrs.profile && (
+                <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.profile}</div>
+              )}
               {profileImageHint && (
                 <div className="hint mono">{profileImageHint}</div>
+              )}
+              {/* Task 2: announce the pending restart before Save fires it. */}
+              {!!selectedProfile && selectedProfile !== (slot.profile || "") && (
+                <div
+                  className="hint"
+                  style={{marginTop: 6, padding: "6px 10px", borderRadius: "var(--rad-sm)", color: "var(--warn)", border: "1px solid var(--warn-line)", background: "var(--warn-soft)"}}
+                >
+                  ⟳ Profile change requires a restart — applied on Save.
+                </div>
               )}
             </div>
           </div>
         );
       })()}
 
-      <div className="form-row">
-        <div className="form-lbl"><span>Model</span><span className="sub">use inline swap from the card for live changes</span></div>
-        <div className="form-ctl">
-          <input className="input mono" value={slot.modelLong || slot.model} readOnly />
-        </div>
-      </div>
+      {/* Task 1: live model swap — mirrors the card's ModelPicker but with the
+          full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
+          Swap is its own POST /slots/{name}/swap (not part of the batched
+          Save); container slots cold-restart to load, so we toast like the
+          popover does. */}
+      {(() => {
+        const isContainer = slot.runtime === "container";
+        const compatible = (modelsQuery.data ?? [])
+          .map(normalizeApiModel)
+          .filter(m =>
+            m.type === slot.type &&
+            // ROCmFP4-quantized models only run on the rocm fork binary — hide
+            // them when the slot isn't on the rocm backend (mirror the popover).
+            !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && slot.backend !== "rocm")
+          );
+        const cur = slot.model_id || slot.model || "";
+        const has = compatible.some(m => m.id === cur);
+        // A background swap is in flight — the select stays usable, but show a
+        // "Swapping…" hint so the operator knows the load is happening.
+        const swapping = swapMut.isPending;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Model</span>
+              <span className="sub">
+                {isContainer ? "swap restarts the container to load" : "applies immediately"}
+              </span>
+            </div>
+            <div className="form-ctl">
+              <select
+                className="input mono"
+                value={cur}
+                disabled={saving}
+                aria-label={`Model for ${slot.name}`}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  if (!id || id === cur) return;
+                  setSubmitErr(null);
+                  const picked = compatible.find(m => m.id === id);
+                  const label = picked?.longName || id;
+                  // Non-blocking: a swap cold-restarts container slots to load
+                  // the model (slow). Fire it and let the slots poll reflect the
+                  // transitional phase — never freeze the drawer on the load.
+                  swapMut.mutate({ name: slot.name, model_id: id }, {
+                    onError: (err) => setSubmitErr(err?.message || "model swap failed"),
+                  });
+                  window.__hal0Toast && window.__hal0Toast(
+                    isContainer
+                      ? `Restarting ${slot.name} to load ${label} — loading in the background`
+                      : `${slot.name} → ${label}`,
+                    "info",
+                  );
+                }}
+              >
+                {cur && !has && <option value={cur}>{slot.modelLong || slot.model || cur}</option>}
+                {!cur && <option value="">—</option>}
+                {compatible.map(m => (
+                  <option key={m.id} value={m.id}>{m.longName || m.id}</option>
+                ))}
+              </select>
+              {swapping && <div className="hint">Swapping…</div>}
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="form-row">
         <div className="form-lbl">
@@ -586,6 +694,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
           <div className="form-lbl">
             <span>Thinking</span>
             <span className="sub">Stream reasoning before the answer. Off = faster, direct replies.</span>
+            {/* Task 3: make the instant-apply contract explicit — unlike the
+                ctx_size/profile fields, this saves on toggle, not on Save. */}
+            <span className="sub">applies immediately (no Save needed)</span>
           </div>
           <div className="form-ctl">
             <label className="checkbox-row">
@@ -597,7 +708,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
                   const next = e.target.checked;
                   setThinking(next);
                   setThinkingPending(true);
-                  setSubmitErr(null);
+                  setThinkingErr(null);
                   try {
                     await editMut.mutateAsync({
                       name: slot.name,
@@ -609,7 +720,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     );
                   } catch (err) {
                     setThinking(!next); // revert on failure
-                    setSubmitErr(err?.message || "thinking toggle failed");
+                    // Task 3: surface the failure inline near the toggle, not
+                    // only via the silent revert above.
+                    setThinkingErr(err?.message || "thinking toggle failed");
                   } finally {
                     setThinkingPending(false);
                   }
@@ -617,11 +730,18 @@ function EditSlotDrawer({ open, slot, onClose }) {
               />
               <span>{thinking ? "Reasoning on" : "Reasoning off"}</span>
             </label>
+            {thinkingErr && (
+              <div className="hint" style={{color: "var(--err)"}}>{thinkingErr}</div>
+            )}
           </div>
         </div>
       )}
 
-      <div className="form-section">Advanced</div>
+      {/* Task 4: Advanced fields (mostly read-only, profile-owned) are
+          collapsed by default — minimal native <details> disclosure (no
+          disclosure primitive exists in primitives.jsx). */}
+      <details className="adv-disclosure">
+      <summary className="form-section" style={{cursor: "pointer", listStyle: "revert"}}>Advanced</summary>
 
       <div className="form-row">
         <div className="form-lbl">
@@ -680,6 +800,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       <div className="hint" style={{paddingTop: 6, fontSize: 10.5, color: "var(--fg-5)", fontFamily: "var(--jbm)"}}>
         Real podman argv from profile image + flags. Read-only.
       </div>
+      </details>
     </Drawer>
   );
 }
