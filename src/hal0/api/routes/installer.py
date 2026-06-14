@@ -27,6 +27,7 @@ import contextlib
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -705,3 +706,77 @@ async def set_slot_default_model(slot: str, request: Request) -> dict[str, Any]:
         "slot_path": str(slot_path),
         "persisted": True,
     }
+
+
+# ── FirstRun v2: services step — verify + one-click repair (design D5) ───────
+
+#: Units the repair button is allowed to restart. Kept to a known allowlist so
+#: a crafted ``{unit}`` can't restart arbitrary system services.
+_REPAIRABLE_UNITS = {
+    "hal0-openwebui.service",
+    "hal0-api.service",
+    "hindsight-api.service",
+    "hal0-agent@hermes.service",
+}
+
+
+def _unit_active(unit: str) -> bool:
+    """True when ``systemctl is-active <unit>`` reports ``active``."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return out.stdout.strip() == "active"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+@router.get("/services")
+async def install_services() -> dict[str, Any]:
+    """Verify post-install services for the FirstRun services step (design D5).
+
+    Reports Hermes + OpenWebUI health so the wizard can show honest dots and
+    offer the one-click repair below when a unit is down.
+    """
+    owui = "hal0-openwebui.service"
+    hermes_active = bool(os.environ.get("HAL0_HERMES_PUBLIC_URL")) or _unit_active(
+        "hal0-agent@hermes.service"
+    )
+    services = [
+        {
+            "unit": owui,
+            "label": "OpenWebUI",
+            "active": _unit_active(owui),
+            "repairable": owui in _REPAIRABLE_UNITS,
+        },
+        {
+            "unit": "hal0-agent@hermes.service",
+            "label": "Hermes agent",
+            "active": hermes_active,
+            "repairable": True,
+        },
+    ]
+    return {"services": services}
+
+
+@router.post("/services/{unit}/repair")
+async def service_repair(unit: str) -> dict[str, Any]:
+    """Restart a known unit (design D5 one-click repair).
+
+    Restricted to :data:`_REPAIRABLE_UNITS` so the ``{unit}`` path segment
+    can't be used to restart arbitrary system services.
+    """
+    if unit not in _REPAIRABLE_UNITS:
+        raise BadRequest(
+            f"unit {unit!r} is not repairable",
+            details={"unit": unit, "allowed": sorted(_REPAIRABLE_UNITS)},
+            code="install.unit_not_repairable",
+        )
+    try:
+        subprocess.run(["systemctl", "restart", unit], check=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PickDefaultError(f"restart failed: {exc}", details={"unit": unit}) from exc
+    return {"unit": unit, "active": _unit_active(unit)}
