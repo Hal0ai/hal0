@@ -10,6 +10,22 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.4.1-alpha.1] — 2026-06-14
+
+Pre-Alpha. First release carrying the clean-install hardening proven end-to-end
+on fresh Ubuntu 24.04 containers:
+
+- Bundled-agent install converges on the hal0-managed venv — `hal0 agent
+  install hermes` provisions toolchain → venv → wrapper → unit in one
+  foreground command, and the API path becomes a thin register-or-hint (#766).
+- Installer auto-installs the python venv stdlib on clean Debian/Ubuntu instead
+  of aborting at preflight (#778); NPU host-lib prereqs (ffmpeg6/XRT) are now
+  best-effort, not fatal (#779).
+- `/var/lib/hal0` permissions let the `hal0` agent refresh the shared STATE.md
+  the session hook reads (#777).
+- Slot config UX Phase 1: grouped drawer, reasoning pill, type-default pane,
+  reactive model dropdown (#796).
+
 ## [v0.3.2-alpha.1] — 2026-05-29
 
 End-of-stream cut for v0.3. Bundles MCP-completion, memory-map redesign,
