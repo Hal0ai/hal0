@@ -258,4 +258,38 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     expect(createBodies[0].device).toBe('gpu-vulkan')
     expect(createBodies[0].profile).toBe('vulkan')
   })
+
+  // C7h — model options re-filter from the SELECTED profile, not the persisted one
+  test('C7h — model options re-filter from the SELECTED profile, not the persisted one', async ({ page }) => {
+    // The dashboard uses mockFetch (VITE_MOCK_HAL0=1) which short-circuits
+    // page.route for allowlisted endpoints like /api/models — it reads
+    // HAL0_DATA.models directly. Seed both slots AND models in a single
+    // addInitScript so the setter patch covers both fields in one pass.
+    // NOTE: capabilities: ['chat'] is required for the lib normalizeApiModel
+    // to derive type='llm'; a bare type field is overwritten by deriveType().
+    const testModels = [
+      { id: 'qwen-fp4', name: 'qwen-fp4', capabilities: ['chat'], tags: ['rocmfp4'] },
+      { id: 'qwen-plain', name: 'qwen-plain', capabilities: ['chat'], tags: [] },
+    ]
+    await page.addInitScript(({ slots, models }: { slots: any[], models: any[] }) => {
+      let real: any
+      Object.defineProperty(window, 'HAL0_DATA', {
+        configurable: true,
+        get() { return real },
+        set(v) {
+          real = v
+          if (v && typeof v === 'object') {
+            v.slots = slots
+            v.models = models
+          }
+        },
+      })
+    }, { slots: [CHAT_CONTAINER], models: testModels })
+    await page.goto('/#slots/chat')
+    const modelSel = page.locator('.drawer .form-row', { hasText: 'Model' }).locator('select')
+    await expect(modelSel.locator('option[value="qwen-fp4"]')).toHaveCount(1)   // rocm profile → fp4 present
+    await page.locator('.drawer .form-row', { hasText: 'Profile' }).locator('select').selectOption('vulkan')
+    await expect(modelSel.locator('option[value="qwen-fp4"]')).toHaveCount(0)   // vulkan → fp4 filtered out
+    await expect(modelSel.locator('option[value="qwen-plain"]')).toHaveCount(1)
+  })
 })

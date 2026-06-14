@@ -606,13 +606,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
           popover does. */}
       {(() => {
         const isContainer = slot.runtime === "container";
+        // Derive the backend from the SELECTED profile (reactive), falling back
+        // to the slot's persisted backend when the profile carries none or isn't
+        // found yet. This makes the rocmfp4 filter re-evaluate immediately when
+        // the operator switches profiles — before Save is clicked.
+        const selProfileMeta = (profilesQuery.data ?? []).find(p => p.name === selectedProfile);
+        const selBackend = selProfileMeta?.backend ?? slot.backend;
         const compatible = (modelsQuery.data ?? [])
           .map(normalizeApiModel)
           .filter(m =>
             m.type === slot.type &&
             // ROCmFP4-quantized models only run on the rocm fork binary — hide
-            // them when the slot isn't on the rocm backend (mirror the popover).
-            !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && slot.backend !== "rocm")
+            // them when the selected profile isn't on the rocm backend.
+            !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && selBackend !== "rocm")
           );
         const cur = slot.model_id || slot.model || "";
         const has = compatible.some(m => m.id === cur);
