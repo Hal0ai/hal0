@@ -13,6 +13,7 @@
 import { useModels, useModelInspect, useModelUpdate, useModelDelete, usePullJob, useScanPreview, useAddModelFromPath, fmtBytes, fmtSpeed, fmtEta } from '@/api/hooks/useModels'
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
+import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
 
@@ -253,16 +254,19 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
 // ─── Recipe editor (per-model defaults) ────────────────────────
 function RecipeEditorModal({ open, onClose, model }) {
   const update = useModelUpdate();
+  const templates = useChatTemplates();
   const init = model?.defaults || {};
   const [ctx, setCtx] = useStateMM("");
   const [ngl, setNgl] = useStateMM("");
   const [extra, setExtra] = useStateMM("");
+  const [chatTemplate, setChatTemplate] = useStateMM("auto");
 
   useEffectMM(() => {
     if (open && model) {
       setCtx(init.context_size != null ? String(init.context_size) : "");
       setNgl(init.n_gpu_layers != null ? String(init.n_gpu_layers) : "");
       setExtra(init.extra_args || "");
+      setChatTemplate(init.chat_template ?? "auto");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, model?.id]);
@@ -280,6 +284,7 @@ function RecipeEditorModal({ open, onClose, model }) {
       if (Number.isFinite(n)) defaults.n_gpu_layers = n;
     }
     if (extra.trim()) defaults.extra_args = extra;
+    defaults.chat_template = chatTemplate;
     try {
       await update.mutateAsync({ id: model.id, body: { defaults } });
       window.__hal0Toast && window.__hal0Toast(`Updated ${model.longName || model.id}`, "ok");
@@ -335,6 +340,24 @@ function RecipeEditorModal({ open, onClose, model }) {
         </div>
         <div className="form-ctl">
           <input className="input mono" placeholder="--rope-freq-base 10000" value={extra} onChange={e => setExtra(e.target.value)} />
+        </div>
+      </div>
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>chat_template</span>
+          <span className="sub">auto = use template embedded in the GGUF</span>
+        </div>
+        <div className="form-ctl">
+          <select
+            className="input mono chat-template-select"
+            value={chatTemplate}
+            onChange={e => setChatTemplate(e.target.value)}
+          >
+            <option value="auto">Auto (GGUF embedded)</option>
+            {(templates.data || []).filter(t => t.id !== "auto").map(t => (
+              <option key={t.id} value={t.id}>{t.label}</option>
+            ))}
+          </select>
         </div>
       </div>
       {update.isError && (
