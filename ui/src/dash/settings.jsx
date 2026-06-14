@@ -18,7 +18,7 @@
 import { useSecrets, useSecretSet, useSecretDelete } from '@/api/hooks/useSecrets'
 import { useUpdateState, useUpdateCheck, useUpdateApply, useUpdateJob, useSetUpdateChannel } from '@/api/hooks/useUpdates'
 import { useCapabilities, useCapabilityPatch, useCapabilityApply } from '@/api/hooks/useCapabilities'
-import { useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
+import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import {
   useSettings,
   useSettingsUpdate,
@@ -30,14 +30,17 @@ import {
 
 const { useState: useStateSet, useEffect: useEffectSet, useRef: useRefSet } = React;
 
-function SettingsView() {
-  const [section, setSection] = useStateSet("secrets");
+function SettingsView({ param }) {
+  const VALID_IDS = ["secrets", "storage", "updates", "voice", "imagegen", "defaults", "general", "about"];
+  const initialSection = param && VALID_IDS.includes(param) ? param : "secrets";
+  const [section, setSection] = useStateSet(initialSection);
   const sections = [
     { id: "secrets",   label: "Secrets" },
     { id: "storage",   label: "Storage" },
     { id: "updates",   label: "Updates" },
     { id: "voice",     label: "Voice" },
     { id: "imagegen",  label: "Image-gen" },
+    { id: "defaults",  label: "Default slots" },
     { id: "general",   label: "General" },
     { id: "about",     label: "About" },
   ];
@@ -69,6 +72,7 @@ function SettingsView() {
           {section === "updates" && <UpdatesSection />}
           {section === "voice" && <VoiceSection />}
           {section === "imagegen" && <ImageGenSection />}
+          {section === "defaults" && <DefaultSlotsSection />}
           {section === "general" && <GeneralSection />}
           {section === "about" && <AboutSection />}
         </div>
@@ -909,6 +913,77 @@ function ImageGenSection() {
           <button className="btn sm" disabled={!imgDirty || loading || applyCapability.isPending} onClick={doSave}>Save Image-gen</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── DefaultSlotsSection ─────────────────────────────────────────────────────
+//
+// For each slot type with ≥2 slots, lets the operator pick which slot is the
+// default for type-routed requests. Setting a default:
+//   PUT /api/slots/{name}/config { default: true }  — on chosen slot
+//   PUT /api/slots/{name}/config { default: false } — on previously-default sibling
+// Both calls route through the existing useSlotEdit hook.
+// No backend schema change is needed — `default` is already an accepted field.
+// Relocated from the slot edit drawer (removed in earlier task).
+function DefaultSlotsSection() {
+  const slotsQuery = useSlots();
+  const editSlot = useSlotEdit();
+  const slots = slotsQuery.data || [];
+  const byType = {};
+  for (const s of slots) { (byType[s.type] ||= []).push(s); }
+  const types = Object.keys(byType).filter(t => byType[t].length >= 2).sort();
+
+  const setDefault = async (type, name) => {
+    const sibs = byType[type] || [];
+    const prev = sibs.find(s => s.isDefault && s.name !== name);
+    try {
+      await editSlot.mutateAsync({ name, body: { default: true } });
+      if (prev) await editSlot.mutateAsync({ name: prev.name, body: { default: false } });
+      window.__hal0Toast && window.__hal0Toast(`Default ${type} slot → ${name}`, "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Couldn't set default — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  return (
+    <div className="s-section">
+      <h2>Default slots</h2>
+      <p className="desc">
+        For each modality with more than one slot, choose which slot serves type-routed requests.
+      </p>
+      {slotsQuery.isPending && (
+        <div style={{padding: 16, color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>Loading slots…</div>
+      )}
+      {slotsQuery.isError && (
+        <div className="err">{slotsQuery.error?.message || "Failed to load slots"}</div>
+      )}
+      {!slotsQuery.isPending && !slotsQuery.isError && types.length === 0 && (
+        <p className="hint" style={{fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>No modality has multiple slots yet.</p>
+      )}
+      {types.length > 0 && (
+        <div className="s-panel">
+          {types.map(type => {
+            const cur = (byType[type].find(s => s.isDefault) || {}).name || "";
+            return (
+              <div className="default-slot-row form-row s-row" key={type}>
+                <div className="k"><span>{type}</span></div>
+                <div className="v">
+                  <select
+                    className="input mono"
+                    value={cur}
+                    disabled={editSlot.isPending}
+                    onChange={e => { const n = e.target.value; if (n && n !== cur) setDefault(type, n); }}
+                    style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}
+                  >
+                    {byType[type].map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+                  </select>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
