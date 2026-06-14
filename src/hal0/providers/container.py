@@ -70,9 +70,7 @@ def _resolve_profile(name: str) -> Any:
     return ProfileCatalog().resolve(name)
 
 
-def _profile_image_and_flags(
-    profile: Any, mtp_override: bool | None = None
-) -> tuple[str, str]:
+def _profile_image_and_flags(profile: Any, mtp_override: bool | None = None) -> tuple[str, str]:
     """Extract ``(image, resolved_flags)`` from a profile object.
 
     Works for both :class:`~hal0.profiles.ResolvedProfile` (whose

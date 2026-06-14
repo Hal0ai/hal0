@@ -6,7 +6,8 @@ the profile setting.  Covers:
   - _profile_image_and_flags(profile, mtp_override) threading
 """
 
-from hal0.config.schema import ProfileConfig, MTP_FLAG_BUNDLE, resolve_profile_flags
+from hal0.config.schema import MTP_FLAG_BUNDLE, ProfileConfig, resolve_profile_flags
+from hal0.providers.container import _profile_image_and_flags
 
 
 def _profile(mtp: bool) -> ProfileConfig:
@@ -36,8 +37,6 @@ def test_override_none_falls_back_to_profile():
 
 
 # ── Container-provider threading ─────────────────────────────────────────────
-
-from hal0.providers.container import _profile_image_and_flags
 
 
 def test_profile_image_and_flags_honors_override():
