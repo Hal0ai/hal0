@@ -1280,7 +1280,11 @@ async def slot_logs_stream(name: str, request: Request) -> StreamingResponse:
 
     async def event_source() -> Any:
         if shutil.which("journalctl") is None:
-            yield 'event: error\ndata: {"message":"journalctl unavailable"}\n\n'
+            # B13: use a custom 'degraded' event name, NOT the reserved SSE
+            # 'error' name — EventSource's onmessage/onerror never fire for a
+            # named 'error' frame, so the log drawer used to spin forever on
+            # "waiting for log lines…". The client listens for 'degraded'.
+            yield 'event: degraded\ndata: {"message":"journalctl unavailable"}\n\n'
             return
         cmd = [
             "journalctl",

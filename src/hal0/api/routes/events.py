@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import json
 from typing import Any
 
@@ -27,7 +28,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.error_codes import Hal0Error
-from hal0.events import EventBus
+from hal0.events import _SEVERITY_ORDER, EventBus
 
 router = APIRouter()
 
@@ -96,15 +97,28 @@ async def list_events(
     sev = _normalise_severity(severity)
     events = bus.backfill(since=since, type_glob=type, min_severity=sev, limit=limit)
     next_since = events[-1]["id"] if events else (since or 0)
-    return {"events": events, "next_since": next_since}
+    # Per-process epoch: event ids restart at 1 on every boot, so a client
+    # holding a stale ``since`` would skip all post-restart events until the
+    # counter climbed past it. Surfacing the epoch lets the client detect the
+    # reset and rewind its cursor to 0 (fixes the footer-blank-after-restart
+    # bug). The audit epoch doubles as the process epoch.
+    epoch = getattr(request.app.state, "audit_epoch", "")
+    return {"events": events, "next_since": next_since, "epoch": epoch}
 
 
 @router.get("/stream")
 async def stream_events(
     request: Request,
     since: int | None = Query(default=None, ge=0),
+    type: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
 ) -> StreamingResponse:
     """Server-Sent Events stream: backfill then live tail.
+
+    ``type`` (fnmatch glob, e.g. ``slot.*``) and ``severity`` (min level,
+    inclusive) narrow BOTH the backfill and the live tail server-side, so a
+    footer wanting only ``slot.*`` no longer receives the full pull-progress
+    firehose (which could overflow the subscriber queue and drop frames).
 
     The replay window is bounded by the ring (500 entries). Clients that
     have been disconnected longer than that lose anything older than the
@@ -112,17 +126,23 @@ async def stream_events(
     ``/api/health`` + ``/api/slots`` after a long outage.
     """
     bus = _bus(request)
+    sev = _normalise_severity(severity)
+    min_rank = _SEVERITY_ORDER.get(sev, -1) if sev else -1
+
+    def _passes(ev: dict[str, Any]) -> bool:
+        if type and not fnmatch.fnmatchcase(ev.get("type", ""), type):
+            return False
+        if min_rank >= 0 and _SEVERITY_ORDER.get(ev.get("severity", "info"), 0) < min_rank:
+            return False
+        return True
 
     async def _gen() -> Any:
         # 1. Subscribe FIRST so events emitted between backfill snapshot
         #    and live tail get queued instead of dropped.
         async with bus.subscribe() as q:
-            # 2. Snapshot whatever is already in the ring with id > since.
-            #    We use the bus's own backfill so the filter logic stays
-            #    in one place; no type/severity narrowing on the stream
-            #    surface (clients filter client-side or use the polling
-            #    endpoint for narrow scopes).
-            replay = bus.backfill(since=since, limit=_LIMIT_MAX)
+            # 2. Snapshot whatever is already in the ring with id > since,
+            #    narrowed by the same type/severity filters as the live tail.
+            replay = bus.backfill(since=since, type_glob=type, min_severity=sev, limit=_LIMIT_MAX)
             last_id = since or 0
             for ev in replay:
                 yield f"data: {json.dumps(ev)}\n\n"
@@ -145,6 +165,8 @@ async def stream_events(
                 if ev["id"] <= last_id:
                     continue
                 last_id = ev["id"]
+                if not _passes(ev):
+                    continue
                 yield f"data: {json.dumps(ev)}\n\n"
 
     async def _safe_gen() -> Any:

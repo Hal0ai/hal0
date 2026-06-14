@@ -217,6 +217,14 @@ def _render_unit_from_plan(
         # never ran) → exit 125 "name already in use" at next boot (#721).
         # --replace removes it first; no-op when no stale record exists.
         "--replace",
+        # B3: the unit already routes conmon's inherited container stdout to
+        # journald via StandardOutput=journal. podman's DEFAULT journald log
+        # driver ALSO writes the same stdout to journald (tagged CONTAINER_NAME),
+        # so `journalctl -u hal0-slot@<name>` matched both copies and every
+        # line appeared twice. Disable podman's own log driver so conmon→unit
+        # is the single sink. (docker ignores an unknown value gracefully; it
+        # accepts --log-driver=none too.)
+        "--log-driver=none",
     ]
     if plan.network_mode:
         argv.append(f"--network={plan.network_mode}")

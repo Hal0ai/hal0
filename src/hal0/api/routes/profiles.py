@@ -19,9 +19,10 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field, field_validator
 
+from hal0.api._audit import record_action
 from hal0.config.schema import ProfileConfig
 from hal0.profiles import ProfileCatalog, ProfilePatch
 
@@ -132,7 +133,7 @@ def list_profiles() -> list[dict[str, Any]]:
 
 
 @router.post("", status_code=201)
-def create_profile(body: ProfileBody) -> dict[str, Any]:
+async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
     """Create a custom profile.
 
     Returns the created profile item (same shape as list).
@@ -141,24 +142,35 @@ def create_profile(body: ProfileBody) -> dict[str, Any]:
         409 profiles.exists: name already exists (seed or custom).
         422: pydantic validation failure (empty image, bad name, …).
     """
-    profile = ProfileCatalog().create(
-        body.name,
-        ProfileConfig(
-            image=body.image,
-            flags=body.flags,
-            mtp=body.mtp,
-            device_class=body.device_class,
-            backend=body.backend,
-            cloned_from=body.cloned_from,
-            intent=body.intent,
-            quant=body.quant,
-        ),
-    )
+    async with record_action(
+        request, category="profile", action="profile.create", target=body.name
+    ) as rec:
+        profile = ProfileCatalog().create(
+            body.name,
+            ProfileConfig(
+                image=body.image,
+                flags=body.flags,
+                mtp=body.mtp,
+                device_class=body.device_class,
+                backend=body.backend,
+                cloned_from=body.cloned_from,
+                intent=body.intent,
+                quant=body.quant,
+            ),
+        )
+        rec.after = {
+            "name": body.name,
+            "image": body.image,
+            "device_class": body.device_class,
+            "backend": body.backend,
+        }
     return profile.to_dict()
 
 
 @router.put("/{name}")
-def update_profile(name: str, body: ProfileUpdateBody) -> dict[str, Any]:
+async def update_profile(
+    name: str, body: ProfileUpdateBody, request: Request
+) -> dict[str, Any]:
     """Update an existing custom profile (shallow merge).
 
     Returns the updated profile item.
@@ -168,23 +180,36 @@ def update_profile(name: str, body: ProfileUpdateBody) -> dict[str, Any]:
         404 profiles.not_found: custom profile not found.
         422: pydantic validation failure.
     """
-    profile = ProfileCatalog().update(
-        name,
-        ProfilePatch(
-            image=body.image,
-            flags=body.flags,
-            mtp=body.mtp,
-            device_class=body.device_class,
-            backend=body.backend,
-            intent=body.intent,
-            quant=body.quant,
-        ),
-    )
+    catalog = ProfileCatalog()
+    before = None
+    existing = next((p for p in catalog.list() if p.name == name), None)
+    if existing is not None:
+        before = existing.to_dict()
+    async with record_action(
+        request,
+        category="profile",
+        action="profile.update",
+        target=name,
+        before=before,
+    ) as rec:
+        profile = catalog.update(
+            name,
+            ProfilePatch(
+                image=body.image,
+                flags=body.flags,
+                mtp=body.mtp,
+                device_class=body.device_class,
+                backend=body.backend,
+                intent=body.intent,
+                quant=body.quant,
+            ),
+        )
+        rec.after = profile.to_dict()
     return profile.to_dict()
 
 
 @router.delete("/{name}", status_code=204)
-def delete_profile(name: str) -> None:
+async def delete_profile(name: str, request: Request) -> None:
     """Delete a custom profile.
 
     Raises:
@@ -192,7 +217,10 @@ def delete_profile(name: str) -> None:
         404 profiles.not_found: custom profile not found.
         409 profiles.in_use: one or more slots reference this profile.
     """
-    ProfileCatalog().delete(name)
+    async with record_action(
+        request, category="profile", action="profile.delete", target=name
+    ):
+        ProfileCatalog().delete(name)
 
 
 __all__ = ["router"]

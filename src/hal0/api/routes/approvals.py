@@ -38,6 +38,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -107,18 +108,22 @@ async def approve_approval(approval_id: str, request: Request) -> dict[str, Any]
     behaviour is distinguishable from a stale dashboard tab.
     """
     queue = _queue(request)
-    try:
-        result = await queue.approve(approval_id)
-    except KeyError:
-        raise ApprovalNotFound(
-            f"approval {approval_id!r} not found",
-            details={"approval_id": approval_id},
-        ) from None
-    except ValueError as exc:
-        raise ApprovalAlreadyResolved(
-            str(exc),
-            details={"approval_id": approval_id},
-        ) from None
+    async with record_action(
+        request, category="approval", action="approval.approve", target=approval_id
+    ) as rec:
+        try:
+            result = await queue.approve(approval_id)
+        except KeyError:
+            raise ApprovalNotFound(
+                f"approval {approval_id!r} not found",
+                details={"approval_id": approval_id},
+            ) from None
+        except ValueError as exc:
+            raise ApprovalAlreadyResolved(
+                str(exc),
+                details={"approval_id": approval_id},
+            ) from None
+        rec.after = {"id": approval_id, "state": result.get("state")}
     return {"approval": result}
 
 
@@ -126,18 +131,22 @@ async def approve_approval(approval_id: str, request: Request) -> dict[str, Any]
 async def deny_approval(approval_id: str, request: Request) -> dict[str, Any]:
     """Deny one pending entry; no executor runs."""
     queue = _queue(request)
-    try:
-        result = await queue.deny(approval_id)
-    except KeyError:
-        raise ApprovalNotFound(
-            f"approval {approval_id!r} not found",
-            details={"approval_id": approval_id},
-        ) from None
-    except ValueError as exc:
-        raise ApprovalAlreadyResolved(
-            str(exc),
-            details={"approval_id": approval_id},
-        ) from None
+    async with record_action(
+        request, category="approval", action="approval.deny", target=approval_id
+    ) as rec:
+        try:
+            result = await queue.deny(approval_id)
+        except KeyError:
+            raise ApprovalNotFound(
+                f"approval {approval_id!r} not found",
+                details={"approval_id": approval_id},
+            ) from None
+        except ValueError as exc:
+            raise ApprovalAlreadyResolved(
+                str(exc),
+                details={"approval_id": approval_id},
+            ) from None
+        rec.after = {"id": approval_id, "state": result.get("state")}
     return {"approval": result}
 
 

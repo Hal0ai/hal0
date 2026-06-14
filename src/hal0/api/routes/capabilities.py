@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from hal0.api._audit import record_action
 from hal0.api.deps import CapabilityOrchestratorDep
 from hal0.capabilities.orchestrator import LEGAL_SLOTS, legal_children
 from hal0.errors import BadRequest
@@ -86,7 +87,18 @@ async def apply_capability(
             details={"allowed": sorted(allowed_keys), "unexpected": sorted(extras)},
         )
 
-    selection = await orchestrator.apply(slot, child, body)
+    async with record_action(
+        request,
+        category="capability",
+        action="capability.apply",
+        target=f"{slot}/{child}",
+    ) as rec:
+        selection = await orchestrator.apply(slot, child, body)
+        rec.after = {
+            "slot": slot,
+            "child": child,
+            **{k: body[k] for k in ("backend", "provider", "model", "enabled") if k in body},
+        }
     return {"ok": True, "selection": selection}
 
 

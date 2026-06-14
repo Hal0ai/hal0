@@ -20,6 +20,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 
+from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
 from hal0.config.loader import load_hal0_config
 from hal0.errors import Hal0Error
@@ -923,41 +924,53 @@ async def delete_model(
     operator's call. Registry rows hold metadata, not bytes.
     """
     registry = request.app.state.model_registry
-    if not registry.has(model_id):
-        # Mirror the registry's typed envelope. We don't raise ModelNotFound
-        # directly to avoid importing it at module scope; the registry's
-        # remove() returns False silently, so we need an explicit guard.
-        from hal0.registry.store import ModelNotFound
+    # Wrap the whole resolve+cascade+remove so the durable audit row captures
+    # BOTH the denied/unknown-id paths (404 / 409) and the successful delete
+    # with a before/after summary. The EventBus ``model.deleted`` emit below is
+    # a separate footer-ticker signal, not the audit record.
+    async with record_action(
+        request, category="model", action="model.delete", target=model_id
+    ) as rec:
+        if not registry.has(model_id):
+            # Mirror the registry's typed envelope. We don't raise ModelNotFound
+            # directly to avoid importing it at module scope; the registry's
+            # remove() returns False silently, so we need an explicit guard.
+            from hal0.registry.store import ModelNotFound
 
-        raise ModelNotFound(
-            f"model {model_id!r} not in registry",
-            details={"model_id": model_id},
-        )
+            raise ModelNotFound(
+                f"model {model_id!r} not in registry",
+                details={"model_id": model_id},
+            )
 
-    affected = _slots_referencing_model(request, model_id)
-    affected_names = [entry["name"] for entry in affected]
+        affected = _slots_referencing_model(request, model_id)
+        affected_names = [entry["name"] for entry in affected]
 
-    if affected and not force_cascade:
-        from hal0.errors import Conflict
+        if affected and not force_cascade:
+            from hal0.errors import Conflict
 
-        raise Conflict(
-            f"model {model_id!r} is referenced by {len(affected)} slot(s); "
-            f"retry with force_cascade=true to cascade",
-            code="model.in_use",
-            details={"model_id": model_id, "affected_slots": affected_names},
-        )
+            raise Conflict(
+                f"model {model_id!r} is referenced by {len(affected)} slot(s); "
+                f"retry with force_cascade=true to cascade",
+                code="model.in_use",
+                details={"model_id": model_id, "affected_slots": affected_names},
+            )
 
-    # Cascade order is load-bearing for the footer's ticker UX:
-    #   1. unload running referrers (each fires slot.state)
-    #   2. clear [model].default in slot TOMLs
-    #   3. registry delete
-    #   4. emit model.deleted LAST
-    for entry in affected:
-        await _unload_slot_if_running(request, entry["name"])
-    for entry in affected:
-        _clear_slot_default(Path(entry["path"]), entry["config"])
+        # Cascade order is load-bearing for the footer's ticker UX:
+        #   1. unload running referrers (each fires slot.state)
+        #   2. clear [model].default in slot TOMLs
+        #   3. registry delete
+        #   4. emit model.deleted LAST
+        for entry in affected:
+            await _unload_slot_if_running(request, entry["name"])
+        for entry in affected:
+            _clear_slot_default(Path(entry["path"]), entry["config"])
 
-    removed = registry.remove(model_id)
+        removed = registry.remove(model_id)
+        rec.after = {
+            "id": model_id,
+            "deleted": bool(removed),
+            "cascaded_slots": affected_names,
+        }
 
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:

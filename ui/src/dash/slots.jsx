@@ -1024,11 +1024,6 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     />
   );
 
-  // `onGo` may be omitted (some legacy call sites); fall through to hash
-  // routing so the snapshot row clicks still navigate. Keeps the sidebar
-  // working in tests/storybook-y harnesses that mount SlotsView directly.
-  const goTo = onGo || ((r) => { window.location.hash = "#" + r; });
-
   // Skip-path layout: render six seeded empty cards under their default groups.
   if (skipPath) {
     const seededByGroup = {
@@ -1076,9 +1071,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
             })}
           </div>
           <div className="dash-side">
-            <SnapshotStrip slots={slots} onGo={goTo} />
-            <MemoryMap variant="sidebar" />
-            <ThroughputCard />
+            <ActivityLog />
           </div>
         </div>
 
@@ -1112,7 +1105,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
             </div>
           </div>
           <div className="dash-side">
-            <MemoryMap variant="sidebar" />
+            <ActivityLog />
           </div>
         </div>
       </div>
@@ -1142,7 +1135,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
             </div>
           </div>
           <div className="dash-side">
-            <MemoryMap variant="sidebar" />
+            <ActivityLog />
           </div>
         </div>
         <CreateSlotModal
@@ -1272,9 +1265,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           )}
         </div>
         <div className="dash-side">
-          <SnapshotStrip slots={slots} onGo={goTo} />
-          <MemoryMap variant="sidebar" />
-          <ThroughputCard />
+          <ActivityLog />
         </div>
       </div>
 

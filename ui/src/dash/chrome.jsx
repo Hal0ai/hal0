@@ -4,7 +4,7 @@
 // `useRuntimeRollup` hook (derived from the shared /api/slots poll), so
 // prototype layout stays unchanged before the first response lands.
 
-import { useRuntimeRollup } from '@/api/hooks/useRuntime'
+import { useRuntimeRollup, useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useLogsStream } from '@/api/hooks/useLogs'
 import { useSlots, useEndpoints } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
@@ -287,7 +287,19 @@ function SidebarRuntimeWidget({ onGo }) {
   const urls      = useConfigUrls();
 
   // ── runtime ──
-  const runtimeClass = L.status === 'up' ? 'up' : L.status === 'down' ? 'down' : '';
+  // B12: the slot-poll rollup only knows up/down; /api/health/system is the
+  // honest signal for up-but-DEGRADED. When the probe says degraded we force
+  // the chip amber and tooltip the failing checks, even if every slot is up.
+  const health        = useHealthSystem();
+  const degraded      = health.data?.status === 'degraded';
+  const failing       = failingChecks(health.data);
+  const runtimeClass  = degraded ? 'warn'
+    : L.status === 'up' ? 'up'
+      : L.status === 'down' ? 'down'
+        : '';
+  const runtimeTitle = degraded
+    ? `degraded — ${failing.length ? failing.join("; ") : "see /api/health/system"}`
+    : `${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`;
 
   // ── hermes ── honest dot tone: green=running, red=broken, amber=unknown.
   // "off" when no agent is installed (no false-broken red on a fresh box).
@@ -371,12 +383,14 @@ function SidebarRuntimeWidget({ onGo }) {
       <div
         className="row"
         data-testid="runtime-row-runtime"
-        title={`${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`}
+        title={runtimeTitle}
       >
         <span className="k">runtime</span>
-        <span className={"v " + runtimeClass}>
+        <span className={"v " + runtimeClass} data-degraded={degraded ? "1" : undefined}>
           <span className="dot" />
-          {L.status}{L.status === 'up' ? ` · ${L.ready}/${L.total} slots ready` : ''}
+          {degraded
+            ? `degraded · ${L.ready}/${L.total} ready`
+            : `${L.status}${L.status === 'up' ? ` · ${L.ready}/${L.total} slots ready` : ''}`}
         </span>
       </div>
 

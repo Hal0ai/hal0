@@ -13,21 +13,27 @@
 // button is the escape hatch for full history.
 //
 // Data: useActivityStream (durable backfill + live tail, epoch-aware) with
-// the active severity/kind filters forwarded server-side. Auto-scroll
+// the active severity/category filters forwarded server-side. Auto-scroll
 // pauses while the cursor hovers the list so a live tail can't yank the
 // row you're reading.
+//
+// NOTE: this is a `.jsx` file (no TS type annotations) — it sits in the
+// same component layer as slots.jsx / chrome.jsx. The typed contract lives
+// in the useActivity.ts hook.
 
 import { useMemo, useRef, useState } from 'react'
-import {
-  useActivityStream,
-  activityExportUrl,
-  type ActivityRecord,
-  type ActivitySeverity,
-} from '@/api/hooks/useActivity'
+import { useActivityStream, activityExportUrl } from '@/api/hooks/useActivity'
+
+// Normalize severity into one of the four CSS row classes.
+function sevOf(rec) {
+  const s = String(rec.severity || '').toLowerCase()
+  if (s === 'ok' || s === 'warn' || s === 'error' || s === 'info') return s
+  return 'info'
+}
 
 // Severity → outcome glyph + class. `ok` = ✓ green confirmation, `error`
 // = ✗ red, everything else = · neutral dot.
-function outcomeGlyph(rec: ActivityRecord): { glyph: string; cls: string } {
+function outcomeGlyph(rec) {
   const sev = sevOf(rec)
   if (sev === 'ok' || rec.outcome === 'ok') return { glyph: '✓', cls: 'ok' }
   if (sev === 'error' || rec.outcome === 'error') return { glyph: '✗', cls: 'error' }
@@ -36,15 +42,8 @@ function outcomeGlyph(rec: ActivityRecord): { glyph: string; cls: string } {
   return { glyph: '·', cls: 'info' }
 }
 
-// Normalize severity into one of the four CSS row classes.
-function sevOf(rec: ActivityRecord): 'ok' | 'warn' | 'error' | 'info' {
-  const s = String(rec.severity || '').toLowerCase()
-  if (s === 'ok' || s === 'warn' || s === 'error' || s === 'info') return s
-  return 'info'
-}
-
 // Short HH:MM:SS from an ISO/epoch ts; falls back to the raw string.
-function shortTime(ts: string): string {
+function shortTime(ts) {
   if (!ts) return ''
   const d = new Date(ts)
   if (!Number.isNaN(d.getTime())) {
@@ -55,13 +54,13 @@ function shortTime(ts: string): string {
 }
 
 // Compact actor label: "mcp:hermes" → "hermes (mcp)", else as-is.
-function actorLabel(actor: string): string {
+function actorLabel(actor) {
   if (!actor) return 'system'
   if (actor.startsWith('mcp:')) return `${actor.slice(4)} (mcp)`
   return actor
 }
 
-const SEVERITY_CHIPS: Array<{ key: 'all' | ActivitySeverity; label: string }> = [
+const SEVERITY_CHIPS = [
   { key: 'all', label: 'all' },
   { key: 'ok', label: 'ok' },
   { key: 'info', label: 'info' },
@@ -79,13 +78,13 @@ const CATEGORY_OPTIONS = [
 ]
 
 export function ActivityLog() {
-  const [severity, setSeverity] = useState<'all' | ActivitySeverity>('all')
-  const [category, setCategory] = useState<string>('all')
+  const [severity, setSeverity] = useState('all')
+  const [category, setCategory] = useState('all')
   const [search, setSearch] = useState('')
   // Auto-scroll-to-top pauses while hovering so a live frame can't yank
   // the row you're reading. (Newest-first → "scroll" is really the top.)
   const [paused, setPaused] = useState(false)
-  const listRef = useRef<HTMLDivElement | null>(null)
+  const listRef = useRef(null)
 
   const stream = useActivityStream({
     follow: true,
@@ -104,7 +103,8 @@ export function ActivityLog() {
       if (severity !== 'all' && sevOf(r) !== severity) return false
       if (category !== 'all' && r.category !== category) return false
       if (q) {
-        const hay = `${r.message || ''} ${r.action || ''} ${r.target || ''} ${r.actor || ''}`.toLowerCase()
+        const hay =
+          `${r.message || ''} ${r.action || ''} ${r.target || ''} ${r.actor || ''}`.toLowerCase()
         if (!hay.includes(q)) return false
       }
       return true
@@ -235,20 +235,10 @@ export function ActivityLog() {
       {/* Export footer — full history without keeping the pane open */}
       <div className="act-foot">
         <span className="act-foot-label mono">export</span>
-        <a
-          className="act-export mono"
-          data-testid="act-export-csv"
-          href={csvHref}
-          download
-        >
+        <a className="act-export mono" data-testid="act-export-csv" href={csvHref} download>
           CSV
         </a>
-        <a
-          className="act-export mono"
-          data-testid="act-export-json"
-          href={jsonHref}
-          download
-        >
+        <a className="act-export mono" data-testid="act-export-json" href={jsonHref} download>
           JSON
         </a>
       </div>

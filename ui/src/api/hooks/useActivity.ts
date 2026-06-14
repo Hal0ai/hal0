@@ -107,17 +107,16 @@ export function useActivityHistorical(opts: UseActivityHistoricalOptions = {}) {
     enabled,
     queryFn: async (): Promise<ActivityEnvelope> => {
       const qs = buildActivityQuery(filters)
-      const body = await apiGet<Partial<ActivityEnvelope> & ActivityRecord[]>(
-        `${ENDPOINTS.activity}${qs}`,
-      )
+      const body = await apiGet<unknown>(`${ENDPOINTS.activity}${qs}`)
       // Guard against a bare-array (older/mocked) payload.
       if (Array.isArray(body)) {
         return { records: body as ActivityRecord[], next_since: null, epoch: null }
       }
+      const env = (body ?? {}) as Partial<ActivityEnvelope>
       return {
-        records: Array.isArray(body?.records) ? body.records : [],
-        next_since: body?.next_since ?? null,
-        epoch: body?.epoch ?? null,
+        records: Array.isArray(env.records) ? env.records : [],
+        next_since: env.next_since ?? null,
+        epoch: env.epoch ?? null,
       }
     },
   })

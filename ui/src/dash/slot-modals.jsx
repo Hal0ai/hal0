@@ -789,6 +789,11 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 // automatically when the drawer unmounts.
 function SlotLogsDrawer({ open, slot, onClose }) {
   const [lines, setLines] = useStateSM([]);
+  // B13: when journalctl is unavailable the backend emits a NAMED
+  // `event: degraded` SSE frame instead of streaming lines. Surfacing it
+  // tells the user *why* there are no lines, instead of spinning forever
+  // on "waiting for log lines…".
+  const [degraded, setDegraded] = useStateSM(null);
   const esRef = useRefSM(null);
 
   useEffectSM(() => {
@@ -798,9 +803,11 @@ function SlotLogsDrawer({ open, slot, onClose }) {
         esRef.current = null;
       }
       setLines([]);
+      setDegraded(null);
       return;
     }
     setLines([]);
+    setDegraded(null);
     try {
       const es = new EventSource(ENDPOINTS.slotLogsStream(slot.name));
       esRef.current = es;
@@ -810,6 +817,20 @@ function SlotLogsDrawer({ open, slot, onClose }) {
           return next.length > 500 ? next.slice(next.length - 500) : next;
         });
       };
+      // Named "degraded" frame — journalctl unavailable for this slot.
+      // Parse the payload for a human reason; fall back to a generic note.
+      es.addEventListener("degraded", (ev) => {
+        let reason = "Log streaming unavailable (journalctl not reachable for this slot).";
+        try {
+          const data = JSON.parse(ev.data);
+          if (data && (data.message || data.reason || data.detail)) {
+            reason = data.message || data.reason || data.detail;
+          }
+        } catch {
+          if (typeof ev.data === "string" && ev.data.trim()) reason = ev.data;
+        }
+        setDegraded(reason);
+      });
       es.onerror = () => {
         // Leave the stream open — server can resume; drawer close cleans up.
       };
@@ -839,6 +860,24 @@ function SlotLogsDrawer({ open, slot, onClose }) {
         </span>
       }
     >
+      {degraded && (
+        <div
+          className="mono"
+          data-testid="slot-logs-degraded"
+          style={{
+            background: "var(--warn-soft)",
+            border: "1px solid var(--warn-line)",
+            borderRadius: "var(--rad-sm)",
+            padding: "8px 10px",
+            fontSize: 11.5,
+            color: "var(--warn)",
+            lineHeight: 1.5,
+            marginBottom: 8,
+          }}
+        >
+          {degraded}
+        </div>
+      )}
       <div
         className="mono"
         style={{
@@ -849,13 +888,17 @@ function SlotLogsDrawer({ open, slot, onClose }) {
           fontSize: 11.5,
           color: "var(--fg-2)",
           lineHeight: 1.5,
-          height: 460,
+          height: degraded ? 414 : 460,
           overflow: "auto",
           whiteSpace: "pre-wrap",
         }}
       >
         {lines.length === 0
-          ? <span style={{color: "var(--fg-4)", fontStyle: "italic"}}>waiting for log lines…</span>
+          ? (
+            <span style={{color: "var(--fg-4)", fontStyle: "italic"}}>
+              {degraded ? "No log lines — see the notice above." : "waiting for log lines…"}
+            </span>
+          )
           : lines.join("\n")}
       </div>
     </Drawer>

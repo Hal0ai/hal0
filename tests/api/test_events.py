@@ -232,7 +232,7 @@ async def test_stream_replay_then_live() -> None:
             async def is_disconnected(self) -> bool:
                 return False
 
-        resp = await stream_events(_StubRequest(), since=None)  # type: ignore[arg-type]
+        resp = await stream_events(_StubRequest(), since=None, type=None, severity=None)  # type: ignore[arg-type]
         gen = resp.body_iterator
 
         # Drain the replay frames (system.restart + first + second).
@@ -300,7 +300,7 @@ async def test_stream_since_skips_backfill() -> None:
             async def is_disconnected(self) -> bool:
                 return False
 
-        resp = await stream_events(_StubRequest(), since=cursor)  # type: ignore[arg-type]
+        resp = await stream_events(_StubRequest(), since=cursor, type=None, severity=None)  # type: ignore[arg-type]
         gen = resp.body_iterator
 
         async def _drain_one(*, timeout: float = 3.0) -> list[dict[str, Any]]:

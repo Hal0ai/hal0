@@ -27,6 +27,7 @@ from fastapi.responses import Response
 
 from hal0 import __version__
 from hal0.config import paths
+from hal0.slots.state import SlotState
 
 log = structlog.get_logger(__name__)
 
@@ -176,7 +177,18 @@ async def health_system(request: Request) -> dict[str, Any]:
     else:
         try:
             slots = await sm.list()
-            checks["slot_manager"] = {"ok": True, "slots": len(slots)}
+            # B2: a slot stuck in ERROR is a real degradation — the previous
+            # check reported ok=True regardless, so a systemd-FAILED slot
+            # rendered the whole system "ok". Surface the errored slots so the
+            # dashboard chip + tooltip can tell the truth.
+            errored = [s.name for s in slots if s.state == SlotState.ERROR]
+            sm_ok = not errored
+            checks["slot_manager"] = {
+                "ok": sm_ok,
+                "slots": len(slots),
+                "errored": errored,
+            }
+            degraded = degraded or not sm_ok
         except Exception as exc:
             checks["slot_manager"] = {"ok": False, "detail": str(exc)}
             degraded = True
