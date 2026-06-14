@@ -48,6 +48,13 @@ Environment=HINDSIGHT_API_LLM_MODEL=hal0/utility
 Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
 # Generous timeout retained: covers utility-slot cold starts + long reflects.
 Environment=HINDSIGHT_API_LLM_TIMEOUT=300
+# Skip the blocking startup LLM verification. On a fresh box no model is loaded
+# yet, so verifying hal0/utility would hang application startup (the daemon never
+# binds :9177) until the timeout. The LLM is only needed for extraction/reflection,
+# which runs lazily after a model is loaded — so the engine can serve, create, and
+# seed banks immediately without one. (When a utility model IS loaded, extraction
+# just works; verification was only ever a startup nicety.)
+Environment=HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
 
 # Embeddings + reranker are LOCAL (bundled BGE 384-d + MiniLM cross-encoder) —
 # the full `hindsight-api` package default. No external embed/rerank config needed.
