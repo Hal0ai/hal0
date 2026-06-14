@@ -345,56 +345,71 @@ export function ComfyuiPane() {
   // Pin toggle — synchronous 200 {"pinned":bool}, so mirror the switchover's
   // refetch-not-optimistic pattern: toast, then refetch /status so the arbiter
   // block (pin state + countdown) re-renders from server truth.
-  const doPin = async () => {
+  // Fire-and-forget pin flip — toast immediately and refetch on success so the
+  // arbiter block re-renders from server truth; never block the toggle on the
+  // round-trip. (Mirrors the non-blocking control pattern from PR #781.)
+  const doPin = () => {
     if (!arb || pin.isPending) return
     const next = !arb.pinned
-    try {
-      await pin.mutateAsync({ pinned: next })
-      toast(next ? 'Image mode pinned — auto-restore disabled.' : 'Unpinned — auto-restore re-armed.', 'ok')
-      q.refetch()
-    } catch (err) {
-      const code = String(err?.code || '')
-      if (code === 'comfyui.switchover_disabled' || err?.status === 501) {
-        toast(
-          'ComfyUI switchover is disabled on this host — set HAL0_COMFYUI_SWITCHOVER_ENABLED=1 ' +
-            'on hal0-api to enable it.',
-          'warn'
-        )
-      } else {
-        toast(err?.message ? `pin failed: ${err.message}` : 'pin failed', 'warn')
+    pin.mutate(
+      { pinned: next },
+      {
+        onSuccess: () => {
+          toast(next ? 'Image mode pinned — auto-restore disabled.' : 'Unpinned — auto-restore re-armed.', 'ok')
+          q.refetch()
+        },
+        onError: (err) => {
+          const code = String(err?.code || '')
+          if (code === 'comfyui.switchover_disabled' || err?.status === 501) {
+            toast(
+              'ComfyUI switchover is disabled on this host — set HAL0_COMFYUI_SWITCHOVER_ENABLED=1 ' +
+                'on hal0-api to enable it.',
+              'warn'
+            )
+          } else {
+            toast(err?.message ? `pin failed: ${err.message}` : 'pin failed', 'warn')
+          }
+        },
       }
-    }
+    )
   }
 
-  const doSwitch = async () => {
+  // Fire-and-forget switchover — close the confirm dialog and toast the moment
+  // the user commits, rather than after the round-trip. The switchover POST is
+  // already async (202; the GPU arbiter drains/flips in the background) and the
+  // status poll's `switchover` block drives the transitional UI, so the click
+  // never has to wait. (Mirrors the non-blocking control pattern from PR #781.)
+  const doSwitch = () => {
     const target = confirm
-    try {
-      // The confirm dialog already warned that queued renders drop — that
-      // consent is what authorizes force when tearing down a busy queue.
-      const force = target === 'inference' && queueTotal > 0 ? true : undefined
-      await sw.mutateAsync({ mode: target, force })
-      toast(`Switching to ${target} mode…`, 'ok')
-      setConfirm(null)
-      setTimeout(() => q.refetch(), 1500)
-    } catch (err) {
-      setConfirm(null)
-      // Hal0Error carries the backend envelope's code directly (e.g.
-      // comfyui.switchover_disabled / comfyui.busy) + the HTTP status.
-      const code = String(err?.code || '')
-      if (code === 'comfyui.switchover_disabled' || err?.status === 501) {
-        toast(
-          'ComfyUI switchover is disabled on this host — set HAL0_COMFYUI_SWITCHOVER_ENABLED=1 ' +
-            'on hal0-api to enable it.',
-          'warn'
-        )
-      } else if (code === 'comfyui.busy') {
-        toast('Renders are still running or queued — drain the queue first.', 'warn')
-      } else if (code === 'comfyui.switch_in_progress') {
-        toast('A switchover is already in progress — wait for it to finish.', 'warn')
-      } else {
-        toast(err?.message ? `switchover failed: ${err.message}` : 'switchover failed', 'warn')
+    // The confirm dialog already warned that queued renders drop — that
+    // consent is what authorizes force when tearing down a busy queue.
+    const force = target === 'inference' && queueTotal > 0 ? true : undefined
+    setConfirm(null)
+    toast(`Switching to ${target} mode…`, 'info')
+    sw.mutate(
+      { mode: target, force },
+      {
+        onError: (err) => {
+          // Hal0Error carries the backend envelope's code directly (e.g.
+          // comfyui.switchover_disabled / comfyui.busy) + the HTTP status.
+          const code = String(err?.code || '')
+          if (code === 'comfyui.switchover_disabled' || err?.status === 501) {
+            toast(
+              'ComfyUI switchover is disabled on this host — set HAL0_COMFYUI_SWITCHOVER_ENABLED=1 ' +
+                'on hal0-api to enable it.',
+              'warn'
+            )
+          } else if (code === 'comfyui.busy') {
+            toast('Renders are still running or queued — drain the queue first.', 'warn')
+          } else if (code === 'comfyui.switch_in_progress') {
+            toast('A switchover is already in progress — wait for it to finish.', 'warn')
+          } else {
+            toast(err?.message ? `switchover failed: ${err.message}` : 'switchover failed', 'warn')
+          }
+        },
+        onSettled: () => setTimeout(() => q.refetch(), 1500),
       }
-    }
+    )
   }
 
   return (

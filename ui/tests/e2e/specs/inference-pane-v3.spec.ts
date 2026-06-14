@@ -104,6 +104,58 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     await expect.poll(() => unloads.length).toBeGreaterThan(0)
   })
 
+  test('Stop stays enabled mid-load (transitional) → cancel fires /unload without waiting', async ({ page }) => {
+    // Regression for the non-blocking control rework: a slot that is still
+    // loading (container_status "starting" → transitional phase) must keep its
+    // Stop control LIVE so the user can cancel a slow model-load instead of
+    // waiting for it to finish. Previously Stop was `disabled` during
+    // transitional.
+    const LOADING_LLM_SLOT = {
+      name: 'loading-llm',
+      type: 'llm',
+      device: 'gpu-rocm',
+      device_class: 'gpu',
+      backend: 'rocm',
+      model: 'qwen3.6-35b-a3b-q4_k_m',
+      model_id: 'qwen3.6-35b-a3b',
+      group: 'chat',
+      state: 'starting',
+      port: 8099,
+      runtime: 'container',
+      profile: 'rocm',
+      container_status: 'starting',
+      container_health: false,
+      mem_mb: 0,
+      enabled: true,
+      isDefault: false,
+      metrics: { toks: 0, ttft: null, ctx: 0, kv: null },
+    }
+    const unloads: string[] = []
+    await page.route('**/api/slots/loading-llm/unload', async (route) => {
+      unloads.push(route.request().url())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
+    await page.addInitScript((slot) => {
+      document.addEventListener('DOMContentLoaded', () => {
+        const w = window as any
+        if (w.HAL0_DATA) {
+          const existing = (w.HAL0_DATA.slots || []).filter((s: any) => s.name !== slot.name)
+          w.HAL0_DATA.slots = [slot, ...existing]
+        }
+      })
+    }, LOADING_LLM_SLOT)
+
+    await page.goto('/#slots')
+    await page.getByTestId('infer-qcaret').click()
+    await expect(engine(page)).toHaveClass(/\bopen\b/)
+
+    const stop = body(page).getByTestId('infer-slot-loading-llm').locator('.sctrl.stop')
+    await expect(stop).toBeVisible()
+    await expect(stop).toBeEnabled() // ← the cancel-mid-load affordance
+    await stop.click()
+    await expect.poll(() => unloads.length).toBeGreaterThan(0)
+  })
+
   test('expanded Restart control POSTs /restart for a running slot', async ({ page }) => {
     const restarts: string[] = []
     await page.route('**/api/slots/primary/restart', async (route) => {
