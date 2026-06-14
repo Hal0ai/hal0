@@ -257,8 +257,8 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 
 function ModelRow({ model, selected, onSelect }) {
   // Backend tags use the unified device palette (.chip.dev-rocm / dev-vulkan /
-  // dev-cpu / dev-npu) so a Vulkan tag here is the same blue as everywhere
-  // else on the dash. `type` is the dispatcher vocab derived in normalizeApiModel.
+  // dev-cpu / dev-npu) so a tag here is the same hue as everywhere else on the
+  // dash. `type` is the dispatcher vocab derived in normalizeApiModel.
   const backends = Array.isArray(model.backends) ? model.backends : [];
   return (
     <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>

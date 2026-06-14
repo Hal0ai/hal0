@@ -958,11 +958,11 @@
 }
 :is(.infer-pane, .npu-pane) .dchip.vulkan {
   color: var(--dev-vulkan);
-  border-color: rgba(127, 184, 255, 0.3);
+  border-color: rgba(249, 216, 132, 0.3);
 }
 :is(.infer-pane, .npu-pane) .dchip.rocm {
   color: var(--dev-rocm);
-  border-color: rgba(215, 107, 107, 0.3);
+  border-color: rgba(127, 184, 255, 0.3);
 }
 :is(.infer-pane, .npu-pane) .dchip.npu {
   color: var(--dev-npu);

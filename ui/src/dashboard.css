@@ -49,11 +49,11 @@
   --info-line:    rgba(127, 184, 255, 0.30);
 
   /* Device colours */
-  --dev-rocm:     #d76b6b;
-  --dev-vulkan:   #7fb8ff;
+  --dev-rocm:     #7fb8ff;
+  --dev-vulkan:   #f9d884;
   --dev-cpu:      #9c9c95;
   --dev-npu:      #c896ff;
-  --dev-img:      #5ea4f9;  /* ComfyUI image-gen — mirrors --comfy accent */
+  --dev-img:      #3c6597;  /* ComfyUI image-gen tag (decoupled from --comfy accent) */
 
   /* ComfyUI "generation engine" accent — its own blue the way the NPU stack
      owns purple. Mirrored in comfyui-pane.css (scoped to .comfy-pane); kept
@@ -496,7 +496,7 @@ a { color: inherit; text-decoration: none; }
 .foot-line.warn  { border-left-color: var(--warn); }
 .foot-line.error { border-left-color: var(--err); }
 .foot-line .ts { color: var(--fg-5); }
-.foot-line .sl { color: var(--dev-vulkan); }
+.foot-line .sl { color: var(--info); }
 .foot-line .sl:nth-child(2) { color: var(--accent); }
 .foot-line .lvl { color: var(--fg-3); }
 .foot-line.ok    .lvl { color: var(--ok); }
@@ -632,11 +632,11 @@ a { color: inherit; text-decoration: none; }
 .chip.warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-line); }
 .chip.err { background: var(--err-soft); color: var(--err); border-color: var(--err-line); }
 .chip.info { background: var(--info-soft); color: var(--info); border-color: var(--info-line); }
-.chip.dev-rocm { color: var(--dev-rocm); border-color: rgba(215, 107, 107, 0.30); background: rgba(215, 107, 107, 0.08); }
-.chip.dev-vulkan { color: var(--dev-vulkan); border-color: rgba(127, 184, 255, 0.30); background: rgba(127, 184, 255, 0.08); }
+.chip.dev-rocm { color: var(--dev-rocm); border-color: rgba(127, 184, 255, 0.30); background: rgba(127, 184, 255, 0.08); }
+.chip.dev-vulkan { color: var(--dev-vulkan); border-color: rgba(249, 216, 132, 0.30); background: rgba(249, 216, 132, 0.08); }
 .chip.dev-cpu { color: var(--dev-cpu); border-color: var(--line-strong); background: var(--bg-2); }
 .chip.dev-npu { color: var(--dev-npu); border-color: rgba(200, 150, 255, 0.30); background: rgba(200, 150, 255, 0.08); }
-.chip.dev-img { color: var(--dev-img); border-color: rgba(94, 164, 249, 0.30); background: rgba(94, 164, 249, 0.08); }
+.chip.dev-img { color: var(--dev-img); border-color: rgba(60, 101, 151, 0.30); background: rgba(60, 101, 151, 0.08); }
 .chip.outlined { background: transparent; }
 
 .kbd {
