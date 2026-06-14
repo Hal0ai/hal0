@@ -471,14 +471,23 @@ function DownloadRow({ modelId, onRemove }) {
 
   const state = job.state;
   const pct = job.pct ?? 0;
-  const onPause = () => {
-    // The pull engine doesn't support pause — degrade gracefully
-    // by cancelling the in-flight transfer; the row can be re-pulled
-    // from the catalog.
-    job.cancel();
+  const [cancelling, setCancelling] = useStateMM(false);
+  const doCancel = async () => {
+    // The hook re-throws Hal0Error on a failed cancel; surface it as a
+    // toast instead of letting the rejection float as unhandled.
+    setCancelling(true);
+    try {
+      await job.cancel();
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Cancel failed — ${e?.message || "see logs"}`, "err",
+      );
+    } finally {
+      setCancelling(false);
+    }
   };
-  const onResume = () => { /* see Pause comment */ };
-  const onCancel = () => { job.cancel(); };
+  const onPause = doCancel;  // engine has no pause; degrade to cancel.
+  const onCancel = doCancel;
   const onRetry = () => { job.start(modelId); };
 
   return (
@@ -524,12 +533,12 @@ function DownloadRow({ modelId, onRemove }) {
       <div style={{display: "flex", gap: 4, marginTop: 6}}>
         {state === "running" && (
           <>
-            <button className="btn ghost sm" onClick={onPause}>Pause</button>
-            <button className="btn ghost sm" onClick={onCancel}>Cancel</button>
+            <button className="btn ghost sm" onClick={onPause} disabled={cancelling}>Pause</button>
+            <button className="btn ghost sm" onClick={onCancel} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel"}</button>
           </>
         )}
         {state === "queued" && (
-          <button className="btn ghost sm" onClick={onCancel}>Cancel</button>
+          <button className="btn ghost sm" onClick={onCancel} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel"}</button>
         )}
         {state === "failed" && (
           <>

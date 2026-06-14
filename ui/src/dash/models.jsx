@@ -287,6 +287,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
   const pull = usePullJob();
   const slotsQuery = useSlots();
   const swap = useSlotSwap();
+  const [cancelling, setCancelling] = useStateM(false);
   if (!model) {
     return (
       <div className="mdl-detail">
@@ -317,6 +318,25 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
       window.__hal0Toast && window.__hal0Toast(
         `Pull failed — ${e?.message || "see logs"}`, "err",
       );
+    }
+  };
+
+  // Cancel an in-flight pull started from this pane. The hook hits
+  // POST /api/models/{id}/pull/cancel and invalidates ['models']; we
+  // surface the same error-toast pattern as the other mutations.
+  const onCancelPull = async () => {
+    setCancelling(true);
+    try {
+      await pull.cancel();
+      window.__hal0Toast && window.__hal0Toast(
+        `Cancelled pull · ${model.longName || model.id}`, "info",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Cancel failed — ${e?.message || "see logs"}`, "err",
+      );
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -416,6 +436,11 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
             <button className="btn" onClick={onPull} disabled={pull.inFlight}>
               {Icons.download} {pull.inFlight ? `Pulling ${pull.pct ?? 0}%` : `Pull (${model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "—")})`}
             </button>
+            {pull.inFlight && (
+              <button className="btn ghost sm" onClick={onCancelPull} disabled={cancelling}>
+                {cancelling ? "Cancelling…" : "Cancel"}
+              </button>
+            )}
             <button className="btn ghost sm" onClick={() => window.open(`https://huggingface.co/${model.hf_repo || model.repo || ""}`, "_blank")}>View on HF →</button>
           </>
         )}
