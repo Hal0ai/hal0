@@ -122,6 +122,48 @@ def models_dir() -> Path:
     return var_lib() / "models"
 
 
+#: Conventional external model-store mount and the historic default for slot
+#: container bind-mounts. Most hal0 deployments target an NFS / fast-disk
+#: mount here; overridable per-install via ``[models].store`` or the
+#: ``HAL0_MODEL_STORE`` env var (see :func:`model_store_root`).
+DEFAULT_MODEL_STORE = "/mnt/ai-models"
+
+
+def model_store_root() -> str:
+    """Resolve the model-store directory that slot containers bind-mount.
+
+    Single source of truth shared by the registry/pull engine
+    (``[models].store``) and the provider container mounts, so the path the
+    registry hands to llama-server can never drift from what the container
+    actually mounts. Precedence:
+
+      1. ``HAL0_MODEL_STORE`` env var — explicit operator / CI override,
+      2. ``[models].store`` from hal0.toml — the documented single-source-of
+         -truth field (``ModelsConfig.store``),
+      3. :data:`DEFAULT_MODEL_STORE` (``/mnt/ai-models``) — the conventional
+         mount + historic default.
+
+    The mount default deliberately stays ``/mnt/ai-models`` (NOT
+    ``pull_root`` / ``models_dir()``) so existing deployments that never set
+    ``store`` keep mounting the same path; once ``store`` is set, the pull
+    engine and the slot mounts align on it. Config is read lazily so this is
+    safe to call from low-level provider code without an import cycle, and it
+    degrades to the default if the config can't be read (early bootstrap).
+    """
+    env = os.environ.get("HAL0_MODEL_STORE", "").strip()
+    if env:
+        return env
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        store = (load_hal0_config().models.store or "").strip()
+        if store:
+            return store
+    except Exception:
+        pass
+    return DEFAULT_MODEL_STORE
+
+
 def slot_data_dir(slot_name: str) -> Path:
     """Return the per-slot working directory (/var/lib/hal0/slots/<name>/)."""
     return var_lib() / "slots" / slot_name

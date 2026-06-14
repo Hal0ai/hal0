@@ -50,11 +50,12 @@ def test_spec_security_opts_for_lxc() -> None:
 
 
 def test_spec_ro_mount_dst_has_ro_suffix() -> None:
-    """ContainerSpec mount dst must carry :ro so the rendered --volume arg is read-only."""
+    """ContainerSpec mount dst must carry :ro (+ SELinux z) so the rendered
+    --volume arg is read-only and relabelled on SELinux hosts."""
     spec = KokoroProvider().container_spec(_slot_cfg(), {})
     ai_mount = next(m for m in spec.mounts if m[0] == "/mnt/ai-models")
-    assert ai_mount[1].endswith(":ro"), (
-        f"mount dst {ai_mount[1]!r} must end with ':ro' — "
+    assert ai_mount[1].endswith(":ro,z"), (
+        f"mount dst {ai_mount[1]!r} must end with ':ro,z' — "
         "_render_unit_from_spec emits --volume={src}:{dst} verbatim"
     )
 

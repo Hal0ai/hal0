@@ -1775,10 +1775,13 @@ class ModelsConfig(BaseModel):
         description=(
             "Single source of truth for where hal0 reads + writes model files. "
             "When set (absolute path, e.g. ``/mnt/ai-models``), the pull engine "
-            "writes here AND slot containers mount the path (observed on the "
-            "next slot restart). "
-            "Empty falls back to ``pull_root`` for PR-#313 compatibility, "
-            "which itself defaults to ``paths.models_dir()``."
+            "writes here AND slot containers bind-mount the path identical-path "
+            "with an SELinux relabel (observed on the next slot restart; see "
+            "``paths.model_store_root``). ``HAL0_MODEL_STORE`` env overrides it. "
+            "Empty falls back to ``pull_root`` for PR-#313 compatibility, which "
+            "itself defaults to ``paths.models_dir()``; note the mount default "
+            "stays ``/mnt/ai-models`` (not ``pull_root``) so existing "
+            "deployments are unaffected until ``store`` is set."
         ),
     )
 

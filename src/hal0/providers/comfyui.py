@@ -55,14 +55,16 @@ _HAL0_COMFYUI_IMAGE = "docker.io/kyuz0/amd-strix-halo-comfyui:latest"
 # In-container app + working-data layout. The kyuz0 image has ComfyUI
 # checked out at /opt/ComfyUI (venv at /opt/venv). Host-side working data
 # (models / output / input / user / custom_nodes + extra_model_paths.yaml)
-# lives under _COMFYUI_DATA_ROOT and is bind-mounted in so weights and
+# lives under "<model-store>/comfyui" and is bind-mounted in so weights and
 # custom nodes persist across container restarts.
 _COMFYUI_APP_DIR = "/opt/ComfyUI"
 _COMFYUI_BASE_DIR = "/var/lib/hal0/comfyui"
 
-# Host data root for the bind mounts. Overridable for tests / non-standard
-# installs via HAL0_COMFYUI_DATA_ROOT.
-_COMFYUI_DATA_ROOT = "/mnt/ai-models/comfyui"
+# ComfyUI's working data lives under "<model-store>/comfyui" so it tracks the
+# configured model store ([models].store / HAL0_MODEL_STORE, default
+# /mnt/ai-models) — resolved per-render in container_spec(). Still directly
+# overridable via HAL0_COMFYUI_DATA_ROOT for tests / non-standard installs.
+_COMFYUI_DATA_SUBDIR = "comfyui"
 
 # Live-validated flag bundle (matches the "comfyui" seed profile). Used
 # when the slot has no resolvable profile.
@@ -245,7 +247,12 @@ class ComfyUIProvider(Provider):
         ).strip()
         command: list[str] = ["bash", "-lc", payload]
 
-        data_root = os.environ.get("HAL0_COMFYUI_DATA_ROOT", "").strip() or _COMFYUI_DATA_ROOT
+        from hal0.config.paths import model_store_root
+
+        data_root = (
+            os.environ.get("HAL0_COMFYUI_DATA_ROOT", "").strip()
+            or f"{model_store_root()}/{_COMFYUI_DATA_SUBDIR}"
+        )
         # ":ro" suffix on the dst is how ContainerSpec expresses read-only
         # mounts (_render_unit_from_spec emits --volume={src}:{dst} verbatim).
         mounts: list[tuple[str, str]] = [

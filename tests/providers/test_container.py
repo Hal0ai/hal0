@@ -144,8 +144,9 @@ class TestRenderUnit:
         # Must follow --name so the pairing is obvious in the rendered unit.
         assert tokens.index("--replace") == tokens.index("--name=hal0-slot-test-slot") + 1
 
-    def test_identical_path_mount_readonly(self) -> None:
-        """Model store must be mounted at /mnt/ai-models:ro (identical path)."""
+    def test_identical_path_mount_readonly(self, monkeypatch) -> None:
+        """Model store mounted identical-path, read-only, with SELinux relabel."""
+        monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
         profile = _moe_profile()
         flags = resolve_profile_flags(profile)
         unit = _render_unit(
@@ -158,10 +159,33 @@ class TestRenderUnit:
         )
         exec_start = self._get_exec_start(unit)
         tokens = shlex.split(exec_start)
-        # --volume arg must be present with :ro suffix
+        # identical-path mount, :ro, plus SELinux relabel (z)
         vol_args = [t for t in tokens if t.startswith(f"--volume={_MODEL_STORE_MOUNT}")]
         assert vol_args, f"no --volume for {_MODEL_STORE_MOUNT} in: {tokens}"
-        assert ":ro" in vol_args[0], f"mount not read-only: {vol_args[0]}"
+        assert vol_args[0] == f"--volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro,z", (
+            f"unexpected mount: {vol_args[0]}"
+        )
+
+    def test_mount_honours_custom_model_store(self, monkeypatch) -> None:
+        """A custom HAL0_MODEL_STORE is what the slot bind-mounts — so a model
+        dir outside /mnt/ai-models is visible inside the container (the Fedora
+        'No such file or directory' bug)."""
+        custom = "/home/cuken/ai/models"
+        monkeypatch.setenv("HAL0_MODEL_STORE", custom)
+        profile = _moe_profile()
+        flags = resolve_profile_flags(profile)
+        unit = _render_unit(
+            "agent0",
+            profile.image,
+            8095,
+            f"{custom}/Qwen3.6-35B.gguf",
+            flags,
+            runtime_bin=_TEST_RUNTIME,
+        )
+        tokens = shlex.split(self._get_exec_start(unit))
+        assert f"--volume={custom}:{custom}:ro,z" in tokens, tokens
+        # the legacy default must NOT be mounted
+        assert not any(t.startswith("--volume=/mnt/ai-models") for t in tokens), tokens
 
     def test_loopback_port_publish(self) -> None:
         """Port must be published on 127.0.0.1 only (not LAN-exposed)."""
@@ -455,7 +479,8 @@ class TestContainerSpec:
         spec = self._build_spec()
         mount_pairs = dict(spec.mounts)
         assert _MODEL_STORE_MOUNT in mount_pairs
-        assert mount_pairs[_MODEL_STORE_MOUNT] == _MODEL_STORE_MOUNT
+        # identical src→dst with :ro,z encoded into the dst (SELinux relabel)
+        assert mount_pairs[_MODEL_STORE_MOUNT] == f"{_MODEL_STORE_MOUNT}:ro,z"
 
     def test_devices_present(self) -> None:
         with patch(

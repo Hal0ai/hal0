@@ -38,6 +38,7 @@ from typing import Any
 import httpx
 
 from hal0.config.loader import resolve_profile
+from hal0.config.paths import model_store_root
 from hal0.config.schema import resolve_profile_flags
 from hal0.errors import Hal0Error
 from hal0.providers.base import ContainerSpec, Provider
@@ -48,14 +49,11 @@ _DEFAULT_KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 # Default profile name if the slot TOML omits one.
 _DEFAULT_PROFILE = "tts"
 
-# Model store: the same absolute path is used inside the container so that
-# ``--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx`` (baked into the
-# profile flags) resolves correctly without any path translation.
-_MODEL_STORE_HOST = "/mnt/ai-models"
-# ":ro" is appended directly because _render_unit_from_spec renders mounts as
-# --volume={src}:{dst} with no separate read-only option.  This is the only way
-# to express a read-only bind-mount with the current ContainerSpec shape.
-_MODEL_STORE_CONTAINER = "/mnt/ai-models:ro"
+# Model store is mounted identical-path so the profile-baked
+# ``--model_path <store>/local/kokoro-v1/kokoro-onnx`` resolves inside the
+# container without path translation. The root is resolved per-render via
+# model_store_root(); ":ro,z" is encoded into the dst because
+# _render_unit_from_spec renders mounts as --volume={src}:{dst} verbatim.
 
 # Providers whose model weights are pre-staged by the operator (not hal0 registry).
 SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "comfyui"})
@@ -159,14 +157,21 @@ class KokoroProvider(Provider):
             str(port),
         ]
 
+        # Effective model-store root ([models].store / HAL0_MODEL_STORE,
+        # default /mnt/ai-models).
+        store_root = model_store_root()
+
         return ContainerSpec(
             image=profile.image,
             command=command,
             env={},
-            # Mount the model store read-only.  ":ro" is appended to the
-            # container path directly — _render_unit_from_spec emits
-            # --volume={src}:{dst} verbatim (no separate ro flag on spec).
-            mounts=[(_MODEL_STORE_HOST, _MODEL_STORE_CONTAINER)],
+            # Mount the model store read-only. ``:ro,z`` is encoded into the
+            # container path (dst) since _render_unit_from_spec emits
+            # --volume={src}:{dst} verbatim; ``z`` relabels for SELinux hosts.
+            # NOTE: Kokoro weights are profile-baked at <store>/local/kokoro-v1
+            # (profiles.toml --model_path). A non-default [models].store moves
+            # the mount but not that flag yet — tracked as a follow-up.
+            mounts=[(store_root, f"{store_root}:ro,z")],
             # CPU-only: no GPU devices or supplementary groups required.
             devices=[],
             cap_add=[],

@@ -49,6 +49,7 @@ import httpx
 # Aliased to the old private name so existing test patch targets
 # (``hal0.providers.container._resolve_profile``) keep working.
 from hal0.config.loader import resolve_profile as _resolve_profile
+from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
 from hal0.config.schema import resolve_profile_flags
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
@@ -61,7 +62,10 @@ log = logging.getLogger(__name__)
 # template.  Writing a complete file means the manager never has to
 # know whether the base exists.
 _SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
-_MODEL_STORE_MOUNT = "/mnt/ai-models"
+# Back-compat alias for the historic default. The *effective* mount root is
+# resolved per-render via model_store_root() ([models].store / HAL0_MODEL_STORE
+# / this default) so a custom model directory actually reaches the container.
+_MODEL_STORE_MOUNT = DEFAULT_MODEL_STORE
 
 
 # Container runtime binary.  Prefer podman (rootless, no daemon);
@@ -181,6 +185,10 @@ def _render_unit(
     runtime = runtime_bin or _container_runtime()
     devices = device_paths if device_paths is not None else resolve_gpu_device_paths()
     container_name = f"hal0-slot-{slot_name}"
+    # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
+    # default /mnt/ai-models). Mounted identical-path so the absolute GGUF path
+    # the registry hands llama-server resolves unchanged inside the container.
+    model_store = model_store_root()
     # Split the profile flags string into tokens for ExecStart quoting.
     flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
     extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
@@ -206,7 +214,10 @@ def _render_unit(
         [
             "--security-opt=apparmor=unconfined",
             "--security-opt=seccomp=unconfined",
-            f"--volume={_MODEL_STORE_MOUNT}:{_MODEL_STORE_MOUNT}:ro",
+            # ``z`` relabels the bind for SELinux-enforcing hosts (Fedora);
+            # it is a shared relabel (multiple slot containers read the store)
+            # and a harmless no-op where SELinux is disabled.
+            f"--volume={model_store}:{model_store}:ro,z",
             # Loopback publish: expose slot port on 127.0.0.1 only.
             f"--publish=127.0.0.1:{port}:{port}",
             # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK
@@ -392,6 +403,7 @@ class ContainerProvider(Provider):
 
         model_path = _resolve_model_path(model_info)
         port = int(slot_cfg.get("port", 0))
+        model_store = model_store_root()
 
         return ContainerSpec(
             image=profile.image,
@@ -405,7 +417,7 @@ class ContainerProvider(Provider):
                 model_path,
                 *flag_tokens,
             ],
-            mounts=[(_MODEL_STORE_MOUNT, _MODEL_STORE_MOUNT)],
+            mounts=[(model_store, f"{model_store}:ro,z")],
             devices=resolve_gpu_device_paths(),
             group_add=[str(g) for g in resolve_gpu_group_ids()],
             security_opt=["apparmor=unconfined", "seccomp=unconfined"],
