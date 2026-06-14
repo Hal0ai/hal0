@@ -20,6 +20,7 @@ import structlog
 from fastapi import FastAPI
 
 from hal0 import __version__
+from hal0.activity import AuditStore
 from hal0.api.agents import (
     budget as agents_budget_routes,
 )
@@ -97,7 +98,6 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     secrets as secrets_routes,
 )
-from hal0.activity import AuditStore
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
 from hal0.config.paths import activity_db
@@ -761,8 +761,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     audit_epoch = uuid.uuid4().hex
     if hal0_cfg.activity.enabled:
         retention = int(
-            os.environ.get("HAL0_ACTIVITY_RETENTION_DAYS")
-            or hal0_cfg.activity.retention_days
+            os.environ.get("HAL0_ACTIVITY_RETENTION_DAYS") or hal0_cfg.activity.retention_days
         )
         audit_store = AuditStore(
             activity_db(),

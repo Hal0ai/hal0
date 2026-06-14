@@ -168,9 +168,7 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
 
 
 @router.put("/{name}")
-async def update_profile(
-    name: str, body: ProfileUpdateBody, request: Request
-) -> dict[str, Any]:
+async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -> dict[str, Any]:
     """Update an existing custom profile (shallow merge).
 
     Returns the updated profile item.
@@ -217,9 +215,7 @@ async def delete_profile(name: str, request: Request) -> None:
         404 profiles.not_found: custom profile not found.
         409 profiles.in_use: one or more slots reference this profile.
     """
-    async with record_action(
-        request, category="profile", action="profile.delete", target=name
-    ):
+    async with record_action(request, category="profile", action="profile.delete", target=name):
         ProfileCatalog().delete(name)
 
 

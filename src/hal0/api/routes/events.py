@@ -132,9 +132,7 @@ async def stream_events(
     def _passes(ev: dict[str, Any]) -> bool:
         if type and not fnmatch.fnmatchcase(ev.get("type", ""), type):
             return False
-        if min_rank >= 0 and _SEVERITY_ORDER.get(ev.get("severity", "info"), 0) < min_rank:
-            return False
-        return True
+        return not (min_rank >= 0 and _SEVERITY_ORDER.get(ev.get("severity", "info"), 0) < min_rank)
 
     async def _gen() -> Any:
         # 1. Subscribe FIRST so events emitted between backfill snapshot

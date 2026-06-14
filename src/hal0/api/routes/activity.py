@@ -79,7 +79,7 @@ def _validate(severity: str | None, kind: str | None, outcome: str | None) -> No
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
-    d = {k: row[k] for k in row.keys()}
+    d = dict(row)
     # Parse the JSON blobs back into objects so the UI doesn't double-decode.
     for col in _JSON_COLS:
         if d.get(col):
@@ -105,8 +105,15 @@ async def list_activity(
     _validate(severity, kind, outcome)
     store = _store(request)
     rows = store.query(
-        since=since, category=category, action=action, severity=severity,
-        outcome=outcome, actor=actor, kind=kind, search=search, limit=limit,
+        since=since,
+        category=category,
+        action=action,
+        severity=severity,
+        outcome=outcome,
+        actor=actor,
+        kind=kind,
+        search=search,
+        limit=limit,
     )
     records = [_row_to_dict(r) for r in rows]
     # Rows come back newest-first; the highest id is the cursor to poll next.
@@ -131,8 +138,14 @@ async def export_activity(
     _validate(severity, kind, outcome)
     store = _store(request)
     blob = store.export(
-        fmt=fmt, category=category, action=action, severity=severity,
-        outcome=outcome, actor=actor, kind=kind, search=search,
+        fmt=fmt,
+        category=category,
+        action=action,
+        severity=severity,
+        outcome=outcome,
+        actor=actor,
+        kind=kind,
+        search=search,
     )
     media = "text/csv" if fmt == "csv" else "application/json"
     return Response(
@@ -156,28 +169,25 @@ async def stream_activity(
 ) -> StreamingResponse:
     _validate(severity, kind, outcome)
     store = _store(request)
-    bus = getattr(request.app.state, "events", None)
     epoch = _epoch(request)
 
-    filters = dict(category=category, action=action, severity=severity,
-                   outcome=outcome, actor=actor, kind=kind, search=search)
-
-    def _matches(rec: dict[str, Any]) -> bool:
-        if category and rec.get("category") != category:
-            return False
-        if severity and rec.get("severity") != severity:
-            return False
-        if outcome and rec.get("outcome") != outcome:
-            return False
-        if actor and rec.get("actor") != actor:
-            return False
-        if kind and rec.get("kind") != kind:
-            return False
-        return True
+    filters = dict(
+        category=category,
+        action=action,
+        severity=severity,
+        outcome=outcome,
+        actor=actor,
+        kind=kind,
+        search=search,
+    )
 
     async def gen():
         # Durable backfill first (id > since), oldest→newest for replay.
-        backfill = list(reversed([_row_to_dict(r) for r in store.query(since=since, limit=_LIMIT_MAX, **filters)]))
+        backfill = list(
+            reversed(
+                [_row_to_dict(r) for r in store.query(since=since, limit=_LIMIT_MAX, **filters)]
+            )
+        )
         cursor = since
         for rec in backfill:
             cursor = max(cursor, rec["id"])
@@ -188,7 +198,14 @@ async def stream_activity(
         while True:
             if await request.is_disconnected():
                 break
-            new = list(reversed([_row_to_dict(r) for r in store.query(since=cursor, limit=_LIMIT_MAX, **filters)]))
+            new = list(
+                reversed(
+                    [
+                        _row_to_dict(r)
+                        for r in store.query(since=cursor, limit=_LIMIT_MAX, **filters)
+                    ]
+                )
+            )
             if new:
                 for rec in new:
                     cursor = max(cursor, rec["id"])

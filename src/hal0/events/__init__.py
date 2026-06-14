@@ -89,7 +89,7 @@ class EventBus:
         *,
         ring_maxlen: int = _RING_MAXLEN,
         subscriber_maxsize: int = _SUBSCRIBER_MAXSIZE,
-        sink: "Callable[[dict[str, Any]], Awaitable[Any]] | None" = None,
+        sink: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
     ) -> None:
         self.ring: deque[dict[str, Any]] = deque(maxlen=ring_maxlen)
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
@@ -133,7 +133,7 @@ class EventBus:
         if self._sink is not None:
             try:
                 await self._sink(event)
-            except Exception:  # noqa: BLE001 — durability is best-effort
+            except Exception:
                 _log.warning("events.sink_failed", exc_info=True)
         return event
 

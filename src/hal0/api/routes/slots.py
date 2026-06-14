@@ -326,7 +326,10 @@ async def create_slot(request: Request) -> dict[str, object]:
 
     body = _normalize_create_body(body)
     async with record_action(
-        request, category="slot", action="slot.create", target=name,
+        request,
+        category="slot",
+        action="slot.create",
+        target=name,
     ) as _rec:
         snap = await sm.create(name, body)
         _rec.after = {"config": body}
@@ -1076,8 +1079,12 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     # Persist the new device. ``auto`` clears the device field entirely so
     # the load path falls back to its default on the next load.
     async with record_action(
-        request, category="slot", action="slot.set_backend", target=name,
-        before={"device": current_declared}, message=f"backend → {backend}",
+        request,
+        category="slot",
+        action="slot.set_backend",
+        target=name,
+        before={"device": current_declared},
+        message=f"backend → {backend}",
     ) as _rec:
         await sm.update_config(name, {"device": target_device or ""})
 
@@ -1140,7 +1147,10 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
                 details={"model_id": model_id, "slot": name},
             )
     async with record_action(
-        request, category="slot", action="slot.load", target=name,
+        request,
+        category="slot",
+        action="slot.load",
+        target=name,
         message=f"load {model_id or 'default'}",
     ) as _rec:
         snap = await sm.load(name, model_id=model_id)
@@ -1199,7 +1209,10 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
             details={"model_id": model_id, "slot": name},
         )
     async with record_action(
-        request, category="slot", action="slot.swap", target=name,
+        request,
+        category="slot",
+        action="slot.swap",
+        target=name,
         message=f"swap → {model_id}",
     ) as _rec:
         snap = await sm.swap(name, model_id)

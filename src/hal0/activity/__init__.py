@@ -38,7 +38,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-__all__ = ["AuditStore", "ActionRecorder", "audit_action"]
+__all__ = ["ActionRecorder", "AuditStore", "audit_action"]
 
 Kind = Literal["action", "event"]
 Severity = Literal["info", "warn", "error", "ok"]
@@ -51,13 +51,37 @@ _REDACTED = "***"
 
 # Categories the type-prefix → category mapping recognises for mirrored events.
 _KNOWN_CATEGORIES = {
-    "slot", "model", "profile", "capability", "backend", "provider", "mcp",
-    "agent", "approval", "updater", "comfyui", "pull", "system",
+    "slot",
+    "model",
+    "profile",
+    "capability",
+    "backend",
+    "provider",
+    "mcp",
+    "agent",
+    "approval",
+    "updater",
+    "comfyui",
+    "pull",
+    "system",
 }
 
 _COLUMNS = [
-    "id", "ts", "kind", "category", "action", "target", "actor", "severity",
-    "outcome", "message", "before", "after", "error", "duration_ms", "request_id",
+    "id",
+    "ts",
+    "kind",
+    "category",
+    "action",
+    "target",
+    "actor",
+    "severity",
+    "outcome",
+    "message",
+    "before",
+    "after",
+    "error",
+    "duration_ms",
+    "request_id",
 ]
 
 _SCHEMA = """
@@ -97,8 +121,7 @@ def _redact(value: Any) -> Any:
     """Recursively replace secret-looking values so they never hit disk."""
     if isinstance(value, dict):
         return {
-            k: (_REDACTED if k.lower() in _SECRET_KEYS else _redact(v))
-            for k, v in value.items()
+            k: (_REDACTED if k.lower() in _SECRET_KEYS else _redact(v)) for k, v in value.items()
         }
     if isinstance(value, list):
         return [_redact(v) for v in value]
@@ -184,9 +207,20 @@ class AuditStore:
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    _now_iso(), kind, category, action, target, actor, severity,
-                    outcome, message, _dump(before), _dump(after), error,
-                    duration_ms, request_id,
+                    _now_iso(),
+                    kind,
+                    category,
+                    action,
+                    target,
+                    actor,
+                    severity,
+                    outcome,
+                    message,
+                    _dump(before),
+                    _dump(after),
+                    error,
+                    duration_ms,
+                    request_id,
                 ),
             )
             conn.commit()
@@ -213,9 +247,18 @@ class AuditStore:
         event loop (offloaded to a worker thread)."""
         return await asyncio.to_thread(
             self._insert,
-            kind=kind, category=category, action=action, target=target,
-            actor=actor, severity=severity, outcome=outcome, message=message,
-            before=before, after=after, error=error, duration_ms=duration_ms,
+            kind=kind,
+            category=category,
+            action=action,
+            target=target,
+            actor=actor,
+            severity=severity,
+            outcome=outcome,
+            message=message,
+            before=before,
+            after=after,
+            error=error,
+            duration_ms=duration_ms,
             request_id=request_id,
         )
 
@@ -225,8 +268,12 @@ class AuditStore:
         data = event.get("data") or {}
         head = etype.split(".", 1)[0]
         category = head if head in _KNOWN_CATEGORIES else "system"
-        target = data.get("slot") or data.get("target") or data.get("model") \
+        target = (
+            data.get("slot")
+            or data.get("target")
+            or data.get("model")
             or _source_target(event.get("source"))
+        )
         return await self.record(
             kind="event",
             category=category,
@@ -258,18 +305,19 @@ class AuditStore:
         message/target/action."""
         clauses: list[str] = ["id > ?"]
         params: list[Any] = [since]
-        if category:
-            clauses.append("category = ?"); params.append(category)
-        if severity:
-            clauses.append("severity = ?"); params.append(severity)
-        if outcome:
-            clauses.append("outcome = ?"); params.append(outcome)
-        if actor:
-            clauses.append("actor = ?"); params.append(actor)
-        if kind:
-            clauses.append("kind = ?"); params.append(kind)
+        for col, val in (
+            ("category", category),
+            ("severity", severity),
+            ("outcome", outcome),
+            ("actor", actor),
+            ("kind", kind),
+        ):
+            if val:
+                clauses.append(f"{col} = ?")
+                params.append(val)
         if action:
-            clauses.append("action GLOB ?"); params.append(action)
+            clauses.append("action GLOB ?")
+            params.append(action)
         if search:
             like = f"%{search}%"
             clauses.append("(message LIKE ? OR target LIKE ? OR action LIKE ?)")
@@ -351,22 +399,36 @@ async def audit_action(
     t0 = time.monotonic()
     try:
         yield rec
-    except Exception as exc:  # noqa: BLE001 — record then re-raise
+    except Exception as exc:
         await store.record(
-            kind="action", category=category, action=action,
+            kind="action",
+            category=category,
+            action=action,
             target=rec.target if rec.target is not None else target,
-            actor=actor, severity="error", outcome="error",
+            actor=actor,
+            severity="error",
+            outcome="error",
             message=rec.message or message or f"{action} failed",
-            before=before, after=rec.after, error=str(exc),
-            duration_ms=int((time.monotonic() - t0) * 1000), request_id=request_id,
+            before=before,
+            after=rec.after,
+            error=str(exc),
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            request_id=request_id,
         )
         raise
     else:
         await store.record(
-            kind="action", category=category, action=action,
+            kind="action",
+            category=category,
+            action=action,
             target=rec.target if rec.target is not None else target,
-            actor=actor, severity="ok", outcome="ok",
+            actor=actor,
+            severity="ok",
+            outcome="ok",
             message=rec.message or message or action,
-            before=before, after=rec.after, error=None,
-            duration_ms=int((time.monotonic() - t0) * 1000), request_id=request_id,
+            before=before,
+            after=rec.after,
+            error=None,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            request_id=request_id,
         )

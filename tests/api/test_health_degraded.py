@@ -7,9 +7,6 @@ endpoint lied.
 
 from __future__ import annotations
 
-from typing import Any
-
-import pytest
 from fastapi.testclient import TestClient
 
 from hal0.slots.manager import Slot
@@ -29,10 +26,12 @@ def _slot(name: str, state: SlotState) -> Slot:
 
 
 def test_health_system_ok_when_no_errored_slots(client: TestClient) -> None:
-    client.app.state.slot_manager = _FakeSM([
-        _slot("chat", SlotState.READY),
-        _slot("embed", SlotState.OFFLINE),
-    ])
+    client.app.state.slot_manager = _FakeSM(
+        [
+            _slot("chat", SlotState.READY),
+            _slot("embed", SlotState.OFFLINE),
+        ]
+    )
     body = client.get("/api/health/system").json()
     assert body["status"] == "ok"
     assert body["checks"]["slot_manager"]["ok"] is True
@@ -40,10 +39,12 @@ def test_health_system_ok_when_no_errored_slots(client: TestClient) -> None:
 
 
 def test_health_system_degraded_when_slot_errored(client: TestClient) -> None:
-    client.app.state.slot_manager = _FakeSM([
-        _slot("chat", SlotState.READY),
-        _slot("npu", SlotState.ERROR),
-    ])
+    client.app.state.slot_manager = _FakeSM(
+        [
+            _slot("chat", SlotState.READY),
+            _slot("npu", SlotState.ERROR),
+        ]
+    )
     body = client.get("/api/health/system").json()
     assert body["status"] == "degraded"
     assert body["checks"]["slot_manager"]["ok"] is False
