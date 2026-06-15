@@ -158,7 +158,24 @@ test.describe('SlotCard container variant (#657)', () => {
     expect(ind.label).toBe('stopped')
   })
 
-  test('container slot !enabled → offline (grey "off") regardless of container_status', async ({ page }) => {
+  test('container slot !enabled + stopped → offline (grey "off")', async ({ page }) => {
+    const ind = await page.evaluate(() => {
+      return (window as any).slotIndicator({
+        runtime: 'container',
+        container_status: 'stopped',
+        container_health: false,
+        state: 'ready',
+        enabled: false,
+      })
+    })
+    expect(ind.cls).toBe('offline')
+    expect(ind.label).toBe('off')
+  })
+
+  test('container slot !enabled but still running + healthy → stale (yellow "running")', async ({ page }) => {
+    // A disabled slot whose container is genuinely up + healthy is holding GPU
+    // and may be serving — it must NOT look identical to a disabled+stopped
+    // slot, or an orphaned / manually-started container is invisible.
     const ind = await page.evaluate(() => {
       return (window as any).slotIndicator({
         runtime: 'container',
@@ -168,8 +185,8 @@ test.describe('SlotCard container variant (#657)', () => {
         enabled: false,
       })
     })
-    expect(ind.cls).toBe('offline')
-    expect(ind.label).toBe('off')
+    expect(ind.cls).toBe('stale')
+    expect(ind.label).toBe('running')
   })
 
   // ── un-enriched slots fall back to the state string (regression guard) ──

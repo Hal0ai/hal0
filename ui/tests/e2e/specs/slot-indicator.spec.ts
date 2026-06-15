@@ -10,7 +10,8 @@
  *   serving + last>1h           → yellow "ready" (stuck-request demotion)
  *   running + healthy / ready   → yellow (resident, awaiting prompt)
  *   pulling / starting / warming→ amber pulse
- *   !enabled / disabled         → grey "off"
+ *   !enabled + stopped          → grey "off"
+ *   !enabled + container live   → yellow "running" (disabled but still up/serving)
  *   stopped / offline           → grey "stopped" (auto-reloads on request)
  *
  * Slots without container enrichment (`container_status == null`, e.g. a
@@ -174,6 +175,23 @@ test.describe('slotIndicator helper', () => {
     })
     expect(ind.cls).toBe('offline')
     expect(ind.label).toBe('off')
+  })
+
+  test('!enabled but container running + healthy → stale (yellow "running")', async ({ page }) => {
+    // A disabled slot whose container is still up + healthy is holding GPU and
+    // may be serving — surface it distinctly instead of a plain grey "off", so
+    // an orphaned / manually-started container is never invisible.
+    const ind = await page.evaluate<Indicator>(() => {
+      return (window as any).slotIndicator({
+        state: 'ready',
+        enabled: false,
+        container_status: 'running',
+        container_health: true,
+      })
+    })
+    expect(ind.cls).toBe('stale')
+    expect(ind.label).toBe('running')
+    expect(ind.tooltip).toMatch(/disabl/i)
   })
 
   test('container running + healthy overrides a stale offline state → stale (yellow)', async ({ page }) => {

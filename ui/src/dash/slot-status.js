@@ -44,9 +44,16 @@ const RECENTLY_LIVE_MS = 60 * 60 * 1000; // 1h stuck-SERVING threshold
 export function slotPhase(slot, now = Date.now()) {
   const enabled = slot?.enabled !== false;
 
-  // Disabled overrides everything.
+  // Disabled normally means stopped — UNLESS the container is genuinely still
+  // up and healthy (started manually to test, or a disable that hasn't yet
+  // reconciled the container). In that case fall through to classify on the
+  // real container state so a live, GPU-holding slot isn't masked as stopped.
   if (!enabled) {
-    return { phase: "stopped", isLive: false, isCold: true };
+    const cs = String(slot?.container_status || "");
+    const liveContainer = cs === "running" && !!slot?.container_health;
+    if (!liveContainer) {
+      return { phase: "stopped", isLive: false, isCold: true };
+    }
   }
   return _containerPhase(slot, now);
 }
@@ -172,6 +179,22 @@ function _containerIndicator(slot, now) {
   const deltaMs = lastUsedMs != null ? now - lastUsedMs : null;
 
   if (!enabled) {
+    // A disabled slot whose container is still up + healthy is NOT the same as
+    // a disabled, stopped slot — it's holding GPU and may be serving requests.
+    // Surface it distinctly (yellow "running") instead of a plain grey "off",
+    // otherwise an orphaned / manually-started container is invisible on the
+    // dashboard. Disabled + stopped keeps the plain offline/off.
+    if (cs === "running" && health) {
+      const recentlyServing =
+        state === "serving" && (deltaMs == null || deltaMs <= RECENTLY_LIVE_MS);
+      return {
+        cls: "stale",
+        label: "running",
+        tooltip: recentlyServing
+          ? (model ? `Disabled — still serving ${model}` : "Disabled — container still serving")
+          : (model ? `Disabled — container still running (${model})` : "Disabled — container still running"),
+      };
+    }
     return { cls: "offline", label: "off", tooltip: "Disabled" };
   }
   if (state === "error" || cs === "crashed") {

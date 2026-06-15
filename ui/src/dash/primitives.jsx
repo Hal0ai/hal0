@@ -46,7 +46,7 @@ function Modal({ open, onClose, title, eyebrow, children, foot, width = 640, dis
 }
 
 // ─── Right-side Drawer ────────────────────────────────────────────────────
-function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520 }) {
+function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520, headRight }) {
   useEffectP(() => {
     if (!open) return;
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -69,6 +69,7 @@ function Drawer({ open, onClose, title, eyebrow, children, foot, width = 520 }) 
         <div className="drawer-h">
           {eyebrow && <div className="modal-h-eye mono">{eyebrow}</div>}
           {title && <h2 className="mono">{title}</h2>}
+          {headRight && <div className="drawer-h-right">{headRight}</div>}
           <button className="modal-close" onClick={onClose} aria-label="Close">{Icons.close}</button>
         </div>
         <div className="drawer-body">{children}</div>

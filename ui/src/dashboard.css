@@ -1376,6 +1376,11 @@ a { color: inherit; text-decoration: none; }
 .slot--disabled { opacity: 0.5; }
 .slot--disabled:hover { opacity: 0.72; }
 .slot--disabled .slot-enable-toggle { opacity: 1; }
+/* A disabled slot whose container is still up + healthy stays full-opacity —
+   it's holding GPU / may be serving, so don't fade it like a dormant slot.
+   slots.jsx adds .slot--live when isSlotLive() is true on a disabled slot. */
+.slot--disabled.slot--live { opacity: 1; }
+.slot--disabled.slot--live:hover { opacity: 1; }
 .slot-disabled-note { font-size: 11px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.04em; }
 /* C7: Capabilities section — denser quarter-width grid for the narrow utility
    cards (embed/rerank/stt/tts). Collapses 4-up → 2-up → 1-up. */
@@ -2263,6 +2268,22 @@ select.npu-sel {
   color: var(--fg-3);
 }
 .drawer-h .modal-close:hover { color: var(--fg); border-color: var(--line-strong); }
+/* Right-aligned header control (e.g. the slot edit drawer's enable/disable
+   toggle) — vertically centred in the header, clear of the close button. */
+.drawer-h-right {
+  position: absolute;
+  top: 0; bottom: 0;
+  right: 56px;
+  display: flex;
+  align-items: center;
+}
+.drawer-enable { gap: 8px; }
+.drawer-enable-label {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
 .drawer-body { flex: 1; overflow-y: auto; padding: 18px 22px; }
 .drawer-foot {
   padding: 14px 22px;
