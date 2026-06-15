@@ -534,6 +534,52 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
     }
 
 
+@router.post("/apply-selections")
+async def install_apply_selections(request: Request, background: BackgroundTasks) -> dict[str, Any]:
+    """Tier-less orchestrated install: accepts a Selections JSON directly and
+    provisions exactly the chosen slots (no tier manifest expansion). Used by
+    the `hal0 setup` TUI's API-up branch (roster coherence — the running
+    service registers the slots itself)."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise PickDefaultError(f"body must be valid JSON: {exc}") from exc
+    if not isinstance(body, dict):
+        raise PickDefaultError("body must be a JSON object")
+    raw_slots = body.get("slots") or []
+    if not isinstance(raw_slots, list):
+        raise PickDefaultError("body.slots must be a list")
+    selections = Selections(
+        storage_dir=body.get("storage_dir") or "",
+        slots=[
+            SlotSelection(
+                capability=s["capability"],
+                slot_name=s["slot_name"],
+                port=int(s["port"]),
+                model_id=s["model_id"],
+                device=s.get("device"),
+                profile=s.get("profile"),
+            )
+            for s in raw_slots
+        ],
+        extensions=body.get("extensions") or {},
+        npu_opt_in=bool(body.get("npu_opt_in", False)),
+    )
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    result = await apply_setup(
+        selections,
+        hardware=request.app.state.hardware_probe.probe(),
+        slot_manager=request.app.state.slot_manager,
+        registry=request.app.state.model_registry,
+        jobs=request.app.state.model_pull_jobs,
+        hf_token=hf_token,
+        write_sentinel=False,
+    )
+    for plan in result.pulls:
+        background.add_task(run_pull, plan.job, **plan.kwargs)
+    return {"model_ids": result.model_ids, "slots": [vars(s) for s in result.slots]}
+
+
 @router.post("/pick-default")
 async def pick_default(
     request: Request,

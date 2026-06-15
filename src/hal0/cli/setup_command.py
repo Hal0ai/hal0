@@ -16,7 +16,7 @@ from hal0.cli._shared import _api_base
 from hal0.config.schema import HardwareInfo
 from hal0.hardware.probe import HardwareProbe
 from hal0.install.extensions import EXTENSIONS, get_extension
-from hal0.install.orchestrate import Selections, SlotSelection, apply_setup
+from hal0.install.orchestrate import Selections, SlotSelection
 from hal0.install.suggest import suggest_models
 
 #: capability → (slot_name, port). Mirrors installer.py:_SLOT_META for the
@@ -77,19 +77,12 @@ def setup(
 
 
 async def _run_auto(sel: Selections, hw: HardwareInfo) -> None:
-    """In-process apply for the install.sh path (api is not up yet)."""
-    slot_manager, registry = _build_offline_deps()
-    result = await apply_setup(
-        sel, hardware=hw, slot_manager=slot_manager, registry=registry, jobs={}, write_sentinel=True
-    )
-    from hal0.registry.pull import run_pull
+    """Apply the auto-selected config. Routes hybrid (in-process at install
+    time when the API is down; via the API when it is up, so a post-install
+    `hal0 setup --auto` on a live service doesn't drift the roster)."""
+    from hal0.cli.setup_install import run_install
 
-    for plan in result.pulls:
-        await run_pull(plan.job, **plan.kwargs)
-    typer.echo(
-        f"hal0 setup complete: {len(result.model_ids)} model(s), "
-        f"{sum(1 for s in result.slots if s.created)} slot(s)."
-    )
+    await run_install(sel, hw)
 
 
 def _build_offline_deps():
