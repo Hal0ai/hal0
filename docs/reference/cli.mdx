@@ -145,6 +145,7 @@ The config path honours `HAL0_HOME`; under FHS it is `/etc/hal0/hal0.toml`.
 |---|---|---|
 | `doctor` | Re-run the installer's preflight battery (systemd, python, container runtime, disk, ports). | `--plain`, `--ports "8080 3001"` |
 | `doctor toolbox-pull` | Verify each pinned toolbox image is anonymously pullable from ghcr.io. | `--json`, `--manifest` |
+| `doctor perms` | Audit Hermes runtime ownership for the root-clobber regression (#843). | — |
 
 `hal0 doctor` shells out to `installer/lib/preflight.sh` and preserves its exit
 code. `doctor toolbox-pull` exits `0` when every image is reachable (digest
@@ -207,6 +208,10 @@ sets from `$HAL0_AGENT_ID`.
 The `migrate` sub-app houses one-shot upgrade helpers for moving older on-disk
 state forward to the current schema. Run `hal0 migrate --help` for the
 commands available in your installed version.
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `migrate model-layout` | Reorganise the model store into the v0.2 canonical `<recipe>/<capability>/` symlink layout (dry-run unless `--apply`). | `--apply`, `--force`, `--registry`, `--mount-root`, `--canonical-root` |
 
 ## Related references
 
