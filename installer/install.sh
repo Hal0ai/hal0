@@ -660,6 +660,18 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
     else
         warn "${HOOK_SRC} not found — Hermes session-state hook not installed"
     fi
+
+    # run-as-hal0 guard: the hermes wrapper sources this at the absolute path
+    # ${LIB_DIR}/guards/run-as-hal0.sh and re-execs as the hal0 service user
+    # when launched as root, preventing the root-clobber regression (#843).
+    GUARD_SRC="${REPO_ROOT}/installer/lib/run-as-hal0.sh"
+    if [[ -f "${GUARD_SRC}" ]]; then
+        install -d "${LIB_DIR}/guards"
+        install -m 0755 "${GUARD_SRC}" "${LIB_DIR}/guards/run-as-hal0.sh"
+        info "wrote ${LIB_DIR}/guards/run-as-hal0.sh"
+    else
+        warn "${GUARD_SRC} not found — run-as-hal0 guard not installed"
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi

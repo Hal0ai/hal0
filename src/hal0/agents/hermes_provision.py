@@ -33,6 +33,7 @@ import datetime
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import subprocess  # nosec B404 — needed to spawn python -m venv + pip
 import sys
@@ -458,6 +459,54 @@ def _install_venv(
     )
 
 
+_HAL0_SERVICE_USER = "hal0"
+
+
+def _resolve_user_ids(user: str) -> tuple[int, int] | None:
+    """Return ``(uid, gid)`` for ``user``, or ``None`` if the user is absent."""
+    try:
+        ent = pwd.getpwnam(user)
+    except KeyError:
+        return None
+    return (ent.pw_uid, ent.pw_gid)
+
+
+def _chown_tree_to_hal0(
+    path: Path,
+    *,
+    user: str = _HAL0_SERVICE_USER,
+    geteuid: Callable[[], int] = os.geteuid,
+    resolve_ids: Callable[[str], tuple[int, int] | None] = _resolve_user_ids,
+    chown: Callable[[str, int, int], None] = os.chown,
+) -> int:
+    """Recursively chown ``path`` to the hal0 service user, returning the count.
+
+    Hands ownership of root-created artifacts (venv, ``$HERMES_HOME`` tree,
+    ``runtime.json``) to the unprivileged ``hal0`` user so the ``User=hal0``
+    systemd unit can read/write them instead of hitting EACCES or silently
+    falling back to the default provider — the root-clobber regression (#843).
+
+    A no-op (returns 0) when not root, when ``user`` doesn't exist, or when
+    ``path`` is missing, so it's safe in dev/non-root installs and idempotent
+    under ``bootstrap --repair``.
+    """
+    if geteuid() != 0:
+        return 0
+    ids = resolve_ids(user)
+    if ids is None:
+        return 0
+    if not path.exists():
+        return 0
+    uid, gid = ids
+    count = 0
+    chown(str(path), uid, gid)
+    count += 1
+    for sub in path.rglob("*"):
+        chown(str(sub), uid, gid)
+        count += 1
+    return count
+
+
 def _copy_wrapper(wrapper_src: Path, wrapper_dst: Path) -> None:
     """Copy + chmod the wrapper into ``wrapper_dst``."""
     wrapper_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -592,6 +641,12 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
                 reason=f"plugin copy {src} -> {dst} failed: {exc}",
             )
     details["plugins"] = [str(p) for p in plugin_targets.values()]
+
+    # The venv lives outside HERMES_HOME (/var/lib/hal0/venvs/hermes); hand it to
+    # hal0 too so a root install doesn't leave a root-owned venv (#843). No-op
+    # when not root.
+    _chown_tree_to_hal0(venv)
+
     return PhaseResult(status=PhaseStatus.OK, details=details)
 
 
@@ -653,6 +708,11 @@ def _phase_home_init(ctx: PhaseContext) -> PhaseResult:
     )
     for sub in standard_subdirs:
         (hermes_home / sub).mkdir(parents=True, exist_ok=True)
+
+    # Hand the whole tree to the hal0 service user so a root-context bootstrap
+    # never leaves root:root files the User=hal0 unit can't read (#843).
+    # No-op when not root; also reconciles ownership under --repair.
+    _chown_tree_to_hal0(hermes_home)
 
     return PhaseResult(
         status=PhaseStatus.OK,
@@ -3511,6 +3571,10 @@ def _phase_install_artifacts(ctx: PhaseContext) -> PhaseResult:
     seed_path, seed_wrote = _write_seed_toml(state, repair=repair)
     env_path, env_wrote = _write_driver_env(state)
     runtime_path, token_wrote = _write_runtime_json(state, repair=repair)
+
+    # runtime.json carries the embed token at 0600 — chown it to hal0 so the
+    # User=hal0 chat proxy can read it instead of falling back silently (#843).
+    _chown_tree_to_hal0(runtime_path)
 
     return PhaseResult(
         status=PhaseStatus.OK,

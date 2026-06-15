@@ -157,6 +157,52 @@ port/address. The default (`http://127.0.0.1:8080`) matches the
 hal0-api bind in `installer/install.sh` — only override if you have
 a non-standard layout.
 
+### Root ran Hermes — config clobbered or split-brain (`root:root` files)
+
+Hermes is meant to run **only** as the unprivileged `hal0` user, with
+`HERMES_HOME=/var/lib/hal0/.hermes`. The systemd unit enforces this
+(`User=hal0`), but a human at a root shell does not: running `sudo hermes …`,
+or letting the installer/bootstrap create artifacts as root, triggers the
+**root-clobber regression**. Two distinct breakages, often together:
+
+1. **Split-brain home.** As root, Hermes resolves `~/.hermes` →
+   **`/root/.hermes`** instead of `/var/lib/hal0/.hermes`. It writes a
+   competing config/state tree there that the `hal0`-user service never reads.
+2. **Permission clobber.** Where root *does* write into
+   `/var/lib/hal0/.hermes`, the files land `root:root` (e.g. `config.yaml`
+   `0600`, the `runtime.json` embed token `0600`, the venv). The `hal0`-user
+   service then hits `EACCES` — or Hermes silently falls back to the **default
+   provider** because it cannot read its own `config.yaml`.
+
+**Symptoms:** chat answers from the wrong/default model with no error; embed
+features fail; `journalctl -u hal0-agent@hermes.service` shows permission
+errors; a stray `/root/.hermes` exists.
+
+**Diagnose** (all should read `hal0:hal0`, NOT `root:root 0600`):
+
+```bash
+stat -c '%U:%G %a' /var/lib/hal0/.hermes/config.yaml
+stat -c '%U:%G %a' /var/lib/hal0/.hermes/runtime.json
+stat -c '%U:%G %a' /var/lib/hal0/venvs/hermes/bin/hermes
+ls -ld /root/.hermes 2>/dev/null && echo "!! split-brain tree exists"
+```
+
+**Remediate** (hand ownership back to `hal0`, drop the split-brain tree):
+
+```bash
+sudo chown -R hal0:hal0 /var/lib/hal0/.hermes /var/lib/hal0/venvs/hermes
+sudo rm -rf /root/.hermes          # only after confirming nothing unique lives here
+hal0 agent bootstrap hermes --repair
+sudo systemctl restart hal0-agent@hermes.service
+```
+
+**Never** invoke `hermes` from a root shell to "just check something" — use
+`sudo -H -u hal0 hermes …` (or `runuser -u hal0 -- hermes …`) so it runs as
+the service user with the correct `HOME`. The structural fix — a self-guarding
+wrapper that re-execs as `hal0` when invoked as root, plus bootstrap chowning
+its artifacts to `hal0:hal0` — is tracked in **issue #843** (see also the
+P5H-4 contract in `docs/superpowers/plans/2026-06-06-hindsight-engine-swap.md`).
+
 ## Customising the unit
 
 **Don't edit `hal0-agent@.service` directly** — `hal0 update` will
