@@ -37,10 +37,21 @@ def _kind(ext_id: str) -> str | None:
     return e.kind if e else None
 
 
-def build_auto_selections(hw: HardwareInfo, *, storage_dir: str) -> Selections:
+def build_auto_selections(
+    hw: HardwareInfo, *, storage_dir: str, with_extensions: bool = True
+) -> Selections:
     """Non-interactive defaults for ``--auto`` (install.sh path): recommended
-    model per slot, default extension set, NPU trio on if present."""
-    ext = {e.id: e.default_enabled for e in EXTENSIONS}
+    model per slot, default extension set, NPU trio on if present.
+
+    When *with_extensions* is ``False`` every extension is disabled (all keys
+    present, all values ``False``).  The coder/agent slot is gated on an agent
+    extension being enabled, so it is skipped when extensions are off.  The
+    chat slot is always included.
+    """
+    if with_extensions:
+        ext = {e.id: e.default_enabled for e in EXTENSIONS}
+    else:
+        ext = {e.id: False for e in EXTENSIONS}
     slots: list[SlotSelection] = []
     # Main (chat) is always provisioned in --auto (OWUI + Hermes default on).
     chat = suggest_models("chat", hw, limit=1)
@@ -65,24 +76,34 @@ app = typer.Typer(help="First-run setup")
 def setup(
     auto: bool = typer.Option(False, "--auto", help="Non-interactive; recommended defaults."),
     storage_dir: str = typer.Option("/var/lib/hal0/models", "--storage-dir"),
+    no_pull: bool = typer.Option(
+        False,
+        "--no-pull",
+        help="Seed slots + sentinel without downloading models.",
+    ),
+    no_extensions: bool = typer.Option(
+        False,
+        "--no-extensions",
+        help="Skip extension install/wiring in --auto mode.",
+    ),
 ) -> None:
     hw = HardwareProbe().probe()
     if auto:
-        sel = build_auto_selections(hw, storage_dir=storage_dir)
-        asyncio.run(_run_auto(sel, hw))
+        sel = build_auto_selections(hw, storage_dir=storage_dir, with_extensions=not no_extensions)
+        asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
         return
     from hal0.cli.setup_ui import run_interactive  # Task 3.x
 
     run_interactive(hw, storage_dir=storage_dir)
 
 
-async def _run_auto(sel: Selections, hw: HardwareInfo) -> None:
+async def _run_auto(sel: Selections, hw: HardwareInfo, *, no_pull: bool = False) -> None:
     """Apply the auto-selected config. Routes hybrid (in-process at install
     time when the API is down; via the API when it is up, so a post-install
     `hal0 setup --auto` on a live service doesn't drift the roster)."""
     from hal0.cli.setup_install import run_install
 
-    await run_install(sel, hw)
+    await run_install(sel, hw, no_pull=no_pull)
 
 
 def _build_offline_deps():

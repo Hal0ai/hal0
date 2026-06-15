@@ -184,20 +184,13 @@ if [[ "${DEV_MODE}" -eq 0 && -e "/opt/hal0/.venv" && "${HAL0_FHS_ROOT}" != "/opt
     warn "  the old tree is now orphaned; remove it with 'sudo bash installer/uninstall.sh' or 'sudo rm -rf /opt/hal0' once you've confirmed the new install works"
 fi
 
-# Resolve pull destination: explicit flag / env wins, then an interactive
-# prompt (only when attached to a tty), then the FHS default. Always
-# absolute — relative paths under sudo would land in /root or wherever
-# the install was launched, which is never what the operator wanted.
+# Resolve pull destination: explicit flag / env wins, then the FHS default.
+# The interactive prompt was removed (Task 5.1): model-dir choice moved into
+# `hal0 setup` (interactive post-install). Always absolute — relative paths
+# under sudo would land in /root or wherever the install was launched.
 DEFAULT_MODELS_DIR="${VAR_DIR}/models"
 if [[ -z "${MODELS_DIR}" ]]; then
-    if [[ -t 0 && -t 1 ]]; then
-        printf '\n  Model pull directory (where downloaded .gguf/.safetensors land)\n'
-        printf '  [%s]: ' "${DEFAULT_MODELS_DIR}"
-        read -r MODELS_DIR_INPUT || MODELS_DIR_INPUT=""
-        MODELS_DIR="${MODELS_DIR_INPUT:-${DEFAULT_MODELS_DIR}}"
-    else
-        MODELS_DIR="${DEFAULT_MODELS_DIR}"
-    fi
+    MODELS_DIR="${DEFAULT_MODELS_DIR}"
 fi
 if [[ "${MODELS_DIR}" != /* ]]; then
     die "--models-dir must be an absolute path (got: ${MODELS_DIR})"
@@ -692,60 +685,18 @@ fi
 
 ui_step "Hardware probe"
 
-if [[ -z "${HAL0_NO_PROBE:-}" ]]; then
-    HAL0_HOME_FOR_PROBE=""
-    if [[ "${DEV_MODE}" -eq 1 ]]; then
-        HAL0_HOME_FOR_PROBE="${PREFIX}"
-    fi
-    # Inline Python: probe → write hardware.json → emit 4 hardware cards
-    # → (if no slots/chat.toml exists yet) render one from
-    # recommend_primary_slot() so the operator has a sensible default
-    # waiting after `hal0 model pull <id>`. CHAT_TOML is exported so
-    # the heredoc doesn't need to know the dev-mode prefix.
-    CHAT_TOML="${ETC_DIR}/slots/chat.toml" \
-    HAL0_HOME="${HAL0_HOME_FOR_PROBE}" "${VENV_DIR}/bin/python" - <<'PY'
-import os
-from pathlib import Path
-
-from hal0.hardware.probe import HardwareProbe, format_cards
-from hal0.hardware.recommend import recommend_primary_slot
-
-p = HardwareProbe()
-info = p.probe()
-out = p.write(info)
-print(f"  wrote {out}")
-for line in format_cards(info):
-    print(line)
-
-# Pre-populate slots/chat.toml if absent. Idempotent: never overwrite
-# an operator-edited file. Disabled by default — they pull a model and
-# flip enabled = true when ready.
-target = Path(os.environ["CHAT_TOML"])
-if target.exists():
-    print(f"  {target} exists — left alone")
-else:
-    rec = recommend_primary_slot(info)
-    meta = rec.pop("_meta", {})
-    import tomli_w  # hal0 install dep, always available here
-    target.parent.mkdir(parents=True, exist_ok=True)
-    header = (
-        "# hal0 chat slot — recommended for this hardware.\n"
-        "# Created by install.sh on first install. Edit freely; the\n"
-        "# installer will not overwrite this file on subsequent runs.\n"
-        "#\n"
-        f"# Backend rationale: {meta.get('rationale_backend', '')}\n"
-        f"# Model rationale:   {meta.get('rationale_model', '')}\n"
-        f"# Memory budget:     ~{meta.get('vram_budget_gb', '?')} GB\n"
-        "#\n"
-        "# Next: `hal0 model pull " + rec['model']['default'] + "`\n"
-        "#       then flip enabled = true and `systemctl start hal0-slot@chat`\n"
-        "\n"
-    )
-    target.write_text(header + tomli_w.dumps(rec))
-    print(f"  wrote {target}  (backend={rec['backend']} model={rec['model']['default']})")
-PY
+if [[ "${HAL0_SKIP_SETUP:-0}" == "1" || "${HAL0_NO_PROBE:-0}" == "1" ]]; then
+    info "Skipping first-run setup (HAL0_SKIP_SETUP/HAL0_NO_PROBE set)."
 else
-    warn "skipping probe (HAL0_NO_PROBE=1)"
+    info "Running first-run setup (recommended defaults; models download later)"
+    # --auto: non-interactive, hardware-recommended Main slot. --no-pull seeds
+    # the slot config + first-run sentinel WITHOUT downloading models (the
+    # curl|bash installer must stay fast). --no-extensions: OpenWebUI + Hermes
+    # are installed by the dedicated stages below, not here. Interactive
+    # `hal0 setup` (post-install) handles model downloads + extension choices.
+    "${HAL0_BIN}" setup --auto --no-pull --no-extensions \
+        ${MODELS_DIR:+--storage-dir "${MODELS_DIR}"} \
+        || warn "first-run setup failed; run 'hal0 setup' after install"
 fi
 
 # ── NPU prerequisites (FastFlowLM) ─────────────────────────────────────────

@@ -147,6 +147,48 @@ else
     add_row "dev-config-validate" "skip" "$(since_ms "${start}")" "hal0 binary not built at ${HAL0_BIN}"
 fi
 
+# ── ROW: dev-setup-sentinel ─────────────────────────────────────────────────
+# Verify that `hal0 setup --auto --no-pull --no-extensions` (Task 5.1) writes
+# the first-run sentinel (/var/lib/hal0/.first_run_done). A Main slot config
+# (/etc/hal0/slots/chat.toml) is also expected on hardware with a supported
+# GPU; on CI/VM boxes with no compatible GPU the slot creation is skipped by
+# apply_setup (device/profile mismatch) but the sentinel is always written.
+# The dev-install row above skips the setup block via HAL0_NO_PROBE=1; we
+# exercise it explicitly here against the already-installed binary using
+# HAL0_HOME so paths resolve under the tmp PREFIX (not /etc or /var/lib).
+log_step "Row: dev-setup-sentinel"
+start=$(start_ms)
+HAL0_BIN="${PREFIX}/.venv/bin/hal0"
+if [[ -x "${HAL0_BIN}" ]]; then
+    SETUP_LOG="${PREFIX}/setup-auto.log"
+    if HAL0_HOME="${PREFIX}" "${HAL0_BIN}" setup --auto --no-pull --no-extensions \
+        --storage-dir "${PREFIX}/var-lib/hal0/models" >"${SETUP_LOG}" 2>&1; then
+        SENTINEL="${PREFIX}/var-lib/hal0/.first_run_done"
+        CHAT_TOML="${PREFIX}/etc/hal0/slots/chat.toml"
+        if [[ -f "${SENTINEL}" ]]; then
+            # Sentinel written — core requirement met. Report chat.toml status.
+            if [[ -f "${CHAT_TOML}" ]]; then
+                add_row "dev-setup-sentinel" "pass" "$(since_ms "${start}")" \
+                    "'hal0 setup --auto --no-pull --no-extensions' wrote sentinel + chat.toml"
+            else
+                # No GPU on this host → slot skipped; sentinel still written.
+                add_row "dev-setup-sentinel" "pass" "$(since_ms "${start}")" \
+                    "sentinel written; chat.toml absent (no compatible GPU on this host — expected on CI/VM)"
+            fi
+        else
+            add_row "dev-setup-sentinel" "fail" "$(since_ms "${start}")" \
+                "setup exited 0 but sentinel missing: ${SENTINEL}"
+        fi
+    else
+        rc=$?
+        add_row "dev-setup-sentinel" "fail" "$(since_ms "${start}")" \
+            "hal0 setup --auto --no-pull --no-extensions exit=${rc}; tail: $(tail -n1 "${SETUP_LOG}" 2>/dev/null | tr -d '\n')"
+    fi
+else
+    add_row "dev-setup-sentinel" "skip" "$(since_ms "${start}")" \
+        "hal0 binary not built at ${HAL0_BIN} — earlier row failed"
+fi
+
 # ── ROW: dev-idempotent ─────────────────────────────────────────────────────
 log_step "Row: dev-idempotent"
 start=$(start_ms)

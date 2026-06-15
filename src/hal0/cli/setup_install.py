@@ -41,16 +41,26 @@ def choose_apply_mode() -> str:
     return "api" if _api_reachable() else "in_process"
 
 
-async def run_install(sel, hw) -> None:
-    """Apply ``sel`` via the live API when it is up, else in-process."""
+async def run_install(sel, hw, *, no_pull: bool = False) -> None:
+    """Apply ``sel`` via the live API when it is up, else in-process.
+
+    *no_pull* is threaded to :func:`_apply_in_process`; the API path
+    always defers pulls to BackgroundTasks and ignores this flag.
+    """
     if choose_apply_mode() == "api":
         await _apply_via_api(sel)
     else:
-        await _apply_in_process(sel, hw)
+        await _apply_in_process(sel, hw, no_pull=no_pull)
 
 
-async def _apply_in_process(sel, hw) -> None:
-    """Install-time path: orchestrate offline, then stream the pulls."""
+async def _apply_in_process(sel, hw, *, no_pull: bool = False) -> None:
+    """Install-time path: orchestrate offline, then stream the pulls.
+
+    When *no_pull* is ``True`` the slot configs + first-run sentinel are
+    written but model downloads are skipped entirely.  The operator runs
+    ``hal0 setup`` (interactive) or ``hal0 model pull`` later to fetch
+    the models.
+    """
     from hal0.cli import setup_command  # imported lazily so monkeypatch lands
     from hal0.install.orchestrate import apply_setup
 
@@ -63,6 +73,13 @@ async def _apply_in_process(sel, hw) -> None:
         jobs={},
         write_sentinel=True,
     )
+
+    if no_pull:
+        n_slots = sum(1 for s in result.slots if getattr(s, "created", False))
+        typer.echo(
+            f"Seeded {n_slots} slot(s); run `hal0 setup` or `hal0 model pull` to download models."
+        )
+        return
 
     await _run_pulls_with_progress(result.pulls)
 
