@@ -37,12 +37,19 @@ Error mapping (``board.*`` codes, surfaced via :class:`hal0.errors.Hal0Error`):
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 from hal0.errors import Hal0Error
+
+# Hermes injects its per-process session bearer into the dashboard HTML it
+# serves at ``/`` as ``window.__HERMES_SESSION_TOKEN__="<token>"`` (the loopback
+# login entry point — fetching ``/`` needs no prior auth). hal0-api harvests it
+# from there so the rotating token never needs manual provisioning.
+_TOKEN_RE = re.compile(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*"([^"]+)"')
 
 # Loopback Hermes dashboard default (SPEC §2.B / §7). Override with
 # HERMES_DASHBOARD_BASE_URL — the single env var the whole board surface
@@ -68,14 +75,14 @@ class BoardUnreachable(Hal0Error):
 
 
 def _default_session_token() -> str | None:
-    """Resolve the Hermes per-process session bearer.
+    """Resolve an explicitly-pinned Hermes session bearer.
 
-    Default resolver reads ``HERMES_SESSION_TOKEN`` from the environment.
-    Returns ``None`` when unset (Hermes will then reject and the upstream
-    4xx/401 is surfaced honestly rather than faked). Deployments that run
-    Hermes on loopback with a stable injected token set this env var; the
-    rotating-token case is handled by pointing the resolver at a reader
-    that re-reads the live token (future work — see report).
+    Reads ``HERMES_SESSION_TOKEN`` from the environment. Returns ``None`` when
+    unset — in which case the client falls back to harvesting the live token
+    from the dashboard HTML (see ``_fetch_html_token``), so the rotating
+    per-process token works with zero manual provisioning. Setting the env var
+    pins a token explicitly and skips the HTML harvest (useful in tests or a
+    non-standard deploy).
     """
     tok = os.environ.get("HERMES_SESSION_TOKEN")
     return tok or None
@@ -117,6 +124,9 @@ class HermesKanbanClient:
             base_url=self._base_url,
             timeout=httpx.Timeout(120.0, connect=3.0),
         )
+        # Cache for the token harvested from the dashboard HTML. Invalidated +
+        # re-harvested on a 401 (covers a Hermes restart rotating the token).
+        self._session_token: str | None = None
 
     @classmethod
     def from_env(cls) -> HermesKanbanClient:
@@ -125,23 +135,58 @@ class HermesKanbanClient:
 
     # ── headers ──────────────────────────────────────────────────────────
 
-    def _headers(self, *, agent_id: str | None = None) -> dict[str, str]:
+    def _headers(self, *, token: str | None, agent_id: str | None = None) -> dict[str, str]:
         """Build the outbound header set.
 
         Injects the Hermes session bearer in BOTH accepted forms
         (``X-Hermes-Session-Token`` + ``Authorization: Bearer``) plus
         ``X-hal0-Agent`` for audit attribution. ``agent_id`` lets the router
         thread a per-request agent override (e.g. an MCP caller's identity).
+        ``token`` is resolved by the caller (env pin or HTML harvest).
         """
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "X-hal0-Agent": agent_id or self._agent_id,
         }
-        token = self._resolve_token()
         if token:
             headers["X-Hermes-Session-Token"] = token
             headers["Authorization"] = f"Bearer {token}"
         return headers
+
+    # ── token resolution ─────────────────────────────────────────────────
+
+    async def _current_token(self, *, force_refresh: bool = False) -> str | None:
+        """Return the session bearer to use for the next request.
+
+        Precedence: an explicit env/resolver pin wins (and skips the HTML
+        harvest); otherwise harvest ``window.__HERMES_SESSION_TOKEN__`` from the
+        dashboard HTML at ``/`` and cache it. ``force_refresh`` drops the cache
+        first (used after a 401 when the per-process token has rotated).
+        """
+        pinned = self._resolve_token()
+        if pinned:
+            return pinned
+        if force_refresh:
+            self._session_token = None
+        if self._session_token is None:
+            self._session_token = await self._fetch_html_token()
+        return self._session_token
+
+    async def _fetch_html_token(self) -> str | None:
+        """Harvest the per-process token from the dashboard HTML entry page.
+
+        Loopback ``GET /`` serves the dashboard SPA with the token inlined and
+        requires no prior auth. Returns ``None`` on any failure — the caller
+        then forwards without a token and Hermes's 401 is surfaced honestly.
+        """
+        try:
+            resp = await self._http.get("/")
+        except httpx.HTTPError:
+            return None
+        if resp.status_code >= 400:
+            return None
+        match = _TOKEN_RE.search(resp.text or "")
+        return match.group(1) if match else None
 
     # ── generic forward ──────────────────────────────────────────────────
 
@@ -167,19 +212,28 @@ class HermesKanbanClient:
         * transport failure → :class:`BoardUnreachable` (503)
         """
         upstream_path = f"{KANBAN_BASE_PATH}{path}"
-        try:
-            resp = await self._http.request(
-                method,
-                upstream_path,
-                headers=self._headers(agent_id=agent_id),
-                params=params,
-                json=json_body,
-            )
-        except httpx.HTTPError as exc:
-            raise BoardUnreachable(
-                "hermes kanban dashboard is unreachable on loopback",
-                details={"error": str(exc), "target": upstream_path},
-            ) from exc
+
+        async def _send(token: str | None) -> httpx.Response:
+            try:
+                return await self._http.request(
+                    method,
+                    upstream_path,
+                    headers=self._headers(token=token, agent_id=agent_id),
+                    params=params,
+                    json=json_body,
+                )
+            except httpx.HTTPError as exc:
+                raise BoardUnreachable(
+                    "hermes kanban dashboard is unreachable on loopback",
+                    details={"error": str(exc), "target": upstream_path},
+                ) from exc
+
+        token = await self._current_token()
+        resp = await _send(token)
+        # A 401 on a harvested (non-pinned) token means Hermes rotated it on
+        # restart — drop the cache, re-harvest once, and retry.
+        if resp.status_code == 401 and not self._resolve_token():
+            resp = await _send(await self._current_token(force_refresh=True))
 
         if resp.status_code >= 400:
             try:

@@ -37,6 +37,9 @@ class _Recorder:
     def respond_empty(self, method: str, path: str, status: int = 200) -> None:
         self.responses[(method, path)] = httpx.Response(status)
 
+    def respond_text(self, method: str, path: str, status: int, text: str) -> None:
+        self.responses[(method, path)] = httpx.Response(status, text=text)
+
     async def handler(self, request: httpx.Request) -> httpx.Response:
         if self.fail_connect:
             raise httpx.ConnectError("connection refused", request=request)
@@ -168,3 +171,73 @@ async def test_transport_failure_maps_to_503(recorder: _Recorder) -> None:
         await client.request_json("GET", "/board")
     assert ei.value.status == 503
     assert ei.value.code == "board.unreachable"
+
+
+# ── token harvest from dashboard HTML (the default, rotation-proof resolver) ──
+
+_HTML = '<!doctype html><script>window.__HERMES_SESSION_TOKEN__="{tok}";</script>'
+
+
+async def test_harvests_token_from_dashboard_html(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
+    recorder.respond_text("GET", "/", 200, _HTML.format(tok="HARVESTED"))
+    client = _make_client(recorder)  # default resolver → no env pin → harvest
+    await client.request_json("GET", "/board")
+    # the dashboard HTML was fetched, then /board carried the harvested bearer
+    assert ("GET", "/") in [(r["method"], r["path"]) for r in recorder.requests]
+    board_req = next(r for r in recorder.requests if r["path"] == f"{KANBAN_BASE_PATH}/board")
+    assert board_req["headers"]["authorization"] == "Bearer HARVESTED"
+    assert board_req["headers"]["x-hermes-session-token"] == "HARVESTED"
+
+
+async def test_harvested_token_is_cached(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
+    recorder.respond_text("GET", "/", 200, _HTML.format(tok="ONCE"))
+    client = _make_client(recorder)
+    await client.request_json("GET", "/board")
+    await client.request_json("GET", "/stats")
+    html_fetches = [r for r in recorder.requests if r["path"] == "/"]
+    assert len(html_fetches) == 1  # cached across requests
+
+
+async def test_env_pin_skips_html_harvest(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_SESSION_TOKEN", "PINNED")
+    recorder.respond_text("GET", "/", 200, _HTML.format(tok="HARVESTED"))
+    client = _make_client(recorder)  # default resolver reads the env pin
+    await client.request_json("GET", "/board")
+    assert all(r["path"] != "/" for r in recorder.requests)  # no harvest
+    board_req = next(r for r in recorder.requests if r["path"] == f"{KANBAN_BASE_PATH}/board")
+    assert board_req["headers"]["authorization"] == "Bearer PINNED"
+
+
+async def test_401_reharvests_token_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
+    # Hermes restarted: HTML now serves a rotated token; the cached one 401s once.
+    state = {"board_calls": 0, "token": "ROTATED"}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/":
+            return httpx.Response(200, text=_HTML.format(tok=state["token"]))
+        if request.url.path == f"{KANBAN_BASE_PATH}/board":
+            state["board_calls"] += 1
+            sent = request.headers.get("authorization")
+            # first attempt presents the (now-stale) token → 401; retry succeeds
+            if state["board_calls"] == 1:
+                return httpx.Response(401, json={"detail": "Unauthorized"})
+            assert sent == "Bearer ROTATED"
+            return httpx.Response(200, json={"columns": []})
+        return httpx.Response(200, json={})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:9119"
+    )
+    client = HermesKanbanClient(http_client=http)
+    result = await client.request_json("GET", "/board")
+    assert result == {"columns": []}
+    assert state["board_calls"] == 2  # initial + one retry
