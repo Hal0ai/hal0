@@ -1,7 +1,12 @@
 from rich.console import Console
 
 from hal0.cli.setup_copy import PANE_COPY
-from hal0.cli.setup_ui import render_extension_checklist, render_shell, render_suggestion_table
+from hal0.cli.setup_ui import (
+    plan_steps,
+    render_extension_checklist,
+    render_shell,
+    render_suggestion_table,
+)
 from hal0.install.extensions import EXTENSIONS
 from hal0.install.suggest import Suggestion
 
@@ -52,3 +57,30 @@ def test_suggestion_table_stars_recommended():
     con = Console(width=80, record=True)
     con.print(render_suggestion_table(sugg))
     assert "Qwen3 4B" in con.export_text()
+
+
+def test_no_agent_skips_agent_step():
+    steps = plan_steps(
+        extensions={"openwebui": True, "hermes": False, "pi": False}, npu_present=True
+    )
+    assert "agent" not in steps
+    assert "main" in steps  # OWUI on → main shown
+
+
+def test_agent_on_shows_agent_and_main():
+    steps = plan_steps(
+        extensions={"openwebui": False, "hermes": True, "pi": False}, npu_present=True
+    )
+    assert "main" in steps and "agent" in steps  # agent routes to main too
+
+
+def test_nothing_consuming_chat_hides_main():
+    steps = plan_steps(
+        extensions={"openwebui": False, "hermes": False, "pi": False}, npu_present=False
+    )
+    assert "main" not in steps and "agent" not in steps and "npu" not in steps
+
+
+def test_no_npu_skips_npu_step():
+    steps = plan_steps(extensions={"openwebui": True}, npu_present=False)
+    assert "npu" not in steps
