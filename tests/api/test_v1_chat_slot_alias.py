@@ -152,7 +152,9 @@ async def test_rewrite_is_noop_for_bare_model_id() -> None:
     from hal0.api.routes.v1 import _rewrite_chat_slot_alias
 
     req = _FakeRequest(_FakeSlotManager(_three_chat_slots()))
-    body = await _rewrite_chat_slot_alias(req, {"model": "hermes-4-14b-q5km", "messages": []})
+    body = await _rewrite_chat_slot_alias(
+        req, {"model": "hermes-4-14b-q5km", "messages": []}
+    )
     assert body["model"] == "hermes-4-14b-q5km"
     assert req._body == b""  # not rewritten
 
@@ -242,7 +244,9 @@ async def test_rewrite_flm_tag_passthrough_is_noop(
 
     _patch_flm_id_to_tag(monkeypatch)
     req = _FakeRequest(_FakeSlotManager(_npu_flm_slot()))
-    body = await _rewrite_chat_slot_alias(req, {"model": "gemma4-it:e2b", "messages": []})
+    body = await _rewrite_chat_slot_alias(
+        req, {"model": "gemma4-it:e2b", "messages": []}
+    )
 
     assert body["model"] == "gemma4-it:e2b"
     assert req._body == b""  # not rewritten
