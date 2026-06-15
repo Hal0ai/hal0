@@ -42,11 +42,14 @@ hal0_ensure_runas() {
     _hru_home="$(getent passwd "$_hru_user" 2>/dev/null | cut -d: -f6)"
     [ -n "$_hru_home" ] || _hru_home="/var/lib/hal0"
 
+    # NOTE: `env` requires options (-u) BEFORE NAME=VALUE assignments — once env
+    # sees an assignment or non-option it treats the rest as the command. Putting
+    # `-u HERMES_HOME` after `HOME=...` makes env exec "-u" (issue #843 follow-up).
     if command -v runuser >/dev/null 2>&1; then
-        exec runuser -u "$_hru_user" -- env "HOME=$_hru_home" -u HERMES_HOME "$@"
+        exec runuser -u "$_hru_user" -- env -u HERMES_HOME "HOME=$_hru_home" "$@"
     elif command -v setpriv >/dev/null 2>&1; then
         exec setpriv --reuid "$_hru_user" --regid "$_hru_user" --init-groups -- \
-            env "HOME=$_hru_home" -u HERMES_HOME "$@"
+            env -u HERMES_HOME "HOME=$_hru_home" "$@"
     elif command -v sudo >/dev/null 2>&1; then
         exec sudo -H -u "$_hru_user" -- env -u HERMES_HOME "$@"
     fi

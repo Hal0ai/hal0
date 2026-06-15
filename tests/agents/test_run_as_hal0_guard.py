@@ -22,6 +22,7 @@ Tests drive the guard through ``sh`` with:
 from __future__ import annotations
 
 import os
+import pwd
 import subprocess
 from pathlib import Path
 
@@ -109,6 +110,27 @@ def test_root_reexecs_as_target_user_via_runuser(tmp_path: Path) -> None:
     assert "HERMES_HOME" in res.stdout  # explicitly stripped via `env -u`
     assert "HOME=" in res.stdout  # target HOME forced
     assert "SHOULD_NOT_REACH" not in res.stdout
+
+
+def test_reexec_actually_runs_with_clean_env(tmp_path: Path) -> None:
+    """Execute the re-exec for real (stub runuser EXECS the wrapped command) so
+    `env`'s arg order is exercised, not just string-matched. Verifies HERMES_HOME
+    is stripped and HOME is set to the target user's home — this is the test that
+    catches a malformed `env -u/NAME=VALUE` ordering (which exits non-zero)."""
+    user = _existing_unprivileged_user()
+    if not user:
+        pytest.skip("no unprivileged target user available on this host")
+    target_home = pwd.getpwnam(user).pw_dir
+    # stub runuser: drop `-u <user> --`, then exec the rest so `env` runs for real.
+    _write_stub(tmp_path, "runuser", 'shift 3; exec "$@"')
+    res = _run_guard(
+        f"hal0_ensure_runas {user} sh -c 'echo HOME=$HOME; echo HERMES=${{HERMES_HOME:-unset}}'",
+        env={"HAL0_RUNAS_TEST_UID": "0", "HERMES_HOME": "/should/be/stripped"},
+        extra_path=tmp_path,
+    )
+    assert res.returncode == 0, f"re-exec failed (env ordering?): {res.stderr}"
+    assert f"HOME={target_home}" in res.stdout
+    assert "HERMES=unset" in res.stdout
 
 
 _HERMES_WRAPPER = _REPO_ROOT / "installer" / "wrappers" / "hermes"
