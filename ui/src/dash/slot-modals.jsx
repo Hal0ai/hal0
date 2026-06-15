@@ -339,7 +339,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // owns them for container slots).
   const initialExtraArgs = slot?.llamacpp_args != null ? slot.llamacpp_args : "";
 
-  const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 4096);
+  const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 16384);
   // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
   // button through PATCH /defaults. Both seed from the slot list payload.
   const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
@@ -371,7 +371,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
   useEffectSM(() => {
     if (slot) {
-      setCtx(slot.metrics?.ctx || 4096);
+      setCtx(slot.metrics?.ctx || 16384);
       setThinking(slot.enable_thinking === true);
       setThinkingPending(false);
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
