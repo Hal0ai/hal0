@@ -321,6 +321,23 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
 }
 
 // ─── Edit-slot drawer ───────────────────────────────────────────
+// Cheap client-side guard for the freeform extra_args field: catch the one
+// error that would make the backend shlex.split() throw — unbalanced quotes.
+// Anything subtler (unknown llama-server flags) is the server's job to reject;
+// this just stops an obviously-malformed string from being saved/regenerated.
+function validateExtraArgs(s) {
+  if (!s) return null;
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" && !inDouble) inSingle = !inSingle;
+    else if (c === '"' && !inSingle) inDouble = !inDouble;
+  }
+  if (inSingle || inDouble) return "Unbalanced quote";
+  return null;
+}
+
 function EditSlotDrawer({ open, slot, onClose }) {
   // Hooks must execute every render — early `return null` would skip
   // them; render the drawer shell with a sentinel slot instead.
@@ -353,6 +370,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
   );
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [submitErr, setSubmitErr] = useStateSM(null);
+  // Enable/disable is instant-apply via its own PUT (mirrors the slot card's
+  // pill toggle, which the redesigned cards dropped). `enableBusy` gates the
+  // header toggle against a double-trigger while the mutation is in flight.
+  const [enableBusy, setEnableBusy] = useStateSM(false);
   // Inline error for the instant-apply thinking toggle (task 3): surface the
   // failure next to the control instead of only reverting state silently.
   const [thinkingErr, setThinkingErr] = useStateSM(null);
@@ -412,6 +433,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
     if (profileDeviceClass === "gpu" && !selectedProfile) {
       errs.profile = "Profile is required";
     }
+    // Block Save on malformed extra_args (unbalanced quotes) the same way
+    // numeric fields block — the resolved command can't be built from it.
+    if (extraArgsErr) {
+      errs.extraArgs = extraArgsErr;
+    }
     if (Object.keys(errs).length > 0) {
       setFieldErrs(errs);
       return;
@@ -423,6 +449,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
     // Task 5: include chat_template only when the user has set/changed an override.
     // Dirty-track against slot.chat_template (mirrors profileChanged pattern).
     const chatTemplateChanged = overrideOpen && chatTemplate !== (slot.chat_template || "");
+    // Per-slot extra_args override — ship only when changed, nested under
+    // [server] so the backend one-level merge preserves sibling server keys.
+    const extraArgsChanged = extraArgs !== extraArgsBaseline;
     try {
       // Two-step: defaults (ctx_size lives under [model]) + slot config
       // for the top-level keys (default, profile). n_gpu_layers /
@@ -438,6 +467,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
       }
       if (chatTemplateChanged) {
         slotBody.chat_template = chatTemplate;
+      }
+      if (extraArgsChanged) {
+        slotBody.server = { extra_args: extraArgs };
       }
       await defaultsMut.mutateAsync({
         name: slot.name,
@@ -471,11 +503,35 @@ function EditSlotDrawer({ open, slot, onClose }) {
       );
     } else {
       window.__hal0Toast && window.__hal0Toast(
-        `Slot "${slot.name}" saved — restart required for ctx_size`,
+        `Slot "${slot.name}" saved — restart required to apply changes`,
         "warn",
       );
     }
     onClose();
+  }
+
+  // Regenerate: persist the slot's freeform extra_args overlay (NOT the
+  // profile) and let useSlotEdit's invalidation refetch the slot, which
+  // recomputes resolved_command server-side. The drawer's `slot` prop is
+  // derived live from the slots query, so on refetch the dirty overlay clears
+  // (baseline now equals the typed value) and the fresh command renders. Does
+  // NOT restart — a running slot keeps its old flags until the next restart.
+  async function onRegenerateClick() {
+    setSubmitErr(null);
+    if (extraArgsErr) return;
+    try {
+      await editMut.mutateAsync({
+        name: slot.name,
+        body: { server: { extra_args: extraArgs } },
+      });
+    } catch (err) {
+      setSubmitErr(err?.message || "regenerate failed");
+      return;
+    }
+    window.__hal0Toast && window.__hal0Toast(
+      `Slot "${slot.name}" extra_args saved — restart to run with the new flags`,
+      "info",
+    );
   }
 
   async function onDeleteClick() {
@@ -495,6 +551,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // drawer in a blocked "Saving…" state for the whole model-load.
   const saving = editMut.isPending || defaultsMut.isPending;
   const deleting = deleteMut.isPending;
+
+  // extra_args dirty-tracking: the resolved command is server-computed from the
+  // persisted config, so any unsaved edit makes the displayed command stale.
+  // Baseline is the on-disk value surfaced as `llamacpp_args` (wire key for
+  // [server].extra_args). `validateExtraArgs` is a cheap client guard (balanced
+  // quotes) — the backend shlex parse is the real validator.
+  const extraArgsBaseline = slot.llamacpp_args != null ? slot.llamacpp_args : "";
+  const extraArgsDirty = extraArgs !== extraArgsBaseline;
+  const extraArgsErr = validateExtraArgs(extraArgs);
 
   return (
     <Drawer
@@ -871,25 +936,80 @@ function EditSlotDrawer({ open, slot, onClose }) {
         </div>
       </div>
 
+      {/* Per-slot freeform override. Persisted to [server].extra_args on the
+          slot TOML (NOT the profile) and appended AFTER the profile flags in
+          the resolved command, so slot flags win on collision. Editable so
+          operators can test one-off flags without minting a new profile. */}
       <div className="form-row">
         <div className="form-lbl">
           <span>extra_args</span>
-          <span className="sub">defined by profile {slot.profile}</span>
+          <span className="sub">per-slot override · wins over profile flags</span>
         </div>
         <div className="form-ctl">
-          <input className="input mono" value={extraArgs} readOnly />
+          <input
+            className="input mono"
+            value={extraArgs}
+            onChange={(e) => setExtraArgs(e.target.value)}
+            placeholder="--flag value  (one-off, no new profile)"
+            spellCheck={false}
+            data-testid="extra-args-input"
+          />
+          {extraArgsErr && (
+            <div style={{color: "var(--err)", fontSize: 11, paddingTop: 4, fontFamily: "var(--jbm)"}}>
+              {extraArgsErr}
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Flags preview — backend-provided resolved_command (real podman argv). */}
+      {/* Flags preview — backend-provided resolved_command (real podman argv).
+          The resolved command is computed SERVER-SIDE (profile + MTP + image
+          resolution), so when extra_args is dirty the displayed command is
+          stale: dim it and overlay a Regenerate prompt that persists the slot
+          override and refetches the freshly-resolved command. */}
       <div className="form-section">Resolved command</div>
-      <div style={{padding: 12, background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-3)", lineHeight: 1.6, whiteSpace: "pre-wrap"}}>
-        {Array.isArray(slot.resolved_command)
-          ? slot.resolved_command.join(" \\\n  ")
-          : slot.resolved_command || "— not yet available (slot not loaded)"}
+      <div style={{position: "relative"}}>
+        <div style={{
+          padding: 12, background: "var(--bg)", border: "1px solid var(--line-soft)",
+          borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11,
+          color: "var(--fg-3)", lineHeight: 1.6, whiteSpace: "pre-wrap",
+          opacity: extraArgsDirty ? 0.28 : 1,
+          filter: extraArgsDirty ? "grayscale(1)" : "none",
+          transition: "opacity .15s ease",
+        }}>
+          {Array.isArray(slot.resolved_command)
+            ? slot.resolved_command.join(" \\\n  ")
+            : slot.resolved_command || "— not yet available (slot not loaded)"}
+        </div>
+        {extraArgsDirty && (
+          <div style={{
+            position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", gap: 10, textAlign: "center", padding: 12,
+          }} data-testid="resolved-stale-overlay">
+            <div style={{
+              maxWidth: 360, padding: "12px 16px", background: "var(--bg-2)",
+              border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)",
+              boxShadow: "0 4px 16px rgba(0,0,0,0.25)", display: "flex",
+              flexDirection: "column", alignItems: "center", gap: 10,
+            }}>
+              <div style={{fontSize: 11.5, color: "var(--fg-2)", lineHeight: 1.5}}>
+                Flags changed. Slot <code style={{fontFamily: "var(--jbm)"}}>extra_args</code> take
+                precedence over the profile — regenerate to fold them into the resolved command.
+              </div>
+              <button
+                className="btn sm"
+                disabled={!!extraArgsErr || editMut.isPending}
+                onClick={onRegenerateClick}
+                data-testid="regenerate-resolved"
+              >
+                {editMut.isPending ? "Regenerating…" : "Regenerate"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       <div className="hint" style={{paddingTop: 6, fontSize: 10.5, color: "var(--fg-5)", fontFamily: "var(--jbm)"}}>
-        Real podman argv from profile image + flags. Read-only.
+        Real podman argv: profile image + flags, then slot extra_args (slot wins). Restart the slot to run with new flags.
       </div>
       </details>
     </Drawer>

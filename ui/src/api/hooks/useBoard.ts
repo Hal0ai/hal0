@@ -259,10 +259,11 @@ function normaliseTask(raw: Record<string, unknown>): BoardTask {
 
 // ── Board response normaliser ─────────────────────────────────────────
 //
-// Handles three wire shapes the server may return:
+// Handles four wire shapes the server may return:
 //   1. {lanes: {status: [task, ...]}}
 //   2. {tasks: [...]}
 //   3. [task, ...]  (bare array)
+//   4. {columns: [{name, tasks: [...]}]}  (what Hermes kanban GET /board emits)
 
 function normaliseBoardResponse(
   raw: unknown,
@@ -285,6 +286,17 @@ function normaliseBoardResponse(
       }
     } else if (Array.isArray(obj.tasks)) {
       flatTasks = (obj.tasks as Record<string, unknown>[]).map(normaliseTask)
+    } else if (Array.isArray(obj.columns)) {
+      // Hermes kanban GET /board returns {columns: [{name, tasks: [...]}]}.
+      // Flatten every column's tasks; lane bucketing below re-groups by status.
+      for (const col of obj.columns as Record<string, unknown>[]) {
+        const colTasks = (col as { tasks?: unknown }).tasks
+        if (Array.isArray(colTasks)) {
+          flatTasks.push(
+            ...(colTasks as Record<string, unknown>[]).map(normaliseTask),
+          )
+        }
+      }
     }
   }
 

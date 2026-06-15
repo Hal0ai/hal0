@@ -19,6 +19,7 @@ import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { ActivityLog } from './activity-log.jsx'
 import { ComfyuiPane } from './comfyui-pane.jsx'
+import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
   InferenceHeroBand,
@@ -140,7 +141,6 @@ function SlotCard({
   onViewLogs,
   swapOpen,
   onCloseSwap,
-  onToggleEnabled,
   errorMsg,
   busy,
 }) {
@@ -148,6 +148,9 @@ function SlotCard({
   // Spec 1 / C3: a slot is enabled unless explicitly off. Disabled slots fade,
   // hide lifecycle buttons, and sort to the end of the grid (SlotsView).
   const enabled = slot.enabled !== false;
+  // A disabled slot whose container is still up + healthy stays full-opacity
+  // (slot--live) instead of fading — it's holding GPU / may be serving.
+  const liveWhileDisabled = !enabled && isSlotLive(slot);
   // Lifecycle phase drives which action buttons render (design 2026-06-04):
   // running (container healthy/serving) -> Stop+Restart; off -> Start;
   // transitional (pulling/starting/unloading) -> actions disabled.
@@ -197,7 +200,7 @@ function SlotCard({
   })();
 
   return (
-    <div className={"slot" + (state === "serving" ? " serving" : "") + (swapOpen ? " swap-open" : "") + (enabled ? "" : " slot--disabled")}>
+    <div className={"slot" + (state === "serving" ? " serving" : "") + (swapOpen ? " swap-open" : "") + (enabled ? "" : " slot--disabled") + (liveWhileDisabled ? " slot--live" : "")}>
       <div className="slot-h">
         <IndicatorDot slot={slot} />
         <div className="slot-name">
@@ -206,27 +209,8 @@ function SlotCard({
         <div className="right">
           {isDefault && <div className="default-badge">★ default</div>}
           {coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
-          {/* C3: enabled toggle — stays full-opacity + interactive even when
-              the card is faded, so a disabled slot can be re-enabled.
-              A11y: the hidden <input type=checkbox> is the focusable AT
-              surface (role=checkbox + aria-label). The visible track span
-              is aria-hidden so AT doesn't announce it twice. NpuSwitch
-              pattern: focus-visible ring is handled in dashboard.css via
-              :focus-visible on the hidden input. */}
-          <label
-            className="slot-enable-toggle"
-            title={enabled ? "Disable slot" : "Enable slot"}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <input
-              type="checkbox"
-              checked={enabled}
-              disabled={!!busy}
-              onChange={() => onToggleEnabled && onToggleEnabled(!enabled)}
-              aria-label={enabled ? "Disable slot" : "Enable slot"}
-            />
-            <span className="slot-enable-track" aria-hidden="true" />
-          </label>
+          {/* Enable/disable lives in the Edit drawer header (EditSlotDrawer
+              headRight) now, not on the card. */}
         </div>
       </div>
       <div className="slot-model mono" onClick={onSwap} style={{position: "relative"}}>
@@ -444,400 +428,6 @@ function SlotListRow({ slot, onEdit }) {
   );
 }
 
-// Helpers — pull live values off the enriched slot dicts the backend
-// returns (slots.py:_container_state_enrichment). Missing field → em-dash
-// rather than an invented value (per brief: no fabricated metrics).
-function npuTrioGroupLabel(slots) {
-  for (const s of slots) {
-    if (typeof s.coresident_group === "string" && s.coresident_group) {
-      return s.coresident_group;
-    }
-  }
-  return null;
-}
-function npuTrioBackendUrl(slots) {
-  // Trio shares one process; any slot with backend_url reports it.
-  for (const s of slots) {
-    if (typeof s.backend_url === "string" && s.backend_url) return s.backend_url;
-  }
-  return null;
-}
-
-// FLM models live in their own namespace (registry seed backend:"flm",
-// upstream:"npu"). Filter /api/models defensively across the field
-// shapes the registry/upstream rows can present, then narrow by the
-// dispatcher `type` vocabulary the picker is for. Never offer GGUFs.
-function isFlmModel(m) {
-  const backends = Array.isArray(m?.backends) ? m.backends : [];
-  return (
-    backends.includes("flm") ||
-    m?.backend === "flm" ||
-    m?.runtime === "flm" ||
-    m?.upstream === "npu"
-  );
-}
-// `normalizeApiModel` derives `type` from the plural `capabilities`
-// array and discards any backend-set type. FLM seed rows carry a
-// SINGULAR `capability` ("chat"|"embed"|"asr"), so when `capabilities`
-// is empty `type` lands as "" — fall back to the singular field so the
-// pickers still populate. (Dispatcher vocab: chat→llm, embed→embedding,
-// asr/transcription→transcription.)
-function modelSlotType(m) {
-  if (m?.type) return m.type;
-  const cap = String(m?.capability || "").toLowerCase();
-  if (cap === "chat") return "llm";
-  if (cap === "embed" || cap === "embeddings") return "embedding";
-  if (cap === "asr" || cap === "transcription") return "transcription";
-  if (cap === "rerank") return "reranking";
-  if (cap === "tts") return "tts";
-  if (cap === "image") return "image";
-  return "";
-}
-function flmModelsByType(models, type) {
-  return (Array.isArray(models) ? models : [])
-    .filter(isFlmModel)
-    .filter(m => modelSlotType(m) === type);
-}
-
-const NPU_CHIP = {
-  color: "var(--dev-npu)",
-  borderColor: "rgba(200,150,255,0.30)",
-  background: "rgba(200,150,255,0.06)",
-};
-
-function slotIsLoaded(slot) {
-  if (slot?.container_status != null) return slot.container_status === "running";
-  const state = String(slot?.state || "");
-  return state === "serving" || state === "ready";
-}
-
-// A11y-friendly on/off switch (matches the prototype's visual language).
-function NpuSwitch({ on, disabled, label, onClick }) {
-  return (
-    <button
-      type="button"
-      className="npu-switch"
-      role="switch"
-      aria-checked={!!on}
-      aria-label={label}
-      disabled={disabled}
-      data-on={on ? "1" : "0"}
-      onClick={onClick}
-    >
-      <span className="knob" />
-    </button>
-  );
-}
-
-// ─── NPU · FLM Stack — Variant B (bracketed trio control surface) ───
-//
-// THE npu rendering. One FLM container packs chat + ASR + embed coresident
-// (the trio boots together when the NPU slot container starts). This
-// section lets the operator pick the FLM chat model, toggle ASR/embed
-// modalities, and load/unload the whole stack — keyed off device=="npu"
-// (never literal slot names).
-function NpuFlmStack({ slots }) {
-  const npuSlots = slots.filter(s => (s.device_class || s.device) === "npu");
-  // Hooks must run unconditionally (rules-of-hooks) — gate render below.
-  const modelsQuery = useModels();
-  const swapMut = useSlotSwap();
-  const loadMut = useSlotLoad();
-  const unloadMut = useSlotUnload();
-  const editMut = useSlotEdit();
-  const restartMutNpu = useSlotRestart();
-  const [npuOpen, setNpuOpen] = useStateS(false);
-
-  if (!npuSlots.length) return null;
-
-  const chat = npuSlots.find(s => s.type === "llm");
-  const asr = npuSlots.find(s => s.type === "transcription");
-  const embed = npuSlots.find(s => s.type === "embedding");
-  const anySlot = chat || npuSlots[0];
-
-  const coresGroup = npuTrioGroupLabel(npuSlots);
-  const backendUrl = npuTrioBackendUrl(npuSlots);
-  const childPort = anySlot?.port ?? null;
-
-  // Toggle state comes from slot.npu (TOML-backed {asr,embed}).
-  const parsed = { asr: !!(chat?.npu?.asr), embed: !!(chat?.npu?.embed) };
-
-  // Only chat (the FLM anchor) is a real model choice — the operator picks
-  // which model `flm serve` runs. ASR/embed are served coresident off that
-  // one process with the model fixed by the --asr/--embed flags, so they
-  // render a read-only label (NpuModalityCard `readOnlyModel`) instead of a
-  // picker — no asr/embed model list to compute.
-  const allModels = modelsQuery.data || [];
-  const chatModels = flmModelsByType(allModels, "llm");
-
-  const loaded = chat ? slotIsLoaded(chat) : npuSlots.some(slotIsLoaded);
-
-  const toast = (msg, kind = "warn") =>
-    window.__hal0Toast && window.__hal0Toast(msg, kind);
-
-  // Fire-and-forget NPU action — the FLM load/restart blocks for the whole
-  // stack warm-up (seconds), so awaiting it froze the trio's controls and the
-  // master switch for the entire load. Fire it, toast immediately, and let the
-  // 5s slots poll reflect the transition. (Mirrors the SlotsView/PR #781
-  // non-blocking pattern.)
-  const fire = (mut, args, msg) => {
-    mut.mutate(args, {
-      onError: (err) => toast(err?.message ? err.message : "NPU action failed", "warn"),
-    });
-    toast(msg, "info");
-  };
-
-  // Master power — load/unload the whole stack via the chat (anchor) slot.
-  // Flip-to-cancel: if the stack is loaded OR mid-load (transitional), the
-  // master fires an unload so a slow warm-up can be aborted without waiting.
-  const onMaster = () => {
-    if (!chat) { toast("No NPU chat slot to load", "warn"); return; }
-    const p = slotCtrlPhase(chat);
-    const stopping = loaded || p === "running" || p === "transitional";
-    fire(
-      stopping ? unloadMut : loadMut,
-      chat.name,
-      stopping ? "Unloading NPU stack…" : "Loading NPU stack…",
-    );
-  };
-
-  const onPickChat = (model_id) => {
-    if (!chat || !model_id || model_id === chat.model) return;
-    fire(swapMut, { name: chat.name, model_id }, "Swapping NPU chat model…");
-  };
-
-  // Toggle a coresident modality (Phase A): write the flip to TOML via
-  //   PUT /api/slots/{name}/config  body: { npu: { [which]: next } }
-  // then trigger an explicit slot restart so the container picks up the
-  // new config (orchestrator/API NEVER auto-restarts — ADR decision).
-  // The existing state chip streams the transition; no new UI needed.
-  const onToggleModality = (which) => {
-    if (!chat) { toast("No NPU chat slot", "warn"); return; }
-    const nextVal = !(parsed[which]);
-    // Await only the fast config write (surfaces a TOML/validation error
-    // inline); then FIRE the cold restart that picks up the new modality —
-    // never block the trio on the FLM reload.
-    editMut.mutate(
-      { name: chat.name, body: { npu: { [which]: nextVal } } },
-      {
-        onSuccess: () => {
-          fire(
-            restartMutNpu,
-            chat.name,
-            `${which} ${nextVal ? "enabled" : "disabled"} — restarting NPU stack…`,
-          );
-        },
-        onError: (err) =>
-          toast(err?.message ? err.message : "NPU config write failed", "warn"),
-      },
-    );
-  };
-
-  // No onPickAsr/onPickEmbed: those modalities are read-only labels (the
-  // FLM trio fixes their model via flags). Chat keeps onPickChat above.
-
-  // ── trio rendered as the canonical slot card (SlotScard, shared with the
-  //    InferencePane). The trio reality is preserved: chat is the loadable
-  //    anchor (model picker + stack load/unload/restart); asr/embed are
-  //    coresident roles whose Start/Stop maps to the modality toggle (the
-  //    "drop embedding" affordance) with an FLM-fixed model label. ──
-  const dispatchLogs = (name) =>
-    name && window.dispatchEvent(new CustomEvent("hal0:slot-logs", { detail: { name } }));
-  const goEdit = (name) => { if (name) window.location.hash = "#slots/" + name; };
-
-  const chatCardNode = chat && (
-    <SlotScard
-      key="chat" s={chat} ind={slotIndicator(chat)} full
-      modelNode={<ModelPicker s={chat} models={chatModels} disabled={!chat} onSwap={onPickChat} />}
-      controls={
-        <SlotControls
-          phase={slotCtrlPhase(chat)} busy={false} compact={false}
-          onStart={() => fire(loadMut, chat.name, `Starting ${chat.name}…`)}
-          onStop={() => fire(unloadMut, chat.name, `Stopping ${chat.name}…`)}
-          onRestart={() => fire(restartMutNpu, chat.name, `Restarting ${chat.name}…`)}
-          onLogs={() => dispatchLogs(chat.name)}
-          onEdit={() => goEdit(chat.name)}
-        />
-      }
-      onEdit={() => goEdit(chat.name)}
-    />
-  );
-
-  const modalityCardNode = (which, slot) => {
-    const on = !!parsed[which];
-    const phase = (loaded && on) ? "running" : "off";
-    const ind = !loaded
-      ? { cls: "offline", label: "off", tooltip: "NPU stack not loaded" }
-      : on
-      ? { cls: "stale", label: "coresident", tooltip: "Served coresident by the FLM trio" }
-      : { cls: "offline", label: "off", tooltip: `${which} modality disabled` };
-    const s = slot || { name: which, type: which === "asr" ? "transcription" : "embedding", metrics: {} };
-    const tgt = slot?.name || chat?.name;
-    return (
-      <SlotScard
-        key={which} s={s} ind={ind} phase={phase} full
-        modelNode={
-          <div className="smodel mono npu-mod-fixed" title="Model fixed by the FLM build (--asr/--embed flags) — not separately selectable.">
-            <span className="npu-fixed-model">{slot?.modelDefault || slot?.model || "—"}</span>
-            <span className="npu-fixed-tag">FLM</span>
-          </div>
-        }
-        controls={
-          <SlotControls
-            phase={phase} busy={false} compact={false}
-            onStart={() => onToggleModality(which)}
-            onStop={() => onToggleModality(which)}
-            onRestart={() => fire(restartMutNpu, chat?.name, "Restarting NPU stack…")}
-            onLogs={() => dispatchLogs(tgt)}
-            onEdit={() => goEdit(tgt)}
-          />
-        }
-        onEdit={() => goEdit(tgt)}
-      />
-    );
-  };
-
-  // ── derived display fields for the engine shell ──
-  // Combined NPU resident memory — sum of per-slot mem_mb (the trio shares one
-  // FLM process, so its weight shows on the loaded anchor). Em-dash, never a
-  // fabricated 0, when nothing is resident.
-  const npuMemMb = npuSlots.reduce(
-    (a, s) => a + (typeof s.mem_mb === "number" ? s.mem_mb : 0), 0,
-  );
-  const npuMemGb = npuMemMb > 0 ? Math.round((npuMemMb / 1024) * 10) / 10 : null;
-  const chatModel = chat?.model || chat?.modelDefault || "—";
-  const epillCls = loaded ? "running" : "stopped";
-  const epillLabel = loaded ? "loaded · 3 roles" : "unloaded";
-
-  // small inline glyphs (purple chip + chevron) — keeps the pane self-contained
-  const ChipGlyph = (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="3.5" y="3.5" width="9" height="9" rx="1" />
-      <rect x="6" y="6" width="4" height="4" rx="0.5" />
-      <path d="M6 3.5v-1.5M10 3.5v-1.5M6 14v-1.5M10 14v-1.5M3.5 6h-1.5M3.5 10h-1.5M14 6h1.5M14 10h1.5" />
-    </svg>
-  );
-  const ChevGlyph = (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-         strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 6l4 4 4-4" />
-    </svg>
-  );
-
-  return (
-    <div className="npu-pane">
-      <div className="proto">
-        <div className="sec-label">
-          <b>NPU Stack</b>
-          <span className="dim">·</span>
-          <span className="mono" style={{color: "var(--dev-npu)"}}>FLM</span>
-          <span className="dim">·</span>
-          <span className="meta">coresident</span>
-          <span className="dim">·</span>
-          <span className="meta">1 process · 3 roles</span>
-          <span className="grow" style={{flex: 1}} />
-          <span className="meta">{loaded ? "npu · loaded" : "npu · idle"}</span>
-        </div>
-
-        <div className={"engine" + (loaded ? " active" : "") + (npuOpen ? " open" : "")}>
-          <div className="engine-h">
-            <span className="engine-glyph">{ChipGlyph}</span>
-            <span className="col">
-              <span className="engine-title">NPU · FLM Stack</span>
-              <span className="engine-sub">coresident · 1 process · 3 roles</span>
-            </span>
-            <span className={"epill " + epillCls} data-testid="npu-epill">
-              <span className="dot" />
-              {epillLabel}
-            </span>
-            <span className="grow" style={{flex: 1}} />
-            <span className="eh-right">
-              <span className="npu-master-lbl">master</span>
-              <NpuSwitch on={loaded} disabled={!chat} label="Load/unload FLM stack" onClick={onMaster} />
-            </span>
-          </div>
-
-          {/* collapsed telemetry strip — hidden when the pane is open */}
-          <div className="collapsed-prog" data-testid="npu-strip">
-            <div className="tel-strip">
-              <span className="tel">
-                <span className="l">mem</span>
-                <span className="v comfy">{npuMemGb == null ? "—" : npuMemGb}<span className="u"> GB</span></span>
-              </span>
-              <span className="tel">
-                <span className="l">chat</span>
-                <span className="v" style={{maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{chatModel}</span>
-              </span>
-              <span className="tel">
-                <span className="l">asr</span>
-                <span className="dotline"><span className={"rdot" + (parsed.asr ? " on" : "")} /><span className="v">{parsed.asr ? "on" : "off"}</span></span>
-              </span>
-              <span className="tel">
-                <span className="l">embed</span>
-                <span className="dotline"><span className={"rdot" + (parsed.embed ? " on" : "")} /><span className="v">{parsed.embed ? "on" : "off"}</span></span>
-              </span>
-              <span className="tel">
-                <span className="l">port</span>
-                <span className="v">:{childPort ?? "—"}</span>
-              </span>
-            </div>
-          </div>
-
-          {/* expandable body — the FLM trio rendered as canonical slot cards
-              (SlotScard, shared with the InferencePane). */}
-          <div className="engine-body">
-            <div className="inner">
-              <div className="engine-b">
-                <div className="npu-stack">
-                  <div className="scards full npu-scards">
-                    {chatCardNode}
-                    {modalityCardNode("asr", asr)}
-                    {modalityCardNode("embed", embed)}
-                  </div>
-
-                  <div className="npu-stack-foot mono">
-                    <code className="npu-args">npu = asr:{parsed.asr ? "on" : "off"} · embed:{parsed.embed ? "on" : "off"}</code>
-                    <span className="sep">·</span>
-                    <span className="item">port :{childPort ?? "—"}{backendUrl ? <span title={backendUrl}> · {backendUrl}</span> : null}</span>
-                    {coresGroup && <><span className="sep">·</span><span className="item">{coresGroup}</span></>}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* footer — flm identity + caret expand control */}
-          <div className="engine-foot has-q">
-            <div className="foot-id">
-              <span className="k">runtime</span>
-              <span className="v comfy">flm serve</span>
-              <span className="sep">·</span>
-              <span className="k">port</span>
-              <span className="v">:{childPort ?? "—"}</span>
-              {coresGroup && <>
-                <span className="sep">·</span>
-                <span className="k">group</span>
-                <span className="v comfy">{coresGroup}</span>
-              </>}
-            </div>
-            <button
-              className="qcaret"
-              onClick={() => setNpuOpen(o => !o)}
-              aria-expanded={npuOpen}
-              data-testid="npu-qcaret"
-            >
-              <span className="q">
-                {ChipGlyph} {npuOpen ? "collapse" : "trio"}
-                <span className="qn">3</span>
-              </span>
-              <span className="car">{ChevGlyph}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ─── Slots view ───
 function SlotsView({ slotVariant, slotParam, onGo }) {
@@ -955,7 +545,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // Section assignment is derived from the slot's device_class (now always
   // emitted by the serializer) rather than the legacy null `group` field:
   //   gpu  → Chat
-  //   npu  → NPU/FLM stack (rendered by NpuFlmStack, excluded here)
+  //   npu  → NPU occupancy card (rendered by NpuOccupancyCard, excluded here)
   //   img  → Image-Gen tab (ComfyUI pane)
   //   else (embedding/reranking/transcription/tts capability slots) →
   //         Capabilities. GPU-backed embed/rerank slots are LLM-adjacent
@@ -1002,20 +592,6 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       swapOpen={swapName === s.name}
       onSwap={(e) => { e.stopPropagation(); setSwapName(swapName === s.name ? null : s.name); }}
       onCloseSwap={() => setSwapName(null)}
-      onToggleEnabled={async (next) => {
-        // C3: instant-apply enabled flip. Query invalidation re-renders the
-        // card from server truth; on error we leave server state untouched and
-        // toast (e.g. the npu-exclusivity 409 when enabling a 2nd NPU LLM).
-        setBusyName(s.name);
-        try {
-          await editMut.mutateAsync({ name: s.name, body: { enabled: next } });
-          toast(`${s.name} ${next ? "enabled" : "disabled"}`, "ok");
-        } catch (err) {
-          toast(err?.message ? `${s.name}: ${err.message}` : `${s.name}: toggle failed`, "warn");
-        } finally {
-          setBusyName(null);
-        }
-      }}
       onEdit={() => { window.location.hash = "#slots/" + s.name; }}
       onRestart={() =>
         runMutation(s.name, restartMut, s.name, `Restarting ${s.name}…`)
@@ -1295,12 +871,13 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
                   they only duplicated rows the pane already lists. */}
               <InferencePane />
 
-              {/* NPU · FLM stack — its own engine-shell pane (purple accent),
-                  parallel to the Inference + ComfyUI panes. No section h2: the
-                  pane supplies its own sec-label + engine header. Keyed off
-                  device_class "npu" (serializer-emitted), with the legacy
-                  device === "npu" kept as a fallback. */}
-              {cardSlots.some(s => dc(s) === "npu") && <NpuFlmStack slots={cardSlots} />}
+              {/* NPU occupancy — full-width card: duty gauge · live 4×8 AIE-ML
+                  occupancy map (single-tenant: one FLM claims the whole array) ·
+                  per-FLM-slot rail with tok/s · ttft · RAM + slot controls.
+                  Replaces the old NpuFlmStack accordion + trio picker. Keyed off
+                  device_class "npu" (serializer-emitted), legacy device === "npu"
+                  kept as a fallback by dc(). */}
+              {cardSlots.some(s => dc(s) === "npu") && <NpuOccupancyCard slots={cardSlots} />}
             </>
           )}
         </div>
@@ -1330,4 +907,4 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   );
 }
 
-Object.assign(window, { SlotsView, SlotCard, SlotListRow, NpuFlmStack, Spark });
+Object.assign(window, { SlotsView, SlotCard, SlotListRow, Spark });

@@ -67,8 +67,8 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     for (const name of ['agent', 'stt-npu', 'embed-npu']) {
       await expect(pane(page).locator(`[data-testid="infer-slot-${name}"]`)).toHaveCount(0)
     }
-    // …they live in the NPU · FLM stack pane below.
-    await expect(page.locator('.npu-pane').first()).toBeVisible()
+    // …they live in the NPU occupancy card below.
+    await expect(page.locator('.npu-card').first()).toBeVisible()
   })
 
   test('engine renders full slot cards with the metric meta row (no accordion)', async ({ page }) => {
@@ -198,22 +198,20 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
   })
 })
 
-test.describe('NPU · FLM engine pane (/slots · Inference tab)', () => {
-  test('renders an engine shell with a collapsed strip', async ({ page }) => {
+test.describe('NPU occupancy card (/slots · Inference tab)', () => {
+  test('renders the occupancy card — gauge + 4×8 AIE-ML grid', async ({ page }) => {
     await page.goto('/#slots')
-    await expect(page.locator('.npu-pane').first()).toBeVisible()
-    await expect(page.getByTestId('npu-epill')).toBeVisible()
-    await expect(page.getByTestId('npu-strip')).toBeVisible()
+    const card = page.locator('.npu-card')
+    await expect(card).toBeVisible()
+    await expect(card.locator('.gauge')).toBeVisible()
+    await expect(card.locator('.aie-grid .aie-col')).toHaveCount(8)
   })
 
-  test('caret toggles the trio open (chat / asr / embed as slot cards)', async ({ page }) => {
+  test('lists a per-FLM-slot card with lifecycle controls', async ({ page }) => {
     await page.goto('/#slots')
-    const npuEngine = page.locator('.npu-pane .engine').first()
-    await expect(npuEngine).not.toHaveClass(/\bopen\b/)
-    await page.getByTestId('npu-qcaret').click()
-    await expect(npuEngine).toHaveClass(/\bopen\b/)
-    // The trio now renders as the canonical slot cards (SlotScard), one per role.
-    await expect(page.locator('.npu-pane .engine-body .scard')).toHaveCount(3)
+    const card = page.locator('.npu-card')
+    await expect(card.locator('.cslot').first()).toBeVisible()
+    await expect(card.locator('.cslot .slot-ctrls').first()).toBeVisible()
   })
 })
 

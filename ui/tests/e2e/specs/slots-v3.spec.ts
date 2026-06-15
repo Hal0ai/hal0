@@ -23,24 +23,23 @@ test.describe('Slots v3 (/slots)', () => {
     await expect(newBtn).toBeVisible()
   })
 
-  test('NPU rollup section renders when an NPU slot is present', async ({ page }) => {
+  test('NPU occupancy card renders when an NPU slot is present', async ({ page }) => {
     await page.goto('/#slots')
-    // The NPU/FLM stack now renders as its own "engine" pane (parallel to the
-    // ComfyUI + Inference panes) instead of a plain <section><h2>NPU</h2> — the
-    // standalone section header was dropped for the pane's own engine header.
-    // HAL0_DATA seeds at least one device=npu slot, so the pane appears.
-    await expect(page.locator('.npu-pane')).toBeVisible()
-    await expect(page.locator('.npu-pane .engine-title')).toContainText('NPU')
+    // The NPU/FLM surface is now a single full-width "NPU occupancy" card
+    // (gauge + 4×8 AIE-ML map + per-FLM-slot rail), replacing the old
+    // NpuFlmStack accordion + trio picker. HAL0_DATA seeds at least one
+    // device=npu slot, so the card appears.
+    await expect(page.locator('.npu-card')).toBeVisible()
+    await expect(page.locator('.npu-card .wcard-h .ttl')).toContainText('NPU occupancy')
   })
 
-  test('NPU trio: chat is a model picker; ASR/embed are read-only labels (model fixed by FLM)', async ({ page }) => {
+  test('NPU occupancy card shows the AIE grid + a per-FLM-slot card', async ({ page }) => {
     await page.goto('/#slots')
-    const stack = page.locator('.npu-stack')
-    await expect(stack).toBeVisible()
-    // Chat (the FLM anchor) keeps a real <select> model picker (the shared
-    // slot-card ModelPicker); ASR/embed render an FLM-fixed read-only label.
-    await expect(stack.locator('.model-picker')).toHaveCount(1)
-    await expect(stack.locator('.npu-mod-fixed')).toHaveCount(2)
-    await expect(stack.locator('.npu-mod-fixed .npu-fixed-tag')).toHaveCount(2)
+    const card = page.locator('.npu-card')
+    await expect(card).toBeVisible()
+    // 4×8 AIE-ML occupancy grid (single-tenant: one FLM claims the whole array)
+    await expect(card.locator('.aie-grid .aie-col')).toHaveCount(8)
+    // at least one resident FLM slot card with its column strip
+    await expect(card.locator('.cslot .cslot-strip').first()).toBeVisible()
   })
 })

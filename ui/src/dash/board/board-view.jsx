@@ -28,6 +28,8 @@
 //   window.__hal0UseReassignTask
 //   window.__hal0UseNudgeDispatch
 //   window.__hal0UseSwitchBoard
+//   window.__hal0UseCreateBoard
+//   window.__hal0UseCreateTask
 //   window.__hal0UseBoardEventsStream
 
 const { useState, useEffect, useMemo, useRef } = React;
@@ -162,6 +164,7 @@ function BoardView() {
   const useNudgeDispatch    = window.__hal0UseNudgeDispatch;
   const useSwitchBoard      = window.__hal0UseSwitchBoard;
   const useCreateBoard      = window.__hal0UseCreateBoard;
+  const useCreateTask       = window.__hal0UseCreateTask;
   const useBoardEventsStream = window.__hal0UseBoardEventsStream;
 
   // ── keep WS stream alive ──
@@ -182,6 +185,7 @@ function BoardView() {
   const nudge       = useNudgeDispatch ? useNudgeDispatch() : null;
   const switchBoard = useSwitchBoard ? useSwitchBoard()  : null;
   const createBoard = useCreateBoard ? useCreateBoard()  : null;
+  const createTask  = useCreateTask  ? useCreateTask()   : null;
 
   // ── local state ──
   const [board, setBoard]           = useState("default");
@@ -578,7 +582,14 @@ function BoardView() {
                       onToggle={toggleSel}
                       onOpen={setOpenTask}
                       openTask={openTask}
-                      onAdd={(id) => toast("new task in " + id)}
+                      onAdd={(laneId) => {
+                        if (createTask) {
+                          createTask.mutate(
+                            { title: "New task", status: laneId },
+                            { onSuccess: () => toast("task created in " + laneId) }
+                          );
+                        }
+                      }}
                       dnd={dnd}
                     />
                   : null
