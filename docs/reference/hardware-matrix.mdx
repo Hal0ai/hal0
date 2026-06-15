@@ -1,0 +1,76 @@
+---
+title: Hardware matrix
+description: Supported hardware reference for hal0 — AMD GPU (ROCm/Vulkan), AMD XDNA NPU (FastFlowLM), CPU fallback, the backend availability order, and why NVIDIA/CUDA is unsupported.
+sidebar:
+  order: 50
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 targets AMD APU/GPU plus the AMD XDNA NPU, with a CPU fallback that is
+always available. This page lists what runs on each accelerator and the order
+hal0 prefers them in.
+
+## Hardware targets
+
+| Target              | Backend / runtime         | What runs there                                    |
+|---------------------|---------------------------|----------------------------------------------------|
+| AMD GPU (ROCm)      | llama.cpp ROCm            | chat / embed / rerank LLM inference (highest tps)  |
+| AMD GPU (Vulkan)    | llama.cpp Vulkan          | chat / embed / rerank LLM inference (broad-compat) |
+| AMD XDNA NPU        | FastFlowLM (FLM)          | chat + speech-to-text + embeddings (one process)   |
+| CPU                 | llama.cpp / ONNX          | fallback LLM inference; Kokoro TTS; Moonshine STT  |
+
+The reference platform is AMD Strix Halo: an 8060S-class iGPU, an XDNA NPU, and
+a unified-memory pool the GPU shares with the host via GTT. hal0's profile flags
+are bench-tuned for that target, but the GPU/Vulkan and CPU paths run on any
+modern Linux AMD system.
+
+## Backend availability order
+
+hal0 probes the host and advertises the backends it can actually run, in this
+order:
+
+1. **NPU** — only when an XDNA NPU is present *and* the FLM toolbox image is
+   already pulled locally.
+2. **GPU (Vulkan)** — whenever a GPU is detected (every modern Linux GPU has
+   Mesa Vulkan).
+3. **GPU (ROCm)** — only when the detected GPU is an AMD GPU with compute
+   support (`compute_capable`).
+4. **CPU** — always reachable; the guaranteed fallback.
+
+| Backend id   | Label        | Provider       | Multiplex | Advertised when                          |
+|--------------|--------------|----------------|-----------|------------------------------------------|
+| `npu`        | NPU          | `flm`          | yes       | XDNA present + FLM image pulled           |
+| `gpu-vulkan` | GPU (Vulkan) | `llama-server` | no        | any GPU detected                          |
+| `gpu-rocm`   | GPU (ROCm)   | `llama-server` | no        | AMD GPU with ROCm compute support         |
+| `cpu`        | CPU          | `llama-server` | no        | always                                    |
+
+The NPU is **multiplex**: a single `flm serve` process answers chat, STT, and
+embeddings at once, so one NPU slot can back three capabilities.
+
+<Aside type="caution" title="NVIDIA / CUDA is not supported">
+hal0's device enum is `{gpu-rocm, gpu-vulkan, cpu, npu}` — there is no CUDA
+device. An NVIDIA GPU will only ever surface through the generic Vulkan path
+(`gpu-vulkan`); there is no ROCm/CUDA compute backend for it. hal0 is built and
+tested on Linux x86_64.
+</Aside>
+
+## NPU host requirements
+
+The NPU path runs FastFlowLM in a container, but the host must provide the XDNA
+driver and firmware:
+
+- the `amdxdna` kernel driver (in-tree on kernel ≥ 6.14, or via the
+  `amdxdna-dkms` package on kernel ≥ 6.10), and
+- NPU firmware ≥ 1.1.0.0.
+
+<Aside type="note">
+The NPU host driver install is **Ubuntu / apt-only** — the FastFlowLM driver
+ships as a `.deb`. The FLM inference itself runs in the pinned `flm` toolbox
+container; only the host-side driver is distro-specific.
+</Aside>
+
+## See also
+
+- [Devices, providers & profiles](/docs/reference/providers-profiles-devices) — the device → profile → image matrix.
+- [NPU & power REST routes](/docs/reference/api/rest-api) — `/api/npu`, `/api/backends`, `/api/stats/hardware`.

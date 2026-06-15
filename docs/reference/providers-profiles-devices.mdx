@@ -1,0 +1,117 @@
+---
+title: Devices, providers & profiles
+description: The hal0 slot matrix — valid devices, providers, the seed profile catalog, the device-to-default-profile map, and the toolbox container images each profile pulls.
+sidebar:
+  order: 40
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A hal0 slot is described by three orthogonal facts: a **device** (the hardware
+preference), a **provider** (the inference runtime label), and a **profile** (a
+reusable container template — image plus bench-tuned flags). This page is the
+authoritative reference for the valid values of each and how they connect.
+
+<Aside type="caution" title="device, not backend">
+The legacy `backend` field is deprecated and accepted for one migration release
+only. Author every slot with `device`. A slot TOML that sets `backend` without
+`device` logs a deprecation warning and auto-fills `device`.
+</Aside>
+
+## Devices
+
+`device` carries hardware intent only. It is validated at config-load time —
+a typo raises a `ValidationError` with the field path.
+
+| `device`     | Hardware                       | Default provider |
+|--------------|--------------------------------|------------------|
+| `gpu-rocm`   | AMD GPU via ROCm               | `llama-server`   |
+| `gpu-vulkan` | Any GPU via Vulkan             | `llama-server`   |
+| `cpu`        | CPU-only fallback              | `llama-server`   |
+| `npu`        | AMD XDNA NPU via FastFlowLM    | `flm`            |
+
+`gpu-rocm` is the default `device` for fresh installs (best throughput on the
+Strix Halo reference target). The recommender may downgrade this on hosts
+without ROCm compute support.
+
+## Providers
+
+`provider` is the runtime label round-tripped on each slot. Every slot runs as
+a podman container regardless of provider; the field exists for UI labels and
+backwards compatibility.
+
+| `provider`     | Runtime                                  | Typical slot types                     |
+|----------------|------------------------------------------|----------------------------------------|
+| `llama-server` | llama.cpp server (ROCm / Vulkan / CPU)   | chat, embed, rerank                     |
+| `flm`          | FastFlowLM on the NPU                     | chat / stt / embed (one process, trio) |
+| `moonshine`    | Moonshine speech-to-text                  | transcription                          |
+| `kokoro`       | Kokoro-82M text-to-speech (ONNX)          | tts                                    |
+| `comfyui`      | ComfyUI image generation                  | image                                  |
+
+## Seed profiles
+
+Profiles live in `/etc/hal0/profiles.toml`. When that file is absent, hal0
+serves the built-in seed catalog below, so `GET /api/profiles` is always
+populated on a fresh install. A profile supplies the container image, the
+bench-tuned flag bundle, and an optional MTP toggle; the slot supplies the
+model, context size, and port.
+
+| Profile     | `device_class` | Image                                                                | MTP   | Intent                |
+|-------------|----------------|----------------------------------------------------------------------|-------|-----------------------|
+| `rocm`      | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | MoE agents            |
+| `rocm-mtp`  | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | Dense chat + MTP      |
+| `vulkan`    | gpu            | `ghcr.io/hal0ai/hal0-toolbox-vulkan:v1` *(see profile note below)*    | off   | Vulkan std / fallback |
+| `flm`       | npu            | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                             | off   | FLM NPU inference     |
+| `tts`       | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                              | off   | TTS (Kokoro)          |
+| `comfyui`   | img            | `docker.io/kyuz0/amd-strix-halo-comfyui:latest`                      | off   | Image generation      |
+
+<Aside type="note">
+GPU profiles also carry a `backend` field (`rocm` or `vulkan`) — that field, not
+the slug, is the authoritative ROCm-vs-Vulkan choice. Non-GPU profiles
+(`flm`, `tts`, `comfyui`) omit it and let `device_class` drive display.
+The `vulkan` seed profile references the vulkan-radv server image; the canonical
+image refs are pinned per release in `manifest.json`.
+</Aside>
+
+### MTP flag bundle
+
+When a profile's effective MTP setting is on (profile `mtp = true`, or a slot's
+`mtp = true` override on a `rocm` profile), the multi-token-prediction
+draft-speculation flag bundle is appended after the profile flags at resolve
+time. A slot's `mtp` field (`true` / `false` / unset-to-inherit) overrides the
+profile.
+
+## Device-to-default-profile map
+
+The create-slot device picker and legacy-slot migration use this map to choose
+a starting profile per device class:
+
+| `device`     | Default profile |
+|--------------|-----------------|
+| `gpu-rocm`   | `rocm`          |
+| `gpu-vulkan` | `vulkan`        |
+| `cpu`        | `tts`           |
+| `npu`        | `flm`           |
+
+## Toolbox images
+
+Toolbox images are pinned per hal0 release in `manifest.json` (by short name →
+canonical `ghcr.io` ref plus a sha256 digest). They are public on
+`ghcr.io/hal0ai/`; the installer pulls them anonymously. An empty digest means
+the image is unpublished for that release and the runtime pulls by tag with a
+warning.
+
+| Short name  | Image ref (current release)                       | Notes                                  |
+|-------------|---------------------------------------------------|----------------------------------------|
+| `vulkan`    | `ghcr.io/hal0ai/hal0-toolbox-vulkan:v1`           | llama.cpp Vulkan backend               |
+| `rocm`      | `ghcr.io/hal0ai/hal0-toolbox-rocm:v1`             | llama.cpp ROCm backend (multi-arch)    |
+| `flm`       | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`          | FastFlowLM on AMD XDNA2 NPU            |
+| `moonshine` | `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1`        | Moonshine STT (CPU/Vulkan)             |
+| `kokoro`    | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`           | Kokoro-82M TTS (CPU ONNX)              |
+| `comfyui`   | `docker.io/kyuz0/amd-strix-halo-comfyui:latest`   | ComfyUI image generation               |
+
+## See also
+
+- [Hardware matrix](/docs/reference/hardware-matrix) — what runs on each device and the backend availability order.
+- [Config schema](/docs/reference/config-schema) — the full slot TOML, profile, and `hal0.toml` field reference.
+- [Paths & files](/docs/reference/paths-and-files) — where `profiles.toml`, slot TOMLs, and `manifest.json` live.

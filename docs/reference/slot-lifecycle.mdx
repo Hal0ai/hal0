@@ -1,136 +1,115 @@
 ---
-title: Slot lifecycle
-description: The state machine every slot moves through, with legal transitions and persistence guarantees.
+title: Slot lifecycle reference
+description: The complete hal0 slot state machine — the nine SlotState values, the legal transitions between them, and how each slot's state persists to state.json.
 sidebar:
-  order: 4
+  order: 30
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Every slot in hal0 is in exactly one **state** at any moment. The set
-of states is fixed; the transitions between them are validated against
-`LEGAL_TRANSITIONS`; every transition is persisted atomically to
-`state.json` and streamed over SSE to clients. The dashboard shows
-real model-readiness, beyond what `systemctl is-active` would report.
-
-The canonical enum is `src/hal0/slots/state.py`, a `StrEnum`,
-wire-stable across versions.
-
-<img
-  src="/screenshots/slots-lifecycle.png"
-  srcset="/screenshots/slots-lifecycle.png 1x, /screenshots/slots-lifecycle@2x.png 2x"
-  alt="Dashboard /slots view showing six slot cards with per-slot T/S, ACT, MEM, UP metrics and a sparkline. Each card surfaces the current state in this lifecycle."
-  width="1440"
-  height="900"
-  loading="lazy"
-/>
+Every slot is a small state machine. The `SlotManager` drives transitions, the
+dashboard SSE stream renders them live, and each transition is persisted
+atomically to `state.json`. The dashboard shows real transitions — not systemd
+snapshots.
 
 ## States
 
-| State        | Meaning                                                                                                  |
-|--------------|----------------------------------------------------------------------------------------------------------|
-| `offline`    | No systemd unit active.                                                                                  |
-| `pulling`    | Model files downloading / verifying.                                                                     |
-| `starting`   | systemd unit up; container booting.                                                                      |
-| `warming`    | Container live; model loading into VRAM / GTT.                                                           |
-| `ready`      | Passed health probe (non-empty `/v1/models` + sentinel completion).                                      |
-| `serving`    | Inference request in-flight.                                                                             |
-| `idle`       | Ready but no traffic past the idle timeout. Unload candidate.                                            |
-| `unloading`  | Graceful stop in progress.                                                                               |
-| `error`      | Failed; details in `state.json` + journald.                                                              |
+`SlotState` has nine values. Each value is also its JSON / SSE wire string.
 
-`error` is a **sideband**. It's reachable from most other states
-when something goes wrong, and the slot returns to `offline` from
-there once the failure is acknowledged.
+| State | Wire value | Meaning |
+|---|---|---|
+| `OFFLINE` | `offline` | Slot is not running. No systemd unit active. |
+| `PULLING` | `pulling` | Model files are downloading or being verified. Unit not yet started. |
+| `STARTING` | `starting` | systemd unit started; waiting for the container to come up. |
+| `WARMING` | `warming` | Container up; health probe returns non-ready while the model loads into VRAM / GTT. |
+| `READY` | `ready` | Passed the full health probe (non-empty `/v1/models` + sentinel completion). Ready to serve. |
+| `SERVING` | `serving` | An inference request is actively in-flight. |
+| `IDLE` | `idle` | Container up but cannot fulfil requests right now (see below). |
+| `UNLOADING` | `unloading` | Graceful shutdown in progress; waiting for the container to exit. |
+| `ERROR` | `error` | Slot has failed. Details in `state.json` and journald. |
 
-## Transition diagram
+### The two faces of `idle`
 
-The canonical happy-path flow:
+`idle` is reached two ways; both render identically on the wire but the state
+machine arrives via different edges:
 
-```
-            ┌──────────────────────────────────────────────────────────┐
-            │                                                          │
-            ▼                                                          │
-┌────────┐  pull   ┌─────────┐  done   ┌──────────┐  spawn   ┌────────┐│
-│offline │────────▶│ pulling │────────▶│ starting │─────────▶│warming ││
-└────────┘         └─────────┘         └──────────┘          └────┬───┘│
-     ▲                                                            │    │
-     │                                  health probe pass         ▼    │
-     │                                                       ┌────────┐│
-     │                                                       │ ready  ││
-     │                       idle timer fires                └───┬────┘│
-     │                                       ┌───────────────────┤    │
-     │                                       ▼                   │    │
-     │                                  ┌────────┐               │    │
-     │                                  │  idle  │               │    │
-     │                                  └───┬────┘  inference    │    │
-     │                                      │       request      │    │
-     │                                      ▼                    ▼    │
-     │                                 ┌───────────┐  done  ┌────────┐│
-     │                                 │ unloading │◀───────│serving ││
-     │                                 └─────┬─────┘        └────────┘│
-     │                                       │                        │
-     └───────────────────────────────────────┘                        │
-                                                                      │
-       error sideband — reachable from pulling / starting / warming   │
-       / ready / serving / unloading; returns to offline when ack'd ──┘
-```
+1. **Process up, no model** (`warming → idle`): the container is reachable but
+   `/v1/models` is empty (e.g. launched with `--model ""` or the model file is
+   missing). Routers **must** treat this distinctly from `ready` — never route
+   an inference request to a slot that can't fulfil it.
+2. **Warm but quiet** (`ready → idle`): a previously-ready slot received no
+   request for longer than its idle timeout. A candidate for unloading.
 
-## Legal transitions (text table)
+## Legal transitions
 
-| From         | Allowed `to:`                                       |
-|--------------|------------------------------------------------------|
-| `offline`    | `pulling`, `starting`, `error`                       |
-| `pulling`    | `starting`, `error`, `offline`                       |
-| `starting`   | `warming`, `error`                                   |
-| `warming`    | `ready`, `error`                                     |
-| `ready`      | `serving`, `idle`, `unloading`, `error`              |
-| `serving`    | `ready`, `error`, `unloading`                        |
-| `idle`       | `serving`, `unloading`, `ready`                      |
-| `unloading`  | `offline`, `error`                                   |
-| `error`      | `offline`                                            |
+Transitions are enforced by the `SlotManager`; an illegal attempt raises
+`IllegalSlotTransition` (HTTP 409).
 
-Any transition not listed is rejected by the manager with a
-`slot.invalid_transition` error. This is a hard invariant — there is
-no escape hatch.
+| From | Allowed next states |
+|---|---|
+| `OFFLINE` | `PULLING`, `STARTING` |
+| `PULLING` | `STARTING`, `ERROR`, `OFFLINE` |
+| `STARTING` | `WARMING`, `ERROR`, `OFFLINE` |
+| `WARMING` | `READY`, `IDLE`, `ERROR`, `OFFLINE` |
+| `READY` | `SERVING`, `IDLE`, `UNLOADING`, `ERROR` |
+| `SERVING` | `READY`, `IDLE`, `ERROR` |
+| `IDLE` | `SERVING`, `UNLOADING`, `READY` |
+| `UNLOADING` | `OFFLINE`, `ERROR` |
+| `ERROR` | `OFFLINE`, `PULLING`, `STARTING` |
 
-## Persistence & streaming
+The happy path is `offline → pulling → starting → warming → ready`, then
+`ready ↔ serving` under load, drifting to `idle` when quiet, and
+`unloading → offline` on teardown. `error` can recover back into `offline`,
+`pulling`, or `starting`.
 
-- Every transition writes
-  `/var/lib/hal0/slots/<name>/state.json` through the atomic-write
-  path (`NamedTemporaryFile → fsync → os.replace()`).
-- The slot manager emits one SSE event per transition on
-  `GET /api/slots/events`.
-- The dashboard's Slots view subscribes to that stream — what you see
-  in the UI is the same wire format the daemon writes to disk.
-
-## What each state implies for API behaviour
-
-| Slot state    | API behaviour                                                                   |
-|---------------|----------------------------------------------------------------------------------|
-| `offline`     | Requests fail fast with `slot.not_loaded`.                                       |
-| `pulling`     | Requests fail with `slot.pulling` and a progress hint.                           |
-| `starting`    | Requests block briefly; if it doesn't reach `warming` quickly, returns 503.      |
-| `warming`     | Requests block on the adaptive cold-boot probe; succeed if the slot reaches `ready` within the request deadline. |
-| `ready`       | Requests are served. Transitions to `serving` for the duration.                  |
-| `serving`     | Concurrent requests stack on the slot's queue.                                   |
-| `idle`        | Requests are served as in `ready`; first request resets the idle timer.          |
-| `unloading`   | Requests fail with `slot.unloading`.                                             |
-| `error`       | Requests fail with the structured error envelope from the failure.               |
-
-<Aside type="tip">
-  The dispatcher's **decision log** records which state every
-  candidate slot was in when a request arrived. If a request didn't
-  go where you expected, that log tells you why — see
-  [Logs](/docs/operate/logs/).
+<Aside type="note">
+Some providers serve a baked-in model and need no explicit `model_id` to reach
+`ready`: `kokoro`, `moonshine`, and `vibevoice`. Other providers require a
+loaded model before they can serve.
 </Aside>
 
-## Why this matters
+## Persistence — `state.json`
 
-A naive setup conflates "the systemd unit is up" with "the model is
-ready to serve". They aren't the same. The model still has to load
-into VRAM (or GTT, on Strix Halo's unified pool), the backend has to
-pass its first health probe, and the sentinel completion has to
-succeed. hal0's state machine encodes that distinction explicitly,
-which is why the dashboard can show "warming, 12s elapsed" instead of
-"service is up" while the request still 503s.
+Each slot's current state is stored as JSON at
+`/var/lib/hal0/slots/<name>/state.json`. The record is intentionally flat for
+human readability and written through an atomic same-directory tempfile +
+`os.replace`, so an SSE reader or the dashboard never observes a half-written
+transition.
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | str | Slot name. |
+| `state` | str | One of the wire values above. |
+| `model_id` | str \| null | Currently-assigned model id. |
+| `port` | int | Host port. |
+| `updated_at` | float | Epoch seconds of the last transition. |
+| `message` | str | Human-readable detail (errors, notes). |
+| `extra` | object | Arbitrary extra metadata. |
+
+A malformed `state.json` (missing/invalid `state`, unreadable file, bad JSON)
+raises `SlotConfigError` rather than being silently swallowed.
+
+## Typed slot errors
+
+Slot operations raise typed errors so the API renders a structured envelope
+with a stable `slot.*` code:
+
+| Error | Code | HTTP |
+|---|---|---|
+| `SlotNotFound` | `slot.not_found` | 404 |
+| `IllegalSlotTransition` | `slot.illegal_transition` | 409 |
+| `SlotNotReady` | `slot.not_ready` | 503 |
+| `SlotSpawnFailed` | `slot.spawn_failed` | 500 |
+| `SlotHealthFailed` | `slot.health_failed` | 503 |
+| `SlotConfigError` | `slot.config_error` | 400 |
+| `NpuExclusivityViolation` | `slot.npu_exclusivity_violation` | 409 |
+
+`NpuExclusivityViolation` guards the AMD XDNA hardware context, which admits
+exactly one NPU LLM at a time: two enabled `device=npu, type=llm` slots cannot
+coexist.
+
+## Related references
+
+- [hal0 CLI](/docs/reference/cli) — `hal0 slot list` reports these states.
+- [Config schema](/docs/reference/config-schema) — the per-slot TOML that defines a slot.
+- [Slots](/docs/concepts/slots) — the concept and dispatch model.

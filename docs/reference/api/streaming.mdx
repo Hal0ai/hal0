@@ -1,0 +1,96 @@
+---
+title: Streaming (SSE)
+description: Streaming reference for hal0's OpenAI-compatible API — the server-sent-events wire format for /v1/chat/completions and /v1/completions, the chunk shape, the [DONE] sentinel, and a client example.
+sidebar:
+  order: 30
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+When a request to `/v1/chat/completions` or `/v1/completions` sets
+`"stream": true`, hal0 returns a server-sent-events (SSE) stream. The format is
+the standard OpenAI streaming wire format: hal0 dispatches the request to a slot
+and forwards the upstream inference server's SSE bytes through unchanged, so any
+OpenAI-compatible streaming client works without modification.
+
+## Wire format
+
+Each event is a line beginning with `data: ` followed by a JSON object, with a
+blank line separating events. The stream is terminated by a final
+`data: [DONE]` sentinel.
+
+```text
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1700000000,"model":"chat","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1700000000,"model":"chat","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1700000000,"model":"chat","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-…","object":"chat.completion.chunk","created":1700000000,"model":"chat","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+| Field         | Meaning                                                                 |
+|---------------|------------------------------------------------------------------------|
+| `object`      | `chat.completion.chunk` for chat; `text_completion` for `/v1/completions`. |
+| `choices[].delta` | The incremental piece. The first chunk typically carries `{"role":"assistant"}`; subsequent chunks carry `{"content":"…"}`; the last carries `{}`. |
+| `choices[].finish_reason` | `null` until the final content-bearing chunk, then `stop` (or `length`, etc.). |
+| `[DONE]`      | Literal sentinel marking end of stream — it is **not** JSON. Stop reading after it. |
+
+<Aside type="note">
+`/v1/completions` streams the same envelope but with `object: "text_completion"`
+and the generated text under `choices[].text` instead of `choices[].delta`. The
+`[DONE]` sentinel is identical.
+</Aside>
+
+The Content-Type of a streaming response is `text/event-stream`. hal0 measures
+per-chunk throughput on the streaming path (counting content deltas) to populate
+its slot tok/s metrics, but does not alter the bytes it forwards.
+
+## Client example
+
+<Tabs>
+<TabItem label="curl">
+
+```bash
+curl -N http://hal0.local:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "chat",
+    "stream": true,
+    "messages": [{"role": "user", "content": "Say hi in three words."}]
+  }'
+```
+
+`-N` disables curl's buffering so chunks print as they arrive.
+
+</TabItem>
+<TabItem label="Python (openai)">
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://hal0.local:8080/v1", api_key="not-needed")
+
+stream = client.chat.completions.create(
+    model="chat",
+    stream=True,
+    messages=[{"role": "user", "content": "Say hi in three words."}],
+)
+for chunk in stream:
+    delta = chunk.choices[0].delta
+    if delta.content:
+        print(delta.content, end="", flush=True)
+```
+
+The SDK consumes the `[DONE]` sentinel for you. hal0 ships with no built-in
+auth, so any `api_key` value is accepted on the local network.
+
+</TabItem>
+</Tabs>
+
+## See also
+
+- [REST API index](/docs/reference/api/rest-api) — the full `/api/*` and `/v1/*` surface.
+- [Devices, providers & profiles](/docs/reference/providers-profiles-devices) — what the `model` field can name.

@@ -1,0 +1,130 @@
+---
+title: Observe the system
+description: Watch hal0 run — tail per-unit journald logs, stream the API log tail with priority filters, and read the durable Activity and Audit log of config changes and slot state transitions.
+sidebar:
+  order: 120
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 gives you three observation surfaces: **journald** per systemd unit,
+the **API log tail** (a thin wrapper over journald with filters), and the
+**durable Activity / Audit log** that survives restarts.
+
+## journald per unit
+
+Every hal0 process runs under a systemd unit, so `journalctl` is the
+ground truth. The slots use a templated unit per slot name:
+
+<Tabs>
+<TabItem label="A slot">
+
+```sh
+journalctl -u hal0-slot@<name>.service -f
+```
+
+</TabItem>
+<TabItem label="The API">
+
+```sh
+journalctl -u hal0-api.service -f
+```
+
+</TabItem>
+</Tabs>
+
+For example, to follow the chat slot or the image-gen slot:
+
+```sh
+journalctl -u hal0-slot@chat.service -f
+journalctl -u hal0-slot@img.service -f
+```
+
+## The API log tail
+
+The API exposes journald over HTTP so the dashboard (and your scripts)
+can read logs without shell access. Return the last `n` entries for a
+unit:
+
+```sh
+curl 'http://localhost:8080/api/logs?unit=hal0-api&n=200'
+```
+
+| Query param | Default | Notes |
+|-------------|---------|-------|
+| `unit`      | —       | Required. The systemd unit, e.g. `hal0-api` or `hal0-slot@chat`. Validated against a conservative character set. |
+| `n`         | `200`   | Trailing lines, 1–5000. |
+| `since`     | —       | A `journalctl --since` value (ISO timestamp or `'5min ago'`). |
+| `level`     | —       | Filter to this priority **and higher severity**: `warning` returns warning + error + critical and up. |
+
+On a host without `journalctl` (e.g. CI), the endpoint returns an empty
+`lines` array plus a `hint` rather than erroring.
+
+Stream a live tail as Server-Sent Events:
+
+```sh
+curl -N 'http://localhost:8080/api/logs/stream?unit=hal0-slot@chat&level=warning'
+```
+
+Each non-empty journal line arrives as a `data:` frame carrying the line
+as a JSON string. The stream closes its subprocess when you disconnect.
+
+<Aside type="note">
+**Config-echoing endpoints redact secrets by key name.** Whenever hal0
+returns a config tree (settings, upstreams, model config), any key
+matching `SECRET | TOKEN | PASSWORD | PASS | API_KEY | PRIVATE_KEY |
+ENCRYPTION_KEY | SALT` is replaced with `{"value": "***REDACTED***",
+"set": <bool>}` — the UI learns whether a secret is configured without
+ever seeing it.
+</Aside>
+
+## The durable Activity and Audit log
+
+journald is a volatile tail. For a permanent record of **what changed**,
+hal0 keeps a SQLite audit store (`/var/lib/hal0/activity.db`, preserved
+across updates). It records every config-mutating user action and every
+system state change — each with a `before`/`after` snapshot and a
+success/failure `outcome`. It's read-only over the API (it must render on
+the slots page during first run).
+
+List recent activity:
+
+```sh
+curl 'http://localhost:8080/api/activity?limit=200'
+```
+
+The response is `{"records": [...], "next_since": <id>, "epoch": "..."}`.
+Poll with `?since=<next_since>` to page forward. Server-side filters
+(combine freely):
+
+| Filter     | Values |
+|------------|--------|
+| `since`    | id cursor — return records newer than this id. |
+| `category` | free-form category string. |
+| `action`   | free-form action name. |
+| `severity` | `info`, `warn`, `error`, `ok`. |
+| `outcome`  | `ok`, `error`, `pending`. |
+| `actor`    | the agent / actor that performed the action. |
+| `kind`     | `action` (a user action) or `event` (a system state change). |
+| `search`   | full-text match. |
+| `limit`    | 1–1000 (default 200). |
+
+Stream the durable backfill then a live tail (filters honoured
+server-side):
+
+```sh
+curl -N 'http://localhost:8080/api/activity/stream?kind=action'
+```
+
+Export the filtered history as a file download:
+
+```sh
+curl 'http://localhost:8080/api/activity/export?fmt=csv' -o hal0-activity.csv
+curl 'http://localhost:8080/api/activity/export?fmt=json' -o hal0-activity.json
+```
+
+## See also
+
+- [Manage slots](/docs/guides/manage-slots) — the slot lifecycle whose transitions show up in the activity log.
+- [Edit configuration](/docs/guides/configure) — config changes are audited.
+- [Security](/docs/concepts/security) — the LAN-open posture and what is (and isn't) logged.

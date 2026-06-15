@@ -1,134 +1,93 @@
 ---
-title: Set up your first model
-description: Run hal0 setup to pick models, enable Extensions (Apps and Agents), opt in to the NPU, and start your first slot.
+title: Load your first model
+description: Pull a model from Hugging Face into hal0's registry and assign it to a slot — through the first-run picker or with the hal0 model CLI.
 sidebar:
-  order: 2
+  order: 30
 ---
 
-import { Aside, Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The one-liner installer seeds the recommended Main slot and writes the
-first-run sentinel automatically — no synchronous download, no
-interaction required. When you're ready to customize, run:
+Models in hal0 live in a local registry, the single source of truth for
+Hugging Face coordinates, SHA-256 digests, and curated filenames. You can
+populate it through the first-run picker or directly from the CLI.
 
-```sh frame="terminal"
-hal0 setup
-```
+## Via the bundle picker
 
-This interactive TUI walks you through every choice. You can re-run it
-at any time to reconfigure storage, swap models, or toggle Extensions.
+If you ran [first-run setup](/docs/getting-started/setup/) and chose a
+tier, hal0 already seeded the registry and kicked off background pulls for
+each model in the bundle. The install-progress pane reattaches to those
+download streams and shows per-model progress. Nothing more is required —
+when a pull completes, its slot is ready to start.
 
-## What `hal0 setup` does
+## Via the CLI
+
+The `hal0 model` subcommand is a thin HTTP client to the API. The common
+flow is **list → pull → assign**.
 
 <Steps>
-1. **Storage.** Confirm or change the directory where models are stored
-   (default: `/var/lib/hal0/models`). If you have an existing model
-   store on a NAS or separate volume, point `--storage-dir` here.
 
-2. **Extensions.** Choose which optional components to install:
-   - **Apps** — Open WebUI (chat UI at `:3001`, zero config, already
-     pointed at your Main slot).
-   - **Agents** — Hermes-Agent (service shape) or pi-coder (CLI shape).
-     `hal0 setup` auto-wires whichever you pick into the platform.
+1. **List what's available** — registry rows plus models advertised by
+   configured upstreams:
 
-3. **Main model.** Pick the chat/LLM model for the primary slot.
-   `hal0 setup` shows curated options filtered to what fits your
-   detected hardware (GPU VRAM / unified RAM).
+   ```sh
+   hal0 model list
+   ```
 
-4. **Agent model.** Optionally pick a dedicated model for the agent
-   slot (smaller / faster). Defaults to the Main model if skipped.
+   Add `--json` to emit the raw `/api/models` payload for scripting.
 
-5. **NPU opt-in** *(Strix Halo only).* Enable the FLM trio — a single
-   NPU container hosting chat + transcription + embedding concurrently
-   on the AMDXDNA hardware context. Requires FastFlowLM to be present.
+2. **Pull a model** from Hugging Face. The argument is either a curated
+   alias (e.g. `qwen3-4b`) or a registered model id:
 
-6. **Download.** Models download with live progress — bytes, percent,
-   speed, and ETA per model. Downloads run in the background; you can
-   exit and the pulls continue.
+   ```sh
+   hal0 model pull qwen3-4b
+   ```
+
+   The pull runs as a background job on the daemon. The CLI polls
+   `/api/models/<id>/pull/status` every 500 ms and prints a progress bar
+   until the job reaches a terminal state, then reports the final path
+   and SHA-256.
+
+3. **Assign the model to a slot's default** (this does not start the
+   slot):
+
+   ```sh
+   hal0 model assign qwen3-4b --slot chat
+   ```
+
+   This writes `model.default` into the slot's configuration. Start the
+   slot afterward (see [Manage slots](/docs/guides/manage-slots/)).
+
 </Steps>
 
-## Non-interactive mode
+Other `hal0 model` commands: `register` (record an on-disk file in the
+registry), `show` (inspect metadata), and `rm` (remove a registry row).
 
-```sh frame="terminal"
-# Fully automatic — recommended defaults, no prompts
-hal0 setup --auto
-
-# Seed slots without downloading models now
-hal0 setup --auto --no-pull
-
-# Skip Extensions (Apps/Agents)
-hal0 setup --auto --no-extensions
-
-# Custom storage directory
-hal0 setup --storage-dir /mnt/ai-models
-```
-
-The one-liner `curl hal0.dev/install.sh | bash` internally runs
-`hal0 setup --auto --no-pull --no-extensions` to seed the Main slot
-non-interactively. Set `HAL0_SKIP_SETUP=1` before invoking the
-installer to skip first-run setup entirely.
-
-## After setup
-
-Once `hal0 setup` completes, check slot state with:
-
-```sh frame="terminal"
-hal0 status
-```
-
-`primary` (and any other enabled slots) should be `ready`. If a model
-is still downloading, the slot stays `starting` until the pull
-finishes.
-
-<Aside type="note" title="Skipping setup — configure manually">
-You don't have to use `hal0 setup`. Drive everything from the CLI:
-
-```sh
-hal0 slot load chat --model phi-3-mini-4k-instruct-q4
-```
-
-The slot manager handles the pull, the systemd unit, and the health
-probe. `hal0 status` shows the same state machine `hal0 setup` streams.
+<Aside type="tip" title="Gated or large models">
+Pulls that need a Hugging Face token read `HF_TOKEN` from the API
+environment. The easiest path is the dashboard: **Settings → Secrets →
+HuggingFace token** applies live without a restart.
 </Aside>
 
 ## When a pull fails
 
-Common causes and fixes:
+A pull job ends in one of these states: `queued`, `running`, `completed`,
+`failed`, or `cancelled`. On `failed`, the CLI exits non-zero and prints
+the error message returned by the daemon; the registry row stays in place
+so you can retry.
 
-- **No disk space.** Free the space and re-run `hal0 setup` — partial
-  downloads resume.
-- **Hugging Face rate-limit.** Set `HF_TOKEN` in `/etc/hal0/api.env`
-  (or dashboard Settings → Secrets) and retry.
-- **License not accepted.** Some gated models require you to accept
-  terms on the Hugging Face model page before the API will serve files.
-  Accept there, then retry.
-
-## Changing models later
-
-After setup the **Models** page in the dashboard is where you live:
-
-```sh frame="terminal"
-hal0 model list
-hal0 slot swap chat --model qwen2.5-coder-7b-instruct-q4_k_m
+```sh
+# retry — an already queued/running pull for the same id is reused,
+# not duplicated
+hal0 model pull qwen3-4b
 ```
 
-See [recommended loadouts](/docs/hardware/strix-halo/#recommended-loadouts)
-for a hardware-by-hardware breakdown of what fits where.
+The FirstRun progress pane surfaces the same failure inline with a
+**Retry** button, and you can always pull later from the dashboard's
+**Models** view. Re-issuing a pull for a `completed`/`failed`/`cancelled`
+job replaces it; a pull already `queued` or `running` returns the
+existing job handle rather than starting a second download.
 
+## Next
 
-## Next steps
-
-<CardGrid>
-  <LinkCard
-    title="Send your first chat"
-    href="/docs/getting-started/first-chat/"
-    description="OpenWebUI is already pointed at your chat slot." />
-  <LinkCard
-    title="Slot lifecycle"
-    href="/docs/slots/what-is-a-slot/"
-    description="The state machine hal0 setup drives." />
-  <LinkCard
-    title="API reference"
-    href="/docs/api/openai-compat/"
-    description="Hit `/v1/chat/completions` directly from any OpenAI SDK." />
-</CardGrid>
+Once a model is pulled and assigned, you're ready to
+[send your first chat](/docs/getting-started/first-chat/).

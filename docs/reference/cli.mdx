@@ -1,229 +1,215 @@
 ---
-title: CLI reference
-description: The hal0 command-line interface — every subcommand grouped by area.
+title: hal0 CLI reference
+description: Complete reference for the hal0 command-line tool — every top-level command and sub-app (slot, model, registry, memory, config, doctor, capabilities, agent, migrate).
 sidebar:
-  order: 1
+  order: 10
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-hal0 ships a single `hal0` binary built with Typer
-(`src/hal0/cli/main.py`). Every non-`serve` subcommand talks to the
-local daemon on `127.0.0.1:8080`, so the CLI and the dashboard end up
-calling the same code paths.
-
-Every command listed below hits a live endpoint. The `# real` /
-`# stub` markers used in earlier builds have been retired now that
-the surface is fully wired.
-
-## System
+The `hal0` command is a thin HTTP client over the `hal0-api` daemon. Almost
+every subcommand resolves the API base (`http://127.0.0.1:8080` by default),
+calls a `/api/*` route, and renders the result. Commands that need the daemon
+exit non-zero with a clear message when the API is unreachable.
 
 ```sh
-hal0 status                                  # system + slot summary
-hal0 probe                                   # re-run hardware detection
-hal0 serve [--host] [--port] [--reload]      # daemon mode
-hal0 setup [--auto] [--storage-dir PATH]     # interactive setup TUI
-           [--no-pull] [--no-extensions]
+hal0 --help          # top-level help (no args also prints help)
+hal0 <group> --help  # per-group help, e.g. hal0 slot --help
 ```
 
-`hal0 status` is what you run first when something looks off.
-`hal0 probe` rewrites `/etc/hal0/hardware.json` — re-run after BIOS
-UMA changes, GPU swaps, or RAM upgrades.
+<Aside type="note">
+The CLI is a client. A few commands (`config show/edit/migrate/validate`,
+`registry import`, `agent install hermes`, `agent status/log`,
+`capabilities migrate`, `memory migrate`) read or write on-disk state
+directly so they work without a running daemon.
+</Aside>
 
-`hal0 setup` is the interactive TUI for post-install configuration:
-storage, Extensions (Apps / Agents), model selection, and NPU opt-in.
-`--auto` applies recommended defaults non-interactively. `--no-pull`
-seeds slots without downloading models. `--no-extensions` skips the
-Apps / Agents step. `--storage-dir PATH` overrides the model storage
-location. Set `HAL0_SKIP_SETUP=1` to skip first-run setup during install.
+## Top-level
 
-## Slots
+| Command | Purpose | Key options |
+|---|---|---|
+| `hal0 --version` / `-V` | Print the version and exit. | — |
+| `hal0 status` | System + slot summary (name, version, slot/upstream counts, slot table). | — |
+| `hal0 probe` | Re-run hardware detection (`POST /api/hardware/probe`) and update `hardware.json`. | — |
+| `hal0 serve` | Start the hal0 API server (used by `hal0-api.service`). | `--host` (default `127.0.0.1`), `--port` (default `8080`), `--reload` |
+| `hal0 update` | Check, apply, or roll back an update (thin client over `/api/updates/*`). | `--check`, `--rollback`, `--channel {stable\|nightly}`, `--target VER` |
+| `hal0 uninstall` | Uninstall hal0 (wraps `installer/uninstall.sh`). Conservative by default. | `--purge`/`--clean-slate`, `--keep-data`, `--force`/`-f`, `--dev` |
 
-```sh
-hal0 slot list
-hal0 slot load <name> [--model M]
-hal0 slot unload <name>
-hal0 slot restart <name>
-hal0 slot swap <name> --model M
-hal0 slot logs <name> [--follow]             # SSE tail of journald
-hal0 slot create <name> --backend B          # create a new slot
-hal0 slot edit <name>                        # open slot TOML in $EDITOR
-hal0 slot show <name>                        # print slot config + state
-hal0 slot delete <name>                      # remove slot permanently
-```
+`hal0 update` with no flags checks the configured channel and applies the
+update if one is newer; it polls the apply job to completion. `--channel`
+persists the channel before checking. `--rollback` restores the previous
+tree recorded at `/var/lib/hal0/hal0.previous`.
 
-`hal0 slot swap` is the most-used command in normal operation. It
-changes a slot's model in one call and you watch it transition
-through `unloading → starting → warming → ready`.
+`hal0 uninstall` defaults to keeping `/etc/hal0` and `/var/lib/hal0`.
+`--purge` additionally deletes config, data, the hal0 system user, and all
+hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
+`HAL0_FORCE=1`).
 
-`hal0 slot logs <name> --follow` is the journald tail wrapped over
-SSE; it shows the same stream the dashboard's Logs view tails.
+## `hal0 slot` — inference slots
 
-`slot add` / `slot remove` still work as deprecated aliases for
-`slot create` / `slot delete` but will be removed in a future release.
+| Command | Purpose | Key options |
+|---|---|---|
+| `slot list` | List configured slots and live state. | `--json` |
+| `slot show <name>` | Full slot config + status. | `--json` |
+| `slot load <name>` | Load a slot (optionally assign a model first). | `--model`/`-m` |
+| `slot unload <name>` | Unload a running slot gracefully. | — |
+| `slot restart <name>` | Restart a slot (unload then load). | — |
+| `slot swap <name>` | Swap the slot's model and persist it (survives restart). | `--model`/`-m` (required), `--no-persist` |
+| `slot create <name>` | Create a new slot config. | `--type`/`-t`, `--provider`, `--hardware`, `--model`/`-m` (required), `--port`/`-p`, `--ctx-size` |
+| `slot edit <name>` | Update one or more slot config fields. | `--model`/`-m`, `--port`/`-p`, `--ctx-size`, `--provider`, `--hardware` |
+| `slot delete <name>` | Delete a slot (stops the unit, removes config). | `--force`/`-f` |
+| `slot logs <name>` | Print or follow slot logs. | `--follow`/`-f`, `--lines`/`-n` (default 200) |
 
-## Models
+`slot create` flags:
 
-```sh
-hal0 model list
-hal0 model pull <ref>                        # HF streaming pull
-hal0 model register <ref>                    # register a local GGUF
-hal0 model show <ref>                        # print model metadata
-hal0 model rm <ref>
-hal0 model assign <ref> --slot S
-```
+- `--type` / `-t` — slot type, routes dispatch: `llm` (default), `embedding`,
+  `reranking`, `transcription`, `tts`, `image`.
+- `--provider` — inference engine: `llama-server` (default), `flm`,
+  `moonshine`, `kokoro`. (Since v0.2 the provider is normally implied by
+  `--type`; kept for legacy slot TOMLs.)
+- `--hardware` — `vulkan` | `rocm` | `cpu`. Auto-detected from
+  `hardware.json` when omitted (defaults to `vulkan` if there is no probe).
+  The slot's `device` field is derived: `vulkan→gpu-vulkan`, `rocm→gpu-rocm`,
+  `cpu→cpu`.
+- `--port` / `-p` — host port; auto-assigned from the free range `8081–8099`
+  when omitted.
+- `--ctx-size` — context window in tokens (default `4096`, minimum `128`).
 
-`hal0 model list` is the CLI view of what the dashboard's `/models`
-page shows: every registered model with its size, backend, and
-capability tags. Use it when you've SSH'd in and don't want to bounce
-to the browser.
+`slot swap` does two steps: a runtime hot-swap (`POST /api/slots/{name}/swap`)
+and a persist of the on-disk default (`PUT /api/install/slots/{name}/model`).
+Pass `--no-persist` to skip the persist and try a model without changing the
+default.
 
-<img
-  src="/screenshots/models-registry.png"
-  srcset="/screenshots/models-registry.png 1x, /screenshots/models-registry@2x.png 2x"
-  alt="Dashboard /models page showing the same registry rows hal0 model list prints, with chat/stt/tts/rerank tags, sizes, and per-row backend."
-  width="1440"
-  height="900"
-  loading="lazy"
-/>
+## `hal0 model` — local model registry
 
-## Configuration
+| Command | Purpose | Key options |
+|---|---|---|
+| `model list` | List registry + upstream models. | `--json` |
+| `model show <ref>` | Show a model's metadata. | `--json` |
+| `model pull <ref>` | Download a model from Hugging Face into the registry (with progress). | — |
+| `model register <id>` | Register a model already on disk. | `--path`/`-p` (required), `--name`, `--license` |
+| `model rm <ref>` | Remove a model from the registry. | `--force`/`-f` |
+| `model assign <ref>` | Assign a model to a slot's default (does not load). | `--slot`/`-s` (required) |
 
-```sh
-hal0 config show
-hal0 config edit                             # opens $EDITOR
-hal0 config validate                         # schema check
-hal0 config migrate                          # apply schema migrations
-hal0 config reload                           # reload daemon config without restart
-hal0 config hardware                         # print detected hardware profile
-```
+`model pull` accepts a curated alias (e.g. `qwen3-4b`) or a registered model
+id. It starts a background pull on the daemon and polls
+`/api/models/<id>/pull/status` until it reaches a terminal state.
 
-`hal0 config validate` is safe to run at any time and doesn't write
-anything. Use it before `hal0 config edit` to confirm your starting
-point is clean.
+## `hal0 registry` — registry repair
 
-`hal0 config hardware` shows the same hardware profile that `hal0 probe`
-writes — useful for a read-only check without triggering a re-detection.
+| Command | Purpose | Key options |
+|---|---|---|
+| `registry import <path>` | Restore `registry.toml` from a v0.1.x backup tarball. | `--force`/`-f`, `--dest` |
 
-## Agents
+`registry import` extracts the backup into a tempdir (with path-traversal
+protection), locates `registry.toml`, and atomically copies it to the
+canonical path. It refuses to overwrite an existing registry unless `--force`
+is set. Only the registry is restored — slot selections, `capabilities.toml`,
+and per-slot TOMLs are **not** migrated (v0.1.x → v0.2 is a clean break).
 
-```sh
-hal0 agent install <name>                    # provision an agent
-hal0 agent uninstall <name>                  # remove an agent
-hal0 agent list                              # list installed agents
-hal0 agent status <name>                     # show agent state
-hal0 agent log <name>                        # tail agent logs
-hal0 agent upgrade <name>                    # upgrade agent to latest
-hal0 agent reprovision <name>                # re-run provisioning
-hal0 agent peers                             # list peer agents in the mesh
-```
+## `hal0 memory` — memory + graph extraction
 
-### Agent approvals
+| Command | Purpose | Key options |
+|---|---|---|
+| `memory graph status` | Show graph-extraction state (enabled, route, counters). | `--json` |
+| `memory graph enable` | Turn graph extraction on. | `--route {upstream\|primary\|agent}`, `--provider`, `--model`, `--json` |
+| `memory graph disable` | Turn graph extraction off (cancels any in-flight build). | `--json` |
+| `memory migrate` | Migrate a legacy Cognee store to Hindsight banks (dry-run only). | `--dry-run` (default on), `--cognee-dir`, `--json` |
 
-```sh
-hal0 agent approvals list                    # pending action approvals
-hal0 agent approvals approve <id>            # approve a pending action
-hal0 agent approvals deny <id>              # deny a pending action
-```
+`memory graph enable --route upstream` requires `--provider` and `--model`.
+`memory migrate` reports the plan without writing; apply/write mode is not yet
+implemented.
 
-### Agent bootstrap
+<Aside type="caution">
+The memory subsystem is opt-in. Graph extraction defaults **off** (ADR-0014):
+small local models flake on structured-output prompts, which would leave the
+graph view empty. See [Enable memory](/docs/guides/enable-memory).
+</Aside>
 
-```sh
-hal0 agent bootstrap hermes                  # bootstrap the Hermes agent
-```
+## `hal0 config` — configuration
 
-### Agent personas
+| Command | Purpose |
+|---|---|
+| `config show` | Print `hal0.toml` from disk. |
+| `config edit` | Open `hal0.toml` in `$EDITOR` (then `$VISUAL`, then `vi`). |
+| `config migrate` | Migrate `hal0.toml` forward to the latest config schema version. |
+| `config validate` | Validate `hal0.toml`, `upstreams.toml`, and `providers.toml` against the schema. |
+| `config reload` | Ask the running daemon to re-read its TOML configs (`POST /api/settings/reload`). |
+| `config hardware` | Show the cached hardware probe payload (`GET /api/hardware`). |
 
-```sh
-hal0 agent personas list                     # list available personas
-hal0 agent personas show <name>              # show persona definition
-hal0 agent personas activate <name>          # set active persona
-```
+The config path honours `HAL0_HOME`; under FHS it is `/etc/hal0/hal0.toml`.
 
-## Capabilities
+## `hal0 doctor` — preflight checks
 
-```sh
-hal0 capabilities migrate                    # migrate capabilities config format
-hal0 capabilities migrate-to-lemonade        # migrate slot backends to Lemonade
-hal0 capabilities sync                       # sync capabilities with running daemon
-```
+| Command | Purpose | Key options |
+|---|---|---|
+| `doctor` | Re-run the installer's preflight battery (systemd, python, container runtime, disk, ports). | `--plain`, `--ports "8080 3001"` |
+| `doctor toolbox-pull` | Verify each pinned toolbox image is anonymously pullable from ghcr.io. | `--json`, `--manifest` |
 
-## Registry
+`hal0 doctor` shells out to `installer/lib/preflight.sh` and preserves its exit
+code. `doctor toolbox-pull` exits `0` when every image is reachable (digest
+drift is reported but does not fail), `1` if any image is unreachable, and `2`
+when the manifest has no toolbox images.
 
-```sh
-hal0 registry import <file>                  # import a registry backup
-```
+## `hal0 capabilities` — capability-slot repair
 
-## Memory
+| Command | Purpose | Key options |
+|---|---|---|
+| `capabilities migrate` | Rewrite persisted capability selections that are illegal against the live catalog. | `--dry-run` |
 
-```sh
-hal0 memory migrate                          # migrate memory store format
-```
+Walks `/etc/hal0/capabilities.toml`: selections whose backend can't serve the
+model are snapped to the model's first legal backend; selections whose model
+left the catalog are cleared. Idempotent.
 
-### Memory graph
+## `hal0 agent` — bundled agents
 
-```sh
-hal0 memory graph status                     # show knowledge-graph state
-hal0 memory graph enable                     # enable the knowledge graph
-hal0 memory graph disable                    # disable the knowledge graph
-```
+| Command | Purpose | Key options |
+|---|---|---|
+| `agent install <name>` | Install a bundled agent (`hermes` provisions a managed venv in the foreground). | `--switch` |
+| `agent uninstall <name>` | Uninstall a bundled agent. | `--keep-memory` |
+| `agent list` | List installed bundled agents. | `--json` |
+| `agent peers` | List discoverable agent identity cards from the `agents` memory dataset. | — |
+| `agent status [name]` | Pretty-print the agent's `provision.json` checkpoint (default `hermes`). | — |
+| `agent log [name]` | Show per-phase bootstrap logs. | `--phase` |
+| `agent upgrade [name]` | Bump the agent's version pin and re-bootstrap with `--repair`. | `--to` |
+| `agent reprovision [name]` | Re-run the bootstrap state machine idempotently. | `--repair`, `--verbose`/`-v` |
 
-## Migrate
+### `hal0 agent approvals`
 
-```sh
-hal0 migrate model-layout                    # migrate model store to canonical layout
-```
+| Command | Purpose |
+|---|---|
+| `agent approvals list` | List pending approval requests for gated agent actions. |
+| `agent approvals approve <id>` | Approve a pending action. |
+| `agent approvals deny <id>` | Deny a pending action. |
 
-## Doctor
+### `hal0 agent bootstrap`
 
-```sh
-hal0 doctor                                  # run preflight health checks
-hal0 doctor toolbox-pull                     # pull latest inference toolbox images
-hal0 doctor perms                            # audit Hermes ownership (root-clobber regression)
-```
+| Command | Purpose | Key options |
+|---|---|---|
+| `agent bootstrap hermes` | Run the Hermes-Agent bootstrap state machine. | `--repair`, `--dry-run`, `--skip-phase` (repeatable), `--offline`, `--verbose`/`-v` |
 
-## Updates
+### `hal0 agent personas`
 
-```sh
-hal0 update                                  # apply latest stable
-hal0 update --channel stable
-hal0 update --channel nightly
-hal0 update --check                          # print version, don't apply
-hal0 update --rollback                       # revert to previous version
-```
+| Command | Purpose | Key options |
+|---|---|---|
+| `agent personas list` | List personas and mark the active one. | — |
+| `agent personas show <id>` | Print a persona's TOML body. | — |
+| `agent personas activate <id>` | Switch the active persona and nudge Hermes to hot-reload. | `--reload-url` |
 
-See [Updates & rollback](/docs/operate/updates/) for the atomic
-symlink-swap mechanics.
+<Aside type="note">
+There is no `rotate-token` subcommand. The daemon has no built-in auth
+(ADR-0012); agent identity flows through the `X-hal0-Agent` header the wrapper
+sets from `$HAL0_AGENT_ID`.
+</Aside>
 
-## Uninstall
+## `hal0 migrate` — config/state migrations
 
-```sh
-hal0 uninstall [--purge | --clean-slate] [--keep-data] [--force] [--dev]
-```
+The `migrate` sub-app houses one-shot upgrade helpers for moving older on-disk
+state forward to the current schema. Run `hal0 migrate --help` for the
+commands available in your installed version.
 
-Thin wrapper over `installer/uninstall.sh`. The **default is conservative**:
-it removes code, units, venvs, CLI shims and containers but keeps `/etc/hal0`
-and `/var/lib/hal0`. Pass `--purge` (alias `--clean-slate`) for a full clean
-slate — config, data, the `hal0` system user, and all hal0 container images.
+## Related references
 
-`--purge` prompts for a typed `DELETE`; the CLI exec's the script so that
-prompt inherits the live TTY. In non-interactive contexts pass `--force`
-(or `HAL0_FORCE=1`) to skip it — a conservative (non-`--purge`) run never
-prompts and is always safe non-interactively. Every step is best-effort and
-the script never aborts mid-teardown on an already-gone target (it exits
-non-zero only if something could not be removed). `--dev` mirrors
-`install.sh --dev` for a `$PWD/.hal0ai` tree.
-
-
-## Talking to the daemon
-
-Almost every subcommand is a thin client on the API. You can hit the
-same endpoints directly:
-
-```sh
-curl http://localhost:8080/api/slots
-curl http://localhost:8080/api/models
-curl -X POST http://localhost:8080/api/slots/primary/restart
-```
-
-The CLI is for ergonomics; the API is the source of truth.
+- [Config schema](/docs/reference/config-schema) — the TOML shape behind these commands.
+- [Slot lifecycle](/docs/reference/slot-lifecycle) — the states `slot list` reports.
+- [OpenAI-compatible API](/docs/reference/api/openai-compat) — the `/v1/*` surface.

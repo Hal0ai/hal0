@@ -1,0 +1,72 @@
+---
+title: REST API index
+description: Index of hal0's HTTP API — the /api/* router groups for slots, models, hardware, capabilities, memory, agents, MCP, activity, updates and more, each with a one-line purpose.
+sidebar:
+  order: 40
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0-api serves the OpenAI-compatible `/v1/*` surface plus a `/api/*`
+management surface that backs the dashboard. This page indexes the `/api/*`
+router groups. For the inference surface see the OpenAI-compat and streaming
+references.
+
+<Aside type="note">
+All endpoints are open on the local network — auth and TLS were removed in
+ADR-0012 and are your reverse proxy's job. The OpenAPI spec is served live at
+`/api/openapi.json` (interactive docs at `/api/docs`).
+</Aside>
+
+## Router groups
+
+| Prefix                  | Purpose                                                              |
+|-------------------------|---------------------------------------------------------------------|
+| `/api/install`          | First-run wizard endpoints.                                          |
+| `/api/slots`            | Slot lifecycle — list, create, delete, restart, model swap.         |
+| `/api/comfyui`          | ComfyUI generation-engine status + the gated image-gen switchover.  |
+| `/api/models`           | Model registry — list, pull, delete, inspect.                       |
+| `/api/hf`               | Hugging Face Hub discovery (search proxy).                          |
+| `/api/hardware`, `/api/stats/hardware` | Hardware probe + live hardware stats.                |
+| `/api/stats/throughput` | Bucketed throughput history.                                        |
+| `/api/power`            | Power / GPU stats.                                                  |
+| `/api/services/health`  | Health of dependent services.                                       |
+| `/api/user/dashboard-layout` | Persisted dashboard layout (file-backed).                      |
+| `/api/logs`             | journald tail for hal0 units.                                       |
+| `/api/settings`         | Read/write `hal0.toml` top-level settings.                          |
+| `/api/secrets`          | Operator secrets store (write-only, persisted to `api.env`).        |
+| `/api/settings/proxmox` | Proxmox integration config.                                        |
+| `/api/memory`           | Memory provider gate/status + Hindsight engine admin (banks, graph, recall). Opt-in. |
+| `/api/providers`        | External LLM provider config.                                       |
+| `/api/updates`          | Update check, apply, rollback (channels + cosign).                  |
+| `/api/capabilities`     | Capability overlay — embed/voice/img children mapped onto slots.    |
+| `/api/bundles`          | First-run bundle picker.                                            |
+| `/api/backends`         | Backend introspection — status + loaded children per backend.       |
+| `/api/npu`              | NPU trio swap-status.                                               |
+| `/api/status`, `/api/config` | Server status + dashboard config/urls (public).               |
+| `/api/profiles`         | Profile catalog (seeds + custom).                                   |
+| `/api/chat-templates`   | Chat-template catalog — bundled + operator-added.                   |
+| `/api/events`           | Dashboard footer event stream (SSE).                               |
+| `/api/activity`         | Durable activity / audit surface (config changes + transitions).    |
+| `/api/journal`          | Unified journal panel (events in journal envelope).                 |
+| `/api/images`           | Image cache for generated PNGs.                                     |
+| `/api/agents`           | Bundled-agent lifecycle, personas, budget, restart, memory stats, chat proxy. |
+| `/api/agent/approvals`  | Approval inbox for gated agent/MCP actions.                         |
+| `/api/mcp`              | MCP introspection — hosted servers, clients, catalog, tool-event tail. |
+
+## Mounted MCP servers
+
+Two MCP servers are mounted as sub-applications (not `/api/*` routers):
+
+| Mount          | Server      | Surface                                  |
+|----------------|-------------|------------------------------------------|
+| `/mcp/admin`   | hal0-admin  | Full admin tool catalog (slots/models/config/memory). |
+| `/mcp/memory`  | hal0-memory | Focused memory tools only.               |
+
+See [MCP tools](/docs/reference/mcp-tools) for the per-tool catalog and gating.
+
+## See also
+
+- [Streaming (SSE)](/docs/reference/api/streaming) — the `/v1` streaming wire format.
+- [MCP tools](/docs/reference/mcp-tools) — what each MCP tool forwards to here.
+- [Environment variables](/docs/reference/env-vars) — `HAL0_PORT` and the rest.

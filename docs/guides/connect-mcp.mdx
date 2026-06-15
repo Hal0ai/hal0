@@ -1,0 +1,140 @@
+---
+title: Connect an MCP client
+description: Point an MCP client at hal0's admin and memory servers — identify with X-hal0-Agent, widen the host and origin allowlists, and understand which tools run autonomously versus which gate for approval.
+sidebar:
+  order: 90
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 ships two [Model Context Protocol](https://modelcontextprotocol.io)
+servers, mounted on the API as Streamable-HTTP sub-apps:
+
+- **`/mcp/memory`** — long-term memory tools (search, add, recall, list,
+  delete). Only mounted when the memory subsystem is initialised.
+- **`/mcp/admin`** — operate hal0: slots, models, capabilities, config,
+  hardware probes. Its `memory_*` tools route in-process to the memory
+  server.
+
+<Aside type="caution">
+hal0 has **no built-in network auth** (ADR-0012). The MCP mounts are
+reachable to anything that can reach the API. Run hal0 on a trusted LAN
+or behind your own reverse proxy — do not expose `/mcp/*` to the
+internet.
+</Aside>
+
+## Connect
+
+Point your MCP client at the mount URL on the hal0 host:
+
+```
+http://localhost:8080/mcp/admin
+http://localhost:8080/mcp/memory
+```
+
+### Identify with X-hal0-Agent
+
+Caller identity flows on the **`X-hal0-Agent`** request header (Bearer
+auth was removed in ADR-0012). The value must match
+`^[a-zA-Z0-9_-]{1,64}$`. It stamps the audit trail and powers the
+`private:<agent>` memory namespace.
+
+```
+X-hal0-Agent: my-agent
+```
+
+An absent or malformed header falls back to `anonymous`. Add
+`X-hal0-Private: 1` to opt a memory client into its private namespace —
+writes then land in `private:<agent>` instead of the default `shared`
+dataset.
+
+### Widen the host and origin allowlists
+
+Each mounted server inherits FastMCP's **localhost-only**
+DNS-rebinding protection. A non-localhost client (another host, or a
+reverse-proxy vhost) otherwise gets a bare **`421 Invalid Host`**. Two
+environment knobs on hal0-api widen the allowlist:
+
+- `HAL0_MCP_ALLOWED_HOSTS` — comma-separated `host` / `host:port` /
+  `host:*` values added to the localhost floor. The single value `*`
+  disables DNS-rebinding protection entirely (the fully-open posture some
+  LAN-only deployments want).
+- `HAL0_MCP_ALLOWED_ORIGINS` — comma-separated browser origins. When
+  unset, `http` + `https` origins are derived automatically from each
+  added host.
+
+```sh
+HAL0_MCP_ALLOWED_HOSTS=hal0.local:8080,hal0.local:*
+```
+
+See [Configure](/docs/guides/configure) for where these env keys live
+(`api.env`).
+
+## Memory tools (`/mcp/memory`)
+
+| Tool            | Effect | Notes |
+|-----------------|--------|-------|
+| `memory_add`    | write  | `text` (required), `dataset`, `tags`, `metadata`, `document_id`. Reuse `document_id` to upsert one logical document. `source` is server-injected from your `X-hal0-Agent` — you cannot pass it. |
+| `memory_search` | read   | `query` (required), `limit` (1–200), `dataset`, `tags`, `before`, `after`. |
+| `memory_recall` | read   | Token-budgeted, consolidated recall — preferred over `search`. `query`, `max_tokens` (1–32768), `types`. |
+| `memory_list`   | read   | Paginate: `dataset`, `cursor`, `limit`. |
+| `memory_delete` | delete | `ids` (non-empty list), optional `dataset`. |
+
+Writes default to the `shared` dataset; `X-hal0-Private: 1` promotes them
+to `private:<agent>`.
+
+## Admin tools (`/mcp/admin`)
+
+Admin tools are classified into three tiers. Read-only and low-blast-radius
+writes run **autonomously**; destructive or wide-reaching tools are
+**gated** — they enqueue for owner approval and return
+`{"status": "pending_approval", "approval_id": "..."}` instead of
+executing.
+
+### Autonomous — read
+
+`slot_list`, `slot_status`, `model_list`, `hardware_probe`,
+`capability_list`, `provider_list`, `version_info`, `gpu_target_version`,
+`npu_status`, `env_report`, `model_store_probe`.
+
+### Autonomous — write (reversible, low blast radius)
+
+`model_swap`, `memory_add`, `memory_search`, `memory_list`, and
+`memory_delete` **for a single id**. A bulk `memory_delete` (more than one
+id) routes to the gated tier at call time.
+
+### Gated — always require approval
+
+`model_pull`, `model_delete`, `slot_create`, `slot_delete`,
+`slot_restart`, `capability_set`, `config_write`,
+`provider_credential_write`, and `logs_tail`.
+
+<Aside type="note">
+`logs_tail` is gated (not autonomous-read) on purpose: until the log
+redactor covers every credential class, dumping raw journald is treated
+as a potential exfiltration vector.
+</Aside>
+
+### The approval flow
+
+When a gated tool is called:
+
+<Steps>
+
+1. The server enqueues the call and returns
+   `{"status": "pending_approval", "approval_id": "..."}`.
+
+2. The owner reviews and approves (or denies) the request — the queued
+   call carries the tool name and arguments so the approver sees exactly
+   what will run.
+
+3. On approval, the tool executes with the approved arguments and the
+   real result is recorded; every gated call is written to the audit log.
+
+</Steps>
+
+## See also
+
+- [Memory](/docs/concepts/memory) — what the memory subsystem powers.
+- [Security](/docs/concepts/security) — the LAN-open posture, MCP allowlist, and origin gate.
+- [MCP tools reference](/docs/reference/mcp-tools) — the complete tool catalogue.

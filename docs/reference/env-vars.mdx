@@ -1,0 +1,97 @@
+---
+title: Environment variables
+description: Reference for hal0's environment variables — server, paths, runtime, memory, MCP, agents, install and update flags — with what each does and its default.
+sidebar:
+  order: 80
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 reads its configuration primarily from TOML under `/etc/hal0`, but a set of
+environment variables (mostly written into the API systemd unit's env file)
+control the server, override paths, and tune install/update behaviour. The most
+useful ones are below.
+
+<Aside type="caution" title="No secrets in TOML">
+API keys and provider credentials are never stored in TOML. They live in
+`/etc/hal0/api.env` (mode 0600, write-only via the API) and are referenced from
+config by env-var name. Never commit a populated `api.env`.
+</Aside>
+
+## Server
+
+| Variable                       | What it does                                                   | Default |
+|--------------------------------|---------------------------------------------------------------|---------|
+| `HAL0_PORT`                    | API listen port. The API binds `0.0.0.0` unconditionally.     | `8080`  |
+| `HAL0_SELF_BASE_URL`           | Base URL hal0 uses to re-enter its own `/v1` surface (omni router). | `http://127.0.0.1:8080` |
+| `HAL0_LOG_LEVEL`               | Log verbosity for the API.                                     | `info`  |
+| `HAL0_UI_DIST`                 | Override path to the built dashboard bundle (`ui/dist`).       | unset (FHS/editable autodetect) |
+| `HAL0_ALLOWED_ORIGINS`         | Allowed browser origins for cross-origin requests.            | unset   |
+| `HAL0_ACTIVITY_RETENTION_DAYS` | Override the activity/audit store retention window.          | from `hal0.toml` |
+
+<Aside type="note">
+hal0 ships with **no built-in auth or TLS** (ADR-0012). The API is open on the
+local network; put it behind your own reverse proxy for TLS and access control.
+There is no bearer-token or basic-auth flag to enable.
+</Aside>
+
+## Paths
+
+| Variable             | What it does                                                          | Default |
+|----------------------|----------------------------------------------------------------------|---------|
+| `HAL0_HOME`          | Relocate all four roots (code/config/state/log) under one prefix.     | unset (use FHS) |
+| `HAL0_MODEL_STORE`   | Model-store directory slot containers bind-mount (highest precedence).| `[models].store`, then the conventional mount |
+
+## Runtime
+
+| Variable                  | What it does                                                       | Default |
+|---------------------------|-------------------------------------------------------------------|---------|
+| `HAL0_CONTAINER_RUNTIME`  | Container runtime binary for slots.                               | `/usr/bin/podman`, falling back to `/usr/bin/docker` |
+| `HAL0_TOOLBOX_IMAGE_ROCM` | Override the `rocm` toolbox image ref.                            | from `manifest.json` |
+| `HAL0_TOOLBOX_IMAGE_VULKAN` | Override the `vulkan` toolbox image ref.                        | from `manifest.json` |
+| `HAL0_TOOLBOX_IMAGE_FLM`  | Override the `flm` toolbox image ref.                             | from `manifest.json` |
+| `HAL0_TOOLBOX_IMAGE_KOKORO` | Override the `kokoro` toolbox image ref.                        | from `manifest.json` |
+| `HAL0_TOOLBOX_IMAGE_COMFYUI` | Override the `comfyui` toolbox image ref.                      | from `manifest.json` |
+
+<Aside type="note">
+podman (rootless, no daemon) is the runtime. `docker` is only a fallback when
+podman is not installed.
+</Aside>
+
+## Memory & MCP
+
+| Variable                  | What it does                                                       | Default |
+|---------------------------|-------------------------------------------------------------------|---------|
+| `HAL0_MEMORY_ENABLED`     | Enable the memory subsystem (Cognee engine, `/mcp/memory`, `/api/memory/*`). Memory is **opt-in**. | `0` (disabled) |
+| `HAL0_MCP_ALLOWED_HOSTS`  | Allowlist of `Host` headers accepted by the mounted MCP servers.  | unset   |
+| `HAL0_MCP_ALLOWED_ORIGINS`| Allowlist of origins for MCP transport requests.                  | unset   |
+
+## Models & providers
+
+| Variable             | What it does                                                  | Default |
+|----------------------|--------------------------------------------------------------|---------|
+| `HF_TOKEN`           | Hugging Face token used when pulling gated/private models.    | unset   |
+| `HF_HOME`            | Hugging Face cache root.                                      | tool default |
+
+## Install & update
+
+These are honoured by the installer / bootstrap scripts.
+
+| Variable                    | What it does                                                       | Default  |
+|-----------------------------|-------------------------------------------------------------------|----------|
+| `HAL0_PREFIX`               | Installation root.                                                 | `/usr/lib/hal0` (system) / `$PWD/.hal0ai` (no-sudo) |
+| `HAL0_CHANNEL`              | Release channel for the default download URL.                     | `stable` |
+| `HAL0_INSTALL_SKIP_VERIFY`  | Install from an unverified source (skip the cosign check). Not recommended. | `0`      |
+| `HAL0_UPDATE_SKIP_COSIGN`   | Skip cosign signature verify (only honoured when cosign is missing). Not recommended. | `0`      |
+| `HAL0_NO_PROBE`             | Skip the hardware probe during install.                           | unset    |
+
+<Aside type="caution">
+`HAL0_INSTALL_SKIP_VERIFY=1` and `HAL0_UPDATE_SKIP_COSIGN=1` disable the
+supply-chain integrity check. Use them only for local development from a trusted
+checkout.
+</Aside>
+
+## See also
+
+- [Paths & files](/docs/reference/paths-and-files) — what each root holds and the `HAL0_HOME` remap.
+- [REST API index](/docs/reference/api/rest-api).

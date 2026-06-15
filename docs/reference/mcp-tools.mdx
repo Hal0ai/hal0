@@ -1,0 +1,114 @@
+---
+title: MCP tools
+description: Reference for hal0's MCP tool surface — the memory MCP and admin MCP tools, split into autonomous-read, autonomous-write, and approval-gated tools per ADR-0004 and ADR-0005.
+sidebar:
+  order: 60
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 hosts two Streamable-HTTP MCP servers that agents call: a focused
+**memory** server (`/mcp/memory`) and a full **admin** server (`/mcp/admin`).
+Every admin tool is classified into one of three tiers — autonomous-read,
+autonomous-write, or approval-gated. Gated tools enqueue for owner approval
+before they run; autonomous tools execute immediately.
+
+<Aside type="note">
+The agent presents its Bearer token through the MCP transport. The server stamps
+the caller's identity on every audit row and re-attaches the same token on the
+internal REST call it forwards to — an agent can only do through MCP what its
+token already permits through REST. Each tool call is written to the audit log.
+</Aside>
+
+## Memory MCP (`/mcp/memory`)
+
+Cognee-backed long-term memory. The memory subsystem is **opt-in** — these tools
+only function when the server is started with `HAL0_MEMORY_ENABLED=1`; otherwise
+calls degrade to a no-op / unavailable surface.
+
+| Tool            | Tier              | Effect                                                                 |
+|-----------------|-------------------|------------------------------------------------------------------------|
+| `memory_add`    | autonomous-write  | Write one item → `{id, timestamp}` (+ `operation_id` when async).      |
+| `memory_search` | autonomous-read   | Vector + tag + time-window query → `{results}`.                        |
+| `memory_recall` | autonomous-read   | Token-budgeted consolidated recall (preferred over search) → `{results}`. |
+| `memory_list`   | autonomous-read   | Paginated walk → `{items, next_cursor}`.                               |
+| `memory_delete` | conditional       | Remove by id(s) → `{deleted}`. **Autonomous** for one id; **gated** for >1. |
+
+Notable arguments:
+
+- `dataset` defaults to `shared`; private-mode callers promote to
+  `private:<client_id>`. A search may pass a list of datasets.
+- `source` is **server-injected** from the caller's identity and cannot be
+  supplied by the caller (audit grounding).
+- `document_id` reuse upserts one logical document (e.g. an evolving
+  conversation); it must match the identity grammar (alphanumeric / `-` / `_`,
+  ≤ 64 chars).
+
+## Admin MCP (`/mcp/admin`)
+
+The admin server hosts every tool an agent might call, including the `memory_*`
+tools above (delegated to the memory surface). Tools are classified as follows.
+
+### Autonomous read
+
+Execute immediately; pure reads against the local REST or host surface.
+
+| Tool                 | Effect                                                          |
+|----------------------|----------------------------------------------------------------|
+| `slot_list`          | List every slot known to hal0 (local + remote).                |
+| `slot_status`        | One slot's lifecycle state + metadata.                          |
+| `model_list`         | Aggregate models from local registry + upstreams.              |
+| `hardware_probe`     | Live hardware probe — backends, memory, accelerators.          |
+| `capability_list`    | Capability overlay state — backends + selections.             |
+| `provider_list`      | List configured providers.                                     |
+| `version_info`       | hal0 version + runtime status.                                 |
+| `gpu_target_version` | Decode KFD's `gfx_target_version` to a `gfxNNNN` string.       |
+| `npu_status`         | XDNA NPU presence + driver binding.                            |
+| `env_report`         | Composite host snapshot (container, CPU, RAM, GPU, NPU, …).    |
+| `model_store_probe`  | Probe a model-store path (fstype, free/total, writable, UMA).  |
+
+### Autonomous write
+
+Mutating but reversible, scoped, and low blast-radius.
+
+| Tool            | Effect                                                |
+|-----------------|-------------------------------------------------------|
+| `model_swap`    | Hot-swap the primary slot to a new model.             |
+| `memory_add`    | Add an item to long-term memory.                      |
+| `memory_search` | Search long-term memory.                              |
+| `memory_list`   | Page through long-term memory items.                  |
+| `memory_delete` | Delete memory item(s) — autonomous only for a single id. |
+
+### Gated (require approval)
+
+Always enqueued for owner approval before execution. These are the members of
+`GATED_TOOLS`:
+
+| Tool                        | Effect                                                |
+|-----------------------------|-------------------------------------------------------|
+| `model_pull`                | Pull a model into the local registry.                 |
+| `model_delete`              | Delete a model from the local registry.               |
+| `slot_create`               | Create a new slot.                                    |
+| `slot_delete`               | Delete a slot.                                        |
+| `slot_restart`              | Restart a slot's systemd unit.                        |
+| `capability_set`            | Assign a capability child to a slot.                  |
+| `config_write`              | Update `hal0.toml` top-level settings.                |
+| `provider_credential_write` | Write provider credentials (secrets never echoed).    |
+| `logs_tail`                 | Tail journald for one systemd unit.                   |
+| `memory_delete` (bulk)      | Delete more than one memory id in a single call.      |
+
+<Aside type="note">
+`logs_tail` is gated as a defensive measure: journald lines can carry Bearer
+tokens and provider keys, so an agent dumping raw logs is a potential
+exfiltration vector. Secret tokens in the returned lines are redacted before the
+response leaves the MCP process.
+</Aside>
+
+A gated call returns `{"status": "pending_approval", "approval_id": "..."}`. The
+owner approves or denies it from the dashboard approval inbox, the
+`/api/agent/approvals` surface, or the `hal0 agent approvals` CLI.
+
+## See also
+
+- [REST API index](/docs/reference/api/rest-api) — the `/api/*` routes each MCP tool forwards to.
+- [Devices, providers & profiles](/docs/reference/providers-profiles-devices).

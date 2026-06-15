@@ -1,0 +1,87 @@
+---
+title: First-run setup
+description: Walk through hal0's first-run bundle picker — choose a hardware-anchored tier, set model storage, provision slots, and verify services.
+sidebar:
+  order: 20
+---
+
+import { Steps, Aside, LinkCard } from '@astrojs/starlight/components';
+
+The first time you open the hal0 dashboard at `http://localhost:8080`, it
+routes you into **FirstRun** — a guided picker that provisions a coherent
+set of slots for your hardware. hal0 ships with no default model stack by
+design; you choose a tier (or skip and configure manually).
+
+<Aside type="note">
+The dashboard decides to show FirstRun by reading
+`GET /api/install/state`: it triggers when the models directory is empty
+**and** the `/var/lib/hal0/.first_run_done` sentinel has not been written
+yet. Either condition flipping false hides the wizard.
+</Aside>
+
+## The picker
+
+FirstRun detects your RAM, GPU, and NPU (via `GET /api/hardware`) and
+presents four hardware-anchored tiers plus a vendor-curated kit:
+
+| Tier | Fits |
+|---|---|
+| **hal0-Lite** | smaller hosts — a tiny chat model only |
+| **hal0-Default** | mid-range — chat + embed/rerank + voice |
+| **hal0-Pro** | larger unified memory — adds a coder model + image generation |
+| **hal0-Max** | high-memory Strix Halo — adds the NPU trio |
+| **LMX-Omni-52B-Halo** | AMD-curated kit for ≥ 100 GB unified Strix Halo |
+
+Tiers whose minimum RAM exceeds the detected pool are greyed out with a
+"needs ≥ N GB" tag; the highest tier that fits is marked recommended.
+
+<Steps>
+
+1. **Pick a tier** (or LMX kit). The recommended one is pre-selected.
+
+2. **Choose model storage.** Set the directory where every slot container
+   reads and writes model files. FirstRun probes candidate paths and
+   offers them as chips; the chosen path is persisted before any pulls
+   start.
+
+3. **(Optional) Open Advanced** to enable the NPU trio (agent + STT/embed
+   passengers — requires an NPU) and to override the model id or backend
+   profile per slot. Blank rows keep the smart default derived from the
+   hardware probe.
+
+4. **Install.** The dashboard POSTs your choice to `/api/install/apply`,
+   which derives a coherent `device` + `profile` for each slot, creates
+   the slot containers in the `OFFLINE` state, and seeds background pull
+   jobs. The progress pane reattaches to each model's download stream.
+
+5. **Verify services.** The final step checks OpenWebUI and the Hermes
+   agent via `/api/install/services`, with a one-click repair for a unit
+   that is down. Clicking **Open dashboard** calls
+   `/api/install/complete`, which writes the
+   `/var/lib/hal0/.first_run_done` sentinel so future boots skip the
+   wizard.
+
+</Steps>
+
+<Aside type="tip" title="Skip and configure manually">
+Choosing **Skip — configure manually** records the decision and drops you
+straight into the dashboard. You then add slots and models yourself — see
+[Load your first model](/docs/getting-started/first-model/).
+</Aside>
+
+## A note on the planned TUI
+
+<Aside type="caution" title="`hal0 setup` TUI — not yet shipped">
+A rich terminal-based setup wizard (`hal0 setup`) is planned to offer the
+same flow without a browser. It is **not built yet** — today the web
+bundle picker is the supported first-run path. Until then, use the
+dashboard, or provision slots from the CLI.
+</Aside>
+
+## Next
+
+<LinkCard
+  title="Load your first model"
+  href="/docs/getting-started/first-model/"
+  description="Pull a model from Hugging Face and assign it to a slot, via the picker or the CLI."
+/>

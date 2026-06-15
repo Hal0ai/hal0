@@ -1,0 +1,129 @@
+---
+title: Security posture
+description: hal0 ships no built-in auth or TLS — the API is open on your LAN by design. Learn the threat model, the reverse-proxy pattern, and the MCP host and origin allowlists.
+sidebar:
+  order: 70
+---
+
+import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+hal0 makes one security decision explicit and central: it does **not** ship
+built-in authentication or TLS. The API binds `0.0.0.0:8080` and every endpoint
+is open to anything that can reach that port. This is a deliberate design choice
+(ADR-0012), and the rest of your security posture is built on top of it rather
+than inside it.
+
+<Aside type="caution">
+Do not expose hal0-api directly to the public internet. It has no auth gate —
+anyone who can reach the port can load models, run inference, drive agents, and
+read activity. Keep it on a trusted network, and put a reverse proxy in front of
+it for anything beyond a single trusted LAN.
+</Aside>
+
+## Why no built-in auth?
+
+Earlier designs bundled an auth layer and a TLS-terminating proxy. That was
+removed (ADR-0012) because it duplicated, badly, what every operator already
+runs better elsewhere: a real reverse proxy. Bundling auth meant maintaining
+credential storage, token rotation, and TLS certificate plumbing inside the
+inference server — surface area that is someone else's core competency.
+
+Instead, hal0 assumes one of two postures:
+
+- **Single trusted LAN** — hal0 is reachable only from machines you trust, and
+  the open API is acceptable.
+- **Reverse proxy in front** — you terminate TLS and enforce authentication at a
+  proxy you control, and only the proxy talks to hal0.
+
+## The reverse-proxy pattern
+
+To add TLS and authentication, place a reverse proxy of your choice — Traefik
+and nginx are common choices — between your clients and hal0-api. The proxy
+owns:
+
+<Steps>
+
+1. **TLS termination** — present a certificate for your chosen hostname and
+   terminate HTTPS at the proxy.
+
+2. **Authentication** — enforce whatever you need (basic auth, OAuth/OIDC, mTLS,
+   an allowlist) before a request is forwarded.
+
+3. **Forwarding** — proxy the authenticated request to hal0-api on
+   `127.0.0.1:8080` (or its LAN address), and bind hal0 itself so only the proxy
+   can reach it.
+
+</Steps>
+
+This is the standard "auth at the edge" pattern. hal0 stays a pure inference and
+control plane; your proxy is the single, well-understood place where access
+control lives.
+
+<Aside type="note">
+The proxy is **your** infrastructure, not a hal0 feature. hal0 has no opinion
+about which one you use and ships nothing to configure it.
+</Aside>
+
+## MCP host and origin allowlists
+
+The one place hal0 does enforce a network gate is the MCP mount. The admin and
+memory MCP servers are mounted as sub-applications under `/mcp/admin` and
+`/mcp/memory`, and the MCP transport applies DNS-rebinding protection.
+
+By default that protection is **localhost-only**: only `127.0.0.1`, `localhost`,
+and `[::1]` (any port) are accepted as `Host` headers and request origins. A
+client reaching the mount from any other host gets a bare `421 Invalid Host`
+response. Because hal0 binds `0.0.0.0` on a LAN, you usually need to widen this
+to reach `/mcp/*` from another machine or through your proxy:
+
+- **`HAL0_MCP_ALLOWED_HOSTS`** — a comma-separated list of `host`,
+  `host:port`, or `host:*` values added to the localhost allowlist. The single
+  value `*` disables DNS-rebinding protection entirely (the fully-open posture
+  some LAN-only deployments want).
+- **`HAL0_MCP_ALLOWED_ORIGINS`** — a comma-separated list of browser origins.
+  When left unset, `http` and `https` origins are derived automatically from
+  each host you add, so the dashboard and a reverse-proxy vhost work without a
+  second knob.
+
+This is a host/origin gate, not authentication — it stops a browser on another
+site from rebinding DNS to reach your loopback MCP server. Real access control
+still belongs at your reverse proxy.
+
+## Agent identity and gated actions
+
+hal0's agent and memory surfaces don't use bearer tokens for identity. Instead,
+a caller's identity rides on the `X-hal0-Agent` request header (validated to a
+bounded `[a-zA-Z0-9_-]` id), and the same identity resolves the same memory
+namespace whether it arrives over REST or MCP. Privileged or destructive agent
+actions are **gated**: rather than executing immediately, they enqueue an
+approval that a human clears from the dashboard, the CLI, or via the approval
+API. See [Agents](/docs/concepts/agents) for how personas, tool gating, and the
+approval queue fit together.
+
+## Practical checklist
+
+<CardGrid>
+  <Card title="Keep it off the internet" icon="warning">
+    Never bind the open API where untrusted clients can reach it. Front it with
+    a proxy or keep it LAN-only.
+  </Card>
+  <Card title="Terminate TLS at a proxy" icon="approve-check">
+    Add HTTPS and auth at Traefik / nginx; let only the proxy reach hal0.
+  </Card>
+  <Card title="Scope the MCP allowlist" icon="setting">
+    Widen `HAL0_MCP_ALLOWED_HOSTS` only to the hosts that must reach `/mcp/*`;
+    avoid `*` unless the whole LAN is trusted.
+  </Card>
+  <Card title="Treat memory as opt-in" icon="document">
+    The memory subsystem is disabled unless you enable it; keep it off if you
+    don't need it. See Memory.
+  </Card>
+</CardGrid>
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Architecture" href="/docs/concepts/architecture" description="How the open API, slots, and dispatcher fit together." />
+  <LinkCard title="Agents" href="/docs/concepts/agents" description="Personas, tool gating, and the approval queue." />
+  <LinkCard title="Memory" href="/docs/concepts/memory" description="The opt-in memory subsystem." />
+</CardGrid>

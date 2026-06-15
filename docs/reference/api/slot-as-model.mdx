@@ -1,0 +1,80 @@
+---
+title: Slot as model
+description: How hal0 lets the OpenAI model field name a slot or alias instead of a model id, rewrites it to the backing model, and loads the slot under its declared backend.
+sidebar:
+  order: 20
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+In a standard OpenAI request the `model` field names a specific model. hal0
+extends this: the `model` field may instead name a **slot** (by its name/alias)
+or a **virtual role name**. hal0 rewrites it to the backing model id and
+ensures the right slot is loaded — all before the dispatcher routes the
+request.
+
+This lets a client pin a co-resident slot (e.g. always talk to the `chat`
+slot) without knowing or hard-coding which model it currently serves. The alias
+is stable across model swaps.
+
+## Addressing modes
+
+| `model` value | Resolution |
+|---|---|
+| A chat-slot **alias** (`chat`, `agent`, `utility`; legacy `primary`, `agent-hermes`) | Rewritten to the slot's configured model id. |
+| A virtual `hal0/*` role name | Live-resolved to whichever model the role currently maps to. |
+| A raw **registry model id** | Used directly; routed to whichever upstream serves it. |
+
+## How the rewrite works
+
+The chat route applies two steps before dispatch, both in `routes/v1.py`:
+
+### 1. Alias rewrite — `_rewrite_chat_slot_alias`
+
+The request's `model` is checked against the chat-slot alias map (slot name →
+configured model id). On a match, hal0:
+
+- replaces `body["model"]` with the slot's model id, and
+- rewrites the request's cached body bytes, so any downstream consumer that
+  re-reads the raw request forwards the rewritten model name — not the bare
+  alias.
+
+It is a no-op when the value isn't a known alias, already equals its own model
+id, the slot manager is absent, or the config read fails (best-effort — it
+never blocks the request).
+
+### 2. Backend-aware load — `_ensure_backend_for_model`
+
+After the alias rewrite, hal0 finds the chat slot that owns the resolved model
+id and calls `SlotManager.load(slot)` **before** dispatch. This is idempotent
+and blocks until the slot is `ready`, so the model is already loaded under the
+slot's declared `device` / `profile` whichever routing path dispatch then
+takes. A model with no backing chat slot is left alone and dispatches as-is.
+
+<Aside type="note">
+A slot already loaded under the wrong backend is not corrected mid-request
+(`load` is a no-op on a ready slot). That drift is surfaced by slot status and
+corrected via the slot's backend control, not silently inside a chat call.
+</Aside>
+
+## Slot name vs registry ref
+
+- **Slot name / alias** — addresses *the slot* and follows whatever model the
+  slot is configured to serve. Best for clients that want a stable handle.
+- **Registry model id** — addresses *the model*. The dispatcher routes it to a
+  serving upstream; if no upstream serves it, the request surfaces the
+  dispatcher's `NoRouteFound` envelope (404). There is no catch-all
+  fall-through.
+
+## Interaction with the GPU arbiter
+
+When the GPU is in exclusive image mode, the backend-aware load step refuses to
+lazy-load an LLM back onto the GPU — it raises the structured `gpu.image_mode`
+503 (with a `Retry-After`) rather than fighting the arbiter and resurrecting a
+slot the arbiter just drained.
+
+## Related references
+
+- [OpenAI-compatible API](/docs/reference/api/openai-compat) — the `/v1/*` endpoints.
+- [Slot lifecycle](/docs/reference/slot-lifecycle) — what "loaded under its backend" means.
+- [hal0 CLI](/docs/reference/cli) — `hal0 slot` to create and configure slots.

@@ -1,0 +1,104 @@
+---
+title: Update and roll back
+description: Update hal0 with a cosign-verified, atomic self-update — check the stable or nightly channel, apply or pin a version, and roll back to the previous tree if anything goes wrong.
+sidebar:
+  order: 110
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 updates itself. The `hal0 update` CLI is a thin client over the
+daemon's `/api/updates/*` surface, so the same code path runs whether you
+trigger an update from the shell or the dashboard. The actual swap is a
+**cosign-verified, atomic symlink swap** of `/usr/lib/hal0/current` — your
+config (`/etc/hal0`) and state (`/var/lib/hal0`) are untouched.
+
+## Check for an update
+
+```sh
+hal0 update --check
+```
+
+Fetches the release manifest for your channel and diffs it against the
+running version. It shows `current → latest (channel)` plus whether an
+update is available, and (when present) the release date, notes URL,
+digest, and signer identity.
+
+## Apply an update
+
+```sh
+hal0 update
+```
+
+This checks, then applies if a newer version exists. The CLI prints the
+apply job id and polls `/api/updates/status/<id>` until it reaches
+`applied` or `failed`. After a successful apply the **daemon
+try-restarts hal0-api itself** — the CLI never touches systemd. If the
+restart didn't complete, the result says so (the new tree stays in place
+regardless).
+
+To pin a specific version instead of the latest:
+
+```sh
+hal0 update --target v0.1.1
+```
+
+## Channels
+
+Two release channels are available: **`stable`** and **`nightly`**. Set
+your channel (it persists in `hal0.toml`), which also runs a check:
+
+```sh
+hal0 update --channel nightly
+```
+
+The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
+(overridable via `HAL0_RELEASES_URL` for dev / air-gapped installs).
+
+## How the atomic update works
+
+<Steps>
+
+1. **Fetch** the release manifest for the channel.
+
+2. **Download** the release tarball plus its detached cosign signature and
+   Fulcio certificate into a per-version cache under `/var/lib/hal0`.
+
+3. **Verify** the signature with `cosign verify-blob` against the GitHub
+   Actions OIDC identity declared in the manifest (`signer_identity` /
+   `signer_issuer`). A missing `cosign` binary or a failed verification
+   aborts the update — nothing is swapped.
+
+4. **Swap** the `/usr/lib/hal0/current` symlink atomically using the POSIX
+   `symlink(tmp) + os.replace(tmp, current)` pattern, then reinstall the
+   code into the venv. A failed re-install rolls the symlink back so
+   `current` and the venv never diverge.
+
+5. **Record** the prior symlink target in `/var/lib/hal0/hal0.previous`
+   for rollback.
+
+</Steps>
+
+<Aside type="caution">
+Signature verification is mandatory on the `stable` channel — there is no
+skip hatch. Don't disable it.
+</Aside>
+
+## Roll back
+
+If an update misbehaves, revert to the previously installed tree:
+
+```sh
+hal0 update --rollback
+```
+
+Rollback reads `/var/lib/hal0/hal0.previous`, atomically swaps the
+`current` symlink back to it, and warns (without erroring) if the previous
+tree is gone. If no previous-version record exists, there's nothing to
+roll back to.
+
+## See also
+
+- [Edit configuration](/docs/guides/configure) — `/etc/hal0` is preserved across updates.
+- [Observe the system](/docs/guides/logs-and-activity) — watch the apply job and `hal0-api` restart.
+- [CLI reference](/docs/reference/cli) — every `hal0` subcommand.
