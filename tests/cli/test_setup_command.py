@@ -33,8 +33,7 @@ def test_auto_selections_pick_recommended_and_default_extensions():
 
 
 def test_auto_selections_no_extensions_disables_all_and_skips_agent_slot():
-    sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models",
-                                with_extensions=False)
+    sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models", with_extensions=False)
     assert all(v is False for v in sel.extensions.values())
     # chat (Main) slot still seeded; agent/coder slot NOT seeded (no agent ext on)
     assert any(s.slot_name == "chat" for s in sel.slots)
@@ -45,3 +44,19 @@ def test_auto_selections_default_keeps_extensions_and_agent_slot():
     sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models")
     assert sel.extensions["hermes"] is True
     assert any(s.slot_name == "coder" for s in sel.slots)
+
+
+def test_auto_selections_skips_existing_slots():
+    sel = build_auto_selections(
+        _hw(96),
+        storage_dir="/var/lib/hal0/models",
+        existing_slots=frozenset({"chat"}),
+    )
+    # chat already exists on disk → not re-seeded; coder (agent default on) still seeded
+    assert not any(s.slot_name == "chat" for s in sel.slots)
+    assert any(s.slot_name == "coder" for s in sel.slots)
+
+
+def test_auto_selections_no_existing_seeds_all_default():
+    sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models")
+    assert any(s.slot_name == "chat" for s in sel.slots)

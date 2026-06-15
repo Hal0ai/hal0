@@ -13,6 +13,7 @@ import httpx
 import typer
 
 from hal0.cli._shared import _api_base
+from hal0.config import paths
 from hal0.config.schema import HardwareInfo
 from hal0.hardware.probe import HardwareProbe
 from hal0.install.extensions import EXTENSIONS, get_extension
@@ -37,8 +38,24 @@ def _kind(ext_id: str) -> str | None:
     return e.kind if e else None
 
 
+def _existing_slot_names() -> frozenset[str]:
+    """Return the stems of ``*.toml`` files in the slots config dir.
+
+    Returns an empty frozenset when the directory does not yet exist
+    (fresh install with no prior slot configs).
+    """
+    slots_dir = paths.slots_config_dir()
+    if not slots_dir.exists():
+        return frozenset()
+    return frozenset(p.stem for p in slots_dir.glob("*.toml"))
+
+
 def build_auto_selections(
-    hw: HardwareInfo, *, storage_dir: str, with_extensions: bool = True
+    hw: HardwareInfo,
+    *,
+    storage_dir: str,
+    with_extensions: bool = True,
+    existing_slots: frozenset[str] = frozenset(),
 ) -> Selections:
     """Non-interactive defaults for ``--auto`` (install.sh path): recommended
     model per slot, default extension set, NPU trio on if present.
@@ -47,19 +64,30 @@ def build_auto_selections(
     present, all values ``False``).  The coder/agent slot is gated on an agent
     extension being enabled, so it is skipped when extensions are off.  The
     chat slot is always included.
+
+    *existing_slots* is the set of slot names whose config files already exist
+    on disk.  Any slot in this set is skipped so that ``--auto`` on an existing
+    install does not overwrite user-customised configs.  Pass the result of
+    :func:`_existing_slot_names` at the call site to keep this function pure
+    and unit-testable.
     """
     if with_extensions:
         ext = {e.id: e.default_enabled for e in EXTENSIONS}
     else:
         ext = {e.id: False for e in EXTENSIONS}
     slots: list[SlotSelection] = []
-    # Main (chat) is always provisioned in --auto (OWUI + Hermes default on).
-    chat = suggest_models("chat", hw, limit=1)
-    if chat:
-        name, port = _SETUP_SLOTS["chat"]
-        slots.append(SlotSelection("chat", name, port, chat[0].model_id))
-    # Agent slot only if an agent extension is enabled.
-    if any(_kind(eid) == "agent" and on for eid, on in ext.items()):
+    # Main (chat) is always provisioned in --auto (OWUI + Hermes default on)
+    # — unless it was already configured by a prior install.
+    if "chat" not in existing_slots:
+        chat = suggest_models("chat", hw, limit=1)
+        if chat:
+            name, port = _SETUP_SLOTS["chat"]
+            slots.append(SlotSelection("chat", name, port, chat[0].model_id))
+    # Agent slot only if an agent extension is enabled and not already present.
+    if (
+        any(_kind(eid) == "agent" and on for eid, on in ext.items())
+        and "coder" not in existing_slots
+    ):
         coder = suggest_models("coder", hw, limit=1, prefer_coder=True)
         if coder:
             name, port = _SETUP_SLOTS["coder"]
@@ -89,7 +117,12 @@ def setup(
 ) -> None:
     hw = HardwareProbe().probe()
     if auto:
-        sel = build_auto_selections(hw, storage_dir=storage_dir, with_extensions=not no_extensions)
+        sel = build_auto_selections(
+            hw,
+            storage_dir=storage_dir,
+            with_extensions=not no_extensions,
+            existing_slots=_existing_slot_names(),
+        )
         asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
         return
     from hal0.cli.setup_ui import run_interactive  # Task 3.x
