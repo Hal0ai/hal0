@@ -815,6 +815,32 @@ def test_resolve_auxiliary_tasks_degrades_to_main_without_utility_slot() -> None
         assert aux[task]["model"] == ""
 
 
+def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> None:
+    # Utility role lives on the NPU slot (name 'npu', role not surfaced by
+    # /api/slots) and there is NO slot named 'utility'. Aux group must target
+    # the hal0/utility virtual so the gateway routes to the NPU slot.
+    slots = [
+        _ROLE_SLOTS[0],  # chat
+        {
+            "name": "npu",
+            "type": "llm",
+            "state": "ready",
+            "device_class": "npu",
+            "model_id": "gemma4-it-e2b-FLM",
+            "context_length": 18000,
+        },
+    ]
+    aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1)
+    for task in ("compression", "session_search", "title_generation", "skills_hub", "mcp"):
+        assert aux[task] == {
+            "provider": "custom",
+            "model": "hal0/utility",
+            "base_url": _HAL0_V1,
+        }
+    for task in ("vision", "web_extract"):
+        assert aux[task] == {"provider": "main", "model": "", "base_url": ""}
+
+
 def test_render_config_yaml_emits_delegation_and_auxiliary_blocks() -> None:
     yaml = pytest.importorskip("yaml")
     deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)

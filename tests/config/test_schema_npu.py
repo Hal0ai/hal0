@@ -74,7 +74,10 @@ def test_seed_npu_toml_validates() -> None:
     assert slot.runtime == "container"
     assert slot.profile == "flm"
     assert slot.device == "npu"
-    assert slot.npu is not None and slot.npu.asr is False
+    # chat-only utility: no [npu] trio table, role aliased to utility
+    assert slot.npu is None
+    assert slot.role == "utility"
+    assert slot.model is not None and slot.model.default == "gemma4-it-e2b-FLM"
 
 
 def test_seed_tts_toml_validates() -> None:

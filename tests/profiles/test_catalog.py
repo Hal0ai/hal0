@@ -20,7 +20,7 @@ def test_resolve_seed_profile_includes_runtime_facts(tmp_hal0_home: str) -> None
 def test_resolve_exposes_backend(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
     assert catalog.resolve("rocm").backend == "rocm"
-    assert catalog.resolve("rocm-mtp").backend == "rocm"
+    assert catalog.resolve("rocm-dnse").backend == "rocm"
     assert catalog.resolve("vulkan").backend == "vulkan"
     # non-GPU seeds carry no backend
     assert catalog.resolve("flm").backend is None
@@ -111,7 +111,7 @@ def test_cloned_from_defaults_to_none_and_survives_update(tmp_hal0_home: str) ->
 def test_seed_bench_metrics_exposed(tmp_hal0_home: str) -> None:
     by_name = {p.name: p for p in ProfileCatalog().list()}
     assert by_name["rocm"].tps == 52.8
-    assert by_name["rocm-mtp"].tps == 24.4
+    assert by_name["rocm-dnse"].tps == 30.4
     # TTS is synth — reported as a real-time factor, not tok/s.
     assert by_name["tts"].tps is None
     assert by_name["tts"].rtf == 0.18

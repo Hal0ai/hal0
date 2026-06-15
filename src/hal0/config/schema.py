@@ -717,13 +717,22 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "MoE agents",
         "quant": "FP4",
     },
-    "rocm-mtp": {
+    "rocm-dnse": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-fa on -ctk q4_0 -ctv q4_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Dense chat + MTP",
+        "intent": "Dense + MTP · q4 KV",
+        "quant": "FP4",
+    },
+    "rocm-moe": {
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "flags": "-fa on -ctk q4_0 -ctv q4_0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja",
+        "mtp": True,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "MoE + MTP · q4 KV",
         "quant": "FP4",
     },
     "vulkan": {
@@ -767,7 +776,8 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
 #: profiles have no entry → the card shows "—" until benched.
 PROFILE_BENCH: dict[str, dict[str, float]] = {
     "rocm": {"tps": 52.8},
-    "rocm-mtp": {"tps": 24.4},
+    "rocm-moe": {"tps": 90.0},
+    "rocm-dnse": {"tps": 30.4},
     "vulkan": {"tps": 41.0},
     "flm": {"tps": 38.6},
     "tts": {"rtf": 0.18},

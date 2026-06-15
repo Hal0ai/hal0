@@ -20,15 +20,24 @@ backend      = "rocm"
 intent       = "MoE agents"
 quant        = "FP4"
 
-[profile.rocm-mtp]
-# ROCm + MTP draft speculation (dense chat, qwopus 27B). ~24.4 tok/s (~2x non-MTP).
-# mtp=true expands to the full --spec-type draft-mtp bundle at resolve time.
+[profile.rocm-dnse]
+# ROCm + MTP draft-mtp, q4 KV (dense chat, qwopus 27B). ~30.4 tok/s.
 image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+flags        = "-fa on -ctk q4_0 -ctv q4_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
 mtp          = true
 device_class = "gpu"
 backend      = "rocm"
-intent       = "Dense chat + MTP"
+intent       = "Dense + MTP · q4 KV"
+quant        = "FP4"
+
+[profile.rocm-moe]
+# ROCm + MTP draft-mtp for MoE (ace-saber 35B-A3B), q4 KV, 16 threads + jinja. ~90 tok/s.
+image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+flags        = "-fa on -ctk q4_0 -ctv q4_0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja"
+mtp          = true
+device_class = "gpu"
+backend      = "rocm"
+intent       = "MoE + MTP · q4 KV"
 quant        = "FP4"
 
 [profile.vulkan]

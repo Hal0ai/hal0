@@ -2457,6 +2457,28 @@ def _find_named_ready_slot(slots: list[dict[str, Any]], name: str) -> dict[str, 
     return None
 
 
+def _has_ready_npu_llm_slot(slots: list[dict[str, Any]]) -> bool:
+    """True if a ready ``type=='llm'`` slot reports ``device_class``/``device`` npu.
+
+    Used to detect the utility role living on the NPU slot (name ``npu``, not
+    ``utility``) when ``/api/slots`` doesn't expose ``role``. Callers then route
+    the utility aux group to the ``hal0/utility`` virtual.
+    """
+    for s in slots:
+        if not isinstance(s, dict):
+            continue
+        if (s.get("device_class") or s.get("device") or "").lower() != "npu":
+            continue
+        if (s.get("type") or "").lower() != "llm":
+            continue
+        if not _is_ready(s):
+            continue
+        if not _slot_model_id(s):
+            continue
+        return True
+    return False
+
+
 def _resolve_delegation(
     slots: list[dict[str, Any]],
     *,
@@ -2500,6 +2522,13 @@ def _resolve_auxiliary_tasks(
         tasks[task] = {"provider": "main", "model": "", "base_url": ""}
 
     utility = _find_named_ready_slot(slots, _UTILITY_SLOT_NAME)
+    # The utility role can live on a slot NOT named ``utility`` — e.g. the NPU
+    # slot (name ``npu``, ``role='utility'``) when the NPU serves utility
+    # inference. ``/api/slots`` doesn't surface ``role``, so we can't match it
+    # by name; instead, when no named utility slot exists but a ready NPU llm
+    # slot does, target the ``hal0/utility`` virtual and let the gateway resolve
+    # to it (the resolver falls back to chat if it is ever not loaded).
+    npu_utility = utility is None and _has_ready_npu_llm_slot(slots)
     for task in _UTILITY_AUX_TASKS:
         if utility is not None:
             tasks[task] = {
@@ -2507,8 +2536,14 @@ def _resolve_auxiliary_tasks(
                 "model": _slot_model_id(utility),
                 "base_url": hal0_base_url,
             }
+        elif npu_utility:
+            tasks[task] = {
+                "provider": "custom",
+                "model": "hal0/utility",
+                "base_url": hal0_base_url,
+            }
         else:
-            # Degrade safely: no utility slot → inherit the chat model.
+            # Degrade safely: no utility target → inherit the chat model.
             tasks[task] = {"provider": "main", "model": "", "base_url": ""}
     return tasks
 
