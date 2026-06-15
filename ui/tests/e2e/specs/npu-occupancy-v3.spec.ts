@@ -74,8 +74,11 @@ test.describe('NPU occupancy card', () => {
     // single-tenant: a serving FLM lights the whole array → active tiles present
     await expect(card.locator('.aie-tile.active').first()).toBeVisible()
 
-    // partition bracket labels the owning slot
+    // partition bracket labels the owning slot — single-tenant: one span-8
+    // bracket for the whole array, not one per column
+    await expect(card.locator('.aie-part')).toHaveCount(1)
     await expect(card.locator('.aie-part .pl')).toContainText('npu')
+    await expect(card.locator('.aie-part .pc')).toHaveText('· 8c')
 
     // per-slot card: name + model (-FLM stripped) + the serving dot
     const cslot = card.locator('.cslot').filter({ hasText: 'npu' }).first()

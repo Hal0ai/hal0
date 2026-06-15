@@ -318,16 +318,18 @@ export function NpuOccupancyCard({ slots }) {
 
   // owner descriptor per column (length 8). Built from the occupancy probe so
   // the grid + every slot strip share one source of truth.
+  // One owner object per slot, shared by reference across every column it
+  // owns — the grid's partition-merge keys off identity, so distinct objects
+  // would fragment a single slot into one bracket per column.
   const owners = Array(NPU_COLS).fill(null)
   npuSlots.forEach((s, idx) => {
     const o = occByName[s.name]
     const cols = o?.cols || []
     const ind = slotIndicatorFromPhase(s)
     const hue = HUES[idx % HUES.length]
+    const ownerObj = { name: s.name, serving: ind.cls === 'serving', ...hue }
     cols.forEach((c) => {
-      if (c >= 0 && c < NPU_COLS) {
-        owners[c] = { name: s.name, serving: ind.cls === 'serving', ...hue }
-      }
+      if (c >= 0 && c < NPU_COLS) owners[c] = ownerObj
     })
   })
 
