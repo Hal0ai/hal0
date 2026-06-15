@@ -29,11 +29,18 @@ orchestrates a full multi-slot bring-up from a single bundle pick.
   `hal0-toolbox-flm:0.9.43` (#813).
 - **Settings** — HuggingFace token field + `api.env` hint for gated pulls
   (#816); standalone `/pull` uses capability-grouped paths (#815).
+- **Dashboard overhaul** — the home page becomes a customizable operator
+  widget board: drag/resize/pin-to-home slot cards, live memory-map,
+  throughput, utilization and power monitors, a quick-chat tester, and a
+  live ComfyUI job-queue widget; layout persists per operator (#814).
+- **v0.5 navigation** — Connections dissolves into Slots/Agent tabs with
+  sidebar sub-links; Memory + MCP unify under a tabbed Agent shell (#817).
 
 ### Fixed
 - Non-blocking slot controls + NPU/image-gen toggles; cancel mid-load (#801).
 - Slot edit drawer shows profile intent in its dropdown (#811).
 - Enforce device↔profile backend coherence on slot create/update (#807).
+- Drop the unimplemented `memory migrate --apply` flag (#820).
 
 ### Internal
 - Recolor the device palette — free red for errors/stop (#803).
