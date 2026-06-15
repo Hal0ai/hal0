@@ -488,6 +488,7 @@ function _subInduce(
 // Resolve the source graph for a bank+kind. Only `big` uses the large
 // synthetic graph; every other bank reuses the existing primary fixtures.
 function graphForBank(bank: string, kind: 'memories' | 'entities') {
+  if (bank === 'empty') return { nodes: [], edges: [] } // empty bank → empty graph
   if (kind === 'entities') return buildMemEntityGraph()
   // Single source of truth for bank→fact-graph, shared by the full-graph route
   // and the subgraph route so ego/top-K slices stay consistent with the whole.
@@ -541,6 +542,9 @@ const MEM_BANKS = [
   { bank_id: 'hermes', name: 'hermes', mission: 'the bundled home agent', fact_count: 612 },
   { bank_id: 'scratch', name: 'scratch', mission: 'ephemeral working memory', fact_count: 88 },
   { bank_id: 'ingest', name: 'ingest', mission: 'raw document drop', fact_count: 4310 },
+  // a genuinely empty bank — exercises the graph empty-state shell (no facts,
+  // no entities) so the explorer's "No graph data" placeholder is testable.
+  { bank_id: 'empty', name: 'empty', mission: 'no memories yet', fact_count: 0 },
 ]
 
 function buildMemoryEngine() {

@@ -2798,7 +2798,13 @@ select.pf-input { cursor: pointer; }
 .mem-graph-svg { width: 100%; height: auto; display: block; }
 .mem-gnode-g { cursor: pointer; }
 .mem-gnode-lbl { font-size: 9px; fill: var(--fg-4); font-family: var(--jbm); pointer-events: none; }
-.mem-graph-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+/* Empty/loading placeholder for the graph stage. Kept IN-FLOW (not an
+   absolute inset:0 overlay): the A/B/C overhaul moved this out of the old
+   position:relative .mem-graph-stage into the static .mg-host, so an absolute
+   overlay escaped to the viewport and swallowed every click (the whole UI
+   "locked up" on any empty bank/search/filter). A min-height gives the
+   message room without collapsing the host to 0. */
+.mem-graph-empty { min-height: 360px; display: flex; align-items: center; justify-content: center; }
 .mem-graph-detail { margin-top: 12px; padding: 12px 14px; }
 .mem-graph-detail-body { font-size: 11px; color: var(--fg-2); display: flex; flex-direction: column; gap: 6px; }
 .mem-graph-detail-label { color: var(--fg); font-size: 12px; }
