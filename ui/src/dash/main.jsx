@@ -19,7 +19,6 @@ function fmtApprovalTs(v) {
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "slotVariant": "instrument",
   "showHero": true,
-  "firstRunLayout": "grid",
   "personaPlacement": "composer-left"
 }/*EDITMODE-END*/;
 
@@ -28,7 +27,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "firstrun", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections"];
+const ROUTES = ["dashboard", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -89,8 +88,6 @@ function App() {
   const { active: activeBanners } = useBanners();
   const [{ route, param }, setRouteState] = useStateA(parseRoute());
   const [bellOpen, setBellOpen] = useStateA(false);
-  const [frStage, setFrStage] = useStateA("pick");
-  const [frBundle, setFrBundle] = useStateA(null);
   const [heroDismissed, setHeroDismissed] = useStateA(false);
   const [toast, setToast] = useStateA(null);
   const [composerState, setComposerState] = useStateA("idle");
@@ -110,13 +107,6 @@ function App() {
   // transient loading false — only redirect once the query has settled.
   const useMemEnabledPending = (typeof window !== "undefined" && window.__hal0UseMemoryEnabledPending) || null;
   const memoryStatusPending = useMemEnabledPending ? useMemEnabledPending() : true;
-
-  // FirstRun auto-route (design D6): on the first dashboard visit of a fresh
-  // install (/api/install/state.first_run), drop the operator straight into
-  // the wizard instead of an empty dashboard. Read via the window bridge to
-  // stay inside the no-ES-imports dash/*.jsx contract.
-  const useInstallStateBridge = (typeof window !== "undefined" && window.__hal0UseInstallState) || null;
-  const installState = useInstallStateBridge ? useInstallStateBridge() : { firstRun: false, pending: true };
 
   // Live approval queue — bridges installed by chrome.jsx (loaded before main.jsx).
   // TODO endpoints.ts (ui-sweep-b owns) — inline paths live in useAgents.ts hooks.
@@ -192,22 +182,6 @@ function App() {
     window.location.hash = "#" + id;
   };
 
-  // FirstRun auto-route (design D6): redirect into the wizard on a fresh
-  // install once /api/install/state has settled. Guard on `pending` so we
-  // don't bounce during the transient loading window, and only when not
-  // already on the firstrun route (so the manual Back/Skip can leave it).
-  useEffectA(() => {
-    if (!installState.pending && installState.firstRun && route !== "firstrun") {
-      go("firstrun");
-    }
-  }, [installState.pending, installState.firstRun, route]);
-
-  const onFirstRunComplete = () => {
-    setFrStage("pick");
-    setFrBundle(null);
-    go("dashboard");
-  };
-
   // route → view
   const renderView = () => {
     switch (route) {
@@ -234,17 +208,6 @@ function App() {
             />
           )
         );
-      case "firstrun":
-        return (
-          <FirstRunView
-            frStage={frStage}
-            setFrStage={setFrStage}
-            frBundle={frBundle}
-            setFrBundle={setFrBundle}
-            onComplete={onFirstRunComplete}
-            layout={tweaks.firstRunLayout}
-          />
-        );
       case "slots":
         return (
           <SlotsView
@@ -270,11 +233,9 @@ function App() {
     }
   };
 
-  const isFirstrun = route === "firstrun";
-
   return (
     <>
-      <div className={"app" + (isFirstrun ? " firstrun" : "")}>
+      <div className="app">
         {/* v0.3 PR-8: approvals are now sourced from the sidebar agent
             rollup (PR-6 SidebarAgentBlock + live /api/agent/approvals
             poll). The topbar bell stays as a launcher for the modal
@@ -288,7 +249,7 @@ function App() {
           menuOpen={navOpen}
           approvals={approvalItems.length}
         />
-        {!isFirstrun && <Sidebar route={route} param={param} onGo={go} />}
+        <Sidebar route={route} param={param} onGo={go} />
         <div className="main">
           <div className="view-banners">
             {/* Phase 2 of #322: UpdateBanner self-renders when the
@@ -318,16 +279,14 @@ function App() {
         />
       </div>
 
-      {!isFirstrun && (
-        <NavDrawer
-          open={navOpen}
-          route={route}
-          param={param}
-          onGo={(id) => { setNavOpen(false); go(id); }}
-          onClose={() => setNavOpen(false)}
-          onCmdK={() => { setNavOpen(false); setPaletteOpen(true); }}
-        />
-      )}
+      <NavDrawer
+        open={navOpen}
+        route={route}
+        param={param}
+        onGo={(id) => { setNavOpen(false); go(id); }}
+        onClose={() => setNavOpen(false)}
+        onCmdK={() => { setNavOpen(false); setPaletteOpen(true); }}
+      />
 
       <ApprovalModal
         open={bellOpen}
@@ -392,18 +351,6 @@ function App() {
           />
         </TweakSection>
 
-        <TweakSection title="FirstRun">
-          <TweakRadio
-            label="Tier layout"
-            value={tweaks.firstRunLayout}
-            onChange={v => setTweak("firstRunLayout", v)}
-            options={[
-              { value: "grid",  label: "Cards" },
-              { value: "table", label: "Matrix" },
-            ]}
-          />
-        </TweakSection>
-
         <TweakSection title="Banners" label="Banners">
           <div className="mono" style={{fontSize: 10, color: "var(--fg-4)", padding: "6px 0", lineHeight: 1.5}}>
             Flip on any banner state to see the surface. They render scoped to the current route plus global.
@@ -414,7 +361,6 @@ function App() {
         </TweakSection>
 
         <TweakSection title="Demo navigation">
-          <TweakButton onClick={() => go("firstrun")}>Jump to FirstRun</TweakButton>
           <TweakButton onClick={() => go("dashboard")}>Jump to Dashboard</TweakButton>
         </TweakSection>
       </TweaksPanel>

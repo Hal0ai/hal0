@@ -141,14 +141,6 @@ function buildSecrets() {
   }
 }
 
-function buildFirstRunState() {
-  return { stage: 'pick', bundle: null }
-}
-
-function buildFirstRunCurated() {
-  return { bundles: data().bundles ?? [], details: data().bundleDetails ?? {} }
-}
-
 // ─── Memory (Hindsight) forced-mock dataset ───────────────────────
 //
 // A coherent ~6-week story of operating strix-halo-01 so the Memory
@@ -821,9 +813,6 @@ export const MOCK_ALLOWLIST: ReadonlyArray<{ re: RegExp; build: Builder }> = Obj
   { re: /^\/api\/auth\/token$/, build: buildAuthToken },
   { re: /^\/api\/auth\/allowed-origins$/, build: buildAllowedOrigins },
   { re: /^\/api\/secrets$/, build: buildSecrets },
-  { re: /^\/api\/firstrun\/state$/, build: buildFirstRunState },
-  { re: /^\/api\/firstrun\/curated-models$/, build: buildFirstRunCurated },
-
   // ── Memory (Hindsight) — engine + bank-scoped surface ────────────
   // Forced-mock + 404-fallback story for the Memory graph overhaul. The
   // bank id is captured as group 1. ORDER MATTERS: the more-specific

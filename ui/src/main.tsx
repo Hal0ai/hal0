@@ -60,8 +60,6 @@ import './dash/dashboard.jsx'
 // .jsx module evaluates. dash-grid.jsx must come after cards-shell (W1).
 import './dash/dash-grid-hook-bridge'
 import './dash/dash-grid.jsx'
-import './dash/install-state-bridge'
-import './dash/firstrun.jsx'
 import './dash/slots.jsx'
 import './dash/slot-modals.jsx'
 import './dash/models.jsx'

@@ -277,22 +277,9 @@ export const ENDPOINTS = {
   profiles: '/api/profiles',
   profile: (name: string) => `/api/profiles/${encodeURIComponent(name)}`,
 
-  // Install / FirstRun — all routes are under /api/install/* (installer.py).
-  // The old /api/firstrun/* prefix was a stale artifact; the backend mounts
-  // the router at /api/install (verified in src/hal0/api/routes/installer.py).
+  // Install state — backs the post-install banner and passive install-state hook.
+  // Retained for useInstallState.ts (banner/status surface). The FirstRun picker
+  // endpoints (apply, complete, curated-models, pick-default, services, etc.) were
+  // removed when the web FirstRun wizard was folded into `hal0 setup` CLI/TUI.
   installState: '/api/install/state',
-  installCuratedModels: '/api/install/curated-models',
-  installPickDefault: '/api/install/pick-default',
-  // FirstRun v2 (design D3): one orchestrated endpoint that pulls every
-  // bundle slot, derives device+profile, and creates the slots OFFLINE. The
-  // legacy per-model pick-default route stays for ad-hoc single assignments.
-  installApply: '/api/install/apply',
-  installComplete: '/api/install/complete',
-  // FirstRun v2 services step (design D5): verify + one-click repair.
-  installServices: '/api/install/services',
-  installServiceRepair: (unit: string) =>
-    `/api/install/services/${encodeURIComponent(unit)}/repair`,
-  // PUT /api/install/slots/{slot}/model — assign a model to a slot post-pick.
-  installSlotModel: (slot: string) =>
-    `/api/install/slots/${encodeURIComponent(slot)}/model`,
 } as const
