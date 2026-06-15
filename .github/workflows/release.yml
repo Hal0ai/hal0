@@ -322,7 +322,81 @@ jobs:
           print(f"manifest OK: version={mf.version} digest_sha256={mf.digest_sha256[:12]}…")
           PY
 
-      # ── 6. Publish GitHub Release with all three assets ─────────────────────
+      # ── 6. Generate release notes ────────────────────────────────────────────
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          CHANNEL="${{ steps.ver.outputs.channel }}"
+          NOTES_FILE="${RUNNER_TEMP}/RELEASE_NOTES.md"
+
+          # Non-fatal wrapper: if anything goes wrong we still publish.
+          generate_notes() {
+            if [[ "${CHANNEL}" == "nightly" ]]; then
+              # Nightly: summarise commits since the previous nightly tag.
+              # The current tag was already pushed by the nightly.yml tag job,
+              # so the "previous" nightly is the second entry in newest-first order.
+              PREV_NIGHTLY="$(git tag --list 'v*-nightly.*' --sort=-creatordate | grep -v "^${TAG}$" | head -n1)"
+
+              if [[ -n "${PREV_NIGHTLY}" ]]; then
+                FROM_REF="${PREV_NIGHTLY}"
+                FROM_LABEL="since ${PREV_NIGHTLY}"
+              else
+                # No prior nightly — fall back to the most recent stable tag.
+                PREV_STABLE="$(git tag --list 'v*' --sort=-creatordate \
+                  | grep -v '\-nightly\.' | grep -v "^${TAG}$" | head -n1)"
+                FROM_REF="${PREV_STABLE:-}"
+                FROM_LABEL="since ${PREV_STABLE:-initial commit}"
+              fi
+
+              {
+                echo "Nightly ${TAG} — changes ${FROM_LABEL}:"
+                echo ""
+                if [[ -n "${FROM_REF}" ]]; then
+                  git log --pretty='- %s (%h)' "${FROM_REF}..HEAD"
+                else
+                  git log --pretty='- %s (%h)' HEAD
+                fi
+              } > "${NOTES_FILE}"
+
+            else
+              # Stable / alpha: extract the matching section from CHANGELOG.md.
+              VERSION="${TAG#v}"
+              SECTION="$(PYTHONPATH=src python3 -c "
+          import sys
+          from hal0.release.notes import extract_changelog_section
+          body = extract_changelog_section(open('CHANGELOG.md').read(), sys.argv[1])
+          print(body)
+          " "${TAG}" 2>/dev/null || true)"
+
+              if [[ -n "${SECTION}" ]]; then
+                echo "${SECTION}" > "${NOTES_FILE}"
+              else
+                # Fallback: commit log since the previous stable tag.
+                PREV_STABLE="$(git tag --list 'v*' --sort=-creatordate \
+                  | grep -v '\-nightly\.' | grep -v "^${TAG}$" | head -n1)"
+                {
+                  echo "Changes in ${TAG}:"
+                  echo ""
+                  if [[ -n "${PREV_STABLE}" ]]; then
+                    git log --pretty='- %s' "${PREV_STABLE}..${TAG}"
+                  else
+                    git log --pretty='- %s' "${TAG}"
+                  fi
+                  echo ""
+                  echo "See CHANGELOG.md for full details."
+                } > "${NOTES_FILE}"
+              fi
+            fi
+          }
+
+          if ! generate_notes 2>/dev/null; then
+            echo "See CHANGELOG.md for release notes." > "${NOTES_FILE}"
+          fi
+
+          echo "path=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+
+      # ── 7. Publish GitHub Release with all three assets ─────────────────────
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -332,6 +406,7 @@ jobs:
           SIG="${{ steps.sign.outputs.sig }}"
           CRT="${{ steps.sign.outputs.cert }}"
           MANIFEST="${{ steps.manifest.outputs.path }}"
+          NOTES_FILE="${{ steps.notes.outputs.path }}"
 
           # Create the release if it doesn't already exist (workflow_dispatch
           # rebuild path) — otherwise just upload the assets, replacing
@@ -345,7 +420,7 @@ jobs:
               # /nightly.json, not /releases/latest.
               gh release create "${TAG}" \
                 --title "hal0 ${TAG}" \
-                --notes "Automated nightly build from green main. Follow with: hal0 update --channel nightly. See docs/operate/updates.mdx." \
+                --notes-file "${NOTES_FILE}" \
                 --draft=false \
                 --prerelease=true
             else
@@ -354,7 +429,7 @@ jobs:
               # on purpose so /releases/latest works while we're pre-stable.
               gh release create "${TAG}" \
                 --title "hal0 ${TAG}" \
-                --notes "Automated release. See docs/internal/release-manifest.md for the verify path." \
+                --notes-file "${NOTES_FILE}" \
                 --draft=false \
                 --prerelease=false \
                 --latest
