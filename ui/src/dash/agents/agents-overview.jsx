@@ -67,11 +67,16 @@ function _fmtK(n) {
   return String(Math.round(n));
 }
 
-// Resolve the chat slot Hermes orchestrates (its throughput/ctx source).
+// Resolve the LLM slot Hermes orchestrates (its throughput/ctx source). The
+// runtime names it `agent` (the GPU agent slot); fall back through the other
+// chat-capable names, then any LLM slot. There is no `primary`/`isDefault`
+// marker in the live topology, so name + type are the only honest signals.
 function _primarySlot(slots) {
   if (!Array.isArray(slots)) return null;
   return (
     slots.find((s) => s.name === "primary") ||
+    slots.find((s) => s.name === "agent") ||
+    slots.find((s) => s.name === "chat") ||
     slots.find((s) => s.isDefault) ||
     slots.find((s) => s.type === "llm") ||
     null
@@ -79,19 +84,21 @@ function _primarySlot(slots) {
 }
 
 // Map agent liveness + slot activity → StatusDot cls + a short label.
+// Mirrors useSidebarAgentRollup: an `installed` AgentRecord IS the running
+// state (the agent runs as a systemd unit), `broken` is down. We then upgrade
+// the dot to `serving` (green) when the backing slot is actively generating,
+// and otherwise show `ready` (amber) — never a fake "serving" while idle.
 function _derive(agentRec, slot) {
-  const status = String(agentRec && agentRec.status ? agentRec.status : "").toLowerCase();
+  if (!agentRec) return { cls: "offline", label: "not installed" };
+  const status = String(agentRec.status || "").toLowerCase();
+  if (status === "broken" || /error|fail|crash|down/.test(status)) {
+    return { cls: "error", label: "down" };
+  }
   const servingNow =
     !!slot && (slot.state === "serving" || (slot.metrics && slot.metrics.toks > 0));
-
-  if (!agentRec) return { cls: "offline", label: "not installed" };
-  if (/broke|error|fail|crash|down/.test(status)) return { cls: "error", label: "down" };
-  if (/run|serv|ready|ok|active|up/.test(status)) {
-    return servingNow
-      ? { cls: "serving", label: "serving" }
-      : { cls: "stale", label: "ready" };
-  }
-  return { cls: "offline", label: status || "offline" };
+  return servingNow
+    ? { cls: "serving", label: "serving" }
+    : { cls: "stale", label: "ready" };
 }
 
 function _health(slot) {
