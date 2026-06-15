@@ -14,7 +14,18 @@
  * the dev-server proxy in vite.config.ts forwards /api+/v1 to 127.0.0.1:8080.
  */
 import { test as base, Page, Route } from '@playwright/test'
-import { MOCK_DATA } from './mock-data'
+import {
+  MOCK_DATA,
+  BOARD_BOARDS,
+  BOARD_PROFILES,
+  BOARD_ASSIGNEES,
+  BOARD_STATS,
+  BOARD_CONFIG,
+  BOARD_WORKERS_ACTIVE,
+  BOARD_TASKS,
+  BOARD_ORCH_DEFAULT,
+  makeBoardLanesResponse,
+} from './mock-data'
 
 export const LIVE = process.env.HAL0_E2E_LIVE === '1'
 export { MOCK_DATA } from './mock-data'
@@ -27,10 +38,15 @@ export type MockState = {
   models: typeof MOCK_DATA.models
   backends: typeof MOCK_DATA.backends
   approvals: any[]
+  // Board mock state — tasks array cloned per spec so mutations don't bleed
+  boardTasks: typeof BOARD_TASKS
 }
 
 export function makeMockState(): MockState {
-  return JSON.parse(JSON.stringify(MOCK_DATA))
+  return {
+    ...JSON.parse(JSON.stringify(MOCK_DATA)),
+    boardTasks: JSON.parse(JSON.stringify(BOARD_TASKS)),
+  }
 }
 
 /* ── helper: JSON fulfil ─────────────────────────────────────────── */
