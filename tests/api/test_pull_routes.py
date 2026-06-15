@@ -1,4 +1,4 @@
-"""Route tests for /api/models/{id}/pull* and /api/install/pick-default.
+"""Route tests for /api/models/{id}/pull*.
 
 The real ``run_pull`` body is patched so tests don't hit HuggingFace —
 we exercise the routing surface, job state machine, and slot TOML
@@ -9,9 +9,7 @@ write, not the HTTP streaming itself (that's tested separately in
 from __future__ import annotations
 
 import time
-import tomllib
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -230,93 +228,6 @@ def test_pull_cancel_flips_flag(
     r = client_isolated.post("/api/models/qwen3-4b/pull/cancel")
     assert r.status_code == 200, r.text
     assert jobs["qwen3-4b"].cancel_requested is True
-
-
-# ── POST /api/install/pick-default ─────────────────────────────────────────
-
-
-def test_pick_default_creates_registry_entry_and_writes_slot(
-    client_isolated: TestClient,
-    tmp_hal0_home: str,
-    app_isolated: FastAPI,
-    fake_run_pull: list[dict[str, Any]],
-) -> None:
-    """pick-default seeds the registry, writes the slot TOML, queues a pull."""
-    r = client_isolated.post(
-        "/api/install/pick-default",
-        json={"model_id": "phi3-mini", "slot": "primary"},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["model_id"] == "phi3-mini"
-    assert body["slot"] == "primary"
-    assert "pull_job_id" in body
-    assert body["next"].startswith("poll /api/models/")
-
-    # Registry row exists with curated metadata.
-    registry = app_isolated.state.model_registry
-    entry = registry.get("phi3-mini")
-    assert entry.hf_repo == "microsoft/Phi-3-mini-4k-instruct-gguf"
-    assert entry.license == "MIT"
-
-    # Slot TOML carries model.default = "phi3-mini".
-    slot_toml = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "primary.toml"
-    assert slot_toml.exists()
-    with open(slot_toml, "rb") as f:
-        cfg = tomllib.load(f)
-    assert cfg["model"]["default"] == "phi3-mini"
-
-    # The pull was queued.
-    assert len(fake_run_pull) == 1
-
-
-def test_pick_default_unknown_id_returns_404(
-    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
-) -> None:
-    r = client_isolated.post(
-        "/api/install/pick-default",
-        json={"model_id": "not-a-curated-id", "slot": "primary"},
-    )
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "install.curated_not_found"
-    assert fake_run_pull == []
-
-
-def test_pick_default_defaults_slot_to_chat(
-    client_isolated: TestClient,
-    tmp_hal0_home: str,
-    fake_run_pull: list[dict[str, Any]],
-) -> None:
-    """Body without ``slot`` falls back to ``chat`` (renamed from ``primary``, #654)."""
-    r = client_isolated.post("/api/install/pick-default", json={"model_id": "qwen3-4b"})
-    assert r.status_code == 200, r.text
-    assert r.json()["slot"] == "chat"
-
-
-def test_pick_default_preserves_existing_slot_port_and_backend(
-    client_isolated: TestClient,
-    tmp_hal0_home: str,
-    fake_run_pull: list[dict[str, Any]],
-) -> None:
-    """A pre-existing slot TOML's port/backend survive the model.default rewrite."""
-    slot_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
-    slot_dir.mkdir(parents=True, exist_ok=True)
-    (slot_dir / "chat.toml").write_text(
-        'name = "chat"\nport = 9999\nbackend = "rocm"\nprovider = "llama-server"\n',
-        encoding="utf-8",
-    )
-
-    r = client_isolated.post(
-        "/api/install/pick-default",
-        json={"model_id": "qwen3-4b"},
-    )
-    assert r.status_code == 200, r.text
-
-    with open(slot_dir / "chat.toml", "rb") as f:
-        cfg = tomllib.load(f)
-    assert cfg["port"] == 9999
-    assert cfg["backend"] == "rocm"
-    assert cfg["model"]["default"] == "qwen3-4b"
 
 
 def test_pull_threads_capability_to_run_pull(
