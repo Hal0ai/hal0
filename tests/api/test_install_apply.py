@@ -9,9 +9,9 @@ import pytest
 
 from hal0.api.routes.installer import (
     CuratedModelNotFound,
-    _build_slot_cfg,
     _resolve_tier,
 )
+from hal0.install.orchestrate import _build_slot_cfg
 
 
 @pytest.mark.parametrize(

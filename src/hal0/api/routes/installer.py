@@ -39,7 +39,7 @@ from hal0.bundles import store as bundle_store
 from hal0.bundles import tiers as bundle_tiers
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
-from hal0.install.orchestrate import apply_setup
+from hal0.install.orchestrate import Selections, SlotSelection, apply_setup
 from hal0.registry.curated import CURATED_MODELS, get_curated
 from hal0.registry.model import Model
 from hal0.registry.pull import make_job, run_pull
@@ -419,32 +419,6 @@ def _assign_to_slot(slot: str, model_id: str) -> Path:
 # ── FirstRun v2: orchestrated multi-slot install (design D3) ────────────────
 
 
-def _build_slot_cfg(
-    *,
-    slot: str,
-    model_id: str,
-    device: str,
-    profile: str,
-    port: int,
-    context_size: int = 4096,
-) -> dict[str, Any]:
-    """Podman-aware slot config dict (design D4/D7).
-
-    Sets the v0.2 ``device`` + ``profile`` fields (NOT the deprecated
-    ``backend``) so :meth:`SlotManager.create` writes a TOML the container
-    runtime can launch. The (device, profile) pair must be backend-coherent
-    per #807 — :func:`derive_profile` guarantees that for derived pairs.
-    """
-    return {
-        "name": slot,
-        "port": port,
-        "device": device,
-        "profile": profile,
-        "enabled": True,
-        "model": {"default": model_id, "context_size": context_size},
-    }
-
-
 #: Map a manifest ``ModelEntry.slot`` → (capability, slot_name, port). The
 #: capability drives both the on-disk store group (design D2) and the
 #: device/profile derivation (design D4).
@@ -480,8 +454,6 @@ def _resolve_tier(name: str) -> str:
 
 
 def _bundle_to_selections(bundle, overrides, npu_opt_in, *, storage_dir):
-    from hal0.install.orchestrate import Selections, SlotSelection
-
     slots = []
     for entry in [e for e in (bundle.primary, bundle.coder, *bundle.aux) if e]:
         cap, slot_name, port = _SLOT_META.get(entry.slot, (entry.slot, entry.slot, 8090))
