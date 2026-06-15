@@ -166,6 +166,86 @@ async def test_rewrite_is_noop_without_slot_manager() -> None:
     assert body["model"] == "primary"
 
 
+# ── FLM-backed slot: catalog-id ↔ served-tag translation ────────────────────
+
+
+def _npu_flm_slot() -> list[dict[str, Any]]:
+    """An FLM-backed NPU chat slot whose configured model is the hal0 catalog
+    id ``gemma4-it-e2b-FLM``; the FLM upstream serves the native tag
+    ``gemma4-it:e2b`` (the id `flm serve` accepts and advertises)."""
+    return [
+        {
+            "name": "npu",
+            "type": "llm",
+            "enabled": True,
+            "port": 8088,
+            "model": {"default": "gemma4-it-e2b-FLM", "context_size": 75000},
+        },
+    ]
+
+
+def _patch_flm_id_to_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the FLM catalog probe so tests don't shell out to the host FLM
+    binary. Maps the one id under test to its native tag."""
+    import hal0.providers.flm as flm_mod
+
+    monkeypatch.setattr(
+        flm_mod,
+        "flm_id_to_tag",
+        lambda mid: "gemma4-it:e2b" if mid == "gemma4-it-e2b-FLM" else None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rewrite_translates_flm_alias_to_served_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An FLM chat slot addressed by its alias (``npu``) rewrites to FLM's
+    native served tag — NOT the hal0 ``<tag>-FLM`` catalog id, which no
+    upstream advertises (→ dispatch.no_route)."""
+    from hal0.api.routes.v1 import _rewrite_chat_slot_alias
+
+    _patch_flm_id_to_tag(monkeypatch)
+    req = _FakeRequest(_FakeSlotManager(_npu_flm_slot()))
+    body = await _rewrite_chat_slot_alias(req, {"model": "npu", "messages": []})
+
+    assert body["model"] == "gemma4-it:e2b"
+    assert json.loads(req._body)["model"] == "gemma4-it:e2b"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_normalizes_direct_flm_catalog_id_to_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request keyed directly on the hal0 ``<tag>-FLM`` catalog id (e.g. a
+    consumer pinned to ``gemma4-it-e2b-FLM``) is normalized to the served tag
+    so it routes to the FLM upstream instead of 404ing."""
+    from hal0.api.routes.v1 import _rewrite_chat_slot_alias
+
+    _patch_flm_id_to_tag(monkeypatch)
+    req = _FakeRequest(_FakeSlotManager(_npu_flm_slot()))
+    body = await _rewrite_chat_slot_alias(req, {"model": "gemma4-it-e2b-FLM", "messages": []})
+
+    assert body["model"] == "gemma4-it:e2b"
+    assert json.loads(req._body)["model"] == "gemma4-it:e2b"
+
+
+@pytest.mark.asyncio
+async def test_rewrite_flm_tag_passthrough_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request already keyed on the native FLM tag is untouched — it is what
+    the FLM upstream advertises."""
+    from hal0.api.routes.v1 import _rewrite_chat_slot_alias
+
+    _patch_flm_id_to_tag(monkeypatch)
+    req = _FakeRequest(_FakeSlotManager(_npu_flm_slot()))
+    body = await _rewrite_chat_slot_alias(req, {"model": "gemma4-it:e2b", "messages": []})
+
+    assert body["model"] == "gemma4-it:e2b"
+    assert req._body == b""  # not rewritten
+
+
 # ── dispatcher non-regression ───────────────────────────────────────────────
 
 
