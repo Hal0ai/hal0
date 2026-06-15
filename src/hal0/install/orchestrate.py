@@ -10,6 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from hal0.config.schema import HardwareInfo
+from hal0.install.profile_derive import derive_device, derive_profile
+from hal0.registry.curated import get_curated
+from hal0.registry.pull import get_job, make_job
+
 
 @dataclass(frozen=True)
 class SlotSelection:
@@ -69,3 +74,128 @@ class SetupResult:
     extensions: list[ExtensionOutcome]
     model_ids: list[str]
     pulls: list[PullPlan] = field(default_factory=list)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _build_slot_cfg(*, slot, model_id, device, profile, port, context_size=4096):
+    """Podman-aware slot config dict (device+profile, NOT backend — #807)."""
+    return {
+        "name": slot,
+        "port": port,
+        "device": device,
+        "profile": profile,
+        "enabled": True,
+        "model": {"default": model_id, "context_size": context_size},
+    }
+
+
+def _ensure_registry_entry(registry, model_id) -> None:
+    """No-op shim if the registry already knows the id; create a stub otherwise.
+
+    Mirrors installer.py's ``_ensure_registry_entry``; the real registry object
+    exposes the same surface. A plain dict (tests) is tolerated.
+    """
+    if hasattr(registry, "ensure"):
+        registry.ensure(model_id)
+
+
+def _install_extensions(extensions: dict) -> list[ExtensionOutcome]:
+    return []  # filled in Task 0.3
+
+
+def mark_first_run_done() -> None:
+    return None  # filled in Task 0.3
+
+
+# ── Core orchestration ─────────────────────────────────────────────────────────
+
+
+async def apply_setup(
+    selections: Selections,
+    *,
+    hardware: HardwareInfo,
+    slot_manager,
+    registry,
+    jobs: dict,
+    hf_token: str | None = None,
+    write_sentinel: bool = True,
+) -> SetupResult:
+    """Create the chosen slots OFFLINE, plan their pulls, install extensions,
+    and (optionally) write the first-run sentinel. Best-effort, non-aborting
+    per item (ADR-0010): a bad row is reported with ``skipped``/``error`` and
+    the walk continues. Does NOT run pulls — see ``SetupResult.pulls``."""
+    slot_outcomes: list[SlotOutcome] = []
+    model_ids: list[str] = []
+    pulls: list[PullPlan] = []
+
+    for s in selections.slots:
+        rec = SlotOutcome(slot=s.slot_name, model_id=s.model_id)
+        device = s.device or derive_device(s.capability, hardware, npu_opt_in=selections.npu_opt_in)
+        if device is None:
+            rec.skipped = "not_applicable_on_this_hardware"
+            slot_outcomes.append(rec)
+            continue
+        profile = s.profile or derive_profile(s.capability, device)
+        rec.device, rec.profile = device, profile
+
+        curated = get_curated(s.model_id)
+        if curated is None:
+            rec.skipped = "needs_upstream_routing"
+            slot_outcomes.append(rec)
+            continue
+
+        _ensure_registry_entry(registry, s.model_id)
+        ctx = int(curated.context_length or 0) or 4096
+        cfg = _build_slot_cfg(
+            slot=s.slot_name,
+            model_id=s.model_id,
+            device=device,
+            profile=profile,
+            port=s.port,
+            context_size=ctx,
+        )
+        try:
+            await slot_manager.create(s.slot_name, cfg)
+            rec.created = True
+        except Exception as exc:  # best-effort
+            rec.error = str(exc)
+            slot_outcomes.append(rec)
+            continue
+
+        existing = get_job(jobs, s.model_id)
+        if existing is not None and getattr(existing, "state", None) in ("queued", "running"):
+            job = existing
+        else:
+            job = make_job(s.model_id)
+            jobs[s.model_id] = job
+            pulls.append(
+                PullPlan(
+                    model_id=s.model_id,
+                    job=job,
+                    kwargs=dict(
+                        hf_repo=curated.hf_repo,
+                        hf_file=curated.hf_file,
+                        registry=registry,
+                        hf_token=hf_token,
+                        comfyui_subdir=curated.comfyui_subdir or None,
+                        capability=s.capability,
+                    ),
+                )
+            )
+        rec.pull_job_id = job.job_id
+        model_ids.append(s.model_id)
+        slot_outcomes.append(rec)
+
+    ext_outcomes = _install_extensions(selections.extensions)
+
+    if write_sentinel:
+        mark_first_run_done()
+
+    return SetupResult(
+        slots=slot_outcomes,
+        extensions=ext_outcomes,
+        model_ids=model_ids,
+        pulls=pulls,
+    )
