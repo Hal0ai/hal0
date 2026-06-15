@@ -36,6 +36,7 @@ from hal0.cli.memory_commands import app as memory_app
 from hal0.cli.migrate_commands import app as migrate_app
 from hal0.cli.model_commands import app as model_app
 from hal0.cli.registry_commands import app as registry_app
+from hal0.cli.setup_command import app as setup_app
 from hal0.cli.slot_commands import app as slot_app
 from hal0.cli.update_commands import update as _update_impl
 
@@ -65,6 +66,7 @@ app.add_typer(capabilities_app, name="capabilities")
 app.add_typer(agent_app, name="agent")
 app.add_typer(migrate_app, name="migrate")
 app.add_typer(registry_app, name="registry")
+app.add_typer(setup_app, name="setup", help="First-run setup")
 
 
 # ---------------------------------------------------------------------------
