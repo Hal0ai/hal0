@@ -80,8 +80,8 @@ NO_START=0
 # reverse proxy (Traefik, nginx, Cloudflare Tunnel) — hal0 does not ship
 # an edge terminator. See docs/operate/tls.md for example proxies.
 # Pull destination for `hal0 model pull` and the dashboard's pull buttons.
-# Empty → ask interactively when stdin is a tty, default to <var-lib>/models
-# otherwise. The chosen path is written to hal0.toml as [models].pull_root
+# Empty → default to <var-lib>/models (non-interactive; model selection
+# happens via 'hal0 setup'). The chosen path is written to hal0.toml as [models].pull_root
 # and also auto-included in [models].roots so it's scanned at startup.
 MODELS_DIR="${HAL0_MODELS_DIR:-}"
 for arg in "$@"; do
@@ -97,7 +97,7 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH]
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
-                      Asks interactively if running on a tty and not provided.
+                      Non-interactive; model selection happens via 'hal0 setup'.
 EOF
             exit 0
             ;;

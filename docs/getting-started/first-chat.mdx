@@ -1,6 +1,6 @@
 ---
 title: Send your first chat
-description: OpenWebUI ships prewired to the local hal0 API. Open a tab, pick the model the wizard loaded, and send a message.
+description: OpenWebUI ships prewired to the local hal0 API. Open a tab, pick the model hal0 setup loaded, and send a message.
 sidebar:
   order: 3
 ---
@@ -9,7 +9,7 @@ import { Aside, Steps, Code, LinkCard, CardGrid } from '@astrojs/starlight/compo
 
 The installer brings up **OpenWebUI** alongside the API, already
 pointed at your `primary` slot. No config, no API key. You loaded a
-model in the [FirstRun wizard](/docs/getting-started/first-model/);
+model with [`hal0 setup`](/docs/getting-started/first-model/);
 this page sends the first message.
 
 ## Open OpenWebUI
@@ -38,8 +38,8 @@ own reverse proxy" — hal0 ships no built-in auth and no bundled TLS
 <Steps>
 1. **Pick the model.** The model selector at the top of the chat
    pulls live from `GET /v1/models`. Anything assigned to a `ready`
-   slot shows up. With only the wizard's pick loaded, the list has
-   exactly one entry.
+   slot shows up. With only the model from `hal0 setup` loaded, the
+   list has exactly one entry.
 
 2. **Type and hit send.** The first message after a cold load takes
    longer because the slot is walking `warming → serving`. Subsequent
@@ -80,8 +80,8 @@ rest. Two tabs, two jobs.
 ## Adding more models
 
 The **Models** page in the hal0 dashboard takes a Hugging Face repo
-ID and a target slot. The same pull job the wizard ran handles it:
-streamed progress, same lifecycle.
+ID and a target slot. Streamed progress, same lifecycle as
+`hal0 setup`'s download step.
 
 For multi-slot loadouts (chat + embed + voice all hot at once),
 [`primary` + `embed`](/docs/slots/what-is-a-slot/) co-resident is the
@@ -100,8 +100,8 @@ If the model picker is blank, walk back through the chain:
    return JSON. If it doesn't, check `journalctl -u hal0-api`.
 
 3. **Does any slot own a model?** `hal0 slot list`. `primary` should
-   be `ready` with a `model` set. If not, re-run the
-   [FirstRun wizard](/docs/getting-started/first-model/).
+   be `ready` with a `model` set. If not, re-run
+   [`hal0 setup`](/docs/getting-started/first-model/).
 
 4. **Did you change `HAL0_PORT`?** OpenWebUI's env file still points
    at `:8080` unless you updated it. Edit

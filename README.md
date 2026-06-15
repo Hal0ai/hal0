@@ -34,9 +34,9 @@ curl -fsSL https://hal0.dev/install.sh | bash
 > definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
 > in `/etc/hal0/profiles.toml`; the model catalog is
 > `registry.toml` — the single source of truth for every HuggingFace
-> coordinate and SHA-256 digest. First run lands a **bundle picker**
-> (`hal0-Lite` / `Default` / `Pro` / `Max` + `LMX-Omni-52B-Halo`) —
-> `capabilities.toml` ships empty by design, no silent default. See
+> coordinate and SHA-256 digest. The one-liner seeds the recommended
+> Main slot non-interactively; run `hal0 setup` anytime to configure
+> models, extensions, and NPU interactively. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
 
 ## Why hal0
@@ -109,16 +109,17 @@ be evicted out from under a streaming request.
   control plane; slot containers bind loopback ports (8081–8099 + fixed
   seeds). No shared inference daemon. See
   [docs/operate/container-runtime.md](./docs/operate/container-runtime.md).
-- **Bundle picker on first run** — `capabilities.toml` ships empty by
-  design. The dashboard's first load surfaces four hardware-anchored
-  tiers (`hal0-Lite` ≥16 GB / `Default` ≥32 GB / `Pro` ≥64 GB / `Max`
-  ≥100 GB) plus the vendor-blessed `LMX-Omni-52B-Halo` kit. Tiers
-  that don't fit the detected unified RAM grey out with a tooltip.
-  See [ADR-0010](./docs/internal/adr/0010-bundle-picker-no-default-stack.md)
-  for the no-silent-default rationale.
+- **`hal0 setup` TUI** — after install (or anytime), `hal0 setup`
+  walks you through storage, Extensions (Apps / Agents), Main and
+  Agent model selection, and NPU opt-in, then downloads models with
+  live progress. Non-interactive: `hal0 setup --auto` applies
+  recommended defaults without prompting. Other flags: `--storage-dir
+  PATH`, `--no-pull` (seed slots without downloading models),
+  `--no-extensions`. Set `HAL0_SKIP_SETUP=1` to skip first-run setup
+  entirely during install.
 - **Hardware-aware probe** — detects GPU / NPU / unified memory,
   writes `/etc/hal0/hardware.json`, surfaces VRAM/RAM fit warnings
-  inline in the slot form and the bundle picker.
+  inline in the slot form and during `hal0 setup`.
 - **Dispatcher** — registry-aware routing, cold-cache prefetch,
   upstream fallback (OpenRouter, Anthropic, OpenAI, custom OpenAI-shaped
   endpoints). Mix local + remote per-model in one config.
@@ -131,6 +132,10 @@ be evicted out from under a streaming request.
   tab operates the ComfyUI container (live GTT/RAM gauges, queue
   depth, model inventory) with a gated inference ⇄ generation iGPU
   switchover behind a blast-radius confirm.
+- **Extensions** — selectable Apps (Open WebUI) and Agents (Hermes,
+  Pi) that `hal0 setup` auto-wires into the platform. A future
+  **Stacks** feature will add runtime-switchable model/slot layouts as
+  a replacement for install-time bundle tiers.
 - **OpenWebUI prewired** — chat at `:3001`, zero config. The installer
   writes `openwebui.env` pointing at the local hal0 API.
 - **OmniRouter (8 tools)** — `generate_image`, `edit_image`,
@@ -138,14 +143,15 @@ be evicted out from under a streaming request.
   `embed_text`, `rerank_documents`, `route_to_chat`. Dispatched
   client-side from chat slots; dynamically filtered per request.
 - **Image generation, day one** — `POST /v1/images/generations` via
-  ComfyUI in the `img` slot container (ROCm). Bundle manifests
-  pre-pick SDXL Turbo / Flux-2-Klein-9B as fits the tier.
-- **First-run wizard + bundle picker** — bundle pick (or "Skip —
-  configure manually") → models download in background.
+  ComfyUI in the `img` slot container (ROCm). `hal0 setup` lets you
+  select image-gen as part of the initial configuration.
 - **Atomic self-update with rollback** — `hal0 update --channel
   stable|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts.
 - **One-line install** — `curl -fsSL https://hal0.dev/install.sh | bash`
+  seeds the recommended Main slot and writes the first-run sentinel
+  automatically (no synchronous model download, no interaction needed).
+  Run `hal0 setup` afterward to customize models, apps, and agents.
   (`--models-dir=PATH` or `HAL0_MODELS_DIR=PATH` redirects model pulls
   off `/var/lib/hal0/models`). The bootstrap fetches the release
   manifest, sha256-verifies the tarball, cosign-verifies the signature
@@ -169,9 +175,9 @@ services, external scripts. The bundled agent is single-pick at install:
 `pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
 `@earendil-works/pi-coding-agent` on npm) or `Hermes-Agent` (service
 shape, installed via the hal0-owned `hal0-hermes` wrapper; connects to
-`hal0-api` via `HAL0_INFERENCE_BASE=http://127.0.0.1:8080`). Pick one
-via the first-run wizard or `hal0 agent install <name>`; swap
-atomically with `--switch`. Capital-D destructive MCP calls
+`hal0-api` via `HAL0_INFERENCE_BASE=http://127.0.0.1:8080`). Select
+one during `hal0 setup` (Extensions step) or any time via `hal0 agent
+install <name>`; swap atomically with `--switch`. Capital-D destructive MCP calls
 (`model_pull`, `slot_delete`, `config_write`, etc.) gate through a
 header bell + inbox modal in the dashboard, with CLI parity via
 `hal0 agent approvals {list,approve,deny}`. See
@@ -194,8 +200,8 @@ pins the container image and flag bundle for each backend.
 
 The NPU path is opt-in: the installer places a FastFlowLM `.deb` on
 the host for device-sanity probes (`flm validate`); inference runs
-inside the `hal0-toolbox-flm` container image. With FLM present, the
-bundle picker's Pro and Max tiers surface the trio as a toggle.
+inside the `hal0-toolbox-flm` container image. With FLM present,
+`hal0 setup` surfaces the NPU trio opt-in during setup.
 
 For the container-runtime operator reference — service layout, slot
 TOML fields, profiles, GPU arbiter, and day-2 commands — see
@@ -328,8 +334,9 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
   AMDXDNA hardware context; toggle via `[npu]` in the slot TOML
 - **OmniRouter client-side tool-calling** — 8 tools, dynamic
   per-request filtering, `route_to_chat` cross-slot delegation
-- **First-run bundle picker** — `hal0-Lite` / `Default` / `Pro` /
-  `Max` + `LMX-Omni-52B-Halo`, hardware-anchored, no silent default
+- **`hal0 setup` TUI** — replaces the web FirstRun picker; seeds the
+  recommended Main slot on install (`--auto --no-pull`); interactive
+  post-install flow covers storage, Extensions, models, and NPU opt-in
 - **`hal0 registry import`** — one-shot v0.1.x → v0.3 registry
   recovery from a backup tarball
 - Carried forward: OpenAI-compatible `/v1/*`, portable hardware

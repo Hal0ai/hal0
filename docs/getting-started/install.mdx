@@ -88,8 +88,8 @@ the kernel speaks systemd and Docker. Three shapes worth naming:
 
 Dashboard at `/`. Four KPIs across the top (API, Slots, Memory,
 Throughput), the unified-memory bar, then the slot grid. On a fresh
-install the slots sit `offline` until the first-run wizard or the CLI
-loads one.
+install the Main slot is seeded but `offline` until `hal0 setup`
+(or the CLI) loads a model into it.
 
 ## Prerequisites
 
@@ -204,8 +204,9 @@ directory and skips the systemd path entirely. Useful for dev installs.
 
 `install.sh --models-dir=/srv/models` points the install at an
 existing model store at provision time. Resolution order: explicit
-flag, then `HAL0_MODELS_DIR`, then an interactive prompt on a tty,
-then `/var/lib/hal0/models`. The path is persisted as
+flag, then `HAL0_MODELS_DIR`, then `/var/lib/hal0/models` (default —
+no interactive prompt; model selection happens via `hal0 setup`).
+The path is persisted as
 `[models].pull_root` and auto-included in `[models].roots` so a fresh
 install scans the existing tree on first boot.
 
@@ -242,9 +243,9 @@ hal0 status
 ```
 
 System summary plus the state of every slot. A healthy install shows
-the five built-in slots `offline`; the
-[first-run wizard](/docs/getting-started/first-model/) lights up
-`primary` for you.
+the built-in slots `offline`; run
+[`hal0 setup`](/docs/getting-started/first-model/) to load models and
+bring them up.
 
 ```sh frame="terminal"
 curl http://localhost:8080/v1/models
@@ -263,9 +264,9 @@ kernel upgrade, a Docker daemon swap, or whenever something feels off.
 
 <CardGrid>
   <LinkCard
-    title="Load your first model"
+    title="Set up your first model"
     href="/docs/getting-started/first-model/"
-    description="The FirstRun wizard: pick a bundle, set storage, run an orchestrated multi-slot install." />
+    description="Run hal0 setup to pick models, enable Extensions, and start your first slot." />
   <LinkCard
     title="Send your first chat"
     href="/docs/getting-started/first-chat/"

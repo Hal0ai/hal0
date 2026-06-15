@@ -22,11 +22,20 @@ the surface is fully wired.
 hal0 status                                  # system + slot summary
 hal0 probe                                   # re-run hardware detection
 hal0 serve [--host] [--port] [--reload]      # daemon mode
+hal0 setup [--auto] [--storage-dir PATH]     # interactive setup TUI
+           [--no-pull] [--no-extensions]
 ```
 
 `hal0 status` is what you run first when something looks off.
 `hal0 probe` rewrites `/etc/hal0/hardware.json` — re-run after BIOS
 UMA changes, GPU swaps, or RAM upgrades.
+
+`hal0 setup` is the interactive TUI for post-install configuration:
+storage, Extensions (Apps / Agents), model selection, and NPU opt-in.
+`--auto` applies recommended defaults non-interactively. `--no-pull`
+seeds slots without downloading models. `--no-extensions` skips the
+Apps / Agents step. `--storage-dir PATH` overrides the model storage
+location. Set `HAL0_SKIP_SETUP=1` to skip first-run setup during install.
 
 ## Slots
 
