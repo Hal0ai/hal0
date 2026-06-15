@@ -591,6 +591,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${HAL0_USER}
+# Group-writable umask so files the API writes into a shared editable tree stay
+# editable by the hal0 group (Hermes & in-runtime agents) — part of the #843
+# root-clobber fix. Harmless on an immutable FHS install.
+UMask=0002
 WorkingDirectory=${API_WORKDIR}
 EnvironmentFile=${API_ENV}
 ExecStart=${HAL0_BIN} serve --host ${API_BIND_HOST} --port \${HAL0_PORT}
