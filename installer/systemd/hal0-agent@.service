@@ -88,8 +88,13 @@ LogsDirectory=hal0
 
 # Carve out the exact paths Hermes + hal0 need to write to under the
 # `ProtectSystem=strict` lockdown. /run/hal0 is for sockets, lock
-# files, and the agent's NOTIFY_SOCKET helpers.
-ReadWritePaths=/var/lib/hal0 /var/log/hal0 /run/hal0
+# files, and the agent's NOTIFY_SOCKET helpers. /etc/hal0 is needed by
+# the `render-context` ExecStartPre, which (re)writes HERMES.md/STATE.md
+# there — without it the render fails with a read-only-fs error and the
+# agent boots with stale live-context. File perms still gate writes:
+# tokens.toml / auth.toml stay root-owned 0600, so the hal0 user can't
+# read or rewrite secrets even with the path made writable.
+ReadWritePaths=/etc/hal0 /var/lib/hal0 /var/log/hal0 /run/hal0
 
 # Stream stdout/stderr into journald with a per-instance identifier
 # so `journalctl -u hal0-agent@hermes` / `-t hal0-agent@hermes` both

@@ -153,11 +153,12 @@ class TestSandboxing:
     def test_readwritepaths_covers_runtime_dirs(self, template_text: str) -> None:
         # `ProtectSystem=strict` mounts /usr + /etc + /boot read-only;
         # without ReadWritePaths the agent can't write to its own state
-        # dir. Assert all three required paths are listed.
+        # dir. /etc/hal0 is required so the render-context ExecStartPre can
+        # (re)write HERMES.md/STATE.md — otherwise it fails read-only-fs.
         m = re.search(r"^ReadWritePaths=(.+)$", template_text, re.MULTILINE)
         assert m is not None
         paths = m.group(1).split()
-        for required in ("/var/lib/hal0", "/var/log/hal0", "/run/hal0"):
+        for required in ("/etc/hal0", "/var/lib/hal0", "/var/log/hal0", "/run/hal0"):
             assert required in paths, (
                 f"ReadWritePaths missing {required} — agent will fail to write state"
             )
@@ -223,6 +224,17 @@ class TestHermesOverride:
             r'^Environment="HAL0_INFERENCE_BASE=http://127\.0\.0\.1:8080"',
             override_text,
             re.MULTILINE,
+        )
+
+    def test_no_hardcoded_python_minor_in_web_dist(self, override_text: str) -> None:
+        # Regression: the override used to pin
+        # HERMES_WEB_DIST=…/lib/python3.12/site-packages/… which crash-looped
+        # the agent on any other interpreter (py3.14 install). The path is now
+        # resolved at runtime by the shim — the override must not hardcode a
+        # `python3.<minor>` web_dist path anymore.
+        assert not re.search(r"python3\.\d+.*web_dist", override_text), (
+            "override.conf still pins a python3.<minor> web_dist path — resolve it "
+            "at runtime in agent_shim._resolve_web_dist instead"
         )
 
 

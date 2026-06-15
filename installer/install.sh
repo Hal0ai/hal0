@@ -808,6 +808,25 @@ else
     ui_spinner_run "apt-get update (refresh package index)" \
         apt-get update -qq
 
+    # FLM host-support gate. Upstream ships ONE Ubuntu-24.04 .deb whose hard
+    # deps are the ffmpeg6-era SONAMEs (libavcodec60 …) + boost1.83. Newer
+    # Ubuntu (25.10 "resolute" onward ships ffmpeg7 = libav*62 / boost1.90), so
+    # those candidates don't exist and BOTH the runtime-libs apt call and the
+    # `.deb` install fail with a noisy `exit 100`. Probe the keystone SONAME up
+    # front: if it isn't even a known package, skip the host-FLM steps with ONE
+    # honest line instead of two scary dumps. The npu container slot bundles its
+    # own runtime, so NPU inference is unaffected — only the host `flm validate`
+    # probe is disabled. (Upstream fix = a FLM build for this release; the
+    # package-name pins can't be satisfied here regardless of what we request.)
+    if apt-cache show libavcodec60 >/dev/null 2>&1; then
+        FLM_HOST_LIBS_OK=1
+    else
+        FLM_HOST_LIBS_OK=0
+        warn "$(distro_pretty): host FastFlowLM unsupported — upstream ships an Ubuntu-24.04 .deb (ffmpeg6/boost1.83); this release has ffmpeg7/boost1.90"
+        warn "  skipping host FLM libs + .deb. The npu container slot bundles its own runtime, so NPU inference is unaffected"
+        warn "  (only the host 'flm validate' probe is disabled). Install FastFlowLM manually if upstream ships a build for this release."
+    fi
+
     # 1. libxrt-npu2 — best-effort. Available only when the host's apt
     #    sources carry an XRT NPU build (e.g. a pre-existing vendor repo
     #    on upgraded boxes). The FLM container image bundles its own
@@ -832,13 +851,14 @@ else
     #    candidate", a mirror flake) used to abort the entire hal0 install
     #    here — over optional host-side NPU libs the containerized slot
     #    doesn't even need. Warn + continue, mirroring libxrt-npu2.
-    if ui_spinner_run "Installing FLM runtime libs (ffmpeg6 + boost1.83 + fftw3)" \
+    if [[ "${FLM_HOST_LIBS_OK}" -eq 1 ]] \
+        && ui_spinner_run "Installing FLM runtime libs (ffmpeg6 + boost1.83 + fftw3)" \
         apt-get install -y \
             libavformat60 libavcodec60 libavutil58 libswscale7 libswresample4 \
             libboost-program-options1.83.0 \
             libfftw3-single3; then
         :
-    else
+    elif [[ "${FLM_HOST_LIBS_OK}" -eq 1 ]]; then
         warn "FLM runtime libs not fully available from configured apt sources — host 'flm validate' may fail"
         warn "  the npu container slot bundles its own runtime and is unaffected"
     fi
@@ -847,7 +867,9 @@ else
     #    doesn't match, warn + skip. NPU paths gate on `flm validate`
     #    succeeding later — GPU-only hal0 still ships fine.
     FLM_DEB_TMP="/tmp/fastflowlm_${FLM_DEB_VERSION}.deb"
-    NEED_FLM_INSTALL=1
+    # 0 when the host-FLM gate above found this release can't satisfy the .deb's
+    # ffmpeg6/boost1.83 deps — skip download+install entirely (no noisy exit).
+    NEED_FLM_INSTALL="${FLM_HOST_LIBS_OK}"
     if command -v dpkg-query >/dev/null 2>&1 && \
        dpkg-query -W -f='${Version}\n' fastflowlm 2>/dev/null | grep -qx "${FLM_DEB_VERSION}"; then
         info "fastflowlm ${FLM_DEB_VERSION} already installed — skipping download"
@@ -1212,7 +1234,12 @@ else
     # provision ran, plus the system-scope gateway (which the provision does
     # not install).
     if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
-        systemctl enable --now hal0-agent@hermes.service
+        # Non-fatal: a hermes start hiccup must NOT abort an otherwise-good
+        # install (hal0-api + chat are already up). Under `set -e` a failed
+        # `enable --now` (e.g. the unit tripped StartLimitBurst) would fire the
+        # ERR trap; `|| warn` downgrades it to the wait_active warning below.
+        systemctl enable --now hal0-agent@hermes.service \
+            || warn "hal0-agent@hermes enable returned non-zero — continuing (check 'journalctl -u hal0-agent@hermes -n 40')"
         if wait_active hal0-agent@hermes.service 20; then
             info "hal0-agent@hermes is running (chat at 127.0.0.1:9119, proxied by hal0-api)"
         else
@@ -1227,9 +1254,11 @@ else
         # HERMES_HOME is unset so the generator bakes the hal0 default
         # (~/.hermes), not a value inherited from the installer env.
         info "installing system-scope hermes gateway (User=hal0)"
-        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0
+        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 \
+            || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
         systemctl daemon-reload
-        systemctl enable --now hermes-gateway.service
+        systemctl enable --now hermes-gateway.service \
+            || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
         if wait_active hermes-gateway.service 20; then
             info "hermes-gateway is running (Telegram/Discord)"
         else

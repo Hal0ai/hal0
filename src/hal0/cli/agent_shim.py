@@ -207,6 +207,25 @@ def _is_ready(cfg: AgentConfig, *, timeout: float = 1.0) -> bool:
 # ----------------------------------------------------------------------------
 
 
+def _resolve_web_dist(cfg: AgentConfig) -> Path | None:
+    """Locate the pre-built Hermes dashboard assets inside the agent venv.
+
+    The wheel ships the bundle at
+    ``<venv>/lib/pythonX.Y/site-packages/hermes_cli/web_dist``. We GLOB the
+    ``pythonX.Y`` segment rather than hardcode a minor version: the agent venv
+    is built with whatever ``python3`` the host provides (3.11-3.14+), so a
+    pinned ``python3.12`` path silently breaks on every other interpreter — the
+    cause of the install-time hermes crash-loop on a Python-3.14 box. Returns
+    the first existing match, or ``None`` when no built dist is present.
+    """
+
+    matches = sorted(cfg.venv.glob("lib/python3.*/site-packages/hermes_cli/web_dist"))
+    for path in matches:
+        if path.is_dir():
+            return path
+    return None
+
+
 def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
     """Build the argv that boots Hermes with ``/api/events`` + ``/api/pty``.
 
@@ -225,7 +244,12 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
       surface needs both.
     * ``--skip-build`` keeps the unit start fast and works without npm
       on the production box — the wheel ships ``hermes_cli/web_dist/``
-      pre-built.
+      pre-built. Added ONLY when a built dist is actually found (see
+      :func:`_resolve_web_dist`): passing it with a missing/wrong-path
+      dist makes hermes hard-exit 1 ("no web dist found") and crash-loop
+      the unit. If the dist is absent we drop the flag so a box with npm
+      can build it; ``HERMES_WEB_DIST`` (set in the env) independently
+      points hermes at the right tree regardless of the venv Python minor.
     * ``--no-open`` because we're running headless (no browser open).
     * ``--host 127.0.0.1`` — hal0-api proxies the WS; binding to all
       interfaces would let any LAN host reach the agent's PTY without
@@ -236,7 +260,7 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
       would have nothing to render (DA-sec-ops MUST-FIX #1).
     """
 
-    return [
+    argv = [
         str(cfg.hermes_bin),
         "dashboard",
         "--host",
@@ -245,8 +269,10 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
         str(cfg.port),
         "--tui",
         "--no-open",
-        "--skip-build",
     ]
+    if _resolve_web_dist(cfg) is not None:
+        argv.append("--skip-build")
+    return argv
 
 
 def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
@@ -258,6 +284,21 @@ def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
     # Mirror ``--tui`` so any nested hermes-cli invocation (e.g. an
     # in-process subprocess.run) sees the same flag without parsing argv.
     env["HERMES_DASHBOARD_TUI"] = "1"
+    # Point hermes at the version-correct pre-built dashboard assets. We honor
+    # an existing HERMES_WEB_DIST ONLY when it resolves to a real directory (a
+    # deliberate hand-built tree set via /etc/hal0/agents/hermes.env); a stale
+    # value inherited from an older unit drop-in — notably the pre-fix
+    # python3.12 path that breaks on other interpreters — won't exist, so we
+    # replace it with the auto-resolved path. When no built dist is found at
+    # all we drop the var so hermes falls back to its own __file__-relative
+    # default rather than a known-wrong path.
+    existing = env.get("HERMES_WEB_DIST")
+    if not (existing and Path(existing).is_dir()):
+        web_dist = _resolve_web_dist(cfg)
+        if web_dist is not None:
+            env["HERMES_WEB_DIST"] = str(web_dist)
+        else:
+            env.pop("HERMES_WEB_DIST", None)
     # Drop NOTIFY_SOCKET from the child — the shim owns sd_notify,
     # and a misbehaving Hermes plugin shouldn't be able to send
     # READY=1 / STOPPING=1 to systemd on our behalf.

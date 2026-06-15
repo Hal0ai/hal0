@@ -174,8 +174,30 @@ class TestHermesArgv:
         argv = agent_shim._build_hermes_argv(_cfg())
         assert "--tui" in argv
 
-    def test_skip_build_to_avoid_npm_on_runtime_box(self) -> None:
-        argv = agent_shim._build_hermes_argv(_cfg())
+    @staticmethod
+    def _mk_web_dist(venv: Path, pyver: str = "python3.14") -> Path:
+        dist = venv / "lib" / pyver / "site-packages" / "hermes_cli" / "web_dist"
+        dist.mkdir(parents=True)
+        return dist
+
+    def test_skip_build_present_when_web_dist_exists(self, tmp_path: Path) -> None:
+        # Built dist present → pass --skip-build to avoid npm at runtime.
+        self._mk_web_dist(tmp_path)
+        argv = agent_shim._build_hermes_argv(_cfg(venv=tmp_path))
+        assert "--skip-build" in argv
+
+    def test_skip_build_omitted_when_web_dist_missing(self, tmp_path: Path) -> None:
+        # No built dist → DON'T pass --skip-build: that combo makes hermes
+        # hard-exit 1 and crash-loop the unit (the original install failure).
+        # Drop it so a box with npm can build instead.
+        argv = agent_shim._build_hermes_argv(_cfg(venv=tmp_path))
+        assert "--skip-build" not in argv
+
+    def test_skip_build_version_agnostic_not_pinned_to_312(self, tmp_path: Path) -> None:
+        # Regression for the hardcoded python3.12 path: a python3.14 venv must
+        # still be recognized so --skip-build is passed.
+        self._mk_web_dist(tmp_path, "python3.14")
+        argv = agent_shim._build_hermes_argv(_cfg(venv=tmp_path))
         assert "--skip-build" in argv
 
     def test_binds_loopback_only(self) -> None:
@@ -225,6 +247,49 @@ class TestHermesEnv:
         with patch.dict(os.environ, {"NOTIFY_SOCKET": "/run/systemd/notify"}):
             env = agent_shim._build_hermes_env(_cfg())
         assert "NOTIFY_SOCKET" not in env
+
+    @staticmethod
+    def _mk_web_dist(venv: Path, pyver: str = "python3.14") -> Path:
+        dist = venv / "lib" / pyver / "site-packages" / "hermes_cli" / "web_dist"
+        dist.mkdir(parents=True)
+        return dist
+
+    def test_web_dist_resolved_to_actual_venv_python(self, tmp_path: Path) -> None:
+        # HERMES_WEB_DIST is set to the version-correct resolved path.
+        dist = self._mk_web_dist(tmp_path, "python3.14")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HERMES_WEB_DIST", None)
+            env = agent_shim._build_hermes_env(_cfg(venv=tmp_path))
+        assert env["HERMES_WEB_DIST"] == str(dist)
+
+    def test_stale_web_dist_env_replaced_with_resolved(self, tmp_path: Path) -> None:
+        # A stale python3.12 path inherited from an old unit drop-in does NOT
+        # exist → must be replaced by the auto-resolved python3.14 dir. This is
+        # the in-place fix for boxes that didn't re-run the installer.
+        dist = self._mk_web_dist(tmp_path, "python3.14")
+        stale = "/var/lib/hal0/venvs/hermes/lib/python3.12/site-packages/hermes_cli/web_dist"
+        with patch.dict(os.environ, {"HERMES_WEB_DIST": stale}):
+            env = agent_shim._build_hermes_env(_cfg(venv=tmp_path))
+        assert env["HERMES_WEB_DIST"] == str(dist)
+
+    def test_valid_user_web_dist_env_honored(self, tmp_path: Path) -> None:
+        # An operator-set HERMES_WEB_DIST that resolves to a real dir (hand-built
+        # tree via hermes.env) wins — the shim must not clobber it.
+        user_dist = tmp_path / "custom-dist"
+        user_dist.mkdir()
+        venv = tmp_path / "venv"
+        self._mk_web_dist(venv, "python3.14")
+        with patch.dict(os.environ, {"HERMES_WEB_DIST": str(user_dist)}):
+            env = agent_shim._build_hermes_env(_cfg(venv=venv))
+        assert env["HERMES_WEB_DIST"] == str(user_dist)
+
+    def test_web_dist_env_dropped_when_missing(self, tmp_path: Path) -> None:
+        # No built dist anywhere + a stale inherited value → pop it so hermes
+        # falls back to its own __file__ default, not a known-wrong path.
+        stale = "/var/lib/hal0/venvs/hermes/lib/python3.12/site-packages/hermes_cli/web_dist"
+        with patch.dict(os.environ, {"HERMES_WEB_DIST": stale}):
+            env = agent_shim._build_hermes_env(_cfg(venv=tmp_path))
+        assert "HERMES_WEB_DIST" not in env
 
 
 # ---------------------------------------------------------------------------
