@@ -9,7 +9,8 @@
  * Everything is scoped under .npu-card so the generic class names (.combo,
  * .aie-tile, .gauge…) can't collide with other panes. Slot-control buttons
  * (.sctrl / .slot-ctrls) are intentionally NOT redefined here — they reuse the
- * global definitions shared with the inference/comfyui slot cards. */
+ * shared definitions in engine-panes.css, whose selector includes .npu-card
+ * so the buttons match the inference/comfyui slot cards exactly. */
 
 .npu-card {
   --npu: var(--dev-npu); /* #c896ff — NPU device hue, the card accent */

@@ -1030,13 +1030,13 @@
 }
 
 /* per-slot control icons */
-:is(.infer-pane, .npu-pane) .slot-ctrls {
+:is(.infer-pane, .npu-pane, .npu-card) .slot-ctrls {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
 }
-:is(.infer-pane, .npu-pane) .sctrl {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1052,34 +1052,34 @@
     border-color 0.12s,
     color 0.12s;
 }
-:is(.infer-pane, .npu-pane) .sctrl:hover {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl:hover {
   border-color: var(--line-strong);
   background: var(--bg-2);
   color: var(--fg-2);
 }
-:is(.infer-pane, .npu-pane) .sctrl:disabled {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl:disabled {
   opacity: 0.4;
   cursor: default;
 }
-:is(.infer-pane, .npu-pane) .sctrl.start {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.start {
   color: var(--ok);
   border-color: var(--ok-line);
 }
-:is(.infer-pane, .npu-pane) .sctrl.start:hover {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.start:hover {
   background: var(--ok-soft);
 }
-:is(.infer-pane, .npu-pane) .sctrl.stop {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.stop {
   color: var(--err);
   border-color: var(--err-line);
 }
-:is(.infer-pane, .npu-pane) .sctrl.stop:hover {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.stop:hover {
   background: var(--err-soft);
 }
-:is(.infer-pane, .npu-pane) .sctrl.restart {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.restart {
   color: var(--comfy);
   border-color: var(--comfy-line);
 }
-:is(.infer-pane, .npu-pane) .sctrl.restart:hover {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.restart:hover {
   background: var(--comfy-soft);
 }
 
