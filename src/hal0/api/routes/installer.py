@@ -39,10 +39,10 @@ from hal0.bundles import store as bundle_store
 from hal0.bundles import tiers as bundle_tiers
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
-from hal0.install.profile_derive import derive_device, derive_profile
+from hal0.install.orchestrate import apply_setup
 from hal0.registry.curated import CURATED_MODELS, get_curated
 from hal0.registry.model import Model
-from hal0.registry.pull import get_job, make_job, run_pull
+from hal0.registry.pull import make_job, run_pull
 from hal0.registry.store import ModelAlreadyExists
 
 # Auth was removed in ADR-0012. All endpoints are open on the local
@@ -479,6 +479,31 @@ def _resolve_tier(name: str) -> str:
     )
 
 
+def _bundle_to_selections(bundle, overrides, npu_opt_in, *, storage_dir):
+    from hal0.install.orchestrate import Selections, SlotSelection
+
+    slots = []
+    for entry in [e for e in (bundle.primary, bundle.coder, *bundle.aux) if e]:
+        cap, slot_name, port = _SLOT_META.get(entry.slot, (entry.slot, entry.slot, 8090))
+        ov = overrides.get(slot_name) if isinstance(overrides.get(slot_name), dict) else {}
+        slots.append(
+            SlotSelection(
+                capability=cap,
+                slot_name=slot_name,
+                port=port,
+                model_id=ov.get("model_id") or entry.model_name,
+                device=ov.get("device"),
+                profile=ov.get("profile"),
+            )
+        )
+    return Selections(
+        storage_dir=storage_dir,
+        slots=slots,
+        extensions={},
+        npu_opt_in=npu_opt_in,
+    )
+
+
 @router.post("/apply")
 async def install_apply(request: Request, background: BackgroundTasks) -> dict[str, Any]:
     """Orchestrated FirstRun install (design D3).
@@ -488,13 +513,10 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
         { "tier": "hal0-Default", "storage_dir": "/srv/models",
           "npu_opt_in": false, "overrides": { "<slot>": {model_id, profile, ...} } }
 
-    For each manifest member: derive device+profile from the hardware probe,
-    create the slot OFFLINE (``SlotManager.create`` — not started, design D7),
-    and seed a pull job reusing ``run_pull`` (capability-grouped path, D2).
-    Best-effort, non-aborting per row (ADR-0010): a member that fails or has no
-    curated/coherent mapping is reported with a ``skipped``/``error`` reason and
-    the walk continues. The UI reattaches per model via the existing
-    ``/api/models/{id}/pull/stream`` SSE.
+    Thin wrapper: builds a :class:`~hal0.install.orchestrate.Selections` from the
+    tier manifest and delegates to :func:`~hal0.install.orchestrate.apply_setup`.
+    Best-effort, non-aborting per row (ADR-0010). The UI reattaches per model via
+    the existing ``/api/models/{id}/pull/stream`` SSE.
     """
     try:
         body = await request.json()
@@ -511,83 +533,31 @@ async def install_apply(request: Request, background: BackgroundTasks) -> dict[s
         raise PickDefaultError("body.overrides must be an object")
 
     canonical = _resolve_tier(tier.strip())
-    manifest = bundle_tiers.load_bundle(canonical)
-    bundle = manifest.bundle
+    bundle = bundle_tiers.load_bundle(canonical).bundle
 
-    hw = request.app.state.hardware_probe.probe()
-    registry = request.app.state.model_registry
-    jobs = request.app.state.model_pull_jobs
-    slot_manager = request.app.state.slot_manager
+    selections = _bundle_to_selections(
+        bundle,
+        overrides,
+        npu_opt_in,
+        storage_dir=body.get("storage_dir") or "",
+    )
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-
-    entries = [e for e in (bundle.primary, bundle.coder, *bundle.aux) if e is not None]
-    model_ids: list[str] = []
-    slot_results: list[dict[str, Any]] = []
-
-    for entry in entries:
-        cap, slot_name, port = _SLOT_META.get(entry.slot, (entry.slot, entry.slot, 8090))
-        ov = overrides.get(slot_name) if isinstance(overrides.get(slot_name), dict) else {}
-        model_id = ov.get("model_id") or entry.model_name
-        rec: dict[str, Any] = {"slot": slot_name, "model_id": model_id, "created": False}
-
-        device = ov.get("device") or derive_device(cap, hw, npu_opt_in=npu_opt_in)
-        if device is None:
-            # NPU/STT lane not provisioned on this box — skip cleanly (§8).
-            rec["skipped"] = "not_applicable_on_this_hardware"
-            slot_results.append(rec)
-            continue
-        profile = ov.get("profile") or derive_profile(cap, device)
-        rec["device"], rec["profile"] = device, profile
-
-        curated = get_curated(model_id)
-        if curated is None:
-            # Manifest references a non-pullable pick (multi-file ONNX, etc.).
-            rec["skipped"] = "needs_upstream_routing"
-            slot_results.append(rec)
-            continue
-
-        _ensure_registry_entry(registry, model_id)
-        ctx = int(curated.context_length or 0) or 4096
-        cfg = _build_slot_cfg(
-            slot=slot_name,
-            model_id=model_id,
-            device=device,
-            profile=profile,
-            port=port,
-            context_size=ctx,
-        )
-        try:
-            await slot_manager.create(slot_name, cfg)
-            rec["created"] = True
-        except Exception as exc:  # best-effort, non-aborting (ADR-0010)
-            rec["error"] = str(exc)
-            slot_results.append(rec)
-            continue
-
-        existing = get_job(jobs, model_id)
-        if existing is not None and existing.state in ("queued", "running"):
-            job = existing
-        else:
-            job = make_job(model_id)
-            jobs[model_id] = job
-            background.add_task(
-                run_pull,
-                job,
-                hf_repo=curated.hf_repo,
-                hf_file=curated.hf_file,
-                registry=registry,
-                hf_token=hf_token,
-                comfyui_subdir=curated.comfyui_subdir or None,
-                capability=cap,
-            )
-        rec["pull_job_id"] = job.job_id
-        model_ids.append(model_id)
-        slot_results.append(rec)
+    result = await apply_setup(
+        selections,
+        hardware=request.app.state.hardware_probe.probe(),
+        slot_manager=request.app.state.slot_manager,
+        registry=request.app.state.model_registry,
+        jobs=request.app.state.model_pull_jobs,
+        hf_token=hf_token,
+        write_sentinel=False,  # the dashboard still POSTs /complete explicitly
+    )
+    for plan in result.pulls:
+        background.add_task(run_pull, plan.job, **plan.kwargs)
 
     return {
         "tier": canonical,
-        "model_ids": model_ids,
-        "slots": slot_results,
+        "model_ids": result.model_ids,
+        "slots": [vars(s) for s in result.slots],
         "next": "reattach /api/models/{id}/pull/stream per model_id",
     }
 
