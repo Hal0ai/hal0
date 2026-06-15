@@ -34,7 +34,7 @@ test.describe('Mobile nav drawer (≤720px)', () => {
     // full nav — including the destinations the dead bottom tabs never reached.
     // v0.5 nav: "Dashboard" relabelled "Overview"; Connections dissolved into
     // the Slots ▸ Endpoints + Agent ▸ MCP sub-links.
-    for (const label of ['Overview', 'Slots', 'Models', 'Agent', 'Logs', 'Settings']) {
+    for (const label of ['Overview', 'Slots', 'Models', 'Agents', 'Logs', 'Settings']) {
       await expect(
         drawer.locator('.sb-row', { has: page.locator('.lbl') }).filter({ hasText: label }).first(),
       ).toBeVisible()

@@ -124,6 +124,10 @@ export const ENDPOINTS = {
     `/api/agents/${encodeURIComponent(id)}/personas/${encodeURIComponent(pid)}/budget/charge`,
   agentActivity: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/activity`,
+  // Restart the systemd unit backing an agent (POST → {status, detail}).
+  // Backend: hal0.api.agents.restart — only "hermes" is a known id in v0.3.
+  agentRestart: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/restart`,
   agentApprovals: '/api/agent/approvals',
   // Approval CRUD — list is an alias of agentApprovals; approve/deny are
   // the action endpoints added by backend-dev task #7 (PR #741 TODOs).
