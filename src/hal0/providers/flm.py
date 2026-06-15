@@ -651,6 +651,29 @@ def is_installed_flm_id(model_id: str) -> bool:
     )
 
 
+def flm_id_to_tag(model_id: str) -> str | None:
+    """Resolve a hal0 ``<tag>-FLM`` id back to FLM's native ``family:size`` tag.
+
+    Inverse of the forward map in :func:`is_installed_flm_id`
+    (``gemma4-it:e2b`` → ``gemma4-it-e2b-FLM``). FLM's ``serve``/``pull``
+    subcommands only accept the colon tag, so any code that hands a hal0
+    catalog id straight to FLM (the slot manager's ``flm_tag`` stamp) must
+    translate first — otherwise FLM answers ``Model not found``.
+
+    Matches on the served-catalog tag regardless of ``installed`` (the
+    transform is a pure naming map). Returns the colon tag, or ``None`` when
+    ``model_id`` isn't a recognised FLM id or the catalog probe is empty —
+    the caller then falls back to the raw id.
+    """
+    if not model_id.endswith("-FLM"):
+        return None
+    for m in flm_served_models():
+        tag = m.get("tag")
+        if isinstance(tag, str) and tag.replace(":", "-") + "-FLM" == model_id:
+            return tag
+    return None
+
+
 def flm_pull_command(tag: str) -> tuple[list[str], str]:
     """Return ``(argv, host_models_dir)`` for a host ``flm pull <tag>`` run.
 

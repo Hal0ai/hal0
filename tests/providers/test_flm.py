@@ -454,3 +454,41 @@ def test_is_installed_flm_id_matches_installed_tag() -> None:
         # missing -FLM suffix (a colon tag or GGUF id) → false (fast path)
         assert flm.is_installed_flm_id("gemma4-it:e4b") is False
         assert flm.is_installed_flm_id("chadrock-35b-ace-saber") is False
+
+
+# ─── flm_id_to_tag (hal0 <tag>-FLM id → FLM native colon tag) ────────────────
+
+
+def test_flm_id_to_tag_resolves_colon_tag() -> None:
+    """A hal0 ``<tag>-FLM`` id resolves to FLM's native ``family:size`` tag.
+
+    Regression for the slot crash-loop where the FLM provider was handed the
+    raw ``-FLM`` id and FLM answered "Model not found" (manager._resolve_model_info
+    stamped ``flm_tag = model_id`` without translating).
+    """
+    import hal0.providers.flm as flm
+
+    fake = [
+        {"tag": "gemma4-it:e2b", "installed": True, "capabilities": ["chat"]},
+        {"tag": "embed-gemma:300m", "installed": True, "capabilities": ["embed"]},
+        {"tag": "whisper-v3:turbo", "installed": False, "capabilities": ["stt"]},
+    ]
+    with patch("hal0.providers.flm.flm_served_models", lambda: fake):
+        # family with embedded dashes still maps off the LAST segment
+        assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") == "gemma4-it:e2b"
+        assert flm.flm_id_to_tag("embed-gemma-300m-FLM") == "embed-gemma:300m"
+        # resolves regardless of installed flag (pure naming transform)
+        assert flm.flm_id_to_tag("whisper-v3-turbo-FLM") == "whisper-v3:turbo"
+        # unknown id → None (caller falls back to the raw id)
+        assert flm.flm_id_to_tag("nope-7b-FLM") is None
+        # already a colon tag / not an -FLM id → None (fast path)
+        assert flm.flm_id_to_tag("gemma4-it:e2b") is None
+        assert flm.flm_id_to_tag("chadrock-35b-ace-saber") is None
+
+
+def test_flm_id_to_tag_empty_catalog_returns_none() -> None:
+    """When the catalog probe is empty, resolution yields None (no crash)."""
+    import hal0.providers.flm as flm
+
+    with patch("hal0.providers.flm.flm_served_models", list):
+        assert flm.flm_id_to_tag("gemma4-it-e2b-FLM") is None

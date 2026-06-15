@@ -63,7 +63,7 @@ def test_npu_tucked_into_extra_on_dump() -> None:
 
 def test_flm_npu_seed_profile() -> None:
     prof = SEED_PROFILES["flm"]
-    assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
+    assert prof["image"] == "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
     assert prof["flags"] == ""
     assert prof["mtp"] is False
 

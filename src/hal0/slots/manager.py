@@ -2215,7 +2215,23 @@ class SlotManager:
         # "model_id" is a FastFlowLM tag like ``qwen3.5:4b`` rather than a
         # local-file model) use them as the canonical lookup key. Mirrors
         # haloai's haloai-launch behaviour.
-        info: dict[str, Any] = {"_model_key": model_id, "flm_tag": model_id}
+        #
+        # FLM's ``serve`` only accepts the native ``family:size`` tag
+        # (``gemma4-it:e2b``), but slots persist the hal0 catalog id
+        # (``gemma4-it-e2b-FLM``). Translate so the FLM provider serves the
+        # right tag instead of passing the ``-FLM`` id straight through, which
+        # makes FLM answer "Model not found" and the slot crash-loop. Falls
+        # back to the raw id when the catalog can't resolve it.
+        flm_tag = model_id
+        try:
+            from hal0.providers.flm import flm_id_to_tag
+        except ImportError:
+            flm_id_to_tag = None  # type: ignore[assignment]
+        if flm_id_to_tag is not None:
+            resolved_tag = flm_id_to_tag(model_id)
+            if resolved_tag:
+                flm_tag = resolved_tag
+        info: dict[str, Any] = {"_model_key": model_id, "flm_tag": flm_tag}
 
         try:
             from hal0.registry.store import ModelNotFound, ModelRegistry

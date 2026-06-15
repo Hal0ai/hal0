@@ -44,7 +44,7 @@ quant        = "Q4_K_M"
 [profile.flm]
 # NPU LLM/trio slot (FastFlowLM). Flags are built by FLMProvider.container_spec,
 # not by this profile — image pin only. No backend (device_class drives display).
-image        = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
+image        = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
 flags        = ""
 mtp          = false
 device_class = "npu"
