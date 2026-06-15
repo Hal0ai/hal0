@@ -46,7 +46,7 @@ def test_uninstall_default_args(captured_exec: dict[str, Any]) -> None:
     the Typer command function directly so the production isatty() check
     sees the True we monkeypatched."""
     with pytest.raises(typer.Exit) as exc:
-        uninstall(keep_data=False, force=False, dev=False)
+        uninstall(purge=False, keep_data=False, force=False, dev=False)
     assert (exc.value.exit_code or 0) == 0
     assert captured_exec["file"] == "bash"
     assert captured_exec["argv"][0] == "bash"
@@ -78,8 +78,42 @@ def test_uninstall_dev_flag(captured_exec: dict[str, Any]) -> None:
     assert captured_exec["argv"][2:] == ["--keep-data", "--dev"]
 
 
-def test_uninstall_refuses_without_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bare `hal0 uninstall` from a non-TTY context must refuse, so the
+def test_uninstall_purge_flag(captured_exec: dict[str, Any]) -> None:
+    """--purge forwards to the script (with --force here to skip the prompt)."""
+    result = runner.invoke(app, ["uninstall", "--purge", "--force"])
+    assert result.exit_code == 0
+    assert captured_exec["argv"][2:] == ["--purge", "--force"]
+
+
+def test_uninstall_clean_slate_alias(captured_exec: dict[str, Any]) -> None:
+    """--clean-slate is an alias of --purge and forwards --purge to the script."""
+    result = runner.invoke(app, ["uninstall", "--clean-slate", "--force"])
+    assert result.exit_code == 0
+    assert captured_exec["argv"][2:] == ["--purge", "--force"]
+
+
+def test_uninstall_default_non_tty_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Conservative default never prompts, so a bare `hal0 uninstall` is safe
+    non-interactively — it must NOT refuse (the old contract did, when the
+    default deleted data)."""
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.delenv("HAL0_FORCE", raising=False)
+
+    captured: dict[str, Any] = {}
+
+    def fake_execvp(file: str, argv: list[str]) -> None:
+        captured["argv"] = list(argv)
+        raise typer.Exit(0)
+
+    monkeypatch.setattr("os.execvp", fake_execvp)
+
+    result = runner.invoke(app, ["uninstall"])
+    assert result.exit_code == 0
+    assert captured["argv"][2:] == []
+
+
+def test_uninstall_purge_refuses_without_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`hal0 uninstall --purge` from a non-TTY context must refuse, so the
     shell script's DELETE prompt doesn't hang silently."""
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("HAL0_FORCE", raising=False)
@@ -91,13 +125,13 @@ def test_uninstall_refuses_without_tty(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("os.execvp", fake_execvp)
 
-    result = runner.invoke(app, ["uninstall"])
+    result = runner.invoke(app, ["uninstall", "--purge"])
     assert result.exit_code == 1
     assert "yes" not in called
 
 
-def test_uninstall_non_tty_with_force_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--force bypasses the prompt — no TTY needed."""
+def test_uninstall_purge_non_tty_with_force_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--force bypasses the --purge prompt — no TTY needed."""
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.delenv("HAL0_FORCE", raising=False)
 
@@ -109,13 +143,14 @@ def test_uninstall_non_tty_with_force_proceeds(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("os.execvp", fake_execvp)
 
-    result = runner.invoke(app, ["uninstall", "--force"])
+    result = runner.invoke(app, ["uninstall", "--purge", "--force"])
     assert result.exit_code == 0
+    assert "--purge" in captured["argv"]
     assert "--force" in captured["argv"]
 
 
-def test_uninstall_non_tty_with_hal0_force_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """HAL0_FORCE=1 also bypasses the TTY requirement."""
+def test_uninstall_purge_non_tty_with_hal0_force_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HAL0_FORCE=1 also bypasses the --purge TTY requirement."""
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setenv("HAL0_FORCE", "1")
 
@@ -127,9 +162,9 @@ def test_uninstall_non_tty_with_hal0_force_env(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr("os.execvp", fake_execvp)
 
-    result = runner.invoke(app, ["uninstall"])
+    result = runner.invoke(app, ["uninstall", "--purge"])
     assert result.exit_code == 0
-    assert captured["argv"][1].endswith("/installer/uninstall.sh")
+    assert "--purge" in captured["argv"]
 
 
 def test_uninstall_resolves_fhs_path_when_not_editable(
@@ -156,7 +191,7 @@ def test_uninstall_resolves_fhs_path_when_not_editable(
     monkeypatch.setattr(paths, "usr_lib", lambda: fhs_current)
 
     with pytest.raises(typer.Exit) as exc:
-        uninstall(keep_data=False, force=True, dev=False)
+        uninstall(purge=False, keep_data=False, force=True, dev=False)
     assert (exc.value.exit_code or 0) == 0
     assert captured_exec["argv"][1] == str(fhs_current / "installer" / "uninstall.sh")
 

@@ -286,13 +286,28 @@ kernel upgrade, a Docker daemon swap, or whenever something feels off.
 sudo bash /usr/lib/hal0/current/installer/uninstall.sh
 ```
 
-Stops the services, removes the unit files, and (with `--keep-data`)
-leaves config and models in place. Without `--keep-data` it also
-clears `/etc/hal0` and `/var/lib/hal0`.
+By default this is **conservative**: it stops the services and removes the
+unit files, code tree, venvs, CLI shims and every hal0 container, but **keeps**
+`/etc/hal0` (config) and `/var/lib/hal0` (models, registry, OpenWebUI state,
+memory banks) so a re-install reuses them.
+
+For a full **clean slate** — wiping config, data, the `hal0` system user, and
+all pulled container images too — pass `--purge`:
+
+```sh frame="terminal"
+sudo bash /usr/lib/hal0/current/installer/uninstall.sh --purge
+```
+
+`--purge` prompts for a typed `DELETE` confirmation unless you pass `--force`
+(or set `HAL0_FORCE=1`). Every step is best-effort: the uninstaller never
+aborts mid-teardown on an already-gone target, and reports any soft failures
+at the end (it leaves general-purpose host packages like `ffmpeg`/`libxrt`
+and podman itself installed).
 
 <Aside type="tip" title="hal0 uninstall — wired to installer/uninstall.sh">
-`hal0 uninstall [--keep-data] [--force] [--dev]` is a thin wrapper
+`hal0 uninstall [--purge] [--keep-data] [--force] [--dev]` is a thin wrapper
 that exec's `installer/uninstall.sh`. The shell script is the source
 of truth; the CLI forwards flags and inherits the live TTY so the
-DELETE confirmation prompt works.
+`--purge` DELETE confirmation prompt works. `--clean-slate` is an alias of
+`--purge`; `--keep-data` is the (default) conservative mode.
 </Aside>

@@ -188,14 +188,21 @@ symlink-swap mechanics.
 ## Uninstall
 
 ```sh
-hal0 uninstall [--keep-data] [--force] [--dev]
+hal0 uninstall [--purge | --clean-slate] [--keep-data] [--force] [--dev]
 ```
 
-Thin wrapper over `installer/uninstall.sh`. The CLI exec's the script
-so the DELETE confirmation prompt inherits the live TTY; in
-non-interactive contexts pass `--force` or `--keep-data` to skip the
-prompt. `--dev` mirrors `install.sh --dev` for a `$PWD/.hal0ai`
-tree.
+Thin wrapper over `installer/uninstall.sh`. The **default is conservative**:
+it removes code, units, venvs, CLI shims and containers but keeps `/etc/hal0`
+and `/var/lib/hal0`. Pass `--purge` (alias `--clean-slate`) for a full clean
+slate — config, data, the `hal0` system user, and all hal0 container images.
+
+`--purge` prompts for a typed `DELETE`; the CLI exec's the script so that
+prompt inherits the live TTY. In non-interactive contexts pass `--force`
+(or `HAL0_FORCE=1`) to skip it — a conservative (non-`--purge`) run never
+prompts and is always safe non-interactively. Every step is best-effort and
+the script never aborts mid-teardown on an already-gone target (it exits
+non-zero only if something could not be removed). `--dev` mirrors
+`install.sh --dev` for a `$PWD/.hal0ai` tree.
 
 
 ## Talking to the daemon

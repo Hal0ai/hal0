@@ -197,16 +197,25 @@ def serve(
 
 @app.command()
 def uninstall(
+    purge: bool = typer.Option(
+        False,
+        "--purge",
+        "--clean-slate",
+        help="Clean slate: ALSO delete /etc/hal0, /var/lib/hal0 (models, "
+        "registry, memory banks), the hal0 system user, and all hal0 podman "
+        "images. Prompts for DELETE unless --force.",
+    ),
     keep_data: bool = typer.Option(
         False,
         "--keep-data",
-        help="Preserve /var/lib/hal0/ (model cache, openwebui state, slot data).",
+        help="Conservative mode (the default): keep /etc/hal0 + /var/lib/hal0. "
+        "Accepted for back-compat / explicitness.",
     ),
     force: bool = typer.Option(
         False,
         "--force",
         "-f",
-        help="Skip the DELETE confirmation prompt (also honours HAL0_FORCE=1).",
+        help="Skip the --purge DELETE confirmation prompt (also honours HAL0_FORCE=1).",
     ),
     dev: bool = typer.Option(
         False,
@@ -219,6 +228,11 @@ def uninstall(
     Thin wrapper around ``installer/uninstall.sh`` — the shell script is the
     source of truth and mirrors install.sh's path layout. We exec it so the
     script inherits the live TTY for its DELETE confirmation prompt.
+
+    By default this is conservative: it stops services and removes code, units,
+    venvs, binaries, and containers but KEEPS /etc/hal0 and /var/lib/hal0 so a
+    re-install reuses them. Pass ``--purge`` for a full clean slate (wipes
+    config, data, the system user, and pulled container images).
     """
     import shutil
 
@@ -244,16 +258,20 @@ def uninstall(
     if not shutil.which("bash"):
         die("bash is required to run the uninstaller.")
 
-    # The script's DELETE prompt needs an interactive stdin. Refuse early in
-    # non-interactive contexts unless the caller has opted out of the prompt.
+    # The script's DELETE prompt only fires under --purge. A conservative run
+    # (the default, or --keep-data) never prompts, so it's safe non-interactive.
+    # For --purge we still require a TTY unless the caller opted out of the
+    # prompt (--force / HAL0_FORCE=1), else the prompt would hang silently.
     force_env = os.environ.get("HAL0_FORCE") == "1"
-    if not (keep_data or force or force_env) and not sys.stdin.isatty():
+    if purge and not (force or force_env) and not sys.stdin.isatty():
         die(
-            "Refusing to uninstall non-interactively without --force or "
-            "--keep-data — the shell script's DELETE prompt would hang."
+            "Refusing to --purge non-interactively without --force — "
+            "the shell script's DELETE prompt would hang."
         )
 
     argv = ["bash", str(script)]
+    if purge:
+        argv.append("--purge")
     if keep_data:
         argv.append("--keep-data")
     if force:
