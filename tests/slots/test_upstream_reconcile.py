@@ -95,6 +95,49 @@ class TestReconcileContainerUpstreams:
         assert reg2.get("embed") is None
 
 
+class TestReconcileAdoptsOfflineButActive:
+    """Startup reconcile must adopt a running container whose state.json is
+    stale-OFFLINE — otherwise the slot stays unrouted AND the dashboard
+    reports it "offline" over a live, serving container (the slot-status
+    coherence bug). Covers a unit started out-of-band, or a state.json that
+    never recorded READY before the api restarted.
+    """
+
+    async def test_adopts_offline_but_active_slot(
+        self, slot_root: Path, container_stub: FakeContainerProvider
+    ) -> None:
+        # Container is running but no transition ever marked it READY, so
+        # _current_state("chat") is OFFLINE (no state.json).
+        container_stub.active.add("chat")
+
+        reg = UpstreamRegistry()
+        sm = SlotManager(upstreams_registry=reg)
+        assert sm._current_state("chat").value == "offline"  # precondition
+
+        restored = await sm.reconcile_container_upstreams()
+
+        # Active container is adopted + routed, not skipped for reading OFFLINE.
+        assert restored == ["chat"]
+        up = reg.get("chat")
+        assert up is not None
+        assert up.kind == "remote"
+        assert ":8081" in up.url
+        # FSM state reconciled to READY by the reconcile pass itself, so
+        # /api/status stops emitting "offline" over the running container.
+        assert sm._current_state("chat").value == "ready"
+
+    async def test_still_skips_offline_and_inactive(
+        self, slot_root: Path, container_stub: FakeContainerProvider
+    ) -> None:
+        # OFFLINE state.json + dead unit → nothing to adopt, no route.
+        reg = UpstreamRegistry()
+        sm = SlotManager(upstreams_registry=reg)
+        restored = await sm.reconcile_container_upstreams()
+        assert restored == []
+        assert reg.get("chat") is None
+        assert sm._current_state("chat").value == "offline"
+
+
 class TestIdempotentLoadReregisters:
     async def test_load_on_ready_slot_restores_upstream(
         self, slot_root: Path, container_stub: FakeContainerProvider

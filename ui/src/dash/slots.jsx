@@ -26,7 +26,7 @@ import {
   SlotControls,
   slotCtrlPhase,
 } from './inference-pane.jsx'
-import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
+import { slotIndicatorFromPhase, slotButtonPhase, isSlotLive } from './slot-status.js'
 import { prettyProfile } from './profile-names.js'
 
 const { useState: useStateS } = React;
@@ -151,25 +151,15 @@ function SlotCard({
   // running (container healthy/serving) -> Stop+Restart; off -> Start;
   // transitional (pulling/starting/unloading) -> actions disabled.
   //
-  // N1: classify from container_status; an un-enriched snapshot (stale
-  // /api/status union entry without container_status) falls back to its
-  // bare state string. Post-Lemonade every slot dispatches through
-  // ContainerProvider, so this is effectively always true — but derive it
-  // honestly from the payload rather than hard-coding (the non-container
-  // branch below is the defensive fallback for a pre-enrichment snapshot).
+  // Derived from slotButtonPhase() in slot-status.js — the SAME classifier
+  // that drives the status dot (IndicatorDot → slotIndicatorFromPhase). This
+  // used to be an inline state table here that diverged from the dot for
+  // `idle`/`unloading` snapshots, producing an "offline" dot beside a "Stop"
+  // button. Sharing one classifier makes that contradiction impossible.
+  // Enriched (container_status present) vs bare (/api/status union entry)
+  // fallback is handled inside the classifier.
   const isContainer = slot.runtime === "container" || slot.container_status != null;
-  let phase;
-  if (slot.container_status != null) {
-    const cs = String(slot.container_status);
-    const health = !!slot?.container_health;
-    const cRunning = cs === "running" && health;
-    const cTransitional = cs === "starting" || cs === "pulling" || (cs === "running" && !health);
-    phase = cTransitional ? "transitional" : cRunning ? "running" : "off";
-  } else {
-    const slotRunning = state === "serving" || state === "ready";
-    const slotTransitional = state === "warming" || state === "starting" || state === "pulling" || state === "unloading";
-    phase = slotTransitional ? "transitional" : slotRunning ? "running" : "off";
-  }
+  const phase = slotButtonPhase(slot);
   const isLlm = type === "llm";
 
   // Only render chips backed by a real slot-payload field. Dead chips
