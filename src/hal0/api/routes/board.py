@@ -368,7 +368,7 @@ async def board_events_ws(websocket: WebSocket) -> None:
 
 
 @router.post("/chat")
-async def board_chat(request: Request):  # noqa: ANN201 — StreamingResponse
+async def board_chat(request: Request):
     """hal0-native board orchestrator. SSE stream. SPEC §2.D / §4.
 
     Delegates to :mod:`hal0.api.routes.board_chat` so the transport stays
