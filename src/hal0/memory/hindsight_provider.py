@@ -96,7 +96,7 @@ def _http_status(exc: Exception) -> int | None:
 # which silently hides the consolidated observation layer — the highest-value
 # tier (deduplicated, evidence-grounded beliefs). hal0's default includes it;
 # callers can still narrow with an explicit ``types``.
-_DEFAULT_RECALL_TYPES = ("world", "experience", "observation")
+_DEFAULT_RECALL_TYPES = ("world", "observation")
 
 
 class HindsightProvider(MemoryProvider):
@@ -165,15 +165,17 @@ class HindsightProvider(MemoryProvider):
         # The join key. Caller-supplied → Hindsight upserts the same
         # logical document across adds (conversation evolution); absent →
         # fresh document per call.
-        document_id = document_id or str(uuid.uuid4())
+        if not document_id:
+            document_id = f"hal0-agent-{source or 'anonymous'}"
         meta = dict(metadata or {})
         if source:
             meta["source"] = source
+        context = f"hal0 agent memory from {source or 'unknown'}: {', '.join(tags or [])}" if tags else f"hal0 agent memory from {source or 'unknown'}"
         resp = await self._client.retain(
             bank_id=bank,
             content=text,
             document_id=document_id,
-            context=meta.get("source"),
+            context=context,
             metadata={k: str(v) for k, v in meta.items()},
             tags=list(tags or []),
             timestamp=None,
