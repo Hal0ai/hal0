@@ -736,7 +736,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "Q4_K_M",
     },
     "flm": {
-        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
+        "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
         "flags": "",
         "mtp": False,
         "device_class": "npu",
