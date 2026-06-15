@@ -99,3 +99,28 @@ async def test_apply_setup_skips_uncurated_model():
     )
     assert res.slots[0].skipped == "needs_upstream_routing"
     assert res.slots[0].created is False
+
+
+def test_mark_first_run_done_writes_sentinel(tmp_path, monkeypatch):
+    from hal0.install import orchestrate
+
+    sentinel = tmp_path / ".first_run_done"
+    monkeypatch.setattr(orchestrate, "_sentinel_path", lambda: sentinel)
+    orchestrate.mark_first_run_done()
+    assert sentinel.exists()
+
+
+def test_install_extensions_dispatches(monkeypatch):
+    from hal0.install import orchestrate
+
+    calls = []
+    monkeypatch.setattr(
+        orchestrate,
+        "install_extension",
+        lambda ext_id: (
+            calls.append(ext_id) or orchestrate.ExtensionOutcome(ext_id=ext_id, installed=True)
+        ),
+    )
+    outs = orchestrate._install_extensions({"openwebui": True, "pi": False, "hermes": True})
+    assert set(calls) == {"openwebui", "hermes"}  # only enabled
+    assert all(o.installed for o in outs)

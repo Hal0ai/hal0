@@ -8,8 +8,10 @@ post-install. Deps are injected so there is no hidden ``app.state`` coupling.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from hal0.config import paths
 from hal0.config.schema import HardwareInfo
 from hal0.install.profile_derive import derive_device, derive_profile
 from hal0.registry.curated import get_curated
@@ -101,12 +103,37 @@ def _ensure_registry_entry(registry, model_id) -> None:
         registry.ensure(model_id)
 
 
-def _install_extensions(extensions: dict) -> list[ExtensionOutcome]:
-    return []  # filled in Task 0.3
+def _sentinel_path() -> Path:
+    """`/var/lib/hal0/.first_run_done` — identical to installer.py's sentinel."""
+    return paths.var_lib() / ".first_run_done"
 
 
 def mark_first_run_done() -> None:
-    return None  # filled in Task 0.3
+    p = _sentinel_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text("")
+    tmp.replace(p)  # atomic
+
+
+def install_extension(ext_id: str) -> ExtensionOutcome:
+    """Install + wire one extension. Delegates to extensions.install_extension
+    (Task 1.2); imported lazily to avoid a cycle."""
+    from hal0.install.extensions import install_extension as _do
+
+    return _do(ext_id)
+
+
+def _install_extensions(extensions: dict) -> list[ExtensionOutcome]:
+    outs: list[ExtensionOutcome] = []
+    for ext_id, enabled in extensions.items():
+        if not enabled:
+            continue
+        try:
+            outs.append(install_extension(ext_id))
+        except Exception as exc:  # best-effort
+            outs.append(ExtensionOutcome(ext_id=ext_id, error=str(exc)))
+    return outs
 
 
 # ── Core orchestration ─────────────────────────────────────────────────────────
