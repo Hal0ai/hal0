@@ -3,7 +3,15 @@
 // Exports: window.TaskDrawer, window.stName, window.liveDot
 const { useState, useEffect, useRef } = React;
 
-const Icon = window.BoardIcon || window.Icons || (() => null);
+// Resolve BoardIcon at RENDER time, not module-eval: board-view.jsx (which
+// registers window.BoardIcon) imports AFTER this module, so window.BoardIcon
+// is undefined when this file evaluates. window.Icons is chrome's glyph-OBJECT
+// map (not a component) — never fall through to it or React throws
+// "Element type is invalid". Render nothing until BoardIcon is available.
+function Icon(props) {
+  const BI = window.BoardIcon;
+  return BI ? <BI {...props} /> : null;
+}
 
 const stName = (s) => {
   const LANE = window.LANE || {};
@@ -16,9 +24,10 @@ const liveDot = (s) => "kdot" + (s === "running" ? " live" : " glow");
 function TaskDrawer({ task, byId, onClose, onOpenTask }) {
   const toast = (msg) => { if (window.__hal0Toast) window.__hal0Toast(msg); };
 
-  // prefer live hook; fall back to prop
-  const liveTask = window.__hal0UseBoardTask ? window.__hal0UseBoardTask(task.id) : null;
-  const t = liveTask || task;
+  // prefer live hook; fall back to prop. useBoardTask returns a TanStack
+  // QueryResult — the task is on `.data`, not the result object itself.
+  const liveTaskQ = window.__hal0UseBoardTask ? window.__hal0UseBoardTask(task.id) : null;
+  const t = (liveTaskQ && liveTaskQ.data) || task;
 
   const [draft, setDraft] = useState("");
   const [parentSelect, setParentSelect] = useState("");
@@ -53,7 +62,10 @@ function TaskDrawer({ task, byId, onClose, onOpenTask }) {
     const body = draft.trim();
     if (!body) return;
     if (!addComment) return;
-    addComment.mutate({ id: t.id, body: { body } });
+    // useAddComment's mutationFn takes a bare string body (it wraps it as
+    // {body} for the wire). Passing {body} here would double-nest to
+    // {body:{body}}. Send the string.
+    addComment.mutate({ id: t.id, body });
     setDraft("");
     toast("comment posted");
   };
@@ -295,8 +307,10 @@ function TaskDrawer({ task, byId, onClose, onOpenTask }) {
               >refresh</span>
             </div>
             <div className="worklog">
-              {logHook && logHook.data
+              {logHook && Array.isArray(logHook.data) && logHook.data.length > 0
                 ? logHook.data
+                    .map(e => (typeof e === "string" ? e : (e.line ?? e.msg ?? JSON.stringify(e))))
+                    .join("\n")
                 : runs.some(r => r.state === "active")
                   ? "worker streaming · tail attached to lemond journal"
                   : "— no worker log yet (task hasn't spawned or log was rotated away) —"}

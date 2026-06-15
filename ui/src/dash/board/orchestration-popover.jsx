@@ -7,23 +7,29 @@
 (function () {
   const { useState } = React;
 
-  const Icon = window.BoardIcon || window.Icons || (() => null);
+  // Resolve BoardIcon at RENDER time (board-view.jsx registers it AFTER this
+  // module loads; window.Icons is chrome's glyph-object, not a component).
+  function Icon(props) {
+    const BI = window.BoardIcon;
+    return BI ? <BI {...props} /> : null;
+  }
 
   function OrchPopover({ orch, set, onClose }) {
-    // Live orchestration state from window hook
+    // Live orchestration state. These window hooks are TanStack queries —
+    // the value lives on `.data`, not the QueryResult object itself.
     const useOrch = window.__hal0UseBoardOrchestration;
-    const orchData = useOrch ? useOrch() : null;
+    const orchData = (useOrch ? useOrch() : null)?.data || null;
 
     // Config hook (read-only values from config.yaml)
     const useConfig = window.__hal0UseBoardConfig;
-    const cfg = useConfig ? useConfig() : null;
+    const cfg = (useConfig ? useConfig() : null)?.data || null;
 
-    // Dropdown data hooks
+    // Dropdown data hooks — unwrap `.data` to the arrays for .map().
     const useProfiles = window.__hal0UseBoardProfiles;
-    const profiles = useProfiles ? useProfiles() : [];
+    const profiles = (useProfiles ? useProfiles() : null)?.data || [];
 
     const useAssignees = window.__hal0UseBoardAssignees;
-    const assignees = useAssignees ? useAssignees() : [];
+    const assignees = (useAssignees ? useAssignees() : null)?.data || [];
 
     // Update mutation hook
     const useUpdateOrch = window.__hal0UseUpdateOrchestration;

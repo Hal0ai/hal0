@@ -3,7 +3,12 @@
 // Exports: window.AgentChat
 const { useState, useEffect, useRef } = React;
 
-const Icon = window.BoardIcon || window.Icons || (() => null);
+// Resolve BoardIcon at RENDER time (board-view.jsx registers it AFTER this
+// module loads; window.Icons is chrome's glyph-object, not a component).
+function Icon(props) {
+  const BI = window.BoardIcon;
+  return BI ? <BI {...props} /> : null;
+}
 
 const AGENT_SUGGEST = window.AGENT_SUGGEST || [
   "what's blocked?",

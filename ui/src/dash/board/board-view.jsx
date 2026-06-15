@@ -161,6 +161,7 @@ function BoardView() {
   const useReassignTask     = window.__hal0UseReassignTask;
   const useNudgeDispatch    = window.__hal0UseNudgeDispatch;
   const useSwitchBoard      = window.__hal0UseSwitchBoard;
+  const useCreateBoard      = window.__hal0UseCreateBoard;
   const useBoardEventsStream = window.__hal0UseBoardEventsStream;
 
   // ── keep WS stream alive ──
@@ -180,6 +181,7 @@ function BoardView() {
   const reassignTask = useReassignTask ? useReassignTask() : null;
   const nudge       = useNudgeDispatch ? useNudgeDispatch() : null;
   const switchBoard = useSwitchBoard ? useSwitchBoard()  : null;
+  const createBoard = useCreateBoard ? useCreateBoard()  : null;
 
   // ── local state ──
   const [board, setBoard]           = useState("default");
@@ -639,7 +641,17 @@ function BoardView() {
           onClose={() => setNewBoard(false)}
           onCreate={(b) => {
             setNewBoard(false);
-            doSwitchBoard(b.slug);
+            // Actually POST the new board (createBoard was previously wired
+            // but never called — the modal only switched). After it lands,
+            // switch to it if the operator opted in.
+            const body = { name: b.name || b.slug, slug: b.slug, desc: b.desc, icon: b.icon };
+            if (createBoard) {
+              createBoard.mutate(body, {
+                onSuccess: () => { if (b.switchTo) doSwitchBoard(b.slug); },
+              });
+            } else if (b.switchTo) {
+              doSwitchBoard(b.slug);
+            }
             toast('board "' + b.slug + '" created');
           }}
         />
