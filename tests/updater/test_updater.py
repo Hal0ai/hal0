@@ -41,6 +41,7 @@ from hal0.updater.updater import (
     _is_pre_release,
     _parse_manifest,
     _previous_record,
+    _version_tuple,
     _versioned_install_dir,
 )
 
@@ -833,3 +834,18 @@ def test_apply_hard_refuses_on_editable_install(
     assert "editable" in str(err).lower() or "git pull" in str(err).lower()
     # No network call, no file I/O — the guard fires before Step 1.
     # (Verified implicitly: no HAL0_RELEASES_URL env → would fail if reached.)
+
+
+# ── _version_tuple ordering — nightly timestamp monotonicity ──────────────────
+
+
+def test_version_tuple_timestamp_nightly_beats_date_only_same_base() -> None:
+    """A 14-digit UTC timestamp nightly sorts strictly above a date-only nightly.
+
+    The nightly workflow now emits YYYYMMDDHHMMSS so same-day re-cuts produce
+    a strictly larger version that the updater will recognise as newer.  Legacy
+    YYYYMMDD tags still order below any timestamp tag with the same base (because
+    20260615 < 20260615000000 as integers).
+    """
+    assert _version_tuple("0.5.1-nightly.20260615120000") > _version_tuple("0.5.1-nightly.20260615")
+    assert _version_tuple("0.5.1-nightly.20260615") > _version_tuple("0.5.0-nightly.20260615")

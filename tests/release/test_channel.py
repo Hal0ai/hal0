@@ -72,3 +72,22 @@ def test_nightlies_to_prune_keeps_newest():
 def test_nightlies_to_prune_nothing_when_under_keep():
     tags = ["v0.5.0-nightly.20260613", "v0.5.0-nightly.20260614"]
     assert nightlies_to_prune(tags, keep=7) == []
+
+
+def test_nightly_version_uses_full_stamp_and_is_monotonic():
+    # a sub-day timestamp stamp is interpolated verbatim
+    assert nightly_version("0.5.1", "20260615120000") == "0.5.1-nightly.20260615120000"
+    assert nightly_tag("0.5.1", "20260615120000") == "v0.5.1-nightly.20260615120000"
+
+
+def test_nightlies_to_prune_orders_by_full_numeric_stamp():
+    tags = [
+        "v0.5.1-nightly.20260615120000",
+        "v0.5.1-nightly.20260615",  # legacy date-only (older)
+        "v0.5.1-nightly.20260615130000",  # newest
+        "v0.5.1-alpha.1",  # not a nightly — never pruned
+    ]
+    pruned = nightlies_to_prune(tags, keep=1)
+    assert "v0.5.1-alpha.1" not in pruned  # stable never pruned
+    assert "v0.5.1-nightly.20260615130000" not in pruned  # newest kept
+    assert "v0.5.1-nightly.20260615" in pruned  # oldest pruned

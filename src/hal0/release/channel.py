@@ -32,14 +32,26 @@ def base_version(version: str) -> str:
     return v.split("-", 1)[0]
 
 
-def nightly_version(base: str, date: str) -> str:
-    """Compose a nightly version from a base ``X.Y.Z`` and a ``YYYYMMDD`` date."""
-    return f"{base}-nightly.{date}"
+def nightly_version(base: str, stamp: str) -> str:
+    """Compose a nightly version from a base ``X.Y.Z`` and a UTC ``stamp``.
+
+    ``stamp`` should be ``YYYYMMDDHHMMSS`` (sub-day resolution) so multiple
+    cuts on the same calendar day produce strictly monotonic version strings —
+    a date-only ``YYYYMMDD`` stamp would collide on same-day re-cuts and the
+    updater's ``_version_tuple`` comparison would see no change and skip the
+    update.  Legacy ``YYYYMMDD`` tags still sort correctly: the shorter numeric
+    segment (8 digits) is always less than a 14-digit timestamp with the same
+    date prefix.
+    """
+    return f"{base}-nightly.{stamp}"
 
 
-def nightly_tag(base: str, date: str) -> str:
-    """Compose the nightly git tag (``v`` + nightly version)."""
-    return f"v{nightly_version(base, date)}"
+def nightly_tag(base: str, stamp: str) -> str:
+    """Compose the nightly git tag (``v`` + nightly version).
+
+    See :func:`nightly_version` for the ``stamp`` format (``YYYYMMDDHHMMSS``).
+    """
+    return f"v{nightly_version(base, stamp)}"
 
 
 def base_matches(pyproject_version: str, tag: str) -> bool:
@@ -55,8 +67,12 @@ def base_matches(pyproject_version: str, tag: str) -> bool:
 def nightlies_to_prune(tags: list[str], keep: int = 7) -> list[str]:
     """Return the nightly tags to delete, keeping the ``keep`` most recent.
 
-    Only ``*-nightly.<date>`` tags are eligible; stable/alpha/rc tags are
-    never returned. Ordering is by the numeric date segment, newest first.
+    Only ``*-nightly.<stamp>`` tags are eligible; stable/alpha/rc tags are
+    never returned.  Ordering is by the numeric timestamp segment (newest
+    first), which handles both legacy ``YYYYMMDD`` (8-digit) stamps and
+    current ``YYYYMMDDHHMMSS`` (14-digit) stamps — a longer digit string for
+    the same date always sorts higher, so old date-only tags naturally fall
+    below new timestamp tags.
     """
     dated: list[tuple[int, str]] = []
     for t in tags:

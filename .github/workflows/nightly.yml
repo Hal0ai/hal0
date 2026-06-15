@@ -2,9 +2,11 @@ name: Nightly
 
 # Cut a nightly hal0 build from green `main` and publish it on the `nightly`
 # release channel. This workflow is only the scheduler/guard/tagger — it does
-# NOT build or sign. It computes a dated v<base>-nightly.<YYYYMMDD> tag at
-# main HEAD, pushes it, then invokes release.yml (workflow_call) which builds,
-# cosign-signs, and publishes nightly.json (channel auto-derived from the tag).
+# NOT build or sign. It computes a timestamped v<base>-nightly.<YYYYMMDDHHMMSS>
+# tag at main HEAD, pushes it, then invokes release.yml (workflow_call) which
+# builds, cosign-signs, and publishes nightly.json (channel auto-derived from
+# the tag). The full UTC timestamp (vs. date-only) ensures same-day re-cuts
+# produce strictly monotonic version strings the updater can distinguish.
 #
 # Testers follow it with a one-time `hal0 update --channel nightly`, then plain
 # `hal0 update`. See docs/operate/updates.mdx and
@@ -87,7 +89,7 @@ jobs:
           import tomllib
           print(tomllib.loads(open("pyproject.toml","rb").read().decode())["project"]["version"])
           ')"
-          DATE="$(date -u +%Y%m%d)"
+          DATE="$(date -u +%Y%m%d%H%M%S)"
           TAG="$(PYV="${PYV}" DATE="${DATE}" PYTHONPATH=src python3 -c "import os; from hal0.release.channel import base_version, nightly_tag; print(nightly_tag(base_version(os.environ['PYV']), os.environ['DATE']))")"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "::notice::nightly tag ${TAG}"
