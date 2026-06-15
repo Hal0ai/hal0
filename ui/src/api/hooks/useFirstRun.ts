@@ -138,6 +138,14 @@ export function useFirstRunComplete() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => apiPost(ENDPOINTS.installComplete),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['firstrun'] }),
+    // Invalidate BOTH the firstrun queries AND the install-state query that
+    // actually gates the wizard (useInstallState → ['install', 'state'],
+    // staleTime 60s). Without the ['install', 'state'] invalidation the gate
+    // keeps its cached first_run=true and bounces the operator back into the
+    // wizard until a hard reload.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['firstrun'] })
+      qc.invalidateQueries({ queryKey: ['install', 'state'] })
+    },
   })
 }

@@ -635,6 +635,12 @@ function FirstRunServices({ onDone }) {
 // ─── FirstRun view shell ───
 function FirstRunView({ frStage, setFrStage, onComplete, layout }) {
   const [skipOpen, setSkipOpen] = useStateF(false);
+  // Skip must DURABLY dismiss the wizard, not just navigate away: write the
+  // first-run sentinel (POST /api/install/complete) exactly like the finish
+  // path's "Open dashboard" button. Without this, /api/install/state still
+  // reports first_run=true (no models + no sentinel) and the wizard returns
+  // on every reload.
+  const completeM = useFirstRunComplete();
   // model IDs + tier name returned by /apply so the progress pane can reattach
   // live SSE streams per model and label the heading.
   const [frModelIds, setFrModelIds] = useStateF([]);
@@ -657,7 +663,7 @@ function FirstRunView({ frStage, setFrStage, onComplete, layout }) {
       <SkipBundleDialog
         open={skipOpen}
         onCancel={() => setSkipOpen(false)}
-        onConfirm={() => { setSkipOpen(false); onComplete(); }}
+        onConfirm={() => { setSkipOpen(false); completeM.mutate(); onComplete(); }}
       />
     </div>
   );

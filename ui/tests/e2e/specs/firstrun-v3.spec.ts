@@ -88,6 +88,25 @@ test.describe('FirstRun v3 (/firstrun)', () => {
     await expect(page.locator('.fr-detect .seg', { hasText: 'NPU' })).toBeVisible()
   })
 
+  test('skip durably dismisses the wizard by writing the sentinel', async ({ page }) => {
+    // Regression: skip used to only navigate away (onComplete), never POSTing
+    // /api/install/complete. Since first_run = (no models) AND (no sentinel),
+    // the wizard returned on every reload. Skip must write the sentinel just
+    // like the finish path.
+    await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
+
+    const completeCall = page.waitForRequest(
+      (req) => req.url().includes('/api/install/complete') && req.method() === 'POST',
+      { timeout: 5000 },
+    )
+
+    await page.locator('.fr-skip').first().click()
+    await page.getByRole('button', { name: 'Skip and configure manually' }).click()
+
+    // The sentinel-writing POST is what hides the wizard across reloads.
+    await completeCall
+  })
+
 
   // ── Progress pane — live SSE rows ──────────────────────────────────
 
