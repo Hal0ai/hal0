@@ -5,7 +5,40 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from hal0.api.routes.installer import _build_slot_cfg
+import pytest
+
+from hal0.api.routes.installer import (
+    CuratedModelNotFound,
+    _build_slot_cfg,
+    _resolve_tier,
+)
+
+
+@pytest.mark.parametrize(
+    "sent, canonical",
+    [
+        # Canonical names (what the docstring originally documented).
+        ("hal0-Pro", "hal0-Pro"),
+        ("hal0-pro", "hal0-Pro"),
+        # Bare display names — what firstrun.jsx actually POSTs (tierObj.name).
+        # Regression: these all 404'd with "unknown tier" before the fix.
+        ("Lite", "hal0-Lite"),
+        ("Default", "hal0-Default"),
+        ("Pro", "hal0-Pro"),
+        ("Max", "hal0-Max"),
+        ("pro", "hal0-Pro"),
+        # Vendor kit keeps its verbatim mixed-case name (no hal0- prefix).
+        ("LMX-Omni-52B-Halo", "LMX-Omni-52B-Halo"),
+        ("lmx-omni-52b-halo", "LMX-Omni-52B-Halo"),
+    ],
+)
+def test_resolve_tier_accepts_bare_and_canonical(sent, canonical):
+    assert _resolve_tier(sent) == canonical
+
+
+def test_resolve_tier_rejects_unknown():
+    with pytest.raises(CuratedModelNotFound, match="unknown tier 'Nope'"):
+        _resolve_tier("Nope")
 
 
 def test_build_slot_cfg_sets_device_profile_model():

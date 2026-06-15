@@ -459,12 +459,19 @@ _SLOT_META: dict[str, tuple[str, str, int]] = {
 
 
 def _resolve_tier(name: str) -> str:
-    """Map a tier name (any case) to its canonical key, or raise 404."""
+    """Map a tier name (any case) to its canonical key, or raise 404.
+
+    Accepts both the canonical name (``hal0-Pro``) and the bare display
+    suffix the FirstRun picker sends (``Pro``) — ``firstrun.jsx`` POSTs
+    ``tierObj.name`` (e.g. ``"Pro"``), not the ``hal0-`` prefixed slug.
+    Matching is case-insensitive on both forms.
+    """
     if name in bundle_tiers.BUNDLES:
         return name
     lower = name.lower()
     for canonical in bundle_tiers.BUNDLES:
-        if canonical.lower() == lower:
+        clower = canonical.lower()
+        if lower in (clower, clower.removeprefix("hal0-")):
             return canonical
     raise CuratedModelNotFound(
         f"unknown tier {name!r}",
