@@ -163,12 +163,9 @@ test.describe('Container slot edit drawer (#658)', () => {
 
   test('container slot card opens edit drawer', async ({ page }) => {
     // The InferencePane slot card's Edit control routes to #slots/<name>,
-    // which opens the EditSlotDrawer. Expand the pane to reveal full controls.
-    await page.getByTestId('infer-qcaret').click()
-    // The full card (with Logs/Edit controls) lives in the expanded engine body;
-    // the collapsed strip also shows a compact card for the same slot, so scope
-    // to the body to avoid matching both.
-    const card = page.locator('.infer-pane .engine-body [data-testid="infer-slot-gpu-chat"]')
+    // which opens the EditSlotDrawer. All slots render as full cards in the
+    // engine body now (no accordion), so the Logs/Edit controls are visible.
+    const card = page.locator('.infer-pane .engine-b [data-testid="infer-slot-gpu-chat"]')
     await expect(card).toBeVisible()
     await card.locator('.sctrl[title="Edit"]').click()
     await expect(page.locator('.drawer')).toBeVisible({ timeout: 5000 })
