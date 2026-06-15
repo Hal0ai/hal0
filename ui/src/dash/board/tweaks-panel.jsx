@@ -5,7 +5,12 @@
 (function () {
   const { } = React; // React in scope via window
 
-  const Icon = window.BoardIcon || window.Icons || (() => null);
+  // Resolve BoardIcon at RENDER time (board-view.jsx registers it AFTER this
+  // module loads; window.Icons is chrome's glyph-object, not a component).
+  function Icon(props) {
+    const BI = window.BoardIcon;
+    return BI ? <BI {...props} /> : null;
+  }
 
   function BoardTweaksPanel({ tw, set, onClose }) {
     const Seg = ({ k, opts, testId }) => (

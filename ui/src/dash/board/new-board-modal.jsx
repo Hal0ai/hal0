@@ -5,7 +5,13 @@
 (function () {
   const { useState } = React;
 
-  const Icon = window.BoardIcon || window.Icons || (() => null);
+  // Resolve BoardIcon at RENDER time (board-view.jsx registers it AFTER this
+  // module loads; window.Icons is chrome's glyph-object, not a component —
+  // grabbing it crashes the modal with "Element type is invalid").
+  function Icon(props) {
+    const BI = window.BoardIcon;
+    return BI ? <BI {...props} /> : null;
+  }
 
   function NewBoardModal({ onClose, onCreate }) {
     const [slug, setSlug] = useState("");
