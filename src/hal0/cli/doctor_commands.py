@@ -26,9 +26,11 @@ Sub-commands:
 
 from __future__ import annotations
 
+import grp
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -429,9 +431,153 @@ def has_ownership_drift(rows: list[dict[str, str]]) -> bool:
     return any(r["status"] == "drift" for r in rows)
 
 
+# ── editable-checkout group-share — the #843 root-clobber *fix* surface ───────
+#
+# Distinct from the Hermes-home audit above. When the install is an editable git
+# checkout (e.g. /opt/hal0 on CT 105), every root-run deploy — `git reset --hard`
+# + `npm build` — recreates each touched file as root:root 644, locking out the
+# unprivileged `hal0` user that Hermes and the in-runtime agents execute as. A
+# one-shot `chown` doesn't hold: the next deploy re-roots exactly the files it
+# changed ("creep"). The durable cure is to make the tree group-shared
+# (group=hal0, setgid dirs, g+w, core.sharedRepository=group) AND have writers
+# use umask 002 (scripts/deploy.sh + the hal0-api unit). This block audits that
+# model and, with --fix, repairs it in place — the easy path for an existing
+# install that's already drifted.
+
+_SHARED_GROUP = "hal0"
+# Values git accepts for core.sharedRepository that grant group write.
+_GIT_SHARED_OK = {"group", "true", "1", "all", "world", "everybody", "2"}
+
+
+def detect_editable_root(start: Path) -> Path | None:
+    """Nearest ancestor of ``start`` that is a git checkout (contains ``.git``),
+    or ``None`` for an immutable FHS install (no ``.git`` — nothing to share)."""
+    for p in (start, *start.parents):
+        if (p / ".git").exists():
+            return p
+    return None
+
+
+def _share_row(label: str, ok: bool, detail: str, path: str = "") -> dict[str, str]:
+    return {"path": path, "label": label, "status": "ok" if ok else "drift", "detail": detail}
+
+
+def check_tree_group_share(
+    root: Path | None,
+    *,
+    group: str = _SHARED_GROUP,
+    group_of: Callable[[Path], str | None],
+    mode_of: Callable[[Path], int],
+    git_shared_of: Callable[[Path], str | None],
+) -> list[dict[str, str]]:
+    """Audit whether an editable checkout is group-shared with ``group``.
+
+    Returns rows ``{path,label,status,detail}`` using the same vocabulary as
+    :func:`check_hermes_ownership` (``ok`` / ``drift`` / ``absent``). When
+    ``root`` is ``None`` the single row is ``absent`` — an immutable FHS install
+    has no editable tree to share, which is correct, not a problem. The stat and
+    git lookups are injected seams so the logic is testable without a real tree.
+    """
+    if root is None:
+        return [
+            {
+                "path": "",
+                "label": "editable checkout",
+                "status": "absent",
+                "detail": "no .git (immutable FHS install) — nothing to share",
+            }
+        ]
+    p = str(root)
+    grp_name = group_of(root)
+    mode = mode_of(root)
+    shared = git_shared_of(root)
+    return [
+        _share_row(
+            f"tree group == {group}",
+            grp_name == group,
+            f"group is {grp_name or '?'}",
+            p,
+        ),
+        _share_row(
+            "tree group-writable",
+            bool(mode & stat.S_IWGRP),
+            "g+w set" if mode & stat.S_IWGRP else "missing g+w (root-run deploy locks out hal0)",
+            p,
+        ),
+        _share_row(
+            "dirs setgid (new files inherit group)",
+            bool(mode & stat.S_ISGID),
+            "setgid set" if mode & stat.S_ISGID else "missing setgid",
+            p,
+        ),
+        _share_row(
+            "git core.sharedRepository",
+            (shared or "").lower() in _GIT_SHARED_OK,
+            f"= {shared or 'unset'}",
+            p,
+        ),
+    ]
+
+
+def repair_tree_group_share(
+    root: Path,
+    group: str = _SHARED_GROUP,
+    *,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[bool, str]:
+    """Apply the group-shared model to ``root`` in place (needs privilege to
+    chgrp). Idempotent: group→``group``, g+w, setgid on every dir, and
+    ``core.sharedRepository=group`` so git preserves the share across future
+    resets. Returns ``(ok, message)``; the first failing step short-circuits."""
+    steps = (
+        (["chgrp", "-R", group, str(root)], "chgrp"),
+        # g+rwX: exec only on dirs / already-exec files, so group members can
+        # traverse without flagging every source file executable.
+        (["chmod", "-R", "g+rwX", str(root)], "chmod g+rwX"),
+        (["find", str(root), "-type", "d", "-exec", "chmod", "g+s", "{}", "+"], "setgid dirs"),
+        (
+            ["git", "-C", str(root), "config", "core.sharedRepository", "group"],
+            "git core.sharedRepository",
+        ),
+    )
+    for argv, label in steps:
+        proc = run(argv, capture_output=True, text=True)
+        if proc.returncode != 0:
+            detail = (proc.stderr or "").strip() or f"exit {proc.returncode}"
+            return False, f"{label} failed: {detail}"
+    return True, f"group-shared perms applied to {root} (group={group}, setgid, g+w)"
+
+
+def _render_audit(title: str, rows: list[dict[str, str]]) -> None:
+    badge = {
+        "ok": "[green]ok[/green]",
+        "drift": "[red]DRIFT[/red]",
+        "absent": "[dim]absent[/dim]",
+    }
+    table = Table(title=title)
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for r in rows:
+        table.add_row(r["label"], badge[r["status"]], r["detail"])
+    console.print(table)
+
+
 @app.command("perms")
-def perms() -> None:
-    """Audit Hermes runtime ownership for the root-clobber regression (#843)."""
+def perms(
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Repair editable-checkout group-share drift in place (needs root).",
+    ),
+) -> None:
+    """Audit ownership for the root-clobber regression (#843).
+
+    Covers two surfaces: Hermes runtime state (/var/lib/hal0/.hermes) and the
+    editable code checkout's group-share. ``--fix`` repairs the latter in place
+    (the easy path for an already-drifted install); Hermes drift is still
+    reconciled via ``sudo hal0 agent bootstrap hermes --repair``.
+    """
 
     def _owner(p: Path) -> str | None:
         try:
@@ -439,24 +585,73 @@ def perms() -> None:
         except (OSError, KeyError):
             return None
 
-    rows = check_hermes_ownership(owner_of=_owner, exists=lambda p: p.exists())
-    table = Table(title="Hermes ownership audit (#843)")
-    table.add_column("Check", style="bold")
-    table.add_column("Status")
-    table.add_column("Detail")
-    badge = {
-        "ok": "[green]ok[/green]",
-        "drift": "[red]DRIFT[/red]",
-        "absent": "[dim]absent[/dim]",
-    }
-    for r in rows:
-        table.add_row(r["label"], badge[r["status"]], r["detail"])
-    console.print(table)
-    if has_ownership_drift(rows):
+    def _group(p: Path) -> str | None:
+        try:
+            return grp.getgrgid(p.stat().st_gid).gr_name
+        except (OSError, KeyError):
+            return None
+
+    def _mode(p: Path) -> int:
+        try:
+            return p.stat().st_mode
+        except OSError:
+            return 0
+
+    def _git_shared(p: Path) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(p), "config", "--get", "core.sharedRepository"],
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        return (proc.stdout.strip() or None) if proc.returncode == 0 else None
+
+    # 1) Hermes runtime ownership (read-only; repair via bootstrap --repair).
+    hermes_rows = check_hermes_ownership(owner_of=_owner, exists=lambda p: p.exists())
+    _render_audit("Hermes ownership audit (#843)", hermes_rows)
+
+    # 2) Editable-checkout group-share (read-only audit; --fix repairs).
+    root = detect_editable_root(Path(hal0.__file__).resolve())
+    tree_rows = check_tree_group_share(
+        root,
+        group=_SHARED_GROUP,
+        group_of=_group,
+        mode_of=_mode,
+        git_shared_of=_git_shared,
+    )
+    _render_audit("Editable checkout group-share (#843)", tree_rows)
+    tree_drift = has_ownership_drift(tree_rows)
+
+    if fix:
+        if root is None:
+            console.print("[dim]nothing to fix — not an editable checkout.[/dim]")
+        elif not tree_drift:
+            console.print("[green]✓[/green]  group-share already clean — nothing to fix.")
+        elif os.geteuid() != 0:
+            console.print("[red]✗[/red]  --fix needs root — re-run `sudo hal0 doctor perms --fix`.")
+            raise typer.Exit(1)
+        else:
+            ok, msg = repair_tree_group_share(root, _SHARED_GROUP)
+            if not ok:
+                console.print(f"[red]✗[/red]  repair failed: {msg}")
+                raise typer.Exit(1)
+            console.print(f"[green]✓[/green]  {msg}")
+            tree_drift = False
+
+    hermes_drift = has_ownership_drift(hermes_rows)
+    if hermes_drift:
         console.print(
-            "[red]✗[/red]  ownership drift — run `sudo hal0 agent bootstrap hermes --repair`"
-            " to reconcile."
+            "[red]✗[/red]  Hermes ownership drift — run "
+            "`sudo hal0 agent bootstrap hermes --repair` to reconcile."
         )
+    if tree_drift and not fix:
+        console.print(
+            "[yellow]![/yellow]  editable-checkout group-share drift — run "
+            "`sudo hal0 doctor perms --fix` to repair."
+        )
+    if hermes_drift or tree_drift:
         raise typer.Exit(1)
-    console.print("[green]✓[/green]  Hermes ownership clean.")
+    console.print("[green]✓[/green]  ownership clean.")
     raise typer.Exit(0)

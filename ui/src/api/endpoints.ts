@@ -80,6 +80,10 @@ export const ENDPOINTS = {
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',
   statsHardware: '/api/stats/hardware',
+  // NPU occupancy — AIE column allocation (xrt-smi probe) + per-FLM-slot
+  // composition for the NPU occupancy card. Single-tenant: one FLM claims
+  // the whole 8-column array.
+  npuOccupancy: '/api/npu/occupancy',
   statsThroughputHistory: '/api/stats/throughput/history',
   // W6 opt-in cards: power/thermal (§5 spike confirmed amdgpu hwmon).
   statsPower: '/api/stats/power',
