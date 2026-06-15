@@ -1,0 +1,190 @@
+/* hal0 dashboard — Agents Overview: collectible agent cards.
+ *
+ * Productionised from Design/agent-card-kit (hermes.html · coming-soon.html).
+ * One card design carries an agent across its lifecycle; here Hermes is the
+ * live `serving` foil (wired to real health + restart) and the rest are
+ * roadmap entries rendered behind a grey "coming soon" mask.
+ *
+ * Everything is namespaced under `.agents-overview` so the kit's generic
+ * class names (.fcard, .atk, .skill, .fc-name …) can't collide with other
+ * dash modules. Brand tokens come from dashboard.css; the few layout tokens
+ * the kit assumes but dashboard.css doesn't define are declared here (same
+ * pattern as connections.css / engine-panes.css). */
+
+.agents-overview {
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur: 0.18s;
+  --rad-pill: 999px;
+  --bg-sunken: #070707;
+  --ls-tight: -0.02em;
+  --ls-title: -0.01em;
+}
+
+/* ─── header + grid ───────────────────────────────────────────────── */
+.agents-overview { padding-bottom: 8px; }
+.ao-head { margin-bottom: 22px; max-width: 640px; }
+.ao-eye { font-family: var(--jbm); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent); }
+.ao-sub { font-family: var(--geist); font-size: 13px; line-height: 1.55; color: var(--fg-3); margin-top: 8px; text-wrap: pretty; }
+.ao-sub b { color: var(--fg-2); font-weight: 500; }
+.ao-legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.ao-lz { display: inline-flex; align-items: center; gap: 7px; font-family: var(--jbm); font-size: 10px; letter-spacing: 0.03em;
+  color: var(--fg-2); background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--rad-pill); padding: 5px 11px 5px 9px; }
+.ao-lz .d { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.ao-lz .d.serving { background: var(--ok); box-shadow: 0 0 9px rgba(111,207,151,0.6); }
+.ao-lz .d.soon { background: transparent; border: 1.5px solid var(--fg-4); }
+.ao-lz .k { color: var(--fg-4); }
+
+.ao-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 340px)); gap: 26px; justify-content: start; }
+
+/* ─── flip + tilt shell ───────────────────────────────────────────── */
+.agents-overview .fcard { --el: var(--accent); --el-glow: var(--accent-glow);
+  width: 340px; height: 520px; perspective: 1150px; cursor: pointer; }
+.agents-overview .fcard.locked { width: 340px; height: 500px; cursor: default; }
+.agents-overview .fcard-tilt { width: 100%; height: 100%; transform-style: preserve-3d;
+  transform: rotateX(var(--rx,0deg)) rotateY(var(--ry,0deg)); transition: transform 0.22s var(--ease); }
+.agents-overview .fcard-inner { position: relative; width: 100%; height: 100%; transform-style: preserve-3d; }
+.agents-overview .fc-face { position: absolute; inset: 0; border-radius: 18px; backface-visibility: hidden;
+  background: var(--bg-1); border: 1px solid var(--line-strong); display: flex; flex-direction: column;
+  transition: opacity 0.3s var(--ease); box-shadow: 0 32px 74px -30px rgba(0,0,0,0.86); }
+.agents-overview .fc-face::before { content: ""; position: absolute; top: 0; left: 12px; right: 12px; height: 1px; z-index: 5;
+  background: linear-gradient(90deg, transparent, var(--el), transparent); opacity: 0.7; }
+.agents-overview .fc-back { transform: rotateY(180deg); }
+.agents-overview .fcard:not(.locked):hover .fc-face {
+  box-shadow: 0 38px 92px -28px rgba(0,0,0,0.9), 0 0 0 1px color-mix(in oklab, var(--el) 26%, transparent); }
+
+/* ─── FRONT · borderless full-art foil (live) ─────────────────────── */
+.agents-overview .fc-front { background: #0b0b0b; border-color: color-mix(in oklab, var(--el) 20%, var(--line-strong)); }
+.agents-overview .foilb-clip { position: absolute; inset: 0; border-radius: 17px; overflow: hidden; }
+.agents-overview .foilb-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 50% 2%; display: block; }
+.agents-overview .foilb-vig { position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(132% 92% at 50% 24%, transparent 56%, rgba(8,7,4,0.36)); }
+.agents-overview .foilb-holo { position: absolute; inset: 0; pointer-events: none; mix-blend-mode: screen; opacity: 0; transition: opacity 0.2s var(--ease);
+  background: radial-gradient(220px 220px at var(--hx,50%) var(--hy,38%), rgba(255,255,255,0.18), transparent 60%),
+    linear-gradient(115deg, transparent 38%, color-mix(in oklab, var(--el) 24%, transparent) 48%, rgba(255,255,255,0.18) 50%, color-mix(in oklab, var(--el) 24%, transparent) 52%, transparent 62%); }
+.agents-overview .foilb-scan { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity 0.2s var(--ease); mix-blend-mode: color-dodge;
+  background: repeating-linear-gradient(72deg, transparent 0 6px, rgba(255,120,180,0.05) 6px 7px, rgba(120,200,255,0.05) 7px 8px); }
+.agents-overview .fcard:hover .foilb-holo, .agents-overview .fcard:hover .foilb-scan { opacity: 0.9; }
+
+.agents-overview .foilb-top { position: absolute; top: 0; left: 0; right: 0; z-index: 3; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 15px 15px 32px; background: linear-gradient(to bottom, rgba(6,6,6,0.92), rgba(6,6,6,0.48) 58%, transparent); }
+.agents-overview .foilb-bottom { position: absolute; bottom: 0; left: 0; right: 0; z-index: 3; display: flex; flex-direction: column; gap: 9px;
+  padding: 32px 15px 15px; background: linear-gradient(to top, rgba(5,5,5,0.95), rgba(5,5,5,0.52) 58%, transparent); }
+
+.agents-overview .fc-id { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.agents-overview .fc-name-row { display: flex; align-items: center; gap: 8px; }
+.agents-overview .fc-name { font-family: var(--jbm); font-size: 22px; font-weight: 600; letter-spacing: var(--ls-tight); text-transform: uppercase; color: var(--fg); line-height: 1; text-shadow: 0 1px 12px rgba(0,0,0,0.6); }
+.agents-overview .fc-model { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-2); letter-spacing: 0.02em; }
+
+/* health — live endpoint health + context */
+.agents-overview .hv { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex-shrink: 0; }
+.agents-overview .hv-health { display: flex; align-items: center; gap: 6px; }
+.agents-overview .hv-tput { font-family: var(--jbm); font-size: 11.5px; font-weight: 600; color: var(--ok); letter-spacing: 0.01em; font-variant-numeric: tabular-nums; }
+.agents-overview .hv-tput.idle { color: var(--fg-3); }
+.agents-overview .hv-ctx { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.agents-overview .hv-ctxrow { display: flex; align-items: baseline; gap: 5px; }
+.agents-overview .hv-l { font-family: var(--jbm); font-size: 8px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--fg-3); }
+.agents-overview .hv-v { font-family: var(--jbm); font-size: 14px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; line-height: 1; }
+.agents-overview .hv-v i { color: var(--fg-4); font-style: normal; }
+.agents-overview .hv-bar { width: 86px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.14); overflow: hidden; }
+.agents-overview .hv-bar i { display: block; height: 100%; background: var(--el); box-shadow: 0 0 8px var(--el-glow); border-radius: 2px; transition: width 0.4s var(--ease); }
+
+/* bottom meta */
+.agents-overview .fc-role { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-2); letter-spacing: 0.02em; line-height: 1.4; }
+.agents-overview .fc-meta { display: flex; align-items: center; gap: 9px; }
+.agents-overview .fc-st { display: flex; align-items: center; gap: 6px; font-family: var(--jbm); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ok); }
+.agents-overview .fc-st.idle { color: var(--fg-3); }
+.agents-overview .fc-st.error { color: var(--err); }
+.agents-overview .fc-rarity { margin-left: auto; display: flex; gap: 3px; }
+.agents-overview .fc-star { width: 8px; height: 8px; transform: rotate(45deg); border-radius: 1px; background: var(--el); box-shadow: 0 0 7px var(--el-glow); }
+.agents-overview .fc-star.off { background: transparent; border: 1px solid var(--fg-5); box-shadow: none; }
+.agents-overview .flip-hint { display: inline-flex; align-items: center; gap: 5px; font-family: var(--jbm); font-size: 9.5px; color: var(--fg-5); letter-spacing: 0.06em; }
+.agents-overview .flip-hint b { color: var(--fg-3); font-weight: 500; }
+
+/* ─── BACK · abilities + skills + actions ─────────────────────────── */
+.agents-overview .fcb-h { display: flex; align-items: center; gap: 9px; padding: 15px 16px 12px; border-bottom: 1px solid var(--line-soft); }
+.agents-overview .fcb-h .l { font-family: var(--jbm); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-4); }
+.agents-overview .fcb-h .l b { color: var(--el); font-weight: 600; }
+.agents-overview .fcb-body { padding: 4px 16px; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+.agents-overview .atk { padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
+.agents-overview .atk:last-child { border-bottom: none; }
+.agents-overview .atk-h { display: flex; align-items: center; gap: 10px; }
+.agents-overview .atk-cost { display: flex; gap: 3px; flex-shrink: 0; }
+.agents-overview .atk-pip { width: 9px; height: 9px; transform: rotate(45deg); border-radius: 1px; background: var(--el); box-shadow: 0 0 7px var(--el-glow); }
+.agents-overview .atk-pip.spent { background: transparent; border: 1px solid var(--fg-5); box-shadow: none; }
+.agents-overview .atk-name { font-family: var(--jbm); font-size: 14.5px; font-weight: 600; letter-spacing: var(--ls-tight); text-transform: uppercase; color: var(--fg); white-space: nowrap; }
+.agents-overview .atk-pow { margin-left: auto; display: flex; align-items: baseline; gap: 4px; }
+.agents-overview .atk-pow .v { font-family: var(--jbm); font-size: 19px; font-weight: 600; color: var(--el); font-variant-numeric: tabular-nums; line-height: 1; }
+.agents-overview .atk-pow .u { font-family: var(--jbm); font-size: 8px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-4); }
+.agents-overview .atk-desc { font-family: var(--geist); font-size: 11.5px; line-height: 1.45; color: var(--fg-3); margin-top: 6px; padding-left: 34px; text-wrap: pretty; }
+
+.agents-overview .fcb-skills { padding: 12px 0 6px; margin-top: 4px; border-top: 1px solid var(--line-soft); }
+.agents-overview .fcb-sec-l { font-family: var(--jbm); font-size: 9px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--fg-4); margin-bottom: 9px; }
+.agents-overview .skill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.agents-overview .skill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--jbm); font-size: 10.5px; color: var(--fg-2);
+  background: var(--bg-sunken); border: 1px solid var(--line-soft); border-radius: var(--rad-pill); padding: 5px 10px 5px 9px; }
+.agents-overview .skill::before { content: ""; width: 5px; height: 5px; flex-shrink: 0; transform: rotate(45deg); border-radius: 1px; background: var(--fg-5); }
+.agents-overview .skill.key { color: var(--fg); border-color: color-mix(in oklab, var(--el) 32%, transparent); }
+.agents-overview .skill.key::before { background: var(--el); box-shadow: 0 0 6px var(--el-glow); }
+
+/* quick-actions zone — pinned to the very bottom of the back face.
+ * A secondary row (Logs · Persona) sits above the primary full-width
+ * Restart button so the restart always lands at the very bottom edge. */
+.agents-overview .fcb-actions { margin-top: auto; border-top: 1px solid var(--line-soft); padding: 11px 14px 13px; display: flex; flex-direction: column; gap: 9px; }
+.agents-overview .fcb-act-row { display: flex; gap: 8px; }
+.agents-overview .fc-act { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  font-family: var(--jbm); font-size: 10.5px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--fg-2); background: transparent; border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px 10px; cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.agents-overview .fc-act:hover { color: var(--fg); border-color: color-mix(in oklab, var(--el) 40%, var(--line-strong)); background: color-mix(in oklab, var(--el) 6%, transparent); }
+.agents-overview .fc-restart { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
+  font-family: var(--jbm); font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: #14110a; background: var(--el); border: none; border-radius: 9px; padding: 11px 14px; cursor: pointer;
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--el) 40%, transparent), 0 8px 22px -10px var(--el-glow);
+  transition: transform 0.12s var(--ease), filter 0.18s var(--ease); }
+.agents-overview .fc-restart:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.agents-overview .fc-restart:active { transform: translateY(0); }
+.agents-overview .fc-restart:disabled { cursor: default; filter: none; transform: none; opacity: 0.92; }
+.agents-overview .fc-restart.busy { background: color-mix(in oklab, var(--el) 28%, var(--bg-3)); color: var(--fg-2); box-shadow: 0 0 0 1px var(--line-strong); }
+.agents-overview .fc-restart.ok { background: var(--ok); color: #08120c; box-shadow: 0 0 0 1px var(--ok-line); }
+.agents-overview .fc-restart.err { background: var(--err); color: #1a0707; box-shadow: 0 0 0 1px var(--err-line); }
+.agents-overview .fc-restart .spin { animation: aoSpin 0.9s linear infinite; transform-origin: center; }
+@keyframes aoSpin { to { transform: rotate(360deg); } }
+
+/* ─── locked / coming-soon card (front module tile) ───────────────── */
+.agents-overview .fcard.locked .fc-front { border-style: dashed; border-color: color-mix(in oklab, var(--el) 13%, var(--line-strong)); }
+.agents-overview .pi-stage { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(122% 96% at 50% 30%, color-mix(in oklab, var(--el) 8%, #0d0e12) 0%, #0a0b0e 60%, #08090b 100%); }
+.agents-overview .pi-grid { position: absolute; inset: 0; pointer-events: none; opacity: 0.45;
+  background-image: linear-gradient(var(--line-soft) 1px, transparent 1px), linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+  background-size: 30px 30px; mask-image: radial-gradient(80% 70% at 50% 40%, #000 30%, transparent 80%); }
+.agents-overview .pi-mark-wrap { position: relative; width: 42%; aspect-ratio: 1; z-index: 2; display: flex; align-items: center; justify-content: center; }
+.agents-overview .pi-mark { width: 100%; height: 100%; object-fit: contain; opacity: 0.6; filter: saturate(0.7) brightness(0.92); }
+
+/* uniform grey "coming soon" mask laid over the whole locked card */
+.agents-overview .ao-mask { position: absolute; inset: 0; z-index: 8; border-radius: 18px; pointer-events: none; overflow: hidden;
+  background: linear-gradient(180deg, rgba(12,12,14,0.62), rgba(8,8,10,0.74)); backdrop-filter: grayscale(0.7) saturate(0.5) blur(0.5px); }
+.agents-overview .ao-mask::after { content: ""; position: absolute; inset: 0;
+  background: repeating-linear-gradient(45deg, transparent 0 13px, rgba(255,255,255,0.018) 13px 14px); }
+.agents-overview .ao-mask-label { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-9deg);
+  font-family: var(--jbm); font-size: 17px; font-weight: 600; letter-spacing: 0.28em; text-transform: uppercase; color: var(--fg-2);
+  padding: 9px 18px; border: 1px solid var(--line-strong); border-radius: 6px; background: rgba(10,10,12,0.72);
+  box-shadow: 0 10px 30px -12px rgba(0,0,0,0.8); white-space: nowrap; }
+.agents-overview .ao-mask-eta { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+  font-family: var(--jbm); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-4); display: inline-flex; align-items: center; gap: 6px; }
+.agents-overview .ao-mask-eta b { color: var(--fg-2); font-weight: 600; }
+
+/* locked-card identity (dimmed) */
+.agents-overview .fcard.locked .foilb-top { z-index: 4; }
+.agents-overview .fcard.locked .fc-name { font-size: 21px; color: var(--fg-2); text-transform: lowercase; }
+.agents-overview .fcard.locked .fc-name.caps { text-transform: capitalize; }
+.agents-overview .fcard.locked .fc-model { color: var(--fg-3); }
+.agents-overview .dot-empty { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-5); box-shadow: 0 0 0 1px rgba(255,255,255,0.04); flex-shrink: 0; }
+.agents-overview .soon-pill { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  font-family: var(--jbm); font-size: 8.5px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--fg-2);
+  background: color-mix(in oklab, var(--el) 14%, #131316); border: 1px solid color-mix(in oklab, var(--el) 34%, transparent);
+  border-radius: var(--rad-pill); padding: 4px 10px 4px 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .agents-overview .fcard-tilt, .agents-overview .fc-face { transition: none; }
+}

@@ -37,7 +37,10 @@
 .mg-meta b { color: var(--fg-2); font-weight: 500; }
 .mg-meta-dir { margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--line); }
 
-.mg-host { width: 100%; }
+/* position:relative makes the host the containing block for the stage's
+   absolutely-positioned children, so any empty/loading placeholder stays
+   inside the graph area instead of escaping to the viewport. */
+.mg-host { width: 100%; position: relative; }
 .mg-wrap { position: relative; }
 
 .mg-controls { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }

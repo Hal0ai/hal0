@@ -299,7 +299,47 @@ async function fetchSlotsUnion(): Promise<Slot[]> {
   const byName = new Map<string, Slot>()
   for (const s of statusSlots) byName.set(s.name, s)
   for (const s of realSlots) byName.set(s.name, s)
-  return [...byName.values()].map(normalizeSlot)
+  return reconcileEnrichment([...byName.values()].map(normalizeSlot))
+}
+
+// Container enrichment (container_status / container_health) is only present
+// on /api/slots entries; /api/status entries are bare (FSM state only). The
+// two fetches above soft-fail independently, so a transient /api/slots miss
+// (its per-slot /health probe is heavy and can lag while a model is mid-
+// generation) would drop a card back to its bare, possibly-stale `state`
+// string — flipping a live slot's dot to "offline" while it is in fact
+// serving. Carry the last-known-good container fields forward for a short
+// window so a dropped /api/slots poll keeps the card coherent rather than
+// downgrading it; after the TTL we let it degrade to the (reconciled) bare
+// state truthfully.
+const ENRICH_TTL_MS = 30_000
+const lastGoodEnrichment = new Map<
+  string,
+  { container_status: unknown; container_health: unknown; ts: number }
+>()
+
+function reconcileEnrichment(slots: Slot[]): Slot[] {
+  const now = Date.now()
+  return slots.map((s) => {
+    if (s._synthetic) return s
+    if (s.container_status != null) {
+      lastGoodEnrichment.set(s.name, {
+        container_status: s.container_status,
+        container_health: (s as { container_health?: unknown }).container_health,
+        ts: now,
+      })
+      return s
+    }
+    const lg = lastGoodEnrichment.get(s.name)
+    if (lg && now - lg.ts <= ENRICH_TTL_MS) {
+      return {
+        ...s,
+        container_status: lg.container_status,
+        container_health: lg.container_health,
+      } as Slot
+    }
+    return s
+  })
 }
 
 /**

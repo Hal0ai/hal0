@@ -162,9 +162,9 @@ test.describe('MCP servers (Agent ▸ MCP, #mcp)', () => {
   })
 
   test('renders the MCP servers engine pane inside the Agent shell', async ({ page }) => {
-    // v0.5: MCP lives under the Agent tabbed page (header "Agent", eyebrow
+    // v0.5: MCP lives under the Agents tabbed page (header "Agents", eyebrow
     // "Tools"); the "Connections" heading is gone.
-    await expect(page.locator('.view .vh h1')).toHaveText('Agent')
+    await expect(page.locator('.view .vh h1')).toHaveText('Agents')
     await expect(page.locator('.cpane-title', { hasText: 'MCP servers' })).toBeVisible()
   })
 

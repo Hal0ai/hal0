@@ -132,6 +132,33 @@ export function slotIndicatorFromPhase(slot, now = Date.now()) {
   return _containerIndicator(slot, now);
 }
 
+/**
+ * Project the slot snapshot → the Start/Stop button selector used by
+ * slots.jsx: "off" (render Start) | "running" (render Stop+Restart) |
+ * "transitional" (actions disabled).
+ *
+ * CRITICAL: this derives from the SAME classifier as the status dot
+ * (`_containerIndicator`) so the dot and the button can never contradict.
+ * slots.jsx previously reimplemented this with its own inline state table,
+ * which diverged from the dot for `idle` and `unloading` snapshots — the
+ * card could show an "offline" dot next to a "Stop" button. Mapping both
+ * off one classifier makes that class of bug structurally impossible.
+ *
+ *   dot serving / stale (loaded & healthy) → running   (offer Stop/Restart)
+ *   dot warming         (pulling/starting) → transitional (buttons disabled)
+ *   dot offline / error (stopped/crashed)  → off        (offer Start)
+ */
+export function slotButtonPhase(slot, now = Date.now()) {
+  // Disabled slots never offer lifecycle actions (the card renders a
+  // "disabled" note instead); return a non-running phase defensively.
+  if (slot?.enabled === false) return "off";
+  const { cls } = _containerIndicator(slot, now);
+  if (cls === "serving" || cls === "stale") return "running";
+  if (cls === "warming") return "transitional";
+  // "offline" (stopped/idle-not-live) and "error" (crashed) → Start.
+  return "off";
+}
+
 function _containerIndicator(slot, now) {
   const cs = String(slot?.container_status || "stopped");
   const hasContainerStatus = slot?.container_status != null;
@@ -164,7 +191,7 @@ function _containerIndicator(slot, now) {
   if (
     cs === "starting" ||
     (hasContainerStatus && cs === "running" && !health) ||
-    (!hasContainerStatus && (state === "warming" || state === "starting"))
+    (!hasContainerStatus && (state === "warming" || state === "starting" || state === "unloading"))
   ) {
     return {
       cls: "warming",

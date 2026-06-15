@@ -239,10 +239,12 @@ function useNavItems() {
     // backend. No live count here (it's per-board; the board's own selector
     // shows task counts).
     { id: "board", label: "Board", icon: Icons.board },
-    // v0.5 nav: Agent hosts Memory (full Hindsight page, gated on the memory
-    // subsystem) and MCP (bundled FastMCP servers, from the old Connections
-    // page) as tabs. MCP is always shown; Memory follows the gate.
-    { id: "agent", label: "Agent", icon: Icons.agent, children: [
+    // v0.5 nav: clicking Agents lands on the Overview (the agent-card library,
+    // with Hermes wired live) — that's the parent row's target, so no separate
+    // Overview sub-link. It then hosts Memory (full Hindsight page, gated on
+    // the memory subsystem) and MCP (bundled FastMCP servers) as tabs. MCP is
+    // always shown; Memory follows the gate.
+    { id: "agent", label: "Agents", icon: Icons.agent, children: [
       ...(memoryEnabled ? [{ id: "memory", label: "Memory" }] : []),
       { id: "mcp", label: "MCP" },
     ] },

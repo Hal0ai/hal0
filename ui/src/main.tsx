@@ -84,6 +84,15 @@ import './dash/extras.jsx'
 // memory-tab.jsx registers on window BEFORE agent-view.jsx mounts.
 import './dash/agents/memory-tab-hook-bridge'
 import './dash/agents/memory-tab.jsx'
+// Agents Overview (the bare #agent landing tab): a card library where Hermes
+// is wired to live health + restart. The hook-bridge installs window.__hal0Use*
+// + window.__hal0AgentArt BEFORE the cards evaluate; agent-card.jsx registers
+// LiveAgentCard/LockedAgentCard, agents-overview.jsx registers AgentsOverview —
+// all BEFORE agent-view.jsx reads them.
+import './dash/agents/agent-cards.css'
+import './dash/agents/agents-hook-bridge'
+import './dash/agents/agent-card.jsx'
+import './dash/agents/agents-overview.jsx'
 import './dash/agents/agent-view.jsx'
 
 // Hindsight Memory view (#memory) — bridge installs the TanStack-Query

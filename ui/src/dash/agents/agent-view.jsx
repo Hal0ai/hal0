@@ -1,7 +1,11 @@
-// hal0 — AgentView shell (#agent route).
+// hal0 — AgentView shell (#agent route), labelled "Agents".
 //
-// v0.5 nav: the Agent page is a tabbed shell hosting the surfaces that used
-// to be their own top-level pages:
+// v0.5 nav: the Agents page is a tabbed shell. Clicking "Agents" lands on the
+// Overview (the agent-card library); Memory + MCP are additional tabs:
+//   - Overview — the collectible agent cards (window.AgentsOverview). Hermes is
+//                the live `serving` foil wired to real health + restart; the
+//                rest of the library are roadmap cards behind a grey mask.
+//                This is the default landing — always present, ungated.
 //   - Memory — the full Hindsight memory page (window.MemoryView), moved in
 //              from the standalone #memory route. Gated on the memory
 //              subsystem (HAL0_MEMORY_ENABLED) via the window bridge.
@@ -9,7 +13,7 @@
 //              from the dissolved Connections page.
 //
 // Hash routes (resolved here from window.location.hash):
-//   #agent                  → default tab (Memory if enabled, else MCP)
+//   #agent                  → Overview tab (the cards landing; default)
 //   #agent/memory[/section] → Memory tab  (also reached via #memory[/section])
 //   #agent/mcp              → MCP tab      (also reached via #mcp)
 //
@@ -22,8 +26,9 @@
 // load order is the contract.
 
 const AGENT_TAB_DEFS = [
-  { id: "memory", label: "Memory", needsMemory: true },
-  { id: "mcp",    label: "MCP",    needsMemory: false },
+  { id: "overview", label: "Overview", needsMemory: false },
+  { id: "memory",   label: "Memory",   needsMemory: true },
+  { id: "mcp",      label: "MCP",       needsMemory: false },
 ];
 
 function _agentTabs(memoryEnabled) {
@@ -41,12 +46,12 @@ function _agentRoute(memoryEnabled) {
     return { tab: "mcp", section: null };
   }
   if (head === "memory" || (head === "agent" && parts[1] === "memory")) {
-    if (!memoryEnabled) return { tab: "mcp", section: null };
+    if (!memoryEnabled) return { tab: "overview", section: null };
     const section = head === "memory" ? parts[1] || null : parts[2] || null;
     return { tab: "memory", section };
   }
-  // bare #agent → default tab
-  return { tab: memoryEnabled ? "memory" : "mcp", section: null };
+  // bare #agent (or #agent/overview) → the cards Overview landing
+  return { tab: "overview", section: null };
 }
 
 function AgentView() {
@@ -59,16 +64,18 @@ function AgentView() {
   const { tab, section } = _agentRoute(memoryEnabled);
 
   // Memory tab is canonically reached via #memory (so MemoryView's internal
-  // #memory/<section> nav round-trips); MCP rides the #agent/mcp sub-path.
+  // #memory/<section> nav round-trips); Overview is the bare #agent landing;
+  // MCP rides the #agent/mcp sub-path.
   const goTab = (id) => {
-    window.location.hash = id === "memory" ? "#memory" : "#agent/" + id;
+    window.location.hash =
+      id === "memory" ? "#memory" : id === "overview" ? "#agent" : "#agent/" + id;
   };
 
   return (
     <div className="view">
       <div className="vh">
         <span className="vh-eye mono">Tools</span>
-        <h1>Agent</h1>
+        <h1>Agents</h1>
         <span className="vh-spacer" />
         <span className="hint mono">Chat in terminal: <code>hermes chat</code></span>
       </div>
@@ -97,6 +104,7 @@ function AgentView() {
         ))}
       </div>
 
+      {tab === "overview" && window.AgentsOverview && <window.AgentsOverview />}
       {tab === "memory" && window.MemoryView && <window.MemoryView param={section} />}
       {tab === "mcp" && (
         <div className="conn">

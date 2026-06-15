@@ -1,7 +1,9 @@
 // hal0 dashboard — DashGrid + DashboardOverhaulView (W3)
 //
-// 12-column CSS masonry grid with edit mode: drag-reorder, resize,
+// 12-column row-aligned CSS grid with edit mode: drag-reorder, resize,
 // card library, pin/unpin. Layout state from useDashLayout + reconcile.
+// Rows size to their tallest card and cells stretch to fill, so card
+// bottoms line up across a band (not masonry — see overhaul.css .dash-grid).
 //
 // Window-global module — exports DashGrid + DashboardOverhaulView onto
 // window so other dash modules can reference them without ES imports.
@@ -24,7 +26,6 @@
 const { React: _R } = window;
 const {
   useState,
-  useEffect,
   useRef,
   useCallback,
   useMemo,
@@ -32,7 +33,6 @@ const {
 
 // ─── constants ────────────────────────────────────────────────────────────────
 const GRID_COLS = 12;
-const ROW_UNIT  = 8;
 const GRID_GAP  = 16;
 
 // ─── CARD_REGISTRY ────────────────────────────────────────────────────────────
@@ -110,40 +110,16 @@ function reconcileLayout(layout, slots) {
   return { v: 2, order: newOrder, enabled, spans, pinned };
 }
 
-// ─── Grid helpers ─────────────────────────────────────────────────────────────
-
-// useRowSpan: ResizeObserver on a card element → CSS gridRowEnd span value
-// Formula: ceil((height + gap) / (rowUnit + gap))
-function useRowSpan(ref) {
-  const [rowSpan, setRowSpan] = useState(1);
-
-  useEffect(() => {
-    if (!ref.current) return;
-    const el = ref.current;
-    const compute = () => {
-      const h = el.offsetHeight;
-      const span = Math.max(1, Math.ceil((h + GRID_GAP) / (ROW_UNIT + GRID_GAP)));
-      setRowSpan(span);
-    };
-    compute();
-    const ro = new ResizeObserver(compute);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [ref]);
-
-  return rowSpan;
-}
-
 // ─── GridCell ─────────────────────────────────────────────────────────────────
-// Wraps one card with: row-span measurement, edit overlay (grip/span/remove/resize).
+// Wraps one card with: column span, edit overlay (grip/span/remove/resize).
+// Height is row-aligned by the grid (no per-card measurement).
 
 function GridCell({ layoutKey, colSpan, editing, isLocked, onRemove, onDragStart, onDragEnter, onDragEnd, onResizeStart, children }) {
-  const cardRef = useRef(null);
-  const rowSpan = useRowSpan(cardRef);
-
+  // Row-aligned layout: the cell only declares its column span; height comes
+  // from the implicit grid row (sized to the tallest card in the band) via
+  // `align-items: stretch`. No JS height measurement needed.
   const style = {
     gridColumn: `span ${colSpan}`,
-    gridRow: `span ${rowSpan}`,
   };
 
   const handleDragStart = (e) => {
@@ -164,7 +140,6 @@ function GridCell({ layoutKey, colSpan, editing, isLocked, onRemove, onDragStart
 
   return (
     <div
-      ref={cardRef}
       className={'dash-cell' + (editing ? ' editing' : '')}
       style={style}
       draggable={editing && !isLocked}
@@ -546,7 +521,7 @@ function DashGrid({ editing: editingProp, onToggleEdit, layout, slots, onLayoutC
         />
       )}
 
-      {/* Masonry grid */}
+      {/* Row-aligned grid */}
       <div className={'dash-grid' + (editing ? ' dash-grid-editing' : '')}>
         {visibleItems.map(key => {
           const span = layout.spans?.[key] ?? (

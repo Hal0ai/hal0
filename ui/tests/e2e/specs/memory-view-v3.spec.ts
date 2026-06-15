@@ -154,9 +154,9 @@ test.describe('Memory view — Hindsight surface', () => {
     await expect(card).toContainText('hindsight')
     await expect(card).toContainText('0.7.2')
     await expect(card.locator('.chip.ok')).toBeVisible()
-    // baked forced-mock has 5 banks (primary/big/hermes/scratch/ingest);
-    // `big` is the FU2 large synthetic bank that exercises the subgraph slice.
-    await expect(card).toContainText('5 banks')
+    // baked forced-mock has 6 banks (primary/big/hermes/scratch/ingest/empty);
+    // `big` exercises the subgraph slice, `empty` the graph empty-state shell.
+    await expect(card).toContainText('6 banks')
   })
 
   test('engine card surfaces a reachability chip without crashing', async ({ page }) => {

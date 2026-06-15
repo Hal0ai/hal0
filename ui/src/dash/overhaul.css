@@ -482,10 +482,15 @@
 .dash-grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
-  grid-auto-rows: 8px;
+  /* Row-aligned (not masonry): each implicit row sizes to its tallest card,
+     and cells stretch to fill it so neighbouring card bottoms line up. The
+     minmax floor keeps a short single card from collapsing too far. Dropped
+     `dense` — it backfilled gaps by pulling unrelated cards up beside taller
+     ones, which is what produced the config-dependent jaggedness. */
+  grid-auto-rows: minmax(120px, auto);
   gap: 16px;
-  grid-auto-flow: row dense;
-  align-items: start;
+  grid-auto-flow: row;
+  align-items: stretch;
 }
 
 /* <1200px: single-column (each cell forced to span 6 of the 6-col grid) */
@@ -502,6 +507,16 @@
 .dash-cell {
   position: relative;
   min-width: 0;
+  /* Stretch the card to the full (row-aligned) cell height so card bottoms
+     align across a band. .dcard is already a flex column; flex:1 makes it
+     fill, and .dcard-b grows so footers/charts settle at the bottom. */
+  display: flex;
+}
+.dash-cell > .dcard {
+  flex: 1;
+}
+.dash-cell > .dcard > .dcard-b {
+  flex: 1;
 }
 .dash-cell.editing {
   outline: 1px dashed var(--line-strong);
