@@ -46,13 +46,13 @@ def test_build_slot_cfg_sets_device_profile_model():
         slot="chat",
         model_id="qwen3.6-27b",
         device="gpu-rocm",
-        profile="rocm-mtp",
+        profile="rocm-dnse",
         port=8081,
         context_size=32768,
     )
     assert cfg["name"] == "chat"
     assert cfg["device"] == "gpu-rocm"
-    assert cfg["profile"] == "rocm-mtp"
+    assert cfg["profile"] == "rocm-dnse"
     assert cfg["enabled"] is True
     assert cfg["model"]["default"] == "qwen3.6-27b"
     assert cfg["model"]["context_size"] == 32768
@@ -107,7 +107,7 @@ def test_apply_seeds_jobs_and_creates_slots(isolated_app_client, tmp_hal0_home, 
     # The default tier's primary is a curated chat model → a job + slot exist.
     assert "qwen3.5-9b" in body["model_ids"]
     chat = next(s for s in body["slots"] if s["slot"] == "chat")
-    assert chat["profile"] in ("rocm-mtp", "vulkan")
+    assert chat["profile"] in ("rocm-dnse", "vulkan")
     assert chat["created"] is True
     # Slot TOML written OFFLINE (not started).
     toml = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "chat.toml"
@@ -142,7 +142,7 @@ def test_apply_honors_per_slot_override(isolated_app_client, tmp_hal0_home, monk
             "storage_dir": tmp_hal0_home,
             "npu_opt_in": False,
             # Override chat: a different curated model + the vulkan profile/device
-            # (coherent pair) instead of the auto-derived rocm-mtp.
+            # (coherent pair) instead of the auto-derived rocm-dnse.
             "overrides": {
                 "chat": {"model_id": "qwen3.6-27b", "profile": "vulkan", "device": "gpu-vulkan"}
             },

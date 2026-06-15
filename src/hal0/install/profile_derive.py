@@ -6,7 +6,7 @@ embed/aux take the plain GPU profile. NPU lanes are selected only when the
 NPU is present AND the operator opted in.
 
 The (device, profile) pairs this produces are backend-coherent per #807:
-``gpu-rocm``→``rocm``/``rocm-mtp`` (backend rocm), ``gpu-vulkan``→``vulkan``,
+``gpu-rocm``→``rocm``/``rocm-dnse`` (backend rocm), ``gpu-vulkan``→``vulkan``,
 ``npu``→``flm``, ``cpu``→``tts``/``vulkan``.
 """
 
@@ -94,7 +94,7 @@ def derive_profile(capability: str, device: str) -> str:
         return "flm"
     if device == "gpu-rocm":
         # Dense chat/coder benefit from MTP; embed + others take plain rocm.
-        return "rocm-mtp" if capability in ("chat", "coder") else "rocm"
+        return "rocm-dnse" if capability in ("chat", "coder") else "rocm"
     if device == "gpu-vulkan":
         return "vulkan"
     if device == "cpu":

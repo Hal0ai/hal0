@@ -34,7 +34,7 @@ def _hw(*, platform="bare-metal-amd-gpu", compute=True, vulkan=True, npu=False):
 def test_chat_on_rocm_box_picks_rocm_mtp():
     hw = _hw(compute=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
-    assert derive_profile("chat", "gpu-rocm") == "rocm-mtp"
+    assert derive_profile("chat", "gpu-rocm") == "rocm-dnse"
 
 
 def test_chat_on_vulkan_only_box_picks_vulkan():

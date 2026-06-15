@@ -42,10 +42,10 @@ class TestListProfiles:
         assert isinstance(data, list)
 
     def test_returns_seed_profiles(self, client: TestClient) -> None:
-        """One entry per seed profile (6 as of Phase D: comfyui joined)."""
+        """One entry per seed profile (7: rocm-moe + rocm-dnse split, Phase D comfyui)."""
         data = client.get("/api/profiles").json()
         assert len(data) == len(SEED_PROFILES)
-        assert len(data) == 6
+        assert len(data) == 7
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
         """Phase A added the flm container profile to the seeds."""
@@ -97,7 +97,7 @@ class TestListProfiles:
         data = client.get("/api/profiles").json()
         by_name = {item["name"]: item for item in data}
         assert by_name["rocm"]["backend"] == "rocm"
-        assert by_name["rocm-mtp"]["backend"] == "rocm"
+        assert by_name["rocm-dnse"]["backend"] == "rocm"
         assert by_name["vulkan"]["backend"] == "vulkan"
         assert by_name["flm"]["backend"] is None
         assert by_name["tts"]["backend"] is None
@@ -110,7 +110,7 @@ class TestListProfiles:
 
     def test_dense_mtp_rocmfp4_mtp_true(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-mtp")
+        dense = next(item for item in data if item["name"] == "rocm-dnse")
         assert dense["mtp"] is True
 
     def test_vulkan_std_image_contains_vulkan(self, client: TestClient) -> None:
@@ -120,12 +120,12 @@ class TestListProfiles:
 
     def test_mtp_true_resolved_flags_contains_spec_type(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-mtp")
+        dense = next(item for item in data if item["name"] == "rocm-dnse")
         assert "--spec-type draft-mtp" in dense["resolved_flags"]
 
     def test_mtp_true_resolved_flags_contains_bundle(self, client: TestClient) -> None:
         data = client.get("/api/profiles").json()
-        dense = next(item for item in data if item["name"] == "rocm-mtp")
+        dense = next(item for item in data if item["name"] == "rocm-dnse")
         assert MTP_FLAG_BUNDLE in dense["resolved_flags"]
 
     def test_mtp_false_resolved_flags_no_spec_type(self, client: TestClient) -> None:

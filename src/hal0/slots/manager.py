@@ -1535,7 +1535,7 @@ class SlotManager:
         _normalize_ctx_key(cfg_dict)
         # Reject (or normalize) an incoherent device/profile backend pairing
         # before it ever lands on disk — the door the dashboard left open for
-        # the utility slot (vulkan device + rocm-mtp profile). Every field is
+        # the utility slot (vulkan device + rocm-dnse profile). Every field is
         # "new" at create time, so a conflicting device+profile is an explicit
         # operator error and raises.
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
@@ -1633,7 +1633,7 @@ class SlotManager:
 
         # Keep device↔profile backend coherent: a profile switch re-derives
         # device (the drawer path that previously left a vulkan device under a
-        # rocm-mtp profile), a cross-backend device flip re-points the profile
+        # rocm-dnse profile), a cross-backend device flip re-points the profile
         # (the POST /backend path, which writes device only), and an explicit
         # conflicting pair raises. Only the field(s) the caller changed drive
         # reconciliation.
@@ -2453,7 +2453,7 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
     A GPU slot implies its backend twice: ``device`` (``gpu-rocm`` /
     ``gpu-vulkan``) drives the llama-server backend, while ``profile`` selects
     the container image + flags. They must agree — a vulkan device under a
-    rocm-mtp profile launches a Vulkan binary with ROCm-only MTP draft flags
+    rocm-dnse profile launches a Vulkan binary with ROCm-only MTP draft flags
     (issue: utility slot). The field the operator changed wins; the stale side
     is re-derived. Both changed to conflicting backends → operator error.
 
