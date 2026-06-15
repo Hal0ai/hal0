@@ -10,6 +10,34 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.5.1-alpha.1] — 2026-06-15
+
+Pre-Alpha. Retires the web FirstRun picker in favour of a terminal `hal0 setup`
+TUI, and adds Ubuntu 26.04 / Python 3.14 install support.
+
+### Added
+- **`hal0 setup` TUI** — replaces the web FirstRun picker with a rich two-column
+  terminal setup (storage → Extensions → Main model → Agent model → NPU) over an
+  always-on context pane. Hybrid apply (in-process at install time, via the API
+  when it's up — roster coherence), `--auto`/`--storage-dir`/`--no-pull`/
+  `--no-extensions` flags, and a tier-less `POST /api/install/apply-selections`
+  endpoint (#833).
+- **Extensions** — selectable, auto-wired Apps (Open WebUI) + Agents (Hermes, Pi),
+  a growing registry surfaced in `hal0 setup` (#833).
+- **Ubuntu 26.04 / Python 3.14 install support** — per-distro FLM `.deb` selection,
+  hindsight `--ignore-requires-python`, py-version-agnostic Hermes web_dist (#829).
+
+### Changed
+- A fresh install seeds the hardware-recommended Main slot **non-destructively**
+  (only slots whose config is absent) and writes the first-run sentinel via
+  `hal0 setup --auto --no-pull` — so `hal0 update`/re-install never overwrites a
+  customised slot. The web bundle-tier picker is retired; the bundle backend is
+  kept dormant for the future *Stacks* feature (#833).
+
+### Removed
+- Web FirstRun picker (`firstrun.jsx` + hooks), the v1 `/api/bundles` surface,
+  `bundles/store.py`, and the legacy `/api/install/pick-default` route (#833).
+
 ## [v0.5.0-alpha.1] — 2026-06-14
 
 Pre-Alpha. Zero-boot install + FirstRun v2: a fresh install now stands up the
