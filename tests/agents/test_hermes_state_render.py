@@ -137,6 +137,61 @@ def test_render_live_context_writes_then_skips_when_unchanged(tmp_path, monkeypa
     assert "10:00:00" in (tmp_path / "STATE.md").read_text()  # as_of unchanged
 
 
+def test_render_live_context_writes_hermes_to_runtime_dir_not_etc(tmp_path, monkeypatch):
+    # HERMES.md must land in the hal0-writable RUNTIME_SNAPSHOT_DIR, never in
+    # /etc/hal0 — regression for the non-fatal "Read-only file system:
+    # /etc/hal0/HERMES.md.tmp" warning the detached hal0-api re-render raised
+    # (its sandbox makes /etc/hal0 read-only). /etc/hal0/HERMES.md is a
+    # provision-maintained symlink, so the runtime writer never touches /etc.
+    etc = tmp_path / "etc"
+    runtime = tmp_path / "var"
+    etc.mkdir()
+    runtime.mkdir()
+    monkeypatch.setattr(hp, "ETC_HAL0_DIR", etc)
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", runtime)
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {"primary": 32768})
+    home = tmp_path / "home"
+    home.mkdir()
+    # Seed an env snapshot so HERMES.md (env.container/env.cpu) renders.
+    import json
+
+    (home / "env-1.json").write_text(
+        json.dumps(
+            {
+                "env_report": {
+                    "container": {"product_name": "hal0-test", "kind": "lxc"},
+                    "cpu": {"model": "AMD Strix Halo", "logical_online": 16},
+                    "npu": {"present": True},
+                }
+            }
+        )
+    )
+    slots = [
+        {
+            "name": "primary",
+            "type": "llm",
+            "model_id": "qwen3-25b",
+            "status": "ready",
+            "backend": "vulkan",
+        }
+    ]
+
+    r = hp.render_live_context(
+        hermes_home=home,
+        slots_fetcher=lambda: slots,
+        now_iso="2026-06-04T10:00:00+00:00",
+    )
+    assert r["hermes_written"] is True
+    assert r["hermes_path"] == str(runtime / "HERMES.md")
+    assert (runtime / "HERMES.md").exists()
+    # HERMES.md is the structural map (points at STATE.md), rendered from the
+    # env snapshot — confirm it actually rendered rather than being empty.
+    assert "STATE.md" in (runtime / "HERMES.md").read_text()
+    # The writer must NOT create anything under /etc/hal0.
+    assert not (etc / "HERMES.md").exists()
+    assert not (etc / "HERMES.md.tmp").exists()
+
+
 def test_render_live_context_degraded_when_daemon_unreachable(tmp_path, monkeypatch):
     monkeypatch.setattr(hp, "ETC_HAL0_DIR", tmp_path)
     monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path)

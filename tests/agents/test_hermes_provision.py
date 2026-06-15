@@ -1396,6 +1396,11 @@ def test_context_link_renders_all_three_files(
     assert out.status == hp.PhaseStatus.OK
     assert (hermes_home / "SOUL.md").exists()
     assert (etc / "HERMES.md").exists()
+    # /etc/hal0/HERMES.md is the stable READ path but is a symlink to the
+    # hal0-writable runtime copy; the real file lives under RUNTIME_SNAPSHOT_DIR.
+    assert (etc / "HERMES.md").is_symlink()
+    assert (etc / "HERMES.md").resolve() == (tmp_path / "HERMES.md").resolve()
+    assert (tmp_path / "HERMES.md").is_file()
     assert (etc / "AGENTS.md").exists()
     soul = (hermes_home / "SOUL.md").read_text()
     # Templates reference Strix Halo signals — confirm at least one
@@ -1410,6 +1415,25 @@ def test_context_link_idempotent_symlink(tmp_path: Path) -> None:
     assert hp._safe_symlink(src, link) is True
     # Second call: no-op (target unchanged).
     assert hp._safe_symlink(src, link) is False
+
+
+def test_relink_managed_migrates_real_file_to_symlink(tmp_path: Path) -> None:
+    # Upgrade path: a pre-relocation install has a REAL /etc/hal0/HERMES.md.
+    # _relink_managed must replace it in place with a symlink to the new
+    # /var/lib copy (so the read path is unchanged for consumers).
+    target = tmp_path / "var" / "HERMES.md"
+    target.parent.mkdir()
+    target.write_text("real body\n", encoding="utf-8")
+    link = tmp_path / "etc" / "HERMES.md"
+    link.parent.mkdir()
+    link.write_text("stale real file from old install\n", encoding="utf-8")  # not a symlink
+
+    assert hp._relink_managed(target, link) is True
+    assert link.is_symlink()
+    assert link.resolve() == target.resolve()
+    assert link.read_text(encoding="utf-8") == "real body\n"
+    # Idempotent: already points at target -> no-op, no churn.
+    assert hp._relink_managed(target, link) is False
 
 
 def test_context_link_skill_mirror_warns_when_src_missing(tmp_path: Path) -> None:

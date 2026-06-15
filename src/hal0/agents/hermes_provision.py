@@ -1423,13 +1423,16 @@ HAL0_BUNDLED_SKILLS = Path("/usr/share/hal0/skills")
 ETC_HAL0_DIR = Path("/etc/hal0")
 ETC_HAL0_AGENT_SKILLS = ETC_HAL0_DIR / "agent-skills"
 
-# STATE.md — the volatile live snapshot rewritten on every restart / model
-# swap — lives under the hal0-owned /var/lib/hal0 rather than the root-owned
+# STATE.md AND HERMES.md — the live files rewritten on every restart / model
+# swap — live under the hal0-owned /var/lib/hal0 rather than the root-owned
 # /etc/hal0 (#473): the hermes unit runs User=hal0 with ProtectSystem=strict,
-# so its ExecStartPre `render-context` can only write to paths in
-# ReadWritePaths — /var/lib/hal0 is already there, /etc/hal0 is not. HERMES.md
-# (structural, cwd-injected from /etc/hal0) and the rest of the config stay
-# under ETC_HAL0_DIR, written at provision time as root.
+# AND the runtime re-render is spawned detached from hal0-api (whose sandbox
+# also makes /etc/hal0 read-only), so the writer can only touch ReadWritePaths
+# — /var/lib/hal0 is in them, /etc/hal0 is not. HERMES.md is cwd-injected from
+# /etc/hal0, so /etc/hal0/HERMES.md is kept as a symlink to the /var/lib copy
+# (provision, running as root, maintains the link). The rest of the config
+# (AGENTS.md, MCP-CLIENTS.md, seeds) stays under ETC_HAL0_DIR, written once at
+# provision time as root.
 RUNTIME_SNAPSHOT_DIR = Path("/var/lib/hal0")
 
 
@@ -1488,6 +1491,32 @@ def _safe_symlink(target: Path, link: Path) -> bool:
     return True
 
 
+def _relink_managed(target: Path, link: Path) -> bool:
+    """Force ``link`` to be a symlink -> ``target``, atomically replacing a
+    stale regular file or a wrong symlink. Returns True when a (re)link
+    happened, False when ``link`` already points at ``target``.
+
+    Unlike :func:`_safe_symlink`, this DOES clobber a pre-existing regular
+    file — it's only used for hal0-MANAGED paths (HERMES.md) where the file
+    is ours. It exists to migrate the pre-relocation layout, where HERMES.md
+    was a real file under /etc/hal0, to the new symlink -> /var/lib/hal0 form
+    in place (so the read path /etc/hal0/HERMES.md is unchanged for consumers).
+    """
+    if link.is_symlink():
+        try:
+            if os.readlink(link) == str(target):
+                return False
+        except OSError:
+            pass
+    link.parent.mkdir(parents=True, exist_ok=True)
+    tmp = link.with_suffix(link.suffix + ".lnktmp")
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
+    os.symlink(str(target), str(tmp))
+    os.replace(tmp, link)  # atomic over an existing file OR symlink
+    return True
+
+
 def _mirror_bundled_skills(src_root: Path, dst_root: Path) -> tuple[list[str], list[str]]:
     """Symlink every immediate child of ``src_root`` into ``dst_root``.
 
@@ -1515,7 +1544,7 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
 
     Files rendered (atomically):
       - $HERMES_HOME/SOUL.md
-      - /etc/hal0/HERMES.md
+      - /var/lib/hal0/HERMES.md (read via the /etc/hal0/HERMES.md symlink)
       - /etc/hal0/AGENTS.md
       - $HERMES_HOME/memories/HOST.md (symlink -> /etc/hal0/HERMES.md)
 
@@ -1627,20 +1656,40 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
             health_probe=ctx.io.http_get,
         )
         details["rendered"]["STATE.md"] = {"path": live["state_path"]}
+        # render_live_context writes the REAL HERMES.md under the hal0-owned
+        # RUNTIME_SNAPSHOT_DIR (so the User=hal0 runtime re-render isn't blocked
+        # by /etc/hal0 being read-only in the hal0-api spawn sandbox). Provision
+        # runs as root, so it (re)establishes /etc/hal0/HERMES.md as a symlink to
+        # that file — keeping the stable read path consumers (Hermes cwd-inject,
+        # the HOST.md mirror, the smoke test) already use. Migrates an older
+        # install where /etc/hal0/HERMES.md was a real file.
+        etc_hermes = ETC_HAL0_DIR / "HERMES.md"
+        runtime_hermes = Path(live.get("hermes_path") or (RUNTIME_SNAPSHOT_DIR / "HERMES.md"))
         details["rendered"]["HERMES.md"] = {
-            "path": str(ETC_HAL0_DIR / "HERMES.md"),
+            "path": str(etc_hermes),
             "written": live["hermes_written"],
         }
         if live["degraded"]:
             warnings.append("STATE.md rendered with daemon degraded")
         if live.get("hermes_error"):
             warnings.append(f"HERMES.md render: {live['hermes_error']}")
-        # render_live_context writes HERMES.md but not the HOST.md mirror;
-        # re-establish the symlink that the memory tier reads.
-        hpath = ETC_HAL0_DIR / "HERMES.md"
-        if hpath.exists():
+        try:
+            # Skip when the two resolve to the same file (e.g. tests that point
+            # both dirs at one tmp_path) — can't symlink a file onto itself.
+            same_file = runtime_hermes.exists() and etc_hermes.resolve() == runtime_hermes.resolve()
+            if (
+                not same_file
+                and runtime_hermes.exists()
+                and _relink_managed(runtime_hermes, etc_hermes)
+            ):
+                details["links"].append(f"{etc_hermes} -> {runtime_hermes}")
+        except OSError as exc:
+            warnings.append(f"HERMES.md /etc symlink: {exc}")
+        # The memory tier reads $HERMES_HOME/memories/HOST.md; mirror it to the
+        # stable /etc/hal0/HERMES.md read path (which now follows the symlink).
+        if etc_hermes.exists():
             host_md = hermes_home / "memories" / "HOST.md"
-            if _safe_symlink(hpath, host_md):
+            if _safe_symlink(etc_hermes, host_md):
                 details["links"].append(str(host_md))
     except Exception as exc:  # best-effort
         warnings.append(f"render_live_context: {exc}")
@@ -2171,11 +2220,14 @@ def render_live_context(
     STATE.md is content-hash gated: rewritten (and its ``_as_of`` line
     bumped) only when the substantive body changes. HERMES.md is written
     atomically (identical content => identical bytes => prompt-cache safe).
+    Both land under the hal0-writable RUNTIME_SNAPSHOT_DIR (/var/lib/hal0);
+    /etc/hal0/HERMES.md is a provision-maintained symlink to the latter, so
+    this writer never touches the read-only /etc/hal0 in its sandbox.
     Never raises on a daemon-unreachable read — leaves last-good files and
     reports ``degraded=True``.
 
     Returns: {"state_written": bool, "hermes_written": bool,
-              "degraded": bool, "state_path": str}.
+              "degraded": bool, "state_path": str, "hermes_path": str}.
     """
     fetch = slots_fetcher or _fetch_slots
     slots_all = fetch() or []
@@ -2244,6 +2296,7 @@ def render_live_context(
         "hermes_written": False,
         "degraded": degraded,
         "state_path": str(RUNTIME_SNAPSHOT_DIR / "STATE.md"),
+        "hermes_path": str(RUNTIME_SNAPSHOT_DIR / "HERMES.md"),
     }
 
     # STATE.md — content-hash gated (ignore the as_of line). Written under the
@@ -2275,6 +2328,14 @@ def render_live_context(
 
     # HERMES.md — structural map; atomic write (identical content => identical
     # bytes => prompt-cache safe). Render failure is non-fatal.
+    #
+    # Written under the hal0-owned RUNTIME_SNAPSHOT_DIR (like STATE.md, #473),
+    # NOT /etc/hal0: the runtime re-render is spawned detached from hal0-api
+    # (hermes_refresh) on a slot/model swap and inherits *that* unit's
+    # ProtectSystem=strict sandbox, where /etc/hal0 is read-only — writing it
+    # there raised the non-fatal "Read-only file system: /etc/hal0/HERMES.md.tmp"
+    # warning and silently froze HERMES.md on slot changes. /etc/hal0/HERMES.md
+    # stays the stable read path via a symlink that provision (root) maintains.
     try:
         hermes_md = _render_template(
             "HERMES.md.j2",
@@ -2289,7 +2350,8 @@ def render_live_context(
                 os.environ.get("HAL0_API_URL", "http://hal0.local:8080").rstrip("/"),
             ),
         )
-        hpath = ETC_HAL0_DIR / "HERMES.md"
+        hpath = RUNTIME_SNAPSHOT_DIR / "HERMES.md"
+        out["hermes_path"] = str(hpath)
         if not hpath.exists() or hpath.read_text(encoding="utf-8") != hermes_md:
             _atomic_write(hpath, hermes_md)
             out["hermes_written"] = True

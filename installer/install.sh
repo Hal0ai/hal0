@@ -759,12 +759,12 @@ fi
 #      missing libxrt only degrades the host probe — the container image
 #      bundles its own runtime.
 #
-#   2. FLM transitive runtime libs (apt) —
-#        * libavformat60/libavcodec60/   ffmpeg6 — FLM's audio transcribe
-#          libavutil58/libswscale7/        path (Whisper-V3-Turbo on NPU)
-#          libswresample4
-#        * libboost-program-options1.83.0  FLM CLI flag parsing
-#        * libfftw3-single3              FLM signal processing
+#   2. FLM transitive runtime libs (ffmpeg for the audio-transcribe path,
+#      libboost-program-options for CLI parsing, libfftw3 for signal
+#      processing). NOT hand-installed — the per-distro .deb (3.) declares the
+#      exact versions for its release, and `apt-get install ./deb` pulls them
+#      from the host's repos. (Hardcoding the ffmpeg6 SONAMEs was the old bug:
+#      they don't exist on ffmpeg7/8 hosts like Ubuntu 25.10+/26.04.)
 #
 #   3. FastFlowLM .deb — pinned URL + SHA-256, fetched from upstream
 #      releases. Verified BEFORE dpkg install; fail-soft if unreachable
@@ -780,18 +780,50 @@ ui_step "NPU prerequisites (FastFlowLM)"
 # twice, so FLMProvider.container_spec must never repeat a mode flag
 # (--asr/--embed) the model already implies.
 FLM_DEB_VERSION="0.9.43"
-FLM_DEB_URL="https://github.com/FastFlowLM/FastFlowLM/releases/download/v${FLM_DEB_VERSION}/fastflowlm_${FLM_DEB_VERSION}_ubuntu24.04_amd64.deb"
-# SHA-256 of the upstream ubuntu24.04 artefact at v0.9.43 (verified on
-# download 2026-06-03). If upstream rebuilds under the same tag this will
-# drift; bump in lockstep with FLM_DEB_VERSION.
-FLM_DEB_SHA256="4173fa82f0043a4ff14cf7b84c7d24188fac4ac64346942601b7d2b915308479"
+# Upstream ships a SEPARATE .deb per distro, each built against that release's
+# ffmpeg/boost ABI: ubuntu24.04 (ffmpeg6/boost1.83), ubuntu25.10 + ubuntu26.04
+# (ffmpeg7/8 / boost1.90), and debian13. Pick the artefact matching THIS host
+# so `apt-get install ./deb` resolves the .deb's ffmpeg/boost/fftw deps from the
+# host's own repos — no hardcoded SONAME list, and newer Ubuntu is first-class.
+# (Older installers pinned ONLY the ubuntu24.04 build and then had to SKIP host
+# FastFlowLM on every ffmpeg>=7 distro — even though the matching build existed.)
+# SHA-256 pinned per artefact, verified on download 2026-06-15; if upstream
+# rebuilds under the same tag these drift — bump in lockstep with FLM_DEB_VERSION.
+_flm_sha_for_suffix() {
+    case "$1" in
+        ubuntu24.04) echo "4173fa82f0043a4ff14cf7b84c7d24188fac4ac64346942601b7d2b915308479" ;;
+        ubuntu25.10) echo "7ff4d9a621c94aaa8bf783c05759dcd40ca43bdb5d07c31d4ccf04946dda0b69" ;;
+        ubuntu26.04) echo "20ab2ba4f338837be2aabdf463d1369ffe56ad7f7c6a3eacd112630d983aa357" ;;
+        debian13)    echo "acad5a520165956016bdadcb4983538f24f3ada9d1e5ac591c5e9ba11c0e22d1" ;;
+    esac
+}
+# Resolve host distro -> .deb suffix. For Ubuntu, pick the HIGHEST shipped build
+# whose version is <= the host's (sort -V), so a future 26.10/27.04 still uses
+# the ffmpeg-newest ubuntu26.04 artefact rather than falling back to ffmpeg6.
+# Empty suffix => no upstream build for this host (handled as an honest skip).
+FLM_DEB_SUFFIX=""
+case "$(distro_id)" in
+    ubuntu)
+        # `|| true`: _os_release_field returns 1 on a missing field, which would
+        # abort under `set -e`; an empty version just falls through to no match.
+        _flm_host_ver="$(_os_release_field VERSION_ID 2>/dev/null || true)"
+        for _cand in 24.04 25.10 26.04; do
+            if [[ "$(printf '%s\n%s\n' "${_cand}" "${_flm_host_ver:-0}" | sort -V | head -1)" == "${_cand}" ]]; then
+                FLM_DEB_SUFFIX="ubuntu${_cand}"
+            fi
+        done
+        ;;
+    debian) FLM_DEB_SUFFIX="debian13" ;;
+esac
+FLM_DEB_SHA256="$(_flm_sha_for_suffix "${FLM_DEB_SUFFIX}")"
+FLM_DEB_URL="https://github.com/FastFlowLM/FastFlowLM/releases/download/v${FLM_DEB_VERSION}/fastflowlm_${FLM_DEB_VERSION}_${FLM_DEB_SUFFIX}_amd64.deb"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev installs don't touch the host's apt or third-party package
     # sources — devs install once manually (see installer/README.md).
     # We still log what *would* have happened so the dev knows the gap
     # exists for production installs.
-    info "dev mode — skipping NPU prereqs (libxrt-npu2 + ffmpeg6 + boost1.83 + fftw3 + FLM .deb v${FLM_DEB_VERSION})"
+    info "dev mode — skipping NPU prereqs (libxrt-npu2 + per-distro FastFlowLM .deb v${FLM_DEB_VERSION} + its ffmpeg/boost/fftw deps)"
     info "          install manually if exercising NPU paths: see installer/README.md"
 elif ! command -v apt-get >/dev/null 2>&1; then
     # Non-Debian host (Fedora, Arch/CachyOS, openSUSE…). FastFlowLM upstream
@@ -808,30 +840,26 @@ else
     ui_spinner_run "apt-get update (refresh package index)" \
         apt-get update -qq
 
-    # FLM host-support gate. Upstream ships ONE Ubuntu-24.04 .deb whose hard
-    # deps are the ffmpeg6-era SONAMEs (libavcodec60 …) + boost1.83. Newer
-    # Ubuntu (25.10 "resolute" onward ships ffmpeg7 = libav*62 / boost1.90), so
-    # those candidates don't exist and BOTH the runtime-libs apt call and the
-    # `.deb` install fail with a noisy `exit 100`. Probe the keystone SONAME up
-    # front: if it isn't even a known package, skip the host-FLM steps with ONE
-    # honest line instead of two scary dumps. The npu container slot bundles its
-    # own runtime, so NPU inference is unaffected — only the host `flm validate`
-    # probe is disabled. (Upstream fix = a FLM build for this release; the
-    # package-name pins can't be satisfied here regardless of what we request.)
-    if apt-cache show libavcodec60 >/dev/null 2>&1; then
+    # FLM host-support gate. Upstream now ships a per-distro .deb (ubuntu24.04 /
+    # ubuntu25.10 / ubuntu26.04 / debian13), each pinned against that release's
+    # ffmpeg/boost ABI — so the host probe works on ffmpeg6/7/8 alike. The
+    # resolution above set FLM_DEB_SUFFIX iff a matching build exists; when it
+    # didn't, skip host-FLM with ONE honest line. The npu CONTAINER slot bundles
+    # its own runtime, so NPU inference is unaffected — only the host `flm
+    # validate` probe is disabled.
+    if [[ -n "${FLM_DEB_SUFFIX}" ]]; then
         FLM_HOST_LIBS_OK=1
     else
         FLM_HOST_LIBS_OK=0
-        warn "$(distro_pretty): host FastFlowLM unsupported — upstream ships an Ubuntu-24.04 .deb (ffmpeg6/boost1.83); this release has ffmpeg7/boost1.90"
-        warn "  skipping host FLM libs + .deb. The npu container slot bundles its own runtime, so NPU inference is unaffected"
-        warn "  (only the host 'flm validate' probe is disabled). Install FastFlowLM manually if upstream ships a build for this release."
+        warn "$(distro_pretty): no matching upstream FastFlowLM .deb (builds: ubuntu 24.04/25.10/26.04, debian 13)"
+        warn "  skipping host FLM .deb. The npu container slot bundles its own runtime, so NPU inference is unaffected"
+        warn "  (only the host 'flm validate' probe is disabled). Install FastFlowLM manually if upstream ships a build for this host."
     fi
 
-    # 1. libxrt-npu2 — best-effort. Available only when the host's apt
-    #    sources carry an XRT NPU build (e.g. a pre-existing vendor repo
-    #    on upgraded boxes). The FLM container image bundles its own
-    #    runtime, so a miss here only disables the HOST `flm validate`
-    #    probe, not the npu slot itself.
+    # libxrt-npu2 — best-effort. Available only when the host's apt sources
+    # carry an XRT NPU build (e.g. a pre-existing vendor repo on upgraded
+    # boxes). The FLM container image bundles its own runtime, so a miss here
+    # only disables the HOST `flm validate` probe, not the npu slot itself.
     if apt-get install -y libxrt-npu2 >/dev/null 2>&1; then
         info "libxrt-npu2 installed (AMDXDNA NPU runtime for the host flm probe)"
     else
@@ -839,36 +867,18 @@ else
         warn "  the npu container slot bundles its own XRT runtime and is unaffected"
     fi
 
-    # 2. Runtime libs — BEST-EFFORT, same rationale as libxrt-npu2 above:
-    #    the FLM container image bundles these, so a host-side miss only
-    #    disables the HOST `flm validate` probe, not the npu slot itself.
-    #    Listed explicitly (not a metapackage) so a future libavformat ABI
-    #    bump is a visible single-line edit rather than silent drift. apt is
-    #    idempotent, so already-installed packages are a no-op.
-    #
-    #    Must NOT be fatal: a transient apt hiccup (a stale `universe` index
-    #    where these ffmpeg6 libs momentarily resolve to "no installation
-    #    candidate", a mirror flake) used to abort the entire hal0 install
-    #    here — over optional host-side NPU libs the containerized slot
-    #    doesn't even need. Warn + continue, mirroring libxrt-npu2.
-    if [[ "${FLM_HOST_LIBS_OK}" -eq 1 ]] \
-        && ui_spinner_run "Installing FLM runtime libs (ffmpeg6 + boost1.83 + fftw3)" \
-        apt-get install -y \
-            libavformat60 libavcodec60 libavutil58 libswscale7 libswresample4 \
-            libboost-program-options1.83.0 \
-            libfftw3-single3; then
-        :
-    elif [[ "${FLM_HOST_LIBS_OK}" -eq 1 ]]; then
-        warn "FLM runtime libs not fully available from configured apt sources — host 'flm validate' may fail"
-        warn "  the npu container slot bundles its own runtime and is unaffected"
-    fi
+    # NB: the FLM ffmpeg/boost/fftw runtime libs are NOT pre-installed by hand
+    # anymore — `apt-get install ./fastflowlm_*.deb` (below) pulls the exact
+    # versions THIS .deb declares from the host's repos. That's why the build
+    # must match the host distro: it's what makes the dep resolution clean on
+    # ffmpeg7/8 hosts instead of demanding the ffmpeg6 SONAMEs that don't exist.
 
     # 3. FLM .deb. Fail-soft: if upstream is unreachable or the SHA-256
     #    doesn't match, warn + skip. NPU paths gate on `flm validate`
     #    succeeding later — GPU-only hal0 still ships fine.
     FLM_DEB_TMP="/tmp/fastflowlm_${FLM_DEB_VERSION}.deb"
-    # 0 when the host-FLM gate above found this release can't satisfy the .deb's
-    # ffmpeg6/boost1.83 deps — skip download+install entirely (no noisy exit).
+    # 0 when the host-FLM gate above found no upstream .deb for this distro —
+    # skip download+install entirely (no noisy exit).
     NEED_FLM_INSTALL="${FLM_HOST_LIBS_OK}"
     if command -v dpkg-query >/dev/null 2>&1 && \
        dpkg-query -W -f='${Version}\n' fastflowlm 2>/dev/null | grep -qx "${FLM_DEB_VERSION}"; then
@@ -1131,9 +1141,21 @@ else
         mkdir -p "${HS_DIR}/hf-cache" "${HS_DIR}/.cache"
         if [[ ! -x "${HS_DIR}/.venv/bin/hindsight-api" ]]; then
             "${PY}" -m venv "${HS_DIR}/.venv"
-            "${HS_DIR}/.venv/bin/pip" install --upgrade pip wheel -q 2>/dev/null || true
-            if ! "${HS_DIR}/.venv/bin/pip" install "hindsight-api==0.7.2" -q; then
-                warn "hindsight-api install failed — memory engine will be unavailable"
+            hs_pip="${HS_DIR}/.venv/bin/pip"
+            "${hs_pip}" install --upgrade pip wheel -q 2>/dev/null || true
+            if ! "${hs_pip}" install "hindsight-api==0.7.2" -q; then
+                # Newer distros (Ubuntu 25.10+/26.04) ship Python 3.14, which
+                # litellm>=1.83.14 (a hindsight-api dep) gates out via its
+                # requires-python metadata — even though the pinned stack runs
+                # fine on 3.14 (litellm dropped the 3.14 classifier over a
+                # since-resolved fastuuid wheel gap; BerriAI/litellm#26343).
+                # Retry past the metadata gate; the hindsight-api /health poll
+                # below is the real gate on whether the engine actually came up.
+                hs_pyver="$("${HS_DIR}/.venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
+                warn "hindsight-api hit a requires-python gate on Python ${hs_pyver}; retrying with --ignore-requires-python"
+                if ! "${hs_pip}" install --ignore-requires-python "hindsight-api==0.7.2" -q; then
+                    warn "hindsight-api install failed — memory engine will be unavailable"
+                fi
             fi
         else
             info "hindsight-api venv already present — skipping pip install"
