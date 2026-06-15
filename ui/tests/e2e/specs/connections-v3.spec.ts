@@ -114,8 +114,10 @@ test.describe('Local endpoints (Slots ▸ Endpoints, #slots/endpoints)', () => {
   })
 
   test('local endpoints list one row per slot', async ({ page }) => {
-    // The default mock state carries 11 slots.
-    await expect(page.locator('.eplist .eprow')).toHaveCount(11)
+    // The default mock state carries 9 slots (one row per useSlots() entry,
+    // including the disabled `legacy` slot; the synthetic hal0 endpoint is
+    // filtered out).
+    await expect(page.locator('.eplist .eprow')).toHaveCount(9)
     const primary = page.locator('.eprow').filter({ hasText: 'primary' }).first()
     await expect(primary.locator('.ep-dot.serving')).toBeVisible()
     await expect(primary.locator('.star')).toBeVisible() // default slot

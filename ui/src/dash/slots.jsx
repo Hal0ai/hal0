@@ -984,7 +984,6 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // Seeded slot identities for the skip-path empty layout.
   const SEEDED = [
     { name: "primary", type: "llm",           device: "gpu-rocm", group: "chat"  },
-    { name: "coder",   type: "llm",           device: "gpu-rocm", group: "chat"  },
     { name: "embed",   type: "embedding",     device: "gpu-rocm", group: "embed" },
     { name: "rerank",  type: "reranking",     device: "gpu-rocm", group: "embed" },
     { name: "stt",     type: "transcription", device: "cpu",      group: "voice" },
