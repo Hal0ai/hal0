@@ -100,6 +100,18 @@
   --rad:    6px;
   --rad-lg: 10px;
   --rad-xl: 14px;
+  --rad-pill: 999px;
+
+  /* Operator Board — motion + surface tokens (ported from the kanban
+     prototype board.css; added here so the board, scoped under .board, can
+     reuse the same vocabulary the rest of the dashboard already implies). */
+  --bg-sunken:     #070707;
+  --ease:          cubic-bezier(.22, 1, .36, 1);
+  --dur-fast:      .12s;
+  --dur:           .18s;
+  --dur-slow:      .22s;
+  --shadow-drawer: -24px 0 80px -20px rgba(0, 0, 0, 0.7);
+  --shadow-toast:  0 12px 36px -12px rgba(0, 0, 0, 0.6);
 
   /* Layout */
   --topbar-h:    52px;
@@ -259,6 +271,32 @@ a { color: inherit; text-decoration: none; }
 }
 .tb-cmdk:hover { color: var(--fg); border-color: var(--line-strong); }
 .tb-cmdk kbd {
+  font-family: var(--jbm);
+  font-size: 10px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg-1);
+  color: var(--fg-3);
+}
+
+/* Operator Board topbar launcher — mirrors .tb-cmdk, glows accent when active. */
+.tb-board {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+  background: transparent;
+  cursor: pointer;
+}
+.tb-board:hover { color: var(--fg); border-color: var(--line-strong); }
+.tb-board.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.tb-board kbd {
   font-family: var(--jbm);
   font-size: 10px;
   padding: 1px 5px;

@@ -159,3 +159,83 @@ Each spike: confirm a REAL source exists, propose the exact endpoint + effort, r
 - Layout survives reload AND a different browser (backend store).
 - `<1200px` collapses to single column; `prefers-reduced-motion` kills loops.
 - `npm run typecheck` + Playwright E2E green; new specs for the grid/edit-mode/dot-state.
+
+---
+
+# Operator Board (#board) — FROZEN DATA CONTRACT (v1)
+
+> Authored & frozen by the UI lead from SPEC §4. The board UI reaches `/api/board/*`
+> via the typed-hook + React Query pattern (`useBoard.ts`) over the existing Vite proxy.
+> hal0-api is a thin audited proxy → Hermes kanban (`/api/plugins/kanban/*`). No kanban
+> data lives in hal0; Hermes owns the DB. Neither team changes a shape here without re-freeze.
+
+## Hard rules (board)
+- **NO STUB DATA.** Every rendered value comes from a real `/api/board/*` response or is gated.
+  Mock board data lives ONLY in the e2e/mock layer (`apiMock.ts` board routes + `mock-data.ts`).
+- `?board=<slug>` threads through every task/board-scoped call (omit = current board).
+- Mutations are audited server-side (`board.<noun>.<verb>`); reads + SSE/WS are not.
+- Live board updates arrive via the `/api/board/events` WS — the board reflects ALL mutations
+  (operator's, the agent chat's, other workers') through this one transport. Chat ≠ board transport.
+
+## Status / lane model (EXACT)
+`VALID_STATUSES` (9): `triage, todo, scheduled, ready, running, blocked, review, done, archived`.
+Visible columns (8, in order): `triage, todo, scheduled, ready, running(=in-progress), blocked, review, done`.
+`archived` shown only when "Show archived" is on. UI label: `running` → "in-progress".
+Move a task = `PATCH /api/board/tasks/{id} {status}`. `done` completes; `blocked` accepts `block_reason`.
+
+## Endpoints (see `endpoints.ts` board section — authoritative)
+| hal0 `/api/board/...` | method | audited action |
+|---|---|---|
+| `/board` | GET | — |
+| `/tasks/{id}` | GET | — |
+| `/tasks` | POST | board.task.create |
+| `/tasks/{id}` | PATCH | board.task.update |
+| `/tasks/{id}` | DELETE | board.task.delete |
+| `/tasks/{id}/comments` | POST | board.task.comment |
+| `/links` | POST / DELETE | board.link.add / board.link.remove |
+| `/tasks/bulk` | POST | board.task.bulk |
+| `/tasks/{id}/reassign` | POST | board.task.reassign |
+| `/tasks/{id}/specify` | POST | board.task.specify |
+| `/tasks/{id}/decompose` | POST | board.task.decompose |
+| `/tasks/{id}/reclaim` | POST | board.task.reclaim |
+| `/tasks/{id}/log?tail=` | GET (pull-only) | — |
+| `/dispatch?max=N` | POST (one-shot nudge) | board.dispatch.nudge |
+| `/boards` | GET / POST | — / board.board.create |
+| `/boards/{slug}` | PATCH / DELETE?delete= | board.board.update / board.board.delete |
+| `/boards/{slug}/switch` | POST | board.board.switch |
+| `/profiles` | GET | — |
+| `/profiles/{name}` | PATCH | board.profile.update |
+| `/assignees?board=` | GET | — |
+| `/stats?board=` | GET | — |
+| `/diagnostics` | GET | — |
+| `/workers/active` | GET | — |
+| `/runs/{id}` | GET | — |
+| `/config` | GET | — (read-only knobs: tick-interval/failure-limit/claim-TTL/max-in-flight) |
+| `/orchestration` | GET / PUT | — / board.orchestration.update (4 knobs: orchestrator_profile, default_assignee, auto_decompose, auto_promote_children) |
+| `/events` | WS ?token=&since=&board=&tenant= | — |
+| `/chat` | POST(SSE) | board.chat.turn (per tool call) |
+
+## Wire shapes (board task — the canonical card/drawer shape)
+A `Task` from `/board` lanes + `/tasks/{id}`:
+```
+{ id, title, status, assignee|profile, tenant, priority, workspace,
+  created_by, created (relative or iso), body|desc, block_reason,
+  schedule?, summary?, deps:{parents:[id], children:[id]},
+  comments:[{author, at, body}], events:[{kind, at, json}],
+  runs:[{state, profile, dur, at, msg}],
+  comment_count, dep_count (e.g. "0/3" or null) }
+```
+The UI normalizes assignee↔profile, created_by↔createdBy, block_reason↔blockReason in `useBoard.ts`
+so view components consume one stable camelCase shape. `/board` returns lanes keyed by status (or a
+flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render with "— no tasks —".
+
+## Gaps surfaced honestly in the UI (do not fake)
+- Orchestration popover: only the 4 PUT knobs are editable. tick-interval / failure-limit /
+  claim-TTL / max-in-flight are read from `/config` and rendered **read-only with a note**.
+- "Nudge dispatcher" = one-shot `POST /dispatch?max=N`. No continuous start/stop.
+- Worker log is pull-only (`/tasks/{id}/log?tail=`); poll on drawer open, no live stream.
+- `create_task` may return a `warning` (no dispatcher running) — show it as a toast/banner.
+
+## Acceptance
+- Pixel parity vs the prototype (`/home/halo/Development/Projects/hal0/kanban/board/`).
+- `npm run typecheck` + Playwright E2E green; every SPEC §5 feature covered in multiple shapes.
