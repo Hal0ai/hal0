@@ -63,12 +63,15 @@ def test_state_returns_shape_expected_by_dashboard(
 ) -> None:
     """GET /api/updates/state matches the UpdateState shape in useUpdates.ts.
 
-    Probes are stubbed so the test doesn't depend on flm being
-    installed on the test host. Issue #233.
+    flm.current is derived from the bundled toolbox image tag (PR #822),
+    not from a subprocess probe. Issue #233.
     """
     from hal0.api.routes import updater as u_mod
 
-    monkeypatch.setattr(u_mod, "_probe_version", lambda _c: None)
+    # Stub the image-ref helper so the test is independent of the real constant.
+    monkeypatch.setattr(
+        u_mod, "_flm_toolbox_image", lambda: "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
+    )
 
     r = isolated_client.get("/api/updates/state")
     assert r.status_code == 200, r.text
@@ -78,28 +81,37 @@ def test_state_returns_shape_expected_by_dashboard(
     assert body["hal0"]["current"]  # __version__ is non-empty
     assert body["hal0"]["available"] == "9.9.9"
     assert body["hal0"]["channel"] == "stable"
-    # Probe returned None — UI should render '—' rather than a fabricated version.
-    assert body["flm"]["current"] is None
+    # flm.current comes from the image tag; source is "toolbox-image".
+    assert body["flm"]["current"] == "0.9.43"
+    assert body["flm"]["source"] == "toolbox-image"
     assert body["autoCheck"] is True
 
 
-def test_state_parses_flm_version_string(
+def test_state_flm_version_from_image_tag(
     isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Probe output ``FLM v0.9.42`` parses cleanly."""
+    """flm.current is derived from the bundled toolbox image tag, not a probe.
+
+    The source of truth post-PR #822 is the ``_DEFAULT_FLM_IMAGE`` /
+    ``_FLM_TOOLBOX_IMAGE`` constant (``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43``).
+    The route parses the tag off the image ref and reports it with
+    ``source="toolbox-image"`` — no subprocess probe required.
+    """
     from hal0.api.routes import updater as u_mod
 
-    def fake_probe(candidates: tuple[str, ...]) -> str | None:
-        if candidates[0] == "flm":
-            return "FLM v0.9.42"
-        return None
-
-    monkeypatch.setattr(u_mod, "_probe_version", fake_probe)
+    # Stub _flm_toolbox_image to return a known image ref so the test is
+    # independent of the real constant's value.
+    monkeypatch.setattr(
+        u_mod,
+        "_flm_toolbox_image",
+        lambda: "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
+    )
 
     r = isolated_client.get("/api/updates/state")
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     body = r.json()
-    assert body["flm"]["current"] == "v0.9.42"
+    assert body["flm"]["current"] == "0.9.43"
+    assert body["flm"]["source"] == "toolbox-image"
 
 
 def test_state_survives_manifest_fetch_failure(

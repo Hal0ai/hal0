@@ -1,17 +1,14 @@
 # NPU LLM slot — FastFlowLM in a podman container (hal0-slot@npu).
-# One FLM process per NPU; model swap = container restart.
+# Chat-only utility slot: gemma4-it:e2b, no trio (asr/embed disabled).
+# role="utility" lets hal0/utility resolve here; hal0/npu still matches by device.
 name = "npu"
 port = 8088
 device = "npu"
 runtime = "container"
 profile = "flm"
 type = "llm"
+role = "utility"
 
 [model]
-default = "gemma3:4b"
+default = "gemma4-it-e2b-FLM"
 context_size = 16384
-
-[npu]
-# Trio modalities (flm serve --asr/--embed). Toggled from the dashboard.
-asr = false
-embed = false

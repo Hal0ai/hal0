@@ -461,6 +461,18 @@ async def hal0_llm_slot_views(
         model_id = _slot_model_id(cfg)
         if not name or not model_id:
             continue
+        # FLM/NPU slots: the resolver matches against the loaded set (FLM's
+        # advertised catalog of native ``family:size`` tags) and returns the
+        # model id dispatched downstream. Both must be the colon tag
+        # (``gemma4-it:e2b``), not hal0's ``-FLM`` catalog id — otherwise
+        # ``hal0/utility``/``hal0/npu`` never match the slot and fall through
+        # to the chat slot. Translate via the same map as the FLM provider.
+        if (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm":
+            from hal0.providers.flm import flm_id_to_tag
+
+            tag = flm_id_to_tag(model_id)
+            if tag:
+                model_id = tag
         out.append(
             {
                 "name": name,

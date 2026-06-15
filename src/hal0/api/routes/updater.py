@@ -272,21 +272,58 @@ def _probe_version(candidates: tuple[str, ...]) -> str | None:
     return None
 
 
+def _flm_toolbox_image() -> str:
+    """Return the bundled FLM toolbox image reference (source of truth post-PR #822).
+
+    Delegates to ``providers.flm._DEFAULT_FLM_IMAGE`` so the version is
+    never duplicated — updating the image constant updates the updater
+    surface automatically. Returns an empty string on import failure so
+    callers can degrade gracefully.
+    """
+    try:
+        from hal0.providers.flm import _DEFAULT_FLM_IMAGE
+
+        return _DEFAULT_FLM_IMAGE
+    except Exception:  # pragma: no cover
+        return ""
+
+
 def _parse_flm_version(raw: str | None) -> str | None:
-    """``FLM v0.9.42`` → ``v0.9.42``."""
+    """``FLM v0.9.43`` → ``v0.9.43`` (probe output normalisation).
+
+    Strips the leading ``FLM `` prefix emitted by ``flm --version`` and
+    returns the version token. Returns ``None`` on empty / ``None`` input.
+    """
     if not raw:
         return None
     parts = raw.split()
     return parts[-1] if parts else raw
 
 
+def _parse_flm_version_from_image(image_ref: str | None) -> str | None:
+    """``ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`` → ``0.9.43``.
+
+    Parses the tag off an OCI image reference (everything after the last
+    ``:``) and returns it, or ``None`` if the ref is empty / has no tag.
+    """
+    if not image_ref:
+        return None
+    # image_ref may be "repo/image:tag" or "registry/repo/image:tag".
+    # The tag is always the fragment after the last colon, provided it
+    # exists and is non-empty.
+    if ":" not in image_ref:
+        return None
+    tag = image_ref.rsplit(":", 1)[-1].strip()
+    return tag if tag else None
+
+
 @router.get("/state")
 async def update_state(request: Request) -> dict[str, Any]:
     """Aggregate update state for the Settings → Updates surface.
 
-    Combines the hal0 self-update channel + local probes of bundled
-    components (flm) so the dashboard renders real versions instead of
-    hardcoded literals (issue #233).
+    Combines the hal0 self-update channel + the bundled FLM toolbox image
+    version so the dashboard renders real versions instead of hardcoded
+    literals (issue #233).
 
     Response shape (matches ``ui/src/api/hooks/useUpdates.ts``)::
 
@@ -296,12 +333,15 @@ async def update_state(request: Request) -> dict[str, Any]:
                 "available": "0.3.0" | null,
                 "channel": "stable"
             },
-            "flm":      {"current": "v0.9.42", "source": "manual-deb"},
+            "flm":      {"current": "0.9.43", "source": "toolbox-image"},
             "autoCheck": true
         }
 
-    Failures in any single probe degrade gracefully — the corresponding
-    field comes back as ``None`` rather than 5xx'ing the whole response.
+    The ``flm.current`` version is derived from the bundled toolbox image
+    tag (``providers.flm._DEFAULT_FLM_IMAGE``) — the single source of truth
+    post PR #822. Failures in any single probe degrade gracefully — the
+    corresponding field comes back as ``None`` rather than 5xx'ing the whole
+    response.
     """
     channel = _current_channel(request)
 
@@ -327,7 +367,10 @@ async def update_state(request: Request) -> dict[str, Any]:
     except (OSError, ValueError):
         pass
 
-    flm_raw = await asyncio.to_thread(_probe_version, _FLM_BIN_CANDIDATES)
+    # Derive FLM version from the bundled toolbox image tag — the source of
+    # truth post PR #822. Gracefully degrades to None if the import fails
+    # (e.g. FLM provider not installed on this host).
+    flm_version = _parse_flm_version_from_image(_flm_toolbox_image())
 
     return {
         "hal0": {
@@ -339,8 +382,8 @@ async def update_state(request: Request) -> dict[str, Any]:
             "revoked_version": hal0_revoked_version,
         },
         "flm": {
-            "current": _parse_flm_version(flm_raw),
-            "source": "manual-deb",
+            "current": flm_version,
+            "source": "toolbox-image",
         },
         "autoCheck": True,
     }

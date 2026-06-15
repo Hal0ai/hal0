@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 
 from hal0.api import hal0_llm_slot_views
@@ -51,3 +53,29 @@ async def test_llm_slot_views_filters_and_projects():
     assert by_name["utility"]["context_length"] == 8192
     # ctx_size key (not context_size) must also be read correctly
     assert by_name["agent"]["context_length"] == 32768
+
+
+@pytest.mark.asyncio
+async def test_llm_slot_views_translates_flm_id_to_colon_tag():
+    """NPU/FLM slot model_id is projected as FLM's native colon tag.
+
+    The resolver matches SlotView.model_id against the loaded set (FLM's
+    advertised colon tags) and dispatches it downstream; the hal0 ``-FLM``
+    catalog id would never match, so ``hal0/utility``/``hal0/npu`` would fall
+    through to the chat slot.
+    """
+    cfgs = [
+        {
+            "name": "npu",
+            "type": "llm",
+            "enabled": True,
+            "device": "npu",
+            "role": "utility",
+            "model": {"default": "gemma4-it-e2b-FLM", "context_size": 18000},
+        },
+    ]
+    fake_catalog = [{"tag": "gemma4-it:e2b", "installed": True, "capabilities": ["chat"]}]
+    with patch("hal0.providers.flm.flm_served_models", lambda: fake_catalog):
+        views = await hal0_llm_slot_views(_FakeSlotManager(cfgs))
+    assert views[0]["model_id"] == "gemma4-it:e2b"
+    assert views[0]["role"] == "utility"
