@@ -234,6 +234,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "r-dashboard", route: "dashboard", label: "Dashboard",  icon: Icons.dashboard, sub: "chat + snapshot + health", keywords: "home chat overview" },
     { id: "r-slots",     route: "slots",     label: "Slots",      icon: Icons.slots,     sub: "inventory + capability rollups", keywords: "lifecycle" },
     { id: "r-models",    route: "models",    label: "Models",     icon: Icons.models,    sub: "catalog + downloads", keywords: "catalog hugging face" },
+    { id: "r-board",     route: "board",     label: "Operator Board", icon: Icons.board, sub: "kanban · tasks, agents, orchestration", keywords: "kanban tasks board lanes orchestrator dispatch" },
     { id: "r-hardware",  route: "hardware",  label: "Hardware",   icon: Icons.hardware,  sub: "cpu, gpu, npu, memory" },
     { id: "r-logs",      route: "logs",      label: "Logs",       icon: Icons.logs,      sub: "hal0 stream", keywords: "tail console output" },
     { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "chat, personas, skills, memory, plugins" },
