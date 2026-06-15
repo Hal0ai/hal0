@@ -172,8 +172,8 @@ test.describe('Memory map — sidebar', () => {
   test('co-resident slots render distinct legend swatch colours', async ({ page }) => {
     // Change 1: each loaded model slot gets its OWN stable colour so
     // co-resident models are visually distinguishable. The default mock has
-    // four live slots with mem_mb > 0 (primary/agent/coder/embed) — three of
-    // them share device=gpu-rocm, which used to collapse to one device hue.
+    // several live slots with mem_mb > 0 (primary/agent/embed/…) — some
+    // share device=gpu-rocm, which used to collapse to one device hue.
     // Their legend swatches must now differ.
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')

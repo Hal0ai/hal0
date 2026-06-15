@@ -202,7 +202,7 @@ function inferSlotShape(s: any): { type: string; group: string; device: string }
   let device = s?.device as string | undefined
 
   if (!type || !group) {
-    if (name === 'primary' || name === 'coder' || name === 'agent' || name.includes('chat')) {
+    if (name === 'primary' || name === 'agent' || name.includes('chat')) {
       type ??= 'llm'; group ??= 'chat'
     } else if (name === 'rerank' || name.includes('rerank')) {
       type ??= 'reranking'; group ??= 'embed'

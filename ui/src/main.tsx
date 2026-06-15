@@ -30,6 +30,7 @@ import './globals-install'
 import './dashboard.css'
 import './dash/comfyui-pane.css'
 import './dash/engine-panes.css'
+import './dash/npu.css'
 import './dash/memory-overhaul.css'
 import './dash/activity-log.css'
 import './dash/overhaul.css'
@@ -104,6 +105,25 @@ import './dash/memory-graph-ego.jsx'
 import './dash/memory-graph.jsx'
 import './dash/memory-tools.jsx'
 import './dash/memory.jsx'
+
+// Operator Board (#board) — a hal0-skinned kanban wired to the Hermes kanban
+// backend via the audited /api/board/* proxy + a live WS + an agent-chat SSE
+// orchestrator. Same window-globals contract as the rest of dash/*:
+//   1. board.css  — scoped under `.board` (board drawer classes renamed `.b-drawer*`).
+//   2. board-hook-bridge — publishes the useBoard hooks on window.__hal0UseBoard*
+//      BEFORE any board .jsx evaluates (mirrors memory-tab-hook-bridge).
+//   3. leaf components (kcard/lane/drawers/overlays) register their window globals.
+//   4. board-view last — its render reads the leaf globals + the bridged hooks.
+import './dash/board/board.css'
+import './dash/board/board-hook-bridge'
+import './dash/board/kcard.jsx'
+import './dash/board/lane.jsx'
+import './dash/board/task-drawer.jsx'
+import './dash/board/agent-chat.jsx'
+import './dash/board/orchestration-popover.jsx'
+import './dash/board/tweaks-panel.jsx'
+import './dash/board/new-board-modal.jsx'
+import './dash/board/board-view.jsx'
 
 // 3) main.jsx mounts <App /> into #root.
 import './dash/main.jsx'

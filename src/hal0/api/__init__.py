@@ -50,6 +50,9 @@ from hal0.api.routes import (
     backends as backends_routes,
 )
 from hal0.api.routes import (
+    board as board_routes,
+)
+from hal0.api.routes import (
     capabilities as capabilities_routes,
 )
 from hal0.api.routes import (
@@ -883,6 +886,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # can detect a restart and reset its cursor (events ids restart at 1).
     app.state.audit = audit_store
     app.state.audit_epoch = audit_epoch
+    # Operator Board: thin audited proxy client to the Hermes kanban plugin
+    # (loopback :9119). Constructed once per process; the board router funnels
+    # every /api/board/* call through it. Resolves HERMES_DASHBOARD_BASE_URL +
+    # the Hermes session bearer (env HERMES_SESSION_TOKEN) from from_env().
+    from hal0.board import HermesKanbanClient
+
+    app.state.hermes_kanban = HermesKanbanClient.from_env()
     await event_bus.emit(
         "system.restart",
         "info",
@@ -1153,6 +1163,12 @@ def create_app() -> FastAPI:
         prefix="/api/memory",
         tags=["memory"],
     )
+
+    # Operator Board (#board) — thin AUDITED proxy to the Hermes kanban plugin
+    # + a hal0-native chat orchestrator. FROZEN FE↔BE contract (SPEC §4).
+    # Mounted PRE-dashboard so /api/board/* (incl. the /events WS + /chat SSE)
+    # is not shadowed by the SPA fallback.
+    app.include_router(board_routes.router, prefix="/api/board", tags=["board"])
 
     app.include_router(providers.router, prefix="/api", tags=["providers"])
     app.include_router(

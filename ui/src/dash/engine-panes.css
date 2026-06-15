@@ -511,6 +511,18 @@
 .infer-pane .engine.open .infer-strip {
   display: none;
 }
+/* Page-level hero band (InferenceHeroBand) — the memory map + throughput tile
+   lifted to the top of the Slots page, above the tabs. Mirrors the engine
+   shell's card chrome so it reads as an anchored banner rather than a loose
+   bar, and spaces itself from the tab row below. */
+.infer-pane.infer-hero-top {
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+}
+
 /* hero band — iGPU GTT memory map (2fr) + combined-throughput tile (1fr),
    pinned at the top of BOTH states (P2). */
 .infer-pane .hero-band {

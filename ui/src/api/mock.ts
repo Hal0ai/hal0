@@ -86,6 +86,40 @@ function buildHardware() {
   return data().host ?? {}
 }
 
+// NPU occupancy card — AIE column allocation + per-FLM-slot composition.
+// Serves HAL0_DATA.npu_occupancy when present; otherwise synthesises a
+// single-tenant "loaded" snapshot from the npu-device slots so the card
+// renders in forced-mock without bespoke fixture data.
+function buildNpuOccupancy() {
+  const d = data()
+  if (d.npu_occupancy) return d.npu_occupancy
+  const npuSlots = (d.slots ?? []).filter(
+    (s: any) => s.device_class === 'npu' || s.device === 'npu',
+  )
+  const serving = npuSlots.find((s: any) => s.state === 'serving')
+  const owner = serving ?? npuSlots[0]
+  const used = owner ? 8 : 0
+  return {
+    present: npuSlots.length > 0,
+    rows: 4,
+    cols: 8,
+    tiles: 32,
+    tops_peak: 50,
+    cols_total: 8,
+    cols_used: used,
+    serving: !!serving,
+    single_tenant: true,
+    columns_available: true,
+    slots: npuSlots.map((s: any) => ({
+      name: s.name,
+      model: String(s.model_id ?? s.model ?? '').replace(/-FLM$/, '') || null,
+      state: s.state === 'serving' ? 'serving' : s.state === 'ready' ? 'ready' : 'idle',
+      cols: s === owner ? [0, 1, 2, 3, 4, 5, 6, 7] : [],
+      gb: typeof s.gb === 'number' ? s.gb : 2.4,
+    })),
+  }
+}
+
 function buildJournal() {
   // Phase 3 of #322: HAL0_DATA.journal is gone — the dashboard streams
   // /api/journal/stream and renders an empty-state placeholder when the
@@ -812,6 +846,7 @@ export const MOCK_ALLOWLIST: ReadonlyArray<{ re: RegExp; build: Builder }> = Obj
   { re: /^\/api\/backends$/, build: buildBackends },
   { re: /^\/api\/capabilities$/, build: buildCapabilities },
   { re: /^\/api\/hardware$/, build: buildHardware },
+  { re: /^\/api\/npu\/occupancy$/, build: buildNpuOccupancy },
   { re: /^\/api\/journal$/, build: buildJournal },
   { re: /^\/api\/updates\/state$/, build: buildUpdateState },
   { re: /^\/api\/auth\/token$/, build: buildAuthToken },

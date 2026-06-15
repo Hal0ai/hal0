@@ -131,6 +131,8 @@ const Icons = {
   cpu:       <Icon><rect x="4" y="4" width="8" height="8" rx="0.5"/><path d="M4 6h-1M4 10h-1M13 6h-1M13 10h-1M6 4v-1M10 4v-1M6 13v-1M10 13v-1"/><rect x="6.5" y="6.5" width="3" height="3"/></Icon>,
   flame:     <Icon d="M8 13c-3 0-4-2-4-4 0-2 2-3 2-5 1 2 5 2 5 6 0 2-1 3-3 3z"/>,
   chat:      <Icon><path d="M2.5 4.5a1.5 1.5 0 0 1 1.5-1.5h8a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5H7l-3 2.5V11H4a1.5 1.5 0 0 1-1.5-1.5z"/></Icon>,
+  // Operator Board — three kanban columns of differing heights.
+  board:     <Icon><rect x="2" y="2.5" width="3.2" height="11" rx="0.8"/><rect x="6.4" y="2.5" width="3.2" height="7" rx="0.8"/><rect x="10.8" y="2.5" width="3.2" height="9" rx="0.8"/></Icon>,
 };
 
 // ─── TopBar ───
@@ -154,6 +156,7 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
     settings:  ["Configure", "Settings"],
     connections: ["Network", "Connections"],
     profiles:  ["iGPU Slots", "Profiles"],
+    board:     ["Orchestration", "Board"],
   };
   const [eyebrow, title] = labels[route] || ["", ""];
   return (
@@ -170,6 +173,17 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
         </div>
       )}
       <div className="tb-spacer" />
+      {/* Operator Board launcher — command-palette-styled, ⌘B. Navigates by
+          hash so it works without threading a handler through main.jsx. */}
+      <button
+        className={"tb-board" + (route === "board" ? " on" : "")}
+        data-testid="tb-board"
+        onClick={() => { window.location.hash = "#board"; }}
+        aria-label="Operator Board"
+      >
+        {Icons.board}<span>Board</span>
+        <kbd>⌘B</kbd>
+      </button>
       <button className="tb-cmdk" onClick={onCmdK}>
         {Icons.search}<span>Command palette</span>
         <kbd>⌘K</kbd>
@@ -221,6 +235,10 @@ function useNavItems() {
       { id: "slots/profiles",  label: "Profiles" },
     ] },
     { id: "models", label: "Models", icon: Icons.models, cnt: modelCount },
+    // Operator Board (#board) — hal0-skinned kanban over the Hermes kanban
+    // backend. No live count here (it's per-board; the board's own selector
+    // shows task counts).
+    { id: "board", label: "Board", icon: Icons.board },
     // v0.5 nav: clicking Agents lands on the Overview (the agent-card library,
     // with Hermes wired live) — that's the parent row's target, so no separate
     // Overview sub-link. It then hosts Memory (full Hindsight page, gated on
