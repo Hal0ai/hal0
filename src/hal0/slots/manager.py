@@ -375,12 +375,6 @@ class SlotManager:
             name = str(cfg.get("name", ""))
             if not name or is_npu_trio_shadow(cfg):
                 continue
-            if self._current_state(name) not in (
-                SlotState.READY,
-                SlotState.SERVING,
-                SlotState.IDLE,
-            ):
-                continue
             port = _cfg_port(cfg)
             if not port:
                 continue
@@ -390,7 +384,28 @@ class SlotManager:
                 )
             except Exception:
                 continue
+            # A stale state.json must never register a dead upstream.
             if not active:
+                continue
+            state = self._current_state(name)
+            if state in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+                # Already dispatchable — just restore the in-memory route.
+                pass
+            elif state in (SlotState.OFFLINE, SlotState.ERROR):
+                # Inverse drift: the container survived the api restart (or
+                # was started out-of-band) but state.json reads OFFLINE.
+                # Pre-fix this slot was skipped, so it stayed unrouted AND
+                # the dashboard reported it "offline" over a live, serving
+                # container until a later /api/slots poll happened to adopt
+                # it. Adopt it here so reconciliation is the single point
+                # that heals the drift at startup.
+                adopted = await self._maybe_adopt_running_slot(name, cfg)
+                if adopted is None:
+                    # Nothing to adopt (e.g. no model configured) — leave it.
+                    continue
+            else:
+                # Transitional (pulling/starting/warming/unloading): a load
+                # is already in flight and will register on completion.
                 continue
             self._register_container_upstream(name, port)
             restored.append(name)

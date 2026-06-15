@@ -152,6 +152,31 @@ export function useAgents(): UseQueryResult<AgentList> {
   })
 }
 
+// ── POST /api/agents/{id}/restart ──────────────────────────────────
+//
+// Wraps `systemctl restart <unit>` for a bundled agent. The backend
+// returns { status: "restarted" | "restarting" | "error", detail } — a
+// non-zero systemctl surfaces as a 500 Hal0Error (caught by the caller
+// to render a toast). On success we invalidate both the agents list and
+// the slots query: a Hermes bounce re-establishes its slot upstreams, so
+// the live telemetry on the card should re-converge promptly.
+
+export interface AgentRestartResult {
+  status: 'restarted' | 'restarting' | 'error'
+  detail?: string
+}
+
+export function useAgentRestart(agentId: string) {
+  const qc = useQueryClient()
+  return useMutation<AgentRestartResult, Error, void>({
+    mutationFn: () => apiPost<AgentRestartResult>(ENDPOINTS.agentRestart(agentId)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['agents', 'list'] })
+      qc.invalidateQueries({ queryKey: ['slots'] })
+    },
+  })
+}
+
 // ── /api/agents/{id}/personas ──────────────────────────────────────
 
 export function useAgentPersonas(agentId: string | null | undefined): UseQueryResult<PersonaList> {
