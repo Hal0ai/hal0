@@ -290,4 +290,38 @@ export const ENDPOINTS = {
   // endpoints (apply, complete, curated-models, pick-default, services, etc.) were
   // removed when the web FirstRun wizard was folded into `hal0 setup` CLI/TUI.
   installState: '/api/install/state',
+
+  // ── Operator Board (#board) — FROZEN FE↔BE contract (SPEC §4) ─────
+  // hal0-api thin audited proxy → Hermes kanban
+  // ({HERMES_DASHBOARD_BASE_URL or 127.0.0.1:9119}/api/plugins/kanban/*).
+  // `?board=<slug>` threads through every task/board-scoped call (omit =
+  // current board). Mutations are audited server-side; reads + SSE/WS are not.
+  // AUTHORED BY THE UI LEAD and FROZEN — the board hooks (useBoard.ts) consume
+  // these; do not diverge from SPEC §4.
+  board: '/api/board/board',                 // GET ?tenant=&include_archived=&board=&workflow_template_id=
+  boardTasks: '/api/board/tasks',            // POST (CreateTaskBody)
+  boardTask: (id: string) => `/api/board/tasks/${encodeURIComponent(id)}`,                 // GET | PATCH | DELETE
+  boardTaskComments: (id: string) => `/api/board/tasks/${encodeURIComponent(id)}/comments`, // POST
+  boardTaskReassign: (id: string) => `/api/board/tasks/${encodeURIComponent(id)}/reassign`, // POST
+  boardTaskSpecify: (id: string) => `/api/board/tasks/${encodeURIComponent(id)}/specify`,   // POST
+  boardTaskDecompose: (id: string) => `/api/board/tasks/${encodeURIComponent(id)}/decompose`,// POST
+  boardTaskReclaim: (id: string) => `/api/board/tasks/${encodeURIComponent(id)}/reclaim`,    // POST
+  boardTaskLog: (id: string) => `/api/board/tasks/${encodeURIComponent(id)}/log`,            // GET ?tail= (pull-only)
+  boardLinks: '/api/board/links',            // POST {parent_id, child_id} | DELETE {parent_id, child_id}
+  boardTasksBulk: '/api/board/tasks/bulk',   // POST
+  boardDispatch: '/api/board/dispatch',      // POST ?max=N (one-shot nudge)
+  boards: '/api/board/boards',               // GET ?include_archived= | POST (CreateBoardBody)
+  boardBySlug: (slug: string) => `/api/board/boards/${encodeURIComponent(slug)}`,            // PATCH | DELETE ?delete=
+  boardSwitch: (slug: string) => `/api/board/boards/${encodeURIComponent(slug)}/switch`,     // POST
+  boardProfiles: '/api/board/profiles',      // GET
+  boardProfile: (name: string) => `/api/board/profiles/${encodeURIComponent(name)}`,         // PATCH
+  boardAssignees: '/api/board/assignees',    // GET ?board=
+  boardStats: '/api/board/stats',            // GET ?board=
+  boardDiagnostics: '/api/board/diagnostics',// GET
+  boardWorkersActive: '/api/board/workers/active', // GET
+  boardRun: (id: string) => `/api/board/runs/${encodeURIComponent(id)}`,                     // GET
+  boardConfig: '/api/board/config',          // GET (read-only orchestration knobs)
+  boardOrchestration: '/api/board/orchestration', // GET | PUT (4 knobs)
+  boardEvents: '/api/board/events',          // WS ?token=&since=&board=&tenant=
+  boardChat: '/api/board/chat',              // POST (SSE)
 } as const

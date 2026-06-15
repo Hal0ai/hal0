@@ -15,11 +15,13 @@
 const { useState, useRef, useEffect } = React;
 
 // ── static (curated) identity for the live Hermes card ──────────────
-// Only health + status are live; the rest is the kit's authored content.
-function _hermesIdentity() {
+// Health + status + the backing model are live; the rest is the kit's
+// authored content. `liveModel` is the model the orchestrated agent slot
+// is actually serving (falls back to a dash when no slot is resolved).
+function _hermesIdentity(liveModel) {
   return {
     name: "Hermes",
-    model: "qwen3-coder-30b-a3b",
+    model: liveModel || "—",
     role: "remote control · self-improving · orchestration",
     rarity: 3,
     art: (window.__hal0AgentArt && window.__hal0AgentArt.hermes) || "",
@@ -178,7 +180,7 @@ function AgentsOverview() {
       <div className="ao-grid">
         {LiveAgentCard && (
           <LiveAgentCard
-            agent={_hermesIdentity()}
+            agent={_hermesIdentity(primary && primary.model)}
             health={health}
             statusCls={statusCls}
             statusLabel={statusLabel}

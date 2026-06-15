@@ -25,9 +25,9 @@ test.describe('Footer runtime chip reflects container readiness (#221)', () => {
       has: page.locator('.k', { hasText: /^runtime:$/ }),
     })
     await expect(runtimeChip).toBeVisible()
-    // HAL0_DATA seeds 10 enabled slots (legacy is disabled); all but the
-    // warming-demo slot are ready → "9/10 ready", chip dot lit "up".
-    await expect(runtimeChip.locator('.v')).toHaveText('9/10 ready')
+    // HAL0_DATA seeds 8 enabled slots (legacy is disabled); all are ready
+    // → "8/8 ready", chip dot lit "up".
+    await expect(runtimeChip.locator('.v')).toHaveText('8/8 ready')
     await expect(runtimeChip).toHaveClass(/\bup\b/)
   })
 
@@ -57,6 +57,6 @@ test.describe('Footer runtime chip reflects container readiness (#221)', () => {
       has: page.locator('.k', { hasText: /^runtime:$/ }),
     })
     await expect(runtimeChip).toBeVisible()
-    await expect(runtimeChip.locator('.v')).toHaveText('0/10 ready')
+    await expect(runtimeChip.locator('.v')).toHaveText('0/8 ready')
   })
 })

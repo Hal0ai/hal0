@@ -22,6 +22,7 @@ import { ComfyuiPane } from './comfyui-pane.jsx'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
+  InferenceHeroBand,
   SlotScard,
   ModelPicker,
   SlotControls,
@@ -574,7 +575,6 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // Seeded slot identities for the skip-path empty layout.
   const SEEDED = [
     { name: "primary", type: "llm",           device: "gpu-rocm", group: "chat"  },
-    { name: "coder",   type: "llm",           device: "gpu-rocm", group: "chat"  },
     { name: "embed",   type: "embedding",     device: "gpu-rocm", group: "embed" },
     { name: "rerank",  type: "reranking",     device: "gpu-rocm", group: "embed" },
     { name: "stt",     type: "transcription", device: "cpu",      group: "voice" },
@@ -801,6 +801,11 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         <span className="hint">Press <kbd>N</kbd> to create</span>
         <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
       </div>
+
+      {/* Memory map + combined-throughput band — lifted out of the Inference
+          engine shell to the top of the page, above the tabs, so iGPU GTT usage
+          and live throughput stay visible regardless of which tab is active. */}
+      <InferenceHeroBand />
 
       {/* Inference ⇄ Image Gen tabs. Tab 1 holds every non-image slot; tab 2 is
           the ComfyUI generation engine pane (one container, not per-model

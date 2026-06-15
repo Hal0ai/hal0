@@ -116,9 +116,8 @@ test.describe('Sidebar Runtime widget — populated', () => {
     await page.goto('/')
     const row = page.locator('[data-testid="runtime-row-runtime"]')
     await expect(row.locator('.k')).toHaveText('runtime')
-    // HAL0_DATA seeds 10 enabled slots (legacy is disabled); all but the
-    // warming-demo slot are ready.
-    await expect(row.locator('.v')).toContainText('up · 9/10 slots ready', { timeout: FIVE_S })
+    // HAL0_DATA seeds 8 enabled slots (legacy is disabled); all are ready.
+    await expect(row.locator('.v')).toContainText('up · 8/8 slots ready', { timeout: FIVE_S })
   })
 })
 

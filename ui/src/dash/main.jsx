@@ -27,7 +27,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections"];
+const ROUTES = ["dashboard", "slots", "profiles", "models", "logs", "agent", "memory", "settings", "mcp", "connections", "board"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -162,6 +162,11 @@ function App() {
         e.preventDefault();
         setPaletteOpen(o => !o);
       }
+      // ⌘B / Ctrl+B — jump to the Operator Board
+      if (e.key === "b" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        window.location.hash = "#board";
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -228,6 +233,13 @@ function App() {
       case "memory":
       case "mcp":
         return <AgentView />;
+      // Operator Board (#board): a hal0-skinned kanban wired to the Hermes
+      // kanban backend via /api/board/*. BoardView owns its own selector /
+      // filters / drawers; renders inside the standard .view shell.
+      case "board":
+        return typeof BoardView === "function"
+          ? <BoardView />
+          : <div className="view">Board unavailable — bundle stale.</div>;
       case "settings": return <SettingsView param={param} />;
       default:         return <div className="view">Not found.</div>;
     }

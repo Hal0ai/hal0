@@ -3,6 +3,7 @@
 
 import { useAgentPersonaEnums, usePersonaUpdate } from '@/api/hooks/useAgents'
 import { useNpuLoad, useNpuUnload } from '@/api/hooks/useBackends'
+import { useSlots } from '@/api/hooks/useSlots'
 
 const { useState: useStateFM, useEffect: useEffectFM } = React;
 
@@ -116,7 +117,7 @@ function PersonaEditModal({ open, onClose, persona }) {
     "You are hal0, an operator-direct AI assistant running locally on the user's hardware. Be terse, technical, and surface the slots/tools you use as you work."
   );
   const [tone, setTone] = useStateFM(persona?.tone || "operator");
-  const [slot, setSlot] = useStateFM(persona?.slot || "primary");
+  const [slot, setSlot] = useStateFM(persona?.slot || "agent");
 
   // #226: tone + tool catalogues come from /api/agents/persona-enums
   // so the picker tracks the server-side enum without UI patches.
@@ -129,12 +130,16 @@ function PersonaEditModal({ open, onClose, persona }) {
   useEffectFM(() => {
     if (open && persona) {
       setName(persona.name || "");
-      setSlot(persona.slot || "primary");
+      setSlot(persona.slot || "agent");
       setTone(persona.tone || "operator");
     }
   }, [open, persona]);
 
-  const llmSlots = HAL0_DATA.slots.filter(s => s.type === "llm");
+  // Routes to the *live* configured slots (GET /api/slots), not the static
+  // HAL0_DATA mock — the mock carried leftover dev-test slots (coder,
+  // warming-demo) that leaked into this picker on the real dashboard.
+  const slotsQ = useSlots();
+  const llmSlots = (slotsQ.data || []).filter(s => s.type === "llm");
 
   return (
     <Modal
