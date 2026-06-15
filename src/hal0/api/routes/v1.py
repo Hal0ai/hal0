@@ -97,11 +97,7 @@ def _instrument_streaming_throughput(
     """
     original = response.body_iterator
     events = _slot_events(app_state, slot_name)
-    ttft_events = (
-        _slot_ttft_events(app_state, slot_name)
-        if dispatch_started is not None
-        else None
-    )
+    ttft_events = _slot_ttft_events(app_state, slot_name) if dispatch_started is not None else None
     if events is None and ttft_events is None:
         return response
     ttft_pending = ttft_events is not None  # one-shot per response
@@ -119,11 +115,7 @@ def _instrument_streaming_throughput(
                 now = time.monotonic()
                 if events is not None:
                     events.append((now, tokens))
-                if (
-                    ttft_pending
-                    and ttft_events is not None
-                    and dispatch_started is not None
-                ):
+                if ttft_pending and ttft_events is not None and dispatch_started is not None:
                     ttft_events.append((now, max(0.0, now - dispatch_started)))
                     ttft_pending = False
             yield chunk
@@ -193,9 +185,7 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-async def _rewrite_chat_slot_alias(
-    request: Request, body: dict[str, Any]
-) -> dict[str, Any]:
+async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """Translate a chat-slot ALIAS in ``body["model"]`` to its model id.
 
     hermes-role-slots: a request may address a co-resident chat slot by
@@ -287,9 +277,7 @@ def _normalize_loaded_models(request: Request) -> set[str]:
     if upstreams is not None and model_cache is not None:
         with contextlib.suppress(Exception):
             for up in upstreams.list():
-                if getattr(up, "kind", "") == "remote" and getattr(
-                    up, "slot_name", None
-                ):
+                if getattr(up, "kind", "") == "remote" and getattr(up, "slot_name", None):
                     loaded |= set(model_cache.get(up.name, []))
     return loaded
 
@@ -303,9 +291,7 @@ async def _normalize_slot_views(request: Request) -> list:
     sm = getattr(request.app.state, "slot_manager", None)
     if sm is None:
         return []
-    rows = await hal0_llm_slot_views(
-        sm, getattr(request.app.state, "model_registry", None)
-    )
+    rows = await hal0_llm_slot_views(sm, getattr(request.app.state, "model_registry", None))
     return [
         SlotView(
             name=r["name"],
@@ -330,9 +316,7 @@ def _is_remote_model(request: Request, model_id: str) -> bool:
             # not genuine external providers, so the thinking policy must apply.
             if getattr(u, "slot_name", None):
                 continue
-            if getattr(u, "kind", "") == "remote" and model_id in set(
-                cache.get(u.name, [])
-            ):
+            if getattr(u, "kind", "") == "remote" and model_id in set(cache.get(u.name, [])):
                 return True
     except Exception:  # pragma: no cover — defensive
         return False
@@ -359,9 +343,7 @@ async def _slot_thinking_default(request: Request, model_id: str) -> bool:
     return False
 
 
-async def _normalize_chat_body(
-    request: Request, body: dict[str, Any]
-) -> dict[str, Any]:
+async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """Resolve hal0/* virtual model names + inject thinking policy.
 
     Rewrites request._body so every downstream consumer observes the
@@ -427,9 +409,7 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     except Exception:
         return
     # Reverse the alias→model_id map: find the chat slot that owns this model.
-    slot_name = next(
-        (slot for slot, mid in alias_to_model.items() if mid == model_id), None
-    )
+    slot_name = next((slot for slot, mid in alias_to_model.items() if mid == model_id), None)
     if slot_name is None:
         # No backing chat slot — nothing to honor.
         return
@@ -490,9 +470,7 @@ async def _dispatch_and_forward(
             dispatch_started=dispatch_started,
         )
     if isinstance(response, Response) and getattr(response, "body", None):
-        _record_nonstreaming_throughput(
-            response.body, request.app.state, call.upstream_name
-        )
+        _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
     return response
 
 
@@ -531,9 +509,7 @@ async def list_models(
     from hal0.api import hal0_chat_slot_model_ids, hal0_slot_alias_models
 
     upstreams = request.app.state.upstreams
-    model_cache: dict[str, list[str]] = (
-        getattr(request.app.state, "upstream_models", {}) or {}
-    )
+    model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {}) or {}
     seen: set[str] = set()
     data: list[dict[str, Any]] = []
     now = int(time.time())
@@ -545,9 +521,7 @@ async def list_models(
     # the id over any same-named raw model id an upstream might advertise.
     if slot_manager is not None and model_registry is not None:
         try:
-            alias_entries = await hal0_slot_alias_models(
-                slot_manager, model_registry, now=now
-            )
+            alias_entries = await hal0_slot_alias_models(slot_manager, model_registry, now=now)
         except Exception:
             alias_entries = []
         for entry in alias_entries:
@@ -610,9 +584,7 @@ async def list_models(
     # All 3 canonical names are advertised whenever they resolve. hal0/npu and
     # hal0/utility fall back to the primary when no npu/utility slot is loaded —
     # intentional: the name always routes (see resolve_chain's fallback contract).
-    for (
-        vname
-    ) in DEFAULT_CHAINS:  # canonical names only (aliases excluded from the picker)
+    for vname in DEFAULT_CHAINS:  # canonical names only (aliases excluded from the picker)
         if vname in seen:
             continue
         res = await resolver.resolve(vname)
@@ -836,9 +808,7 @@ def _wrap_npu_trio_response(upstream: Any) -> Response:
     )
 
 
-async def _maybe_run_omni_loop(
-    request: Request, body: dict[str, Any]
-) -> Response | None:
+async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Response | None:
     """Attempt to run the OmniRouter loop for this chat request.
 
     Returns:
@@ -1064,9 +1034,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
 
         cfgs = await manager.iter_configs()
         img_cfg = next((c for c in cfgs if gpu_exclusive_group(c) == "img"), None)
-        img_section = (
-            (img_cfg or {}).get("image") or (img_cfg or {}).get("image_gen") or {}
-        )
+        img_section = (img_cfg or {}).get("image") or (img_cfg or {}).get("image_gen") or {}
         if isinstance(img_section, dict):
             default_size = img_section.get("default_size")
             if not body.get("size") and isinstance(default_size, str) and default_size:
@@ -1267,9 +1235,7 @@ async def _forward_multipart(
     # path would 404. Plan §5.2.
     if model_value and request.url.path.endswith("/audio/transcriptions"):
         synthetic_body = {"model": model_value}
-        if await _is_npu_trio_request(
-            request, synthetic_body, slot_type="transcription"
-        ):
+        if await _is_npu_trio_request(request, synthetic_body, slot_type="transcription"):
             router_obj = getattr(request.app.state, "npu_trio_router", None)
             if router_obj is not None:
                 upstream_resp = await router_obj.dispatch_stt_npu(
@@ -1278,9 +1244,7 @@ async def _forward_multipart(
                 )
                 return _wrap_npu_trio_response(upstream_resp)
 
-    call = await dispatcher.dispatch(
-        request, body={"model": model_value} if model_value else {}
-    )
+    call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})
 
     last_used = getattr(request.app.state, "last_used_model", None)
     if last_used is not None and call.upstream_name and call.resolved_model:
