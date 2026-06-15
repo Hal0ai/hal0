@@ -256,6 +256,9 @@ function App() {
                 `useUpdateState()` hook reports a newer hal0 release than
                 the current install. BannerStack continues to drive the
                 Tweaks-panel demo toggles for every other banner state. */}
+            {/* Task 7.1: passive nudge when first_run===true (no models
+                configured). Dismiss is per-session; no auto-route. */}
+            <FirstRunBanner />
             <UpdateBanner />
             {/* Phase D8: self-renders while the GPU arbiter reports image
                 mode (/api/comfyui/status arbiter.mode === "img"). */}

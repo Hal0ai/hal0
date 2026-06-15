@@ -238,7 +238,6 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "r-logs",      route: "logs",      label: "Logs",       icon: Icons.logs,      sub: "hal0 stream", keywords: "tail console output" },
     { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "chat, personas, skills, memory, plugins" },
     { id: "r-settings",  route: "settings",  label: "Settings",   icon: Icons.settings,  sub: "auth, secrets, updates" },
-    { id: "r-firstrun",  route: "firstrun",  label: "FirstRun picker", icon: Icons.flame, sub: "re-run the bundle picker", keywords: "setup install bundle" },
   ];
   routes.forEach(r => items.push({ ...r, section: "Routes", hint: "↵ jump" }));
 

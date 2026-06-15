@@ -1063,7 +1063,6 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           <h1>Slots</h1>
           <span className="vh-spacer" />
           <span className="hint mono" style={{color: "var(--accent)"}}>skip-path · six slots seeded · none configured</span>
-          <button className="btn ghost" onClick={() => window.location.hash = "#firstrun"}>Pick a bundle instead</button>
           <button className="btn" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
         </div>
 
@@ -1151,10 +1150,9 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           <div className="dash-main">
             <div className="dash-empty">
               <h2 className="mono">No slots configured</h2>
-              <p>No slot has a model loaded yet. Pick a bundle to get started, or create a slot one at a time.</p>
+              <p>No slot has a model loaded yet. Run <span className="mono">hal0 setup</span> in your terminal to configure a bundle, or create a slot one at a time.</p>
               <div className="dash-empty-cta">
-                <button className="btn lg" onClick={() => window.location.hash = "#firstrun"}>Pick a bundle</button>
-                <button className="btn ghost lg" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
+                <button className="btn lg" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
               </div>
             </div>
           </div>

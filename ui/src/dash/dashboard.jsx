@@ -252,7 +252,7 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
         <div className="dash-empty">
           <div className="dash-empty-glyph"><Wordmark size={56} /></div>
           <h1 className="mono">No models configured yet</h1>
-          <p>hal0 is ready, but no slot has a model loaded. Run setup to install a bundle, or configure slots one at a time.</p>
+          <p>hal0 is ready, but no slot has a model loaded. Run <span className="mono">hal0 setup</span> in your terminal to install a bundle, or configure slots one at a time.</p>
           <div className="dash-empty-meta mono">
             <span><span style={{color: "var(--fg-3)"}}>host</span> {hostName}</span>
             <span style={{color: "var(--fg-5)"}}>·</span>
@@ -260,7 +260,6 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
             {hw.data?.npu.present && <><span style={{color: "var(--fg-5)"}}>·</span><span><span style={{color: "var(--fg-3)"}}>npu</span> ready</span></>}
           </div>
           <div className="dash-empty-cta">
-            <button className="btn lg" onClick={() => window.location.hash = "#firstrun"}>Run setup</button>
             <button className="btn ghost lg" onClick={() => onGo("slots")}>Configure slots</button>
           </div>
         </div>

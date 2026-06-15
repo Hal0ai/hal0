@@ -147,7 +147,6 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
   const appVer = verState.data?.hal0?.current;
   const labels = {
     dashboard: ["Overview", "Dashboard"],
-    firstrun:  ["Setup",   "FirstRun"],
     slots:     ["Lifecycle", "Slots"],
     models:    ["Catalog", "Models"],
     logs:      ["Runtime", "Logs"],
@@ -163,7 +162,7 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
         <Wordmark size={18} />
         <span className="ver mono">{appVer ? "v" + appVer : "v0.5.0-alpha.1"}</span>
       </div>
-      {route !== "firstrun" && (
+      {(eyebrow || title) && (
         <div className="tb-eyebrow mono">
           <span>{eyebrow}</span>
           <span className="sep">/</span>

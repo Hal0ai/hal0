@@ -656,12 +656,6 @@ function UpdatesSection() {
             </select>
           }
         />
-        <SRow
-          k="FirstRun"
-          sub="Re-run the bundle picker without reinstalling"
-          v="capabilities.toml will be overwritten on confirm"
-          actions={<button className="btn ghost sm" onClick={() => window.location.hash = "#firstrun"}>{Icons.restart} Run picker again</button>}
-        />
       </div>
     </div>
   );

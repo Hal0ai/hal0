@@ -358,10 +358,8 @@ const BANNER_CATALOG = [
     id: "skip-path", scope: "slots", kind: "info",
     eyebrow: "Slots · skip-path",
     heading: "Six seeded slots, none configured",
-    body: <span>You skipped the bundle picker. Each seeded slot below has a <b>Configure</b> button that opens the Create-slot modal pre-filled. Or run the bundle picker again from <span className="mono">Settings → FirstRun</span>.</span>,
-    actions: [
-      { label: "Run picker", primary: true, onClick: () => window.location.hash = "#firstrun" },
-    ],
+    body: <span>You skipped the bundle picker. Each seeded slot below has a <b>Configure</b> button that opens the Create-slot modal pre-filled. Or run <span className="mono">hal0 setup</span> in your terminal to configure a bundle.</span>,
+    actions: [],
   },
 ];
 
@@ -404,6 +402,24 @@ function UpdateBanner() {
           }
         >Read release notes</button>
       }
+      onDismiss={() => setDismissed(true)}
+    />
+  );
+}
+
+// ─── FirstRunBanner — passive nudge to run `hal0 setup` ─────────────────
+// Task 7.1: shows when /api/install/state returns first_run===true.
+// Passive only — no auto-route. Dismiss is per-session (resets on reload).
+function FirstRunBanner() {
+  const q = useInstallState();
+  const [dismissed, setDismissed] = useStateP(false);
+  if (dismissed || !q.data?.first_run) return null;
+  return (
+    <Banner
+      kind="info"
+      eyebrow="Setup · first run"
+      heading="No models configured yet"
+      body={<span>Run <span className="mono">hal0 setup</span> in your terminal to add models, apps, and agents.</span>}
       onDismiss={() => setDismissed(true)}
     />
   );
@@ -509,4 +525,4 @@ function Menu({ anchor = "right", items, onClose, style }) {
   );
 }
 
-Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FieldGroup, PillToggle });
+Object.assign(window, { Modal, Drawer, ConfirmDialog, Banner, BannerStack, BannerProvider, useBanners, BANNER_CATALOG, Menu, UpdateBanner, GpuImageModeBanner, FirstRunBanner, FieldGroup, PillToggle });
