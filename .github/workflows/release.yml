@@ -239,11 +239,14 @@ jobs:
           # manifest below — keep these two strings in lock-step.
           # github.repository preserves case (Hal0ai/hal0); use (?i) to
           # absorb the lowercase `hal0ai` redirect form too.
-          # The Fulcio cert SAN is the ENTRY-POINT workflow ref: release.yml@<tag>
-          # on a direct tag push, or nightly.yml@refs/heads/main when invoked as
-          # a reusable workflow. github.workflow_ref gives exactly that, so the
-          # verify identity is correct in both modes (and matches the manifest).
-          IDENT="^(?i)https://github\\.com/${{ github.workflow_ref }}$"
+          # The Fulcio cert SAN is the workflow that OWNS the signing job
+          # (release.yml — the job_workflow_ref) at the CALLER's ref:
+          # release.yml@refs/tags/vX on a direct tag push, or
+          # release.yml@refs/heads/main when invoked via workflow_call from
+          # nightly.yml. github.ref is the caller's ref in BOTH cases — NOT
+          # github.workflow_ref, which is the entry-point (nightly.yml) and
+          # does NOT match the cert SAN under workflow_call.
+          IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@${{ github.ref }}$"
           ISSUER="https://token.actions.githubusercontent.com"
           cosign verify-blob \
               --signature "${SIG}" \
@@ -266,9 +269,9 @@ jobs:
           MANIFEST_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${CHANNEL}.json"
 
           # Must match the Self-verify identity above (and the cert SAN) so the
-          # updater's cosign verify-blob succeeds. Derived from the entry-point
-          # workflow ref to stay correct under workflow_call (nightly).
-          IDENT="^(?i)https://github\\.com/${{ github.workflow_ref }}$"
+          # updater's cosign verify-blob succeeds. release.yml@<caller-ref> via
+          # github.ref — correct for both tag-push and workflow_call (nightly).
+          IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@${{ github.ref }}$"
 
           python3 - "${OUT}" "${VERSION}" "${TAG}" "${CHANNEL}" "${DIGEST}" \
                    "${BASE_URL}" "${MANIFEST_URL}" "${IDENT}" <<'PY'
