@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace as _NS
 from typing import Any
 from unittest.mock import patch
 
@@ -539,3 +540,55 @@ def test_render_context_in_parser_choices() -> None:
     parser = agent_shim._build_parser()
     args = parser.parse_args(["hermes", "render-context"])
     assert args.subcommand == "render-context"
+
+
+# ── run-as-hal0 privilege drop (#843) ────────────────────────────────────────
+#
+# The shim is the systemd ExecStart path and execs the venv binary directly,
+# bypassing the /usr/local/bin/hermes wrapper guard. Under the unit it already
+# runs as User=hal0, but a manual `hal0-agent hermes serve` as root would spawn
+# a root-owned hermes that clobbers state. `_runas_popen_extras` drops the child
+# to hal0 when (and only when) we're root.
+
+
+def _fake_pw(uid: int, gid: int, home: str):
+    def _getpwnam(name: str):
+        return _NS(pw_uid=uid, pw_gid=gid, pw_dir=home)
+
+    return _getpwnam
+
+
+def test_runas_extras_noop_when_not_root() -> None:
+    env: dict[str, str] = {"HOME": "/root"}
+    extras = agent_shim._runas_popen_extras(
+        env, geteuid=lambda: 1000, getpwnam=_fake_pw(33, 33, "/var/lib/hal0")
+    )
+    assert extras == {}
+    assert env["HOME"] == "/root"  # untouched
+
+
+def test_runas_extras_drops_to_hal0_when_root() -> None:
+    env: dict[str, str] = {"HOME": "/root"}
+    extras = agent_shim._runas_popen_extras(
+        env, geteuid=lambda: 0, getpwnam=_fake_pw(33, 33, "/var/lib/hal0")
+    )
+    assert extras == {"user": 33, "group": 33}
+    assert env["HOME"] == "/var/lib/hal0"  # corrected to target home
+
+
+def test_runas_extras_respects_opt_out() -> None:
+    env: dict[str, str] = {"HOME": "/root"}
+    extras = agent_shim._runas_popen_extras(
+        env, geteuid=lambda: 0, getpwnam=_fake_pw(33, 33, "/var/lib/hal0"), allow_root=True
+    )
+    assert extras == {}
+    assert env["HOME"] == "/root"
+
+
+def test_runas_extras_noop_when_user_absent() -> None:
+    def _raise(name: str):
+        raise KeyError(name)
+
+    env: dict[str, str] = {"HOME": "/root"}
+    extras = agent_shim._runas_popen_extras(env, geteuid=lambda: 0, getpwnam=_raise)
+    assert extras == {}

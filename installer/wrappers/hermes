@@ -33,6 +33,18 @@
 
 set -eu
 
+# run-as-hal0 guard: if launched as root, re-exec as the unprivileged hal0
+# service user (correct HOME, HERMES_HOME stripped) BEFORE we touch any state.
+# Otherwise hermes would resolve ~/.hermes to /root/.hermes and write root:root
+# files the hal0 service can't read — the root-clobber regression (#843).
+# Sourced defensively: a dev/uninstalled box without the lib runs unguarded.
+HAL0_GUARD_LIB="${HAL0_GUARD_LIB:-/usr/lib/hal0/guards/run-as-hal0.sh}"
+if [ -r "$HAL0_GUARD_LIB" ]; then
+    # shellcheck disable=SC1090
+    . "$HAL0_GUARD_LIB"
+    hal0_ensure_runas hal0 "$0" "$@" || exit $?
+fi
+
 HAL0_AGENT_ID="${HAL0_AGENT_ID:-hermes-agent}"
 HAL0_HERMES_BIN="${HAL0_HERMES_BIN:-/var/lib/hal0/venvs/hermes/bin/hermes}"
 HAL0_HERMES_SECRETS="${HAL0_HERMES_SECRETS:-/var/lib/hal0/secrets/agents/hermes.env}"

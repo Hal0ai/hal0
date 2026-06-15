@@ -202,3 +202,32 @@ Test home + style confirmed against the existing installer/wrapper test layout
    branch).
 4. Operator deploys to CT105 (out of scope here; another session is currently
    active on that runtime) and runs `bootstrap --repair` to converge the box.
+
+## As-built (implemented on `fix/hal0-runas-guard`)
+
+Concrete decisions made during TDD implementation:
+
+- **Layer 1 (wrapper):** guard lib lives at `installer/lib/run-as-hal0.sh`,
+  installed by `install.sh` to `/usr/lib/hal0/guards/run-as-hal0.sh` (matches the
+  hermes-hooks `install -m 0755` idiom; dev-mode PREFIX shadows it). Only
+  `installer/wrappers/hermes` sources it — `hal0-hermes` is a symlink to that
+  wrapper, so it inherits the guard for free. Re-exec wraps the command in
+  `env HOME=<home> -u HERMES_HOME` so HOME is correct and HERMES_HOME is dropped
+  regardless of which dropper (runuser → setpriv → sudo) is used.
+- **Layer 1 (systemd path):** the `hal0-agent` shim execs the venv binary
+  directly (NOT the wrapper), so the guard there is `_runas_popen_extras()` in
+  `agent_shim.py`, which adds `user=`/`group=` to the `Popen` and corrects
+  `env['HOME']` when running as root. No-op under the unit (already `User=hal0`).
+- **Layer 2 (chown):** `_chown_tree_to_hal0()` in `hermes_provision.py`, called
+  from `_phase_install` (venv), `_phase_home_init` (HERMES_HOME tree), and
+  `_phase_install_artifacts` (runtime.json). No-op unless root, so `--repair`
+  reconciles ownership on already-broken boxes.
+- **Layer 3 (detect):** `hal0 doctor perms` — read-only ownership audit
+  (`check_hermes_ownership` / `has_ownership_drift` in `doctor_commands.py`).
+  Exits non-zero and points at `bootstrap --repair` on drift. No auto-repair.
+- **Opt-out:** `HAL0_ALLOW_ROOT=1` honored by both the shell guard and the shim.
+- **Test seam:** `HAL0_RUNAS_TEST_UID` lets the guard's euid be faked in CI
+  (we can't become root); production never sets it.
+- **Deferred:** a root-context harness smoke row (real `stat` ownership +
+  no-`/root/.hermes` after a root install) — can't run in non-root CI; tracked
+  as a follow-up. Ownership behavior is covered by the helper unit tests.
