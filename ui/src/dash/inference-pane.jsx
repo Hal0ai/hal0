@@ -461,7 +461,7 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
 
 function SlotCards({ rows, full, models, busyName, handlers }) {
   if (!rows.length)
-    return <div className="scards-empty">no active slots — expand to start one</div>
+    return <div className="scards-empty">no inference slots — create one to start</div>
   return (
     <div className={'scards ' + (full ? 'full' : 'compact')}>
       {rows.map(({ s, ind }) => {
@@ -506,42 +506,25 @@ function SlotCards({ rows, full, models, busyName, handlers }) {
   )
 }
 
-export function InferencePane() {
+// Page-level hero band — the iGPU GTT memory map + combined-throughput tile,
+// lifted out of the Inference engine shell so it sits at the very top of the
+// Slots page (above the Inference ⇄ Image Gen tabs) and stays visible across
+// tabs. Self-contained: owns its own slots/memory queries + throughput ring
+// buffer, so SlotsView can drop it in without threading any state down. Wrapped
+// in `.infer-pane .proto` so it inherits the pane's accent vars + box-sizing
+// and reuses the existing .hero-band / .mem / .tp styling verbatim.
+export function InferenceHeroBand() {
   const slotsQuery = useSlots()
-  const modelsQuery = useModels()
   const mm = useMemoryMapModel()
-  const restartMut = useSlotRestart()
-  const unloadMut = useSlotUnload()
-  const loadMut = useSlotLoad()
-  const swapMut = useSlotSwap()
-  const [open, setOpen] = useStateI(false)
-  const [busyName, setBusyName] = useStateI(null)
 
-  // The Inference rollup is the iGPU/CPU slot stack. Image generation is its
-  // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
-  // stack pane below — they appear here only as the sec-label FLM count.
   const allSlots = slotsQuery.data || []
   const nonImg = allSlots.filter((s) => (s.group || '') !== 'img')
   const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
-  const npuN = nonImg.length - slots.length
-
   const rows = slots.map((s) => ({ s, ind: slotIndicatorFromPhase(s) }))
-  // collapsed view: serving + ready only (warming/idle wait for the expand)
-  const compactRows = rows.filter((r) => {
-    const d = dotCls(r.ind)
-    return d === 'serving' || d === 'ready'
-  })
   const servingN = rows.filter((r) => r.ind.cls === 'serving').length
-  const loadedN = rows.filter((r) => isSlotLive(r.s)).length
 
-  const gpuN = slots.filter((s) => {
-    const k = devKind(s.device)
-    return k === 'rocm' || k === 'vulkan'
-  }).length
-
-  // Combined throughput — summed tok/s across this pane's serving slots
-  // (NPU/FLM throughput belongs to the NPU pane), with a client ring buffer
-  // for the spark (the backend exposes no rolling series).
+  // Combined throughput — summed tok/s across this pane's serving slots, with a
+  // client ring buffer for the spark (the backend exposes no rolling series).
   const toksVals = slots
     .map((s) => s?.metrics?.toks)
     .filter((t) => typeof t === 'number' && t > 0)
@@ -559,7 +542,46 @@ export function InferencePane() {
   const ticks = historyRef.current
   const peak = ticks.length ? Math.max(...ticks) : null
 
-  // GTT headroom for the expanded status line (the memory map's frame).
+  return (
+    <div className="infer-pane infer-hero-top" data-testid="infer-hero-band">
+      <div className="proto">
+        <div className="hero-band">
+          <MemGtt mm={mm} full />
+          <TpTile value={value} ticks={ticks} peak={peak} servingN={servingN} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function InferencePane() {
+  const slotsQuery = useSlots()
+  const modelsQuery = useModels()
+  const mm = useMemoryMapModel()
+  const restartMut = useSlotRestart()
+  const unloadMut = useSlotUnload()
+  const loadMut = useSlotLoad()
+  const swapMut = useSlotSwap()
+  const [busyName, setBusyName] = useStateI(null)
+
+  // The Inference rollup is the iGPU/CPU slot stack. Image generation is its
+  // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
+  // stack pane below — they appear here only as the sec-label FLM count.
+  const allSlots = slotsQuery.data || []
+  const nonImg = allSlots.filter((s) => (s.group || '') !== 'img')
+  const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
+  const npuN = nonImg.length - slots.length
+
+  const rows = slots.map((s) => ({ s, ind: slotIndicatorFromPhase(s) }))
+  const servingN = rows.filter((r) => r.ind.cls === 'serving').length
+  const loadedN = rows.filter((r) => isSlotLive(r.s)).length
+
+  const gpuN = slots.filter((s) => {
+    const k = devKind(s.device)
+    return k === 'rocm' || k === 'vulkan'
+  }).length
+
+  // GTT headroom for the slots status line (the memory map's frame).
   const gttCapGb = mm.pool?.totalGb || 0
   const gttFreeGb = Math.max(0, Math.round(gttCapGb - (mm.self?.gttUsedGb || 0)))
 
@@ -604,13 +626,6 @@ export function InferencePane() {
     window.location.hash = '#logs'
   }
 
-  const hero = (full) => (
-    <div className="hero-band">
-      <MemGtt mm={mm} full={full} />
-      <TpTile value={value} ticks={ticks} peak={peak} servingN={servingN} />
-    </div>
-  )
-
   return (
     <div className="infer-pane">
       <div className="proto">
@@ -633,7 +648,7 @@ export function InferencePane() {
           <span className="meta">podman · :8080</span>
         </div>
 
-        <div className={'engine' + (loadedN > 0 ? ' active' : '') + (open ? ' open' : '')}>
+        <div className={'engine' + (loadedN > 0 ? ' active' : '')}>
           <div className="engine-h">
             <span className="engine-glyph">
               <Ic name="slots" size={16} />
@@ -657,50 +672,30 @@ export function InferencePane() {
             </span>
           </div>
 
-          {/* collapsed strip — compact hero, hidden when the pane is open */}
-          <div className="infer-strip" data-testid="infer-strip">
-            {hero(false)}
+          {/* All slots as full cards — always visible (freed from the old
+              collapse/expand accordion). The memory + throughput hero now lives
+              in the page-level InferenceHeroBand above the tabs. */}
+          <div className="engine-b" data-testid="infer-slots">
             <div>
-              <SubLabel icon="slots" note={`${loadedN} loaded`}>
-                active slots
+              <SubLabel icon="slots" note={`all ${rows.length} · full cards`}>
+                slots
               </SubLabel>
               <SlotCards
-                rows={compactRows}
-                full={false}
+                rows={rows}
+                full
                 models={modelsQuery.data}
                 busyName={busyName}
                 handlers={handlers}
               />
             </div>
-          </div>
-
-          {/* expandable body — hero pinned on top, then all slots as full cards */}
-          <div className="engine-body">
-            <div className="inner">
-              <div className="engine-b">
-                {hero(true)}
-                <div>
-                  <SubLabel icon="slots" note={`all ${rows.length} · full cards`}>
-                    slots
-                  </SubLabel>
-                  <SlotCards
-                    rows={rows}
-                    full
-                    models={modelsQuery.data}
-                    busyName={busyName}
-                    handlers={handlers}
-                  />
-                </div>
-                <div className="body-status">
-                  {servingN} serving
-                  {gttCapGb > 0 ? ` · ${gttFreeGb} GB free` : ''}
-                </div>
-              </div>
+            <div className="body-status">
+              {servingN} serving
+              {gttCapGb > 0 ? ` · ${gttFreeGb} GB free` : ''}
             </div>
           </div>
 
-          {/* footer — engine identity + caret expand control */}
-          <div className="engine-foot has-q">
+          {/* footer — engine identity (caret expander removed) */}
+          <div className="engine-foot">
             <div className="foot-id">
               <span className="k">runtime</span>
               <span className="v comfy">hal0</span>
@@ -714,21 +709,6 @@ export function InferencePane() {
               <span className="k">gateway</span>
               <span className="v comfy">:8080</span>
             </div>
-            <button
-              className="qcaret"
-              onClick={() => setOpen((o) => !o)}
-              aria-expanded={open}
-              data-testid="infer-qcaret"
-            >
-              <span className="q">
-                <Ic name="slots" size={13} /> {open ? 'collapse' : 'all slots'}
-                <span className="qn">{slots.length}</span>
-                <span className="qrun">· {servingN} serving</span>
-              </span>
-              <span className="car">
-                <Ic name="chev" size={13} />
-              </span>
-            </button>
           </div>
         </div>
       </div>
@@ -736,4 +716,4 @@ export function InferencePane() {
   )
 }
 
-Object.assign(window, { InferencePane })
+Object.assign(window, { InferencePane, InferenceHeroBand })
