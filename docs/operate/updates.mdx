@@ -81,15 +81,38 @@ so your config, models, and registry are preserved.
 
 | Channel  | What you get                                                              |
 |----------|---------------------------------------------------------------------------|
-| `stable` | Cut releases. The default and the only channel with a live publish pipeline today. |
-| `nightly`| Schema-reserved for every green main build. No publishing workflow yet.   |
+| `stable` | Cut releases. The default. Recommended for production installs.           |
+| `nightly`| Automated nightly build from the latest green `main`. For co-developers and beta testers. |
 | `dev`    | Schema-reserved for ad-hoc dev cuts. No publishing workflow yet.          |
 
 Channels are configured in `hal0.toml`. Switch with
-`hal0 config edit` or via the dashboard's Settings view. Selecting
-anything other than `stable` will currently fall back to `stable` —
-the schema is in place, the cron-scheduled workflow that would
-populate `nightly.json` / `dev.json` is not.
+`hal0 config edit` or via the dashboard's Settings view.
+
+### Nightly channel
+
+The `nightly` channel publishes an automated, cosign-signed build from
+the latest green `main`, cut every night at approximately 02:00
+US-Eastern. It's the easiest way for co-developers and beta testers to
+track hal0 development without waiting for a stable release.
+
+**Switch once, then update normally:**
+
+```sh
+hal0 update --channel nightly   # persists the channel, then checks
+hal0 update                     # every day after — pulls the newest nightly
+```
+
+Nightly builds are published as GitHub **prereleases** and never become
+the "Latest" release, so they don't affect a `stable`-channel install.
+To switch back to stable:
+
+```sh
+hal0 update --channel stable
+```
+
+Nightlies are versioned `X.Y.Z-nightly.<YYYYMMDD>`. The seven most
+recent builds are retained; no nightly is cut on a night when `main`
+is red or unchanged.
 
 <Aside type="note">
   The release manifest schema is `hal0.releases.v1` (see

@@ -7,6 +7,8 @@ name: Release
 #   4. publish tarball + .sig + manifest as a GitHub Release
 #
 # Triggered by: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+# Also reusable via workflow_call from nightly.yml (a GITHUB_TOKEN tag push
+# can't trigger this workflow's `push` event, so nightly invokes it directly).
 #
 # The manifest is automatically served at https://releases.hal0.dev/<channel>.json
 # (e.g. /stable.json) by the Cloudflare Pages middleware in hal0-web
@@ -37,9 +39,20 @@ on:
         required: true
         default: ""
       channel:
-        description: "Release channel manifest field"
+        description: "Release channel (blank = derive from tag)"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build a release for"
         required: true
-        default: "stable"
+        type: string
+      channel:
+        description: "Release channel (blank = derive from tag)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write     # required to upload Release assets
@@ -76,7 +89,16 @@ jobs:
             echo "::error::could not resolve version from tag '${TAG}'"
             exit 1
           fi
-          CHANNEL="${{ inputs.channel || 'stable' }}"
+          # Channel: an explicit input wins; otherwise derive from the tag
+          # (a `-nightly.<date>` segment ⇒ nightly, else stable).
+          # On a plain tag-push event `inputs` is undefined and ${{ inputs.channel }}
+          # renders empty, so the -z branch (Python derivation) is the push path.
+          # TAG goes through the environment, not string-interpolated into the
+          # one-liner, so an odd tag can't break/inject into the Python literal.
+          CHANNEL="${{ inputs.channel }}"
+          if [[ -z "${CHANNEL}" ]]; then
+            CHANNEL="$(TAG="${TAG}" PYTHONPATH=src python3 -c "import os; from hal0.release.channel import channel_for_tag; print(channel_for_tag(os.environ['TAG']))")"
+          fi
           echo "tag=${TAG}"           >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
           echo "channel=${CHANNEL}"   >> "$GITHUB_OUTPUT"
@@ -89,7 +111,18 @@ jobs:
           ')"
           echo "pyproject.toml version: ${PYV}"
           echo "tag-derived version:    ${{ steps.ver.outputs.version }}"
-          if [[ "${PYV}" != "${{ steps.ver.outputs.version }}" ]]; then
+          CHANNEL="${{ steps.ver.outputs.channel }}"
+          if [[ "${CHANNEL}" == "nightly" ]]; then
+            # Nightly: pyproject stays on its dev version (e.g. 0.5.0-alpha.1)
+            # while the tag is v<base>-nightly.<date>; require only the base
+            # X.Y.Z to match so we never ship a tarball off the wrong line.
+            # PYV/TAG via env (not interpolated into the literal) so an odd
+            # version/tag string can't break or inject into the Python.
+            if ! PYV="${PYV}" TAG="${{ steps.ver.outputs.tag }}" PYTHONPATH=src python3 -c "import os, sys; from hal0.release.channel import base_matches; sys.exit(0 if base_matches(os.environ['PYV'], os.environ['TAG']) else 1)"; then
+              echo "::error::nightly tag base ≠ pyproject base version (${PYV})"
+              exit 1
+            fi
+          elif [[ "${PYV}" != "${{ steps.ver.outputs.version }}" ]]; then
             echo "::error::pyproject.toml version (${PYV}) ≠ tag (${{ steps.ver.outputs.version }})"
             echo "::error::bump pyproject.toml + retag, or use scripts/release-check.sh --tag ${{ steps.ver.outputs.tag }} first"
             exit 1
@@ -206,7 +239,11 @@ jobs:
           # manifest below — keep these two strings in lock-step.
           # github.repository preserves case (Hal0ai/hal0); use (?i) to
           # absorb the lowercase `hal0ai` redirect form too.
-          IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@${{ github.ref }}$"
+          # The Fulcio cert SAN is the ENTRY-POINT workflow ref: release.yml@<tag>
+          # on a direct tag push, or nightly.yml@refs/heads/main when invoked as
+          # a reusable workflow. github.workflow_ref gives exactly that, so the
+          # verify identity is correct in both modes (and matches the manifest).
+          IDENT="^(?i)https://github\\.com/${{ github.workflow_ref }}$"
           ISSUER="https://token.actions.githubusercontent.com"
           cosign verify-blob \
               --signature "${SIG}" \
@@ -228,7 +265,10 @@ jobs:
           BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
           MANIFEST_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${CHANNEL}.json"
 
-          IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@refs/tags/${TAG}$"
+          # Must match the Self-verify identity above (and the cert SAN) so the
+          # updater's cosign verify-blob succeeds. Derived from the entry-point
+          # workflow ref to stay correct under workflow_call (nightly).
+          IDENT="^(?i)https://github\\.com/${{ github.workflow_ref }}$"
 
           python3 - "${OUT}" "${VERSION}" "${TAG}" "${CHANNEL}" "${DIGEST}" \
                    "${BASE_URL}" "${MANIFEST_URL}" "${IDENT}" <<'PY'
@@ -294,27 +334,28 @@ jobs:
           # rebuild path) — otherwise just upload the assets, replacing
           # any prior copies with --clobber.
           if ! gh release view "${TAG}" >/dev/null 2>&1; then
-            # NOTE: every pre-v1.0 release is a SemVer prerelease by tag
-            # convention (vX.Y.Z-alpha.N / -beta.N / -rcN), but we
-            # publish them with --prerelease=false on purpose: GitHub's
-            # /releases/latest endpoint and "Latest" badge filter out
-            # prereleases, and the install + update path relies on a
-            # working /latest while we're still pre-stable. Flip back
-            # to a real prerelease check on the v1.0.0 cut. See the
-            # hal0_v0.1.0-alpha-launch + hal0_release_prerelease_flag
-            # memories.
-            # `--latest` is also explicit. The "automatic based on date
-            # and version" default did NOT flip the Latest badge from
-            # v0.3.0-alpha.1 → v0.3.1-alpha.1 on the 2026-05-28 cut,
-            # so /releases/latest stayed stuck at the prior tag until
-            # a manual `gh release edit --latest`. Hard-code it for
-            # the same v1.0.0 horizon as --prerelease=false above.
-            gh release create "${TAG}" \
-              --title "hal0 ${TAG}" \
-              --notes "Automated release. See docs/internal/release-manifest.md for the verify path." \
-              --draft=false \
-              --prerelease=false \
-              --latest
+            if [[ "${{ steps.ver.outputs.channel }}" == "nightly" ]]; then
+              # Nightly: a real prerelease, and deliberately NOT --latest —
+              # /releases/latest and the "Latest" badge must keep pointing at
+              # the newest STABLE release that install.sh + stable `hal0 update`
+              # depend on. The nightly channel is followed via releases.hal0.dev
+              # /nightly.json, not /releases/latest.
+              gh release create "${TAG}" \
+                --title "hal0 ${TAG}" \
+                --notes "Automated nightly build from green main. Follow with: hal0 update --channel nightly. See docs/operate/updates.mdx." \
+                --draft=false \
+                --prerelease=true
+            else
+              # Stable: see hal0_v0.1.0-alpha-launch + hal0_release_prerelease_flag
+              # memories. Pre-v1.0 tags are published --prerelease=false --latest
+              # on purpose so /releases/latest works while we're pre-stable.
+              gh release create "${TAG}" \
+                --title "hal0 ${TAG}" \
+                --notes "Automated release. See docs/internal/release-manifest.md for the verify path." \
+                --draft=false \
+                --prerelease=false \
+                --latest
+            fi
           fi
 
           gh release upload "${TAG}" "${TARBALL}" "${SIG}" "${CRT}" "${MANIFEST}" --clobber
