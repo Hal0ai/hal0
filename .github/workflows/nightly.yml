@@ -1,0 +1,137 @@
+name: Nightly
+
+# Cut a nightly hal0 build from green `main` and publish it on the `nightly`
+# release channel. This workflow is only the scheduler/guard/tagger — it does
+# NOT build or sign. It computes a dated v<base>-nightly.<YYYYMMDD> tag at
+# main HEAD, pushes it, then invokes release.yml (workflow_call) which builds,
+# cosign-signs, and publishes nightly.json (channel auto-derived from the tag).
+#
+# Testers follow it with a one-time `hal0 update --channel nightly`, then plain
+# `hal0 update`. See docs/operate/updates.mdx and
+# docs/superpowers/specs/2026-06-14-nightly-channel-design.md.
+
+on:
+  schedule:
+    # 06:00 UTC = 02:00 America/New_York during EDT (drifts to 01:00 EST in
+    # winter; GitHub cron is UTC and does not observe DST). The exact minute
+    # is not load-bearing for a nightly, and GH delays scheduled runs anyway.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Tag even if main is unchanged since the last nightly"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # push the nightly tag (tag job) + create the release (release job)
+  id-token: write   # cosign keyless OIDC in the called release.yml
+  packages: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Gate + tag nightly
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      skip: ${{ steps.green.outputs.skip == 'true' || steps.change.outputs.skip == 'true' }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - name: Checkout main (full history + tags)
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Greenness gate — latest CI run on main must be success
+        id: green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CONCLUSION="$(gh run list --workflow=ci.yml --branch=main \
+            --limit=1 --json conclusion --jq '.[0].conclusion // "none"')"
+          echo "latest main CI conclusion: ${CONCLUSION}"
+          if [[ "${CONCLUSION}" != "success" ]]; then
+            echo "::notice::main CI is '${CONCLUSION}', not success — skipping nightly."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Change gate — skip if HEAD already nightly-tagged
+        id: change
+        if: steps.green.outputs.skip == 'false'
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          LAST_TAG="$(git tag --list 'v*-nightly.*' --sort=-creatordate | head -n1)"
+          echo "head=${HEAD_SHA}  last-nightly-tag=${LAST_TAG:-<none>}"
+          SKIP=false
+          if [[ -n "${LAST_TAG}" ]]; then
+            LAST_SHA="$(git rev-list -n1 "${LAST_TAG}")"
+            if [[ "${HEAD_SHA}" == "${LAST_SHA}" && "${{ inputs.force }}" != "true" ]]; then
+              echo "::notice::main HEAD already tagged ${LAST_TAG} — skipping (use force to override)."
+              SKIP=true
+            fi
+          fi
+          echo "skip=${SKIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute nightly version + tag
+        id: ver
+        if: steps.green.outputs.skip == 'false' && steps.change.outputs.skip == 'false'
+        run: |
+          PYV="$(python3 -c '
+          import tomllib
+          print(tomllib.loads(open("pyproject.toml","rb").read().decode())["project"]["version"])
+          ')"
+          DATE="$(date -u +%Y%m%d)"
+          TAG="$(PYV="${PYV}" DATE="${DATE}" PYTHONPATH=src python3 -c "import os; from hal0.release.channel import base_version, nightly_tag; print(nightly_tag(base_version(os.environ['PYV']), os.environ['DATE']))")"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "::notice::nightly tag ${TAG}"
+
+      - name: Create + push nightly tag
+        if: steps.green.outputs.skip == 'false' && steps.change.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          git config user.name  "hal0-nightly[bot]"
+          git config user.email "hal0-nightly@users.noreply.github.com"
+          # Re-runnable within a day (manual force): move the tag if it exists.
+          git tag -fa "${TAG}" -m "hal0 nightly ${TAG}"
+          git push -f origin "refs/tags/${TAG}"
+
+      - name: Prune old nightly releases + tags (keep last 7)
+        if: steps.green.outputs.skip == 'false' && steps.change.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t TAGS < <(git tag --list 'v*-nightly.*')
+          TO_PRUNE="$(PYTHONPATH=src python3 -c "
+          import sys
+          from hal0.release.channel import nightlies_to_prune
+          print('\n'.join(nightlies_to_prune(sys.argv[1:], keep=7)))
+          " "${TAGS[@]}")"
+          if [[ -z "${TO_PRUNE}" ]]; then
+            echo "nothing to prune"; exit 0
+          fi
+          while IFS= read -r t; do
+            [[ -z "${t}" ]] && continue
+            echo "pruning ${t}"
+            gh release delete "${t}" --yes --cleanup-tag || true
+          done <<< "${TO_PRUNE}"
+
+  release:
+    name: Build + sign + publish (nightly)
+    needs: tag
+    if: needs.tag.outputs.skip == 'false'
+    permissions:
+      contents: write
+      id-token: write
+      packages: read
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+      channel: nightly
