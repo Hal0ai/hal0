@@ -1,0 +1,164 @@
+---
+title: Architecture
+description: How hal0 fits together — the FastAPI control plane, podman-backed inference slots, the dispatcher that routes each request, and the dashboard and OpenWebUI front ends.
+sidebar:
+  order: 10
+---
+
+import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+hal0 is a single self-hosted service that turns one machine into an
+OpenAI-compatible inference platform. Everything runs behind one process —
+**hal0-api** — which owns configuration, model and slot lifecycle, request
+routing, and the web UI. Understanding how those parts relate is the key to
+understanding the rest of these docs.
+
+## The pieces
+
+<CardGrid>
+  <Card title="hal0-api" icon="rocket">
+    A FastAPI application that binds `0.0.0.0:8080`. It serves the REST control
+    plane under `/api/*`, the OpenAI-compatible inference surface under
+    `/v1/*`, the MCP servers under `/mcp/*`, and the built dashboard at `/`.
+  </Card>
+  <Card title="Slots" icon="puzzle">
+    Each slot is one model served by one podman container, managed through a
+    `hal0-slot@<name>.service` systemd unit. The `SlotManager` owns their
+    lifecycle and state.
+  </Card>
+  <Card title="Dispatcher" icon="random">
+    The registry-aware router that resolves every incoming `/v1` request to a
+    slot or an external upstream, then forwards it — wrapping the slot in its
+    serving state for the duration of the call.
+  </Card>
+  <Card title="Front ends" icon="laptop">
+    The Vue dashboard (served by hal0-api itself) for operating the platform,
+    plus optional OpenWebUI as a chat front end pointed at the `/v1` surface.
+  </Card>
+</CardGrid>
+
+## hal0-api: the control plane
+
+The application is built once in `create_app()` and exposes a clearly grouped
+surface area:
+
+- **`/v1/*`** — the OpenAI-compatible inference API. The model-listing probe
+  (`GET /v1/models`) is intentionally separate from the inference writer
+  surface, because OpenAI clients commonly list models before sending an
+  `Authorization` header.
+- **`/api/*`** — the operator control plane: slots, models, capabilities,
+  profiles, providers, hardware, health, settings, activity, updates, and more.
+- **`/mcp/admin`** and **`/mcp/memory`** — Model Context Protocol servers
+  mounted as sub-applications so agents and tools can drive hal0 directly.
+- **`/`** — the built dashboard SPA, mounted last so it never shadows an API
+  route. Any unmatched non-API path falls back to the SPA's `index.html` so
+  client-side routing survives a reload.
+
+When hal0-api starts, its lifespan wires the long-lived objects together: the
+model registry, the upstream registry, the `SlotManager`, the `Dispatcher`, the
+hardware probe, the capability orchestrator, and an event bus that streams
+state changes to the dashboard footer. These are shared across all requests —
+the API is a thin layer over them.
+
+<Aside type="note">
+hal0 ships with **no built-in authentication or TLS**. The API is open on the
+local network by design. See [Security](/docs/concepts/security) for the
+reverse-proxy pattern you put in front of it.
+</Aside>
+
+## Slots: where models actually run
+
+A **slot** is a named, long-lived place to serve one model. Behind each slot is
+a single podman container started by a `hal0-slot@<name>.service` systemd unit
+whose `ExecStart` runs `podman run`. The `SlotManager` drives every transition
+through an explicit state machine and persists it so the dashboard reflects real
+lifecycle events, not systemd snapshots.
+
+Slots are the unit hal0 reasons about everywhere: the dispatcher routes to
+them, the GPU arbiter coordinates exclusive GPU access between them, and
+capabilities and profiles describe how to configure them. The
+[Slots](/docs/concepts/slots) concept covers the lifecycle, single-flight
+dispatch, and the GPU arbiter in depth.
+
+## The dispatcher: routing a request
+
+The `Dispatcher` reads the model registry and the list of upstreams to decide
+where each OpenAI-compatible request goes. It never starts or stops slots
+itself; it resolves a target, gates on readiness, and forwards. Resolution runs
+in a fixed order so behaviour is predictable:
+
+<Steps>
+
+1. **Container-slot preemption** — a loaded container slot is the authoritative
+   server for the models it advertises, so it wins over any default registry
+   binding.
+
+2. **Registry lookup** — an exact model-to-upstream binding from the registry.
+   If that upstream is online, forward there.
+
+3. **Passthrough** — any upstream whose cached `/v1/models` already advertises
+   the requested model id.
+
+4. **Cold-cache prefetch** — fan out `/v1/models` against external upstreams
+   with empty caches (coalesced so concurrent identical prefetches share one
+   call), then re-check passthrough.
+
+5. **Capability / path routing** — last-resort heuristics: `/embeddings` →
+   the embed slot, `/audio/speech` → the TTS slot, `/images/generations` → the
+   image slot, an FLM `name:tag` model → the NPU slot, and explicit slot-name
+   addressing. Falls back to the `chat` slot.
+
+</Steps>
+
+Every routing decision emits one structured log line, so you can always see why
+a request went where it did.
+
+### Data flow of a chat request
+
+<Steps>
+
+1. A client `POST`s to `/v1/chat/completions` with a `model` field — that can
+   be a model id, or a **slot alias** such as `chat` or `agent`.
+
+2. The route layer translates a slot alias to the slot's configured model id,
+   then asks the dispatcher to resolve the request to an `UpstreamCall`.
+
+3. If the target is a local slot whose model isn't loaded yet, the dispatcher
+   kicks a backend-aware load so the slot's declared device and profile pick
+   the runtime — then gates on readiness. A slot that is still loading returns a
+   structured `slot.loading` 503 with a `Retry-After` hint instead of a raw
+   connection error.
+
+4. Once the slot is ready, the dispatcher forwards the request, wrapping the
+   slot in its **serving** state for the lifetime of the call. For a streamed
+   response, that state is held open until the stream drains.
+
+5. The upstream's response (including streamed SSE chunks and any error
+   envelope) is passed back to the client verbatim.
+
+</Steps>
+
+<Aside type="tip">
+Addressing a slot by its **alias** (`chat`, `agent`, `utility`) is the stable
+way to pin a co-resident model: the alias doesn't change when you swap the
+underlying model. See [Slots](/docs/concepts/slots).
+</Aside>
+
+## The front ends
+
+hal0-api serves the **dashboard** itself — there is no separate web server to
+run. The dashboard is where you create and operate slots, pull models, pick
+capabilities, watch live activity, and configure the platform.
+
+For end-user chat, point **OpenWebUI** (or any OpenAI-compatible client) at
+hal0's `/v1` surface. Because hal0 speaks the OpenAI API, anything that talks to
+OpenAI talks to hal0.
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Slots" href="/docs/concepts/slots" description="The lifecycle, single-flight dispatch, and the GPU arbiter." />
+  <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How capabilities, profiles, and devices shape a slot." />
+  <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The reference hardware and why it's the tuning target." />
+  <LinkCard title="Security" href="/docs/concepts/security" description="The LAN-open posture and the reverse-proxy pattern." />
+</CardGrid>

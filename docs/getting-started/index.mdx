@@ -1,0 +1,71 @@
+---
+title: hal0 documentation
+description: hal0 is an open-source home AI inference platform for AMD Strix Halo — iGPU, XDNA NPU, and unified memory behind one OpenAI-compatible API.
+sidebar:
+  order: 0
+---
+
+import { Card, CardGrid, LinkCard, Aside } from '@astrojs/starlight/components';
+
+**hal0** turns a Linux box into a polished, OpenAI-compatible inference
+appliance. It is built for the AMD Ryzen AI Max+ 395 ("Strix Halo") —
+iGPU + XDNA NPU + 128 GB of unified memory — and falls back to portable
+hardware parsers on every other host.
+
+Every inference workload runs as its own **podman container**, supervised
+by a `hal0-slot@<name>.service` systemd unit. A single control plane,
+`hal0-api` on port `8080`, owns the slot state machines, dispatches
+OpenAI-compatible `/v1/*` requests to the right slot, and serves the
+dashboard. There is no shared inference daemon to babysit.
+
+<Aside type="note" title="Current release">
+This documentation tracks **hal0 v0.5.0-alpha.1** — the container-runtime
+era, where each slot (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, and
+the NPU trio) runs in a dedicated podman container.
+</Aside>
+
+## What you get
+
+- **OpenAI-compatible `/v1/*` API** — chat, completions, embeddings,
+  rerank, audio transcription, speech, and image generation. Point any
+  OpenAI SDK at `http://localhost:8080/v1` and go.
+- **Hardware-aware slots** — each capability gets its own container,
+  image, flags, port, and lifecycle, sharing only the GPU through an
+  arbiter.
+- **First-run bundle picker** — hardware-anchored tiers download a
+  coherent set of models in the background.
+- **Prewired chat UI** — OpenWebUI on port `3001`, zero config.
+- **Signed self-update** — cosign-verified tarballs with one-flag
+  rollback.
+
+## Start here
+
+<CardGrid>
+  <LinkCard
+    title="Install hal0"
+    href="/docs/getting-started/install/"
+    description="One-line install: fetch, verify, unpack, and bring up the API."
+  />
+  <LinkCard
+    title="First-run setup"
+    href="/docs/getting-started/setup/"
+    description="Walk through the bundle picker and provision your first slots."
+  />
+  <LinkCard
+    title="Load your first model"
+    href="/docs/getting-started/first-model/"
+    description="Pull a model from Hugging Face and assign it to a slot."
+  />
+  <LinkCard
+    title="Send your first chat"
+    href="/docs/getting-started/first-chat/"
+    description="Chat from OpenWebUI or curl the OpenAI-compatible endpoint."
+  />
+</CardGrid>
+
+<Aside type="caution" title="No built-in auth or TLS">
+`hal0-api` binds `0.0.0.0:8080` and treats every request as authenticated
+by network reachability — the right posture for a trusted LAN appliance.
+If hal0 is reachable from anywhere you do not control, front it with a
+reverse proxy that owns auth and TLS.
+</Aside>

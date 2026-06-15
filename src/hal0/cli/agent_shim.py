@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import pwd
 import shutil
 import signal
 import socket
@@ -48,6 +49,7 @@ import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # ----------------------------------------------------------------------------
 # Configuration discovery
@@ -275,6 +277,39 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
     return argv
 
 
+_RUNAS_USER = "hal0"
+
+
+def _runas_popen_extras(
+    env: dict[str, str],
+    *,
+    user: str = _RUNAS_USER,
+    geteuid: Callable[[], int] = os.geteuid,
+    getpwnam: Callable[[str], Any] = pwd.getpwnam,
+    allow_root: bool | None = None,
+) -> dict[str, Any]:
+    """Popen kwargs that drop the child to ``user`` when we're running as root.
+
+    The systemd ExecStart path execs the venv binary directly (bypassing the
+    /usr/local/bin/hermes wrapper guard). Under the unit we're already
+    ``User=hal0``, but a manual ``hal0-agent hermes serve`` as root would spawn a
+    root-owned Hermes that clobbers state (#843). When root, return
+    ``{"user", "group"}`` for ``subprocess.Popen`` and correct ``env['HOME']`` to
+    the target user's home. A no-op (``{}``) when not root, when
+    ``HAL0_ALLOW_ROOT`` is set, or when ``user`` doesn't exist.
+    """
+    if allow_root is None:
+        allow_root = os.environ.get("HAL0_ALLOW_ROOT", "") in ("1", "true", "yes")
+    if allow_root or geteuid() != 0:
+        return {}
+    try:
+        ent = getpwnam(user)
+    except KeyError:
+        return {}
+    env["HOME"] = ent.pw_dir
+    return {"user": ent.pw_uid, "group": ent.pw_gid}
+
+
 def _build_hermes_env(cfg: AgentConfig) -> dict[str, str]:
     """Build the child env for Hermes — inherits parent + adds hal0 keys."""
 
@@ -341,6 +376,11 @@ def cmd_serve(cfg: AgentConfig) -> int:
     argv = _build_hermes_argv(cfg)
     env = _build_hermes_env(cfg)
 
+    # If launched as root (manual `hal0-agent hermes serve` — the systemd unit
+    # is already User=hal0), drop the child to hal0 so it can't write root-owned
+    # state (#843). No-op under the unit / non-root / HAL0_ALLOW_ROOT.
+    runas = _runas_popen_extras(env)
+
     # Don't ``exec`` — we need a parent process to drive sd_notify
     # READY/WATCHDOG. Forward signals into the child via the SIGTERM
     # handler below.
@@ -349,6 +389,7 @@ def cmd_serve(cfg: AgentConfig) -> int:
         env=env,
         cwd=str(cfg.home if cfg.home.exists() else Path.cwd()),
         stdin=subprocess.DEVNULL,
+        **runas,
     )
 
     def _forward_signal(signum: int, _frame: object) -> None:

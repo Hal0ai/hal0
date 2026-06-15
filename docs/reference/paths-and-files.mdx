@@ -1,0 +1,93 @@
+---
+title: Paths & files
+description: FHS layout reference for hal0 — every config file under /etc/hal0, every state path under /var/lib/hal0, the code and log roots, and how HAL0_HOME remaps them all.
+sidebar:
+  order: 70
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every filesystem path hal0 uses flows through one resolver, so the four roots
+below are the whole story. Config and state are preserved across updates; code
+is replaced.
+
+## The four roots
+
+| Root            | FHS path             | Purpose                                            |
+|-----------------|----------------------|----------------------------------------------------|
+| Code            | `/usr/lib/hal0/current` | hal0 code (a symlink to the versioned dir).      |
+| Config          | `/etc/hal0`          | User-editable config. Preserved on update.         |
+| State           | `/var/lib/hal0`      | Mutable runtime state. Preserved on update.        |
+| Logs            | `/var/log/hal0`      | Optional supplementary log files (journald is primary). |
+
+## Config files (`/etc/hal0`)
+
+| Path                          | What it holds                                                        |
+|-------------------------------|---------------------------------------------------------------------|
+| `/etc/hal0/hal0.toml`         | Top-level config (`[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[models]`, `[memory]`, …). |
+| `/etc/hal0/slots/`            | One TOML per slot (`/etc/hal0/slots/<name>.toml`).                   |
+| `/etc/hal0/profiles.toml`     | Profile catalog. **Optional** — the built-in seeds are used when absent. |
+| `/etc/hal0/agents/`           | One TOML per agent (`/etc/hal0/agents/<name>.toml`): workspace, MCP servers, tool tiers. |
+| `/etc/hal0/hardware.json`     | Hardware probe result (written by `hal0 probe`).                     |
+| `/etc/hal0/manifest.json`     | Release manifest — toolbox image digests pinned per release.         |
+| `/etc/hal0/openwebui.env`     | OpenWebUI environment file.                                          |
+
+<Aside type="note">
+Provider and operator secrets live in `/etc/hal0/api.env` (written by the
+Settings → Secrets surface and the provider-credential writer). It is written
+mode 0600 and its values are write-only — never returned by the API, never
+logged. Upstream catalog config (`upstreams.toml`) and provider config
+(`providers.toml`) also live under `/etc/hal0`.
+</Aside>
+
+## State paths (`/var/lib/hal0`)
+
+| Path                                    | What it holds                                                  |
+|-----------------------------------------|---------------------------------------------------------------|
+| `/var/lib/hal0/models/`                 | Default model cache directory.                                 |
+| `/var/lib/hal0/registry/`               | Model registry (`registry.toml` and friends).                 |
+| `/var/lib/hal0/slots/<name>/`           | Per-slot working directory.                                    |
+| `/var/lib/hal0/activity.db`             | Durable activity / audit store (SQLite, plus `-wal`/`-shm`).   |
+| `/var/lib/hal0/agents/<name>/workspace/`| Per-agent filesystem sandbox root.                            |
+| `/var/lib/hal0/openwebui/`              | OpenWebUI state directory.                                     |
+| `/var/lib/hal0/.first-run.lock`         | First-run claim lockfile (mode 0600, single-use OTP).         |
+| `/var/lib/hal0/.bundle-chosen`          | First-run bundle-picker completion marker.                   |
+
+<Aside type="note">
+`.first_run_done`, `.first-run.lock`, and `.bundle-chosen` all live directly
+under `/var/lib/hal0`, so a single `rm -rf /var/lib/hal0` resets the whole
+first-run state.
+</Aside>
+
+## The model store
+
+The directory slot containers bind-mount for model weights is resolved
+separately from the model cache above, with this precedence:
+
+1. the `HAL0_MODEL_STORE` environment variable,
+2. `[models].store` in `hal0.toml`,
+3. the conventional default model-store mount.
+
+This is the single source of truth shared by the pull engine and the container
+mounts, so the path the registry hands to the inference server can never drift
+from what the container actually mounts.
+
+## HAL0_HOME remap
+
+Setting `HAL0_HOME=/some/path` relocates **all four roots** under that prefix —
+used for dev installs and isolated tests:
+
+| Root   | Under `HAL0_HOME`                  |
+|--------|------------------------------------|
+| Code   | `$HAL0_HOME/usr-lib/hal0/current`  |
+| Config | `$HAL0_HOME/etc/hal0`              |
+| State  | `$HAL0_HOME/var-lib/hal0`          |
+| Logs   | `$HAL0_HOME/var-log/hal0`          |
+
+Every derived path (slots dir, registry, `activity.db`, `manifest.json`, …)
+follows automatically because they are built on these roots.
+
+## See also
+
+- [Environment variables](/docs/reference/env-vars) — `HAL0_HOME`, `HAL0_MODEL_STORE`, and the rest.
+- [Config schema](/docs/reference/config-schema) — the field-level reference for `hal0.toml` and slot TOMLs.

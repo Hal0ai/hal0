@@ -1,0 +1,174 @@
+---
+title: Generate images
+description: Run Stable-Diffusion-family image generation on hal0 with ComfyUI — read the generation-engine status, switch the iGPU between inference and generation, and call /v1/images/generations.
+sidebar:
+  order: 70
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 generates images through **ComfyUI**, a node-graph Stable-Diffusion
+runtime. It runs as one containerized **generation engine** — a single
+run loads many cooperating models at once — using the
+[kyuz0 Strix Halo ComfyUI image](https://github.com/kyuz0/amd-strix-halo-toolboxes)
+(`docker.io/kyuz0/amd-strix-halo-comfyui`), tuned for the AMD iGPU.
+
+Because there is exactly one iGPU, image generation is **mutually
+exclusive** with the LLM stack: only one of them can hold GPU memory at a
+time. hal0 models this as a switchover driven by the GPU arbiter — the
+ComfyUI container stays resident, only its model memory is freed and
+reloaded.
+
+<Aside type="caution">
+Switching the iGPU to generation **stops the LLM stack** (chat bots and
+memory extraction go dark) for as long as generation holds the GPU. The
+switchover write path is gated off by default — see
+[Enable the switchover](#enable-the-switchover).
+</Aside>
+
+## Read the generation-engine status
+
+The dashboard's Image-Gen tab renders from a read-only aggregator that
+folds container state, the LLM-owner check, and ComfyUI's own HTTP API
+into one object:
+
+```sh
+curl http://localhost:8080/api/comfyui/status
+```
+
+Key fields:
+
+- `mode` — `generation` (ComfyUI owns the iGPU) or `inference` (the LLM
+  stack owns it). The GPU arbiter is the source of truth.
+- `engine` — `running`, `generating` (a render is in flight), `starting`
+  (container up, port not bound yet), or `stopped`.
+- `reachable` — whether ComfyUI's HTTP API answers.
+- `container` — the `img` slot container's state (`running` / `exited` /
+  `absent`).
+- `memory` — GTT and RAM gauges from ComfyUI's `/system_stats`.
+- `queue` — `{running, pending}` job counts.
+- `switchover` — the in-flight switch tracker (`active`, `target`,
+  `error`) so a poll can render "switching…".
+
+Every probe degrades to a safe default: a dead engine surfaces as
+`stopped`, never a 500.
+
+## Switch the iGPU between modes
+
+The `img` slot runs as the `hal0-slot@img.service` systemd unit. To hand
+the iGPU to ComfyUI (drains and unloads the LLM GPU slots, then ensures
+the resident container is up):
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/switchover \
+  -H 'Content-Type: application/json' \
+  -d '{"mode": "generation"}'
+```
+
+To hand it back to inference (frees ComfyUI's models via ComfyUI's own
+free path — the container and web UI stay up — then reloads the saved LLM
+slots):
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/switchover \
+  -H 'Content-Type: application/json' \
+  -d '{"mode": "inference"}'
+```
+
+Body fields:
+
+| Field   | Type   | Notes |
+|---------|--------|-------|
+| `mode`  | string | `generation` or `inference` (required). |
+| `force` | bool   | Switching to `inference` drops any running/pending render. Without `force`, a busy queue is refused with **409**. |
+| `pin`   | bool   | `generation` only — hold image mode against the arbiter's idle-restore. |
+
+Responses: **202** (`switching`, runs in the background — poll the
+`switchover` block on `/status`), **200** (`noop`, already in the target
+mode), **409** (switch already in flight, or a busy queue without
+`force`), **501** (switchover disabled on this host), **503** (arbiter not
+wired).
+
+Pin or unpin image mode independently:
+
+```sh
+curl -X POST http://localhost:8080/api/comfyui/pin \
+  -H 'Content-Type: application/json' \
+  -d '{"pinned": true}'
+```
+
+### Enable the switchover
+
+Both write paths (`/switchover` and `/pin`) stay gated behind an
+environment flag because the switch takes the LLM stack offline — an
+operator decision per host. Set it on hal0-api:
+
+```sh
+HAL0_COMFYUI_SWITCHOVER_ENABLED=1
+```
+
+Without it, both endpoints answer **501** (`comfyui.switchover_disabled`).
+See [Configure](/docs/guides/configure) for where to set environment
+keys (`api.env`).
+
+## Generate an image
+
+The OpenAI-compatible endpoint translates your request into a ComfyUI
+workflow, runs it, and returns the result in OpenAI's shape. The route
+flips the GPU to image mode before dispatching, so a single call also
+performs the switchover when needed.
+
+```sh
+curl -X POST http://localhost:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "sdxl-turbo",
+    "prompt": "a cat in a hat, studio lighting",
+    "n": 1,
+    "size": "1024x1024",
+    "response_format": "url"
+  }'
+```
+
+Request fields honoured:
+
+| Field             | Default       | Notes |
+|-------------------|---------------|-------|
+| `model`           | `sdxl-turbo`  | Must be a **curated** image model. Built-ins: `sdxl-turbo`, `sd-1.5-pruned-emaonly`. |
+| `prompt`          | —             | Required. Empty prompt → **422** (`image.prompt_required`). |
+| `n`               | `1`           | Batch size. |
+| `size`            | slot default  | `WxH`, e.g. `1024x1024`. Falls back to the `img` slot's `[image] default_size`. |
+| `response_format` | `url`         | `url` or `b64_json`. |
+
+A hal0 extension `extra_body` accepts `seed`, `steps`, `cfg`, and
+`negative_prompt`.
+
+A model that isn't in the curated image catalogue returns **404**
+(`image.model_not_curated`).
+
+The response is the OpenAI image shape:
+
+```json
+{
+  "created": 1716000000,
+  "data": [
+    { "url": "/api/images/cache/<uuid>.png" }
+  ],
+  "_hal0": { "...debug meta from the workflow translator..." }
+}
+```
+
+With `response_format: "b64_json"` each `data` entry carries a base64 PNG
+in `b64_json` instead of a `url`.
+
+<Aside type="note">
+The first generation after a cold start eats the checkpoint-load cost
+(several seconds on the iGPU for SDXL); from there the model is warm. hal0
+caps a single render at 10 minutes before it gives up.
+</Aside>
+
+## See also
+
+- [Manage slots](/docs/guides/manage-slots) — the `img` slot lifecycle.
+- [Configure](/docs/guides/configure) — set `HAL0_COMFYUI_SWITCHOVER_ENABLED` and the `[image]` slot defaults.
+- [Observe the system](/docs/guides/logs-and-activity) — tail `hal0-slot@img`.

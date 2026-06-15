@@ -1,0 +1,132 @@
+---
+title: Connect external providers
+description: Route requests to external OpenAI-compatible LLM providers (OpenAI, Anthropic, OpenRouter, Ollama, custom) by editing upstreams.toml, then write the API key and test the connection.
+sidebar:
+  order: 40
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 can route requests to **external upstreams** — third-party
+OpenAI-compatible APIs like OpenAI, Anthropic, OpenRouter, Google AI
+Studio, Ollama, or any custom endpoint. You wire them up by editing
+`/etc/hal0/upstreams.toml` (the source of truth) and then writing the
+credential and testing reachability through the API or dashboard.
+
+<Aside type="note">
+Upstreams are authored by editing the TOML file. The API exposes read,
+credential-write, and connection-test paths; creating and deleting
+upstreams reactively from the dashboard is intentionally deferred — the
+TOML is canonical.
+</Aside>
+
+## See what's available
+
+The integration catalog lists the known provider templates the
+"add upstream" form draws from:
+
+```sh
+curl http://localhost:8080/api/providers/catalog
+```
+
+It includes OpenAI, Anthropic, OpenRouter, Google AI Studio, Ollama, and a
+generic **custom** OpenAI-compatible entry, each with its default base URL
+and auth style.
+
+## Define the upstream
+
+Add a `[[upstream]]` block to `/etc/hal0/upstreams.toml`:
+
+```toml
+[[upstream]]
+name = "openrouter"
+kind = "remote"
+url = "https://openrouter.ai/api/v1"
+auth_style = "bearer"
+auth_value_env = "OPENROUTER_API_KEY"
+timeout_seconds = 300.0
+advertise_models = true
+```
+
+The fields:
+
+<Steps>
+
+1. **`name`** — a unique id you'll reference everywhere else.
+
+2. **`kind`** — `remote` for an external provider (`slot` is reserved for
+   local container slots, which register themselves).
+
+3. **`url`** — the base URL (required, non-empty).
+
+4. **`auth_style`** — one of `bearer`, `header`, or `none`.
+
+5. **`auth_value_env`** — the **name** of the environment variable that
+   holds the secret. The key itself is never written to TOML — only the
+   env-var name lives here.
+
+6. **`timeout_seconds`** — request timeout (default `300`).
+
+7. **`advertise_models`** — whether this upstream's models appear in the
+   aggregated model list (default `true`).
+
+</Steps>
+
+## Write the credential
+
+The secret lives in `/etc/hal0/api.env` (a systemd `EnvironmentFile`),
+not in the TOML. Write it through the API, which binds the credential to
+the upstream's declared `auth_value_env` so you can't accidentally write a
+key the upstream won't read:
+
+```sh
+curl -X POST http://localhost:8080/api/providers/openrouter/credentials \
+  -H 'content-type: application/json' \
+  -d '{"key":"OPENROUTER_API_KEY","value":"sk-or-..."}'
+```
+
+The `key` must match the upstream's `auth_value_env` exactly and be a
+valid `ALL_CAPS` env-var name. The endpoint writes the value atomically
+to `api.env` with `0600` permissions, updates the running process
+environment so the change takes effect immediately, and **never echoes
+the secret back** — the response carries `"value": "***REDACTED***"`.
+
+<Aside type="caution">
+There is no built-in authentication on the hal0 API (ADR-0012) — it binds
+to the LAN. `api.env` is a LAN-writable file; treat the host as you would
+any secret-bearing service and reverse-proxy it if it needs to be exposed.
+</Aside>
+
+## List configured providers
+
+```sh
+# remote providers only
+curl http://localhost:8080/api/providers
+
+# all upstreams (remote + local slots)
+curl http://localhost:8080/api/upstreams
+
+# one upstream
+curl http://localhost:8080/api/upstreams/openrouter
+```
+
+Each entry reports `auth_configured` (whether the env-var is set) but
+never the secret value.
+
+## Test the connection
+
+```sh
+curl -X POST http://localhost:8080/api/upstreams/openrouter/test
+```
+
+This probes the upstream's `/v1/models` and returns a reachability report:
+`{ok, status, latency_ms, models_count, error?}`. An unhealthy result also
+fires a dashboard footer event so the outage is visible. The dashboard's
+Providers tab exposes the same probe behind a "test connection" button.
+
+## Picking up changes
+
+Credential writes through the API apply to the running process
+immediately. Edits to `upstreams.toml` (adding, removing, or retiming an
+upstream) are read at startup — restart hal0-api or reload upstreams to
+pick them up. The credential-write response includes that hint.

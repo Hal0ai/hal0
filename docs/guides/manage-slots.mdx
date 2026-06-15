@@ -1,0 +1,193 @@
+---
+title: Manage slots
+description: Create, load, swap, restart, edit, and delete inference slots with the hal0 slot CLI — plus stream live logs. Every slot is a podman container managed by a systemd unit.
+sidebar:
+  order: 10
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+A **slot** is one inference endpoint: a podman container, backed by the
+`hal0-slot@<name>.service` systemd unit, serving a model on a loopback
+port. The `hal0 slot` CLI is a thin client over the API — every command
+hits the local daemon at `http://localhost:8080`, so the CLI and the
+dashboard always agree.
+
+<Aside type="note">
+The CLI talks to a running hal0-api. If the daemon is down, commands exit
+non-zero with an "API unreachable" message rather than acting on disk
+directly.
+</Aside>
+
+## List slots
+
+```sh
+hal0 slot list
+```
+
+Shows every configured slot with its state, model, backend, port, and
+kind. The slot state machine moves through `offline → starting → warming →
+ready → serving → idle` (and `unloading` / `error`). Add `--json` to get
+the raw `/api/slots` payload for scripts:
+
+```sh
+hal0 slot list --json
+```
+
+## Inspect one slot
+
+```sh
+hal0 slot show primary
+```
+
+Prints the full status **and** the on-disk TOML config as JSON. Use
+`--json` for the unformatted `{status, config}` object.
+
+## Create a slot
+
+```sh
+hal0 slot create embed \
+  --type embedding \
+  --model nomic-embed-text-v1.5-q8_0 \
+  --hardware vulkan \
+  --ctx-size 8192
+```
+
+<Steps>
+
+1. **`name`** (positional) — the slot id, e.g. `primary`, `embed`, `stt`.
+
+2. **`--type` / `-t`** — how the dispatcher routes requests. One of
+   `llm` (default), `embedding`, `reranking`, `transcription`, `tts`,
+   `image`.
+
+3. **`--model` / `-m`** (required) — the initial model ref to assign.
+
+4. **`--hardware`** — the compute backend: `vulkan`, `rocm`, or `cpu`.
+   When omitted it is auto-detected from the hardware probe (falls back
+   to `vulkan`). The slot's `device` field is derived from this:
+   `vulkan → gpu-vulkan`, `rocm → gpu-rocm`, `cpu → cpu`.
+
+5. **`--port` / `-p`** — the slot's port. Omit it and hal0 auto-assigns
+   the next free port in the `8081–8099` range.
+
+6. **`--ctx-size`** — context window in tokens (default `4096`).
+
+</Steps>
+
+Creating a slot writes its config and systemd drop-in but does **not**
+start it — follow with `hal0 slot load`.
+
+<Aside type="caution">
+The legacy `--backend` / `-b` flag historically named the *provider*, not
+the hardware. It is deprecated and hidden. Use `--hardware` for the
+compute device and let `--type` select the provider.
+</Aside>
+
+## Load, restart, unload
+
+<Tabs>
+<TabItem label="Load">
+
+```sh
+hal0 slot load primary
+# or assign a model at load time:
+hal0 slot load primary --model qwen3.6-27b
+```
+
+Loads the slot's container and waits for it to go healthy. A bad
+`--model` is rejected against the registry up front, so you don't wait
+out the health timeout on a typo.
+
+</TabItem>
+<TabItem label="Restart">
+
+```sh
+hal0 slot restart primary
+```
+
+Unloads then reloads — used after editing config that the running
+container baked in (ports, backend, ctx size).
+
+</TabItem>
+<TabItem label="Unload">
+
+```sh
+hal0 slot unload primary
+```
+
+Stops the container gracefully and returns the slot to `offline`.
+
+</TabItem>
+</Tabs>
+
+## Swap the model
+
+```sh
+hal0 slot swap primary --model qwen3.5-9b
+```
+
+A swap does two things by default:
+
+1. **Hot-swap** the running slot to the new model (`POST
+   /api/slots/{name}/swap`).
+2. **Persist** the new default to the slot's on-disk config so it
+   survives a restart.
+
+Pass `--no-persist` to try a model briefly without changing the default:
+
+```sh
+hal0 slot swap primary --model phi3-mini --no-persist
+```
+
+If the hot-swap succeeds but the persist step fails, the runtime swap is
+left in place and the failure is surfaced so you can retry.
+
+## Edit slot config
+
+```sh
+hal0 slot edit primary --ctx-size 32768
+hal0 slot edit embed --hardware rocm
+```
+
+Pass any subset of `--model`, `--port`, `--ctx-size`, `--provider`,
+`--hardware`. At least one is required. Changes that the container baked
+in (port, backend) take effect on the next `restart`.
+
+## Delete a slot
+
+```sh
+hal0 slot delete scratch
+```
+
+Stops the unit and removes the config. You'll be asked to confirm; pass
+`--force` / `-f` to skip the prompt.
+
+<Aside type="note">
+Built-in slots (such as `primary`, `embed`, `stt`, `tts`) are reserved
+and cannot be deleted — the API rejects the request.
+</Aside>
+
+## Stream logs
+
+```sh
+# last 200 lines
+hal0 slot logs primary
+
+# follow live (SSE tail)
+hal0 slot logs primary --follow
+
+# more history
+hal0 slot logs primary --lines 1000
+```
+
+Logs come from the slot's `hal0-slot@<name>.service` journal. On a host
+without `journalctl` the command returns an empty result with a hint
+rather than an error.
+
+## Related
+
+- [Pull and register models](/docs/guides/pull-and-register-models) — get
+  a model into the registry before assigning it.
+- [Choose models](/docs/guides/choose-models) — recommended picks per
+  slot and how fit is evaluated.

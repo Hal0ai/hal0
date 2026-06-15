@@ -1,0 +1,169 @@
+---
+title: Run agents
+description: Install and manage the bundled Hermes agent with the hal0 agent CLI — provisioning, personas, the approvals queue for gated actions, and per-persona spending budgets.
+sidebar:
+  order: 60
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 can run a **bundled agent** — Hermes — provisioned into a
+hal0-managed virtualenv and driven through the `hal0 agent` CLI. The agent
+gets a persona (system prompt + tool gating), an approvals queue for
+gated/destructive actions, and an optional per-persona spending budget.
+
+<Aside type="note">
+Only one bundled agent is active at a time (single-pick). `hal0 agent`
+lifecycle commands are thin clients over the API; provisioning Hermes runs
+locally in the foreground because the venv build can't fit in one HTTP
+request.
+</Aside>
+
+## Install Hermes
+
+```sh
+sudo hal0 agent install hermes
+```
+
+Installing Hermes runs a three-step foreground pipeline:
+
+<Steps>
+
+1. **Toolchain** — ensures `python3` (≥3.11), the venv stdlib, `pip`, and
+   `pipx` via the distro helper. Idempotent.
+
+2. **Provision** — creates the managed venv under
+   `/var/lib/hal0/venvs/hermes`, pip-installs `hermes-agent`, installs the
+   `hermes` shim, and registers the agent.
+
+3. **Enable** — `systemctl enable --now hal0-agent@hermes` so the agent
+   runs and survives reboot.
+
+</Steps>
+
+Run it as root: provisioning writes under root-owned `/var/lib/hal0` and
+then hands the trees to the `hal0` agent runtime user. If you run it as a
+normal user it aborts cleanly up front with a `sudo` hint rather than
+crashing mid-build.
+
+Pass `--switch` to atomically uninstall whatever agent is currently
+installed before installing this one.
+
+## Manage the lifecycle
+
+<Tabs>
+<TabItem label="List / status">
+
+```sh
+hal0 agent list                 # installed bundled agents
+hal0 agent list --json
+hal0 agent status hermes        # provisioning checkpoint, per phase
+```
+
+</TabItem>
+<TabItem label="Logs">
+
+```sh
+hal0 agent log hermes
+hal0 agent log hermes --phase provision
+```
+
+Per-phase provisioning logs from the agent's state directory.
+
+</TabItem>
+<TabItem label="Re-run / upgrade">
+
+```sh
+hal0 agent reprovision hermes          # idempotent re-converge
+hal0 agent reprovision hermes --repair # force every phase
+hal0 agent upgrade hermes              # bump the version pin + repair
+hal0 agent upgrade hermes --to 0.15.3  # pin a specific version
+```
+
+</TabItem>
+<TabItem label="Uninstall">
+
+```sh
+hal0 agent uninstall hermes
+hal0 agent uninstall hermes --keep-memory
+```
+
+Default uninstall tears down the agent's private memory namespace too;
+`--keep-memory` preserves it so a re-install reuses the identity card.
+
+</TabItem>
+</Tabs>
+
+## Personas
+
+A persona is a TOML file pairing a system prompt with tool gating. Manage
+them with the `personas` sub-app:
+
+```sh
+hal0 agent personas list                 # list + mark the active one
+hal0 agent personas show <id>            # print a persona's TOML (good template)
+hal0 agent personas activate <id>        # switch active + nudge a hot-reload
+```
+
+Activating writes the `active.txt` pointer atomically and best-effort
+nudges a running Hermes to hot-reload. If Hermes isn't running, the next
+restart picks up the new active persona. To author your own, copy
+`personas show` output, change the persona id, and save it under the
+persona store.
+
+## The approvals queue
+
+Destructive or gated tool calls don't execute immediately — they land in
+an approvals queue you review:
+
+```sh
+hal0 agent approvals list                # pending requests
+hal0 agent approvals approve <id>        # let it run
+hal0 agent approvals deny <id>           # reject it
+```
+
+Each pending row shows the request id, the tool, the requesting agent
+(`client_id`), when it was enqueued, and a one-line summary built from the
+tool's primary argument. The dashboard's Agent → Approvals tab renders the
+same queue.
+
+## Spending budget
+
+Each persona can carry spending caps so an autonomous loop can't drain a
+paid provider pool. Caps live in the persona's `[persona.budget]`
+sub-table:
+
+```toml
+[persona.budget]
+daily_usd = 5.0
+monthly_usd = 50.0
+lifetime_usd = 200.0
+per_call_max_usd = 0.50
+hard_cap = true
+```
+
+Every cap is optional — omit one to leave that window uncapped, or set it
+to `0.0` to block every paid request. `hard_cap = true` (the default)
+denies requests that would overshoot; `hard_cap = false` lets them through
+but still reports the breach so the caller can log a warning. Spend is
+tracked in an append-only ledger per persona, aggregated over `daily`,
+`monthly`, and `lifetime` windows.
+
+## Audit trail
+
+Every gated tool invocation is journaled. Pull an agent's recent MCP
+activity:
+
+```sh
+curl 'http://localhost:8080/api/agents/hermes/activity?limit=50'
+```
+
+Each row carries `tool`, `args`, `gated`, `outcome`, `timestamp`, and the
+`client_id` the action was attributed to.
+
+## Related
+
+- [Enable memory](/docs/guides/enable-memory) — the recall store agents
+  read and write.
+- [Connect external providers](/docs/guides/connect-external-providers) —
+  wire the paid upstream a budget caps spend against.

@@ -1,0 +1,121 @@
+---
+title: Enable memory
+description: hal0's memory subsystem is opt-in. Turn it on by setting HAL0_MEMORY_ENABLED=1, then control the graph-extraction gate with hal0 memory graph and migrate any legacy store.
+sidebar:
+  order: 50
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0's memory subsystem is **off by default**. When enabled it gives
+agents a persistent recall store (Hindsight by default) plus an optional
+knowledge-graph extraction layer. Enabling it is a single environment
+flag — no code change, no reinstall.
+
+<Aside type="note">
+Memory ships disabled so behaviour is identical on fresh and upgraded
+installs. Every downstream caller — the admin MCP tools, the
+`/api/memory/*` routes, the agent memory provider — degrades to a no-op or
+`503` when memory is off, so flipping the flag is the whole toggle.
+</Aside>
+
+## Turn it on
+
+<Steps>
+
+1. **Set the flag.** Add `HAL0_MEMORY_ENABLED=1` to `/etc/hal0/api.env`:
+
+   ```sh
+   echo 'HAL0_MEMORY_ENABLED=1' | sudo tee -a /etc/hal0/api.env
+   ```
+
+2. **Restart the API** so `create_app` constructs the memory provider:
+
+   ```sh
+   sudo systemctl restart hal0-api
+   ```
+
+3. **Confirm it's wired.** The graph status endpoint now responds with
+   real state instead of degrading:
+
+   ```sh
+   hal0 memory graph status
+   ```
+
+</Steps>
+
+When the flag is set, hal0 builds the memory provider from your config.
+The default engine is **Hindsight**; if the Hindsight daemon is
+unreachable at boot, hal0 logs a warning and degrades to a local
+pgvector-backed provider rather than failing startup.
+
+## The graph-extraction gate
+
+Storing recall items is one thing; running an LLM over them to extract a
+knowledge graph is heavier and separately gated. Control it with the
+`hal0 memory graph` sub-app (a thin client over `/api/memory/graph`).
+
+<Tabs>
+<TabItem label="Status">
+
+```sh
+hal0 memory graph status
+hal0 memory graph status --json
+```
+
+Shows whether extraction is on, the dispatch route, the configured
+upstream, and counters (builds OK, errors, in-flight, last build / error).
+
+</TabItem>
+<TabItem label="Enable">
+
+```sh
+# extract via a configured external upstream
+hal0 memory graph enable --route upstream \
+  --provider openrouter --model anthropic/claude-3.5-sonnet
+
+# or route to a local slot
+hal0 memory graph enable --route primary
+hal0 memory graph enable --route agent
+```
+
+`--route` is one of `upstream`, `primary`, or `agent`. When
+`--route=upstream`, both `--provider` and `--model` are required (the
+server enforces this too, so scripts hitting the API directly get the same
+validation).
+
+</TabItem>
+<TabItem label="Disable">
+
+```sh
+hal0 memory graph disable
+```
+
+Turns extraction off and cancels any in-flight build.
+
+</TabItem>
+</Tabs>
+
+## Migrate a legacy store
+
+If you previously ran the Cognee-backed memory store, preview a migration
+into Hindsight banks:
+
+```sh
+hal0 memory migrate --dry-run
+hal0 memory migrate --dry-run --cognee-dir /var/lib/hal0/memory/cognee
+```
+
+The report shows rows total / mapped / unmapped and whether it's a no-op.
+
+<Aside type="caution">
+Migration is **dry-run only** today — it reports the plan without writing.
+Passing `--apply` exits with a "not yet implemented" error.
+</Aside>
+
+## Related
+
+- [Run agents](/docs/guides/run-agents) — agents are the main consumer of
+  the memory store.
+- [Connect external providers](/docs/guides/connect-external-providers) —
+  set up the upstream you route graph extraction through.

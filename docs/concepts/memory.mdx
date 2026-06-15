@@ -1,0 +1,82 @@
+---
+title: Memory
+description: hal0's optional memory subsystem — a Hindsight-backed brain that operators and agents share. It's opt-in via HAL0_MEMORY_ENABLED and degrades cleanly to a no-op when off.
+sidebar:
+  order: 50
+---
+
+import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+hal0 can give your platform a persistent **memory** — a store of facts that both
+the operator surfaces and the bundled agent can write to and recall from. It's a
+deliberate, opt-in subsystem: powerful when you want it, and completely absent
+when you don't.
+
+## What memory is
+
+The memory subsystem is an engine-neutral layer behind two surfaces: the
+`/api/memory/*` REST routes (which the dashboard's Memory view uses) and the
+`/mcp/memory` MCP server (which agents and external tools use). Both speak to the
+same provider, so a fact written by an agent over MCP is the same fact the
+dashboard shows.
+
+The default engine is **Hindsight** — a memory service that powers the shared
+operator and agent "brain." When configured, hal0 builds a Hindsight client and
+wraps it with a reranker so recall surfaces the most relevant facts. If the
+Hindsight service can't be reached at boot, hal0 degrades down a ladder to a
+local provider rather than failing — the subsystem stays usable.
+
+<Aside type="note">
+The memory layer is engine-neutral by design. Hindsight is the default, but the
+provider is selected from config, so the surfaces (REST + MCP) stay the same
+regardless of which engine backs them.
+</Aside>
+
+## Memory is opt-in
+
+This is the most important thing to know: **memory is disabled by default.** hal0
+only constructs a memory provider when `HAL0_MEMORY_ENABLED=1` is set in the
+environment. When it isn't:
+
+- No memory provider is built.
+- Every downstream caller degrades to a no-op or a clean error — the
+  `/api/memory/*` routes, the `/mcp/memory` server, the agent's memory provider,
+  and the per-agent memory stats all handle the absent provider gracefully.
+- The dashboard hides the Memory navigation.
+
+Flipping the flag is the *entire* toggle — no code change, and the behaviour is
+identical on fresh and upgraded installs (an upgrade never rewrites your
+environment file to turn it on). This default-off posture exists so memory is a
+conscious choice, not something that quietly accumulates data you didn't ask for.
+
+<Aside type="caution">
+Turn memory on only when you want hal0 to retain facts across sessions. Until you
+set `HAL0_MEMORY_ENABLED=1`, the memory surfaces are inert.
+</Aside>
+
+## What memory powers
+
+When enabled, memory becomes the shared brain that ties the platform together:
+
+<CardGrid>
+  <Card title="The agent's recall" icon="comment">
+    The bundled agent reads and writes memory through MCP, so it can remember
+    context across conversations — scoped to a per-agent namespace.
+  </Card>
+  <Card title="Operator memory" icon="document">
+    The dashboard Memory view and the `/api/memory/*` routes let you add, search,
+    and prune facts directly.
+  </Card>
+  <Card title="Namespaced writes" icon="setting">
+    Callers identify themselves (via the `X-hal0-Agent` header), so private
+    writes land in the right per-agent namespace rather than a shared pool.
+  </Card>
+</CardGrid>
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />
+  <LinkCard title="Security" href="/docs/concepts/security" description="Identity, namespaces, and the MCP allowlist." />
+  <LinkCard title="Architecture" href="/docs/concepts/architecture" description="Where the memory surfaces sit in the API." />
+</CardGrid>

@@ -1,0 +1,116 @@
+---
+title: Choose models
+description: hal0's curated catalogue of recommended chat, embed, rerank, and image models — sized for unified memory — plus how model fit is evaluated against a slot's type, device, and profile.
+sidebar:
+  order: 30
+---
+
+import { Steps, Aside, Tabs, TabItem, Code, CardGrid, Card } from '@astrojs/starlight/components';
+
+You don't have to guess which model to run. hal0 ships a **curated
+catalogue** — a hand-picked list of good defaults, each pointing at a
+specific GGUF (or safetensors) file in a Hugging Face repo, sized for the
+target's unified-memory pool. Pull any of them by id:
+
+```sh
+hal0 model pull qwen3.6-27b
+```
+
+The catalogue ships *with* each release (it lives in code, not a remote
+manifest), so you can never land on a stale pick list.
+
+## Chat picks
+
+These are surfaced first by the FirstRun wizard, ordered roughly largest
+to smallest. The headline picks are quantized to UD-Q4_K_XL / Q5_K_XL for
+the quality margin a large unified pool affords.
+
+| Id | Model | Size | Min memory | License | Notes |
+|---|---|---|---|---|---|
+| `qwen3-coder-next` | Qwen3 Coder Next | ~49 GB | ~56 GB | Apache-2.0 | Frontier coding model; needs the full pool. |
+| `qwen3.6-27b` | Qwen3.6 27B | ~20 GB | ~24 GB | Apache-2.0 | General-purpose default; strong reasoning + multilingual. |
+| `gpt-oss-20b` | GPT-OSS 20B | ~12 GB | ~16 GB | Apache-2.0 | OpenAI open-weights 20B. |
+| `qwen3.5-9b` | Qwen3.5 9B | ~6 GB | ~8 GB | Apache-2.0 | Lean default; fits alongside embed + voice slots. |
+| `qwen3.5-0.8b` | Qwen3.5 0.8B | ~0.6 GB | ~1 GB | Apache-2.0 | Tiny; sub-second cold start. Doubles as the install smoke test. |
+| `qwen3-4b` | Qwen3 4B Instruct | ~2.5 GB | ~4 GB | Apache-2.0 | Fast all-rounder for a 4–8 GB budget. |
+| `llama32-3b` | Llama 3.2 3B Instruct | ~2 GB | ~3 GB | Llama-3.2-Community | Small and fast; good for low-memory hosts. |
+| `phi3-mini` | Phi-3 Mini 4K Instruct | ~2.4 GB | ~3 GB | MIT | Compact reasoning, MIT-licensed. |
+
+<Aside type="tip">
+`qwen3.5-0.8b` is the recommended first pull on a fresh install — it
+verifies the whole slot lifecycle (pull → load → serve) in seconds before
+you commit to downloading a 20+ GB pick.
+</Aside>
+
+## Embed and rerank picks
+
+llama.cpp-compatible GGUFs that fan out to `gpu-vulkan` / `gpu-rocm` /
+`cpu`. Assign these to an embedding or reranking slot.
+
+| Id | Model | Capability | Size | License |
+|---|---|---|---|---|
+| `nomic-embed-text-v1.5-q8_0` | Nomic Embed Text v1.5 (Q8_0) | embed | ~0.15 GB | Apache-2.0 |
+| `bge-base-en-v1.5-q4_k_m` | BGE Base EN v1.5 (Q4_K_M) | embed | ~0.07 GB | MIT |
+| `bge-reranker-base-q4_k_m` | BGE Reranker Base (Q4_K_M) | rerank | ~0.26 GB | MIT |
+| `bge-reranker-v2-m3-q4_k_m` | BGE Reranker v2 M3 (Q4_K_M) | rerank | ~0.44 GB | Apache-2.0 |
+
+<Aside type="note">
+Embedding quality is brittle under aggressive quantization, so the nomic
+default ships at Q8_0 — the size delta is negligible on a unified pool.
+Rerank slots need a non-default port and the `--reranking` flag.
+</Aside>
+
+## Image picks
+
+Routed through ComfyUI — these land in ComfyUI's `models/checkpoints` tree
+rather than the per-id model directory, so its loaders pick them up
+directly.
+
+| Id | Model | Size | License |
+|---|---|---|---|
+| `sdxl-turbo` | SDXL Turbo | ~6.5 GB | SAI-NC-Research-Community (research only) |
+| `sd-1.5-pruned-emaonly` | Stable Diffusion 1.5 | ~4.3 GB | CreativeML-Open-RAIL-M |
+
+<Aside type="caution">
+Image picks span the licensing spectrum on purpose — SDXL Turbo is
+research-only, SD 1.5 is RAIL-M. Read the license before using output
+commercially.
+</Aside>
+
+## How model fit is evaluated
+
+Before a model is assigned to a slot, hal0 computes a **fit verdict** —
+`allowed`, `degraded`, or `blocked` — with stable reason strings the
+dashboard renders as chips. The check runs three gates in order:
+
+<Steps>
+
+1. **Type match.** The model's classified modality must match the slot
+   type. A chat model maps to an `llm` slot, embed → `embedding`, rerank →
+   `reranking`, stt → `transcription`, tts → `tts`, image → `image`. A
+   mismatch is `blocked` (`model.slot_type_mismatch`).
+
+2. **Resolvability.** The model id must resolve — present in the registry,
+   or an installed FLM tag. An unresolvable id is `blocked`
+   (`model.not_resolvable`).
+
+3. **Profile + device class.** The slot's profile must support the slot
+   type, and the device must agree with the profile's device class
+   (`gpu-rocm`/`gpu-vulkan → gpu`, `cpu → cpu`, `npu → npu`). NPU and
+   image mismatches are hard `blocked` failures — they route to different
+   runtime families. A GPU↔CPU mismatch is `degraded` instead: a custom
+   image may still run, but it needs operator attention before launch.
+
+</Steps>
+
+A `degraded` verdict is allowed to proceed; only `blocked` stops the
+assignment. This is why the device you pick for a slot has to be
+consistent with its profile — see
+[Manage slots](/docs/guides/manage-slots) for the `--hardware` flag that
+sets it.
+
+## Off-catalogue models
+
+Anything not in the catalogue still works — search Hugging Face, inspect a
+repo's variants, and pull by coordinates. See
+[Pull and register models](/docs/guides/pull-and-register-models).

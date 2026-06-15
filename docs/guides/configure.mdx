@@ -1,0 +1,117 @@
+---
+title: Edit configuration
+description: Edit hal0's TOML config under /etc/hal0 — hal0.toml, api.env, upstreams, profiles, capabilities, and per-slot files — then show, validate, reload, and migrate it with the hal0 config CLI.
+sidebar:
+  order: 100
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0's configuration lives as plain TOML (plus one env file) under
+**`/etc/hal0`**. The directory is **preserved across updates** — the
+updater only swaps code, never your config. The `hal0 config` CLI is a
+thin layer over the same files and the running daemon.
+
+<Aside type="note">
+Paths assume a standard install. If you set `HAL0_HOME=/some/path`, the
+config root moves to `$HAL0_HOME/etc/hal0` and everything below shifts
+with it.
+</Aside>
+
+## The files under `/etc/hal0`
+
+| File | What it holds |
+|------|---------------|
+| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots] port_range_start/end`, `[models] store`, telemetry channel. |
+| `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — feature flags and env knobs like `HAL0_MODEL_STORE`, `HAL0_COMFYUI_SWITCHOVER_ENABLED`, `HAL0_MCP_ALLOWED_HOSTS`. |
+| `upstreams.toml` | External / upstream provider routing. |
+| `providers.toml` | Provider credential references (key **names**, never plaintext secrets). |
+| `profiles.toml` | Optional profile catalogue. Absent → built-in seed profiles are used. |
+| `capabilities.toml` | Persisted capability selections (embed / voice / img / vision). Carries its own `schema_version`. |
+| `slots/<name>.toml` | One file per slot — model, device, profile, port, and per-slot tables like `[image]`. |
+
+Other files the runtime drops here: `hardware.json` (cached hardware
+probe), `manifest.json` (release image pins), `openwebui.env`.
+
+<Aside type="caution">
+Never hand-edit a file with sloppy string splicing — malformed TOML can
+poison the config cache. Use `hal0 config edit` (which seeds a valid
+skeleton) and `hal0 config validate` before reloading.
+</Aside>
+
+## Show the current config
+
+```sh
+hal0 config show
+```
+
+Prints `hal0.toml` as it is on disk. If the file is root-owned and you run
+as a non-root user, the command tells you to re-run with `sudo` (or to
+`chmod` the config tree once) instead of crashing.
+
+## Edit the config
+
+```sh
+hal0 config edit
+```
+
+Opens `hal0.toml` in `$EDITOR` (falling back to `$VISUAL`, then `vi`). If
+the file doesn't exist yet, it's created with a valid skeleton
+(`[meta] schema_version`, `[slots]` port range).
+
+## Validate before you reload
+
+```sh
+hal0 config validate
+```
+
+Loads and validates `hal0.toml`, `upstreams.toml`, and `providers.toml`
+against the current Pydantic schema. It prints each problem and exits
+non-zero on any failure, or `✓ All configs pass schema validation` when
+clean.
+
+## Reload a running daemon
+
+After editing, ask the live daemon to re-read its TOMLs without a full
+restart:
+
+```sh
+hal0 config reload
+```
+
+This hits `POST /api/settings/reload` on the local API. If the daemon is
+down, the command exits non-zero — start hal0-api first.
+
+## Migrate the schema forward
+
+When you update hal0 across a schema bump, bring `hal0.toml` to the latest
+version:
+
+```sh
+hal0 config migrate
+```
+
+It reads `meta.schema_version`, runs the registered migration chain, and
+**atomically writes the result back only if the version actually
+advanced**. If the config is already current (or absent), nothing is
+written and that is reported honestly.
+
+<Aside type="note">
+Capability selections version independently — `capabilities.toml` carries
+its own counter. Use `hal0 capabilities migrate` to bring that file
+forward against the current catalogue.
+</Aside>
+
+## Atomic writes
+
+Every config write hal0 performs — `config migrate`, the settings API,
+the updater's `hal0.previous` record — uses a tempfile + `os.replace`
+pattern so a write is either fully applied or not at all; an interrupted
+write never leaves a half-written, unparseable file in place.
+
+## See also
+
+- [Configuration schema reference](/docs/reference/config-schema) — every key in `hal0.toml` and the per-slot files.
+- [Paths and files](/docs/reference/paths-and-files) — the full FHS map.
+- [Environment variables](/docs/reference/env-vars) — the `api.env` keys.
+- [Update and roll back](/docs/guides/update-and-rollback) — how updates preserve `/etc/hal0`.

@@ -1,0 +1,105 @@
+---
+title: Agents
+description: hal0's agent model — Hermes runs as a sandboxed systemd service, shaped by personas that gate its tools, with an approval queue for risky actions and per-persona spending budgets.
+sidebar:
+  order: 60
+---
+
+import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+hal0 doesn't build its own agent runtime — it **bundles** one. The bundled agent
+is **Hermes**, and hal0's job is to run it safely: as a sandboxed service, shaped
+by a persona that controls what it can do, with a human in the loop for risky
+actions and a spending cap for paid calls. The pieces below are how hal0 turns a
+general-purpose agent into a governed component of your platform.
+
+## Hermes, the bundled agent
+
+Hermes is the agent hal0 ships and provisions today. The agent subsystem is
+single-pick: **only one agent is active at a time**, and installing a second one
+requires an explicit switch, which atomically tears down the existing agent
+before installing the new one. That invariant keeps the platform's behaviour
+unambiguous — there's always exactly one agent answering.
+
+The agent runs as a systemd template unit, `hal0-agent@<id>.service` (so Hermes
+is `hal0-agent@hermes`). It runs as the unprivileged **`hal0`** system user the
+installer creates, under a tight sandbox: no new privileges, a read-only system
+with only hal0's own directories writable, a private temp dir, and a watchdog.
+Crucially, the agent's secret files stay root-owned and unreadable to the `hal0`
+user, so the agent can't read its own credential store even though it can write
+to hal0's data paths.
+
+The agent process binds to **loopback only** (`127.0.0.1:9119`). The browser
+never talks to it directly — hal0-api proxies the chat connection, enforcing an
+origin allowlist and a session cookie on every WebSocket upgrade, and carrying
+the embed token in an `Authorization` header rather than a URL. The agent
+reaches hal0's own inference and admin surfaces through environment hal0 writes
+for it (the API URL and the admin/memory MCP URLs).
+
+<Aside type="note">
+"Bundle, don't build" is the explicit design stance. hal0 governs and wires the
+agent; it doesn't reimplement one.
+</Aside>
+
+## Personas: the agent's character and limits
+
+A **persona** is the unit that shapes the agent. It is a small TOML file that
+carries a **system prompt**, a **tool-gating policy**, a memory namespace, a
+preferred upstream/model, and a spending budget. Switching personas changes the
+agent's behaviour on its next turn — without restarting the process.
+
+The tool-gating policy is what makes a persona a safety boundary. Each persona
+declares a default policy (`ask`, `auto-approve`, or `never`) plus glob lists for
+which tools to auto-approve and which to always require approval for. The seed
+defaults are conservative: read-style tools (memory reads, searches, slot reads)
+auto-approve, while file, shell, and admin tools require approval. hal0 composes
+the persona's system prompt together with a description of the available hal0 MCP
+tools and the active approval policy, so the agent always knows both what it can
+do and what will need sign-off.
+
+## The approval queue: a human in the loop
+
+Privileged actions don't just execute. The MCP admin server classifies its tools
+into autonomous and **gated** sets — gated tools include model pulls and
+deletes, slot create/delete/restart, capability changes, config writes, and
+credential writes. When the agent invokes a gated tool, it doesn't run; instead
+it **enqueues an approval** and returns a "pending approval" result.
+
+That queue is a single source of truth read by three surfaces: the dashboard's
+approval bell and inbox, the `hal0 agent approvals` CLI, and the approval REST
+API. Approving an entry actually runs the deferred action; denying it just closes
+it. The queue de-duplicates — a repeated request for the same target bumps a
+counter rather than stacking entries — and every gated and autonomous invocation
+is audited so you can see exactly what the agent did and what's waiting on you.
+
+<Aside type="tip">
+Gating is per-action, not all-or-nothing. A persona can auto-approve safe reads
+while still routing anything destructive through a human.
+</Aside>
+
+## Spending budgets
+
+For agents that can make paid calls (such as routing to an external provider),
+each persona can carry a **budget**. The budget supports per-call, daily,
+monthly, and lifetime caps, and a `hard_cap` flag that decides whether
+overshooting is denied or merely logged. Spend is recorded to an append-only
+per-persona ledger, and a pre-call check enforces the most-restrictive applicable
+cap before a paid request goes out — with a matching charge recorded after the
+response. This gives a paid upstream a real spending gate from day one rather
+than an unbounded bill.
+
+## Agent memory
+
+When the [memory subsystem](/docs/concepts/memory) is enabled, the agent gets a
+per-agent memory namespace (e.g. `private:hermes`) it reads and writes through
+MCP. Because memory is opt-in, the agent's memory surface degrades cleanly when
+it's off: the per-agent memory stats simply report as unavailable rather than
+erroring, so an install without memory still runs the agent normally.
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Memory" href="/docs/concepts/memory" description="The opt-in brain the agent reads and writes." />
+  <LinkCard title="Security" href="/docs/concepts/security" description="Identity, gating, and the network posture." />
+  <LinkCard title="Architecture" href="/docs/concepts/architecture" description="Where the agent surfaces sit under the API." />
+</CardGrid>

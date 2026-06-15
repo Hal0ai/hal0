@@ -1,126 +1,110 @@
 ---
 title: Send your first chat
-description: OpenWebUI ships prewired to the local hal0 API. Open a tab, pick the model hal0 setup loaded, and send a message.
+description: Send your first message to hal0 — from the prewired OpenWebUI on port 3001, or with curl against the OpenAI-compatible /v1/chat/completions endpoint.
 sidebar:
-  order: 3
+  order: 40
 ---
 
-import { Aside, Steps, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
 
-The installer brings up **OpenWebUI** alongside the API, already
-pointed at your `primary` slot. No config, no API key. You loaded a
-model with [`hal0 setup`](/docs/getting-started/first-model/);
-this page sends the first message.
+With a model pulled and assigned to a slot, you can chat through the
+prewired web UI or directly against the OpenAI-compatible API.
 
-## Open OpenWebUI
+## With OpenWebUI
 
-```
-http://localhost:3001
-```
-
-If you set `HAL0_OPENWEBUI_PORT`, swap the port. OpenWebUI runs as a
-Docker container under `hal0-openwebui.service`. The installer wrote
-`/etc/hal0/openwebui.env` with
-`OPENAI_API_BASE_URLS=http://127.0.0.1:8080/v1`. That's the wiring
-that makes the chat tab work with no setup. See
-[operate / OpenWebUI](/docs/operate/openwebui/) for day-2 details
-(swapping the bundled UI, rebinding ports, persistence).
-
-On first launch, OpenWebUI asks you to create a local admin account.
-That account lives in OpenWebUI's own SQLite database under
-`/var/lib/hal0/openwebui/`. It has nothing to do with hal0-api's
-posture, which in v1 is simply "trust your LAN, or front it with your
-own reverse proxy" — hal0 ships no built-in auth and no bundled TLS
-(see [Authentication & Security](/docs/operate/auth/)).
-
-## Send a message
+hal0 installs and prewires **OpenWebUI**, which binds port `3001` and
+points at the local hal0 API out of the box.
 
 <Steps>
-1. **Pick the model.** The model selector at the top of the chat
-   pulls live from `GET /v1/models`. Anything assigned to a `ready`
-   slot shows up. With only the model from `hal0 setup` loaded, the
-   list has exactly one entry.
 
-2. **Type and hit send.** The first message after a cold load takes
-   longer because the slot is walking `warming → serving`. Subsequent
-   messages re-use the warm slot and arrive at the model's natural
-   tok/s.
+1. Make sure the OpenWebUI unit is running:
 
-3. **Watch the slot.** The **Slots** view on the hal0 dashboard at
-   `http://localhost:8080` streams the same state machine over SSE.
-   `primary` flips to `serving` while the response generates, then
-   back to `ready`.
+   ```sh
+   systemctl status hal0-openwebui
+   ```
+
+2. Open `http://localhost:3001` (or `http://hal0.local:3001`) in your
+   browser.
+
+3. Pick your model from the model selector and send a message.
+
 </Steps>
 
-## What's actually happening
+<Aside type="note">
+The dashboard discovers the Chat link via `GET /api/config/urls`, which
+returns the OpenWebUI URL and whether the unit is active. On a stock LAN
+install it advertises `http://<host>:3001`. Behind a reverse proxy, set
+`HAL0_OPENWEBUI_PUBLIC_URL` in `/etc/hal0/api.env` — OpenWebUI emits
+root-absolute asset URLs and must be served on its own (sub)domain, not a
+path prefix.
+</Aside>
 
-OpenWebUI sees a normal OpenAI-compatible backend. It POSTs to
-`/v1/chat/completions`. The hal0 API authenticates the request, picks
-the slot that owns the requested model, and proxies the stream back
-through the same dispatcher that handles every external client.
+## With curl
 
-```sh frame="terminal"
+The API is OpenAI-compatible at `http://localhost:8080/v1`. Use a **slot
+name** (e.g. `chat`) as the `model` id — hal0 rewrites the slot alias to
+the slot's configured model before dispatching, so you don't need to know
+the underlying model id.
+
+<Tabs>
+<TabItem label="Non-streaming">
+
+```sh
 curl http://localhost:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
+  -H "Content-Type: application/json" \
   -d '{
-    "model": "phi-3-mini-4k-instruct-q4",
-    "messages": [{"role": "user", "content": "Hello!"}]
+    "model": "chat",
+    "messages": [
+      {"role": "user", "content": "Say hello in one sentence."}
+    ]
   }'
 ```
 
-OpenWebUI is doing exactly that under the hood.
+</TabItem>
+<TabItem label="Streaming">
 
-<Aside type="tip" title="Dashboard operates, OpenWebUI chats">
-hal0's dashboard never tries to be a chat client. Slots, models,
-hardware, logs, and config are what it shows. The chat surface is
-OpenWebUI, with conversation history, prompts, multi-modal, and the
-rest. Two tabs, two jobs.
+```sh
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "chat",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "Say hello in one sentence."}
+    ]
+  }'
+```
+
+The response is a Server-Sent Events stream of OpenAI-shaped chunks.
+
+</TabItem>
+</Tabs>
+
+<Aside type="tip" title="Slot aliases">
+The chat-slot aliases accepted as the `model` id are the slot names
+`chat`, `agent`, and `utility` (the legacy aliases `primary` and
+`agent-hermes` also resolve). Passing the underlying model id directly
+works too.
 </Aside>
 
-## Adding more models
+No `Authorization` header is required — hal0 ships with no built-in auth
+and treats the local network as trusted (front it with a reverse proxy if
+it is exposed). You can point any OpenAI SDK at the same base URL:
 
-The **Models** page in the hal0 dashboard takes a Hugging Face repo
-ID and a target slot. Streamed progress, same lifecycle as
-`hal0 setup`'s download step.
+```python
+from openai import OpenAI
 
-For multi-slot loadouts (chat + embed + voice all hot at once),
-[`primary` + `embed`](/docs/slots/what-is-a-slot/) co-resident is the
-baseline. The [Strix Halo loadouts](/docs/hardware/strix-halo/#recommended-loadouts)
-map combos to hardware envelopes.
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
+resp = client.chat.completions.create(
+    model="chat",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(resp.choices[0].message.content)
+```
 
-## When OpenWebUI looks empty
+## Beyond chat
 
-If the model picker is blank, walk back through the chain:
-
-<Steps>
-1. **Did the install finish?** `systemctl status hal0-openwebui`
-   should be `active (running)`.
-
-2. **Is the API up?** `curl http://localhost:8080/v1/models` should
-   return JSON. If it doesn't, check `journalctl -u hal0-api`.
-
-3. **Does any slot own a model?** `hal0 slot list`. `primary` should
-   be `ready` with a `model` set. If not, re-run
-   [`hal0 setup`](/docs/getting-started/first-model/).
-
-4. **Did you change `HAL0_PORT`?** OpenWebUI's env file still points
-   at `:8080` unless you updated it. Edit
-   `/etc/hal0/openwebui.env` and `systemctl restart hal0-openwebui`.
-</Steps>
-
-## Next steps
-
-<CardGrid>
-  <LinkCard
-    title="Slot architecture"
-    href="/docs/slots/what-is-a-slot/"
-    description="What `ready` and `serving` actually mean, and how the dispatcher routes." />
-  <LinkCard
-    title="API reference"
-    href="/docs/api/openai-compat/"
-    description="Point your own apps at `http://localhost:8080/v1`." />
-  <LinkCard
-    title="Strix Halo loadouts"
-    href="/docs/hardware/strix-halo/#recommended-loadouts"
-    description="Curated chat + embed + voice combos that fit a 128 GB unified pool." />
-</CardGrid>
+The same `/v1` surface exposes `embeddings`, `rerankings`, `audio/
+transcriptions`, `audio/speech`, and `images/generations` — each routed
+to the appropriate slot. `GET /v1/models` lists everything the configured
+slots and upstreams advertise.

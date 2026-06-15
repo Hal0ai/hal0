@@ -1,0 +1,145 @@
+---
+title: Slots
+description: A slot is one model served by one podman container, owned by the SlotManager. Learn the lifecycle state machine, single-flight dispatch, the GPU arbiter, and the seeded slots.
+sidebar:
+  order: 20
+---
+
+import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+A **slot** is hal0's unit of served inference: one named place that runs one
+model. Behind every slot is a single podman container, and around every slot is
+a lifecycle the platform manages for you. Slots are what the dispatcher routes
+to, what the GPU arbiter coordinates, and what capabilities and profiles
+configure — so they are the central concept in hal0.
+
+## One slot, one container
+
+Each slot is backed by a systemd template unit named
+`hal0-slot@<name>.service` whose `ExecStart` runs `podman run`. That launches
+exactly one container — `hal0-slot-<name>` — serving one model on a loopback
+port. The container runtime defaults to podman; the unit uses `--replace` so a
+restart never trips over a stale container name, and publishes its port on
+`127.0.0.1` only.
+
+The **`SlotManager`** owns this. It renders the unit, starts and stops it,
+tracks state, and registers the running container as an internal upstream so the
+dispatcher can forward to it. A slot is configured by a small TOML file that
+supplies the model, context size, and port; the container image and tuned flags
+come from the slot's [profile](/docs/concepts/capabilities-and-profiles).
+
+<Aside type="note">
+The container runtime is podman. A docker fallback exists, but podman is the
+supported path — slot units are generated for it.
+</Aside>
+
+## The lifecycle state machine
+
+A slot moves through an explicit set of states. The `SlotState` values are also
+the wire representation streamed to the dashboard, so what you see is a real
+transition, not a systemd snapshot:
+
+| State | Meaning |
+|---|---|
+| `offline` | Not running; no active unit. |
+| `pulling` | Model files are downloading or being verified. |
+| `starting` | The unit has started; waiting for the container to come up. |
+| `warming` | Container is up; the model is loading into the GPU/GTT pool. |
+| `ready` | Health probe passed; ready to serve. |
+| `serving` | A request is actively in flight. |
+| `idle` | Up but not serving — either warm-but-quiet, or up with no loadable model. |
+| `unloading` | Graceful shutdown in progress. |
+| `error` | Failed; details in state.json and the journal. |
+
+Transitions are constrained — only legal edges are allowed — and persisted
+atomically so a dashboard reader never observes a half-written state. The
+**dispatchable "ready set"** is `ready`, `serving`, and `idle`: those are the
+states a request can be routed to. Any other state means the slot is
+mid-lifecycle, and the dispatcher returns a structured `slot.loading` 503 with a
+`Retry-After` hint rather than failing with a raw connection error.
+
+<Aside type="tip">
+`idle` is two situations the dashboard renders the same way: a slot that was
+ready but has had no traffic past its idle timeout (a candidate for unload), or
+a process that started but has no model it can actually serve. Both are
+distinct from `ready` so routing never picks a slot that can't fulfil a request.
+</Aside>
+
+### Serving and idling
+
+When the dispatcher forwards a request to a slot, it wraps the call in the
+slot's **serving** state: the first concurrent request moves the slot
+`ready`/`idle` → `serving`, and the last one to finish moves it back to `ready`.
+For a streamed response, the slot stays `serving` until the stream drains. A
+background idle monitor demotes a quiet `ready` slot to `idle` after its idle
+timeout (300 seconds by default), so the dashboard can distinguish "warm and
+working" from "warm but quiet."
+
+## Single-flight dispatch
+
+Two safety mechanisms keep concurrent traffic from colliding:
+
+- **Per-slot lock.** Load, unload, and restart for a given slot serialize behind
+  one lock, so two requests can never race to start or swap the same slot's
+  container.
+- **Coalesced prefetch.** When the dispatcher needs to fetch a cold upstream's
+  model list, identical concurrent fetches share a single execution — a
+  hundred simultaneous requests for the same uncached model trigger one upstream
+  call, not a hundred. They all receive the same result (or the same error).
+
+The effect is that a burst of requests for a model that isn't loaded yet
+produces exactly one load, and everyone waits on that load rather than starting
+their own.
+
+## The GPU arbiter
+
+The reference hardware has a single iGPU sharing one unified memory pool, so two
+GPU workloads can't both hold their weights at once. The **GPU arbiter** makes
+that exclusivity explicit. It sorts GPU-backed container slots into two groups —
+an **llm** group (GPU chat/embedding slots) and an **img** group (the ComfyUI
+image-generation slot) — and only one group may hold the GPU's memory at a time.
+NPU and CPU slots are never arbitrated; they don't contend for the iGPU.
+
+When the GPU is in image mode, the arbiter refuses to dispatch to an llm-group
+slot: that request gets a structured `gpu.image_mode` 503 (with a `Retry-After`)
+instead of silently failing. The image container itself stays resident — what's
+exclusive is the GPU **memory**, not the container — so switching modes is fast.
+After the image slot has had no jobs for its configured idle window
+(`idle_restore_minutes`, 60 by default; `0` means manual-only), the arbiter
+frees the diffusion models and restores the LLM slots it had stopped.
+
+<Aside type="caution">
+The single NPU LLM anchor is exclusive too, but for a different reason: the AMD
+XDNA hardware context admits exactly one NPU LLM at a time. hal0 enforces this —
+enabling a second `device=npu` chat slot is rejected.
+</Aside>
+
+## Seeded slots, roles, and aliases
+
+Every install starts with a set of **seeded slots** so the common capabilities
+have a home before you create anything:
+
+`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`, and `agent`.
+
+When the NPU runtime (FLM) is present, two more shadow slots are seeded:
+`stt-npu` and `embed-npu`. Seeded slots are reserved — you can't create a
+conflicting name or delete them.
+
+Each slot carries a **type** (`llm`, `embedding`, `reranking`, `transcription`,
+`tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`, `cpu`,
+or `npu`). hal0 also keeps a couple of back-compat **aliases** so older callers
+keep working: `primary` resolves to `chat`, and `agent-hermes` resolves to
+`agent`. Aliases are never written to disk and never appear in slot listings —
+they're a transparent translation at dispatch time.
+
+Addressing a slot by its name (e.g. `model: "chat"`) is the stable way to pin a
+co-resident model: the name doesn't change when you swap the underlying model
+file.
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Capabilities & profiles" href="/docs/concepts/capabilities-and-profiles" description="How a slot gets its image, flags, and device." />
+  <LinkCard title="Architecture" href="/docs/concepts/architecture" description="How slots sit under the dispatcher and API." />
+  <LinkCard title="Strix Halo" href="/docs/concepts/strix-halo" description="The unified-memory hardware the arbiter coordinates." />
+</CardGrid>

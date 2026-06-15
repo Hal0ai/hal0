@@ -1,106 +1,233 @@
 ---
 title: Config schema reference
-description: The shape of hal0.toml — every section, every field.
+description: The hal0.toml shape and per-slot TOML block — Pydantic-validated config, valid devices and providers, profiles, and the FHS file locations hal0 reads.
 sidebar:
-  order: 2
+  order: 20
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The runtime config is split across:
+Every TOML file under `/etc/hal0/` is validated against Pydantic v2 models at
+load time. A typo like `device = "gpu-rcom"` raises a `ValidationError` with
+the offending field path rather than failing later at dispatch.
 
-| File                              | Role                                                 |
-|-----------------------------------|------------------------------------------------------|
-| `/etc/hal0/hal0.toml`             | Main daemon config (API, paths, upstreams, update).  |
-| `/etc/hal0/capabilities.toml`     | User-facing capability config (embed / voice / img / NPU rollups). |
-| `/etc/hal0/slots/<name>.toml`     | Per-slot lower-layer config.                         |
-| `/etc/hal0/proxmox.json`          | Optional PVE API token + endpoint for the Proxmox host-pressure integration. `0600`, redacted in logs. |
+## File locations (FHS)
 
-The schema is defined in Pydantic (`src/hal0/config/schema.py`) and
-exported as JSON Schema for clients that want machine-readable
-references.
+When `HAL0_HOME` is unset, hal0 uses the standard layout. Setting
+`HAL0_HOME=/some/path` re-roots everything under that prefix (used for dev
+installs and tests).
 
-## How the schema is enforced
+| File | FHS path | Purpose |
+|---|---|---|
+| `hal0.toml` | `/etc/hal0/hal0.toml` | Top-level config. |
+| `slots/<name>.toml` | `/etc/hal0/slots/<name>.toml` | One file per slot. |
+| `profiles.toml` | `/etc/hal0/profiles.toml` | Profile catalog (optional; seeds used if absent). |
+| `providers.toml` | `/etc/hal0/providers.toml` | External LLM providers. |
+| `upstreams.toml` | `/etc/hal0/upstreams.toml` | Slot + remote upstream catalog. |
+| `capabilities.toml` | `/etc/hal0/capabilities.toml` | Capability-slot selections. |
+| `agents/<name>.toml` | `/etc/hal0/agents/<name>.toml` | One file per bundled/user agent. |
+| `hardware.json` | `/etc/hal0/hardware.json` | Cached hardware probe (written by `hal0 probe`). |
+| `manifest.json` | `/etc/hal0/manifest.json` | Release manifest (pinned toolbox image digests). |
 
-Every read of `hal0.toml` goes through `pydantic.model_validate`.
-A failed validation raises a structured `config.invalid` error with
-`details.path` pointing at the offending field. The dashboard surfaces
-this inline; the CLI prints it with the same code.
+State (registry, models, slot state, memory banks) lives under
+`/var/lib/hal0/`. Config and state are both preserved across updates.
 
-`hal0 config validate` runs the schema check without writing
-anything, so it's safe to run at any time.
+## Valid enums
 
-## Top-level sections
+| Set | Values |
+|---|---|
+| `device` (hardware preference) | `gpu-rocm`, `gpu-vulkan`, `cpu`, `npu` |
+| `provider` (engine label) | `llama-server`, `flm`, `moonshine`, `kokoro`, `comfyui` |
+| slot `type` (dispatch routing) | `llm`, `embedding`, `reranking`, `transcription`, `tts`, `image` |
+| seed profiles | `rocm`, `rocm-mtp`, `vulkan`, `flm`, `tts`, `comfyui` |
 
-| Section          | Purpose                                                  |
-|------------------|----------------------------------------------------------|
-| `[api]`          | API listen host/port, request limits, telemetry toggle.  |
-| `[paths]`        | FHS path overrides for unusual deployments.              |
-| `[slots.<name>]` | One block per slot — see below.                          |
-| `[upstreams]`    | External OpenAI-compatible providers (optional).         |
-| `[update]`       | Update channel + cosign signer identity.                 |
-| `[openwebui]`    | Bundled UI configuration knobs.                          |
-
-## Per-slot block
-
-Every slot entry has at minimum:
-
-```toml
-[slots.primary]
-provider = "llama.cpp"                       # one of: llama.cpp, flm, moonshine, kokoro, comfyui
-model = "qwen2.5-0.5b-instruct-q4_k_m"       # registry ref (install-time seed; runtime swap writes env override)
-port = 8081                                  # 8081-8099, must be unique
-idle_timeout_seconds = 600                   # ready -> idle transition threshold
-```
-
-Provider-specific knobs go under `[slots.<name>.options]`. The five
-built-in slots (`primary`, `embed`, `stt`, `tts`, `img`) cannot be
-removed; their `provider`, `model`, and `port` fields are still freely
-editable.
-
-`[model] default` in a per-slot TOML is the install-time seed only.
-Once the slot is provisioned, model swaps go through the env layer
-and the TOML stays stale by design. To swap a slot's model at runtime
-use `hal0 slot swap <name> --model <ref>` or the dashboard's picker.
-
-## Defaults & FHS paths
-
-Defaults match the FHS layout (PLAN §2):
-
-| Path                         | Default                                  |
-|------------------------------|------------------------------------------|
-| Install root                 | `/usr/lib/hal0/current/`                 |
-| Config dir                   | `/etc/hal0/`                             |
-| State dir                    | `/var/lib/hal0/`                         |
-| Model registry               | `/var/lib/hal0/models/`                  |
-| Per-slot state file          | `/var/lib/hal0/slots/<name>/state.json`  |
-| OpenWebUI state              | `/var/lib/hal0/openwebui/`               |
-
-`HAL0_HOME` overrides all of the above as a single root. Useful for
-dev installs that don't want to touch system dirs.
-
-## Atomic writes
-
-Every config write goes through the
-`NamedTemporaryFile → fsync → os.replace()` pattern. A failed write
-leaves the previous file intact. The same pattern applies to per-slot
-env files at `/etc/hal0/slots/<name>.env`.
-
-## Hardware probe sidecar
-
-`/etc/hal0/hardware.json` is **not** part of `hal0.toml`. It's probe
-output, regenerated by `hal0 probe`, consumed by the slot loader.
-Don't hand-edit it.
-
-<Aside type="note">
-  The canonical, always-current schema is the Pydantic model in the
-  repo. This page summarises what's there; if you need the exhaustive
-  field list, the JSON Schema export is the source of truth.
+<Aside type="caution">
+Use `device`, not the legacy `backend` field. `backend` is deprecated: a slot
+TOML that sets `backend` without `device` logs a deprecation warning and the
+loader auto-fills `device`. Set `device` directly. NVIDIA/CUDA is unsupported —
+it is not a valid device.
 </Aside>
 
-## Coming soon — outline
+## `hal0.toml`
 
-- Embedded JSON Schema dump on this page, generated from the
-  Pydantic model at build time.
-- Per-field anchor links for direct deep-linking from error messages.
-- Drop-in fragment support — `/etc/hal0/conf.d/*.toml` merged on load.
+The top-level config is assembled from these sections, each with sane
+defaults (an empty file is valid).
+
+### `[meta]`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `schema_version` | int (≥1) | `1` | Bumped by `hal0 config migrate`. |
+
+### `[slots]` — global slot policy
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `max_slots` | int (≥0) | `0` | Max concurrent slots; `0` = unlimited. |
+| `port_range_start` | int | `8081` | First port in the slot pool. |
+| `port_range_end` | int | `8200` | Last port (inclusive); must be ≥ start. |
+| `idle_timeout_s` | int (≥0) | `300` | Default idle-eviction TTL; `0` disables. Per-slot value overrides. |
+
+### `[dispatcher]`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `prefetch_timeout_s` | float (>0) | `8.0` | Cold-cache prefetch timeout. |
+| `prefetch_parallel_cap` | int (≥1) | `4` | Max concurrent upstream prefetches. |
+
+### `[telemetry]`
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Opt-in anonymous telemetry. |
+| `channel` | `"stable"` \| `"nightly"` | `"stable"` | Update channel. |
+
+### `[models]` — discovery
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `roots` | list[str] | `["/var/lib/hal0/models"]` | Absolute roots scanned for model files. |
+| `auto_scan_on_start` | bool | `true` | Run discovery scan at startup. |
+| `file_extensions` | list[str] | `[".gguf", ".safetensors"]` | Candidate file suffixes. |
+| `store` | str | `""` | Single source of truth for where models are read/written. When set, the pull engine writes here and slot containers bind-mount it. `HAL0_MODEL_STORE` overrides. |
+
+<Aside type="note">
+`store` is the canonical model-store field. When empty, hal0 falls back to the
+deprecated `pull_root` (default `/var/lib/hal0/models`). Point `store` at your
+fast disk / network mount to align pulls and slot bind-mounts on one path.
+</Aside>
+
+### `[memory.graph]` — graph extraction (ADR-0014)
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Off by default. When false, `memory_add` skips graph extraction; vector search still works. |
+| `route` | `"upstream"` \| `"primary"` \| `"agent"` | `"upstream"` | Where the extraction LLM call is dispatched. |
+| `upstream.provider` | str | `"openrouter"` | Provider id; must match a `providers.toml` entry for key resolution. |
+| `upstream.model` | str | `""` | Model id. Required when `enabled = true` and `route = "upstream"`. |
+
+## Per-slot TOML (`slots/<name>.toml`)
+
+A slot config has `[slot]`, `[model]`, and optional `[server]` / `[npu]` /
+`[image]` sections. Unknown keys round-trip (the model uses `extra="allow"`).
+
+### `[slot]` section
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `name` | str | required | Lowercase alphanumeric + `-`/`_`, starts alphanumeric, ≤32 chars. |
+| `port` | int | required | Host port `8081–8200` (127.0.0.1 only). |
+| `device` | str | `gpu-rocm` | `gpu-rocm` \| `gpu-vulkan` \| `cpu` \| `npu`. |
+| `provider` | str | `llama-server` | Engine label (round-trips for compatibility/UI). |
+| `profile` | str \| null | `null` | Profile name from `profiles.toml` (image + tuned flags). |
+| `role` | str \| null | `null` | Role hint: `primary`, `utility`, `npu`. Derived from name when unset. |
+| `enabled` | bool | `true` | Start this slot on hal0 startup. |
+| `enable_thinking` | bool \| null | `null` | Per-slot reasoning default; overridable per request. |
+| `mtp` | bool \| null | `null` | Per-slot multi-token-prediction override (effective only on `rocmfp4`/MTP-capable profiles). |
+| `chat_template` | str \| null | `null` | Chat-template id override (`auto`/null = GGUF-embedded). |
+| `workers` | int (≥1) | `1` | Parallel request workers. |
+| `idle_timeout_s` | int (≥0) | `300` | Idle TTL for this slot; `0` disables. |
+
+<Aside type="note">
+`backend` (deprecated) and `runtime` (always `container`) still round-trip but
+should not be authored. Slots always run as podman containers managed by the
+container provider.
+</Aside>
+
+### `[model]` section
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `default` | str | `""` | Default model id from the registry. |
+| `context_size` | int (≥128) | `4096` | Context window in tokens. |
+| `n_gpu_layers` | int | `-1` | Layers offloaded to GPU; `-1` = all. |
+| `rope_freq_base` | float (≥0) | `0.0` | RoPE base override; `0.0` = model default. |
+
+### `[server]` section
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `extra_args` | str \| null | `null` | Freeform `llama-server` CLI passthrough; tokenised and merged with the profile/model flags. |
+
+### `[npu]` section (NPU slots)
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `asr` | bool | `false` | Enable ASR via FLM `--asr 1`. |
+| `embed` | bool | `false` | Enable embeddings via FLM `--embed 1`. |
+
+### `[image]` section (img / ComfyUI slot)
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `idle_restore_minutes` | int (≥0) | `60` | Idle minutes before the GPU arbiter restores stopped LLM GPU slots; `0` = never. |
+| `default_size` | str | `"1024x1024"` | Default output size (WxH). |
+| `default_steps` | int (≥0) | `0` | Default sampler steps; `0` = model-class default. |
+
+### Example slot TOML
+
+<Tabs>
+<TabItem label="GPU chat slot">
+
+```toml
+[slot]
+name = "chat"
+port = 8081
+device = "gpu-rocm"
+profile = "rocm"
+role = "primary"
+
+[model]
+default = "qwen3-4b-q4_k_m"
+context_size = 32768
+
+[server]
+extra_args = "-fa on"
+```
+
+</TabItem>
+<TabItem label="NPU embed slot">
+
+```toml
+[slot]
+name = "embed-npu"
+port = 8090
+device = "npu"
+profile = "flm"
+type = "embedding"
+
+[npu]
+embed = true
+
+[model]
+default = ""
+```
+
+</TabItem>
+</Tabs>
+
+## Profiles (`profiles.toml`)
+
+A profile is a reusable backend template: a container image plus a bench-tuned
+flag bundle. Slots reference a profile by name; the profile supplies the image
+and flags, the slot supplies the model, context size, and port. When
+`profiles.toml` is absent, hal0 serves the built-in seed profiles.
+
+| Key | Type | Notes |
+|---|---|---|
+| `image` | str | Container image ref (required). |
+| `flags` | str | Bench-tuned `llama-server` flags (no model/port/ctx args). |
+| `mtp` | bool | Append the MTP draft-speculation bundle at resolve time. |
+| `device_class` | `gpu` \| `cpu` \| `npu` \| `img` | Device class the profile targets. |
+| `backend` | `rocm` \| `vulkan` \| null | GPU runtime (authoritative ROCm-vs-Vulkan choice); null for non-GPU profiles. |
+| `intent` | str | Human label shown in the dashboard. |
+| `quant` | str | Weight quant format shown as a chip (informational). |
+
+Seed profiles: `rocm`, `rocm-mtp`, `vulkan` (GPU), `flm` (NPU), `tts` (CPU /
+Kokoro), `comfyui` (image generation).
+
+## Related references
+
+- [Slot lifecycle](/docs/reference/slot-lifecycle) — the slot state machine and `state.json`.
+- [hal0 CLI](/docs/reference/cli) — `hal0 config` and `hal0 slot` commands.
+- [Capabilities & profiles](/docs/concepts/capabilities-and-profiles) — the concept behind the schema.

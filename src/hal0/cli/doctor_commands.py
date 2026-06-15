@@ -27,9 +27,11 @@ Sub-commands:
 from __future__ import annotations
 
 import os
+import pwd
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -353,3 +355,108 @@ def toolbox_pull(
 
     failures = [r for r in rows if not r["ok"]]
     raise typer.Exit(1 if failures else 0)
+
+
+# ── hal0 doctor perms — Hermes ownership drift (#843) ─────────────────────────
+#
+# Read-only audit for the root-clobber regression: when root runs Hermes it
+# writes a split-brain /root/.hermes tree and/or leaves root:root files the
+# User=hal0 unit can't read (so Hermes silently falls back to the default
+# provider). This surfaces that loudly. It NEVER repairs — reconciliation is the
+# explicit `sudo hal0 agent bootstrap hermes --repair` path.
+
+_HERMES_HOME = Path("/var/lib/hal0/.hermes")
+_HERMES_VENV = Path("/var/lib/hal0/venvs/hermes")
+_STRAY_ROOT_HOME = Path("/root/.hermes")
+_EXPECTED_OWNER = "hal0"
+
+
+def check_hermes_ownership(
+    *,
+    expected_user: str = _EXPECTED_OWNER,
+    hermes_home: Path = _HERMES_HOME,
+    venv: Path = _HERMES_VENV,
+    stray_home: Path = _STRAY_ROOT_HOME,
+    owner_of: Callable[[Path], str | None],
+    exists: Callable[[Path], bool],
+) -> list[dict[str, str]]:
+    """Audit Hermes runtime ownership; return rows ``{path,label,status,detail}``.
+
+    ``status`` is ``ok`` (owned by ``expected_user``), ``drift`` (wrong owner, or
+    a stray /root/.hermes), or ``absent`` (not present — not a problem).
+    """
+    rows: list[dict[str, str]] = []
+    checks = (
+        (hermes_home, "HERMES_HOME tree"),
+        (hermes_home / "config.yaml", "config.yaml"),
+        (hermes_home / "runtime.json", "runtime.json (embed token)"),
+        (venv, "hermes venv"),
+    )
+    for path, label in checks:
+        if not exists(path):
+            rows.append(
+                {"path": str(path), "label": label, "status": "absent", "detail": "not present"}
+            )
+            continue
+        owner = owner_of(path)
+        if owner == expected_user:
+            rows.append(
+                {"path": str(path), "label": label, "status": "ok", "detail": f"owned by {owner}"}
+            )
+        else:
+            rows.append(
+                {
+                    "path": str(path),
+                    "label": label,
+                    "status": "drift",
+                    "detail": f"owned by {owner or '?'} (expected {expected_user})",
+                }
+            )
+    if exists(stray_home):
+        rows.append(
+            {
+                "path": str(stray_home),
+                "label": "split-brain /root/.hermes",
+                "status": "drift",
+                "detail": "root ran Hermes; remove after reconciling",
+            }
+        )
+    return rows
+
+
+def has_ownership_drift(rows: list[dict[str, str]]) -> bool:
+    """True iff any row is in the ``drift`` state."""
+    return any(r["status"] == "drift" for r in rows)
+
+
+@app.command("perms")
+def perms() -> None:
+    """Audit Hermes runtime ownership for the root-clobber regression (#843)."""
+
+    def _owner(p: Path) -> str | None:
+        try:
+            return pwd.getpwuid(p.stat().st_uid).pw_name
+        except (OSError, KeyError):
+            return None
+
+    rows = check_hermes_ownership(owner_of=_owner, exists=lambda p: p.exists())
+    table = Table(title="Hermes ownership audit (#843)")
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_column("Detail")
+    badge = {
+        "ok": "[green]ok[/green]",
+        "drift": "[red]DRIFT[/red]",
+        "absent": "[dim]absent[/dim]",
+    }
+    for r in rows:
+        table.add_row(r["label"], badge[r["status"]], r["detail"])
+    console.print(table)
+    if has_ownership_drift(rows):
+        console.print(
+            "[red]✗[/red]  ownership drift — run `sudo hal0 agent bootstrap hermes --repair`"
+            " to reconcile."
+        )
+        raise typer.Exit(1)
+    console.print("[green]✓[/green]  Hermes ownership clean.")
+    raise typer.Exit(0)

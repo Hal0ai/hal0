@@ -1,0 +1,116 @@
+---
+title: Speech to text and text to speech
+description: Enable hal0's voice capability — speech-to-text with Moonshine on CPU or FLM on the NPU, text-to-speech with Kokoro on CPU — and call the OpenAI-compatible /v1/audio endpoints.
+sidebar:
+  order: 80
+---
+
+import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 exposes two voice directions through OpenAI-compatible endpoints:
+
+- **Speech-to-text** (`POST /v1/audio/transcriptions`) — Moonshine on CPU,
+  or the FLM trio on the AMD NPU.
+- **Text-to-speech** (`POST /v1/audio/speech`) — Kokoro (ONNX) on CPU.
+
+Both are children of the **`voice`** capability: `voice.stt` maps to the
+`stt` slot and `voice.tts` maps to the `tts` slot.
+
+## Enable the voice capability
+
+Voice is opt-in. Enable each direction from the dashboard's capability
+picker, or by POSTing a partial selection to the capability API. The body
+accepts any subset of `{ device, provider, model, enabled }`:
+
+<Tabs>
+<TabItem label="Speech-to-text (CPU, Moonshine)">
+
+```sh
+curl -X POST http://localhost:8080/api/capabilities/voice/stt \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "device": "cpu", "provider": "moonshine"}'
+```
+
+</TabItem>
+<TabItem label="Speech-to-text (NPU, FLM trio)">
+
+```sh
+curl -X POST http://localhost:8080/api/capabilities/voice/stt \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "device": "npu"}'
+```
+
+</TabItem>
+<TabItem label="Text-to-speech (CPU, Kokoro)">
+
+```sh
+curl -X POST http://localhost:8080/api/capabilities/voice/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "device": "cpu", "provider": "kokoro"}'
+```
+
+</TabItem>
+</Tabs>
+
+The response is `{ "ok": true, "selection": { ...current selection... } }`.
+
+<Aside type="note">
+**Moonshine runs CPU-only** — picking it always writes `device=cpu`.
+**Kokoro runs CPU-only** too (no CUDA, ROCm, or NPU). The
+NPU path for transcription is FLM, not Moonshine.
+</Aside>
+
+### How the NPU path differs
+
+Choosing `device=npu` for `voice.stt` does **not** spawn a standalone
+process. Instead it drives the **FLM trio** — one `flm serve` anchor
+process serving chat coresident with transcription (and embeddings). The
+orchestrator toggles the anchor's `asr` flag and writes a
+`type=transcription` slot record for dispatch gating; the live anchor is
+reloaded so the change takes effect. This is why NPU transcription needs
+the FLM chat anchor to be loaded.
+
+## Transcribe audio (speech to text)
+
+Send a multipart upload with the audio file and a required `model` field.
+The raw multipart bytes are forwarded unchanged to the upstream:
+
+```sh
+curl -X POST http://localhost:8080/v1/audio/transcriptions \
+  -F 'file=@recording.wav' \
+  -F 'model=<your-stt-model>'
+```
+
+The `model` form field is **required**; omitting it returns **400**
+(`request.missing_model`) rather than a misleading 404.
+
+## Synthesize speech (text to speech)
+
+Send a JSON body with `model`, `input`, and `voice`. The response is the
+audio stream:
+
+```sh
+curl -X POST http://localhost:8080/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "<your-tts-model>",
+    "input": "Hello from hal0.",
+    "voice": "<voice-id>"
+  }' \
+  --output speech.wav
+```
+
+As with transcription, `model` is required — a missing or empty `model`
+returns **400** (`request.missing_model`).
+
+<Aside type="note">
+Kokoro weights are operator-staged on the configured model store; the
+toolbox image wraps a server that implements `POST /v1/audio/speech`,
+`GET /v1/models`, and `GET /health`.
+</Aside>
+
+## See also
+
+- [Capabilities and profiles](/docs/concepts/capabilities-and-profiles) — the capability overlay and the FLM NPU trio.
+- [Manage slots](/docs/guides/manage-slots) — the `stt` and `tts` slots.
+- [OpenAI-compatible API](/docs/reference/api/openai-compat) — the full `/v1` surface.
