@@ -203,27 +203,53 @@ async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> di
         downstream consumer that re-reads ``request.body()`` verbatim
         forwards the rewritten model name rather than the bare alias.
 
-    No-op when: the model isn't a known chat-slot alias, equals its own
-    model id already, the slot manager is absent, or the config read
-    raises (best-effort — never blocks the request).
+    FLM-backed slots get a second translation step: the alias resolves to the
+    hal0 ``<tag>-FLM`` catalog id (``gemma4-it-e2b-FLM``), but ``flm serve``
+    advertises only the native ``family:size`` tag (``gemma4-it:e2b``). Routing
+    keys off the advertised set, so an un-translated ``-FLM`` id — reached via
+    the ``npu`` alias OR requested directly by a consumer pinned to the catalog
+    id — matches no upstream and 404s with ``dispatch.no_route``. We normalise
+    it to the served tag here, mirroring ``SlotManager._resolve_model_info``.
+
+    No-op when: the model isn't a known chat-slot alias and isn't a ``-FLM``
+    id, already equals its served name, the slot manager is absent, or the
+    config read raises (best-effort — never blocks the request).
     """
     raw_model = body.get("model")
     if not isinstance(raw_model, str) or not raw_model:
         return body
+
+    # Step 1: alias → configured model id (co-resident chat slots). Skipped
+    # when the slot manager is absent; a direct model id still flows on.
+    target = raw_model
     slot_manager = getattr(request.app.state, "slot_manager", None)
-    if slot_manager is None:
-        return body
-    from hal0.api import hal0_chat_slot_alias_map
+    if slot_manager is not None:
+        from hal0.api import hal0_chat_slot_alias_map
 
-    try:
-        alias_to_model = await hal0_chat_slot_alias_map(slot_manager)
-    except Exception:
-        return body
-    mapped = alias_to_model.get(raw_model)
-    if not mapped or mapped == raw_model:
+        try:
+            alias_to_model = await hal0_chat_slot_alias_map(slot_manager)
+        except Exception:
+            alias_to_model = {}
+        target = alias_to_model.get(raw_model) or raw_model
+
+    # Step 2: FLM catalog id → native served tag (gemma4-it-e2b-FLM →
+    # gemma4-it:e2b). Independent of the slot manager — a directly-requested
+    # -FLM id normalises too. Only fires on the ``-FLM`` suffix, so non-FLM
+    # requests never pay the catalog probe.
+    if target.endswith("-FLM"):
+        try:
+            from hal0.providers.flm import flm_id_to_tag
+        except ImportError:
+            flm_id_to_tag = None  # type: ignore[assignment]
+        if flm_id_to_tag is not None:
+            tag = flm_id_to_tag(target)
+            if tag:
+                target = tag
+
+    if target == raw_model:
         return body
 
-    new_body = {**body, "model": mapped}
+    new_body = {**body, "model": target}
     # Overwrite the cached request body so downstream consumers that
     # re-read request.body() see the rewritten model name. If we can't
     # (unexpected request shape), still return the rewritten dict — the
