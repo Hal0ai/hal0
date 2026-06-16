@@ -412,6 +412,34 @@ function SidebarRuntimeWidget({ onGo }) {
   );
 }
 
+// ─── Footer health vocabulary (live-journal redesign) ───
+// The ribbon reads as two glanceable LED-pip groups — `runtimes` (one pip per
+// enabled slot) and `services` (one pip per backing service) — each with a
+// ready count, replacing the crammed single "X/Y ready hal0hermesopenwebui"
+// chip. Journal rows gain a device-hued source dot + a level stripe.
+
+// Journal source → device hue (mirrors the slot device palette).
+const _SRC_HUE = {
+  hal0: 'var(--accent)',
+  lemond: 'var(--dev-vulkan)',
+  npu: 'var(--dev-npu)',
+  openwebui: 'var(--info)',
+  comfyui: '#5ea4f9',
+  hermes: 'var(--fg-2)',
+};
+const _srcHue = (s) => _SRC_HUE[s] || 'var(--fg-3)';
+
+// A slot's LED tone for the `runtimes` group: green ready · amber warming ·
+// grey offline. Mirrors useRuntimeRollup's readiness rule.
+const _slotPip = (s) => {
+  const st = String(s?.state ?? '').toLowerCase();
+  if (s?.container_status === 'running' || ['ready', 'serving', 'idle'].includes(st)) return 'ok';
+  if (['warming', 'starting', 'loading', 'connecting'].includes(st)) return 'warm';
+  return 'off';
+};
+// A service indicator's tone (up/warn/err) → LED tone (ok/warm/err).
+const _svcPip = (tone) => (tone === 'up' ? 'ok' : tone === 'warn' ? 'warm' : 'err');
+
 // ─── Footer ───
 // Phase 3 of #322: the journal pane reads `useLogsStream` against
 // /api/journal/stream (no more HAL0_DATA.journal fallback) and the
@@ -495,6 +523,9 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
       title: serviceById.openwebui?.detail || (serviceHealth.pending ? 'service health pending' : 'openwebui down'),
     },
   ];
+  // runtimes group — one LED pip per enabled slot, plus the ready count.
+  const enabledSlots = (useSlots().data || []).filter((s) => s.enabled !== false);
+  const servicesReady = footerIndicators.filter((s) => s.tone === 'up').length;
 
   return (
     <div className={"footer" + (expanded ? " expanded" : "")}>
@@ -536,9 +567,10 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
                 No journal entries match. <span style={{color: "var(--accent)", cursor: "pointer"}} onClick={() => { setPaneSrc("merged"); setPaneQ(""); }}>Clear filters</span>
               </div>
             ) : filtered.map((e, i) => (
-              <div key={e.id ?? i} className={"foot-line " + e.level}>
+              <div key={e.id ?? i} className={"foot-line " + e.level} style={{"--src": _srcHue(e.source)}}>
+                <span className="stripe" />
                 <span className="ts">{e.ts}</span>
-                <span className={"sl " + e.source}>[{e.source}]</span>
+                <span className={"src " + e.source}><span className="d" />{e.source}</span>
                 <span className="lvl">{e.level}</span>
                 <span className="msg">{paneQ ? highlightFoot(e.msg, paneQ) : e.msg}</span>
               </div>
@@ -547,29 +579,47 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
         </div>
       )}
       <div className="foot-chips">
-        <div className={"foot-chip " + runtimeTone} title={runtimeTitle}>
-          <span className="dot" />
-          <span className="k">runtime:</span>
-          <span className="v">{L.status === 'up' ? `${L.ready}/${L.total} ready` : L.status}</span>
-          <span className="foot-service-dots" aria-label="service health">
+        {/* runtimes — one LED pip per enabled slot + ready count */}
+        <div className="foot-health" data-testid="foot-health-runtimes" title={runtimeTitle}>
+          <span className="pips" aria-hidden="true">
+            {enabledSlots.map((s, i) => (
+              <span key={s.name ?? i} className={"pip " + _slotPip(s)} />
+            ))}
+          </span>
+          <span className="lbl">
+            <span className="k">runtimes</span>
+            <span className={"v" + (L.ready < L.total ? " warn" : "")}>
+              <b>{L.ready} / {L.total}</b> ready
+            </span>
+          </span>
+        </div>
+
+        {/* services — one LED pip per backing service + ready count */}
+        <div className="foot-health" data-testid="foot-health-services" title="service health">
+          <span className="pips" aria-label="service health">
             {footerIndicators.map((svc) => (
               <span
                 key={svc.id}
-                className={"foot-service-dot " + svc.tone}
+                className={"pip " + _svcPip(svc.tone)}
                 title={`${svc.label}: ${svc.title}`}
                 aria-label={`${svc.label}: ${svc.tone}`}
-              >
-                <span className="dot" />
-                <span>{svc.label}</span>
-              </span>
+              />
             ))}
           </span>
+          <span className="lbl">
+            <span className="k">services</span>
+            <span className={"v" + (servicesReady < footerIndicators.length ? " warn" : "")}>
+              <b>{servicesReady} / {footerIndicators.length}</b> ready
+            </span>
+          </span>
         </div>
+
+        <span className="foot-spacer" />
+
         {showUpdateChip && (
-          <div className="foot-chip accent">
-            <span className="k">●</span>
-            <span className="v">{`hal0 ${hal0Channel.available} available`}</span>
-          </div>
+          <span className="foot-update" title={`hal0 ${hal0Channel.available} available`}>
+            <span className="bullet">●</span> <b>hal0 {hal0Channel.available}</b> available
+          </span>
         )}
         <button className="foot-toggle" onClick={onToggle} aria-expanded={expanded} aria-label="Toggle journal pane">
           <span style={{transform: expanded ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.18s ease", display: "inline-block"}}>⌃</span>

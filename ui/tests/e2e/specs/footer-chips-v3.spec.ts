@@ -21,14 +21,13 @@ test.describe('Footer runtime chip reflects container readiness (#221)', () => {
     const footer = page.locator('.footer')
     await expect(footer).toBeVisible()
 
-    const runtimeChip = footer.locator('.foot-chip', {
-      has: page.locator('.k', { hasText: /^runtime:$/ }),
-    })
-    await expect(runtimeChip).toBeVisible()
+    const runtimes = footer.locator('[data-testid="foot-health-runtimes"]')
+    await expect(runtimes).toBeVisible()
     // HAL0_DATA seeds 8 enabled slots (legacy is disabled); all are ready
-    // → "8/8 ready", chip dot lit "up".
-    await expect(runtimeChip.locator('.v')).toHaveText('8/8 ready')
-    await expect(runtimeChip).toHaveClass(/\bup\b/)
+    // → "8 / 8 ready", all LED pips lit green.
+    await expect(runtimes.locator('.lbl .v')).toContainText('8 / 8 ready')
+    await expect(runtimes.locator('.pip.ok')).toHaveCount(8)
+    await expect(runtimes.locator('.pip.off')).toHaveCount(0)
   })
 
   test('runtime chip counts drop when containers stop', async ({ page }) => {
@@ -53,10 +52,9 @@ test.describe('Footer runtime chip reflects container readiness (#221)', () => {
     const footer = page.locator('.footer')
     await expect(footer).toBeVisible()
 
-    const runtimeChip = footer.locator('.foot-chip', {
-      has: page.locator('.k', { hasText: /^runtime:$/ }),
-    })
-    await expect(runtimeChip).toBeVisible()
-    await expect(runtimeChip.locator('.v')).toHaveText('0/8 ready')
+    const runtimes = footer.locator('[data-testid="foot-health-runtimes"]')
+    await expect(runtimes).toBeVisible()
+    await expect(runtimes.locator('.lbl .v')).toContainText('0 / 8 ready')
+    await expect(runtimes.locator('.pip.off')).toHaveCount(8)
   })
 })
