@@ -429,6 +429,15 @@ const _SRC_HUE = {
 };
 const _srcHue = (s) => _SRC_HUE[s] || 'var(--fg-3)';
 
+// Journal rows show wall-clock time only (HH:MM:SS.mmm), like the design —
+// the full ISO `2026-06-16T21:12:56.942581+00:00` overflowed the ts column
+// and collided with the source dot. Pure string slice (no TZ conversion):
+// take the time component, truncate the fractional seconds to milliseconds.
+const _shortTs = (ts) => {
+  const m = String(ts ?? '').match(/(\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?/);
+  return m ? (m[2] ? `${m[1]}.${m[2]}` : m[1]) : String(ts ?? '');
+};
+
 // A slot's LED tone for the `runtimes` group: green ready · amber warming ·
 // grey offline. Mirrors useRuntimeRollup's readiness rule.
 const _slotPip = (s) => {
@@ -569,7 +578,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
             ) : filtered.map((e, i) => (
               <div key={e.id ?? i} className={"foot-line " + e.level} style={{"--src": _srcHue(e.source)}}>
                 <span className="stripe" />
-                <span className="ts">{e.ts}</span>
+                <span className="ts">{_shortTs(e.ts)}</span>
                 <span className={"src " + e.source}><span className="d" />{e.source}</span>
                 <span className="lvl">{e.level}</span>
                 <span className="msg">{paneQ ? highlightFoot(e.msg, paneQ) : e.msg}</span>
@@ -635,7 +644,7 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
         <div className="foot-journal mono">
           {ringSorted.slice(-6).map((e, i, arr) => (
             <span key={e.id ?? i} className={"ent " + e.level}>
-              <span className="ts">{e.ts}</span>
+              <span className="ts">{_shortTs(e.ts)}</span>
               <span className="sl">[{e.source}]</span>
               <span className="ar">·</span>
               <span>{e.msg}</span>
