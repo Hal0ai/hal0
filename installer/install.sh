@@ -943,6 +943,50 @@ for seed_slot in npu tts rerank utility img; do
     fi
 done
 
+# ── ComfyUI control scripts ──────────────────────────────────────────────────
+# Place the six manual-ops scripts at /opt/comfyui/ (fixed path — comfy-up.sh
+# self-references /opt/comfyui/comfy-postinstall.sh and /opt/comfyui/comfy-logs.sh
+# so the directory cannot vary with PREFIX). Idempotent: install(1) overwrites
+# in place on re-run.
+# Also create the model/output/input/user/custom_nodes subdirectories and place
+# extra_model_paths.yaml on the share so comfy-up.sh can mount them.
+ui_step "ComfyUI control scripts"
+
+COMFYUI_SCRIPTS_SRC="${REPO_ROOT}/installer/comfyui/scripts"
+COMFYUI_DIR="/opt/comfyui"
+COMFYUI_MODELS_ROOT="/mnt/ai-models/comfyui"
+
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping /opt/comfyui install (no system writes)"
+else
+    if [[ -d "${COMFYUI_SCRIPTS_SRC}" ]]; then
+        install -d "${COMFYUI_DIR}"
+        install -m0755 "${COMFYUI_SCRIPTS_SRC}"/*.sh "${COMFYUI_DIR}/"
+        info "wrote ComfyUI control scripts → ${COMFYUI_DIR}/"
+    else
+        warn "${COMFYUI_SCRIPTS_SRC} not found — ComfyUI control scripts not installed"
+    fi
+
+    # Create the model-share subdirs that comfy-up.sh bind-mounts into the container.
+    for _subdir in models output input user custom_nodes; do
+        install -d "${COMFYUI_MODELS_ROOT}/${_subdir}"
+    done
+    info "ensured ${COMFYUI_MODELS_ROOT}/{models,output,input,user,custom_nodes}"
+
+    # Place extra_model_paths.yaml if not already present (operator may have a
+    # customised copy — never overwrite).
+    _EXTRA_PATHS_SRC="${REPO_ROOT}/installer/comfyui/extra_model_paths.yaml"
+    _EXTRA_PATHS_DST="${COMFYUI_MODELS_ROOT}/extra_model_paths.yaml"
+    if [[ -f "${_EXTRA_PATHS_DST}" ]]; then
+        info "${_EXTRA_PATHS_DST} exists — left alone"
+    elif [[ -f "${_EXTRA_PATHS_SRC}" ]]; then
+        install -m0644 "${_EXTRA_PATHS_SRC}" "${_EXTRA_PATHS_DST}"
+        info "wrote ${_EXTRA_PATHS_DST}"
+    else
+        warn "${_EXTRA_PATHS_SRC} not found — extra_model_paths.yaml not placed (create manually before first comfy-up)"
+    fi
+fi
+
 # ── hal0 system user ────────────────────────────────────────────────────────
 # A dedicated `hal0` system user/group runs the non-root hal0 services:
 # hal0-agent@<id> (the Hermes runner), hermes-gateway, and the shared
