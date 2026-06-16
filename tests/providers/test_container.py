@@ -701,3 +701,44 @@ def test_resolve_model_path_registry_miss_falls_back_to_bare_id() -> None:
     GGUF path — the C8 deploy precheck enforces this on CT105.
     """
     assert _resolve_model_path({"_model_key": "gemma-4-12b-it"}) == "gemma-4-12b-it"
+
+
+class TestContextSizeDerive:
+    """Regression guard for the 2026-06-15 chat@4096 incident: a slot whose
+    TOML pins no context_size must NEVER silently inherit llama-server's 4096
+    default. container_spec derives the model's native window (dense-capped),
+    or falls back to a safe 8192 when the native window is unknown."""
+
+    def _spec(self, cfg: dict[str, Any], model_info: dict[str, Any]):
+        provider = ContainerProvider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            return provider.container_spec(cfg, model_info)
+
+    @staticmethod
+    def _ctx(command: list[str]) -> str | None:
+        return command[command.index("--ctx-size") + 1] if "--ctx-size" in command else None
+
+    def test_unset_ctx_derives_native_dense_capped(self) -> None:
+        cfg = _slot_cfg()  # [model] has no context_size
+        mi = _model_info(metadata={"context_length": 131072})
+        assert self._ctx(self._spec(cfg, mi).command) == "32768"
+
+    def test_unset_ctx_unknown_native_falls_back_8192_not_4096(self) -> None:
+        cfg = _slot_cfg()
+        mi = _model_info()  # no metadata.context_length, no defaults.context_size
+        ctx = self._ctx(self._spec(cfg, mi).command)
+        assert ctx == "8192"
+        assert ctx != "4096"
+
+    def test_unset_ctx_uses_model_defaults_when_no_metadata(self) -> None:
+        cfg = _slot_cfg()
+        mi = _model_info(defaults={"context_size": 16384})
+        assert self._ctx(self._spec(cfg, mi).command) == "16384"
+
+    def test_explicit_ctx_always_wins_over_native(self) -> None:
+        cfg = _slot_cfg(model={"default": "m.gguf", "context_size": 131072})
+        mi = _model_info(metadata={"context_length": 262144})
+        assert self._ctx(self._spec(cfg, mi).command) == "131072"

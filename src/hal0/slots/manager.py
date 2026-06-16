@@ -1548,6 +1548,16 @@ class SlotManager:
         cfg_dict = _cfg_to_dict(slot_cfg)
         # #585: canonicalize a ctx_size alias from the create modal too.
         _normalize_ctx_key(cfg_dict)
+        # Persist a concrete context window when the operator left it unset, so
+        # the TOML, the dashboard, and the running container all agree. The
+        # provider's load-path derive is the belt-and-suspenders fallback; this
+        # makes the chosen window visible at create time (chat@4096 incident).
+        model_tbl = cfg_dict.get("model")
+        if isinstance(model_tbl, dict) and model_tbl.get("context_size") is None:
+            from hal0.providers.container import _resolve_context_size
+
+            model_info = await self._resolve_model_info(model_tbl.get("default"))
+            model_tbl["context_size"] = _resolve_context_size(None, model_info)
         # Reject (or normalize) an incoherent device/profile backend pairing
         # before it ever lands on disk — the door the dashboard left open for
         # the utility slot (vulkan device + rocm-dnse profile). Every field is
@@ -2369,10 +2379,19 @@ class SlotManager:
 
 def _cfg_to_dict(cfg: SlotConfig | dict[str, Any]) -> dict[str, Any]:
     if hasattr(cfg, "model_dump"):
-        return cfg.model_dump()  # type: ignore[no-any-return]
-    if isinstance(cfg, dict):
-        return dict(cfg)
-    raise SlotConfigError(f"unsupported slot cfg type {type(cfg).__name__}")
+        d: dict[str, Any] = cfg.model_dump()
+    elif isinstance(cfg, dict):
+        d = dict(cfg)
+    else:
+        raise SlotConfigError(f"unsupported slot cfg type {type(cfg).__name__}")
+    # An unset context_size (schema default None) must never reach the TOML
+    # writer: write_toml_atomic rejects None, and a persisted 4096 was the
+    # chat@4096 incident. Drop the key so the load path derives the model's
+    # native window instead (see providers.container._resolve_context_size).
+    model = d.get("model")
+    if isinstance(model, dict) and model.get("context_size") is None:
+        model.pop("context_size", None)
+    return d
 
 
 def _cfg_port(cfg: SlotConfig | dict[str, Any]) -> int:

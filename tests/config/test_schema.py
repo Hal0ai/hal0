@@ -124,7 +124,9 @@ class TestModelConfig:
     def test_defaults(self) -> None:
         m = ModelConfig()
         assert m.default == ""
-        assert m.context_size == 4096
+        # Unset is None (NOT 4096): the load path derives the model's native
+        # window or a safe 8192 floor (chat@4096 incident, 2026-06-15).
+        assert m.context_size is None
         assert m.n_gpu_layers == -1
 
     def test_context_size_below_minimum_raises(self) -> None:

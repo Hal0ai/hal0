@@ -315,6 +315,11 @@ def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
         },
         "model": data["model"],
     }
+    # context_size is Optional (unset → derived at load by the provider);
+    # None has no TOML representation, so elide any None in the model table.
+    model_tbl = out.get("model")
+    if isinstance(model_tbl, dict):
+        out["model"] = {k: v for k, v in model_tbl.items() if v is not None}
     extra = data.get("extra") or {}
     if isinstance(extra, dict):
         for k, v in extra.items():

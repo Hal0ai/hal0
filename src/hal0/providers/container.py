@@ -439,6 +439,54 @@ def _profile_runtime_family(slot_cfg: dict[str, Any]) -> str | None:
         return None
 
 
+# Native context-window resolution (chat@4096 incident, 2026-06-15).
+#
+# A slot whose [model].context_size is unset must NEVER fall through to
+# llama-server's silent 4096 default. We derive the model's native window
+# from the registry (GGUF arch max), cap dense models so an unconfigured
+# slot can't request an impractically large KV cache, and otherwise use a
+# safe floor. Mirrors hal0.hardware.recommend's installer-side policy.
+_CTX_SAFE_FALLBACK = 8192
+_CTX_DENSE_CAP = 32768
+
+
+def _native_ctx(model_info: dict[str, Any]) -> int | None:
+    """Best-effort native context window for a model, or None if unknown.
+
+    GGUF arch max (registry metadata.context_length) is authoritative;
+    a model's own defaults.context_size is the secondary source.
+    """
+    md = model_info.get("metadata")
+    if isinstance(md, dict) and md.get("context_length"):
+        try:
+            return int(md["context_length"])
+        except (TypeError, ValueError):
+            pass
+    defaults = model_info.get("defaults")
+    if isinstance(defaults, dict) and defaults.get("context_size"):
+        try:
+            return int(defaults["context_size"])
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _resolve_context_size(explicit: int | None, model_info: dict[str, Any]) -> int:
+    """The slot's effective context window.
+
+    The explicit slot value wins when set; otherwise derive the model's
+    native window (dense-capped); otherwise a safe _CTX_SAFE_FALLBACK.
+    Guarantees a non-None int so the slot never silently inherits
+    llama-server's 4096 default.
+    """
+    if explicit is not None:
+        return int(explicit)
+    native = _native_ctx(model_info)
+    if native:
+        return min(native, _CTX_DENSE_CAP)
+    return _CTX_SAFE_FALLBACK
+
+
 class ContainerProvider(Provider):
     """Podman-container-per-slot inference backend.
 
@@ -497,7 +545,10 @@ class ContainerProvider(Provider):
         port = int(slot_cfg.get("port", 0))
 
         model_table = slot_cfg.get("model") or {}
-        context_size = model_table.get("context_size") if isinstance(model_table, dict) else None
+        context_size = _resolve_context_size(
+            model_table.get("context_size") if isinstance(model_table, dict) else None,
+            model_info,
+        )
         server_table = slot_cfg.get("server") or {}
         extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
         # Registry model id → llama-server --alias so the container advertises

@@ -150,10 +150,15 @@ class ModelConfig(BaseModel):
         default="",
         description="Default model id from the registry.  Must exist in /var/lib/hal0/registry/.",
     )
-    context_size: int = Field(
-        default=4096,
+    context_size: int | None = Field(
+        default=None,
         ge=128,
-        description="Context window size in tokens.",
+        description=(
+            "Context window size in tokens. Unset (None) is NOT 4096: the "
+            "load path derives the model's native window (dense-capped) or a "
+            "safe 8192 floor, so a slot never silently inherits llama-server's "
+            "4096 default (chat@4096 incident, 2026-06-15)."
+        ),
     )
     n_gpu_layers: int = Field(
         default=-1,
