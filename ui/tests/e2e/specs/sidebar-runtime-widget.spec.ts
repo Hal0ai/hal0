@@ -11,12 +11,10 @@
  *                 binds loopback-only, so there's no host:port fallback).
  *   - hal0      — the composite /v1 endpoint (synthetic /api/slots entry,
  *                 served from HAL0_DATA in forced-mock) + model count.
- *   - runtime   — container slot readiness (useRuntimeRollup over the
- *                 shared /api/slots poll): "up · N/M slots ready".
- *   - openwebui — external chat UI; status + link both derived from
- *                 /api/config/urls (openwebui + openwebui_enabled), which the
- *                 backend resolves from the request host — so links work on
- *                 any install without hardcoding.
+ *   - openwebui — external chat UI link derived from /api/config/urls.
+ *
+ * Health indicators live in the footer runtime chip: slot readiness from
+ * useRuntimeRollup plus service dots from /api/services/health.
  *
  * Mock seams: /api/agents and /api/config/urls are NOT in the forced-mock
  * allowlist, so page.route drives them. /api/slots IS allowlisted, so the
@@ -51,11 +49,49 @@ const URLS_NONE = {
   hermes: '',
   hermes_enabled: false,
 }
+const SERVICES_HEALTH_UP = {
+  services: [
+    { id: 'comfyui', name: 'ComfyUI', up: false, detail: 'unreachable', url: null, stat: null },
+    { id: 'hermes', name: 'Hermes', up: true, detail: 'systemd unit active', url: null, stat: null },
+    {
+      id: 'openwebui',
+      name: 'OpenWebUI',
+      up: true,
+      detail: 'reachable — /health ok',
+      url: null,
+      stat: null,
+    },
+    { id: 'n8n', name: 'n8n', up: false, detail: 'unmonitored', url: null, stat: null },
+  ],
+}
+const SERVICES_HEALTH_DOWN = {
+  services: [
+    { id: 'comfyui', name: 'ComfyUI', up: false, detail: 'unreachable', url: null, stat: null },
+    {
+      id: 'hermes',
+      name: 'Hermes',
+      up: false,
+      detail: 'systemd unit inactive or absent',
+      url: null,
+      stat: null,
+    },
+    {
+      id: 'openwebui',
+      name: 'OpenWebUI',
+      up: false,
+      detail: 'unreachable (ConnectError)',
+      url: null,
+      stat: null,
+    },
+    { id: 'n8n', name: 'n8n', up: false, detail: 'unmonitored', url: null, stat: null },
+  ],
+}
 
 test.describe('Sidebar Runtime widget — populated', () => {
   test.beforeEach(async ({ page }) => {
     await page.route('**/api/agents', (route) => json(route, AGENTS_RUNNING))
     await page.route('**/api/config/urls', (route) => json(route, URLS_ALL))
+    await page.route('**/api/services/health', (route) => json(route, SERVICES_HEALTH_UP))
   })
 
   test('renders one widget with hermes / hal0 / runtime / openwebui rows', async ({ page }) => {
@@ -65,13 +101,12 @@ test.describe('Sidebar Runtime widget — populated', () => {
     await expect(widget.locator('.sb-runtime-h')).toHaveText('Runtime')
     await expect(page.locator('[data-testid="runtime-row-hermes"]')).toBeVisible()
     await expect(page.locator('[data-testid="runtime-row-hal0"]')).toBeVisible()
-    await expect(page.locator('[data-testid="runtime-row-runtime"]')).toBeVisible()
     await expect(page.locator('[data-testid="runtime-row-openwebui"]')).toBeVisible()
     // The old standalone block is gone.
     await expect(page.locator('[data-testid="sidebar-agent-block"]')).toHaveCount(0)
   })
 
-  test('hermes row deep-links to the backend-advertised dashboard + shows running', async ({
+  test('hermes row deep-links to the backend-advertised dashboard', async ({
     page,
   }) => {
     await page.goto('/')
@@ -81,12 +116,11 @@ test.describe('Sidebar Runtime widget — populated', () => {
     await expect(link).toContainText('hermes')
     await expect(link).toHaveAttribute('href', HERMES_URL)
     await expect(link).toHaveAttribute('target', '_blank')
-    await expect(row.locator('.v')).toContainText('running')
-    await expect(row.locator('.v')).toHaveClass(/up/)
-    await expect(row.locator('.v .dot')).toBeVisible()
+    await expect(row.locator('.v')).toContainText('agent')
+    await expect(row.locator('.v .dot')).toHaveCount(0)
   })
 
-  test('openwebui row deep-links to the backend-advertised URL + shows running', async ({
+  test('openwebui row deep-links to the backend-advertised URL', async ({
     page,
   }) => {
     await page.goto('/')
@@ -96,28 +130,24 @@ test.describe('Sidebar Runtime widget — populated', () => {
     await expect(link).toContainText('openwebui')
     await expect(link).toHaveAttribute('href', OPENWEBUI_URL)
     await expect(link).toHaveAttribute('target', '_blank')
-    await expect(row.locator('.v')).toContainText('running')
-    await expect(row.locator('.v')).toHaveClass(/up/)
+    await expect(row.locator('.v')).toContainText('chat')
+    await expect(row.locator('.v .dot')).toHaveCount(0)
   })
 
-  test('hal0 row shows serving + the advertised model count', async ({ page }) => {
+  test('hal0 row shows the advertised model count', async ({ page }) => {
     await page.goto('/')
     const row = page.locator('[data-testid="runtime-row-hal0"]')
     await expect(row).toBeVisible({ timeout: FIVE_S })
-    await expect(row.locator('.v')).toContainText('serving')
-    await expect(row.locator('.v')).toHaveClass(/up/)
-    // model count sub-row reflects HAL0_DATA's synthetic endpoint (2 chat).
-    const sub = page.locator('[data-testid="sidebar-runtime-widget"] .row.rt-sub')
-    await expect(sub.locator('.k')).toHaveText('models')
-    await expect(sub.locator('.v b')).toHaveText('2')
+    // model count reflects HAL0_DATA's synthetic endpoint (2 chat).
+    await expect(row.locator('.v b')).toHaveText('2')
   })
 
-  test('runtime row shows status + slot readiness inline', async ({ page }) => {
+  test('footer runtime chip shows readiness and service health dots', async ({ page }) => {
     await page.goto('/')
-    const row = page.locator('[data-testid="runtime-row-runtime"]')
-    await expect(row.locator('.k')).toHaveText('runtime')
+    const chip = page.locator('.foot-chip').filter({ hasText: 'runtime:' })
     // HAL0_DATA seeds 8 enabled slots (legacy is disabled); all are ready.
-    await expect(row.locator('.v')).toContainText('up · 8/8 slots ready', { timeout: FIVE_S })
+    await expect(chip.locator('.v')).toContainText('8/8 ready', { timeout: FIVE_S })
+    await expect(chip.locator('.foot-service-dot.up')).toContainText(['hal0', 'hermes', 'openwebui'])
   })
 })
 
@@ -125,30 +155,32 @@ test.describe('Sidebar Runtime widget — no advertised service links', () => {
   test.beforeEach(async ({ page }) => {
     await page.route('**/api/agents', (route) => json(route, AGENTS_RUNNING))
     await page.route('**/api/config/urls', (route) => json(route, URLS_NONE))
+    await page.route('**/api/services/health', (route) => json(route, SERVICES_HEALTH_UP))
   })
 
-  test('hermes row stays plain text (no dead-end link) but keeps health', async ({ page }) => {
+  test('hermes row stays plain text when no dashboard URL is advertised', async ({ page }) => {
     await page.goto('/')
     const row = page.locator('[data-testid="runtime-row-hermes"]')
     await expect(row).toBeVisible({ timeout: FIVE_S })
     // No anchor — just the bare key — while health still renders.
     await expect(row.locator('a.rt-link')).toHaveCount(0)
     await expect(row.locator('.k')).toHaveText('hermes')
-    await expect(row.locator('.v')).toContainText('running')
+    await expect(row.locator('.v')).toContainText('agent')
   })
 
-  test('openwebui row shows "off" (red) with no link when not reachable', async ({ page }) => {
+  test('openwebui health can be up even when no link is advertised', async ({ page }) => {
     await page.goto('/')
     const row = page.locator('[data-testid="runtime-row-openwebui"]')
-    await expect(row.locator('.v')).toContainText('off', { timeout: FIVE_S })
-    await expect(row.locator('.v')).toHaveClass(/down/)
+    await expect(row.locator('.v')).toContainText('chat', { timeout: FIVE_S })
     await expect(row.locator('a.rt-link')).toHaveCount(0)
     await expect(row.locator('.k')).toHaveText('openwebui')
+    const chip = page.locator('.foot-chip').filter({ hasText: 'runtime:' })
+    await expect(chip.locator('.foot-service-dot.up')).toContainText(['openwebui'])
   })
 })
 
 test.describe('Sidebar Runtime widget — hermes tone mapping', () => {
-  test('broken agent renders a down (red) dot', async ({ page }) => {
+  test('service health renders a down (red) hermes dot', async ({ page }) => {
     await page.route('**/api/agents', (route) =>
       json(route, {
         agents: [{ name: 'hermes', installed_at: '2026-05-25T12:00:00Z', status: 'broken' }],
@@ -156,19 +188,20 @@ test.describe('Sidebar Runtime widget — hermes tone mapping', () => {
       }),
     )
     await page.route('**/api/config/urls', (route) => json(route, URLS_ALL))
+    await page.route('**/api/services/health', (route) => json(route, SERVICES_HEALTH_DOWN))
     await page.goto('/')
-    const v = page.locator('[data-testid="runtime-row-hermes"] .v')
-    await expect(v).toHaveClass(/down/, { timeout: FIVE_S })
-    await expect(v).toContainText('broken')
+    const v = page.locator('.foot-chip').filter({ hasText: 'runtime:' }).locator('.foot-service-dot').filter({ hasText: 'hermes' })
+    await expect(v).toHaveClass(/err/, { timeout: FIVE_S })
+    await expect(v).toContainText('hermes')
   })
 
-  test('no agent installed renders "off" (amber)', async ({ page }) => {
+  test('no agent installed renders sidebar copy without a health dot', async ({ page }) => {
     await page.route('**/api/agents', (route) => json(route, AGENTS_EMPTY))
     await page.route('**/api/config/urls', (route) => json(route, URLS_ALL))
+    await page.route('**/api/services/health', (route) => json(route, SERVICES_HEALTH_UP))
     await page.goto('/')
     const v = page.locator('[data-testid="runtime-row-hermes"] .v')
-    await expect(v).toHaveClass(/warn/, { timeout: FIVE_S })
-    await expect(v).toContainText('off')
+    await expect(v).toContainText('not installed', { timeout: FIVE_S })
     // The widget itself still renders (hermes never hides the whole card).
     await expect(page.locator('[data-testid="sidebar-runtime-widget"]')).toBeVisible()
   })
