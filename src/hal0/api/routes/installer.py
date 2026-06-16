@@ -438,12 +438,32 @@ def _unit_active(unit: str) -> bool:
         return False
 
 
+def _container_active() -> bool:
+    """True when the ComfyUI container is running under podman or docker."""
+    for runtime in ("podman", "docker"):
+        exe = shutil.which(runtime)
+        if exe is None:
+            continue
+        try:
+            out = subprocess.run(
+                [exe, "inspect", "--format", "{{.State.Running}}", "comfyui"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip().lower() == "true":
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return False
+
+
 @router.get("/services")
 async def install_services() -> dict[str, Any]:
     """Verify post-install services for the FirstRun services step (design D5).
 
-    Reports Hermes + OpenWebUI health so the wizard can show honest dots and
-    offer the one-click repair below when a unit is down.
+    Reports Hermes + OpenWebUI + ComfyUI health so the wizard can show honest
+    dots and offer the one-click repair below when a unit is down.
     """
     owui = "hal0-openwebui.service"
     hermes_active = bool(os.environ.get("HAL0_HERMES_PUBLIC_URL")) or _unit_active(
@@ -462,6 +482,14 @@ async def install_services() -> dict[str, Any]:
             "active": hermes_active,
             "repairable": True,
         },
+        # ComfyUI is arbiter/slot-managed (not a systemd unit) — probed via
+        # container runtime, repaired via comfy-up.sh (see service_repair).
+        {
+            "unit": "comfyui",
+            "label": "ComfyUI",
+            "active": _container_active(),
+            "repairable": True,
+        },
     ]
     return {"services": services}
 
@@ -470,9 +498,26 @@ async def install_services() -> dict[str, Any]:
 async def service_repair(unit: str) -> dict[str, Any]:
     """Restart a known unit (design D5 one-click repair).
 
-    Restricted to :data:`_REPAIRABLE_UNITS` so the ``{unit}`` path segment
-    can't be used to restart arbitrary system services.
+    Restricted to :data:`_REPAIRABLE_UNITS` (systemd) or the special-cased
+    ``comfyui`` container so the ``{unit}`` path segment can't be used to
+    restart arbitrary system services.
+
+    NOTE: ComfyUI is NOT a systemd unit and cannot live in ``_REPAIRABLE_UNITS``
+    (which drives ``systemctl restart``).  It is handled as a special case here:
+    we call ``/opt/comfyui/comfy-up.sh`` directly.  If a future refactor
+    generalises repair to support non-systemd targets (e.g. a ``repair_fn``
+    dispatch table), this special case should be folded in at that point.
     """
+    # Special case: ComfyUI is container-managed, not systemd.
+    if unit == "comfyui":
+        try:
+            subprocess.run(["/opt/comfyui/comfy-up.sh"], check=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise PickDefaultError(
+                f"comfyui restart failed: {exc}", details={"unit": unit}
+            ) from exc
+        return {"unit": unit, "active": _container_active()}
+
     if unit not in _REPAIRABLE_UNITS:
         raise BadRequest(
             f"unit {unit!r} is not repairable",
