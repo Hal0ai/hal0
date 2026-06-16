@@ -609,4 +609,234 @@ async def comfyui_models_fetch(body: _FetchBody) -> JSONResponse:
     return JSONResponse(status_code=202, content={"jobs": job_ids})
 
 
+def _comfyui_workflows_dir() -> str:
+    """Primary workflow directory — env override for tests; default is the bind-mount path."""
+    return os.environ.get("COMFYUI_WORKFLOWS_DIR", "/mnt/ai-models/comfyui/workflows")
+
+
+def _comfyui_data_dir() -> str:
+    """Root of the ComfyUI data directory (for fallback user/default/workflows path)."""
+    return os.environ.get("COMFYUI_DATA_DIR", "/mnt/ai-models/comfyui")
+
+
+def _find_workflow(name: str) -> str | None:
+    """Locate <name>.json, trying primary then user/default fallback. None if absent."""
+    primary = os.path.join(_comfyui_workflows_dir(), f"{name}.json")
+    if os.path.isfile(primary):
+        return primary
+    fallback = os.path.join(_comfyui_data_dir(), "user", "default", "workflows", f"{name}.json")
+    if os.path.isfile(fallback):
+        return fallback
+    return None
+
+
+# ---------------------------------------------------------------------------
+# POST /render/cancel — clear queue + interrupt current render
+# ---------------------------------------------------------------------------
+
+
+@router.post("/render/cancel", status_code=202)
+async def comfyui_render_cancel() -> JSONResponse:
+    """Cancel current and queued renders.
+
+    Issues POST /queue (clear: true) and POST /interrupt to the ComfyUI
+    HTTP API. Fail-soft: network errors are suppressed — the cancel
+    intent is best-effort and the render state is visible via /status.
+    """
+    base = _comfyui_base_url()
+    client = _get_client()
+
+    async def _post(path: str, body: dict[str, Any]) -> None:
+        with contextlib.suppress(Exception):
+            await client.post(f"{base}{path}", json=body)
+
+    await asyncio.gather(
+        _post("/queue", {"clear": True}),
+        _post("/interrupt", {}),
+    )
+    return JSONResponse(status_code=202, content={"status": "cancel_requested"})
+
+
+# ---------------------------------------------------------------------------
+# POST /restart — restart the comfyui container via comfy-up.sh
+# ---------------------------------------------------------------------------
+
+_COMFYUI_UP_SCRIPT = "/opt/comfyui/comfy-up.sh"
+
+
+@router.post("/restart", status_code=202)
+async def comfyui_restart() -> JSONResponse:
+    """Restart the ComfyUI container by invoking comfy-up.sh (down + up).
+
+    Runs in the background and returns 202 immediately — the container
+    takes several seconds to come back up. Track readiness via /status.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _COMFYUI_UP_SCRIPT,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        # Fire-and-forget: don't wait — answer 202 now, let the container start.
+        asyncio.ensure_future(proc.communicate())
+    except (OSError, asyncio.TimeoutError):
+        pass  # fail-soft: missing script or exec failure still returns 202
+    return JSONResponse(status_code=202, content={"status": "restart_requested"})
+
+
+# ---------------------------------------------------------------------------
+# GET /logs — tail container logs
+# ---------------------------------------------------------------------------
+
+
+@router.get("/logs")
+async def comfyui_logs(tail: int = 60) -> JSONResponse:
+    """Return the last N lines of the ComfyUI container logs.
+
+    Uses ``docker logs --tail N`` (or ``podman``) against the container
+    name. Returns ``{"lines": []}`` when the container runtime is absent
+    or the container has no logs yet — never a 500.
+    """
+    container = _comfyui_container()
+    # Prefer podman if available (post-D9 the img slot runs under podman)
+    runtime = shutil.which("podman") or shutil.which("docker")
+    if not runtime:
+        return JSONResponse(status_code=200, content={"lines": []})
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            runtime,
+            "logs",
+            "--tail",
+            str(tail),
+            container,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+    except (TimeoutError, OSError):
+        return JSONResponse(status_code=200, content={"lines": []})
+    # docker logs writes to stderr for container output; combine both
+    combined = (out + err).decode("utf-8", "replace")
+    lines = [ln for ln in combined.splitlines() if ln]
+    return JSONResponse(status_code=200, content={"lines": lines})
+
+
+# ---------------------------------------------------------------------------
+# POST /workflows/{name}/launch — quick-launch a curated workflow
+# ---------------------------------------------------------------------------
+
+
+@router.post("/workflows/{name}/launch", status_code=202)
+async def comfyui_workflow_launch(name: str) -> JSONResponse:
+    """Quick-launch a workflow by name from the bind-mounted workflows directory.
+
+    Reads <name>.json from the primary workflows dir, falling back to the
+    user/default/workflows path. Posts the API-format workflow JSON to
+    ComfyUI's /prompt endpoint and returns 202 with the prompt_id.
+    404 when the workflow file does not exist.
+    """
+    workflow_path = _find_workflow(name)
+    if workflow_path is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "code": "comfyui.workflow_not_found",
+                    "message": f"workflow '{name}' not found in workflows directories",
+                }
+            },
+        )
+    try:
+        with open(workflow_path) as fh:
+            workflow = fh.read()
+        workflow_data = __import__("json").loads(workflow)
+    except (OSError, ValueError) as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "comfyui.workflow_read_error", "message": str(exc)}},
+        )
+    base = _comfyui_base_url()
+    try:
+        resp = await _get_client().post(
+            f"{base}/prompt",
+            json={"prompt": workflow_data},
+        )
+        result = resp.json() if resp.status_code == 200 else {}
+    except (httpx.HTTPError, ValueError):
+        result = {}
+    prompt_id = result.get("prompt_id")
+    return JSONResponse(
+        status_code=202,
+        content={"status": "queued", "prompt_id": prompt_id},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /preview — proxy the latest output image from ComfyUI history
+# ---------------------------------------------------------------------------
+
+
+def _latest_output_image(history: dict[str, Any]) -> dict[str, str] | None:
+    """Find the newest output image entry in ComfyUI's /history response.
+
+    ComfyUI history is a dict keyed by prompt_id; each entry has an
+    ``outputs`` dict with node-keyed image lists. We pick the entry with
+    the highest timestamp (or first if none) and return the first image.
+    """
+    if not history:
+        return None
+    # Sort by timestamp if available, newest first
+    def _ts(entry):
+        return entry.get("timestamp", 0.0)
+
+    candidates = sorted(history.values(), key=_ts, reverse=True)
+    for entry in candidates:
+        outputs = entry.get("outputs", {})
+        for node_out in outputs.values():
+            images = node_out.get("images", [])
+            if images:
+                return images[0]
+    return None
+
+
+@router.get("/preview")
+async def comfyui_preview() -> Any:
+    """Proxy the latest output image from the ComfyUI history.
+
+    Queries /history for the most recent completed prompt, fetches the
+    newest output image via /view?filename=...&type=output, and streams
+    the bytes back with the correct content-type. Returns 404 when there
+    is no output yet.
+    """
+    from fastapi.responses import Response
+
+    history = await _fetch_json("/history")
+    if not isinstance(history, dict):
+        return JSONResponse(status_code=404, content={"error": {"code": "comfyui.no_output"}})
+    img = _latest_output_image(history)
+    if img is None:
+        return JSONResponse(status_code=404, content={"error": {"code": "comfyui.no_output"}})
+    filename = img.get("filename", "")
+    subfolder = img.get("subfolder", "")
+    img_type = img.get("type", "output")
+    params = f"filename={filename}&type={img_type}"
+    if subfolder:
+        params += f"&subfolder={subfolder}"
+    base = _comfyui_base_url()
+    try:
+        resp = await _get_client().get(f"{base}/view?{params}")
+        if resp.status_code != 200:
+            return JSONResponse(
+                status_code=404, content={"error": {"code": "comfyui.image_fetch_failed"}}
+            )
+        content_type = resp.headers.get("content-type", "image/png")
+        return Response(content=resp.content, media_type=content_type)
+    except (httpx.HTTPError, OSError):
+        return JSONResponse(
+            status_code=404, content={"error": {"code": "comfyui.image_fetch_failed"}}
+        )
+
+
 __all__ = ["aclose_client", "router"]
