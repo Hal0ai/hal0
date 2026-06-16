@@ -492,6 +492,60 @@ CURATED_MODELS: list[CuratedModel] = [
         model_class="sd-1.5",
         comfyui_subdir="checkpoints",
     ),
+    CuratedModel(
+        id="sdxl-lightning",
+        display_name="SDXL Lightning (8-step)",
+        description=(
+            "ByteDance's SDXL + Lightning LoRA distillation. 8-step fast txt2img "
+            "at full 1024x1024 SDXL quality on Strix Halo. CreativeML Open RAIL++"
+        ),
+        family="sdxl",
+        size_gb=6.8,
+        vram_gb_min=8.0,
+        license="CreativeML-OpenRAIL++",
+        license_url="https://huggingface.co/ByteDance/SDXL-Lightning/blob/main/LICENSE.md",
+        hf_repo="ByteDance/SDXL-Lightning",
+        hf_file="sdxl_lightning_8step_lora.safetensors",
+        context_length=0,
+        recommended_slot="img",
+        tags=["image", "sdxl", "fast", "lora"],
+        notes=(
+            "Requires the SDXL base checkpoint (stabilityai/stable-diffusion-xl-base-1.0) "
+            "already present in ComfyUI checkpoints/. Use the sdxl_lightning workflow "
+            "with 8 steps, cfg≈1.0, and the Lightning LoRA loaded at strength 1.0."
+        ),
+        capability="image",
+        model_class="image",
+        comfyui_subdir="checkpoints",
+    ),
+    CuratedModel(
+        id="esrgan-4x",
+        display_name="Real-ESRGAN 4x",
+        description=(
+            "xinntao's RealESRGAN x4plus upscaler. 4x upscale for post-processing "
+            "any ComfyUI output. Runs on CPU or GPU."
+        ),
+        family="esrgan",
+        size_gb=0.064,
+        vram_gb_min=0.5,
+        license="BSD-3-Clause",
+        license_url="https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE",
+        hf_repo="xinntao/Real-ESRGAN",
+        hf_file="RealESRGAN_x4plus.pth",
+        context_length=0,
+        recommended_slot="img",
+        tags=["image", "upscale", "esrgan"],
+        notes=(
+            "Direct download via get_esrgan.sh (installer/comfyui/scripts/). "
+            "The .pth is fetched from the GitHub release "
+            "v0.1.0 — not a standard HF safetensors pull. "
+            "Lands in ComfyUI upscale_models/ directory."
+        ),
+        capability="image",
+        model_class="image",
+        comfyui_subdir="upscale_models",
+        bundle_only=True,
+    ),
     # ── Bundle-only canonical defs (#500) ────────────────────────────────
     # These give the omni bundle manifests a single, loadable id to
     # reference. Ids match the legacy stock ``server_models.json`` keys
