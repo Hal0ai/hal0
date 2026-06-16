@@ -158,7 +158,7 @@ a { color: inherit; text-decoration: none; }
 .app {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
-  grid-template-rows: var(--topbar-h) 1fr var(--footer-h);
+  grid-template-rows: var(--topbar-h) 1fr min-content;
   grid-template-areas:
     "topbar topbar"
     "sidebar main"
@@ -427,15 +427,19 @@ a { color: inherit; text-decoration: none; }
   border-top: 1px solid var(--line);
   background: var(--bg);
   display: grid;
-  grid-template-rows: 1fr 1fr;
+  grid-template-rows: auto auto;
   font-family: var(--jbm);
   font-size: 11px;
   position: relative;
   transition: max-height 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
+/* Collapsed: chips bar + the always-on journal chyron beneath it. When the
+   full pane is open the chyron is redundant (the pane shows the logs), so
+   hide it — the opposite of the old behaviour. */
 .footer.expanded {
-  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-rows: auto;
 }
+.footer.expanded .foot-journal { display: none; }
 .foot-pane {
   display: flex;
   flex-direction: column;
@@ -600,24 +604,56 @@ a { color: inherit; text-decoration: none; }
 }
 .foot-toggle:hover { color: var(--accent); }
 
+/* Always-on journal chyron (collapsed footer): a thin scrolling tail of the
+   most recent entries. Each entry is a device-hued source dot + name · short
+   ts · message, separated by a vertical divider so entries read distinctly. */
 .foot-journal {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 0;
+  height: 30px;
   padding: 0 14px;
+  border-top: 1px solid var(--line-soft);
   overflow-x: auto;
   font-size: 10.5px;
-  color: var(--fg-4);
   white-space: nowrap;
   letter-spacing: 0.01em;
+  scrollbar-width: none;
 }
-.foot-journal .ent { display: inline-flex; align-items: center; gap: 6px; }
+.foot-journal::-webkit-scrollbar { display: none; }
+.foot-journal .ent {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 15px;
+  position: relative;
+  flex-shrink: 0;
+}
+.foot-journal .ent:first-child { padding-left: 0; }
+/* vertical divider between entries */
+.foot-journal .ent + .ent::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 12px;
+  width: 1px;
+  background: var(--line-strong);
+}
+.foot-journal .ent .d {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--src, var(--fg-4));
+  box-shadow: 0 0 6px var(--src, transparent);
+  flex-shrink: 0;
+}
+.foot-journal .ent .src { color: var(--src, var(--fg-3)); font-weight: 500; }
 .foot-journal .ent .ts { color: var(--fg-5); }
-.foot-journal .ent .sl { color: var(--fg-3); }
-.foot-journal .ent .ar { color: var(--fg-5); }
-.foot-journal .ent.ok .sl { color: var(--ok); }
-.foot-journal .ent.warn .sl { color: var(--warn); }
-.foot-journal .sep { color: var(--fg-5); }
+.foot-journal .ent .msg { color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; max-width: 42ch; }
+.foot-journal .ent.warn .msg { color: var(--fg-2); }
+.foot-journal .ent.warn .src, .foot-journal .ent.warn .d { color: var(--warn); --src: var(--warn); }
+.foot-journal .ent.error .msg { color: var(--fg-2); }
+.foot-journal .ent.error .src, .foot-journal .ent.error .d { color: var(--err); --src: var(--err); }
 
 /* ─── Main content area ─────────────────────────────────────────── */
 .main {

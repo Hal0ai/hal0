@@ -641,14 +641,13 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
         before the first frame arrives so we never hardcode mock copy.
       */}
       {ringSorted.length > 0 && (
-        <div className="foot-journal mono">
-          {ringSorted.slice(-6).map((e, i, arr) => (
-            <span key={e.id ?? i} className={"ent " + e.level}>
+        <div className="foot-journal mono" aria-label="recent journal">
+          {ringSorted.slice(-6).map((e, i) => (
+            <span key={e.id ?? i} className={"ent " + e.level} style={{"--src": _srcHue(e.source)}}>
+              <span className="d" />
+              <span className="src">{e.source}</span>
               <span className="ts">{_shortTs(e.ts)}</span>
-              <span className="sl">[{e.source}]</span>
-              <span className="ar">·</span>
-              <span>{e.msg}</span>
-              {i < arr.length - 1 && <span className="sep">  </span>}
+              <span className="msg">{e.msg}</span>
             </span>
           ))}
         </div>
