@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import shlex
 import shutil
@@ -741,6 +742,23 @@ class ContainerProvider(Provider):
         )
         self._write_and_start_unit(slot_name, unit_text)
 
+    def expected_argv(
+        self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+    ) -> list[str] | None:
+        """Return the freshly-rendered runtime command for drift checks.
+
+        This is the command portion passed to the container image, not the
+        podman/systemd preamble. It goes through the same provider plan path as
+        ``load_sync`` so derived context size, profile flags, model alias, and
+        slot ``[server].extra_args`` match what a restart would render now.
+        """
+        try:
+            provider = _spec_provider_for(slot_cfg) or self
+            plan = provider.container_spec(slot_cfg, model_info)
+        except Exception:
+            return None
+        return list(plan.command)
+
     def unload_sync(self, slot_cfg: dict[str, Any]) -> None:
         """Stop and clean up the container unit (synchronous)."""
         slot_name: str = str(slot_cfg.get("name", ""))
@@ -807,6 +825,39 @@ class ContainerProvider(Provider):
             return None
         ref = result.stdout.strip()
         return ref or None
+
+    def running_argv(self, slot_name: str) -> list[str] | None:
+        """Return the live container command argv for *slot_name*.
+
+        Uses ``<runtime> inspect hal0-slot-<name> --format {{json .Config.Cmd}}``.
+        Returns None when the container is not running, inspect fails, or the
+        runtime returns an unexpected shape. Never raises; status callers treat
+        missing data as "unknown", not drift.
+        """
+        try:
+            runtime = _container_runtime()
+        except RuntimeError:
+            return None
+        container_name = f"hal0-slot-{slot_name}"
+        try:
+            result = subprocess.run(
+                [runtime, "inspect", container_name, "--format", "{{json .Config.Cmd}}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            payload = json.loads(result.stdout.strip())
+        except ValueError:
+            return None
+        if not isinstance(payload, list):
+            return None
+        return [str(part) for part in payload]
 
     async def pull_image_stream(self, image: str):
         """Async generator that runs ``<runtime> pull <image>`` and yields

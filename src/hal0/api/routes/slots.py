@@ -798,7 +798,7 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
     """
     sm = _get_slot_manager(request)
     try:
-        snap = await sm.status(name)
+        snap = await sm.status(name, include_config_drift=True)
         out = _slot_to_dict(snap, request)
         enrichment = await _config_field_enrichment(request)
         extra = enrichment.get(name)
