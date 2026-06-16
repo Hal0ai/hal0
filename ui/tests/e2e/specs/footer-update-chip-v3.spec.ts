@@ -32,7 +32,7 @@ async function withUpdateState(
 }
 
 const UPDATE_CHIP = (page: import('@playwright/test').Page) =>
-  page.locator('.footer .foot-chip.accent', { hasText: /hal0 .* available/ })
+  page.locator('.footer .foot-update', { hasText: /hal0 .* available/ })
 
 test.describe('Footer update chip (#325)', () => {
   test('chip hidden when useUpdateState returns no available release', async ({ page }) => {
@@ -46,7 +46,7 @@ test.describe('Footer update chip (#325)', () => {
     // Wait for the rollup poll to land — the runtime-chip text proves
     // useRuntimeRollup has settled, which means useUpdateState has had
     // time to run too.
-    await expect(page.locator('.footer .foot-chip', { hasText: 'runtime' })).toBeVisible({
+    await expect(page.locator('.footer [data-testid="foot-health-runtimes"]')).toBeVisible({
       timeout: 6_000,
     })
     await expect(UPDATE_CHIP(page)).toHaveCount(0)
@@ -60,7 +60,7 @@ test.describe('Footer update chip (#325)', () => {
     })
     await page.goto('/')
     await expect(page.locator('.footer')).toBeVisible()
-    await expect(page.locator('.footer .foot-chip', { hasText: 'runtime' })).toBeVisible({
+    await expect(page.locator('.footer [data-testid="foot-health-runtimes"]')).toBeVisible({
       timeout: 6_000,
     })
     await expect(UPDATE_CHIP(page)).toHaveCount(0)
