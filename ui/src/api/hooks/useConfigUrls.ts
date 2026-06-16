@@ -6,8 +6,8 @@
 // a raw LAN IP, an mDNS `hal0.local` name, or a custom reverse-proxy domain.
 //
 // Per-service `*_enabled` flags say whether to advertise a link at all:
-//   - openwebui: false on a host with the unit down, or behind a proxy with
-//     no HAL0_OPENWEBUI_PUBLIC_URL (OWUI can't be path-prefixed).
+//   - openwebui: false on a host with the unit down; otherwise points at
+//     HAL0_OPENWEBUI_PUBLIC_URL or the default http://<host>:3001 fallback.
 //   - hermes:    false unless HAL0_HERMES_PUBLIC_URL is set — the dashboard
 //     binds loopback-only (127.0.0.1:9119), so there's no host:port fallback.
 

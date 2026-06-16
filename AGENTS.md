@@ -114,6 +114,61 @@ Single-context. `CONTEXT.md` at root; ADRs at `docs/internal/adr/`. See `docs/ag
   — v0.3 integration roll-up (composer over xterm, plugin host,
   persona TOML, composite upstream).
 
+## Shipping: deploy + PR workflow (how teammate agents land work here)
+
+This repo is worked by **multiple parallel Claude sessions** against one
+shared runtime (CT 105, `/opt/hal0`). Follow this so two agents never
+collide and nothing reaches CT 105 by hand-guessing.
+
+**1. Isolate every change in a worktree off `main`.** Never edit on a
+branch another agent owns, and never stack new work on an unmerged feature
+branch unless you intend a stacked PR. Pin to `main` so your diff is
+reviewable independently:
+
+```bash
+git fetch origin --prune
+git worktree add -b <type>/<slug> ~/dev/wt/<slug> origin/main
+```
+
+If your changes were authored on top of someone else's branch, re-base them
+onto `main` with `git apply --3way` (production regions are usually
+disjoint; only test mocks tend to conflict — adapt the assertion to main's
+fixtures, don't pull in the other branch's unmerged mock).
+
+**2. Claim before you touch the shared tree.** Local board:
+`~/.claude/bin/wip claim "<intent>" <files…>`. For CT 105 itself:
+`~/.claude/bin/wip hal0 claim "<intent>" /opt/hal0` — and check
+`wip hal0 status` first; if it's not on `main` or has tracked edits,
+another session is mid-deploy, so coordinate, don't reset over it.
+
+**3. Verify on the branch before deploying.** `tsc --noEmit` (ui),
+targeted `pytest` (not the whole suite — it hangs on this dev box), and the
+relevant `playwright … --project=chromium` spec (forced-mock). Build the UI
+clean (`rm -rf node_modules/.vite dist && npm run build`) — `ui/dist` is
+gitignored, so a stale bundle hides UI changes.
+
+**4. Deploy / preview to CT 105 with `scripts/deploy.sh` — never by hand.**
+A bare `git reset` updates source but leaves the served bundle stale; the
+script folds in the UI rebuild, the group-share perms re-assert, the
+`hal0-api` restart, and a health check. To preview an **unmerged** branch:
+
+```bash
+ssh hal0 'cd /opt/hal0 && sudo bash scripts/deploy.sh --ref origin/<your-branch>'
+```
+
+It refuses to reset over another session's uncommitted tracked edits unless
+`--force`. After this, CT 105 is **ahead of `main`** until your PR merges.
+
+**5. PR against `main`; merge base-first.** Open the PR (`gh pr create
+--base main`), let CI go green, get approval. Stacked PRs merge their base
+first. After merge, reconcile CT 105 back to trunk:
+`ssh hal0 'cd /opt/hal0 && sudo bash scripts/deploy.sh --ref origin/main'`,
+then clean `[gone]` branches.
+
+**6. Record memory-worthy outcomes** (PR/merge, gotcha, decision) to the
+hal0 Hindsight engine via the `hal0-memory` skill — see the standing rules
+in `CLAUDE.md`.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

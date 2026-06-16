@@ -132,6 +132,14 @@ def _behind_proxy(request: Request) -> bool:
     return any(fwd.get(h) for h in ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-for"))
 
 
+def _host_without_port(host: str) -> str:
+    """Return a hostname suitable for adding the OpenWebUI fixed port."""
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end >= 0 else host
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
 @router.get("/urls")
 async def get_urls(request: Request) -> dict[str, object]:
     """Return the canonical URLs the dashboard should advertise.
@@ -151,14 +159,16 @@ async def get_urls(request: Request) -> dict[str, object]:
     whenever it's defined — it's how a reverse-proxy deploy declares the
     public hostname for OpenWebUI (e.g. ``https://hal0-chat.example.com``).
     Open WebUI emits root-absolute asset URLs and cannot be served under
-    a path prefix, so the proxy must give it its own (sub)domain; there
-    is no safe way to synthesise that from the request alone.
+    a path prefix, so a polished proxy deployment should give it its own
+    (sub)domain.
 
     Without the env var, LAN-direct deploys fall back to
     ``http://<host>:3001`` (matching the systemd unit's bound port).
-    Reverse-proxy deploys without the env var get ``openwebui_enabled =
-    false`` so the dashboard hides the Chat link instead of dangling it
-    at a broken URL.
+    Reverse-proxy deploys without the env var fall back to the same
+    hostname on OpenWebUI's fixed port, ``http://<host>:3001``. This is
+    the open-source default path: operators can expose the service port
+    directly without needing custom DNS. Set ``HAL0_OPENWEBUI_PUBLIC_URL``
+    when OpenWebUI lives on a distinct hostname.
 
     Hermes is different: its dashboard binds ``127.0.0.1:9119`` (loopback)
     so — unlike OpenWebUI — there is NO browser-reachable host:port
@@ -191,10 +201,11 @@ async def get_urls(request: Request) -> dict[str, object]:
     if _behind_proxy(request):
         scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
         forwarded_host = request.headers.get("x-forwarded-host") or host
+        openwebui_host = _host_without_port(forwarded_host)
         return {
             "api": f"{scheme}://{forwarded_host}",
-            "openwebui": "",
-            "openwebui_enabled": False,
+            "openwebui": f"http://{openwebui_host}:{_OPENWEBUI_PORT}",
+            "openwebui_enabled": enabled,
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
         }
