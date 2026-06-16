@@ -171,6 +171,14 @@ class TestSerializeSlot:
         assert out["backend"] == "vulkan"
         assert out["provider"] == "llama-server"
 
+    def test_config_drift_lifted_from_metadata(self) -> None:
+        drift = {
+            "drifted": True,
+            "diffs": [{"key": "--ctx-size", "running": "4096", "rendered": "131072"}],
+        }
+        out = serialize_slot(_slot(metadata={"config_drift": drift}), model_cache={})
+        assert out["config_drift"] == drift
+
     def test_explicit_backend_wins_over_metadata(self) -> None:
         out = serialize_slot(
             _slot(backend="rocm", metadata={"backend": "vulkan"}),
