@@ -1,42 +1,24 @@
-// hal0 dashboard — ComfyUI "generation engine" pane (slots-page Image-Gen tab).
+// hal0 dashboard — ComfyUI "Image Gen" pane · V2 "Render hero".
 //
-// Ported from the hal0 Design System exploration
-// (Design System/explorations/comfyui-row/{comfyui-pane,row}.{html,jsx}). The
-// design models ComfyUI as ONE containerized generation engine — not per-model
-// slots — that is mutually exclusive with the LLM stack on the single iGPU.
+// Ported from Design/design_handoff_comfyui_imagegen/design/ (Task 5.1).
+// Mock data only — live API wiring is Task 5.2. Feed `data` prop with
+// the RUN/QUEUE/GTT/RAM/STATS/ENGINE shape from comfy-core or the mock.
 //
-// What's wired live (read-only, via useComfyui → /api/comfyui/status):
-//   - engine state + which mode owns the GPU (docker + systemd)
-//   - GTT / RAM gauges + memory pressure (ComfyUI /system_stats)
-//   - queue depth (ComfyUI /queue)
-//   - model inventory counts (verified file counts on the share)
-// The switchover toggle opens a blast-radius confirm dialog, then calls the
-// feature-gated POST /api/comfyui/switchover (202; the API's GPU arbiter
-// drains + stops the LLM slots and starts the ComfyUI img slot in-process —
-// no shell-out. The status poll's `switchover` block drives the transitional
-// UI — never an optimistic flip; 501 toast when the host gate is off).
-// The `arbiter` block on /status (mode img|llm, pinned, idle_restore_at) is
-// arbiter-truth: it drives the mode chip, the pin toggle and the auto-restore
-// countdown; when it is null (gate off / older backend) the pane fails soft
-// to the legacy container-telemetry display.
+// Host must add class "comfy-page" to the mount wrapper for the blue
+// --comfy accent scope to apply (see comfyui-pane.css).
 //
-// Deliberately NOT wired yet (need ComfyUI's WS /ws + AMDGPUMonitor, or the
-// privileged path): per-node progress %, it/s, GPU util/temp/clocks, per-job
-// queue names, and the container start/stop/restart controls. Those render in a
-// disabled/"—" state so the layout stays faithful without inventing numbers.
+// Empty-queue note (recall PR #845 lockup): the empty state must be
+// in-flow with min-height, never position:absolute;inset:0 overlay.
+//
+// The only looping animation is @keyframes pulse (1.4s, ldot.generating).
+// prefers-reduced-motion:reduce disables it via CSS `animation:none`.
 
-import {
-  useComfyui,
-  useComfyuiSwitchover,
-  useComfyuiPin,
-  COMFYUI_FALLBACK,
-} from '@/api/hooks/useComfyui'
+import './comfyui-pane.css'
 
-const { useState } = React
+const { useState, useEffect, useRef } = React
 
-// ── icons (16×16, 1.5 stroke — hal0 thin-line family + generation glyphs).
-// Ported from the design's row.jsx so the pane is self-contained.
-const RI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
+// ── icons (16×16, hal0 thin-line family) ─────────────────────────────────────
+const CI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
   <svg
     width={size}
     height={size}
@@ -51,717 +33,543 @@ const RI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
     {d ? <path d={d} /> : children}
   </svg>
 )
-const RIcons = {
+
+const CIcons = {
   comfy: (
-    <RI>
+    <CI>
       <circle cx="4" cy="4" r="2" />
       <circle cx="12" cy="6" r="2" />
       <circle cx="6" cy="12" r="2" />
       <path d="M6 4.5l4 1M5.4 10.2l5-3.6" />
-    </RI>
+    </CI>
   ),
-  stop: (
-    <RI>
-      <rect x="4" y="4" width="8" height="8" rx="1" />
-    </RI>
-  ),
-  ext: <RI d="M6 3H3v10h10v-3M9 3h4v4M9 9l4-4" />,
+  bolt: <CI d="M9 2L4 9h3l-1 5 5-7H8l1-5z" fill="currentColor" sw="0" />,
   image: (
-    <RI>
+    <CI>
       <rect x="2.5" y="3" width="11" height="10" rx="1.5" />
       <circle cx="6" cy="6.5" r="1.2" />
       <path d="M3 11l3-2.5 2.5 2 2-1.5L13 11.5" />
-    </RI>
+    </CI>
   ),
   video: (
-    <RI>
+    <CI>
       <rect x="2" y="4" width="9" height="8" rx="1.5" />
       <path d="M11 7l3-2v6l-3-2z" />
-    </RI>
+    </CI>
   ),
   layers: (
-    <RI>
+    <CI>
       <path d="M8 2l6 3-6 3-6-3 6-3z" />
       <path d="M2 8l6 3 6-3M2 11l6 3 6-3" />
-    </RI>
+    </CI>
   ),
   cube: (
-    <RI>
+    <CI>
       <path d="M8 2l5.5 3v6L8 14l-5.5-3V5L8 2z" />
       <path d="M8 8l5.5-3M8 8v6M8 8L2.5 5" />
-    </RI>
+    </CI>
   ),
-  bolt: <RI d="M9 2L4 9h3l-1 5 5-7H8l1-5z" fill="currentColor" />,
-  queue: <RI d="M3 4h10M3 8h10M3 12h6" />,
-  cancel: (
-    <RI>
-      <circle cx="8" cy="8" r="5.5" />
-      <path d="M6 6l4 4M10 6l-4 4" />
-    </RI>
-  ),
-  chev: <RI d="M4 6l4 4 4-4" />,
+  queue: <CI d="M3 4h10M3 8h10M3 12h6" />,
   mem: (
-    <RI>
+    <CI>
       <rect x="2" y="5" width="12" height="6" rx="1" />
       <path d="M5 5V3M8 5V3M11 5V3M5 13v-2M11 13v-2" />
-    </RI>
+    </CI>
   ),
-  logs: <RI d="M3 3h10M3 6h10M3 9h7M3 12h5" />,
+  gauge: (
+    <CI>
+      <path d="M3 12a5 5 0 1 1 10 0" />
+      <path d="M8 12l3-3.5" />
+      <circle cx="8" cy="12" r="1" fill="currentColor" sw="0" />
+    </CI>
+  ),
+  ext:  <CI d="M6 3H3v10h10v-3M9 3h4v4M9 9l4-4" />,
+  stop: (
+    <CI>
+      <rect x="4" y="4" width="8" height="8" rx="1" />
+    </CI>
+  ),
   refresh: (
-    <RI>
+    <CI>
       <path d="M14 8a6 6 0 1 1-2-4.5" />
       <path d="M14 1v3.5h-3.5" />
-    </RI>
+    </CI>
   ),
-  close: <RI d="M4 4l8 8M12 4l-4 4" />,
-  warn: (
-    <RI>
-      <path d="M8 2l6 11H2L8 2z" />
-      <path d="M8 7v3M8 12v0.01" />
-    </RI>
-  ),
+  logs:  <CI d="M3 3h10M3 6h10M3 9h7M3 12h5" />,
+  close: <CI d="M4 4l8 8M12 4l-4 4" />,
 }
-const Ic = ({ name, size = 16 }) =>
-  RIcons[name] ? React.cloneElement(RIcons[name], { size }) : null
 
-function Toggle({ on, comfy = false, busy = false }) {
+const Ci = ({ name, size = 16 }) =>
+  CIcons[name] ? React.cloneElement(CIcons[name], { size }) : null
+
+// ── reduced-motion detection ─────────────────────────────────────────────────
+const REDUCE =
+  typeof window !== 'undefined' &&
+  window.matchMedia &&
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+// ── shared tick (900ms; freezes under reduced-motion) ────────────────────────
+function useTick(ms = 900) {
+  const [t, setT] = useState(0)
+  useEffect(() => {
+    if (REDUCE) return
+    const id = setInterval(() => setT((x) => x + 1), ms)
+    return () => clearInterval(id)
+  }, [ms])
+  return t
+}
+
+// deterministic jitter for live readout breathing
+const jit = (base, amp, t, ph = 0) =>
+  REDUCE ? base : +(base + amp * Math.sin(t * 0.8 + ph)).toFixed(base < 10 ? 1 : 0)
+
+// ── Radial Gauge — 270° sweep (same primitive as NPU widget) ─────────────────
+function Gauge({ pct, label, sub, size = 116, warn = false }) {
+  const sw = Math.round(size * 0.065)
+  const r = size / 2 - sw - 4
+  const cx = size / 2
+  const cy = size / 2
+  const C = 2 * Math.PI * r
+  const arc = C * 0.75
+  const fill = Math.max(0, Math.min(1, (pct || 0) / 100)) * arc
   return (
-    <span
-      className={'toggle' + (on ? ' on' : '') + (comfy ? ' comfy' : '') + (busy ? ' busy' : '')}
-    >
-      <span className="knob" />
-    </span>
+    <div className={'gauge' + (size < 140 ? ' sm' : '')} style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle
+          className="gtrack"
+          cx={cx} cy={cy} r={r}
+          strokeWidth={sw}
+          strokeDasharray={`${arc} ${C}`}
+          strokeLinecap="round"
+          transform={`rotate(135 ${cx} ${cy})`}
+        />
+        <circle
+          className={'gfill' + (warn ? ' warn' : '')}
+          cx={cx} cy={cy} r={r}
+          strokeWidth={sw}
+          strokeDasharray={`${fill} ${C}`}
+          transform={`rotate(135 ${cx} ${cy})`}
+        />
+      </svg>
+      <div className="gc">
+        <div className="pct">
+          {Math.round(pct || 0)}
+          <span className="s">%</span>
+        </div>
+        <div className="lbl">{label}</div>
+        {sub ? <div className="sub">{sub}</div> : null}
+      </div>
+    </div>
   )
 }
 
-function EngineGlyph() {
+// ── Bar sparkline ─────────────────────────────────────────────────────────────
+const SPARK_DEFAULT = [1.5, 1.7, 1.6, 1.8, 1.9, 1.7, 2.0, 1.8, 1.9, 2.1, 1.9, 2.0, 1.8, 1.9, 2.0, 1.9]
+
+function BarSpark({ data = SPARK_DEFAULT, hotN = 4, style }) {
+  const max = Math.max(...data, 1)
   return (
-    <span className="engine-glyph">
-      <Ic name="comfy" size={16} />
-    </span>
+    <div className="cspark" style={style}>
+      {data.map((v, i) => (
+        <i
+          key={i}
+          className={i >= data.length - hotN ? 'hot' : ''}
+          style={{ height: (v / max * 100) + '%' }}
+        />
+      ))}
+    </div>
   )
 }
 
-// GTT (iGPU) gauge over the 80GB ceiling + a RAM bar under it. `null` used
-// values render an em-dash bar rather than a fabricated fill.
-function GttGauge({ usedGb, ceil = 80, ramGb, ramCeil = 96, pressure = false }) {
-  const pct = usedGb == null ? 0 : Math.min(100, (usedGb / ceil) * 100)
-  const ramPct = ramGb == null ? 0 : Math.min(100, (ramGb / ramCeil) * 100)
+// ── Block header ─────────────────────────────────────────────────────────────
+function BlkH({ icon, acc, children, note }) {
   return (
-    <div className="gauge">
-      <div className="gauge-h">
-        <span>GTT (iGPU)</span>
-        <span>
-          <b>{usedGb == null ? '—' : usedGb}</b> / {ceil} <span className="ceil">GB</span>
-        </span>
-      </div>
-      <div className="gauge-track">
-        <i className={pressure ? 'warnz' : 'comfy'} style={{ width: pct + '%' }} />
-      </div>
-      <div className="gauge-h" style={{ marginTop: 4 }}>
-        <span style={{ color: 'var(--fg-4)' }}>RAM</span>
-        <span style={{ color: 'var(--fg-3)' }}>
-          {ramGb == null ? '—' : ramGb} / {ramCeil} GB
-        </span>
-      </div>
-      <div className="gauge-track" style={{ height: 6 }}>
-        <i className="os" style={{ width: ramPct + '%' }} />
-      </div>
-      {pressure && (
-        <div className="gauge-note pressure">⚠ memory pressure — no swap on this host</div>
+    <div className="blk-h">
+      <span className={'ic' + (acc ? ' acc' : '')}>
+        <Ci name={icon} size={13} />
+      </span>
+      {children}
+      {note != null && (
+        <>
+          <span className="grow" />
+          <span className="note">{note}</span>
+        </>
       )}
     </div>
   )
 }
 
-// ComfyUI's own web UI lives on the runtime host's :8188 (the dashboard is
-// served from :8080), so links derive from the current hostname.
-function comfyHref() {
-  const host =
-    typeof window !== 'undefined' && window.location ? window.location.hostname : '127.0.0.1'
-  return `http://${host}:8188`
-}
-
-function toast(msg, kind) {
-  if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind)
-}
-
-const STATE_LABEL = {
-  stopped: 'stopped',
-  starting: 'starting…',
-  running: 'running · idle',
-  generating: 'generating',
-  error: 'error',
-}
-
-// Switchover confirm — states the blast radius before flipping the iGPU.
-function SwitchoverConfirm({ target, queuePending, busy, onCancel, onConfirm }) {
-  const toGen = target === 'generation'
+// ── Step pips timeline ────────────────────────────────────────────────────────
+function StepPips({ step, total }) {
+  const pips = Array.from({ length: total }, (_, i) => {
+    if (i < step - 1) return 'done'
+    if (i === step - 1) return 'now'
+    return ''
+  })
   return (
-    <div className="cf-scrim" onClick={onCancel}>
-      <div className="cf" onClick={(e) => e.stopPropagation()}>
-        <div className="cf-h">
-          <div className={'cf-eye' + (toGen ? '' : ' warn')}>
-            {toGen ? 'ComfyUI · take the iGPU' : 'Inference · restore the LLM stack'}
-          </div>
-          <h3 className="cf-title">
-            {toGen ? 'Switch to generation mode?' : 'Switch back to inference mode?'}
-          </h3>
-        </div>
-        <div className="cf-b">
-          <p className="cf-lede">
-            {toGen ? (
-              <>
-                Only one of <span className="mono">{'{ inference, ComfyUI }'}</span> can hold the
-                single iGPU. Switching drains in-flight requests, then <b>stops the LLM slots</b>{' '}
-                and starts the ComfyUI container. The stopped slots restore automatically after
-                the engine sits idle — pinning image mode disables that auto-restore.
-              </>
-            ) : (
-              <>
-                This stops the ComfyUI container and <b>restores the LLM slots</b> that were
-                stopped by the switchover. In-flight renders are not interrupted by the
-                dashboard — drain the queue first.
-              </>
-            )}
-          </p>
-          {toGen && (
-            <div className="cf-blast">
-              <div className="row">
-                <span className="ic">
-                  <Ic name="warn" size={14} />
-                </span>
-                Telegram / Discord bots go dark until you switch back.
-              </div>
-              <div className="row">
-                <span className="ic">
-                  <Ic name="warn" size={14} />
-                </span>
-                Background memory extraction pauses (NPU gemma3-4b slot); it recovers
-                automatically. Rerank pauses too (GPU slot); embeddings are unaffected (NPU).
-              </div>
-            </div>
-          )}
-          {!toGen && queuePending > 0 && (
-            <div className="cf-guard">
-              <Ic name="warn" size={14} /> {queuePending} job{queuePending === 1 ? '' : 's'} still
-              queued — they will be dropped when the container stops.
-            </div>
-          )}
-          <div className="cf-steps">
-            {toGen ? (
-              <>
-                <span className="n">1</span> <span className="cmd">drain + stop LLM slots</span>{' '}
-                <span className="arr">→</span> <span className="cmd">start ComfyUI</span>
-              </>
-            ) : (
-              <>
-                <span className="n">1</span> <span className="cmd">stop ComfyUI</span>{' '}
-                <span className="arr">→</span> <span className="cmd">restore LLM slots</span>
-              </>
-            )}
-          </div>
-        </div>
-        <div className="cf-f">
-          <span className="note">the GPU arbiter on the runtime host runs the switchover</span>
-          <span className="grow" style={{ flex: 1 }} />
-          <button className="rbtn" onClick={onCancel} disabled={busy}>
-            Cancel
-          </button>
-          <button
-            className={'rbtn ' + (toGen ? 'primary' : 'danger')}
-            onClick={onConfirm}
-            disabled={busy}
-          >
-            {busy ? 'switching…' : toGen ? 'Switch to generation' : 'Switch to inference'}
-          </button>
-        </div>
-      </div>
+    <div className="steps-pips">
+      {pips.map((c, i) => (
+        <span className={'pip ' + c} key={i}>
+          {c ? <i /> : null}
+        </span>
+      ))}
     </div>
   )
 }
 
-const FLOWS = [
-  { ic: 'image', a: 'text', b: 'image', note: 'qwen-image' },
-  { ic: 'image', a: 'image', b: 'image' },
-  { ic: 'video', a: 'text', b: 'video', note: 'wan 2.2' },
-  { ic: 'video', a: 'image', b: 'video', note: 'i2v' },
-  { ic: 'layers', a: 'still', b: 'animate', note: 'chain' },
-  { ic: 'cube', a: 'upscale', b: '4×' },
+// ── Workflows quick-launch ─────────────────────────────────────────────────────
+const FLOWS_DEFAULT = [
+  { ic: 'image',  a: 'text',   b: 'image',   tag: 'qwen-image' },
+  { ic: 'image',  a: 'image',  b: 'image' },
+  { ic: 'video',  a: 'text',   b: 'video',   tag: 'wan 2.2' },
+  { ic: 'video',  a: 'image',  b: 'video',   tag: 'i2v' },
+  { ic: 'layers', a: 'still',  b: 'animate', tag: 'chain' },
+  { ic: 'cube',   a: 'upscale',b: '4×' },
 ]
 
-export function ComfyuiPane() {
-  const q = useComfyui()
-  const sw = useComfyuiSwitchover()
-  const pin = useComfyuiPin()
-  const st = q.data || COMFYUI_FALLBACK
-  const [open, setOpen] = useState(false)
-  const [confirm, setConfirm] = useState(null) // target mode or null
-
-  const gen = st.mode === 'generation'
-  const containerUp = st.container?.state === 'running'
-  // GPU-arbiter truth block (null → fail soft to the legacy display).
-  const arb = st.arbiter || null
-  // Post-migration the engine IS the podman img slot, so when the arbiter
-  // block is present its mode is the engine truth: img implies the engine is
-  // up even if container telemetry lags a poll; llm implies stopped. Container
-  // telemetry stays the fallback when the arbiter is unavailable.
-  const engineRaw = st.engine || 'stopped'
-  const engine = arb
-    ? arb.mode === 'img'
-      ? engineRaw === 'stopped'
-        ? 'running'
-        : engineRaw
-      : 'stopped'
-    : engineRaw
-  // Idle auto-restore countdown — recomputed on each status poll (renders in
-  // minutes, so no per-second timer needed).
-  const restoreMin =
-    arb && arb.mode === 'img' && !arb.pinned && arb.idle_restore_at
-      ? Math.max(1, Math.ceil((arb.idle_restore_at * 1000 - Date.now()) / 60_000))
-      : null
-  // A switch in flight overrides the snapshot state: the pane's poll is what
-  // tracks the transition to terminal (202 + the arbiter's in-process
-  // transition server-side).
-  const switching = !!st.switchover?.active
-  const switchError = st.switchover?.error || null
-  const stateLabel = switching
-    ? `switching to ${st.switchover.target}…`
-    : STATE_LABEL[engine] || engine
-  const mem = st.memory
-  const gtt = mem?.gtt_used_gb ?? null
-  const gttCeil = mem?.gtt_ceil_gb ?? 80
-  const ram = mem?.ram_used_gb ?? null
-  const ramCeil = mem?.ram_ceil_gb ?? 96
-  const pressure = !!mem?.pressure
-  const running = st.queue?.running || 0
-  const pending = st.queue?.pending || 0
-  const queueTotal = running + pending
-  const inv = st.inventory
-
-  const href = comfyHref()
-  const openComfy = () => window.open(href, '_blank', 'noopener')
-
-  // Pin toggle — synchronous 200 {"pinned":bool}, so mirror the switchover's
-  // refetch-not-optimistic pattern: toast, then refetch /status so the arbiter
-  // block (pin state + countdown) re-renders from server truth.
-  // Fire-and-forget pin flip — toast immediately and refetch on success so the
-  // arbiter block re-renders from server truth; never block the toggle on the
-  // round-trip. (Mirrors the non-blocking control pattern from PR #781.)
-  const doPin = () => {
-    if (!arb || pin.isPending) return
-    const next = !arb.pinned
-    pin.mutate(
-      { pinned: next },
-      {
-        onSuccess: () => {
-          toast(next ? 'Image mode pinned — auto-restore disabled.' : 'Unpinned — auto-restore re-armed.', 'ok')
-          q.refetch()
-        },
-        onError: (err) => {
-          const code = String(err?.code || '')
-          if (code === 'comfyui.switchover_disabled' || err?.status === 501) {
-            toast(
-              'ComfyUI switchover is disabled on this host — set HAL0_COMFYUI_SWITCHOVER_ENABLED=1 ' +
-                'on hal0-api to enable it.',
-              'warn'
-            )
-          } else {
-            toast(err?.message ? `pin failed: ${err.message}` : 'pin failed', 'warn')
-          }
-        },
-      }
-    )
-  }
-
-  // Fire-and-forget switchover — close the confirm dialog and toast the moment
-  // the user commits, rather than after the round-trip. The switchover POST is
-  // already async (202; the GPU arbiter drains/flips in the background) and the
-  // status poll's `switchover` block drives the transitional UI, so the click
-  // never has to wait. (Mirrors the non-blocking control pattern from PR #781.)
-  const doSwitch = () => {
-    const target = confirm
-    // The confirm dialog already warned that queued renders drop — that
-    // consent is what authorizes force when tearing down a busy queue.
-    const force = target === 'inference' && queueTotal > 0 ? true : undefined
-    setConfirm(null)
-    toast(`Switching to ${target} mode…`, 'info')
-    sw.mutate(
-      { mode: target, force },
-      {
-        onError: (err) => {
-          // Hal0Error carries the backend envelope's code directly (e.g.
-          // comfyui.switchover_disabled / comfyui.busy) + the HTTP status.
-          const code = String(err?.code || '')
-          if (code === 'comfyui.switchover_disabled' || err?.status === 501) {
-            toast(
-              'ComfyUI switchover is disabled on this host — set HAL0_COMFYUI_SWITCHOVER_ENABLED=1 ' +
-                'on hal0-api to enable it.',
-              'warn'
-            )
-          } else if (code === 'comfyui.busy') {
-            toast('Renders are still running or queued — drain the queue first.', 'warn')
-          } else if (code === 'comfyui.switch_in_progress') {
-            toast('A switchover is already in progress — wait for it to finish.', 'warn')
-          } else {
-            toast(err?.message ? `switchover failed: ${err.message}` : 'switchover failed', 'warn')
-          }
-        },
-        onSettled: () => setTimeout(() => q.refetch(), 1500),
-      }
-    )
-  }
-
+function WorkflowsBlock({ flows = FLOWS_DEFAULT }) {
   return (
-    <div className="comfy-pane">
-      <div className="proto">
-        {/* section label */}
-        <div className="sec-label">
-          <b>Generation Engine</b>
-          <span className="dim">·</span>
-          <span className="mono" style={{ color: 'var(--comfy)' }}>
-            ComfyUI
-          </span>
-          <span className="dim">·</span>
-          <span className="meta">1 container</span>
-          <span className="dim">·</span>
-          <span className="meta">exclusive iGPU</span>
-          <span className="grow" style={{ flex: 1 }} />
-          <span className="meta">{containerUp ? 'docker · :8188' : 'docker · stopped'}</span>
-        </div>
-
-        <div className={'engine' + (gen ? ' active' : '') + (open ? ' open' : '')}>
-          {/* header */}
-          <div className="engine-h">
-            <EngineGlyph />
-            <span className="col">
-              <span className="engine-title">ComfyUI</span>
-              <span className="engine-sub">generation engine · docker</span>
-            </span>
-            <span className={'epill ' + (switching ? 'starting' : engine)}>
-              <span className="dot" />
-              {stateLabel}
-            </span>
-            {/* Arbiter mode chip — arbiter-truth display; hidden (fail-soft)
-                when the arbiter block is null. */}
-            {arb && (
-              <span
-                className={'epill ' + (arb.mode === 'img' ? 'running' : 'stopped')}
-                data-testid="comfy-arbiter-chip"
-                title={
-                  arb.mode === 'img'
-                    ? 'The GPU arbiter holds the iGPU for image generation — LLM slots are stopped.'
-                    : 'The LLM stack holds the iGPU — the image engine is parked.'
-                }
-              >
-                <span className="dot" />
-                {arb.mode === 'img' ? 'image mode' : 'inference'}
-                {arb.pinned && arb.mode === 'img' ? ' · pinned' : ''}
-              </span>
-            )}
-            {restoreMin != null && (
-              <span className="meta" data-testid="comfy-restore-countdown">
-                auto-restore in ~{restoreMin}m
-              </span>
-            )}
-            {switchError && !switching && (
-              <span className="meta" style={{ color: 'var(--warn)' }} title={switchError}>
-                last switch failed
-              </span>
-            )}
-            <span className="grow" style={{ flex: 1 }} />
-            <span className="eh-right">
-              {/* Pin toggle — only with an arbiter; disables idle auto-restore. */}
-              {arb && (
-                <button
-                  className={'rbtn' + (arb.pinned ? ' primary' : '')}
-                  data-testid="comfy-pin-toggle"
-                  onClick={doPin}
-                  disabled={pin.isPending}
-                  title={
-                    arb.pinned
-                      ? 'Image mode is pinned — auto-restore disabled. Click to unpin.'
-                      : 'Pin image mode (disables the idle auto-restore of LLM slots)'
-                  }
-                >
-                  {pin.isPending ? '…' : arb.pinned ? 'pinned' : 'pin'}
-                </button>
-              )}
-              <button
-                className="rbtn ghost-comfy"
-                disabled={!containerUp}
-                style={!containerUp ? { opacity: 0.4 } : null}
-                onClick={openComfy}
-                title={containerUp ? 'Open ComfyUI' : 'ComfyUI is not running'}
-              >
-                <Ic name="ext" size={13} /> Open ↗
-              </button>
-              <span
-                className="sw-wrap"
-                onClick={() => !switching && setConfirm(gen ? 'inference' : 'generation')}
-                style={{ cursor: switching ? 'wait' : 'pointer' }}
-                title={
-                  switching
-                    ? 'Switchover in progress…'
-                    : 'Switch the iGPU between inference and generation'
-                }
-              >
-                <span className={'mode' + (!gen ? ' llm-on' : '')}>inference</span>
-                <Toggle on={gen} comfy busy={sw.isPending || switching} />
-                <span className={'mode' + (gen ? ' on' : '')}>generation</span>
-              </span>
-            </span>
-          </div>
-
-          {/* collapsed telemetry strip — real read-only metrics inline */}
-          {containerUp && !open && (
-            <div className="collapsed-prog">
-              <div className="tel-strip">
-                <span className="tel">
-                  <span className="l">GTT</span>
-                  <span className="minibar">
-                    <i
-                      style={{
-                        width: (gtt == null ? 0 : (gtt / gttCeil) * 100) + '%',
-                        background: pressure ? 'var(--warn)' : 'var(--comfy)',
-                      }}
-                    />
-                  </span>
-                  <span className={'v' + (pressure ? ' warn' : '')}>
-                    {gtt == null ? '—' : gtt}
-                    <span className="u">/{gttCeil} GB</span>
-                  </span>
-                </span>
-                <span className="tel">
-                  <span className="l">RAM</span>
-                  <span className="v">
-                    {ram == null ? '—' : ram}
-                    <span className="u">/{ramCeil} GB</span>
-                  </span>
-                </span>
-                <span className="tel">
-                  <span className="l">queue</span>
-                  {queueTotal > 0 ? (
-                    <span className="qn">{queueTotal}</span>
-                  ) : (
-                    <span className="v dimx">idle</span>
-                  )}
-                  {running > 0 && (
-                    <span className="v dimx" style={{ fontSize: 11 }}>
-                      {running} running
-                    </span>
-                  )}
-                </span>
-                <span className="tel">
-                  <span className="l">engine</span>
-                  <span className="v comfy">{engine}</span>
-                </span>
-                {pressure && (
-                  <span className="tel">
-                    <span className="v warn" style={{ fontSize: 11 }}>
-                      ⚠ no swap
-                    </span>
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* expandable body */}
-          <div className="engine-body">
-            <div className="inner">
-              <div className="engine-b">
-                {/* active job — read-only summary (live per-node progress needs WS) */}
-                <div className="subcard">
-                  <div className="subcard-h">
-                    <Ic name="bolt" size={13} /> active job
-                  </div>
-                  <div className="mono dimx" style={{ fontSize: 12, padding: '2px 0' }}>
-                    {!containerUp
-                      ? 'engine stopped · switch to generation to run jobs'
-                      : running > 0
-                        ? `${running} job${running === 1 ? '' : 's'} running · open ComfyUI for live per-node progress ↗`
-                        : 'engine idle · no job running'}
-                  </div>
-                </div>
-
-                {/* queue (counts from /queue; per-job names live in ComfyUI) */}
-                <div className="queue">
-                  <div className="queue-h">
-                    <Ic name="queue" size={13} /> queue
-                    <span style={{ color: 'var(--fg-5)', marginLeft: 2 }}>· {pending} pending</span>
-                    <span className="grow" style={{ flex: 1 }} />
-                    <span
-                      className="clear"
-                      onClick={openComfy}
-                      style={{ cursor: 'pointer' }}
-                      title="Manage the queue in ComfyUI"
-                    >
-                      open queue ↗
-                    </span>
-                  </div>
-                  <div className="queue-empty">
-                    {queueTotal === 0
-                      ? 'nothing queued · drop a workflow in ComfyUI to enqueue'
-                      : `${running} running · ${pending} pending — manage in ComfyUI ↗`}
-                  </div>
-                </div>
-
-                {/* bottom 50/50 — memory + iGPU | models on share + workflows */}
-                <div className="subgrid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-                  <div className="subcard">
-                    <div className="subcard-h">
-                      <Ic name="mem" size={13} /> memory <span style={{ color: 'var(--fg-5)' }}>· iGPU</span>
-                    </div>
-                    <GttGauge usedGb={gtt} ceil={gttCeil} ramGb={ram} ramCeil={ramCeil} pressure={pressure} />
-                    <div className="gpu-stats">
-                      <span className="gs">
-                        <b style={{ color: 'var(--comfy)' }}>{st.reachable ? engine : '—'}</b>
-                        <span className="u">state</span>
-                      </span>
-                      <span className="gs">
-                        <b>{st.inference?.hermes ? 'up' : 'down'}</b>
-                        <span className="u">hermes</span>
-                      </span>
-                      <span className="gs">
-                        <b>{containerUp ? 'up' : 'down'}</b>
-                        <span className="u">container</span>
-                      </span>
-                    </div>
-                  </div>
-                  <div className="subcard">
-                    <div className="subcard-h">
-                      <Ic name="layers" size={13} /> models on share
-                      <span className="grow" style={{ flex: 1 }} />
-                      <span className="rchip comfy" onClick={openComfy} style={{ cursor: 'pointer' }}>
-                        manager ↗
-                      </span>
-                    </div>
-                    {inv ? (
-                      <div className="inv">
-                        <span className="inv-pill">
-                          <b>{inv.checkpoints ?? 0}</b> checkpoints
-                        </span>
-                        <span className="inv-pill">
-                          <b>{inv.diffusion ?? 0}</b> <span className="u">diffusion</span>
-                        </span>
-                        <span className="inv-pill">
-                          <b>{inv.loras ?? 0}</b> loras
-                        </span>
-                        <span className="inv-pill">
-                          <b>{inv.vae ?? 0}</b> vae
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="mono dimx" style={{ fontSize: 11 }}>
-                        model share not mounted
-                      </div>
-                    )}
-
-                    <div className="card-section">
-                      <div className="subcard-h">
-                        <span style={{ color: 'var(--comfy)' }}>
-                          <Ic name="bolt" size={13} />
-                        </span>{' '}
-                        workflows
-                        <span className="grow" style={{ flex: 1 }} />
-                        <span
-                          className="dimx"
-                          style={{ fontSize: 10, textTransform: 'none', letterSpacing: 0 }}
-                        >
-                          opens in ComfyUI ↗
-                        </span>
-                      </div>
-                      <div className="flows">
-                        {FLOWS.map((f, i) => (
-                          <button key={i} className="flow" onClick={openComfy}>
-                            <span className="ic">
-                              <Ic name={f.ic} size={14} />
-                            </span>
-                            <span>{f.a}</span>
-                            <span className="arr">→</span>
-                            <span>{f.b}</span>
-                            {f.note && (
-                              <span className="dimx" style={{ fontSize: 10, marginLeft: 2 }}>
-                                {f.note}
-                              </span>
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* container controls — write ops need the privileged path; shown
-                    disabled until that's wired, so the layout stays honest. */}
-                <div className="row-flex">
-                  <button className="rbtn" disabled style={{ opacity: 0.4 }} title="needs the privileged switchover path">
-                    <Ic name="stop" size={13} /> Stop container
-                  </button>
-                  <button className="rbtn" disabled style={{ opacity: 0.4 }} title="needs the privileged switchover path">
-                    <Ic name="refresh" size={13} /> Restart
-                  </button>
-                  <button className="rbtn" onClick={openComfy} title="Open ComfyUI logs / console">
-                    <Ic name="logs" size={13} /> Logs ↗
-                  </button>
-                  <span className="grow" style={{ flex: 1 }} />
-                  <span className="mono dimx" style={{ fontSize: 11 }}>
-                    {st.inference?.hermes ? 'inference holds the iGPU' : containerUp ? 'generation holds the iGPU' : 'iGPU idle'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* footer — container identity + queue/caret expand control */}
-          <div className="engine-foot has-q">
-            <div className="foot-id">
-              <span className="k">container</span>
-              <span className="v comfy">{st.container?.name || 'comfyui'}</span>
-              <span className="sep">·</span>
-              <span className="k">state</span>
-              <span className="v">{st.container?.state || 'absent'}</span>
-              <span className="sep">·</span>
-              <span className="k">mode</span>
-              <span className="v comfy">{st.mode}</span>
-              <span className="sep">·</span>
-              <span className="k">endpoint</span>
-              <span className="v comfy">{st.endpoint || '—'}</span>
-            </div>
-            <button
-              className={'qcaret' + (queueTotal === 0 ? ' empty' : '')}
-              onClick={() => setOpen((o) => !o)}
-              aria-expanded={open}
-            >
-              <span className="q">
-                <Ic name="queue" size={13} /> queue
-                {queueTotal > 0 ? (
-                  <span className="qn">{queueTotal}</span>
-                ) : (
-                  <span className="qrun">empty</span>
-                )}
-                {running > 0 && <span className="qrun">· {running} running</span>}
-              </span>
-              <span className="car">
-                <Ic name="chev" size={13} />
-              </span>
-            </button>
-          </div>
-        </div>
+    <div>
+      <BlkH icon="bolt" acc note="opens in ComfyUI ↗">workflows</BlkH>
+      <div className="flows">
+        {flows.map((f, i) => (
+          <button className="flow" key={i}>
+            <span className="ic"><Ci name={f.ic} size={14} /></span>
+            <span>{f.a}</span>
+            <span className="arr">→</span>
+            <span>{f.b}</span>
+            {f.tag && <span className="tag">{f.tag}</span>}
+          </button>
+        ))}
       </div>
-
-      {confirm && (
-        <SwitchoverConfirm
-          target={confirm}
-          queuePending={pending}
-          busy={sw.isPending}
-          onCancel={() => setConfirm(null)}
-          onConfirm={doSwitch}
-        />
-      )}
     </div>
   )
 }
 
-Object.assign(window, { ComfyuiPane })
+// ── Models on share inventory ─────────────────────────────────────────────────
+const INV_DEFAULT = [
+  { n: 6,  l: 'checkpoints' },
+  { n: 4,  l: 'video', u: true },
+  { n: 11, l: 'loras' },
+  { n: 3,  l: 'vae' },
+]
+const MODELS_DEFAULT = 'Wan 2.2 · Qwen-Image · HunyuanVideo 1.5 · LTX-2'
+
+function ModelsBlock({ inv = INV_DEFAULT, models = MODELS_DEFAULT }) {
+  return (
+    <div>
+      <BlkH icon="layers" note="manager ↗">models on share</BlkH>
+      <div className="inv">
+        {inv.map((m, i) => (
+          <span className="inv-pill" key={i}>
+            <b>{m.n}</b>
+            {m.u ? <span className="u">{m.l}</span> : ` ${m.l}`}
+          </span>
+        ))}
+      </div>
+      <div className="inv-models">{models}</div>
+    </div>
+  )
+}
+
+// ── Mock data (handoff demo values) ─────────────────────────────────────────
+export const COMFYUI_V2_MOCK = {
+  engine: {
+    name: 'ComfyUI',
+    endpoint: ':8188',
+    image: 'ghcr.io/hal0ai/comfyui@sha256:9f3c…b21a',
+    restart: 'no',
+  },
+  run: {
+    name: 'wan2.2-i2v',
+    kind: '480p · 81 frames',
+    pct: 72,
+    eta: '~38s',
+    node: 'KSampler (low-noise)',
+    step: 3,
+    total: 4,
+    its: 1.9,
+    loaded: 'wan-hi + wan-lo · umt5-xxl · wan-vae · 2 loras',
+  },
+  queue: [
+    { name: 'qwen-image', kind: 'txt2img · 1328²' },
+    { name: 'sdxl',       kind: 'upscale 4×' },
+  ],
+  gtt: { used: 54, ceil: 80 },
+  ram: { used: 61, ceil: 96 },
+  stats: { util: 97, temp: 71, clk: 2.7, its: 1.9 },
+}
+
+// ── Card header ───────────────────────────────────────────────────────────────
+function CardHead({ engine, run, pct }) {
+  const hasRun = run != null
+  return (
+    <div className="wcard-h">
+      <span className="glyph"><Ci name="comfy" size={16} /></span>
+      <span className="col">
+        <span className="ttl">ComfyUI</span>
+        <span className="sub">image-gen engine · docker</span>
+      </span>
+      <span className={'epill' + (hasRun ? ' generating' : '')}>
+        <span className="dot" />
+        {hasRun ? `generating · ${Math.round(pct)}%` : 'idle'}
+      </span>
+      <span className="cf-pill">
+        <span className="d" />
+        iGPU · exclusive
+      </span>
+      <span className="grow" />
+      <span className="gpu-note">
+        <Ci name="bolt" size={11} /> inference slots <span className="b">paused</span> while rendering
+      </span>
+      <span className="meta">docker · <b>{engine.endpoint}</b></span>
+    </div>
+  )
+}
+
+// ── Card footer ───────────────────────────────────────────────────────────────
+function CardFoot({ engine }) {
+  return (
+    <div className="wfoot">
+      <div className="foot-id">
+        <span className="k">container</span>
+        <span className="v acc">comfyui</span>
+        <span className="sep">·</span>
+        <span className="k">image</span>
+        <span className="v">{engine.image}</span>
+        <span className="sep">·</span>
+        <span className="k">restart</span>
+        <span className="v">{engine.restart}</span>
+        <span className="sep">·</span>
+        <span className="k">endpoint</span>
+        <span className="v acc">{engine.endpoint}</span>
+      </div>
+      <span className="grow" />
+      <span className="foot-ctrls">
+        <button className="sctrl stop" title="Stop container"><Ci name="stop" size={12} /></button>
+        <button className="sctrl restart" title="Restart"><Ci name="refresh" size={12} /></button>
+        <button className="sctrl" title="Logs"><Ci name="logs" size={12} /></button>
+      </span>
+    </div>
+  )
+}
+
+// ── Empty-queue state (in-flow, NO overlay) ───────────────────────────────────
+// CRITICAL: must NOT be position:absolute;inset:0 — see PR #845 lockup.
+// min-height keeps the block in-flow with visible height.
+function EmptyQueueState() {
+  return (
+    <div className="queue-empty-state">
+      <span>nothing queued · drop a workflow in</span>
+      <button className="rbtn acc" style={{ marginLeft: 8 }}>
+        <Ci name="ext" size={12} /> Open ComfyUI ↗
+      </button>
+    </div>
+  )
+}
+
+// ── Main ImageGenCard ─────────────────────────────────────────────────────────
+export function ImageGenCard({ mock = COMFYUI_V2_MOCK }) {
+  const { engine, run, queue, gtt, ram, stats } = mock
+  const t = useTick(900)
+
+  // Active render state (null = no render running)
+  const hasRun = run != null
+
+  // Jitter live readouts
+  const pct  = hasRun ? Math.min(99, jit(run.pct, 1.2, t)) : 0
+  const its  = hasRun ? jit(run.its, 0.18, t, 0.6) : 0
+  const used = jit(gtt.used, 1.4, t)
+
+  const gttPct  = used / gtt.ceil * 100
+  const gttWarn = gttPct >= 80
+
+  return (
+    <div className="wcard active">
+      <CardHead engine={engine} run={run} pct={pct} />
+      <div className="wcard-b">
+
+        {/* ── Render hero: preview frame + active-render progress ── */}
+        <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 22, alignItems: 'stretch' }}>
+          {/* Preview frame */}
+          <div className="preview">
+            <span className="scan" />
+            <span className="glyph"><Ci name="video" size={30} /></span>
+            {hasRun ? (
+              <span className="lab">
+                <b>{run.name}</b><br />{run.kind}<br />
+                live preview ↦ frame {Math.round(pct / 100 * 81)}/81
+              </span>
+            ) : (
+              <span className="lab">no active render</span>
+            )}
+          </div>
+
+          {/* Active render progress detail */}
+          <div>
+            <BlkH icon="bolt" acc note={hasRun ? `eta ${run.eta}` : undefined}>
+              active render
+            </BlkH>
+            {hasRun ? (
+              <div className="job" style={{ background: 'transparent', border: 'none', padding: 0, gap: 13 }}>
+                <div className="job-h" style={{ alignItems: 'flex-end' }}>
+                  <div className="col" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <span className="nm">
+                      {run.name} <span className="kind">· {run.kind}</span>
+                    </span>
+                    <span className="job-loaded">{run.node} · step {run.step}/{run.total}</span>
+                  </div>
+                  <span className="grow" />
+                  <span className="pct big">{Math.round(pct)}%</span>
+                </div>
+                <div className="gbar tall">
+                  <i style={{ width: pct + '%' }} />
+                </div>
+                <StepPips step={run.step} total={run.total} />
+                <div className="job-steps" style={{ marginTop: 2 }}>
+                  <span className="node">loaded: {run.loaded}</span>
+                  <span>{its} it/s</span>
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <button className="rbtn"><Ci name="stop" size={13} /> Cancel render</button>
+                  <button className="rbtn acc"><Ci name="ext" size={13} /> Open ComfyUI ↗</button>
+                </div>
+              </div>
+            ) : (
+              <div className="job-empty">engine idle · no job running</div>
+            )}
+          </div>
+        </div>
+
+        {/* ── Lower row: queue (2/3) + telemetry (1/3) ── */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '2fr 1fr',
+          gap: 22,
+          marginTop: 18,
+          paddingTop: 16,
+          borderTop: '1px solid var(--line-soft)',
+        }}>
+          {/* Queue */}
+          <div>
+            <BlkH icon="queue" note={`${hasRun ? '1 running' : '0 running'} · ${queue.length} pending`}>
+              queue
+            </BlkH>
+            {queue.length === 0 && !hasRun ? (
+              <EmptyQueueState />
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+                {/* Running row */}
+                {hasRun && (
+                  <div className="qcard row running">
+                    <span className="ldot generating" />
+                    <span className="qjob">
+                      <span className="qnm">{run.name}</span>
+                      <span className="qkind">{run.kind} · {run.node}</span>
+                    </span>
+                    <span className="grow" />
+                    <span className="qprog">
+                      <span className="bar"><i style={{ width: pct + '%' }} /></span>
+                      <span className="pc">{Math.round(pct)}%</span>
+                    </span>
+                    <span className="qspeed">{its} it/s</span>
+                    <span className="ctrls">
+                      <button className="sctrl stop" title="Cancel"><Ci name="stop" size={12} /></button>
+                      <button className="sctrl restart" title="Restart"><Ci name="refresh" size={12} /></button>
+                    </span>
+                  </div>
+                )}
+                {/* Pending rows */}
+                {queue.map((j, i) => (
+                  <div className="qcard row pending" key={j.name}>
+                    <span className="ldot pending" />
+                    <span className="qjob">
+                      <span className="qnm">{j.name}</span>
+                      <span className="qkind">{j.kind}</span>
+                    </span>
+                    <span className="grow" />
+                    <span className="stat">#{i + 1} · queued</span>
+                    <span className="ctrls">
+                      <button className="sctrl" title="Logs"><Ci name="logs" size={12} /></button>
+                      <button className="sctrl" title="Remove"><Ci name="close" size={12} /></button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Telemetry: GTT gauge + RAM spark + device metric grid */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+              <Gauge
+                pct={gttPct}
+                label="gtt"
+                sub={`${used} / ${gtt.ceil}`}
+                size={116}
+                warn={gttWarn}
+              />
+              <div style={{ minWidth: 0 }}>
+                <div className="blk-h" style={{ margin: '0 0 5px' }}>system ram</div>
+                <div className="tp-num" style={{ fontSize: 22 }}>
+                  {ram.used}<span className="u">/ {ram.ceil} GB</span>
+                </div>
+                <BarSpark style={{ height: 24, marginTop: 8 }} />
+              </div>
+            </div>
+            <div>
+              <BlkH icon="gauge" note="iGPU">device</BlkH>
+              <div className="mx2">
+                <div className="cstat">
+                  <span className="cl">util</span>
+                  <span className="cv acc">{stats.util}<span className="u">%</span></span>
+                </div>
+                <div className="cstat">
+                  <span className="cl">temp</span>
+                  <span className="cv">{stats.temp}<span className="u">°C</span></span>
+                </div>
+                <div className="cstat">
+                  <span className="cl">clock</span>
+                  <span className="cv">{stats.clk}<span className="u">GHz</span></span>
+                </div>
+                <div className="cstat">
+                  <span className="cl">speed</span>
+                  <span className="cv acc">{stats.its}<span className="u">it/s</span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Workflows + Models lower section ── */}
+        <div className="wcard-sub">
+          <WorkflowsBlock />
+          <ModelsBlock />
+        </div>
+      </div>
+
+      <CardFoot engine={engine} />
+    </div>
+  )
+}
+
+// ── Pane wrapper (mount point from slots.jsx) ─────────────────────────────────
+// Adds .comfy-v2-pane root + .comfy-page scope for blue accent CSS vars.
+//
+// Tests (and dev) can inject a different mock shape via
+// `window.__comfyuiV2MockOverride` before mount — same seam as
+// `window.__hal0UpdateStateOverride` in mock.ts.
+export function ComfyuiPane() {
+  const override =
+    typeof window !== 'undefined' ? window.__comfyuiV2MockOverride : undefined
+  const mock = override ?? COMFYUI_V2_MOCK
+  // .comfy-pane kept for backward-compat (comfyui-arbiter-v3 mount selector);
+  // those specs test switchover/pin UI removed in V2 — update in Task 5.2.
+  return (
+    <div className="comfy-v2-pane comfy-pane comfy-page">
+      <ImageGenCard mock={mock} />
+    </div>
+  )
+}
+
+Object.assign(window, { ComfyuiPane, ImageGenCard })
