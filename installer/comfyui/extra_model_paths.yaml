@@ -1,0 +1,15 @@
+comfyui:
+    base_path: /root/comfy-models
+    checkpoints: checkpoints
+    diffusion_models: diffusion_models
+    unet: unet
+    text_encoders: text_encoders
+    clip: clip
+    clip_vision: clip_vision
+    vae: vae
+    loras: loras
+    controlnet: controlnet
+    upscale_models: upscale_models
+    latent_upscale_models: latent_upscale_models
+    embeddings: embeddings
+    style_models: style_models
