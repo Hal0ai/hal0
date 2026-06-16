@@ -12,16 +12,13 @@ All network + subprocess calls are mocked — no real ComfyUI or container.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 from pathlib import Path
-from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Module-state isolation (same pattern as test_comfyui_proxy.py)
@@ -286,11 +283,7 @@ class TestWorkflowLaunch:
 _HISTORY_RESP = {
     "abc123": {
         "outputs": {
-            "9": {
-                "images": [
-                    {"filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"}
-                ]
-            }
+            "9": {"images": [{"filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"}]}
         },
         "timestamp": 1718530000.0,
     }
@@ -364,7 +357,7 @@ class TestPreview:
 class TestStatusTelemetry:
     """Ensure /status fields needed by the pane are present and well-formed."""
 
-    _SYSTEM_STATS = {
+    _SYSTEM_STATS: ClassVar[dict] = {
         "system": {"ram_total": 128 * 1024**3, "ram_free": 46 * 1024**3},
         "devices": [
             {
@@ -375,8 +368,8 @@ class TestStatusTelemetry:
             }
         ],
     }
-    _QUEUE_IDLE = {"queue_running": [], "queue_pending": []}
-    _QUEUE_BUSY = {
+    _QUEUE_IDLE: ClassVar[dict] = {"queue_running": [], "queue_pending": []}
+    _QUEUE_BUSY: ClassVar[dict] = {
         "queue_running": [[0, "abc", {}, {}, {}]],
         "queue_pending": [],
     }

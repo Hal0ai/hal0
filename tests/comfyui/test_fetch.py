@@ -1,19 +1,18 @@
 """Task 2.4: fetch_model TDD — mocked subprocess, no real downloads."""
+
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-
-from hal0.comfyui.capabilities import ModelVariant, default_variant
+from hal0.comfyui.capabilities import default_variant
 from hal0.comfyui.fetch import cancel_job, fetch_model, get_job
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 LTX2_VARIANT = default_variant("txt2video")  # family=ltx2, precision=bf16, fetch_script=get_ltx2.sh
-ESRGAN_VARIANT = default_variant("image_upscale")  # family=esrgan, precision=None, fetch_script=get_esrgan.sh
+ESRGAN_VARIANT = default_variant(
+    "image_upscale"
+)  # family=esrgan, precision=None, fetch_script=get_esrgan.sh
 
 
 def _make_proc(returncode=None, pid=12345):

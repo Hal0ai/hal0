@@ -96,10 +96,8 @@ def build_auto_selections(
     # No model pull at install — operator triggers downloads later via
     # POST /api/comfyui/models/fetch.
     from hal0.comfyui.capabilities import CAPABILITIES as _CAPS
-    comfyui_defaults = tuple(
-        (cap_id, cap.alternatives[0].family)
-        for cap_id, cap in _CAPS.items()
-    )
+
+    comfyui_defaults = tuple((cap_id, cap.alternatives[0].family) for cap_id, cap in _CAPS.items())
     return Selections(
         storage_dir=storage_dir,
         slots=slots,

@@ -7,10 +7,12 @@ Tests:
   3. get_sdxl.sh --dry-run lists expected target subdirs (checkpoints, loras, vae).
   4. get_esrgan.sh --dry-run lists expected target subdir (upscale_models).
 """
+
 import subprocess
 from pathlib import Path
-import yaml
+
 import pytest
+import yaml
 
 SCRIPTS_DIR = Path(__file__).parent.parent.parent / "installer" / "comfyui" / "scripts"
 MODEL_STORE = "/mnt/ai-models/comfyui/models"

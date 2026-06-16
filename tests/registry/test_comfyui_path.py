@@ -1,11 +1,7 @@
 """TDD: test _comfyui_models_dir uses model_store_root() instead of hardcoded /var/lib/hal0."""
 
-from pathlib import Path
-
-import pytest
-
-from hal0.registry import pull
 from hal0.config import paths
+from hal0.registry import pull
 
 
 def test_comfyui_models_dir_uses_store_root(monkeypatch, tmp_path):

@@ -36,6 +36,7 @@ def test_install_extension_comfyui_calls_comfy_up(monkeypatch):
     monkeypatch.setattr(exts, "_run", _fake_run)
     # Also mock shutil.which so the podman guard passes
     import shutil
+
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
 
     result = exts.install_extension("comfyui")

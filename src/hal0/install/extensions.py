@@ -63,6 +63,7 @@ def install_extension(ext_id: str) -> ExtensionOutcome:
                 _run(["/opt/comfyui/comfy-up.sh"])
             else:
                 import logging
+
                 logging.getLogger(__name__).info(
                     "comfyui: no container runtime found; skipping container start"
                 )

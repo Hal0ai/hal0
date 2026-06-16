@@ -1,4 +1,5 @@
 """Task 3.5 TDD: POST /api/comfyui/models/fetch route."""
+
 from __future__ import annotations
 
 import pytest
@@ -28,13 +29,13 @@ def client(tmp_hal0_home, monkeypatch):
 
 
 def test_auto_fetch_returns_202(client):
-    c, call_log = client
+    c, _call_log = client
     resp = c.post("/api/comfyui/models/fetch", json={"auto": True})
     assert resp.status_code == 202
 
 
 def test_auto_fetch_returns_5_jobs(client):
-    c, call_log = client
+    c, _call_log = client
     resp = c.post("/api/comfyui/models/fetch", json={"auto": True})
     data = resp.json()
     assert "jobs" in data

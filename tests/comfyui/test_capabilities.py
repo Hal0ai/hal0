@@ -1,7 +1,8 @@
 """Task 2.2: ComfyUI capability registry — TDD tests."""
+
 import os
-import pytest
-from hal0.comfyui.capabilities import CAPABILITIES, Capability, ModelVariant, default_variant
+
+from hal0.comfyui.capabilities import CAPABILITIES, default_variant
 
 SCRIPTS_DIR = os.path.join(
     os.path.dirname(__file__),
@@ -10,7 +11,13 @@ SCRIPTS_DIR = os.path.join(
 
 
 def test_all_capability_ids_present():
-    assert set(CAPABILITIES.keys()) == {"txt2img", "img2img", "txt2video", "img2video", "image_upscale"}
+    assert set(CAPABILITIES.keys()) == {
+        "txt2img",
+        "img2img",
+        "txt2video",
+        "img2video",
+        "image_upscale",
+    }
 
 
 def test_txt2img_default_family():

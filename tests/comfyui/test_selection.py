@@ -1,4 +1,5 @@
 """Task 3.5 TDD: selection.py — auto_selections + variant_for."""
+
 from __future__ import annotations
 
 import pytest
@@ -22,7 +23,7 @@ def test_auto_selections_match_defaults():
     """Each returned variant == the capability's first alternative."""
     result = auto_selections()
     cap_list = list(CAPABILITIES.values())
-    for v, cap in zip(result, cap_list):
+    for v, cap in zip(result, cap_list, strict=False):
         assert v is cap.alternatives[0], f"{cap.id}: expected first alternative"
 
 

@@ -33,7 +33,7 @@ import asyncio
 import contextlib
 import os
 import shutil
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -66,6 +66,9 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=1.5, read=4.0, write=2.0, pool=2.0)
 _POOL_LIMITS = httpx.Limits(max_connections=4, max_keepalive_connections=2)
 
 _client: httpx.AsyncClient | None = None
+
+# Keep strong refs to fire-and-forget tasks so they aren't GC'd mid-flight (RUF006).
+_BG_TASKS: set[asyncio.Task[Any]] = set()
 
 # In-flight switchover tracker. Module-global on purpose: there is exactly one
 # iGPU, so there is exactly one switch — /status surfaces it so the pane's poll
@@ -554,8 +557,8 @@ class _SelectionItem(BaseModel):
 
 
 class _FetchBody(BaseModel):
-    auto: Optional[bool] = None
-    selections: Optional[list[_SelectionItem]] = None
+    auto: bool | None = None
+    selections: list[_SelectionItem] | None = None
 
 
 @router.post("/models/fetch", status_code=202)
@@ -679,8 +682,10 @@ async def comfyui_restart() -> JSONResponse:
             stderr=asyncio.subprocess.DEVNULL,
         )
         # Fire-and-forget: don't wait — answer 202 now, let the container start.
-        asyncio.ensure_future(proc.communicate())
-    except (OSError, asyncio.TimeoutError):
+        _task = asyncio.ensure_future(proc.communicate())
+        _BG_TASKS.add(_task)
+        _task.add_done_callback(_BG_TASKS.discard)
+    except (TimeoutError, OSError):
         pass  # fail-soft: missing script or exec failure still returns 202
     return JSONResponse(status_code=202, content={"status": "restart_requested"})
 
@@ -787,6 +792,7 @@ def _latest_output_image(history: dict[str, Any]) -> dict[str, str] | None:
     """
     if not history:
         return None
+
     # Sort by timestamp if available, newest first
     def _ts(entry):
         return entry.get("timestamp", 0.0)

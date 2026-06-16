@@ -8,6 +8,7 @@ Public API:
         Looks up the variant with the given family within the capability.
         Raises KeyError for unknown capability or unknown family.
 """
+
 from __future__ import annotations
 
 from hal0.comfyui.capabilities import CAPABILITIES, ModelVariant, default_variant

@@ -31,6 +31,7 @@ EXPECTED_SCRIPTS = [
 
 # ── (a) scripts exist and are bash -n clean ──────────────────────────────────
 
+
 def test_all_scripts_exist():
     missing = [s for s in EXPECTED_SCRIPTS if not (SCRIPTS_DIR / s).exists()]
     assert not missing, f"Missing scripts in {SCRIPTS_DIR}: {missing}"
@@ -38,10 +39,8 @@ def test_all_scripts_exist():
 
 def test_all_scripts_are_executable():
     import stat
-    not_exec = [
-        s for s in EXPECTED_SCRIPTS
-        if not (SCRIPTS_DIR / s).stat().st_mode & stat.S_IXUSR
-    ]
+
+    not_exec = [s for s in EXPECTED_SCRIPTS if not (SCRIPTS_DIR / s).stat().st_mode & stat.S_IXUSR]
     assert not not_exec, f"Scripts not executable: {not_exec}"
 
 
@@ -59,10 +58,11 @@ def test_all_scripts_bash_syntax_clean():
         )
         if result.returncode != 0:
             errors.append(f"{name}: {result.stderr.strip()}")
-    assert not errors, f"bash -n failures:\n" + "\n".join(errors)
+    assert not errors, "bash -n failures:\n" + "\n".join(errors)
 
 
 # ── (b) comfyui.py /opt/comfyui/*.sh references covered ─────────────────────
+
 
 def test_comfyui_py_script_refs_all_shipped():
     """Every /opt/comfyui/<name>.sh referenced in comfyui.py must be shipped.
@@ -77,18 +77,15 @@ def test_comfyui_py_script_refs_all_shipped():
     refs = re.findall(r"/opt/comfyui/([\w.-]+\.sh)", source)
     shipped = {s for s in EXPECTED_SCRIPTS}
     missing = [r for r in refs if r not in shipped]
-    assert not missing, (
-        f"comfyui.py references /opt/comfyui/ scripts not in shipped set: {missing}"
-    )
+    assert not missing, f"comfyui.py references /opt/comfyui/ scripts not in shipped set: {missing}"
 
 
 # ── (c) install.sh places scripts at /opt/comfyui ────────────────────────────
 
+
 def test_install_sh_contains_opt_comfyui_placement():
     content = INSTALL_SH.read_text()
-    assert "/opt/comfyui" in content, (
-        "installer/install.sh has no /opt/comfyui placement block"
-    )
+    assert "/opt/comfyui" in content, "installer/install.sh has no /opt/comfyui placement block"
     # More specific: must use install command to copy the scripts
     assert "installer/comfyui/scripts" in content or "comfyui/scripts" in content, (
         "installer/install.sh does not reference installer/comfyui/scripts"
@@ -101,10 +98,8 @@ def test_install_sh_uses_install_command_for_scripts():
     # We look for the pattern of install + comfyui scripts + /opt/comfyui
     has_install_block = (
         "install -d /opt/comfyui" in content
-        or "install -d \"${PREFIX}/opt/comfyui\"" in content
+        or 'install -d "${PREFIX}/opt/comfyui"' in content
         or 'install -d "${PREFIX}/opt/comfyui"' in content
         or "COMFYUI_DIR" in content
     )
-    assert has_install_block, (
-        "install.sh does not contain 'install -d /opt/comfyui' or equivalent"
-    )
+    assert has_install_block, "install.sh does not contain 'install -d /opt/comfyui' or equivalent"

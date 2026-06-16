@@ -5,17 +5,19 @@ Public API:
     get_job(job_id)       -> dict | None
     cancel_job(job_id)    -> bool
 """
+
 from __future__ import annotations
 
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from hal0.comfyui.capabilities import ModelVariant
 
 # Scripts live at <repo-root>/installer/comfyui/scripts/
-_SCRIPTS_DIR: Path = Path(__file__).parent.parent.parent.parent / "installer" / "comfyui" / "scripts"
+_SCRIPTS_DIR: Path = (
+    Path(__file__).parent.parent.parent.parent / "installer" / "comfyui" / "scripts"
+)
 
 # Module-level job registry: job_id -> {"id", "family", "status", "returncode", "script", "_proc"}
 _JOBS: dict[str, dict] = {}
@@ -46,7 +48,7 @@ def fetch_model(variant: ModelVariant) -> str:
     return job_id
 
 
-def get_job(job_id: str) -> Optional[dict]:
+def get_job(job_id: str) -> dict | None:
     """Return job dict (without _proc) or None if unknown.
 
     Status is refreshed from proc.poll() on each call.
