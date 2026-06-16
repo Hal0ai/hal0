@@ -49,6 +49,10 @@ class FakeContainerProvider:
         self.load_calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
         self.unload_calls: list[dict[str, Any]] = []
         self.fail_load: Exception | None = None
+        # /health probe result. Default True: an active unit is also ready.
+        # Set False to simulate a still-loading / wedged model server (unit
+        # active but the inference server isn't answering /health yet).
+        self.healthy: bool = True
 
     # — SlotManager._spawn_locked / terminate (sync, executor-run) —
 
@@ -71,7 +75,7 @@ class FakeContainerProvider:
         return None
 
     async def health(self, port: int) -> dict[str, Any]:
-        return {"ok": True}
+        return {"ok": self.healthy}
 
     # — slot_view container_enrichment extras —
 

@@ -133,3 +133,42 @@ async def test_fail_watcher_does_not_fire_when_slot_unloads_cleanly(
     # Give any stray watcher time to misbehave; then assert OFFLINE held.
     await asyncio.sleep(0.6)  # > _FAIL_WATCH_INTERVAL_S
     assert sm._states["chat"].state == SlotState.OFFLINE
+
+
+async def test_fail_watcher_demotes_to_error_when_health_fails(
+    slot_root: Any,
+    container_stub: FakeContainerProvider,
+    fast_fail_watch: None,
+) -> None:
+    """#783/B4: a ready slot whose unit stays active but whose /health probe
+    starts failing (model server crashed / wedged) is demoted to ERROR.
+
+    Previously the watcher only checked ``is_active`` — a crashed-but-active
+    container kept publishing as dispatchable READY, so /api/health/system
+    and hal0_slot_up both lied. Demoting to ERROR makes the health endpoint
+    report degraded and drops the slot from the dispatchable set. The probe
+    result is recorded as health_ok=False for the metric fold-in (#791).
+    """
+    sm = SlotManager()
+    await sm.load("chat")
+    assert "chat" in sm._fail_watchers
+    # Unit stays active, but the model server stops answering /health.
+    container_stub.healthy = False
+    observed = await _wait_for_state(sm, "chat", SlotState.ERROR, timeout_s=5.0)
+    assert observed == SlotState.ERROR
+    rec = sm._states["chat"]
+    assert rec.extra.get("health_ok") is False
+
+
+async def test_fail_watcher_keeps_ready_while_health_ok(
+    slot_root: Any,
+    container_stub: FakeContainerProvider,
+    fast_fail_watch: None,
+) -> None:
+    """Guard: a healthy active slot must NOT be demoted by the watcher."""
+    sm = SlotManager()
+    await sm.load("chat")
+    assert "chat" in sm._fail_watchers
+    # Let several poll intervals elapse with the unit active + healthy.
+    await asyncio.sleep(0.8)  # > 3 * _FAIL_WATCH_INTERVAL_S (0.2)
+    assert sm._states["chat"].state == SlotState.READY

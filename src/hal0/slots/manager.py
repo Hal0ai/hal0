@@ -106,6 +106,11 @@ _FAIL_WATCH_INTERVAL_S: float = 2.0
 _FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
     {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
 )
+# #783/B4: an active unit is not necessarily healthy. The watcher also probes
+# the model server's /health; a crashed-but-active server (active unit, failing
+# /health) is demoted to ERROR — but only after this many CONSECUTIVE failures,
+# so a single transient blip doesn't trigger a disruptive model reload.
+_HEALTH_FAIL_STRIKES: int = 2
 
 # Idle-monitor defaults. A READY slot whose last activity is older than
 # _IDLE_AFTER_S gets demoted to IDLE so dashboards / unload heuristics
@@ -720,6 +725,7 @@ class SlotManager:
         once the slot leaves the live-state set, by self-cancel via the
         ERROR transition, or via outer ``task.cancel()``.
         """
+        health_failures = 0
         try:
             while True:
                 await asyncio.sleep(_FAIL_WATCH_INTERVAL_S)
@@ -740,7 +746,39 @@ class SlotManager:
                     )
                     continue
                 if active:
-                    continue
+                    # #783/B4: active is necessary but not sufficient. Probe
+                    # the model server's /health — a crashed/wedged server is
+                    # active to systemd while /health fails, so an is-active-
+                    # only watcher leaves it lying as dispatchable READY.
+                    if await self._probe_health(slot_name):
+                        health_failures = 0
+                        continue
+                    health_failures += 1
+                    if health_failures < _HEALTH_FAIL_STRIKES:
+                        # Tolerate a transient blip; a real crash fails again.
+                        continue
+                    # Re-check state in case load/unload moved us mid-probe.
+                    current = self._current_state(slot_name)
+                    if current not in _FAIL_WATCH_LIVE_STATES:
+                        return
+                    # Confirmed unhealthy → ERROR (red dot, operator cue). The
+                    # health endpoint (#783 cr1) then reports degraded and
+                    # hal0_slot_up reads health_ok=False (#791). Recoverable —
+                    # the dispatcher reloads on the next request.
+                    try:
+                        await self._transition(
+                            slot_name,
+                            SlotState.ERROR,
+                            message="model server failed /health probe",
+                            extra={"health_ok": False},
+                            force=True,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "slot.fail_watch_transition_failed",
+                            extra={"slot": slot_name, "error": str(exc)},
+                        )
+                    return
                 # The container unit went inactive while we believed it
                 # was live. Re-check state once more — load/unload may
                 # have moved us legitimately during the probe.
@@ -795,6 +833,37 @@ class SlotManager:
                 extra={"slot": slot_name, "error": str(exc)},
             )
             return False
+
+    async def _probe_health(self, slot_name: str) -> bool:
+        """Probe the slot's model-server ``/health`` (#783/B4).
+
+        Returns ``False`` only on a *definitive* not-ok response. Anything
+        inconclusive — missing config, no port, an NPU trio shadow (whose
+        /health would target a non-existent child port), or a probe
+        exception — returns ``True`` so the fail-watch never demotes a slot
+        it cannot actually judge. The watcher's strike counter handles
+        transient single failures; this method only reports one probe.
+        """
+        cfg = await self._maybe_load_config(slot_name)
+        if not cfg or is_npu_trio_shadow(cfg):
+            return True
+        port = _cfg_port(cfg)
+        if not port:
+            return True
+
+        from hal0.providers.container import container_provider
+
+        try:
+            health = await container_provider().health(port)
+        except Exception as exc:
+            # Inconclusive — a transport error is not proof the model server
+            # is dead. Don't demote; the next poll re-probes.
+            log.warning(
+                "slot.health_probe_failed",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return True
+        return bool(health.get("ok"))
 
     async def container_readiness_check(self, slot_name: str) -> tuple[bool, str]:
         """Check whether a container-backed slot is ready to serve requests.
@@ -2330,13 +2399,26 @@ class SlotManager:
         if not active:
             return None
 
-        resolved = SlotState.READY
+        # #790: an active unit is not necessarily ready. A still-loading or
+        # wedged container is active to systemd while its model server isn't
+        # answering /health — adopting it straight to READY publishes it as
+        # dispatchable and live traffic 502s. is_active is already confirmed
+        # above, so only the /health half remains: probe it and adopt to
+        # WARMING (not READY) on a definitive not-ok. _probe_health degrades
+        # gracefully (inconclusive → True) so a probe transport error never
+        # 500s the best-effort /api/slots list, and short-circuits NPU trio
+        # shadows (no own model server) to healthy.
+        healthy = await self._probe_health(slot_name)
+        resolved = SlotState.READY if healthy else SlotState.WARMING
         extras: dict[str, Any] = {
             "backend": cfg.get("backend", "vulkan"),
             "provider": cfg.get("provider", "llama-server"),
             "adopted": True,
+            # Record the probe result so /api/health + hal0_slot_up can fold
+            # in real readiness rather than trusting FSM state alone (#791).
+            "health_ok": healthy,
         }
-        detail = "container unit active"
+        detail = "container unit active" if healthy else "container active, model server not ready"
         # ``force=True`` is required: the legal-transition map does not
         # contain offline→ready. Adoption is the exception — the state
         # machine is recovering from drift, not following load().
