@@ -5,6 +5,7 @@ this makes them (and future entries) a selectable, wired set."""
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Literal
@@ -23,6 +24,7 @@ class Extension:
 
 EXTENSIONS: list[Extension] = [
     Extension("openwebui", "app", "Open WebUI", "Chat web UI for your models", True),
+    Extension("comfyui", "app", "ComfyUI", "Image & video generation (iGPU)", True),
     Extension("hermes", "agent", "Hermes", "Conversational agent with memory", True),
     Extension("pi", "agent", "Pi", "Coding agent", False),
 ]
@@ -53,6 +55,18 @@ def install_extension(ext_id: str) -> ExtensionOutcome:
             _run(["hal0", "agent", "install", ext.id])
         elif ext.id == "openwebui":
             _run(["systemctl", "enable", "--now", "hal0-openwebui.service"])
+        elif ext.id == "comfyui":
+            # ComfyUI is arbiter/slot-managed (not a systemd unit).
+            # Bring the container up via comfy-up.sh if a container runtime is present.
+            runtime = shutil.which("podman") or shutil.which("docker")
+            if runtime:
+                _run(["/opt/comfyui/comfy-up.sh"])
+            else:
+                import logging
+                logging.getLogger(__name__).info(
+                    "comfyui: no container runtime found; skipping container start"
+                )
+                return ExtensionOutcome(ext_id=ext_id, skipped="no_container_runtime")
         return ExtensionOutcome(ext_id=ext_id, installed=True)
     except Exception as exc:  # best-effort
         return ExtensionOutcome(ext_id=ext_id, error=str(exc))
