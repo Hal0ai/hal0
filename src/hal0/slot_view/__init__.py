@@ -154,6 +154,21 @@ def serialize_slot(slot: Any, model_cache: dict[str, Any] | None = None) -> dict
             loaded.remove(slot.model_id)
             loaded.insert(0, slot.model_id)
         base["models"] = loaded
+        # #792: a model-requiring slot that reports "serving" with zero
+        # resident models is lying — nothing is actually loaded to serve.
+        # The provided model_cache is the authoritative live loaded set, so
+        # an empty list means nothing is resident. Downgrade the surfaced
+        # status to idle — the documented "process up but /v1/models empty"
+        # state (issue #31). Only SERVING is corrected: an empty cache for a
+        # READY/IDLE slot can mean "not yet observed" rather than "definitely
+        # empty". The true FSM ``state`` is preserved; only ``status`` moves.
+        if base.get("status") == "serving" and not loaded:
+            # Lazy import: top-level would cycle (hal0.slots.__init__ pulls in
+            # the heavy manager, which imports this module). See module note.
+            from hal0.slots.state import provider_requires_model
+
+            if provider_requires_model(base.get("provider")):
+                base["status"] = "idle"
     return base
 
 

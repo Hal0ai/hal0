@@ -402,6 +402,29 @@ async def test_status_adopts_running_slot_when_unit_active(
     assert snap.state == SlotState.READY
     # extras carry the adoption marker.
     assert snap.metadata.get("adopted") is True
+    # #790: a healthy adoption records the probe result so metrics / health
+    # can fold it in (health_ok=True is what keeps hal0_slot_up honest).
+    assert snap.metadata.get("health_ok") is True
+
+
+async def test_status_adopts_active_but_unhealthy_slot_as_warming(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#790: an active unit whose /health probe fails adopts to WARMING.
+
+    A still-loading or wedged container is active to systemd but its model
+    server isn't answering /health. Adopting it straight to READY publishes
+    it as dispatchable and live traffic 502s. It must adopt to WARMING and
+    record health_ok=False instead.
+    """
+    sm = SlotManager()
+    await sm._transition("chat", SlotState.OFFLINE, force=True)
+    container_stub.active.add("chat")
+    container_stub.healthy = False  # unit up, model server not ready
+    snap = await sm.status("chat")
+    assert snap.state == SlotState.WARMING
+    assert snap.metadata.get("health_ok") is False
 
 
 async def test_status_rehydrates_backend_from_toml(

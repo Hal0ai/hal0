@@ -155,3 +155,45 @@ def test_route_is_public(client: TestClient) -> None:
     resp = client.get("/api/metrics/prometheus")
     # 200 even without credentials — public route.
     assert resp.status_code == 200
+
+
+# ── #791: hal0_slot_up folds in the real /health ok-flag ────────────────────
+
+
+def test_crashed_but_active_slot_reports_up_zero() -> None:
+    # A slot whose last health probe FAILED while its FSM still reads a
+    # ready-set state (crashed-but-active) must report up=0 — otherwise
+    # alerting is blind to a slot that is "active" to systemd but whose
+    # model server is dead. ready_total must drop with it.
+    from types import SimpleNamespace
+
+    from hal0.slots.metrics import render_slot_metrics
+
+    crashed = SimpleNamespace(name="chat", state="ready", metadata={"health_ok": False})
+    body = render_slot_metrics([crashed])
+    assert 'hal0_slot_up{slot="chat"} 0' in body
+    # The one-hot state line still reflects the true FSM state.
+    assert 'hal0_slot_state{slot="chat",state="ready"} 1' in body
+    assert "hal0_slots_ready_total 0" in body
+
+
+def test_ready_slot_without_health_flag_stays_up() -> None:
+    # Backward-compat: an absent/unknown health flag must NOT force up=0 —
+    # the metric falls back to FSM state (slot not yet probed / cache lag).
+    from types import SimpleNamespace
+
+    from hal0.slots.metrics import render_slot_metrics
+
+    body = render_slot_metrics([SimpleNamespace(name="chat", state="ready", metadata={})])
+    assert 'hal0_slot_up{slot="chat"} 1' in body
+
+
+def test_health_ok_true_ready_slot_reports_up() -> None:
+    from types import SimpleNamespace
+
+    from hal0.slots.metrics import render_slot_metrics
+
+    body = render_slot_metrics(
+        [SimpleNamespace(name="chat", state="ready", metadata={"health_ok": True})]
+    )
+    assert 'hal0_slot_up{slot="chat"} 1' in body
