@@ -13,6 +13,7 @@ import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useSidebarAgentRollup, useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useHardware } from '@/api/hooks/useHardware'
+import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -321,47 +322,20 @@ function Sidebar({ route, param, onGo }) {
 //                 the chat figure (advertised_models) plus a non-chat modality
 //                 breakdown counted from the real slots by group.
 //   - runtime   — container-slot readiness (useRuntimeRollup → /api/slots).
-//   - openwebui — the external chat UI unit (useInstallState.openwebui_running).
+//   - openwebui — the external chat UI link from /api/config/urls.
 //                 Row key deep-links to the OpenWebUI app.
 //
 // hermes + openwebui link targets are NOT hardcoded — useConfigUrls() reads
 // GET /api/config/urls, where the backend derives the reachable host from the
 // request (so links work on localhost / LAN IP / hal0.local / a custom
 // reverse-proxy domain) and honours the HAL0_{OPENWEBUI,HERMES}_PUBLIC_URL
-// env overrides. Each `*_enabled` flag gates whether we render a link at all.
+// env overrides.
 function SidebarRuntimeWidget({ onGo }) {
-  const L         = useRuntimeRollup();
   const agent     = useSidebarAgentRollup();
   const endpoints = useEndpoints().data || [];
   const slots     = useSlots().data     || [];
   const urls      = useConfigUrls();
 
-  // ── runtime ──
-  // B12: the slot-poll rollup only knows up/down; /api/health/system is the
-  // honest signal for up-but-DEGRADED. When the probe says degraded we force
-  // the chip amber and tooltip the failing checks, even if every slot is up.
-  const health        = useHealthSystem();
-  const degraded      = health.data?.status === 'degraded';
-  const failing       = failingChecks(health.data);
-  const runtimeClass  = degraded ? 'warn'
-    : L.status === 'up' ? 'up'
-      : L.status === 'down' ? 'down'
-        : '';
-  const runtimeTitle = degraded
-    ? `degraded — ${failing.length ? failing.join("; ") : "see /api/health/system"}`
-    : `${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`;
-
-  // ── hermes ── honest dot tone: green=running, red=broken, amber=unknown.
-  // "off" when no agent is installed (no false-broken red on a fresh box).
-  const agentClass =
-    agent.agentStatus === 'running' ? 'up'
-      : agent.agentStatus === 'broken' ? 'down'
-        : 'warn';
-  const agentLabel =
-    !agent.installed ? 'off'
-      : agent.agentStatus === 'running' ? 'running'
-        : agent.agentStatus === 'broken' ? 'broken'
-          : '—';
   // hermes web dashboard link — only when the backend advertises a public
   // URL (loopback-only otherwise, so no host:port fallback exists).
   const hermesUrl      = urls.data?.hermes || "";
@@ -369,9 +343,6 @@ function SidebarRuntimeWidget({ onGo }) {
 
   // ── hal0 endpoint ── the synthetic composite upstream (first/only one).
   const ep        = endpoints[0];
-  const epServing = !!ep && ep.status === 'serving';
-  const epClass   = !ep ? 'warn' : epServing ? 'up' : 'down';
-  const epLabel   = !ep ? '—' : epServing ? 'serving' : 'offline';
   const chatCount = ep?.advertised_models ?? 0;
   const embedCount = slots.filter(s => s.group === "embed").length;
   const voiceCount = slots.filter(s => s.group === "voice").length;
@@ -382,15 +353,10 @@ function SidebarRuntimeWidget({ onGo }) {
   if (imgCount   > 0) extraParts.push(`${imgCount} img`);
   const modelsTitle = [`${chatCount} chat`, ...extraParts].join(" · ");
 
-  // ── openwebui ── "—" until /api/config/urls resolves, then running/off.
-  // `openwebui_enabled` already folds in "unit up AND reachably linkable",
-  // so it drives both the dot and whether the key is a link.
+  // ── openwebui ── /api/config/urls is link discovery only. Health lives in
+  // the footer runtime chip, driven by /api/services/health.
   const owuiUrl      = urls.data?.openwebui || "";
-  const owuiKnown    = urls.isSuccess;
-  const owuiEnabled  = urls.data?.openwebui_enabled === true;
-  const owuiClass    = !owuiKnown ? 'warn' : owuiEnabled ? 'up' : 'down';
-  const owuiLabel    = !owuiKnown ? '—' : owuiEnabled ? 'running' : 'off';
-  const owuiLinkable = owuiEnabled && !!owuiUrl;
+  const owuiLinkable = !!owuiUrl;
 
   return (
     <div className="sb-status sb-runtime" data-testid="sidebar-runtime-widget">
@@ -409,42 +375,22 @@ function SidebarRuntimeWidget({ onGo }) {
         ) : (
           <span className="k">hermes</span>
         )}
-        <span className={"v " + agentClass} title={`agent ${agent.agentId ?? ""} — ${agentLabel}`}>
-          <span className="dot" />{agentLabel}
-        </span>
+        <span className="v">{agent.installed ? "agent" : "not installed"}</span>
       </div>
 
-      {/* hal0 — composite /v1 endpoint (read-only) */}
-      <div className="row" data-testid="runtime-row-hal0" title={ep?._synthetic_reason || ""}>
+      {/* hal0 — composite /v1 endpoint (read-only) + model count */}
+      <div className="row" data-testid="runtime-row-hal0" title={modelsTitle || ep?._synthetic_reason || ""}>
         <span className="k">hal0</span>
-        <span className={"v " + epClass}><span className="dot" />{epLabel}</span>
-      </div>
-      <div className="row rt-sub" title={modelsTitle}>
-        <span className="k">models</span>
         <span className="v">
           <b>{chatCount}</b>
+          <span className="rt-model-label"> models</span>
           {extraParts.length > 0 && (
             <span className="rt-extra"> + {extraParts.join(" · ")}</span>
           )}
         </span>
       </div>
 
-      {/* runtime — container slot readiness */}
-      <div
-        className="row"
-        data-testid="runtime-row-runtime"
-        title={runtimeTitle}
-      >
-        <span className="k">runtime</span>
-        <span className={"v " + runtimeClass} data-degraded={degraded ? "1" : undefined}>
-          <span className="dot" />
-          {degraded
-            ? `degraded · ${L.ready}/${L.total} ready`
-            : `${L.status}${L.status === 'up' ? ` · ${L.ready}/${L.total} slots ready` : ''}`}
-        </span>
-      </div>
-
-      {/* openwebui — deep-links to the external chat UI when reachable */}
+      {/* openwebui — deep-links to the external chat UI when a URL is known */}
       <div className="row" data-testid="runtime-row-openwebui">
         {owuiLinkable ? (
           <a
@@ -457,7 +403,7 @@ function SidebarRuntimeWidget({ onGo }) {
         ) : (
           <span className="k">openwebui</span>
         )}
-        <span className={"v " + owuiClass}><span className="dot" />{owuiLabel}</span>
+        <span className="v">chat</span>
       </div>
 
       <div className="ln" />
@@ -482,6 +428,8 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   // useLogsStream subscribes to /api/journal/stream when the pane is
   // expanded (saves opening an SSE we don't render).
   const L = useRuntimeRollup();
+  const health = useHealthSystem();
+  const serviceHealth = useServicesHealth();
   const [paneSrc, setPaneSrc] = useStateC("merged");
   const [paneQ, setPaneQ] = useStateC("");
   // Source filter rides the SSE URL so the backend pre-filters; search
@@ -520,6 +468,33 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
   // chip stays hidden even when a real update exists (used to honour
   // the banner-stack dismiss). Default (undefined) is "no suppression".
   const showUpdateChip = hasUpdate && updateAvailable !== false;
+  const degraded = health.data?.status === 'degraded';
+  const failing = failingChecks(health.data);
+  const runtimeTone = degraded ? 'warn' : L.status === 'up' ? 'up' : L.status === 'down' ? 'err' : 'warn';
+  const runtimeTitle = degraded
+    ? `degraded — ${failing.length ? failing.join("; ") : "see /api/health/system"}`
+    : `${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`;
+  const serviceById = Object.fromEntries((serviceHealth.services || []).map((s) => [s.id, s]));
+  const footerIndicators = [
+    {
+      id: 'hal0',
+      label: 'hal0',
+      tone: degraded ? 'warn' : health.isError ? 'warn' : 'up',
+      title: degraded ? `hal0 degraded — ${failing.join("; ") || "see /api/health/system"}` : 'hal0 api ok',
+    },
+    {
+      id: 'hermes',
+      label: 'hermes',
+      tone: serviceHealth.pending ? 'warn' : serviceById.hermes?.up ? 'up' : 'err',
+      title: serviceById.hermes?.detail || (serviceHealth.pending ? 'service health pending' : 'hermes down'),
+    },
+    {
+      id: 'openwebui',
+      label: 'openwebui',
+      tone: serviceHealth.pending ? 'warn' : serviceById.openwebui?.up ? 'up' : 'err',
+      title: serviceById.openwebui?.detail || (serviceHealth.pending ? 'service health pending' : 'openwebui down'),
+    },
+  ];
 
   return (
     <div className={"footer" + (expanded ? " expanded" : "")}>
@@ -572,10 +547,23 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
         </div>
       )}
       <div className="foot-chips">
-        <div className={"foot-chip " + (L.status === 'up' ? 'up' : '')}>
+        <div className={"foot-chip " + runtimeTone} title={runtimeTitle}>
           <span className="dot" />
           <span className="k">runtime:</span>
           <span className="v">{L.status === 'up' ? `${L.ready}/${L.total} ready` : L.status}</span>
+          <span className="foot-service-dots" aria-label="service health">
+            {footerIndicators.map((svc) => (
+              <span
+                key={svc.id}
+                className={"foot-service-dot " + svc.tone}
+                title={`${svc.label}: ${svc.title}`}
+                aria-label={`${svc.label}: ${svc.tone}`}
+              >
+                <span className="dot" />
+                <span>{svc.label}</span>
+              </span>
+            ))}
+          </span>
         </div>
         {showUpdateChip && (
           <div className="foot-chip accent">

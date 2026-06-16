@@ -56,13 +56,8 @@ def test_urls_openwebui_enabled_false_when_systemctl_missing(
     assert resp.json()["openwebui_enabled"] is False
 
 
-def test_urls_behind_proxy_without_public_url_hides_chat(client: TestClient) -> None:
-    """Proxy deploys must declare HAL0_OPENWEBUI_PUBLIC_URL.
-
-    Without it we can't know where OpenWebUI is publicly reachable
-    (it can't be served under a path prefix), so the Chat link is
-    hidden rather than dangled at a broken URL.
-    """
+def test_urls_behind_proxy_without_public_url_uses_openwebui_port(client: TestClient) -> None:
+    """Proxy deploys without custom DNS still get the default :3001 link."""
     resp = client.get(
         "/api/config/urls",
         headers={
@@ -72,7 +67,7 @@ def test_urls_behind_proxy_without_public_url_hides_chat(client: TestClient) -> 
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["openwebui"] == "", body
+    assert body["openwebui"] == "http://ai-dev.thinmint.dev:3001", body
     assert body["openwebui_enabled"] is False, body
     assert body["api"] == "https://ai-dev.thinmint.dev", body
 
