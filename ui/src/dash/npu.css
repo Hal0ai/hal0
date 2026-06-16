@@ -25,6 +25,23 @@
   --npu-b-dim: rgba(104, 112, 149, 0.18);
   --npu-b-glow: rgba(104, 112, 149, 0.5);
   --npu-b-line: rgba(104, 112, 149, 0.45);
+
+  /* per-slot owner accents — assigned by slot index in npu-pane HUES. These
+     fill the slot's claimed columns (grid + mini strip). The glow/line halos
+     are deliberately *lightened* tints of each base so the colours (esp. the
+     dark indigo s0) read as a halo against the dark grid. */
+  --npu-s0: #4a4466; /* slot 0 — deep indigo */
+  --npu-s0-dim: rgba(74, 68, 102, 0.2);
+  --npu-s0-glow: rgba(138, 130, 184, 0.62); /* lightened indigo halo */
+  --npu-s0-line: rgba(138, 130, 184, 0.5);
+  --npu-s1: #6eadbc; /* slot 1 — teal */
+  --npu-s1-dim: rgba(110, 173, 188, 0.2);
+  --npu-s1-glow: rgba(140, 205, 220, 0.62);
+  --npu-s1-line: rgba(140, 205, 220, 0.5);
+  --npu-s2: #9fcbad; /* slot 2 — sage */
+  --npu-s2-dim: rgba(159, 203, 173, 0.2);
+  --npu-s2-glow: rgba(183, 224, 196, 0.62);
+  --npu-s2-line: rgba(183, 224, 196, 0.5);
 }
 .npu-card * {
   box-sizing: border-box;
@@ -301,13 +318,46 @@
   position: absolute;
   inset: 0;
   background: var(--tile-hue, var(--npu));
-  opacity: 0;
+  opacity: var(--base, 0); /* solid base fill — the colour IS the claim; empty tiles stay 0 */
   transition: opacity 0.45s var(--ease, ease);
+}
+/* claimed/serving cores breathe between --lo and --hi (set per-tile in JS from
+   the live activity level). Empty tiles carry no class → no keyframe → stay dark. */
+.npu-card .aie-tile.claimed .core,
+.npu-card .aie-tile.active .core {
+  animation: npuTilePulse var(--dur, 8s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
 }
 .npu-card .aie-tile.active {
   box-shadow:
     0 0 0 1px var(--tile-line, var(--npu-line)) inset,
     0 0 9px -2px var(--tile-glow, var(--npu-glow));
+  /* glow blur swells with load via --gmax; static box-shadow above is the
+     at-rest / reduced-motion fallback */
+  animation: npuTileGlow var(--dur, 8s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+}
+@keyframes npuTilePulse {
+  0%,
+  100% {
+    opacity: var(--lo, var(--base, 0.5));
+  }
+  50% {
+    opacity: var(--hi, var(--base, 0.9));
+  }
+}
+@keyframes npuTileGlow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px var(--tile-line, var(--npu-line)) inset,
+      0 0 3px -2px var(--tile-glow, var(--npu-glow));
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px var(--tile-line, var(--npu-line)) inset,
+      0 0 var(--gmax, 9px) -2px var(--tile-glow, var(--npu-glow));
+  }
 }
 /* degraded — probe could not read columns */
 .npu-card .aie.degraded {
@@ -366,12 +416,24 @@
   background: var(--bg-3);
   border: 1px solid var(--line);
 }
-.npu-card .tstrip .t.claimed {
-  border-color: transparent;
-}
+.npu-card .tstrip .t.claimed,
 .npu-card .tstrip .t.active {
   border-color: transparent;
+  opacity: var(--base, 0.5); /* solid fill; breathes via the shared keyframe */
+  animation: npuTilePulse var(--dur, 8s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+}
+.npu-card .tstrip .t.active {
   box-shadow: 0 0 6px -1px var(--tile-glow, var(--npu-glow));
+}
+
+/* reduced motion — freeze every tile at its solid base: no breath, no glow pulse */
+@media (prefers-reduced-motion: reduce) {
+  .npu-card .aie-tile .core,
+  .npu-card .aie-tile.active,
+  .npu-card .tstrip .t {
+    animation: none !important;
+  }
 }
 
 /* ── per-slot cards (right rail) ───────────────────────────────────── */
