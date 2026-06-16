@@ -427,6 +427,122 @@ async def test_status_adopts_active_but_unhealthy_slot_as_warming(
     assert snap.metadata.get("health_ok") is False
 
 
+async def test_status_flags_running_container_config_drift(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#863: a live unit whose argv no longer matches rendered config warns."""
+    (slot_root / "chat.toml").write_text(
+        "\n".join(
+            [
+                'name = "chat"',
+                "port = 8081",
+                'backend = "vulkan"',
+                'provider = "llama-server"',
+                'profile = "vulkan"',
+                "enabled = true",
+                "[model]",
+                'default = "qwen3-4b-q4_k_m"',
+                "context_size = 131072",
+                "[server]",
+                'extra_args = "-b 2048 -ub 2048"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    container_stub.expected_argv_by_slot["chat"] = [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8081",
+        "--model",
+        "/mnt/ai-models/qwen.gguf",
+        "--alias",
+        "qwen3-4b-q4_k_m",
+        "--ctx-size",
+        "131072",
+        "-b",
+        "2048",
+        "-ub",
+        "2048",
+    ]
+    container_stub.running_argv_by_slot["chat"] = [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8081",
+        "--model",
+        "/mnt/ai-models/qwen.gguf",
+        "--alias",
+        "qwen3-4b-q4_k_m",
+        "--ctx-size",
+        "4096",
+        "-b",
+        "512",
+        "-ub",
+        "512",
+    ]
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    drift = snap.metadata.get("config_drift")
+    assert drift == {
+        "drifted": True,
+        "diffs": [
+            {"key": "--ctx-size", "running": "4096", "rendered": "131072"},
+            {"key": "-b", "running": "512", "rendered": "2048"},
+            {"key": "-ub", "running": "512", "rendered": "2048"},
+        ],
+    }
+
+
+async def test_status_omits_config_drift_when_argv_matches(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    expected = [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8081",
+        "--model",
+        "/mnt/ai-models/qwen.gguf",
+        "--alias",
+        "qwen3-4b-q4_k_m",
+        "--ctx-size",
+        "131072",
+        "-b",
+        "2048",
+    ]
+    container_stub.expected_argv_by_slot["chat"] = list(expected)
+    container_stub.running_argv_by_slot["chat"] = list(expected)
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}
+
+
+async def test_list_does_not_compute_config_drift_on_poll_path(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#863: /api/slots polling must not podman-inspect argv for every slot."""
+    container_stub.expected_argv_by_slot["chat"] = ["--ctx-size", "131072"]
+    container_stub.running_argv_by_slot["chat"] = ["--ctx-size", "4096"]
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snaps = await sm.list()
+
+    chat = next(s for s in snaps if s.name == "chat")
+    assert "config_drift" not in chat.metadata
+
+
 async def test_status_rehydrates_backend_from_toml(
     slot_root: Path,
     tmp_hal0_home: str,

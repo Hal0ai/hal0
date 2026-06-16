@@ -148,6 +148,8 @@ def serialize_slot(slot: Any, model_cache: dict[str, Any] | None = None) -> dict
         base["backend"] = meta.get("backend")
     if not base.get("provider") and meta.get("provider"):
         base["provider"] = meta.get("provider")
+    if "config_drift" in meta:
+        base["config_drift"] = meta.get("config_drift")
     if model_cache is not None:
         loaded = list(model_cache.get(slot.name, []))
         if slot.model_id and slot.model_id in loaded:

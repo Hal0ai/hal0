@@ -49,6 +49,8 @@ class FakeContainerProvider:
         self.load_calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
         self.unload_calls: list[dict[str, Any]] = []
         self.fail_load: Exception | None = None
+        self.running_argv_by_slot: dict[str, list[str] | None] = {}
+        self.expected_argv_by_slot: dict[str, list[str] | None] = {}
         # /health probe result. Default True: an active unit is also ready.
         # Set False to simulate a still-loading / wedged model server (unit
         # active but the inference server isn't answering /health yet).
@@ -81,6 +83,14 @@ class FakeContainerProvider:
 
     def running_image(self, slot_name: str) -> str | None:
         return None
+
+    def running_argv(self, slot_name: str) -> list[str] | None:
+        return self.running_argv_by_slot.get(slot_name)
+
+    def expected_argv(
+        self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+    ) -> list[str] | None:
+        return self.expected_argv_by_slot.get(str(slot_cfg.get("name")))
 
     def image_present(self, image: str) -> bool:
         return False

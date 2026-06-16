@@ -509,6 +509,21 @@ class TestContainerSpec:
         spec = self._build_spec()
         assert spec.network_mode == ""
 
+    def test_expected_argv_uses_launch_plan_context_derive(self) -> None:
+        """#863: drift's rendered side must match the real load-path derive."""
+        provider = self._provider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            argv = provider.expected_argv(
+                _slot_cfg(),
+                _model_info(metadata={"context_length": 131072}),
+            )
+
+        assert argv is not None
+        assert argv[argv.index("--ctx-size") + 1] == "32768"
+
 
 # ── load_sync / unload_sync systemd interaction ───────────────────────────────
 
@@ -662,6 +677,34 @@ class TestLoadSync:
         assert any("stop" in c for c in cmds), f"stop not in {cmds}"
         # Unit file must be deleted
         assert not unit_file.exists()
+
+    def test_running_argv_reads_podman_config_cmd(self) -> None:
+        provider = ContainerProvider()
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = '["--ctx-size","4096","-b","512"]\n'
+
+        with (
+            patch("hal0.providers.container._container_runtime", return_value="/usr/bin/podman"),
+            patch("hal0.providers.container.subprocess.run", return_value=result) as run,
+        ):
+            argv = provider.running_argv("chat")
+
+        assert argv == ["--ctx-size", "4096", "-b", "512"]
+        run.assert_called_once()
+        assert "hal0-slot-chat" in run.call_args.args[0]
+
+    def test_running_argv_returns_none_on_unexpected_inspect_payload(self) -> None:
+        provider = ContainerProvider()
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = '{"Cmd":["--ctx-size","4096"]}\n'
+
+        with (
+            patch("hal0.providers.container._container_runtime", return_value="/usr/bin/podman"),
+            patch("hal0.providers.container.subprocess.run", return_value=result),
+        ):
+            assert provider.running_argv("chat") is None
 
 
 class TestImageMismatch:

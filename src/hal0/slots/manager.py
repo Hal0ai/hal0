@@ -111,6 +111,7 @@ _FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
 # /health) is demoted to ERROR — but only after this many CONSECUTIVE failures,
 # so a single transient blip doesn't trigger a disruptive model reload.
 _HEALTH_FAIL_STRIKES: int = 2
+_CONFIG_DRIFT_KEYS: tuple[str, ...] = ("--ctx-size", "--model", "--alias", "-b", "-ub")
 
 # Idle-monitor defaults. A READY slot whose last activity is older than
 # _IDLE_AFTER_S gets demoted to IDLE so dashboards / unload heuristics
@@ -1102,7 +1103,7 @@ class SlotManager:
 
     # ── queries ──────────────────────────────────────────────────────────────
 
-    async def status(self, slot_name: str) -> Slot:
+    async def status(self, slot_name: str, *, include_config_drift: bool = False) -> Slot:
         """Return a snapshot of the current slot state.
 
         Combines the persisted state.json with a live "is the container
@@ -1198,6 +1199,10 @@ class SlotManager:
         }
         if backend:
             meta["backend"] = backend
+        if include_config_drift:
+            config_drift = await self.compute_config_drift(slot_name, cfg=cfg, active=active)
+            if config_drift is not None:
+                meta["config_drift"] = config_drift
         return Slot(
             name=slot_name,
             state=observed,
@@ -1207,6 +1212,49 @@ class SlotManager:
             metadata=meta,
             last_used_at=self._last_used.get(slot_name),
         )
+
+    async def compute_config_drift(
+        self,
+        slot_name: str,
+        *,
+        cfg: dict[str, Any] | None = None,
+        active: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """Compare live container argv to the command a restart would render.
+
+        Returns a structured payload when the comparison is meaningful, or
+        None when the slot is inactive, lacks a config, is an NPU trio shadow,
+        or the provider cannot read either side of the comparison.
+        """
+        if active is None:
+            active = await self._is_active(slot_name)
+        if not active:
+            return None
+        if cfg is None:
+            cfg = await self._maybe_load_config(slot_name)
+        if not cfg or is_npu_trio_shadow(cfg):
+            return None
+
+        model_info = await self._resolve_model_info(_model_default(cfg))
+        from hal0.providers.container import container_provider
+
+        provider = container_provider()
+        loop = asyncio.get_event_loop()
+        running, rendered = await asyncio.gather(
+            loop.run_in_executor(None, provider.running_argv, slot_name),
+            loop.run_in_executor(None, provider.expected_argv, cfg, model_info),
+        )
+        if not running or not rendered:
+            return None
+
+        running_flags = _argv_values(running, _CONFIG_DRIFT_KEYS)
+        rendered_flags = _argv_values(rendered, _CONFIG_DRIFT_KEYS)
+        diffs = [
+            {"key": key, "running": running_flags.get(key), "rendered": rendered_flags.get(key)}
+            for key in _CONFIG_DRIFT_KEYS
+            if running_flags.get(key) != rendered_flags.get(key)
+        ]
+        return {"drifted": bool(diffs), "diffs": diffs}
 
     async def _maybe_load_config(self, slot_name: str) -> dict[str, Any] | None:
         """Read the slot's TOML if it exists, swallowing parse errors.
@@ -2493,6 +2541,30 @@ def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
     if isinstance(model, dict):
         return str(model.get("default") or "")
     return ""
+
+
+def _argv_values(argv: list[str], keys: tuple[str, ...]) -> dict[str, str | None]:
+    """Return the last value for each flag key in argv.
+
+    Last value wins because slot ``[server].extra_args`` intentionally follows
+    profile flags and can override them.
+    """
+    wanted = set(keys)
+    out: dict[str, str | None] = {}
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token in wanted:
+            out[token] = argv[i + 1] if i + 1 < len(argv) else None
+            i += 2
+            continue
+        for key in keys:
+            prefix = f"{key}="
+            if token.startswith(prefix):
+                out[key] = token[len(prefix) :]
+                break
+        i += 1
+    return out
 
 
 def _normalize_ctx_key(cfg_dict: dict[str, Any]) -> None:
