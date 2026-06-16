@@ -1,158 +1,223 @@
 /**
- * comfyui-arbiter-v3 — Playwright coverage for the GPU arbiter surface
- * (Phase D8): global "GPU: image mode" banner, arbiter mode chip, pin
- * toggle, and idle auto-restore countdown on the ComfyUI pane.
+ * comfyui-arbiter-v3 — V2 live-wired pane integration tests (Task 5.2).
  *
- * Harness mirrors profiles-crud-v3.spec.ts: VITE_MOCK_HAL0=1 build,
- * but /api/comfyui/* is NOT in the mockFetch allowlist, so page.route
- * intercepts both the status GET (read path) and the pin POST (raw:true
- * write path).
+ * Replaces the removed V1 switchover/pin UI tests. Tests the V2 pane's
+ * live API binding: page.route mocks /api/comfyui/* responses and asserts
+ * that status fields render into hero/queue/telemetry and that control
+ * buttons fire the correct POST endpoints.
+ *
+ * Convention (mirrors profiles-crud-v3.spec.ts):
+ *   - VITE_MOCK_HAL0=1 build; /api/comfyui/* is NOT in MOCK_ALLOWLIST
+ *   - page.route intercepts all comfyui routes
+ *   - The V2 pane is on .comfy-v2-pane (slots page Image Gen tab)
  */
 
 import { test, expect, json } from '../fixtures/apiMock'
 
-// Full /api/comfyui/status shape (D1-D7 backend): `mode` is arbiter-truth,
-// `arbiter` is the new block (null when the arbiter is unavailable).
-function comfyStatus(overrides: Record<string, any> = {}) {
+// Full /api/comfyui/status shape with V2 extension fields
+function comfyV2Status(overrides: Record<string, any> = {}) {
   return {
-    mode: 'inference',
-    reachable: false,
-    engine: 'stopped',
-    container: { name: 'comfyui', state: 'exited' },
-    endpoint: null,
-    memory: null,
-    queue: { running: 0, pending: 0 },
-    inference: { hermes: true },
-    inventory: { checkpoints: 3, diffusion: 2, loras: 8, vae: 2 },
-    switchover: { active: false, target: null, error: null },
-    arbiter: null,
-    ...overrides,
-  }
-}
-
-const IMG_STATUS = () =>
-  comfyStatus({
     mode: 'generation',
     reachable: true,
-    engine: 'running',
+    engine: 'generating',
     container: { name: 'comfyui', state: 'running' },
-    endpoint: 'http://127.0.0.1:8188',
+    endpoint: ':8188',
+    memory: {
+      gtt_used_gb: 54,
+      gtt_ceil_gb: 80,
+      ram_used_gb: 61,
+      ram_ceil_gb: 96,
+      pressure: false,
+    },
+    queue: { running: 1, pending: 2 },
     inference: { hermes: false },
+    inventory: { checkpoints: 6, video: 4, loras: 11, vae: 3 },
+    switchover: { active: false, target: null, error: null },
     arbiter: {
       mode: 'img',
       pinned: false,
       saved_llm_slots: ['primary', 'agent'],
-      // ~10 minutes out so the countdown renders a stable "~10m".
-      idle_restore_at: Math.floor(Date.now() / 1000) + 600,
+      idle_restore_at: null,
     },
-  })
+    // V2 render-hero extension fields (not in base /status spec but accepted
+    // by transformComfyuiStatus when present — same shape as mock fixture)
+    active_render: {
+      name: 'wan2.2-i2v',
+      kind: '480p · 81 frames',
+      pct: 72,
+      eta: '~38s',
+      node: 'KSampler (low-noise)',
+      step: 3,
+      total: 4,
+      its: 1.9,
+      loaded: 'wan-hi + wan-lo · umt5-xxl · wan-vae · 2 loras',
+    },
+    queue_jobs: [
+      { name: 'qwen-image', kind: 'txt2img · 1328²' },
+      { name: 'sdxl', kind: 'upscale 4×' },
+    ],
+    ...overrides,
+  }
+}
 
-const LLM_STATUS = () =>
-  comfyStatus({
-    arbiter: { mode: 'llm', pinned: false, saved_llm_slots: [], idle_restore_at: null },
+// Idle-engine variant — no active render, no pending jobs
+function comfyV2Idle() {
+  return comfyV2Status({
+    engine: 'running',
+    queue: { running: 0, pending: 0 },
+    active_render: null,
+    queue_jobs: [],
   })
+}
 
 async function gotoImageTab(page: any) {
   await page.goto('/#slots')
   await page.waitForSelector('.slot-tab.comfy', { timeout: 10_000 })
   await page.click('.slot-tab.comfy')
-  await page.waitForSelector('.comfy-pane', { timeout: 10_000 })
+  // V2 pane root has class .comfy-v2-pane
+  await page.waitForSelector('.comfy-v2-pane', { timeout: 10_000 })
 }
 
-test.describe('ComfyUI GPU arbiter — Phase D8', () => {
-  // ── 1. img mode: global banner + image-mode chip + countdown ──────────────
+test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
 
-  test('arbiter.mode img → global banner + image-mode chip + countdown', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route) => json(route, IMG_STATUS()))
+  // ── 1. status renders into hero ──────────────────────────────────────────
 
-    await page.goto('/#slots')
+  test('status: generating state renders job name + progress in hero', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+    await gotoImageTab(page)
 
-    // Global banner renders in the view-banners strip (any route).
-    const banner = page.locator('.banner', { hasText: 'GPU: image mode' })
-    await expect(banner).toBeVisible({ timeout: 10_000 })
-    await expect(banner).toContainText('LLM slots are stopped')
-
-    // Pane: arbiter chip shows image mode + the auto-restore countdown.
-    await page.click('.slot-tab.comfy')
-    await page.waitForSelector('.comfy-pane', { timeout: 10_000 })
-    const chip = page.locator('[data-testid="comfy-arbiter-chip"]')
-    await expect(chip).toBeVisible()
-    await expect(chip).toContainText('image mode')
-
-    const countdown = page.locator('[data-testid="comfy-restore-countdown"]')
-    await expect(countdown).toBeVisible()
-    await expect(countdown).toContainText(/auto-restore in ~\d+m/)
+    const pane = page.locator('.comfy-v2-pane')
+    await expect(pane).toContainText('wan2.2-i2v')
+    await expect(pane.locator('.gbar').first()).toBeVisible()
+    await expect(pane).toContainText('~38s')
+    await expect(pane).toContainText('it/s')
   })
 
-  // ── 2. pin toggle → POST /api/comfyui/pin {"pinned":true} ────────────────
+  // ── 2. status renders into queue ─────────────────────────────────────────
 
-  test('pin toggle POSTs {"pinned":true}; pinned reflected, countdown hidden', async ({ page }) => {
-    const posts: any[] = []
-    let pinned = false
+  test('status: queue rows bind — 1 running + 2 pending', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+    await gotoImageTab(page)
 
-    await page.route('**/api/comfyui/status', (route) => {
-      const st = IMG_STATUS()
-      st.arbiter!.pinned = pinned
-      return json(route, st)
+    const pane = page.locator('.comfy-v2-pane')
+    await expect(pane.locator('.qcard.row.running')).toBeVisible()
+    await expect(pane.locator('.qcard.row.running .ldot.generating')).toBeVisible()
+
+    const pending = pane.locator('.qcard.row.pending')
+    await expect(pending).toHaveCount(2)
+    await expect(pending.nth(0)).toContainText('qwen-image')
+    await expect(pending.nth(1)).toContainText('sdxl')
+  })
+
+  // ── 3. status renders into telemetry gauges ──────────────────────────────
+
+  test('status: GTT gauge shows memory values from /status memory block', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+    await gotoImageTab(page)
+
+    const pane = page.locator('.comfy-v2-pane')
+    const gauge = pane.locator('.gauge').first()
+    await expect(gauge).toBeVisible()
+    await expect(gauge).toContainText('gtt')
+    // gtt_used_gb: 54 should appear in sub label
+    await expect(gauge).toContainText('54')
+  })
+
+  // ── 4. Cancel render fires POST /api/comfyui/render/cancel ───────────────
+
+  test('Cancel render button fires POST /render/cancel', async ({ page }) => {
+    const posts: string[] = []
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+    await page.route('**/api/comfyui/render/cancel', (route: any) => {
+      posts.push(route.request().method())
+      return json(route, { status: 'cancel_requested' }, 202)
     })
-    await page.route('**/api/comfyui/pin', (route) => {
-      if (route.request().method() === 'POST') {
-        try { posts.push(JSON.parse(route.request().postData() || '{}')) } catch { posts.push({}) }
-        pinned = posts[posts.length - 1].pinned === true
-        return json(route, { pinned })
-      }
-      return json(route, { pinned })
+
+    await gotoImageTab(page)
+
+    const cancelBtn = page.locator('.comfy-v2-pane button', { hasText: 'Cancel render' }).first()
+    await expect(cancelBtn).toBeVisible()
+    await cancelBtn.click()
+
+    await expect.poll(() => posts.length, { timeout: 5_000 }).toBeGreaterThan(0)
+    expect(posts[0]).toBe('POST')
+  })
+
+  // ── 5. Workflow chip fires POST /api/comfyui/workflows/{name}/launch ──────
+
+  test('workflow chip click fires POST /workflows/{name}/launch', async ({ page }) => {
+    const launched: string[] = []
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+    await page.route(/\/api\/comfyui\/workflows\/[^/]+\/launch/, (route: any) => {
+      const url = route.request().url()
+      // extract name from URL
+      const match = url.match(/\/workflows\/([^/]+)\/launch/)
+      if (match) launched.push(decodeURIComponent(match[1]))
+      return json(route, { status: 'queued', prompt_id: 'mock-id' }, 202)
     })
 
     await gotoImageTab(page)
 
-    const pinBtn = page.locator('[data-testid="comfy-pin-toggle"]')
-    await expect(pinBtn).toBeVisible()
-    await expect(page.locator('[data-testid="comfy-restore-countdown"]')).toBeVisible()
+    // Click the first workflow chip (qwen-image)
+    const chips = page.locator('.comfy-v2-pane .flow')
+    await expect(chips).toHaveCount(6)
+    await chips.first().click()
 
-    await pinBtn.click()
-
-    // POST body asserted.
-    await expect.poll(() => posts.length).toBeGreaterThan(0)
-    expect(posts[0]).toEqual({ pinned: true })
-
-    // Pinned state reflected after refetch: pin active, countdown hidden.
-    await expect(pinBtn).toContainText('pinned', { timeout: 10_000 })
-    await expect(page.locator('[data-testid="comfy-restore-countdown"]')).not.toBeVisible()
+    await expect.poll(() => launched.length, { timeout: 5_000 }).toBeGreaterThan(0)
+    expect(launched[0]).toBe('qwen-image')
   })
 
-  // ── 3. llm mode: banner gone, inference chip ─────────────────────────────
+  // ── 6. Restart button fires POST /api/comfyui/restart ────────────────────
 
-  test('arbiter.mode llm → no banner, inference chip', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route) => json(route, LLM_STATUS()))
+  test('footer Restart button fires POST /restart', async ({ page }) => {
+    const posts: string[] = []
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+    await page.route('**/api/comfyui/restart', (route: any) => {
+      posts.push(route.request().method())
+      return json(route, { status: 'restart_requested' }, 202)
+    })
 
     await gotoImageTab(page)
 
-    await expect(page.locator('.banner', { hasText: 'GPU: image mode' })).not.toBeVisible()
+    const restartBtn = page.locator('.comfy-v2-pane .wfoot .sctrl.restart')
+    await expect(restartBtn).toBeVisible()
+    await restartBtn.click()
 
-    const chip = page.locator('[data-testid="comfy-arbiter-chip"]')
-    await expect(chip).toBeVisible()
-    await expect(chip).toContainText('inference')
-
-    // No countdown in llm mode.
-    await expect(page.locator('[data-testid="comfy-restore-countdown"]')).not.toBeVisible()
+    await expect.poll(() => posts.length, { timeout: 5_000 }).toBeGreaterThan(0)
+    expect(posts[0]).toBe('POST')
   })
 
-  // ── 4. arbiter null: fail-soft — no chip/banner/pin, legacy pane intact ──
+  // ── 7. Idle state: empty queue renders in-flow (no overlay lockup) ────────
 
-  test('arbiter null → no chip/banner/pin; legacy pane intact', async ({ page }) => {
-    await page.route('**/api/comfyui/status', (route) => json(route, comfyStatus()))
-
+  test('idle: empty-queue state renders in-flow, no click-blocking overlay', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Idle()))
     await gotoImageTab(page)
 
-    await expect(page.locator('.banner', { hasText: 'GPU: image mode' })).not.toBeVisible()
-    await expect(page.locator('[data-testid="comfy-arbiter-chip"]')).toHaveCount(0)
-    await expect(page.locator('[data-testid="comfy-pin-toggle"]')).toHaveCount(0)
-    await expect(page.locator('[data-testid="comfy-restore-countdown"]')).toHaveCount(0)
+    const pane = page.locator('.comfy-v2-pane')
+    await expect(pane.locator('.queue-empty-state')).toBeVisible()
 
-    // Legacy display: engine card + mode toggle + footer identity still render.
-    await expect(page.locator('.comfy-pane .engine')).toBeVisible()
-    await expect(page.locator('.comfy-pane .sw-wrap')).toBeVisible()
-    await expect(page.locator('.comfy-pane .engine-foot')).toContainText('inference')
+    // Open ComfyUI button must be clickable (would fail if overlay intercepts)
+    const openBtn = pane.locator('button, a', { hasText: 'Open ComfyUI' }).first()
+    await expect(openBtn).toBeVisible()
+    await expect(openBtn).toBeEnabled()
+    await openBtn.click({ trial: true })
+  })
+
+  // ── 8. Graceful degrade: absent active_render uses placeholder skeleton ───
+
+  test('degrade: no active_render field → placeholder skeleton renders without crash', async ({ page }) => {
+    // Status says 1 running but no active_render detail
+    const statusNoDetail = comfyV2Status({ active_render: undefined, queue_jobs: undefined })
+    delete statusNoDetail.active_render
+    delete statusNoDetail.queue_jobs
+
+    await page.route('**/api/comfyui/status', (route: any) => json(route, statusNoDetail))
+    await gotoImageTab(page)
+
+    const pane = page.locator('.comfy-v2-pane')
+    // Pane must not crash — the card header should be visible
+    await expect(pane.locator('.wcard-h')).toBeVisible()
+    // running row is shown (1 running)
+    await expect(pane.locator('.qcard.row.running')).toBeVisible()
   })
 })

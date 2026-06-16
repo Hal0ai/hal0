@@ -18,6 +18,13 @@ export const ENDPOINTS = {
   // Pin image mode (disables the arbiter's idle auto-restore). 501 when the
   // switchover gate is off.
   comfyuiPin: '/api/comfyui/pin',
+  // Render control
+  comfyuiRenderCancel: '/api/comfyui/render/cancel',
+  comfyuiRestart: '/api/comfyui/restart',
+  comfyuiLogs: '/api/comfyui/logs',
+  comfyuiWorkflowLaunch: (name: string) => `/api/comfyui/workflows/${encodeURIComponent(name)}/launch`,
+  // Latest output image proxy
+  comfyuiPreview: '/api/comfyui/preview',
 
   slotMetrics: '/api/slots/metrics',
   slot: (name: string) => `/api/slots/${encodeURIComponent(name)}`,

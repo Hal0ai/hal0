@@ -14,6 +14,14 @@
 // prefers-reduced-motion:reduce disables it via CSS `animation:none`.
 
 import './comfyui-pane.css'
+import {
+  useComfyui,
+  useComfyuiRenderCancel,
+  useComfyuiRestart,
+  useComfyuiWorkflowLaunch,
+  transformComfyuiStatus,
+  COMFYUI_FALLBACK,
+} from '@/api/hooks/useComfyui'
 
 const { useState, useEffect, useRef } = React
 
@@ -219,21 +227,26 @@ function StepPips({ step, total }) {
 
 // ── Workflows quick-launch ─────────────────────────────────────────────────────
 const FLOWS_DEFAULT = [
-  { ic: 'image',  a: 'text',   b: 'image',   tag: 'qwen-image' },
-  { ic: 'image',  a: 'image',  b: 'image' },
-  { ic: 'video',  a: 'text',   b: 'video',   tag: 'wan 2.2' },
-  { ic: 'video',  a: 'image',  b: 'video',   tag: 'i2v' },
-  { ic: 'layers', a: 'still',  b: 'animate', tag: 'chain' },
-  { ic: 'cube',   a: 'upscale',b: '4×' },
+  { ic: 'image',  a: 'text',   b: 'image',   tag: 'qwen-image',  name: 'qwen-image' },
+  { ic: 'image',  a: 'image',  b: 'image',                        name: 'img2img' },
+  { ic: 'video',  a: 'text',   b: 'video',   tag: 'wan 2.2',     name: 'wan2.2-t2v' },
+  { ic: 'video',  a: 'image',  b: 'video',   tag: 'i2v',         name: 'wan2.2-i2v' },
+  { ic: 'layers', a: 'still',  b: 'animate', tag: 'chain',       name: 'animate' },
+  { ic: 'cube',   a: 'upscale',b: '4×',                          name: 'upscale-4x' },
 ]
 
-function WorkflowsBlock({ flows = FLOWS_DEFAULT }) {
+function WorkflowsBlock({ flows = FLOWS_DEFAULT, onLaunch }) {
   return (
     <div>
       <BlkH icon="bolt" acc note="opens in ComfyUI ↗">workflows</BlkH>
       <div className="flows">
         {flows.map((f, i) => (
-          <button className="flow" key={i}>
+          <button
+            className="flow"
+            key={i}
+            onClick={() => onLaunch && onLaunch(f.name)}
+            data-workflow={f.name}
+          >
             <span className="ic"><Ci name={f.ic} size={14} /></span>
             <span>{f.a}</span>
             <span className="arr">→</span>
@@ -328,7 +341,7 @@ function CardHead({ engine, run, pct }) {
 }
 
 // ── Card footer ───────────────────────────────────────────────────────────────
-function CardFoot({ engine }) {
+function CardFoot({ engine, onRestart, onLogs }) {
   return (
     <div className="wfoot">
       <div className="foot-id">
@@ -347,8 +360,8 @@ function CardFoot({ engine }) {
       <span className="grow" />
       <span className="foot-ctrls">
         <button className="sctrl stop" title="Stop container"><Ci name="stop" size={12} /></button>
-        <button className="sctrl restart" title="Restart"><Ci name="refresh" size={12} /></button>
-        <button className="sctrl" title="Logs"><Ci name="logs" size={12} /></button>
+        <button className="sctrl restart" title="Restart" onClick={onRestart}><Ci name="refresh" size={12} /></button>
+        <button className="sctrl" title="Logs" onClick={onLogs}><Ci name="logs" size={12} /></button>
       </span>
     </div>
   )
@@ -357,19 +370,32 @@ function CardFoot({ engine }) {
 // ── Empty-queue state (in-flow, NO overlay) ───────────────────────────────────
 // CRITICAL: must NOT be position:absolute;inset:0 — see PR #845 lockup.
 // min-height keeps the block in-flow with visible height.
-function EmptyQueueState() {
+function EmptyQueueState({ comfyBaseUrl }) {
   return (
     <div className="queue-empty-state">
       <span>nothing queued · drop a workflow in</span>
-      <button className="rbtn acc" style={{ marginLeft: 8 }}>
-        <Ci name="ext" size={12} /> Open ComfyUI ↗
-      </button>
+      {comfyBaseUrl ? (
+        <a className="rbtn acc" href={comfyBaseUrl} target="_blank" rel="noopener noreferrer" style={{ marginLeft: 8 }}>
+          <Ci name="ext" size={12} /> Open ComfyUI ↗
+        </a>
+      ) : (
+        <button className="rbtn acc" style={{ marginLeft: 8 }}>
+          <Ci name="ext" size={12} /> Open ComfyUI ↗
+        </button>
+      )}
     </div>
   )
 }
 
 // ── Main ImageGenCard ─────────────────────────────────────────────────────────
-export function ImageGenCard({ mock = COMFYUI_V2_MOCK }) {
+export function ImageGenCard({
+  mock = COMFYUI_V2_MOCK,
+  onCancel,
+  onRestart,
+  onLogs,
+  onLaunch,
+  comfyBaseUrl,
+}) {
   const { engine, run, queue, gtt, ram, stats } = mock
   const t = useTick(900)
 
@@ -394,7 +420,16 @@ export function ImageGenCard({ mock = COMFYUI_V2_MOCK }) {
           {/* Preview frame */}
           <div className="preview">
             <span className="scan" />
-            <span className="glyph"><Ci name="video" size={30} /></span>
+            {hasRun && comfyBaseUrl ? (
+              <img
+                src="/api/comfyui/preview"
+                alt="latest render output"
+                className="preview-img"
+                style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.7 }}
+              />
+            ) : (
+              <span className="glyph"><Ci name="video" size={30} /></span>
+            )}
             {hasRun ? (
               <span className="lab">
                 <b>{run.name}</b><br />{run.kind}<br />
@@ -431,8 +466,14 @@ export function ImageGenCard({ mock = COMFYUI_V2_MOCK }) {
                   <span>{its} it/s</span>
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                  <button className="rbtn"><Ci name="stop" size={13} /> Cancel render</button>
-                  <button className="rbtn acc"><Ci name="ext" size={13} /> Open ComfyUI ↗</button>
+                  <button className="rbtn" onClick={onCancel}><Ci name="stop" size={13} /> Cancel render</button>
+                  {comfyBaseUrl ? (
+                    <a className="rbtn acc" href={comfyBaseUrl} target="_blank" rel="noopener noreferrer">
+                      <Ci name="ext" size={13} /> Open ComfyUI ↗
+                    </a>
+                  ) : (
+                    <button className="rbtn acc"><Ci name="ext" size={13} /> Open ComfyUI ↗</button>
+                  )}
                 </div>
               </div>
             ) : (
@@ -456,7 +497,7 @@ export function ImageGenCard({ mock = COMFYUI_V2_MOCK }) {
               queue
             </BlkH>
             {queue.length === 0 && !hasRun ? (
-              <EmptyQueueState />
+              <EmptyQueueState comfyBaseUrl={comfyBaseUrl} />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
                 {/* Running row */}
@@ -474,8 +515,8 @@ export function ImageGenCard({ mock = COMFYUI_V2_MOCK }) {
                     </span>
                     <span className="qspeed">{its} it/s</span>
                     <span className="ctrls">
-                      <button className="sctrl stop" title="Cancel"><Ci name="stop" size={12} /></button>
-                      <button className="sctrl restart" title="Restart"><Ci name="refresh" size={12} /></button>
+                      <button className="sctrl stop" title="Cancel" onClick={onCancel}><Ci name="stop" size={12} /></button>
+                      <button className="sctrl restart" title="Restart" onClick={onRestart}><Ci name="refresh" size={12} /></button>
                     </span>
                   </div>
                 )}
@@ -543,12 +584,12 @@ export function ImageGenCard({ mock = COMFYUI_V2_MOCK }) {
 
         {/* ── Workflows + Models lower section ── */}
         <div className="wcard-sub">
-          <WorkflowsBlock />
+          <WorkflowsBlock onLaunch={onLaunch} />
           <ModelsBlock />
         </div>
       </div>
 
-      <CardFoot engine={engine} />
+      <CardFoot engine={engine} onRestart={onRestart} onLogs={onLogs} />
     </div>
   )
 }
@@ -556,18 +597,68 @@ export function ImageGenCard({ mock = COMFYUI_V2_MOCK }) {
 // ── Pane wrapper (mount point from slots.jsx) ─────────────────────────────────
 // Adds .comfy-v2-pane root + .comfy-page scope for blue accent CSS vars.
 //
-// Tests (and dev) can inject a different mock shape via
-// `window.__comfyuiV2MockOverride` before mount — same seam as
-// `window.__hal0UpdateStateOverride` in mock.ts.
+// Priority for data source (highest wins):
+//   1. window.__comfyuiV2MockOverride  — e2e seam, set before mount
+//   2. live API poll (useComfyui + transformComfyuiStatus)
+//   3. COMFYUI_V2_MOCK                — static fallback for dev/storybook
+//
+// The mock override seam bypasses the hook entirely so e2e tests that inject
+// window.__comfyuiV2MockOverride get deterministic rendering without needing
+// to intercept /api/comfyui/status.
 export function ComfyuiPane() {
+  // Mock override seam (e2e / dev)
   const override =
     typeof window !== 'undefined' ? window.__comfyuiV2MockOverride : undefined
-  const mock = override ?? COMFYUI_V2_MOCK
-  // .comfy-pane kept for backward-compat (comfyui-arbiter-v3 mount selector);
-  // those specs test switchover/pin UI removed in V2 — update in Task 5.2.
+
+  // Live API poll — disabled when the override is set
+  const { data: liveStatus } = useComfyui({ active: !override })
+
+  // Derive pane data: override > live transform > static mock
+  let paneData
+  if (override) {
+    paneData = override
+  } else if (liveStatus) {
+    paneData = transformComfyuiStatus(liveStatus)
+  } else {
+    paneData = COMFYUI_V2_MOCK
+  }
+
+  // Control mutations
+  const cancelMutation = useComfyuiRenderCancel()
+  const restartMutation = useComfyuiRestart()
+  const launchMutation = useComfyuiWorkflowLaunch()
+
+  // Derive the ComfyUI base URL from live status endpoint field
+  const comfyBaseUrl = liveStatus?.endpoint
+    ? liveStatus.endpoint.startsWith('http')
+      ? liveStatus.endpoint
+      : `http://127.0.0.1:8188`
+    : undefined
+
+  // .comfy-pane kept for backward-compat (some mount selectors still use it).
   return (
     <div className="comfy-v2-pane comfy-pane comfy-page">
-      <ImageGenCard mock={mock} />
+      <ImageGenCard
+        mock={paneData}
+        onCancel={() => cancelMutation.mutate()}
+        onRestart={() => restartMutation.mutate()}
+        onLogs={() => {
+          // Fetch logs and open in a basic alert for now; a logs drawer is a
+          // future enhancement (the endpoint is wired, UI depth TBD).
+          fetch('/api/comfyui/logs?tail=60')
+            .then((r) => r.json())
+            .then((d) => {
+              if (Array.isArray(d?.lines) && d.lines.length > 0) {
+                alert(d.lines.join('\n'))
+              } else {
+                alert('no logs available')
+              }
+            })
+            .catch(() => alert('logs fetch failed'))
+        }}
+        onLaunch={(name) => launchMutation.mutate(name)}
+        comfyBaseUrl={comfyBaseUrl}
+      />
     </div>
   )
 }

@@ -88,7 +88,8 @@ test.describe('ImageGen V2 render-hero pane', () => {
 
     // Cancel + Open controls
     await expect(pane.locator('button', { hasText: 'Cancel render' })).toBeVisible()
-    await expect(pane.locator('button', { hasText: 'Open ComfyUI' })).toBeVisible()
+    // Open ComfyUI may be a <button> or <a> depending on whether the live endpoint is known
+    await expect(pane.locator('button, a').filter({ hasText: 'Open ComfyUI' }).first()).toBeVisible()
   })
 
   // ── 2. Queue rows ───────────────────────────────────────────────────────
@@ -187,7 +188,8 @@ test.describe('ImageGen V2 render-hero pane', () => {
 
     // Verify the Open ComfyUI button (below/near empty state) is clickable.
     // A full-bleed overlay would intercept this click and cause an error or wrong element.
-    const openBtn = pane.locator('button', { hasText: 'Open ComfyUI' }).first()
+    // Open ComfyUI may be <button> or <a> — check either
+    const openBtn = pane.locator('button, a').filter({ hasText: 'Open ComfyUI' }).first()
     await expect(openBtn).toBeVisible()
     // isEnabled asserts no invisible overlay blocking it
     await expect(openBtn).toBeEnabled()
