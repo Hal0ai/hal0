@@ -33,11 +33,15 @@ import asyncio
 import contextlib
 import os
 import shutil
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+import hal0.comfyui.fetch as _fetch_module
+from hal0.comfyui.selection import auto_selections, variant_for
 
 router = APIRouter()
 
@@ -537,6 +541,72 @@ async def comfyui_pin(request: Request) -> JSONResponse:
         return _arbiter_unavailable()
     arbiter.set_pin(pinned)
     return JSONResponse(status_code=200, content={"pinned": pinned})
+
+
+# ---------------------------------------------------------------------------
+# POST /models/fetch — deferred model pull trigger (Task 3.5)
+# ---------------------------------------------------------------------------
+
+
+class _SelectionItem(BaseModel):
+    capability: str
+    family: str
+
+
+class _FetchBody(BaseModel):
+    auto: Optional[bool] = None
+    selections: Optional[list[_SelectionItem]] = None
+
+
+@router.post("/models/fetch", status_code=202)
+async def comfyui_models_fetch(body: _FetchBody) -> JSONResponse:
+    """Trigger deferred model pulls for ComfyUI capabilities.
+
+    Body (one of):
+      {"auto": true}
+          Fetches the default variant for every capability (5 total).
+      {"selections": [{"capability": "txt2img", "family": "sdxl"}, ...]}
+          Fetches the named variant(s) explicitly.
+
+    Returns 202 with {"jobs": [job_id, ...]} immediately; each job runs in the
+    background via fetch.fetch_model (subprocess, non-blocking).
+
+    This is the DEFERRED post-install pull path — install runs with --no-pull
+    and this endpoint is called by the dashboard after setup completes.
+    """
+    if body.auto is None and not body.selections:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "comfyui.fetch.invalid_body",
+                    "message": "body must be {'auto': true} or {'selections': [...]}",
+                }
+            },
+        )
+
+    if body.auto:
+        variants = auto_selections()
+    else:
+        # Resolve explicit selections; surface unknown cap/family as 422.
+        variants = []
+        for item in body.selections:  # type: ignore[union-attr]
+            try:
+                v = variant_for(item.capability, item.family)
+            except KeyError as exc:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "error": {
+                            "code": "comfyui.fetch.unknown_variant",
+                            "message": str(exc),
+                        }
+                    },
+                )
+            variants.append(v)
+
+    job_ids = [_fetch_module.fetch_model(v) for v in variants]
+    return JSONResponse(status_code=202, content={"jobs": job_ids})
 
 
 __all__ = ["aclose_client", "router"]

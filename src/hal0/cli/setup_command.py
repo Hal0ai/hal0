@@ -92,8 +92,20 @@ def build_auto_selections(
         if coder:
             name, port = _SETUP_SLOTS["coder"]
             slots.append(SlotSelection("coder", name, port, coder[0].model_id))
+    # Record ComfyUI default capability picks as (capability_id, family) pairs.
+    # No model pull at install — operator triggers downloads later via
+    # POST /api/comfyui/models/fetch.
+    from hal0.comfyui.capabilities import CAPABILITIES as _CAPS
+    comfyui_defaults = tuple(
+        (cap_id, cap.alternatives[0].family)
+        for cap_id, cap in _CAPS.items()
+    )
     return Selections(
-        storage_dir=storage_dir, slots=slots, extensions=ext, npu_opt_in=bool(hw.npu.present)
+        storage_dir=storage_dir,
+        slots=slots,
+        extensions=ext,
+        npu_opt_in=bool(hw.npu.present),
+        comfyui_defaults=comfyui_defaults,
     )
 
 

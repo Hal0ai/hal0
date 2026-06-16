@@ -38,6 +38,16 @@ class Selections:
     slots: list[SlotSelection]
     extensions: dict[str, bool]  # extension id -> enabled
     npu_opt_in: bool = False
+    # Task 3.5: ComfyUI default capability selections recorded at install time.
+    # These are NOT pulled at install — the operator triggers pulls later via
+    # POST /api/comfyui/models/fetch.  Stored as (capability_id, family) pairs
+    # so they survive serialisation without depending on capabilities.py here.
+    # NOTE: install-selection integration friction — Selections models LLM slots
+    # (chat/coder), not image-gen pickers; this field is a lightweight sidecar
+    # rather than a first-class slot because ComfyUI picks are capability/family
+    # pairs (no port, no model_id from the LLM registry).  A future refactor
+    # could lift ComfyUI picks into a dedicated setup phase.
+    comfyui_defaults: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
