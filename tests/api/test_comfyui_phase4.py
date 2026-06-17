@@ -239,6 +239,50 @@ class TestWorkflowLaunch:
         r = client.post("/api/comfyui/workflows/nonexistent/launch")
 
         assert r.status_code == 404
+        body = r.json()
+        assert body["error"]["message"] == "Workflow not found."
+        assert "nonexistent" not in body["error"]["message"]
+
+    def test_launch_rejects_invalid_workflow_name_before_filesystem_lookup(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", "/tmp/hal0-workflows")
+
+        with patch("hal0.api.routes.comfyui.os.path.isfile") as isfile:
+            r = client.post("/api/comfyui/workflows/..secret/launch")
+
+        assert r.status_code == 404
+        assert r.json()["error"]["message"] == "Workflow not found."
+        isfile.assert_not_called()
+
+    def test_launch_rejects_slash_workflow_name_without_filesystem_lookup(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", "/tmp/hal0-workflows")
+
+        with patch("hal0.api.routes.comfyui.os.path.isfile") as isfile:
+            r = client.post("/api/comfyui/workflows/bad%2Fname/launch")
+
+        assert r.status_code in {404, 422}
+        isfile.assert_not_called()
+
+    def test_launch_read_error_does_not_leak_raw_exception(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        wf_dir = tmp_path / "comfyui" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "broken.json").write_text("{not json")
+        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
+
+        r = client.post("/api/comfyui/workflows/broken/launch")
+
+        assert r.status_code == 500
+        body = r.json()
+        assert body["error"] == {
+            "code": "comfyui.workflow_read_error",
+            "message": "Workflow could not be read.",
+        }
+        assert "Expecting property name" not in r.text
 
     def test_launch_falls_back_to_user_default_dir(
         self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

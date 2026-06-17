@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
+import re
 import shutil
 from typing import Any
 
@@ -44,6 +46,7 @@ import hal0.comfyui.fetch as _fetch_module
 from hal0.comfyui.selection import auto_selections, variant_for
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 # iGPU memory ceilings on the Strix Halo target (GB). The host addresses ~80 GB
 # of the 96 GB unified pool from the GPU, with zero swap — so memory pressure is
@@ -59,6 +62,7 @@ _IMG_UNIT = "hal0-slot@img.service"
 # (arbiter.ensure_img); "inference" hands it back to the LLM stack
 # (arbiter.restore_llm).
 _MODES = ("generation", "inference")
+_WORKFLOW_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Short connect so a dead engine surfaces fast; the read budget is modest because
 # /system_stats and /queue are cheap snapshots.
@@ -624,6 +628,8 @@ def _comfyui_data_dir() -> str:
 
 def _find_workflow(name: str) -> str | None:
     """Locate <name>.json, trying primary then user/default fallback. None if absent."""
+    if not _WORKFLOW_NAME_RE.fullmatch(name) or ".." in name:
+        return None
     primary = os.path.join(_comfyui_workflows_dir(), f"{name}.json")
     if os.path.isfile(primary):
         return primary
@@ -631,6 +637,18 @@ def _find_workflow(name: str) -> str | None:
     if os.path.isfile(fallback):
         return fallback
     return None
+
+
+def _workflow_not_found_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": {
+                "code": "comfyui.workflow_not_found",
+                "message": "Workflow not found.",
+            }
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -744,23 +762,21 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
     """
     workflow_path = _find_workflow(name)
     if workflow_path is None:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "error": {
-                    "code": "comfyui.workflow_not_found",
-                    "message": f"workflow '{name}' not found in workflows directories",
-                }
-            },
-        )
+        return _workflow_not_found_response()
     try:
         with open(workflow_path) as fh:
             workflow = fh.read()
         workflow_data = __import__("json").loads(workflow)
     except (OSError, ValueError) as exc:
+        log.warning("Failed to read ComfyUI workflow %r from %s: %s", name, workflow_path, exc)
         return JSONResponse(
             status_code=500,
-            content={"error": {"code": "comfyui.workflow_read_error", "message": str(exc)}},
+            content={
+                "error": {
+                    "code": "comfyui.workflow_read_error",
+                    "message": "Workflow could not be read.",
+                }
+            },
         )
     base = _comfyui_base_url()
     try:
@@ -776,6 +792,12 @@ async def comfyui_workflow_launch(name: str) -> JSONResponse:
         status_code=202,
         content={"status": "queued", "prompt_id": prompt_id},
     )
+
+
+@router.post("/workflows/{name:path}/launch", include_in_schema=False)
+async def comfyui_invalid_workflow_launch(name: str) -> JSONResponse:
+    """Reject malformed workflow names that include path separators."""
+    return _workflow_not_found_response()
 
 
 # ---------------------------------------------------------------------------

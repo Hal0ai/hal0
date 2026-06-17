@@ -31,7 +31,7 @@
       "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
     },
     "comfyui": {
-      "tag": "docker.io/kyuz0/amd-strix-halo-comfyui:latest",
+      "tag": "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
       "digest": "sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
       "_notes": "live-validated on CT105 2026-06-11 (Wan2.2/Qwen-Image/Flux/SDXL on gfx1151); repinned from unpublished hal0-toolbox-comfyui (Phase D)",
       "_upstream_reference": "https://github.com/comfyanonymous/ComfyUI"

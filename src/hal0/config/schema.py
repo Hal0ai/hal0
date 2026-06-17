@@ -766,7 +766,7 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "quant": "",
     },
     "comfyui": {
-        "image": "docker.io/kyuz0/amd-strix-halo-comfyui:latest",
+        "image": "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
         "flags": "--disable-mmap --bf16-vae --cache-none",
         "mtp": False,
         "device_class": "img",
