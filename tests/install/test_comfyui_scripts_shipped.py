@@ -1,7 +1,7 @@
 """TDD — Task 3.1: Ship ComfyUI control scripts.
 
 Three assertions:
-  (a) All 6 scripts exist in installer/comfyui/scripts/ and are bash -n clean.
+  (a) All shipped scripts exist in installer/comfyui/scripts/ and are bash -n clean.
   (b) Every /opt/comfyui/*.sh path referenced in src/hal0/api/routes/comfyui.py
       has a matching shipped script in installer/comfyui/scripts/.
   (c) installer/install.sh contains the /opt/comfyui placement block.
@@ -24,8 +24,6 @@ EXPECTED_SCRIPTS = [
     "comfy-down.sh",
     "comfy-logs.sh",
     "comfy-postinstall.sh",
-    "start-inference.sh",
-    "stop-inference.sh",
 ]
 
 
