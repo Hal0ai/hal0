@@ -3,11 +3,15 @@
 Replaces old wrong-contract test that asserted --precision flag form for
 positional-arg scripts.
 
-fetch_model is synchronous: job status is final when it returns.
+fetch_model is NON-BLOCKING: it starts a daemon-thread worker and returns
+immediately.  Tests wait for the worker to finish (via _wait_done) before
+asserting terminal status / reading the recorder.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from unittest.mock import MagicMock
 
 from hal0.comfyui.capabilities import CAPABILITIES, default_variant
@@ -24,6 +28,17 @@ def _make_proc(returncode=0, pid=12345):
     proc.poll.return_value = returncode
     proc.wait.return_value = returncode
     return proc
+
+
+def _wait_done(job_id, timeout=5.0):
+    """Poll get_job until status != 'running' (worker finished).  Returns the job."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = get_job(job_id)
+        if job is not None and job["status"] != "running":
+            return job
+        time.sleep(0.005)
+    raise AssertionError(f"job {job_id} still running after {timeout}s")
 
 
 class _PopenRecorder:
@@ -112,18 +127,44 @@ class TestFetchModel:
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
         job_id = fetch_model(LTX2_T2V)
         assert isinstance(job_id, str) and len(job_id) > 0
+        _wait_done(job_id)
+
+    def test_non_blocking_returns_while_step_running(self, monkeypatch):
+        """fetch_model must return BEFORE a slow step finishes; status=='running' then."""
+        release = threading.Event()
+        started = threading.Event()
+        proc = _make_proc(0)
+
+        def slow_wait():
+            started.set()
+            release.wait(timeout=5.0)
+            return 0
+
+        proc.wait.side_effect = slow_wait
+        monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", lambda *a, **kw: proc)
+
+        job_id = fetch_model(ESRGAN)
+        # worker has entered the (blocked) wait()
+        assert started.wait(timeout=5.0)
+        # fetch_model already returned while the step is still in wait()
+        assert get_job(job_id)["status"] == "running"
+        # let it finish cleanly
+        release.set()
+        _wait_done(job_id)
 
     def test_ltx2_t2v_invokes_script_three_times(self, monkeypatch):
         """get_ltx2.sh called 3 times: common, checkpoint bf16, lora."""
         rec = _PopenRecorder([_make_proc(0)] * 3)
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
-        fetch_model(LTX2_T2V)
+        job_id = fetch_model(LTX2_T2V)
+        _wait_done(job_id)
         assert len(rec.calls) == 3
 
     def test_ltx2_t2v_step_argv(self, monkeypatch):
         rec = _PopenRecorder([_make_proc(0)] * 3)
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
-        fetch_model(LTX2_T2V)
+        job_id = fetch_model(LTX2_T2V)
+        _wait_done(job_id)
         # call[0]: bash get_ltx2.sh common
         assert rec.calls[0][0] == "bash"
         assert rec.calls[0][1].endswith("get_ltx2.sh")
@@ -136,13 +177,15 @@ class TestFetchModel:
     def test_wan22_t2v_14b_t2v_step(self, monkeypatch):
         rec = _PopenRecorder([_make_proc(0)] * 3)
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
-        fetch_model(WAN22_T2V)
+        job_id = fetch_model(WAN22_T2V)
+        _wait_done(job_id)
         assert rec.calls[1][2:] == ["14b-t2v", "fp16"]
 
     def test_qwen_4step_two_calls_choices_1_and_3(self, monkeypatch):
         rec = _PopenRecorder([_make_proc(0)] * 2)
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
-        fetch_model(QWEN4STEP)
+        job_id = fetch_model(QWEN4STEP)
+        _wait_done(job_id)
         assert len(rec.calls) == 2
         assert rec.calls[0][2:] == ["1", "bf16"]
         assert rec.calls[1][2:] == ["3", "bf16"]
@@ -150,7 +193,8 @@ class TestFetchModel:
     def test_esrgan_one_call_no_extra_args(self, monkeypatch):
         rec = _PopenRecorder([_make_proc(0)])
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
-        fetch_model(ESRGAN)
+        job_id = fetch_model(ESRGAN)
+        _wait_done(job_id)
         assert len(rec.calls) == 1
         # argv: ["bash", "<path>/get_esrgan.sh"]
         assert len(rec.calls[0]) == 2
@@ -161,6 +205,7 @@ class TestFetchModel:
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
         job_id = fetch_model(LTX2_T2V)
         assert get_job(job_id)["family"] == "ltx2"
+        _wait_done(job_id)
 
     def test_job_has_script_field(self, monkeypatch):
         rec = _PopenRecorder([_make_proc(0)] * 3)
@@ -169,13 +214,14 @@ class TestFetchModel:
         job = get_job(job_id)
         assert "script" in job
         assert job["script"].endswith("get_ltx2.sh")
+        _wait_done(job_id)
 
     def test_nonzero_step_marks_failed_and_stops(self, monkeypatch):
         """Step 0 fails → job=failed, step 1+ NOT called."""
         rec = _PopenRecorder([_make_proc(1)])  # only 1 proc; if called again it would loop
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
         job_id = fetch_model(LTX2_T2V)
-        job = get_job(job_id)
+        job = _wait_done(job_id)
         assert job["status"] == "failed"
         assert len(rec.calls) == 1
 
@@ -183,8 +229,9 @@ class TestFetchModel:
         rec = _PopenRecorder([_make_proc(0)] * 3)
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
         job_id = fetch_model(LTX2_T2V)
-        assert get_job(job_id)["status"] == "done"
-        assert get_job(job_id)["returncode"] == 0
+        job = _wait_done(job_id)
+        assert job["status"] == "done"
+        assert job["returncode"] == 0
 
 
 # ── TestGetJob ────────────────────────────────────────────────────────────────
@@ -198,13 +245,13 @@ class TestGetJob:
         rec = _PopenRecorder([_make_proc(0)] * 3)
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
         job_id = fetch_model(LTX2_T2V)
-        assert get_job(job_id)["status"] == "done"
+        assert _wait_done(job_id)["status"] == "done"
 
     def test_job_failed_when_first_step_nonzero(self, monkeypatch):
         rec = _PopenRecorder([_make_proc(1)])
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
         job_id = fetch_model(ESRGAN)
-        job = get_job(job_id)
+        job = _wait_done(job_id)
         assert job["status"] == "failed"
         assert job["returncode"] == 1
 
@@ -220,33 +267,40 @@ class TestCancelJob:
         rec = _PopenRecorder([_make_proc(0)])
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
         job_id = fetch_model(ESRGAN)
-        # job is done now (synchronous); cancel should return False
+        _wait_done(job_id)
+        # job is done now; cancel should return False
         assert cancel_job(job_id) is False
 
     def test_cancel_failed_job_returns_false(self, monkeypatch):
         rec = _PopenRecorder([_make_proc(1)])
         monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", rec)
         job_id = fetch_model(ESRGAN)
+        _wait_done(job_id)
         assert cancel_job(job_id) is False
 
-    def test_cancel_terminates_proc_and_marks_cancelled(self, monkeypatch):
-        """Inject a cancel mid-step by pre-setting status='running' and calling cancel_job."""
-        # Manually inject a "running" job to test cancel logic
-        import uuid
+    def test_cancel_running_job_terminates_and_marks_cancelled(self, monkeypatch):
+        """Cancel a job whose current step is still in wait(); proc.terminate() fires."""
+        release = threading.Event()
+        started = threading.Event()
+        proc = _make_proc(0)
 
-        from hal0.comfyui import fetch as fetch_mod
+        def slow_wait():
+            started.set()
+            release.wait(timeout=5.0)
+            return 0
 
-        job_id = str(uuid.uuid4())
-        mock_proc = _make_proc(0)
-        fetch_mod._JOBS[job_id] = {
-            "id": job_id,
-            "family": "esrgan",
-            "status": "running",
-            "returncode": None,
-            "script": "get_esrgan.sh",
-            "_proc": mock_proc,
-        }
+        proc.wait.side_effect = slow_wait
+        monkeypatch.setattr("hal0.comfyui.fetch.subprocess.Popen", lambda *a, **kw: proc)
+
+        job_id = fetch_model(LTX2_T2V)
+        assert started.wait(timeout=5.0)  # worker is blocked in step 0's wait()
+
         result = cancel_job(job_id)
         assert result is True
-        mock_proc.terminate.assert_called_once()
-        assert fetch_mod._JOBS[job_id]["status"] == "cancelled"
+        proc.terminate.assert_called_once()
+        assert get_job(job_id)["status"] == "cancelled"
+
+        # unblock worker; it must observe cancelled and NOT advance to step 1
+        release.set()
+        time.sleep(0.05)
+        assert get_job(job_id)["status"] == "cancelled"
