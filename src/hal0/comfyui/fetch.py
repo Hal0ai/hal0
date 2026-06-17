@@ -1,9 +1,14 @@
 """Task 2.4: Async model fetch wrapper for ComfyUI scripts.
 
 Public API:
-    fetch_model(variant)  -> job_id   (starts subprocess, non-blocking)
+    fetch_model(variant)  -> job_id   (runs all fetch_steps sequentially)
     get_job(job_id)       -> dict | None
     cancel_job(job_id)    -> bool
+
+Fix #872: scripts take POSITIONAL args (not --precision flags) and require
+MULTIPLE invocations per variant.  fetch_steps on ModelVariant encodes the
+exact argv for each invocation; we iterate them sequentially, stopping on
+the first nonzero exit.
 """
 
 from __future__ import annotations
@@ -19,66 +24,68 @@ _SCRIPTS_DIR: Path = (
     Path(__file__).parent.parent.parent.parent / "installer" / "comfyui" / "scripts"
 )
 
-# Module-level job registry: job_id -> {"id", "family", "status", "returncode", "script", "_proc"}
+# Module-level job registry
 _JOBS: dict[str, dict] = {}
 
 
 def fetch_model(variant: ModelVariant) -> str:
-    """Launch fetch script for *variant* as a background subprocess.
+    """Run all fetch_steps for *variant* sequentially.
 
-    Returns a job_id.  The script is run from _SCRIPTS_DIR; stdout/stderr
-    go to PIPE (captured but not streamed — YAGNI until progress API exists).
+    Each step: bash <script> *step_args.  Stops on first nonzero exit.
+    Returns a job_id.  Job status is final when fetch_model returns.
     """
     script_path = str(_SCRIPTS_DIR / variant.fetch_script)
-    cmd = [script_path]
-    if variant.precision is not None:
-        cmd += ["--precision", variant.precision]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
     job_id = str(uuid.uuid4())
-    _JOBS[job_id] = {
+
+    rec: dict = {
         "id": job_id,
         "family": variant.family,
         "status": "running",
         "returncode": None,
         "script": script_path,
-        "_proc": proc,
+        "_proc": None,
     }
+    _JOBS[job_id] = rec
+
+    for step_args in variant.fetch_steps:
+        cmd = ["bash", script_path, *step_args]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        rec["_proc"] = proc
+
+        rc = proc.wait()
+
+        if rec["status"] == "cancelled":
+            return job_id
+
+        if rc != 0:
+            rec["returncode"] = rc
+            rec["status"] = "failed"
+            return job_id
+
+    rec["returncode"] = 0
+    rec["status"] = "done"
     return job_id
 
 
 def get_job(job_id: str) -> dict | None:
-    """Return job dict (without _proc) or None if unknown.
-
-    Status is refreshed from proc.poll() on each call.
-    """
+    """Return job dict (without internal fields) or None if unknown."""
     rec = _JOBS.get(job_id)
     if rec is None:
         return None
-
-    # Refresh status if still running
-    if rec["status"] == "running":
-        rc = rec["_proc"].poll()
-        if rc is not None:
-            rec["returncode"] = rc
-            rec["status"] = "done" if rc == 0 else "failed"
-
-    return {k: v for k, v in rec.items() if k != "_proc"}
+    return {k: v for k, v in rec.items() if not k.startswith("_")}
 
 
 def cancel_job(job_id: str) -> bool:
-    """Terminate a running job.  Returns True if terminated, False otherwise."""
+    """Terminate the in-flight step.  Returns True if cancelled, False otherwise."""
     rec = _JOBS.get(job_id)
     if rec is None:
         return False
-
-    # Refresh status first
-    get_job(job_id)
 
     if rec["status"] != "running":
         return False
 
-    rec["_proc"].terminate()
     rec["status"] = "cancelled"
+    proc = rec.get("_proc")
+    if proc is not None:
+        proc.terminate()
     return True
