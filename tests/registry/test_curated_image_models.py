@@ -5,7 +5,7 @@ Two surfaces under test:
   1. The curated catalogue itself — every image entry validates and
      declares the metadata the workflow translator + pull layer need.
   2. ``hal0.registry.pull.run_pull`` honours ``comfyui_subdir`` so
-     SDXL Turbo lands in ``/var/lib/hal0/comfyui/models/checkpoints/``
+     SDXL Turbo lands in ``model_store_root()/comfyui/models/checkpoints/``
      instead of the default per-id models tree.
 """
 
@@ -74,17 +74,19 @@ def test_get_curated_lookup_for_image_entries() -> None:
 # ─── pull path routing ───────────────────────────────────────────────────────
 
 
-def test_final_path_routes_to_comfyui_subdir(tmp_hal0_home: str) -> None:
+def test_final_path_routes_to_comfyui_subdir(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An entry with comfyui_subdir lands under the ComfyUI models tree."""
+    model_store = Path(tmp_hal0_home) / "model-store"
+    monkeypatch.setenv("HAL0_MODEL_STORE", str(model_store))
     p = _final_path_for_entry(
         "sdxl-turbo",
         "sd_xl_turbo_1.0_fp16.safetensors",
         comfyui_subdir="checkpoints",
     )
     expected = (
-        Path(tmp_hal0_home)
-        / "var-lib"
-        / "hal0"
+        model_store
         / "comfyui"
         / "models"
         / "checkpoints"
@@ -100,14 +102,18 @@ def test_final_path_falls_back_to_default_layout(tmp_hal0_home: str) -> None:
     assert p == expected
 
 
-def test_comfyui_subdir_is_path_safe(tmp_hal0_home: str) -> None:
+def test_comfyui_subdir_is_path_safe(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A malicious comfyui_subdir can't escape the comfyui/models tree."""
+    model_store = Path(tmp_hal0_home) / "model-store"
+    monkeypatch.setenv("HAL0_MODEL_STORE", str(model_store))
     p = _comfyui_models_dir("../../etc/passwd")
     # Sanitiser maps anything outside [A-Za-z0-9._-] to '-' and strips
     # leading dashes — result is a single flat name under comfyui/models.
     assert p.name == "etc-passwd"
-    # Critically: the path stays directly under <hal0_home>/var-lib/hal0/comfyui/models/
-    assert p.parent == paths.var_lib() / "comfyui" / "models"
+    # Critically: the path stays directly under model_store_root()/comfyui/models/
+    assert p.parent == Path(paths.model_store_root()) / "comfyui" / "models"
 
 
 def test_comfyui_subdir_empty_falls_back_to_checkpoints(tmp_hal0_home: str) -> None:
@@ -117,8 +123,12 @@ def test_comfyui_subdir_empty_falls_back_to_checkpoints(tmp_hal0_home: str) -> N
 
 
 @pytest.mark.asyncio
-async def test_run_pull_writes_to_comfyui_subdir(tmp_hal0_home: str) -> None:
+async def test_run_pull_writes_to_comfyui_subdir(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """End-to-end: a pull with comfyui_subdir lands under the right tree."""
+    model_store = Path(tmp_hal0_home) / "model-store"
+    monkeypatch.setenv("HAL0_MODEL_STORE", str(model_store))
     payload = b"FAKE-SAFETENSORS" + b"\x00" * 256
     digest = hashlib.sha256(payload).hexdigest()
 
@@ -147,7 +157,7 @@ async def test_run_pull_writes_to_comfyui_subdir(tmp_hal0_home: str) -> None:
     assert job.state == "completed", f"got {job.state}: {job.error}"
     assert job.sha256 == digest
     final = Path(job.path)
-    # The pull must land under <hal0_home>/var-lib/hal0/comfyui/models/checkpoints/
+    # The pull must land under model_store_root()/comfyui/models/checkpoints/
     assert "comfyui" in final.parts
     assert "checkpoints" in final.parts
     assert final.name == "sd_xl_turbo_1.0_fp16.safetensors"

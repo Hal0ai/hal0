@@ -62,11 +62,12 @@ def test_set_extra_paths_yaml_keys(tmp_path):
     fake_comfy = tmp_path / "ComfyUI"
     fake_comfy.mkdir()
     yaml_file = fake_comfy / "extra_model_paths.yaml"
+    model_store = tmp_path / "model-store" / "comfyui" / "models"
 
     script = SCRIPTS_DIR / "set_extra_paths.sh"
     env = {
         "CONFY_DIR": str(fake_comfy),
-        "MODEL_DIR": MODEL_STORE,
+        "MODEL_DIR": str(model_store),
         "HOME": str(tmp_path),
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     }
@@ -82,8 +83,8 @@ def test_set_extra_paths_yaml_keys(tmp_path):
     data = yaml.safe_load(yaml_file.read_text())
     comfy_section = data.get("comfyui", {})
 
-    assert comfy_section.get("base_path") == MODEL_STORE, (
-        f"base_path wrong: {comfy_section.get('base_path')!r} != {MODEL_STORE!r}"
+    assert comfy_section.get("base_path") == str(model_store), (
+        f"base_path wrong: {comfy_section.get('base_path')!r} != {str(model_store)!r}"
     )
 
     actual_keys = set(comfy_section.keys()) - {"base_path"}
