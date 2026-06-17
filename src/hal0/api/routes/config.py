@@ -52,6 +52,10 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
 # /etc/hal0/api.env; OpenWebUI's port is fixed at 3001 in the unit.
 _DEFAULT_API_PORT = 8080
 _OPENWEBUI_PORT = 3001
+# ComfyUI's own web UI binds :8188 on the runtime host (the img slot's
+# container publishes there). Like OpenWebUI it's browser-reachable on the
+# LAN, so it gets a host:port fallback; HAL0_COMFYUI_PUBLIC_URL overrides it.
+_COMFYUI_PORT = 8188
 
 _OPENWEBUI_UNIT = "hal0-openwebui.service"
 
@@ -140,6 +144,28 @@ def _host_without_port(host: str) -> str:
     return host.rsplit(":", 1)[0] if ":" in host else host
 
 
+def _comfyui_link(request: Request) -> str:
+    """Resolve the link the dashboard should use to open ComfyUI.
+
+    ``HAL0_COMFYUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins when
+    defined — it's how a reverse-proxy deploy declares a clean HTTPS
+    hostname (e.g. ``https://comfyui.thinmint.dev``). That matters because
+    an HTTPS dashboard opening the bare ``http://<host>:8188`` fallback is
+    blocked by the browser as mixed content, so the workflow links appear
+    dead. Without the env var we fall back to ``http://<host>:8188`` on the
+    request host (the port-stripped forwarded host behind a proxy), which
+    works LAN-direct.
+    """
+    public = os.environ.get("HAL0_COMFYUI_PUBLIC_URL", "").strip().rstrip("/")
+    if public:
+        return public
+    if _behind_proxy(request):
+        host = request.headers.get("x-forwarded-host") or _resolve_host(request)
+    else:
+        host = _resolve_host(request)
+    return f"http://{_host_without_port(host)}:{_COMFYUI_PORT}"
+
+
 @router.get("/urls")
 async def get_urls(request: Request) -> dict[str, object]:
     """Return the canonical URLs the dashboard should advertise.
@@ -153,6 +179,7 @@ async def get_urls(request: Request) -> dict[str, object]:
           "openwebui_enabled": true | false,
           "hermes":            "" | "https://hermes.<host>",
           "hermes_enabled":    true | false,
+          "comfyui":           "http://<host>:8188" | "https://comfyui.<host>",
         }
 
     ``HAL0_OPENWEBUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins
@@ -182,6 +209,7 @@ async def get_urls(request: Request) -> dict[str, object]:
     hermes = os.environ.get("HAL0_HERMES_PUBLIC_URL", "").strip().rstrip("/")
     host = _resolve_host(request)
     enabled = await _openwebui_is_active()
+    comfyui = _comfyui_link(request)
 
     if public:
         if _behind_proxy(request):
@@ -196,6 +224,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "openwebui_enabled": enabled,
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
+            "comfyui": comfyui,
         }
 
     if _behind_proxy(request):
@@ -208,6 +237,7 @@ async def get_urls(request: Request) -> dict[str, object]:
             "openwebui_enabled": enabled,
             "hermes": hermes,
             "hermes_enabled": bool(hermes),
+            "comfyui": comfyui,
         }
     return {
         "api": f"http://{host}:{_api_port()}",
@@ -215,6 +245,7 @@ async def get_urls(request: Request) -> dict[str, object]:
         "openwebui_enabled": enabled,
         "hermes": hermes,
         "hermes_enabled": bool(hermes),
+        "comfyui": comfyui,
     }
 
 

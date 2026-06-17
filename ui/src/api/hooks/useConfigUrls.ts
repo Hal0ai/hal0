@@ -21,6 +21,10 @@ export interface ConfigUrls {
   openwebui_enabled: boolean
   hermes: string
   hermes_enabled: boolean
+  // ComfyUI's own web UI. Defaults to http://<host>:8188 (the runtime
+  // host's bound port); a reverse-proxy deploy sets HAL0_COMFYUI_PUBLIC_URL
+  // to a clean HTTPS hostname so the link isn't blocked as mixed content.
+  comfyui: string
 }
 
 export function useConfigUrls() {

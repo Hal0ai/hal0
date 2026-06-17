@@ -160,28 +160,27 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
     expect(posts[0]).toBe('POST')
   })
 
-  // ── 5. Workflow chip fires POST /api/comfyui/workflows/{name}/launch ──────
-
-  test('workflow chip click fires POST /workflows/{name}/launch', async ({ page }) => {
-    const launched: string[] = []
+  // ── 5. Workflow chip is a link that opens ComfyUI ────────────────────────
+  // The tags open ComfyUI's editor (matching the "opens in ComfyUI ↗" label).
+  // True per-workflow auto-open via URL is blocked upstream
+  // (comfyanonymous/ComfyUI#9858); the ?workflow=<file> param is a
+  // forward-compatible breadcrumb that current ComfyUI ignores.
+  test('workflow chip is an anchor that opens ComfyUI in a new tab', async ({ page }) => {
     await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
-    await page.route(/\/api\/comfyui\/workflows\/[^/]+\/launch/, (route: any) => {
-      const url = route.request().url()
-      // extract name from URL
-      const match = url.match(/\/workflows\/([^/]+)\/launch/)
-      if (match) launched.push(decodeURIComponent(match[1]))
-      return json(route, { status: 'queued', prompt_id: 'mock-id' }, 202)
-    })
 
     await gotoImageTab(page)
 
-    // Click the first workflow chip (qwen-image)
     const chips = page.locator('.comfy-v2-pane .flow')
     await expect(chips).toHaveCount(6)
-    await chips.first().click()
 
-    await expect.poll(() => launched.length, { timeout: 5_000 }).toBeGreaterThan(0)
-    expect(launched[0]).toBe('qwen-image')
+    const first = chips.first()
+    // Renders as a link, opens in a new tab.
+    expect((await first.evaluate((el: Element) => el.tagName)).toLowerCase()).toBe('a')
+    await expect(first).toHaveAttribute('target', '_blank')
+    // Points at ComfyUI (:8188) and carries the curated workflow breadcrumb.
+    const href = await first.getAttribute('href')
+    expect(href).toContain(':8188')
+    expect(href).toContain('workflow=')
   })
 
   // ── 6. Restart button fires POST /api/comfyui/restart ────────────────────

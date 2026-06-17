@@ -18,10 +18,10 @@ import {
   useComfyui,
   useComfyuiRenderCancel,
   useComfyuiRestart,
-  useComfyuiWorkflowLaunch,
   transformComfyuiStatus,
   COMFYUI_FALLBACK,
 } from '@/api/hooks/useComfyui'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 
 const { useState, useEffect, useRef } = React
 
@@ -226,34 +226,53 @@ function StepPips({ step, total }) {
 }
 
 // ── Workflows quick-launch ─────────────────────────────────────────────────────
+// Each tag opens ComfyUI's editor (the block label is literally "opens in
+// ComfyUI ↗"). `wf` is the real curated workflow file (graph format, in
+// user/default/workflows) — passed as ComfyUI's proposed `?workflow=<file>`
+// param (upstream comfyanonymous/ComfyUI#9858). That param is harmlessly
+// ignored by current ComfyUI (the link just opens the editor, where the
+// converted workflows are pickable from the browser) and auto-upgrades to a
+// true deep-link if/when #9858 lands. `upscale-4x` has no curated file yet,
+// so it opens the editor root.
 const FLOWS_DEFAULT = [
-  { ic: 'image',  a: 'text',   b: 'image',   tag: 'qwen-image',  name: 'qwen-image' },
-  { ic: 'image',  a: 'image',  b: 'image',                        name: 'img2img' },
-  { ic: 'video',  a: 'text',   b: 'video',   tag: 'wan 2.2',     name: 'wan2.2-t2v' },
-  { ic: 'video',  a: 'image',  b: 'video',   tag: 'i2v',         name: 'wan2.2-i2v' },
-  { ic: 'layers', a: 'still',  b: 'animate', tag: 'chain',       name: 'animate' },
+  { ic: 'image',  a: 'text',   b: 'image',   tag: 'qwen-image', name: 'qwen-image',  wf: 'Qwen-Image-2512-BF16-4-Step-LoRA.json' },
+  { ic: 'image',  a: 'image',  b: 'image',                       name: 'img2img',     wf: 'Qwen-Image-Edit-2511-BF16-4-Step-LoRA.json' },
+  { ic: 'video',  a: 'text',   b: 'video',   tag: 'wan 2.2',    name: 'wan2.2-t2v',  wf: 'Wan2.2-T2V-A14B-FP16-4steps-lora-rank64-Seko-V2.json' },
+  { ic: 'video',  a: 'image',  b: 'video',   tag: 'i2v',        name: 'wan2.2-i2v',  wf: 'Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1-FP16.json' },
+  { ic: 'layers', a: 'still',  b: 'animate', tag: 'chain',      name: 'animate',     wf: 'Hunyuan-Video-1.5_720p_i2v-4-step-lora.json' },
   { ic: 'cube',   a: 'upscale',b: '4×',                          name: 'upscale-4x' },
 ]
 
-function WorkflowsBlock({ flows = FLOWS_DEFAULT, onLaunch }) {
+function workflowHref(comfyBaseUrl, wf) {
+  if (!comfyBaseUrl) return undefined
+  return wf ? `${comfyBaseUrl}/?workflow=${encodeURIComponent(wf)}` : comfyBaseUrl
+}
+
+function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl }) {
   return (
     <div>
       <BlkH icon="bolt" acc note="opens in ComfyUI ↗">workflows</BlkH>
       <div className="flows">
-        {flows.map((f, i) => (
-          <button
-            className="flow"
-            key={i}
-            onClick={() => onLaunch && onLaunch(f.name)}
-            data-workflow={f.name}
-          >
-            <span className="ic"><Ci name={f.ic} size={14} /></span>
-            <span>{f.a}</span>
-            <span className="arr">→</span>
-            <span>{f.b}</span>
-            {f.tag && <span className="tag">{f.tag}</span>}
-          </button>
-        ))}
+        {flows.map((f, i) => {
+          const href = workflowHref(comfyBaseUrl, f.wf)
+          return (
+            <a
+              className="flow"
+              key={i}
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-disabled={href ? undefined : 'true'}
+              data-workflow={f.name}
+            >
+              <span className="ic"><Ci name={f.ic} size={14} /></span>
+              <span>{f.a}</span>
+              <span className="arr">→</span>
+              <span>{f.b}</span>
+              {f.tag && <span className="tag">{f.tag}</span>}
+            </a>
+          )
+        })}
       </div>
     </div>
   )
@@ -393,7 +412,6 @@ export function ImageGenCard({
   onCancel,
   onRestart,
   onLogs,
-  onLaunch,
   comfyBaseUrl,
 }) {
   const { engine, run, queue, gtt, ram, stats } = mock
@@ -584,7 +602,7 @@ export function ImageGenCard({
 
         {/* ── Workflows + Models lower section ── */}
         <div className="wcard-sub">
-          <WorkflowsBlock onLaunch={onLaunch} />
+          <WorkflowsBlock comfyBaseUrl={comfyBaseUrl} />
           <ModelsBlock />
         </div>
       </div>
@@ -626,14 +644,21 @@ export function ComfyuiPane() {
   // Control mutations
   const cancelMutation = useComfyuiRenderCancel()
   const restartMutation = useComfyuiRestart()
-  const launchMutation = useComfyuiWorkflowLaunch()
 
-  // Derive the ComfyUI base URL from live status endpoint field
-  const comfyBaseUrl = liveStatus?.endpoint
-    ? liveStatus.endpoint.startsWith('http')
-      ? liveStatus.endpoint
-      : `http://127.0.0.1:8188`
-    : undefined
+  // Resolve the browser-reachable ComfyUI base URL. The authoritative source
+  // is /api/config/urls → `comfyui` (HAL0_COMFYUI_PUBLIC_URL, or
+  // http://<request-host>:8188): the backend knows the real runtime host and
+  // can hand back a clean HTTPS link, avoiding the mixed-content block an
+  // HTTPS dashboard hits on a bare :8188 URL. We deliberately do NOT trust the
+  // /status `endpoint` field — it reports ":8188" which old code turned into
+  // http://127.0.0.1:8188 (the *server's* loopback, dead from a browser). The
+  // window.location fallback only covers the pre-config-load tick.
+  const { data: cfgUrls } = useConfigUrls()
+  const comfyBaseUrl =
+    cfgUrls?.comfyui ||
+    (typeof window !== 'undefined' && window.location
+      ? `http://${window.location.hostname}:8188`
+      : undefined)
 
   // .comfy-pane kept for backward-compat (some mount selectors still use it).
   return (
@@ -656,7 +681,6 @@ export function ComfyuiPane() {
             })
             .catch(() => alert('logs fetch failed'))
         }}
-        onLaunch={(name) => launchMutation.mutate(name)}
         comfyBaseUrl={comfyBaseUrl}
       />
     </div>

@@ -147,3 +147,58 @@ def test_urls_hermes_advertised_even_behind_proxy(
     body = resp.json()
     assert body["hermes"] == "https://hermes.example.com", body
     assert body["hermes_enabled"] is True, body
+
+
+def test_urls_comfyui_lan_direct_default_port_8188(client: TestClient) -> None:
+    """ComfyUI's own web UI is advertised at the request host on :8188.
+
+    The dashboard is served from :8080; ComfyUI's frontend lives on the
+    runtime host's :8188, so a LAN-direct hit derives ``http://<host>:8188``.
+    """
+    resp = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["comfyui"] == "http://hal0-test.lan:8188", body
+
+
+def test_urls_comfyui_public_url_env_wins(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """HAL0_COMFYUI_PUBLIC_URL is the canonical override.
+
+    This is how a reverse-proxy deploy points the ComfyUI link at a clean
+    HTTPS hostname (e.g. ``https://comfyui.thinmint.dev``) instead of the
+    mixed-content ``http://<host>:8188`` that a browser on an HTTPS
+    dashboard would block.
+    """
+    monkeypatch.setenv("HAL0_COMFYUI_PUBLIC_URL", "https://comfyui.thinmint.dev/")
+    resp = client.get(
+        "/api/config/urls",
+        headers={
+            "x-forwarded-host": "hal0.thinmint.dev",
+            "x-forwarded-proto": "https",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Trailing slash stripped so links concat predictably.
+    assert body["comfyui"] == "https://comfyui.thinmint.dev", body
+
+
+def test_urls_comfyui_behind_proxy_without_env_uses_port_8188(client: TestClient) -> None:
+    """Proxy deploys without the env var still get a host:8188 link.
+
+    The port-stripped forwarded host keeps the link reachable on the LAN
+    even before an operator declares a dedicated ComfyUI subdomain.
+    """
+    resp = client.get(
+        "/api/config/urls",
+        headers={
+            "x-forwarded-host": "hal0.thinmint.dev",
+            "x-forwarded-proto": "https",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["comfyui"] == "http://hal0.thinmint.dev:8188", body
