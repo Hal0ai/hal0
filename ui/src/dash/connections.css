@@ -206,6 +206,98 @@
 /* loading / empty rows inside a pane body */
 .conn .cn-empty { padding: 18px 14px; font-family: var(--jbm); font-size: 11.5px; color: var(--fg-4); text-align: center; }
 
+@media (max-width: 720px) {
+  .conn-eyebrow {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+  }
+
+  .cpane-h {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+
+  .cpane-titles {
+    flex: 1 1 calc(100% - 48px);
+  }
+
+  .cpane-title,
+  .cpane-sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .cpane-h .grow {
+    display: none;
+  }
+
+  .cpane-h .cpill,
+  .cpane-h .cbtn {
+    flex: 0 1 auto;
+  }
+
+  .cpane-h .caret {
+    margin-left: auto;
+  }
+
+  .ep-head {
+    display: none;
+  }
+
+  .eprow-main {
+    grid-template-columns: 9px minmax(0, 1fr) auto auto 24px;
+    grid-template-rows: auto auto auto;
+    gap: 4px 10px;
+    padding: 10px 12px;
+  }
+
+  .eprow-main .ep-dot {
+    grid-column: 1;
+    grid-row: 1 / 4;
+    align-self: start;
+    margin-top: 4px;
+  }
+
+  .eprow-main .ep-name {
+    grid-column: 2 / 5;
+    grid-row: 1;
+  }
+
+  .eprow-main .ep-model {
+    grid-column: 2 / 5;
+    grid-row: 2;
+  }
+
+  .eprow-main .ep-dev {
+    grid-column: 2;
+    grid-row: 3;
+    text-align: left;
+  }
+
+  .eprow-main .ep-port {
+    grid-column: 3;
+    grid-row: 3;
+    justify-self: end;
+  }
+
+  .eprow-main .ep-tps {
+    grid-column: 4;
+    grid-row: 3;
+    justify-self: end;
+  }
+
+  .eprow-main .ep-caret {
+    grid-column: 5;
+    grid-row: 1 / 4;
+    align-self: center;
+  }
+
+  .ep-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ════════════════════════════════════════════════════════════════
    MCP — quick-links + expandable server panes with tools
    ════════════════════════════════════════════════════════════════ */

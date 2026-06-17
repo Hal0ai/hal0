@@ -6,13 +6,11 @@
 
 import { useRuntimeRollup, useHealthSystem, failingChecks } from '@/api/hooks/useRuntime'
 import { useLogsStream } from '@/api/hooks/useLogs'
-import { useSlots, useEndpoints } from '@/api/hooks/useSlots'
+import { useSlots } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState } from '@/api/hooks/useUpdates'
-import { useSidebarAgentRollup, useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
-import { useConfigUrls } from '@/api/hooks/useConfigUrls'
-import { useHardware } from '@/api/hooks/useHardware'
+import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
@@ -137,12 +135,7 @@ const Icons = {
 };
 
 // ─── TopBar ───
-function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuOpen = false, approvals = 0 }) {
-  // Issue #333: hostname from live /api/hardware (useHardware hook) instead of
-  // the legacy HAL0_DATA seed. Fall back to a neutral "hal0" placeholder
-  // while the first response is in flight so the layout stays stable.
-  const hw = useHardware();
-  const hostName = hw.data?.name || "hal0";
+function TopBar({ route, onCmdK, onMenu, menuOpen = false }) {
   // Brand-bar version badge — live from /api/updates/state (hal0.current,
   // sourced from hal0.__version__) so it never goes stale; the static fallback
   // keeps it correct before the first response lands.
@@ -186,17 +179,8 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuO
         <kbd>⌘B</kbd>
       </button>
       <button className="tb-cmdk" onClick={onCmdK}>
-        {Icons.search}<span>Command palette</span>
+        {Icons.zap}<span>Quick actions</span>
         <kbd>⌘K</kbd>
-      </button>
-      <div className="tb-host">
-        <span className="host-dot" />
-        <b>{hostName}</b>
-        <span className="ut">· up {hostUptime}</span>
-      </div>
-      <button className="tb-bell" onClick={onBell} aria-label="Agent approvals">
-        {Icons.bell}
-        {approvals > 0 && <span className="badge num">{approvals}</span>}
       </button>
       {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
       <button
@@ -298,116 +282,6 @@ function Sidebar({ route, param, onGo }) {
         ))}
       </div>
       <div className="sb-spacer" />
-      {/*
-        Runtime widget (2026-06-05): the former three stacked status blocks
-        (SidebarAgentBlock / SidebarEndpointBlock / SidebarStatusBlock) are
-        consolidated into ONE card so hermes, hal0, the runtime and openwebui read
-        as a single runtime rollup. hermes + openwebui rows deep-link to their
-        own dashboards.
-      */}
-      <SidebarRuntimeWidget onGo={onGo} />
-    </div>
-  );
-}
-
-// ─── Runtime widget (consolidated status card) ───
-//
-// Single sidebar card that rolls up the four runtime surfaces that used to
-// live in three separate blocks:
-//   - hermes    — bundled agent health (useSidebarAgentRollup → /api/agents).
-//                 Row key deep-links to the standalone Hermes dashboard.
-//   - hal0      — the composite ``hal0`` /v1 upstream surfaced as a synthetic
-//                 entry on /api/slots (useEndpoints filters `_synthetic`);
-//                 NOT a lifecycle slot, so it's read-only here. Model count is
-//                 the chat figure (advertised_models) plus a non-chat modality
-//                 breakdown counted from the real slots by group.
-//   - runtime   — container-slot readiness (useRuntimeRollup → /api/slots).
-//   - openwebui — the external chat UI link from /api/config/urls.
-//                 Row key deep-links to the OpenWebUI app.
-//
-// hermes + openwebui link targets are NOT hardcoded — useConfigUrls() reads
-// GET /api/config/urls, where the backend derives the reachable host from the
-// request (so links work on localhost / LAN IP / hal0.local / a custom
-// reverse-proxy domain) and honours the HAL0_{OPENWEBUI,HERMES}_PUBLIC_URL
-// env overrides.
-function SidebarRuntimeWidget({ onGo }) {
-  const agent     = useSidebarAgentRollup();
-  const endpoints = useEndpoints().data || [];
-  const slots     = useSlots().data     || [];
-  const urls      = useConfigUrls();
-
-  // hermes web dashboard link — only when the backend advertises a public
-  // URL (loopback-only otherwise, so no host:port fallback exists).
-  const hermesUrl      = urls.data?.hermes || "";
-  const hermesLinkable = urls.data?.hermes_enabled === true && !!hermesUrl;
-
-  // ── hal0 endpoint ── the synthetic composite upstream (first/only one).
-  const ep        = endpoints[0];
-  const chatCount = ep?.advertised_models ?? 0;
-  const embedCount = slots.filter(s => s.group === "embed").length;
-  const voiceCount = slots.filter(s => s.group === "voice").length;
-  const imgCount   = slots.filter(s => s.group === "img").length;
-  const extraParts = [];
-  if (embedCount > 0) extraParts.push(`${embedCount} embed`);
-  if (voiceCount > 0) extraParts.push(`${voiceCount} voice`);
-  if (imgCount   > 0) extraParts.push(`${imgCount} img`);
-  const modelsTitle = [`${chatCount} chat`, ...extraParts].join(" · ");
-
-  // ── openwebui ── /api/config/urls is link discovery only. Health lives in
-  // the footer runtime chip, driven by /api/services/health.
-  const owuiUrl      = urls.data?.openwebui || "";
-  const owuiLinkable = !!owuiUrl;
-
-  return (
-    <div className="sb-status sb-runtime" data-testid="sidebar-runtime-widget">
-      <div className="sb-runtime-h">Runtime</div>
-
-      {/* hermes — deep-links to the Hermes dashboard when one is published */}
-      <div className="row" data-testid="runtime-row-hermes">
-        {hermesLinkable ? (
-          <a
-            className="k rt-link"
-            href={hermesUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Open the Hermes dashboard"
-          >hermes ↗</a>
-        ) : (
-          <span className="k">hermes</span>
-        )}
-        <span className="v">{agent.installed ? "agent" : "not installed"}</span>
-      </div>
-
-      {/* hal0 — composite /v1 endpoint (read-only) + model count */}
-      <div className="row" data-testid="runtime-row-hal0" title={modelsTitle || ep?._synthetic_reason || ""}>
-        <span className="k">hal0</span>
-        <span className="v">
-          <b>{chatCount}</b>
-          <span className="rt-model-label"> models</span>
-          {extraParts.length > 0 && (
-            <span className="rt-extra"> + {extraParts.join(" · ")}</span>
-          )}
-        </span>
-      </div>
-
-      {/* openwebui — deep-links to the external chat UI when a URL is known */}
-      <div className="row" data-testid="runtime-row-openwebui">
-        {owuiLinkable ? (
-          <a
-            className="k rt-link"
-            href={owuiUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Open the OpenWebUI chat"
-          >openwebui ↗</a>
-        ) : (
-          <span className="k">openwebui</span>
-        )}
-        <span className="v">chat</span>
-      </div>
-
-      <div className="ln" />
-      <div className="nudge" onClick={() => onGo && onGo("logs")}>View runtime logs →</div>
     </div>
   );
 }
@@ -788,9 +662,8 @@ if (typeof document !== "undefined" && !document.getElementById("hal0-modal-css"
 // ─── Bottom tab bar (mobile <720px) ───
 // ─── NavDrawer (mobile) ───
 // Slide-in drawer that replaces the (display:none) desktop sidebar at
-// ≤720px. Mirrors the sidebar: the command-palette launcher (folded in
-// from the topbar on mobile), the full nav (useNavItems), and the runtime
-// status widget. Opened from the topbar hamburger; closed via backdrop,
+// ≤720px. Mirrors the sidebar: the quick-actions launcher (folded in
+// from the topbar on mobile) and the full nav (useNavItems). Opened from the topbar hamburger; closed via backdrop,
 // the X, Esc, or navigating.
 function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
   const items = useNavItems();
@@ -814,7 +687,7 @@ function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
           </button>
         </div>
         <button className="nav-drawer-cmdk" onClick={onCmdK}>
-          {Icons.search}<span>Command palette</span><kbd>⌘K</kbd>
+          {Icons.zap}<span>Quick actions</span><kbd>⌘K</kbd>
         </button>
         <div className="sb-list">
           {items.map(it => (
@@ -842,7 +715,6 @@ function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
           ))}
         </div>
         <div className="sb-spacer" />
-        <SidebarRuntimeWidget onGo={onGo} />
         </>)}
       </aside>
     </>

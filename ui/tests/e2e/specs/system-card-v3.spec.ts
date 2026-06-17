@@ -82,7 +82,7 @@ test.describe.skip('System card (dashboard sidebar)', () => {
   test('runtime health row is no longer present in the System card', async ({ page }) => {
     await page.goto('/#dashboard')
     const card = page.locator('.sys-card')
-    // Removed 2026-06-05 — folded into the sidebar Runtime widget instead.
+    // Runtime health lives in the footer, not the System card.
     await expect(card.locator('.sys-row .k', { hasText: 'runtime' })).toHaveCount(0)
     await expect(card.locator('.sys-health')).toHaveCount(0)
   })

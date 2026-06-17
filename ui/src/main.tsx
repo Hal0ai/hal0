@@ -37,9 +37,6 @@ import './dash/overhaul.css'
 
 import './dash/data.jsx'
 import './dash/tweaks-panel.jsx'
-// 2026-06-05: the standalone SidebarAgentBlock (+ its window hook bridge) is
-// retired — its agent health folded into the consolidated Runtime widget in
-// chrome.jsx, which imports useSidebarAgentRollup directly via ES modules.
 import './dash/chrome.jsx'
 import './dash/primitives.jsx'
 import './dash/cards-shell.jsx'

@@ -433,17 +433,12 @@
   box-sizing: border-box;
 }
 
-/* ─── Hero strip ─────────────────────────────────────────────────────────────── */
+/* ─── Dashboard toolbar ─────────────────────────────────────────────────────── */
 .dash-hero {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 4px 0 8px;
-}
-.dash-hero-greeting {
-  font-size: 13px;
-  color: var(--fg-2);
-  font-family: var(--geist, sans-serif);
+  padding: 0 0 4px;
 }
 .dash-hero-spacer { flex: 1; }
 .dash-hero-meta {
@@ -451,6 +446,7 @@
   font-size: 11px;
   color: var(--fg-4);
   letter-spacing: 0.02em;
+  min-width: 0;
 }
 
 /* ─── Customize / Done button ────────────────────────────────────────────────── */

@@ -248,18 +248,11 @@ function App() {
   return (
     <>
       <div className="app">
-        {/* v0.3 PR-8: approvals are now sourced from the sidebar agent
-            rollup (PR-6 SidebarAgentBlock + live /api/agent/approvals
-            poll). The topbar bell stays as a launcher for the modal
-            view; its badge counter is suppressed until the live hook is
-            bridged here in PR-10 (it's already alive in the sidebar). */}
         <TopBar
           route={route}
-          onBell={() => setBellOpen(true)}
           onCmdK={() => setPaletteOpen(true)}
           onMenu={() => setNavOpen(true)}
           menuOpen={navOpen}
-          approvals={approvalItems.length}
         />
         <Sidebar route={route} param={param} onGo={go} />
         <div className="main">

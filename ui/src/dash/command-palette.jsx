@@ -147,7 +147,7 @@ function CommandPaletteInner({ onClose }) {
 
   return (
     <div className="cp-backdrop" onMouseDown={(e) => { if (e.target.classList.contains("cp-backdrop")) onClose(); }}>
-      <div className="cp-shell" role="dialog" aria-label="Command palette">
+      <div className="cp-shell" role="dialog" aria-label="Quick actions">
         <div className="cp-input-row">
           <span className="cp-input-ic">{Icons.search}</span>
           <input

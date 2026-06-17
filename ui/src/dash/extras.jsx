@@ -238,12 +238,12 @@ function LogLine({ e, search }) {
     ? highlightSearch(e.msg, search)
     : e.msg;
   return (
-    <div style={{padding: "2px 16px", display: "grid", gridTemplateColumns: "100px 78px 60px 80px 1fr", gap: 12, borderLeft: e.level === "warn" ? "2px solid var(--warn)" : e.level === "error" ? "2px solid var(--err)" : "2px solid transparent"}}>
-      <span style={{color: "var(--fg-5)"}}>{e.ts}</span>
-      <span style={{color: "var(--accent)"}}>{e.source}</span>
-      <span style={{color: e.level === "ok" ? "var(--ok)" : e.level === "warn" ? "var(--warn)" : e.level === "error" ? "var(--err)" : "var(--fg-3)"}}>{e.level}</span>
-      <span style={{color: e.slot ? "var(--fg-2)" : "var(--fg-5)"}}>{e.slot || "—"}</span>
-      <span style={{color: "var(--fg-2)"}}>{msg}</span>
+    <div className={"log-row log-" + (e.level || "info")}>
+      <span className="log-ts">{e.ts}</span>
+      <span className="log-source">{e.source}</span>
+      <span className="log-level">{e.level}</span>
+      <span className={"log-slot" + (e.slot ? "" : " empty")}>{e.slot || "—"}</span>
+      <span className="log-msg">{msg}</span>
     </div>
   );
 }
@@ -255,25 +255,25 @@ function LogGroup({ group, search }) {
   return (
     <>
       <div
-        style={{padding: "2px 16px", display: "grid", gridTemplateColumns: "100px 78px 60px 80px 1fr", gap: 12, borderLeft: "2px solid var(--warn)", cursor: "pointer", background: open ? "rgba(232,185,78,0.05)" : "transparent"}}
+        className={"log-row log-warn log-group-row" + (open ? " open" : "")}
         onClick={() => setOpen(o => !o)}
       >
-        <span style={{color: "var(--fg-5)"}}>{head.ts}</span>
-        <span style={{color: "var(--dev-vulkan)"}}>{head.source}</span>
-        <span style={{color: "var(--warn)"}}>{head.level}</span>
-        <span style={{color: "var(--fg-2)"}}>{head.slot || "—"}</span>
-        <span style={{color: "var(--fg-2)", display: "flex", alignItems: "center", gap: 8}}>
-          {open ? "▾" : "▸"} <b style={{color: "var(--fg)", fontWeight: 500}}>{head.msg}</b>
-          <span style={{color: "var(--fg-4)", fontSize: 10, marginLeft: 4}}>+ {rest} more · request {group.id}</span>
+        <span className="log-ts">{head.ts}</span>
+        <span className="log-source">{head.source}</span>
+        <span className="log-level">{head.level}</span>
+        <span className="log-slot">{head.slot || "—"}</span>
+        <span className="log-msg log-group-msg">
+          {open ? "▾" : "▸"} <b>{head.msg}</b>
+          <span className="log-group-meta">+ {rest} more · request {group.id}</span>
         </span>
       </div>
       {open && group.items.slice(1).map((ln, i) => (
-        <div key={i} style={{padding: "2px 16px 2px 32px", display: "grid", gridTemplateColumns: "84px 78px 60px 80px 1fr", gap: 12, color: "var(--fg-3)", borderLeft: "2px solid rgba(232,185,78,0.4)", background: "rgba(232,185,78,0.03)"}}>
-          <span style={{color: "var(--fg-5)"}}>{ln.ts}</span>
-          <span style={{color: "var(--dev-vulkan)"}}>{ln.source}</span>
-          <span style={{color: "var(--warn)"}}>{ln.level}</span>
-          <span>{ln.slot || "—"}</span>
-          <span>{ln.msg}</span>
+        <div key={i} className="log-row log-warn log-group-child">
+          <span className="log-ts">{ln.ts}</span>
+          <span className="log-source">{ln.source}</span>
+          <span className="log-level">{ln.level}</span>
+          <span className="log-slot">{ln.slot || "—"}</span>
+          <span className="log-msg">{ln.msg}</span>
         </div>
       ))}
     </>

@@ -50,9 +50,9 @@ const HAL0_DATA = {
 
   slots: [
     {
-      // Synthetic composite /v1 upstream — surfaced by useEndpoints() in the
-      // sidebar Runtime widget (hal0 row) and filtered OUT of the slot grid by
-      // useSlots(). Mirrors slots.py → _synthesize_slots_from_upstreams.
+      // Synthetic composite /v1 upstream — surfaced by useEndpoints() and
+      // filtered OUT of the slot grid by useSlots(). Mirrors slots.py →
+      // _synthesize_slots_from_upstreams.
       name: "hal0",
       _synthetic: true,
       _synthetic_reason: "Composite /v1 endpoint that fronts every chat model — not a lifecycle slot.",

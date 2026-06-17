@@ -124,8 +124,7 @@ function SystemCard() {
     ? (H.npu.present ? joinDot(H.npu.name || "XDNA", H.npu.driver) : "absent")
     : "—";
 
-  // Runtime health row removed (2026-06-05) — runtime status now lives solely
-  // in the sidebar Runtime widget; the System card is hardware identity only.
+  // Runtime health row removed — runtime status now lives in the footer.
   return (
     <div className="side-card sys-card">
       <div className="side-card-h">
@@ -272,7 +271,6 @@ function DashboardView({ slots: _slotsProp, onGo, showHero, onDismissHero }) {
       {showHero && (
         <div className="hero-strip" style={{marginBottom: 16}}>
           <div className="greet">
-            <span className="dim">system steady on </span>
             <span className="mono" style={{color: "var(--fg-2)"}}>{hostName}</span>
           </div>
           <div className="spacer" />

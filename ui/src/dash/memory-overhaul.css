@@ -239,6 +239,28 @@
 .ag-ptr-ic { width: 52px; height: 52px; border-radius: var(--rad-lg); border: 1px solid var(--accent-line); background: var(--accent-soft); display: inline-flex; align-items: center; justify-content: center; color: var(--accent); }
 .ag-ptr-h { font-size: 15px; color: var(--fg); margin-bottom: 6px; }
 .ag-ptr-body p { font-size: 12.5px; color: var(--fg-3); line-height: 1.55; margin: 0 0 14px; max-width: 560px; }
+
+@media (max-width: 900px) {
+  .mo-top {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 520px) {
+  .mo-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .mo-bank-head {
+    gap: 8px;
+    align-items: flex-start;
+  }
+
+  .mo-bank-id {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
 .ag-ptr-body b { color: var(--fg-2); }
 .ag-ptr-actions { display: flex; gap: 8px; }
 .ag-ptr-stat { display: flex; flex-direction: column; gap: 8px; padding-left: 20px; border-left: 1px solid var(--line); }

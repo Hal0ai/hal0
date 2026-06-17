@@ -28,10 +28,12 @@ test.describe('Dashboard v3 (/)', () => {
     await expect(page.locator('.sb-row.active .lbl')).toHaveText('Overview')
   })
 
-  test('topbar exposes brand + command-palette button + bell', async ({ page }) => {
+  test('topbar exposes brand + quick actions without stale host/bell chrome', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.tb-brand')).toBeVisible()
     await expect(page.locator('.tb-cmdk')).toBeVisible()
-    await expect(page.locator('.tb-bell')).toBeVisible()
+    await expect(page.locator('.tb-cmdk')).toContainText('Quick actions')
+    await expect(page.locator('.tb-host')).toHaveCount(0)
+    await expect(page.locator('.tb-bell')).toHaveCount(0)
   })
 })

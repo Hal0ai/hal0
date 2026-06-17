@@ -212,64 +212,21 @@ a { color: inherit; text-decoration: none; }
 .tb-eyebrow .sep { color: var(--fg-5); }
 .tb-eyebrow .now { color: var(--fg); font-weight: 500; }
 .tb-spacer { flex: 1; }
-.tb-host {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  font-family: var(--jbm);
-  font-size: 11px;
-  color: var(--fg-2);
-  cursor: pointer;
-}
-.tb-host:hover { border-color: var(--line-strong); }
-.tb-host .host-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-.tb-host b { color: var(--fg); font-weight: 500; }
-.tb-host .ut { color: var(--fg-4); }
-.tb-bell {
-  width: 30px; height: 30px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background: transparent;
-  cursor: pointer;
-  color: var(--fg-2);
-  position: relative;
-}
-.tb-bell:hover { color: var(--fg); border-color: var(--line-strong); }
-.tb-bell .badge {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  background: var(--accent);
-  color: #0a0a0a;
-  font-family: var(--jbm);
-  font-size: 9px;
-  font-weight: 600;
-  min-width: 16px;
-  height: 16px;
-  border-radius: 999px;
-  padding: 0 4px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 2px solid var(--bg);
-}
 .tb-cmdk {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   padding: 5px 9px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--accent-line);
   border-radius: var(--rad);
   font-family: var(--jbm);
   font-size: 11px;
-  color: var(--fg-3);
+  color: var(--fg-2);
+  background: color-mix(in srgb, var(--bg-2) 78%, var(--accent-soft));
   cursor: pointer;
 }
-.tb-cmdk:hover { color: var(--fg); border-color: var(--line-strong); }
+.tb-cmdk:hover { color: var(--fg); border-color: var(--accent-line); background: var(--accent-soft); }
+.tb-cmdk svg { color: var(--accent); }
 .tb-cmdk kbd {
   font-family: var(--jbm);
   font-size: 10px;
@@ -393,33 +350,6 @@ a { color: inherit; text-decoration: none; }
 /* v0.3 PR-6 — variant for SidebarAgentBlock. Keeps base .sb-status
    layout but tightens vertical margin so the sidebar can host both
    blocks without scrolling on a 720-tall viewport. */
-
-/* Runtime widget (2026-06-05) — consolidated hermes/hal0/runtime/openwebui
-   rollup. Inherits the base .sb-status card chrome; these rules add the
-   section header, deep-link row keys, and the indented hal0 model sub-row. */
-.sb-runtime .sb-runtime-h {
-  color: var(--fg-4);
-  font-size: 9.5px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  margin-bottom: 6px;
-}
-.sb-runtime .row { padding: 2.5px 0; }
-.sb-runtime .row.rt-sub { padding-top: 0; }
-.sb-runtime .row.rt-sub .k { padding-left: 10px; opacity: 0.8; }
-.sb-runtime .rt-extra { color: var(--fg-4); font-size: 0.85em; margin-left: 4px; }
-.sb-runtime a.rt-link {
-  color: var(--fg-4);
-  text-decoration: none;
-  cursor: pointer;
-  transition: color 0.12s ease;
-}
-.sb-runtime a.rt-link:hover { color: var(--accent); }
-.sb-runtime a.rt-link:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 2px;
-}
 
 /* ─── Footer ────────────────────────────────────────────────────── */
 .footer {
@@ -856,12 +786,14 @@ a { color: inherit; text-decoration: none; }
 /* Slots-page tabs — underline style, matching the Agent page's tab bar
    (Inference · Image Gen · Endpoints · Profiles). Borderless buttons with an
    accent bottom-border when active, over a single hairline rule. */
-.slot-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.slot-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.slot-tabs::-webkit-scrollbar { display: none; }
 .slot-tab {
   display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px;
   background: transparent; border: none; border-bottom: 2px solid transparent;
   font-family: var(--jbm); font-size: 12.5px; font-weight: 500; color: var(--fg-3);
   cursor: pointer; transition: color 0.12s ease, border-color 0.12s ease;
+  flex: 0 0 auto;
 }
 .slot-tab:hover { color: var(--fg); }
 .slot-tab.on,
@@ -873,6 +805,52 @@ a { color: inherit; text-decoration: none; }
 .slot-tab.on.comfy .slot-tab-ct { color: var(--comfy); }
 .slot-tab .slot-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-5); }
 .slot-tab .slot-tab-dot.live { background: var(--comfy); box-shadow: 0 0 8px var(--comfy); }
+
+/* Logs page rows */
+.log-row {
+  padding: 2px 16px;
+  display: grid;
+  grid-template-columns: 100px 78px 60px 80px minmax(0, 1fr);
+  gap: 12px;
+  border-left: 2px solid transparent;
+}
+.log-row.log-warn { border-left-color: var(--warn); }
+.log-row.log-error { border-left-color: var(--err); }
+.log-ts { color: var(--fg-5); }
+.log-source { color: var(--accent); }
+.log-level { color: var(--fg-3); }
+.log-ok .log-level { color: var(--ok); }
+.log-warn .log-level { color: var(--warn); }
+.log-error .log-level { color: var(--err); }
+.log-slot { color: var(--fg-2); }
+.log-slot.empty { color: var(--fg-5); }
+.log-msg {
+  color: var(--fg-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.log-group-row { cursor: pointer; }
+.log-group-row.open { background: rgba(232,185,78,0.05); }
+.log-group-child {
+  padding-left: 32px;
+  color: var(--fg-3);
+  border-left-color: rgba(232,185,78,0.4);
+  background: rgba(232,185,78,0.03);
+}
+.log-group-msg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.log-group-msg b {
+  color: var(--fg);
+  font-weight: 500;
+}
+.log-group-meta {
+  color: var(--fg-4);
+  font-size: 10px;
+  margin-left: 4px;
+}
 
 /* Main 50/50 row — Memory map | Throughput (home-redesign 2026-06-05).
    Both halves are .side-card so they read as a matched pair. */
@@ -1873,13 +1851,28 @@ select.npu-sel {
   .models-layout { grid-template-columns: 1fr; }
   .mdl-filters { position: static; }
 }
+@media (max-width: 900px) {
+  .vh {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .vh .vh-spacer {
+    display: none;
+  }
+  .vh h1 {
+    margin-right: auto;
+  }
+  .vh .btn {
+    flex: 0 1 auto;
+  }
+}
 @media (max-width: 720px) {
   :root { --sidebar-w: 0px; }
   .sidebar { display: none; }
   .view { padding: 16px 16px 80px; }
   .view-banners { padding: 14px 16px 0; }
   .tb-brand { width: auto; }
-  .tb-host .ut { display: none; }
   .tb-cmdk { display: none; }   /* command palette folded into the nav drawer on mobile */
   .topbar .tb-menu { display: flex; }
   .tb-eyebrow { display: none; }
@@ -1904,6 +1897,33 @@ select.npu-sel {
   .topbar { padding: 0 12px; gap: 10px; }
   .footer { display: none; }
   .app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
+  .log-row {
+    grid-template-columns: 74px 52px 44px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    gap: 1px 8px;
+    padding: 5px 10px;
+  }
+  .log-slot {
+    grid-column: 4;
+    grid-row: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .log-msg {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .log-group-child {
+    padding-left: 20px;
+  }
+  .log-group-msg {
+    display: block;
+  }
+  .log-group-meta {
+    display: block;
+    margin: 2px 0 0;
+  }
 }
 
 /* Container image-pull indeterminate progress bar (issue #659).
@@ -2070,10 +2090,6 @@ select.npu-sel {
   border-radius: 4px;
   padding: 1px 5px;
 }
-/* The 1080px breakpoint hides .sb-status globally (desktop sidebar rail
-   collapse); re-show it inside the drawer where the rail is full-width. */
-.nav-drawer .sb-status { display: block; }
-
 /* ─── Toast ────────────────────────────────────────────────────── */
 .hal0-toast {
   position: fixed;

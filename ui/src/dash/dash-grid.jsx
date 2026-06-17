@@ -586,14 +586,6 @@ function DashboardOverhaulView({ editing: editingProp, onToggleEdit }) {
   const slots = slotsQuery.data ?? [];
   const hw    = hwQuery.data ?? null;
 
-  // Live host identity for the hero greeting (handoff: "Welcome back, halo.
-  // system steady on <host>"). Prefer the live stats node, fall back to the
-  // HAL0_DATA seed host name so the hero never shows a bare "on ".
-  const hostName =
-    hw?.host?.node ||
-    (typeof window !== 'undefined' && window.HAL0_DATA?.host?.name) ||
-    null;
-
   // Reconcile raw layout with live slots
   const rawLayout = layoutQuery.data;
   const layout = useMemo(() => {
@@ -630,16 +622,9 @@ function DashboardOverhaulView({ editing: editingProp, onToggleEdit }) {
     // padding from the app shell); every route view uses it. Keep it so the
     // overhaul board inherits the same chrome as the old DashboardView.
     <div className="view dash-overhaul-view">
-      {/* Hero strip — handoff copy: "Welcome back, halo. system steady on
-          <host>". `hero-strip` class kept alongside `dash-hero` so shell +
-          existing hero specs still target it. */}
       <div className="dash-hero hero-strip">
-        <span className="dash-hero-greeting">
-          Welcome back, halo. system steady{hostName ? ` on ` : ''}
-          {hostName ? <span className="mono">{hostName}</span> : ''}
-        </span>
-        <span className="dash-hero-spacer" />
         <span className="dash-hero-meta mono">{heroMeta}</span>
+        <span className="dash-hero-spacer" />
         <button
           className={'dash-customize-btn' + (editing ? ' active' : '')}
           onClick={toggleEdit}

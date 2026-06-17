@@ -402,3 +402,55 @@
 
 /* ─── Responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 1100px) { .board .lane { width: 270px; } }
+
+@media (max-width: 720px) {
+  .board .board-top {
+    padding: 14px 16px 0;
+  }
+
+  .board .board-bar {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .board .board-select {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .board .board-select .bs-btn {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .board .board-select .bs-btn .nm {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .board .board-bar .bb-spacer {
+    flex: 1 1 auto;
+  }
+
+  .board .filterbar {
+    gap: 10px;
+  }
+
+  .board .flt,
+  .board .flt-search,
+  .board .flt-search .input {
+    width: 100%;
+  }
+
+  .board .flt-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .board .lanes-scroll {
+    padding: 4px 16px 0;
+  }
+}

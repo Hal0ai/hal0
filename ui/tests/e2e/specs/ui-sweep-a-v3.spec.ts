@@ -26,6 +26,12 @@ import { test, expect, json } from '../fixtures/apiMock'
 
 const FIVE_S = 5_500
 
+async function openApprovals(page: any) {
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('hal0:open-approvals'))
+  })
+}
+
 // ─── 1. AddSecretModal: real save ──────────────────────────────────────────
 
 test.describe('AddSecretModal — real save', () => {
@@ -146,10 +152,7 @@ test.describe('ApprovalModal live wiring', () => {
     )
     await page.goto('/#dashboard')
 
-    // Open the bell modal
-    const bell = page.locator('[aria-label="Agent approvals"]')
-    await bell.waitFor({ state: 'visible', timeout: FIVE_S })
-    await bell.click()
+    await openApprovals(page)
 
     await expect(page.locator('.approval-card')).toHaveCount(1, { timeout: FIVE_S })
     await expect(page.locator('.approval-card')).toContainText('fs_write')
@@ -161,9 +164,7 @@ test.describe('ApprovalModal live wiring', () => {
       json(route, { approvals: [] })
     )
     await page.goto('/#dashboard')
-    const bell = page.locator('[aria-label="Agent approvals"]')
-    await bell.waitFor({ state: 'visible', timeout: FIVE_S })
-    await bell.click()
+    await openApprovals(page)
     await expect(page.locator('[data-testid="approvals-empty"]')).toBeVisible({ timeout: FIVE_S })
   })
 
@@ -178,9 +179,7 @@ test.describe('ApprovalModal live wiring', () => {
     })
 
     await page.goto('/#dashboard')
-    const bell = page.locator('[aria-label="Agent approvals"]')
-    await bell.waitFor({ state: 'visible', timeout: FIVE_S })
-    await bell.click()
+    await openApprovals(page)
     await expect(page.locator('.approval-card')).toBeVisible({ timeout: FIVE_S })
 
     await page.locator('.approval-card button:has-text("Approve")').click()
@@ -199,9 +198,7 @@ test.describe('ApprovalModal live wiring', () => {
     })
 
     await page.goto('/#dashboard')
-    const bell = page.locator('[aria-label="Agent approvals"]')
-    await bell.waitFor({ state: 'visible', timeout: FIVE_S })
-    await bell.click()
+    await openApprovals(page)
     await expect(page.locator('.approval-card')).toBeVisible({ timeout: FIVE_S })
 
     await page.locator('.approval-card .btn.danger').first().click()
@@ -215,19 +212,15 @@ test.describe('ApprovalModal live wiring', () => {
 //        pointer card (design §7). Those tests were deleted; the memory
 //        surface is covered by memory-view/-tools/-graph specs instead.
 
-// ─── 7. Dashboard: no hardcoded "halo" username ─────────────────────────
+// ─── 7. Dashboard: compact operational toolbar ───────────────────────────
 
 test.describe('Dashboard hero strip', () => {
-  // dashboard-overhaul (feat/dashboard-overhaul): the handoff hero copy is
-  // explicitly "Welcome back, halo. system steady on <host>" — the design
-  // mandates the greeting the old anti-hardcoded-username guard removed. The
-  // design handoff is the law for this surface, so the assertion is inverted:
-  // the greeting + the live host phrasing must both be present.
-  test('renders the handoff hero greeting + live host phrasing', async ({ page }) => {
+  test('renders status metadata without the old greeting copy', async ({ page }) => {
     await page.goto('/#dashboard')
     await expect(page.locator('.hero-strip')).toBeVisible({ timeout: FIVE_S })
-    await expect(page.locator('.hero-strip')).toContainText('Welcome back, halo')
-    await expect(page.locator('.hero-strip')).toContainText('system steady on')
+    await expect(page.locator('.hero-strip')).not.toContainText('Welcome back, halo')
+    await expect(page.locator('.hero-strip')).not.toContainText('system steady on')
+    await expect(page.getByRole('button', { name: /customize/i })).toBeVisible()
   })
 })
 

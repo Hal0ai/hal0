@@ -15,12 +15,10 @@
  *     (nav-memory absent); the MCP sub-link stays
  *   - the Agent page renders an MCP-only tab bar (the Memory tab is hidden),
  *     and a deep link to #memory falls back to the MCP tab
- *   - the sidebar Runtime widget carries no dead-end "Memory →" link
- *     (the widget consolidated the old SidebarAgentBlock; its agent row now
- *     deep-links to the Hermes dashboard, never the gated Memory route)
+ *   - the removed sidebar Runtime widget does not reappear under the gate
  *
  * The ON state is covered by the default mock (memory_enabled: true) across
- * agent-view-v3 / memory-graph-v3 / sidebar-runtime-widget.
+ * agent-view-v3 / memory-graph-v3.
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
@@ -62,12 +60,10 @@ test.describe('memory gate OFF (HAL0_MEMORY_ENABLED unset)', () => {
     await expect(page.locator('[data-testid="mem-engine-card"]')).toHaveCount(0)
   })
 
-  test('Runtime widget renders with no dead-end Memory link', async ({ page }) => {
+  test('removed Runtime widget does not reappear', async ({ page }) => {
     await page.goto('/#dashboard')
     await expect(page.locator('.sb-list')).toBeVisible({ timeout: FIVE_S })
-    // The consolidated Runtime widget still renders under the memory gate...
-    await expect(page.locator('[data-testid="sidebar-runtime-widget"]')).toBeVisible()
-    // ...and never offers the old dead-end "Memory →" CTA into the gated route.
+    await expect(page.locator('[data-testid="sidebar-runtime-widget"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="sidebar-agent-open-memory"]')).toHaveCount(0)
   })
 })
