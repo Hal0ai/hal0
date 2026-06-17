@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -418,8 +419,16 @@ class TestStatusTelemetry:
         "queue_pending": [],
     }
 
-    def _patch_status(self, stats, queue):
+    def _patch_status(
+        self,
+        stats,
+        queue,
+        *,
+        gpu_busy: float | None = 0.97,
+        power: dict | None = None,
+    ):
         base = _BASE
+        power = power or {"gpu_temp_c": 68.5, "gpu_sclk_mhz": 2700.0}
 
         async def fetch(path):
             if "system_stats" in path:
@@ -432,11 +441,16 @@ class TestStatusTelemetry:
             patch(f"{base}._container_state", new_callable=AsyncMock, return_value="running"),
             patch(f"{base}._systemd_active", new_callable=AsyncMock, return_value=False),
             patch(f"{base}._fetch_json", new_callable=AsyncMock, side_effect=fetch),
+            patch(
+                f"{base}.gpu_view.sample",
+                return_value=SimpleNamespace(gpu_busy=gpu_busy),
+            ),
+            patch(f"{base}._probe_power", return_value=power),
         )
 
     def test_status_memory_fields_present(self, client: TestClient):
-        c, s, f = self._patch_status(self._SYSTEM_STATS, self._QUEUE_IDLE)
-        with c, s, f:
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_IDLE)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             body = client.get("/api/comfyui/status").json()
 
         mem = body["memory"]
@@ -448,22 +462,57 @@ class TestStatusTelemetry:
 
     def test_util_is_none_or_zero_when_no_running_job(self, client: TestClient):
         """gpu_busy_percent is forced-high artifact — util must be 0/None when idle."""
-        c, s, f = self._patch_status(self._SYSTEM_STATS, self._QUEUE_IDLE)
-        with c, s, f:
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_IDLE, gpu_busy=1.0)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             body = client.get("/api/comfyui/status").json()
 
-        # util key may be absent or be 0/None — it must NOT be 100 when idle
-        util = body.get("util") or (body.get("memory") or {}).get("util")
-        assert util in (None, 0, 0.0), f"util should be null/0 when idle, got {util}"
+        assert body["util"] == 0
 
-    def test_it_s_eta_step_absent_is_acceptable(self, client: TestClient):
-        """it/s, eta, step are websocket-derived — absent is OK (UI degrades gracefully)."""
-        c, s, f = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
-        with c, s, f:
+    def test_running_status_surfaces_live_gpu_telemetry(self, client: TestClient):
+        patches = self._patch_status(
+            self._SYSTEM_STATS,
+            self._QUEUE_BUSY,
+            gpu_busy=0.63,
+            power={"gpu_temp_c": 68.5, "gpu_sclk_mhz": 2700.0},
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
             body = client.get("/api/comfyui/status").json()
 
-        # These fields are optional — test just asserts that if present they're sensible
+        assert body["util"] == 63.0
+        assert body["temp"] == 68.5
+        assert body["clock"] == 2.7
+
+    def test_it_s_eta_step_exist_as_null(self, client: TestClient):
+        """it/s, eta, step require a future ComfyUI websocket subscription."""
+        patches = self._patch_status(self._SYSTEM_STATS, self._QUEUE_BUSY)
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            body = client.get("/api/comfyui/status").json()
+
         for field in ("it_s", "eta", "step"):
-            val = body.get(field)
-            if val is not None:
-                assert isinstance(val, (int, float, str)), f"{field} unexpected type"
+            assert field in body
+            assert body[field] is None
+
+    def test_telemetry_probe_failure_is_fail_soft(self, client: TestClient):
+        base = _BASE
+
+        async def fetch(path):
+            if "system_stats" in path:
+                return self._SYSTEM_STATS
+            if "queue" in path:
+                return self._QUEUE_BUSY
+            return None
+
+        with (
+            patch(f"{base}._container_state", new_callable=AsyncMock, return_value="running"),
+            patch(f"{base}._systemd_active", new_callable=AsyncMock, return_value=False),
+            patch(f"{base}._fetch_json", new_callable=AsyncMock, side_effect=fetch),
+            patch(f"{base}.gpu_view.sample", side_effect=RuntimeError("gpu unavailable")),
+            patch(f"{base}._probe_power", side_effect=RuntimeError("hwmon unavailable")),
+        ):
+            response = client.get("/api/comfyui/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["util"] is None
+        assert body["temp"] is None
+        assert body["clock"] is None

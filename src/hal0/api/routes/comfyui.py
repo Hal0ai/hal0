@@ -43,7 +43,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import hal0.comfyui.fetch as _fetch_module
+from hal0.api.routes.power import _probe_power
 from hal0.comfyui.selection import auto_selections, variant_for
+from hal0.hardware import gpu_view
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -250,6 +252,54 @@ def _queue_counts(queue: dict[str, Any] | None) -> dict[str, int]:
     }
 
 
+def _as_pct(value: Any) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    return round(max(0.0, min(1.0, float(value))) * 100, 1)
+
+
+def _mhz_to_ghz(value: Any) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    return round(float(value) / 1000.0, 2)
+
+
+async def _gpu_telemetry(request: Request, *, render_active: bool) -> dict[str, float | int | None]:
+    """Read live GPU util/temp/clock for /status, degrading per-field to null.
+
+    ``gpu_busy_percent`` is a forced-high artifact on the target AMD host while
+    the GPU is pinned to a high perf level, so util is exposed only while a
+    ComfyUI render is actively running. Temp and shader clock are factual reads
+    and are surfaced independently.
+    """
+    util: float | int | None = 0
+    temp: float | None = None
+    clock: float | None = None
+
+    try:
+        stats = getattr(request.app.state, "hardware_stats", None)
+        if stats is not None and hasattr(stats, "gpu_sample"):
+            sample = await asyncio.to_thread(stats.gpu_sample)
+        else:
+            sample = await asyncio.to_thread(gpu_view.sample)
+        if render_active:
+            util = _as_pct(getattr(sample, "gpu_busy", None))
+    except Exception:
+        util = 0 if not render_active else None
+
+    try:
+        power = await asyncio.to_thread(_probe_power)
+        temp_value = power.get("gpu_temp_c") if isinstance(power, dict) else None
+        clock_mhz = power.get("gpu_sclk_mhz") if isinstance(power, dict) else None
+        temp = round(float(temp_value), 1) if isinstance(temp_value, (int, float)) else None
+        clock = _mhz_to_ghz(clock_mhz)
+    except Exception:
+        temp = None
+        clock = None
+
+    return {"util": util, "temp": temp, "clock": clock}
+
+
 # Model categories surfaced in the pane's "models on share" card, mapped to the
 # share subdirs. ``diffusion`` folds the standalone diffusion/video model dirs.
 _INVENTORY_DIRS: dict[str, tuple[str, ...]] = {
@@ -341,6 +391,7 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
     )
     reachable = stats is not None
     counts = _queue_counts(queue)
+    telemetry = await _gpu_telemetry(request, render_active=counts["running"] > 0)
     engine = _engine_state(container, reachable, counts["running"])
     # Arbiter snapshot is fail-soft like every other probe here: a missing
     # manager or a corrupt state file degrades to null, never a 500.
@@ -369,6 +420,10 @@ async def comfyui_status(request: Request) -> dict[str, Any]:
         "endpoint": ":8188" if (reachable or mode == "generation") else None,
         "memory": _parse_memory(stats),
         "queue": counts,
+        **telemetry,
+        "it_s": None,
+        "eta": None,
+        "step": None,
         "inference": {"hermes": hermes},
         "inventory": _model_inventory(),
         "switchover": dict(_switch),

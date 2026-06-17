@@ -30,6 +30,12 @@ function comfyV2Status(overrides: Record<string, any> = {}) {
       pressure: false,
     },
     queue: { running: 1, pending: 2 },
+    util: 63,
+    temp: 68.5,
+    clock: 2.7,
+    it_s: null,
+    eta: null,
+    step: null,
     inference: { hermes: false },
     inventory: { checkpoints: 6, video: 4, loras: 11, vae: 3 },
     switchover: { active: false, target: null, error: null },
@@ -65,6 +71,7 @@ function comfyV2Idle() {
   return comfyV2Status({
     engine: 'running',
     queue: { running: 0, pending: 0 },
+    util: 0,
     active_render: null,
     queue_jobs: [],
   })
@@ -121,6 +128,16 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
     await expect(gauge).toContainText('gtt')
     // gtt_used_gb: 54 should appear in sub label
     await expect(gauge).toContainText('54')
+  })
+
+  test('status: device telemetry shows util, temp, and clock from /status', async ({ page }) => {
+    await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
+    await gotoImageTab(page)
+
+    const pane = page.locator('.comfy-v2-pane')
+    await expect(pane).toContainText('63%')
+    await expect(pane).toContainText('68.5°C')
+    await expect(pane).toContainText('2.7GHz')
   })
 
   // ── 4. Cancel render fires POST /api/comfyui/render/cancel ───────────────

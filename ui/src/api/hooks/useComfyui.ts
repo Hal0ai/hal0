@@ -60,6 +60,12 @@ export interface ComfyuiStatus {
   endpoint: string | null
   memory: ComfyuiMemory | null
   queue: { running: number; pending: number }
+  util: number | null
+  temp: number | null
+  clock: number | null
+  it_s: number | null
+  eta: string | null
+  step: number | null
   inference: { hermes: boolean }
   inventory: Record<string, number> | null
   switchover: ComfyuiSwitchover
@@ -77,6 +83,12 @@ export const COMFYUI_FALLBACK: ComfyuiStatus = {
   endpoint: null,
   memory: null,
   queue: { running: 0, pending: 0 },
+  util: 0,
+  temp: null,
+  clock: null,
+  it_s: null,
+  eta: null,
+  step: null,
   inference: { hermes: false },
   inventory: null,
   switchover: { active: false, target: null, error: null },
@@ -167,10 +179,11 @@ export function useComfyuiWorkflowLaunch() {
 
 // ── V2 pane data transform ───────────────────────────────────────────────────
 //
-// The server /status payload has queue counts + memory but NOT per-job detail
-// (name, kind, node, step, its, eta — those are ComfyUI-internal fields not
-// yet surfaced by the aggregator). The component renders placeholders for
-// absent fields — never crashes on undefined.
+// The server /status payload has queue counts, memory, and device telemetry.
+// Per-job detail (name, kind, node, progress) is not fully surfaced yet; it/s,
+// ETA, and step are explicit nulls until a ComfyUI websocket subscription lands.
+// The component renders placeholders for absent fields — never crashes on
+// undefined.
 //
 // active_render and queue_jobs are optional extensions that may be injected
 // by the window.__comfyuiV2MockOverride seam or a future richer backend.
@@ -265,8 +278,11 @@ export function transformComfyuiStatus(
       used: mem?.ram_used_gb ?? 0,
       ceil: mem?.ram_ceil_gb ?? 96,
     },
-    // iGPU stats are not in /status today — render em-dash via 0 sentinel.
-    // A future /api/stats/hardware extension can populate these.
-    stats: { util: 0, temp: 0, clk: 0, its: 0 },
+    stats: {
+      util: status.util ?? 0,
+      temp: status.temp ?? 0,
+      clk: status.clock ?? 0,
+      its: status.it_s ?? 0,
+    },
   }
 }
