@@ -107,6 +107,14 @@ function devKind(device) {
   return 'cpu'
 }
 
+// Utility (support) slot groups — the non-conversational tier that renders as
+// the compact mini-card row below the headline chat/agent cards. Anything else
+// (chat/agent LLMs) is a headline slot.
+const UTIL_GROUPS = new Set(['embed', 'rerank', 'tts', 'stt', 'voice'])
+function isUtilGroup(group) {
+  return UTIL_GROUPS.has(String(group || '').toLowerCase())
+}
+
 // Phase → dot class (reuses the design's .sdot vocabulary). Derived from the
 // shared slot-status classifier so the dot matches the rest of the page.
 function dotCls(ind) {
@@ -290,7 +298,7 @@ function DevCell({ s, onProfile }) {
       <span className="flm-chip">FLM · npu</span>
     ) : (
       <span className={'dchip ' + kind}>
-        <span className="d" />
+        <span className="sw" />
         {kind}
       </span>
     )
@@ -417,7 +425,6 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
   const memGb = typeof s.mem_mb === 'number' && s.mem_mb > 0 ? round1(s.mem_mb / 1024) : null
   const tps = typeof s.metrics?.toks === 'number' && s.metrics.toks > 0 ? s.metrics.toks : null
   const ttft = typeof s.metrics?.ttft === 'number' && s.metrics.ttft > 0 ? s.metrics.ttft : null
-  const spill = dot === 'serving' ? (tps ? `${tps} tok/s` : 'serving') : dot
   return (
     <div
       className={'scard ' + dot + (ph === 'off' ? ' dim' : '')}
@@ -426,7 +433,7 @@ export function SlotScard({ s, ind, full, modelNode, controls, phase, onEdit }) 
       <div className="scard-h">
         <span className={'sdot ' + dot} title={ind.tooltip} />
         <span className="snm">{s.name}</span>
-        <span className={'spill ' + dot}>{spill}</span>
+        <span className="sport">{s.port ? ':' + s.port : ''}</span>
       </div>
       <div className="scard-b">
         {modelNode}
@@ -506,6 +513,53 @@ function SlotCards({ rows, full, models, busyName, handlers }) {
   )
 }
 
+// Utility tier — compact mini cards for the support slots (embed / rerank /
+// voice). No meta row, no model picker: just the dot + name + port header and
+// a minimal model + Start/Stop/Restart control cluster (SlotControls compact).
+function MiniCard({ s, ind, busy, handlers }) {
+  const dot = dotCls(ind)
+  const ph = slotCtrlPhase(s)
+  return (
+    <div className={'mcard ' + dot} data-testid={`infer-slot-${s.name}`}>
+      <div className="mcard-h">
+        <span className={'sdot ' + dot} title={ind.tooltip} />
+        <span className="snm">{s.name}</span>
+        <span className="sport">{s.port ? ':' + s.port : ''}</span>
+      </div>
+      <div className="mcard-b">
+        <span className="smodel" title={s.model || ''}>
+          {s.model || '—'}
+        </span>
+        <SlotControls
+          phase={ph}
+          busy={busy}
+          compact
+          onStart={() => handlers.onStart(s)}
+          onStop={() => handlers.onStop(s)}
+          onRestart={() => handlers.onRestart(s)}
+        />
+      </div>
+    </div>
+  )
+}
+
+function MiniCards({ rows, busyName, handlers }) {
+  if (!rows.length) return null
+  return (
+    <div className="util-mini">
+      {rows.map(({ s, ind }) => (
+        <MiniCard
+          key={s.name}
+          s={s}
+          ind={ind}
+          busy={busyName === s.name}
+          handlers={handlers}
+        />
+      ))}
+    </div>
+  )
+}
+
 // Page-level hero band — the iGPU GTT memory map + combined-throughput tile,
 // lifted out of the Inference engine shell so it sits at the very top of the
 // Slots page (above the Inference ⇄ Image Gen tabs) and stays visible across
@@ -575,6 +629,14 @@ export function InferencePane() {
   const rows = slots.map((s) => ({ s, ind: slotIndicatorFromPhase(s) }))
   const servingN = rows.filter((r) => r.ind.cls === 'serving').length
   const loadedN = rows.filter((r) => isSlotLive(r.s)).length
+
+  // Tier split — headline = the conversational LLM slots (chat / agent groups);
+  // utility = the support slots (embed / rerank / voice). Keyed off slot.group
+  // so the split tracks the backend's own grouping; voice covers tts/stt too.
+  // This pane is always expanded (no accordion), so the utility tier shows ALL
+  // its slots; the live count drives the SubLabel note.
+  const headlineRows = rows.filter((r) => !isUtilGroup(r.s.group))
+  const utilRows = rows.filter((r) => isUtilGroup(r.s.group))
 
   const gpuN = slots.filter((s) => {
     const k = devKind(s.device)
@@ -677,17 +739,35 @@ export function InferencePane() {
               in the page-level InferenceHeroBand above the tabs. */}
           <div className="engine-b" data-testid="infer-slots">
             <div>
-              <SubLabel icon="slots" note={`all ${rows.length} · full cards`}>
-                slots
+              <SubLabel
+                icon="slots"
+                note={`${headlineRows.length} · chat · agent`}
+              >
+                chat · agent
               </SubLabel>
               <SlotCards
-                rows={rows}
+                rows={headlineRows}
                 full
                 models={modelsQuery.data}
                 busyName={busyName}
                 handlers={handlers}
               />
             </div>
+            {utilRows.length > 0 && (
+              <div data-testid="infer-util">
+                <SubLabel
+                  icon="mem"
+                  note={`${utilRows.length} support slots`}
+                >
+                  utility · embed · rerank · voice
+                </SubLabel>
+                <MiniCards
+                  rows={utilRows}
+                  busyName={busyName}
+                  handlers={handlers}
+                />
+              </div>
+            )}
             <div className="body-status">
               {servingN} serving
               {gttCapGb > 0 ? ` · ${gttFreeGb} GB free` : ''}

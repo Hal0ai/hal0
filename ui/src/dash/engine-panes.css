@@ -110,6 +110,13 @@
     0 0 0 1px var(--comfy-line),
     0 0 40px -20px var(--comfy-glow);
 }
+/* Inference: keep the engine container neutral — no accent border/ring around
+   the whole pane. The "live" accent lives on the per-slot serving cards
+   (accent left-border + breathe), not the container. */
+.infer-pane .engine.active {
+  border-color: var(--line);
+  box-shadow: none;
+}
 .infer-pane .engine-h,
 .npu-pane .engine-h {
   display: flex;
@@ -749,6 +756,20 @@
 :is(.infer-pane, .npu-pane) .scard.serving {
   border-left: 2px solid var(--comfy);
 }
+/* living-grid breathe — a subtle glow on the headline serving cards (infer-pane
+   only; the NPU pane uses its own .cslot markup). */
+.infer-pane .scard.serving {
+  animation: breathe 3.4s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow: 0 0 22px -10px var(--comfy-glow);
+  }
+}
 :is(.infer-pane, .npu-pane) .scard.warming {
   border-left: 2px solid var(--warn);
 }
@@ -775,69 +796,48 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-:is(.infer-pane, .npu-pane) .sdot {
+/* ── ONE status vocabulary (round dot), yellow-family · scoped to .infer-pane ──
+   ready   = solid yellow (loaded, healthy, idle-but-up) — no glow
+   serving = yellow + glow + pulse (active / working)
+   warming = orange + glow + pulse
+   error   = red + glow
+   offline = grey, no glow
+   Green (--ok) no longer appears for any slot status in this pane. */
+.infer-pane .sdot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--fg-5);
   flex-shrink: 0;
 }
-:is(.infer-pane, .npu-pane) .sdot.serving {
+.infer-pane .sdot.ready {
   background: var(--comfy);
-  box-shadow: 0 0 7px var(--comfy);
+}
+.infer-pane .sdot.serving {
+  background: var(--comfy);
+  box-shadow: 0 0 8px var(--comfy);
   animation: pulse 1.4s ease-in-out infinite;
 }
-:is(.infer-pane, .npu-pane) .sdot.ready {
-  background: var(--ok);
-}
-:is(.infer-pane, .npu-pane) .sdot.warming {
+.infer-pane .sdot.warming {
   background: var(--warn);
-  box-shadow: 0 0 7px var(--warn);
+  box-shadow: 0 0 8px var(--warn);
   animation: pulse 1.4s ease-in-out infinite;
 }
-:is(.infer-pane, .npu-pane) .sdot.error {
+.infer-pane .sdot.error {
   background: var(--err);
+  box-shadow: 0 0 8px var(--err);
 }
-:is(.infer-pane, .npu-pane) .sdot.offline {
+.infer-pane .sdot.offline {
   background: var(--fg-5);
 }
-/* status pill — serving shows live tok/s, others the state word */
-:is(.infer-pane, .npu-pane) .spill {
+/* port — replaces the old status pill; pushed right, plain mono */
+.infer-pane .sport {
   margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2px 8px;
-  border-radius: 999px;
   font-family: var(--jbm);
-  font-size: 10px;
-  border: 1px solid var(--line);
-  color: var(--fg-3);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-:is(.infer-pane, .npu-pane) .spill.serving {
-  color: var(--comfy);
-  border-color: var(--comfy-line);
-  background: var(--comfy-soft);
-}
-:is(.infer-pane, .npu-pane) .spill.ready {
-  color: var(--ok);
-  border-color: var(--ok-line);
-  background: var(--ok-soft);
-}
-:is(.infer-pane, .npu-pane) .spill.warming {
-  color: var(--warn);
-  border-color: var(--warn-line);
-  background: var(--warn-soft);
-}
-:is(.infer-pane, .npu-pane) .spill.error {
-  color: var(--err);
-  border-color: var(--err-line);
-  background: var(--err-soft);
-}
-:is(.infer-pane, .npu-pane) .spill.offline {
+  font-size: 11px;
   color: var(--fg-4);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
 }
 :is(.infer-pane, .npu-pane) .scard-b {
   padding: 10px 12px;
@@ -948,40 +948,60 @@
   color: var(--fg-4);
 }
 
-/* device chip + profile pill */
+/* device chip + profile pill — the device tag uses a SQUARE swatch (category,
+   not status) + a neutral name, so the device hue never reads as a status dot.
+   Round = status (the .sdot), square = device/category (matches the memory
+   legend swatches). */
 :is(.infer-pane, .npu-pane) .dchip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   padding: 2px 7px;
   border-radius: 3px;
   font-family: var(--jbm);
   font-size: 10px;
   border: 1px solid var(--line);
   background: var(--bg-1);
-  color: var(--fg-3);
+  color: var(--fg-2);
   white-space: nowrap;
 }
+.infer-pane .dchip .sw {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--rad-xs, 2px);
+  background: var(--dev-cpu);
+  flex-shrink: 0;
+}
+.infer-pane .dchip.vulkan .sw {
+  background: var(--dev-vulkan);
+}
+.infer-pane .dchip.rocm .sw {
+  background: var(--dev-rocm);
+}
+.infer-pane .dchip.npu .sw {
+  background: var(--dev-npu);
+}
+.infer-pane .dchip.cpu .sw {
+  background: var(--dev-cpu);
+}
+/* round .d dot — retained ONLY for the memory-track "iGPU" header label
+   (MemGtt), which is a hue-keyed category badge, not a slot device tag. The
+   `:has(.d)` guard hue-keys that chip while leaving slot device tags (which use
+   the neutral square .sw) untouched. */
 :is(.infer-pane, .npu-pane) .dchip .d {
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: currentColor;
 }
-:is(.infer-pane, .npu-pane) .dchip.vulkan {
+:is(.infer-pane, .npu-pane) .dchip.vulkan:has(.d) {
   color: var(--dev-vulkan);
-  border-color: rgba(249, 216, 132, 0.3);
 }
-:is(.infer-pane, .npu-pane) .dchip.rocm {
+:is(.infer-pane, .npu-pane) .dchip.rocm:has(.d) {
   color: var(--dev-rocm);
-  border-color: rgba(127, 184, 255, 0.3);
 }
-:is(.infer-pane, .npu-pane) .dchip.npu {
+:is(.infer-pane, .npu-pane) .dchip.npu:has(.d) {
   color: var(--dev-npu);
-  border-color: rgba(200, 150, 255, 0.3);
-}
-:is(.infer-pane, .npu-pane) .dchip.cpu {
-  color: var(--fg-3);
 }
 :is(.infer-pane, .npu-pane) .flm-chip {
   display: inline-flex;
@@ -1081,6 +1101,82 @@
 }
 :is(.infer-pane, .npu-pane, .npu-card) .sctrl.restart:hover {
   background: var(--comfy-soft);
+}
+
+/* ─── Utility tier — compact mini cards (embed / rerank / voice) ─────────
+   A tighter grid below the headline chat/agent cards: header = dot + name +
+   port, body = model text + a minimal Start/Stop/Restart cluster. No meta row,
+   no model picker. Scoped to .infer-pane (the NPU pane has its own markup). */
+.infer-pane .util-mini {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(218px, 1fr));
+}
+.infer-pane .mcard {
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg);
+  overflow: hidden;
+  transition: border-color 0.14s var(--ease);
+}
+.infer-pane .mcard:hover {
+  border-color: var(--line-strong);
+}
+.infer-pane .mcard.ready {
+  border-left: 2px solid var(--comfy);
+}
+.infer-pane .mcard.serving {
+  border-left: 2px solid var(--comfy);
+  animation: breathe 3.4s ease-in-out infinite;
+}
+.infer-pane .mcard.warming {
+  border-left: 2px solid var(--warn);
+}
+.infer-pane .mcard.error {
+  border-left: 2px solid var(--err);
+}
+.infer-pane .mcard.offline {
+  opacity: 0.6;
+}
+.infer-pane .mcard-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-1);
+}
+.infer-pane .mcard-h .snm {
+  font-family: var(--jbm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.infer-pane .mcard-b {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.infer-pane .mcard-b .smodel {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.infer-pane .mcard-b .slot-ctrls {
+  flex-shrink: 0;
+}
+.infer-pane .mcard .sctrl {
+  width: 22px;
+  height: 22px;
 }
 
 /* ════════════════════════════════════════════════════════════════════

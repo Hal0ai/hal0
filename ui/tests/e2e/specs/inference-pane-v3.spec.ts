@@ -41,13 +41,16 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     // engine pane: state pill summarises serving/loaded counts (primary serving).
     await expect(pane(page)).toBeVisible()
     await expect(page.getByTestId('infer-epill')).toContainText('serving')
-    // every slot renders as a FULL card now (no accordion); the serving primary
-    // card's status pill carries the live tok/s (45 in the seed).
+    // headline (chat · agent) slots render as FULL cards. The status pill is
+    // gone — the header now shows the slot PORT (mono, pushed right); readiness
+    // is the dot, and tok/s lives in the meta row.
     await expect(body(page).locator('.scards.full')).toHaveCount(1)
     const card = body(page).getByTestId('infer-slot-primary')
     await expect(card).toBeVisible()
     await expect(card).toHaveClass(/\bscard\b/)
-    await expect(card.locator('.spill')).toContainText('45 tok/s')
+    // serving primary → yellow serving dot + the port (:8092 in the seed).
+    await expect(card.locator('.scard-h .sdot')).toHaveClass(/\bserving\b/)
+    await expect(card.locator('.scard-h .sport')).toContainText(':8092')
   })
 
   test('profile pill surfaces the runtime profile name (slot.profile)', async ({ page }) => {
