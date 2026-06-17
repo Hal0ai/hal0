@@ -172,6 +172,56 @@ def slot_list(
     console.print(table)
 
 
+def _drift_warning(status: dict[str, Any]) -> str | None:
+    drift = status.get("config_drift") or {}
+    if not isinstance(drift, dict) or drift.get("drifted") is not True:
+        return None
+    diffs = drift.get("diffs") or []
+    parts: list[str] = []
+    if isinstance(diffs, list):
+        for diff in diffs:
+            if not isinstance(diff, dict):
+                continue
+            parts.append(
+                f"{diff.get('key')}: running={diff.get('running')} rendered={diff.get('rendered')}"
+            )
+    detail = "; ".join(parts) if parts else "running argv differs from rendered config"
+    return f"WARN config drift: {detail}"
+
+
+@app.command("status")
+def slot_status(
+    name: str = typer.Argument(..., help="Slot name to inspect"),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw /api/slots/{name} JSON."),
+) -> None:
+    """Show a slot status summary, including config-drift warnings."""
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        status = api_get(f"/api/slots/{name}")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if json_out:
+        typer.echo(jsonlib.dumps(status, indent=2))
+        return
+
+    table = Table(title=f"hal0 slot: {name}")
+    table.add_column("State")
+    table.add_column("Model")
+    table.add_column("Port", justify="right")
+    table.add_row(
+        _fmt_state(status.get("status") or status.get("state")),
+        (status.get("model") or status.get("model_id") or "—") or "—",
+        str(status.get("port") or "—"),
+    )
+    console.print(table)
+    warning = _drift_warning(status)
+    if warning:
+        console.print(f"[bold yellow]{warning}[/bold yellow]")
+
+
 @app.command("load")
 def slot_load(
     name: str = typer.Argument(..., help="Slot name (e.g. primary)"),

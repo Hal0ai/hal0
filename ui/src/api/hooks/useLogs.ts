@@ -19,6 +19,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import { appendEntry } from './logRing.js'
 
 /** Unified journal entry — mirrors ``hal0.api.routes.journal.JournalEntry``. */
 export interface JournalEntry {
@@ -133,12 +134,9 @@ export function useLogsStream(opts: UseLogsStreamOptions = {}) {
   const errorCountRef = useRef(0)
 
   const push = (entry: JournalEntry) => {
-    setRing((prev) => {
-      const next =
-        prev.length >= RING_MAX ? prev.slice(prev.length - RING_MAX + 1) : prev.slice()
-      next.push(entry)
-      return next
-    })
+    // appendEntry dedups by content signature so re-opening the pane (which
+    // reconnects the SSE and replays the tail) never double-renders a line.
+    setRing((prev) => appendEntry(prev, entry, RING_MAX))
   }
 
   useEffect(() => {

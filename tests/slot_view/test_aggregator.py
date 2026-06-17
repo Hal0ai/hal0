@@ -171,6 +171,14 @@ class TestSerializeSlot:
         assert out["backend"] == "vulkan"
         assert out["provider"] == "llama-server"
 
+    def test_config_drift_lifted_from_metadata(self) -> None:
+        drift = {
+            "drifted": True,
+            "diffs": [{"key": "--ctx-size", "running": "4096", "rendered": "131072"}],
+        }
+        out = serialize_slot(_slot(metadata={"config_drift": drift}), model_cache={})
+        assert out["config_drift"] == drift
+
     def test_explicit_backend_wins_over_metadata(self) -> None:
         out = serialize_slot(
             _slot(backend="rocm", metadata={"backend": "vulkan"}),
@@ -188,6 +196,40 @@ class TestSerializeSlot:
     def test_no_cache_omits_models_key(self) -> None:
         out = serialize_slot(_slot(), model_cache=None)
         assert "models" not in out
+
+    def test_serving_with_empty_models_downgraded_to_idle(self) -> None:
+        # #792: a model-requiring slot cannot be "serving" with zero resident
+        # models. With an authoritative (provided) model_cache that lists none,
+        # the surfaced status must downgrade to idle (the documented "process
+        # up but /v1/models empty" state, issue #31). The true FSM ``state``
+        # is preserved; only the surfaced ``status`` is corrected.
+        out = serialize_slot(
+            _slot(state=SlotState.SERVING, model_id="qwen3-4b"),
+            model_cache={},
+        )
+        assert out["status"] == "idle"
+        assert out["state"] == "serving"
+
+    def test_serving_with_resident_models_stays_serving(self) -> None:
+        # Guard: a real loaded model means "serving" is honest — no downgrade.
+        out = serialize_slot(
+            _slot(state=SlotState.SERVING, model_id="qwen3-4b"),
+            model_cache={"chat": ["qwen3-4b"]},
+        )
+        assert out["status"] == "serving"
+
+    def test_self_managed_provider_serving_empty_not_downgraded(self) -> None:
+        # Guard: kokoro/moonshine/vibevoice serve a baked-in model and report
+        # no model_id, so an empty model list is not a lie — leave it alone.
+        out = serialize_slot(
+            _slot(
+                state=SlotState.SERVING,
+                model_id=None,
+                metadata={"provider": "kokoro"},
+            ),
+            model_cache={},
+        )
+        assert out["status"] == "serving"
 
 
 # ── concern 2: config-field lifting (pure TOML lift) ────────────────────────

@@ -68,6 +68,10 @@ def container_stub() -> Iterator[dict[str, Any]]:
     provider.is_active = MagicMock(side_effect=lambda name: name in state["active"])
     provider.health = AsyncMock(side_effect=lambda port: {"ok": True, "status": "healthy"})
     provider.running_image = MagicMock(return_value=None)
+    provider.running_argv = MagicMock(side_effect=lambda name: state.get("running_argv"))
+    provider.expected_argv = MagicMock(
+        side_effect=lambda cfg, model_info: state.get("expected_argv")
+    )
     provider.image_present = MagicMock(return_value=True)
 
     with patch("hal0.providers.container.container_provider", return_value=provider):
@@ -1367,6 +1371,27 @@ def test_get_slot_includes_config_enrichment(
     assert body["coresident_group"] == "npu-flm-trio"
     assert body["type"] == "llm"
     assert body["model_default"] == "gemma3-1b"
+
+
+def test_get_slot_includes_config_drift_when_requested(
+    slot_root: Path,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """#863: single-slot status includes argv drift without burdening list()."""
+    isolated_client.post("/api/slots/chat/load")
+    container_stub["running_argv"] = ["--ctx-size", "4096", "-b", "512"]
+    container_stub["expected_argv"] = ["--ctx-size", "131072", "-b", "2048"]
+
+    r = isolated_client.get("/api/slots/chat")
+
+    assert r.status_code == 200, r.text
+    drift = r.json()["config_drift"]
+    assert drift["drifted"] is True
+    assert drift["diffs"] == [
+        {"key": "--ctx-size", "running": "4096", "rendered": "131072"},
+        {"key": "-b", "running": "512", "rendered": "2048"},
+    ]
 
 
 # ── Backwards compatibility ────────────────────────────────────────────────

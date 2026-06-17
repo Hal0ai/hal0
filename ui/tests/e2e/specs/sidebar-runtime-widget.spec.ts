@@ -142,12 +142,16 @@ test.describe('Sidebar Runtime widget — populated', () => {
     await expect(row.locator('.v b')).toHaveText('2')
   })
 
-  test('footer runtime chip shows readiness and service health dots', async ({ page }) => {
+  test('footer ribbon shows runtimes + services health groups', async ({ page }) => {
     await page.goto('/')
-    const chip = page.locator('.foot-chip').filter({ hasText: 'runtime:' })
     // HAL0_DATA seeds 8 enabled slots (legacy is disabled); all are ready.
-    await expect(chip.locator('.v')).toContainText('8/8 ready', { timeout: FIVE_S })
-    await expect(chip.locator('.foot-service-dot.up')).toContainText(['hal0', 'hermes', 'openwebui'])
+    const runtimes = page.locator('[data-testid="foot-health-runtimes"]')
+    await expect(runtimes.locator('.lbl .v')).toContainText('8 / 8 ready', { timeout: FIVE_S })
+    await expect(runtimes.locator('.pip.ok')).toHaveCount(8)
+    // services group — one LED pip per backing service, all up here.
+    const services = page.locator('[data-testid="foot-health-services"]')
+    await expect(services.locator('.lbl .v')).toContainText('3 / 3 ready')
+    await expect(services.locator('.pip.ok')).toHaveCount(3)
   })
 })
 
@@ -174,8 +178,9 @@ test.describe('Sidebar Runtime widget — no advertised service links', () => {
     await expect(row.locator('.v')).toContainText('chat', { timeout: FIVE_S })
     await expect(row.locator('a.rt-link')).toHaveCount(0)
     await expect(row.locator('.k')).toHaveText('openwebui')
-    const chip = page.locator('.foot-chip').filter({ hasText: 'runtime:' })
-    await expect(chip.locator('.foot-service-dot.up')).toContainText(['openwebui'])
+    // footer services pip still reads the openwebui health as up.
+    const services = page.locator('[data-testid="foot-health-services"]')
+    await expect(services.locator('.pip[aria-label="openwebui: up"]')).toHaveCount(1)
   })
 })
 
@@ -190,9 +195,8 @@ test.describe('Sidebar Runtime widget — hermes tone mapping', () => {
     await page.route('**/api/config/urls', (route) => json(route, URLS_ALL))
     await page.route('**/api/services/health', (route) => json(route, SERVICES_HEALTH_DOWN))
     await page.goto('/')
-    const v = page.locator('.foot-chip').filter({ hasText: 'runtime:' }).locator('.foot-service-dot').filter({ hasText: 'hermes' })
-    await expect(v).toHaveClass(/err/, { timeout: FIVE_S })
-    await expect(v).toContainText('hermes')
+    const pip = page.locator('[data-testid="foot-health-services"] .pip[aria-label^="hermes:"]')
+    await expect(pip).toHaveClass(/\berr\b/, { timeout: FIVE_S })
   })
 
   test('no agent installed renders sidebar copy without a health dot', async ({ page }) => {

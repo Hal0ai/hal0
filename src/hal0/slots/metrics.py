@@ -58,6 +58,14 @@ def render_slot_metrics(slots: list[Any]) -> str:
         raw_state = getattr(slot, "state", "")
         state = str(getattr(raw_state, "value", raw_state) or "").lower()
         up = 1 if state in _READY_STATES else 0
+        # #791: don't trust FSM state alone. The last health probe records its
+        # ok-flag on the snapshot's ``metadata["health_ok"]``; an explicit
+        # False means the unit is active to systemd but the model server is
+        # dead (crashed-but-active) — force up=0 so alerting isn't blind. An
+        # absent/None flag (not yet probed) falls back to FSM state.
+        meta = getattr(slot, "metadata", None) or {}
+        if up and meta.get("health_ok") is False:
+            up = 0
         ready_total += up
         lines.append(f'hal0_slot_up{{slot="{name}"}} {up}')
         state_lines.append(f'hal0_slot_state{{slot="{name}",state="{_escape_label(state)}"}} 1')
