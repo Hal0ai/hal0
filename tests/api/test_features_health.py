@@ -26,14 +26,14 @@ def test_features_shape(client: TestClient) -> None:
     assert body["mcp_supervisor"] is False
 
 
-def test_features_comfyui_gate_reads_env(
+def test_features_comfyui_switchover_always_available(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     assert client.get("/api/features").json()["comfyui_switchover"] is True
     monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "0")
-    assert client.get("/api/features").json()["comfyui_switchover"] is False
+    assert client.get("/api/features").json()["comfyui_switchover"] is True
 
 
 def test_features_memory_reflects_state(client: TestClient) -> None:

@@ -145,6 +145,21 @@ elif [[ "$DO_BUILD" -eq 0 ]]; then
     warn "skipping UI build (--no-build)"
 fi
 
+# ── 2b. Sync runtime-mounted ComfyUI custom nodes ─────────────────────────────
+# ComfyUI imports custom nodes from the persistent model share, not the source
+# checkout. Keep shipped hal0 nodes in sync during runtime deploys; the ComfyUI
+# slot still needs a restart to import changed node code.
+comfy_nodes_src="${REPO_ROOT}/installer/comfyui/custom_nodes"
+comfy_nodes_dst="${HAL0_COMFYUI_CUSTOM_NODES_DIR:-/mnt/ai-models/comfyui/custom_nodes}"
+if [[ -d "$comfy_nodes_src" ]]; then
+    if install -d "$comfy_nodes_dst" 2>/dev/null \
+        && install -m0644 "$comfy_nodes_src"/*.py "$comfy_nodes_dst"/ 2>/dev/null; then
+        info "ComfyUI custom nodes synced → ${comfy_nodes_dst}"
+    else
+        warn "could not sync ComfyUI custom nodes to ${comfy_nodes_dst}"
+    fi
+fi
+
 # ── 3. Re-assert group-shared ownership ───────────────────────────────────────
 # The reset + build above just (re)created files as the deploying user. Hand the
 # tree back to the shared group so the hal0 service user (Hermes, agents) can

@@ -1105,7 +1105,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(slots.router, prefix="/api/slots", tags=["slots"])
     # Read-only ComfyUI "generation engine" status for the slots-page Image-Gen
-    # tab (docker + systemd + ComfyUI HTTP), plus the feature-gated switchover.
+    # tab (docker + systemd + ComfyUI HTTP), plus arbiter switchover controls.
     app.include_router(comfyui.router, prefix="/api/comfyui", tags=["comfyui"])
     app.include_router(models.router, prefix="/api/models", tags=["models"])
     # Issue #311: HuggingFace Hub discovery (search proxy). Sits next

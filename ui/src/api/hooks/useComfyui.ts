@@ -13,9 +13,7 @@
 // arbiter runs the transition in-process; the `switchover` block on /status
 // (active/target/error) is what tracks the transition to terminal — the pane's
 // poll renders it, per the async-job-must-poll-to-terminal rule. Tearing down a
-// non-empty queue needs `force: true` (the confirm dialog is that consent). The
-// whole path stays feature-gated server-side (HAL0_COMFYUI_SWITCHOVER_ENABLED,
-// 501 when off) — surfaced as a toast, never an optimistic flip.
+// non-empty queue needs `force: true` (the confirm dialog is that consent).
 //
 // `arbiter` is the arbiter-truth block ({mode img|llm, pinned, saved slots,
 // idle_restore_at}); it is null when the arbiter is unavailable (gate off /
@@ -120,8 +118,8 @@ export interface SwitchoverBody {
   pin?: boolean
 }
 
-// raw:true so the dev mockFetch GET-shim can't mask the 501/503 gate — we want
-// the real status code to drive the toast copy.
+// raw:true so the dev mockFetch GET-shim can't mask 503 arbiter failures — we
+// want the real status code to drive the toast copy.
 export function useComfyuiSwitchover() {
   return useMutation({
     mutationFn: (body: SwitchoverBody) =>
@@ -131,7 +129,7 @@ export function useComfyuiSwitchover() {
 
 // Pin / unpin image mode (disables / re-arms the arbiter's idle auto-restore).
 // Synchronous 200 {"pinned":bool} — the caller refetches /status to reflect
-// the new arbiter state. raw:true for the same 501-gate reason as switchover.
+// the new arbiter state. raw:true for the same failure handling as switchover.
 export function useComfyuiPin() {
   return useMutation({
     mutationFn: (body: { pinned: boolean }) =>

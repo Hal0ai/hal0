@@ -21,9 +21,9 @@ arbiter never stops the img container once it is up:
     (cold-)started when it isn't already dispatchable.
   - ``restore_llm`` — ``POST /free`` to ComfyUI (drop its models from GTT),
     then reload the saved llm set. The container keeps serving the UI.
-  - actually *running* a generation in llm mode is refused at three gates:
-    the dispatch guard (``guard_dispatch``), and ComfyUI's own ``/prompt``
-    via the host-mounted ``hal0_gpu_gate`` custom node (403).
+  - direct ComfyUI ``/prompt`` submission goes through the host-mounted
+    ``hal0_gpu_gate`` custom node, which now asks hal0-api to enter image
+    mode before forwarding the prompt.
 
 Crash-recovery ordering (locked): the arbiter persists its target state to
 ``/var/lib/hal0/gpu_arbiter.json`` BEFORE the first unload, so an api
@@ -207,8 +207,8 @@ class GpuInferenceMode(Hal0Error):
     """Image dispatch refused — the GPU is serving the LLM set.
 
     The resident ComfyUI container stays READY in llm mode (its web UI is
-    always up), so this guard is what stops a generation from grabbing GTT
-    under the loaded LLM weights. Flip the switch first.
+    always up). The OpenAI-compatible image route switches before dispatch,
+    so this guard mainly protects lower-level/img-slot dispatch callers.
     """
 
     code = "gpu.inference_mode"

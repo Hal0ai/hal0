@@ -1,4 +1,4 @@
-"""Read-only ComfyUI "generation engine" status aggregator (+ gated switchover).
+"""ComfyUI "generation engine" status aggregator + control routes.
 
 The dashboard models ComfyUI as ONE containerized generation engine, not a list
 of per-model slots (a single run loads many cooperating models at once, and it
@@ -23,8 +23,7 @@ container and its web UI stay up — then reload the saved llm slots). It runs
 in the background behind a 202; the ``switchover`` block on /status tracks the
 transition. The API no longer shells out — the ``/opt/comfyui`` control scripts
 stay on disk for manual ops only. ``POST /api/comfyui/pin`` toggles the
-arbiter's manual pin (blocks idle-restore). Both write paths stay feature-gated
-behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` (501 when off).
+arbiter's manual pin (blocks idle-restore).
 """
 
 from __future__ import annotations
@@ -445,27 +444,6 @@ async def _run_switch(arbiter: Any, mode: str, *, pin: bool = False, force: bool
         _switch["target"] = None
 
 
-def _gate_closed() -> JSONResponse | None:
-    """501 when the operator hasn't enabled the GPU-switch write path."""
-    if os.environ.get("HAL0_COMFYUI_SWITCHOVER_ENABLED", "0") == "1":
-        return None
-    return JSONResponse(
-        status_code=501,
-        content={
-            "error": {
-                "code": "comfyui.switchover_disabled",
-                "message": (
-                    "ComfyUI switchover is disabled on this host. It stops "
-                    "the LLM stack (bots + memory extraction go dark) while "
-                    "generation holds the iGPU; set "
-                    "HAL0_COMFYUI_SWITCHOVER_ENABLED=1 on hal0-api to "
-                    "enable it."
-                ),
-            }
-        },
-    )
-
-
 def _arbiter_unavailable() -> JSONResponse:
     return JSONResponse(
         status_code=503,
@@ -490,13 +468,10 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
     background — track completion via the ``switchover`` block on
     ``GET /status``.
 
-    Stays gated behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` because the switch
-    takes the LLM stack (bots + memory extraction) offline (an operator
-    decision per host), not because the path is unwired.
+    The endpoint is always available when the SlotManager/GpuArbiter is wired:
+    ComfyUI prompt submission can call it as the implicit handoff before
+    enqueueing a render.
     """
-    gate = _gate_closed()
-    if gate is not None:
-        return gate
     try:
         body = await request.json()
     except ValueError:
@@ -577,12 +552,9 @@ async def comfyui_switchover(request: Request, background_tasks: BackgroundTasks
 async def comfyui_pin(request: Request) -> JSONResponse:
     """Toggle the arbiter's manual pin (holds image mode against idle-restore).
 
-    Body: ``{"pinned": bool}``. Gated by the same env flag as the switchover —
-    pinning only matters when the GPU-switch write path is live.
+    Body: ``{"pinned": bool}``. Pinning disables idle auto-restore while image
+    mode is active.
     """
-    gate = _gate_closed()
-    if gate is not None:
-        return gate
     try:
         body = await request.json()
     except ValueError:

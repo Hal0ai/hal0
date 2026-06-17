@@ -11,12 +11,10 @@ export const ENDPOINTS = {
   slots: '/api/slots',
 
   // ── ComfyUI generation engine (slots-page Image-Gen tab) ─────────
-  // Read-only aggregate of docker + systemd + ComfyUI HTTP; the
-  // switchover write-path is feature-gated server-side.
+  // Read-only aggregate of docker + systemd + ComfyUI HTTP.
   comfyuiStatus: '/api/comfyui/status',
   comfyuiSwitchover: '/api/comfyui/switchover',
-  // Pin image mode (disables the arbiter's idle auto-restore). 501 when the
-  // switchover gate is off.
+  // Pin image mode (disables the arbiter's idle auto-restore).
   comfyuiPin: '/api/comfyui/pin',
   // Render control
   comfyuiRenderCancel: '/api/comfyui/render/cancel',

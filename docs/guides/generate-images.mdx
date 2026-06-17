@@ -21,9 +21,9 @@ reloaded.
 
 <Aside type="caution">
 Switching the iGPU to generation **stops the LLM stack** (chat bots and
-memory extraction go dark) for as long as generation holds the GPU. The
-switchover write path is gated off by default — see
-[Enable the switchover](#enable-the-switchover).
+memory extraction go dark) for as long as generation holds the GPU. hal0
+does this automatically when a render needs the iGPU, then idle-restore
+hands it back to inference.
 </Aside>
 
 ## Read the generation-engine status
@@ -86,8 +86,7 @@ Body fields:
 Responses: **202** (`switching`, runs in the background — poll the
 `switchover` block on `/status`), **200** (`noop`, already in the target
 mode), **409** (switch already in flight, or a busy queue without
-`force`), **501** (switchover disabled on this host), **503** (arbiter not
-wired).
+`force`), **503** (arbiter not wired).
 
 Pin or unpin image mode independently:
 
@@ -96,20 +95,6 @@ curl -X POST http://localhost:8080/api/comfyui/pin \
   -H 'Content-Type: application/json' \
   -d '{"pinned": true}'
 ```
-
-### Enable the switchover
-
-Both write paths (`/switchover` and `/pin`) stay gated behind an
-environment flag because the switch takes the LLM stack offline — an
-operator decision per host. Set it on hal0-api:
-
-```sh
-HAL0_COMFYUI_SWITCHOVER_ENABLED=1
-```
-
-Without it, both endpoints answer **501** (`comfyui.switchover_disabled`).
-See [Configure](/docs/guides/configure) for where to set environment
-keys (`api.env`).
 
 ## Generate an image
 
@@ -170,5 +155,5 @@ caps a single render at 10 minutes before it gives up.
 ## See also
 
 - [Manage slots](/docs/guides/manage-slots) — the `img` slot lifecycle.
-- [Configure](/docs/guides/configure) — set `HAL0_COMFYUI_SWITCHOVER_ENABLED` and the `[image]` slot defaults.
+- [Configure](/docs/guides/configure) — set the `[image]` slot defaults.
 - [Observe the system](/docs/guides/logs-and-activity) — tail `hal0-slot@img`.

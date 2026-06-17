@@ -23,7 +23,7 @@ with it.
 | File | What it holds |
 |------|---------------|
 | `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots] port_range_start/end`, `[models] store`, telemetry channel. |
-| `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — feature flags and env knobs like `HAL0_MODEL_STORE`, `HAL0_COMFYUI_SWITCHOVER_ENABLED`, `HAL0_MCP_ALLOWED_HOSTS`. |
+| `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — feature flags and env knobs like `HAL0_MODEL_STORE`, `HAL0_MCP_ALLOWED_HOSTS`. |
 | `upstreams.toml` | External / upstream provider routing. |
 | `providers.toml` | Provider credential references (key **names**, never plaintext secrets). |
 | `profiles.toml` | Optional profile catalogue. Absent → built-in seed profiles are used. |

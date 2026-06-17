@@ -16,6 +16,7 @@ from pathlib import Path
 # Repo root = three levels up from tests/install/
 REPO = Path(__file__).parent.parent.parent
 SCRIPTS_DIR = REPO / "installer" / "comfyui" / "scripts"
+CUSTOM_NODES_DIR = REPO / "installer" / "comfyui" / "custom_nodes"
 COMFYUI_PY = REPO / "src" / "hal0" / "api" / "routes" / "comfyui.py"
 INSTALL_SH = REPO / "installer" / "install.sh"
 
@@ -101,3 +102,10 @@ def test_install_sh_uses_install_command_for_scripts():
         or "COMFYUI_DIR" in content
     )
     assert has_install_block, "install.sh does not contain 'install -d /opt/comfyui' or equivalent"
+
+
+def test_install_sh_places_comfyui_custom_nodes():
+    content = INSTALL_SH.read_text()
+    assert (CUSTOM_NODES_DIR / "hal0_gpu_gate.py").exists()
+    assert "installer/comfyui/custom_nodes" in content or "comfyui/custom_nodes" in content
+    assert "COMFYUI_MODELS_ROOT}/custom_nodes" in content

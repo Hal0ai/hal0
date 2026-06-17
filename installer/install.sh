@@ -953,6 +953,7 @@ done
 ui_step "ComfyUI control scripts"
 
 COMFYUI_SCRIPTS_SRC="${REPO_ROOT}/installer/comfyui/scripts"
+COMFYUI_CUSTOM_NODES_SRC="${REPO_ROOT}/installer/comfyui/custom_nodes"
 COMFYUI_DIR="/opt/comfyui"
 COMFYUI_MODELS_ROOT="/mnt/ai-models/comfyui"
 
@@ -972,6 +973,13 @@ else
         install -d "${COMFYUI_MODELS_ROOT}/${_subdir}"
     done
     info "ensured ${COMFYUI_MODELS_ROOT}/{models,output,input,user,custom_nodes}"
+
+    if [[ -d "${COMFYUI_CUSTOM_NODES_SRC}" ]]; then
+        install -m0644 "${COMFYUI_CUSTOM_NODES_SRC}"/*.py "${COMFYUI_MODELS_ROOT}/custom_nodes/"
+        info "wrote ComfyUI custom nodes → ${COMFYUI_MODELS_ROOT}/custom_nodes/"
+    else
+        warn "${COMFYUI_CUSTOM_NODES_SRC} not found — ComfyUI custom nodes not installed"
+    fi
 
     # Place extra_model_paths.yaml if not already present (operator may have a
     # customised copy — never overwrite).

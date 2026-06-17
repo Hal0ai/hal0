@@ -1,9 +1,9 @@
 /**
  * mobile-nav-v3 — at ≤720px the desktop sidebar is hidden and navigation
  * moves into a top-right hamburger (.tb-menu) that opens a slide-in
- * NavDrawer: command-palette launcher (folded in from the topbar), the full
- * nav (useNavItems — incl. Logs + MCP the old bottom-tabs never reached),
- * and the runtime status widget. Replaces the never-shown bottom-tab bar.
+ * NavDrawer: quick-actions launcher (folded in from the topbar) and the full
+ * nav (useNavItems — incl. Logs + MCP the old bottom-tabs never reached).
+ * Replaces the never-shown bottom-tab bar.
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -48,8 +48,8 @@ test.describe('Mobile nav drawer (≤720px)', () => {
     await expect(drawer.locator('.sb-row .lbl', { hasText: 'Connections' })).toHaveCount(0)
     // command palette folded into the drawer on mobile
     await expect(drawer.locator('.nav-drawer-cmdk')).toBeVisible()
-    // runtime widget re-shown inside the drawer (despite the 1080px global hide)
-    await expect(drawer.locator('.sb-status').first()).toBeVisible()
+    // runtime health lives in the footer, not the drawer/sidebar.
+    await expect(drawer.locator('.sb-status')).toHaveCount(0)
   })
 
   test('selecting a destination navigates and closes the drawer', async ({ page }) => {

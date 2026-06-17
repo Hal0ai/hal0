@@ -1,4 +1,4 @@
-"""Tests for the read-only ComfyUI status aggregator + gated switchover.
+"""Tests for the ComfyUI status aggregator + arbiter switchover.
 
 The dashboard's Image-Gen tab renders a single "generation engine" pane backed
 by ``GET /api/comfyui/status``. That endpoint aggregates three sources, all of
@@ -10,14 +10,13 @@ crash on a dead container):
     currently owns the single iGPU
   - ComfyUI's own HTTP API (``/system_stats`` + ``/queue``) for live telemetry
 
-The switchover *write* path (POST /api/comfyui/switchover) is feature-gated
-behind ``HAL0_COMFYUI_SWITCHOVER_ENABLED`` (501 when off). When on it validates
-the target mode, no-ops if already there, refuses to drop a busy render queue
-without ``force``, and drives the GpuArbiter in the background behind a 202 —
-the ``switchover`` block on /status is what tracks the transition to terminal.
-No subprocess is ever spawned for the switch (the shell-script path is retired):
-tests install a stub arbiter on ``app.state.slot_manager`` and assert the
-arbiter calls, mirroring the patched status seams.
+The switchover *write* path (POST /api/comfyui/switchover) validates the target
+mode, no-ops if already there, refuses to drop a busy render queue without
+``force``, and drives the GpuArbiter in the background behind a 202 — the
+``switchover`` block on /status is what tracks the transition to terminal. No
+subprocess is ever spawned for the switch (the shell-script path is retired):
+tests install a stub arbiter on ``app.state.slot_manager`` and assert the arbiter
+calls, mirroring the patched status seams.
 """
 
 from __future__ import annotations
@@ -448,14 +447,8 @@ def test_switchover_arbiter_error_recorded(
 
 
 def test_pin_endpoint_toggles(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Same 501 feature gate as the switchover, then a plain set_pin passthrough
-    # that reflects the new value back.
+    # Plain set_pin passthrough that reflects the new value back.
     arb = _install_arbiter(client)
-    r = client.post("/api/comfyui/pin", json={"pinned": True})
-    assert r.status_code == 501
-    arb.set_pin.assert_not_called()
-
-    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
     r = client.post("/api/comfyui/pin", json={"pinned": True})
     assert r.status_code == 200
     assert r.json() == {"pinned": True}
@@ -521,21 +514,22 @@ def test_switchover_rejects_unknown_mode(
     assert r.json()["error"]["code"] == "comfyui.invalid_mode"
 
 
-def test_switchover_gated_off_returns_501(client: TestClient) -> None:
-    # Default: the privileged root path is NOT wired. Must refuse, not pretend.
-    r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
-    assert r.status_code == 501
-    assert "switchover" in r.json()["error"]["code"]
+def test_switchover_is_not_env_gated(client: TestClient) -> None:
+    # Prompt submission can implicitly ask for image mode, so the switchover
+    # route must not depend on HAL0_COMFYUI_SWITCHOVER_ENABLED.
+    arb = _install_arbiter(client)
+    c, s, f = _patch(container="absent", hermes=True, fetch=_fetch_down)
+    with c, s, f:
+        r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
+    assert r.status_code == 202
+    arb.ensure_img.assert_awaited_once_with(pin=False)
 
 
-def test_switchover_enabled_flag_is_read_per_request(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # When the flag is on, the gate opens (even though the stub then reports the
-    # root path is still unimplemented — proves the flag is consulted live).
-    monkeypatch.setenv("HAL0_COMFYUI_SWITCHOVER_ENABLED", "1")
+def test_switchover_unwired_returns_503_not_501(client: TestClient) -> None:
+    client.app.state.slot_manager = None
     r = client.post("/api/comfyui/switchover", json={"mode": "generation"})
-    assert r.status_code != 501
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
 
 
 # ── _container_state: podman-first probe (#710) ──────────────────────────────

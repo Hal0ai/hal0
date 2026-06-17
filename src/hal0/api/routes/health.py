@@ -16,7 +16,6 @@ a follow-up (scrape each container's own ``/metrics``).
 
 from __future__ import annotations
 
-import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -246,8 +245,7 @@ async def list_features(request: Request) -> dict[str, Any]:
 
     Flat ``feature → bool | str`` map:
 
-      - ``comfyui_switchover``: image-gen engine switchover is unlocked
-        (``HAL0_COMFYUI_SWITCHOVER_ENABLED=1``).
+      - ``comfyui_switchover``: image-gen engine switchover route is present.
       - ``memory``: a memory provider is wired (HAL0_MEMORY_ENABLED + a
         successful init).
       - ``memory_engine``: the configured engine name (``hindsight`` |
@@ -257,7 +255,7 @@ async def list_features(request: Request) -> dict[str, Any]:
         restart) — not implemented yet (pending ADR-0015), always false.
     """
     features: dict[str, Any] = {
-        "comfyui_switchover": os.environ.get("HAL0_COMFYUI_SWITCHOVER_ENABLED", "") == "1",
+        "comfyui_switchover": True,
         "memory": getattr(request.app.state, "memory_provider", None) is not None,
         "mcp_supervisor": False,
     }
