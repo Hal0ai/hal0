@@ -29,7 +29,6 @@ from hal0.slots.arbiter import (
     ArbiterPinned,
     GpuArbiter,
     GpuImageMode,
-    GpuInferenceMode,
     GpuMode,
     gpu_exclusive_group,
 )
@@ -625,13 +624,13 @@ def test_guard_uses_derived_group_from_slot_toml(
         arb.guard_dispatch("utility")
 
 
-def test_guard_dispatch_blocks_img_slot_in_llm_mode(
+def test_guard_dispatch_allows_img_slot_in_llm_mode(
     fake_mgr: FakeManager, state_path: Path, tmp_hal0_home: str
 ) -> None:
-    """Resident img container: the slot stays READY in llm mode, so the
-    dispatch guard is the only thing stopping an image generation from
-    running while the LLM set holds the GPU — refuse with a typed 503
-    telling the caller to flip the switch first."""
+    """GPU coexistence (see docs/superpowers/plans/2026-06-17-comfyui-gpu-coexistence.md):
+    img dispatch is NO LONGER hard-blocked in llm mode. The per-render GTT
+    admission guard moved to POST /api/comfyui/admit. guard_dispatch must not
+    raise GpuInferenceMode for the img group — the slot passes through."""
     slots_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     slots_dir.mkdir(parents=True, exist_ok=True)
     (slots_dir / "img.toml").write_text(
@@ -650,13 +649,10 @@ def test_guard_dispatch_blocks_img_slot_in_llm_mode(
     )
     arb = GpuArbiter(fake_mgr, state_path=state_path)  # default llm mode
 
-    with pytest.raises(GpuInferenceMode) as ei:
-        arb.guard_dispatch("img")
-    assert ei.value.code == "gpu.inference_mode"
-    assert ei.value.status == 503
-    assert ei.value.details["slot"] == "img"
+    # Must NOT raise — coexistence plan relaxed this guard.
+    arb.guard_dispatch("img")  # no exception expected
 
-    # llm-group + non-arbitrated slots pass untouched in llm mode
+    # llm-group + non-arbitrated slots also pass untouched in llm mode
     arb.guard_dispatch("npu")
     arb.guard_dispatch("tts")
 

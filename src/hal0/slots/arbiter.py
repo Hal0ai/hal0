@@ -56,10 +56,12 @@ import tempfile
 import time
 from enum import StrEnum
 from pathlib import Path
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from hal0.config import paths
 from hal0.errors import Hal0Error, NotFound
+from hal0.slots.gpu_budget import AdmitDecision, admit_render
 from hal0.slots.state import SlotState
 
 if TYPE_CHECKING:  # pragma: no cover — import cycle guard (manager owns us)
@@ -668,13 +670,10 @@ class GpuArbiter:
                 f"until image mode ends",
                 details={"slot": name, "retry_after_s": self._retry_after_s(st)},
             )
-        if st["mode"] == GpuMode.LLM.value and group == "img":
-            raise GpuInferenceMode(
-                f"GPU is in inference mode; switch to image generation first "
-                f"(POST /api/comfyui/switchover mode=generation) before "
-                f"dispatching to slot {name!r}",
-                details={"slot": name},
-            )
+        # Coexistence (see docs/superpowers/plans/2026-06-17-comfyui-gpu-coexistence.md):
+        # img dispatch is no longer hard-blocked in llm mode — per-render GTT
+        # admission happens at POST /api/comfyui/admit. Reverse guard kept.
+        # (GpuInferenceMode is intentionally NOT raised here for the img group.)
 
     def _retry_after_s(self, st: dict[str, Any]) -> int:
         """Remaining idle-restore window, floored at 15s (D6 owns the loop)."""
@@ -708,3 +707,107 @@ class GpuArbiter:
             "saved_llm_slots": list(st["saved_llm_slots"]),
             "idle_restore_at": idle_restore_at,
         }
+
+    # ── GTT-budget admission (coexistence) ───────────────────────────────────
+
+    def _gtt_ceil_gb(self) -> float:
+        """Read GTT ceiling from sysfs; fall back to 96.0 GiB."""
+        import glob
+
+        for p in glob.glob("/sys/class/drm/card*/device/mem_info_gtt_total"):
+            try:
+                with open(p) as f:
+                    return int(f.read().strip()) / (1024**3)
+            except (OSError, ValueError):
+                continue
+        return 96.0
+
+    def _loaded_llm_footprints(self) -> dict[str, float]:
+        """name → GiB for currently-loaded llm-group slots (best-effort)."""
+        out: dict[str, float] = {}
+        for slot in getattr(self._manager, "list_slots", lambda: [])():
+            name = getattr(slot, "name", None)
+            if not name or self._slot_group(name) != "llm":
+                continue
+            if str(getattr(slot, "state", "")) not in ("ready", "loaded", "warming"):
+                continue
+            mb = getattr(slot, "memory_mb", None) or getattr(slot, "gtt_mb", None)
+            out[name] = float(mb) / 1024 if mb else 0.0
+        return out
+
+    def _reserve_gb(self, loaded: dict[str, float]) -> float:
+        """LLM GTT reserve: env override → sum of loaded footprints → 33 GiB default."""
+        env = os.environ.get("HAL0_GPU_LLM_RESERVE_GB", "").strip()
+        if env:
+            try:
+                return float(env)
+            except ValueError:
+                pass
+        total = sum(loaded.values())
+        return total if total > 0 else 33.0
+
+    def compute_budget(self) -> dict[str, float]:
+        """Partition the GTT ceiling into [LLM reserve | render envelope | margin].
+
+        Returns a dict with keys: gtt_ceil_gb, reserve_gb, margin_gb,
+        envelope_gb, free_gb.
+        """
+        loaded = self._loaded_llm_footprints()
+        ceil = self._gtt_ceil_gb()
+        reserve = self._reserve_gb(loaded)
+        margin = float(os.environ.get("HAL0_GPU_GTT_MARGIN_GB", "6") or 6)
+        envelope = ceil - reserve - margin
+        return {
+            "gtt_ceil_gb": ceil,
+            "reserve_gb": reserve,
+            "margin_gb": margin,
+            "envelope_gb": envelope,
+            "free_gb": max(0.0, envelope),
+        }
+
+    def plan_admission(self, footprint_gb: float) -> AdmitDecision:
+        """Decide whether a render of *footprint_gb* GiB can coexist with the
+        current LLM set, or which LLM slots must be evicted first.
+
+        ``used_non_llm_gb=0.0`` is a deliberate v1 choice: the reserve already
+        protects the LLM budget, and concurrent renders are serialized by
+        ComfyUI's internal queue — so live non-LLM GTT is not subtracted here.
+        """
+        loaded = self._loaded_llm_footprints()
+        b = self.compute_budget()
+        priority = [
+            s
+            for s in os.environ.get(
+                "HAL0_GPU_EVICT_PRIORITY", "stt,tts,rerank,embed,utility,chat"
+            ).split(",")
+            if s.strip()
+        ]
+        return admit_render(
+            footprint_gb,
+            gtt_ceil_gb=b["gtt_ceil_gb"],
+            reserve_gb=b["reserve_gb"],
+            margin_gb=b["margin_gb"],
+            used_non_llm_gb=0.0,
+            loaded_llm_slots=list(loaded),
+            llm_footprints_gb=loaded,
+            evict_priority=priority,
+        )
+
+    async def evict_to_fit(self, evict_plan: Sequence[str]) -> list[str]:
+        """Unload the planned slots in order (agent last, already ordered by
+        :func:`~hal0.slots.gpu_budget.order_evictions`).
+
+        Fail-soft: a single unload failure is logged and skipped so the
+        remaining slots can still be freed.
+        """
+        freed: list[str] = []
+        for name in evict_plan:
+            try:
+                await self._manager.unload(name)
+                freed.append(name)
+            except Exception as exc:  # fail-soft: keep going
+                log.warning(
+                    "gpu_arbiter.evict_failed",
+                    extra={"slot": name, "error": str(exc)},
+                )
+        return freed
