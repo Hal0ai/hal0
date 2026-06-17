@@ -86,11 +86,7 @@ def test_final_path_routes_to_comfyui_subdir(
         comfyui_subdir="checkpoints",
     )
     expected = (
-        model_store
-        / "comfyui"
-        / "models"
-        / "checkpoints"
-        / "sd_xl_turbo_1.0_fp16.safetensors"
+        model_store / "comfyui" / "models" / "checkpoints" / "sd_xl_turbo_1.0_fp16.safetensors"
     )
     assert p == expected
 
@@ -102,9 +98,7 @@ def test_final_path_falls_back_to_default_layout(tmp_hal0_home: str) -> None:
     assert p == expected
 
 
-def test_comfyui_subdir_is_path_safe(
-    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_comfyui_subdir_is_path_safe(tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """A malicious comfyui_subdir can't escape the comfyui/models tree."""
     model_store = Path(tmp_hal0_home) / "model-store"
     monkeypatch.setenv("HAL0_MODEL_STORE", str(model_store))
