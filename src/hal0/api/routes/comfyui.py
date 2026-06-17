@@ -734,32 +734,28 @@ async def comfyui_render_cancel() -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# POST /restart — restart the comfyui container via comfy-up.sh
+# POST /restart — restart the slot-managed img runtime
 # ---------------------------------------------------------------------------
-
-_COMFYUI_UP_SCRIPT = "/opt/comfyui/comfy-up.sh"
 
 
 @router.post("/restart", status_code=202)
-async def comfyui_restart() -> JSONResponse:
-    """Restart the ComfyUI container by invoking comfy-up.sh (down + up).
+async def comfyui_restart(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
+    """Restart the slot-managed ComfyUI runtime.
 
     Runs in the background and returns 202 immediately — the container
     takes several seconds to come back up. Track readiness via /status.
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            _COMFYUI_UP_SCRIPT,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        # Fire-and-forget: don't wait — answer 202 now, let the container start.
-        _task = asyncio.ensure_future(proc.communicate())
-        _BG_TASKS.add(_task)
-        _task.add_done_callback(_BG_TASKS.discard)
-    except (TimeoutError, OSError):
-        pass  # fail-soft: missing script or exec failure still returns 202
+    manager = getattr(request.app.state, "slot_manager", None)
+    if manager is None or not hasattr(manager, "restart"):
+        return _arbiter_unavailable()
+
+    async def _restart_img() -> None:
+        try:
+            await manager.restart("img")
+        except Exception as exc:
+            log.warning("comfyui.img_restart_failed", extra={"error": str(exc)})
+
+    background_tasks.add_task(_restart_img)
     return JSONResponse(status_code=202, content={"status": "restart_requested"})
 
 

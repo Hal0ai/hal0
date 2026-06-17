@@ -421,7 +421,17 @@ _REPAIRABLE_UNITS = {
     "hal0-api.service",
     "hindsight-api.service",
     "hal0-agent@hermes.service",
+    "hal0-slot@img.service",
 }
+_COMFYUI_SLOT_UNIT = "hal0-slot@img.service"
+_SYSTEMCTL = "/usr/bin/systemctl"
+
+
+def _privileged_systemctl_argv(*args: str) -> list[str]:
+    argv = [_SYSTEMCTL, *args]
+    if os.geteuid() == 0:
+        return argv
+    return ["sudo", "-n", *argv]
 
 
 def _unit_active(unit: str) -> bool:
@@ -440,6 +450,8 @@ def _unit_active(unit: str) -> bool:
 
 def _container_active() -> bool:
     """True when the ComfyUI container is running under podman or docker."""
+    if _unit_active(_COMFYUI_SLOT_UNIT):
+        return True
     for runtime in ("podman", "docker"):
         exe = shutil.which(runtime)
         if exe is None:
@@ -482,8 +494,8 @@ async def install_services() -> dict[str, Any]:
             "active": hermes_active,
             "repairable": True,
         },
-        # ComfyUI is arbiter/slot-managed (not a systemd unit) — probed via
-        # container runtime, repaired via comfy-up.sh (see service_repair).
+        # ComfyUI is slot-managed by hal0-slot@img.service; the /opt/comfyui
+        # scripts are manual-operator tools only.
         {
             "unit": "comfyui",
             "label": "ComfyUI",
@@ -499,19 +511,21 @@ async def service_repair(unit: str) -> dict[str, Any]:
     """Restart a known unit (design D5 one-click repair).
 
     Restricted to :data:`_REPAIRABLE_UNITS` (systemd) or the special-cased
-    ``comfyui`` container so the ``{unit}`` path segment can't be used to
+    ``comfyui`` service id so the ``{unit}`` path segment can't be used to
     restart arbitrary system services.
 
-    NOTE: ComfyUI is NOT a systemd unit and cannot live in ``_REPAIRABLE_UNITS``
-    (which drives ``systemctl restart``).  It is handled as a special case here:
-    we call ``/opt/comfyui/comfy-up.sh`` directly.  If a future refactor
-    generalises repair to support non-systemd targets (e.g. a ``repair_fn``
-    dispatch table), this special case should be folded in at that point.
+    NOTE: ComfyUI is exposed to the UI as ``comfyui`` but the single lifecycle
+    owner is the seeded img slot unit. The legacy ``/opt/comfyui`` scripts stay
+    available for manual operator use only.
     """
-    # Special case: ComfyUI is container-managed, not systemd.
+    # Special case: public service id maps to the slot unit that owns :8188.
     if unit == "comfyui":
         try:
-            subprocess.run(["/opt/comfyui/comfy-up.sh"], check=True, timeout=60)
+            subprocess.run(
+                _privileged_systemctl_argv("restart", _COMFYUI_SLOT_UNIT),
+                check=True,
+                timeout=60,
+            )
         except (OSError, subprocess.SubprocessError) as exc:
             raise PickDefaultError(
                 f"comfyui restart failed: {exc}", details={"unit": unit}

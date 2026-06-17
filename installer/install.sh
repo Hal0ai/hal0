@@ -944,7 +944,7 @@ for seed_slot in npu tts rerank utility img; do
 done
 
 # ── ComfyUI control scripts ──────────────────────────────────────────────────
-# Place the six manual-ops scripts at /opt/comfyui/ (fixed path — comfy-up.sh
+# Place the manual-ops scripts at /opt/comfyui/ (fixed path — comfy-up.sh
 # self-references /opt/comfyui/comfy-postinstall.sh and /opt/comfyui/comfy-logs.sh
 # so the directory cannot vary with PREFIX). Idempotent: install(1) overwrites
 # in place on re-run.
@@ -984,6 +984,15 @@ else
         info "wrote ${_EXTRA_PATHS_DST}"
     else
         warn "${_EXTRA_PATHS_SRC} not found — extra_model_paths.yaml not placed (create manually before first comfy-up)"
+    fi
+
+    _COMFYUI_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-comfyui"
+    _COMFYUI_SUDOERS_DST="/etc/sudoers.d/hal0-comfyui"
+    if [[ -f "${_COMFYUI_SUDOERS_SRC}" ]]; then
+        install -m0440 "${_COMFYUI_SUDOERS_SRC}" "${_COMFYUI_SUDOERS_DST}"
+        info "wrote ${_COMFYUI_SUDOERS_DST}"
+    else
+        warn "${_COMFYUI_SUDOERS_SRC} not found — ComfyUI sudoers grant not installed"
     fi
 fi
 

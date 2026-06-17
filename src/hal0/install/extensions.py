@@ -5,7 +5,6 @@ this makes them (and future entries) a selectable, wired set."""
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Literal
@@ -56,18 +55,9 @@ def install_extension(ext_id: str) -> ExtensionOutcome:
         elif ext.id == "openwebui":
             _run(["systemctl", "enable", "--now", "hal0-openwebui.service"])
         elif ext.id == "comfyui":
-            # ComfyUI is arbiter/slot-managed (not a systemd unit).
-            # Bring the container up via comfy-up.sh if a container runtime is present.
-            runtime = shutil.which("podman") or shutil.which("docker")
-            if runtime:
-                _run(["/opt/comfyui/comfy-up.sh"])
-            else:
-                import logging
-
-                logging.getLogger(__name__).info(
-                    "comfyui: no container runtime found; skipping container start"
-                )
-                return ExtensionOutcome(ext_id=ext_id, skipped="no_container_runtime")
+            # ComfyUI is owned by the seeded img slot. The legacy
+            # /opt/comfyui scripts remain manual operator tools only.
+            _run(["systemctl", "enable", "--now", "hal0-slot@img.service"])
         return ExtensionOutcome(ext_id=ext_id, installed=True)
     except Exception as exc:  # best-effort
         return ExtensionOutcome(ext_id=ext_id, error=str(exc))

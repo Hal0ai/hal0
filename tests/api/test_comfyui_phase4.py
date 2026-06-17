@@ -2,7 +2,7 @@
 
 Covers:
   POST /api/comfyui/render/cancel   — clears queue + interrupts
-  POST /api/comfyui/restart         — shells out to comfy-up.sh
+  POST /api/comfyui/restart         — restarts the slot-managed img runtime
   GET  /api/comfyui/logs?tail=N     — container log lines
   POST /api/comfyui/workflows/{name}/launch — reads workflow file + posts /prompt
   GET  /api/comfyui/preview         — proxies latest output image bytes
@@ -98,30 +98,43 @@ class TestRenderCancel:
 
 
 class TestRestart:
-    def test_restart_calls_comfy_up_sh_returns_202(self, client: TestClient):
-        """restart must invoke /opt/comfyui/comfy-up.sh via subprocess."""
-        called_args = []
+    def test_restart_uses_slot_manager_img_restart(self, isolated_app_client):
+        """restart must use the slot-owned img runtime, not /opt/comfyui scripts."""
+        app, client = isolated_app_client
+        restarted = []
 
-        async def fake_subprocess(*args, **kwargs):
-            called_args.extend(args)
-            return _make_proc(returncode=0)
+        class _SlotManager:
+            async def restart(self, name):
+                restarted.append(name)
 
-        with patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess):
+        app.state.slot_manager = _SlotManager()
+
+        with patch("asyncio.create_subprocess_exec") as create_proc:
             r = client.post("/api/comfyui/restart")
 
         assert r.status_code == 202
-        assert any("comfy-up.sh" in str(a) for a in called_args), (
-            f"comfy-up.sh not in called args: {called_args}"
-        )
+        assert restarted == ["img"]
+        create_proc.assert_not_called()
 
-    def test_restart_returns_202_even_when_script_fails(self, client: TestClient):
-        """Script non-zero exit must still answer 202 (background op)."""
+    def test_restart_returns_503_when_slot_manager_unavailable(self, isolated_app_client):
+        app, client = isolated_app_client
+        app.state.slot_manager = None
 
-        async def fake_subprocess(*args, **kwargs):
-            return _make_proc(returncode=1)
+        r = client.post("/api/comfyui/restart")
 
-        with patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess):
-            r = client.post("/api/comfyui/restart")
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "comfyui.arbiter_unavailable"
+
+    def test_restart_background_failure_is_fail_soft(self, isolated_app_client):
+        app, client = isolated_app_client
+
+        class _SlotManager:
+            async def restart(self, name):
+                raise RuntimeError("boom")
+
+        app.state.slot_manager = _SlotManager()
+
+        r = client.post("/api/comfyui/restart")
 
         assert r.status_code == 202
 

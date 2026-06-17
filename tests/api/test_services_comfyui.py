@@ -2,7 +2,7 @@
 
 Assertions:
   (a) GET /api/install/services includes a comfyui entry.
-  (b) repair path for comfyui calls comfy-up.sh (not systemctl).
+  (b) repair path for comfyui restarts the slot-managed img unit.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def test_services_includes_comfyui(isolated_client, monkeypatch):
     )
 
 
-def test_comfyui_repair_calls_comfy_up_not_systemctl(isolated_client, monkeypatch):
+def test_comfyui_repair_restarts_img_slot_unit(isolated_client, monkeypatch):
     import hal0.api.routes.installer as inst
 
     calls = []
@@ -36,15 +36,38 @@ def test_comfyui_repair_calls_comfy_up_not_systemctl(isolated_client, monkeypatc
         return _R()
 
     monkeypatch.setattr(inst.subprocess, "run", _fake_run)
+    monkeypatch.setattr(inst.os, "geteuid", lambda: 0)
     monkeypatch.setattr(inst, "_unit_active", lambda u: False)
     monkeypatch.setattr(inst, "_container_active", lambda: True)
 
     r = isolated_client.post("/api/install/services/comfyui/repair")
     assert r.status_code == 200, r.text
     assert calls, "repair made no subprocess calls"
-    flat = " ".join(str(x) for c in calls for x in c)
-    assert "comfy-up" in flat, f"Expected comfy-up.sh call; got: {calls}"
-    assert "systemctl" not in flat, f"Should not call systemctl for comfyui; got: {calls}"
+    assert calls[0] == [inst._SYSTEMCTL, "restart", inst._COMFYUI_SLOT_UNIT]
+
+
+def test_comfyui_repair_uses_sudo_when_non_root(isolated_client, monkeypatch):
+    import hal0.api.routes.installer as inst
+
+    calls = []
+
+    def _fake_run(cmd, **kw):
+        calls.append(list(cmd))
+
+        class _R:
+            returncode = 0
+            stdout = ""
+
+        return _R()
+
+    monkeypatch.setattr(inst.subprocess, "run", _fake_run)
+    monkeypatch.setattr(inst.os, "geteuid", lambda: 1001)
+    monkeypatch.setattr(inst, "_unit_active", lambda u: False)
+    monkeypatch.setattr(inst, "_container_active", lambda: True)
+
+    r = isolated_client.post("/api/install/services/comfyui/repair")
+    assert r.status_code == 200, r.text
+    assert calls[0] == ["sudo", "-n", inst._SYSTEMCTL, "restart", inst._COMFYUI_SLOT_UNIT]
 
 
 def test_comfyui_repair_not_blocked_by_unknown_unit_check(isolated_client, monkeypatch):
@@ -63,6 +86,7 @@ def test_comfyui_repair_not_blocked_by_unknown_unit_check(isolated_client, monke
         return _R()
 
     monkeypatch.setattr(inst.subprocess, "run", _fake_run)
+    monkeypatch.setattr(inst.os, "geteuid", lambda: 0)
     monkeypatch.setattr(inst, "_unit_active", lambda u: False)
     monkeypatch.setattr(inst, "_container_active", lambda: True)
 
