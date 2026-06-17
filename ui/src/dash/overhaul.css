@@ -144,6 +144,12 @@
   gap: 0 8px;
   padding: 0 14px;
   min-height: 0;
+  min-width: 0;
+}
+
+.sh > *,
+.sr > * {
+  min-width: 0;
 }
 
 /* ── Header row ────────────────────────────────────────────────────────────── */
@@ -224,6 +230,11 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.sl-detail-row {
+  display: contents;
 }
 
 /* ── Device chips ──────────────────────────────────────────────────────────── */
@@ -295,6 +306,7 @@
   align-items: flex-end;
   gap: 1px;
   font-family: var(--jbm);
+  min-width: 0;
 }
 
 .sl-ml {
@@ -500,6 +512,75 @@
   }
   .dash-cell {
     grid-column: span 6 !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .sl-table .sh {
+    display: none;
+  }
+
+  .sr {
+    grid-template-columns: 10px minmax(0, 1fr) 26px;
+    grid-template-rows: auto auto auto;
+    gap: 3px 8px;
+    height: auto;
+    min-height: 70px;
+    padding: 8px 10px;
+    align-items: center;
+  }
+
+  .sr .sl-dot-cell {
+    grid-column: 1;
+    grid-row: 1 / 4;
+    align-self: start;
+    padding-top: 4px;
+  }
+
+  .sr .snm {
+    grid-column: 2;
+    grid-row: 1;
+    max-width: 100%;
+  }
+
+  .sr .smodel {
+    grid-column: 2;
+    grid-row: 2;
+    max-width: min(100%, 15ch);
+    line-height: 1.2;
+  }
+
+  .sr .sl-detail-row {
+    grid-column: 2;
+    grid-row: 3;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    min-width: 0;
+  }
+
+  .sr .sl-metric {
+    flex: 0 1 auto;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 3px;
+  }
+
+  .sr .sl-ml {
+    font-size: 7.5px;
+  }
+
+  .sr .sl-mv,
+  .sr .sl-mv.sl-ctx {
+    font-size: 10px;
+  }
+
+  .sr .pinbtn {
+    grid-column: 3;
+    grid-row: 1 / 4;
+    opacity: 1;
+    align-self: center;
   }
 }
 

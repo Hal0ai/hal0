@@ -143,33 +143,35 @@ function SlotRow({ s, pinned, onTogglePin }) {
         {s.model || '—'}
       </span>
 
-      {/* col 4: device chip (auto) */}
-      <DevChip s={s} />
+      <span className="sl-detail-row">
+        {/* col 4: device chip (auto) */}
+        <DevChip s={s} />
 
-      {/* col 5: mem (58px) */}
-      <span className="sl-metric">
-        <span className="sl-ml">mem</span>
-        <span className="sl-mv">{mem || '—'}</span>
-      </span>
-
-      {/* col 6: tok/s (52px) */}
-      <span className="sl-metric">
-        <span className="sl-ml">tok/s</span>
-        <span className={'sl-mv' + (isServing && toks ? ' sl-acc' : ' sl-muted')}>
-          {toks || '—'}
+        {/* col 5: mem (58px) */}
+        <span className="sl-metric">
+          <span className="sl-ml">mem</span>
+          <span className="sl-mv">{mem || '—'}</span>
         </span>
-      </span>
 
-      {/* col 7: ttft (56px) */}
-      <span className="sl-metric">
-        <span className="sl-ml">ttft</span>
-        <span className={'sl-mv' + (ttft ? '' : ' sl-muted')}>{ttft || '—'}</span>
-      </span>
+        {/* col 6: tok/s (52px) */}
+        <span className="sl-metric">
+          <span className="sl-ml">tok/s</span>
+          <span className={'sl-mv' + (isServing && toks ? ' sl-acc' : ' sl-muted')}>
+            {toks || '—'}
+          </span>
+        </span>
 
-      {/* col 8: ctx (74px) */}
-      <span className="sl-metric">
-        <span className="sl-ml">ctx</span>
-        <span className={'sl-mv sl-ctx' + (ctx ? '' : ' sl-muted')}>{ctx || '—'}</span>
+        {/* col 7: ttft (56px) */}
+        <span className="sl-metric">
+          <span className="sl-ml">ttft</span>
+          <span className={'sl-mv' + (ttft ? '' : ' sl-muted')}>{ttft || '—'}</span>
+        </span>
+
+        {/* col 8: ctx (74px) */}
+        <span className="sl-metric">
+          <span className="sl-ml">ctx</span>
+          <span className={'sl-mv sl-ctx' + (ctx ? '' : ' sl-muted')}>{ctx || '—'}</span>
+        </span>
       </span>
 
       {/* col 9: pin (26px) */}
