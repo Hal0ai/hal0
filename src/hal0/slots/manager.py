@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import re
 import shutil
 import time
@@ -111,6 +112,8 @@ _FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
 # /health) is demoted to ERROR — but only after this many CONSECUTIVE failures,
 # so a single transient blip doesn't trigger a disruptive model reload.
 _HEALTH_FAIL_STRIKES: int = 2
+# Must match the exact flag spellings emitted by ContainerProvider's llama
+# launch renderer; drift checks compare argv text, not llama-server aliases.
 _CONFIG_DRIFT_KEYS: tuple[str, ...] = ("--ctx-size", "--model", "--alias", "-b", "-ub")
 
 # Idle-monitor defaults. A READY slot whose last activity is older than
@@ -1252,7 +1255,7 @@ class SlotManager:
         diffs = [
             {"key": key, "running": running_flags.get(key), "rendered": rendered_flags.get(key)}
             for key in _CONFIG_DRIFT_KEYS
-            if running_flags.get(key) != rendered_flags.get(key)
+            if not _config_drift_values_equal(key, running_flags.get(key), rendered_flags.get(key))
         ]
         return {"drifted": bool(diffs), "diffs": diffs}
 
@@ -2565,6 +2568,12 @@ def _argv_values(argv: list[str], keys: tuple[str, ...]) -> dict[str, str | None
                 break
         i += 1
     return out
+
+
+def _config_drift_values_equal(key: str, running: str | None, rendered: str | None) -> bool:
+    if key == "--model" and running is not None and rendered is not None:
+        return os.path.realpath(running) == os.path.realpath(rendered)
+    return running == rendered
 
 
 def _normalize_ctx_key(cfg_dict: dict[str, Any]) -> None:

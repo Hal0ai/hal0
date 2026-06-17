@@ -524,6 +524,28 @@ class TestContainerSpec:
         assert argv is not None
         assert argv[argv.index("--ctx-size") + 1] == "32768"
 
+    def test_expected_argv_emits_config_drift_watched_flag_spellings(self) -> None:
+        """#863: drift watches exact argv spellings, so renderer renames must fail."""
+        provider = self._provider()
+        with patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=_moe_profile(),
+        ):
+            argv = provider.expected_argv(
+                _slot_cfg(model={"default": "chadrock-35b-ace-saber", "context_size": 131072}),
+                _model_info(),
+            )
+
+        assert argv is not None
+        assert "--model" in argv
+        assert "--alias" in argv
+        assert "--ctx-size" in argv
+        assert "-b" in argv
+        assert "-ub" in argv
+        assert "-c" not in argv
+        assert "--batch-size" not in argv
+        assert "--ubatch-size" not in argv
+
 
 # ── load_sync / unload_sync systemd interaction ───────────────────────────────
 

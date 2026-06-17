@@ -527,6 +527,41 @@ async def test_status_omits_config_drift_when_argv_matches(
     assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}
 
 
+async def test_status_omits_config_drift_when_model_paths_resolve_to_same_file(
+    slot_root: Path,
+    tmp_path: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """#863: --model compares real paths so symlink/remount spelling is stable."""
+    real_dir = tmp_path / "models"
+    real_dir.mkdir()
+    model_path = real_dir / "qwen.gguf"
+    model_path.write_text("", encoding="utf-8")
+    link_dir = tmp_path / "model-link"
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+
+    expected = [
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8081",
+        "--model",
+        str(model_path),
+        "--ctx-size",
+        "131072",
+    ]
+    running = list(expected)
+    running[running.index("--model") + 1] = str(link_dir / "qwen.gguf")
+    container_stub.expected_argv_by_slot["chat"] = expected
+    container_stub.running_argv_by_slot["chat"] = running
+
+    sm = SlotManager()
+    await sm.load("chat")
+    snap = await sm.status("chat", include_config_drift=True)
+
+    assert snap.metadata.get("config_drift") == {"drifted": False, "diffs": []}
+
+
 async def test_list_does_not_compute_config_drift_on_poll_path(
     slot_root: Path,
     container_stub: FakeContainerProvider,
