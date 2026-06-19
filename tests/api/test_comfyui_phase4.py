@@ -3,7 +3,7 @@
 Covers:
   POST /api/comfyui/render/cancel   — clears queue + interrupts
   POST /api/comfyui/restart         — restarts the slot-managed img runtime
-  GET  /api/comfyui/logs?tail=N     — container log lines
+  GET  /api/comfyui/logs?tail=N     — img-slot journal lines
   POST /api/comfyui/workflows/{name}/launch — reads workflow file + posts /prompt
   GET  /api/comfyui/preview         — proxies latest output image bytes
 
@@ -153,13 +153,38 @@ class TestLogs:
         log_lines = ["2026-06-16 startup ok", "loading model", "ready"]
         proc = self._make_log_proc(log_lines)
 
-        with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with (
+            patch("shutil.which", return_value="/usr/bin/journalctl"),
+            patch("asyncio.create_subprocess_exec", return_value=proc),
+        ):
             r = client.get("/api/comfyui/logs?tail=60")
 
         assert r.status_code == 200
         body = r.json()
         assert "lines" in body
         assert body["lines"] == log_lines
+
+    def test_logs_reads_img_slot_journal_unit(self, client: TestClient):
+        """Logs must come from the hal0-slot@img journal, not `podman logs`.
+
+        Post-D9 the img container uses the 'none' log driver, so its output
+        is only reachable via journalctl on its systemd unit.
+        """
+        call_args_store = []
+
+        async def capture(*args, **kwargs):
+            call_args_store.extend(args)
+            return _make_proc(stdout=b"line1\nline2")
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/journalctl"),
+            patch("asyncio.create_subprocess_exec", side_effect=capture),
+        ):
+            r = client.get("/api/comfyui/logs")
+
+        assert r.status_code == 200
+        assert call_args_store[0] == "journalctl"
+        assert "hal0-slot@img.service" in call_args_store
 
     def test_logs_default_tail_60(self, client: TestClient):
         """Default tail when not supplied must be 60."""
@@ -169,7 +194,10 @@ class TestLogs:
             call_args_store.extend(args)
             return _make_proc(stdout=b"line1\nline2")
 
-        with patch("asyncio.create_subprocess_exec", side_effect=capture):
+        with (
+            patch("shutil.which", return_value="/usr/bin/journalctl"),
+            patch("asyncio.create_subprocess_exec", side_effect=capture),
+        ):
             r = client.get("/api/comfyui/logs")
 
         assert r.status_code == 200
@@ -177,23 +205,39 @@ class TestLogs:
         assert "60" in joined, f"tail=60 not found in subprocess args: {call_args_store}"
 
     def test_logs_custom_tail(self, client: TestClient):
-        """tail= query param must be forwarded to the container runtime."""
+        """tail= query param must be forwarded to journalctl (-n)."""
         call_args_store = []
 
         async def capture(*args, **kwargs):
             call_args_store.extend(args)
             return _make_proc(stdout=b"x")
 
-        with patch("asyncio.create_subprocess_exec", side_effect=capture):
+        with (
+            patch("shutil.which", return_value="/usr/bin/journalctl"),
+            patch("asyncio.create_subprocess_exec", side_effect=capture),
+        ):
             r = client.get("/api/comfyui/logs?tail=10")
 
         assert r.status_code == 200
         joined = " ".join(str(a) for a in call_args_store)
         assert "10" in joined
 
-    def test_logs_empty_when_no_container_runtime(self, client: TestClient):
-        """If docker/podman not found, return empty lines not a 500."""
+    def test_logs_empty_when_no_journalctl(self, client: TestClient):
+        """If journalctl is not found, return empty lines not a 500."""
         with patch("shutil.which", return_value=None):
+            r = client.get("/api/comfyui/logs")
+
+        assert r.status_code == 200
+        assert r.json() == {"lines": []}
+
+    def test_logs_empty_on_no_journal_entries(self, client: TestClient):
+        """journalctl's '-- No entries --' placeholder normalises to []."""
+        proc = _make_proc(stdout=b"-- No entries --")
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/journalctl"),
+            patch("asyncio.create_subprocess_exec", return_value=proc),
+        ):
             r = client.get("/api/comfyui/logs")
 
         assert r.status_code == 200

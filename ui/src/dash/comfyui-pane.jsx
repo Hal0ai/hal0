@@ -239,25 +239,44 @@ function StepPips({ step, total }) {
 // true deep-link if/when #9858 lands. `upscale-4x` has no curated file yet,
 // so it opens the editor root.
 const FLOWS_DEFAULT = [
-  { ic: 'image',  a: 'text',   b: 'image',   tag: 'qwen-image', name: 'qwen-image',  wf: 'Qwen-Image-2512-BF16-4-Step-LoRA.json' },
-  { ic: 'image',  a: 'image',  b: 'image',                       name: 'img2img',     wf: 'Qwen-Image-Edit-2511-BF16-4-Step-LoRA.json' },
-  { ic: 'video',  a: 'text',   b: 'video',   tag: 'wan 2.2',    name: 'wan2.2-t2v',  wf: 'Wan2.2-T2V-A14B-FP16-4steps-lora-rank64-Seko-V2.json' },
-  { ic: 'video',  a: 'image',  b: 'video',   tag: 'i2v',        name: 'wan2.2-i2v',  wf: 'Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1-FP16.json' },
-  { ic: 'layers', a: 'still',  b: 'animate', tag: 'chain',      name: 'animate',     wf: 'Hunyuan-Video-1.5_720p_i2v-4-step-lora.json' },
-  { ic: 'cube',   a: 'upscale',b: '4×',                          name: 'upscale-4x' },
+  { ic: 'image',  a: 'text',   b: 'image',   tag: 'qwen-image', name: 'qwen-image',  type: 'image',   wf: 'Qwen-Image-2512-BF16-4-Step-LoRA.json' },
+  { ic: 'image',  a: 'image',  b: 'image',                       name: 'img2img',     type: 'image',   wf: 'Qwen-Image-Edit-2511-BF16-4-Step-LoRA.json' },
+  { ic: 'video',  a: 'text',   b: 'video',   tag: 'wan 2.2',    name: 'wan2.2-t2v',  type: 'video',   wf: 'Wan2.2-T2V-A14B-FP16-4steps-lora-rank64-Seko-V2.json' },
+  { ic: 'video',  a: 'image',  b: 'video',   tag: 'i2v',        name: 'wan2.2-i2v',  type: 'video',   wf: 'Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1-FP16.json' },
+  { ic: 'layers', a: 'still',  b: 'animate', tag: 'chain',      name: 'animate',     type: 'video',   wf: 'Hunyuan-Video-1.5_720p_i2v-4-step-lora.json' },
+  { ic: 'cube',   a: 'upscale',b: '4×',                          name: 'upscale-4x',  type: 'enhance' },
 ]
+
+// Type grouping order for the workflow strip — keeps like-with-like
+// (image → video → enhance) so a quick scan reads by capability.
+const FLOW_TYPE_ORDER = ['image', 'video', 'enhance']
+
+function sortFlowsByType(flows) {
+  const rank = (f) => {
+    const i = FLOW_TYPE_ORDER.indexOf(f.type)
+    return i === -1 ? FLOW_TYPE_ORDER.length : i
+  }
+  // Stable sort: preserve authored order within a type.
+  return flows
+    .map((f, i) => [f, i])
+    .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1])
+    .map(([f]) => f)
+}
 
 function workflowHref(comfyBaseUrl, wf) {
   if (!comfyBaseUrl) return undefined
   return wf ? `${comfyBaseUrl}/?workflow=${encodeURIComponent(wf)}` : comfyBaseUrl
 }
 
-function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl }) {
+// `max` caps the strip so it stays ~2 rows — a curated, varied set sorted by
+// type rather than an unbounded wall of tags.
+function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl, max = 6 }) {
+  const shown = sortFlowsByType(flows).slice(0, max)
   return (
     <div>
       <BlkH icon="bolt" acc note="opens in ComfyUI ↗">workflows</BlkH>
       <div className="flows">
-        {flows.map((f, i) => {
+        {shown.map((f, i) => {
           const href = workflowHref(comfyBaseUrl, f.wf)
           return (
             <a
@@ -282,7 +301,7 @@ function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl }) {
   )
 }
 
-// ── Models on share inventory ─────────────────────────────────────────────────
+// ── Models inventory ──────────────────────────────────────────────────────────
 const INV_DEFAULT = [
   { n: 6,  l: 'checkpoints' },
   { n: 4,  l: 'video', u: true },
@@ -294,7 +313,7 @@ const MODELS_DEFAULT = 'Wan 2.2 · Qwen-Image · HunyuanVideo 1.5 · LTX-2'
 function ModelsBlock({ inv = INV_DEFAULT, models = MODELS_DEFAULT }) {
   return (
     <div>
-      <BlkH icon="layers" note="manager ↗">models on share</BlkH>
+      <BlkH icon="layers" note="manager ↗">models</BlkH>
       <div className="inv">
         {inv.map((m, i) => (
           <span className="inv-pill" key={i}>
@@ -423,10 +442,12 @@ export function ImageGenCard({
   const { engine, run, queue, gtt, ram, stats } = mock
   const t = useTick(900)
 
-  // Queue + workflows (bottom half) collapse by default; the top render/metrics
-  // row is always visible. Keeping the lower half behind an expander keeps the
-  // card compact in the common "watch the active render" case and only reveals
-  // the queue list + workflow/model inventory on demand.
+  // Queue + model inventory (bottom half) collapse by default; the top
+  // render/metrics row — which now also carries the always-visible workflows
+  // quick-launch beside the device metrics — stays visible. Keeping the lower
+  // half behind an expander keeps the card compact in the common "watch the
+  // active render" case and only reveals the queue list + model inventory on
+  // demand.
   const [expanded, setExpanded] = useState(false)
 
   // Live preview frame. /api/comfyui/preview 404s until the running render emits
@@ -526,6 +547,14 @@ export function ImageGenCard({
                 )}
               </div>
             </div>
+
+            {/* Workflows (sorted by type, 2 rows) + model inventory fill the
+                area below the render, beside the device metrics. Always
+                visible (no longer tucked behind the queue expander). */}
+            <div className="activity-extras">
+              <WorkflowsBlock comfyBaseUrl={comfyBaseUrl} />
+              <ModelsBlock />
+            </div>
           </div>
 
           {/* Telemetry: GTT gauge + RAM spark + device metric grid */}
@@ -578,17 +607,17 @@ export function ImageGenCard({
           onClick={() => setExpanded((v) => !v)}
         >
           <span className="qx-ic"><Ci name="queue" size={13} /></span>
-          <span className="qx-label">queue &amp; workflows</span>
+          <span className="qx-label">queue</span>
           <span className="qx-sub">{hasRun ? '1 running' : '0 running'} · {queue.length} pending</span>
           <span className="grow" />
           <span className="qx-chev"><Ci name="chev" size={14} /></span>
         </button>
 
-        {/* ── Lower row: queue (60%) + workflows/models (40%) ── */}
+        {/* ── Lower row: queue (workflows + models now live up top) ── */}
         {expanded && (
         <div className="queue-assets-row">
           {/* Queue */}
-          <div>
+          <div className="queue-col">
             <BlkH icon="queue" note={`${hasRun ? '1 running' : '0 running'} · ${queue.length} pending`}>
               queue
             </BlkH>
@@ -634,11 +663,6 @@ export function ImageGenCard({
                 ))}
               </div>
             )}
-          </div>
-
-          <div className="wcard-sub">
-            <WorkflowsBlock comfyBaseUrl={comfyBaseUrl} />
-            <ModelsBlock />
           </div>
         </div>
         )}

@@ -64,8 +64,9 @@ async function gotoImageTab(page: any) {
   await page.waitForSelector('.comfy-v2-pane', { timeout: 10_000 })
 }
 
-// Queue + workflows/models are collapsed by default behind the expander;
-// open it before asserting on the lower-half elements.
+// Queue + model inventory are collapsed by default behind the expander;
+// open it before asserting on the lower-half elements. (Workflows are no
+// longer down here — they live in the always-visible metrics column.)
 async function openQueue(page: any) {
   await page.click('.comfy-v2-pane .queue-expander')
   await page.waitForSelector('.comfy-v2-pane .queue-assets-row', { timeout: 5_000 })
@@ -135,22 +136,43 @@ test.describe('ImageGen V2 render-hero pane', () => {
   })
 
   // ── 4. Workflows strip ──────────────────────────────────────────────────
-  test('workflows strip renders 6 flow buttons', async ({ page }) => {
+  test('workflows strip renders 6 flow buttons below the render (always visible)', async ({
+    page,
+  }) => {
     await gotoImageTab(page)
-    await openQueue(page)
     const pane = page.locator('.comfy-v2-pane')
 
-    await expect(pane.locator('.flows')).toBeVisible()
+    // Workflows now live in the left activity column, below the render and
+    // beside the device metrics — visible without opening the queue expander.
+    await expect(pane.locator('.activity-extras .flows')).toBeVisible()
     await expect(pane.locator('.flow')).toHaveCount(6)
   })
 
-  // ── 5. Models on share ─────────────────────────────────────────────────
+  // ── 4b. Workflows are sorted by type (image → video → enhance) ───────────
+  test('workflows are grouped by type', async ({ page }) => {
+    await gotoImageTab(page)
+    const names = await page
+      .locator('.comfy-v2-pane .activity-extras .flow')
+      .evaluateAll((els: Element[]) => els.map((e) => e.getAttribute('data-workflow')))
+
+    expect(names).toEqual([
+      'qwen-image',
+      'img2img',
+      'wan2.2-t2v',
+      'wan2.2-i2v',
+      'animate',
+      'upscale-4x',
+    ])
+  })
+
+  // ── 5. Models inventory ─────────────────────────────────────────────────
   test('models block: inv pills render (checkpoints, loras, vae…)', async ({ page }) => {
     await gotoImageTab(page)
-    await openQueue(page)
     const pane = page.locator('.comfy-v2-pane')
 
-    await expect(pane.locator('.inv')).toBeVisible()
+    // Models moved up into the always-visible activity column (out of the
+    // expander), below the workflows.
+    await expect(pane.locator('.activity-extras .inv')).toBeVisible()
     // "6 checkpoints" pill
     await expect(pane.locator('.inv-pill').first()).toContainText('6')
   })

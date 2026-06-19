@@ -738,34 +738,43 @@ async def comfyui_restart(request: Request, background_tasks: BackgroundTasks) -
 
 @router.get("/logs")
 async def comfyui_logs(tail: int = 60) -> JSONResponse:
-    """Return the last N lines of the ComfyUI container logs.
+    """Return the last N lines of the ComfyUI slot's journal output.
 
-    Uses ``docker logs --tail N`` (or ``podman``) against the container
-    name. Returns ``{"lines": []}`` when the container runtime is absent
-    or the container has no logs yet — never a 500.
+    Post-D9 the img slot runs as the podman ``hal0-slot-img`` container
+    under the ``hal0-slot@img`` systemd unit with ``StandardOutput=journal``
+    (the container itself uses the ``none`` log driver, so ``podman logs``
+    yields nothing). We therefore read the journal — matching the regular
+    slot logs endpoint — rather than ``podman/docker logs``.
+
+    Returns ``{"lines": []}`` when ``journalctl`` is absent or the slot
+    has no journal entries yet — never a 500.
     """
-    container = _comfyui_container()
-    # Prefer podman if available (post-D9 the img slot runs under podman)
-    runtime = shutil.which("podman") or shutil.which("docker")
-    if not runtime:
+    if shutil.which("journalctl") is None:
         return JSONResponse(status_code=200, content={"lines": []})
+    n = max(1, min(int(tail or 60), 5000))
     try:
         proc = await asyncio.create_subprocess_exec(
-            runtime,
-            "logs",
-            "--tail",
-            str(tail),
-            container,
+            "journalctl",
+            "-u",
+            _IMG_UNIT,
+            "-n",
+            str(n),
+            "--no-pager",
+            "-o",
+            "short-iso",
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        out, _err = await asyncio.wait_for(proc.communicate(), timeout=10.0)
     except (TimeoutError, OSError):
         return JSONResponse(status_code=200, content={"lines": []})
-    # docker logs writes to stderr for container output; combine both
-    combined = (out + err).decode("utf-8", "replace")
+    combined = out.decode("utf-8", "replace")
     lines = [ln for ln in combined.splitlines() if ln]
+    # journalctl emits a "-- No entries --" placeholder when the unit has
+    # never logged; normalise that to an empty list for the UI's contract.
+    if len(lines) == 1 and lines[0].strip().startswith("-- No entries"):
+        lines = []
     return JSONResponse(status_code=200, content={"lines": lines})
 
 
