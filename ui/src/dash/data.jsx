@@ -216,7 +216,9 @@ const HAL0_DATA = {
       model: "kokoro-v1",
       model_id: "kokoro-v1",
       modelLong: "hexgrad/Kokoro-82M",
-      group: "voice",
+      group: "chat",   // intentionally MISLABELED: regression fixture — a tts
+                       // slot with a non-utility group must STILL route to the
+                       // util footer (placement is type-driven, not group-driven).
       state: "ready",
       isDefault: true,
       cpuOnly: true,
