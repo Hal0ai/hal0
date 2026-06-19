@@ -12,7 +12,15 @@ from hal0.registry.discover import (
     register_candidate,
     scan_and_register,
 )
+from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
+
+
+def test_model_mmproj_defaults_none() -> None:
+    """A Model with no sidecar carries mmproj=None (the registry contract
+    the llama-server provider reads via model_info.get('mmproj'))."""
+    m = Model(id="x", path="/tmp/x.gguf")
+    assert m.mmproj is None
 
 
 @pytest.fixture
@@ -156,6 +164,73 @@ def test_scan_and_register_idempotent(model_root: Path, registry: ModelRegistry)
     # Second run finds no new files.
     second = scan_and_register(registry, cfg)
     assert second["added"] == []
+
+
+@pytest.fixture
+def vision_root(tmp_path: Path) -> Path:
+    """A model directory laid out like the real chat model + mmproj sidecar."""
+    root = tmp_path / "models"
+    root.mkdir()
+    vision_dir = root / "qwopus3.6-27b-v2"
+    vision_dir.mkdir()
+    (vision_dir / "qwopus3.6-27b-v2.STRIX_LEAN.gguf").write_bytes(b"m" * 256)
+    # The sidecar — note the .mmproj extension is NOT in file_extensions,
+    # so association must key on the filename, not the suffix.
+    (vision_dir / "mmproj-F32.mmproj").write_bytes(b"p" * 64)
+    # A plain chat model with no sidecar in its own directory.
+    plain_dir = root / "plain-chat"
+    plain_dir.mkdir()
+    (plain_dir / "plain-chat-q4_k_m.gguf").write_bytes(b"c" * 128)
+    return root
+
+
+def test_find_candidates_associates_sidecar(vision_root: Path) -> None:
+    """A *mmproj* file beside a main model attaches to that model's
+    candidate; the sidecar itself is never emitted as a candidate."""
+    candidates = find_candidates(
+        roots=[vision_root],
+        extensions=[".gguf", ".safetensors"],
+        known_paths=set(),
+    )
+    by_name = {c.path.name: c for c in candidates}
+    # The sidecar is not a routable candidate.
+    assert "mmproj-F32.mmproj" not in by_name
+    # The main model carries the sidecar's resolved path.
+    main = by_name["qwopus3.6-27b-v2.STRIX_LEAN.gguf"]
+    assert main.mmproj is not None
+    assert Path(main.mmproj).name == "mmproj-F32.mmproj"
+    assert Path(main.mmproj).is_file()
+
+
+def test_find_candidates_no_sidecar_is_none(vision_root: Path) -> None:
+    """A model in a directory with no sidecar resolves mmproj=None
+    (no false positives leaking across directories)."""
+    candidates = find_candidates(
+        roots=[vision_root],
+        extensions=[".gguf", ".safetensors"],
+        known_paths=set(),
+    )
+    by_name = {c.path.name: c for c in candidates}
+    assert by_name["plain-chat-q4_k_m.gguf"].mmproj is None
+
+
+def test_scan_and_register_attaches_and_omits_sidecar(
+    vision_root: Path, registry: ModelRegistry
+) -> None:
+    """End-to-end: the registered main model resolves its mmproj path, and
+    no standalone model is registered for the sidecar."""
+    cfg = ModelsConfig(roots=[str(vision_root)])
+    scan_and_register(registry, cfg)
+    models = registry.list()
+    # No registered model points at the sidecar.
+    assert all("mmproj" not in Path(m.path).name.lower() for m in models)
+    # The main vision model carries its sidecar path.
+    main = next(m for m in models if m.path.endswith("STRIX_LEAN.gguf"))
+    assert main.mmproj is not None
+    assert Path(main.mmproj).name == "mmproj-F32.mmproj"
+    # The plain model has no sidecar.
+    plain = next(m for m in models if m.path.endswith("plain-chat-q4_k_m.gguf"))
+    assert plain.mmproj is None
 
 
 def test_scan_and_register_missing_root_is_silent(tmp_path: Path, registry: ModelRegistry) -> None:

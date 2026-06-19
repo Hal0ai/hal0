@@ -122,6 +122,16 @@ class Model(BaseModel):
         ),
     )
 
+    mmproj: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path to a multimodal projector (mmproj) GGUF sidecar that "
+            "sits beside this model, or None. Surfaced verbatim to the "
+            "llama-server provider as --mmproj to enable vision; the sidecar is "
+            "never registered as a standalone routable model."
+        ),
+    )
+
     defaults: ModelDefaults | None = Field(
         default=None,
         description=(

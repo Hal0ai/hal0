@@ -95,6 +95,9 @@ class CandidateModel:
     suggested_id: str
     curated_match: CuratedModel | None
     capability_guess: str
+    # Resolved path to a multimodal projector (mmproj) GGUF sidecar that sits
+    # in the same directory, or None. Associated post-walk by find_candidates.
+    mmproj: Path | None = None
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -131,6 +134,16 @@ def _match_curated(filename: str) -> CuratedModel | None:
     return None
 
 
+def _is_mmproj_sidecar(p: Path) -> bool:
+    """True for a multimodal-projector (mmproj) sidecar file.
+
+    Matched by filename rather than suffix: the real artifact is named
+    ``mmproj-F32.mmproj`` and ``.mmproj`` is not one of the configured model
+    ``file_extensions``, so an extension check would miss it.
+    """
+    return "mmproj" in p.name.lower()
+
+
 def _is_skippable(p: Path) -> bool:
     """Skip dotfiles, .tmp partials, hash-only blob names, shards, accessory dirs."""
     name = p.name
@@ -164,6 +177,10 @@ def find_candidates(
     exts = {e.lower() for e in extensions}
     seen: set[Path] = set()
     out: list[CandidateModel] = []
+    # Resolved directory → resolved mmproj sidecar path. Collected during the
+    # walk and associated with sibling candidates once the walk completes, so
+    # ordering (sidecar before or after its model) doesn't matter.
+    mmproj_by_dir: dict[Path, Path] = {}
     started = time.monotonic()
     for root in roots:
         root_path = Path(root).expanduser()
@@ -186,6 +203,17 @@ def find_candidates(
                 if not candidate.is_file():
                     continue
             except OSError:
+                continue
+            # Record mmproj sidecars for association, then skip them so they
+            # never become standalone routable candidates. Done before the
+            # generic skip rule (which also drops mmproj) and before the
+            # extension check (the real sidecar's .mmproj suffix isn't listed).
+            if _is_mmproj_sidecar(candidate):
+                try:
+                    mmproj_abs = candidate.resolve()
+                except OSError:
+                    mmproj_abs = candidate
+                mmproj_by_dir.setdefault(mmproj_abs.parent, mmproj_abs)
                 continue
             if _is_skippable(candidate):
                 continue
@@ -220,6 +248,11 @@ def find_candidates(
                     capability_guess=_guess_capability(naming_source.name),
                 )
             )
+    # Associate each sidecar with sibling main models in the same directory.
+    for cand in out:
+        sidecar = mmproj_by_dir.get(cand.path.parent)
+        if sidecar is not None:
+            cand.mmproj = sidecar
     return out
 
 
@@ -248,6 +281,10 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             capabilities=[candidate.capability_guess],
             metadata={"discovered": True, "source": "auto-scan"},
         )
+    # Carry a discovered mmproj sidecar onto the model so the llama-server
+    # provider can surface it as --mmproj. None when no sidecar was found.
+    if candidate.mmproj is not None:
+        model.mmproj = str(candidate.mmproj)
     try:
         registry.add(model)
     except ModelAlreadyExists:
