@@ -146,12 +146,14 @@ test.describe('BoardView — agent chat', () => {
   // ── SSE streaming path ────────────────────────────────────────────────
 
   test('send message → POST /api/board/chat → assistant tokens stream in', async ({ page }) => {
+    let postBody: any = null
     // Mock chat SSE endpoint with proper streaming body
     await page.route('**/api/board/chat', async (route) => {
       if (route.request().method() !== 'POST') {
         await route.fallback()
         return
       }
+      postBody = route.request().postDataJSON()
       const sseBody = [
         'data: {"type":"token","text":"Hello"}\n\n',
         'data: {"type":"token","text":", board"}\n\n',
@@ -178,6 +180,12 @@ test.describe('BoardView — agent chat', () => {
     // Assistant message with streamed content appears
     await expect(msgs.nth(1)).toBeVisible({ timeout: FIVE_S })
     await expect(msgs.nth(1)).toContainText('Hello')
+
+    // Board chat must run on the agent slot (orchestrator model), and send
+    // OpenAI-style `messages` (not the legacy `{message}`).
+    expect(postBody.model).toBe('hal0/agent')
+    expect(Array.isArray(postBody.messages)).toBe(true)
+    expect(postBody.messages.at(-1)).toMatchObject({ role: 'user', content: 'what is blocked?' })
   })
 
   test('send via Enter key fires chat POST', async ({ page }) => {

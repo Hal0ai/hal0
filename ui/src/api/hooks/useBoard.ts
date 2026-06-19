@@ -921,6 +921,11 @@ export interface UseBoardChatResult {
   streaming: boolean
 }
 
+// Board chat runs on the `agent` slot (the tool-calling orchestrator model),
+// not the conversational `chat` slot. Sent explicitly so it routes correctly
+// regardless of the backend's PRIMARY_SLOT_MODEL default.
+const BOARD_CHAT_MODEL = 'hal0/agent'
+
 export function useBoardChat(board?: string): UseBoardChatResult {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
@@ -961,15 +966,20 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       : ENDPOINTS.boardChat
 
     // Open SSE stream via fetch POST. Contract (see board_chat.py): the body
-    // carries `messages` (OpenAI format) + optional `board`; the response is
-    // SSE frames `{type: token|tool_call|tool_result|done|error}`.
+    // carries `messages` (OpenAI format), optional `board`, and `model`; the
+    // response is SSE frames `{type: token|tool_call|tool_result|done|error}`.
+    // `model` is sent explicitly so board chat runs on the `agent` slot (the
+    // tool-calling orchestrator model) — board_chat.py honours payload.model
+    // over its default, so this routes correctly without a backend restart.
+    const body: Record<string, unknown> = { messages: outbound, model: BOARD_CHAT_MODEL }
+    if (board) body.board = board
     fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
       },
-      body: JSON.stringify(board ? { messages: outbound, board } : { messages: outbound }),
+      body: JSON.stringify(body),
       signal,
     })
       .then(async (res) => {

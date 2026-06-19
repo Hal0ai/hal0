@@ -50,8 +50,12 @@ log = structlog.get_logger(__name__)
 # forever (mirrors OmniRouter._MAX_LOOP_ROUNDS).
 _MAX_ROUNDS = 8
 
-# The chat slot the orchestrator drives. hal0's `primary` virtual slot name.
-PRIMARY_SLOT_MODEL = "hal0/primary"
+# The slot the orchestrator drives. Points at the `agent` slot — the
+# tool-calling orchestrator model — rather than the conversational `chat`
+# slot (hal0/primary): board chat IS an agentic surface (it drives audited
+# board mutations via tool-calls), so the agent model is the correct brain.
+# (Named PRIMARY_SLOT_MODEL for back-compat; resolves via the hal0/ alias map.)
+PRIMARY_SLOT_MODEL = "hal0/agent"
 
 #: LLM backend signature: an OpenAI chat-completion request body in, the
 #: parsed response dict out.
