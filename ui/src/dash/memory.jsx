@@ -501,31 +501,31 @@ function MemoryView({ param } = {}) {
         <MemTimeseries bank={chartBank} period={period} setPeriod={setPeriod} />
       </div>
 
+      {/* .sec is a flex title-row (h2 + flex:1 rule); content must be a SIBLING,
+          not a child, or it gets pinned into the heading row and shrink-wraps. */}
       <div className="sec">
         <h2>Banks {banks.length > 0 && <span className="ct">{banks.length}</span>}</h2>
         <div className="rule" />
-        <div className="pf-toolbar">
-          <button className="btn sm" onClick={() => setCreating(true)} data-testid="mem-btn-new-bank">
-            + New bank
-          </button>
-        </div>
-        {banksQuery.isLoading ? (
-          <div className="empty mono">Loading banks…</div>
-        ) : banks.length === 0 ? (
-          <div className="empty mono">No memory banks yet.</div>
-        ) : (
-          <div className="mo-grid">
-            {banks.map(b => (
-              <MemBankCard
-                key={b.bank_id}
-                bank={b}
-                selected={b.bank_id === selectedId}
-                onSelect={(bank) => selectBank(bank.bank_id)}
-              />
-            ))}
-          </div>
-        )}
+        <button className="btn sm" onClick={() => setCreating(true)} data-testid="mem-btn-new-bank">
+          + New bank
+        </button>
       </div>
+      {banksQuery.isLoading ? (
+        <div className="empty mono">Loading banks…</div>
+      ) : banks.length === 0 ? (
+        <div className="empty mono">No memory banks yet.</div>
+      ) : (
+        <div className="mo-grid">
+          {banks.map(b => (
+            <MemBankCard
+              key={b.bank_id}
+              bank={b}
+              selected={b.bank_id === selectedId}
+              onSelect={(bank) => selectBank(bank.bank_id)}
+            />
+          ))}
+        </div>
+      )}
 
       {creating && <MemNewBankForm onClose={() => setCreating(false)} />}
 
