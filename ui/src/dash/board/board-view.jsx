@@ -164,6 +164,7 @@ function BoardView() {
   const useSwitchBoard      = window.__hal0UseSwitchBoard;
   const useCreateBoard      = window.__hal0UseCreateBoard;
   const useCreateTask       = window.__hal0UseCreateTask;
+  const useBoardChat        = window.__hal0UseBoardChat;
   const useBoardEventsStream = window.__hal0UseBoardEventsStream;
 
   // ── keep WS stream alive ──
@@ -185,6 +186,9 @@ function BoardView() {
   const switchBoard = useSwitchBoard ? useSwitchBoard()  : null;
   const createBoard = useCreateBoard ? useCreateBoard()  : null;
   const createTask  = useCreateTask  ? useCreateTask()   : null;
+  // Chat state lives HERE (BoardView stays mounted) rather than inside
+  // AgentChat, so the conversation survives closing/reopening the drawer.
+  const chat        = useBoardChat   ? useBoardChat()    : null;
 
   // ── local state ──
   const [board, setBoard]           = useState("default");
@@ -641,6 +645,7 @@ function BoardView() {
       {/* agent chat */}
       {chatOpen && AgentChat && (
         <AgentChat
+          chat={chat}
           byId={byId}
           onClose={() => setChatOpen(false)}
           onOpenTask={(id) => { setChatOpen(false); setOpenTask(id); }}
