@@ -348,6 +348,7 @@ def _llama_launch_plan(
     extra_args: str | None = None,
     model_alias: str | None = None,
     chat_template_path: str | None = None,
+    mmproj: str | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -373,6 +374,11 @@ def _llama_launch_plan(
     command += flag_tokens
     if chat_template_path:
         command += ["--chat-template-file", chat_template_path]
+    # Vision projector: --mmproj loads the multimodal projector so the model
+    # can accept images. Mirrors the native llama_server.py provider. Placed
+    # before extra_tokens so a manual --mmproj in [server].extra_args can win.
+    if mmproj:
+        command += ["--mmproj", mmproj]
     command += extra_tokens
 
     # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
@@ -569,6 +575,11 @@ class ContainerProvider(Provider):
             else None
         )
 
+        # Vision projector sidecar associated with the model in the registry
+        # (#899). Bind-mounted at its identical host path, so the container sees
+        # the same path. None for text-only models — no flag emitted.
+        mmproj = model_info.get("mmproj")
+
         return _llama_launch_plan(
             image=image,
             port=port,
@@ -580,6 +591,7 @@ class ContainerProvider(Provider):
             extra_args=extra_args,
             model_alias=model_alias,
             chat_template_path=chat_template_path,
+            mmproj=str(mmproj) if mmproj else None,
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────

@@ -822,10 +822,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await slot_manager.reconcile_unconfigured_slots()
 
     # Idle monitor — demotes READY → IDLE after the configured timeout
-    # so the dashboard distinguishes "warm but quiet" from "warm and
-    # actively serving" without operator help.  Defaults to 300s; the
-    # constructor accepts overrides for tests.
-    await slot_manager.start_idle_monitor()
+    # (so the dashboard distinguishes "warm but quiet" from "warm and
+    # actively serving") AND hard-evicts slots idle past their TTL to free
+    # host RAM (#902).  The global default evict TTL comes from
+    # slots.idle_timeout_s; per-slot TOML idle_timeout_s overrides it and
+    # idle_timeout_s = 0 pins a slot.  Defaults to 300s for tests.
+    await slot_manager.start_idle_monitor(evict_after_s=hal0_cfg.slots.idle_timeout_s)
 
     # Auto-register one composite ``hal0`` upstream so the dispatcher can
     # route ``model: <slot_name>`` requests without requiring the user to
