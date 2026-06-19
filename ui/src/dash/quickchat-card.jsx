@@ -85,12 +85,11 @@ function openChatStream({ model, messages, onDelta, onDone, onError }) {
 }
 
 // ── Slot picker ───────────────────────────────────────────────────────────────
-// Filters to chat-capable (group=chat or type=llm) + serving/ready.
+// Filters to chat-capable (type llm/chat) + serving/ready.
 function isChatCapable(slot) {
   if (slot._synthetic) return false
-  const g = (slot.group ?? '').toLowerCase()
   const t = (slot.type ?? '').toLowerCase()
-  const chatType = g === 'chat' || t === 'llm' || t === 'chat'
+  const chatType = t === 'llm' || t === 'chat'
   const liveState = slot.state === 'serving' || slot.state === 'ready'
   return chatType && liveState
 }

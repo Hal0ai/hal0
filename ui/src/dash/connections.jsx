@@ -143,7 +143,6 @@ function slotGroup(s) {
   if (t === 'embedding' || t === 'reranking') return 'embed'
   if (t === 'image') return 'img'
   if (t === 'tts' || t === 'transcription') return 'voice'
-  if (['chat', 'embed', 'img', 'voice'].includes(s.group)) return s.group
   return 'chat'
 }
 function isStt(s) {
