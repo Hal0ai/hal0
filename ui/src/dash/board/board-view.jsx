@@ -263,7 +263,7 @@ function BoardView() {
   const profileOpts = useMemo(() => {
     const ps = profilesList.length > 0
       ? profilesList
-      : [...new Set(tasks.map(t => t.profile).filter(Boolean))].map(p => ({ id: p, label: p }));
+      : [...new Set(tasks.map(t => t.assignee).filter(Boolean))].map(p => ({ id: p, label: p }));
     return [{ id: "all", label: "all profiles" }, ...ps.map(p => ({ id: p.id ?? p, label: p.label ?? p.id ?? p, ct: p.count }))];
   }, [profilesList, tasks]);
 
@@ -273,7 +273,7 @@ function BoardView() {
       (t.id || "").toLowerCase().includes(search.toLowerCase())
     )) return false;
     if (tenant !== "all" && t.tenant !== tenant) return false;
-    if (profile !== "all" && t.profile !== profile) return false;
+    if (profile !== "all" && t.assignee !== profile) return false;
     return true;
   };
 

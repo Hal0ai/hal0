@@ -53,8 +53,8 @@ function BoardCard({ task, selected, onToggle, onOpen, isOpen, onDragStart, onDr
       </div>
       <div className="kc-title">{task.title}</div>
       <div className="kc-foot">
-        <span className={"kc-assignee" + (task.profile ? "" : " unassigned")}>
-          {task.profile ? "@" + task.profile : "unassigned"}
+        <span className={"kc-assignee" + (task.assignee ? "" : " unassigned")}>
+          {task.assignee ? "@" + task.assignee : "unassigned"}
         </span>
         {task.commentCount > 0 && (
           <span className="kc-meta">

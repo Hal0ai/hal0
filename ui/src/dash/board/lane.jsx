@@ -19,7 +19,7 @@ function BoardLane({ lane, tasks, byProfile, sel, onToggle, onOpen, openTask, on
     if (!byProfile) return null;
     const m = new Map();
     tasks.forEach(t => {
-      const k = t.profile || "unassigned";
+      const k = t.assignee || "unassigned";
       if (!m.has(k)) m.set(k, []);
       m.get(k).push(t);
     });
