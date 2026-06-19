@@ -14,6 +14,7 @@ import { useModels, useModelInspect, useModelUpdate, useModelDelete, usePullJob,
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
+import { MODEL_TYPE_TAGS, splitModelTags, mergeModelTags } from '@/dash/model-types.js'
 
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
 
@@ -262,6 +263,12 @@ function RecipeEditorModal({ open, onClose, model }) {
   const [ngl, setNgl] = useStateMM("");
   const [extra, setExtra] = useStateMM("");
   const [chatTemplate, setChatTemplate] = useStateMM("auto");
+  // Identity + types. `name` is the editable display name; `types` is the
+  // selected subset of MODEL_TYPE_TAGS; `otherTags` snapshots the model's
+  // non-curated tags so we can re-emit them verbatim on save (never clobber).
+  const [name, setName] = useStateMM("");
+  const [types, setTypes] = useStateMM([]);
+  const [otherTags, setOtherTags] = useStateMM([]);
 
   useEffectMM(() => {
     if (open && model) {
@@ -269,9 +276,16 @@ function RecipeEditorModal({ open, onClose, model }) {
       setNgl(init.n_gpu_layers != null ? String(init.n_gpu_layers) : "");
       setExtra(init.extra_args || "");
       setChatTemplate(init.chat_template ?? "auto");
+      setName(model.name || "");
+      const split = splitModelTags(model.tags);
+      setTypes(split.selected);
+      setOtherTags(split.other);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, model?.id]);
+
+  const toggleType = (tag) =>
+    setTypes(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
 
   if (!model) return null;
 
@@ -289,8 +303,21 @@ function RecipeEditorModal({ open, onClose, model }) {
     // Only persist a real template choice — 'auto' means GGUF-embedded, which
     // is the absence of an override, so don't pollute defaults with it.
     if (chatTemplate && chatTemplate !== "auto") defaults.chat_template = chatTemplate;
+    const body = { defaults };
+    // Display name: only persist a real, changed value — never blank it out.
+    const trimmedName = name.trim();
+    if (trimmedName && trimmedName !== (model.name || "")) body.name = trimmedName;
+    // Tags: union of preserved (non-curated) tags + selected types. Only
+    // emit when the set actually changed (order-insensitive) so a
+    // defaults-only save doesn't spuriously report a tag edit.
+    const nextTags = mergeModelTags(otherTags, types);
+    const prevTags = Array.isArray(model.tags) ? model.tags : [];
+    const sameTags =
+      nextTags.length === prevTags.length &&
+      [...nextTags].sort().join(" ") === [...prevTags].sort().join(" ");
+    if (!sameTags) body.tags = nextTags;
     try {
-      await update.mutateAsync({ id: model.id, body: { defaults } });
+      await update.mutateAsync({ id: model.id, body });
       window.__hal0Toast && window.__hal0Toast(`Updated ${model.longName || model.id}`, "ok");
       onClose();
     } catch (e) {
@@ -304,7 +331,7 @@ function RecipeEditorModal({ open, onClose, model }) {
     <Modal
       open={open}
       onClose={onClose}
-      eyebrow="Recipe · edit defaults"
+      eyebrow="Edit model · name, types & defaults"
       title={`Edit options · ${model.longName || model.name || model.id}`}
       width={560}
       foot={
@@ -319,6 +346,45 @@ function RecipeEditorModal({ open, onClose, model }) {
         </>
       }
     >
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>display name</span>
+          <span className="sub">what the dashboard shows · empty keeps the model id</span>
+        </div>
+        <div className="form-ctl">
+          <input
+            className="input"
+            data-testid="model-name-input"
+            placeholder={model.id}
+            value={name}
+            onChange={e => setName(e.target.value)}
+          />
+        </div>
+      </div>
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>types</span>
+          <span className="sub">capability tags · drive routing &amp; slot features (e.g. mtp shows the slot MTP toggle)</span>
+        </div>
+        <div className="form-ctl" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {MODEL_TYPE_TAGS.map(tag => {
+            const on = types.includes(tag);
+            return (
+              <button
+                key={tag}
+                type="button"
+                role="switch"
+                aria-checked={on}
+                data-testid={`type-toggle-${tag}`}
+                className={"mdl-chip" + (on ? " on" : "")}
+                onClick={() => toggleType(tag)}
+              >
+                {tag}
+              </button>
+            );
+          })}
+        </div>
+      </div>
       <div className="form-row">
         <div className="form-lbl">
           <span>context_size</span>

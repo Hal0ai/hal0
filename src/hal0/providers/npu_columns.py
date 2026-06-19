@@ -39,17 +39,21 @@ from typing import Any
 # sourced; under a bare `podman exec` it fails, so we call the real ELF.
 _XRT_SMI_BIN = "/opt/xilinx/xrt/bin/unwrapped/xrt-smi"
 
-# AIE-partition examine command. `-o /dev/stdout` keeps the JSON on the
-# pipe (no /tmp file dance). Empty stdout → fail-soft None.
-_XRT_SMI_CMD: tuple[str, ...] = (
-    _XRT_SMI_BIN,
-    "examine",
-    "-r",
-    "aie-partitions",
-    "-f",
-    "JSON",
-    "-o",
-    "/dev/stdout",
+# AIE-partition examine probe, run through `sh -c` inside the container.
+#
+# We cannot stream JSON via `-o /dev/stdout`: the live xrt-smi build rejects it
+# ("output file '/dev/stdout' already exists", exit 1), and with `--force` it
+# interleaves its human-readable console report onto stdout *alongside* the
+# JSON, so the captured payload no longer parses. The robust path is the /tmp
+# dance — write JSON to a private per-exec temp file (``$$`` is the in-container
+# shell PID, unique even under concurrent probes), ``cat`` it back (JSON only),
+# then remove it. A failed probe propagates a non-zero exit so the returncode
+# check in :func:`read_aie_columns` degrades to None.
+_XRT_SMI_SH = (
+    'f="/tmp/hal0-aie-$$.json"; '
+    '"' + _XRT_SMI_BIN + '" examine -r aie-partitions -f JSON -o "$f" --force '
+    '>/dev/null 2>&1 || { rm -f "$f"; exit 1; }; '
+    'cat "$f"; rm -f "$f"'
 )
 
 # Exec timeout — xrt-smi examine is sub-second when healthy.
@@ -167,7 +171,9 @@ async def read_aie_columns(container_name: str) -> dict[str, Any] | None:
             runtime,
             "exec",
             container_name,
-            *_XRT_SMI_CMD,
+            "sh",
+            "-c",
+            _XRT_SMI_SH,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
