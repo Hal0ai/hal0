@@ -121,6 +121,18 @@ _CONFIG_DRIFT_KEYS: tuple[str, ...] = ("--ctx-size", "--model", "--alias", "-b",
 # can distinguish "warm but quiet" from "warm and serving".
 _IDLE_AFTER_S: float = 300.0
 _IDLE_MONITOR_INTERVAL_S: float = 30.0
+# Hard-eviction default TTL (#902). A slot idle past this long (resolved
+# per-slot: TOML idle_timeout_s overrides, then this global default) is
+# *unloaded* — freeing host RAM — not merely relabeled IDLE. 0 disables
+# eviction; per-slot idle_timeout_s = 0 pins that slot.
+_EVICT_AFTER_S: float = 300.0
+
+# Anchor slots pinned against TTL eviction *under default config* — i.e.
+# when their TOML carries no explicit idle_timeout_s. Evicting these would
+# defeat always-warm chat, the agent loop, and the NPU trio anchor. An
+# explicit per-slot idle_timeout_s in TOML still wins (lets an operator
+# opt a named anchor back into eviction); explicit 0 keeps it pinned.
+_PINNED_BY_DEFAULT: frozenset[str] = frozenset({"chat", "agent", "npu"})
 
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
@@ -263,6 +275,7 @@ class SlotManager:
         pull_runner: PullRunner | None = None,
         model_cache_check: ModelCacheCheck | None = None,
         idle_after_s: float = _IDLE_AFTER_S,
+        evict_after_s: float = _EVICT_AFTER_S,
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
@@ -309,6 +322,10 @@ class SlotManager:
         # ``start_idle_monitor()`` (the API lifespan owns the lifecycle so
         # tests can inject shorter intervals).
         self._idle_after_s: float = idle_after_s
+        # Hard-eviction TTL default (#902): a slot idle past its resolved
+        # idle_timeout_s is unloaded, not just relabeled.  Per-slot TOML
+        # idle_timeout_s overrides this global default.
+        self._evict_after_s: float = evict_after_s
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         self._idle_monitor_task: asyncio.Task[None] | None = None
         # GpuArbiter (Phase D, spec §7) — constructed lazily on first
@@ -2196,17 +2213,20 @@ class SlotManager:
         self,
         *,
         idle_after_s: float | None = None,
+        evict_after_s: float | None = None,
         interval_s: float | None = None,
     ) -> None:
-        """Start the background sweeper that demotes READY → IDLE.
+        """Start the background sweeper that demotes READY → IDLE and evicts.
 
         Idempotent — calling twice while the task is alive is a no-op.
-        Callers in the API lifespan invoke this once at startup; tests
-        construct a SlotManager with shorter intervals and start the
-        monitor explicitly.
+        Callers in the API lifespan invoke this once at startup (wiring
+        ``evict_after_s`` from ``slots.idle_timeout_s``); tests construct a
+        SlotManager with shorter intervals and start the monitor explicitly.
         """
         if idle_after_s is not None:
             self._idle_after_s = idle_after_s
+        if evict_after_s is not None:
+            self._evict_after_s = evict_after_s
         if interval_s is not None:
             self._idle_monitor_interval_s = interval_s
         existing = self._idle_monitor_task
@@ -2244,25 +2264,91 @@ class SlotManager:
         except asyncio.CancelledError:
             raise
 
+    async def _evict_timeout_for(self, slot_name: str) -> float | None:
+        """Resolve the idle TTL after which a slot is hard-evicted (#902).
+
+        Returns ``None`` when the slot is pinned (never TTL-evicted):
+          * an explicit ``idle_timeout_s = 0`` in the slot's TOML, or
+          * a default-pinned anchor (chat / agent / npu) with no explicit
+            per-slot value, or
+          * a non-positive global default with no explicit per-slot value.
+
+        Otherwise returns the effective TTL in seconds: the per-slot TOML
+        ``idle_timeout_s`` when set (overrides the global), else the global
+        ``_evict_after_s`` default.  ``0`` consistently means "disabled" at
+        both levels, matching the config-schema contract.
+        """
+        canonical = self._resolve_alias(slot_name)
+        try:
+            cfg = await self._load_slot_config(canonical)
+        except (SlotConfigError, SlotNotFound):
+            cfg = {}
+        raw = cfg.get("idle_timeout_s")
+        if isinstance(raw, bool):  # bool is an int subclass — never a TTL
+            raw = None
+        if isinstance(raw, int):
+            return None if raw <= 0 else float(raw)
+        # No explicit per-slot value: pin the named anchors, else fall back
+        # to the global default (itself disabled when non-positive).
+        if canonical in _PINNED_BY_DEFAULT:
+            return None
+        return float(self._evict_after_s) if self._evict_after_s > 0 else None
+
     async def _sweep_idle_once(self) -> None:
-        """One pass: flip any READY slot past idle-timeout to IDLE."""
+        """One idle-sweep pass over every tracked slot.
+
+        Stage 1 (soft): a READY slot idle past ``_idle_after_s`` is
+        relabeled IDLE so dashboards distinguish "warm but quiet" from
+        "warm and serving".
+
+        Stage 2 (hard, #902): a slot idle past its resolved per-slot TTL
+        (:meth:`_evict_timeout_for`) is **unloaded**, freeing host RAM —
+        the only way to reclaim it, since llama-server allocates KV
+        statically at ``ctx_size``.  ``idle_timeout_s = 0`` (or a pinned
+        anchor) is never evicted.  A slot mid-request
+        (``serving_count > 0``) is never touched; the dispatcher reloads an
+        evicted slot transparently on its next request (wake-on-request),
+        so eviction is safe.
+        """
         now = time.time()
         for slot_name, ts in list(self._last_used.items()):
-            if (now - ts) < self._idle_after_s:
-                continue
+            idle_for = now - ts
             if self._serving_count.get(slot_name, 0) > 0:
                 continue
-            if self._current_state(slot_name) != SlotState.READY:
+            state = self._current_state(slot_name)
+            if state not in (SlotState.READY, SlotState.IDLE):
                 continue
-            try:
-                await self._transition(
-                    slot_name,
-                    SlotState.IDLE,
-                    message=f"idle for {now - ts:.0f}s",
-                )
-            except IllegalSlotTransition:
-                # Raced with an unload — fine; next sweep will skip it.
+
+            # Stage 2 — hard TTL eviction.
+            evict_after = await self._evict_timeout_for(slot_name)
+            if evict_after is not None and idle_for >= evict_after:
+                try:
+                    await self.unload(slot_name)
+                    log.info(
+                        "slot.idle_evicted",
+                        extra={"slot": slot_name, "idle_s": round(idle_for)},
+                    )
+                except IllegalSlotTransition:
+                    # Raced with another transition — next sweep retries.
+                    pass
+                except Exception as exc:  # never let one slot kill the sweep
+                    log.warning(
+                        "slot.idle_evict_failed",
+                        extra={"slot": slot_name, "error": str(exc)},
+                    )
                 continue
+
+            # Stage 1 — soft demotion READY → IDLE.
+            if state == SlotState.READY and idle_for >= self._idle_after_s:
+                try:
+                    await self._transition(
+                        slot_name,
+                        SlotState.IDLE,
+                        message=f"idle for {idle_for:.0f}s",
+                    )
+                except IllegalSlotTransition:
+                    # Raced with an unload — fine; next sweep will skip it.
+                    continue
 
     async def get_config(self, slot_name: str) -> dict[str, Any]:
         """Return the slot's TOML config as a plain dict (read-only view).
