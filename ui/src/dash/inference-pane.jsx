@@ -574,7 +574,7 @@ export function InferenceHeroBand() {
   const mm = useMemoryMapModel()
 
   const allSlots = slotsQuery.data || []
-  const nonImg = allSlots.filter((s) => String(s.type) !== 'image')
+  const nonImg = allSlots.filter((s) => String(s?.type) !== 'image')
   const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
   const rows = slots.map((s) => ({ s, ind: slotIndicatorFromPhase(s) }))
   const servingN = rows.filter((r) => r.ind.cls === 'serving').length
@@ -624,7 +624,7 @@ export function InferencePane() {
   // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
   // stack pane below — they appear here only as the sec-label FLM count.
   const allSlots = slotsQuery.data || []
-  const nonImg = allSlots.filter((s) => String(s.type) !== 'image')
+  const nonImg = allSlots.filter((s) => String(s?.type) !== 'image')
   const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
   const npuN = nonImg.length - slots.length
 
