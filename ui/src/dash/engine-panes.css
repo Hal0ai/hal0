@@ -744,20 +744,38 @@
   padding: 8px 2px;
 }
 :is(.infer-pane, .npu-pane) .scard {
+  position: relative;
   border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background: var(--bg);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
   overflow: hidden;
-  transition: border-color 0.14s var(--ease);
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+/* left accent — colour per state, matching the profile-card .pf-accent treatment */
+:is(.infer-pane, .npu-pane) .scard::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--bk, transparent);
+  opacity: 0.85;
 }
 :is(.infer-pane, .npu-pane) .scard:hover {
   border-color: var(--line-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+:is(.infer-pane, .npu-pane) .scard:hover::before {
+  opacity: 1;
+  box-shadow: 0 0 12px var(--bk);
 }
 :is(.infer-pane, .npu-pane) .scard.ready {
-  border-left: 2px solid var(--comfy);
+  --bk: var(--dev-vulkan);
 }
 :is(.infer-pane, .npu-pane) .scard.serving {
-  border-left: 2px solid var(--comfy);
+  --bk: var(--dev-vulkan);
 }
 /* living-grid breathe — a subtle glow on the headline serving cards (infer-pane
    only; the NPU pane uses its own .cslot markup). */
@@ -774,10 +792,10 @@
   }
 }
 :is(.infer-pane, .npu-pane) .scard.warming {
-  border-left: 2px solid var(--warn);
+  --bk: var(--warn);
 }
 :is(.infer-pane, .npu-pane) .scard.error {
-  border-left: 2px solid var(--err);
+  --bk: var(--err);
 }
 :is(.infer-pane, .npu-pane) .scard.dim {
   opacity: 0.55;
@@ -1116,27 +1134,44 @@
   grid-template-columns: repeat(auto-fill, minmax(218px, 1fr));
 }
 .infer-pane .mcard {
+  position: relative;
   border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background: var(--bg);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
   overflow: hidden;
-  transition: border-color 0.14s var(--ease);
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.infer-pane .mcard::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--bk, transparent);
+  opacity: 0.85;
 }
 .infer-pane .mcard:hover {
   border-color: var(--line-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+.infer-pane .mcard:hover::before {
+  opacity: 1;
+  box-shadow: 0 0 12px var(--bk);
 }
 .infer-pane .mcard.ready {
-  border-left: 2px solid var(--comfy);
+  --bk: var(--dev-vulkan);
 }
 .infer-pane .mcard.serving {
-  border-left: 2px solid var(--comfy);
+  --bk: var(--dev-vulkan);
   animation: breathe 3.4s ease-in-out infinite;
 }
 .infer-pane .mcard.warming {
-  border-left: 2px solid var(--warn);
+  --bk: var(--warn);
 }
 .infer-pane .mcard.error {
-  border-left: 2px solid var(--err);
+  --bk: var(--err);
 }
 .infer-pane .mcard.offline {
   opacity: 0.6;

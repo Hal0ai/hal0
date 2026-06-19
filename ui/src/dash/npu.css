@@ -439,14 +439,15 @@
 /* ── per-slot cards (right rail) ───────────────────────────────────── */
 .npu-card .cslot {
   border: 1px solid var(--line);
-  border-radius: var(--rad-sm);
-  background: var(--bg-2);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   position: relative;
   overflow: hidden;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 .npu-card .cslot::before {
   content: '';
@@ -456,6 +457,16 @@
   bottom: 0;
   width: 2px;
   background: var(--slot-hue, var(--line));
+  opacity: 0.85;
+}
+.npu-card .cslot:hover {
+  border-color: var(--line-strong);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+.npu-card .cslot:hover::before {
+  opacity: 1;
+  box-shadow: 0 0 12px var(--slot-hue);
 }
 .npu-card .cslot.dim {
   opacity: 0.62;

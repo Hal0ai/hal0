@@ -344,15 +344,20 @@
 
 /* ── Queue rows (card-styled, V2 row layout) ────────────────────────────────── */
 .comfy-page .qcard {
-  border: 1px solid var(--line); border-radius: var(--rad-sm);
-  background: var(--bg-2); padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--rad-lg);
+  background: var(--bg-1); padding: 10px 12px;
   display: flex; flex-direction: column; gap: 8px;
   position: relative; overflow: hidden;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
-.comfy-page .qcard::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--qc-hue, var(--line)); }
+.comfy-page .qcard::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--qc-hue, var(--line)); opacity: 0.85; }
 .comfy-page .qcard.running::before { background: var(--comfy); }
 .comfy-page .qcard.pending { opacity: 0.78; }
 .comfy-page .qcard.pending::before { background: var(--fg-5); }
+.comfy-page .qcard:hover { border-color: var(--line-strong); transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28); }
+.comfy-page .qcard:hover::before { opacity: 1; box-shadow: 0 0 12px var(--qc-hue, var(--line)); }
+.comfy-page .qcard.running:hover::before { box-shadow: 0 0 12px var(--comfy); }
+.comfy-page .qcard.pending:hover::before { box-shadow: 0 0 12px var(--fg-5); }
 
 /* Row layout for V2 queue */
 .comfy-page .qcard.row { flex-direction: row; align-items: center; gap: 11px; padding: 11px 14px; }
