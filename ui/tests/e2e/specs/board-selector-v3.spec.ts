@@ -167,6 +167,85 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
     await expect(page.locator('[data-testid="board-new-modal"]')).not.toBeVisible()
   })
 
+  // ── New task modal ─────────────────────────────────────────────────────
+  // CORRECT (post-fix) behaviour: a lane's "+" opens an explicit NewTaskModal
+  // and POSTs NOTHING until the operator fills a title and hits Create. The
+  // old behaviour POSTed a blank `{ title: "New task" }` on click, which the
+  // dispatcher then auto-advanced out of the lane.
+
+  test('lane "+" opens the new-task modal WITHOUT creating a task', async ({ page }) => {
+    let posted = false
+    await page.route('**/api/board/tasks', async (route) => {
+      if (route.request().method() === 'POST') {
+        posted = true
+        await json(route, { id: 'should-not-happen' }, 201)
+      } else {
+        await route.fallback()
+      }
+    })
+
+    await gotoBoardAndWait(page)
+    await page.locator('[data-testid="board-lane-triage"] .ladd').click()
+
+    // Modal appears, and crucially nothing has been POSTed yet.
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).toBeVisible({ timeout: FIVE_S })
+    await page.waitForTimeout(300)
+    expect(posted).toBe(false)
+  })
+
+  test('new-task modal: title + Create → POST /api/board/tasks with title + lane status', async ({ page }) => {
+    let postBody: any = null
+    await page.route('**/api/board/tasks', async (route) => {
+      if (route.request().method() === 'POST') {
+        postBody = route.request().postDataJSON()
+        await json(route, { ...postBody, id: 'new-1' }, 201)
+      } else {
+        await route.fallback()
+      }
+    })
+
+    await gotoBoardAndWait(page)
+    await page.locator('[data-testid="board-lane-todo"] .ladd').click()
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).toBeVisible()
+
+    // Create is disabled until a title is present.
+    const createBtn = page.locator('[data-testid="board-action-create-task"]')
+    await expect(createBtn).toBeDisabled()
+
+    await page.locator('[data-testid="board-new-task-title"]').fill('Wire the SSE protocol')
+    await page.locator('[data-testid="board-new-task-body"]').fill('match frontend to board_chat.py')
+    await expect(createBtn).toBeEnabled()
+    await createBtn.click()
+    await page.waitForTimeout(400)
+
+    // Modal closed and a single POST carried the title + the clicked lane's status.
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).not.toBeVisible()
+    expect(postBody).toMatchObject({
+      title: 'Wire the SSE protocol',
+      body: 'match frontend to board_chat.py',
+      status: 'todo',
+    })
+  })
+
+  test('cancel in new-task modal closes it without POSTing', async ({ page }) => {
+    let posted = false
+    await page.route('**/api/board/tasks', async (route) => {
+      if (route.request().method() === 'POST') {
+        posted = true
+        await json(route, { id: 'x' }, 201)
+      } else {
+        await route.fallback()
+      }
+    })
+
+    await gotoBoardAndWait(page)
+    await page.locator('[data-testid="board-lane-triage"] .ladd').click()
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).toBeVisible()
+    await page.locator('[data-testid="board-action-cancel-task"]').click()
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).not.toBeVisible()
+    expect(posted).toBe(false)
+  })
+
   // ── Orchestration popover ──────────────────────────────────────────────
 
   test('orchestration popover opens from orch-pill', async ({ page }) => {
