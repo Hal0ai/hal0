@@ -86,22 +86,26 @@ def test_flatten_strix_halo_is_unified() -> None:
     """is_uma comes from the live gpu_view sample (#703) — the old
     ``vram > ram*0.5`` route heuristic is deleted. For this fixture both
     derivations agree (96GB pooled vram > 128GB ram * 0.5)."""
+    # Mirror production: the cached probe's pooled vram_mb is STALE (80 GiB,
+    # frozen at boot) while the live sysfs sample is fresh (96 GiB). The live
+    # sample must win so the GTT total tracks amdgpu's grown GART limit.
     info = HardwareInfo(
         cpu_model="AMD Ryzen AI Max+ PRO 395",
         cpu_cores=16,
         cpu_threads=32,
         ram_mb=128 * 1024,
         unified_memory_mb=128 * 1024,
-        gpus=[GPUInfo(vendor="amd", name="Radeon 8060S", vram_mb=96 * 1024)],
+        gpus=[GPUInfo(vendor="amd", name="Radeon 8060S", vram_mb=80 * 1024)],
         npu=NPUInfo(present=True, vendor="amd", name="AMD NPU (XDNA)"),
         platform="strix-halo",
     ).model_dump(mode="python")
-    flat = _flatten_for_ui(info, _uma_sample())
+    flat = _flatten_for_ui(info, _uma_sample(gtt_total_mb=96 * 1024, total_mb=96 * 1024))
     assert flat["platform"] == "strix-halo"
     assert flat["platform_label"] == "Strix Halo (unified memory)"
     assert flat["memory_kind"] == "unified"
     assert flat["is_uma"] is True
-    # UMA split: the probe's pooled vram_mb surfaces as GTT, not VRAM.
+    # UMA split: the GTT pool surfaces as GTT (not VRAM), sourced from the
+    # LIVE sample (96 GiB), not the stale cached vram_mb (80 GiB).
     assert flat["vram_total_mb"] == 0
     assert flat["gtt_total_mb"] == 96 * 1024
 

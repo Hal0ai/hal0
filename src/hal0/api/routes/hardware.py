@@ -120,6 +120,12 @@ def _flatten_for_ui(info: dict[str, Any], gpu: GPUMemorySample | None = None) ->
     # only for non-UMA. This stops the dashboard from treating GTT and VRAM
     # as independent buckets.
     is_uma = gpu.is_uma if gpu is not None else False
+    # Prefer the LIVE sysfs GTT total over the cached probe's vram_mb. amdgpu
+    # grows the GART limit dynamically, so the boot-time probe (max(vram,gtt)
+    # frozen in hardware.json) goes stale — e.g. 80 GiB cached vs 96 GiB live.
+    # The gpu sample is read fresh from mem_info_gtt_total each request; fall
+    # back to the cached pool only when no live sample is available.
+    live_gtt_total_mb = gpu.gtt_total_mb if (gpu is not None and gpu.gtt_total_mb) else None
     platform = info.get("platform", "unknown") or "unknown"
     # memory_kind tells the UI whether to label the pool "unified" or
     # "system". Only strix-halo is genuinely unified for our purposes;
@@ -131,7 +137,7 @@ def _flatten_for_ui(info: dict[str, Any], gpu: GPUMemorySample | None = None) ->
         "gpu_name": primary_gpu.get("name", ""),
         "gpu_vendor": vendor,
         "vram_total_mb": 0 if is_uma else vram_mb,
-        "gtt_total_mb": vram_mb if is_uma else 0,
+        "gtt_total_mb": (live_gtt_total_mb or vram_mb) if is_uma else 0,
         "ram_total_mb": ram_mb,
         "ram_available_mb": info.get("ram_available_mb", 0),
         "unified_memory_mb": unified_mb,
