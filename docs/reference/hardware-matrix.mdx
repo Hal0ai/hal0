@@ -1,6 +1,6 @@
 ---
 title: Hardware matrix
-description: Supported hardware reference for hal0 — AMD GPU (ROCm/Vulkan), AMD XDNA NPU (FastFlowLM), CPU fallback, the backend availability order, and why NVIDIA/CUDA is unsupported.
+description: hal0 hardware reference — AMD GPU (ROCm/Vulkan), AMD XDNA NPU (FastFlowLM), CPU fallback, backend availability order, and why NVIDIA/CUDA is unsupported.
 sidebar:
   order: 50
 ---
@@ -25,6 +25,9 @@ a unified-memory pool the GPU shares with the host via GTT. hal0's profile flags
 are bench-tuned for that target, but the GPU/Vulkan and CPU paths run on any
 modern Linux AMD system.
 
+![Hardware metrics panel showing GPU, NPU, and memory utilization](/screenshots/hardware-metrics.png)
+*Hardware monitoring dashboard for GPU, NPU, and system memory.*
+
 ## Backend availability order
 
 hal0 probes the host and advertises the backends it can actually run, in this
@@ -47,6 +50,9 @@ order:
 
 The NPU is **multiplex**: a single `flm serve` process answers chat, STT, and
 embeddings at once, so one NPU slot can back three capabilities.
+
+![The hal0 Slots view showing iGPU and FLM (NPU) slots in the Inference Engine, above the shared GTT memory carve-out](/screenshots/npu-occupancy.png)
+*The Inference Engine slot inventory — here `4 iGPU · 3 FLM` — with the shared iGPU GTT carve-out above it.*
 
 <Aside type="caution" title="NVIDIA / CUDA is not supported">
 hal0's device enum is `{gpu-rocm, gpu-vulkan, cpu, npu}` — there is no CUDA

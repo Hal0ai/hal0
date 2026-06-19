@@ -42,3 +42,13 @@ async def test_client_recall_hits_recall_route():
 def test_prefetch_uses_recall_not_search():
     src = inspect.getsource(Hal0MemoryProvider.prefetch)
     assert ".recall(" in src and ".search(" not in src
+
+
+def test_writes_stamp_the_author_tag():
+    # Convention: tag the author (agent:<id>), bank the scope. Hermes's
+    # automatic writes must carry agent:hermes so they're filterable by author
+    # without giving each author its own bank.
+    for fn in (Hal0MemoryProvider.sync_turn, Hal0MemoryProvider.on_memory_write):
+        assert '"agent:hermes"' in inspect.getsource(fn)
+    # and the system prompt teaches the convention to model-driven memory_add
+    assert "agent:hermes" in inspect.getsource(Hal0MemoryProvider.system_prompt_block)

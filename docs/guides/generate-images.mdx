@@ -10,7 +10,7 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 hal0 generates images through **ComfyUI**, a node-graph Stable-Diffusion
 runtime. It runs as one containerized **generation engine** — a single
 run loads many cooperating models at once — using the
-[kyuz0 Strix Halo ComfyUI image](https://github.com/kyuz0/amd-strix-halo-toolboxes)
+[kyuz0 Strix Halo ComfyUI image](https://github.com/kyuz0/amd-strix-halo-comfyui)
 (`docker.io/kyuz0/amd-strix-halo-comfyui`), tuned for the AMD iGPU.
 
 Because there is exactly one iGPU, image generation is **mutually
@@ -21,10 +21,13 @@ reloaded.
 
 <Aside type="caution">
 Switching the iGPU to generation **stops the LLM stack** (chat bots and
-memory extraction go dark) for as long as generation holds the GPU. hal0
-does this automatically when a render needs the iGPU, then idle-restore
-hands it back to inference.
+memory extraction go dark) for as long as generation holds the GPU. The
+switchover write path is gated off by default — see
+[Enable the switchover](#enable-the-switchover).
 </Aside>
+
+![The hal0 Image-Gen tab showing engine state, GPU memory gauges, and queue counts](/screenshots/image-gen-comfyui.png)
+*The Image-Gen tab: engine state, GPU memory gauges, queue, and switchover controls.*
 
 ## Read the generation-engine status
 
@@ -86,7 +89,8 @@ Body fields:
 Responses: **202** (`switching`, runs in the background — poll the
 `switchover` block on `/status`), **200** (`noop`, already in the target
 mode), **409** (switch already in flight, or a busy queue without
-`force`), **503** (arbiter not wired).
+`force`), **503** (`comfyui.arbiter_unavailable` — the GPU arbiter is not
+wired on this host).
 
 Pin or unpin image mode independently:
 
@@ -95,6 +99,15 @@ curl -X POST http://localhost:8080/api/comfyui/pin \
   -H 'Content-Type: application/json' \
   -d '{"pinned": true}'
 ```
+
+### Enable the switchover
+
+Both write paths (`/switchover` and `/pin`) require the GPU arbiter to be
+wired — that is, hal0-api must be running with a configured `img` slot so
+the slot manager attaches the arbiter at startup. Without it both endpoints
+return **503** (`comfyui.arbiter_unavailable`). See
+[Manage slots](/docs/guides/manage-slots) for how to add and enable the
+`img` slot.
 
 ## Generate an image
 
@@ -155,5 +168,5 @@ caps a single render at 10 minutes before it gives up.
 ## See also
 
 - [Manage slots](/docs/guides/manage-slots) — the `img` slot lifecycle.
-- [Configure](/docs/guides/configure) — set the `[image]` slot defaults.
+- [Configure](/docs/guides/configure) — set `[image]` slot defaults (`default_size`, `default_steps`, `idle_restore_minutes`).
 - [Observe the system](/docs/guides/logs-and-activity) — tail `hal0-slot@img`.

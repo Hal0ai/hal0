@@ -1,6 +1,6 @@
 ---
 title: Update and roll back
-description: Update hal0 with a cosign-verified, atomic self-update — check the stable or nightly channel, apply or pin a version, and roll back to the previous tree if anything goes wrong.
+description: Cosign-verified, atomic self-update for hal0 — check the stable or nightly channel, apply or pin a specific version, and roll back to the previous tree.
 sidebar:
   order: 110
 ---
@@ -40,7 +40,7 @@ regardless).
 To pin a specific version instead of the latest:
 
 ```sh
-hal0 update --target v0.1.1
+hal0 update --target v0.4.0
 ```
 
 ## Channels
@@ -54,6 +54,9 @@ hal0 update --channel nightly
 
 The manifest is fetched from `https://releases.hal0.dev/<channel>.json`
 (overridable via `HAL0_RELEASES_URL` for dev / air-gapped installs).
+
+![The Settings → Updates panel showing current version, available update, and channel selector](/screenshots/settings-page.png)
+*Settings → Updates: current version, available release, and channel selector.*
 
 ## How the atomic update works
 

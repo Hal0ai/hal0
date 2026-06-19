@@ -1,6 +1,6 @@
 ---
 title: Pull and register models
-description: Download models from Hugging Face into hal0's local registry, register files already on disk, search and inspect HF repos, and assign models to slots — all from the CLI or API.
+description: Pull models from Hugging Face into hal0's registry, register files already on disk, search and inspect HF repos, and assign models to slots via CLI or API.
 sidebar:
   order: 20
 ---
@@ -165,14 +165,17 @@ default, the API cascades: it unloads the slot and clears the default.
 </TabItem>
 </Tabs>
 
+![Models registry — installed and available models with pull status badges](/screenshots/models-registry.png)
+*The Models tab lists every installed and upstream-advertised model, with pull-state badges for in-flight downloads.*
+
 ## Assign a model to a slot
 
 ```sh
-hal0 model assign qwen3.5-9b --slot primary
+hal0 model assign qwen3.5-9b --slot chat
 ```
 
 This sets the slot's default model but does **not** load it — follow with
-`hal0 slot load primary` (see
+`hal0 slot load chat` (see
 [Manage slots](/docs/guides/manage-slots)).
 
 ## The registry on disk

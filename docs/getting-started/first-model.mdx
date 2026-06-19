@@ -1,6 +1,6 @@
 ---
 title: Load your first model
-description: Pull a model from Hugging Face into hal0's registry and assign it to a slot — through the first-run picker or with the hal0 model CLI.
+description: Pull a model from Hugging Face into hal0's local registry and assign it to a slot — via the hal0 setup TUI or directly with the hal0 model CLI.
 sidebar:
   order: 30
 ---
@@ -9,17 +9,20 @@ import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
 Models in hal0 live in a local registry, the single source of truth for
 Hugging Face coordinates, SHA-256 digests, and curated filenames. You can
-populate it through the first-run picker or directly from the CLI.
+populate it through the `hal0 setup` TUI or directly from the CLI.
 
-## Via the bundle picker
+## Via `hal0 setup`
 
 If you ran [first-run setup](/docs/getting-started/setup/) and chose a
 tier, hal0 already seeded the registry and kicked off background pulls for
-each model in the bundle. The install-progress pane reattaches to those
-download streams and shows per-model progress. Nothing more is required —
-when a pull completes, its slot is ready to start.
+each model in that tier. Re-run `hal0 setup` any time to pull more; when a
+pull completes, its slot is ready to start. Nothing more is required.
 
 ## Via the CLI
+
+![Models registry](/screenshots/models-registry.png)
+
+*The Models view — registry, pull progress, and curated loadouts.*
 
 The `hal0 model` subcommand is a thin HTTP client to the API. The common
 flow is **list → pull → assign**.
@@ -81,9 +84,9 @@ so you can retry.
 hal0 model pull qwen3-4b
 ```
 
-The FirstRun progress pane surfaces the same failure inline with a
-**Retry** button, and you can always pull later from the dashboard's
-**Models** view. Re-issuing a pull for a `completed`/`failed`/`cancelled`
+The dashboard's **Models** view surfaces the same failure inline with a
+**Retry** button, and you can always pull later from there or via the CLI.
+Re-issuing a pull for a `completed`/`failed`/`cancelled`
 job replaces it; a pull already `queued` or `running` returns the
 existing job handle rather than starting a second download.
 

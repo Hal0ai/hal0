@@ -1,6 +1,6 @@
 ---
 title: hal0 CLI reference
-description: Complete reference for the hal0 command-line tool — every top-level command and sub-app (slot, model, registry, memory, config, doctor, capabilities, agent, migrate).
+description: "Complete reference for the hal0 CLI — top-level commands and every sub-app: slot, model, registry, memory, config, doctor, capabilities, agent, migrate."
 sidebar:
   order: 10
 ---
@@ -50,8 +50,8 @@ hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
 | Command | Purpose | Key options |
 |---|---|---|
 | `slot list` | List configured slots and live state. | `--json` |
-| `slot status <name>` | Show a slot status summary, including config-drift warnings. | `--json` |
-| `slot show <name>` | Full slot config + status. | `--json` |
+| `slot status <name>` | Short slot status + config-drift warning. | `--json` |
+| `slot show <name>` | Full slot config + status (Rich panel). | `--json` |
 | `slot load <name>` | Load a slot (optionally assign a model first). | `--model`/`-m` |
 | `slot unload <name>` | Unload a running slot gracefully. | — |
 | `slot restart <name>` | Restart a slot (unload then load). | — |
@@ -68,13 +68,18 @@ hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
 - `--provider` — inference engine: `llama-server` (default), `flm`,
   `moonshine`, `kokoro`. (Since v0.2 the provider is normally implied by
   `--type`; kept for legacy slot TOMLs.)
+  **Note:** `comfyui` is not a valid `--provider` value in the CLI; image
+  slots are created by passing `--type image`, which implies the comfyui
+  provider automatically.
 - `--hardware` — `vulkan` | `rocm` | `cpu`. Auto-detected from
   `hardware.json` when omitted (defaults to `vulkan` if there is no probe).
   The slot's `device` field is derived: `vulkan→gpu-vulkan`, `rocm→gpu-rocm`,
   `cpu→cpu`.
 - `--port` / `-p` — host port; auto-assigned from the free range `8081–8099`
   when omitted.
-- `--ctx-size` — context window in tokens (default `4096`, minimum `128`).
+- `--ctx-size` — context window in tokens (minimum `128`, default `4096`).
+  Pass the model's full native context size when you want to override this
+  floor; the daemon may cap very large values to the model's trained limit.
 
 `slot swap` does two steps: a runtime hot-swap (`POST /api/slots/{name}/swap`)
 and a persist of the on-disk default (`PUT /api/install/slots/{name}/model`).
@@ -146,7 +151,7 @@ The config path honours `HAL0_HOME`; under FHS it is `/etc/hal0/hal0.toml`.
 |---|---|---|
 | `doctor` | Re-run the installer's preflight battery (systemd, python, container runtime, disk, ports). | `--plain`, `--ports "8080 3001"` |
 | `doctor toolbox-pull` | Verify each pinned toolbox image is anonymously pullable from ghcr.io. | `--json`, `--manifest` |
-| `doctor perms` | Audit Hermes runtime ownership for the root-clobber regression (#843). | — |
+| `doctor perms` | Audit ownership for the editable-checkout root-clobber regression (group-share drift). | `--fix` (repair in place; needs root) |
 
 `hal0 doctor` shells out to `installer/lib/preflight.sh` and preserves its exit
 code. `doctor toolbox-pull` exits `0` when every image is reachable (digest
@@ -207,12 +212,11 @@ sets from `$HAL0_AGENT_ID`.
 ## `hal0 migrate` — config/state migrations
 
 The `migrate` sub-app houses one-shot upgrade helpers for moving older on-disk
-state forward to the current schema. Run `hal0 migrate --help` for the
-commands available in your installed version.
+state forward to the current schema. Today it has exactly one subcommand:
 
 | Command | Purpose | Key options |
 |---|---|---|
-| `migrate model-layout` | Reorganise the model store into the v0.2 canonical `<recipe>/<capability>/` symlink layout (dry-run unless `--apply`). | `--apply`, `--force`, `--registry`, `--mount-root`, `--canonical-root` |
+| `migrate model-layout` | Migrate an older model store + registry to the current canonical layout. Dry-run by default. | `--apply`, `--force`/`-f`, `--registry`, `--mount-root`, `--canonical-root` |
 
 ## Related references
 

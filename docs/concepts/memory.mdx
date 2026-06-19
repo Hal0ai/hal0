@@ -20,11 +20,17 @@ The memory subsystem is an engine-neutral layer behind two surfaces: the
 same provider, so a fact written by an agent over MCP is the same fact the
 dashboard shows.
 
+![Memory interface showing stored facts and recall](/screenshots/memory-view.png)
+*Memory view in the hal0 dashboard*
+
 The default engine is **Hindsight** — a memory service that powers the shared
 operator and agent "brain." When configured, hal0 builds a Hindsight client and
 wraps it with a reranker so recall surfaces the most relevant facts. If the
-Hindsight service can't be reached at boot, hal0 degrades down a ladder to a
-local provider rather than failing — the subsystem stays usable.
+Hindsight service is unavailable at boot, hal0 degrades gracefully to a local
+provider rather than failing — the subsystem stays usable.
+
+![Memory graph visualization showing relationships between facts](/screenshots/memory-graph.png)
+*Fact relationships in the knowledge graph*
 
 <Aside type="note">
 The memory layer is engine-neutral by design. Hindsight is the default, but the

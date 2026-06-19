@@ -1,6 +1,6 @@
 ---
 title: Connect an MCP client
-description: Point an MCP client at hal0's admin and memory servers — identify with X-hal0-Agent, widen the host and origin allowlists, and understand which tools run autonomously versus which gate for approval.
+description: Connect an MCP client to hal0's admin and memory servers, set the X-hal0-Agent identity header, configure host allowlists, and see which tools run autonomously.
 sidebar:
   order: 90
 ---
@@ -71,6 +71,9 @@ See [Configure](/docs/guides/configure) for where these env keys live
 (`api.env`).
 
 ## Memory tools (`/mcp/memory`)
+
+![MCP admin tab in dashboard](/screenshots/mcp-tab.png)
+*Dashboard tab showing available MCP tools and their approval status.*
 
 | Tool            | Effect | Notes |
 |-----------------|--------|-------|

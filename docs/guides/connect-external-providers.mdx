@@ -1,6 +1,6 @@
 ---
 title: Connect external providers
-description: Route requests to external OpenAI-compatible LLM providers (OpenAI, Anthropic, OpenRouter, Ollama, custom) by editing upstreams.toml, then write the API key and test the connection.
+description: Wire up OpenAI, Anthropic, OpenRouter, Ollama, or any OpenAI-compatible provider by editing upstreams.toml, writing credentials, and testing reachability.
 sidebar:
   order: 40
 ---
@@ -59,7 +59,11 @@ The fields:
 
 3. **`url`** — the base URL (required, non-empty).
 
-4. **`auth_style`** — one of `bearer`, `header`, or `none`.
+4. **`auth_style`** — how the key is sent. Hand-written `upstreams.toml`
+   entries use `bearer`, `header`, or `none`. The built-in cloud presets add
+   two more, applied automatically when you pick them: `anthropic`
+   (`x-api-key` + `anthropic-version`, for Anthropic) and `google_query`
+   (`?key=` on the URL, for Google AI Studio).
 
 5. **`auth_value_env`** — the **name** of the environment variable that
    holds the secret. The key itself is never written to TOML — only the
@@ -119,7 +123,7 @@ never the secret value.
 curl -X POST http://localhost:8080/api/upstreams/openrouter/test
 ```
 
-This probes the upstream's `/v1/models` and returns a reachability report:
+This probes the upstream's `/models` endpoint (appended to the configured base URL) and returns a reachability report:
 `{ok, status, latency_ms, models_count, error?}`. An unhealthy result also
 fires a dashboard footer event so the outage is visible. The dashboard's
 Providers tab exposes the same probe behind a "test connection" button.

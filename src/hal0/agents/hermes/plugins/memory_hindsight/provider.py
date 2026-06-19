@@ -131,7 +131,9 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             "You have a durable memory store at hal0-memory "
             f"(private:{agent_id} namespace, resolved server-side). "
             "Use memory_search before asking repeat-questions; "
-            "memory_add to persist facts worth recalling across sessions."
+            "memory_add to persist facts worth recalling across sessions. "
+            "When you memory_add, tag the author with agent:hermes and the "
+            "scope with repo:/topic:/kind: — tag the author, bank the scope."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -177,7 +179,7 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             return
         text = f"User: {user_content}\nAssistant: {assistant_content}"
         try:
-            asyncio.run(self._client.add(text, tags=["chat", "hermes"]))
+            asyncio.run(self._client.add(text, tags=["chat", "agent:hermes"]))
         except Hal0MemoryClientError as exc:
             logger.debug("hal0-memory sync_turn transport failure: %s", exc)
         except RuntimeError as exc:
@@ -217,7 +219,8 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             return
         if self._agent_context in _SKIP_WRITE_CONTEXTS:
             return
-        tags = ["builtin-memory", target] if target else ["builtin-memory"]
+        base = ["builtin-memory", "agent:hermes"]
+        tags = [*base, target] if target else base
         try:
             asyncio.run(self._client.add(content, tags=tags, metadata=metadata))
         except Hal0MemoryClientError as exc:

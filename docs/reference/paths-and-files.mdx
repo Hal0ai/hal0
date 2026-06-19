@@ -1,6 +1,6 @@
 ---
 title: Paths & files
-description: FHS layout reference for hal0 — every config file under /etc/hal0, every state path under /var/lib/hal0, the code and log roots, and how HAL0_HOME remaps them all.
+description: FHS layout reference for hal0 — config files under /etc/hal0, state paths under /var/lib/hal0, the code and log roots, and how HAL0_HOME remaps them all.
 sidebar:
   order: 70
 ---
@@ -50,6 +50,7 @@ logged. Upstream catalog config (`upstreams.toml`) and provider config
 | `/var/lib/hal0/activity.db`             | Durable activity / audit store (SQLite, plus `-wal`/`-shm`).   |
 | `/var/lib/hal0/agents/<name>/workspace/`| Per-agent filesystem sandbox root.                            |
 | `/var/lib/hal0/openwebui/`              | OpenWebUI state directory.                                     |
+| `/var/lib/hal0/.first_run_done`         | First-run completion sentinel (written by the installer/wizard). |
 | `/var/lib/hal0/.first-run.lock`         | First-run claim lockfile (mode 0600, single-use OTP).         |
 | `/var/lib/hal0/.bundle-chosen`          | First-run bundle-picker completion marker.                   |
 

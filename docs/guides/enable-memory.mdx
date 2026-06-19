@@ -1,6 +1,6 @@
 ---
 title: Enable memory
-description: hal0's memory subsystem is opt-in. Turn it on by setting HAL0_MEMORY_ENABLED=1, then control the graph-extraction gate with hal0 memory graph and migrate any legacy store.
+description: hal0's memory subsystem is opt-in. Enable it with HAL0_MEMORY_ENABLED=1, then control graph extraction with hal0 memory graph and migrate any legacy store.
 sidebar:
   order: 50
 ---
@@ -45,8 +45,8 @@ installs. Every downstream caller — the admin MCP tools, the
 </Steps>
 
 When the flag is set, hal0 builds the memory provider from your config.
-The default engine is **Hindsight**; if the Hindsight daemon is
-unreachable at boot, hal0 logs a warning and degrades to a local
+The default engine is **Hindsight**; if the Hindsight service is
+unreachable at startup, hal0 logs a warning and degrades to a local
 pgvector-backed provider rather than failing startup.
 
 ## The graph-extraction gate
@@ -54,6 +54,9 @@ pgvector-backed provider rather than failing startup.
 Storing recall items is one thing; running an LLM over them to extract a
 knowledge graph is heavier and separately gated. Control it with the
 `hal0 memory graph` sub-app (a thin client over `/api/memory/graph`).
+
+![Memory view showing live graph extraction status and counters](/screenshots/memory-view.png)
+*Live memory and graph-extraction dashboard in hal0.*
 
 <Tabs>
 <TabItem label="Status">
@@ -110,7 +113,7 @@ The report shows rows total / mapped / unmapped and whether it's a no-op.
 
 <Aside type="caution">
 Migration is **dry-run only** today — it reports the plan without writing.
-Passing `--apply` exits with a "not yet implemented" error.
+Passing `--no-dry-run` exits with a "not yet implemented" error.
 </Aside>
 
 ## Related

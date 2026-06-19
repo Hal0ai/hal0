@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: How hal0 fits together — the FastAPI control plane, podman-backed inference slots, the dispatcher that routes each request, and the dashboard and OpenWebUI front ends.
+description: How hal0 fits together — the FastAPI control plane, podman-backed inference slots, the dispatcher that routes each request, and the dashboard front end.
 sidebar:
   order: 10
 ---
@@ -32,7 +32,7 @@ understanding the rest of these docs.
     serving state for the duration of the call.
   </Card>
   <Card title="Front ends" icon="laptop">
-    The Vue dashboard (served by hal0-api itself) for operating the platform,
+    The React dashboard (served by hal0-api itself) for operating the platform,
     plus optional OpenWebUI as a chat front end pointed at the `/v1` surface.
   </Card>
 </CardGrid>
@@ -146,13 +146,17 @@ underlying model. See [Slots](/docs/concepts/slots).
 
 ## The front ends
 
-hal0-api serves the **dashboard** itself — there is no separate web server to
-run. The dashboard is where you create and operate slots, pull models, pick
-capabilities, watch live activity, and configure the platform.
+hal0-api serves the **dashboard** itself — a React single-page application. 
+There is no separate web server to run. The dashboard is where you create and 
+operate slots, pull models, pick capabilities, watch live activity, and configure 
+the platform.
 
 For end-user chat, point **OpenWebUI** (or any OpenAI-compatible client) at
 hal0's `/v1` surface. Because hal0 speaks the OpenAI API, anything that talks to
 OpenAI talks to hal0.
+
+![The hal0 dashboard showing slot status, model activity, and the hardware footer.](/screenshots/dashboard-overview.png)
+*The hal0 dashboard — slot cards, live activity, and hardware metrics in one view.*
 
 ## Where to go next
 

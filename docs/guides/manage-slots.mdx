@@ -1,6 +1,6 @@
 ---
 title: Manage slots
-description: Create, load, swap, restart, edit, and delete inference slots with the hal0 slot CLI — plus stream live logs. Every slot is a podman container managed by a systemd unit.
+description: Create, load, swap, restart, edit, and delete inference slots with the hal0 CLI. Each slot is a podman container behind a systemd unit and the local API.
 sidebar:
   order: 10
 ---
@@ -26,22 +26,31 @@ hal0 slot list
 ```
 
 Shows every configured slot with its state, model, backend, port, and
-kind. The slot state machine moves through `offline → starting → warming →
-ready → serving → idle` (and `unloading` / `error`). Add `--json` to get
+kind. The slot state machine moves through `offline → pulling → starting → warming → ready → serving → idle` (and `unloading` / `error`). Add `--json` to get
 the raw `/api/slots` payload for scripts:
 
 ```sh
 hal0 slot list --json
 ```
 
+![Slot list showing configured slots with state badges, model names, device, and port](/screenshots/slots-inference.png)
+*The slot list view shows live state, assigned model, device, and port for every configured slot.*
+
 ## Inspect one slot
 
 ```sh
-hal0 slot show primary
+hal0 slot show chat
 ```
 
 Prints the full status **and** the on-disk TOML config as JSON. Use
 `--json` for the unformatted `{status, config}` object.
+
+![Slot detail panel showing state, model, port, and on-disk TOML config as formatted JSON](/screenshots/slot-detail.png)
+*The slot detail panel combines live status with the persisted TOML config in a single view.*
+
+<Aside type="note">
+The legacy name `primary` is still accepted as an alias for `chat`.
+</Aside>
 
 ## Create a slot
 
@@ -154,6 +163,15 @@ Pass any subset of `--model`, `--port`, `--ctx-size`, `--provider`,
 `--hardware`. At least one is required. Changes that the container baked
 in (port, backend) take effect on the next `restart`.
 
+<Aside type="note" title="Editing raw flags in the dashboard">
+The dashboard's slot edit drawer can also set per-slot `[server] extra_args`
+(raw launch flags) — there's no CLI flag for this; it writes via
+`PUT /api/slots/{name}/config`. After changing args that the container baked
+in, the drawer surfaces a **Regenerate** action to rebuild the unit. The
+drawer's context-size field defaults to 16k in the UI; the CLI `--ctx-size`
+default remains `4096`.
+</Aside>
+
 ## Delete a slot
 
 ```sh
@@ -164,7 +182,7 @@ Stops the unit and removes the config. You'll be asked to confirm; pass
 `--force` / `-f` to skip the prompt.
 
 <Aside type="note">
-Built-in slots (such as `primary`, `embed`, `stt`, `tts`) are reserved
+Built-in slots (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`, `agent`) are reserved
 and cannot be deleted — the API rejects the request.
 </Aside>
 

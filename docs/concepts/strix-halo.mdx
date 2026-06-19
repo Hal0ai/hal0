@@ -1,6 +1,6 @@
 ---
 title: Strix Halo
-description: hal0's reference hardware — AMD Ryzen AI Max+ with a Radeon iGPU, an XDNA NPU, and a large unified-memory pool — and why that shared GTT pool is the central tuning target.
+description: AMD Ryzen AI Max+ ("Strix Halo") — hal0's reference platform. Radeon iGPU, XDNA NPU, and a shared GTT unified memory pool that is the central tuning target.
 sidebar:
   order: 40
 ---
@@ -81,7 +81,13 @@ once. That's exactly why the [GPU arbiter](/docs/concepts/slots#the-gpu-arbiter)
 exists: it gives the GPU's memory to either the LLM slots or the image slot, one
 group at a time, rather than letting them fight over the pool.
 
+![The Slots view: the iGPU GTT carve-out bar above the Inference Engine, where iGPU and FLM (NPU) slots share the unified-memory pool](/screenshots/npu-occupancy.png)
+*The shared GTT carve-out above the Inference Engine — iGPU slots and FLM (NPU) slots both draw from one unified-memory pool.*
+
 ## What the hardware probe detects
+
+![hal0 hardware metrics panel showing CPU, GPU, NPU, RAM, and disk readings](/screenshots/hardware-metrics.png)
+*The hardware dashboard panel after a successful probe run.*
 
 hal0 ships a hardware probe that inspects the machine and writes the result for
 the rest of the system to read. It detects the CPU (model, cores, threads),

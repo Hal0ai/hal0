@@ -1,6 +1,6 @@
 ---
 title: Security posture
-description: hal0 ships no built-in auth or TLS — the API is open on your LAN by design. Learn the threat model, the reverse-proxy pattern, and the MCP host and origin allowlists.
+description: hal0 ships no built-in auth or TLS — open on your LAN by design. Learn the threat model, the reverse-proxy pattern, and the MCP host and origin allowlists.
 sidebar:
   order: 70
 ---
@@ -70,9 +70,12 @@ The one place hal0 does enforce a network gate is the MCP mount. The admin and
 memory MCP servers are mounted as sub-applications under `/mcp/admin` and
 `/mcp/memory`, and the MCP transport applies DNS-rebinding protection.
 
+![MCP tab showing tool and resource inventory](/screenshots/mcp-tab.png)
+*The dashboard's MCP tab displays the live admin and memory server status.*
+
 By default that protection is **localhost-only**: only `127.0.0.1`, `localhost`,
 and `[::1]` (any port) are accepted as `Host` headers and request origins. A
-client reaching the mount from any other host gets a bare `421 Invalid Host`
+client reaching the mount from any other host gets a bare `421 Invalid Host header`
 response. Because hal0 binds `0.0.0.0` on a LAN, you usually need to widen this
 to reach `/mcp/*` from another machine or through your proxy:
 

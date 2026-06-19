@@ -1,6 +1,6 @@
 ---
 title: Agents
-description: hal0's agent model — Hermes runs as a sandboxed systemd service, shaped by personas that gate its tools, with an approval queue for risky actions and per-persona spending budgets.
+description: "hal0's agent model: Hermes runs as a sandboxed systemd service, shaped by personas that gate its tools, with an approval queue and per-persona spending budgets."
 sidebar:
   order: 60
 ---
@@ -71,6 +71,9 @@ API. Approving an entry actually runs the deferred action; denying it just close
 it. The queue de-duplicates — a repeated request for the same target bumps a
 counter rather than stacking entries — and every gated and autonomous invocation
 is audited so you can see exactly what the agent did and what's waiting on you.
+
+![The hal0 Operator Board — a Hermes-backed kanban tracking agent tasks across Triage, To-do, Scheduled, and Ready lanes](/screenshots/operator-board.png)
+*The Operator Board orchestrates agent tasks across lanes; gated tool calls still pause for human sign-off before they run.*
 
 <Aside type="tip">
 Gating is per-action, not all-or-nothing. A persona can auto-approve safe reads

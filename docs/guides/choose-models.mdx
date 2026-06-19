@@ -19,6 +19,9 @@ hal0 model pull qwen3.6-27b
 The catalogue ships *with* each release (it lives in code, not a remote
 manifest), so you can never land on a stale pick list.
 
+![Models registry view showing the curated catalogue cards with size, license, and memory badges](/screenshots/models-registry.png)
+*The Models view renders each curated entry as a card with size, license, and minimum-memory badges.*
+
 ## Chat picks
 
 These are surfaced first by the FirstRun wizard, ordered roughly largest
@@ -28,7 +31,7 @@ the quality margin a large unified pool affords.
 | Id | Model | Size | Min memory | License | Notes |
 |---|---|---|---|---|---|
 | `qwen3-coder-next` | Qwen3 Coder Next | ~49 GB | ~56 GB | Apache-2.0 | Frontier coding model; needs the full pool. |
-| `qwen3.6-27b` | Qwen3.6 27B | ~20 GB | ~24 GB | Apache-2.0 | General-purpose default; strong reasoning + multilingual. |
+| `qwen3.6-27b` | Qwen3.6 27B (MTP ROCmFP4) | ~17 GB | ~22 GB | other (see HF repo) | General-purpose default with MTP and vision support; ROCmFP4 build for Strix Halo. |
 | `gpt-oss-20b` | GPT-OSS 20B | ~12 GB | ~16 GB | Apache-2.0 | OpenAI open-weights 20B. |
 | `qwen3.5-9b` | Qwen3.5 9B | ~6 GB | ~8 GB | Apache-2.0 | Lean default; fits alongside embed + voice slots. |
 | `qwen3.5-0.8b` | Qwen3.5 0.8B | ~0.6 GB | ~1 GB | Apache-2.0 | Tiny; sub-second cold start. Doubles as the install smoke test. |
@@ -57,7 +60,7 @@ llama.cpp-compatible GGUFs that fan out to `gpu-vulkan` / `gpu-rocm` /
 <Aside type="note">
 Embedding quality is brittle under aggressive quantization, so the nomic
 default ships at Q8_0 — the size delta is negligible on a unified pool.
-Rerank slots need a non-default port and the `--reranking` flag.
+Rerank slots must be created with `--type reranking` (see [Manage slots](/docs/guides/manage-slots)).
 </Aside>
 
 ## Image picks
@@ -69,6 +72,7 @@ directly.
 | Id | Model | Size | License |
 |---|---|---|---|
 | `sdxl-turbo` | SDXL Turbo | ~6.5 GB | SAI-NC-Research-Community (research only) |
+| `sdxl-lightning` | SDXL Lightning (8-step) | ~6.8 GB | CreativeML-OpenRAIL++-M |
 | `sd-1.5-pruned-emaonly` | Stable Diffusion 1.5 | ~4.3 GB | CreativeML-Open-RAIL-M |
 
 <Aside type="caution">
@@ -90,13 +94,12 @@ dashboard renders as chips. The check runs three gates in order:
    `reranking`, stt → `transcription`, tts → `tts`, image → `image`. A
    mismatch is `blocked` (`model.slot_type_mismatch`).
 
-2. **Resolvability.** The model id must resolve — present in the registry,
-   or an installed FLM tag. An unresolvable id is `blocked`
-   (`model.not_resolvable`).
+2. **Resolvability.** The model id must resolve — present in the local
+   registry. An unresolvable id is `blocked` (`model.not_resolvable`).
 
 3. **Profile + device class.** The slot's profile must support the slot
    type, and the device must agree with the profile's device class
-   (`gpu-rocm`/`gpu-vulkan → gpu`, `cpu → cpu`, `npu → npu`). NPU and
+   (`gpu-rocm`/`gpu-vulkan` → `gpu`, `cpu` → `cpu`, `npu` → `npu`). NPU and
    image mismatches are hard `blocked` failures — they route to different
    runtime families. A GPU↔CPU mismatch is `degraded` instead: a custom
    image may still run, but it needs operator attention before launch.

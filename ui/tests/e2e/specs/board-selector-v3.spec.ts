@@ -97,10 +97,15 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
 
   // ── New board modal ────────────────────────────────────────────────────
 
-  test('new-board modal opens via board-action-new-board', async ({ page }) => {
+  test('new-board modal opens via board-action-new-board and is styled', async ({ page }) => {
     await gotoBoardAndWait(page)
     await page.locator('[data-testid="board-action-new-board"]').click()
-    await expect(page.locator('[data-testid="board-new-modal"]')).toBeVisible({ timeout: FIVE_S })
+    const scrim = page.locator('[data-testid="board-new-modal"]')
+    await expect(scrim).toBeVisible({ timeout: FIVE_S })
+    // Regression: the modal renders outside the main `.board` container, so it
+    // must be wrapped in `.board` for the `.board .modal-scrim` scoped styles to
+    // apply. Without the wrapper it rendered as an unstyled in-flow block.
+    await expect(scrim).toHaveCSS('position', 'fixed')
   })
 
   test('new-board modal has all input fields', async ({ page }) => {
@@ -165,6 +170,85 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
     await expect(page.locator('[data-testid="board-new-modal"]')).toBeVisible()
     await page.locator('[data-testid="board-action-cancel-board"]').click()
     await expect(page.locator('[data-testid="board-new-modal"]')).not.toBeVisible()
+  })
+
+  // ── New task modal ─────────────────────────────────────────────────────
+  // CORRECT (post-fix) behaviour: a lane's "+" opens an explicit NewTaskModal
+  // and POSTs NOTHING until the operator fills a title and hits Create. The
+  // old behaviour POSTed a blank `{ title: "New task" }` on click, which the
+  // dispatcher then auto-advanced out of the lane.
+
+  test('lane "+" opens the new-task modal WITHOUT creating a task', async ({ page }) => {
+    let posted = false
+    await page.route('**/api/board/tasks', async (route) => {
+      if (route.request().method() === 'POST') {
+        posted = true
+        await json(route, { id: 'should-not-happen' }, 201)
+      } else {
+        await route.fallback()
+      }
+    })
+
+    await gotoBoardAndWait(page)
+    await page.locator('[data-testid="board-lane-triage"] .ladd').click()
+
+    // Modal appears, and crucially nothing has been POSTed yet.
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).toBeVisible({ timeout: FIVE_S })
+    await page.waitForTimeout(300)
+    expect(posted).toBe(false)
+  })
+
+  test('new-task modal: title + Create → POST /api/board/tasks with title + lane status', async ({ page }) => {
+    let postBody: any = null
+    await page.route('**/api/board/tasks', async (route) => {
+      if (route.request().method() === 'POST') {
+        postBody = route.request().postDataJSON()
+        await json(route, { ...postBody, id: 'new-1' }, 201)
+      } else {
+        await route.fallback()
+      }
+    })
+
+    await gotoBoardAndWait(page)
+    await page.locator('[data-testid="board-lane-todo"] .ladd').click()
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).toBeVisible()
+
+    // Create is disabled until a title is present.
+    const createBtn = page.locator('[data-testid="board-action-create-task"]')
+    await expect(createBtn).toBeDisabled()
+
+    await page.locator('[data-testid="board-new-task-title"]').fill('Wire the SSE protocol')
+    await page.locator('[data-testid="board-new-task-body"]').fill('match frontend to board_chat.py')
+    await expect(createBtn).toBeEnabled()
+    await createBtn.click()
+    await page.waitForTimeout(400)
+
+    // Modal closed and a single POST carried the title + the clicked lane's status.
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).not.toBeVisible()
+    expect(postBody).toMatchObject({
+      title: 'Wire the SSE protocol',
+      body: 'match frontend to board_chat.py',
+      status: 'todo',
+    })
+  })
+
+  test('cancel in new-task modal closes it without POSTing', async ({ page }) => {
+    let posted = false
+    await page.route('**/api/board/tasks', async (route) => {
+      if (route.request().method() === 'POST') {
+        posted = true
+        await json(route, { id: 'x' }, 201)
+      } else {
+        await route.fallback()
+      }
+    })
+
+    await gotoBoardAndWait(page)
+    await page.locator('[data-testid="board-lane-triage"] .ladd').click()
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).toBeVisible()
+    await page.locator('[data-testid="board-action-cancel-task"]').click()
+    await expect(page.locator('[data-testid="board-new-task-modal"]')).not.toBeVisible()
+    expect(posted).toBe(false)
   })
 
   // ── Orchestration popover ──────────────────────────────────────────────
@@ -270,36 +354,19 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
     await expect(page.locator('[data-testid="board-orch-popover"]')).not.toBeVisible({ timeout: FIVE_S })
   })
 
-  // ── Tweaks panel ──────────────────────────────────────────────────────
+  // ── Display defaults (tweaks panel removed) ────────────────────────────
+  // The runtime tweaks panel was removed; display is permanently compact +
+  // left-rail accent + mono titles.
 
-  test('tweaks fab opens board-tweaks panel', async ({ page }) => {
+  test('board display is permanently compact / left accent / mono — no tweaks FAB', async ({ page }) => {
     await gotoBoardAndWait(page)
-    // Click the tweaks FAB
-    await page.locator('.tweak-fab').click()
-    await expect(page.locator('[data-testid="board-tweaks"]')).toBeVisible({ timeout: FIVE_S })
-  })
-
-  test('tweaks panel has density, accent, titlefont, meta controls', async ({ page }) => {
-    await gotoBoardAndWait(page)
-    await page.locator('.tweak-fab').click()
-    await expect(page.locator('[data-testid="board-tweaks"]')).toBeVisible()
-
-    await expect(page.locator('[data-testid="board-tweak-density"]')).toBeVisible()
-    await expect(page.locator('[data-testid="board-tweak-accent"]')).toBeVisible()
-    await expect(page.locator('[data-testid="board-tweak-titlefont"]')).toBeVisible()
-    await expect(page.locator('[data-testid="board-tweak-meta"]')).toBeVisible()
-  })
-
-  test('switching density to compact changes data-density attr', async ({ page }) => {
-    await gotoBoardAndWait(page)
-    await page.locator('.tweak-fab').click()
-    await expect(page.locator('[data-testid="board-tweaks"]')).toBeVisible()
-
-    await page.locator('[data-testid="board-tweak-density"] button').filter({ hasText: 'compact' }).click()
-    await page.waitForTimeout(200)
-
     const board = page.locator('[data-testid="board-view"]')
     await expect(board).toHaveAttribute('data-density', 'compact')
+    await expect(board).toHaveAttribute('data-accent', 'left')
+    await expect(board).toHaveAttribute('data-titlefont', 'mono')
+    // The tweaks FAB + panel are gone.
+    await expect(page.locator('.tweak-fab')).toHaveCount(0)
+    await expect(page.locator('[data-testid="board-tweaks"]')).toHaveCount(0)
   })
 
 })

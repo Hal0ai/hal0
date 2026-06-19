@@ -226,10 +226,11 @@
 .board[data-meta="off"] .kc-id { display: none; }
 .board[data-meta="off"] .kc-when { display: none; }
 
-/* drop-to-delete */
-.board .drop-delete { width: 86px; flex-shrink: 0; align-self: stretch; border: 1px dashed var(--line); border-radius: var(--rad-lg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--fg-5); font-family: var(--jbm); font-size: 10px; text-align: center; line-height: 1.3; transition: all var(--dur) var(--ease); }
-.board .drop-delete.armed { border-color: var(--err-line); color: var(--err); background: var(--err-soft); }
-.board .drop-delete .di { opacity: 0.7; }
+/* drag-to-delete danger veil — shown while a card is dragged over the board
+   background (outside any column). pointer-events:none so the drop still
+   reaches the lanes-scroll handler underneath. */
+.board .danger-veil { position: fixed; inset: 0; z-index: 110; pointer-events: none; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 32%, var(--err-soft) 100%); animation: board-fade-in var(--dur) var(--ease); }
+.board .danger-badge { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 22px 30px; border: 1px solid var(--err-line); border-radius: var(--rad-lg); background: var(--err-soft); color: var(--err); font-family: var(--jbm); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; box-shadow: var(--shadow-menu); }
 
 /* ─── Drawer scrim (position:fixed — intentionally unscoped) ─────────── */
 .b-drawer-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 90; animation: board-fade-in var(--dur) var(--ease); }
@@ -377,28 +378,12 @@
 .board .orch-step button:hover { background: var(--bg-2); color: var(--fg); }
 .board .orch-step .val { min-width: 44px; text-align: center; font-family: var(--jbm); font-size: 12px; color: var(--fg); border-left: 1px solid var(--line); border-right: 1px solid var(--line); padding: 0 4px; height: 22px; display: inline-flex; align-items: center; justify-content: center; }
 
-/* ─── Tweaks panel ───────────────────────────────────────────────────── */
-.board .tweak-fab { position: fixed; bottom: 76px; right: 24px; z-index: 80; width: 40px; height: 40px; border-radius: var(--rad); border: 1px solid var(--line-strong); background: var(--bg-2); color: var(--fg-2); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: var(--shadow-toast); }
-.board .tweak-fab:hover { color: var(--accent); border-color: var(--accent-line); }
-.board .tweak-fab.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
-.board .tweaks { position: fixed; bottom: 76px; right: 24px; z-index: 81; width: 268px; background: var(--bg-1); border: 1px solid var(--line-strong); border-radius: var(--rad-lg); box-shadow: var(--shadow-menu); overflow: hidden; animation: board-drawer-in var(--dur-slow) var(--ease); }
-.board .tweaks-h { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line-soft); }
-.board .tweaks-h .t { font-family: var(--jbm); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-2); }
-.board .tweaks-h .x { margin-left: auto; color: var(--fg-4); cursor: pointer; display: inline-flex; }
-.board .tweaks-h .x:hover { color: var(--fg); }
-.board .tweaks-b { padding: 6px 14px 14px; display: flex; flex-direction: column; gap: 14px; }
-.board .tw { display: flex; flex-direction: column; gap: 7px; }
-.board .tw > .tl { font-family: var(--jbm); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-5); }
-.board .tw-seg { display: flex; gap: 4px; }
-.board .tw-seg button { flex: 1; font-family: var(--jbm); font-size: 11px; padding: 6px 4px; border: 1px solid var(--line); border-radius: var(--rad-sm); background: var(--bg); color: var(--fg-3); cursor: pointer; }
-.board .tw-seg button.on { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
-.board .tw-seg button:hover:not(.on) { border-color: var(--line-strong); color: var(--fg-2); }
+/* ─── Toggle switch (shared by the orchestration popover) ────────────── */
 .board .tw-toggle { display: flex; align-items: center; gap: 9px; cursor: pointer; }
 .board .tw-switch { width: 32px; height: 18px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--line); position: relative; transition: all var(--dur) var(--ease); flex-shrink: 0; }
 .board .tw-switch::after { content: ""; position: absolute; top: 1.5px; left: 1.5px; width: 13px; height: 13px; border-radius: 50%; background: var(--fg-4); transition: all var(--dur) var(--ease); }
 .board .tw-toggle.on .tw-switch { background: var(--accent-soft); border-color: var(--accent-line); }
 .board .tw-toggle.on .tw-switch::after { left: 15px; background: var(--accent); }
-.board .tw-toggle .tt { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-2); }
 
 /* ─── Responsive ─────────────────────────────────────────────────────── */
 @media (max-width: 1100px) { .board .lane { width: 270px; } }

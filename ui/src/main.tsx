@@ -118,8 +118,8 @@ import './dash/board/lane.jsx'
 import './dash/board/task-drawer.jsx'
 import './dash/board/agent-chat.jsx'
 import './dash/board/orchestration-popover.jsx'
-import './dash/board/tweaks-panel.jsx'
 import './dash/board/new-board-modal.jsx'
+import './dash/board/new-task-modal.jsx'
 import './dash/board/board-view.jsx'
 
 // 3) main.jsx mounts <App /> into #root.

@@ -1,11 +1,14 @@
 ---
 title: MCP tools
-description: Reference for hal0's MCP tool surface — the memory MCP and admin MCP tools, split into autonomous-read, autonomous-write, and approval-gated tools per ADR-0004 and ADR-0005.
+description: Reference for hal0's two MCP servers — memory and admin tools, classified as autonomous-read, autonomous-write, or approval-gated per ADR-0004 and ADR-0005.
 sidebar:
   order: 60
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+
+![The hal0 dashboard MCP tab showing connected servers and tool tiers](/screenshots/mcp-tab.png)
+*Dashboard MCP tab — lists connected servers, active tool tiers, and pending approvals.*
 
 hal0 hosts two Streamable-HTTP MCP servers that agents call: a focused
 **memory** server (`/mcp/memory`) and a full **admin** server (`/mcp/admin`).
@@ -14,24 +17,26 @@ autonomous-write, or approval-gated. Gated tools enqueue for owner approval
 before they run; autonomous tools execute immediately.
 
 <Aside type="note">
-The agent presents its Bearer token through the MCP transport. The server stamps
-the caller's identity on every audit row and re-attaches the same token on the
-internal REST call it forwards to — an agent can only do through MCP what its
-token already permits through REST. Each tool call is written to the audit log.
+hal0 has no built-in auth (ADR-0012) — there are no bearer tokens. When Hermes
+or another bundled agent calls the MCP server, it identifies itself with the
+`X-hal0-Agent` header (set from `$HAL0_AGENT_ID` by the agent wrapper). The
+server stamps that identity on every audit row and carries it onto the internal
+REST call, so an agent's actions are attributed and gated by its identity, not a
+secret. Each tool call is written to the audit log.
 </Aside>
 
 ## Memory MCP (`/mcp/memory`)
 
-Cognee-backed long-term memory. The memory subsystem is **opt-in** — these tools
+Hindsight (Cognee-backed) long-term memory. The memory subsystem is **opt-in** — these tools
 only function when the server is started with `HAL0_MEMORY_ENABLED=1`; otherwise
 calls degrade to a no-op / unavailable surface.
 
 | Tool            | Tier              | Effect                                                                 |
 |-----------------|-------------------|------------------------------------------------------------------------|
-| `memory_add`    | autonomous-write  | Write one item → `{id, timestamp}` (+ `operation_id` when async).      |
-| `memory_search` | autonomous-read   | Vector + tag + time-window query → `{results}`.                        |
-| `memory_recall` | autonomous-read   | Token-budgeted consolidated recall (preferred over search) → `{results}`. |
-| `memory_list`   | autonomous-read   | Paginated walk → `{items, next_cursor}`.                               |
+| `memory_add`    | autonomous-write  | Write one item → `{id, timestamp}` (+ `operation_id` when async).          |
+| `memory_search` | autonomous-read   | Vector + tag + time-window query → `{results}`.                             |
+| `memory_recall` | autonomous-read   | Token-budgeted consolidated recall (Hindsight preferred) → `{results}`.     |
+| `memory_list`   | autonomous-read   | Paginated walk → `{items, next_cursor}`.                                    |
 | `memory_delete` | conditional       | Remove by id(s) → `{deleted}`. **Autonomous** for one id; **gated** for >1. |
 
 Notable arguments:
@@ -43,6 +48,8 @@ Notable arguments:
 - `document_id` reuse upserts one logical document (e.g. an evolving
   conversation); it must match the identity grammar (alphanumeric / `-` / `_`,
   ≤ 64 chars).
+- `memory_recall` accepts `max_tokens` (default 4096, range 1–32768), `types`,
+  `dataset`, and `tags` for token-budgeted retrieval via Hindsight recall.
 
 ## Admin MCP (`/mcp/admin`)
 
@@ -53,19 +60,19 @@ tools above (delegated to the memory surface). Tools are classified as follows.
 
 Execute immediately; pure reads against the local REST or host surface.
 
-| Tool                 | Effect                                                          |
+| Tool                 | Effect                                                         |
 |----------------------|----------------------------------------------------------------|
 | `slot_list`          | List every slot known to hal0 (local + remote).                |
-| `slot_status`        | One slot's lifecycle state + metadata.                          |
+| `slot_status`        | One slot's lifecycle state + metadata.                         |
 | `model_list`         | Aggregate models from local registry + upstreams.              |
 | `hardware_probe`     | Live hardware probe — backends, memory, accelerators.          |
-| `capability_list`    | Capability overlay state — backends + selections.             |
+| `capability_list`    | Capability overlay state — backends + selections.              |
 | `provider_list`      | List configured providers.                                     |
 | `version_info`       | hal0 version + runtime status.                                 |
-| `gpu_target_version` | Decode KFD's `gfx_target_version` to a `gfxNNNN` string.       |
+| `gpu_target_version` | Decode KFD's `gfx_target_version` to a `gfxNNNN` string.      |
 | `npu_status`         | XDNA NPU presence + driver binding.                            |
-| `env_report`         | Composite host snapshot (container, CPU, RAM, GPU, NPU, …).    |
-| `model_store_probe`  | Probe a model-store path (fstype, free/total, writable, UMA).  |
+| `env_report`         | Composite host snapshot (container, CPU, RAM, GPU, NPU, …).   |
+| `model_store_probe`  | Probe a model-store path (fstype, free/total, writable, UMA). |
 
 ### Autonomous write
 

@@ -62,7 +62,7 @@ podman is not installed.
 
 | Variable                  | What it does                                                       | Default |
 |---------------------------|-------------------------------------------------------------------|---------|
-| `HAL0_MEMORY_ENABLED`     | Enable the memory subsystem (Cognee engine, `/mcp/memory`, `/api/memory/*`). Memory is **opt-in**. | `0` (disabled) |
+| `HAL0_MEMORY_ENABLED`     | Enable the memory subsystem (Hindsight / Cognee-backed, `/mcp/memory`, `/api/memory/*`). Memory is **opt-in**. | `0` (disabled) |
 | `HAL0_MCP_ALLOWED_HOSTS`  | Allowlist of `Host` headers accepted by the mounted MCP servers.  | unset   |
 | `HAL0_MCP_ALLOWED_ORIGINS`| Allowlist of origins for MCP transport requests.                  | unset   |
 
@@ -82,7 +82,7 @@ These are honoured by the installer / bootstrap scripts.
 | `HAL0_PREFIX`               | Installation root.                                                 | `/usr/lib/hal0` (system) / `$PWD/.hal0ai` (no-sudo) |
 | `HAL0_CHANNEL`              | Release channel for the default download URL.                     | `stable` |
 | `HAL0_INSTALL_SKIP_VERIFY`  | Install from an unverified source (skip the cosign check). Not recommended. | `0`      |
-| `HAL0_UPDATE_SKIP_COSIGN`   | Skip cosign signature verify (only honoured when cosign is missing). Not recommended. | `0`      |
+| `HAL0_UPDATE_SKIP_COSIGN`   | Skip cosign signature verify on updates. Only honoured on pre-release/dev builds — silently ignored on stable v1+. Not recommended. | `0`      |
 | `HAL0_NO_PROBE`             | Skip the hardware probe during install.                           | unset    |
 
 <Aside type="caution">

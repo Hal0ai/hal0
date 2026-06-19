@@ -1,6 +1,6 @@
 ---
 title: REST API index
-description: Index of hal0's HTTP API — the /api/* router groups for slots, models, hardware, capabilities, memory, agents, MCP, activity, updates and more, each with a one-line purpose.
+description: Index of hal0's HTTP API — /api/* router groups for slots, models, hardware, capabilities, memory, agents, MCP, activity, and updates, one-line summary each.
 sidebar:
   order: 40
 ---
@@ -40,10 +40,11 @@ ADR-0012 and are your reverse proxy's job. The OpenAPI spec is served live at
 | `/api/providers`        | External LLM provider config.                                       |
 | `/api/updates`          | Update check, apply, rollback (channels + cosign).                  |
 | `/api/capabilities`     | Capability overlay — embed/voice/img children mapped onto slots.    |
-| `/api/bundles`          | First-run bundle picker.                                            |
 | `/api/backends`         | Backend introspection — status + loaded children per backend.       |
 | `/api/npu`              | NPU trio swap-status.                                               |
-| `/api/status`, `/api/config` | Server status + dashboard config/urls (public).               |
+| `/api/board`            | Hermes agent board — chat proxy, WebSocket session, and board-level events. |
+| `/api/status`           | Server status (public).                                              |
+| `/api/config`           | Dashboard URLs discovery (`/api/config/urls`) + models list (public). |
 | `/api/profiles`         | Profile catalog (seeds + custom).                                   |
 | `/api/chat-templates`   | Chat-template catalog — bundled + operator-added.                   |
 | `/api/events`           | Dashboard footer event stream (SSE).                               |

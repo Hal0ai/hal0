@@ -1,6 +1,6 @@
 ---
 title: Install hal0
-description: Install hal0 with one command — the bootstrap fetches a signed release, verifies it with SHA-256 and cosign, installs podman, and brings up the API.
+description: Install hal0 with one command — the bootstrap verifies the release with SHA-256 and cosign, installs podman, seeds default slot config, and starts the API.
 sidebar:
   order: 10
 ---
@@ -64,8 +64,9 @@ through the Vulkan or ROCm container profiles.
 
 4. **Unpack and hand off** to `installer/install.sh`, which runs
    pre-flight checks, installs podman + the Python venv, builds the
-   dashboard, writes config and systemd units, runs the hardware probe,
-   and starts the API.
+   dashboard, writes config and systemd units, runs first-run setup
+   (`hal0 setup --auto --no-pull --no-extensions`) to seed a
+   hardware-recommended slot configuration, and starts the API.
 
 </Steps>
 
@@ -78,9 +79,9 @@ flags:
 |---|---|---|
 | `HAL0_PREFIX` | `/usr/lib/hal0` | Installation root (FHS layout with a versioned dir + `current` symlink) |
 | `HAL0_PORT` | `8080` | API bind port |
-| `HAL0_MODELS_DIR` | `<var-lib>/models` | Where Hugging Face pulls land |
+| `HAL0_MODELS_DIR` | `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`) | Where Hugging Face pulls land |
 | `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
-| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the post-install hardware probe |
+| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip first-run automatic setup (hardware-recommended slot seed) |
 
 | Flag | Effect |
 |---|---|
@@ -89,9 +90,9 @@ flags:
 | `--models-dir=PATH` | Absolute path where pulls land (same as `HAL0_MODELS_DIR`) |
 
 <Aside type="tip">
-The model pull directory must be an **absolute** path. When you run the
-installer on a TTY without specifying one, it prompts interactively and
-defaults to `<var-lib>/models`.
+The model pull directory must be an **absolute** path. When not specified,
+the installer defaults to `/var/lib/hal0/models` non-interactively. You
+can change it later through `hal0 setup`.
 </Aside>
 
 ## Verify the install
@@ -132,9 +133,9 @@ venvs, binaries, and every hal0 podman container, but keeps `/etc/hal0`
 re-install reuses them.
 
 `--purge` (alias `--clean-slate`) additionally removes the config and
-data directories, the `hal0` system user and group, all hal0/toolbox
-podman images, and the FastFlowLM package. It prompts for a typed
-`DELETE` confirmation unless you pass `--force` (or set `HAL0_FORCE=1`).
+data directories, the `hal0` system user and group, and all hal0/toolbox
+podman images. It prompts for a typed `DELETE` confirmation unless you pass
+`--force` (or set `HAL0_FORCE=1`).
 
 <Aside type="note">
 `--purge` deliberately leaves general-purpose host packages installed —

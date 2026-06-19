@@ -1,6 +1,6 @@
 ---
 title: Capabilities & profiles
-description: How hal0 separates what a slot does (capabilities) from how it runs (profiles) and where it runs (device) — plus the device-to-profile defaults and the NPU trio.
+description: How hal0 separates what a slot does (capabilities) from how it runs (profiles) and where it runs (device) — device-to-profile defaults and the NPU trio.
 sidebar:
   order: 30
 ---
@@ -58,8 +58,9 @@ hal0 ships seed profiles so a fresh install is immediately usable:
 
 | Profile | Targets | Purpose |
 |---|---|---|
-| `rocm` | GPU (ROCm) | MoE agents |
-| `rocm-mtp` | GPU (ROCm) | Dense chat with multi-token-prediction speculative decoding |
+| `rocm` | GPU (ROCm) | MoE / agent models, FP4, no MTP (larger q8 KV) — the `gpu-rocm` default |
+| `rocm-dnse` | GPU (ROCm) | Dense models with MTP speculative decoding (q4 KV) |
+| `rocm-moe` | GPU (ROCm) | MoE models with MTP speculative decoding (q4 KV) |
 | `vulkan` | GPU (Vulkan) | Standard Vulkan path and fallback |
 | `flm` | NPU | FLM inference on the NPU |
 | `tts` | CPU | Text-to-speech (Kokoro) |
@@ -70,6 +71,10 @@ profile API is always populated. Seed profiles are immutable — to customise on
 clone it under a new name and edit the copy. Each profile is also classified
 into a runtime family (llama-server, FLM, Kokoro, or ComfyUI) that determines
 which slot types it can serve.
+
+![The Profiles tab in the hal0 dashboard showing seed profile cards for rocm, rocm-dnse, rocm-moe, vulkan, flm, tts, and comfyui with bench metrics and device class chips](/screenshots/profiles-tab.png)
+
+*The Profiles tab — seed profile cards with bench metrics, device class chips, and the clone affordance for creating custom profiles.*
 
 <Aside type="tip">
 When `mtp` is enabled on a profile, hal0 appends a tuned speculative-decoding
@@ -123,7 +128,7 @@ chat, speech-to-text, and embeddings. hal0 calls this the **NPU trio**.
 
 There is one containerized NPU slot. Its chat role routes through the slot's
 upstream like any other slot. The other two modalities ride as **shadow slots**
-— `stt-npu` and `embed-npu` — whose requests are posted straight to the same
+— `stt` and `embed` — whose requests are posted straight to the same
 container's port when their slot records are enabled. There's no second process
 and no separate model server: the three endpoints are the same FLM process
 answering on one static port.

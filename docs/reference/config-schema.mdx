@@ -39,7 +39,7 @@ State (registry, models, slot state, memory banks) lives under
 | `device` (hardware preference) | `gpu-rocm`, `gpu-vulkan`, `cpu`, `npu` |
 | `provider` (engine label) | `llama-server`, `flm`, `moonshine`, `kokoro`, `comfyui` |
 | slot `type` (dispatch routing) | `llm`, `embedding`, `reranking`, `transcription`, `tts`, `image` |
-| seed profiles | `rocm`, `rocm-mtp`, `vulkan`, `flm`, `tts`, `comfyui` |
+| seed profiles | `rocm`, `rocm-dnse`, `rocm-moe`, `vulkan`, `flm`, `tts`, `comfyui` |
 
 <Aside type="caution">
 Use `device`, not the legacy `backend` field. `backend` is deprecated: a slot
@@ -116,7 +116,8 @@ A slot config has `[slot]`, `[model]`, and optional `[server]` / `[npu]` /
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `name` | str | required | Lowercase alphanumeric + `-`/`_`, starts alphanumeric, ≤32 chars. |
-| `port` | int | required | Host port `8081–8200` (127.0.0.1 only). |
+| `port` | int | required | Host port in range `8081–8200` (127.0.0.1 only). |
+| `type` | str | `llm` | Dispatch routing: `llm` \| `embedding` \| `reranking` \| `transcription` \| `tts` \| `image`. |
 | `device` | str | `gpu-rocm` | `gpu-rocm` \| `gpu-vulkan` \| `cpu` \| `npu`. |
 | `provider` | str | `llama-server` | Engine label (round-trips for compatibility/UI). |
 | `profile` | str \| null | `null` | Profile name from `profiles.toml` (image + tuned flags). |
@@ -139,7 +140,7 @@ container provider.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `default` | str | `""` | Default model id from the registry. |
-| `context_size` | int (≥128) | `4096` | Context window in tokens. |
+| `context_size` | int (≥128) | `null (derived)` | When unset, hal0 derives the context window from the model's native size (capped) or a safe floor; never silently falls back to 4096. |
 | `n_gpu_layers` | int | `-1` | Layers offloaded to GPU; `-1` = all. |
 | `rope_freq_base` | float (≥0) | `0.0` | RoPE base override; `0.0` = model default. |
 
@@ -223,8 +224,9 @@ and flags, the slot supplies the model, context size, and port. When
 | `intent` | str | Human label shown in the dashboard. |
 | `quant` | str | Weight quant format shown as a chip (informational). |
 
-Seed profiles: `rocm`, `rocm-mtp`, `vulkan` (GPU), `flm` (NPU), `tts` (CPU /
-Kokoro), `comfyui` (image generation).
+Seed profiles: `rocm`, `rocm-moe`, `rocm-dnse`, `vulkan` (GPU), `flm` (NPU),
+`tts` (CPU / Kokoro), `comfyui` (image generation). `rocm` is the `gpu-rocm`
+default (MoE/agents, FP4, no MTP).
 
 ## Related references
 

@@ -1,6 +1,6 @@
 ---
 title: Speech to text and text to speech
-description: Enable hal0's voice capability — speech-to-text with Moonshine on CPU or FLM on the NPU, text-to-speech with Kokoro on CPU — and call the OpenAI-compatible /v1/audio endpoints.
+description: "Enable hal0's voice capability: transcription via Moonshine (CPU) or FLM (NPU), synthesis via Kokoro, then call /v1/audio/transcriptions and /v1/audio/speech."
 sidebar:
   order: 80
 ---
@@ -9,9 +9,9 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 
 hal0 exposes two voice directions through OpenAI-compatible endpoints:
 
-- **Speech-to-text** (`POST /v1/audio/transcriptions`) — Moonshine on CPU,
-  or the FLM trio on the AMD NPU.
-- **Text-to-speech** (`POST /v1/audio/speech`) — Kokoro (ONNX) on CPU.
+- **Speech-to-text** (`POST /v1/audio/transcriptions`) — Moonshine container on CPU,
+  or the FLM trio on the NPU.
+- **Text-to-speech** (`POST /v1/audio/speech`) — Kokoro container on CPU.
 
 Both are children of the **`voice`** capability: `voice.stt` maps to the
 `stt` slot and `voice.tts` maps to the `tts` slot.
@@ -20,7 +20,7 @@ Both are children of the **`voice`** capability: `voice.stt` maps to the
 
 Voice is opt-in. Enable each direction from the dashboard's capability
 picker, or by POSTing a partial selection to the capability API. The body
-accepts any subset of `{ device, provider, model, enabled }`:
+accepts any subset of `{ backend, provider, model, enabled }`:
 
 <Tabs>
 <TabItem label="Speech-to-text (CPU, Moonshine)">
@@ -28,7 +28,7 @@ accepts any subset of `{ device, provider, model, enabled }`:
 ```sh
 curl -X POST http://localhost:8080/api/capabilities/voice/stt \
   -H 'Content-Type: application/json' \
-  -d '{"enabled": true, "device": "cpu", "provider": "moonshine"}'
+  -d '{"enabled": true, "backend": "cpu", "provider": "moonshine"}'
 ```
 
 </TabItem>
@@ -37,7 +37,7 @@ curl -X POST http://localhost:8080/api/capabilities/voice/stt \
 ```sh
 curl -X POST http://localhost:8080/api/capabilities/voice/stt \
   -H 'Content-Type: application/json' \
-  -d '{"enabled": true, "device": "npu"}'
+  -d '{"enabled": true, "backend": "npu"}'
 ```
 
 </TabItem>
@@ -46,7 +46,7 @@ curl -X POST http://localhost:8080/api/capabilities/voice/stt \
 ```sh
 curl -X POST http://localhost:8080/api/capabilities/voice/tts \
   -H 'Content-Type: application/json' \
-  -d '{"enabled": true, "device": "cpu", "provider": "kokoro"}'
+  -d '{"enabled": true, "backend": "cpu", "provider": "kokoro"}'
 ```
 
 </TabItem>
@@ -55,14 +55,13 @@ curl -X POST http://localhost:8080/api/capabilities/voice/tts \
 The response is `{ "ok": true, "selection": { ...current selection... } }`.
 
 <Aside type="note">
-**Moonshine runs CPU-only** — picking it always writes `device=cpu`.
-**Kokoro runs CPU-only** too (no CUDA, ROCm, or NPU). The
-NPU path for transcription is FLM, not Moonshine.
+Both Moonshine and Kokoro are containerized servers running on CPU — they do not use ROCm or the NPU.
+The NPU transcription path uses the FLM container, not Moonshine.
 </Aside>
 
 ### How the NPU path differs
 
-Choosing `device=npu` for `voice.stt` does **not** spawn a standalone
+Choosing `backend=npu` for `voice.stt` does **not** spawn a standalone
 process. Instead it drives the **FLM trio** — one `flm serve` anchor
 process serving chat coresident with transcription (and embeddings). The
 orchestrator toggles the anchor's `asr` flag and writes a
@@ -104,8 +103,9 @@ As with transcription, `model` is required — a missing or empty `model`
 returns **400** (`request.missing_model`).
 
 <Aside type="note">
-Kokoro weights are operator-staged on the configured model store; the
-toolbox image wraps a server that implements `POST /v1/audio/speech`,
+Kokoro weights are operator-staged on the configured model store. The Kokoro
+toolbox is a containerized server managed by hal0 as a podman slot — no manual
+container management needed. It implements `POST /v1/audio/speech`,
 `GET /v1/models`, and `GET /health`.
 </Aside>
 

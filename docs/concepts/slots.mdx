@@ -1,6 +1,6 @@
 ---
 title: Slots
-description: A slot is one model served by one podman container, owned by the SlotManager. Learn the lifecycle state machine, single-flight dispatch, the GPU arbiter, and the seeded slots.
+description: A slot is one model served by one podman container. Learn the lifecycle state machine, single-flight dispatch, the GPU arbiter, and the seeded slot catalogue.
 sidebar:
   order: 20
 ---
@@ -38,6 +38,9 @@ supported path — slot units are generated for it.
 A slot moves through an explicit set of states. The `SlotState` values are also
 the wire representation streamed to the dashboard, so what you see is a real
 transition, not a systemd snapshot:
+
+![A visual diagram showing the lifecycle state machine with transitions between offline, pulling, starting, warming, ready, serving, idle, unloading, and error states](/screenshots/slots-lifecycle.png)
+*The slot lifecycle transitions visualized.*
 
 | State | Meaning |
 |---|---|

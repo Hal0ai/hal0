@@ -1,6 +1,6 @@
 ---
 title: Devices, providers & profiles
-description: The hal0 slot matrix — valid devices, providers, the seed profile catalog, the device-to-default-profile map, and the toolbox container images each profile pulls.
+description: Valid devices, providers, and the seed profile catalog — the slot matrix reference covering device-to-profile defaults and toolbox container image refs.
 sidebar:
   order: 40
 ---
@@ -30,9 +30,10 @@ a typo raises a `ValidationError` with the field path.
 | `cpu`        | CPU-only fallback              | `llama-server`   |
 | `npu`        | AMD XDNA NPU via FastFlowLM    | `flm`            |
 
-`gpu-rocm` is the default `device` for fresh installs (best throughput on the
-Strix Halo reference target). The recommender may downgrade this on hosts
-without ROCm compute support.
+`gpu-rocm` is the package-level default `device` constant, but the hardware
+recommender actively steers Strix Halo (unified memory) installs to `gpu-vulkan`
+for broader compatibility. The recommender may also select `cpu` or `npu` on
+hosts without ROCm support.
 
 ## Providers
 
@@ -58,28 +59,39 @@ model, context size, and port.
 
 | Profile     | `device_class` | Image                                                                | MTP   | Intent                |
 |-------------|----------------|----------------------------------------------------------------------|-------|-----------------------|
-| `rocm`      | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | MoE agents            |
-| `rocm-mtp`  | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | Dense chat + MTP      |
-| `vulkan`    | gpu            | `ghcr.io/hal0ai/hal0-toolbox-vulkan:v1` *(see profile note below)*    | off   | Vulkan std / fallback |
+| `rocm`      | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | off   | MoE agents · q8 KV    |
+| `rocm-dnse` | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | Dense + MTP · q4 KV   |
+| `rocm-moe`  | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`  | on    | MoE + MTP · q4 KV     |
+| `vulkan`    | gpu            | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`         | off   | Vulkan std · fallback |
 | `flm`       | npu            | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                             | off   | FLM NPU inference     |
-| `tts`       | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                              | off   | TTS (Kokoro)          |
-| `comfyui`   | img            | `docker.io/kyuz0/amd-strix-halo-comfyui:latest`                      | off   | Image generation      |
+| `tts`       | cpu            | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                              | off   | TTS · Kokoro          |
+| `comfyui`   | img            | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69…`   | off   | Image generation      |
+
+![The Profiles tab in the hal0 dashboard showing seed profile cards with device class, intent, and bench metrics](/screenshots/profiles-tab.png)
+*Profiles tab in the hal0 dashboard — seed profile cards display device class, quantisation, and bench throughput (tokens/sec or RTF).*
 
 <Aside type="note">
 GPU profiles also carry a `backend` field (`rocm` or `vulkan`) — that field, not
 the slug, is the authoritative ROCm-vs-Vulkan choice. Non-GPU profiles
 (`flm`, `tts`, `comfyui`) omit it and let `device_class` drive display.
-The `vulkan` seed profile references the vulkan-radv server image; the canonical
-image refs are pinned per release in `manifest.json`.
+Canonical image refs are pinned per release in `manifest.json` and may differ
+from these seed defaults.
+</Aside>
+
+<Aside type="caution" title="The old `rocm-mtp` slug">
+An earlier single `rocm-mtp` profile was split into `rocm-dnse` and `rocm-moe`
+(MTP is now the per-slot/per-profile `mtp` field). `rocm` itself is **not**
+retired — it's a live seed profile and the default for `gpu-rocm`. There is no
+loader remap, so a slot TOML pointing at a slug that no longer exists should be
+repointed to one of the current profiles.
 </Aside>
 
 ### MTP flag bundle
 
 When a profile's effective MTP setting is on (profile `mtp = true`, or a slot's
-`mtp = true` override on a `rocm` profile), the multi-token-prediction
-draft-speculation flag bundle is appended after the profile flags at resolve
-time. A slot's `mtp` field (`true` / `false` / unset-to-inherit) overrides the
-profile.
+`mtp = true` override), the multi-token-prediction draft-speculation flag bundle
+is appended after the profile flags at resolve time. A slot's `mtp` field
+(`true` / `false` / unset-to-inherit) overrides the profile default.
 
 ## Device-to-default-profile map
 
@@ -96,19 +108,18 @@ a starting profile per device class:
 ## Toolbox images
 
 Toolbox images are pinned per hal0 release in `manifest.json` (by short name →
-canonical `ghcr.io` ref plus a sha256 digest). They are public on
-`ghcr.io/hal0ai/`; the installer pulls them anonymously. An empty digest means
-the image is unpublished for that release and the runtime pulls by tag with a
-warning.
+canonical ref plus a sha256 digest). They are public on `ghcr.io/hal0ai/`; the
+installer pulls them anonymously. An empty digest means the image is unpublished
+for that release and the runtime pulls by tag with a warning.
 
-| Short name  | Image ref (current release)                       | Notes                                  |
-|-------------|---------------------------------------------------|----------------------------------------|
-| `vulkan`    | `ghcr.io/hal0ai/hal0-toolbox-vulkan:v1`           | llama.cpp Vulkan backend               |
-| `rocm`      | `ghcr.io/hal0ai/hal0-toolbox-rocm:v1`             | llama.cpp ROCm backend (multi-arch)    |
-| `flm`       | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`          | FastFlowLM on AMD XDNA2 NPU            |
-| `moonshine` | `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1`        | Moonshine STT (CPU/Vulkan)             |
-| `kokoro`    | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`           | Kokoro-82M TTS (CPU ONNX)              |
-| `comfyui`   | `docker.io/kyuz0/amd-strix-halo-comfyui:latest`   | ComfyUI image generation               |
+| Short name  | Image ref (current release)                                                                      | Notes                                  |
+|-------------|---------------------------------------------------------------------------------------------------|----------------------------------------|
+| `vulkan`    | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`                                     | llama.cpp Vulkan backend               |
+| `rocm`      | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`                               | llama.cpp ROCm backend                 |
+| `flm`       | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                                                         | FastFlowLM on AMD XDNA2 NPU            |
+| `moonshine` | `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1`                                                       | Moonshine STT (CPU/Vulkan)             |
+| `kokoro`    | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                                                          | Kokoro-82M TTS (CPU ONNX)              |
+| `comfyui`   | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2` | ComfyUI image generation               |
 
 ## See also
 

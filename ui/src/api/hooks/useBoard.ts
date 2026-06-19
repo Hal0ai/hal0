@@ -16,6 +16,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { api, apiGet, apiPost, apiPatch, apiPut, apiDelete } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import { normaliseAssignee, normaliseProfile } from './boardActors.js'
 
 // ── Query key helper (exported so bridge + specs can use it) ──────────
 
@@ -392,10 +393,12 @@ export function useBoardProfiles(): UseQueryResult<BoardProfile[]> {
       const raw = await apiGet<
         BoardProfile[] | { profiles: BoardProfile[] }
       >(ENDPOINTS.boardProfiles)
-      if (Array.isArray(raw)) return raw
-      if (raw && Array.isArray((raw as { profiles: BoardProfile[] }).profiles))
-        return (raw as { profiles: BoardProfile[] }).profiles
-      return []
+      const list = Array.isArray(raw)
+        ? raw
+        : raw && Array.isArray((raw as { profiles: BoardProfile[] }).profiles)
+          ? (raw as { profiles: BoardProfile[] }).profiles
+          : []
+      return list.map(normaliseProfile) as BoardProfile[]
     },
   })
 }
@@ -408,10 +411,12 @@ export function useBoardAssignees(board?: string): UseQueryResult<BoardAssignee[
       const raw = await apiGet<
         BoardAssignee[] | { assignees: BoardAssignee[] }
       >(`${ENDPOINTS.boardAssignees}${qs}`)
-      if (Array.isArray(raw)) return raw
-      if (raw && Array.isArray((raw as { assignees: BoardAssignee[] }).assignees))
-        return (raw as { assignees: BoardAssignee[] }).assignees
-      return []
+      const list = Array.isArray(raw)
+        ? raw
+        : raw && Array.isArray((raw as { assignees: BoardAssignee[] }).assignees)
+          ? (raw as { assignees: BoardAssignee[] }).assignees
+          : []
+      return list.map(normaliseAssignee) as BoardAssignee[]
     },
   })
 }
@@ -916,10 +921,19 @@ export interface UseBoardChatResult {
   streaming: boolean
 }
 
+// Board chat runs on the `agent` slot (the tool-calling orchestrator model),
+// not the conversational `chat` slot. Sent explicitly so it routes correctly
+// regardless of the backend's PRIMARY_SLOT_MODEL default.
+const BOARD_CHAT_MODEL = 'hal0/agent'
+
 export function useBoardChat(board?: string): UseBoardChatResult {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  // Mirror `messages` in a ref so `send` can build the request history without
+  // a stale closure (and without re-creating the callback every render).
+  const messagesRef = useRef<ChatMessage[]>([])
+  messagesRef.current = messages
   const qc = useQueryClient()
 
   const send = (text: string) => {
@@ -929,6 +943,16 @@ export function useBoardChat(board?: string): UseBoardChatResult {
     }
     abortRef.current = new AbortController()
     const signal = abortRef.current.signal
+
+    // Build the OpenAI-style conversation the backend expects: prior
+    // user/assistant turns + this new user message. Tool frames are UI-only
+    // and intentionally omitted (sending bare tool messages without their
+    // originating assistant tool_calls is malformed for the LLM).
+    const history = messagesRef.current
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .filter((m) => (m.body ?? '').trim().length > 0)
+      .map((m) => ({ role: m.role, content: m.body }))
+    const outbound = [...history, { role: 'user', content: text }]
 
     // Append user message immediately
     setMessages((prev) => [
@@ -941,14 +965,21 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       ? `${ENDPOINTS.boardChat}?board=${encodeURIComponent(board)}`
       : ENDPOINTS.boardChat
 
-    // Open SSE stream via fetch POST
+    // Open SSE stream via fetch POST. Contract (see board_chat.py): the body
+    // carries `messages` (OpenAI format), optional `board`, and `model`; the
+    // response is SSE frames `{type: token|tool_call|tool_result|done|error}`.
+    // `model` is sent explicitly so board chat runs on the `agent` slot (the
+    // tool-calling orchestrator model) — board_chat.py honours payload.model
+    // over its default, so this routes correctly without a backend restart.
+    const body: Record<string, unknown> = { messages: outbound, model: BOARD_CHAT_MODEL }
+    if (board) body.board = board
     fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
       },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify(body),
       signal,
     })
       .then(async (res) => {
@@ -1007,37 +1038,63 @@ export function useBoardChat(board?: string): UseBoardChatResult {
           for (const line of lines) {
             if (!line.startsWith('data:')) continue
             const payload = line.slice(5).trim()
+            if (!payload) continue
+            // Back-compat: some proxies still terminate with a bare [DONE].
             if (payload === '[DONE]') {
               finaliseAssistant()
               setStreaming(false)
               return
             }
+            let frame: {
+              type?: string
+              text?: string
+              name?: string
+              arguments?: unknown
+              result?: unknown
+              id?: string
+              message?: string
+            }
             try {
-              const frame = JSON.parse(payload) as {
-                type?: string
-                delta?: string
-                content?: string
-                refs?: string[]
-                tool_call?: unknown
-              }
-              if (frame.type === 'tool_call') {
-                // Board mutation happened — invalidate board queries
-                qc.invalidateQueries({ queryKey: boardKey(board) })
+              frame = JSON.parse(payload)
+            } catch {
+              continue // ignore malformed
+            }
+            switch (frame.type) {
+              case 'token':
+                // Assistant text delta (backend sends per-round content).
+                if (frame.text) appendAssistant(frame.text)
+                break
+              case 'tool_call':
+                // The orchestrator is invoking an audited board mutation.
                 setMessages((prev) => [
                   ...prev,
                   {
                     role: 'tool',
-                    body: JSON.stringify(frame.tool_call ?? ''),
-                    tool_call: frame.tool_call,
+                    body: `→ ${frame.name ?? 'tool'}(${JSON.stringify(frame.arguments ?? {})})`,
+                    tool_call: { name: frame.name, arguments: frame.arguments, id: frame.id },
                   },
                 ])
-              } else if (frame.delta) {
-                appendAssistant(frame.delta)
-              } else if (frame.content) {
-                appendAssistant(frame.content)
-              }
-            } catch {
-              // ignore malformed
+                break
+              case 'tool_result':
+                // Mutation landed — refresh the board so the change shows live.
+                qc.invalidateQueries({ queryKey: boardKey(board) })
+                break
+              case 'error':
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    role: 'assistant',
+                    body: `⚠ ${frame.message ?? 'chat error'}`,
+                    at: new Date().toISOString(),
+                  },
+                ])
+                break
+              case 'done':
+                finaliseAssistant()
+                setStreaming(false)
+                return
+              default:
+                break
             }
           }
         }

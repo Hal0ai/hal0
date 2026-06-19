@@ -1,6 +1,6 @@
 ---
 title: Observe the system
-description: Watch hal0 run — tail per-unit journald logs, stream the API log tail with priority filters, and read the durable Activity and Audit log of config changes and slot state transitions.
+description: Tail per-unit journald logs, stream the API log tail with priority filters, and query the durable Activity log of config changes and slot transitions.
 sidebar:
   order: 120
 ---
@@ -55,7 +55,10 @@ curl 'http://localhost:8080/api/logs?unit=hal0-api&n=200'
 | `unit`      | —       | Required. The systemd unit, e.g. `hal0-api` or `hal0-slot@chat`. Validated against a conservative character set. |
 | `n`         | `200`   | Trailing lines, 1–5000. |
 | `since`     | —       | A `journalctl --since` value (ISO timestamp or `'5min ago'`). |
-| `level`     | —       | Filter to this priority **and higher severity**: `warning` returns warning + error + critical and up. |
+| `level`     | —       | Filter to this priority **and higher severity**: `warning` returns warning and all higher-severity levels (error, critical, alert, emergency). |
+
+![The hal0 dashboard Logs panel showing live journal output for a slot unit](/screenshots/logs-activity.png)
+*The dashboard Logs panel streams journal output for any hal0 unit in real time.*
 
 On a host without `journalctl` (e.g. CI), the endpoint returns an empty
 `lines` array plus a `hint` rather than erroring.

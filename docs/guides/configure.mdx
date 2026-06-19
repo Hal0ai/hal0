@@ -1,6 +1,6 @@
 ---
 title: Edit configuration
-description: Edit hal0's TOML config under /etc/hal0 — hal0.toml, api.env, upstreams, profiles, capabilities, and per-slot files — then show, validate, reload, and migrate it with the hal0 config CLI.
+description: "Manage hal0's TOML config under /etc/hal0: hal0.toml, api.env, upstreams, profiles, and per-slot files. Validate, reload, and migrate with the hal0 config CLI."
 sidebar:
   order: 100
 ---
@@ -22,8 +22,8 @@ with it.
 
 | File | What it holds |
 |------|---------------|
-| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots] port_range_start/end`, `[models] store`, telemetry channel. |
-| `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — feature flags and env knobs like `HAL0_MODEL_STORE`, `HAL0_MCP_ALLOWED_HOSTS`. |
+| `hal0.toml` | Top-level config: `[meta] schema_version`, `[slots] port_range_start/end`, `[dispatcher] prefetch_timeout_s`, `[telemetry] channel`. |
+| `api.env` | Environment for the hal0-api service (systemd `EnvironmentFile`) — feature flags and env knobs like `HAL0_MODEL_STORE`, `HAL0_COMFYUI_SWITCHOVER_ENABLED`, `HAL0_MCP_ALLOWED_HOSTS`. |
 | `upstreams.toml` | External / upstream provider routing. |
 | `providers.toml` | Provider credential references (key **names**, never plaintext secrets). |
 | `profiles.toml` | Optional profile catalogue. Absent → built-in seed profiles are used. |
@@ -67,7 +67,7 @@ hal0 config validate
 
 Loads and validates `hal0.toml`, `upstreams.toml`, and `providers.toml`
 against the current Pydantic schema. It prints each problem and exits
-non-zero on any failure, or `✓ All configs pass schema validation` when
+non-zero on any failure, or `✓ All configs pass schema validation.` when
 clean.
 
 ## Reload a running daemon
@@ -81,6 +81,9 @@ hal0 config reload
 
 This hits `POST /api/settings/reload` on the local API. If the daemon is
 down, the command exits non-zero — start hal0-api first.
+
+![Settings page showing live reload status](/screenshots/settings-page.png)
+*Settings page with live daemon status and reload controls.*
 
 ## Migrate the schema forward
 

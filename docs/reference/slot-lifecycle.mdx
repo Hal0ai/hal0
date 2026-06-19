@@ -40,6 +40,9 @@ machine arrives via different edges:
 2. **Warm but quiet** (`ready → idle`): a previously-ready slot received no
    request for longer than its idle timeout. A candidate for unloading.
 
+![Slot detail panel showing live state, model, and transition controls](/screenshots/slot-detail.png)
+*The slot detail panel in the dashboard, reflecting the current SlotState in real time.*
+
 ## Legal transitions
 
 Transitions are enforced by the `SlotManager`; an illegal attempt raises

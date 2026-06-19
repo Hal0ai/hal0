@@ -1,6 +1,6 @@
 ---
 title: Run agents
-description: Install and manage the bundled Hermes agent with the hal0 agent CLI — provisioning, personas, the approvals queue for gated actions, and per-persona spending budgets.
+description: Install and manage the bundled Hermes agent with the hal0 agent CLI — provisioning, personas, gated-action approvals, and per-persona spending budgets.
 sidebar:
   order: 60
 ---
@@ -42,9 +42,9 @@ Installing Hermes runs a three-step foreground pipeline:
 </Steps>
 
 Run it as root: provisioning writes under root-owned `/var/lib/hal0` and
-then hands the trees to the `hal0` agent runtime user. If you run it as a
-normal user it aborts cleanly up front with a `sudo` hint rather than
-crashing mid-build.
+then chowns the provisioned trees to the `hal0` user (the shared agent runtime
+user). If you run it as a normal user it aborts cleanly up front with a `sudo`
+hint rather than crashing mid-build.
 
 Pass `--switch` to atomically uninstall whatever agent is currently
 installed before installing this one.
@@ -126,6 +126,9 @@ Each pending row shows the request id, the tool, the requesting agent
 (`client_id`), when it was enqueued, and a one-line summary built from the
 tool's primary argument. The dashboard's Agent → Approvals tab renders the
 same queue.
+
+![The hal0 Operator Board — the Hermes task kanban in the dashboard](/screenshots/operator-board.png)
+*The Operator Board (dashboard ▸ Board) — Hermes agent tasks move across Triage → To-do → Scheduled → Ready lanes.*
 
 ## Spending budget
 
