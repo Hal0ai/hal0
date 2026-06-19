@@ -112,6 +112,35 @@ def test_read_success(monkeypatch):
     assert out["partitions"][0]["num_cols"] == 8
 
 
+def test_read_uses_tempfile_shell_not_dev_stdout(monkeypatch):
+    """Regression: the live xrt-smi build rejects ``-o /dev/stdout`` ("output
+    file already exists", exit 1), and with ``--force`` it interleaves its
+    human-readable console report onto stdout alongside the JSON — so the JSON
+    must be written to a private temp file inside the container and read back.
+    The probe therefore runs through ``sh -c`` with ``--force`` and a temp file,
+    never ``-o /dev/stdout``.
+    """
+    captured: list[tuple] = []
+
+    async def _fake_exec(*args, **kwargs):
+        captured.append(args)
+        return _FakeProc(stdout=_XRT_JSON_FULL.encode(), returncode=0)
+
+    monkeypatch.setattr(npu_columns.asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(npu_columns, "_container_runtime", lambda: "/usr/bin/podman")
+
+    out = asyncio.run(npu_columns.read_aie_columns("hal0-slot-npu"))
+    assert out is not None  # clean JSON (cat of the temp file) still parses
+    assert captured, "exec was not invoked"
+    argv = captured[0]
+    assert argv[:5] == ("/usr/bin/podman", "exec", "hal0-slot-npu", "sh", "-c")
+    script = argv[5]
+    assert "--force" in script
+    assert "/dev/stdout" not in script
+    assert "cat " in script  # JSON read back from the temp file
+    assert npu_columns._XRT_SMI_BIN in script
+
+
 def test_read_nonzero_returncode_none(monkeypatch):
     _patch_exec(monkeypatch, _FakeProc(stdout=b"garbage", returncode=1))
     assert asyncio.run(npu_columns.read_aie_columns("hal0-slot-npu")) is None
