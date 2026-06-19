@@ -128,9 +128,12 @@ function useTick(ms = 900) {
   return t
 }
 
-// deterministic jitter for live readout breathing
+// deterministic jitter for live readout breathing. A non-positive base (the
+// live "rendering…" placeholder reports pct/its = 0 before per-frame detail
+// lands) is returned untouched — otherwise amp·sin() pushes it negative and the
+// hero paints "-1%", "frame -1/81", "-0.1 it/s".
 const jit = (base, amp, t, ph = 0) =>
-  REDUCE ? base : +(base + amp * Math.sin(t * 0.8 + ph)).toFixed(base < 10 ? 1 : 0)
+  REDUCE || base <= 0 ? base : +(base + amp * Math.sin(t * 0.8 + ph)).toFixed(base < 10 ? 1 : 0)
 
 // ── Radial Gauge — 270° sweep (same primitive as NPU widget) ─────────────────
 function Gauge({ pct, label, sub, size = 116, warn = false }) {
@@ -426,6 +429,13 @@ export function ImageGenCard({
   // the queue list + workflow/model inventory on demand.
   const [expanded, setExpanded] = useState(false)
 
+  // Live preview frame. /api/comfyui/preview 404s until the running render emits
+  // its first frame (the "rendering…" placeholder state has none yet); a bare
+  // <img> then paints a broken-image box with stray alt text over the preview.
+  // Fall back to the glyph on error and retry on a coarse tick (~5s) so the
+  // frame appears once the render starts producing output.
+  const [previewBroken, setPreviewBroken] = useState(false)
+
   // Active render state (null = no render running)
   const hasRun = run != null
 
@@ -436,6 +446,12 @@ export function ImageGenCard({
 
   const gttPct  = used / gtt.ceil * 100
   const gttWarn = gttPct >= 80
+
+  // Coarse retry cadence for the preview frame (t ticks every 900ms → ~5.4s).
+  // Resetting previewBroken on each step lets a transient 404 recover once the
+  // render emits a frame, without re-fetching the image on every tick.
+  const previewTick = Math.floor(t / 6)
+  useEffect(() => { setPreviewBroken(false) }, [previewTick])
 
   return (
     <div className="engine wcard active">
@@ -449,11 +465,12 @@ export function ImageGenCard({
               {/* Preview frame */}
               <div className={'preview' + (hasRun ? ' active' : '')}>
                 {hasRun ? <span className="scan" /> : null}
-                {hasRun && comfyBaseUrl ? (
+                {hasRun && comfyBaseUrl && !previewBroken ? (
                   <img
-                    src="/api/comfyui/preview"
+                    src={`/api/comfyui/preview?t=${previewTick}`}
                     alt="latest render output"
                     className="preview-img"
+                    onError={() => setPreviewBroken(true)}
                   />
                 ) : (
                   <span className="glyph"><Ci name="video" size={24} /></span>
