@@ -16,6 +16,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { api, apiGet, apiPost, apiPatch, apiPut, apiDelete } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import { normaliseAssignee, normaliseProfile } from './boardActors.js'
 
 // ── Query key helper (exported so bridge + specs can use it) ──────────
 
@@ -392,10 +393,12 @@ export function useBoardProfiles(): UseQueryResult<BoardProfile[]> {
       const raw = await apiGet<
         BoardProfile[] | { profiles: BoardProfile[] }
       >(ENDPOINTS.boardProfiles)
-      if (Array.isArray(raw)) return raw
-      if (raw && Array.isArray((raw as { profiles: BoardProfile[] }).profiles))
-        return (raw as { profiles: BoardProfile[] }).profiles
-      return []
+      const list = Array.isArray(raw)
+        ? raw
+        : raw && Array.isArray((raw as { profiles: BoardProfile[] }).profiles)
+          ? (raw as { profiles: BoardProfile[] }).profiles
+          : []
+      return list.map(normaliseProfile) as BoardProfile[]
     },
   })
 }
@@ -408,10 +411,12 @@ export function useBoardAssignees(board?: string): UseQueryResult<BoardAssignee[
       const raw = await apiGet<
         BoardAssignee[] | { assignees: BoardAssignee[] }
       >(`${ENDPOINTS.boardAssignees}${qs}`)
-      if (Array.isArray(raw)) return raw
-      if (raw && Array.isArray((raw as { assignees: BoardAssignee[] }).assignees))
-        return (raw as { assignees: BoardAssignee[] }).assignees
-      return []
+      const list = Array.isArray(raw)
+        ? raw
+        : raw && Array.isArray((raw as { assignees: BoardAssignee[] }).assignees)
+          ? (raw as { assignees: BoardAssignee[] }).assignees
+          : []
+      return list.map(normaliseAssignee) as BoardAssignee[]
     },
   })
 }

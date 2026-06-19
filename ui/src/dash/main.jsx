@@ -83,6 +83,48 @@ function parseRoute() {
   return { route, param: rest.join("/") || null, query };
 }
 
+// View-level error boundary. A render-time throw anywhere in renderView() (e.g.
+// an unexpected API shape reaching a JSX child — React error #31) used to
+// unwind the entire tree and black-screen the dashboard, taking the TopBar and
+// Sidebar down with it. This contains the failure to the .view area so the
+// chrome survives and the user can navigate away. Mounted with key={route} so
+// switching pages remounts it and clears any caught error automatically.
+class ViewErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { err: null };
+  }
+  static getDerivedStateFromError(err) {
+    return { err };
+  }
+  componentDidCatch(err, info) {
+    // Surface in the console for diagnosis; never re-throw.
+    console.error("view crashed:", err, info && info.componentStack);
+  }
+  render() {
+    if (this.state.err) {
+      return (
+        <div className="view">
+          <div className="empty-state" role="alert" style={{ padding: "2rem", maxWidth: 560 }}>
+            <h2 style={{ marginTop: 0 }}>This view hit an error</h2>
+            <p style={{ opacity: 0.8 }}>
+              The page failed to render, usually from unexpected data. The rest of
+              the dashboard is still usable — switch pages, or reload.
+            </p>
+            <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, opacity: 0.7 }}>
+              {String(this.state.err && (this.state.err.message || this.state.err))}
+            </pre>
+            <button className="btn" onClick={() => window.location.reload()}>
+              Reload dashboard
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function App() {
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const { active: activeBanners } = useBanners();
@@ -270,7 +312,7 @@ function App() {
             <GpuImageModeBanner />
             <BannerStack scope="global" route={route} />
           </div>
-          {renderView()}
+          <ViewErrorBoundary key={route}>{renderView()}</ViewErrorBoundary>
         </div>
         {/*
           Phase 3 of #322: Footer is self-driven. The update chip reads
