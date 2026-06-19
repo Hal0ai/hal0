@@ -2,7 +2,7 @@
  * board-render-v3 — Operator Board render contract.
  *
  * Covers:
- *   - Entry via #board hash, ⌘B shortcut, ⌘K palette, sidebar nav, .tb-board
+ *   - Entry via #board hash, ⌘B shortcut, ⌘K palette, sidebar nav, Services Kanban link
  *   - Populated board: 8 lanes, cards in correct lanes, card fields
  *   - Empty board: 8 lanes each with "no tasks" / empty sentinel
  *   - Show-archived toggle: board-lane-archived appears
@@ -75,10 +75,10 @@ test.describe('BoardView — render', () => {
     await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
   })
 
-  test('entry via .tb-board topbar button', async ({ page }) => {
+  test('entry via sidebar Services Kanban link', async ({ page }) => {
     await page.goto('/')
     await page.waitForLoadState('domcontentloaded')
-    await page.locator('[data-testid="tb-board"]').click()
+    await page.locator('[data-testid="svc-kanban"]').click()
     await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
   })
 

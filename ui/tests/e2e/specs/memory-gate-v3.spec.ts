@@ -43,8 +43,11 @@ test.describe('memory gate OFF (HAL0_MEMORY_ENABLED unset)', () => {
     await expect(navList.getByText('Models', { exact: true })).toBeVisible()
     // v0.5: the Agent nav item ALWAYS renders (the MCP sub-link is ungated).
     await expect(navList.locator('[data-testid="nav-agent"]')).toBeVisible()
+    // Accordion: sub-links are collapsed until the parent is expanded. Open the
+    // Agent section so its sub-links render.
+    await navList.locator('[data-testid="nav-agent-toggle"]').click()
     await expect(navList.locator('[data-testid="nav-mcp"]')).toBeVisible()
-    // ...but its gated Memory sub-link is gone.
+    // ...but its gated Memory sub-link is gone (absent whether collapsed or not).
     await expect(navList.locator('[data-testid="nav-memory"]')).toHaveCount(0)
   })
 

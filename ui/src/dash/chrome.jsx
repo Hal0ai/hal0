@@ -12,6 +12,7 @@ import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useApprovalList, useApproveApproval, useDenyApproval } from '@/api/hooks/useAgents'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
+import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -167,17 +168,8 @@ function TopBar({ route, onCmdK, onMenu, menuOpen = false }) {
         </div>
       )}
       <div className="tb-spacer" />
-      {/* Operator Board launcher — command-palette-styled, ⌘B. Navigates by
-          hash so it works without threading a handler through main.jsx. */}
-      <button
-        className={"tb-board" + (route === "board" ? " on" : "")}
-        data-testid="tb-board"
-        onClick={() => { window.location.hash = "#board"; }}
-        aria-label="Operator Board"
-      >
-        {Icons.board}<span>Board</span>
-        <kbd>⌘B</kbd>
-      </button>
+      {/* Operator Board launcher moved to the sidebar Services section (Kanban).
+          The ⌘B shortcut (main.jsx) still jumps to #board. */}
       <button className="tb-cmdk" onClick={onCmdK}>
         {Icons.zap}<span>Quick actions</span>
         <kbd>⌘K</kbd>
@@ -250,38 +242,137 @@ function _navActive(route, param, id) {
   return false;
 }
 
-// ─── Sidebar ───
-function Sidebar({ route, param, onGo }) {
+// ─── NavList (shared accordion) ───
+// The single source of nav markup for both the desktop Sidebar and the mobile
+// NavDrawer — they used to duplicate the map (and a "never drift" comment), so
+// the accordion state lives here once. Parent rows with `children` collapse by
+// default; a child group is revealed when its parent is expanded. The section
+// you're currently in auto-expands (and re-opens whenever you navigate into it),
+// so endpoints/profiles + agent sub-links don't show until you open Slots/Agents.
+// `testPrefix` keeps the desktop ("nav-") and drawer ("nav-drawer-") test ids apart.
+function NavList({ route, param, onGo, testPrefix }) {
   const items = useNavItems();
+  // The active parent is the section whose route is currently showing. It drives
+  // auto-expand so navigating into a section always reveals its sub-links.
+  const activeParent = items.find(it => it.children && _navActive(route, param, it.id))?.id;
+  const [open, setOpen] = useStateC(() => (activeParent ? { [activeParent]: true } : {}));
+  useEffectC(() => {
+    if (activeParent) setOpen(o => (o[activeParent] ? o : { ...o, [activeParent]: true }));
+  }, [activeParent]);
+  const tid = (id) => testPrefix + id.replace(/\//g, "-");
   return (
-    <div className="sidebar">
-      <div className="sb-section">Navigate</div>
-      <div className="sb-list">
-        {items.map(it => (
+    <div className="sb-list">
+      {items.map(it => {
+        const expanded = !!open[it.id];
+        return (
           <React.Fragment key={it.id}>
             <div
-              className={"sb-row" + (_navActive(route, param, it.id) ? " active" : "")}
-              data-testid={"nav-" + it.id.replace(/\//g, "-")}
-              onClick={() => onGo(it.id)}
+              className={"sb-row" + (_navActive(route, param, it.id) ? " active" : "") + (it.children ? " has-children" : "")}
+              data-testid={tid(it.id)}
+              onClick={() => { if (it.children) setOpen(o => ({ ...o, [it.id]: true })); onGo(it.id); }}
             >
               {it.icon}
               <span className="lbl">{it.label}</span>
               {it.cnt !== undefined && <span className="cnt num">{it.cnt}</span>}
+              {it.children && (
+                <button
+                  className={"sb-caret" + (expanded ? " open" : "")}
+                  data-testid={tid(it.id) + "-toggle"}
+                  onClick={(e) => { e.stopPropagation(); setOpen(o => ({ ...o, [it.id]: !o[it.id] })); }}
+                  aria-label={(expanded ? "Collapse " : "Expand ") + it.label}
+                  aria-expanded={expanded}
+                >
+                  {Icons.chev}
+                </button>
+              )}
             </div>
-            {it.children && it.children.map(ch => (
+            {it.children && expanded && it.children.map(ch => (
               <div
                 key={ch.id}
                 className={"sb-row sb-sub" + (_navActive(route, param, ch.id) ? " active" : "")}
-                data-testid={"nav-" + ch.id.replace(/\//g, "-")}
+                data-testid={tid(ch.id)}
                 onClick={() => onGo(ch.id)}
               >
                 <span className="lbl">{ch.label}</span>
               </div>
             ))}
           </React.Fragment>
-        ))}
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── ServiceLinks (sidebar bottom) ───
+// A separate launch zone, pinned to the sidebar bottom below the spacer, away
+// from the app/config nav above. Holds the three sibling-service shortcuts:
+//   - Kanban    → the internal Operator Board (#board) — same target as ⌘B.
+//   - OpenWebUI → external chat UI, link host-derived by GET /api/config/urls.
+//   - Hermes    → external Hermes dashboard, likewise host-derived.
+// The external links come from `useConfigUrls`, whose backend resolves the
+// hostname from the *request* (loopback, LAN IP, mDNS, or proxy domain) — so
+// they resolve correctly on every install, not just this dev box. Each is gated
+// by its `*_enabled` flag (systemd unit active / public-URL configured); a row
+// is simply omitted when the service isn't reachable on this host.
+// `testPrefix` keeps desktop ("svc-") vs drawer ("svc-drawer-") ids apart;
+// `onLaunch` lets the mobile drawer close itself after a tap.
+function ServiceLinks({ onGo, onLaunch, testPrefix }) {
+  const cfg = useConfigUrls();
+  const owui = cfg.data?.openwebui_enabled ? (cfg.data.openwebui || "") : "";
+  const hermes = cfg.data?.hermes_enabled ? (cfg.data.hermes || "") : "";
+  return (
+    <div className="sb-services">
+      <div className="sb-section">Services</div>
+      <div className="sb-svc-list">
+        <div
+          className="sb-row sb-svc"
+          data-testid={testPrefix + "kanban"}
+          onClick={() => { onGo("board"); onLaunch && onLaunch(); }}
+        >
+          {Icons.board}
+          <span className="lbl">Kanban</span>
+        </div>
+        {owui && (
+          <a
+            className="sb-row sb-svc"
+            data-testid={testPrefix + "openwebui"}
+            href={owui}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => onLaunch && onLaunch()}
+          >
+            {Icons.chat}
+            <span className="lbl">OpenWebUI</span>
+            <span className="sb-svc-ext">{Icons.ext}</span>
+          </a>
+        )}
+        {hermes && (
+          <a
+            className="sb-row sb-svc"
+            data-testid={testPrefix + "hermes"}
+            href={hermes}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => onLaunch && onLaunch()}
+          >
+            {Icons.agent}
+            <span className="lbl">Hermes Dash</span>
+            <span className="sb-svc-ext">{Icons.ext}</span>
+          </a>
+        )}
       </div>
+    </div>
+  );
+}
+
+// ─── Sidebar ───
+function Sidebar({ route, param, onGo }) {
+  return (
+    <div className="sidebar">
+      <div className="sb-section">Navigate</div>
+      <NavList route={route} param={param} onGo={onGo} testPrefix="nav-" />
       <div className="sb-spacer" />
+      <ServiceLinks onGo={onGo} testPrefix="svc-" />
     </div>
   );
 }
@@ -666,7 +757,6 @@ if (typeof document !== "undefined" && !document.getElementById("hal0-modal-css"
 // from the topbar on mobile) and the full nav (useNavItems). Opened from the topbar hamburger; closed via backdrop,
 // the X, Esc, or navigating.
 function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
-  const items = useNavItems();
   return (
     <>
       <div
@@ -689,32 +779,9 @@ function NavDrawer({ open, route, param, onGo, onClose, onCmdK }) {
         <button className="nav-drawer-cmdk" onClick={onCmdK}>
           {Icons.zap}<span>Quick actions</span><kbd>⌘K</kbd>
         </button>
-        <div className="sb-list">
-          {items.map(it => (
-            <React.Fragment key={it.id}>
-              <div
-                className={"sb-row" + (_navActive(route, param, it.id) ? " active" : "")}
-                data-testid={"nav-drawer-" + it.id.replace(/\//g, "-")}
-                onClick={() => onGo(it.id)}
-              >
-                {it.icon}
-                <span className="lbl">{it.label}</span>
-                {it.cnt !== undefined && <span className="cnt num">{it.cnt}</span>}
-              </div>
-              {it.children && it.children.map(ch => (
-                <div
-                  key={ch.id}
-                  className={"sb-row sb-sub" + (_navActive(route, param, ch.id) ? " active" : "")}
-                  data-testid={"nav-drawer-" + ch.id.replace(/\//g, "-")}
-                  onClick={() => onGo(ch.id)}
-                >
-                  <span className="lbl">{ch.label}</span>
-                </div>
-              ))}
-            </React.Fragment>
-          ))}
-        </div>
+        <NavList route={route} param={param} onGo={onGo} testPrefix="nav-drawer-" />
         <div className="sb-spacer" />
+        <ServiceLinks onGo={onGo} onLaunch={onClose} testPrefix="svc-drawer-" />
         </>)}
       </aside>
     </>

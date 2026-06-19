@@ -40,6 +40,10 @@ test.describe('Mobile nav drawer (≤720px)', () => {
       ).toBeVisible()
     }
     // v0.5 sub-link rows now carry data-testids (the drawer rows had none before).
+    // Accordion: they're collapsed until the parent is expanded, so open the
+    // Slots + Agents sections via their carets first.
+    await drawer.locator('[data-testid="nav-drawer-slots-toggle"]').click()
+    await drawer.locator('[data-testid="nav-drawer-agent-toggle"]').click()
     await expect(drawer.locator('[data-testid="nav-drawer-slots-endpoints"]')).toBeVisible()
     await expect(drawer.locator('[data-testid="nav-drawer-slots-profiles"]')).toBeVisible()
     await expect(drawer.locator('[data-testid="nav-drawer-memory"]')).toBeVisible()

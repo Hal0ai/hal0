@@ -142,6 +142,8 @@ test.describe('Memory view — Hindsight surface', () => {
 
   test('nav shows Memory item and routes to #memory', async ({ page }) => {
     await page.goto('/#dashboard')
+    // Accordion: the Memory sub-link sits under Agents, collapsed until opened.
+    await page.locator('[data-testid="nav-agent-toggle"]').click()
     const nav = page.locator('[data-testid="nav-memory"]')
     await expect(nav).toBeVisible()
     await nav.click()

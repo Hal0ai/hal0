@@ -315,12 +315,41 @@ a { color: inherit; text-decoration: none; }
   background: var(--bg-2);
 }
 .sb-row.active .cnt { background: var(--accent-soft); color: var(--accent); }
-/* v0.5 nav: sub-links under Slots / Agent (always shown). Their text starts at
-   the centre of the parent's icon: row padding 10px + half the 16px icon = 18px. */
+/* v0.5 nav: sub-links under Slots / Agent. Accordion: hidden until the parent
+   row is expanded (the active section auto-opens). Their text starts at the
+   centre of the parent's icon: row padding 10px + half the 16px icon = 18px. */
 .sb-row.sb-sub { padding-left: 18px; font-size: 12.5px; color: var(--fg-3); }
 .sb-row.sb-sub .lbl { font-weight: 400; }
 .sb-row.sb-sub:hover { color: var(--fg); }
 .sb-row.sb-sub.active { color: var(--fg); }
+/* Accordion caret on parent rows — a flat button that toggles its sub-links
+   without triggering the row's own navigation (click handler stops propagation). */
+.sb-row.has-children .lbl { flex: 1; }
+.sb-caret {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; margin: -4px -4px -4px 2px; padding: 0;
+  background: transparent; border: 0; border-radius: var(--rad-sm);
+  color: var(--fg-4); cursor: pointer; flex-shrink: 0;
+}
+.sb-caret:hover { color: var(--fg); background: var(--bg-3); }
+.sb-caret svg { transition: transform 0.18s ease; transform: rotate(-90deg); }
+.sb-caret.open svg { transform: rotate(0deg); }
+.sb-row.active .sb-caret { color: var(--accent); }
+
+/* Services launch zone — pinned to the sidebar bottom (after .sb-spacer),
+   visually fenced off from the app/config nav above by a top divider. Holds
+   the Kanban (internal #board) + external OpenWebUI/Hermes shortcuts. */
+.sb-services { border-top: 1px solid var(--line); padding-bottom: 8px; }
+.sb-services .sb-section { padding-top: 10px; }
+/* Distinct from .sb-list so test/nav selectors targeting the main nav list
+   stay unambiguous; same flex-column layout. */
+.sb-svc-list { display: flex; flex-direction: column; gap: 1px; padding: 0 8px; }
+.sb-row.sb-svc { color: var(--fg-2); text-decoration: none; }
+.sb-row.sb-svc:hover { background: var(--bg-2); color: var(--fg); }
+.sb-row.sb-svc .lbl { flex: 1; }
+/* The ↗ external-link glyph sits muted at the row's trailing edge. */
+.sb-row.sb-svc .sb-svc-ext { display: inline-flex; color: var(--fg-5); }
+.sb-row.sb-svc:hover .sb-svc-ext { color: var(--fg-3); }
 
 .sb-spacer { flex: 1; }
 .sb-status {
@@ -1870,6 +1899,9 @@ select.npu-sel {
 @media (max-width: 1080px) {
   :root { --sidebar-w: 56px; }
   .sidebar .lbl, .sidebar .cnt, .sidebar .sb-section, .sb-status { display: none; }
+  /* Rail mode has no labels, so the accordion caret + label-only sub-rows have
+     nothing to show — hide them and keep the rail to single parent glyphs. */
+  .sidebar .sb-caret, .sidebar .sb-row.sb-sub, .sidebar .sb-svc-ext { display: none; }
   .sidebar .sb-row { justify-content: center; }
   .tb-brand { width: calc(56px - 18px); justify-content: center; }
   .tb-brand .ver { display: none; }
