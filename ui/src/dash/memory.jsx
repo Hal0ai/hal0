@@ -328,26 +328,28 @@ function MemBankDetail({ bank, onClose, onDeleted }) {
           <button className="btn ghost sm pf-form-close" onClick={onClose} aria-label="Close">×</button>
         </div>
       </div>
+      {/* .sec is a flex title-row — keep only the heading in it; content
+          (ops list, danger controls) must be siblings or they shrink-wrap. */}
       <div className="sec">
         <h2>Operations</h2>
         <div className="rule" />
-        <MemOperations bank={bank.bank_id} />
       </div>
+      <MemOperations bank={bank.bank_id} />
       <div className="sec mem-danger">
         <h2>Danger zone</h2>
         <div className="rule" />
-        {confirming ? (
-          <div className="mem-confirm mono">
-            Delete bank <b>{bank.bank_id}</b> and all its memories?
-            <button className="btn danger xs" onClick={doDelete} data-testid="mem-btn-delete-confirm">Delete</button>
-            <button className="btn ghost xs" onClick={() => setConfirming(false)}>Cancel</button>
-          </div>
-        ) : (
-          <button className="btn ghost xs danger" onClick={() => setConfirming(true)} data-testid="mem-btn-delete-bank">
-            Delete bank
-          </button>
-        )}
       </div>
+      {confirming ? (
+        <div className="mem-confirm mono">
+          Delete bank <b>{bank.bank_id}</b> and all its memories?
+          <button className="btn danger xs" onClick={doDelete} data-testid="mem-btn-delete-confirm">Delete</button>
+          <button className="btn ghost xs" onClick={() => setConfirming(false)}>Cancel</button>
+        </div>
+      ) : (
+        <button className="btn ghost xs danger" onClick={() => setConfirming(true)} data-testid="mem-btn-delete-bank">
+          Delete bank
+        </button>
+      )}
     </div>
   );
 }
