@@ -97,10 +97,15 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
 
   // ── New board modal ────────────────────────────────────────────────────
 
-  test('new-board modal opens via board-action-new-board', async ({ page }) => {
+  test('new-board modal opens via board-action-new-board and is styled', async ({ page }) => {
     await gotoBoardAndWait(page)
     await page.locator('[data-testid="board-action-new-board"]').click()
-    await expect(page.locator('[data-testid="board-new-modal"]')).toBeVisible({ timeout: FIVE_S })
+    const scrim = page.locator('[data-testid="board-new-modal"]')
+    await expect(scrim).toBeVisible({ timeout: FIVE_S })
+    // Regression: the modal renders outside the main `.board` container, so it
+    // must be wrapped in `.board` for the `.board .modal-scrim` scoped styles to
+    // apply. Without the wrapper it rendered as an unstyled in-flow block.
+    await expect(scrim).toHaveCSS('position', 'fixed')
   })
 
   test('new-board modal has all input fields', async ({ page }) => {
@@ -349,36 +354,19 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
     await expect(page.locator('[data-testid="board-orch-popover"]')).not.toBeVisible({ timeout: FIVE_S })
   })
 
-  // ── Tweaks panel ──────────────────────────────────────────────────────
+  // ── Display defaults (tweaks panel removed) ────────────────────────────
+  // The runtime tweaks panel was removed; display is permanently compact +
+  // left-rail accent + mono titles.
 
-  test('tweaks fab opens board-tweaks panel', async ({ page }) => {
+  test('board display is permanently compact / left accent / mono — no tweaks FAB', async ({ page }) => {
     await gotoBoardAndWait(page)
-    // Click the tweaks FAB
-    await page.locator('.tweak-fab').click()
-    await expect(page.locator('[data-testid="board-tweaks"]')).toBeVisible({ timeout: FIVE_S })
-  })
-
-  test('tweaks panel has density, accent, titlefont, meta controls', async ({ page }) => {
-    await gotoBoardAndWait(page)
-    await page.locator('.tweak-fab').click()
-    await expect(page.locator('[data-testid="board-tweaks"]')).toBeVisible()
-
-    await expect(page.locator('[data-testid="board-tweak-density"]')).toBeVisible()
-    await expect(page.locator('[data-testid="board-tweak-accent"]')).toBeVisible()
-    await expect(page.locator('[data-testid="board-tweak-titlefont"]')).toBeVisible()
-    await expect(page.locator('[data-testid="board-tweak-meta"]')).toBeVisible()
-  })
-
-  test('switching density to compact changes data-density attr', async ({ page }) => {
-    await gotoBoardAndWait(page)
-    await page.locator('.tweak-fab').click()
-    await expect(page.locator('[data-testid="board-tweaks"]')).toBeVisible()
-
-    await page.locator('[data-testid="board-tweak-density"] button').filter({ hasText: 'compact' }).click()
-    await page.waitForTimeout(200)
-
     const board = page.locator('[data-testid="board-view"]')
     await expect(board).toHaveAttribute('data-density', 'compact')
+    await expect(board).toHaveAttribute('data-accent', 'left')
+    await expect(board).toHaveAttribute('data-titlefont', 'mono')
+    // The tweaks FAB + panel are gone.
+    await expect(page.locator('.tweak-fab')).toHaveCount(0)
+    await expect(page.locator('[data-testid="board-tweaks"]')).toHaveCount(0)
   })
 
 })

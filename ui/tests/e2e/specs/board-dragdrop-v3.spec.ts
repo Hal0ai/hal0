@@ -180,4 +180,32 @@ test.describe('BoardView — drag-and-drop', () => {
     expect(patchBody).toMatchObject({ status: 'triage' })
   })
 
+  test('dragging a card over the board background arms the danger veil', async ({ page }) => {
+    const anyTask = BOARD_TASKS.find(t => t.status === 'ready')!
+    await gotoBoardAndWait(page)
+    const cardTestId = `board-task-${anyTask.id}`
+    await expect(page.locator(`[data-testid="${cardTestId}"]`)).toBeVisible()
+
+    // Veil is hidden until a drag is in progress over the background.
+    await expect(page.locator('[data-testid="board-danger-veil"]')).toHaveCount(0)
+
+    // dragstart on the card, then dragover the lanes-scroll background.
+    await page.evaluate((src: string) => {
+      const el = document.querySelector(`[data-testid="${src}"]`) as HTMLElement
+      const dt = new DataTransfer()
+      dt.effectAllowed = 'move'
+      ;(window as any).__e2eDt = dt
+      el.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }))
+    }, cardTestId)
+    await page.waitForTimeout(120)
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="board-drop-delete"]') as HTMLElement
+      const dt = (window as any).__e2eDt || new DataTransfer()
+      el.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }))
+    })
+
+    await expect(page.locator('[data-testid="board-danger-veil"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="board-danger-veil"]')).toContainText('Release to delete')
+  })
+
 })
