@@ -64,8 +64,16 @@ cleanup() {
   # A privileged LXC holding /dev/kfd (after install warms ROCm) hangs on
   # `lxc-stop --kill`. SIGKILL the lxc-start monitor first — that tears the
   # container down immediately — then clear any stale lock and purge-destroy.
-  PVE "pkill -9 -f 'lxc-start -F -n ${VMID}' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${VMID}.lock; pct destroy $VMID --force --purge" >/dev/null 2>&1 || true
-  log "destroyed clone $VMID"
+  # The first destroy can race the monitor teardown and leave the CT
+  # stopped-but-present, so retry — then VERIFY with `pct status` and only
+  # claim "destroyed" when it's actually gone (a swallowed `|| true` used to
+  # log success unconditionally and orphan clones piled up).
+  for _ in 1 2; do
+    PVE "pkill -9 -f 'lxc-start -F -n ${VMID}' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${VMID}.lock; pct destroy $VMID --force --purge" >/dev/null 2>&1 || true
+    PVE "pct status $VMID" >/dev/null 2>&1 || { log "destroyed clone $VMID"; return; }
+    sleep 3
+  done
+  log "WARNING: clone $VMID still present after destroy attempts — run 'pct destroy $VMID --force --purge' on $PVE_HOST"
 }
 trap cleanup EXIT
 
@@ -115,9 +123,13 @@ SSH "hal0 status && hal0 --version && for i in \$(seq 1 15); do curl -fsS -m 5 h
 log "uninstall"
 # `hal0 uninstall` resolves uninstall.sh for either layout (#495). Fall back to
 # running it directly — FHS prod path first, then the legacy editable path.
-if SSH "sudo hal0 uninstall --force" >&2 2>&1 \
-   || SSH "sudo bash /usr/lib/hal0/current/installer/uninstall.sh --force" >&2 2>&1 \
-   || SSH "sudo bash /opt/hal0/installer/uninstall.sh --force" >&2 2>&1; then
+# Use --purge: the conservative default deliberately KEEPS /etc/hal0 +
+# /var/lib/hal0 + the hal0 group (so a re-install reuses them), but the residue
+# check below asserts ZERO residue including those paths — only --purge removes
+# them. Without it this harness always fails on a clean uninstall.
+if SSH "sudo hal0 uninstall --purge --force" >&2 2>&1 \
+   || SSH "sudo bash /usr/lib/hal0/current/installer/uninstall.sh --purge --force" >&2 2>&1 \
+   || SSH "sudo bash /opt/hal0/installer/uninstall.sh --purge --force" >&2 2>&1; then
   UNINSTALL_OK=true
 fi
 
