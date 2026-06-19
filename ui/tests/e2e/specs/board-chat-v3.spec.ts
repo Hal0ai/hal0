@@ -12,10 +12,12 @@
  *   - Close chat via Escape
  *
  * SSE mock: useBoardChat reads response via fetch ReadableStream; we mock the
- * POST /api/board/chat route to return a body of SSE lines:
- *   data: {"delta":"Hello"}\n\n
- *   data: {"type":"tool_call","tool_call":{"action":"update_task","id":"<id>","status":"done"}}\n\n
- *   data: [DONE]\n\n
+ * POST /api/board/chat route to return SSE lines in the REAL backend contract
+ * (see src/hal0/api/routes/board_chat.py — the frame `type` is authoritative):
+ *   data: {"type":"token","text":"Hello"}\n\n
+ *   data: {"type":"tool_call","name":"move_task","arguments":{"task_id":"<id>","status":"done"}}\n\n
+ *   data: {"type":"tool_result","name":"move_task","result":{}}\n\n
+ *   data: {"type":"done"}\n\n
  *
  * WS mock: installWsHarness replaces window.WebSocket with FakeWebSocket.
  * After goto we waitForWs('/api/board/events') then emit a task.updated frame
@@ -87,6 +89,33 @@ test.describe('BoardView — agent chat', () => {
     await expect(page.locator('[data-testid="board-chat"]')).not.toBeVisible({ timeout: FIVE_S })
   })
 
+  test('chat thread persists across close + reopen', async ({ page }) => {
+    await page.route('**/api/board/chat', async (route) => {
+      if (route.request().method() !== 'POST') { await route.fallback(); return }
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: 'data: {"type":"token","text":"Persisted reply"}\n\ndata: {"type":"done"}\n\n',
+      })
+    })
+
+    await gotoBoardAndWait(page)
+    await openChat(page)
+    await page.locator('[data-testid="board-chat-input"]').fill('remember this')
+    await page.locator('[data-testid="board-chat-send"]').click()
+
+    const msgs = page.locator('[data-testid="board-chat-msg"]')
+    await expect(msgs.nth(1)).toContainText('Persisted reply', { timeout: FIVE_S })
+
+    // Close the drawer, then reopen — the conversation must still be there.
+    await page.keyboard.press('Escape')
+    await expect(page.locator('[data-testid="board-chat"]')).not.toBeVisible({ timeout: FIVE_S })
+    await openChat(page)
+
+    await expect(page.locator('[data-testid="board-chat-msg"]')).toHaveCount(2)
+    await expect(page.locator('[data-testid="board-chat-msg"]').nth(1)).toContainText('Persisted reply')
+  })
+
   // ── Send via stub (no hook) ────────────────────────────────────────────
   // When __hal0UseBoardChat is absent the stub path is used (typing reply + setTimeout).
   // The spec uses the mock SSE route which makes the hook present.
@@ -124,10 +153,10 @@ test.describe('BoardView — agent chat', () => {
         return
       }
       const sseBody = [
-        'data: {"delta":"Hello"}\n\n',
-        'data: {"delta":", board"}\n\n',
-        'data: {"delta":"!"}\n\n',
-        'data: [DONE]\n\n',
+        'data: {"type":"token","text":"Hello"}\n\n',
+        'data: {"type":"token","text":", board"}\n\n',
+        'data: {"type":"token","text":"!"}\n\n',
+        'data: {"type":"done"}\n\n',
       ].join('')
       await route.fulfill({
         status: 200,
@@ -159,7 +188,7 @@ test.describe('BoardView — agent chat', () => {
         await route.fulfill({
           status: 200,
           contentType: 'text/event-stream',
-          body: 'data: {"delta":"ok"}\n\ndata: [DONE]\n\n',
+          body: 'data: {"type":"token","text":"ok"}\n\ndata: {"type":"done"}\n\n',
         })
       } else {
         await route.fallback()
@@ -182,10 +211,11 @@ test.describe('BoardView — agent chat', () => {
     await page.route('**/api/board/chat', async (route) => {
       if (route.request().method() !== 'POST') { await route.fallback(); return }
       const sseBody = [
-        'data: {"delta":"Moving task for you..."}\n\n',
-        `data: {"type":"tool_call","tool_call":{"action":"update_task","id":"${targetTask.id}","status":"done"}}\n\n`,
-        'data: {"delta":" Done."}\n\n',
-        'data: [DONE]\n\n',
+        'data: {"type":"token","text":"Moving task for you..."}\n\n',
+        `data: {"type":"tool_call","name":"move_task","id":"c1","arguments":{"task_id":"${targetTask.id}","status":"done"}}\n\n`,
+        `data: {"type":"tool_result","name":"move_task","id":"c1","result":{"ok":true}}\n\n`,
+        'data: {"type":"token","text":" Done."}\n\n',
+        'data: {"type":"done"}\n\n',
       ].join('')
       await route.fulfill({ status: 200, contentType: 'text/event-stream', body: sseBody })
     })

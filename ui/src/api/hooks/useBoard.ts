@@ -925,6 +925,10 @@ export function useBoardChat(board?: string): UseBoardChatResult {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [streaming, setStreaming] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  // Mirror `messages` in a ref so `send` can build the request history without
+  // a stale closure (and without re-creating the callback every render).
+  const messagesRef = useRef<ChatMessage[]>([])
+  messagesRef.current = messages
   const qc = useQueryClient()
 
   const send = (text: string) => {
@@ -934,6 +938,16 @@ export function useBoardChat(board?: string): UseBoardChatResult {
     }
     abortRef.current = new AbortController()
     const signal = abortRef.current.signal
+
+    // Build the OpenAI-style conversation the backend expects: prior
+    // user/assistant turns + this new user message. Tool frames are UI-only
+    // and intentionally omitted (sending bare tool messages without their
+    // originating assistant tool_calls is malformed for the LLM).
+    const history = messagesRef.current
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .filter((m) => (m.body ?? '').trim().length > 0)
+      .map((m) => ({ role: m.role, content: m.body }))
+    const outbound = [...history, { role: 'user', content: text }]
 
     // Append user message immediately
     setMessages((prev) => [
@@ -946,14 +960,16 @@ export function useBoardChat(board?: string): UseBoardChatResult {
       ? `${ENDPOINTS.boardChat}?board=${encodeURIComponent(board)}`
       : ENDPOINTS.boardChat
 
-    // Open SSE stream via fetch POST
+    // Open SSE stream via fetch POST. Contract (see board_chat.py): the body
+    // carries `messages` (OpenAI format) + optional `board`; the response is
+    // SSE frames `{type: token|tool_call|tool_result|done|error}`.
     fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
       },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify(board ? { messages: outbound, board } : { messages: outbound }),
       signal,
     })
       .then(async (res) => {
@@ -1012,37 +1028,63 @@ export function useBoardChat(board?: string): UseBoardChatResult {
           for (const line of lines) {
             if (!line.startsWith('data:')) continue
             const payload = line.slice(5).trim()
+            if (!payload) continue
+            // Back-compat: some proxies still terminate with a bare [DONE].
             if (payload === '[DONE]') {
               finaliseAssistant()
               setStreaming(false)
               return
             }
+            let frame: {
+              type?: string
+              text?: string
+              name?: string
+              arguments?: unknown
+              result?: unknown
+              id?: string
+              message?: string
+            }
             try {
-              const frame = JSON.parse(payload) as {
-                type?: string
-                delta?: string
-                content?: string
-                refs?: string[]
-                tool_call?: unknown
-              }
-              if (frame.type === 'tool_call') {
-                // Board mutation happened — invalidate board queries
-                qc.invalidateQueries({ queryKey: boardKey(board) })
+              frame = JSON.parse(payload)
+            } catch {
+              continue // ignore malformed
+            }
+            switch (frame.type) {
+              case 'token':
+                // Assistant text delta (backend sends per-round content).
+                if (frame.text) appendAssistant(frame.text)
+                break
+              case 'tool_call':
+                // The orchestrator is invoking an audited board mutation.
                 setMessages((prev) => [
                   ...prev,
                   {
                     role: 'tool',
-                    body: JSON.stringify(frame.tool_call ?? ''),
-                    tool_call: frame.tool_call,
+                    body: `→ ${frame.name ?? 'tool'}(${JSON.stringify(frame.arguments ?? {})})`,
+                    tool_call: { name: frame.name, arguments: frame.arguments, id: frame.id },
                   },
                 ])
-              } else if (frame.delta) {
-                appendAssistant(frame.delta)
-              } else if (frame.content) {
-                appendAssistant(frame.content)
-              }
-            } catch {
-              // ignore malformed
+                break
+              case 'tool_result':
+                // Mutation landed — refresh the board so the change shows live.
+                qc.invalidateQueries({ queryKey: boardKey(board) })
+                break
+              case 'error':
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    role: 'assistant',
+                    body: `⚠ ${frame.message ?? 'chat error'}`,
+                    at: new Date().toISOString(),
+                  },
+                ])
+                break
+              case 'done':
+                finaliseAssistant()
+                setStreaming(false)
+                return
+              default:
+                break
             }
           }
         }

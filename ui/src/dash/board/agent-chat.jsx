@@ -18,8 +18,13 @@ const AGENT_SUGGEST = window.AGENT_SUGGEST || [
 ];
 
 // ─── Agent chat slide-out (the orchestrator) ──────────────────────────
-function AgentChat({ byId, onClose, onOpenTask }) {
-  const chatHook = window.__hal0UseBoardChat ? window.__hal0UseBoardChat() : null;
+function AgentChat({ chat, byId, onClose, onOpenTask }) {
+  // Chat state is owned by BoardView (which stays mounted) and passed in, so
+  // the thread persists across closing/reopening the drawer. Fall back to a
+  // local hook call only if no chat was provided (standalone/demo use).
+  const chatHook = chat !== undefined
+    ? chat
+    : (window.__hal0UseBoardChat ? window.__hal0UseBoardChat() : null);
 
   // live path
   const messages = chatHook ? chatHook.messages : (window.AGENT_SEED || []);
