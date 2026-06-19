@@ -253,7 +253,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
       icon: <span className={"dot " + s.state} style={{display: "inline-block"}} />,
       sub: `${s.model || "—"} · ${s.type} · ${s.device}${isDefault ? " · default" : ""}`,
       tag: s.state === "serving" ? <span className="chip amber">{s.state}</span> : null,
-      keywords: `${s.type} ${s.device} ${s.group || ""}`,
+      keywords: `${s.type} ${s.device}`,
       hint: "open edit drawer",
     });
   });

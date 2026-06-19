@@ -93,7 +93,6 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const [type, setType] = useStateSM(defaults.type || "llm");
   const [profile, setProfile] = useStateSM(defaults.profile || "");
   const [model, setModel] = useStateSM(defaults.model || "");
-  const [group, setGroup] = useStateSM(defaults.group || "chat");
   const [makeDefault, setMakeDefault] = useStateSM(false);
   const [submitErr, setSubmitErr] = useStateSM(null);
 
@@ -107,7 +106,6 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       setName(defaults.name || "");
       setType(defaults.type || "llm");
       setProfile(defaults.profile || "");
-      setGroup(defaults.group || "chat");
       setModel("");
       setMakeDefault(false);
       setSubmitErr(null);
@@ -157,7 +155,6 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         if (dc === "cpu") return "cpu";
         return "gpu-rocm";
       })(),
-      group,
       ...(model ? { model } : {}),
       ...(makeDefault ? { default: true } : {}),
     };
@@ -284,22 +281,6 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
               and the backend need not honour, so we state the behaviour
               instead of fabricating a specific port. */}
           <span className="mono" style={{padding: "6px 10px", background: "var(--bg)", border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)", display: "inline-block", color: "var(--fg-4)", fontSize: 12}}>auto · assigned on save</span>
-        </div>
-      </div>
-
-      <div className="form-row">
-        <div className="form-lbl">
-          <span>Group</span>
-          <span className="sub">pure UI rollup label</span>
-        </div>
-        <div className="form-ctl">
-          <select className="input mono" value={group} onChange={e => setGroup(e.target.value)}>
-            <option value="chat">chat</option>
-            <option value="embed">embed</option>
-            <option value="voice">voice</option>
-            <option value="img">img</option>
-            <option value="custom">custom</option>
-          </select>
         </div>
       </div>
 
@@ -1276,7 +1257,7 @@ function SlotLogsDrawer({ open, slot, onClose }) {
 }
 
 // ─── Empty SlotCard (no model loaded) ────────────────────────────
-function EmptySlotCard({ name, type, group, device, onConfigure }) {
+function EmptySlotCard({ name, type, device, onConfigure }) {
   return (
     <div className="slot" style={{borderStyle: "dashed", borderColor: "var(--line)"}}>
       <div className="slot-h">
@@ -1289,7 +1270,6 @@ function EmptySlotCard({ name, type, group, device, onConfigure }) {
       <div className="slot-chips">
         <span className="chip">{type}</span>
         <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
-        <span className="chip">{group}</span>
       </div>
       <div style={{padding: "10px 12px", background: "var(--accent-soft)", border: "1px solid var(--accent-line)", borderRadius: "var(--rad-sm)", display: "flex", alignItems: "center", gap: 8}}>
         <span className="mono" style={{fontSize: 11, color: "var(--accent)", flex: 1}}>seeded · ready to configure</span>

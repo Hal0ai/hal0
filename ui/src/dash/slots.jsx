@@ -585,14 +585,20 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     ? (slots || []).find(s => s.name === logsForSlot)
     : null;
 
-  // Seeded slot identities for the skip-path empty layout.
+  // Seeded slot identities for the skip-path empty layout. Section membership
+  // is derived from the capability type (mirrors the live pane's type-driven
+  // split), so seeded cards never disagree with their type.
+  const SECTION_FOR_TYPE = {
+    llm: "chat", embedding: "embed", reranking: "embed",
+    transcription: "voice", tts: "voice", image: "img",
+  };
   const SEEDED = [
-    { name: "primary", type: "llm",           device: "gpu-rocm", group: "chat"  },
-    { name: "embed",   type: "embedding",     device: "gpu-rocm", group: "embed" },
-    { name: "rerank",  type: "reranking",     device: "gpu-rocm", group: "embed" },
-    { name: "stt",     type: "transcription", device: "cpu",      group: "voice" },
-    { name: "tts",     type: "tts",           device: "cpu",      group: "voice" },
-    { name: "img",     type: "image",         device: "gpu-rocm", group: "img"   },
+    { name: "primary", type: "llm",           device: "gpu-rocm" },
+    { name: "embed",   type: "embedding",     device: "gpu-rocm" },
+    { name: "rerank",  type: "reranking",     device: "gpu-rocm" },
+    { name: "stt",     type: "transcription", device: "cpu"      },
+    { name: "tts",     type: "tts",           device: "cpu"      },
+    { name: "img",     type: "image",         device: "gpu-rocm" },
   ];
   const openCreatePrefilled = (def) => { setCreateDefaults(def); setCreateOpen(true); };
 
@@ -630,10 +636,10 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // Skip-path layout: render six seeded empty cards under their default groups.
   if (skipPath) {
     const seededByGroup = {
-      chat:  SEEDED.filter(s => s.group === "chat"),
-      embed: SEEDED.filter(s => s.group === "embed"),
-      voice: SEEDED.filter(s => s.group === "voice"),
-      img:   SEEDED.filter(s => s.group === "img"),
+      chat:  SEEDED.filter(s => SECTION_FOR_TYPE[s.type] === "chat"),
+      embed: SEEDED.filter(s => SECTION_FOR_TYPE[s.type] === "embed"),
+      voice: SEEDED.filter(s => SECTION_FOR_TYPE[s.type] === "voice"),
+      img:   SEEDED.filter(s => SECTION_FOR_TYPE[s.type] === "img"),
     };
     return (
       <div className="view">
@@ -663,8 +669,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
                         name={c.name}
                         type={c.type}
                         device={c.device}
-                        group={c.group}
-                        onConfigure={() => openCreatePrefilled({ name: c.name, type: c.type, device: c.device, group: c.group })}
+                        onConfigure={() => openCreatePrefilled({ name: c.name, type: c.type, device: c.device })}
                       />
                     ))}
                   </div>

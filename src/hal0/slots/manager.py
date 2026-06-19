@@ -1494,7 +1494,6 @@ class SlotManager:
         type: str,
         model: str,
         device: str = "gpu-rocm",
-        group: str = "custom",
         port: int = 8081,
     ) -> Slot:
         """Programmatic ``hal0 slot add`` (plan §4.3).
@@ -1513,7 +1512,6 @@ class SlotManager:
             device: Hardware preference (``gpu-rocm | gpu-vulkan | cpu
                 | npu``); see ``map_backend_to_device``. Default
                 ``gpu-rocm`` matches Strix Halo seed semantics.
-            group: Dashboard rollup group (default ``custom``).
             port: SlotConfig.port — the container's loopback port.
         """
         if not _SLOT_NAME_RE.match(name):
@@ -1542,7 +1540,6 @@ class SlotManager:
             "device": device,
             "provider": "llama-server",
             "enabled": True,
-            "group": group,
             "model": {"default": model},
         }
         return await self.create(name, cfg)

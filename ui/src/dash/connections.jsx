@@ -134,16 +134,14 @@ function epState(s) {
   return 'idle'
 }
 
-// Slot → the OpenAI route family. Prefer the slot `type` (a true modality)
-// over `group` — the latter can be a device bucket (e.g. "npu") rather than a
-// modality. Fall back to an explicit chat|embed|img|voice group, else chat.
+// Slot → the OpenAI route family. Maps the slot `type` (a true modality) onto
+// a route family; any unrecognised type defaults to chat.
 function slotGroup(s) {
   const t = s.type
   if (t === 'llm') return 'chat'
   if (t === 'embedding' || t === 'reranking') return 'embed'
   if (t === 'image') return 'img'
   if (t === 'tts' || t === 'transcription') return 'voice'
-  if (['chat', 'embed', 'img', 'voice'].includes(s.group)) return s.group
   return 'chat'
 }
 function isStt(s) {

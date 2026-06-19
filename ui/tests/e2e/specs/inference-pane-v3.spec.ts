@@ -199,6 +199,21 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     // the picker is populated (at minimum the current model is an option).
     await expect.poll(async () => picker.locator('option').count()).toBeGreaterThan(0)
   })
+
+  test('utility-type slots route to the support footer regardless of group', async ({ page }) => {
+    await page.goto('/#slots')
+    await expect(pane(page)).toBeVisible()
+    const util = pane(page).getByTestId('infer-util')
+    await expect(util).toBeVisible()
+    // embed + rerank (util types) live in the footer…
+    await expect(util.getByTestId('infer-slot-embed')).toHaveCount(1)
+    await expect(util.getByTestId('infer-slot-rerank')).toHaveCount(1)
+    // …and the tts slot does too, EVEN THOUGH its mock group is "chat"
+    // (type-driven routing overrides the mislabeled group).
+    await expect(util.getByTestId('infer-slot-tts')).toHaveCount(1)
+    // it must NOT appear among the headline (full) cards.
+    await expect(body(page).locator('.scards.full').getByTestId('infer-slot-tts')).toHaveCount(0)
+  })
 })
 
 test.describe('NPU occupancy card (/slots · Inference tab)', () => {

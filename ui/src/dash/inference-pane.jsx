@@ -107,12 +107,14 @@ function devKind(device) {
   return 'cpu'
 }
 
-// Utility (support) slot groups — the non-conversational tier that renders as
-// the compact mini-card row below the headline chat/agent cards. Anything else
-// (chat/agent LLMs) is a headline slot.
-const UTIL_GROUPS = new Set(['embed', 'rerank', 'tts', 'stt', 'voice'])
-function isUtilGroup(group) {
-  return UTIL_GROUPS.has(String(group || '').toLowerCase())
+// Utility (support) slot types — the non-conversational tier that renders as
+// the compact mini-card row below the headline chat/agent cards. Placement is
+// derived from the slot's capability type, never a hand-set label, so a
+// mislabeled slot can't escape its tier. Anything else (llm) is a headline slot;
+// image is its own pane.
+const UTIL_TYPES = new Set(['embedding', 'reranking', 'tts', 'transcription'])
+function isUtil(s) {
+  return UTIL_TYPES.has(String(s?.type || '').toLowerCase())
 }
 
 // Phase → dot class (reuses the design's .sdot vocabulary). Derived from the
@@ -572,7 +574,7 @@ export function InferenceHeroBand() {
   const mm = useMemoryMapModel()
 
   const allSlots = slotsQuery.data || []
-  const nonImg = allSlots.filter((s) => (s.group || '') !== 'img')
+  const nonImg = allSlots.filter((s) => String(s?.type) !== 'image')
   const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
   const rows = slots.map((s) => ({ s, ind: slotIndicatorFromPhase(s) }))
   const servingN = rows.filter((r) => r.ind.cls === 'serving').length
@@ -622,7 +624,7 @@ export function InferencePane() {
   // own pane (ComfyuiPane); NPU/FLM slots are cordoned off to the NPU · FLM
   // stack pane below — they appear here only as the sec-label FLM count.
   const allSlots = slotsQuery.data || []
-  const nonImg = allSlots.filter((s) => (s.group || '') !== 'img')
+  const nonImg = allSlots.filter((s) => String(s?.type) !== 'image')
   const slots = nonImg.filter((s) => devKind(s.device) !== 'npu')
   const npuN = nonImg.length - slots.length
 
@@ -630,13 +632,13 @@ export function InferencePane() {
   const servingN = rows.filter((r) => r.ind.cls === 'serving').length
   const loadedN = rows.filter((r) => isSlotLive(r.s)).length
 
-  // Tier split — headline = the conversational LLM slots (chat / agent groups);
-  // utility = the support slots (embed / rerank / voice). Keyed off slot.group
-  // so the split tracks the backend's own grouping; voice covers tts/stt too.
-  // This pane is always expanded (no accordion), so the utility tier shows ALL
-  // its slots; the live count drives the SubLabel note.
-  const headlineRows = rows.filter((r) => !isUtilGroup(r.s.group))
-  const utilRows = rows.filter((r) => isUtilGroup(r.s.group))
+  // Tier split — headline = the conversational LLM slots; utility = the support
+  // slots (embed / rerank / tts / transcription). Keyed off slot.type so the
+  // split can't be thrown off by a mislabeled group. This pane is always
+  // expanded (no accordion), so the utility tier shows ALL its slots; the live
+  // count drives the SubLabel note.
+  const headlineRows = rows.filter((r) => !isUtil(r.s))
+  const utilRows = rows.filter((r) => isUtil(r.s))
 
   const gpuN = slots.filter((s) => {
     const k = devKind(s.device)
