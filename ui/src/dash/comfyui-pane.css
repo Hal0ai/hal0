@@ -201,6 +201,50 @@
   border-top: 1px solid var(--line-soft);
 }
 
+/* ── Queue/workflows expander (collapses the lower half by default) ───────── */
+.comfy-page .queue-expander {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  margin-top: 18px;
+  padding: 11px 13px;
+  background: transparent;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--rad);
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.comfy-page .queue-expander:hover {
+  border-color: var(--comfy-line);
+  background: var(--comfy-soft);
+  color: var(--fg);
+}
+.comfy-page .queue-expander.open { border-color: var(--comfy-line); color: var(--comfy); }
+.comfy-page .queue-expander .qx-ic { display: inline-flex; color: var(--fg-4); }
+.comfy-page .queue-expander.open .qx-ic { color: var(--comfy); }
+.comfy-page .queue-expander .qx-label { font-weight: 600; }
+.comfy-page .queue-expander .qx-sub {
+  text-transform: none; letter-spacing: 0; font-size: 10px; color: var(--fg-5);
+}
+.comfy-page .queue-expander .grow { flex: 1; }
+.comfy-page .queue-expander .qx-chev {
+  display: inline-flex; color: var(--fg-4); transition: transform 0.16s ease;
+}
+.comfy-page .queue-expander.open .qx-chev { transform: rotate(180deg); color: var(--comfy); }
+
+/* When open the expander supplies the separator — drop the row's own. */
+.comfy-page .queue-expander.open + .queue-assets-row {
+  margin-top: 12px;
+  padding-top: 0;
+  border-top: none;
+}
+
 .comfy-page .render-grid {
   display: grid;
   grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);

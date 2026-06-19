@@ -805,6 +805,8 @@ a { color: inherit; text-decoration: none; }
 .slot-tab.on.comfy .slot-tab-ct { color: var(--comfy); }
 .slot-tab .slot-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-5); }
 .slot-tab .slot-tab-dot.live { background: var(--comfy); box-shadow: 0 0 8px var(--comfy); }
+/* Inference tab dot — yellow, to match the Inference accent (not comfy blue). */
+.slot-tab .slot-tab-dot.infer.live { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
 
 /* Logs page rows */
 .log-row {

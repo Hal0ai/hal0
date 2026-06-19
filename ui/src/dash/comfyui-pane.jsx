@@ -105,6 +105,7 @@ const CIcons = {
   ),
   logs:  <CI d="M3 3h10M3 6h10M3 9h7M3 12h5" />,
   close: <CI d="M4 4l8 8M12 4l-4 4" />,
+  chev:  <CI d="M4 6l4 4 4-4" />,
 }
 
 const Ci = ({ name, size = 16 }) =>
@@ -419,6 +420,12 @@ export function ImageGenCard({
   const { engine, run, queue, gtt, ram, stats } = mock
   const t = useTick(900)
 
+  // Queue + workflows (bottom half) collapse by default; the top render/metrics
+  // row is always visible. Keeping the lower half behind an expander keeps the
+  // card compact in the common "watch the active render" case and only reveals
+  // the queue list + workflow/model inventory on demand.
+  const [expanded, setExpanded] = useState(false)
+
   // Active render state (null = no render running)
   const hasRun = run != null
 
@@ -546,7 +553,22 @@ export function ImageGenCard({
           </div>
         </div>
 
+        {/* ── Expander: queue + workflows are hidden until opened ── */}
+        <button
+          type="button"
+          className={'queue-expander' + (expanded ? ' open' : '')}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <span className="qx-ic"><Ci name="queue" size={13} /></span>
+          <span className="qx-label">queue &amp; workflows</span>
+          <span className="qx-sub">{hasRun ? '1 running' : '0 running'} · {queue.length} pending</span>
+          <span className="grow" />
+          <span className="qx-chev"><Ci name="chev" size={14} /></span>
+        </button>
+
         {/* ── Lower row: queue (60%) + workflows/models (40%) ── */}
+        {expanded && (
         <div className="queue-assets-row">
           {/* Queue */}
           <div>
@@ -602,6 +624,7 @@ export function ImageGenCard({
             <ModelsBlock />
           </div>
         </div>
+        )}
       </div>
 
       <CardFoot engine={engine} onRestart={onRestart} onLogs={onLogs} />

@@ -85,6 +85,12 @@ async function gotoImageTab(page: any) {
   await page.waitForSelector('.comfy-v2-pane', { timeout: 10_000 })
 }
 
+// Queue rows live in the collapsed lower half — open the expander first.
+async function openQueue(page: any) {
+  await page.click('.comfy-v2-pane .queue-expander')
+  await page.waitForSelector('.comfy-v2-pane .queue-assets-row', { timeout: 5_000 })
+}
+
 test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
 
   // ── 1. status renders into hero ──────────────────────────────────────────
@@ -105,6 +111,7 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
   test('status: queue rows bind — 1 running + 2 pending', async ({ page }) => {
     await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
     await gotoImageTab(page)
+    await openQueue(page)
 
     const pane = page.locator('.comfy-v2-pane')
     await expect(pane.locator('.qcard.row.running')).toBeVisible()
@@ -169,6 +176,7 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
     await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Status()))
 
     await gotoImageTab(page)
+    await openQueue(page)
 
     const chips = page.locator('.comfy-v2-pane .flow')
     await expect(chips).toHaveCount(6)
@@ -208,6 +216,7 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
   test('idle: empty-queue state renders in-flow, no click-blocking overlay', async ({ page }) => {
     await page.route('**/api/comfyui/status', (route: any) => json(route, comfyV2Idle()))
     await gotoImageTab(page)
+    await openQueue(page)
 
     const pane = page.locator('.comfy-v2-pane')
     await expect(pane.locator('.queue-empty-state')).toBeVisible()
@@ -233,7 +242,8 @@ test.describe('ComfyUI V2 live-wired pane (Task 5.2)', () => {
     const pane = page.locator('.comfy-v2-pane')
     // Pane must not crash — the card header should be visible
     await expect(pane.locator('.wcard-h')).toBeVisible()
-    // running row is shown (1 running)
+    // running row is shown (1 running) — in the collapsed lower half
+    await openQueue(page)
     await expect(pane.locator('.qcard.row.running')).toBeVisible()
   })
 })

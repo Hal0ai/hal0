@@ -574,6 +574,12 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     img:   cardSlots.filter(s => dc(s) === "img" || s.type === "image"),
   };
 
+  // Any non-image slot currently holding GPU/loaded → drives the Inference-tab
+  // status dot (mirrors comfyLive for the Image Gen tab, but yellow).
+  const inferLive = cardSlots.some(
+    s => dc(s) !== "img" && s.type !== "image" && isSlotLive(s),
+  );
+
   const editSlot = (slots || []).find(s => s.name === editName);
   const logsSlot = logsForSlot
     ? (slots || []).find(s => s.name === logsForSlot)
@@ -824,6 +830,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           className={"slot-tab infer" + (tab === "inference" ? " on" : "")}
           onClick={() => { setTab("inference"); if (slotParam) window.location.hash = "#slots"; }}
         >
+          {inferLive && <span className="slot-tab-dot infer live" />}
           <span>Inference</span>
           <span className="slot-tab-ct num">{cardSlots.length - groups.img.length}</span>
         </button>
@@ -833,7 +840,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           className={"slot-tab comfy" + (tab === "image" ? " on" : "")}
           onClick={() => { setTab("image"); if (slotParam) window.location.hash = "#slots"; }}
         >
-          <span className={"slot-tab-dot" + (comfyLive ? " live" : "")} />
+          {comfyLive && <span className="slot-tab-dot live" />}
           <span>Image Gen</span>
         </button>
         <button

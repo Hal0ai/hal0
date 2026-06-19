@@ -64,6 +64,13 @@ async function gotoImageTab(page: any) {
   await page.waitForSelector('.comfy-v2-pane', { timeout: 10_000 })
 }
 
+// Queue + workflows/models are collapsed by default behind the expander;
+// open it before asserting on the lower-half elements.
+async function openQueue(page: any) {
+  await page.click('.comfy-v2-pane .queue-expander')
+  await page.waitForSelector('.comfy-v2-pane .queue-assets-row', { timeout: 5_000 })
+}
+
 test.describe('ImageGen V2 render-hero pane', () => {
   // ── 1. Render hero renders ──────────────────────────────────────────────
   test('render-hero: job name, progress bar, step info, it/s, eta, controls', async ({ page }) => {
@@ -95,6 +102,7 @@ test.describe('ImageGen V2 render-hero pane', () => {
   // ── 2. Queue rows ───────────────────────────────────────────────────────
   test('queue: running row + 2 pending rows render', async ({ page }) => {
     await gotoImageTab(page)
+    await openQueue(page)
     const pane = page.locator('.comfy-v2-pane')
 
     // running row: ldot.generating
@@ -129,6 +137,7 @@ test.describe('ImageGen V2 render-hero pane', () => {
   // ── 4. Workflows strip ──────────────────────────────────────────────────
   test('workflows strip renders 6 flow buttons', async ({ page }) => {
     await gotoImageTab(page)
+    await openQueue(page)
     const pane = page.locator('.comfy-v2-pane')
 
     await expect(pane.locator('.flows')).toBeVisible()
@@ -138,6 +147,7 @@ test.describe('ImageGen V2 render-hero pane', () => {
   // ── 5. Models on share ─────────────────────────────────────────────────
   test('models block: inv pills render (checkpoints, loras, vae…)', async ({ page }) => {
     await gotoImageTab(page)
+    await openQueue(page)
     const pane = page.locator('.comfy-v2-pane')
 
     await expect(pane.locator('.inv')).toBeVisible()
@@ -181,6 +191,7 @@ test.describe('ImageGen V2 render-hero pane', () => {
     await page.waitForSelector('.slot-tab.comfy', { timeout: 10_000 })
     await page.click('.slot-tab.comfy')
     await page.waitForSelector('.comfy-v2-pane', { timeout: 10_000 })
+    await openQueue(page)
 
     const pane = page.locator('.comfy-v2-pane')
     // Empty-queue state shows an in-flow message (not a bleed overlay)
@@ -203,6 +214,7 @@ test.describe('ImageGen V2 render-hero pane', () => {
     // Emulate prefers-reduced-motion: reduce
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await gotoImageTab(page)
+    await openQueue(page)
     const pane = page.locator('.comfy-v2-pane')
 
     // The generating dot should exist but its computed animation should be none/paused
