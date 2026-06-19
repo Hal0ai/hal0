@@ -354,6 +354,17 @@ class SlotConfig(BaseModel):
             "default. See resolve_chat_template."
         ),
     )
+    vision: bool = Field(
+        default=True,
+        description=(
+            "Per-slot vision toggle (#901). When the bound model carries an "
+            "mmproj sidecar, the container provider loads it (--mmproj) so the "
+            "slot accepts images — default-on. Set false to boot the slot "
+            "text-only (no --mmproj, modalities.vision:false) on memory-tight "
+            "hosts; the projector is ~0.9 GB resident. No effect when the model "
+            "has no sidecar."
+        ),
+    )
 
     # [model] section (nested)
     model: ModelConfig = Field(default_factory=ModelConfig)

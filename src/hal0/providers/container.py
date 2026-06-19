@@ -577,8 +577,12 @@ class ContainerProvider(Provider):
 
         # Vision projector sidecar associated with the model in the registry
         # (#899). Bind-mounted at its identical host path, so the container sees
-        # the same path. None for text-only models — no flag emitted.
+        # the same path. None for text-only models — no flag emitted. Gated by
+        # the per-slot ``vision`` toggle (#901, default-on): vision=false boots
+        # the slot text-only even when a sidecar exists.
         mmproj = model_info.get("mmproj")
+        if not slot_cfg.get("vision", True):
+            mmproj = None
 
         return _llama_launch_plan(
             image=image,

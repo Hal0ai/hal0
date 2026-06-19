@@ -261,6 +261,12 @@ def _model_capabilities(entry: CuratedModel | HaloaiModel | Any) -> list[str]:
     tags = getattr(entry, "tags", None)
     if isinstance(tags, list) and "vision" in tags and "vision" not in caps:
         caps.append("vision")
+    # Auto-surface vision from an associated mmproj sidecar (#901): a model
+    # that carries a projector can serve images, so it advertises ``vision``
+    # as a secondary capability without a hand-added tag (its primary
+    # ``chat`` capability is preserved above).
+    if getattr(entry, "mmproj", None) and "vision" not in caps:
+        caps.append("vision")
     return caps
 
 
