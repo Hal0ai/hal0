@@ -2651,6 +2651,17 @@ select.npu-sel {
   padding: 14px 18px; margin-bottom: 22px;
   border: 1px solid var(--line); border-radius: var(--rad-lg); background: var(--bg-1);
 }
+
+/* Profiles section panel — an engine-h header + the summary in one bordered
+   card, mirroring the Inference / Image Gen / Endpoints tab shells so the tab
+   reads as part of the same family. .engine-h base styling is global
+   (connections.css); the wrapper just owns the border + body. */
+.pf-engine {
+  border: 1px solid var(--line); border-radius: var(--rad-lg);
+  background: var(--bg-1); overflow: hidden; margin-bottom: 22px;
+}
+.pf-engine-h { background: var(--bg); cursor: default; }
+.pf-engine .pf-summary { border: 0; border-radius: 0; margin-bottom: 0; background: transparent; }
 .pf-stat { display: flex; flex-direction: column; gap: 2px; }
 .pf-stat-v { font-family: var(--jbm); font-size: 20px; font-weight: 500; color: var(--fg); letter-spacing: -0.01em; line-height: 1; }
 .pf-stat-l { font-size: 10px; color: var(--fg-4); letter-spacing: 0.04em; }

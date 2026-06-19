@@ -511,6 +511,37 @@ function Stat({ value, label, accent }) {
 
 // ── Main view ────────────────────────────────────────────────────────────────────
 
+// Section header — mirrors the engine-h header the Inference / Image Gen /
+// Endpoints tabs use (glyph · title · sub · status pill · actions), so the
+// Profiles tab reads as part of the same family instead of the old big-h1 view
+// header. The base .engine-h styling is global (connections.css); .pf-engine-h
+// only de-emphasises the pointer cursor and accent the panel owns.
+function ProfilesHeader({ count, onNew }) {
+  return (
+    <div className="engine-h pf-engine-h">
+      <span className="engine-glyph">{Icons.slots}</span>
+      <span className="cpane-titles">
+        <span className="engine-title">Profiles</span>
+        <span className="engine-sub">launch profiles · image + bench-tuned flags per workload</span>
+      </span>
+      {count != null && (
+        <span className="cpill">
+          <span className="dot" />
+          {count} profile{count === 1 ? '' : 's'}
+        </span>
+      )}
+      <span className="grow" />
+      {onNew && (
+        <span className="eh-right">
+          <button className="pf-btn primary" onClick={onNew} data-testid="pf-btn-new">
+            {Icons.plus} New profile
+          </button>
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ProfilesView() {
   const query = useProfiles();
   const profiles = query.data ?? [];
@@ -525,7 +556,7 @@ function ProfilesView() {
   if (query.isLoading) {
     return (
       <div className="view">
-        <div className="vh"><span className="vh-eye mono">RUNTIME</span><h1>Profiles</h1></div>
+        <div className="pf-engine"><ProfilesHeader /></div>
         <div className="empty mono">Loading profiles…</div>
       </div>
     );
@@ -534,7 +565,7 @@ function ProfilesView() {
   if (query.isError) {
     return (
       <div className="view">
-        <div className="vh"><span className="vh-eye mono">RUNTIME</span><h1>Profiles</h1></div>
+        <div className="pf-engine"><ProfilesHeader /></div>
         <div className="empty mono" style={{ color: 'var(--err)' }}>
           Failed to load profiles: {query.error?.message || 'unknown error'}
         </div>
@@ -544,28 +575,21 @@ function ProfilesView() {
 
   return (
     <div className="view">
-      <div className="vh">
-        <span className="vh-eye mono">RUNTIME</span>
-        <h1>Profiles</h1>
-        <div className="vh-spacer" />
-        <span className="hint mono">image + bench-tuned flags per workload</span>
-        <button className="pf-btn primary lg" onClick={() => setDrawer({ mode: 'create' })} data-testid="pf-btn-new">
-          {Icons.plus} New profile
-        </button>
-      </div>
-
-      <div className="pf-summary">
-        <Stat value={profiles.length} label="profiles" />
-        <span className="pf-stat-div" />
-        <Stat value={seeds.length} label="seed templates" />
-        <Stat value={custom.length} label="custom" accent="var(--accent)" />
-        <span className="pf-stat-div" />
-        <Stat value={`${inUseCount}/${profiles.length}`} label="bound to slots" accent="var(--ok)" />
-        <span className="pf-grow" />
-        <div className="pf-legend mono">
-          {Object.entries(BACKEND_META).map(([k, m]) => (
-            <span className="pf-legend-i" key={k} style={{ '--bk': m.color }}><span className="pf-chip-dot" />{m.label}</span>
-          ))}
+      <div className="pf-engine">
+        <ProfilesHeader count={profiles.length} onNew={() => setDrawer({ mode: 'create' })} />
+        <div className="pf-summary">
+          <Stat value={profiles.length} label="profiles" />
+          <span className="pf-stat-div" />
+          <Stat value={seeds.length} label="seed templates" />
+          <Stat value={custom.length} label="custom" accent="var(--accent)" />
+          <span className="pf-stat-div" />
+          <Stat value={`${inUseCount}/${profiles.length}`} label="bound to slots" accent="var(--ok)" />
+          <span className="pf-grow" />
+          <div className="pf-legend mono">
+            {Object.entries(BACKEND_META).map(([k, m]) => (
+              <span className="pf-legend-i" key={k} style={{ '--bk': m.color }}><span className="pf-chip-dot" />{m.label}</span>
+            ))}
+          </div>
         </div>
       </div>
 
