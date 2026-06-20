@@ -21,6 +21,7 @@ _WS = re.compile(r"\s+")
 def normalized_match(a: str, b: str) -> float:
     """Return a 0..1 similarity ratio between two strings after normalizing
     case, punctuation, and whitespace."""
+
     def norm(s: str) -> str:
         s = _PUNCT.sub(" ", s.lower())
         return _WS.sub(" ", s).strip()
@@ -51,7 +52,12 @@ def test_voice_roundtrip_live() -> None:
     with httpx.Client(timeout=180.0) as client:
         speech = client.post(
             f"{base}/v1/audio/speech",
-            json={"model": TTS_MODEL, "input": phrase, "voice": TTS_VOICE, "response_format": "wav"},
+            json={
+                "model": TTS_MODEL,
+                "input": phrase,
+                "voice": TTS_VOICE,
+                "response_format": "wav",
+            },
         )
         assert speech.status_code == 200, speech.text
         audio = speech.content

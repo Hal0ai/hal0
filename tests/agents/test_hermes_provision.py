@@ -1607,7 +1607,11 @@ def test_voice_wire_finds_local_tts_and_transcription_slots(
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
     (hermes_home / "config.yaml").write_text(
         hp._render_config_yaml(
-            primary={"model_id": "primary", "backend_url": "http://127.0.0.1:8080/v1", "context_length": 8000},
+            primary={
+                "model_id": "primary",
+                "backend_url": "http://127.0.0.1:8080/v1",
+                "context_length": 8000,
+            },
             agent_id="hermes-agent",
         ),
         encoding="utf-8",
