@@ -161,3 +161,14 @@ def test_trusted_email_header_via_explicit_override(
     env = _parse_env(target.read_text())
     assert env["WEBUI_AUTH"] == "True"
     assert env["WEBUI_AUTH_TRUSTED_EMAIL_HEADER"] == "X-Forwarded-Email"
+
+
+def test_enable_persistent_config_is_false(tmp_path: Path) -> None:
+    """ENABLE_PERSISTENT_CONFIG=False must be prewired so env vars always
+    win over OWUI's PersistentConfig DB, which can pin a stale base URL
+    (e.g. the container-loopback 127.0.0.1:8080 overriding the correct
+    host.docker.internal value on subsequent boots)."""
+    target = tmp_path / "openwebui.env"
+    write_openwebui_env(target)
+    env = _parse_env(target.read_text())
+    assert env["ENABLE_PERSISTENT_CONFIG"] == "False"
