@@ -79,7 +79,7 @@ def _render_check(text: str) -> str | None:
     env.globals["strftime_now"] = _strftime_now
     try:
         env.from_string(text).render(**_SAMPLE_CONTEXT)
-    except Exception as exc:  # noqa: BLE001 — a lint must never crash the catalog
+    except Exception as exc:  # a lint must never crash the catalog
         return f"{type(exc).__name__}: {exc}".strip()
     return None
 
