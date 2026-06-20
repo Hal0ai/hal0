@@ -1,0 +1,68 @@
+---
+title: Model roster benchmark
+description: Decode/prefill/MTP-acceptance benchmarks for the full hal0 chat & coding model roster, measured under a uniform exclusive-GPU sweep on a single AMD Strix Halo box.
+# Wide benchmark table needs the horizontal room — drop the right-hand TOC and
+# let the content column fill the full pane width (page-scoped via head style).
+tableOfContents: false
+head:
+  - tag: style
+    content: ':root{--sl-content-width:100%}'
+sidebar:
+  order: 55
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import ModelRoster from '../../../../components/ModelRoster.astro';
+import { ROSTER_DATE } from '../../../../data/model-roster.ts';
+
+export const updated = new Date(`${ROSTER_DATE}T00:00:00`).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+A head-to-head benchmark of every chat and coding model in the hal0 registry,
+measured under **uniform conditions** on a single [AMD Strix Halo](/docs/reference/hardware-matrix/)
+box: same context length, same profile, exclusive GPU access, one model at a
+time. The numbers below are throughput as served by hal0's `llama-server`
+provider — i.e. what a slot on this hardware actually delivers, not vendor
+marketing figures.
+
+<ModelRoster />
+
+## How to read it
+
+- **Decode t/s** — single-stream token generation throughput (greedy, 256-token
+  completion, median of 3 runs). This is the number you feel during a chat.
+- **Prefill t/s** — prompt-ingestion throughput on a ~2k-token prompt.
+- **MTP acc%** — for [multi-token-prediction](/docs/concepts/) models, the share
+  of speculatively-drafted tokens the target model accepted. Higher acceptance =
+  more of the speedup is real.
+- **Caps** — capability tags that drive routing and slot features (MTP, vision,
+  tool-calling, coding, reasoning).
+- **Spec / KV / Size** — the speculative-decode mode, KV-cache quantization, and
+  on-disk GGUF size for the measured configuration.
+
+## What the data shows
+
+- **MTP A3B models dominate.** The sparse 35B-A3B models with self-speculative
+  draft-mtp lead the board — `chadrock-35b-ace-saber` tops it at ~100 t/s decode.
+- **Acceptance matters more than raw size.** A model with weak MTP acceptance
+  (drafted tokens getting rejected) gives back most of the speculative speedup —
+  watch the acc% column, not just the decode figure.
+- **The curated default is the slowest real model.** Dense `qwen3.6-27b` lands
+  at ~10 t/s — an A3B-MTP model is several times faster for the same class of
+  work.
+
+<Aside type="note" title="Methodology & caveats">
+Every model was measured the same way: greedy 256-token decode (median of 3),
+~2k-token prefill, native `llama-server` `/completion` timings read directly
+from the slot port, with the `util` slot locked out so nothing else contended
+for the GPU. MTP-tagged models ran with `--spec-type draft-mtp` (self
+speculation). Because the sweep is **uniform** (fixed context, one profile), a
+model's number here can differ from its tuned production-slot figure — this
+board answers "how do they compare head-to-head," not "what's each model's best
+possible config."
+</Aside>
+
+<Aside type="tip" title="Auto-generated">
+These numbers are generated automatically and refresh whenever the model roster
+is re-benchmarked on the hardware above — no figures are edited by hand. **Last
+updated {updated}.**
+</Aside>

@@ -43,6 +43,12 @@ AGENTS_DATASET = "agents"
 PRIVATE_PREFIX = "private:"
 PROJECT_PREFIX = "project:"
 
+# Sentinel the MCP/REST identity resolvers emit for an absent/malformed
+# ``X-hal0-Agent`` header. It is NOT a real identity: a private write under it
+# must be rejected, not mis-scoped into a ``private:anonymous`` bank. See
+# ``mcp_mount.client_id_resolver`` whose contract delegates that rejection here.
+ANONYMOUS_CLIENT_ID = "anonymous"
+
 # Spec §3 namespace grammar — the scoped suffix after ``project:`` follows
 # the same identity rules as agent ids (ADR-0005 §5): alnum + ``-`` + ``_``,
 # ≤64 chars, so bank names derived from it stay path-traversal-free.
@@ -92,7 +98,7 @@ def resolve_write_dataset(
         docstring).
     """
     if private:
-        if not client_id:
+        if not client_id or client_id == ANONYMOUS_CLIENT_ID:
             raise MemoryNamespaceError("private namespace requires an authenticated client_id")
         return f"{PRIVATE_PREFIX}{client_id}"
     if requested is None or not requested.strip():

@@ -314,7 +314,7 @@ function RecipeEditorModal({ open, onClose, model }) {
     const prevTags = Array.isArray(model.tags) ? model.tags : [];
     const sameTags =
       nextTags.length === prevTags.length &&
-      [...nextTags].sort().join(" ") === [...prevTags].sort().join(" ");
+      [...nextTags].sort().join(" ") === [...prevTags].sort().join(" ");
     if (!sameTags) body.tags = nextTags;
     try {
       await update.mutateAsync({ id: model.id, body });

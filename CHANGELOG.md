@@ -10,6 +10,38 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.7.3-beta.2] — 2026-06-19
+
+Second beta in the 0.7.3 line. Vision lands on the chat slot, idle slots
+finally give their RAM back, and the Operator Board stops crashing on
+task creation.
+
+### Added
+- **Chat-slot vision** — mmproj sidecars are now associated with their parent
+  model in the registry, the container provider emits `--mmproj` from that
+  sidecar, and vision auto-surfaces as a capability with a per-slot toggle.
+  (#899, #900, #901)
+- **TTL-driven hard eviction** — idle slots are now unloaded after their timeout,
+  freeing resident RAM instead of merely relabelling READY→IDLE. (#902)
+- **Hermes memory authorship** — writes from Hermes are stamped with an
+  `agent:hermes` author tag. (#912)
+
+### Fixed
+- **Operator Board** no longer black-screens (React #31) when adding a task;
+  modal styling, drag-to-delete, and the agent-chat drawer are reworked, and
+  board chat now runs on the agent slot instead of the (wedged) chat slot.
+  (#905, #914, #916)
+- **Slot MTP gate** hardened on the backend and NUL bytes stripped from
+  model-modal inputs. (#918)
+- **Memory** rejects anonymous private writes (stops `private__anonymous`
+  misrouting). (#915)
+- **Memory banks grid** fills its width again, unnested from the section
+  title row. (#911)
+- **ComfyUI** reads slot logs from journald and reworks its card layout. (#909)
+
+### Changed
+- Docs mirrored from hal0-web.
+
 ## [v0.7.3-beta.1] — 2026-06-19
 
 First Beta. The dashboard becomes a full operations console — ComfyUI image

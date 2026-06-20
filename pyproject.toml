@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hal0"
-version = "0.7.3-beta.1"
+version = "0.7.3-beta.2"
 description = "Open-source home AI inference platform"
 readme = "README.md"
 requires-python = ">=3.12"
