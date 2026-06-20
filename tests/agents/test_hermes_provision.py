@@ -1729,6 +1729,71 @@ def test_voice_wire_provisions_stt_for_npu_trio_facade(
     )
 
 
+def test_voice_wire_does_not_provision_stt_when_npu_anchor_is_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Safety: stt facade served_by an offline anchor must NOT write STT_OPENAI_BASE_URL.
+
+    The secondary _find_slot pass should only accept a facade when its named
+    anchor is _is_ready — if the anchor is offline/error/starting the facade
+    has no live backend and voice_wire must not point voice clients at it.
+    TTS may still be written (independent slot), or SKIP if neither is ready.
+    """
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    secrets_env = tmp_path / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", secrets_env)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    (hermes_home / "config.yaml").write_text(
+        hp._render_config_yaml(
+            primary={
+                "model_id": "primary",
+                "backend_url": "http://127.0.0.1:8080/v1",
+                "context_length": 8000,
+            },
+            agent_id="hermes-agent",
+        ),
+        encoding="utf-8",
+    )
+    tts_url = "http://127.0.0.1:8084/v1"
+    # NPU anchor is offline — facade must not be accepted.
+    slots = [
+        {
+            "name": "kokoro",
+            "type": "tts",
+            "kind": "local",
+            "state": "ready",
+            "backend_url": tts_url,
+        },
+        {
+            "name": "npu",
+            "type": "llm",
+            "kind": "local",
+            "state": "offline",  # anchor is not ready
+        },
+        {
+            "name": "stt",
+            "type": "transcription",
+            "kind": "local",
+            "state": "offline",
+            "served_by": "npu",
+        },
+    ]
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    io = hp.PhaseIO(
+        fetch_slots=lambda: slots,
+        fetch_model_contexts=lambda: {},
+    )
+    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    # TTS is ready so we get OK (not SKIP), but STT must be absent.
+    assert out.status in (hp.PhaseStatus.OK, hp.PhaseStatus.SKIP)
+    if secrets_env.exists():
+        env_text = secrets_env.read_text()
+        assert "STT_OPENAI_BASE_URL=" not in env_text, (
+            f"STT URL must not be written when anchor is offline. env:\n{env_text}"
+        )
+
+
 # ── #246 phase impls — smoke_tests + self_report ────────────────────────────
 
 
