@@ -2137,7 +2137,13 @@ def _fetch_model_contexts() -> dict[str, int]:
 
 
 def _slot_kind(slot: dict[str, Any]) -> str:
-    """Best-effort capability classifier — handles a few schema variants."""
+    """Best-effort capability classifier — handles a few schema variants.
+
+    NOTE: still used by _phase_model_automap (~line 2743) for the embed/rerank/img
+    skip list — do NOT remove. The "kind"-before-"type" priority is a latent bug
+    for those slot types (tracked separately); voice_wire uses _find_slot instead,
+    which checks slot["type"] directly.
+    """
     for key in ("capability", "kind", "type"):
         v = slot.get(key)
         if isinstance(v, str) and v:
