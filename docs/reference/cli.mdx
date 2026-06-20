@@ -66,7 +66,7 @@ hal0 podman images (prompts for a `DELETE` confirmation unless `--force` or
 - `--type` / `-t` — slot type, routes dispatch: `llm` (default), `embedding`,
   `reranking`, `transcription`, `tts`, `image`.
 - `--provider` — inference engine: `llama-server` (default), `flm`,
-  `moonshine`, `kokoro`. (Since v0.2 the provider is normally implied by
+  `kokoro`. (Since v0.2 the provider is normally implied by
   `--type`; kept for legacy slot TOMLs.)
   **Note:** `comfyui` is not a valid `--provider` value in the CLI; image
   slots are created by passing `--type image`, which implies the comfyui

@@ -152,3 +152,68 @@ def test_post_invalid_id_writes_nothing(
     )
     evil_path = tmp_path / "evil.jinja"
     assert not evil_path.exists(), "Path traversal must not write outside store"
+
+
+# ── render-validation (valid / error fields) ──────────────────────────────────
+
+# A minimal but real chat template that renders cleanly against the sample.
+_GOOD_TEMPLATE = (
+    "{% for m in messages %}<|{{ m['role'] }}|>\n{{ m['content'] }}\n{% endfor %}"
+    "{% if add_generation_prompt %}<|assistant|>\n{% endif %}"
+)
+# Broken: unterminated {% for %} block → Jinja TemplateSyntaxError.
+_BROKEN_TEMPLATE = "{% for m in messages %}{{ m['content'] }}"
+
+
+def test_auto_entry_is_valid(store_client: TestClient) -> None:
+    """The synthetic ``auto`` entry is always reported valid (nothing to lint)."""
+    r = store_client.get("/api/chat-templates")
+    assert r.status_code == 200, r.text
+    auto = next(e for e in r.json() if e["id"] == "auto")
+    assert auto["valid"] is True
+    assert auto["error"] is None
+
+
+def test_bundled_templates_lint_clean(store_client: TestClient) -> None:
+    """The bundled templates (chatml/llama3/qwen3.6-27b-mtp) render-check clean."""
+    r = store_client.get("/api/chat-templates")
+    assert r.status_code == 200, r.text
+    by_id = {e["id"]: e for e in r.json()}
+    for tid in ("chatml", "llama3", "qwen3.6-27b-mtp"):
+        assert by_id[tid]["valid"] is True, f"{tid} unexpectedly invalid: {by_id[tid]['error']}"
+
+
+def test_valid_template_reports_valid(store_client: TestClient) -> None:
+    store_client.post("/api/chat-templates", json={"id": "goodtpl", "content": _GOOD_TEMPLATE})
+    r = store_client.get("/api/chat-templates")
+    entry = next(e for e in r.json() if e["id"] == "goodtpl")
+    assert entry["valid"] is True
+    assert entry["error"] is None
+
+
+def test_malformed_template_reports_invalid_with_error(
+    store_client: TestClient, tmp_path: Path
+) -> None:
+    """A malformed template dropped in the store dir is flagged, not hidden."""
+    # Drop straight onto the filesystem to exercise the catalog's own lint
+    # (the path that bypasses POST, i.e. an operator copying a file in).
+    store = tmp_path / "chat-templates"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "brokentpl.jinja").write_text(_BROKEN_TEMPLATE)
+
+    r = store_client.get("/api/chat-templates")
+    entry = next(e for e in r.json() if e["id"] == "brokentpl")
+    assert entry["valid"] is False
+    assert entry["error"], "an invalid template must carry a non-empty error string"
+
+
+def test_post_returns_lint_result(store_client: TestClient) -> None:
+    """POST echoes the lint result so a caller writing a broken template knows."""
+    r = store_client.post(
+        "/api/chat-templates", json={"id": "postbroken", "content": _BROKEN_TEMPLATE}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The write still succeeds (mirrors filesystem-drop), but it's flagged.
+    assert body["valid"] is False
+    assert body["error"]

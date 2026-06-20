@@ -12,6 +12,12 @@ import { ENDPOINTS } from '../endpoints'
 export interface ChatTemplate {
   id: string
   label: string
+  // Best-effort render lint from the backend (see api/routes/chat_templates.py).
+  // `valid` is false when a template in the store dir fails to render against a
+  // sample conversation; `error` carries the short reason. `auto` is always
+  // valid. Absent on older backends → treat as valid (optional fields).
+  valid?: boolean
+  error?: string | null
 }
 
 // `enabled` gates the fetch — pass the host modal/drawer's `open` so the

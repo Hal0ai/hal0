@@ -45,7 +45,6 @@ backwards compatibility.
 |----------------|------------------------------------------|----------------------------------------|
 | `llama-server` | llama.cpp server (ROCm / Vulkan / CPU)   | chat, embed, rerank                     |
 | `flm`          | FastFlowLM on the NPU                     | chat / stt / embed (one process, trio) |
-| `moonshine`    | Moonshine speech-to-text                  | transcription                          |
 | `kokoro`       | Kokoro-82M text-to-speech (ONNX)          | tts                                    |
 | `comfyui`      | ComfyUI image generation                  | image                                  |
 
@@ -117,7 +116,6 @@ for that release and the runtime pulls by tag with a warning.
 | `vulkan`    | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server`                                     | llama.cpp Vulkan backend               |
 | `rocm`      | `ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server`                               | llama.cpp ROCm backend                 |
 | `flm`       | `ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43`                                                         | FastFlowLM on AMD XDNA2 NPU            |
-| `moonshine` | `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1`                                                       | Moonshine STT (CPU/Vulkan)             |
 | `kokoro`    | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`                                                          | Kokoro-82M TTS (CPU ONNX)              |
 | `comfyui`   | `docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2` | ComfyUI image generation               |
 

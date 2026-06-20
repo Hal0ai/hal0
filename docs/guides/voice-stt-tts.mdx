@@ -1,6 +1,6 @@
 ---
 title: Speech to text and text to speech
-description: "Enable hal0's voice capability: transcription via Moonshine (CPU) or FLM (NPU), synthesis via Kokoro, then call /v1/audio/transcriptions and /v1/audio/speech."
+description: "Enable hal0's voice capability: transcription via whisper-v3:turbo on the XDNA NPU (FLM), synthesis via Kokoro, then call /v1/audio/transcriptions and /v1/audio/speech."
 sidebar:
   order: 80
 ---
@@ -9,9 +9,11 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 
 hal0 exposes two voice directions through OpenAI-compatible endpoints:
 
-- **Speech-to-text** (`POST /v1/audio/transcriptions`) — Moonshine container on CPU,
-  or the FLM trio on the NPU.
-- **Text-to-speech** (`POST /v1/audio/speech`) — Kokoro container on CPU.
+- **Speech-to-text** (`POST /v1/audio/transcriptions`) — `whisper-v3:turbo` served by
+  FastFlowLM (FLM) on the XDNA NPU, co-loaded with the chat model in one FLM process
+  (the "NPU trio": chat + STT + embed).
+- **Text-to-speech** (`POST /v1/audio/speech`) — Kokoro-82M ONNX container on CPU,
+  54 voices, MP3 by default (default voice: `af_heart`).
 
 Both are children of the **`voice`** capability: `voice.stt` maps to the
 `stt` slot and `voice.tts` maps to the `tts` slot.
@@ -23,16 +25,7 @@ picker, or by POSTing a partial selection to the capability API. The body
 accepts any subset of `{ backend, provider, model, enabled }`:
 
 <Tabs>
-<TabItem label="Speech-to-text (CPU, Moonshine)">
-
-```sh
-curl -X POST http://localhost:8080/api/capabilities/voice/stt \
-  -H 'Content-Type: application/json' \
-  -d '{"enabled": true, "backend": "cpu", "provider": "moonshine"}'
-```
-
-</TabItem>
-<TabItem label="Speech-to-text (NPU, FLM trio)">
+<TabItem label="Speech-to-text (NPU, FLM + whisper-v3:turbo)">
 
 ```sh
 curl -X POST http://localhost:8080/api/capabilities/voice/stt \
@@ -55,19 +48,19 @@ curl -X POST http://localhost:8080/api/capabilities/voice/tts \
 The response is `{ "ok": true, "selection": { ...current selection... } }`.
 
 <Aside type="note">
-Both Moonshine and Kokoro are containerized servers running on CPU — they do not use ROCm or the NPU.
-The NPU transcription path uses the FLM container, not Moonshine.
+STT runs on the XDNA NPU via the FLM container — not on CPU. There is no CPU
+whisper.cpp backend in hal0. Kokoro TTS runs on CPU (ONNX). Neither uses ROCm.
 </Aside>
 
-### How the NPU path differs
+### How the NPU STT path works
 
-Choosing `backend=npu` for `voice.stt` does **not** spawn a standalone
-process. Instead it drives the **FLM trio** — one `flm serve` anchor
-process serving chat coresident with transcription (and embeddings). The
-orchestrator toggles the anchor's `asr` flag and writes a
+Enabling `voice.stt` with `backend=npu` does **not** spawn a standalone
+process. It drives the **FLM trio** — one `flm serve` anchor process serving
+chat, transcription (whisper-v3:turbo), and embeddings together. The
+orchestrator toggles the anchor's `--asr 1` flag and writes a
 `type=transcription` slot record for dispatch gating; the live anchor is
-reloaded so the change takes effect. This is why NPU transcription needs
-the FLM chat anchor to be loaded.
+reloaded so the change takes effect immediately. NPU transcription requires the
+FLM chat anchor to be loaded.
 
 ## Transcribe audio (speech to text)
 

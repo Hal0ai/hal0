@@ -18,7 +18,7 @@ hal0 prefers them in.
 | AMD GPU (ROCm)      | llama.cpp ROCm            | chat / embed / rerank LLM inference (highest tps)  |
 | AMD GPU (Vulkan)    | llama.cpp Vulkan          | chat / embed / rerank LLM inference (broad-compat) |
 | AMD XDNA NPU        | FastFlowLM (FLM)          | chat + speech-to-text + embeddings (one process)   |
-| CPU                 | llama.cpp / ONNX          | fallback LLM inference; Kokoro TTS; Moonshine STT  |
+| CPU                 | llama.cpp / ONNX          | fallback LLM inference; Kokoro TTS                 |
 
 The reference platform is AMD Strix Halo: an 8060S-class iGPU, an XDNA NPU, and
 a unified-memory pool the GPU shares with the host via GTT. hal0's profile flags

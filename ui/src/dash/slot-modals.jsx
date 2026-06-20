@@ -830,10 +830,24 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     onChange={e => setChatTemplate(e.target.value)}
                   >
                     <option value="auto">Auto (GGUF embedded)</option>
-                    {templates.map(t => (
-                      <option key={t.id} value={t.id}>{t.label || t.id}</option>
+                    {/* Filter out the backend's own "auto" entry — it's rendered
+                        above as a fixed first option. A template the render-lint
+                        flagged invalid is disabled so it can't be pinned (it would
+                        only crash the slot at cold-start). */}
+                    {templates.filter(t => t.id !== "auto").map(t => (
+                      <option key={t.id} value={t.id} disabled={t.valid === false}>
+                        {(t.label || t.id) + (t.valid === false ? "  ⚠ invalid" : "")}
+                      </option>
                     ))}
                   </select>
+                  {(() => {
+                    const sel = templates.find(t => t.id === chatTemplate);
+                    return sel && sel.valid === false ? (
+                      <div className="hint" style={{color: "var(--err)", marginTop: 4}}>
+                        ⚠ Template failed to render: {sel.error}
+                      </div>
+                    ) : null;
+                  })()}
                   <button
                     type="button"
                     className="btn ghost sm"

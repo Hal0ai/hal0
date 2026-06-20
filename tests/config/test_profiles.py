@@ -120,8 +120,10 @@ class TestResolveProfileFlags:
         assert "--spec-draft-device ROCm0" in result
         assert "--spec-draft-ngl all" in result
         assert "--spec-draft-n-max 4" in result
-        assert "--spec-draft-type-k q4_0" in result
-        assert "--spec-draft-type-v q4_0" in result
+        assert "--spec-draft-type-k f16" in result
+        assert "--spec-draft-type-v f16" in result
+        assert "--spec-draft-threads 16" in result
+        assert "--spec-draft-poll 1" in result
 
     def test_mtp_bundle_literal_match(self) -> None:
         """MTP_FLAG_BUNDLE constant is verbatim in the resolved string."""
