@@ -886,14 +886,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
       )}
       {/* Task 2: MTP pill — capability-gated, rocm-only.
           Renders ONLY when the slot's loaded model has the "mtp" tag AND
-          the slot's device starts with "gpu-rocm". Toggle is instant-apply
+          the slot's backend is "rocm". Toggle is instant-apply
           via PUT /config (editMut) + non-blocking restart (mirrors the
           profile-change pattern above). */}
       {(() => {
         const cur = slot.model_id || slot.model || "";
         const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
         const mtpCapable = Array.isArray(m?.tags) && m.tags.includes("mtp");
-        const isRocm = String(slot.device || "").startsWith("gpu-rocm");
+        // Gate on `backend` — the authoritative slot field the API emits.
+        // `device` ("gpu-rocm") is a client-side convenience synthesized by
+        // normalizeSlot from backend and is ABSENT on the raw slot shape, so
+        // keying off it alone is fragile; the device check stays only as a
+        // defensive fallback for any path that bypasses the normalizer.
+        const isRocm = slot.backend === "rocm" || String(slot.device || "").startsWith("gpu-rocm");
         if (!mtpCapable || !isRocm) return null;
         const mtpOn = slot.mtp === true;
         return (
