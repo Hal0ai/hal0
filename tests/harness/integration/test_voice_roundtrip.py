@@ -38,7 +38,7 @@ def test_normalized_match_detects_divergence() -> None:
 
 TTS_MODEL = os.environ.get("HAL0_VOICE_TTS_MODEL", "kokoro-v1")
 TTS_VOICE = os.environ.get("HAL0_VOICE_TTS_VOICE", "af_heart")
-STT_MODEL = os.environ.get("HAL0_VOICE_STT_MODEL", "Whisper-Large-v3-Turbo")
+STT_MODEL = os.environ.get("HAL0_VOICE_STT_MODEL", "whisper-v3:turbo")
 _LIVE_URL = os.environ.get("HAL0_VOICE_LIVE_URL")
 
 
