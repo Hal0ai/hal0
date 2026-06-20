@@ -124,13 +124,15 @@ def test_bearer_resolver_stamps_client_id_off_request_ctx() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_add_promotes_to_private_namespace_via_resolvers() -> None:
-    """End-to-end: the dispatcher wired with the production resolvers
-    promotes a write to ``private:<client_id>`` when the live MCP request
-    carries ``X-hal0-Private: 1`` — and stays ``shared`` without it.
+async def test_memory_add_private_toggle_requires_identity_via_resolvers() -> None:
+    """End-to-end: the dispatcher wired with the production resolvers honors
+    ``X-hal0-Private: 1`` — promoting to ``private:<client_id>`` for a real
+    identity, rejecting when the identity is absent/anonymous, and staying
+    ``shared`` without the toggle.
 
-    This is the user-visible symptom from #413: private writes silently
-    landed in ``shared`` because the resolver never saw the header.
+    #413: private writes once silently landed in ``shared`` because the
+    resolver never saw the header. Follow-up: with the header but no agent id
+    they silently landed in ``private:anonymous`` — also wrong. Now rejected.
     """
     wrapper = _RecordingWrapper()
     dispatcher = memory.make_dispatcher(
@@ -139,10 +141,12 @@ async def test_memory_add_promotes_to_private_namespace_via_resolvers() -> None:
         private_resolver=mcp_mount.private_resolver,
     )
 
+    # Private toggle with no/anonymous agent id is REJECTED, not mis-scoped
+    # into private:anonymous (the misrouting bug that was filling that bank).
     with _CtxToken({"X-hal0-Private": "1"}):
         out = await dispatcher("memory_add", {"text": "remember me", "dataset": ""})
-    assert out["status"] == "ok", out
-    assert wrapper.add_calls[-1]["dataset"] == "private:anonymous"
+    assert out["status"] == "error", out
+    assert not any(c["dataset"] == "private:anonymous" for c in wrapper.add_calls)
 
     with _CtxToken({}):
         out = await dispatcher("memory_add", {"text": "shared note", "dataset": ""})

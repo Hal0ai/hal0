@@ -62,6 +62,16 @@ def test_write_private_toggle_still_promotes() -> None:
     assert resolve_write_dataset("anything", private=True, client_id="a") == "private:a"
 
 
+def test_write_private_rejects_missing_or_anonymous_client_id() -> None:
+    # The MCP/REST identity resolvers emit "anonymous" for an absent/malformed
+    # X-hal0-Agent header; a private write under it must be rejected, not
+    # mis-scoped into a private:anonymous bank (regression: that bank was
+    # accumulating misrouted writes because "anonymous" is truthy).
+    for cid in (None, "", "anonymous"):
+        with pytest.raises(MemoryNamespaceError, match="authenticated client_id"):
+            resolve_write_dataset("anything", private=True, client_id=cid)
+
+
 # ── resolve_read_datasets ────────────────────────────────────────────────────
 
 
