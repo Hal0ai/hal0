@@ -13,6 +13,7 @@ Prewired variables (PLAN.md §8):
     WEBUI_NAME=hal0
     ENABLE_OPENAI_API=True
     ENABLE_OLLAMA_API=False
+    ENABLE_PERSISTENT_CONFIG=False
     DATA_DIR=/app/backend/data
     DEFAULT_LOCALE=en
 
@@ -99,6 +100,11 @@ _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
     "DEFAULT_LOCALE": "en",
     "ENABLE_OLLAMA_API": "False",
     "ENABLE_OPENAI_API": "True",
+    # Disable OWUI's PersistentConfig so env vars always win.  Without this,
+    # OWUI pins values like OPENAI_API_BASE_URLS in its DB on first boot and
+    # ignores env on subsequent boots — so a stale DB entry (e.g. the container
+    # loopback 127.0.0.1:8080) silently overrides the correct env value.
+    "ENABLE_PERSISTENT_CONFIG": "False",
     "OPENAI_API_BASE_URLS": "http://host.docker.internal:8080/v1",
     "WEBUI_AUTH": "False",
     "WEBUI_NAME": "hal0",
