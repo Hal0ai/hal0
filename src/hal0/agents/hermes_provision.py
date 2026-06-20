@@ -2954,9 +2954,20 @@ def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
     )
 
 
+# /api/slots uses "transcription" as the type for STT slots; accept both so
+# _find_slot(slots, "stt") matches regardless of which label the server uses.
+_STT_SLOT_TYPES: frozenset[str] = frozenset({"stt", "transcription"})
+
+
 def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+    # Check the functional type field directly — _slot_kind checks "kind" before
+    # "type", but "kind" carries the local/remote deployment shape ("local"),
+    # not the capability.  Matching on "type" (then "capability") avoids the
+    # short-circuit that made voice_wire always skip local tts/transcription slots.
+    accept = _STT_SLOT_TYPES if kind == "stt" else frozenset({kind})
     for s in slots:
-        if _slot_kind(s) == kind and _is_ready(s):
+        slot_type = (s.get("type") or s.get("capability") or "").lower()
+        if slot_type in accept and _is_ready(s):
             return s
     return None
 

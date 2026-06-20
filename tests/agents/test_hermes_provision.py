@@ -1591,6 +1591,68 @@ def test_voice_wire_skips_when_no_voice_slot(
     assert out.status == hp.PhaseStatus.SKIP
 
 
+def test_voice_wire_finds_local_tts_and_transcription_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: _find_slot used _slot_kind which read 'kind' before 'type'.
+
+    Real /api/slots sets kind='local' (deployment shape) on all local slots,
+    so _slot_kind returned 'local' instead of 'tts'/'transcription'.  voice_wire
+    always skipped with 'no stt/tts slots ready', never writing the env vars.
+    """
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    secrets_env = tmp_path / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", secrets_env)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    (hermes_home / "config.yaml").write_text(
+        hp._render_config_yaml(
+            primary={"model_id": "primary", "backend_url": "http://127.0.0.1:8080/v1", "context_length": 8000},
+            agent_id="hermes-agent",
+        ),
+        encoding="utf-8",
+    )
+    tts_url = "http://127.0.0.1:8084/v1"
+    stt_url = "http://127.0.0.1:8088/v1"
+    # Both slots have kind='local' (the local-vs-remote deployment field) AND
+    # the functional type field.  Before the fix, _slot_kind returned 'local'
+    # for both, so _find_slot(slots, 'tts') and _find_slot(slots, 'stt')
+    # always returned None and voice_wire always skipped.
+    slots = [
+        {
+            "name": "kokoro",
+            "type": "tts",
+            "kind": "local",
+            "state": "ready",
+            "backend_url": tts_url,
+        },
+        {
+            "name": "whisper",
+            "type": "transcription",
+            "kind": "local",
+            "state": "ready",
+            "backend_url": stt_url,
+        },
+    ]
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    io = hp.PhaseIO(
+        fetch_slots=lambda: slots,
+        fetch_model_contexts=lambda: {},
+    )
+    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    assert out.status == hp.PhaseStatus.OK, (
+        f"expected OK but got {out.status!r}: {out.reason!r} — "
+        "voice_wire skipped local tts/transcription slots (kind='local' bug)"
+    )
+    env_text = secrets_env.read_text()
+    assert f"TTS_OPENAI_BASE_URL={tts_url}" in env_text, (
+        f"TTS URL not written to secrets env. env contents:\n{env_text}"
+    )
+    assert f"STT_OPENAI_BASE_URL={stt_url}" in env_text, (
+        f"STT URL not written to secrets env. env contents:\n{env_text}"
+    )
+
+
 # ── #246 phase impls — smoke_tests + self_report ────────────────────────────
 
 
