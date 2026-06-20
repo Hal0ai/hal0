@@ -739,11 +739,11 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "rocm-dnse": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk f16 -ctv f16 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1",
+        "flags": "-fa on -ctk q4_0 -ctv q4_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Dense + MTP · f16 KV",
+        "intent": "Dense + MTP · q4 KV",
         "quant": "FP4",
     },
     "rocm-moe": {
