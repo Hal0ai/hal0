@@ -16,6 +16,17 @@ Prewired variables (PLAN.md §8):
     DATA_DIR=/app/backend/data
     DEFAULT_LOCALE=en
 
+Voice / Call-mode variables:
+    AUDIO_STT_ENGINE=openai
+    AUDIO_STT_OPENAI_API_BASE_URL=http://host.docker.internal:8080/v1
+    AUDIO_STT_OPENAI_API_KEY=sk-hal0-local
+    AUDIO_STT_MODEL=whisper-v3:turbo
+    AUDIO_TTS_ENGINE=openai
+    AUDIO_TTS_OPENAI_API_BASE_URL=http://host.docker.internal:8080/v1
+    AUDIO_TTS_OPENAI_API_KEY=sk-hal0-local
+    AUDIO_TTS_MODEL=kokoro-v1
+    AUDIO_TTS_VOICE=af_heart
+
 OpenWebUI runs in its open-by-default posture. Operators fronting hal0
 with an upstream reverse proxy that injects a trusted email header
 should pass `WEBUI_AUTH=True` + `WEBUI_AUTH_TRUSTED_EMAIL_HEADER=<name>`
@@ -72,6 +83,18 @@ write_env_atomic = _load_write_env_atomic()
 #   ``--add-host=host.docker.internal:host-gateway``. podman (>=4.0)
 #   honours the host-gateway magic value just like Docker does on Linux.
 _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
+    # Voice / Call mode — point Open WebUI's STT+TTS at hal0's own /v1 audio
+    # endpoints (Call mode in the browser does mic capture + playback; hal0
+    # provides the engines). API key is a placeholder — hal0 ignores auth.
+    "AUDIO_STT_ENGINE": "openai",
+    "AUDIO_STT_MODEL": "whisper-v3:turbo",
+    "AUDIO_STT_OPENAI_API_BASE_URL": "http://host.docker.internal:8080/v1",
+    "AUDIO_STT_OPENAI_API_KEY": "sk-hal0-local",
+    "AUDIO_TTS_ENGINE": "openai",
+    "AUDIO_TTS_MODEL": "kokoro-v1",
+    "AUDIO_TTS_OPENAI_API_BASE_URL": "http://host.docker.internal:8080/v1",
+    "AUDIO_TTS_OPENAI_API_KEY": "sk-hal0-local",
+    "AUDIO_TTS_VOICE": "af_heart",
     "DATA_DIR": "/app/backend/data",
     "DEFAULT_LOCALE": "en",
     "ENABLE_OLLAMA_API": "False",

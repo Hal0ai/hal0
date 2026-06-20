@@ -129,6 +129,21 @@ def test_webui_auth_is_always_false_by_default(
     assert "WEBUI_AUTH_TRUSTED_EMAIL_HEADER" not in env
 
 
+def test_write_openwebui_env_includes_voice_callmode_keys(tmp_path: Path) -> None:
+    """Open WebUI Call mode is prewired to hal0's /v1 audio endpoints."""
+    target = tmp_path / "openwebui.env"
+    write_openwebui_env(target)
+    env = _parse_env(target.read_text())
+
+    assert env["AUDIO_STT_ENGINE"] == "openai"
+    assert env["AUDIO_TTS_ENGINE"] == "openai"
+    assert env["AUDIO_STT_OPENAI_API_BASE_URL"] == "http://host.docker.internal:8080/v1"
+    assert env["AUDIO_TTS_OPENAI_API_BASE_URL"] == "http://host.docker.internal:8080/v1"
+    assert env["AUDIO_STT_MODEL"] == "whisper-v3:turbo"
+    assert env["AUDIO_TTS_MODEL"] == "kokoro-v1"
+    assert env["AUDIO_TTS_VOICE"]  # a non-empty default voice
+
+
 def test_trusted_email_header_via_explicit_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
