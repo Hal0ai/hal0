@@ -21,23 +21,26 @@ intent       = "MoE agents"
 quant        = "FP4"
 
 [profile.rocm-dnse]
-# ROCm + MTP draft-mtp, q4 KV (dense chat, qwopus 27B). ~30.4 tok/s.
+# ROCm + MTP draft-mtp, f16 KV (dense chat, qwopus 27B). Bench-tuned: f16 KV,
+# -b 8192/-ub 2048, 16+32 threads, poll. NOTE: f16 KV is heavier than q4 — at
+# large ctx a dense 27B may not coexist with other GPU slots; validate fit.
 image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-flags        = "-fa on -ctk q4_0 -ctv q4_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+flags        = "-fa on -ctk f16 -ctv f16 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1"
 mtp          = true
 device_class = "gpu"
 backend      = "rocm"
-intent       = "Dense + MTP · q4 KV"
+intent       = "Dense + MTP · f16 KV"
 quant        = "FP4"
 
 [profile.rocm-moe]
-# ROCm + MTP draft-mtp for MoE (ace-saber 35B-A3B), q4 KV, 16 threads + jinja. ~90 tok/s.
+# ROCm + MTP draft-mtp for MoE (crown-halo / ace-saber 35B-A3B). Bench-tuned:
+# f16 KV, -b 8192/-ub 2048, 16+32 threads, poll, jinja. ~84 tok/s (n-max 4).
 image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-flags        = "-fa on -ctk q4_0 -ctv q4_0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja"
+flags        = "-fa on -ctk f16 -ctv f16 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1 --jinja"
 mtp          = true
 device_class = "gpu"
 backend      = "rocm"
-intent       = "MoE + MTP · q4 KV"
+intent       = "MoE + MTP · f16 KV"
 quant        = "FP4"
 
 [profile.vulkan]
