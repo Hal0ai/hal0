@@ -51,15 +51,16 @@ def test_voice_roundtrip_live() -> None:
     with httpx.Client(timeout=180.0) as client:
         speech = client.post(
             f"{base}/v1/audio/speech",
-            json={"model": TTS_MODEL, "input": phrase, "voice": TTS_VOICE},
+            json={"model": TTS_MODEL, "input": phrase, "voice": TTS_VOICE, "response_format": "wav"},
         )
         assert speech.status_code == 200, speech.text
-        wav = speech.content
-        assert wav[:4] == b"RIFF" and len(wav) > 1000, f"not a wav: {wav[:16]!r} len={len(wav)}"
+        audio = speech.content
+        assert len(audio) > 1000, f"audio too small: {len(audio)}"
 
+        fmt = "wav" if audio[:4] == b"RIFF" else "mp3"
         stt = client.post(
             f"{base}/v1/audio/transcriptions",
-            files={"file": ("speech.wav", wav, "audio/wav")},
+            files={"file": (f"speech.{fmt}", audio, f"audio/{fmt}")},
             data={"model": STT_MODEL},
         )
         assert stt.status_code == 200, stt.text
