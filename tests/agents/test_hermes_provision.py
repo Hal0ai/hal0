@@ -1657,6 +1657,78 @@ def test_voice_wire_finds_local_tts_and_transcription_slots(
     )
 
 
+def test_voice_wire_provisions_stt_for_npu_trio_facade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: NPU-trio stt facade (type=transcription, state=offline, served_by=anchor)
+    was rejected by _find_slot because _is_ready checks state and 'offline' is not in the
+    ready set. The facade has no unit of its own — the npu anchor's FLM child serves it.
+    Fix: _find_slot should accept the facade when its named anchor is ready.
+    """
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    secrets_env = tmp_path / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", secrets_env)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    (hermes_home / "config.yaml").write_text(
+        hp._render_config_yaml(
+            primary={
+                "model_id": "primary",
+                "backend_url": "http://127.0.0.1:8080/v1",
+                "context_length": 8000,
+            },
+            agent_id="hermes-agent",
+        ),
+        encoding="utf-8",
+    )
+    tts_url = "http://127.0.0.1:8084/v1"
+    # NPU trio: anchor (llm, ready) + stt facade (transcription, offline, served_by anchor)
+    # The facade mirrors live container_enrichment output: served_by is the anchor name.
+    slots = [
+        {
+            "name": "kokoro",
+            "type": "tts",
+            "kind": "local",
+            "state": "ready",
+            "backend_url": tts_url,
+        },
+        {
+            "name": "npu",
+            "type": "llm",
+            "kind": "local",
+            "state": "ready",
+        },
+        {
+            "name": "stt",
+            "type": "transcription",
+            "kind": "local",
+            "state": "offline",  # facade has no unit; routes through npu anchor
+            "served_by": "npu",
+        },
+    ]
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    io = hp.PhaseIO(
+        fetch_slots=lambda: slots,
+        fetch_model_contexts=lambda: {},
+    )
+    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    assert out.status == hp.PhaseStatus.OK, (
+        f"expected OK but got {out.status!r}: {out.reason!r} — "
+        "voice_wire skipped NPU-trio stt facade (offline state bug)"
+    )
+    env_text = secrets_env.read_text()
+    assert f"TTS_OPENAI_BASE_URL={tts_url}" in env_text
+    assert "STT_OPENAI_BASE_URL=" in env_text, (
+        f"STT URL not written to secrets env. env contents:\n{env_text}"
+    )
+    # The facade has no explicit backend_url, so _slot_backend_url falls back
+    # to the default HAL0 API gateway — voice clients send STT there, which
+    # routes to the NPU trio.
+    assert f"STT_OPENAI_BASE_URL={hp._DEFAULT_PRIMARY_BACKEND_URL}" in env_text, (
+        f"STT URL incorrect. env contents:\n{env_text}"
+    )
+
+
 # ── #246 phase impls — smoke_tests + self_report ────────────────────────────
 
 

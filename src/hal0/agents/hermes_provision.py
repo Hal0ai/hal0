@@ -2975,6 +2975,18 @@ def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
         slot_type = (s.get("type") or s.get("capability") or "").lower()
         if slot_type in accept and _is_ready(s):
             return s
+    # STT special case: the NPU-trio transcription facade (type=transcription,
+    # served_by=<anchor>) always reports state=offline — it has no unit of its
+    # own and routes through the npu anchor's FLM child. container_enrichment
+    # stamps served_by on these shadows. Accept the facade when its anchor is
+    # ready so voice_wire auto-provisions STT_OPENAI_BASE_URL.
+    if kind == "stt":
+        ready_names = {str(s.get("name")) for s in slots if _is_ready(s) and s.get("name")}
+        for s in slots:
+            slot_type = (s.get("type") or s.get("capability") or "").lower()
+            anchor = s.get("served_by")
+            if slot_type in accept and isinstance(anchor, str) and anchor in ready_names:
+                return s
     return None
 
 
