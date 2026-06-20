@@ -748,11 +748,11 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "rocm-moe": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk f16 -ctv f16 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1 --jinja",
+        "flags": "-fa on -ctk q4_0 -ctv q4_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1 --jinja",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "MoE + MTP · f16 KV",
+        "intent": "MoE + MTP · q4 KV",
         "quant": "FP4",
     },
     "vulkan": {
