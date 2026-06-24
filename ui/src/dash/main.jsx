@@ -136,6 +136,16 @@ function App() {
   const [footerOpen, setFooterOpen] = useStateA(false);
   const [paletteOpen, setPaletteOpen] = useStateA(false);
   const [navOpen, setNavOpen] = useStateA(false);
+  const [chatOpen, setChatOpen] = useStateA(false);
+
+  // Agent-chat slide-out (the orchestrator) is hoisted to App so it can be
+  // opened from anywhere in the dash — the topbar Agent Chat button and the
+  // board toolbar both toggle it via the `hal0:toggle-agent-chat` event. The
+  // conversation hook lives here (App stays mounted) so the thread survives
+  // closing/reopening the slide-out. The board-hook bridge loads before
+  // main.jsx (see main.tsx), so this window ref is set on first render.
+  const useBoardChatHook = (typeof window !== "undefined" && window.__hal0UseBoardChat) || null;
+  const agentChat = useBoardChatHook ? useBoardChatHook() : undefined;
 
   // 0.4 gate: the Agent route is reduced to the Memory tab, so it only
   // renders when the memory subsystem is live (HAL0_MEMORY_ENABLED, surfaced
@@ -190,7 +200,7 @@ function App() {
   useEffectA(() => {
     // global keyboard shortcuts
     const onKey = (e) => {
-      if (e.key === "Escape") { setBellOpen(false); setNavOpen(false); return; }
+      if (e.key === "Escape") { setBellOpen(false); setNavOpen(false); setChatOpen(false); return; }
       const tgt = e.target;
       const typing = tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable);
       if (typing) return;
@@ -219,6 +229,22 @@ function App() {
     const onApprovals = () => setBellOpen(true);
     window.addEventListener("hal0:open-approvals", onApprovals);
     return () => window.removeEventListener("hal0:open-approvals", onApprovals);
+  }, []);
+
+  // Agent-chat: broadcast open state (so triggers everywhere can light up) and
+  // expose a global toggle driven by the `hal0:toggle-agent-chat` event.
+  useEffectA(() => {
+    window.__hal0AgentChatOpen = chatOpen;
+    window.dispatchEvent(new CustomEvent("hal0:agent-chat-changed", { detail: chatOpen }));
+  }, [chatOpen]);
+  useEffectA(() => {
+    const onToggle = () => setChatOpen(o => !o);
+    window.__hal0ToggleAgentChat = () => setChatOpen(o => !o);
+    window.addEventListener("hal0:toggle-agent-chat", onToggle);
+    return () => {
+      window.removeEventListener("hal0:toggle-agent-chat", onToggle);
+      delete window.__hal0ToggleAgentChat;
+    };
   }, []);
 
   // Close the mobile nav drawer on any route change (deep links, command
@@ -293,6 +319,8 @@ function App() {
         <TopBar
           route={route}
           onCmdK={() => setPaletteOpen(true)}
+          onBoard={() => go("board")}
+          onAgentChat={() => setChatOpen(o => !o)}
           onMenu={() => setNavOpen(true)}
           menuOpen={navOpen}
         />
@@ -348,6 +376,23 @@ function App() {
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <SlotActionBridge />
+
+      {/* Agent-chat slide-out — global, triggered from the topbar or the board.
+          Renders only when open; the conversation hook lives in App so the
+          thread persists across open/close. byId comes from the board (when
+          mounted) so task-ref chips resolve; a ref click jumps to the board. */}
+      {chatOpen && typeof AgentChat === "function" && (
+        <AgentChat
+          chat={agentChat}
+          byId={(typeof window !== "undefined" && window.__hal0BoardById) || {}}
+          onClose={() => setChatOpen(false)}
+          onOpenTask={(id) => {
+            setChatOpen(false);
+            window.location.hash = "#board";
+            window.dispatchEvent(new CustomEvent("hal0:open-board-task", { detail: id }));
+          }}
+        />
+      )}
 
       {toast && (
         <div className={"hal0-toast " + (toast.kind || "info")} role="status" aria-live="polite">

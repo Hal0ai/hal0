@@ -57,8 +57,9 @@ test.describe('BoardView — render', () => {
   test('entry via ⌘K palette → Operator Board', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.topbar')).toBeVisible({ timeout: FIVE_S })
-    // Click the command palette button in topbar
-    await page.locator('.tb-cmdk').click()
+    // The topbar "Quick actions" button was replaced by the Kanban + Agent Chat
+    // launchers; the command palette is now reached via the ⌘K shortcut.
+    await page.keyboard.press('Control+k')
     const palette = page.locator('.cp-shell')
     await expect(palette).toBeVisible({ timeout: FIVE_S })
     // Type to find board
@@ -75,10 +76,10 @@ test.describe('BoardView — render', () => {
     await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
   })
 
-  test('entry via sidebar Services Kanban link', async ({ page }) => {
+  test('entry via topbar Kanban launcher', async ({ page }) => {
     await page.goto('/')
     await page.waitForLoadState('domcontentloaded')
-    await page.locator('[data-testid="svc-kanban"]').click()
+    await page.locator('[data-testid="tb-launch-board"]').click()
     await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
   })
 
@@ -158,21 +159,25 @@ test.describe('BoardView — render', () => {
 
   // ── Show-archived toggle ──────────────────────────────────────────────
 
-  test('show-archived toggle is visible and clickable', async ({ page }) => {
-    // The BOARD_LANES in board-view.jsx has 8 lanes; no archived lane is added
-    // by the local toggle — it affects visibleIds (select-all includes archived)
-    // and triggers a refetch with include_archived=true via the hook.
+  test('show-archived toggle reveals the Archived lane', async ({ page }) => {
+    // BOARD_LANES includes an `archived` lane that is filtered out by default
+    // and revealed when "Show archived" is on (it also widens visibleIds for
+    // select-all + triggers an include_archived=true refetch via the hook).
     await gotoBoardAndWait(page)
     const toggleLabel = page.locator('[data-testid="board-toggle-archived"]')
     await expect(toggleLabel).toBeVisible()
-    // Toggle on
+    // Hidden by default.
+    const archivedLane = page.locator('[data-testid="board-lane-archived"]')
+    await expect(archivedLane).toHaveCount(0)
+    // Toggle on → the check lights up and the Archived lane appears.
     await toggleLabel.click()
-    // The check element gets the "on" class when active
     const check = toggleLabel.locator('..').locator('.kcheck').first()
     await expect(check).toHaveClass(/on/, { timeout: FIVE_S })
-    // Toggle off again
+    await expect(archivedLane).toBeVisible({ timeout: FIVE_S })
+    // Toggle off again → lane hidden.
     await toggleLabel.click()
     await expect(check).not.toHaveClass(/on/)
+    await expect(archivedLane).toHaveCount(0)
   })
 
   // ── By-profile toggle ─────────────────────────────────────────────────

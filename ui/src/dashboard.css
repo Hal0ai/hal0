@@ -263,6 +263,50 @@ a { color: inherit; text-decoration: none; }
   color: var(--fg-3);
 }
 
+/* Topbar primary launchers — Kanban + Agent Chat. Replaces the old
+   "Quick actions" button. Icons read white at rest with a soft cast shadow,
+   then glow amber (the accent) on hover / when their surface is active. */
+.tb-launch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.tb-launch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-2);
+  background: var(--bg-2);
+  cursor: pointer;
+  transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.tb-launch-btn svg {
+  color: #fff;                                       /* white at rest */
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.55)); /* shadow */
+  transition: color .16s ease, filter .16s ease;
+}
+.tb-launch-btn:hover {
+  color: var(--fg);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+.tb-launch-btn:hover svg,
+.tb-launch-btn.on svg {
+  color: var(--accent);                              /* yellow/amber */
+  filter: drop-shadow(0 0 5px var(--accent)) drop-shadow(0 1px 1px rgba(0, 0, 0, 0.5)); /* glow */
+}
+.tb-launch-btn.on {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent-line), 0 0 14px -4px var(--accent);
+}
+
 /* wordmark — inline SVG renders at currentColor */
 .wm svg { display: block; }
 .wm .zero { fill: var(--accent); }
@@ -1936,6 +1980,7 @@ select.npu-sel {
   .view-banners { padding: 14px 16px 0; }
   .tb-brand { width: auto; }
   .tb-cmdk { display: none; }   /* command palette folded into the nav drawer on mobile */
+  .tb-launch { display: none; } /* Kanban + Agent Chat launchers: use the nav drawer on mobile */
   .topbar .tb-menu { display: flex; }
   .tb-eyebrow { display: none; }
   .tiers { grid-template-columns: 1fr; }

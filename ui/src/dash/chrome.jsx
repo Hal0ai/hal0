@@ -136,7 +136,17 @@ const Icons = {
 };
 
 // ─── TopBar ───
-function TopBar({ route, onCmdK, onMenu, menuOpen = false }) {
+function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false }) {
+  // Mirror the global agent-chat open state so the Agent Chat launcher lights
+  // up while the slide-out is open (App broadcasts hal0:agent-chat-changed).
+  const [chatOn, setChatOn] = useStateC(
+    typeof window !== "undefined" ? !!window.__hal0AgentChatOpen : false,
+  );
+  useEffectC(() => {
+    const onChg = (e) => setChatOn(!!e.detail);
+    window.addEventListener("hal0:agent-chat-changed", onChg);
+    return () => window.removeEventListener("hal0:agent-chat-changed", onChg);
+  }, []);
   // Brand-bar version badge — live from /api/updates/state (hal0.current,
   // sourced from hal0.__version__) so it never goes stale; the static fallback
   // keeps it correct before the first response lands.
@@ -168,12 +178,29 @@ function TopBar({ route, onCmdK, onMenu, menuOpen = false }) {
         </div>
       )}
       <div className="tb-spacer" />
-      {/* Operator Board launcher moved to the sidebar Services section (Kanban).
-          The ⌘B shortcut (main.jsx) still jumps to #board. */}
-      <button className="tb-cmdk" onClick={onCmdK}>
-        {Icons.zap}<span>Quick actions</span>
-        <kbd>⌘K</kbd>
-      </button>
+      {/* Primary launchers — Kanban board + the agent-chat slide-out. These
+          replace the old "Quick actions" button (the ⌘K command palette is
+          still reachable via the shortcut). White icons by default, glowing
+          amber on hover/active. */}
+      <div className="tb-launch">
+        <button
+          className={"tb-launch-btn" + (route === "board" ? " on" : "")}
+          data-testid="tb-launch-board"
+          onClick={onBoard}
+          title="Open the Kanban board (⌘B)"
+        >
+          {Icons.board}<span>Kanban</span>
+        </button>
+        <button
+          className={"tb-launch-btn" + (chatOn ? " on" : "")}
+          data-testid="tb-launch-chat"
+          onClick={onAgentChat}
+          title="Open the agent chat"
+          aria-pressed={chatOn}
+        >
+          {Icons.agent}<span>Agent Chat</span>
+        </button>
+      </div>
       {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
       <button
         className="tb-menu"
@@ -306,10 +333,11 @@ function NavList({ route, param, onGo, testPrefix }) {
 
 // ─── ServiceLinks (sidebar bottom) ───
 // A separate launch zone, pinned to the sidebar bottom below the spacer, away
-// from the app/config nav above. Holds the three sibling-service shortcuts:
-//   - Kanban    → the internal Operator Board (#board) — same target as ⌘B.
+// from the app/config nav above. Holds the external sibling-service shortcuts:
 //   - OpenWebUI → external chat UI, link host-derived by GET /api/config/urls.
 //   - Hermes    → external Hermes dashboard, likewise host-derived.
+// (The Kanban shortcut moved to the topbar launcher; the Operator Board is
+// also in the main nav and on ⌘B.)
 // The external links come from `useConfigUrls`, whose backend resolves the
 // hostname from the *request* (loopback, LAN IP, mDNS, or proxy domain) — so
 // they resolve correctly on every install, not just this dev box. Each is gated
@@ -325,14 +353,6 @@ function ServiceLinks({ onGo, onLaunch, testPrefix }) {
     <div className="sb-services">
       <div className="sb-section">Services</div>
       <div className="sb-svc-list">
-        <div
-          className="sb-row sb-svc"
-          data-testid={testPrefix + "kanban"}
-          onClick={() => { onGo("board"); onLaunch && onLaunch(); }}
-        >
-          {Icons.board}
-          <span className="lbl">Kanban</span>
-        </div>
         {owui && (
           <a
             className="sb-row sb-svc"

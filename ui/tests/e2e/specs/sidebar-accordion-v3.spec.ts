@@ -67,15 +67,15 @@ test.describe('sidebar accordion', () => {
 })
 
 test.describe('sidebar Services zone', () => {
-  test('renders Kanban + install-derived OpenWebUI/Hermes links', async ({ page }) => {
+  test('renders install-derived OpenWebUI/Hermes links (no Kanban — moved to topbar)', async ({ page }) => {
     await mockConfigUrls(page)
     await page.goto('/#dashboard')
     const svc = page.locator('.sb-services')
     await expect(svc).toBeVisible({ timeout: FIVE_S })
 
-    // Kanban is an internal nav (no href); OpenWebUI/Hermes are external <a>s
-    // whose href comes straight from the backend-resolved config URLs.
-    await expect(svc.locator('[data-testid="svc-kanban"]')).toBeVisible()
+    // Kanban moved to the topbar launcher; Services now holds only the external
+    // OpenWebUI/Hermes <a>s, hrefs straight from the backend-resolved config.
+    await expect(svc.locator('[data-testid="svc-kanban"]')).toHaveCount(0)
     await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveAttribute(
       'href',
       'http://hal0.example:3001',
@@ -89,9 +89,9 @@ test.describe('sidebar Services zone', () => {
     await expect(svc.locator('[data-testid="svc-openwebui"]')).toHaveAttribute('rel', /noopener/)
   })
 
-  test('Kanban link routes to the Operator Board', async ({ page }) => {
+  test('topbar Kanban launcher routes to the Operator Board', async ({ page }) => {
     await page.goto('/#dashboard')
-    await page.locator('[data-testid="svc-kanban"]').click()
+    await page.locator('[data-testid="tb-launch-board"]').click()
     await expect(page).toHaveURL(/#board/)
     await expect(page.locator('[data-testid="board-view"]')).toBeVisible({ timeout: FIVE_S })
   })
@@ -111,7 +111,7 @@ test.describe('sidebar Services zone', () => {
     )
     await page.goto('/#dashboard')
     const svc = page.locator('.sb-services')
-    await expect(svc.locator('[data-testid="svc-kanban"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(svc).toBeVisible({ timeout: FIVE_S })
     await expect(svc.locator('[data-testid="svc-openwebui"]')).toBeVisible()
     await expect(svc.locator('[data-testid="svc-hermes"]')).toHaveCount(0)
   })

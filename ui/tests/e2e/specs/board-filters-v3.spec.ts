@@ -71,8 +71,10 @@ test.describe('BoardView — filters', () => {
   })
 
   test('show-archived toggle toggles on/off (affects visibleIds for select-all)', async ({ page }) => {
-    // BOARD_LANES in board-view.jsx has no archived entry — toggle affects
-    // visibleIds (select-all count) and triggers include_archived=true refetch.
+    // The toggle reveals the archived lane (BOARD_LANES includes it, filtered
+    // out by default), widens visibleIds (select-all count), and triggers an
+    // include_archived=true refetch. (Lane visibility is asserted in
+    // board-render-v3; here we just check the on/off state.)
     await gotoBoardAndWait(page)
     const toggleLabel = page.locator('[data-testid="board-toggle-archived"]')
     await expect(toggleLabel).toBeVisible()

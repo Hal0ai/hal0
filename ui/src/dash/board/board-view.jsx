@@ -94,6 +94,10 @@ const BOARD_LANES = [
   { id: "blocked",   name: "Blocked",   desc: "Waiting for resource or input" },
   { id: "review",    name: "Review",    desc: "Needs operator sign-off" },
   { id: "done",      name: "Done",      desc: "Completed" },
+  // Hidden by default — revealed only when the "Show archived" filter is on
+  // (see the BOARD_LANES.filter on showArchived below). Tasks reach this lane
+  // via the bulk "archive" action and the task-drawer archive button.
+  { id: "archived",  name: "Archived",  desc: "Archived tasks" },
 ];
 
 // ─── Lightweight dropdown (filter selects) ────────────────────────────────────
@@ -164,7 +168,6 @@ function BoardView() {
   const useSwitchBoard      = window.__hal0UseSwitchBoard;
   const useCreateBoard      = window.__hal0UseCreateBoard;
   const useCreateTask       = window.__hal0UseCreateTask;
-  const useBoardChat        = window.__hal0UseBoardChat;
   const useBoardEventsStream = window.__hal0UseBoardEventsStream;
 
   // ── keep WS stream alive ──
@@ -186,9 +189,11 @@ function BoardView() {
   const switchBoard = useSwitchBoard ? useSwitchBoard()  : null;
   const createBoard = useCreateBoard ? useCreateBoard()  : null;
   const createTask  = useCreateTask  ? useCreateTask()   : null;
-  // Chat state lives HERE (BoardView stays mounted) rather than inside
-  // AgentChat, so the conversation survives closing/reopening the drawer.
-  const chat        = useBoardChat   ? useBoardChat()    : null;
+  // The agent-chat slide-out (and its persistent conversation hook) now lives
+  // in App (main.jsx) so it can be triggered from anywhere in the dash, not
+  // just this page. The board's chat button toggles that global slide-out via
+  // a window event; `chatOpen` here is only a mirror for the button's lit
+  // state. byId is published below so the global chat can resolve task refs.
 
   // ── local state ──
   const [board, setBoard]           = useState("default");
@@ -229,7 +234,6 @@ function BoardView() {
     const onKey = (e) => {
       if (e.key === "Escape") {
         setOpenTask(null);
-        setChatOpen(false);
         setOrchOpen(false);
         setBoardMenu(false);
         setNewTaskLane(null);
@@ -363,7 +367,6 @@ function BoardView() {
 
   // ── window component lookups ──
   const TaskDrawer     = window.TaskDrawer;
-  const AgentChat      = window.AgentChat;
   const NewBoardModal  = window.NewBoardModal;
   const NewTaskModal   = window.NewTaskModal;
   const OrchPopover    = window.OrchPopover;
@@ -371,6 +374,25 @@ function BoardView() {
 
   const opened = openTask ? tasks.find(t => t.id === openTask) : null;
   const byId   = useMemo(() => Object.fromEntries(tasks.map(t => [t.id, t])), [tasks]);
+
+  // Publish the task map so the global agent chat (App-owned) can resolve
+  // task-ref chips, and accept an "open this task" request from it.
+  useEffect(() => {
+    window.__hal0BoardById = byId;
+    return () => { if (window.__hal0BoardById === byId) delete window.__hal0BoardById; };
+  }, [byId]);
+  useEffect(() => {
+    const onOpen = (e) => { if (e.detail) setOpenTask(e.detail); };
+    window.addEventListener("hal0:open-board-task", onOpen);
+    return () => window.removeEventListener("hal0:open-board-task", onOpen);
+  }, []);
+  // Mirror the global agent-chat open state so the toolbar button lights up.
+  useEffect(() => {
+    setChatOpen(!!window.__hal0AgentChatOpen);
+    const onChg = (e) => setChatOpen(!!e.detail);
+    window.addEventListener("hal0:agent-chat-changed", onChg);
+    return () => window.removeEventListener("hal0:agent-chat-changed", onChg);
+  }, []);
 
   return (
     <React.Fragment>
@@ -501,11 +523,12 @@ function BoardView() {
               </BoardCheckFlt>
               <span className="flt-spacer" />
               <div className="flt-actions">
-                {/* agent chat toggle — FIRST in flt-actions */}
+                {/* agent chat toggle — FIRST in flt-actions. Drives the global
+                    App-owned slide-out (also reachable from the topbar). */}
                 <button
                   className={"tb-chat" + (chatOpen ? " on" : "")}
                   data-testid="board-action-chat"
-                  onClick={() => setChatOpen(o => !o)}
+                  onClick={() => window.dispatchEvent(new CustomEvent("hal0:toggle-agent-chat"))}
                 >
                   <BoardIcon name="chat" size={14} />
                   <span>agent</span>
@@ -642,15 +665,8 @@ function BoardView() {
         />
       )}
 
-      {/* agent chat */}
-      {chatOpen && AgentChat && (
-        <AgentChat
-          chat={chat}
-          byId={byId}
-          onClose={() => setChatOpen(false)}
-          onOpenTask={(id) => { setChatOpen(false); setOpenTask(id); }}
-        />
-      )}
+      {/* agent chat is mounted globally by App (main.jsx) so it can be opened
+          from anywhere in the dash; the board's chat button toggles it. */}
 
       {/* new task modal — explicit creation; nothing is POSTed until submit.
           Wrapped in `.board` so the `.board .modal-*` scoped styles apply
