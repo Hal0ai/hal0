@@ -1201,8 +1201,11 @@ class Dispatcher:
             if lk in _HOP_BY_HOP or lk == "authorization":
                 continue
             out[k] = v
-        # Future hook: out.update(auth_headers(upstream)) when Agent J ships it.
-        _ = upstream  # silence unused
+        # Inject upstream auth (bearer/anthropic/header) for remote providers
+        # that declare an auth_value_env. Local slot upstreams use auth_style
+        # "none" so this is a no-op for them. (Lights the previously-stubbed
+        # Agent J hook so authed cloud upstreams like MiniMax don't 401.)
+        out.update(self._upstreams.auth_headers(upstream))
         return out
 
     async def _cold_prefetch(self, cold_remotes: list[Upstream]) -> None:  # TIER2 + TIER3
