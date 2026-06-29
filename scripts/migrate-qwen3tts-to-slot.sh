@@ -2,7 +2,11 @@
 # migrate-qwen3tts-to-slot.sh
 #
 # Retire the standalone hal0-qwen3tts.service and repoint the Hermes TTS
-# bridge to use the hal0-managed qwen3tts slot instead.
+# bridge to the hal0 `tts` slot serving Qwen3 via the voice.tts capability
+# selection (the deployed "selection within the tts slot" model — there is NO
+# separate qwen3tts slot). The forward migration was completed on CT105
+# 2026-06-29; this script remains for re-runs / fresh boxes and as the
+# rollback path.
 #
 # SAFETY:
 #   - Default mode is --dry-run. Nothing is changed unless you pass --apply.
@@ -19,21 +23,20 @@
 #   --rollback  Revert a previously applied migration.
 #
 # PRECONDITIONS (enforced by guards before --apply acts):
-#   1. hal0 qwen3tts slot exists and state == "ready"
-#   2. /v1/audio/speech via hal0 front door returns audio (non-empty WAV)
-#   3. Kokoro fallback slot is healthy on :8084
-#   4. /var/lib/hal0/.hermes/scripts/hal0-voice-tts.py contains the old URL
+#   1. hal0 `tts` slot is state == "ready" AND serving model "qwen3-tts"
+#      (i.e. the voice.tts selection = qwen3/gpu-rocm has been applied —
+#      e.g. via `hal0-voice qwen3` or the dashboard)
+#   2. /v1/audio/speech via hal0 front door (:8080) returns audio (non-empty WAV)
+#   3. /var/lib/hal0/.hermes/scripts/hal0-voice-tts.py contains the old URL
 #      (idempotency: skip bridge edit if already pointing to :8080)
 #
 # ROLLBACK:
 #   Reverts the bridge URL edit, re-enables and starts hal0-qwen3tts.service.
 #
-# PORT COLLISION CONTEXT:
-#   Both the standalone service and the slot TOML default to port 8095.
-#   This script stops the standalone first, then the hal0 slot manager may
-#   start the slot on 8095. If the slot is already running (enabled before
-#   this script), the standalone will have failed to bind on its last restart
-#   -- check `systemctl status hal0-qwen3tts` before running.
+# PORT CONTEXT:
+#   Qwen3 runs in the `tts` slot (port 8084), reached via the :8080 front
+#   door — NOT on :8095. The standalone service used :8095; stopping it just
+#   frees the duplicate GPU load. There is no port collision in this model.
 #
 # OWNERSHIP GOTCHA:
 #   /var/lib/hal0/.hermes/ must stay owned by hal0:hal0. Root edits flip
@@ -45,7 +48,8 @@ set -euo pipefail
 # --- Configuration -----------------------------------------------------------
 
 HAL0_API="http://127.0.0.1:8080"
-KOKORO_HEALTH="http://127.0.0.1:8084/health"
+TTS_SLOT_API="${HAL0_API}/api/slots/tts"
+EXPECTED_TTS_MODEL="qwen3-tts"
 STANDALONE_UNIT="hal0-qwen3tts.service"
 BRIDGE_SCRIPT="/var/lib/hal0/.hermes/scripts/hal0-voice-tts.py"
 OLD_TTS_URL="http://127.0.0.1:8095/v1/audio/speech"
@@ -91,24 +95,30 @@ dry_or_run() {
 # --- Guards -------------------------------------------------------------------
 
 guard_slot_ready() {
-    step "Guard 1: qwen3tts slot exists and is READY"
+    step "Guard 1: tts slot is READY and serving ${EXPECTED_TTS_MODEL}"
     local resp
-    resp=$(curl -sf "${HAL0_API}/api/slots/qwen3tts" 2>/dev/null) || {
-        fail "Could not reach hal0 API at ${HAL0_API}/api/slots/qwen3tts"
-        fail "Is hal0-api running? Is the qwen3tts slot deployed via a release update?"
+    resp=$(curl -sf "${TTS_SLOT_API}" 2>/dev/null) || {
+        fail "Could not reach hal0 API at ${TTS_SLOT_API}"
+        fail "Is hal0-api running?"
         return 1
     }
-    local state
+    local state model
     state=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('state','?'))" 2>/dev/null) || {
         fail "Could not parse slot state from API response: $resp"
         return 1
     }
+    model=$(echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('model_id','?'))" 2>/dev/null) || model="?"
     if [ "$state" != "ready" ]; then
-        fail "qwen3tts slot state is '${state}', expected 'ready'"
-        fail "Check: hal0 slot load qwen3tts; then re-run this script"
+        fail "tts slot state is '${state}', expected 'ready'"
+        fail "Apply the Qwen3 voice selection first: hal0-voice qwen3 (or set it in the dashboard)"
         return 1
     fi
-    ok "qwen3tts slot state = ready"
+    if [ "$model" != "${EXPECTED_TTS_MODEL}" ]; then
+        fail "tts slot is serving '${model}', expected '${EXPECTED_TTS_MODEL}'"
+        fail "Select the Qwen3 engine first: hal0-voice qwen3"
+        return 1
+    fi
+    ok "tts slot ready, serving ${EXPECTED_TTS_MODEL}"
 }
 
 guard_audio_speech() {
@@ -137,20 +147,8 @@ guard_audio_speech() {
     ok "/v1/audio/speech -> HTTP 200, ${size} bytes"
 }
 
-guard_kokoro_healthy() {
-    step "Guard 3: kokoro fallback is healthy on :8084"
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 "$KOKORO_HEALTH" 2>/dev/null) || http_code=000
-    if [ "$http_code" != "200" ]; then
-        fail "kokoro health at ${KOKORO_HEALTH} returned HTTP ${http_code}"
-        fail "Hermes fallback engine must be up before cutting over"
-        return 1
-    fi
-    ok "kokoro :8084 health = 200"
-}
-
 guard_bridge_script_exists() {
-    step "Guard 4: bridge script exists"
+    step "Guard 3: bridge script exists"
     if [ ! -f "$BRIDGE_SCRIPT" ]; then
         fail "Bridge script not found: ${BRIDGE_SCRIPT}"
         return 1
@@ -162,7 +160,6 @@ run_guards() {
     local failed=0
     guard_slot_ready  || failed=1
     guard_audio_speech || failed=1
-    guard_kokoro_healthy || failed=1
     guard_bridge_script_exists || failed=1
     if [ "$failed" -ne 0 ]; then
         echo
