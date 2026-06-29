@@ -38,7 +38,7 @@
     },
     "qwen3tts": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1",
-      "digest": null,
+      "digest": "sha256:c3a4606de1488ef594c3552057985186bc01f4af7e79a23bbd2c9cf275e70838",
       "_notes": "Qwen3-TTS-12Hz-1.7B-CustomVoice multilingual GPU TTS (ROCm); OpenAI-compat /v1/audio/speech. Digest is null until the first successful CI push via .github/workflows/toolbox.yml — run scripts/update-toolbox-digests.sh on main after the first build to pin it."
     }
   },
