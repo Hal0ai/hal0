@@ -35,6 +35,11 @@
       "digest": "sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
       "_notes": "live-validated on CT105 2026-06-11 (Wan2.2/Qwen-Image/Flux/SDXL on gfx1151); repinned from unpublished hal0-toolbox-comfyui (Phase D)",
       "_upstream_reference": "https://github.com/comfyanonymous/ComfyUI"
+    },
+    "qwen3tts": {
+      "tag": "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1",
+      "digest": null,
+      "_notes": "Qwen3-TTS-12Hz-1.7B-CustomVoice multilingual GPU TTS (ROCm); OpenAI-compat /v1/audio/speech. Digest is null until the first successful CI push via .github/workflows/toolbox.yml — run scripts/update-toolbox-digests.sh on main after the first build to pin it."
     }
   },
   "_legacy_toolboxes": {
