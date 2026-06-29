@@ -1,0 +1,15 @@
+# Qwen3-TTS slot — multilingual GPU TTS in a podman container
+# (hal0-slot@qwen3tts). The GPU sibling of the cpu `tts`/kokoro slot; both
+# implement the OpenAI /v1/audio/speech contract. Disabled by default so a
+# fresh install boots with the lighter CPU Kokoro slot; enable this to make
+# the GPU multilingual engine available.
+name = "qwen3tts"
+type = "tts"
+device = "gpu-rocm"
+runtime = "container"
+profile = "tts-qwen3"
+enabled = false
+port = 8095
+
+[model]
+default = "qwen3-tts"

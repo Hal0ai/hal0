@@ -78,6 +78,21 @@ device_class = "cpu"
 intent       = "TTS · Kokoro"
 quant        = ""
 
+[profile.tts-qwen3]
+# GPU TTS slot (Qwen3-TTS CustomVoice, multilingual). ROCm on native gfx1151
+# (~2.1x realtime). The GPU sibling of the cpu `tts`/kokoro profile — runtime
+# family qwen3tts routes it to Qwen3TTSProvider (GPU passthrough + /cache).
+# Flags bake --model_path + default voice/language; the model store is mounted
+# read-only so there is no download on start. Do NOT add HSA_OVERRIDE here —
+# native gfx1151 is ~4.5x faster than the gfx1100 override.
+image        = "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1"
+flags        = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
+mtp          = false
+device_class = "gpu"
+backend      = "rocm"
+intent       = "TTS · Qwen3 (multilingual GPU)"
+quant        = "BF16"
+
 [profile.comfyui]
 # Image-gen slot (ComfyUI on ROCm, kyuz0 Strix Halo build). Exclusive-GPU:
 # the GpuArbiter stops LLM GPU slots while img runs (Phase D, #599).

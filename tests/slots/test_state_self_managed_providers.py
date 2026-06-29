@@ -1,8 +1,8 @@
 """Tests for the SELF_MANAGED_PROVIDERS gate.
 
-Some providers (kokoro, moonshine, vibevoice) serve a baked-in model and
-don't need an explicit ``model_id``.  Every other provider does.  This
-gate keeps adoption + transition guards from labelling a modelless
+Some providers (kokoro, qwen3tts, moonshine, vibevoice) serve operator-staged
+weights and don't need an explicit ``model_id``.  Every other provider does.
+This gate keeps adoption + transition guards from labelling a modelless
 llama-server / FLM slot as READY.
 """
 
@@ -13,7 +13,11 @@ from hal0.slots.state import SELF_MANAGED_PROVIDERS, provider_requires_model
 
 def test_self_managed_providers_set_matches_ui() -> None:
     """The Python set must stay in sync with the UI's SELF_MANAGED_PROVIDERS."""
-    assert frozenset({"kokoro", "moonshine", "vibevoice"}) == SELF_MANAGED_PROVIDERS
+    assert frozenset({"kokoro", "qwen3tts", "moonshine", "vibevoice"}) == SELF_MANAGED_PROVIDERS
+
+
+def test_qwen3tts_does_not_require_model() -> None:
+    assert provider_requires_model("qwen3tts") is False
 
 
 def test_kokoro_does_not_require_model() -> None:

@@ -424,6 +424,14 @@ def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
         from hal0.providers.flm import FLMProvider
 
         return FLMProvider()
+    # Qwen3-TTS (GPU) must be matched by its runtime family BEFORE the generic
+    # ``slot_type == "tts"`` → Kokoro fallback, so the two TTS engines coexist:
+    # a slot whose profile resolves to the qwen3tts family gets the GPU
+    # provider; a profile-less ``type=tts`` slot still falls through to Kokoro.
+    if family == "qwen3tts":
+        from hal0.providers.qwen3tts import Qwen3TTSProvider
+
+        return Qwen3TTSProvider()
     if family == "kokoro" or slot_type == "tts":
         from hal0.providers.kokoro import KokoroProvider
 
