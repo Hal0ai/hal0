@@ -86,7 +86,7 @@ BACKEND_TO_DEVICE: dict[str, str] = {
 # label compatibility. ``"comfyui"`` is the exception: it is the active
 # container image-gen provider (img.toml, ADR image slots), not a
 # deprecated legacy value.
-_VALID_PROVIDERS = frozenset({"llama-server", "flm", "moonshine", "kokoro", "comfyui"})
+_VALID_PROVIDERS = frozenset({"llama-server", "flm", "moonshine", "kokoro", "qwen3tts", "comfyui"})
 
 # Slot port range.  8080 is the hal0 API; slots get 8081-8099; 8188 =
 # ComfyUI's stock port for the img slot — kept well-known so operator
@@ -781,6 +781,18 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "TTS · Kokoro",
         "quant": "",
     },
+    "tts-qwen3": {
+        "image": "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1",
+        "flags": (
+            "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice "
+            "--default_voice Ryan --default_language Auto"
+        ),
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "TTS · Qwen3 (multilingual GPU)",
+        "quant": "BF16",
+    },
     "comfyui": {
         "image": "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
         "flags": "--disable-mmap --bf16-vae --cache-none",
@@ -802,6 +814,8 @@ PROFILE_BENCH: dict[str, dict[str, float]] = {
     "vulkan": {"tps": 41.0},
     "flm": {"tps": 38.6},
     "tts": {"rtf": 0.18},
+    # Native gfx1151 ~2.1x realtime -> rtf ~= 1/2.1 (memory qwen3tts-voice-ct105).
+    "tts-qwen3": {"rtf": 0.48},
 }
 
 #: Preselect map for the create-modal device picker and legacy-slot

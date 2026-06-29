@@ -39,7 +39,7 @@ from hal0.errors import Conflict, NotFound
 
 log = logging.getLogger(__name__)
 
-RuntimeFamily = Literal["llama-server", "flm", "kokoro", "comfyui"]
+RuntimeFamily = Literal["llama-server", "flm", "kokoro", "qwen3tts", "comfyui"]
 SlotType = Literal["llm", "embedding", "reranking", "transcription", "tts", "image"]
 
 _PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -109,6 +109,12 @@ def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
     image = profile.image.lower()
     if name == "flm" or profile.device_class == "npu" or "flm" in image:
         return "flm"
+    # Qwen3-TTS (GPU) is checked before Kokoro and the llama-server fallback:
+    # it is a TTS engine on a GPU device_class, so neither the kokoro nor the
+    # llama discriminators would catch it. Match by image/name (robust to a
+    # slug rename, same belt-and-suspenders style as the others).
+    if name == "tts-qwen3" or "qwen3tts" in image or "qwen3-tts" in image:
+        return "qwen3tts"
     if name == "tts" or "kokoro" in image:
         return "kokoro"
     if name == "comfyui" or profile.device_class == "img" or "comfyui" in image:
@@ -119,7 +125,7 @@ def _runtime_family(name: str, profile: ProfileConfig) -> RuntimeFamily:
 def _supported_slot_types(runtime_family: RuntimeFamily) -> tuple[SlotType, ...]:
     if runtime_family == "flm":
         return ("llm", "embedding", "transcription")
-    if runtime_family == "kokoro":
+    if runtime_family in ("kokoro", "qwen3tts"):
         return ("tts",)
     if runtime_family == "comfyui":
         return ("image",)

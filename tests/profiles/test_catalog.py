@@ -17,6 +17,18 @@ def test_resolve_seed_profile_includes_runtime_facts(tmp_hal0_home: str) -> None
     assert profile.supported_slot_types == ("llm", "embedding", "transcription")
 
 
+def test_resolve_qwen3tts_seed_is_gpu_tts_family(tmp_hal0_home: str) -> None:
+    profile = ProfileCatalog().resolve("tts-qwen3")
+
+    assert profile.seed is True
+    assert profile.runtime_family == "qwen3tts"
+    # GPU TTS engine: a TTS-only slot type on a ROCm GPU device.
+    assert profile.supported_slot_types == ("tts",)
+    assert profile.device_class == "gpu"
+    assert profile.backend == "rocm"
+    assert profile.rtf == 0.48
+
+
 def test_resolve_exposes_backend(tmp_hal0_home: str) -> None:
     catalog = ProfileCatalog()
     assert catalog.resolve("rocm").backend == "rocm"

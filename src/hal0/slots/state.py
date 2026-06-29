@@ -121,7 +121,7 @@ def is_transition_legal(from_state: SlotState, to_state: SlotState) -> bool:
 
 #: Providers that serve a baked-in model and don't require an explicit model_id.
 #: Must stay in sync with ui/src/composables/useSlotStats.js SELF_MANAGED_PROVIDERS.
-SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "moonshine", "vibevoice"})
+SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "qwen3tts", "moonshine", "vibevoice"})
 
 
 def provider_requires_model(provider: str | None) -> bool:

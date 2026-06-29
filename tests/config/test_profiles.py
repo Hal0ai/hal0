@@ -180,7 +180,8 @@ class TestLoadProfilesConfig:
 
     def test_seed_count(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
-        assert len(cfg.profile) == 7  # rocm, rocm-dnse, rocm-moe, vulkan, flm, tts, comfyui
+        # rocm, rocm-dnse, rocm-moe, vulkan, flm, tts, tts-qwen3, comfyui
+        assert len(cfg.profile) == 8
 
     def test_seed_profiles_have_correct_names(self, tmp_path: Path) -> None:
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
