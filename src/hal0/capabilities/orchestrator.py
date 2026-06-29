@@ -37,7 +37,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from hal0.capabilities.catalog import models_for_capability
+from hal0.capabilities.catalog import models_for_capability, tts_profile_for_device
 from hal0.capabilities.config import (
     CapabilityConfig,
     CapabilitySelection,
@@ -635,12 +635,18 @@ class CapabilityOrchestrator:
         avoid treating generic CPU as kokoro except for TTS.
         """
         profile_name: str | None = None
-        if device == "npu":
+        if capability == "tts":
+            # TTS is engine-selected within the single ``tts`` slot: GPU →
+            # Qwen3-TTS (``tts-qwen3`` → Qwen3TTSProvider), CPU → Kokoro
+            # (``tts``). This must precede the generic gpu→llama branch below,
+            # which would otherwise hand a TTS slot the rocm/vulkan llama
+            # profile (wrong runtime family — the slot would never start the
+            # TTS image).
+            profile_name = tts_profile_for_device(device)
+        elif device == "npu":
             profile_name = DEVICE_DEFAULT_PROFILES.get("npu")
         elif device in {"gpu-rocm", "gpu-vulkan"}:
             profile_name = DEVICE_DEFAULT_PROFILES.get(device)
-        elif capability == "tts":
-            profile_name = "tts"
         elif capability == "image":
             profile_name = "comfyui"
         if not profile_name:
@@ -691,6 +697,14 @@ class CapabilityOrchestrator:
         slot_type = _CHILD_TO_SLOT_TYPE.get(child) if child else None
         if slot_type:
             cfg_dict["type"] = slot_type
+        # voice.tts engine switch (follow-up to #972): a (re)created tts slot
+        # must carry the engine's runtime profile + type so the spawn routes to
+        # the right provider (cpu→Kokoro, gpu→Qwen3). The builtin tts.toml
+        # normally exists so this path is the deleted-slot fallback.
+        if child == "tts":
+            cfg_dict["type"] = "tts"
+            cfg_dict["runtime"] = "container"
+            cfg_dict["profile"] = tts_profile_for_device(selection.device)
         try:
             await self._slot_manager.create(slot_name, cfg_dict)
         except Exception as exc:
