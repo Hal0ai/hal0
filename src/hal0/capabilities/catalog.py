@@ -89,6 +89,54 @@ _CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
 }
 
 
+# ── voice.tts engine switch (deferred follow-up to #972) ──────────────────────
+#
+# TTS is engine-selected WITHIN the single ``tts`` slot: the operator picks a
+# device in the voice.tts card and the slot swaps which provider it runs.
+#   - cpu      → Kokoro (provider ``kokoro``, profile ``tts``)
+#   - gpu-rocm → Qwen3-TTS (provider ``qwen3tts``, profile ``tts-qwen3``)
+# Each entry feeds both the catalog enumeration below and ``_profile_for_fit``
+# so the picker and the apply path agree on which profile/provider a device
+# implies.
+_TTS_ENGINES: tuple[dict[str, str], ...] = (
+    {
+        "id": "kokoro-v1",
+        "device": "cpu",
+        "provider": "kokoro",
+        "profile": "tts",
+    },
+    {
+        "id": "qwen3-tts",
+        "device": "gpu-rocm",
+        "provider": "qwen3tts",
+        "profile": "tts-qwen3",
+    },
+)
+
+#: device → tts profile name (the engine switch). Used by ``_profile_for_fit``
+#: in BOTH this module and the orchestrator so picker fit and apply-time
+#: reconciliation resolve the same profile.
+TTS_DEVICE_TO_PROFILE: dict[str, str] = {e["device"]: e["profile"] for e in _TTS_ENGINES}
+
+#: GPU TTS resolves to Qwen3 regardless of which GPU backend the card offers
+#: (only ROCm is wired today, but a future Vulkan TTS engine would slot here).
+_TTS_GPU_PROFILE = "tts-qwen3"
+
+
+def tts_profile_for_device(device: str) -> str:
+    """Return the TTS slot profile a device selection implies.
+
+    The engine switch: ``cpu`` → Kokoro's ``tts`` profile, any GPU backend
+    → Qwen3's ``tts-qwen3`` profile. Unknown/empty devices fall back to the
+    CPU Kokoro profile (the safe default — it needs no GPU passthrough).
+    """
+    if device in TTS_DEVICE_TO_PROFILE:
+        return TTS_DEVICE_TO_PROFILE[device]
+    if device in {"gpu-rocm", "gpu-vulkan"}:
+        return _TTS_GPU_PROFILE
+    return "tts"
+
+
 # ── Backends ──────────────────────────────────────────────────────────────────
 
 
@@ -573,7 +621,85 @@ def _flat_rows_for_capability(
         seen.add(key)
         rows.append(npu_row)
 
+    for tts_row in _tts_rows_for_capability(capability, registry=registry):
+        key = (tts_row["id"], tts_row["backend"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(tts_row)
+
     return rows
+
+
+def _tts_rows_for_capability(
+    capability: str,
+    *,
+    registry: ModelRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """Enumerate the two TTS engines for the voice.tts picker.
+
+    The deferred follow-up to #972 makes the voice.tts card a real engine
+    switch. Neither engine surfaces through the curated/registry fan-out
+    above: ``kokoro-v1`` is ``bundle_only`` (hidden from dropdowns) and the
+    operator-staged ``qwen3-tts`` weights aren't a curated entry at all. So
+    this enumerates both directly, mirroring how :func:`_flm_rows_for_capability`
+    injects the NPU rows.
+
+    Each engine emits one row on its legal device with the provider/profile
+    the apply path will write into the single ``tts`` slot
+    (:func:`tts_profile_for_device`). ``downloaded``/``pullable`` come from
+    the registry lookup so the picker shows an honest ⬇ chip.
+    """
+    if capability != "tts":
+        return []
+
+    from hal0.registry.curated import CURATED_BY_ID
+
+    out: list[dict[str, Any]] = []
+    for engine in _TTS_ENGINES:
+        curated = CURATED_BY_ID.get(engine["id"])
+        out.append(
+            {
+                "id": engine["id"],
+                "backend": engine["device"],
+                "provider": engine["provider"],
+                "size_gb": _size_gb(curated) if curated is not None else 0.0,
+                "capabilities": ["tts"],
+                # Kokoro is HF-pullable (curated coords); Qwen3-TTS weights are
+                # operator-staged self-managed (no pull route) — fall back to
+                # the registry for both so an installed engine reads as ready.
+                "downloaded": _is_downloaded(curated, registry=registry)
+                if curated is not None
+                else _registry_downloaded(engine["id"], registry=registry),
+                "pullable": _is_pullable(curated, registry=registry)
+                if curated is not None
+                else False,
+            }
+        )
+    return out
+
+
+def _registry_downloaded(model_id: str, *, registry: ModelRegistry | None) -> bool:
+    """True iff ``model_id`` resolves to an on-disk path in the registry.
+
+    Used for self-managed TTS weights (qwen3-tts) that have no curated entry:
+    the registry is the only signal that the operator staged them.
+    """
+    if registry is None:
+        return False
+    try:
+        if not registry.has(model_id):
+            return False
+        reg_entry = registry.get(model_id)
+    except Exception:
+        return False
+    reg_path = getattr(reg_entry, "path", None)
+    if not isinstance(reg_path, str) or not reg_path:
+        return False
+    try:
+        return Path(reg_path).exists()
+    except OSError:
+        return False
 
 
 def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
@@ -584,12 +710,15 @@ def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
     selection schema carries an explicit profile.
     """
     profile_name: str | None = None
-    if device == "npu":
+    if capability == "tts":
+        # Engine switch within the tts slot — GPU resolves Qwen3, CPU Kokoro.
+        # Must precede the generic gpu→llama branch (a TTS slot never runs the
+        # rocm/vulkan llama profile). See ``tts_profile_for_device``.
+        profile_name = tts_profile_for_device(device)
+    elif device == "npu":
         profile_name = DEVICE_DEFAULT_PROFILES.get("npu")
     elif device in {"gpu-rocm", "gpu-vulkan"}:
         profile_name = DEVICE_DEFAULT_PROFILES.get(device)
-    elif capability == "tts":
-        profile_name = "tts"
     elif capability == "image":
         profile_name = "comfyui"
     if not profile_name:

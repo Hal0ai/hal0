@@ -182,7 +182,7 @@ class SlotConfigStore:
 
         slot_path = self._slot_path(selection.slot_name)
         slot_before = _read_toml_or_none(slot_path)
-        slot_after = self._reconciled_slot(slot_before, selection.selection)
+        slot_after = self._reconciled_slot(slot_before, selection)
 
         return ChangeSet(
             before=(
@@ -244,7 +244,7 @@ class SlotConfigStore:
         return capabilities_toml_payload(cfg)
 
     def _reconciled_slot(
-        self, raw_before: dict[str, Any] | None, selection: CapabilitySelection
+        self, raw_before: dict[str, Any] | None, slot_selection: SlotSelection
     ) -> dict[str, Any] | None:
         """Project an enabled selection onto the existing slot TOML dict.
 
@@ -259,7 +259,16 @@ class SlotConfigStore:
             legacy alias) written, translated via :mod:`hal0.model_meta`,
           - the ``ctx_size`` → ``context_size`` alias folded (#585) so
             the two keys can't diverge on disk.
+
+        voice.tts engine switch (follow-up to #972): the two TTS engines
+        (Kokoro CPU / Qwen3-TTS GPU) live in the SAME ``tts`` slot, selected
+        by device. The device alone is not enough to start the right engine —
+        the slot's ``profile`` is what ``container._spec_provider_for`` resolves
+        to a runtime family. So for the ``tts`` child we also derive and write
+        the engine's ``profile`` (cpu → ``tts``, gpu → ``tts-qwen3``); without
+        this the slot would keep Kokoro's profile and never spawn Qwen3.
         """
+        selection = slot_selection.selection
         if raw_before is None or not selection.enabled:
             return raw_before
 
@@ -275,6 +284,13 @@ class SlotConfigStore:
             updates["provider"] = selection.provider
         if selection.model:
             updates["model"] = {"default": selection.model}
+
+        # TTS engine switch: derive the slot profile from the picked device so
+        # the GPU/CPU choice actually swaps the provider inside the one tts slot.
+        tts_profile = self._tts_profile_for(slot_selection)
+        if tts_profile is not None:
+            updates["profile"] = tts_profile
+
         if not updates:
             return raw_before
 
@@ -294,6 +310,23 @@ class SlotConfigStore:
             model["context_size"] = model.pop("ctx_size")
             after["model"] = model
         return after
+
+    @staticmethod
+    def _tts_profile_for(slot_selection: SlotSelection) -> str | None:
+        """Engine profile a voice.tts selection implies, or ``None``.
+
+        Only the ``tts`` child carries an engine switch — every other
+        capability leaves the slot's profile untouched (most have none). The
+        canonical (device → profile) mapping lives in
+        :func:`hal0.capabilities.catalog.tts_profile_for_device`; imported
+        lazily here to keep this module import-light (the cycle the module
+        docstring guards against).
+        """
+        if slot_selection.child != "tts":
+            return None
+        from hal0.capabilities.catalog import tts_profile_for_device
+
+        return tts_profile_for_device(slot_selection.selection.device)
 
 
 # ── file-state IO ────────────────────────────────────────────────────────────
