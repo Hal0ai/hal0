@@ -1,67 +1,141 @@
 # hal0 codebase map
 
-Where things live in the hal0 source tree at `/opt/hal0/`.
+Where things live in the hal0 source tree. On an installed host the package
+lives under `/usr/lib/hal0/current/src/hal0/`; in a dev checkout it is
+`src/hal0/`. Paths below are relative to `src/hal0/`.
 
-## Source tree (`/opt/hal0/src/hal0/`)
+hal0 is a Python/FastAPI control plane. There is **no Go gateway**, **no
+Lemonade / lemond daemon**, and **no `:13305` upstream** — those were retired.
+Every local model runs as a **podman container, one per slot**. `hal0-api`
+runs **as root** (the hardened/non-root mode was removed, ADR-0023).
 
-### API layer
-- `api/routes/v1.py` — OpenAI-compatible `/v1/` endpoints. Chat handler at L550-584: `chat_completions()` reads body, rewrites slot aliases (`_rewrite_chat_slot_alias`, L233-281), optionally runs OmniRouter loop, then dispatches via `_dispatch_and_forward`. Also: `/v1/models` listing, embeddings, STT, TTS, image generation, rerankings.
-- `api/routes/lemonade_proxy.py` — NoRouteFound fall-through proxy to lemond `:13305` (L138).
-- `api/` — `hal0_chat_slot_alias_map()` builds alias→model_id dict from slot configs.
+## Top-level subpackages (`src/hal0/`)
 
-### Dispatcher
-- `dispatcher/router.py` — `dispatch()` routes requests to upstreams. Composite `hal0` upstream (L99-119) redirects to lemond `:13305/v1/` (L138). Remote upstreams forward to their own URLs.
-- `dispatcher/forward.py` — httpx-based forwarding with retry, error recovery.
+| Package | Role |
+|---------|------|
+| `api/` | FastAPI app factory (`api/__init__.py` → `create_app`, module-level `app` for `uvicorn hal0.api:app`) + all HTTP routes. |
+| `dispatcher/` | Registry-aware request router. Decides which upstream serves each OpenAI-compatible request; does **not** start/stop slots. |
+| `slots/` | Slot lifecycle: `SlotManager` (load/unload/swap/restart/create/delete) + the `SlotState` state machine. |
+| `providers/` | Inference backends. `ContainerProvider` is the sole slot-lifecycle backend (podman). |
+| `capabilities/` | Operator-facing overlay grouping slots into capability children (embed/voice/img). |
+| `slot_config/` | `SlotConfigStore` — reconciles `capabilities.toml` ↔ per-slot `slots/<name>.toml` atomically (compute `ChangeSet`, then `commit`). |
+| `profiles/` | `ProfileCatalog` — runtime profile (image + flags + runtime family) lookup and mutation over `profiles.toml`. |
+| `config/` | FHS path resolver (`paths.py`), config loader (`loader.py`), schema (`schema.py`), env (`env.py`), `migrations/`. |
+| `registry/` | Atomic TOML model catalog ("what models exist on this host"); `ModelRegistry` is the entry point. |
+| `upstreams/` | `UpstreamRegistry` of routing targets: `kind="slot"` (local container) or `kind="remote"` (OpenRouter/Anthropic/etc). |
+| `memory/` | Memory subsystem. `MemoryProvider` ABC + `HindsightProvider`/`PgVectorProvider` (Hindsight-backed; cognee removed, ADR-0023). |
+| `normalize/` | Virtual model-name resolution (`hal0/agent`, `hal0/utility`, `hal0/<slot>`) + thinking-flag normalization. |
+| `omni_router/` | Optional server-side tool-calling loop (`OmniRouter.run_loop`) invoked when a chat request opts in. |
+| `agents/` | Bundled agents (hermes + pi-coder), agent manager, MCP client, personas. |
+| `mcp/` | MCP servers exposed by hal0: `admin.py` (hal0-admin) and `memory.py` (hal0-memory). |
+| `cli/` | `hal0` CLI (`cli/main.py`) — slot/model/config/agent/setup/update subcommands. |
+| `capabilities/`, `comfyui/`, `hardware/`, `install/`, `stacks/`, `bundles/`, `release/`, `updater/`, `journal/`, `events/`, `activity/`, `board/`, `dashboard/`, `openwebui/`, `model_meta/`, `templates/` | Supporting subsystems (image-gen, hardware probe, installer orchestration, stacks, release channel, self-updater, audit/events, kanban board, dashboard layout, chat templates). |
 
-### Agent provisioning (Hermes integration)
-- `agents/hermes_templates/config.yaml.j2` — Jinja2 template for Hermes `config.yaml`. Sections: `model` (L45-57), `providers.custom` (L59-66), `model_aliases` (L70-76), `custom_providers` (L87-96, per-model context_length), `delegation` (L98-110), `memory` (L112-123), `mcp_servers` (L130-141), `skills` (L143-147), `terminal` (L149-151), `agent` (L153-164), `auxiliary` (L183-191), `stt/tts` (L193-210).
-- `agents/hermes_provision.py` — Bootstrap state assembly, template rendering, config write. `_apply_overrides()` at L818-833 deep-merges `/etc/hal0/agents/hermes/overrides.yaml` on top of rendered YAML.
-- `agents/hermes_provision.py:480` — legacy `Hal0Profile` model-provider plugin removal (dead `:8000` base_url).
+## API layer (`api/`)
 
-### Bifrost (to be retired, per spec)
-- `gateway/normalize/resolve.go` — live `/health` LLM-slot resolver + `isNPUorFLM` discriminator (ported to Python in spec).
-- `gateway/normalize/normalize.go:35` — `chat_template_kwargs.enable_thinking=false` (wrong layer for current lemond).
+- `api/__init__.py` — FastAPI app factory; mounts every router and constructs the `MemoryProvider`.
+- `api/routes/v1.py` — the OpenAI-compatible `/v1/` surface (the file the old map called `routes/v1.py`). Key functions:
+  - `chat_completions()` (L642) — `/v1/chat/completions` entry point.
+  - `_rewrite_chat_slot_alias()` (L188) — rewrites `hal0/<alias>` → concrete model/slot.
+  - `_ensure_backend_for_model()` (L379) — warms the backing slot via `SlotManager`.
+  - `_dispatch_and_forward()` (L438) — hands off to the `Dispatcher` and forwards the upstream response.
+  - `_dispatch_via_npu_trio()` (L755) — NPU FLM-trio dispatch path.
+  - `list_models()` (L479) — `/v1/models`. Plus embeddings, rerank, STT, TTS, image-gen handlers.
+- `api/routes/` — one router per concern: `slots.py`, `models.py`, `capabilities.py`, `profiles.py`, `providers.py`, `config.py`, `backends.py`, `stacks.py`, `memory.py`/`memory_admin.py`, `health.py`/`services_health.py`, `hardware.py`, `npu.py`, `updater.py`, `agents.py`, `installer.py`, `logs.py`, `journal.py`, `power.py`, `secrets.py`, `settings.py`, `events.py`, etc.
+- `api/agents/` — agent-facing endpoints (chat proxy, budget, personas, restart, memory stats).
+- `api/middleware/` — request-id, log scrubbing, error-code mapping.
+- `api/mcp_mount.py` — mounts the MCP servers under the API.
+
+There is **no** `api/routes/lemonade_proxy.py`.
+
+## Dispatcher (`dispatcher/`)
+
+- `dispatcher/router.py` — the heart. `Dispatcher.dispatch()` resolves a request through: (1) registry-exact binding → (2) warm-cache passthrough → (3) cold-cache prefetch (single-flight coalesced) → (4) capability/path routing (`resolve_by_capability`). The legacy `proxy.py` shim was **absorbed into `router.py`** — its slot heuristics now live in `resolve_by_capability`. There is **no** `dispatcher/forward.py` (only a `tests/dispatcher/test_forward.py` test remains).
+- `dispatcher/single_flight.py` — `SingleFlightGroup` for coalescing duplicate prefetches.
+- `dispatcher/npu_trio.py`, `_npu_common.py`, `npu_swap_status.py` — NPU FLM-trio routing helpers.
+- `dispatcher/memory_dispatcher.py` — routing for memory requests.
+- Decision logging: every routing decision emits one structured journald line with `SYSLOG_IDENTIFIER=hal0-dispatch`.
+
+## Slots (`slots/`)
+
+- `slots/manager.py` — `SlotManager`: every state-changing call (`load`/`unload`/`swap`/`status`/`restart`/`create`/`delete`/`update_config`) dispatches through `ContainerProvider`. Returns `Slot` snapshots, never dicts. Does **not** import from `dispatcher`.
+- `slots/state.py` — `SlotState` enum + state machine: `offline → pulling → starting → warming → ready ⇄ idle ⇄ serving → unloading → offline` (+ `error`). Persisted atomically to `/var/lib/hal0/slots/<name>/state.json`, streamable via SSE.
+- `slots/arbiter.py`, `capacity.py`, `argv.py`, `flag_merge.py`, `metrics.py`, `ttft_samples.py` — admission/capacity arbitration, argv assembly, flag merging, metrics.
+
+## Providers (`providers/`)
+
+- `providers/container.py` — `ContainerProvider`, the **sole** slot-lifecycle backend. Each slot → systemd template unit `hal0-slot@<name>.service` running `podman run … <image> --model <path> --port <n> <flags>`. Port is loopback-published; dispatcher reaches it via a `kind="remote"` upstream entry. Mounts `/mnt/ai-models` at the identical path (registry GGUFs are symlinks to absolute `/mnt/ai-models/...` targets).
+- `providers/base.py` — `Provider` ABC (stateless) + `ContainerSpec` (frozen).
+- `providers/llama_server.py` — llama.cpp argv/env derivation (Vulkan default, ROCm opt-in) consumed by container profiles.
+- `providers/flm.py` — AMD NPU via host FLM (Strix Halo only).
+- `providers/comfyui.py`, `kokoro.py`, `qwen3tts.py` — image-gen / TTS helpers (driven by `api/routes/v1.py`, not self-managed slots).
+- `providers/_gpu.py` — render/video GID resolution for container `/dev/dri` access.
+
+## Capabilities & slot config
+
+- `capabilities/orchestrator.py` — `CapabilityOrchestrator` bridges capability children (embed.embed, embed.rerank, voice.stt, voice.tts, img.img) 1:1 to real slots; `apply()` flips slots load/swap/unload. NPU-trio modalities drive the FLM anchor instead of spawning standalone processes.
+- `slot_config/__init__.py` — `SlotConfigStore`: `apply()` is compute-only (returns a `ChangeSet`), `commit()` writes atomically. Prevents `capabilities.toml` ↔ `slots/<name>.toml` drift.
+
+## Agents (`agents/`)
+
+- `agents/hermes_provision.py` — Hermes bootstrap state machine (15 deterministic phases, checkpointed to `/var/lib/hal0/state/agents/hermes/provision.json`). This is the provisioner.
+- `agents/hermes_refresh.py` — re-render/refresh of an already-provisioned Hermes.
+- `agents/hermes_templates/` — Jinja2 templates rendered into the Hermes home: `HERMES.md.j2`, `AGENTS.md.j2`, `SOUL.md.j2`, `STATE.md.j2`, `MCP-CLIENTS.md.j2`. (There is **no** `config.yaml.j2` — Hermes owns its own `config.yaml`; hal0 applies it via `hermes config set`.)
+- `agents/hermes/` — the bundled Hermes driver + `plugins/memory_hindsight/` (hal0-memory plugin).
+- `agents/pi_coder.py`, `agents/manager.py`, `agents/persona.py`, `agents/personas.py`, `agents/mcp_client.py` — pi-coder agent, agent manager, persona definitions, MCP client.
+
+## Memory (`memory/`)
+
+- `memory/provider.py` — `MemoryProvider` ABC + record types.
+- `memory/hindsight_provider.py` + `hindsight_client.py` — Hindsight backend (the default).
+- `memory/pgvector_provider.py` — pgvector backend.
+- `memory/namespace.py`, `migrate.py`, `extraction_env.py` — namespacing, migration, extraction-slot env. (cognee removed per ADR-0023.)
+- Surface: `/mcp/memory` (MCP) + `/api/memory/*` (REST), wired in `api/routes/memory.py`.
 
 ## Runtime paths
 
 | Path | Role |
 |------|------|
-| `/opt/hal0/` | Source repo root |
-| `/var/lib/hal0/` | hal0 data directory (runtime state, models, venvs, secrets) |
-| `/var/lib/hal0/.hermes/config.yaml` | Active Hermes config (rendered by provisioner) |
-| `/var/lib/hal0/secrets/agents/hermes.env` | Platform tokens, allowlists (provisioner-owned) |
-| `/var/lib/hal0/agents/hermes/logs/gateway.log` | Gateway application log (not journald) |
-| `/root/.config/systemd/user/hermes-gateway.service` | Gateway systemd unit |
-| `/etc/hal0/agents/hermes/overrides.yaml` | Config overrides (survives re-render) |
-| `/etc/hal0/capabilities.toml` | Slot/capability config (edit via hal0_admin, not directly) |
+| `/usr/lib/hal0/current/` | Installed code (symlink to versioned dir). Dev checkout uses the repo root instead. |
+| `HAL0_HOME` | Env override for all roots (dev installs / tests). When set, roots become `$HAL0_HOME/{usr-lib,etc,var-lib,var-log}`. |
+| `/etc/hal0/` | User-editable config (preserved on update). |
+| `/etc/hal0/capabilities.toml` | Operator capability selections (edit via hal0-admin / dashboard, not by hand). |
+| `/etc/hal0/slots/<name>.toml` | Per-slot config. |
+| `/etc/hal0/profiles.toml` | Runtime profiles (image + flags). |
+| `/etc/hal0/upstreams.toml` | Remote/slot upstream targets. |
+| `/var/lib/hal0/` | Mutable runtime state (preserved on update). |
+| `/var/lib/hal0/slots/<name>/state.json` | Persisted slot state. |
+| `/var/lib/hal0/registry/` | Atomic TOML model catalog. |
+| `/var/lib/hal0/state/agents/hermes/provision.json` | Hermes provisioning checkpoints. |
+| `/var/log/hal0/` | Optional file logs (journald is primary). |
+| `/mnt/ai-models/` | GGUF model store, mounted read-only into every slot container at the identical path. |
 
-## Design specs
+## Services / systemd units
 
-At `/opt/hal0/docs/superpowers/specs/`. Dated filenames, e.g. `2026-06-04-hal0-api-lemond-normalization-design.md`.
+- `hal0-api.service` — the FastAPI control plane on `:8080` (runs as **root**).
+- `hal0-slot@<name>.service` — one podman container per slot (`ExecStart = podman run …`, `ExecStop = podman stop`).
+- MCP servers (`hal0-admin`, `hal0-memory`) are mounted under the API, not separate daemons.
 
-## hal0-api request flow (chat)
+## hal0-api chat request flow
 
 ```
 POST /v1/chat/completions (:8080)
-  → _read_json_body (v1.py:569)
-  → _rewrite_chat_slot_alias (v1.py:233-281) — alias → model_id
-  → [OmniRouter loop if omni:true]
-  → _ensure_backend_for_model (v1.py:359) — SlotManager.load()
-  → Dispatcher.dispatch → forward
-      → composite "hal0" → http://127.0.0.1:13305/v1/chat/completions
-      → NoRouteFound → lemonade_proxy._proxy → :13305
+  → chat_completions()            api/routes/v1.py:642
+  → _rewrite_chat_slot_alias()    v1.py:188   (hal0/<alias> → model/slot)
+  → [OmniRouter.run_loop if the request opts into server-side tools]
+  → _ensure_backend_for_model()   v1.py:379   (SlotManager warms the slot)
+  → _dispatch_and_forward()       v1.py:438
+      → Dispatcher.dispatch()     dispatcher/router.py
+          → registry-exact | warm passthrough | cold prefetch | resolve_by_capability
+      → forward to the slot's loopback container upstream (kind="remote")
+  → [_dispatch_via_npu_trio() v1.py:755 for NPU FLM-trio requests]
 ```
 
-## Hermes → hal0 integration
+## Verifying this map
 
-- Provider: `custom` (built-in Hermes provider for OpenAI-compat LAN endpoints)
-- Base URL: `http://127.0.0.1:8080/v1`
-- Model discovery: Hermes queries `GET /v1/models` on startup (reads `data[].id` only — models.py:3168)
-- Model picker (`/model`): populated EXCLUSIVELY from server-side `/v1/models` response. Client-side `model_aliases` in config.yaml feed `DIRECT_ALIASES` for request-time resolution only — they do NOT populate the picker UI.
-- Context length: resolved via multi-step chain (model_metadata.py:1452-1738). Priority order: `model.context_length` global → `custom_providers` per-model → persistent cache → live `/v1/models` probe → provider-specific APIs → models.dev → hardcoded defaults → 256K fallback. `custom_providers` wins over `/v1/models` when both exist.
-- Context-length fields read from `/v1/models`: `context_length` > `context_window` > `context_size` > `max_model_len` > ... (11 keys, first valid int wins).
-- Thinking suppression: Hermes does NOT set `enable_thinking`/`chat_template_kwargs`/`no_think` on any outbound request. Safe for server-side defaults.
-- JSON tolerance: Hermes ignores unknown fields in `/v1/models` rows. Adding a `_hal0` metadata block is safe.
-- Subagents: `delegation.model` resolved once at delegate_task time, not re-read per turn.
-- Auxiliary tasks: `auxiliary.<task>.{provider,model,base_url}` for compaction/title/search/vision
-- Full internals: see `homelab-ops/hal0-hermes-integration` skill and its `references/hermes-provider-internals.md`.
+This doc is hand-maintained. When in doubt, re-derive it from the tree:
+
+```
+git ls-files src/hal0/            # current subpackages and modules
+sed -n '1,30p' src/hal0/<mod>.py  # each module's docstring states its role
+```

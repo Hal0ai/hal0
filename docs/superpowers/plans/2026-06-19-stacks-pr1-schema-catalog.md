@@ -1,5 +1,7 @@
 # Stacks — PR-1: Schema + Catalog — Implementation Plan
 
+> **Status: Implemented / Shipped (v0.8.x).** `StackConfig`/catalog landed in `src/hal0/config/schema.py` + `src/hal0/stacks/` (with seed stacks saber/forge/pi). (#921, #964) Plan retained for historical context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add the `StackConfig` data model and a `StacksCatalog` that reads/writes a single atomic `stacks.toml`, giving hal0 a validated, persisted, CRUD-able catalog of Stacks — the foundation all later PRs bind to.

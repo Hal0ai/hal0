@@ -1,7 +1,7 @@
 # hal0 architecture
 
 This document covers hal0's internal architecture. For the user-facing
-shape (install, ports, filesystem layout), see [`docs/install.md`](./docs/install.md).
+shape (install, ports, filesystem layout), see [`docs/getting-started/install.mdx`](./docs/getting-started/install.mdx).
 For scope and roadmap, see [`PLAN.md`](./PLAN.md).
 
 ## Process model
@@ -46,9 +46,9 @@ src/hal0/
 │   ├── mcp_mount.py # mounts hal0-admin + hal0-memory MCP servers
 │   └── middleware/  # error envelope, request id, log scrub
 ├── agents/          # bundled-agent provisioner + driver
-│   ├── hermes_provision.py    # 12-phase Hermes bootstrap
+│   ├── hermes_provision.py    # 15-phase Hermes bootstrap
 │   ├── hermes/                # hal0-bundled Hermes plugins
-│   │   └── plugins/memory_cognee/  # hal0-cognee MemoryProvider
+│   │   └── plugins/memory_hindsight/  # hal0-hindsight MemoryProvider
 │   ├── personas.py            # persona TOML store + hot-reload nudge
 │   ├── manager.py             # single-pick install / uninstall
 │   └── mcp_client.py          # MCP client allow-list (ADR-0013)
@@ -232,7 +232,7 @@ model advertised and will 4xx on inference attempts (issue #31).
 ## v0.3 agents subsystem
 
 A bundled agent in v0.3 is a third-party agent runtime (Hermes-Agent
-today, pi-coder in v0.4) running as a sibling systemd unit with hal0
+and pi-coder, single-pick at install) running as a sibling systemd unit with hal0
 wired in as its local AI provider. The boundary is intentionally
 narrow: hal0 owns provisioning, identity, MCP wiring, and the chat-
 surface proxy. Runtime is whatever the bundled upstream does natively.
@@ -250,13 +250,13 @@ surface proxy. Runtime is whatever the bundled upstream does natively.
                   ▼                                ▼
         ┌────────────────────┐         ┌──────────────────────┐
         │  hal0-memory       │ ◀────── │  composite "hal0"    │
-        │  hal0-admin        │  Cognee │  upstream → /v1/*    │
+        │  hal0-admin        │ Hindsight│  upstream → /v1/*    │
         └────────────────────┘         └──────────────────────┘
 ```
 
 ### Surfaces
 
-* **Provision** — `hal0 agent provision hermes` → 12-phase orchestrator
+* **Provision** — `hal0 agent provision hermes` → 15-phase orchestrator
   in `src/hal0/agents/hermes_provision.py`. Idempotent + checkpointed
   via `/var/lib/hal0/state/agents/hermes/provision.json`.
 * **Service** — `hal0-agent@<id>.service` (template; v0.3 instances:
@@ -276,13 +276,16 @@ surface proxy. Runtime is whatever the bundled upstream does natively.
 * **Personas** — `src/hal0/agents/personas.py` owns the TOML store;
   `src/hal0/api/agents/personas.py` is the REST shim. Hot-reload nudges
   hermes via JSON-RPC; system-prompt scope swaps on the next turn.
-* **Memory** — `hal0-memory` MCP wraps `src/hal0/memory/cognee_wrapper.py`.
-  Per-agent private namespace = `private:<agent_id>` per ADR-0005 §3.
+* **Memory** — `hal0-memory` MCP wraps the engine-neutral
+  `MemoryProvider` (`src/hal0/memory/provider.py`), whose default engine
+  is Hindsight (`src/hal0/memory/hindsight_provider.py`); the cognee
+  wrapper was removed in ADR-0023. Per-agent private namespace =
+  `private:<agent_id>` per ADR-0005 §3.
 * **Skills catalog** — `GET /api/agents/skills` returns the static
   catalog (`HERMES_TOOL_CATALOG` + `HAL0_MCP_TOOL_CATALOG`) the
   dashboard sidebar renders. Bumps ride ADR-0018's weekly drift PRs.
 * **Identity** — agent identity card published once into the `agents`
-  Cognee dataset per ADR-0011. `X-hal0-Agent` is the header the proxy
+  memory namespace per ADR-0011. `X-hal0-Agent` is the header the proxy
   injects on every outbound hop.
 
 ### Module map
@@ -290,10 +293,10 @@ surface proxy. Runtime is whatever the bundled upstream does natively.
 | Module                                         | Owns                                         |
 |------------------------------------------------|----------------------------------------------|
 | `src/hal0/agents/manager.py`                   | single-pick install / uninstall              |
-| `src/hal0/agents/hermes_provision.py`          | 12-phase Hermes bootstrap orchestrator       |
+| `src/hal0/agents/hermes_provision.py`          | 15-phase Hermes bootstrap orchestrator       |
 | `src/hal0/agents/personas.py`                  | persona TOML store + hot-reload helper       |
 | `src/hal0/agents/mcp_client.py`                | MCP server-axis + tool-axis classifier       |
-| `src/hal0/agents/hermes/plugins/memory_cognee/`| hal0-cognee MemoryProvider plugin            |
+| `src/hal0/agents/hermes/plugins/memory_hindsight/`| hal0-hindsight MemoryProvider plugin       |
 | `src/hal0/api/agents/personas.py`              | `/api/agents/{id}/personas[/{pid}/activate]` |
 | `src/hal0/api/agents/chat_proxy.py`            | WS proxy + session REST shim                 |
 | `src/hal0/api/agents/restart.py`               | `POST /api/agents/{id}/restart`              |
@@ -318,6 +321,6 @@ HEAD. Bump process: review issue, edit shim adapters if needed, run
 ## See also
 
 - [`PLAN.md`](./PLAN.md) — v1 scope, modules ported from haloai, milestones
-- [`docs/slots.md`](./docs/slots.md) — slot lifecycle state machine *(TODO)*
-- [`docs/dispatcher.md`](./docs/dispatcher.md) — routing algorithm *(TODO)*
-- [`docs/install.md`](./docs/install.md) — install flow + filesystem layout *(TODO)*
+- [`docs/reference/slot-lifecycle.mdx`](./docs/reference/slot-lifecycle.mdx) — slot lifecycle state machine
+- [`docs/concepts/architecture.mdx`](./docs/concepts/architecture.mdx) — control plane + dispatcher routing
+- [`docs/getting-started/install.mdx`](./docs/getting-started/install.mdx) — install flow + filesystem layout

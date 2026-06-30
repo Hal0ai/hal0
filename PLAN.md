@@ -7,47 +7,46 @@ one-line install) and re-architected around the things that make hal0
 different from "a wrapper around llama-server": hardware-aware slots,
 clean lifecycle, and a real reliability bar.
 
-**Status (2026-06-14):** **v0.5.0-alpha.1** — container-runtime era.
+**Status (2026-06-30):** **v0.8.2b3** — container-runtime era.
 Every slot runs as a dedicated podman container under
 `hal0-slot@<name>.service` (ContainerProvider + `profiles.toml`).
 The v0.2 Lemonade daemon epoch is over — see Phase 9 (historical
 record below) and the container-runtime epic (#652) / full extraction
-(#687, PRs #688–#726). **Active work streams:**
+(#687, PRs #688–#726). **Work streams (most now shipped):**
 
-1. **Hermes-Agent bootstrap** — bundled agent becomes hal0-aware on
-   first run: env probe, model auto-wiring, MCP memory connection,
-   identity-card publishing to a dedicated `agents` dataset. Plan:
-   [`docs/internal/hermes-bootstrap-plan-2026-05-23.md`](docs/internal/hermes-bootstrap-plan-2026-05-23.md).
-   ADR: [ADR-0011 (agent identity cards)](docs/internal/adr/0011-agent-identity-cards.md).
+1. **Hermes-Agent bootstrap** — ✅ shipped. Bundled agent becomes
+   hal0-aware on first run: env probe, model auto-wiring, MCP memory
+   connection (Hindsight-backed), identity-card publishing to a
+   dedicated `agents` dataset. ADR: ADR-0011 (agent identity cards).
    Tracker: issues #237 / #238 / #240–#247 (10 tracer-bullet slices).
-2. **React dashboard v3 — fully functional** — v3 scaffold landed on
-   `main` (#235); wires every panel against live container-runtime /
-   admin-MCP / memory-MCP / agent surfaces. Replaces v2 (v0.2.1 cutover
-   shipped #199). Tracker: `dashboard-v3` label + `feat/dash-v3-*`
-   branches.
-3. **Container-runtime polish** — GPU-accelerated TTS (closes the
-   `[CPU]` chip on the voice card), KV% for GPU slots (hal0-built
-   llama-server or upstream), per-slot Prometheus metrics surface.
-4. **Admin / auth simplification (ADR-0001 close-out)** — collapse Caddy
-   to TLS-only or drop entirely; FastAPI owns auth (password + session
-   cookies + Bearer middleware), `/v1/*` served directly. In flight
-   across `feat/adr-0001-*` + `fix/issue-28-caddy-public-paths` +
-   `docs/adr-0001-close-out-2026-05-21`.
-5. **Advanced memory + MCP client side (Phase 10 → v0.3)** — Cognee
-   graph extraction + Memify pipeline + per-agent allow-listed external
-   MCP clients + memory federation across local + remote sources. Was
-   "post-v0.2 unscheduled"; reclassified as v0.3 scope.
+2. **React dashboard v3 — fully functional** — ✅ shipped. v3 wires
+   every panel against live container-runtime / admin-MCP / memory-MCP /
+   agent surfaces. Replaces v2 (v0.2.1 cutover shipped #199). Tracker:
+   `dashboard-v3` label + `feat/dash-v3-*` branches.
+3. **Container-runtime polish** — ✅ largely shipped. GPU-accelerated
+   TTS (voice stack live; Qwen3-TTS + kokoro slots), KV% for GPU slots
+   (hal0-built llama-server or upstream), per-slot Prometheus metrics
+   surface.
+4. **Admin / auth simplification** — ✅ shipped. ADR-0012 superseded
+   the ADR-0001 close-out: auth and Caddy were removed entirely (no
+   built-in auth or bundled TLS; upstream reverse proxy recommended for
+   non-LAN). `/v1/*` served directly from FastAPI.
+5. **Advanced memory + MCP client side** — Hindsight graph extraction
+   (Cognee removed per ADR-0023; `extraction_slot`-wired) + per-agent
+   allow-listed external MCP clients + memory federation across local +
+   remote sources.
 
-Architecture decisions in force:
-[ADR-0009 (FLM trio NPU packing)](docs/internal/adr/0009-flm-trio-npu-packing.md),
-[ADR-0010 (bundle picker — no default stack)](docs/internal/adr/0010-bundle-picker-no-default-stack.md).
-ADR-0008 (Lemonade adoption) is superseded by the container-runtime
-epic (#652); ADR-0006 / ADR-0007 were already superseded. v0.3 adds:
-- [ADR-0011 (agent identity cards)](docs/internal/adr/0011-agent-identity-cards.md) — Hermes bootstrap publishes per-agent cards into a dedicated `agents` Cognee dataset.
-- [ADR-0012 (remove auth and Caddy entirely)](docs/internal/adr/0012-remove-auth-and-caddy.md) — supersedes ADR-0001; hal0 v0.3 ships with no built-in auth or TLS, recommends upstream reverse proxy (Traefik / nginx / Cloudflare Tunnel) for non-LAN deployments. ~6,000 lines removed across backend, frontend, tests, installer, packaging.
-- [ADR-0013 (MCP-client allow-list for bundled agents)](docs/internal/adr/0013-mcp-client-allow-list.md) — resolves stream #5 ships-when "at least one MCP-client external source connectable from a bundled agent" with default-deny on server + tool axis + ADR-0004 approval-queue integration.
-- [ADR-0014 (Cognee graph extraction model gate)](docs/internal/adr/0014-cognee-graph-extraction-model-gate.md) — supersedes ADR-0005 §6 graph bullet; resolves stream #5 ships-when "configurable model" requirement (default-off + typed route enum: `upstream` / `primary` / `agent`).
-- [ADR-0023 (canonical LLM roles agent+utility)](docs/internal/adr/0023-canonical-llm-roles-agent-utility.md) — supersedes ADR-0014 §2; retires the `chat`/`primary` role names for `agent` (default/anchor) + `utility` (cheap helper, now seeded), generalizes `hal0/<slot>` addressing, removes Cognee, and replaces `[memory.graph].route`/`upstream` with a wired `extraction_slot`.
+Architecture decisions in force (ADRs are kept internal / not in-repo —
+referenced by number):
+ADR-0009 (FLM trio NPU packing), ADR-0010 (bundle picker — no default
+stack). ADR-0008 (Lemonade adoption) is superseded by the
+container-runtime epic (#652); ADR-0006 / ADR-0007 were already
+superseded. v0.3 adds:
+- ADR-0011 (agent identity cards) — Hermes bootstrap publishes per-agent cards into a dedicated `agents` dataset.
+- ADR-0012 (remove auth and Caddy entirely) — supersedes ADR-0001; hal0 ships with no built-in auth or TLS, recommends upstream reverse proxy (Traefik / nginx / Cloudflare Tunnel) for non-LAN deployments. ~6,000 lines removed across backend, frontend, tests, installer, packaging.
+- ADR-0013 (MCP-client allow-list for bundled agents) — resolves stream #5 ships-when "at least one MCP-client external source connectable from a bundled agent" with default-deny on server + tool axis + ADR-0004 approval-queue integration.
+- ADR-0014 (graph extraction model gate) — superseded by ADR-0023 §2; resolved stream #5 ships-when "configurable model" requirement (default-off + typed route enum).
+- ADR-0023 (canonical LLM roles agent+utility) — supersedes ADR-0014 §2; retires the `chat`/`primary` role names for `agent` (default/anchor) + `utility` (cheap helper, now seeded), generalizes `hal0/<slot>` addressing, removes Cognee (memory engine is now Hindsight), and replaces `[memory.graph].route`/`upstream` with a wired `extraction_slot`.
 
 ADR-0006 / ADR-0007 are superseded.
 
@@ -72,10 +71,9 @@ fully-wired dashboard, simpler admin, polished container runtime. See §1
 > extraction (#687, PRs #688–#726) supersede it. See §2 (Architecture)
 > and Phase 9 / Phase 11 below for the complete before/after.
 
-The Lemonade Server adoption was end-to-end at this cut. See
-[`docs/internal/lemonade-adoption-plan-2026-05-22.md`](docs/internal/lemonade-adoption-plan-2026-05-22.md)
-for the locked v0.2 implementation contract; the high-level
-deliverables were:
+The Lemonade Server adoption was end-to-end at this cut (locked v0.2
+implementation contract tracked in the internal Lemonade-adoption
+planning doc, not in-repo); the high-level deliverables were:
 
 - **Lemonade Server as the unified inference runtime** — one `lemond`
   process per host on `127.0.0.1:13305`, supervised by
@@ -133,7 +131,7 @@ See §15 Phase 9 below for the per-PR map.
     catalog (`b90a569`) groups models first, narrows the backend
     dropdown to backends a model can actually serve, and ships
     `hal0 capabilities migrate` for stale persisted selections.
-- **Auth + reverse proxy** (per [ADR-0001](docs/internal/adr/0001-collapse-edge-auth-into-fastapi.md),
+- **Auth + reverse proxy** (per ADR-0001,
   collapsed to a single FastAPI layer in PRs #58 + #59; original dual-layer
   shipped ahead of schedule via Team J, 2026-05-15 — `ba79427`, `f62902c`)
   - All auth lives in FastAPI: Bearer tokens for programmatic clients,
@@ -247,10 +245,9 @@ Two hal0-owned Hermes plugins (`Hal0Profile` for the provider,
 `Hal0MemoryProvider` for native memory injection via the upstream
 `MemoryProvider` ABC). Idempotent + repairable.
 
-- Bootstrap plan: [`docs/internal/hermes-bootstrap-plan-2026-05-23.md`](docs/internal/hermes-bootstrap-plan-2026-05-23.md)
-- Upstream surface: [`docs/internal/hermes-upstream-map-2026-05-23.md`](docs/internal/hermes-upstream-map-2026-05-23.md)
-- Env probes: [`docs/internal/hermes-env-probe-recipes-2026-05-23.md`](docs/internal/hermes-env-probe-recipes-2026-05-23.md)
-- ADR: [ADR-0011 (agent identity cards)](docs/internal/adr/0011-agent-identity-cards.md)
+- Bootstrap plan, upstream surface, and env-probe recipes: tracked in
+  the internal Hermes-bootstrap planning docs (not in-repo).
+- ADR: ADR-0011 (agent identity cards)
 - Tracker: 10 issues #237–#247 (4 admin MCP probe tools → scaffold → install → provider+config → memory plugin → identity cards → context → model_automap → robustness → dashboard panel)
 
 #### 2. React dashboard v3 — wired-up and functional
@@ -265,7 +262,7 @@ every panel against the live data planes:
 - **MCP** — list installed MCP servers (hal0-admin, hal0-memory,
   user-added); per-server tool surface introspection; identity-card
   reader for the `agents` dataset.
-- **Memory** — Cognee dataset explorer (shared / private / `agents`);
+- **Memory** — Hindsight dataset explorer (shared / private / `agents`);
   search + delete; per-agent namespace surfaced.
 - **Agents** — render identity cards from the `agents` dataset
   (per ADR-0011); reachability ping; bootstrap/repair/uninstall
@@ -306,27 +303,24 @@ Tracker: `dashboard-v3` label, `feat/dash-v3-*` branches, issue #200.
 
 Promoted to v0.3 scope. Locked deliverables:
 
-- **Cognee graph extraction (Kuzu)** — gated behind a configurable
-  model per [ADR-0014](docs/internal/adr/0014-cognee-graph-extraction-model-gate.md).
-  Default OFF; opt-in via dashboard toggle; route enum `upstream`
-  (default suggestion — OpenRouter / Anthropic / OpenAI) /
-  `primary` / `agent`. Eval suite deferred to v0.4 (audit gap G2).
+- **Hindsight graph extraction** — gated behind a configurable
+  model per ADR-0014 (superseded by ADR-0023, which wires a
+  dedicated `extraction_slot`). Default OFF; opt-in via dashboard
+  toggle. Eval suite deferred to v0.4 (audit gap G2).
 - **Memify pipeline** for memory hygiene.
 - **MCP client side of hal0** — bundled agents reach external MCP
-  servers with a per-agent allow-list per
-  [ADR-0013](docs/internal/adr/0013-mcp-client-allow-list.md).
+  servers with a per-agent allow-list per ADR-0013.
   Config at `/etc/hal0/agents/<name>.toml`; default-deny on both
   server + tool axis; three-tier classification (`allow` / `gated`
   / `blocked`); filesystem sandbox at
   `/var/lib/hal0/agents/<name>/workspace`; approval-queue reuse
   from ADR-0004.
 - **Memory federation** — pluggable Provider pattern; multiple
-  memory sources (local Cognee + remote MCPs) federated under one
+  memory sources (local Hindsight + remote MCPs) federated under one
   query path. Deferable to v0.4 per owner call mid-cycle (PLAN
   §15 Phase 10 "Deferred from v0.3 → v0.4" list).
-- **RBAC + audit log surface** — Cognee's built-in RBAC +
-  dataset-scoped permissions; rotating audit log visible in
-  dashboard.
+- **RBAC + audit log surface** — Hindsight dataset-scoped
+  permissions; rotating audit log visible in dashboard.
 
 #### Stretch / nice-to-have
 
@@ -1011,11 +1005,11 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 - Migrate haloai LXC → hal0 (cutover) — script ready (PR #22, `scripts/migrate-haloai.py` + 14-model curated allow-list); cutover script tested with synthetic fixtures, not yet against live haloai data
 - Public launch — pending §16 decisions (launch story, contribution model)
 
-**Phase 8 — Agents v0.2 (initially v0.2; shipped 2026-05-22 ahead of the Lemonade migration)** — ✅ done 2026-05-22 — combined Agents + MCP + basic memory release; design settled via grilling 2026-05-22, deliverables in `docs/adr/0004-agents.md` + `docs/adr/0005-memory-engine-cognee.md`. Public API docs: [`docs/api/mcp.md`](./docs/api/mcp.md), [`docs/api/agents.md`](./docs/api/agents.md).
+**Phase 8 — Agents v0.2 (initially v0.2; shipped 2026-05-22 ahead of the Lemonade migration)** — ✅ done 2026-05-22 — combined Agents + MCP + basic memory release; design settled via grilling 2026-05-22, deliverables in ADR-0004 (agents) + ADR-0005 (memory engine — originally Cognee, since replaced by Hindsight per ADR-0023). Public API docs: [docs/reference/mcp-tools.mdx](./docs/reference/mcp-tools.mdx), [docs/concepts/agents.mdx](./docs/concepts/agents.mdx).
 
 - **Bundled agent app, single-pick at install.** Supported choices: `pi-coder` (CLI, installed from `Hal0ai/pi-mono` fork via `@earendil-works/pi-coding-agent` on npm) and `Hermes-Agent` (service, installed via the hal0-owned `hal0-hermes` wrapper around upstream `hermes`). User picks one via the first-run wizard or `hal0 agent {install,uninstall,list} <name>`; single-pick enforced; `--switch` flag for atomic swap. install.sh stays non-interactive (no `--agent` flag).
 - **hal0 admin MCP server at `/mcp/admin`.** Tools wrap existing `/api/*` routes only (rule: a tool ships iff it maps to an existing `/api/*` route — no new privileged surface). Bearer-token auth reused from ADR-0001. Two-tier scope: routine ops (slot status / list / `model_swap` / hardware probe / logs) autonomous; capital-D destructives (`model_pull`, `slot_restart/create/delete`, `capability_set`, `config_write`) gated.
-- **hal0 memory MCP server at `/mcp/memory`.** Wraps **Cognee** (Apache 2.0, embedded SQLite + LanceDB + Kuzu defaults — same stack we'd otherwise build). v0.2 surfaces only `memory_add` / `memory_search` / `memory_list` / `memory_delete`; Cognee's graph pipeline and Memify stay disabled until v0.3 (Phase 10 stream 5).
+- **hal0 memory MCP server at `/mcp/memory`.** Originally wrapped **Cognee** (Apache 2.0, embedded SQLite + LanceDB + Kuzu defaults); the v0.2 surface was `memory_add` / `memory_search` / `memory_list` / `memory_delete`. _Cognee was later removed per ADR-0023 — the memory engine is now **Hindsight**; the same four MCP tools carry forward._
 - **Approvals UX.** Bell+inbox in dashboard header (badge count, modal); inline pending indicators on Models / Slots / Capabilities pages where relevant; pending-forever (no auto-expire); no per-agent "trust mode" toggle (destructives must always be approved); full CLI parity via `hal0 agent approvals {list,approve,deny}` for headless workflows.
 - **Per-agent surface, asymmetric by upstream shape.** Service-shape (Hermes-Agent) gets a sidebar link-out OWUI-style; CLI-shape (pi-coder) gets no dashboard surface in v0.2. Both agents `track latest` upstream — no version pin — backed by a nightly CI smoke test that re-runs `installer/agents/pi-coder.sh` end-to-end against current upstream + asserts an MCP round-trip.
 - **Asymmetric ownership of integration shims.** hal0 maintains `installer/agents/pi-coder.sh` (installs pi-mono + `pi-mcp-adapter` for MCP routing + leaves `pi-memory-md` in place for project-scoped markdown memory). Hermes grows native hal0-awareness upstream (you own it); hal0's Hermes shim is a one-liner calling Hermes's own install command.
@@ -1024,7 +1018,7 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
   - `topoteretes/cognee-integrations/integrations/claude-code` — Claude Code plugin using six lifecycle hooks + `node_set` tagging (user-context / project-docs / agent-actions). Gives Claude Code users a second path into the same Cognee store, complementary to MCP.
   - `topoteretes/cognee-integrations/integrations/openclaw-skills` — `SKILL.md` + YAML-frontmatter format + Ingest → Execute → Observe → Amendify loop. Reference shape if hal0 ever grows agent-side skills (distinct from the platform "skills" = MCP tools settled here).
 
-**Phase 9 — Lemonade migration (v0.2)** — ✅ done 2026-05-23 — _Historical record. Superseded by the container runtime (epic #652) and full extraction (#687, PRs #688–#726); see Phase 11 below._ Lemonade Server was adopted as the unified inference runtime; six per-modality toolbox containers + the `hal0-slot@.service` template were retired in favour of one `hal0-lemonade.service`. Locked plan: [`docs/internal/lemonade-adoption-plan-2026-05-22.md`](docs/internal/lemonade-adoption-plan-2026-05-22.md). Architecture decisions: [ADR-0008](docs/internal/adr/0008-lemonade-adoption.md) (adoption — now superseded by #652), [ADR-0009](docs/internal/adr/0009-flm-trio-npu-packing.md) (FLM trio — still in force), [ADR-0010](docs/internal/adr/0010-bundle-picker-no-default-stack.md) (bundle picker — still in force). ADR-0006 / ADR-0007 superseded.
+**Phase 9 — Lemonade migration (v0.2)** — ✅ done 2026-05-23 — _Historical record. Superseded by the container runtime (epic #652) and full extraction (#687, PRs #688–#726); see Phase 11 below._ Lemonade Server was adopted as the unified inference runtime; six per-modality toolbox containers + the `hal0-slot@.service` template were retired in favour of one `hal0-lemonade.service`. Architecture decisions: ADR-0008 (adoption — now superseded by #652), ADR-0009 (FLM trio — still in force), ADR-0010 (bundle picker — still in force). ADR-0006 / ADR-0007 superseded.
 
 22 PRs across 6 sub-phases:
 
@@ -1049,7 +1043,7 @@ Cross-cutting:
 
 | Stream | Owner artifacts | Tracker |
 |---|---|---|
-| Hermes-Agent bootstrap | `docs/internal/hermes-bootstrap-plan-2026-05-23.md` + ADR-0011 | issues #237–#247 (10 tracer-bullet slices) |
+| Hermes-Agent bootstrap | internal Hermes-bootstrap plan (not in-repo) + ADR-0011 | issues #237–#247 (10 tracer-bullet slices) |
 | React dashboard v3 wired functional | `feat/dash-v3-*` branches; v3 scaffold landed (#235) | `dashboard-v3` label, issue #200 |
 | Container-runtime polish (GPU TTS, KV%, `/v1/*` proxy, Prometheus) | PR #248 + follow-ups | per-PR |
 | Admin/auth simplification (ADR-0001 close-out) | `feat/adr-0001-{a,b}-*`, `docs/adr-0001-{c-housekeeping,close-out-*}` | ADR-0001 children |
@@ -1070,7 +1064,7 @@ Cross-cutting:
 - Wiring `hermes-agent-self-evolution` (DSPy + GEPA prompt evolution; opens upstream PRs)
 - Memory federation: deferred only if it can't ship with the rest of stream #5 — owner's call mid-cycle
 
-**Phase 11 — Container runtime + Lemonade extraction (v0.3)** — ✅ done 2026-06-12 — Full removal of the `lemond` daemon; every slot is now a podman container supervised by `hal0-slot@<name>.service`. `ContainerProvider` + `profiles.toml` are the new inference layer. Operator reference: [docs/operate/container-runtime.md](docs/operate/container-runtime.md).
+**Phase 11 — Container runtime + Lemonade extraction (v0.3)** — ✅ done 2026-06-12 — Full removal of the `lemond` daemon; every slot is now a podman container supervised by `hal0-slot@<name>.service`. `ContainerProvider` + `profiles.toml` are the new inference layer. Operator reference: [docs/concepts/architecture.mdx](./docs/concepts/architecture.mdx).
 
 | Sub-epic | Issues | Scope |
 |---|---|---|

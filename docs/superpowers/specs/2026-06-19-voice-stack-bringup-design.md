@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-19
 **Branch:** `feat/voice-stack` (worktree `/home/halo/dev/wt/voice-stack`, base `origin/main`)
-**Status:** Design — awaiting user review before plan
+**Status:** Implemented / Shipped (v0.8.x) — voice stack brought up and verified end-to-end (TTS + STT, `voice_wire` fix, Open WebUI Call mode); later extended with the Qwen3-TTS GPU slot and the `voice.tts` engine switch. (#924, #928, #972, #976) This design doc is retained for historical context.
 
 ## Problem
 

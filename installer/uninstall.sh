@@ -354,12 +354,14 @@ else
     info "${LIB_DIR} not present"
 fi
 
-# Benchmark seam sudoers grant (install.sh seam #3). Lives in /etc/sudoers.d,
-# outside the /etc/hal0 config sweep, so remove it explicitly (system mode only).
-# The seam helper + harness themselves live under LIB_DIR (removed above); the
-# results under ${VAR_DIR}/benchmarks are data, kept unless --purge.
+# Sudoers grants (install.sh seams). Live in /etc/sudoers.d, outside the
+# /etc/hal0 config sweep, so remove them explicitly (system mode only). The
+# seam helpers + harness live under LIB_DIR (removed above); benchmark results
+# under ${VAR_DIR}/benchmarks are data, kept unless --purge.
 if [[ "${DEV_MODE}" -eq 0 ]]; then
+    rm_path "/etc/sudoers.d/hal0-agentenv"
     rm_path "/etc/sudoers.d/hal0-benchctl"
+    rm_path "/etc/sudoers.d/hal0-comfyui"
 fi
 
 # The install PREFIX (default /opt/hal0). install.sh rsyncs the source

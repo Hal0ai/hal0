@@ -1,5 +1,7 @@
 # Stacks — PR-3: Export / Import / Snapshot — Implementation Plan
 
+> **Status: Implemented / Shipped (v0.8.x).** Export/import/snapshot (`.hal0stack.json` envelope + model resolve pass) landed in `src/hal0/stacks/portable.py`; `stack_import`/`stack_apply` exposed via MCP + REST. (#926, #964) Plan retained for historical context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make a stack portable. **Export** a `StackConfig` to a self-contained `.hal0stack.json` envelope that embeds referenced profiles + model *metadata* (never weights/paths) with a content checksum. **Import** an envelope: validate, run a resolve pass classifying each model ref as present / pullable / unresolvable, reconcile embedded profiles, and create the stack. **Snapshot** the live config (slots + capabilities) into a new `StackConfig`.
