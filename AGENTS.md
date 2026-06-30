@@ -1,28 +1,32 @@
 # AGENTS.md
 
 Agent-facing entry point: what kind of work happens here, what shape it
-takes in v0.3, and where to find the contracts a teammate AGENT needs.
+takes, and where to find the contracts a teammate AGENT needs.
 
 ## hal0 in one paragraph
 
 hal0 is an open-source home AI inference platform: a single FastAPI
-service (`hal0-api`) that orchestrates Lemonade-served chat / embed /
-voice / image models, plus a v0.3 bundled-agent surface where a
-third-party agent runtime (Hermes-Agent today, pi-coder in v0.4) runs
+service (`hal0-api`) that orchestrates chat / embed / voice / image
+models, each served by its own per-slot container runtime
+(`src/hal0/providers/container.py` — one podman container per slot),
+plus a bundled-agent surface where a third-party agent runtime runs
 as a sibling systemd unit with hal0 wired in as its local AI provider.
 
-## v0.3 agent surface (current)
+## Agent surface (current)
 
-A v0.3 bundled agent is:
+A bundled agent is:
 
 * A systemd unit `hal0-agent@<id>.service` (template, parameterised by
-  agent id). v0.3 ships `hermes` only — see ADR-0004 single-pick.
-* Provisioned by `hal0 agent provision hermes` → the 12-phase
+  agent id). Two agents ship as first-class bundled agents —
+  `BUNDLED_AGENTS = ("pi-coder", "hermes")` in
+  `src/hal0/agents/manager.py`; `hermes` is the default integration.
+* Provisioned by `hal0 agent provision hermes` → the 15-phase
   `src/hal0/agents/hermes_provision.py` orchestrator
-  (preflight → install → env_probe → home_init → config_write →
-  mcp_wire → context_link → namespace_register → model_automap →
-  voice_wire → smoke_tests → self_report). Idempotent + checkpointed
-  via `/var/lib/hal0/state/agents/hermes/provision.json`.
+  (preflight → install → env_probe → home_init → install_artifacts →
+  persona_seed → config_write → mcp_wire → context_link →
+  namespace_register → model_automap → voice_wire →
+  gateway_secrets_wire → smoke_tests → self_report). Idempotent +
+  checkpointed via `/var/lib/hal0/state/agents/hermes/provision.json`.
 * Reachable through hal0-api's chat surface — `/api/agents/{id}/{events,
   submit,session/*}` (PR-9 WS proxy + REST shim) — never directly
   exposed to the browser. Hermes itself binds 127.0.0.1:9119 inside the
@@ -35,7 +39,7 @@ A v0.3 bundled agent is:
 ### Install + lifecycle
 
 ```
-sudo hal0 agent provision hermes        # one-shot 12-phase bootstrap
+sudo hal0 agent provision hermes        # one-shot 15-phase bootstrap
 sudo systemctl status hal0-agent@hermes  # unit health
 hal0 agent personas                      # list personas (TOML store)
 hal0 agent personas activate coder       # swap active persona
@@ -52,7 +56,7 @@ A persona is a TOML file under `/var/lib/hal0/agents/hermes/personas/`
 declaring (`id`, `display_name`, `summary`, `system_prompt`,
 `tools_allowed`, `memory_namespace`, `preferred_upstream`,
 `preferred_model`, `approval.{default_policy, auto_approve,
-require_approval}`). v0.3 seeds two: `hermes` (general) and `coder`.
+require_approval}`). The provisioner seeds two: `hermes` (general) and `coder`.
 The active persona is the contents of `active.txt`; switching personas
 swaps the system-prompt scope on the next turn without restarting the
 agent process. Configured per-agent via `GET/POST
@@ -63,11 +67,12 @@ agent process. Configured per-agent via `GET/POST
 `hermes_provision` registers `hal0-memory` and `hal0-admin` as MCP
 servers in hermes's config.toml. The plugin slot for memory is
 implemented by the hal0-bundled hermes plugin at
-`src/hal0/agents/hermes/plugins/memory_cognee/` — a `MemoryProvider`
-subclass that turns memory into part of the system prompt
+`src/hal0/agents/hermes/plugins/memory_hindsight/` — a `MemoryProvider`
+subclass (memory is Hindsight-backed; see ADR-0023) that turns memory
+into part of the system prompt
 (`system_prompt_block`) rather than a tool the agent has to remember
 to call. Plugin host (PR-7) lets the dashboard mount upstream Hermes
-plugin bundles (the v0.3 kanban plugin today) inside an iframe with a
+plugin bundles (the kanban plugin today) inside an iframe with a
 shadow-DOM-isolated SDK shim.
 
 ### Approvals + audit
@@ -84,35 +89,44 @@ back for the dashboard Activity tab.
 
 ### Issue tracker
 
-GitHub Issues on `Hal0ai/hal0` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+GitHub Issues on `Hal0ai/hal0` via the `gh` CLI.
 
 ### Triage labels
 
-Default vocabulary — `needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`. See `docs/agents/triage-labels.md`.
+Default vocabulary — `needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`.
 
 ### Domain docs
 
-Single-context. `CONTEXT.md` at root; ADRs at `docs/internal/adr/`. See `docs/agents/domain.md`.
+Single-context. `CONTEXT.md` at root. Published docs live under `docs/`
+(Starlight `.mdx`); ADRs are operator-only notes kept out of the tree
+(`docs/internal/` is gitignored), so they are referenced by number in
+prose below, not by file link.
 
-## v0.3 agent contracts (for deeper dives)
+## Agent contracts (for deeper dives)
 
-* [`docs/agents/hermes/CONFIG.md`](docs/agents/hermes/CONFIG.md) —
-  persona TOML, overrides.yaml, allowlist.toml, runtime.json,
-  hermes.env, plugin manifests, hot-reload-vs-restart semantics.
-* [`docs/agents/hermes/SERVICE.md`](docs/agents/hermes/SERVICE.md) —
-  hal0-agent@.service unit shape, sandboxing, restart endpoint
-  reference.
-* [`docs/internal/adr/0004-agents.md`](docs/internal/adr/0004-agents.md)
-  — bundling decision + single-pick.
-* [`docs/internal/adr/0011-agent-identity-cards.md`](docs/internal/adr/0011-agent-identity-cards.md)
-  — agent identity card schema.
-* [`docs/internal/adr/0013-mcp-client-allow-list.md`](docs/internal/adr/0013-mcp-client-allow-list.md)
-  — server-axis + tool-axis default-deny.
-* [`docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md`](docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md)
-  — upstream pin + weekly drift detection.
-* [`docs/internal/adr/0019-v0_3-hermes-integration.md`](docs/internal/adr/0019-v0_3-hermes-integration.md)
-  — v0.3 integration roll-up (composer over xterm, plugin host,
-  persona TOML, composite upstream).
+Published agent docs:
+
+* [`docs/concepts/agents.mdx`](docs/concepts/agents.mdx) — the bundled-agent
+  model: sandboxed service, personas (tool gating), approval queue,
+  per-persona spending budgets.
+* [`docs/guides/run-agents.mdx`](docs/guides/run-agents.mdx) — the
+  `hal0 agent` CLI: provisioning, personas, approvals, budgets.
+* [`docs/concepts/memory.mdx`](docs/concepts/memory.mdx) — the
+  Hindsight-backed memory subsystem operators and agents share.
+
+Standing decisions (ADRs are operator-only and untracked; stated inline):
+
+* **Agent bundling** — hal0 does not build its own agent runtime; it
+  bundles third-party runtimes (`pi-coder`, `hermes`) and runs them
+  safely as sandboxed sibling units.
+* **MCP allow-list** — the MCP client is default-deny on two axes
+  (server-axis + tool-axis); a persona's `tools_allowed` opens the gate.
+* **Upstream pin** — the bundled Hermes runtime is pinned with periodic
+  drift detection rather than tracking upstream `main`.
+* **ADR-0023 (current canonical ADR)** — LLM roles are `agent`
+  (default anchor) + `utility`; the older `chat` / `primary` roles are
+  retired. Memory is Hindsight-only (Cognee removed). hal0-api runs as
+  root (the earlier hardened-perms mode was removed).
 
 ## Shipping: deploy + PR workflow (how teammate agents land work here)
 

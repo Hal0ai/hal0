@@ -1,7 +1,7 @@
 # Contributing to hal0
 
-hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.5.0-alpha.1** — the
-Lemonade Server adoption release. The contribution model is still
+hal0 is licensed [Apache 2.0](./LICENSE). hal0 is at **v0.8.2b3** — the
+container-runtime line (one podman container per slot). The contribution model is still
 being decided (see [`PLAN.md`](./PLAN.md) §16).
 <!-- TODO(human): flip the next line to open the external-PR merge window
      when ready (audit Q6.3 / #630). Timing is the maintainer's call. -->

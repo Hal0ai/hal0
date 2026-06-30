@@ -28,7 +28,7 @@ shared inference daemon; no extra process to babysit.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.8.0-beta.2** — container-runtime era, declarative
+> **Status:** **v0.8.2b3** — container-runtime era, declarative
 > config. Each slot (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, NPU
 > trio) runs as a dedicated podman container (`hal0-slot@<name>.service`).
 > Slot definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
@@ -74,8 +74,7 @@ Whisper-V3-Turbo + Embedding-Gemma all coresident. hal0 exposes this
 as three slots (`agent`, `stt-npu`, `embed-npu`); the `npu.toml`
 `[npu]` table toggles ASR and embed. The host-side FLM `.deb` is
 installed for device-sanity probes only — inference runs in the
-container. See [ADR-0009](./docs/internal/adr/0009-flm-trio-npu-packing.md)
-for why.
+container. See ADR-0009 (FLM trio NPU packing) for why.
 
 **Dispatcher with single-flight + OmniRouter tool-calling.** Registry-aware
 routing across local slots *and* external upstreams (OpenRouter,
@@ -112,7 +111,7 @@ be evicted out from under a streaming request.
   under `hal0-slot@<name>.service`. `hal0-api` on `:8080` is the
   control plane; slot containers bind loopback ports (8081–8099 + fixed
   seeds). No shared inference daemon. See
-  [docs/operate/container-runtime.md](./docs/operate/container-runtime.md).
+  [docs/concepts/architecture.mdx](./docs/concepts/architecture.mdx).
 - **`hal0 setup` TUI** — after install (or anytime), `hal0 setup`
   walks you through storage, Extensions (Apps / Agents), Main and
   Agent model selection, and NPU opt-in, then downloads models with
@@ -177,7 +176,7 @@ be evicted out from under a streaming request.
 
 hal0 ships **two MCP servers** and **one bundled agent app**. The MCP
 servers (`/mcp/admin` for slot / model / capability / config / hardware
-/ log admin and `/mcp/memory` for Cognee-backed long-term memory) are
+/ log admin and `/mcp/memory` for Hindsight-backed long-term memory) are
 reachable by any MCP-speaking client — Claude Code, future RAG
 services, external scripts. The bundled agent is single-pick at install:
 `pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
@@ -189,8 +188,9 @@ install <name>`; swap atomically with `--switch`. Capital-D destructive MCP call
 (`model_pull`, `slot_delete`, `config_write`, etc.) gate through a
 header bell + inbox modal in the dashboard, with CLI parity via
 `hal0 agent approvals {list,approve,deny}`. See
-[docs/mcp/overview.md](./docs/mcp/overview.md) and
-[docs/agents/overview.md](./docs/agents/overview.md).
+[docs/concepts/agents.mdx](./docs/concepts/agents.mdx),
+[docs/reference/mcp-tools.mdx](./docs/reference/mcp-tools.mdx), and
+[docs/guides/run-agents.mdx](./docs/guides/run-agents.mdx).
 
 ## Backends
 
@@ -213,7 +213,8 @@ inside the `hal0-toolbox-flm` container image. With FLM present,
 
 For the container-runtime operator reference — service layout, slot
 TOML fields, profiles, GPU arbiter, and day-2 commands — see
-[docs/operate/container-runtime.md](./docs/operate/container-runtime.md).
+[docs/concepts/architecture.mdx](./docs/concepts/architecture.mdx) and
+[docs/guides/manage-slots.mdx](./docs/guides/manage-slots.mdx).
 
 ## Hardware
 
@@ -293,7 +294,7 @@ systemctl restart hal0-slot@chat
 
 ### Auth posture
 
-Per [ADR-0012](./docs/internal/adr/0012-remove-auth-and-caddy.md) (supersedes
+Per ADR-0012 (remove auth and Caddy entirely, supersedes
 ADR-0001), hal0 ships with **no built-in auth and no bundled TLS**.
 `hal0-api` binds `0.0.0.0:8080` and treats every request as
 authenticated by virtue of network reachability — the right posture
@@ -302,7 +303,7 @@ for a homelab appliance on a trusted LAN.
 If hal0 is reachable from anything you don't physically control,
 front it with an upstream reverse proxy that owns auth + TLS — Traefik,
 nginx, Cloudflare Tunnel, or your own preferred edge. See
-[`docs/operate/auth.mdx`](./docs/operate/auth.mdx) for example configs
+[`docs/concepts/security.mdx`](./docs/concepts/security.mdx) for example configs
 of each.
 
 ### Proxmox integration (optional)
@@ -351,13 +352,13 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
   probe, capability slots + orchestrator, dispatcher with
   single-flight + cold-cache prefetch, bundled OpenWebUI on `:3001`,
   cosign-keyless self-update with rollback, bundled agents
-  (pi-coder / Hermes-Agent) + MCP admin + Cognee memory MCP
+  (pi-coder / Hermes-Agent) + MCP admin + Hindsight memory MCP
 
 ### Soon
 
 - **GPU-accelerated TTS** — kokoro-vulkan or successor; closes the
   `[CPU]` chip on the voice slot card
-- **Advanced memory** — Cognee graph + Memify pipeline enabled, MCP
+- **Advanced memory** — Hindsight graph extraction enabled, MCP
   client side of hal0 (agents reach external MCP servers), federated
   memory across local + remote sources
 - **Benchmarks & presets UI** — in-dashboard tok/s + latency runs,

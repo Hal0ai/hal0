@@ -2,8 +2,9 @@
 # Launch (or resume) the ComfyUI container on hal0 iGPU (gfx1151).
 # - Image is DIGEST-PINNED for reproducibility (a re-pull can't silently change the build).
 #   To update: pull a new tag, then replace the @sha256 below with its RepoDigest.
-# - --restart no: does NOT auto-start on boot, so it never contends with Lemonade at boot.
-#   (After a CT reboot, run this script to bring ComfyUI back up.)
+# - --restart no: does NOT auto-start on boot. (After a CT reboot, run this script to
+#   bring ComfyUI back up.) NOTE: the managed `img` slot owns ComfyUI on the iGPU via
+#   podman; this standalone docker script is for manual/debug use — see issue #985.
 # - On a FRESH create it self-heals node deps (which live in the ephemeral container venv).
 set -euo pipefail
 IMG=docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2

@@ -8,7 +8,70 @@ v0.2) may carry breaking changes; patch releases inside a minor line
 
 Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
-For ADR-level architecture context see `docs/internal/adr/`.
+ADR-level architecture decisions are kept internal (the `docs/internal/`
+tree is gitignored, #638) and referenced by number throughout the code.
+
+## [v0.8.2b4] — 2026-06-30
+
+Documentation and installer hygiene — no runtime behaviour change. This
+release re-baselines the engineering docs to the current v0.8.x reality
+(container runtime, Hindsight memory, agent/utility roles) and fixes a
+handful of installer drift bugs surfaced by a codebase assessment sweep.
+Safe upgrade from v0.8.2b3.
+
+### Changed
+- **Docs re-baselined to v0.8.x.** Swept the Lemonade→container-runtime and
+  Cognee→Hindsight terminology out of `AGENTS.md`, `ARCHITECTURE.md`,
+  `CONTEXT.md`, `PLAN.md`, and `README.md`; corrected the Hermes provisioner
+  to its real 15-phase pipeline; refreshed version/status lines; and rewrote the
+  (largely fictional) `hal0-service-management` codebase-map reference against
+  the current `src/hal0/` tree. Marked the shipped Stacks and voice-stack
+  superpowers plans as completed.
+- **Dead ADR links fixed.** Tracked docs no longer link into the gitignored
+  `docs/internal/adr/` tree (#638); surviving decisions are inlined and ADRs are
+  referenced by number. (In-code citation sweep tracked in #984.)
+
+### Fixed
+- **qwen3tts migration script aligned with the `tts`-slot model.** The
+  standalone-to-slot migration script's Guard 1 checked a non-existent
+  `qwen3tts` slot (always 404) and Guard 3 checked a removed kokoro `:8084`
+  fallback; both are corrected to the deployed design where Qwen3-TTS serves
+  from the canonical `tts` slot via `voice.tts`. (#979)
+- **`uninstall.sh` now removes all three sudoers grants.** It only removed
+  `hal0-benchctl`, leaking `hal0-agentenv` and `hal0-comfyui` behind on uninstall.
+- **Hermes private memory bank seeded under its canonical name.** `install.sh`
+  seeded `private__hermes-agent`, which the server (which derives the bank from the
+  agent-id via `PRIVATE_PREFIX="private:"`) never matches — corrected to
+  `private:hermes` so the pre-seeded retain-mission/dispositions actually apply.
+- **Dropped the obsolete Lemonade boot-contention comment** from
+  `installer/comfyui/scripts/comfy-up.sh`.
+
+## [v0.8.2b3] — 2026-06-29
+
+GPU text-to-speech lands: Qwen3-TTS now runs as a hal0-native slot with a
+one-switch swap between the Kokoro (CPU) and Qwen3-TTS (GPU) engines, plus a
+GPU benchmark harness and dashboard polish. Safe upgrade from v0.8.2b2.
+
+### Added
+- **GPU Qwen3-TTS as a hal0-native slot.** New `Qwen3TTSProvider` serves
+  Qwen3-TTS from the `tts` slot, with a `voice.tts` capability switch that swaps
+  the engine between Kokoro (CPU) and Qwen3-TTS (GPU) without reconfiguring the
+  slot. (#972, #976) The toolbox image builds + pushes to ghcr.io and its digest
+  is pinned in `manifest.json`. (#975, #977) Ships a standalone-to-slot migration
+  runbook + guarded script. (#974)
+- **GPU benchmark harness.** A GPU benchmarking toolbox with the `hal0-benchctl`
+  seam and accompanying agent skills. (#967) Dashboard gains an iGPU usage gauge
+  and a prefill TTFT readout. (#968) Topbar adds Kanban / Agent-Chat launchers, a
+  global agent chat, and an Archived lane. (#966)
+
+### Fixed
+- **Dispatcher injects upstream auth headers for remote providers**, so requests
+  routed to authenticated remote upstreams carry their credentials. (#973)
+- **UI builds land reliably on deploy** (no-cache index + install to the served
+  `dist`). (#969)
+
+### Docs
+- Benchmarking toolbox UI/feature handoff. (#971)
 
 ## [v0.8.2b2] — 2026-06-24
 

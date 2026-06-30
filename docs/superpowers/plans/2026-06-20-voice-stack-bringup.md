@@ -1,5 +1,7 @@
 # hal0 Voice Stack Bring-up Implementation Plan
 
+> **Status: Implemented / Shipped (v0.8.x).** Voice stack brought up and verified end-to-end (TTS + STT, `voice_wire` fix, Open WebUI Call mode); later extended with the Qwen3-TTS GPU slot and `voice.tts` engine switch. (#924, #928, #972, #976) Plan retained for historical context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Take hal0 voice from "wired, never lit" to running and verifiably tested on hermes (CT105) — TTS (Kokoro), STT (Whisper, CPU then NPU), agent voice tools, and hands-free voice via Open WebUI Call mode.

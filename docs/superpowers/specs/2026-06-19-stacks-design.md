@@ -1,6 +1,6 @@
 # Stacks — Design Spec
 
-- **Status:** Approved design, pre-implementation
+- **Status:** Implemented / Shipped (v0.8.x) — Stacks subsystem (`src/hal0/stacks/`: schema/catalog, `StackApplyEngine` apply+drift+converge, `portable.py` export/import/snapshot), seed stacks (saber/forge/pi), and `stack_*` MCP/REST tools all landed. (#921, #923, #925, #926, #964) This spec is retained for historical/design context.
 - **Date:** 2026-06-19
 - **Author:** Alexander (via Claude)
 - **Target repo:** `hal0` (runtime + `ui/` dashboard). Docs page lands in `hal0-web`.

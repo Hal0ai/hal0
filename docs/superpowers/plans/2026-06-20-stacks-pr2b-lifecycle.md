@@ -1,5 +1,7 @@
 # Stacks — PR-2b: Lifecycle Convergence — Implementation Plan
 
+> **Status: Implemented / Shipped (v0.8.x).** `StackApplyEngine.converge()` (SlotManager load/swap/unload + capability-child routing) landed in `src/hal0/stacks/apply.py`. (#925) Plan retained for historical context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add async `StackApplyEngine.converge(stack)` — drive the existing `SlotManager` to load/swap the stack's primary slots to their assigned models, route the stack's capability-child rows through the existing `CapabilityOrchestrator.apply`, and unload running slots NOT in the stack (declarative replace). Returns a per-slot `ConvergeReport`; individual failures are recorded, never unwound.

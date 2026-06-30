@@ -1343,8 +1343,10 @@ else
             if [[ "${hs_up}" -eq 1 ]]; then
                 info "hindsight-api is running (memory engine on 127.0.0.1:9177)"
                 # Seed banks through hal0-api (idempotent import, config-by-field):
-                # `shared` = the global cross-agent brain; `private__hermes-agent`
-                # = hermes' private store. Other private/project banks lazy-create.
+                # `shared` = the global cross-agent brain; `private:hermes`
+                # = hermes' private store (the server derives it from the agent-id
+                # via PRIVATE_PREFIX="private:", so the seed name must match exactly).
+                # Other private/project banks lazy-create.
                 _seed_bank() {
                     curl -fsS -m 20 -X POST \
                         "http://127.0.0.1:${HAL0_PORT}/api/memory/banks/$1/import" \
@@ -1352,8 +1354,8 @@ else
                         -d "$2" >/dev/null 2>&1
                 }
                 if _seed_bank shared '{"version":"1","bank":{"retain_mission":"Extract technical decisions and rationale, gotchas and fixes, PRs and status changes, conventions, commands, endpoints, flags, incidents and resolutions, and cross-session coordination facts. Ignore routine edits, transient state, secrets, and anything already in git.","enable_observations":true,"disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":1}}' \
-                    && _seed_bank private__hermes-agent '{"version":"1","bank":{"retain_mission":"This agent private working notes, scratch decisions, and per-task state. Never store shared facts here.","disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":2}}'; then
-                    info "seeded memory banks: shared (global) + private__hermes-agent"
+                    && _seed_bank private:hermes '{"version":"1","bank":{"retain_mission":"This agent private working notes, scratch decisions, and per-task state. Never store shared facts here.","disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":2}}'; then
+                    info "seeded memory banks: shared (global) + private:hermes"
                 else
                     warn "memory bank seeding incomplete — banks also lazy-create on first write"
                 fi

@@ -1,5 +1,7 @@
 # Stacks — PR-2a: Config Apply + Dry-Run + Drift — Implementation Plan
 
+> **Status: Implemented / Shipped (v0.8.x).** `StackApplyEngine` (apply_config + dry-run + drift_status) landed in `src/hal0/stacks/apply.py` + `state.py`. (#923) Plan retained for historical context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Translate a `StackConfig` into one atomic, reversible config change over the stack's slot TOMLs — with a compute-only dry-run preview, commit via the existing `SlotConfigStore` rollback machinery, and an active-stack pointer + content-hash drift status (`clean`/`modified`/`none`).

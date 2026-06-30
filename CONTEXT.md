@@ -1,6 +1,6 @@
 # hal0 — Glossary
 
-Project terminology. Update inline as new terms get resolved during design sessions or PR reviews. NOT a spec — this is just the canonical names + short disambiguators. For decision rationale, see `docs/internal/adr/`.
+Project terminology. Update inline as new terms get resolved during design sessions or PR reviews. NOT a spec — this is just the canonical names + short disambiguators. For decision rationale, see the ADRs (ADR-0023 fixes the canonical LLM roles; most ADR files are gitignored, so decisions that still matter are inlined here).
 
 ---
 
@@ -9,48 +9,48 @@ Project terminology. Update inline as new terms get resolved during design sessi
 Two distinct senses in this repo. Disambiguate by context.
 
 1. **internal dev sense** — a Claude teammate (the multi-agent fan-out pattern used in `docs/models-slots-impl-plan.md` and `CONTRIBUTING.md:93`). Never user-facing. About *how we build hal0*, not what hal0 is.
-2. **product sense** — a Phase 8 bundled agent app (`pi-coder` or `Hermes-Agent`). User-facing. About *what users do with hal0*. See ADR-0004.
+2. **product sense** — a bundled agent app (`pi-coder` or `Hermes-Agent`). User-facing. About *what users do with hal0*.
 
 When in doubt, ask which sense applies before writing the word.
 
 ## Agents subsystem
 
-**Stripped.** Previously a haloai-style first-party agent runtime (PLAN.md §1 Strip listed it as gone). The Phase 8 product-sense agents (above) are NOT a revival — they're third-party bundled apps with a fundamentally different architecture. Do not reintroduce the first-party runtime.
+**Stripped.** Previously a haloai-style first-party agent runtime (PLAN.md §1 Strip listed it as gone). The product-sense bundled agents (above) are NOT a revival — they're third-party bundled apps with a fundamentally different architecture. Do not reintroduce the first-party runtime.
 
 ## bundled agent
 
-Phase 8 product feature. A third-party agent application installed alongside hal0, prewired to use hal0 as its local AI provider and to consume hal0's MCP servers. v0.2 supports `pi-coder` (CLI shape) and `Hermes-Agent` (service shape). Single-pick at install. See ADR-0004.
+A third-party agent application installed alongside hal0, prewired to use hal0 as its local AI provider and to consume hal0's MCP servers. Supports `pi-coder` (CLI shape) and `Hermes-Agent` (service shape). Single-pick at install.
 
-## Cognee
+## Hindsight
 
-The embedded memory engine adopted from v0.2 (Apache 2.0). Defaults: SQLite + LanceDB + Kuzu — all embedded, no external services. Powers `/mcp/memory`. See ADR-0005.
+The memory engine (ADR-0023; client at `src/hal0/memory/hindsight_client.py`, provider at `hindsight_provider.py`). Replaced the earlier Cognee engine — the Cognee wrapper was removed in c4c77a80. Powers `/mcp/memory` and the `/api/memory/*` REST surface. (Cognee is dead vocabulary in this repo; do not reintroduce it.)
 
-## dataset (Cognee)
+## namespace (memory)
 
-Cognee's namespace primitive. hal0's namespace rule (v0.2): default `shared` for all clients; per-client `--private` toggle promotes that client's writes to `private:<client_id>`. Multi-user revisits the rule in Phase 9 (future ADR pending — ADR-0006 was reassigned to Lemonade migration). See ADR-0005 §3.
+Hindsight's per-client scope primitive. hal0's namespace rule: default `shared` for all clients; per-client `--private` toggle promotes that client's writes to `private:<client_id>`. Private-mode reads expand to `[shared, private:<client_id>]` so a caller sees their own scoped items alongside the shared bucket. Resolution lives in `src/hal0/memory/namespace.py`, shared by the MCP + REST surfaces. Multi-user hardening of the rule is a future concern.
 
 ## MCP server (hal0-exposed)
 
-hal0 exposes two MCP servers (Phase 8, v0.2):
-- `/mcp/admin` — wraps existing `/api/*` routes (slot/model/hardware/log admin). Tool catalog rule: ships iff it maps to an existing route. See ADR-0004 §4.
-- `/mcp/memory` — wraps Cognee's Python API. See ADR-0005 §2.
+hal0 exposes two MCP servers:
+- `/mcp/admin` — wraps existing `/api/*` routes (slot/model/hardware/log admin). Tool catalog rule: ships iff it maps to an existing route.
+- `/mcp/memory` — wraps the Hindsight memory surface.
 
-Both reachable by any MCP-speaking client: bundled agents, Claude Code, future RAG services. Auth via existing Bearer token (ADR-0001).
+Both reachable by any MCP-speaking client: bundled agents, Claude Code, future RAG services. Auth via the API's existing Bearer token.
 
 ## memory
 
 Two distinct memory surfaces coexist on a hal0 box. They serve different scopes — don't displace one with the other.
 
 - **pi-memory-md** — project-scoped markdown files in the repo. Pi-coder's native extension, kept in place by the hal0 pi-coder shim. NOT touched by hal0's memory MCP.
-- **hal0 memory MCP** — cross-session, cross-agent, cross-app. Backed by Cognee. Default namespace `shared`. See ADR-0005.
+- **hal0 memory MCP** — cross-session, cross-agent, cross-app. Backed by Hindsight. Default namespace `shared`.
 
 ## pi-coder
 
-Bundled agent option (CLI shape). Upstream: `badlogic/pi-mono`. Minimal-by-design (4 tools: read/write/edit/bash; no native MCP, no native memory). hal0's pi shim adds `pi-mcp-adapter` (MCP routing) + leaves `pi-memory-md` in place. Track-latest upstream (NOT pinned). See ADR-0004 §3, §6.
+Bundled agent option (CLI shape). Upstream: `badlogic/pi-mono`. Minimal-by-design (4 tools: read/write/edit/bash; no native MCP, no native memory). hal0's pi shim adds `pi-mcp-adapter` (MCP routing) + leaves `pi-memory-md` in place. Track-latest upstream (NOT pinned).
 
 ## Hermes-Agent
 
-Bundled agent option (service shape). User-owned upstream — grows native hal0-awareness on the Hermes side rather than via a hal0-owned shim. Runs as `hal0-agent-hermes.service`. Sidebar link-out OWUI-style in dashboard. See ADR-0004 §3, §6.
+Bundled agent option (service shape). User-owned upstream — grows native hal0-awareness on the Hermes side rather than via a hal0-owned shim. Runs as `hal0-agent-hermes.service`. Sidebar link-out OWUI-style in dashboard.
 
 ## skills
 
@@ -58,36 +58,36 @@ Overloaded THREE ways. Default to sense (3) in hal0 product context.
 
 1. **Claude Code skills** — the markdown + YAML-frontmatter format Claude Code itself uses (e.g. `~/.claude/skills/`). Internal tooling for dev sessions; not a hal0 product feature.
 2. **stripped haloai skills subsystem** — historical, gone (PLAN.md §1 Strip section). Do not reintroduce.
-3. **hal0 platform skills** = MCP tools exposed by the admin MCP server (Phase 8). An agent calling `/mcp/admin` sees `slot_list`, `model_swap`, etc. as its "skills." This is the sense used in hal0 product copy and ADR-0004.
+3. **hal0 platform skills** = MCP tools exposed by the admin MCP server. An agent calling `/mcp/admin` sees `slot_list`, `model_swap`, etc. as its "skills." This is the sense used in hal0 product copy.
 
-(Possible Phase 9+ stretch: agent-side skills in the `cognee-integrations/openclaw-skills` style — `SKILL.md` + YAML frontmatter + self-improving loop. If we ever ship that, it's a separate noun and gets its own gloss entry.)
+(Possible future stretch: agent-side skills in the `openclaw-skills` style — `SKILL.md` + YAML frontmatter + self-improving loop. If we ever ship that, it's a separate noun and gets its own gloss entry.)
 
 ## device
 
-Per-slot hardware preference. Field on `SlotConfig` replacing v0.1.x's overloaded `backend` field (which mixed providers and backends). Enum: `gpu-rocm` | `gpu-vulkan` | `cpu` | `npu`. Default for new installs: `gpu-rocm`. `model_meta.device_to_backend(device)` maps it to a `(recipe, llamacpp)` pair, and the device selects the container profile (`config/schema.DEVICE_DEFAULT_PROFILES`): `gpu-rocm` → `rocm` (ROCm-FP4 llama-server toolbox), `gpu-vulkan` → `vulkan`, `cpu` → `tts`, `npu` → `flm` (the FLM NPU toolbox).
+Per-slot hardware preference. Field on `SlotConfig` replacing v0.1.x's overloaded `backend` field (which mixed providers and backends). Enum: `gpu-rocm` | `gpu-vulkan` | `cpu` | `npu`. Default for new installs: `gpu-rocm`. `model_meta.device_to_backend(device)` maps it to a `(recipe, llamacpp)` pair, and the device selects the container profile (`config/schema.DEVICE_DEFAULT_PROFILES`): `gpu-rocm` → `rocm` (ROCm-FP4 llama-server image), `gpu-vulkan` → `vulkan`, `cpu` → `tts`, `npu` → `flm` (the FLM NPU image).
 
 Note: spike data showed `gpu-vulkan` is much slower than `gpu-rocm` for Strix Halo — the user-facing UI should advise `gpu-rocm` as the recommended default and label `gpu-vulkan` as fallback.
 
 ## slot
 
-A named, configured serving target — e.g. `primary`, `embed`, `stt`, `tts`, `img`, plus optional chat slots (`agent`, future others). NOT a memory or RAG primitive — slots serve inference, memory lives in `/mcp/memory`.
+A named, configured serving target — e.g. `agent`, `embed`, `stt`, `tts`, `img`, plus the `utility` helper slot and any user-defined ones. NOT a memory or RAG primitive — slots serve inference, memory lives in `/mcp/memory`.
 
-**Current runtime (container-per-slot, #652/#687).** A slot is one `hal0-slot@<name>.service` systemd unit whose `ExecStart` is a single `podman run` of the slot's container (llama-server, FLM, Kokoro, or ComfyUI). `SlotManager` dispatches lifecycle (load/unload/swap/status) through `ContainerProvider`; the profile (`/etc/hal0/profiles.toml`) supplies the image + bench-tuned flags, the slot TOML supplies model/port/`context_size`. Slot state (`ready`/`idle`/`serving`) comes from the state machine in `hal0.slots.state`, reconciled against `systemctl is-active` + a `/health` probe on the slot's loopback port. Slot identity persists in `capabilities.toml`; the runtime layer is the per-slot container.
+**Current runtime (container-per-slot, #652/#687).** A slot is one `hal0-slot@<name>.service` systemd unit whose `ExecStart` is a single `podman run` of the slot's container (llama-server, FLM, Kokoro, or ComfyUI). `SlotManager` dispatches lifecycle (load/unload/swap/status) through `ContainerProvider` (`src/hal0/providers/container.py`); the profile (`/etc/hal0/profiles.toml`) supplies the image + bench-tuned flags, the slot TOML supplies model/port/`context_size`. Slot state (`ready`/`idle`/`serving`) comes from the state machine in `hal0.slots.state`, reconciled against `systemctl is-active` + a `/health` probe on the slot's loopback port. Slot identity persists in `capabilities.toml`; the runtime layer is the per-slot container.
 
-(Historical: in v0.2, slots were a logical mapping onto a single shared `lemond` process with no per-slot systemd unit. The lemonade runtime was removed in the container-switchover epic, #687; the per-slot template unit returned, this time wrapping a podman container.)
+(Historical: slots once mapped logically onto a single shared `lemond` (Lemonade) process with no per-slot systemd unit. The Lemonade runtime was removed in the container-switchover epic, #687; the per-slot template unit returned, this time wrapping a podman container.)
 
 ### slot inventory
 
-A slot has exactly ONE `type` and ONE loaded model. **Slot identity is a bare name** (e.g., `chat`, `embed`, `rerank`, `agent`) — unique across the whole `capabilities.toml`. The `group` is a field on the slot's selection, used purely for dashboard rollup. `embed` and `rerank` are two separate slots filed under the `embed` group; same for `stt`/`tts` under `voice`. (The seeded `chat` slot was named `primary` in v0.1.x; `primary` is now a back-compat alias for `chat` in `SlotManager.SLOT_ALIASES`.)
+A slot has exactly ONE `type` and ONE loaded model. **Slot identity is a bare name** (e.g., `agent`, `utility`, `embed`, `rerank`) — unique across the whole `capabilities.toml`. The `group` is a field on the slot's selection, used purely for dashboard rollup. `embed` and `rerank` are two separate slots filed under the `embed` group; same for `stt`/`tts` under `voice`. The canonical chat roles are `agent` (default anchor) and `utility` (seeded helper) per ADR-0023; the pre-ADR `chat`/`primary` names are retired (a lingering operator-custom `chat` slot is reachable by its own name via generalized `hal0/<slot>` resolution, not an alias). The only surviving back-compat alias in `SlotManager.SLOT_ALIASES` is `agent-hermes` → `agent`.
 
 Migration note: the v0.1.x `capabilities.toml` shape `selections.<group>.<slot>` carries the group implicitly in the TOML path. The same TOML path is kept for back-compat but the canonical identity in code is the bare slot name.
 
-The seeded set is `SlotManager.SEEDED_SLOTS = (chat, embed, rerank, stt, tts, img, vision, agent)`; the NPU shadow slots `(stt-npu, embed-npu)` (`NPU_SEEDED_SLOTS`) seed only when the FastFlowLM `.deb` is installed.
+The seeded set is `SlotManager.SEEDED_SLOTS = (utility, embed, rerank, stt, tts, img, vision, agent)`; the NPU shadow slots `(stt-npu, embed-npu)` (`NPU_SEEDED_SLOTS`) seed only when the FastFlowLM `.deb` is installed.
 
 | Slot | type | UI group | Default at install |
 |---|---|---|---|
-| `chat` | `llm` | chat | seeded, empty model |
-| `agent` | `llm` | chat | seeded, empty (GPU MoE chat-role sibling of `chat`) |
+| `agent` | `llm` | chat | seeded, empty (default chat anchor — GPU MoE) |
+| `utility` | `llm` | chat | seeded, empty (seeded helper role) |
 | `embed` | `embedding` | embed | seeded, empty |
 | `rerank` | `reranking` | embed | seeded, empty |
 | `stt` | `transcription` | voice | seeded, empty |
@@ -99,7 +99,7 @@ The seeded slots are a **catalog**, not a stack — every selection is empty (`e
 
 ### group
 
-Pure UI rollup in `capabilities.toml` (`selections.<group>.<slot>`). Groups bundle related slots into one dashboard panel. v0.2 groups: `chat` (primary, agent, …), `embed` (embed, rerank), `voice` (stt, tts), `img` (img). Groups do NOT carry types or per-group state — slots do. Users adding custom slots pick which group to file under.
+Pure UI rollup in `capabilities.toml` (`selections.<group>.<slot>`). Groups bundle related slots into one dashboard panel. Groups: `chat` (agent, utility, vision, …), `embed` (embed, rerank), `voice` (stt, tts), `img` (img). Groups do NOT carry types or per-group state — slots do. Users adding custom slots pick which group to file under.
 
 ### user-defined slots
 
@@ -146,9 +146,9 @@ Type vocabulary: `llm`, `embedding`, `reranking`, `transcription`, `tts`, `image
 
 ## OmniRouter
 
-Client-side OpenAI tool-calling loop, owned by hal0 (it lives in hal0-api, not the inference container). The LLM in a `chat`-type slot is given a JSON tool catalog; it emits `tool_calls`; hal0 dispatches each to the appropriate `/api/v1/*` endpoint and folds the result back into the conversation.
+Client-side OpenAI tool-calling loop, owned by hal0 (it lives in hal0-api, not the inference container). The LLM in an `llm`-type slot is given a JSON tool catalog; it emits `tool_calls`; hal0 dispatches each to the appropriate `/api/v1/*` endpoint and folds the result back into the conversation.
 
-The tool set is per-bundle (a `collection.omni` manifest names which tools the LLM sees). v0.2 ships these 7 tools:
+The tool set is per-bundle (a `collection.omni` manifest names which tools the LLM sees). It ships these 7 tools:
 
 | Tool | Source | Endpoint | Target slot type | Required model labels |
 |---|---|---|---|---|
@@ -160,17 +160,17 @@ The tool set is per-bundle (a `collection.omni` manifest names which tools the L
 | `embed_text` | **hal0 custom** | `/v1/embeddings` | `embedding` | `embeddings` |
 | `rerank_documents` | **hal0 custom** | `/v1/rerank` | `reranking` | `reranking` |
 
-Deferred to v0.3: `route_to_chat` (LLM-driven persona swap; needs semantics ADR), `recall_memory` (depends on Cognee MCP maturity in Phase 8).
+Deferred: `route_to_chat` (LLM-driven persona swap; needs semantics decision), `recall_memory` (depends on the Hindsight memory MCP).
 
 Upstream tools are kept in sync via a checksum-pinned copy of `src/app/src/renderer/utils/toolDefinitions.json` at `src/hal0/omni_router/tool_definitions.json`. hal0 custom tools live next to them in the same JSON.
 
 **Dynamic tool filtering (per chat request).** hal0's OmniRouter client computes the active tool set at chat-start based on (a) which slots are `enabled = true` with a loadable model, AND (b) for label-gated tools like `analyze_image`, whether any enabled slot of the required type has a model with the required label. Only the active subset goes into the LLM prompt. LLMs without the `tool-calling` label receive no tools at all. Filtering re-runs at next dispatch when slot configuration changes mid-conversation.
 
-Bundle-level tool whitelists/blacklists are NOT supported in v0.2 (YAGNI until requested). The set is always derived from slot enablement.
+Bundle-level tool whitelists/blacklists are NOT supported (YAGNI until requested). The set is always derived from slot enablement.
 
 ## model namespace
 
-`registry.toml` (under `/var/lib/hal0/registry/`) is the **sole** model catalog — there is no second loader process to keep in sync (the lemonade `server_models.json` / `user_models.json` / `extra.*` split was removed with the runtime, #687). Every slot's `--model` path is a registry-backed file under the model store `/mnt/ai-models`.
+`registry.toml` (under `/var/lib/hal0/registry/`) is the **sole** model catalog — there is no second loader process to keep in sync (the Lemonade `server_models.json` / `user_models.json` / `extra.*` split was removed with the runtime, #687). Every slot's `--model` path is a registry-backed file under the model store `/mnt/ai-models`.
 
 The registry tags each row with a namespace bucket (`ns`) the dashboard renders as a badge:
 
@@ -196,7 +196,7 @@ Resolution rules:
 
 ## chat persona (DO NOT use "chat-duo")
 
-A user-facing label for "which chat slot is currently serving the dashboard chat surface". Implementation = each persona is just a chat slot (`primary`, `agent`, etc.). The UI offers a persona dropdown; the OmniRouter `route_to_chat` tool lets the LLM switch personas mid-conversation. "Chat-duo" was an early term that implied pairs — retired before it landed.
+A user-facing label for "which chat slot is currently serving the dashboard chat surface". Implementation = each persona is just an `llm`-type slot (`agent`, `utility`, etc.). The UI offers a persona dropdown; the OmniRouter `route_to_chat` tool lets the LLM switch personas mid-conversation. "Chat-duo" was an early term that implied pairs — retired before it landed.
 
 ## v0.1.x → v0.2 upgrade
 
@@ -222,11 +222,11 @@ Driver: v0.1.x audience is single-digit alpha users; migration script ROI is bad
 
 ## fresh install
 
-v0.2 installs ship **no pre-selected model stack**. capabilities.toml lands with empty selections (`enabled = false` for every group). First-run dashboard shows a **bundle picker** — 4 hardware-anchored tiers plus the vendor-blessed LMX bundle — with a "Skip — configure manually" path to a blank dashboard.
+Installs ship **no pre-selected model stack**. capabilities.toml lands with empty selections (`enabled = false` for every group). First-run dashboard shows a **bundle picker** — 4 hardware-anchored tiers plus the vendor-blessed LMX bundle — with a "Skip — configure manually" path to a blank dashboard.
 
 The bundle PICKER is the user's first action; the installer never silently chooses. Driver: hal0 is a platform, not a curated bundle; opinionation is a per-tier concept, not a default-install concept.
 
-## bundle tiers (v0.2 first-run picker)
+## bundle tiers (first-run picker)
 
 | Tier | Min unified RAM | `chat.primary` | `chat.coder` | Aux | NPU trio |
 |---|---|---|---|---|---|
@@ -245,7 +245,7 @@ Notes:
 
 ## two-tier scope
 
-Access-control pattern for the admin MCP per ADR-0004. Routine ops (slot status, `model_swap`, `hardware_probe`, `memory_add`, etc.) = autonomous. Capital-D destructives (`model_pull`, `slot_delete`, `config_write`, `memory_delete` >1 record, etc.) = gated via the dashboard approval inbox. No per-agent trust toggle (destructives must always be approved).
+Access-control pattern for the admin MCP. Routine ops (slot status, `model_swap`, `hardware_probe`, `memory_add`, etc.) = autonomous. Capital-D destructives (`model_pull`, `slot_delete`, `config_write`, `memory_delete` >1 record, etc.) = gated via the dashboard approval inbox. No per-agent trust toggle (destructives must always be approved).
 
 ---
 
@@ -253,15 +253,15 @@ Access-control pattern for the admin MCP per ADR-0004. Routine ops (slot status,
 
 ## agent identity card
 
-A memory item published by a bundled agent during its first-run bootstrap, recording who-it-is and how-to-reach-it. Lives in the dedicated `agents` Cognee dataset (NOT `shared`, NOT `private:*`), tagged `agent-identity`. Immutable — written once, cleaned on uninstall. Schema v1 pins required fields in `metadata`: `agent_id`, `display_name`, `namespace`, `hal0_state.{registered_at, bootstrap_version, hal0_version, hermes_version}`. The `text` field is a human-readable summary. See [ADR-0011](docs/internal/adr/0011-agent-identity-cards.md).
+A memory item published by a bundled agent during its first-run bootstrap, recording who-it-is and how-to-reach-it. Lives in the dedicated `agents` memory namespace (NOT `shared`, NOT `private:*`), tagged `agent-identity`. Immutable — written once, cleaned on uninstall. Schema v1 pins required fields in `metadata`: `agent_id`, `display_name`, `namespace`, `hal0_state.{registered_at, bootstrap_version, hal0_version, hermes_version}`. The `text` field is a human-readable summary.
 
-## agents dataset
+## agents namespace
 
-Cognee dataset reserved for agent identity cards. Separate from `shared` (episodic memory) and `private:*` (per-agent working memory). Small forever (5-10 cards). Discoverable via `memory_search({dataset: "agents", tags: ["agent-identity"]})`. Foundation for multi-agent discovery in v0.3+.
+Hindsight memory namespace reserved for agent identity cards. Separate from `shared` (episodic memory) and `private:*` (per-agent working memory). Small forever (5-10 cards). Discoverable via `memory_search({namespace: "agents", tags: ["agent-identity"]})`. Foundation for multi-agent discovery.
 
 ## Hal0Profile
 
-**Removed (R4 H4).** This was a hal0-owned Hermes model-provider plugin at `$HERMES_HOME/plugins/model-providers/hal0/`. It was deleted because it hardcoded a stale base URL; `hermes_provision` now actively removes the legacy plugin and points Hermes's config at hal0-api directly (`base_url = {HAL0_API_URL}/v1`, derived from the primary chat slot). Inference request shaping happens server-side in hal0-api's `/v1` surface, not in a Hermes-side profile.
+**Removed (R4 H4).** This was a hal0-owned Hermes model-provider plugin at `$HERMES_HOME/plugins/model-providers/hal0/`. It was deleted because it hardcoded a stale base URL; `hermes_provision` now actively removes the legacy plugin and points Hermes's config at hal0-api directly (`base_url = {HAL0_API_URL}/v1`, derived from the default chat slot — the `agent` anchor). Inference request shaping happens server-side in hal0-api's `/v1` surface, not in a Hermes-side profile.
 
 ## Hal0MemoryProvider
 
@@ -269,7 +269,7 @@ A hal0-owned Hermes plugin extending `agent.memory_provider.MemoryProvider`. Liv
 
 ## hermes_provision
 
-The hal0 module at `src/hal0/agents/hermes_provision.py` that orchestrates the 12-phase Hermes bootstrap (preflight → install → env_probe → home_init → config_write → mcp_wire → context_link → namespace_register → model_automap → voice_wire → smoke_tests → self_report). Idempotent + checkpointed via `/var/lib/hal0/state/agents/hermes/provision.json`. CLI verb is `hal0 agent bootstrap hermes`. Renamed from `hermes_bootstrap.py` to avoid soft collision with upstream's Windows-UTF8 module of the same filename.
+The hal0 module at `src/hal0/agents/hermes_provision.py` that orchestrates the 15-phase Hermes bootstrap (preflight → install → env_probe → home_init → install_artifacts → persona_seed → config_write → mcp_wire → context_link → namespace_register → model_automap → voice_wire → gateway_secrets_wire → smoke_tests → self_report). Idempotent + checkpointed via `/var/lib/hal0/state/agents/hermes/provision.json`. CLI verb is `hal0 agent bootstrap hermes`. Renamed from `hermes_bootstrap.py` to avoid soft collision with upstream's Windows-UTF8 module of the same filename.
 
 ## HERMES_HOME (v0.3)
 
@@ -277,13 +277,13 @@ Pinned to `/var/lib/hal0/agents/hermes/` for hal0-bundled installs (not `~/.herm
 
 ## v0.3
 
-The milestone opened 2026-05-23. Five interlocking streams: (1) Hermes-Agent first-run bootstrap, (2) React dashboard v3 wired to live data, (3) inference-runtime polish (preload+idle, GPU TTS, KV%, `/v1/*` proxy) — at the time this rode on the lemonade runtime, since replaced by the per-slot container runtime (#687), (4) Admin/auth simplification (ADR-0001 close-out: FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced memory + MCP client side (memory graph + Memify + federation + per-agent external MCP allow-list). See PLAN.md §1 v0.3 + §15 Phase 10.
+The milestone opened 2026-05-23. Five interlocking streams: (1) Hermes-Agent first-run bootstrap, (2) React dashboard v3 wired to live data, (3) inference-runtime polish (preload+idle, GPU TTS, KV%, `/v1/*` proxy) — at the time this rode on the Lemonade runtime, since replaced by the per-slot container runtime (#687), (4) Admin/auth simplification (ADR-0001 close-out: FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced memory + MCP client side (memory graph + Memify + federation + per-agent external MCP allow-list). See PLAN.md §1 v0.3 + §15 Phase 10.
 
 ---
 
 # v0.3 integration vocabulary (added 2026-05-28)
 
-The terms below land with the v0.3 Hermes integration sweep (PRs #393–#404 + #PR-11). Pinned by [ADR-0019](docs/internal/adr/0019-v0_3-hermes-integration.md).
+The terms below land with the Hermes integration sweep (PRs #393–#404 + #PR-11).
 
 ## composer
 
@@ -295,31 +295,31 @@ The rolling chat history rendered above the composer. Built by zustand store `us
 
 ## plugin host
 
-The hal0-api surface (`/api/dashboard/plugins/*` + `/dashboard-plugins/{name}/*`) that proxies upstream Hermes plugin manifests + static assets so the v3 dashboard can mount plugin bundles (the kanban plugin in v0.3) inside an `<AgentView>` tab. Each plugin renders inside a shadow-DOM iframe with the `__HERMES_PLUGIN_SDK__` global shimmed from `src/hal0/api/plugins/sdk-shim.js`. v0.3 vendors the SDK shape; ADR-0018's drift detection alerts on upstream registry.ts changes that would break the shim. See PR-7.
+The hal0-api surface (`/api/dashboard/plugins/*` + `/dashboard-plugins/{name}/*`) that proxies upstream Hermes plugin manifests + static assets so the v3 dashboard can mount plugin bundles (the kanban plugin in v0.3) inside an `<AgentView>` tab. Each plugin renders inside a shadow-DOM iframe with the `__HERMES_PLUGIN_SDK__` global shimmed from `src/hal0/api/plugins/sdk-shim.js`. hal0 vendors the SDK shape; the upstream-Hermes pin is human-gated and a drift-detection job (see `hermes-sdk-diff`) alerts on upstream registry.ts changes that would break the shim. See PR-7.
 
 ## sidecar agent block
 
-The compact agent panel rendered in the v3 dashboard sidebar — service-status chip, persona picker, memory chip, skills list, approvals bell, [Open chat] button. Lives at `ui/src/dash/agents/SidebarAgentBlock.jsx`. Parameterised by `agent_id` so v0.4 pi-coder lights up by adding a row. The service chip wires `POST /api/agents/{id}/restart` (PR-11); the memory chip reads `GET /api/agents/{id}/memory/stats` (PR-11); the skills list reads `GET /api/agents/skills` (PR-11).
+The compact agent panel rendered in the v3 dashboard sidebar — service-status chip, persona picker, memory chip, skills list, approvals bell, [Open chat] button. Lives at `ui/src/dash/agents/SidebarAgentBlock.jsx`. Parameterised by `agent_id` so pi-coder lights up by adding a row. The service chip wires `POST /api/agents/{id}/restart` (PR-11); the memory chip reads `GET /api/agents/{id}/memory/stats` (PR-11); the skills list reads `GET /api/agents/skills` (PR-11).
 
 ## persona TOML
 
-A file under `/var/lib/hal0/agents/hermes/personas/{id}.toml` declaring `[persona]` (`id`, `display_name`, `summary`, `system_prompt`, `tools_allowed`, `memory_namespace`, `preferred_upstream`, `preferred_model`) and `[persona.approval]` (`default_policy`, `auto_approve`, `require_approval`). The filename stem MUST match `[persona].id` — `load_persona` raises `PersonaError` on a mismatch to prevent silent renames. Seeded by `hermes_provision` Phase 8 with two personas (`hermes`, `coder`); operator-edited via `hal0 agent personas` or the dashboard persona editor. The active persona is the contents of `active.txt` next to the personas dir; switching swaps the system-prompt scope on the next turn without restart.
+A file under `/var/lib/hal0/agents/hermes/personas/{id}.toml` declaring `[persona]` (`id`, `display_name`, `summary`, `system_prompt`, `tools_allowed`, `memory_namespace`, `preferred_upstream`, `preferred_model`) and `[persona.approval]` (`default_policy`, `auto_approve`, `require_approval`). The filename stem MUST match `[persona].id` — `load_persona` raises `PersonaError` on a mismatch to prevent silent renames. Seeded by `hermes_provision` with two personas (`hermes`, `coder`); operator-edited via `hal0 agent personas` or the dashboard persona editor. The active persona is the contents of `active.txt` next to the personas dir; switching swaps the system-prompt scope on the next turn without restart.
 
-## hal0-cognee
+## hal0-memory (Hermes plugin)
 
-The hal0-owned `MemoryProvider` plugin at `src/hal0/agents/hermes/plugins/memory_cognee/`, mounted into `$HERMES_HOME/plugins/memory/hal0-memory/` by the provisioner. Wraps hal0-memory's REST surface (`/api/memory/{add,search,list,delete}`) so memory injection happens inside Hermes's prompt pipeline (`system_prompt_block`) rather than as an explicit tool call. Per-persona namespace via persona TOML `memory_namespace`; omitted dataset on writes resolves to `private:<agent_id>` server-side per ADR-0005 §3 (#317 fix once it lands). v0.3 supersedes Hal0MemoryProvider above as the canonical name.
+The hal0-owned `MemoryProvider` plugin at `src/hal0/agents/hermes/plugins/memory_hindsight/` (renamed from `hal0-cognee`), mounted into `$HERMES_HOME/plugins/memory/hal0-memory/` by the provisioner. Wraps hal0-memory's REST surface (`/api/memory/{add,search,list,delete}`) so memory injection happens inside Hermes's prompt pipeline (`system_prompt_block`) rather than as an explicit tool call. Per-persona namespace via persona TOML `memory_namespace`; an omitted namespace on writes resolves to `private:<agent_id>` server-side. Supersedes Hal0MemoryProvider above as the canonical name.
 
 ## hermes-sdk-diff
 
-The weekly GitHub Action + local script (`scripts/hermes-sdk-diff.sh`) that diffs hal0's pinned Hermes upstream commit (`pyproject.toml [tool.hal0.upstream-hermes]`) against upstream HEAD for the tracked files (`web/src/plugins/registry.ts`, `web/src/plugins/slots.ts`, `hermes_cli/web_server.py`, `agent/memory_provider.py`, `tools/registry.py`, `agent/events.py`). When any tracked file changes, the workflow opens an issue with the upstream commit range so the bump is human-gated. Bump process documented in [ADR-0018](docs/internal/adr/0018-upstream-hermes-pin-and-upgrade.md) §4.
+The weekly GitHub Action + local script (`scripts/hermes-sdk-diff.sh`) that diffs hal0's pinned Hermes upstream commit (`pyproject.toml [tool.hal0.upstream-hermes]`) against upstream HEAD for the tracked files (`web/src/plugins/registry.ts`, `web/src/plugins/slots.ts`, `hermes_cli/web_server.py`, `agent/memory_provider.py`, `tools/registry.py`, `agent/events.py`). When any tracked file changes, the workflow opens an issue with the upstream commit range so the bump is human-gated. (Decision: the upstream-Hermes pin is bumped only through this human-gated path — never auto-merged.)
 
 ## HMAC session cookie
 
-The browser-facing authn seam on hal0-api's chat-proxy surface (`/api/agents/{id}/{events,submit,session/*}`). Minted on first GET `/api/agents/{id}/session/handshake`, payload `{session_id, expires_at}`, signature `HMAC-SHA256(<secret>, base64url(payload))`. Secret lives at `/var/lib/hal0/agents/secret.bin` (chmod 0600, generated on first use). `HttpOnly` + `SameSite=Lax` + 8h TTL. Belongs to the chat-proxy specifically — ADR-0012 removed Bearer-token auth from the rest of the API. See `src/hal0/api/agents/_auth.py`.
+The browser-facing authn seam on hal0-api's chat-proxy surface (`/api/agents/{id}/{events,submit,session/*}`). Minted on first GET `/api/agents/{id}/session/handshake`, payload `{session_id, expires_at}`, signature `HMAC-SHA256(<secret>, base64url(payload))`. Secret lives at `/var/lib/hal0/agents/secret.bin` (chmod 0600, generated on first use). `HttpOnly` + `SameSite=Lax` + 8h TTL. Belongs to the chat-proxy specifically (Bearer-token auth was removed from the rest of the API; identity on hal0-api is carried by the `X-hal0-Agent` header, below). See `src/hal0/api/agents/_auth.py`.
 
 ## X-hal0-Agent
 
-The HTTP header hal0-api sets on outbound hops to hermes (and that bundled agents set on inbound hops to hal0-api). Carries the agent's stable id (e.g. `hermes`, `pi-coder`). Per ADR-0012 it's the identity claim on hal0-api (NOT Bearer); per MASTER-PLAN §1 security-baseline the chat-proxy injects it, the browser never sees or sets it. The hal0-memory MCP resolver derives the per-agent private namespace from this header.
+The HTTP header hal0-api sets on outbound hops to hermes (and that bundled agents set on inbound hops to hal0-api). Carries the agent's stable id (e.g. `hermes`, `pi-coder`). It is the identity claim on hal0-api (NOT Bearer); per the security-baseline the chat-proxy injects it, the browser never sees or sets it. The hal0-memory MCP resolver derives the per-agent private namespace from this header.
 
 ## composite hal0 upstream
 
