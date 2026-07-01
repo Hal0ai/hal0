@@ -1542,6 +1542,16 @@ class SlotsConfig(BaseModel):
             "slot's TOML overrides this value."
         ),
     )
+    evict_pressure_mb: int = Field(
+        default=8192,
+        ge=0,
+        description=(
+            "Host free-RAM floor (MiB) for pressure-driven LRU eviction (#903). "
+            "When host MemAvailable drops below this value, idle lru-eligible "
+            "slots are evicted in least-recently-used order until free RAM is "
+            "back above the floor. 0 disables pressure eviction."
+        ),
+    )
 
     @model_validator(mode="after")
     def port_range_sane(self) -> SlotsConfig:

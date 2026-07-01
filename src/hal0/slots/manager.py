@@ -292,6 +292,7 @@ class SlotManager:
         model_cache_check: ModelCacheCheck | None = None,
         idle_after_s: float = _IDLE_AFTER_S,
         evict_after_s: float = _EVICT_AFTER_S,
+        evict_pressure_mb: float = 8192.0,
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
@@ -342,6 +343,10 @@ class SlotManager:
         # idle_timeout_s is unloaded, not just relabeled.  Per-slot TOML
         # idle_timeout_s overrides this global default.
         self._evict_after_s: float = evict_after_s
+        # Pressure-eviction floor (#903): when host MemAvailable drops below
+        # this value (MiB), idle lru-eligible slots are evicted in LRU order
+        # until free RAM recovers.  0 disables pressure eviction.
+        self._evict_pressure_mb: float = float(evict_pressure_mb)
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         self._idle_monitor_task: asyncio.Task[None] | None = None
         # GpuArbiter (Phase D, spec §7) — constructed lazily on first
@@ -2359,6 +2364,7 @@ class SlotManager:
         *,
         idle_after_s: float | None = None,
         evict_after_s: float | None = None,
+        evict_pressure_mb: float | None = None,
         interval_s: float | None = None,
     ) -> None:
         """Start the background sweeper that demotes READY → IDLE and evicts.
@@ -2372,6 +2378,8 @@ class SlotManager:
             self._idle_after_s = idle_after_s
         if evict_after_s is not None:
             self._evict_after_s = evict_after_s
+        if evict_pressure_mb is not None:
+            self._evict_pressure_mb = float(evict_pressure_mb)
         if interval_s is not None:
             self._idle_monitor_interval_s = interval_s
         existing = self._idle_monitor_task
@@ -2398,7 +2406,7 @@ class SlotManager:
             await task
 
     async def _idle_monitor_loop(self) -> None:
-        """Periodically sweep READY slots for idle-timeout."""
+        """Periodically sweep READY slots for idle-timeout and pressure."""
         try:
             while True:
                 await asyncio.sleep(self._idle_monitor_interval_s)
@@ -2406,6 +2414,10 @@ class SlotManager:
                     await self._sweep_idle_once()
                 except Exception as exc:  # never let the monitor die quietly
                     log.warning("slot.idle_sweep_failed", extra={"error": str(exc)})
+                try:
+                    await self._pressure_evict_once()
+                except Exception as exc:
+                    log.warning("slot.pressure_sweep_failed", extra={"error": str(exc)})
         except asyncio.CancelledError:
             raise
 
@@ -2494,6 +2506,101 @@ class SlotManager:
                 except IllegalSlotTransition:
                     # Raced with an unload — fine; next sweep will skip it.
                     continue
+
+    def _probe_host_free_mb(self) -> float:
+        """Return host MemAvailable in MiB by reading /proc/meminfo (#903).
+
+        Reuses :func:`hal0.slots.capacity._read_meminfo` — the single
+        authoritative reader for /proc/meminfo in the slots subtree.
+        Returns 0.0 on any probe failure so the pressure guard never
+        fires erroneously (a probe error is logged, not raised).
+        """
+        try:
+            from hal0.slots.capacity import _read_meminfo
+
+            _total_mib, avail_mib = _read_meminfo()
+            return avail_mib
+        except Exception as exc:
+            log.warning("slot.pressure_probe_failed", extra={"error": str(exc)})
+            return 0.0
+
+    async def _pressure_evict_once(self) -> None:
+        """One pressure-eviction pass (#903).
+
+        Probes host free RAM. When MemAvailable < ``_evict_pressure_mb``,
+        evicts idle, ``lru``-eligible slots one at a time in
+        least-recently-used order (oldest ``last_used`` first) until free
+        RAM is back above the floor or no more eligible slots remain.
+
+        Guards:
+          - ``_evict_pressure_mb == 0`` → pressure eviction is disabled.
+          - A slot serving a request (``serving_count > 0``) is never evicted.
+          - The canonical ``agent`` slot (and other _PINNED_BY_DEFAULT names)
+            is never evicted by pressure.
+          - Only slots with ``lru = true`` in their TOML are eligible.
+        """
+        if self._evict_pressure_mb <= 0:
+            return
+        free_mb = self._probe_host_free_mb()
+        if free_mb >= self._evict_pressure_mb:
+            return
+
+        # Build the LRU-ordered candidate list.  Only slots with a
+        # last_used timestamp are candidates (unloaded/offline slots are
+        # never in _last_used) so this is naturally bounded.
+        candidates: list[tuple[float, str]] = []
+        for slot_name, ts in list(self._last_used.items()):
+            if self._serving_count.get(slot_name, 0) > 0:
+                continue
+            canonical = self._resolve_alias(slot_name)
+            if canonical in _PINNED_BY_DEFAULT:
+                continue
+            state = self._current_state(slot_name)
+            if state not in (SlotState.READY, SlotState.IDLE):
+                continue
+            # Read lru flag from slot TOML.
+            try:
+                cfg = await self._load_slot_config(slot_name)
+            except (SlotConfigError, SlotNotFound):
+                continue
+            if not cfg.get("lru", False):
+                continue
+            candidates.append((ts, slot_name))
+
+        # Evict oldest-first until pressure is relieved or list is exhausted.
+        candidates.sort(key=lambda pair: pair[0])
+        for _ts, slot_name in candidates:
+            # Re-check serving guard and state — may have changed since
+            # the list was built (another coroutine may have started a
+            # request or the TTL sweep may have evicted it already).
+            if self._serving_count.get(slot_name, 0) > 0:
+                continue
+            state = self._current_state(slot_name)
+            if state not in (SlotState.READY, SlotState.IDLE):
+                continue
+            try:
+                await self.unload(slot_name)
+                log.info(
+                    "slot.pressure_evicted",
+                    extra={
+                        "slot": slot_name,
+                        "free_mb": round(free_mb),
+                        "floor_mb": round(self._evict_pressure_mb),
+                    },
+                )
+            except IllegalSlotTransition:
+                # Raced with another transition — skip, next sweep retries.
+                pass
+            except Exception as exc:
+                log.warning(
+                    "slot.pressure_evict_failed",
+                    extra={"slot": slot_name, "error": str(exc)},
+                )
+                continue
+            # Re-probe free RAM after each eviction to avoid over-shedding.
+            free_mb = self._probe_host_free_mb()
+            if free_mb >= self._evict_pressure_mb:
+                break
 
     async def get_config(self, slot_name: str) -> dict[str, Any]:
         """Return the slot's TOML config as a plain dict (read-only view).
