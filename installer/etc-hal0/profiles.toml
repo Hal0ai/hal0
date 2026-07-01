@@ -102,3 +102,15 @@ mtp          = false
 device_class = "img"
 intent       = "Image generation"
 quant        = ""
+
+[profile.cpu-llm]
+# CPU-only LLM template (#834). The Vulkan toolbox image runs llama-server in
+# CPU mode when no GPU devices are passed to the container (GGML_CPU auto-
+# selected). No backend → passes the #807 device/profile coherence check on a
+# CPU-only host. Seeded so first-run on a GPU-less box gets a coherent Main slot.
+image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
+flags        = "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap"
+mtp          = false
+device_class = "cpu"
+intent       = "CPU-only LLM · llama-server"
+quant        = "Q4_K_M"

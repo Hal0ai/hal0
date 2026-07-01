@@ -106,3 +106,62 @@ def test_strix_platform_forces_rocm_even_if_compute_flag_missing():
     # platform=strix-halo is the canonical FP4 signal.
     hw = _hw(platform="strix-halo", compute=False, vulkan=True)
     assert derive_device("chat", hw, npu_opt_in=False) == "gpu-rocm"
+
+
+# ── CPU-only host fixes (#834) ─────────────────────────────────────────────────
+
+
+def _cpu_hw():
+    """Hardware fixture for a GPU-less host (bare-metal-cpu-only)."""
+    return HardwareInfo(
+        cpu_model="Intel Xeon E5-2670",
+        cpu_cores=8,
+        cpu_threads=16,
+        ram_mb=32768,
+        unified_memory_mb=32768,
+        platform="bare-metal-cpu-only",
+        gpus=[],
+        npu=NPUInfo(present=False, vendor="", name="", driver=""),
+    )
+
+
+def test_cpu_host_chat_derives_cpu_device():
+    """On a GPU-less host, chat capability must derive to 'cpu', not a GPU device."""
+    hw = _cpu_hw()
+    assert derive_device("chat", hw, npu_opt_in=False) == "cpu"
+
+
+def test_cpu_host_chat_derives_cpu_llm_profile():
+    """derive_profile(chat, cpu) must return 'cpu-llm', not 'vulkan' (#834).
+
+    This test fails on the old code where cpu→non-tts returned 'vulkan',
+    causing the #807 coherence check to reject device=cpu + profile=vulkan.
+    """
+    assert derive_profile("chat", "cpu") == "cpu-llm"
+
+
+def test_cpu_host_coder_derives_cpu_llm_profile():
+    """coder capability on a CPU host must also derive to 'cpu-llm'."""
+    assert derive_profile("coder", "cpu") == "cpu-llm"
+
+
+def test_cpu_host_embed_derives_cpu_llm_profile():
+    """embed capability on a CPU host must derive to 'cpu-llm', not 'vulkan'."""
+    assert derive_profile("embed", "cpu") == "cpu-llm"
+
+
+def test_cpu_host_tts_still_derives_tts_profile():
+    """tts capability on a CPU host must still derive to 'tts' (kokoro), unchanged."""
+    assert derive_profile("tts", "cpu") == "tts"
+
+
+def test_cpu_llm_profile_exists_in_seed_profiles():
+    """The 'cpu-llm' seed profile must exist and have backend=None (cpu-coherent)."""
+    from hal0.config.schema import SEED_PROFILES
+
+    assert "cpu-llm" in SEED_PROFILES
+    profile = SEED_PROFILES["cpu-llm"]
+    assert profile.get("backend") is None, (
+        "cpu-llm profile must have backend=None so the #807 coherence check passes"
+    )
+    assert profile.get("device_class") == "cpu"
