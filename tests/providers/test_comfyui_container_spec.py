@@ -119,7 +119,9 @@ def test_comfyui_profile_flags_fallback_without_profile() -> None:
     cfg = _img_cfg()
     del cfg["profile"]
     spec = ComfyUIProvider().container_spec(cfg, {})
-    assert spec.command[2].endswith("--disable-mmap --bf16-vae --cache-none --disable-async-offload")
+    assert spec.command[2].endswith(
+        "--disable-mmap --bf16-vae --cache-none --disable-async-offload"
+    )
 
 
 def test_comfyui_slot_port_override_flows_into_argv() -> None:
@@ -158,10 +160,8 @@ def test_comfyui_disable_async_offload_flag_present() -> None:
         resolved_flags = _DEFAULT_PROFILE_FLAGS
 
     class _FakeCatalog:
-        def resolve(self, _name: str) -> "_FakeResolved":
+        def resolve(self, _name: str) -> _FakeResolved:
             return _FakeResolved()
-
-    import hal0.providers.comfyui as _mod
 
     orig = None
     try:
