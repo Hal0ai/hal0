@@ -1084,6 +1084,30 @@ for seed_slot in npu tts rerank utility img; do
     fi
 done
 
+# ── profiles.toml additive seed merge (A10b, #838) ────────────────────────────
+# If /etc/hal0/profiles.toml already exists (created by a prior install or a
+# dashboard profile edit), inject any SEED_PROFILES entries that are MISSING
+# from it — without clobbering operator-customised profiles (additive only).
+# On a fresh install the file does not yet exist; load_profiles_config returns
+# the seeds in-memory on every call and no write is needed until the operator
+# saves a custom profile via the dashboard.
+PROFILES_TOML="${ETC_DIR}/profiles.toml"
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping profiles.toml seed merge (no system writes)"
+elif [[ -f "${PROFILES_TOML}" ]]; then
+    info "profiles.toml exists — merging any missing seed profiles (additive, #838)"
+    "${VENV_DIR}/bin/python" - <<'PYEOF'
+from hal0.updater.updater import ensure_seed_profiles
+n = ensure_seed_profiles()
+if n:
+    print(f"  seeded {n} new profile(s) into /etc/hal0/profiles.toml")
+else:
+    print("  profiles.toml already contains all seed profiles")
+PYEOF
+else
+    info "profiles.toml absent — seeds served in-memory on first request"
+fi
+
 # ── ComfyUI model share ───────────────────────────────────────────────────────
 # The docker comfy-up/down/logs/postinstall.sh scripts have been retired; the
 # podman img slot (hal0-slot@img.service) is the sole lifecycle owner of :8188

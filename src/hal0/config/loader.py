@@ -391,10 +391,12 @@ def save_upstreams_config(cfg: UpstreamsConfig, path: Path | None = None) -> Non
 def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
     """Load and validate /etc/hal0/profiles.toml.
 
-    Returns a :class:`ProfilesConfig` seeded with the three built-in bench
+    Returns a :class:`ProfilesConfig` seeded with the built-in bench
     profiles when the file is absent so ``GET /api/profiles`` is always
-    populated on a fresh install.  When the file *is* present, only its
-    contents are returned — the seeds are NOT merged in.
+    populated on a fresh install.  When the file *is* present, any
+    SEED_PROFILES entries whose keys are **missing** from the on-disk
+    catalog are injected additively — existing operator-customised profiles
+    are never overwritten (additive-merge semantics, #838).
 
     Args:
         path: Override path.  If None, uses
@@ -412,12 +414,19 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
         return ProfilesConfig.model_validate({"profile": SEED_PROFILES})
     raw = _read_toml(Path(target))
     try:
-        return ProfilesConfig.model_validate(raw)
+        cfg = ProfilesConfig.model_validate(raw)
     except Exception as exc:
         raise ConfigParseError(
             f"failed to validate profiles.toml at {target}: {exc}",
             details={"path": str(target), "reason": str(exc)},
         ) from exc
+    # Additive merge: inject any seed profiles that are absent from the
+    # on-disk catalog so upgrades pick up newly-added seed profiles without
+    # clobbering operator edits.  Keys already present are left untouched.
+    for key, seed_raw in SEED_PROFILES.items():
+        if key not in cfg.profile:
+            cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
+    return cfg
 
 
 def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
@@ -427,12 +436,12 @@ def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
     seed profiles that should survive — to ``paths.profiles_toml()`` (or
     *path* if given) via :func:`write_toml_atomic`.
 
-    The written file is the single source of truth; on next load,
-    :func:`load_profiles_config` will read it instead of returning the
-    in-memory seeds (load REPLACES, it does not merge).  Callers are
-    therefore responsible for ensuring the catalog passed to this function
-    is complete (e.g. start from ``load_profiles_config()`` and add/modify
-    entries) so the seed profiles survive the round trip.
+    The written file is the single source of truth for operator-authored
+    profiles; on next load :func:`load_profiles_config` additively fills in
+    any seed profiles missing from the file, so callers do not need to
+    include seed profiles in *cfg* to keep them available.  That said,
+    starting from ``load_profiles_config()`` and modifying entries is still
+    the recommended pattern so the full catalog is explicit on disk.
 
     Note: :func:`write_toml_atomic` emits pure TOML — no header comment is
     written (tomli_w has no comment support and the atomic writer takes no

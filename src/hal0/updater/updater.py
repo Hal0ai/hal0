@@ -55,7 +55,13 @@ from pydantic import BaseModel, Field, field_validator
 
 import hal0
 from hal0.config import paths
-from hal0.config.loader import load_hal0_config, write_toml_atomic
+from hal0.config.loader import (
+    ConfigParseError,
+    load_hal0_config,
+    load_profiles_config,
+    save_profiles_config,
+    write_toml_atomic,
+)
 from hal0.config.migrations import latest_version, run_migrations
 from hal0.errors import Hal0Error
 
@@ -857,6 +863,71 @@ def _cache_dir(version: str) -> Path:
     return paths.var_lib() / "cache" / version
 
 
+# ── Seed-profile merge helpers ─────────────────────────────────────────────────
+
+
+def ensure_seed_profiles(*, job_id: str | None = None) -> int:
+    """Additively merge missing SEED_PROFILES into /etc/hal0/profiles.toml.
+
+    Loads the on-disk profile catalog (or the in-memory seeds when the
+    file is absent), injects any seed keys that are missing, and
+    atomically writes the result back to disk only when the file already
+    exists and new seeds were actually added.  If the file is absent,
+    nothing is written — :func:`load_profiles_config` returns the seeds
+    in-memory and the file is only created by explicit operator action or
+    :func:`save_profiles_config`.
+
+    Operator-customised profiles are never overwritten: the merge is
+    strictly additive — only keys absent from the on-disk catalog are
+    touched (#838).
+
+    Args:
+        job_id: Optional breadcrumb for structured-log tracing.
+
+    Returns:
+        Number of seed profiles injected (0 means already up-to-date).
+    """
+    from hal0.config.schema import SEED_PROFILES, ProfileConfig, ProfilesConfig
+    from hal0.config.loader import _read_toml
+
+    target = paths.profiles_toml()
+    if not target.exists():
+        # Fresh install — no on-disk file yet; load_profiles_config already
+        # returns the seeds in-memory on every call. No write needed.
+        log.info("updater.seed_profiles_noop", job_id=job_id, reason="profiles.toml absent")
+        return 0
+
+    # Load the raw on-disk catalog directly so we can detect exactly which
+    # seed keys are missing before deciding whether to write anything.
+    raw = _read_toml(target)
+    try:
+        cfg = ProfilesConfig.model_validate(raw)
+    except Exception as exc:
+        raise ConfigParseError(
+            f"failed to validate profiles.toml during seed merge at {target}: {exc}",
+            details={"path": str(target), "reason": str(exc)},
+        ) from exc
+
+    added: list[str] = []
+    for key, seed_raw in SEED_PROFILES.items():
+        if key not in cfg.profile:
+            cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
+            added.append(key)
+
+    if not added:
+        log.info("updater.seed_profiles_noop", job_id=job_id, reason="all seeds present")
+        return 0
+
+    save_profiles_config(cfg, path=target)
+    log.info(
+        "updater.seed_profiles_merged",
+        job_id=job_id,
+        added=added,
+        count=len(added),
+    )
+    return len(added)
+
+
 # ── Updater class ──────────────────────────────────────────────────────────────
 
 
@@ -1084,6 +1155,19 @@ class Updater:
                 details={**exc.details, "version": target_version},
             ) from exc
 
+        # Step 7b: additive seed-profile merge — inject any new SEED_PROFILES
+        # entries into /etc/hal0/profiles.toml without clobbering operator edits.
+        # Runs after migrations so the schema is stable before touching profiles.
+        try:
+            await asyncio.to_thread(ensure_seed_profiles, job_id=self.job_id)
+        except Exception as exc:
+            log.warning(
+                "updater.seed_profiles_merge_failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+            # Non-fatal: a missing seed profile is cosmetic; don't abort the update.
+
         # Step 8 + 9: atomic symlink swap + record previous.
         link = _current_symlink()
         try:
@@ -1264,6 +1348,7 @@ __all__ = [
     "UpdateSwapError",
     "UpdateVerifyError",
     "Updater",
+    "ensure_seed_profiles",
     "fetch_release_manifest",
     "releases_url",
 ]

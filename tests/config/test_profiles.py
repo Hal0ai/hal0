@@ -246,6 +246,89 @@ class TestLoadProfilesConfig:
         with pytest.raises(ConfigParseError):
             load_profiles_config(path=p)
 
+    # ── additive seed merge (#838) ────────────────────────────────────────────
+
+    def test_partial_file_gets_missing_seeds_merged_in(self, tmp_path: Path) -> None:
+        """A profiles.toml with only one profile gets the missing seeds injected."""
+        # Write a file with just the 'rocm' seed — everything else is missing.
+        toml_content = (
+            "[profile.rocm]\n"
+            'image = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"\n'
+            'flags = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"\n'
+            "mtp = false\n"
+            'device_class = "gpu"\n'
+            'backend = "rocm"\n'
+            'intent = "MoE agents"\n'
+            'quant = "FP4"\n'
+        )
+        p = tmp_path / "profiles.toml"
+        p.write_bytes(toml_content.encode())
+
+        cfg = load_profiles_config(path=p)
+
+        # All SEED_PROFILES keys must now be present.
+        assert set(SEED_PROFILES.keys()) <= set(cfg.profile.keys()), (
+            f"missing seeds after merge: {set(SEED_PROFILES.keys()) - set(cfg.profile.keys())}"
+        )
+
+    def test_operator_customised_profile_not_overwritten(self, tmp_path: Path) -> None:
+        """An operator-edited seed profile is left untouched by the additive merge."""
+        # Write a 'rocm' entry with a custom image — the merge must not reset it
+        # to the SEED_PROFILES value.
+        custom_image = "ghcr.io/my-org/custom-rocm-toolbox:operator-build"
+        toml_content = (
+            "[profile.rocm]\n"
+            f'image = "{custom_image}"\n'
+            'flags = "-fa on"\n'
+            "mtp = false\n"
+            'device_class = "gpu"\n'
+            'backend = "rocm"\n'
+        )
+        p = tmp_path / "profiles.toml"
+        p.write_bytes(toml_content.encode())
+
+        cfg = load_profiles_config(path=p)
+
+        # The operator's custom image must be preserved — NOT replaced by the seed.
+        assert cfg.profile["rocm"].image == custom_image, (
+            "additive merge overwrote an operator-customised profile (key 'rocm')"
+        )
+
+    def test_partial_file_custom_profile_preserved(self, tmp_path: Path) -> None:
+        """A non-seed (operator-created) profile survives the additive merge."""
+        toml_content = (
+            "[profile.my-special]\n"
+            'image = "ghcr.io/my-org/special:v42"\n'
+            'flags = "--special-flag"\n'
+            "mtp = false\n"
+            'device_class = "gpu"\n'
+        )
+        p = tmp_path / "profiles.toml"
+        p.write_bytes(toml_content.encode())
+
+        cfg = load_profiles_config(path=p)
+
+        # Operator's custom profile survives.
+        assert "my-special" in cfg.profile
+        assert cfg.profile["my-special"].image == "ghcr.io/my-org/special:v42"
+        # Seeds are also present.
+        assert set(SEED_PROFILES.keys()) <= set(cfg.profile.keys())
+
+    def test_complete_seed_file_no_extras_added(self, tmp_path: Path) -> None:
+        """A file that already contains all seeds gets no duplicates."""
+        import tomli_w
+
+        # Write a file with all seeds present.
+        raw = {"profile": {k: dict(v) for k, v in SEED_PROFILES.items()}}
+        p = tmp_path / "profiles.toml"
+        with open(p, "wb") as f:
+            tomli_w.dump(raw, f)
+
+        cfg = load_profiles_config(path=p)
+
+        # Exactly the seed keys — no extras injected.
+        assert set(cfg.profile.keys()) == set(SEED_PROFILES.keys())
+
 
 # ── seed file parity check ────────────────────────────────────────────────────
 
