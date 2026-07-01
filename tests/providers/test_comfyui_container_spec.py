@@ -73,8 +73,11 @@ def test_comfyui_spec_matches_live_deployment() -> None:
     }
     assert spec.network_mode == "host"
     assert spec.port == 8188
-    # Profile flags flow into the bash -lc payload.
-    assert spec.command[-1].endswith("--cache-none")
+    # Profile flags flow into the bash -lc payload (always-present baseline flags).
+    payload = spec.command[-1]
+    assert "--disable-mmap" in payload
+    assert "--bf16-vae" in payload
+    assert "--cache-none" in payload
 
 
 def test_comfyui_argv_uses_opt_comfyui_workdir() -> None:
@@ -116,13 +119,61 @@ def test_comfyui_profile_flags_fallback_without_profile() -> None:
     cfg = _img_cfg()
     del cfg["profile"]
     spec = ComfyUIProvider().container_spec(cfg, {})
-    assert spec.command[2].endswith("--disable-mmap --bf16-vae --cache-none")
+    assert spec.command[2].endswith("--disable-mmap --bf16-vae --cache-none --disable-async-offload")
 
 
 def test_comfyui_slot_port_override_flows_into_argv() -> None:
     spec = ComfyUIProvider().container_spec(_img_cfg(port=8189), {})
     assert spec.port == 8189
     assert "--port 8189" in spec.command[2]
+
+
+def test_comfyui_disable_async_offload_flag_present() -> None:
+    """#719: --disable-async-offload must be in the default flag bundle and in the
+    container payload for both the profile path and the no-profile fallback path.
+
+    ComfyUI 0.22.0 enables async weight offloading (NUM_STREAMS=2) by default
+    on AMD, spawning asyncio ThreadPoolExecutor workers that busy-loop at
+    100-165% CPU while the queue is idle (strace: zero syscalls → pure
+    userspace spin).  Disabling the streams via this flag stops the spin.
+    The flag must be present here so it reaches the bash -lc argv that podman
+    executes.
+
+    ⚠ REQUIRES live CT105 py-spy verification before merge (#719).
+    """
+    from hal0.providers.comfyui import _DEFAULT_PROFILE_FLAGS
+
+    # 1. The constant itself must carry the flag.
+    assert "--disable-async-offload" in _DEFAULT_PROFILE_FLAGS
+
+    # 2. No-profile fallback: the flag reaches the container argv payload.
+    cfg_no_profile = _img_cfg()
+    del cfg_no_profile["profile"]
+    spec_no_profile = ComfyUIProvider().container_spec(cfg_no_profile, {})
+    assert "--disable-async-offload" in spec_no_profile.command[2]
+
+    # 3. Profile path (monkeypatching ProfileCatalog to return the real seed
+    #    flags so this test is self-contained without the full profiles.toml).
+    class _FakeResolved:
+        resolved_flags = _DEFAULT_PROFILE_FLAGS
+
+    class _FakeCatalog:
+        def resolve(self, _name: str) -> "_FakeResolved":
+            return _FakeResolved()
+
+    import hal0.providers.comfyui as _mod
+
+    orig = None
+    try:
+        import hal0.profiles as _profiles
+
+        orig = _profiles.ProfileCatalog
+        _profiles.ProfileCatalog = _FakeCatalog  # type: ignore[assignment]
+        spec_profile = ComfyUIProvider().container_spec(_img_cfg(), {})
+        assert "--disable-async-offload" in spec_profile.command[2]
+    finally:
+        if orig is not None:
+            _profiles.ProfileCatalog = orig
 
 
 def test_comfyui_fallback_image_is_kyuz0() -> None:

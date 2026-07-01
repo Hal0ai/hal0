@@ -67,7 +67,18 @@ _COMFYUI_DATA_SUBDIR = "comfyui"
 
 # Live-validated flag bundle (matches the "comfyui" seed profile). Used
 # when the slot has no resolvable profile.
-_DEFAULT_PROFILE_FLAGS = "--disable-mmap --bf16-vae --cache-none"
+#
+# --disable-async-offload (#719): ComfyUI 0.22.0 enables async weight
+# offloading (NUM_STREAMS=2) by default on AMD. The two HIP streams spawn
+# asyncio ThreadPoolExecutor workers that spin at 100-165% CPU while the
+# queue is empty (strace shows zero syscalls → pure userspace busy-loop).
+# Disabling the streams eliminates the spin. The Strix Halo iGPU uses
+# NORMAL_VRAM mode (96 GB HBM shared); async offload is a VRAM-saving
+# optimisation aimed at NVIDIA cards with limited VRAM, so disabling it
+# here carries no inference-quality cost. Confirmed safe in ComfyUI 0.22.0
+# cli_args.py (sets NUM_STREAMS=0 and skips stream allocation entirely).
+# ⚠ REQUIRES live CT105 py-spy verification before merge (#719).
+_DEFAULT_PROFILE_FLAGS = "--disable-mmap --bf16-vae --cache-none --disable-async-offload"
 
 # Default port — ComfyUI's stock listen port.
 _DEFAULT_PORT = 8188

@@ -96,8 +96,10 @@ quant        = "BF16"
 [profile.comfyui]
 # Image-gen slot (ComfyUI on ROCm, kyuz0 Strix Halo build). Exclusive-GPU:
 # the GpuArbiter stops LLM GPU slots while img runs (Phase D, #599).
+# --disable-async-offload (#719): eliminates idle 100-165% CPU spin from
+# the HIP async-offload streams (NUM_STREAMS=2 on AMD by default in 0.22.0).
 image        = "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
-flags        = "--disable-mmap --bf16-vae --cache-none"
+flags        = "--disable-mmap --bf16-vae --cache-none --disable-async-offload"
 mtp          = false
 device_class = "img"
 intent       = "Image generation"

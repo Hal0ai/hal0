@@ -795,7 +795,11 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "comfyui": {
         "image": "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
-        "flags": "--disable-mmap --bf16-vae --cache-none",
+        # --disable-async-offload (#719): stops the HIP async-offload streams
+        # (NUM_STREAMS=2) that spin one asyncio ThreadPoolExecutor thread at
+        # 100-165% CPU while the queue is idle. Safe on Strix Halo iGPU
+        # (NORMAL_VRAM — no VRAM pressure that async offload is designed for).
+        "flags": "--disable-mmap --bf16-vae --cache-none --disable-async-offload",
         "mtp": False,
         "device_class": "img",
         "intent": "Image generation",

@@ -21,6 +21,20 @@ def test_comfyui_seed_profile() -> None:
     assert "kyuz0/amd-strix-halo-comfyui" in p["image"]
 
 
+def test_comfyui_seed_profile_has_disable_async_offload() -> None:
+    """#719: seed profile flags must include --disable-async-offload.
+
+    ComfyUI 0.22.0 enables async weight offloading (NUM_STREAMS=2) on AMD by
+    default.  The resulting asyncio ThreadPoolExecutor streams busy-loop at
+    100-165% CPU while idle.  The seed profile (schema.py + profiles.toml)
+    must carry the flag so existing deployments pick it up on next restart.
+
+    ⚠ REQUIRES live CT105 py-spy verification before merge (#719).
+    """
+    p = SEED_PROFILES["comfyui"]
+    assert "--disable-async-offload" in p["flags"]
+
+
 def test_seed_img_toml_validates() -> None:
     raw = tomllib.loads((_SEEDED_SLOTS_DIR / "img.toml").read_text(encoding="utf-8"))
     cfg = SlotConfig.model_validate(raw)
