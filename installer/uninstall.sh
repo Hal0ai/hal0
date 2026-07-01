@@ -369,6 +369,7 @@ fi
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     rm_path "/etc/sudoers.d/hal0-agentenv"
     rm_path "/etc/sudoers.d/hal0-benchctl"
+    # hal0-comfyui sudoers removed in #984 (hardened-perms abandoned, ADR-0023)
     rm_path "/etc/sudoers.d/hal0-comfyui"
 fi
 

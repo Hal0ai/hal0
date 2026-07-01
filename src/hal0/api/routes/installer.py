@@ -523,8 +523,8 @@ async def service_repair(unit: str) -> dict[str, Any]:
     restart arbitrary system services.
 
     NOTE: ComfyUI is exposed to the UI as ``comfyui`` but the single lifecycle
-    owner is the seeded img slot unit. The legacy ``/opt/comfyui`` scripts stay
-    available for manual operator use only.
+    owner is the seeded img slot unit (the standalone ``comfy-*.sh`` docker
+    scripts were retired in #984).
     """
     # Special case: public service id maps to the slot unit that owns :8188.
     if unit == "comfyui":
