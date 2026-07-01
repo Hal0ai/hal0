@@ -164,56 +164,59 @@ class EventBus:
     def _enqueue(self, q: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:
         """Push to a subscriber queue, dropping oldest on overflow.
 
-        When the queue is full we:
-          1. Drop the oldest item to free a slot.
-          2. Increment the per-queue drop counter.
-          3. Emit a ``events.gap`` synthetic event carrying the accumulated
-             drop count so the consumer can detect and render a gap marker.
-          4. Log a warning so the server-side operator sees the pressure.
+        A slow consumer must never block the producer, so on overflow we drop
+        the OLDEST buffered event and keep the newest flowing. Silent loss is
+        surfaced via a per-subscriber drop counter: as soon as the queue has
+        room again we inject a SINGLE coalesced ``events.gap`` marker carrying
+        the true number of events dropped since the last acknowledged gap, then
+        clear the counter. Because the counter is only cleared once the marker
+        is actually enqueued, the reported ``dropped`` count stays accurate even
+        across sustained overflow — and gap markers never displace live events
+        (they are only added when a slot is free).
         """
-        try:
-            q.put_nowait(event)
-        except asyncio.QueueFull:
-            # Drop one to free a slot, then retry. ``get_nowait`` can
-            # itself raise QueueEmpty in a tight race (another consumer
-            # drained it between the full + get) — fall through silently
-            # if so; the next emit will try again.
-            with contextlib.suppress(asyncio.QueueEmpty):
-                q.get_nowait()
+        qid = id(q)
 
-            # Accumulate the drop count for this subscriber.
-            qid = id(q)
-            self._drop_count[qid] = self._drop_count.get(qid, 0) + 1
-            dropped = self._drop_count[qid]
-
-            _log.warning(
-                "events.subscriber_overflow",
-                extra={"dropped": dropped, "event_type": event.get("type"), "event_id": event.get("id")},
-            )
-
-            # Inject a synthetic gap event so the consumer learns a
-            # discontinuity occurred. We use next(self._next_id) so the
-            # gap event carries a proper monotonic id and won't be filtered
-            # by the ``id > since`` cursor check in the SSE route.
+        # If this subscriber has un-signalled drops and the queue now has room,
+        # surface one coalesced gap marker BEFORE the next real event. Use
+        # next(self._next_id) so the gap carries a monotonic id and isn't
+        # filtered by the ``id > since`` cursor check in the SSE route.
+        pending = self._drop_count.get(qid, 0)
+        if pending and not q.full():
             gap = make_event(
                 next(self._next_id),
                 type="events.gap",
                 severity="warn",
                 source="events",
-                message=f"subscriber queue overflow — {dropped} event(s) dropped",
-                data={"dropped": dropped},
+                message=f"subscriber queue overflow — {pending} event(s) dropped",
+                data={"dropped": pending},
             )
-            # Reset the counter after the gap event is emitted so the next
-            # gap reports a fresh count relative to the last acknowledged gap.
-            self._drop_count[qid] = 0
-
-            # Enqueue the gap event (overwriting the newest item if we're
-            # still full — the gap itself must get through).
-            with contextlib.suppress(asyncio.QueueEmpty):
-                if q.full():
-                    q.get_nowait()
-            with contextlib.suppress(asyncio.QueueFull):
+            try:
                 q.put_nowait(gap)
+                # Only clear once the marker is actually delivered.
+                self._drop_count.pop(qid, None)
+            except asyncio.QueueFull:  # pragma: no cover - lost the race; retry next emit
+                pass
+
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            # Drop the oldest to free a slot, keeping the newest. ``get_nowait``
+            # can itself raise QueueEmpty in a tight race (another consumer
+            # drained it between the full + get) — fall through silently if so.
+            with contextlib.suppress(asyncio.QueueEmpty):
+                q.get_nowait()
+
+            self._drop_count[qid] = self._drop_count.get(qid, 0) + 1
+            _log.warning(
+                "events.subscriber_overflow",
+                extra={
+                    "dropped_total": self._drop_count[qid],
+                    "event_type": event.get("type"),
+                    "event_id": event.get("id"),
+                },
+            )
+            with contextlib.suppress(asyncio.QueueFull):
+                q.put_nowait(event)
 
     # ── Subscribe ─────────────────────────────────────────────────────
 

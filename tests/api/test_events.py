@@ -126,61 +126,58 @@ async def test_subscriber_full_queue_drops_oldest_not_raises() -> None:
             await bus.emit("t", "info", "x", str(i))  # must not raise
         # Queue still bounded.
         assert full_q.qsize() <= 4
-        # Drain and collect everything still in the queue.
         items: list[dict[str, Any]] = []
         while not full_q.empty():
             items.append(full_q.get_nowait())
         assert items, "queue should not be empty"
-        # Real events (type "t") should have ids <= 20 (20 emitted, ids start at 1).
-        # Gap events are also allowed — they carry a higher id from the gap
-        # injection. The key invariant: real events never exceed the emit count.
-        real_events = [ev for ev in items if ev.get("type") != "events.gap"]
-        gap_events = [ev for ev in items if ev.get("type") == "events.gap"]
-        if real_events:
-            assert max(ev["id"] for ev in real_events) <= 20
-        # There should be at least some gap events since 20 >> 4 (maxsize).
-        assert gap_events, "expected gap events to be present after 20 emits into a size-4 queue"
+        # A permanently-full queue never has room for a gap marker, so live
+        # events keep flowing newest-wins and no gap displaces them.
+        assert all(ev.get("type") != "events.gap" for ev in items)
+        # Newest survives (last id == 20, ids start at 1).
+        assert max(ev["id"] for ev in items) == 20
+        # But the drop was still accounted for, ready to surface once there is room.
+        assert bus._drop_count.get(id(full_q), 0) == 20 - 4
     finally:
         bus.subscribers.discard(full_q)
 
 
 @pytest.mark.asyncio
-async def test_overflow_injects_gap_event_into_subscriber_queue() -> None:
-    """After a subscriber queue overflows, a synthetic events.gap event with
-    data['dropped'] >= 1 must appear in that queue so the consumer knows a
-    gap occurred.  This test MUST FAIL without the _enqueue gap-injection fix.
+async def test_overflow_surfaces_one_coalesced_gap_when_consumer_catches_up() -> None:
+    """Once a slow consumer drains enough to free a slot, the next emit injects
+    exactly ONE ``events.gap`` marker carrying the TRUE accumulated drop count,
+    and the counter resets. This MUST FAIL without the _enqueue gap fix (old
+    code produced no gap / an inaccurate per-drop count of 1).
     """
     bus = EventBus(subscriber_maxsize=4)
-    # Register a queue that never drains — all emits after the 4th overflow.
-    full_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=4)
-    bus.subscribers.add(full_q)
+    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=4)
+    bus.subscribers.add(q)
     try:
-        # Emit enough events to guarantee at least one overflow.
-        for i in range(10):
-            await bus.emit("t", "info", "x", str(i))  # must not raise
+        # 8 emits into a size-4 queue that isn't draining → 4 events dropped,
+        # queue holds the newest 4, no gap yet (never any room).
+        for i in range(8):
+            await bus.emit("t", "info", "x", str(i))
+        assert q.qsize() == 4
+        assert bus._drop_count[id(q)] == 4
 
-        # Drain the entire queue and collect all events.
-        items: list[dict[str, Any]] = []
-        while not full_q.empty():
-            items.append(full_q.get_nowait())
+        # Consumer catches up: free two slots.
+        q.get_nowait()
+        q.get_nowait()
 
-        # There must be at least one synthetic gap event.
-        gap_events = [ev for ev in items if ev.get("type") == "events.gap"]
-        assert gap_events, (
-            "expected at least one events.gap synthetic event in the subscriber queue "
-            "after overflow, got none"
-        )
-        # Every gap event must carry a positive dropped count.
-        for gap in gap_events:
-            assert gap["data"].get("dropped", 0) >= 1, (
-                f"events.gap event missing dropped count: {gap}"
-            )
-        # Gap events carry the required schema fields.
-        first_gap = gap_events[0]
-        assert first_gap["severity"] == "warn"
-        assert first_gap["source"] == "events"
+        # Next emit finds room → one coalesced gap (dropped=4) then the event.
+        await bus.emit("t", "info", "x", "next")
+
+        rest: list[dict[str, Any]] = []
+        while not q.empty():
+            rest.append(q.get_nowait())
+        gaps = [ev for ev in rest if ev.get("type") == "events.gap"]
+        assert len(gaps) == 1, f"expected exactly one coalesced gap, got {len(gaps)}"
+        assert gaps[0]["data"]["dropped"] == 4  # accurate accumulated count
+        assert gaps[0]["severity"] == "warn"
+        assert gaps[0]["source"] == "events"
+        # Counter reset once the gap was delivered.
+        assert bus._drop_count.get(id(q), 0) == 0
     finally:
-        bus.subscribers.discard(full_q)
+        bus.subscribers.discard(q)
 
 
 # ── HTTP endpoint tests ──────────────────────────────────────────────────────
