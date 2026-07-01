@@ -8,8 +8,10 @@ write, not the HTTP streaming itself (that's tested separately in
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -248,3 +250,94 @@ def test_pull_body_capability_overrides(
     r = client_isolated.post("/api/models/qwen3-4b/pull", json={"capability": "embed"})
     assert r.status_code == 202, r.text
     assert fake_run_pull[0]["capability"] == "embed"
+
+
+# ── #626: durable pull-job store ────────────────────────────────────────────
+
+
+def test_pull_persists_job_to_disk(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+    tmp_hal0_home: str,
+) -> None:
+    """A queued pull job is written to disk under model-pull-jobs/<model_id>.json.
+
+    The queued snapshot is persisted synchronously before the route returns
+    so a status poll survives a daemon restart (the job file exists even
+    before the background task runs).
+    """
+    r = client_isolated.post("/api/models/qwen3-4b/pull")
+    assert r.status_code == 202, r.text
+
+    # The sanitised model id "qwen3-4b" maps to the same filename.
+    job_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs" / "qwen3-4b.json"
+    assert job_file.exists(), f"expected on-disk job record at {job_file}"
+    on_disk = json.loads(job_file.read_text(encoding="utf-8"))
+    assert on_disk["model_id"] == "qwen3-4b"
+    assert "state" in on_disk
+    # The terminal snapshot includes bytes_downloaded from the fake.
+    assert on_disk["bytes_downloaded"] == 1024
+
+
+def test_pull_status_falls_back_to_disk_after_restart(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    fake_run_pull: list[dict[str, Any]],
+    tmp_hal0_home: str,
+) -> None:
+    """Status poll resolves from disk even when the in-memory dict was wiped.
+
+    Simulates an ``hal0-api`` restart mid-pull: the process-local
+    ``app.state.model_pull_jobs`` dict is cleared, but the durable record
+    on disk lets the status poll still resolve (no 404).
+    """
+    r = client_isolated.post("/api/models/qwen3-4b/pull")
+    assert r.status_code == 202, r.text
+
+    # Wait for the background task to persist a terminal state.
+    job_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs" / "qwen3-4b.json"
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if job_file.exists():
+            rec = json.loads(job_file.read_text(encoding="utf-8"))
+            if rec.get("state") not in ("queued", "running"):
+                break
+        time.sleep(0.05)
+
+    # Simulate the restart: wipe the in-memory job registry.
+    app_isolated.state.model_pull_jobs = {}
+
+    # Status poll must still return 200 using the on-disk snapshot.
+    s = client_isolated.get("/api/models/qwen3-4b/pull/status")
+    assert s.status_code == 200, s.text
+    body = s.json()
+    assert body["model_id"] == "qwen3-4b"
+    assert body["state"] == "completed"
+
+
+def test_pull_status_reconciles_stale_inflight_to_failed_after_restart(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """A snapshot left mid-pull (queued/running) is served as ``failed`` after a
+    restart — its worker is gone so it can never progress, and the client must
+    not poll a forever-``running`` state. Regression guard for the disk-fallback
+    serving a non-terminal snapshot verbatim."""
+    job_dir = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "qwen3-4b.json").write_text(
+        json.dumps(
+            {"id": "j1", "model_id": "qwen3-4b", "state": "running", "bytes_downloaded": 512}
+        ),
+        encoding="utf-8",
+    )
+    # Fresh in-memory dict → forces the disk fallback + reconcile path.
+    app_isolated.state.model_pull_jobs = {}
+
+    s = client_isolated.get("/api/models/qwen3-4b/pull/status")
+    assert s.status_code == 200, s.text
+    body = s.json()
+    assert body["state"] == "failed"
+    assert body["error_code"] == "pull.interrupted"

@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
+from hal0.config import paths as _config_paths
 from hal0.config.loader import load_hal0_config
 from hal0.errors import Hal0Error
 from hal0.model_meta import classify
@@ -41,6 +44,87 @@ from hal0.registry.pull import (
 # See slots.py for the writer-gate rationale.
 
 router = APIRouter()
+
+log = logging.getLogger(__name__)
+
+
+# ── durable pull-job store (#626) ─────────────────────────────────────────────
+#
+# Model-pull jobs live only on app.state.model_pull_jobs, so a hal0-api
+# restart mid-pull 404s the status poll. Mirror each job snapshot to
+# /var/lib/hal0/model-pull-jobs/<model_id>.json (atomic write) and fall back
+# to disk on status lookup — mirroring the updater.py pattern (#509).
+
+
+def _pull_jobs_dir() -> Path:
+    """Return /var/lib/hal0/model-pull-jobs (HAL0_HOME-aware via paths)."""
+    return _config_paths.var_lib() / "model-pull-jobs"
+
+
+def _pull_job_file(model_id: str) -> Path:
+    from hal0.registry.pull import _sanitise_id
+
+    return _pull_jobs_dir() / f"{_sanitise_id(model_id)}.json"
+
+
+def _persist_pull_job(job: PullJob) -> None:
+    """Atomically write a pull-job snapshot to disk (best-effort, fail-soft).
+
+    A failure to persist must never break the pull flow — the in-memory
+    registry remains authoritative for the running process.
+    """
+    path = _pull_job_file(job.model_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        tmp_path = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(job.as_dict(), f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None  # type: ignore[assignment]
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("model.pull_job_persist_failed model_id=%s error=%s", job.model_id, exc)
+
+
+def _load_persisted_pull_job(model_id: str) -> dict[str, Any] | None:
+    """Read a persisted pull-job snapshot from disk, or None if absent/unreadable."""
+    path = _pull_job_file(model_id)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        loaded = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    return _reconcile_persisted_pull_job(loaded)
+
+
+def _reconcile_persisted_pull_job(persisted: dict[str, Any]) -> dict[str, Any]:
+    """Repair a persisted snapshot that was left in a non-terminal state.
+
+    A snapshot only reaches disk-fallback when its job is absent from the
+    in-memory dict — which after a restart means the worker that owned it is
+    gone. A ``queued``/``running`` snapshot can therefore never make further
+    progress, so we surface it as ``failed`` (rather than a state the client
+    would poll forever) with an explanatory error. Terminal snapshots
+    (completed/failed/cancelled) are returned unchanged.
+    """
+    if persisted.get("state") in ("queued", "running"):
+        persisted = dict(persisted)
+        persisted["state"] = "failed"
+        persisted.setdefault("error", "pull interrupted by hal0-api restart; re-run the pull")
+        persisted.setdefault("error_code", "pull.interrupted")
+    return persisted
 
 
 # Known-alias model ids that upstream gateways advertise as routing
@@ -1158,15 +1242,20 @@ async def _run_pull_with_events(
     capability-grouped store layout; both default to None → legacy flat layout.
     """
     if event_bus is None:
-        await run_pull(
-            job,
-            hf_repo=hf_repo,
-            hf_file=hf_file,
-            registry=registry,
-            hf_token=hf_token,
-            capability=capability,
-            comfyui_subdir=comfyui_subdir,
-        )
+        try:
+            await run_pull(
+                job,
+                hf_repo=hf_repo,
+                hf_file=hf_file,
+                registry=registry,
+                hf_token=hf_token,
+                capability=capability,
+                comfyui_subdir=comfyui_subdir,
+            )
+        finally:
+            # Persist terminal state so a restart-surviving status poll resolves
+            # (#626) — in a finally so a re-raised cancellation is still recorded.
+            _persist_pull_job(job)
         return
 
     async def _emit_progress() -> None:
@@ -1215,6 +1304,8 @@ async def _run_pull_with_events(
         progress_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await progress_task
+        # Persist terminal state so a restart-surviving status poll resolves (#626).
+        _persist_pull_job(job)
 
     await _emit_terminal_pull_event(event_bus, job)
 
@@ -1353,6 +1444,9 @@ async def pull_model(
         _seed_registry_from_body(request, model_id, hf_repo, hf_file, labels)
     job = make_job(model_id)
     jobs[model_id] = job
+    # Persist the queued snapshot before returning so a status poll resolves
+    # even if the daemon restarts before the background task runs (#626).
+    _persist_pull_job(job)
 
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
@@ -1407,6 +1501,9 @@ async def _start_flm_pull(
     """
     job = make_job(model_id)
     jobs[model_id] = job
+    # Persist the queued snapshot before returning so a status poll resolves
+    # even if the daemon restarts before the background task runs (#626).
+    _persist_pull_job(job)
     registry = request.app.state.model_registry
     event_bus = getattr(request.app.state, "events", None)
 
@@ -1423,6 +1520,8 @@ async def _start_flm_pull(
         try:
             await run_flm_pull(job, tag=model_id, registry=registry)
         finally:
+            # Persist terminal state so a restart-surviving status poll resolves (#626).
+            _persist_pull_job(job)
             if event_bus is not None:
                 await _emit_terminal_pull_event(event_bus, job)
 
@@ -1442,10 +1541,16 @@ async def pull_status(model_id: str, request: Request) -> dict[str, object]:
     Mirror of the updater route shape — `id`, `state`, `bytes_*`,
     `error*`, `path`, `sha256`. Polling at ~500ms is fine; for live
     progress prefer the SSE stream.
+
+    Falls back to the on-disk store (#626) so a status poll still
+    resolves after an ``hal0-api`` restart wiped the process-local dict.
     """
     jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
     job = jobs.get(model_id)
     if job is None:
+        persisted = _load_persisted_pull_job(model_id)
+        if persisted is not None:
+            return persisted
         raise PullJobNotFound(
             f"no pull job for model {model_id!r}",
             details={"model_id": model_id},
@@ -1461,10 +1566,26 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
     500ms (whichever is rarer), and a final frame on completion
     /failure/cancellation. Idempotent: subscribing after the job has
     finished yields one frame with the terminal state and closes.
+
+    Falls back to the on-disk store (#626) when the in-memory job is
+    absent (e.g. after an ``hal0-api`` restart): emits one terminal
+    frame from the persisted snapshot and closes.
     """
     jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
     job = jobs.get(model_id)
     if job is None:
+        persisted = _load_persisted_pull_job(model_id)
+        if persisted is not None:
+            # Serve one terminal frame from the persisted snapshot so the
+            # client's SSE consumer sees the final state and can close.
+            async def _gen_persisted() -> Any:
+                yield f"data: {json.dumps(persisted)}\n\n"
+
+            return StreamingResponse(
+                _gen_persisted(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
         raise PullJobNotFound(
             f"no pull job for model {model_id!r}",
             details={"model_id": model_id},
