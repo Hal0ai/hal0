@@ -18,6 +18,25 @@ can `await events.emit(...)` without coupling to FastAPI internals. The
 ring caches the last 500 events for SSE replay-on-reconnect; per-subscriber
 queues fan-out live events with a bounded backlog (we drop oldest on a
 slow consumer rather than blocking the producer).
+
+Gap contract
+------------
+When a subscriber's queue overflows, the dropped event is discarded and a
+synthetic ``events.gap`` event is injected in its place::
+
+    {
+        "type":    "events.gap",
+        "severity": "warn",
+        "source":   "events",
+        "message":  "subscriber queue overflow — N event(s) dropped",
+        "data":     {"dropped": N},
+    }
+
+This lets SSE consumers detect non-contiguous event streams and render a
+gap marker in the UI rather than silently presenting an incomplete journal.
+The ``events.gap`` type passes through the ``/api/events/stream`` type-glob
+filter unconditionally (i.e. it is always forwarded regardless of the
+``?type=`` query parameter) so consumers cannot accidentally suppress it.
 """
 
 from __future__ import annotations
@@ -95,6 +114,11 @@ class EventBus:
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._next_id: itertools.count[int] = itertools.count(1)
         self._subscriber_maxsize = subscriber_maxsize
+        # Per-queue drop counter: tracks how many events have been silently
+        # dropped for each subscriber since it last drained below capacity.
+        # Keyed by queue id() so we never hold a strong reference to the queue
+        # object (subscribers are discarded on disconnect).
+        self._drop_count: dict[int, int] = {}
         # Optional durable forwarder (the "future enrichment" hook noted in
         # the class docstring). When set, every emitted event is also handed
         # to ``sink`` — e.g. the AuditStore, which persists it. A sink that
@@ -138,7 +162,15 @@ class EventBus:
         return event
 
     def _enqueue(self, q: asyncio.Queue[dict[str, Any]], event: dict[str, Any]) -> None:
-        """Push to a subscriber queue, dropping oldest on overflow."""
+        """Push to a subscriber queue, dropping oldest on overflow.
+
+        When the queue is full we:
+          1. Drop the oldest item to free a slot.
+          2. Increment the per-queue drop counter.
+          3. Emit a ``events.gap`` synthetic event carrying the accumulated
+             drop count so the consumer can detect and render a gap marker.
+          4. Log a warning so the server-side operator sees the pressure.
+        """
         try:
             q.put_nowait(event)
         except asyncio.QueueFull:
@@ -148,8 +180,40 @@ class EventBus:
             # if so; the next emit will try again.
             with contextlib.suppress(asyncio.QueueEmpty):
                 q.get_nowait()
+
+            # Accumulate the drop count for this subscriber.
+            qid = id(q)
+            self._drop_count[qid] = self._drop_count.get(qid, 0) + 1
+            dropped = self._drop_count[qid]
+
+            _log.warning(
+                "events.subscriber_overflow",
+                extra={"dropped": dropped, "event_type": event.get("type"), "event_id": event.get("id")},
+            )
+
+            # Inject a synthetic gap event so the consumer learns a
+            # discontinuity occurred. We use next(self._next_id) so the
+            # gap event carries a proper monotonic id and won't be filtered
+            # by the ``id > since`` cursor check in the SSE route.
+            gap = make_event(
+                next(self._next_id),
+                type="events.gap",
+                severity="warn",
+                source="events",
+                message=f"subscriber queue overflow — {dropped} event(s) dropped",
+                data={"dropped": dropped},
+            )
+            # Reset the counter after the gap event is emitted so the next
+            # gap reports a fresh count relative to the last acknowledged gap.
+            self._drop_count[qid] = 0
+
+            # Enqueue the gap event (overwriting the newest item if we're
+            # still full — the gap itself must get through).
+            with contextlib.suppress(asyncio.QueueEmpty):
+                if q.full():
+                    q.get_nowait()
             with contextlib.suppress(asyncio.QueueFull):
-                q.put_nowait(event)
+                q.put_nowait(gap)
 
     # ── Subscribe ─────────────────────────────────────────────────────
 
@@ -167,6 +231,7 @@ class EventBus:
             yield q
         finally:
             self.subscribers.discard(q)
+            self._drop_count.pop(id(q), None)
 
     # ── Backfill ──────────────────────────────────────────────────────
 

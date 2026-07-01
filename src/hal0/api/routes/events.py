@@ -14,6 +14,18 @@ Endpoint contract::
         → SSE: backfill (id > since) then live tail; one ``data: <json>\\n\\n``
           frame per event. JSON carries its own ``type`` field so we don't
           emit a separate SSE ``event:`` name.
+
+Gap contract
+------------
+When the server-side subscriber queue overflows (a slow SSE consumer),
+the ``EventBus`` drops the overflowing event and injects a synthetic
+``events.gap`` frame instead::
+
+    {"type": "events.gap", "severity": "warn", "data": {"dropped": N}, ...}
+
+``events.gap`` events **always** pass through this route's ``?type=`` glob
+filter — they cannot be suppressed — so consumers reliably learn about
+non-contiguous event streams and can render a gap marker in the UI.
 """
 
 from __future__ import annotations
@@ -130,7 +142,12 @@ async def stream_events(
     min_rank = _SEVERITY_ORDER.get(sev, -1) if sev else -1
 
     def _passes(ev: dict[str, Any]) -> bool:
-        if type and not fnmatch.fnmatchcase(ev.get("type", ""), type):
+        ev_type = ev.get("type", "")
+        # Gap events always pass through regardless of the caller's type
+        # filter — a consumer cannot accidentally suppress gap markers.
+        if ev_type == "events.gap":
+            return True
+        if type and not fnmatch.fnmatchcase(ev_type, type):
             return False
         return not (min_rank >= 0 and _SEVERITY_ORDER.get(ev.get("severity", "info"), 0) < min_rank)
 
