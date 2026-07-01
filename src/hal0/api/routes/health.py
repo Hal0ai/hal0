@@ -52,6 +52,19 @@ def _disk_free_mb(path: Path) -> int:
         return 0
 
 
+def _memory_degraded(request: Request) -> bool | None:
+    """Return the memory degraded state for /api/status.
+
+    True  → memory enabled, running on the volatile in-memory fallback.
+    False → memory enabled, using a real durable provider.
+    None  → memory is disabled (no provider wired).
+    """
+    provider = getattr(request.app.state, "memory_provider", None)
+    if provider is None:
+        return None
+    return bool(getattr(provider, "degraded", False))
+
+
 @router.get("/status")
 async def get_status(request: Request) -> dict[str, Any]:
     """Overall liveness + dashboard summary.
@@ -118,6 +131,11 @@ async def get_status(request: Request) -> dict[str, Any]:
         # backend can never disagree. Reflects the real wrapper, so an init
         # failure also reads as off.
         "memory_enabled": getattr(request.app.state, "memory_provider", None) is not None,
+        # True  → memory is enabled but running on the volatile in-memory
+        #         PgVectorProvider fallback (writes will be lost on restart).
+        # False → memory is enabled and using a real durable provider.
+        # None  → memory is disabled (HAL0_MEMORY_ENABLED not set / init failed).
+        "memory_degraded": _memory_degraded(request),
     }
 
 
