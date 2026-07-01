@@ -2512,8 +2512,10 @@ class SlotManager:
 
         Reuses :func:`hal0.slots.capacity._read_meminfo` — the single
         authoritative reader for /proc/meminfo in the slots subtree.
-        Returns 0.0 on any probe failure so the pressure guard never
-        fires erroneously (a probe error is logged, not raised).
+        Returns ``inf`` on any probe failure so the pressure guard is
+        fail-SAFE: an unreadable probe reports "plenty of free RAM", so the
+        ``free_mb >= floor`` early-return skips eviction rather than evicting
+        blindly on a bad reading (the error is logged, not raised).
         """
         try:
             from hal0.slots.capacity import _read_meminfo
@@ -2522,7 +2524,7 @@ class SlotManager:
             return avail_mib
         except Exception as exc:
             log.warning("slot.pressure_probe_failed", extra={"error": str(exc)})
-            return 0.0
+            return float("inf")
 
     async def _pressure_evict_once(self) -> None:
         """One pressure-eviction pass (#903).

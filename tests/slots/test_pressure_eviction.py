@@ -24,7 +24,6 @@ from hal0.slots.manager import SlotManager
 from hal0.slots.state import SlotState
 from tests.slots.conftest import FakeContainerProvider
 
-
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -187,6 +186,33 @@ async def test_pressure_evict_unloads_lru_slot_under_floor(
     assert any(c.get("name") == "rerank" for c in container_stub.unload_calls)
 
 
+async def test_pressure_evict_noop_when_probe_fails(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed host-RAM probe is fail-SAFE: it reports ``inf`` free RAM so the
+    floor check short-circuits and nothing is evicted — rather than evicting
+    blindly on a bad reading (regression guard for the 0.0 fail-open bug)."""
+    _write_slot(slot_root, "rerank", port=8090, lru=True)
+    sm = SlotManager(evict_pressure_mb=8192.0)
+    await sm.load("rerank")
+    sm._last_used["rerank"] = 0.0
+
+    def _boom() -> tuple[float, float]:
+        raise OSError("cannot read /proc/meminfo")
+
+    # Local import inside _probe_host_free_mb resolves this name at call time.
+    monkeypatch.setattr("hal0.slots.capacity._read_meminfo", _boom)
+    assert sm._probe_host_free_mb() == float("inf")
+
+    await sm._pressure_evict_once()
+
+    # Slot survives — a probe failure must never trigger eviction.
+    assert (await sm.status("rerank")).state != SlotState.OFFLINE
+    assert not any(c.get("name") == "rerank" for c in container_stub.unload_calls)
+
+
 # ── LRU ordering ─────────────────────────────────────────────────────────────
 
 
@@ -208,7 +234,7 @@ async def test_pressure_evict_lru_order(
 
     # embed is older (LRU) → must be evicted first.
     sm._last_used["rerank"] = 1000.0  # newer
-    sm._last_used["embed"] = 100.0    # older → evicted first
+    sm._last_used["embed"] = 100.0  # older → evicted first
 
     evicted: list[str] = []
 
@@ -232,9 +258,7 @@ async def test_pressure_evict_lru_order(
 
     await sm._pressure_evict_once()
 
-    assert evicted == ["embed"], (
-        f"oldest slot (embed) must be evicted first; got {evicted}"
-    )
+    assert evicted == ["embed"], f"oldest slot (embed) must be evicted first; got {evicted}"
 
 
 # ── stops evicting once floor is met ─────────────────────────────────────────
@@ -257,7 +281,7 @@ async def test_pressure_evict_stops_when_floor_met(
     for name in ("rerank", "embed", "stt"):
         await sm.load(name)
 
-    sm._last_used["stt"] = 50.0    # oldest
+    sm._last_used["stt"] = 50.0  # oldest
     sm._last_used["embed"] = 200.0
     sm._last_used["rerank"] = 500.0  # newest
 
@@ -272,10 +296,7 @@ async def test_pressure_evict_stops_when_floor_met(
     await sm._pressure_evict_once()
 
     # Only the oldest slot (stt) should have been evicted.
-    states = {
-        n: (await sm.status(n)).state
-        for n in ("rerank", "embed", "stt")
-    }
+    states = {n: (await sm.status(n)).state for n in ("rerank", "embed", "stt")}
     assert states["stt"] == SlotState.OFFLINE
     assert states["embed"] in (SlotState.READY, SlotState.IDLE)
     assert states["rerank"] in (SlotState.READY, SlotState.IDLE)
