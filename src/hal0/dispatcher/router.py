@@ -156,6 +156,19 @@ _TTS_DEFAULT = "tts"
 # Phase D: model-less /v1/images/* requests default to the img slot (ComfyUI).
 _IMAGE_DEFAULT = "img"
 
+# Dispatcher HTTP client connection limits — mirrors the bounded pattern in
+# src/hal0/upstreams/registry.py.  Keeps the dispatcher pool from starving
+# new requests when many slow upstream calls are in-flight (#415).
+_DISPATCHER_MAX_CONNECTIONS: int = 64
+_DISPATCHER_MAX_KEEPALIVE: int = 16
+
+# Non-streaming (direct) read timeout.  300 s was too generous: a stuck
+# upstream could hold a connection slot for 5 min, rapidly exhausting the
+# pool under even modest sustained load.  60 s is still well above the
+# longest expected non-streaming completion time (and streaming paths are
+# unaffected — the read timeout is not applied once the stream is open).
+_DIRECT_READ_TIMEOUT_S: float = 60.0
+
 # Outgoing upstream path rewrites applied before forwarding.
 # Key: incoming /v1/* path (as-is from the client).
 # Value: replacement path to use in the upstream URL.
@@ -470,10 +483,22 @@ class Dispatcher:
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
-            # Long read timeout for slow generation; short connect/write/pool.
-            # Streaming responses ignore the read timeout once the stream starts.
+            # Short connect/write/pool; non-streaming read capped at
+            # _DIRECT_READ_TIMEOUT_S (streaming paths ignore the read timeout
+            # once the first byte arrives — see httpx docs on stream=True).
+            # Connection limits match registry.py to prevent pool starvation
+            # under sustained slow-upstream load (#415).
             self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0),
+                timeout=httpx.Timeout(
+                    connect=5.0,
+                    read=_DIRECT_READ_TIMEOUT_S,
+                    write=10.0,
+                    pool=5.0,
+                ),
+                limits=httpx.Limits(
+                    max_connections=_DISPATCHER_MAX_CONNECTIONS,
+                    max_keepalive_connections=_DISPATCHER_MAX_KEEPALIVE,
+                ),
                 follow_redirects=False,
             )
         return self._http_client
