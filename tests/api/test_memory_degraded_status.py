@@ -41,7 +41,7 @@ def test_status_memory_degraded_none_when_disabled(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """memory_degraded=None when no memory provider is wired."""
-    app, client = _build(monkeypatch, None)
+    _app, client = _build(monkeypatch, None)
     with client:
         body = client.get("/api/status").json()
     assert body["memory_enabled"] is False

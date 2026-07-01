@@ -14,10 +14,10 @@ Verifies:
 
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -73,9 +73,9 @@ def test_pgvector_construction_emits_warning():
         PgVectorProvider()
 
     warning_events = [e["event"] for e in logs if e.get("log_level") == "warning"]
-    assert any(
-        "hal0.memory.degraded_provider_active" in ev for ev in warning_events
-    ), f"No degrade-provider-active warning found in: {warning_events}"
+    assert any("hal0.memory.degraded_provider_active" in ev for ev in warning_events), (
+        f"No degrade-provider-active warning found in: {warning_events}"
+    )
 
 
 # ── add() write warning ───────────────────────────────────────────────────────
@@ -94,9 +94,9 @@ async def test_pgvector_add_emits_warning_on_first_call():
         await p.add("hello", dataset="shared")
 
     warning_events = [e["event"] for e in logs if e.get("log_level") == "warning"]
-    assert any(
-        "hal0.memory.degraded_write" in ev for ev in warning_events
-    ), f"No degraded_write warning found in: {warning_events}"
+    assert any("hal0.memory.degraded_write" in ev for ev in warning_events), (
+        f"No degraded_write warning found in: {warning_events}"
+    )
 
 
 @pytest.mark.asyncio
@@ -116,12 +116,11 @@ async def test_pgvector_add_warns_only_once_per_instance():
 
     # After the first-write warning is consumed, subsequent adds must be silent.
     write_warnings = [
-        e for e in logs
+        e
+        for e in logs
         if e.get("log_level") == "warning" and "degraded_write" in e.get("event", "")
     ]
-    assert write_warnings == [], (
-        f"Unexpected repeated write warnings: {write_warnings}"
-    )
+    assert write_warnings == [], f"Unexpected repeated write warnings: {write_warnings}"
 
 
 @pytest.mark.asyncio
@@ -152,7 +151,6 @@ def test_factory_degrade_provider_has_degraded_true():
 def test_factory_real_provider_degraded_is_falsy():
     """When Hindsight is reachable, provider_from_config returns degraded=False/absent."""
     from hal0.memory import provider_from_config
-    from hal0.memory.hindsight_provider import HindsightProvider
 
     with (
         patch("hal0.memory._build_hindsight_client", return_value=object()),
