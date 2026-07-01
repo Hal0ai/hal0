@@ -10,6 +10,8 @@ this exercises:
   * b64_json response_format → inline base64 PNG.
   * GET /api/images/cache/{name}.png serves the cached bytes.
   * Cache-miss + path-traversal attempt 404 cleanly.
+  * Cold-slot path (issue #725): ensure_img() runs before dispatch so the
+    img upstream is registered before resolve_by_capability runs.
 """
 
 from __future__ import annotations
@@ -194,6 +196,95 @@ def test_v1_images_provider_error_surfaces(
     )
     assert r.status_code == 502
     assert r.json()["error"]["code"] == "dispatch.upstream_failed"
+
+
+# ─── cold-slot dispatch path (issue #725) ────────────────────────────────────
+
+
+def test_v1_images_cold_slot_ensure_img_before_dispatch(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_hal0_home: str,
+) -> None:
+    """Regression test for #725: ensure_img() must run BEFORE dispatcher.dispatch().
+
+    Repro path (before fix):
+      - img upstream NOT registered (cold/idle slot)
+      - dispatcher.dispatch() → resolve_by_capability selects "img" (Rule 4)
+      - no "img" upstream in registry → LegacyResolutionFailed → 404
+
+    After fix, ensure_img() runs first and registers the upstream, so dispatch
+    succeeds.  We simulate this by installing a fake slot_manager/arbiter whose
+    ensure_img() side-effect registers the img upstream in app.state.upstreams,
+    exactly as the real arbiter does via _register_container_upstream.
+    """
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"c" * 64
+
+    mock_infer = AsyncMock(
+        return_value={
+            "images": [
+                {
+                    "png": fake_png,
+                    "filename": "cold-slot-test.png",
+                    "subfolder": "",
+                    "type": "output",
+                }
+            ],
+            "meta": {"template": "sdxl_turbo_simple", "seed": 42, "width": 512, "height": 512},
+            "prompt_id": "cold725",
+        }
+    )
+    from hal0.providers import get_provider
+
+    monkeypatch.setattr(get_provider("comfyui"), "infer", mock_infer)
+
+    # Build a fake arbiter whose ensure_img() registers the upstream,
+    # simulating what the real arbiter does when it cold-starts the container.
+    upstreams = client.app.state.upstreams
+    _PORT = 8186
+
+    class _FakeArbiter:
+        async def ensure_img(self) -> None:
+            # Simulate _register_container_upstream: wire the img upstream
+            # so that resolve_by_capability Rule 4 can find it.
+            upstreams.upsert(
+                Upstream(
+                    name="img",
+                    kind="slot",
+                    url=f"http://127.0.0.1:{_PORT}/v1",
+                    slot_name="img",
+                    auth_style="none",
+                )
+            )
+
+        def touch_img_activity(self) -> None:
+            pass
+
+    class _FakeSlotManager:
+        arbiter = _FakeArbiter()
+
+        async def iter_configs(self) -> list[dict[str, Any]]:
+            # Return a config that gpu_exclusive_group() classifies as "img":
+            # provider=="comfyui" on a container slot (runtime=="container",
+            # device defaults to gpu-rocm).
+            return [{"name": "img", "provider": "comfyui", "enabled": True}]
+
+    # Verify that WITHOUT our fix the upstream is NOT pre-registered.
+    assert upstreams.get("img") is None, "upstream must be absent at test start"
+
+    client.app.state.slot_manager = _FakeSlotManager()
+
+    r = client.post(
+        "/v1/images/generations",
+        json={"model": "sdxl-turbo", "prompt": "cold slot test"},
+    )
+    # Must succeed — not 404 dispatch.no_route / dispatch.legacy_failed.
+    assert r.status_code == 200, (
+        f"cold-slot dispatch failed with {r.status_code}: {r.text}\n"
+        "This is the #725 regression: ensure_img() must run before dispatch()."
+    )
+    body = r.json()
+    assert body["data"], "expected at least one image in the response"
 
 
 # ─── image cache route ────────────────────────────────────────────────────────
