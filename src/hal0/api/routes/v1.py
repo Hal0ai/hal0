@@ -1014,44 +1014,17 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     if not body.get("prompt"):
         raise _ImagePromptRequired("body.prompt is required")
 
-    # 1. Resolve the slot the request should land on. We dispatch to get
-    #    the port + slot name; the dispatcher's heuristics already route
-    #    /v1/images/* to the `img` slot via the legacy fallback rule.
-    call = await dispatcher.dispatch(request, body=body)
-
-    # 2. Find the curated metadata for the requested model id so we know
-    #    which workflow template + checkpoint filename to pin into the
-    #    workflow.
-    requested = (body.get("model") or "").strip() or "sdxl-turbo"
-    curated = get_curated(requested)
-    if curated is None or curated.capability != "image":
-        raise _ImageModelNotCurated(
-            f"model {requested!r} is not in the curated image-gen catalogue; "
-            "current built-ins: sdxl-turbo, sd-1.5-pruned-emaonly",
-            details={"model": requested},
-        )
-
-    # 3. Discover the local slot's port from the resolved upstream.
-    upstream = request.app.state.upstreams.get(call.upstream_name)
-    if upstream is None:
-        raise NoRouteFound(
-            f"image-gen dispatch landed on upstream {call.upstream_name!r} which is not registered",
-            details={"upstream": call.upstream_name},
-        )
-    port = _extract_port_from_upstream_url(upstream.url)
-    if port is None:
-        raise UpstreamUnavailable(
-            f"image-gen upstream {call.upstream_name!r} has no parseable port "
-            f"in url={upstream.url!r}",
-            details={"upstream": call.upstream_name, "url": upstream.url},
-        )
-
-    # 4. GPU arbitration (Phase D, spec §7). Flip the GPU to exclusive
-    #    image mode BEFORE dispatching to the img upstream (unloads llm
-    #    GPU slots, loads the img slot), and stamp img activity at request
-    #    START and again at COMPLETION so long Wan video jobs keep the
-    #    idle-restore window open. Also seed #599 request defaults from
-    #    the img slot's [image] section (default_size / default_steps).
+    # 1. GPU arbitration (Phase D, spec §7) — BEFORE dispatch so the img
+    #    upstream is registered before resolve_by_capability runs.  When the
+    #    img slot is cold (the normal idle state after arbiter restore_llm),
+    #    ensure_img() cold-starts the container which calls
+    #    _register_container_upstream; without this, dispatch's Rule-4 path
+    #    selects slot "img" but no upstream exists yet and raises
+    #    LegacyResolutionFailed → 404.  Fix for issue #725.
+    #
+    #    Also seed #599 request defaults from the img slot's [image] section
+    #    (default_size / default_steps) here — before dispatch — so the body
+    #    the dispatcher sees already has the resolved defaults.
     manager = getattr(request.app.state, "slot_manager", None)
     arbiter = manager.arbiter if manager is not None else None
     if manager is not None:
@@ -1085,6 +1058,38 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             if exc.code != "gpu.img_slot_missing":
                 raise
         arbiter.touch_img_activity()
+
+    # 2. Resolve the slot the request should land on.  ensure_img() above
+    #    guarantees the img upstream is registered, so resolve_by_capability
+    #    Rule 4 (/images/ path) succeeds even on a cold slot.
+    call = await dispatcher.dispatch(request, body=body)
+
+    # 3. Find the curated metadata for the requested model id so we know
+    #    which workflow template + checkpoint filename to pin into the
+    #    workflow.
+    requested = (body.get("model") or "").strip() or "sdxl-turbo"
+    curated = get_curated(requested)
+    if curated is None or curated.capability != "image":
+        raise _ImageModelNotCurated(
+            f"model {requested!r} is not in the curated image-gen catalogue; "
+            "current built-ins: sdxl-turbo, sd-1.5-pruned-emaonly",
+            details={"model": requested},
+        )
+
+    # 4. Discover the local slot's port from the resolved upstream.
+    upstream = request.app.state.upstreams.get(call.upstream_name)
+    if upstream is None:
+        raise NoRouteFound(
+            f"image-gen dispatch landed on upstream {call.upstream_name!r} which is not registered",
+            details={"upstream": call.upstream_name},
+        )
+    port = _extract_port_from_upstream_url(upstream.url)
+    if port is None:
+        raise UpstreamUnavailable(
+            f"image-gen upstream {call.upstream_name!r} has no parseable port "
+            f"in url={upstream.url!r}",
+            details={"upstream": call.upstream_name, "url": upstream.url},
+        )
 
     # 5. Drive the ComfyUI provider directly. Inject the curated metadata
     #    into the body so the provider's translator knows what to render
