@@ -141,7 +141,9 @@ class TestListProfiles:
                 assert item["resolved_flags"] == item["flags"].strip()
 
     def test_custom_profiles_file_used_when_present(self, tmp_hal0_home: str) -> None:
-        """When profiles.toml is present, its contents are used (not seeds)."""
+        """A custom profiles.toml is preserved AND missing seed profiles are
+        additively merged in (#838): operator customisations coexist with the
+        canonical seeds so upgrades pick up newly-added seed profiles."""
         profiles_path = Path(tmp_hal0_home) / "etc" / "hal0" / "profiles.toml"
         profiles_path.parent.mkdir(parents=True, exist_ok=True)
         profiles_path.write_text(
@@ -155,7 +157,10 @@ class TestListProfiles:
         with TestClient(app) as c:
             data = c.get("/api/profiles").json()
         names = {item["name"] for item in data}
-        assert names == {"custom-only"}
+        # Operator's custom profile is preserved...
+        assert "custom-only" in names
+        # ...and the missing seed profiles were additively merged in (#838).
+        assert set(SEED_PROFILES.keys()) <= names
         custom = next(item for item in data if item["name"] == "custom-only")
         assert custom["seed"] is False
 
