@@ -21,7 +21,13 @@ from typing import Any
 import httpx
 import pytest
 
-from hal0.dispatcher.router import Dispatcher, SlotLoadFailed, SlotLoading, UpstreamCall, UpstreamUnavailable
+from hal0.dispatcher.router import (
+    Dispatcher,
+    SlotLoadFailed,
+    SlotLoading,
+    UpstreamCall,
+    UpstreamUnavailable,
+)
 from hal0.slots.state import SlotState
 
 # ── tiny SlotManager stand-in ────────────────────────────────────────────────
