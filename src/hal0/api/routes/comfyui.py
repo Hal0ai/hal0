@@ -21,9 +21,10 @@ ComfyUI container is only cold-started when it is down), inference →
 ``restore_llm(force=...)`` (free ComfyUI's models via POST /free — the
 container and its web UI stay up — then reload the saved llm slots). It runs
 in the background behind a 202; the ``switchover`` block on /status tracks the
-transition. The API no longer shells out — the ``/opt/comfyui`` control scripts
-stay on disk for manual ops only. ``POST /api/comfyui/pin`` toggles the
-arbiter's manual pin (blocks idle-restore).
+transition. The API no longer shells out to any ComfyUI control scripts — the
+podman ``hal0-slot@img`` unit is the sole owner of the container lifecycle
+(the standalone ``comfy-*.sh`` docker scripts were retired in #984).
+``POST /api/comfyui/pin`` toggles the arbiter's manual pin (blocks idle-restore).
 """
 
 from __future__ import annotations
