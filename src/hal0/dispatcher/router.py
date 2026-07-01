@@ -49,6 +49,7 @@ from fastapi.responses import Response, StreamingResponse
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.slots.manager import SLOT_ALIASES
+from hal0.slots.state import SlotState
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 if TYPE_CHECKING:
@@ -299,6 +300,24 @@ class SlotLoading(DispatchError):
 
     code = "slot.loading"
     status = 503
+
+
+class SlotLoadFailed(DispatchError):
+    """The target slot encountered a hard load failure (``SlotState.ERROR``).
+
+    Raised by ``Dispatcher._check_slot_ready_for_dispatch`` when the slot
+    is in the terminal ``ERROR`` state rather than a transient loading
+    state.  Unlike :class:`SlotLoading`, this error is **non-retryable**:
+    the slot will not recover on its own, so clients must not retry.
+
+    Deliberately carries no ``retry_after_s`` in ``details`` so the error
+    middleware never emits a ``Retry-After`` header.  Status 502 (Bad
+    Gateway) signals a hard backend failure distinct from the 503 +
+    Retry-After that a loading slot emits.
+    """
+
+    code = "slot.load_failed"
+    status = 502
 
 
 class LegacyResolutionFailed(Hal0Error):
@@ -874,6 +893,20 @@ class Dispatcher:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
+            # Fix #987: if the slot is now in ERROR (hard load failure),
+            # raise SlotLoadFailed immediately rather than deferring to the
+            # ready-check — which cannot distinguish "still loading" from
+            # "permanently failed" and would return a retryable 503 instead.
+            if self._slot_manager.state(slot_name) == SlotState.ERROR:
+                raise SlotLoadFailed(
+                    f"slot {slot_name!r} failed to load — manual recovery required",
+                    details={
+                        "slot": slot_name,
+                        "state": SlotState.ERROR.value,
+                        "upstream": call.upstream_name,
+                        "load_error": str(exc),
+                    },
+                ) from exc
 
     async def _check_container_slot_ready(self, call: UpstreamCall) -> None:
         """Raise :class:`SlotLoading` if a container-backed slot isn't ready.
@@ -909,21 +942,36 @@ class Dispatcher:
             )
 
     def _check_slot_ready_for_dispatch(self, call: UpstreamCall) -> None:
-        """Raise :class:`SlotLoading` if the target slot isn't ready to serve.
+        """Raise a typed error if the target slot isn't ready to serve.
 
         Ready set: ``READY``, ``SERVING``, ``IDLE`` (per #696 — single source
         in :meth:`SlotManager.is_ready_for_dispatch`).  Any other state means
         the slot is mid-lifecycle (``OFFLINE``, ``PULLING``, ``STARTING``,
         ``WARMING``, ``UNLOADING``, ``ERROR``) and forwarding would either
         ConnectError or get a raw 503 from llama-server's "still loading"
-        gate.  We raise a typed error here so the middleware can emit a
-        structured envelope plus a ``Retry-After`` header.
+        gate.
+
+        ``ERROR`` is treated specially (fix #987): it is a **terminal** state
+        — the slot will not recover without operator intervention.  We raise
+        :class:`SlotLoadFailed` (502, no ``Retry-After``) so clients get a
+        non-retryable signal instead of hammering the API forever.  Every
+        other non-ready state gets the retryable :class:`SlotLoading` 503.
         """
         assert self._slot_manager is not None  # narrowed by caller
         if self._slot_manager.is_ready_for_dispatch(call.slot_name):
             return
 
         current = self._slot_manager.state(call.slot_name)
+        if current == SlotState.ERROR:
+            # Terminal failure — surface as non-retryable 502 (no Retry-After).
+            raise SlotLoadFailed(
+                f"slot {call.slot_name!r} failed to load — manual recovery required",
+                details={
+                    "slot": call.slot_name,
+                    "state": current.value,
+                    "upstream": call.upstream_name,
+                },
+            )
         raise SlotLoading(
             f"slot {call.slot_name!r} is {current.value} — not ready to serve",
             details=self._build_loading_response(call, current),
@@ -1532,6 +1580,8 @@ __all__ = [
     "LegacyResolutionFailed",
     "NoRouteFound",
     "RegistryLoadFailed",
+    "SlotLoadFailed",
+    "SlotLoading",
     "UnknownUpstream",
     "UpstreamCall",
     "UpstreamUnavailable",
