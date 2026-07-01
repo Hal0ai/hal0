@@ -1147,9 +1147,18 @@ class Updater:
         — forward-only migrations are acceptable for v1 (PLAN §9 + Team D
         brief). The route layer can surface the warning in the job result.
 
+        Step 8b (non-editable installs only): after the symlink swap, re-pips
+        the prior tree into the running venv so that the next ``hal0-api``
+        restart actually serves the rolled-back version. This mirrors the
+        same step in ``apply()`` (#495 / #980). On pip failure the symlink is
+        swapped *forward* again (back to ``current_target``) so the symlink
+        and the venv-installed code stay consistent — same failure-recovery
+        pattern as ``apply()``.
+
         Raises:
             UpdateRollbackUnavailable: No previous record on disk.
             UpdateSwapError: The symlink swap itself failed.
+            UpdateError: Re-pip of the prior tree failed (non-editable only).
         """
         record = _previous_record()
         if not record.exists():
@@ -1186,6 +1195,23 @@ class Updater:
                 f"rollback symlink swap failed: {exc}",
                 details={"link": str(link), "target": str(prior_path), "error": str(exc)},
             ) from exc
+
+        # Step 8b: re-install the prior tree into the running venv so the
+        # next hal0-api restart serves the rolled-back version. Editable/dev
+        # installs are exempt (no FHS venv to refresh; mirrors apply()).
+        if not _is_editable_install():
+            try:
+                await asyncio.to_thread(_reinstall_into_venv, prior_path, job_id=self.job_id)
+            except UpdateError:
+                # Re-pip failed: swap the symlink forward again so `current`
+                # and the venv's installed code stay consistent — both remain
+                # pointing at current_target (the version we just rolled away
+                # from), rather than leaving the symlink at prior_path while
+                # site-packages still has the newer code.
+                if current_target is not None:
+                    with contextlib.suppress(OSError):
+                        _atomic_symlink_swap(current_target, link)
+                raise
 
         # Re-record what we just swapped away from so a double-rollback
         # bounces between the two installs (matches haloai semantics).
