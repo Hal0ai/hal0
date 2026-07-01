@@ -59,7 +59,7 @@ class CuratedModelNotFound(PickDefaultError):
     status = 404
 
 
-_DEFAULT_SLOT = "chat"
+_DEFAULT_SLOT = "agent"
 
 
 def _first_run_sentinel() -> Path:
@@ -85,9 +85,18 @@ def _models_dir_populated() -> bool:
 
 
 def _has_default_slot() -> bool:
-    """True if the chat slot TOML exists (chat.toml or legacy primary.toml)."""
+    """True if the canonical agent slot TOML exists, or a legacy fallback.
+
+    Per ADR-0023 the default anchor slot is ``agent`` (SEED_STACKS bind
+    ``slot=agent``); ``chat`` and ``primary`` are retained as legacy
+    fallbacks for boxes that pre-date the rename.
+    """
     slots_dir = paths.slots_config_dir()
-    return (slots_dir / "chat.toml").exists() or (slots_dir / "primary.toml").exists()
+    return (
+        (slots_dir / "agent.toml").exists()
+        or (slots_dir / "chat.toml").exists()
+        or (slots_dir / "primary.toml").exists()
+    )
 
 
 async def _openwebui_running() -> bool:
