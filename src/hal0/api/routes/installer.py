@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from hal0.hardware.probe import HardwareProbe
 from hal0.install.orchestrate import Selections, SlotSelection, apply_setup
 from hal0.registry.curated import CURATED_MODELS
 from hal0.registry.pull import run_pull
+from hal0.slot_config import write_slot_toml
 
 # Auth was removed in ADR-0012. All endpoints are open on the local
 # network; the first-run wizard runs without any credential.
@@ -56,6 +58,20 @@ class CuratedModelNotFound(PickDefaultError):
     """404 — caller asked for a curated id that's not in the catalogue."""
 
     code = "install.curated_not_found"
+    status = 404
+
+
+class SlotTomlNotFound(Hal0Error):
+    """404 — PUT /install/slots/{name}/model refused: TOML does not exist.
+
+    The endpoint only updates existing slots; it never synthesises a new
+    TOML from scratch so that legacy profile-less files can't be created
+    by accident. Callers that need to create a new slot should use the
+    ``POST /api/slots`` or ``POST /api/backends/npu/load`` paths which
+    write the full canonical config.
+    """
+
+    code = "install.slot_toml_not_found"
     status = 404
 
 
@@ -419,6 +435,80 @@ async def install_apply_selections(request: Request, background: BackgroundTasks
     for plan in result.pulls:
         background.add_task(run_pull, plan.job, **plan.kwargs)
     return {"model_ids": result.model_ids, "slots": [vars(s) for s in result.slots]}
+
+
+# ── Slot model-default update ─────────────────────────────────────────────────
+
+
+@router.put("/slots/{name}/model")
+async def update_slot_model(name: str, request: Request) -> dict[str, Any]:
+    """Update the default model for an existing slot TOML.
+
+    Body: ``{"model_id": "<model-tag>"}``.
+
+    Reads the existing ``/etc/hal0/slots/{name}.toml`` and rewrites it
+    through :func:`hal0.slot_config.write_slot_toml` (the canonical
+    slots/*.toml write path) with ``model.default`` updated to the new
+    value.  Returns a typed 404 (:class:`SlotTomlNotFound`) when the
+    slot TOML does not exist — this endpoint never synthesises a
+    profile-less slot from scratch.
+
+    The caller is responsible for ensuring ``model_id`` is present in
+    the model registry; this endpoint only updates the slot pointer and
+    does not pull or validate the model.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest(
+            "request body must be valid JSON",
+            details={"error": str(exc)},
+            code="request.invalid_json",
+        ) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
+
+    model_id = body.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise BadRequest(
+            "'model_id' is required (non-empty string)",
+            code="install.model_id_required",
+        )
+    model_id = model_id.strip()
+
+    slot_path = paths.slots_config_dir() / f"{name}.toml"
+    if not slot_path.exists():
+        raise SlotTomlNotFound(
+            f"slot TOML for {name!r} does not exist; create the slot first",
+            details={"slot": name, "path": str(slot_path)},
+        )
+
+    try:
+        with slot_path.open("rb") as fh:
+            cfg = tomllib.load(fh)
+    except Exception as exc:
+        raise Hal0Error(
+            f"failed to read slot TOML for {name!r}: {exc}",
+            details={"slot": name, "error": str(exc)},
+        ) from exc
+
+    # Deep-merge: preserve any sibling keys under [model] (e.g. context_size)
+    # while updating only model.default — matches update_config semantics.
+    existing_model = cfg.get("model")
+    if isinstance(existing_model, dict):
+        cfg["model"] = {**existing_model, "default": model_id}
+    else:
+        cfg["model"] = {"default": model_id}
+
+    try:
+        write_slot_toml(slot_path, cfg)
+    except OSError as exc:
+        raise Hal0Error(
+            f"failed to write slot TOML for {name!r}: {exc}",
+            details={"slot": name, "error": str(exc)},
+        ) from exc
+
+    return {"slot": name, "model_id": model_id, "path": str(slot_path)}
 
 
 # ── FirstRun v2: services step — verify + one-click repair (design D5) ───────
