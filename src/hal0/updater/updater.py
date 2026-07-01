@@ -58,7 +58,6 @@ from hal0.config import paths
 from hal0.config.loader import (
     ConfigParseError,
     load_hal0_config,
-    load_profiles_config,
     save_profiles_config,
     write_toml_atomic,
 )
@@ -887,8 +886,8 @@ def ensure_seed_profiles(*, job_id: str | None = None) -> int:
     Returns:
         Number of seed profiles injected (0 means already up-to-date).
     """
-    from hal0.config.schema import SEED_PROFILES, ProfileConfig, ProfilesConfig
     from hal0.config.loader import _read_toml
+    from hal0.config.schema import SEED_PROFILES, ProfileConfig, ProfilesConfig
 
     target = paths.profiles_toml()
     if not target.exists():
