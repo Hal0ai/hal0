@@ -21,7 +21,7 @@ from typing import Any
 import httpx
 import pytest
 
-from hal0.dispatcher.router import Dispatcher, SlotLoading, UpstreamCall, UpstreamUnavailable
+from hal0.dispatcher.router import Dispatcher, SlotLoadFailed, SlotLoading, UpstreamCall, UpstreamUnavailable
 from hal0.slots.state import SlotState
 
 # ── tiny SlotManager stand-in ────────────────────────────────────────────────
@@ -243,17 +243,20 @@ async def test_single_flight_prefetch_does_not_enter_serving() -> None:
         SlotState.STARTING,
         SlotState.WARMING,
         SlotState.UNLOADING,
-        SlotState.ERROR,
     ],
 )
 @pytest.mark.asyncio
 async def test_forward_gates_slot_in_loading_state(state: SlotState) -> None:
-    """Every non-ready slot state must raise SlotLoading before the HTTP forward.
+    """Transient non-ready states raise SlotLoading (retryable 503) before the HTTP forward.
 
     Without the gate, requests in the swap window hit a dead port (502)
     or a still-loading llama-server (raw 503).  The gate raises a
     structured envelope with retry_after_s instead, which the error
     middleware promotes to a Retry-After header.
+
+    Note: SlotState.ERROR is intentionally excluded — it raises SlotLoadFailed
+    (non-retryable 502) rather than SlotLoading.  See
+    test_forward_error_state_raises_slot_load_failed below.
     """
     sm = _RecordingSlotManager(state=state)
 
@@ -274,6 +277,113 @@ async def test_forward_gates_slot_in_loading_state(state: SlotState) -> None:
         assert progress["phase"] == state.value
         assert progress["upstream"] == "primary"
         # No serving counter movement — the gate fires before _forward_with_serving.
+        assert sm.events == []
+        assert sm.in_flight_count("primary") == 0
+    finally:
+        await dispatcher.aclose()
+
+
+# ── ERROR state → SlotLoadFailed (fix #987) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_forward_error_state_raises_slot_load_failed() -> None:
+    """SlotState.ERROR must raise SlotLoadFailed (non-retryable 502), NOT SlotLoading.
+
+    A slot in ERROR has permanently failed — bad profile, OOM, missing
+    model file.  Returning a retryable 503 + Retry-After would cause the
+    client/SDK to hammer an endpoint that will never recover without
+    operator intervention.  SlotLoadFailed (502, no Retry-After) signals
+    a terminal failure so the client can surface a meaningful error.
+    """
+    sm = _RecordingSlotManager(state=SlotState.ERROR)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError("forward must not reach upstream when slot is in ERROR")
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
+    try:
+        with pytest.raises(SlotLoadFailed) as ei:
+            await dispatcher.forward(_slot_call())
+        exc = ei.value
+        assert exc.code == "slot.load_failed"
+        assert exc.status == 502
+        assert exc.details["slot"] == "primary"
+        assert exc.details["state"] == SlotState.ERROR.value
+        # Must NOT carry retry_after_s — the middleware must not emit Retry-After.
+        assert "retry_after_s" not in exc.details
+        # No serving counter movement — gate fires before _forward_with_serving.
+        assert sm.events == []
+        assert sm.in_flight_count("primary") == 0
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_forward_error_state_is_not_slot_loading() -> None:
+    """Regression guard: SlotState.ERROR must NOT surface as SlotLoading.
+
+    This test is designed to FAIL without the fix in _check_slot_ready_for_dispatch.
+    It complements test_forward_error_state_raises_slot_load_failed by
+    asserting the negative: the wrong error type is never raised.
+    """
+    sm = _RecordingSlotManager(state=SlotState.ERROR)
+    dispatcher = _make_dispatcher(
+        httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True})),
+        sm=sm,
+    )
+    try:
+        with pytest.raises(Exception) as ei:
+            await dispatcher.forward(_slot_call())
+        assert not isinstance(ei.value, SlotLoading), (
+            "SlotState.ERROR must not raise SlotLoading — "
+            "that would give the client a retryable Retry-After hint for a terminal failure"
+        )
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_backend_aware_load_failure_raises_slot_load_failed_immediately() -> None:
+    """When SlotManager.load() raises and leaves the slot in ERROR, raise SlotLoadFailed
+    immediately from _ensure_slot_loaded_backend_aware rather than deferring to the
+    ready-check (which would still mis-classify as loading before the fix).
+
+    The SlotManager stub here transitions to ERROR when load() raises,
+    mimicking a real load failure (bad profile, OOM, missing model).
+    """
+
+    class _ErrorOnLoadSlotManager(_RecordingSlotManager):
+        """Transitions slot to ERROR when load() raises."""
+
+        def __init__(self) -> None:
+            super().__init__(state=SlotState.OFFLINE)
+
+        def is_ready_for_dispatch(self, _slot_name: str) -> bool:
+            return self._state in _DISPATCHABLE_STATES
+
+        async def load(self, slot_name: str) -> None:
+            # Simulate a hard load failure: slot transitions to ERROR.
+            self._state = SlotState.ERROR
+            raise RuntimeError("model file not found: /models/missing.gguf")
+
+    sm = _ErrorOnLoadSlotManager()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise AssertionError("forward must not reach upstream after load failure")
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
+    try:
+        with pytest.raises(SlotLoadFailed) as ei:
+            await dispatcher.forward(_slot_call())
+        exc = ei.value
+        assert exc.code == "slot.load_failed"
+        assert exc.status == 502
+        assert exc.details["slot"] == "primary"
+        assert "retry_after_s" not in exc.details
+        # load_error carries the underlying exception message.
+        assert "missing.gguf" in exc.details.get("load_error", "")
+        # No serving counter movement.
         assert sm.events == []
         assert sm.in_flight_count("primary") == 0
     finally:
