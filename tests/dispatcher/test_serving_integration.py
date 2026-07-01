@@ -423,3 +423,131 @@ async def test_forward_remote_protocol_error_raises_upstream_unavailable() -> No
         assert calls["n"] == 1
     finally:
         await dispatcher.aclose()
+
+
+# ── container-slot serving (#746) ────────────────────────────────────────────
+#
+# Post-container-migration (#723) every slot is container-backed.  The old
+# code routed container_slot_name calls through _forward_plain (no serving
+# context, no last_used_at bump).  These tests verify the fix: the container
+# branch now enters _forward_with_serving so the slot state machine fires.
+
+
+class _RecordingContainerSlotManager(_RecordingSlotManager):
+    """Extends _RecordingSlotManager with a container_readiness_check stub.
+
+    Returning (True, "ready") by default so the gate passes through and
+    _forward_with_serving is reached.
+    """
+
+    def __init__(self, state: SlotState = SlotState.READY) -> None:
+        super().__init__(state=state)
+
+    async def container_readiness_check(self, slot_name: str) -> tuple[bool, str]:
+        return (True, "ready")
+
+
+def _container_slot_call(streaming: bool = False) -> UpstreamCall:
+    """UpstreamCall with container_slot_name set and slot_name empty."""
+    return UpstreamCall(
+        upstream_name="agent",
+        target_url="http://127.0.0.1:8090/v1/chat/completions",
+        headers={"content-type": "application/json"},
+        body=b"{}",
+        streaming=streaming,
+        method="POST",
+        slot_name="",  # container remotes carry no slot_name
+        container_slot_name="agent",
+    )
+
+
+@pytest.mark.asyncio
+async def test_container_slot_call_enters_and_exits_serving() -> None:
+    """A container-slot call (slot_name='', container_slot_name set) must
+    enter serving() and exit it — verifying READY→SERVING→READY and that
+    last_used_at is bumped (#746).
+    """
+    sm = _RecordingContainerSlotManager()
+    dispatcher = _make_dispatcher(
+        httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True})),
+        sm=sm,
+    )
+    try:
+        resp = await dispatcher.forward(_container_slot_call())
+        assert resp.status_code == 200
+        assert sm.events == [("enter", "agent"), ("exit", "agent")]
+        assert sm.in_flight_count("agent") == 0
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_container_slot_call_uses_container_slot_name_not_slot_name() -> None:
+    """serving() receives container_slot_name (not slot_name) as the key.
+
+    Defends against a regression where the effective-slot logic falls back
+    to slot_name (empty string) and serving("") is called instead.
+    """
+    sm = _RecordingContainerSlotManager()
+    dispatcher = _make_dispatcher(
+        httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True})),
+        sm=sm,
+    )
+    try:
+        await dispatcher.forward(_container_slot_call())
+        # The slot key must be the container name, never the empty string.
+        entered_slots = [slot for op, slot in sm.events if op == "enter"]
+        assert entered_slots == ["agent"], f"unexpected serving key(s): {entered_slots}"
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_container_slot_streaming_holds_serving_until_drain() -> None:
+    """Streaming container-slot call keeps SERVING open until the body drains."""
+    sm = _RecordingContainerSlotManager()
+    chunks = [b"data: a\n\n", b"data: [DONE]\n\n"]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(b"".join(chunks)),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
+    try:
+        resp = await dispatcher.forward(_container_slot_call(streaming=True))
+        # forward() returns but the stream hasn't drained — SERVING held open.
+        assert sm.events == [("enter", "agent")]
+        assert sm.in_flight_count("agent") == 1
+
+        collected = b""
+        async for c in resp.body_iterator:
+            collected += c if isinstance(c, bytes) else c.encode()
+
+        # After drain, exit fires.
+        assert collected == b"".join(chunks)
+        assert sm.events == [("enter", "agent"), ("exit", "agent")]
+        assert sm.in_flight_count("agent") == 0
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_container_slot_network_error_releases_serving() -> None:
+    """A ConnectError on a container-slot call must still release serving()."""
+    sm = _RecordingContainerSlotManager()
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=req)
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm=sm)
+    try:
+        with pytest.raises(UpstreamUnavailable):
+            await dispatcher.forward(_container_slot_call())
+        assert sm.in_flight_count("agent") == 0
+        ops = [op for op, _ in sm.events]
+        assert ops == ["enter", "exit"]
+    finally:
+        await dispatcher.aclose()

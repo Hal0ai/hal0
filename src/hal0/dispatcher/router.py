@@ -369,8 +369,10 @@ class UpstreamCall:
     503 instead of a raw 502 ConnectError.
 
     Deliberately separate from ``slot_name`` — container remotes must NOT
-    enter the ``_ensure_slot_loaded_backend_aware`` / ``_forward_with_serving``
-    path (no auto-load, no SERVING state wrap).
+    enter the ``_ensure_slot_loaded_backend_aware`` path (no auto-load).
+    They DO enter ``_forward_with_serving`` so the slot transitions
+    READY → SERVING → READY around each request and ``last_used_at`` is
+    bumped correctly (#746).
     """
 
     latency_ms: float = 0.0
@@ -779,6 +781,10 @@ class Dispatcher:
             # gets a structured slot.loading 503 with Retry-After instead of
             # a raw 502 ConnectError when the container is down or starting.
             await self._check_container_slot_ready(call)
+            # Mirror the slot_name branch: wrap the forward in the serving
+            # context so the slot transitions READY → SERVING → READY and
+            # last_used_at is bumped around every request (#746).
+            return await self._forward_with_serving(call)
         return await self._forward_plain(call)
 
     def _guard_gpu_image_mode(self, call: UpstreamCall) -> None:
@@ -966,7 +972,10 @@ class Dispatcher:
         finishes consuming the stream (or the response is GC'd).
         """
         assert self._slot_manager is not None  # narrowed by forward()
-        ctx = self._slot_manager.serving(call.slot_name)
+        # Use the effective slot name: slot_name for kind=slot upstreams,
+        # container_slot_name for container-backed kind=remote upstreams (#746).
+        effective_slot = call.slot_name or call.container_slot_name
+        ctx = self._slot_manager.serving(effective_slot)
         await ctx.__aenter__()
         released = False
 
@@ -980,7 +989,7 @@ class Dispatcher:
             except Exception as exc:  # never bury the request's outcome
                 log.warning(
                     "dispatch.serving_release_failed",
-                    slot=call.slot_name,
+                    slot=effective_slot,
                     error=str(exc),
                 )
 
