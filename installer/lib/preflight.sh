@@ -299,6 +299,37 @@ preflight_container_runtime() {
 # Back-compat alias: older docs / `hal0 doctor` builds call preflight_docker.
 preflight_docker() { preflight_container_runtime "$@"; }
 
+# Docker + podman coexistence: Docker sets the iptables FORWARD policy to DROP
+# and manages that chain. netavark (podman's firewall) adds no explicit
+# NEW-connection ACCEPT for published ports (it assumes FORWARD defaults to
+# ACCEPT), so once Docker is installed alongside podman, packets to a
+# podman-published port (e.g. OpenWebUI's 0.0.0.0:3001) are reachable from the
+# host itself but DROPped for every other host — a reverse proxy or LAN client
+# can't connect. The hal0-podman-forward.service unit closes the gap by adding
+# an ACCEPT for the podman0 bridge into DOCKER-USER; install.sh enables it when
+# docker is present. This check is purely advisory — it never fails (returns 0)
+# and only runs its checks when BOTH runtimes are present (the conflict source).
+# It also needs root + iptables; under an unprivileged `hal0 doctor` the probes
+# quietly no-op.
+preflight_podman_forward() {
+    command -v podman >/dev/null 2>&1 || return 0
+    command -v docker >/dev/null 2>&1 || return 0
+    command -v iptables >/dev/null 2>&1 || return 0
+    # No podman bridge yet (no containers created) — nothing to reconcile.
+    ip link show podman0 >/dev/null 2>&1 || return 0
+    # Already reconciled? (unit ran, or FORWARD isn't DROP) — all good.
+    if iptables -C DOCKER-USER -o podman0 -j ACCEPT 2>/dev/null; then
+        info "podman/Docker FORWARD: podman0 accepted in DOCKER-USER"
+        return 0
+    fi
+    if iptables -S FORWARD 2>/dev/null | grep -q -- '-P FORWARD DROP'; then
+        warn "podman/Docker coexistence: FORWARD is DROP and DOCKER-USER lacks a podman0 ACCEPT"
+        warn "  → podman-published ports (e.g. OpenWebUI :3001) are unreachable off-host"
+        warn "  fix: systemctl enable --now hal0-podman-forward   (or re-run install.sh)"
+    fi
+    return 0
+}
+
 preflight_disk() {
     local min_gb="${1:-${HAL0_DISK_MIN_GB:-20}}"
     local target="${2:-${HAL0_DISK_TARGET:-/var/lib}}"
@@ -390,6 +421,7 @@ preflight_all() {
     preflight_writable || rc=$?
     preflight_network || rc=$?
     preflight_container_runtime || rc=$?
+    preflight_podman_forward || rc=$?
     preflight_disk    || rc=$?
     preflight_ports   || rc=$?
     if (( rc == 0 )); then

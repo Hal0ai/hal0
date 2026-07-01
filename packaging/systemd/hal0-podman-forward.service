@@ -1,0 +1,39 @@
+[Unit]
+Description=hal0 podman<->Docker FORWARD reconciliation (keeps published podman ports reachable when Docker is co-installed)
+Documentation=https://github.com/Hal0ai/hal0
+# Why this exists:
+#   hal0's inference slots + OpenWebUI run as podman (netavark) containers.
+#   When Docker is ALSO installed on the same host it sets the iptables
+#   FORWARD policy to DROP and manages that chain. netavark adds no explicit
+#   NEW-connection ACCEPT for podman-published ports (it assumes FORWARD
+#   defaults to ACCEPT), so once Docker flips the policy, packets to a
+#   podman-published port (e.g. OpenWebUI's 0.0.0.0:3001) are DROPped for
+#   every host except the box itself: reachable from localhost, dead from a
+#   reverse proxy or LAN client. Docker rewrites FORWARD on every start, so
+#   the fix must re-apply after Docker (After=/PartOf=/WantedBy=docker.service)
+#   and at boot (WantedBy=multi-user.target).
+#
+# What it does: re-adds an ACCEPT for the podman0 bridge into DOCKER-USER —
+#   the one chain Docker preserves across restarts. Self-guarding + idempotent:
+#   a no-op when iptables, podman0, or the DOCKER-USER chain are absent.
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# No iptables / no podman bridge / no Docker (DOCKER-USER chain) => nothing to
+# do. Otherwise ensure both directions of the podman0 ACCEPT exist exactly once.
+ExecStart=/usr/bin/env bash -c '\
+  command -v iptables >/dev/null 2>&1 || exit 0; \
+  ip link show podman0 >/dev/null 2>&1 || exit 0; \
+  iptables -L DOCKER-USER -n >/dev/null 2>&1 || exit 0; \
+  iptables -C DOCKER-USER -i podman0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i podman0 -j ACCEPT; \
+  iptables -C DOCKER-USER -o podman0 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -o podman0 -j ACCEPT'
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hal0-podman-forward
+
+[Install]
+WantedBy=docker.service multi-user.target
