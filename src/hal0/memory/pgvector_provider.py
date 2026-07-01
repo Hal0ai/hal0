@@ -5,6 +5,11 @@ as the engines. Stands in when Hindsight is unavailable at boot so the
 tools return empties + the dashboard shows "no engine" instead of crashing.
 A real pgvector backing is deferred; the contract + degrade path are what P0
 needs.
+
+SAFETY: this provider is IN-MEMORY ONLY — all writes are LOST on restart.
+Callers can detect this via the ``degraded`` attribute (always ``True`` here).
+``add()`` emits a structlog WARNING on the first write per instance to alert
+operators before data loss occurs.
 """
 
 from __future__ import annotations
@@ -13,7 +18,11 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
+
 from hal0.memory.provider import MemoryProvider
+
+log = structlog.get_logger(__name__)
 
 _SHARED = "shared"
 _PRIVATE = "private:"
@@ -24,12 +33,31 @@ def _now() -> str:
 
 
 class PgVectorProvider(MemoryProvider):
+    #: Always True — signals that this provider is the in-memory degrade
+    #: fallback; writes are NOT persisted and are LOST on restart.
+    degraded: bool = True
+
     def __init__(self, *, client_id: str = "anonymous") -> None:
         self._client_id = client_id
         self._rows: list[dict[str, Any]] = []
         self._graph_enabled = False
         self._extraction_slot = "utility"
         self._rerank_enabled = False
+        # Emit the degrade warning exactly once per provider instance so log
+        # consumers see it on construction rather than being spammed on each
+        # write.  A second warning fires on the first add() call so the
+        # WARNING is visible in the write path even when the provider was
+        # constructed outside of our factory (e.g. in tests).
+        self._add_warned = False
+        log.warning(
+            "hal0.memory.degraded_provider_active",
+            detail=(
+                "Memory is running on the in-memory PgVectorProvider fallback. "
+                "All writes are VOLATILE and will be LOST on restart. "
+                "Ensure Hindsight is reachable and HAL0_MEMORY_ENABLED=1 "
+                "to enable durable storage."
+            ),
+        )
 
     def _allowed(self, requested: str | list[str], client_id: str | None) -> list[str]:
         cid = client_id or self._client_id
@@ -57,6 +85,20 @@ class PgVectorProvider(MemoryProvider):
         client_id=None,
         document_id=None,
     ):
+        # Emit a per-call warning (throttled to once per instance) so the
+        # write-path is loud even when the construction-time warning was
+        # swallowed by a log filter or the provider was built outside our
+        # factory.
+        if not self._add_warned:
+            self._add_warned = True
+            log.warning(
+                "hal0.memory.degraded_write",
+                detail=(
+                    "Memory write accepted by in-memory PgVectorProvider. "
+                    "This data is VOLATILE and will be LOST on restart."
+                ),
+                dataset=dataset,
+            )
         # No document semantics on this engine — a caller-supplied
         # document_id just becomes the item id so delete round-trips.
         item_id = document_id or str(uuid.uuid4())

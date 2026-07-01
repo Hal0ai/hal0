@@ -65,6 +65,11 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
     to Hindsight, with a boot-time degrade to the in-memory PgVectorProvider when
     the Hindsight daemon is unreachable. ``cfg`` is the object returned by
     ``hal0.config.loader.load_hal0_config``.
+
+    Callers can check ``getattr(provider, "degraded", False)`` to detect when the
+    returned provider is the in-memory PgVectorProvider fallback rather than a real
+    durable engine. ``PgVectorProvider.degraded`` is always ``True``; all other
+    providers default to ``False`` (absent attribute → ``getattr`` fallback).
     """
     engine = str(getattr(cfg.memory, "engine", "hindsight") or "hindsight").lower()
     embed = cfg.memory.embedding
