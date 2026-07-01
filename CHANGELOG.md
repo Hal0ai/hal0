@@ -11,6 +11,24 @@ page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 ADR-level architecture decisions are kept internal (the `docs/internal/`
 tree is gitignored, #638) and referenced by number throughout the code.
 
+## [Unreleased]
+
+### Fixed
+- **Chat requests with mis-positioned or stacked `role='system'` messages
+  no longer 500 the Qwen3.6-35B-A3B upstream.** The Hermes dashboard SPA,
+  Open WebUI and LibreChat build the messages array by append, so a stale
+  session system message can land mid-array; third-party clients can also
+  stack two system blocks deliberately. The Qwen3 Jinja chat template
+  hard-raises `System message must be at the beginning` from line ~85 in
+  both cases, surfacing as HTTP 500 with `Jinja Exception: ...`. The
+  OpenAI-compat normaliser now calls
+  `hal0.normalize.messages.normalize_system_messages` inside
+  `_normalize_chat_body`, which **collapses** every system entry into one
+  and **hoists** the result to position 0 (joined with blank lines,
+  matching the OpenAI/Anthropic convention for stacked-system payloads).
+  No-system payloads are returned without a copy so the SPA's hot path
+  pays nothing.
+
 ## [v0.8.2b4] — 2026-06-30
 
 Documentation and installer hygiene — no runtime behaviour change. This
