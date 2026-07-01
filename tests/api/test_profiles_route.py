@@ -42,11 +42,11 @@ class TestListProfiles:
         assert isinstance(data, list)
 
     def test_returns_seed_profiles(self, client: TestClient) -> None:
-        """One entry per seed profile (8: rocm-moe + rocm-dnse split, Phase D
-        comfyui, plus the GPU tts-qwen3 profile)."""
+        """One entry per seed profile (9: rocm-moe + rocm-dnse split, Phase D
+        comfyui, the GPU tts-qwen3 profile, plus the cpu-llm CPU profile #834)."""
         data = client.get("/api/profiles").json()
         assert len(data) == len(SEED_PROFILES)
-        assert len(data) == 8
+        assert len(data) == 9
 
     def test_flm_npu_seed_present(self, client: TestClient) -> None:
         """Phase A added the flm container profile to the seeds."""
