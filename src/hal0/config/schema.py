@@ -793,6 +793,19 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "TTS · Qwen3 (multilingual GPU)",
         "quant": "BF16",
     },
+    "cpu-llm": {
+        # The Vulkan toolbox image runs in CPU-only mode when no GPU devices
+        # are passed to the container (llama-server auto-selects GGML_CPU).
+        # CPU-optimal flags: no flash-attn (not available without GPU), smaller
+        # batch to limit peak RAM, and a thread count sensible for a typical
+        # multi-core host.  backend=None keeps the #807 coherence check happy.
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
+        "flags": "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap",
+        "mtp": False,
+        "device_class": "cpu",
+        "intent": "CPU-only LLM · llama-server",
+        "quant": "Q4_K_M",
+    },
     "comfyui": {
         "image": "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2",
         "flags": "--disable-mmap --bf16-vae --cache-none",

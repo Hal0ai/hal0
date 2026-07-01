@@ -98,5 +98,9 @@ def derive_profile(capability: str, device: str) -> str:
     if device == "gpu-vulkan":
         return "vulkan"
     if device == "cpu":
-        return "tts" if capability == "tts" else "vulkan"
-    return "vulkan"
+        # ``tts`` stays on the kokoro/CPU profile; everything else (chat,
+        # coder, embed, utility, …) goes to the CPU-coherent llama-server
+        # profile.  Returning "vulkan" here caused #807 to reject the slot
+        # on GPU-less boxes (device=cpu + profile=vulkan incoherent, #834).
+        return "tts" if capability == "tts" else "cpu-llm"
+    return "cpu-llm"
