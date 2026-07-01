@@ -715,6 +715,109 @@ def test_rollback_swaps_symlink_back(
     assert "hal0-0.0.2" in _previous_record().read_text(encoding="utf-8")
 
 
+# ── rollback re-pip into venv (#980) ──────────────────────────────────────────
+
+
+def test_rollback_repips_prior_tree_when_not_editable(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prod (non-editable) rollback re-pips the prior tree into the venv (#980).
+
+    After apply() v1 → apply() v2 → rollback(), _reinstall_into_venv must be
+    called with the v1 (prior) install directory so the next hal0-api restart
+    actually runs v1, not the v2 code still in site-packages.
+    """
+    # Land v0.0.1.
+    asyncio.run(Updater().apply())
+    v1_dir = _versioned_install_dir("0.0.1")
+
+    # Build and apply v0.0.2.
+    artifacts = tmp_path / "v2"
+    artifacts.mkdir()
+    tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
+    sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
+    sig2.write_bytes(b"sig")
+    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
+    cert2.write_bytes(b"cert")
+    _write_release_manifest(
+        manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
+        tarball=tarball2,
+        sig=sig2,
+        cert=cert2,
+        version="0.0.2",
+    )
+    asyncio.run(Updater().apply())
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.2"
+
+    # Capture _reinstall_into_venv calls during rollback.
+    calls: list[Path] = []
+
+    def _capture(install_dir: Path, *, job_id: str | None = None) -> None:
+        calls.append(install_dir)
+
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater._reinstall_into_venv", _capture)
+
+    res = asyncio.run(Updater().rollback())
+
+    # rollback returned the prior (v0.0.1) path.
+    assert "hal0-0.0.1" in res["rolled_back_to"]
+    # _reinstall_into_venv was called exactly once with the v0.0.1 dir.
+    assert calls == [v1_dir]
+    # Symlink points at v0.0.1.
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.1"
+
+
+def test_rollback_repip_failure_re_swaps_symlink_forward(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing re-pip during rollback swaps `current` forward again (#980).
+
+    If _reinstall_into_venv raises during rollback, the symlink must be
+    restored to the version we just rolled *away from* (current_target) so
+    that the symlink and the venv's installed code remain consistent.
+    """
+    # Land v0.0.1.
+    asyncio.run(Updater().apply())
+
+    # Build and apply v0.0.2.
+    artifacts = tmp_path / "v2"
+    artifacts.mkdir()
+    tarball2 = _build_release_tarball(tmp=artifacts, version="0.0.2")
+    sig2 = artifacts / "hal0-0.0.2.tar.gz.sig"
+    sig2.write_bytes(b"sig")
+    cert2 = artifacts / "hal0-0.0.2.tar.gz.crt"
+    cert2.write_bytes(b"cert")
+    _write_release_manifest(
+        manifest_path=Path(os.environ["HAL0_RELEASES_URL"]),
+        tarball=tarball2,
+        sig=sig2,
+        cert=cert2,
+        version="0.0.2",
+    )
+    asyncio.run(Updater().apply())
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.2"
+
+    # Force the re-pip to fail.
+    def _boom(install_dir: Path, *, job_id: str | None = None) -> None:
+        raise UpdateError("pip reinstall failed during rollback", details={})
+
+    monkeypatch.setattr("hal0.updater.updater._is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater._reinstall_into_venv", _boom)
+
+    with pytest.raises(UpdateError):
+        asyncio.run(Updater().rollback())
+
+    # Symlink should be restored to v0.0.2 (the version we tried to leave).
+    assert Path(os.readlink(_current_symlink())).name == "hal0-0.0.2"
+
+
 # ── channel switching ─────────────────────────────────────────────────────────
 
 
