@@ -633,6 +633,19 @@ else
     warn "${OPENWEBUI_UNIT_SRC} not found — OpenWebUI unit not installed"
 fi
 
+# podman<->Docker FORWARD reconciliation unit. Only meaningful when Docker is
+# co-installed with podman: Docker flips the iptables FORWARD policy to DROP and
+# clobbers the implicit ACCEPT podman relies on, which makes podman-published
+# ports (OpenWebUI :3001) unreachable off-host. Laid down unconditionally;
+# enabled below only when docker is present. The unit self-guards (no-op without
+# iptables/podman0/Docker), so shipping it on a docker-free box is harmless.
+PODMAN_FWD_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-podman-forward.service"
+PODMAN_FWD_UNIT_DST="${UNIT_DIR}/hal0-podman-forward.service"
+if [[ -f "${PODMAN_FWD_UNIT_SRC}" ]]; then
+    cp "${PODMAN_FWD_UNIT_SRC}" "${PODMAN_FWD_UNIT_DST}"
+    info "wrote ${PODMAN_FWD_UNIT_DST}"
+fi
+
 # hal0-agent@ template + hermes drop-in (v0.3 PR-5). The template is the
 # generic per-agent runner; the drop-in pins hermes-specific env.
 # Lay them down whether or not bootstrap has been run — the shim's
@@ -1390,6 +1403,22 @@ else
             systemctl reset-failed hal0-openwebui >/dev/null 2>&1 || true
             info "hal0-openwebui not started — no usable container runtime"
             info "  install podman, then: systemctl enable --now hal0-openwebui  (chat at :3001)"
+        fi
+    fi
+
+    # podman<->Docker FORWARD reconciliation. Only needed when Docker is
+    # co-installed alongside podman: Docker sets iptables FORWARD policy to DROP
+    # and rewrites the chain on every start, which drops external traffic to
+    # podman-published ports (OpenWebUI :3001) — reachable from the host but not
+    # from a reverse proxy / LAN client. The hal0-podman-forward unit re-adds an
+    # ACCEPT for the podman0 bridge into DOCKER-USER at boot and on each docker
+    # restart. The unit self-guards, so enabling it is safe; we gate on docker
+    # actually being present to avoid shipping a firewall unit on podman-only boxes.
+    if [[ -f "${PODMAN_FWD_UNIT_DST}" ]] && command -v docker >/dev/null 2>&1; then
+        if systemctl enable --now hal0-podman-forward >/dev/null 2>&1; then
+            info "hal0-podman-forward enabled (keeps podman ports reachable alongside Docker)"
+        else
+            warn "hal0-podman-forward did not enable; check 'journalctl -u hal0-podman-forward'"
         fi
     fi
 

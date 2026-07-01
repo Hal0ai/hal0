@@ -186,7 +186,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # writes neither, but an install that predates those changes still
     # has the unit on disk — and a stale hal0-lemonade restart-loops with
     # 203/EXEC once its placeholder binary is gone, so tear it down too.
-    UNITS=(hal0-api hal0-openwebui hal0-caddy hal0-lemonade \
+    UNITS=(hal0-api hal0-openwebui hal0-podman-forward hal0-caddy hal0-lemonade \
            hindsight-api hal0-agent@hermes hermes-gateway)
 
     # Discover any running slot instances
@@ -246,6 +246,13 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
             esac
         done < <("${_rt}" ps -a --format '{{.Names}}' 2>/dev/null || true)
     done
+
+    # Drop the DOCKER-USER podman0 ACCEPT rules added by hal0-podman-forward.
+    # Best-effort: harmless if iptables is absent or the rules were never added.
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -D DOCKER-USER -i podman0 -j ACCEPT 2>/dev/null || true
+        iptables -D DOCKER-USER -o podman0 -j ACCEPT 2>/dev/null || true
+    fi
 else
     step "Skipping systemd / docker stop (dev mode)"
 fi
@@ -302,6 +309,7 @@ step "Removing systemd units"
 for UNIT_FILE in \
     "${UNIT_DIR}/hal0-api.service" \
     "${UNIT_DIR}/hal0-openwebui.service" \
+    "${UNIT_DIR}/hal0-podman-forward.service" \
     "${UNIT_DIR}/hal0-caddy.service" \
     "${UNIT_DIR}/hal0-lemonade.service" \
     "${UNIT_DIR}/hindsight-api.service" \
