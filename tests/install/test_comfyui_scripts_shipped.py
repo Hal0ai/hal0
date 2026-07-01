@@ -82,9 +82,7 @@ def test_install_sh_does_not_install_comfyui_sudoers():
     assert "packaging/sudoers/hal0-comfyui" not in content, (
         "install.sh still installs packaging/sudoers/hal0-comfyui — sudoers block not removed"
     )
-    assert "hal0-comfyui" not in content, (
-        "install.sh still references hal0-comfyui sudoers"
-    )
+    assert "hal0-comfyui" not in content, "install.sh still references hal0-comfyui sudoers"
 
 
 # ── (d) model-share setup block still present ────────────────────────────────
