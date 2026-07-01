@@ -15,20 +15,17 @@ a bounded error rather than hanging indefinitely.
 
 from __future__ import annotations
 
-import asyncio
-
 import httpx
 import pytest
 
 from hal0.dispatcher.router import (
-    Dispatcher,
-    UpstreamCall,
-    UpstreamUnavailable,
     _DIRECT_READ_TIMEOUT_S,
     _DISPATCHER_MAX_CONNECTIONS,
     _DISPATCHER_MAX_KEEPALIVE,
+    Dispatcher,
+    UpstreamCall,
+    UpstreamUnavailable,
 )
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -54,9 +51,7 @@ def _call(
 def test_dispatcher_pool_constants_are_bounded() -> None:
     """The module constants must reflect the bounded values from the fix."""
     # Before the fix these didn't exist; importing them would NameError.
-    assert _DISPATCHER_MAX_CONNECTIONS == 64, (
-        "max_connections should be 64, matching registry.py"
-    )
+    assert _DISPATCHER_MAX_CONNECTIONS == 64, "max_connections should be 64, matching registry.py"
     assert _DISPATCHER_MAX_KEEPALIVE == 16, (
         "max_keepalive_connections should be 16, matching registry.py"
     )
@@ -93,8 +88,7 @@ def test_lazy_http_client_read_timeout() -> None:
     d = Dispatcher()
     client = d._get_http_client()
     assert client.timeout.read == _DIRECT_READ_TIMEOUT_S, (
-        f"Client read timeout is {client.timeout.read} s, "
-        f"expected {_DIRECT_READ_TIMEOUT_S} s"
+        f"Client read timeout is {client.timeout.read} s, expected {_DIRECT_READ_TIMEOUT_S} s"
     )
 
 
