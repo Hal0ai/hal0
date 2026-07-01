@@ -323,3 +323,93 @@ def test_container_slot_not_treated_as_remote_for_thinking():
     assert v1._is_remote_model(req, "qwopus3.6-27b-v2") is False
     # Genuine external remote → remote (skip thinking injection).
     assert v1._is_remote_model(req, "gpt-x") is True
+
+
+# ── system-message canonicalisation integration tests ─────────────────────
+#
+# These exercise the call site in `_normalize_chat_body` itself rather than
+# the pure helper — they pin the contract that every body reaching the
+# upstream is canonical (system at index 0, at most one system), so the
+# Qwen3.6-35B-A3B Jinja template never sees a config that triggers its
+# `raise_exception('System message must be at the beginning')`.
+
+
+@pytest.mark.asyncio
+async def test_normalize_chat_body_hoists_mid_array_system_to_position_zero():
+    """The dashboard bug repro: a system message mid-array used to leave
+    `_normalize_chat_body` untouched and reach llama-server, which 500'd."""
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"})
+    body = {
+        "model": "hal0/agent",
+        "messages": [
+            {"role": "user", "content": "Hi"},
+            {"role": "system", "content": "you are the hal0 operator"},
+        ],
+    }
+    out = await v1._normalize_chat_body(req, body)
+    msgs = out["messages"]
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"] == "you are the hal0 operator"
+    assert msgs[-1]["role"] == "user"
+    assert msgs[-1]["content"] == "Hi"
+
+
+@pytest.mark.asyncio
+async def test_normalize_chat_body_collapses_stacked_systems():
+    """Two system entries collapse into one leading system joined with
+    blank lines; non-system turns retain their original order."""
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"})
+    body = {
+        "model": "hal0/agent",
+        "messages": [
+            {"role": "user", "content": "u1"},
+            {"role": "system", "content": "s1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "system", "content": "s2"},
+        ],
+    }
+    out = await v1._normalize_chat_body(req, body)
+    msgs = out["messages"]
+    sys_entries = [m for m in msgs if m["role"] == "system"]
+    assert len(sys_entries) == 1
+    assert sys_entries[0] == {"role": "system", "content": "s1\n\ns2"}
+    # non-system order preserved
+    assert msgs[1:] == [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_normalize_chat_body_user_only_body_is_passthrough():
+    """No-system payloads must round-trip through normalise without
+    rewriting the message array (the SPA's hot path)."""
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"})
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+    out = await v1._normalize_chat_body(req, {"model": "hal0/agent", "messages": list(msgs)})
+    assert out["messages"] == msgs
+
+
+@pytest.mark.asyncio
+async def test_normalize_chat_body_caches_canonical_messages_in_request_body():
+    """Once normalised, request._body must reflect the canonical array so
+    downstream consumers reading the request body verbatim see the same
+    shape (Dispatcher re-serialises it)."""
+    req = _make_request(cfgs=_PRIMARY, loaded={"big"})
+    req._body = b""  # the helper writes here; assert it's rewritten
+    body = {
+        "model": "hal0/agent",
+        "messages": [
+            {"role": "user", "content": "Hi"},
+            {"role": "system", "content": "ops"},
+        ],
+    }
+    await v1._normalize_chat_body(req, body)
+    import json as _json
+
+    cached = _json.loads(req._body)
+    assert cached["messages"][0]["role"] == "system"
+    assert cached["messages"][-1]["role"] == "user"
