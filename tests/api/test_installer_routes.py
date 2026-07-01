@@ -81,6 +81,21 @@ def test_install_state_has_default_slot_when_primary_toml_exists(
     assert r.json()["has_default_slot"] is True
 
 
+def test_install_state_has_default_slot_when_agent_toml_exists(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """An agent.toml on disk flips has_default_slot to True (canonical per ADR-0023)."""
+    slots = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    slots.mkdir(parents=True, exist_ok=True)
+    (slots / "agent.toml").write_text(
+        'name = "agent"\nport = 8081\nbackend = "vulkan"\nprovider = "llama-server"\n',
+        encoding="utf-8",
+    )
+    r = isolated_client.get("/api/install/state")
+    assert r.status_code == 200
+    assert r.json()["has_default_slot"] is True
+
+
 def test_install_state_has_no_bundle_field(isolated_client: TestClient, tmp_hal0_home: str) -> None:
     """The v1 ``bundle`` field is absent from /state (removed in Task 6.2)."""
     r = isolated_client.get("/api/install/state")
