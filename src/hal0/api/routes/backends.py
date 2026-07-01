@@ -377,8 +377,10 @@ async def load_npu_model(request: Request, slot_manager: SlotManagerDep) -> dict
         cfg = {
             "name": slot_name,
             "port": port,
-            "backend": "flm",
-            "provider": "flm",
+            "device": "npu",
+            "type": "llm",
+            "runtime": "container",
+            "profile": "flm",
             "enabled": True,
             "model": {"default": model_id},
         }
