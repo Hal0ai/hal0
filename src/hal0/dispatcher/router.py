@@ -994,14 +994,17 @@ class Dispatcher:
         Raises:
           GpuImageMode: llm-group slot during exclusive image mode.
         """
-        if not (call.slot_name and self._slot_manager is not None):
+        effective_slot = call.slot_name or call.container_slot_name
+        if not (effective_slot and self._slot_manager is not None):
             return
         arbiter = getattr(self._slot_manager, "arbiter", None)
         if arbiter is not None:
             # Raises GpuImageMode for llm-group slots while mode == img;
             # no-op otherwise. Covers the race where the arbiter flipped
             # to img (and force-killed the container) mid-request.
-            arbiter.guard_dispatch(call.slot_name)
+            # Uses effective_slot so container-backed slots (#723) also fire
+            # the guard — consistent with _forward_with_serving (#746).
+            arbiter.guard_dispatch(effective_slot)
 
     def _build_loading_response(
         self,

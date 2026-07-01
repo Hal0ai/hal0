@@ -140,6 +140,36 @@ def _slot_call(slot_name: str = "primary") -> UpstreamCall:
     )
 
 
+def _container_slot_call(slot_name: str = "primary") -> UpstreamCall:
+    """UpstreamCall with container_slot_name set and slot_name empty.
+
+    Mirrors the shape produced by ``_container_slot_name_of`` post-#723:
+    container-backed slots register as kind="remote" so ``slot_name`` is
+    empty and ``container_slot_name`` carries the effective slot key.
+    """
+    return UpstreamCall(
+        upstream_name=slot_name,
+        target_url="http://slot/chat/completions",
+        headers={"content-type": "application/json"},
+        body=b"{}",
+        streaming=False,
+        method="POST",
+        slot_name="",  # container remotes carry no slot_name
+        container_slot_name=slot_name,
+    )
+
+
+class _ArbiterContainerSlotManager(_ArbiterSlotManager):
+    """Extends _ArbiterSlotManager with a container_readiness_check stub.
+
+    Returns (True, "ready") by default so the gate passes and
+    _forward_with_serving (and then _forward_direct) is reached.
+    """
+
+    async def container_readiness_check(self, slot_name: str) -> tuple[bool, str]:
+        return (True, "ready")
+
+
 # ── app-level harness (mirrors tests/api/test_v1_images.py) ─────────────────
 
 
@@ -436,6 +466,71 @@ async def test_dead_port_in_llm_mode_raises_upstream_unavailable(tmp_path: Path)
     try:
         with pytest.raises(UpstreamUnavailable):
             await dispatcher.forward(_slot_call("primary"))
+        assert calls["n"] == 1, "dead port must not be retried"
+        assert sm.load_calls == []
+    finally:
+        await dispatcher.aclose()
+
+
+# ── NON-NEGOTIABLE 1b: dead-port guard fires for container slots (#997) ──────
+
+
+@pytest.mark.asyncio
+async def test_container_dead_port_in_img_mode_raises_gpu_image_mode(
+    tmp_path: Path,
+) -> None:
+    """ConnectError on a container-slot while mode==img → 503 gpu.image_mode.
+
+    Regression test for #997: ``_guard_dead_port_image_mode`` was checking
+    ``call.slot_name`` only, which is always empty for container-backed slots
+    (post-#723 they carry ``container_slot_name``, not ``slot_name``).  The
+    guard was therefore silently dead for every real inference slot.
+
+    This test MUST FAIL on the unfixed code (guard returns early at the
+    ``if not (call.slot_name …)`` check) and PASS after the fix
+    (``call.slot_name or call.container_slot_name``).
+    """
+    sm = _ArbiterContainerSlotManager(tmp_path)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        # Arbiter flips to img between the guard and the upstream connect.
+        st = sm.arbiter._load_state()
+        st["mode"] = "img"
+        st["saved_llm_slots"] = ["primary"]
+        raise httpx.ConnectError("container force-killed", request=req)
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm)
+    try:
+        with pytest.raises(GpuImageMode) as ei:
+            await dispatcher.forward(_container_slot_call("primary"))
+        assert ei.value.code == "gpu.image_mode"
+        assert ei.value.status == 503
+        assert sm.load_calls == [], "no slot load may fight the arbiter"
+        assert sm.in_flight_count("primary") == 0
+    finally:
+        await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_container_dead_port_in_llm_mode_raises_upstream_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Outside image mode a dead container-slot port → plain UpstreamUnavailable.
+
+    Guard must NOT raise GpuImageMode when the arbiter is in LLM mode;
+    the caller sees a regular UpstreamUnavailable with no retry.
+    """
+    sm = _ArbiterContainerSlotManager(tmp_path)
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectError("connection refused", request=req)
+
+    dispatcher = _make_dispatcher(httpx.MockTransport(handler), sm)
+    try:
+        with pytest.raises(UpstreamUnavailable):
+            await dispatcher.forward(_container_slot_call("primary"))
         assert calls["n"] == 1, "dead port must not be retried"
         assert sm.load_calls == []
     finally:
