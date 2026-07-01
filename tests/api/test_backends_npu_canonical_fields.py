@@ -16,14 +16,11 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from hal0.api import create_app
 from hal0.slots.state import SlotState
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -96,9 +93,7 @@ def test_npu_load_creates_slot_with_all_canonical_fields(
     assert created_cfg.get("device") == "npu", (
         f"expected device='npu', got {created_cfg.get('device')!r}"
     )
-    assert created_cfg.get("type") == "llm", (
-        f"expected type='llm', got {created_cfg.get('type')!r}"
-    )
+    assert created_cfg.get("type") == "llm", f"expected type='llm', got {created_cfg.get('type')!r}"
     assert created_cfg.get("runtime") == "container", (
         f"expected runtime='container', got {created_cfg.get('runtime')!r}"
     )
@@ -156,18 +151,20 @@ def test_install_slot_model_updates_model_default(
     slot_toml = _seed_slot_toml(
         tmp_hal0_home,
         "npu",
-        "\n".join([
-            'name = "npu"',
-            "port = 8088",
-            'device = "npu"',
-            'type = "llm"',
-            'runtime = "container"',
-            'profile = "flm"',
-            "[model]",
-            'default = "gemma4-it-e2b-FLM"',
-            "context_size = 16384",
-            "",
-        ]),
+        "\n".join(
+            [
+                'name = "npu"',
+                "port = 8088",
+                'device = "npu"',
+                'type = "llm"',
+                'runtime = "container"',
+                'profile = "flm"',
+                "[model]",
+                'default = "gemma4-it-e2b-FLM"',
+                "context_size = 16384",
+                "",
+            ]
+        ),
     )
 
     r = client.put(
@@ -201,19 +198,21 @@ def test_install_slot_model_preserves_all_existing_top_level_fields(
     slot_toml = _seed_slot_toml(
         tmp_hal0_home,
         "agent",
-        "\n".join([
-            'name = "agent"',
-            "port = 8081",
-            'type = "llm"',
-            'device = "gpu-vulkan"',
-            'runtime = "container"',
-            'profile = "vulkan"',
-            "enabled = true",
-            "[model]",
-            'default = "qwen3.5-9b"',
-            "context_size = 65536",
-            "",
-        ]),
+        "\n".join(
+            [
+                'name = "agent"',
+                "port = 8081",
+                'type = "llm"',
+                'device = "gpu-vulkan"',
+                'runtime = "container"',
+                'profile = "vulkan"',
+                "enabled = true",
+                "[model]",
+                'default = "qwen3.5-9b"',
+                "context_size = 65536",
+                "",
+            ]
+        ),
     )
 
     r = client.put(
@@ -286,20 +285,22 @@ def test_seeded_npu_toml_fields_survive_model_update(
         tmp_hal0_home,
         "npu",
         # Mirrors installer/etc-hal0/slots/npu.toml exactly
-        "\n".join([
-            '# NPU LLM slot',
-            'name = "npu"',
-            "port = 8088",
-            'device = "npu"',
-            'runtime = "container"',
-            'profile = "flm"',
-            'type = "llm"',
-            'role = "utility"',
-            "[model]",
-            'default = "gemma4-it-e2b-FLM"',
-            "context_size = 16384",
-            "",
-        ]),
+        "\n".join(
+            [
+                "# NPU LLM slot",
+                'name = "npu"',
+                "port = 8088",
+                'device = "npu"',
+                'runtime = "container"',
+                'profile = "flm"',
+                'type = "llm"',
+                'role = "utility"',
+                "[model]",
+                'default = "gemma4-it-e2b-FLM"',
+                "context_size = 16384",
+                "",
+            ]
+        ),
     )
 
     r = client.put(
