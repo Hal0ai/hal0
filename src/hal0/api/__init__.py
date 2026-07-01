@@ -831,7 +831,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # host RAM (#902).  The global default evict TTL comes from
     # slots.idle_timeout_s; per-slot TOML idle_timeout_s overrides it and
     # idle_timeout_s = 0 pins a slot.  Defaults to 300s for tests.
-    await slot_manager.start_idle_monitor(evict_after_s=hal0_cfg.slots.idle_timeout_s)
+    await slot_manager.start_idle_monitor(
+        evict_after_s=hal0_cfg.slots.idle_timeout_s,
+        evict_pressure_mb=hal0_cfg.slots.evict_pressure_mb,
+    )
 
     # Auto-register one composite ``hal0`` upstream so the dispatcher can
     # route ``model: <slot_name>`` requests without requiring the user to
