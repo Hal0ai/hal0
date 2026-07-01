@@ -617,7 +617,7 @@ Delete entirely (source + folder):
 2. Download `hal0-vX.Y.Z-linux-x86_64.tar.gz` + `.sig` from `hal0.dev/releases/latest.json` (channel = stable | nightly)
 3. Verify signature (cosign keyless against the release OIDC identity)
 4. Lay down `/usr/lib/hal0-X.Y.Z/`, atomic-swap `/usr/lib/hal0/current` symlink
-5. If first install: write `/etc/hal0/` defaults (slot TOMLs + `profiles.toml`); if upgrade: skip
+5. If first install: write `/etc/hal0/` defaults (slot TOMLs; `profiles.toml` is served in-memory from SEED_PROFILES until the operator saves a custom profile); if upgrade: additively merge any new SEED_PROFILES entries into an existing profiles.toml without clobbering operator edits (#838)
 6. Hardware probe → `/etc/hal0/hardware.json` + recommended `slots/chat.toml` derived from detected NPU/GPU
 7. Install + enable systemd units (`hal0-api`, `hal0-openwebui`, `hal0-agent@` template); per-slot units are written by `ContainerProvider` on first load, not pre-seeded
 8. Seed container image pulls in background (open-webui + toolbox images referenced by seed profiles)

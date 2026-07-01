@@ -6,8 +6,10 @@
 # See the container-runtime design doc (§1) for the layering rationale.
 #
 # NOTE: this file is OPTIONAL.  hal0-api returns these seed profiles as built-in
-# defaults when the file is absent (SEED_PROFILES in schema.py).
-# Keep this file identical to SEED_PROFILES to avoid silent drift.
+# defaults when the file is absent (SEED_PROFILES in schema.py).  When the file
+# IS present, load_profiles_config additively merges any SEED_PROFILES entries
+# missing from the file without clobbering operator-customised profiles (#838).
+# Keep this file in sync with SEED_PROFILES to avoid silent drift.
 
 [profile.rocm]
 # Standard ROCm GPU template (ace-saber A3B MoE etc). ~52.8 tok/s gen, 131k ctx.
