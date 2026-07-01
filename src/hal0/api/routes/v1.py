@@ -345,13 +345,37 @@ async def _slot_thinking_default(request: Request, model_id: str) -> bool:
 
 
 async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[str, Any]:
-    """Resolve hal0/* virtual model names + inject thinking policy.
+    """Normalise messages → resolve hal0/* aliases → inject thinking policy.
 
-    Rewrites request._body so every downstream consumer observes the
-    normalized body.
+    Order of operations matters:
+
+      1. **Canonicalise the messages array** — collapse every
+         ``role='system'`` entry into one and hoist it to position 0
+         (see :func:`hal0.normalize.messages.normalize_system_messages`).
+         Doing this BEFORE the alias rewrite keeps every downstream
+         consumer — the dispatcher, audit middleware, response
+         introspection, the cached ``request._body`` — consistent.
+      2. **Rewrite the slot alias** (``hal0/agent`` → ``qwen3-6-…``) so
+         registry / dispatch see the real model id.
+      3. **Apply the thinking policy** (Qwen3 template kwarg lever;
+         see :mod:`hal0.normalize.thinking`).
+
+    ``request._body`` is rewritten at the end so any code re-reading
+    ``request.body()`` verbatim (e.g. ``Dispatcher``) observes the
+    normalised body too.
     """
+    from hal0.normalize.messages import normalize_system_messages
     from hal0.normalize.resolver import LiveSlotResolver
     from hal0.normalize.thinking import apply_thinking_policy
+
+    # Step 1: collapse + hoist system messages to position 0. Done before
+    # the alias rewrite so the rewrite sees the same canonical array the
+    # dispatcher will forward — avoids a second pass downstream.
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        canonical = normalize_system_messages(messages)
+        if canonical is not messages:
+            body = {**body, "messages": canonical}
 
     views = await _normalize_slot_views(request)
     resolver = LiveSlotResolver(
