@@ -271,9 +271,7 @@ def test_pull_persists_job_to_disk(
     assert r.status_code == 202, r.text
 
     # The sanitised model id "qwen3-4b" maps to the same filename.
-    job_file = (
-        Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs" / "qwen3-4b.json"
-    )
+    job_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs" / "qwen3-4b.json"
     assert job_file.exists(), f"expected on-disk job record at {job_file}"
     on_disk = json.loads(job_file.read_text(encoding="utf-8"))
     assert on_disk["model_id"] == "qwen3-4b"
@@ -298,9 +296,7 @@ def test_pull_status_falls_back_to_disk_after_restart(
     assert r.status_code == 202, r.text
 
     # Wait for the background task to persist a terminal state.
-    job_file = (
-        Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs" / "qwen3-4b.json"
-    )
+    job_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs" / "qwen3-4b.json"
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         if job_file.exists():
@@ -318,3 +314,30 @@ def test_pull_status_falls_back_to_disk_after_restart(
     body = s.json()
     assert body["model_id"] == "qwen3-4b"
     assert body["state"] == "completed"
+
+
+def test_pull_status_reconciles_stale_inflight_to_failed_after_restart(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """A snapshot left mid-pull (queued/running) is served as ``failed`` after a
+    restart — its worker is gone so it can never progress, and the client must
+    not poll a forever-``running`` state. Regression guard for the disk-fallback
+    serving a non-terminal snapshot verbatim."""
+    job_dir = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "qwen3-4b.json").write_text(
+        json.dumps(
+            {"id": "j1", "model_id": "qwen3-4b", "state": "running", "bytes_downloaded": 512}
+        ),
+        encoding="utf-8",
+    )
+    # Fresh in-memory dict → forces the disk fallback + reconcile path.
+    app_isolated.state.model_pull_jobs = {}
+
+    s = client_isolated.get("/api/models/qwen3-4b/pull/status")
+    assert s.status_code == 200, s.text
+    body = s.json()
+    assert body["state"] == "failed"
+    assert body["error_code"] == "pull.interrupted"

@@ -76,9 +76,7 @@ def _persist_pull_job(job: PullJob) -> None:
     path = _pull_job_file(job.model_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_str = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
+        fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         tmp_path = Path(tmp_str)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -106,7 +104,27 @@ def _load_persisted_pull_job(model_id: str) -> dict[str, Any] | None:
         loaded = json.loads(raw)
     except ValueError:
         return None
-    return loaded if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict):
+        return None
+    return _reconcile_persisted_pull_job(loaded)
+
+
+def _reconcile_persisted_pull_job(persisted: dict[str, Any]) -> dict[str, Any]:
+    """Repair a persisted snapshot that was left in a non-terminal state.
+
+    A snapshot only reaches disk-fallback when its job is absent from the
+    in-memory dict — which after a restart means the worker that owned it is
+    gone. A ``queued``/``running`` snapshot can therefore never make further
+    progress, so we surface it as ``failed`` (rather than a state the client
+    would poll forever) with an explanatory error. Terminal snapshots
+    (completed/failed/cancelled) are returned unchanged.
+    """
+    if persisted.get("state") in ("queued", "running"):
+        persisted = dict(persisted)
+        persisted["state"] = "failed"
+        persisted.setdefault("error", "pull interrupted by hal0-api restart; re-run the pull")
+        persisted.setdefault("error_code", "pull.interrupted")
+    return persisted
 
 
 # Known-alias model ids that upstream gateways advertise as routing
@@ -1224,17 +1242,20 @@ async def _run_pull_with_events(
     capability-grouped store layout; both default to None → legacy flat layout.
     """
     if event_bus is None:
-        await run_pull(
-            job,
-            hf_repo=hf_repo,
-            hf_file=hf_file,
-            registry=registry,
-            hf_token=hf_token,
-            capability=capability,
-            comfyui_subdir=comfyui_subdir,
-        )
-        # Persist terminal state so a restart-surviving status poll resolves (#626).
-        _persist_pull_job(job)
+        try:
+            await run_pull(
+                job,
+                hf_repo=hf_repo,
+                hf_file=hf_file,
+                registry=registry,
+                hf_token=hf_token,
+                capability=capability,
+                comfyui_subdir=comfyui_subdir,
+            )
+        finally:
+            # Persist terminal state so a restart-surviving status poll resolves
+            # (#626) — in a finally so a re-raised cancellation is still recorded.
+            _persist_pull_job(job)
         return
 
     async def _emit_progress() -> None:
