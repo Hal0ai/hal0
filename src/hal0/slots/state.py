@@ -119,6 +119,30 @@ def is_transition_legal(from_state: SlotState, to_state: SlotState) -> bool:
     return to_state in LEGAL_TRANSITIONS.get(from_state, frozenset())
 
 
+# ── dispatchable ready-set (single source of truth, #696 / DR-8) ─────────────
+
+#: States in which a slot is safe to dispatch inference requests to.
+#: This is the ONE canonical definition (finding DR-8): SlotManager, the GPU
+#: arbiter, stack apply, the Prometheus metrics renderer, and the slot_view
+#: aggregator all reference this set instead of re-declaring their own copy.
+#: Because SlotState is a StrEnum, membership works for BOTH enum members and
+#: their lowercase wire strings — ``"ready" in DISPATCHABLE_STATES`` is True —
+#: so the string-based snapshot callers (metrics / slot_view) share it too.
+DISPATCHABLE_STATES: frozenset[SlotState] = frozenset(
+    {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
+)
+
+
+def is_dispatchable_state(state: SlotState | str) -> bool:
+    """Return True when *state* is in the dispatchable ready-set.
+
+    Accepts a :class:`SlotState` or a raw wire string and applies the same
+    str/StrEnum normalisation the snapshot callers use, so a ``SlotState``
+    member, its ``.value``, or a plain lowercase string all classify alike.
+    """
+    return str(getattr(state, "value", state) or "").lower() in DISPATCHABLE_STATES
+
+
 #: Providers that serve a baked-in model and don't require an explicit model_id.
 #: Must stay in sync with ui/src/composables/useSlotStats.js SELF_MANAGED_PROVIDERS.
 SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "qwen3tts", "moonshine", "vibevoice"})
@@ -323,6 +347,7 @@ def read_state(path: Path | str) -> SlotStateRecord | None:
 
 
 __all__ = [
+    "DISPATCHABLE_STATES",
     "LEGAL_TRANSITIONS",
     "SELF_MANAGED_PROVIDERS",
     "IllegalSlotTransition",
@@ -335,6 +360,7 @@ __all__ = [
     "SlotSpawnFailed",
     "SlotState",
     "SlotStateRecord",
+    "is_dispatchable_state",
     "is_transition_legal",
     "provider_requires_model",
     "read_state",

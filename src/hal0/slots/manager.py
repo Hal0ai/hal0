@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from hal0.config import paths
 from hal0.slot_config import write_slot_toml
 from hal0.slots.state import (
+    DISPATCHABLE_STATES,
     IllegalSlotTransition,
     NpuExclusivityViolation,
     SlotConfigError,
@@ -120,9 +121,10 @@ _SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 # inactive underneath us the watcher flips state and emits an SSE
 # frame within ~1s.
 _FAIL_WATCH_INTERVAL_S: float = 2.0
-_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
-    {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
-)
+#: The "live" states the fail-watcher polls are exactly the dispatchable
+#: ready-set (container up and usable) — alias the one canonical set (DR-8)
+#: rather than re-declaring the literal.
+_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES
 # #783/B4: an active unit is not necessarily healthy. The watcher also probes
 # the model server's /health; a crashed-but-active server (active unit, failing
 # /health) is demoted to ERROR — but only after this many CONSECUTIVE failures,
@@ -515,11 +517,10 @@ class SlotManager:
     # ── public readiness interface (issue #696) ─────────────────────────────
 
     #: States in which a slot is safe to dispatch inference requests to.
-    #: Single source of truth per #696 — never duplicate inline.
+    #: Single source of truth per #696 / DR-8 — aliases the one canonical set
+    #: in ``hal0.slots.state`` so this class never re-declares the literal.
     #: Sync read so call sites in the hot dispatch path pay zero await overhead.
-    _DISPATCHABLE_STATES: frozenset[SlotState] = frozenset(
-        {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
-    )
+    _DISPATCHABLE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES
 
     def state(self, name: str) -> SlotState:
         """Return the current :class:`SlotState` for *name*.

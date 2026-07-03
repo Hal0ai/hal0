@@ -23,7 +23,7 @@ from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.model_meta import canonical_device, device_to_legacy_backend
 from hal0.slot_config import ChangeSet, FileState, SlotConfigStore
-from hal0.slots.state import SlotState
+from hal0.slots.state import DISPATCHABLE_STATES, SlotState
 from hal0.stacks.state import (
     StackStateRecord,
     read_stack_state,
@@ -62,7 +62,8 @@ class StackChangePlan:
 
 
 # Slot states by convergence intent.
-_DISPATCHABLE = frozenset({SlotState.READY, SlotState.SERVING, SlotState.IDLE})
+# _DISPATCHABLE aliases the canonical ready-set (DR-8) — single source of truth.
+_DISPATCHABLE = DISPATCHABLE_STATES
 _TRANSITIONAL = frozenset(
     {SlotState.PULLING, SlotState.STARTING, SlotState.WARMING, SlotState.UNLOADING}
 )

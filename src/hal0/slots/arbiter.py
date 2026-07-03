@@ -60,7 +60,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from hal0.config import paths
 from hal0.errors import Hal0Error, NotFound
-from hal0.slots.state import SlotState
+from hal0.slots.state import DISPATCHABLE_STATES, SlotState
 
 if TYPE_CHECKING:  # pragma: no cover — import cycle guard (manager owns us)
     from hal0.slots.manager import SlotManager
@@ -86,9 +86,8 @@ _IMG_READY_TIMEOUT_S = 120.0
 _READY_POLL_S = 0.5
 
 #: Slot states that can take a dispatch / mean "the img container is up".
-_DISPATCHABLE: frozenset[SlotState] = frozenset(
-    {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
-)
+#: Aliases the canonical set (DR-8) — do not re-declare the literal here.
+_DISPATCHABLE: frozenset[SlotState] = DISPATCHABLE_STATES
 #: Terminal states that abort the readiness poll immediately.
 _TERMINAL: frozenset[SlotState] = frozenset({SlotState.ERROR, SlotState.OFFLINE})
 
