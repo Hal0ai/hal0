@@ -193,9 +193,11 @@ def test_apply_updates_capabilities_selection(tmp_hal0_home: str) -> None:
     assert after["schema_version"] == 2
 
 
-def test_apply_skips_slot_toml_when_disabled(tmp_hal0_home: str) -> None:
-    """A disable-only change must not reconcile the slot TOML (parity with
-    the pre-store orchestrator: pure disable never rewrote the slot)."""
+def test_apply_writes_enabled_false_on_disable(tmp_hal0_home: str) -> None:
+    """SC-1 regression: a disable change writes ``enabled = false`` into the
+    slot TOML while leaving the model/backend siblings intact (disabling a
+    capability must actually flip the slot's enablement so routing stops
+    resolving it)."""
     slot_path = _write_embed_slot(tmp_hal0_home)
     _write_caps(tmp_hal0_home)
 
@@ -203,7 +205,62 @@ def test_apply_skips_slot_toml_when_disabled(tmp_hal0_home: str) -> None:
 
     before = {fs.path: fs.data for fs in cs.before}[slot_path]
     after = {fs.path: fs.data for fs in cs.after}[slot_path]
-    assert after == before
+    assert after is not None
+    assert after["enabled"] is False
+    # A pure disable must not rewrite the reconciled fields — the model and
+    # backend siblings survive verbatim from the fixture.
+    assert after["model"]["default"] == before["model"]["default"] == "old-model"
+    assert after["backend"] == before["backend"] == "vulkan"
+    assert after["port"] == 8082
+
+
+def test_apply_writes_enabled_true_on_enable(tmp_hal0_home: str) -> None:
+    """SC-1 symmetric case: an enable change writes ``enabled = true`` and
+    clears a pre-existing stale ``enabled = false`` on the slot TOML, while
+    reconciling the device/model fields."""
+    slots_dir = _etc(tmp_hal0_home) / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    slot_path = slots_dir / "embed.toml"
+    slot_path.write_text(
+        "\n".join(
+            [
+                'name = "embed"',
+                "port = 8082",
+                'backend = "vulkan"',
+                'provider = "llama-server"',
+                "enabled = false",
+                "[model]",
+                'default = "old-model"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_caps(tmp_hal0_home)
+
+    cs = SlotConfigStore().apply(_selection(enabled=True))
+
+    after = {fs.path: fs.data for fs in cs.after}[slot_path]
+    assert after is not None
+    assert after["enabled"] is True
+    assert after["device"] == "npu"
+    assert after["model"]["default"] == "nomic-embed-text-v1.5-q8_0"
+
+
+def test_commit_writes_enabled_false_to_disk_on_disable(tmp_hal0_home: str) -> None:
+    """SC-1 end-state: after ``commit`` the slot TOML on disk carries
+    ``enabled = false`` for a disable change (proving the store — not the
+    orchestrator lifecycle — is what persists disablement)."""
+    slot_path = _write_embed_slot(tmp_hal0_home)
+    _write_caps(tmp_hal0_home)
+
+    store = SlotConfigStore()
+    cs = store.apply(_selection(enabled=False))
+    store.commit(cs)
+
+    on_disk = _read_toml(slot_path)
+    assert on_disk["enabled"] is False
+    assert on_disk["model"]["default"] == "old-model"
 
 
 def test_apply_skips_slot_toml_when_missing(tmp_hal0_home: str) -> None:

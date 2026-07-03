@@ -264,7 +264,14 @@ async def test_apply_no_rewrite_on_pure_disable(
     orchestrator: tuple[CapabilityOrchestrator, FakeSlotManager],
     drifted_state: Path,
 ) -> None:
-    """Disabling the slot does not require rewriting the TOML."""
+    """A pure disable flips only ``enabled`` on the slot TOML, via the store.
+
+    The STANDARD-lifecycle disable never calls ``update_config`` (persistence
+    flows through the store commit, not the SlotManager). Post-SC-1 the store
+    now writes ``enabled = false`` so routing stops resolving the slot — but
+    the model/backend siblings must survive verbatim (a pure disable does not
+    reconcile them).
+    """
     orch, fake = orchestrator
     # Pin the persisted selection to a non-NPU backend first: this test is
     # about the STANDARD lifecycle's pure-disable transition, and a
@@ -290,7 +297,12 @@ async def test_apply_no_rewrite_on_pure_disable(
 
     update_calls = [c for c in fake.calls if c[0] == "update_config"]
     assert update_calls == [], f"unexpected update_config on disable transition: {update_calls}"
-    assert _read_slot_toml(drifted_state) == before, "slot TOML changed on pure disable"
+    after = _read_slot_toml(drifted_state)
+    assert after["enabled"] is False, "pure disable must flip enabled=false on the slot TOML"
+    # Only ``enabled`` may differ — the model/backend siblings are untouched.
+    assert {k: v for k, v in after.items() if k != "enabled"} == {
+        k: v for k, v in before.items() if k != "enabled"
+    }, "pure disable rewrote a non-enabled field"
 
 
 async def test_apply_commit_failure_leaves_both_files_at_before(
@@ -338,6 +350,65 @@ async def test_apply_commit_failure_leaves_both_files_at_before(
     monkeypatch.setattr(slot_config_mod, "write_toml_atomic", real_write)
     assert _read_slot_toml(home) == slot_before
     assert caps_path.read_bytes() == caps_before
+
+
+async def test_disable_hides_slot_from_routing(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SC-1 end-to-end: disabling an embed capability flips the slot TOML's
+    ``enabled`` flag so the real SlotManager's request router stops resolving
+    it. Routing reads the reconciled slot TOML (``_loaded_slot_from_config``
+    drops ``enabled is False``), so before the fix the disabled slot stayed
+    routable because the store never wrote ``enabled = false``.
+    """
+    from hal0.slots.manager import SlotManager
+
+    monkeypatch.setattr(
+        CapabilityOrchestrator,
+        "_validate_model_in_catalog",
+        lambda self, slot, child, model_id, backend_id: None,
+    )
+    home = Path(tmp_hal0_home)
+    slots_dir = home / "etc" / "hal0" / "slots"
+    slots_dir.mkdir(parents=True, exist_ok=True)
+    (slots_dir / "embed.toml").write_text(
+        "\n".join(
+            [
+                'name = "embed"',
+                "port = 8082",
+                'type = "embedding"',
+                'backend = "vulkan"',
+                'device = "gpu-vulkan"',
+                'provider = "llama-server"',
+                "enabled = true",
+                "[model]",
+                'default = "nomic-embed-text-v1.5-q8_0"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_caps(
+        home,
+        slot="embed",
+        child="embed",
+        fields={
+            "backend": "gpu-vulkan",
+            "provider": "llama-server",
+            "model": "nomic-embed-text-v1.5-q8_0",
+            "enabled": True,
+        },
+    )
+
+    manager = SlotManager()
+    # Sanity: routing resolves the enabled slot before the disable.
+    assert await manager.resolve_for_request("embedding") is not None
+
+    orch = CapabilityOrchestrator(slot_manager=manager)
+    await orch.apply("embed", "embed", {"enabled": False})
+
+    # After the disable the router must no longer see the slot.
+    assert await manager.resolve_for_request("embedding") is None
 
 
 async def test_apply_lifecycle_failure_still_persists_intent(

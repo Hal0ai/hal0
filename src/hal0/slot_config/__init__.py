@@ -171,10 +171,13 @@ class SlotConfigStore:
              ``selection.selection``, serialised through the canonical
              :func:`capabilities_toml_payload` shape.
           2. ``slots/<slot_name>.toml`` — reconciled against the
-             selection **iff** the selection is enabled AND the file
-             already exists (slot creation carries state.json + port
-             allocation side effects and stays with
-             ``SlotManager.create``). Otherwise ``after == before``.
+             selection **iff** the file already exists (slot creation
+             carries state.json + port allocation side effects and stays
+             with ``SlotManager.create``, so a missing file yields
+             ``after == before``). The ``enabled`` flag is always written
+             on both enable and disable; the backend/device/provider/
+             model/profile fields are reconciled only when the selection
+             is enabled.
         """
         caps_path = self._caps_path()
         caps_before = _read_toml_or_none(caps_path)
@@ -246,13 +249,17 @@ class SlotConfigStore:
     def _reconciled_slot(
         self, raw_before: dict[str, Any] | None, slot_selection: SlotSelection
     ) -> dict[str, Any] | None:
-        """Project an enabled selection onto the existing slot TOML dict.
+        """Project a selection onto the existing slot TOML dict.
 
-        Mirrors the semantics of the pre-#697 rewrite-through-
-        ``SlotManager.update_config`` path exactly:
+        The store is the single owner of the slot's ``enabled`` flag (SC-1):
 
-          - reconcile only when the selection is enabled (pure disable
-            never rewrote the slot file) and the file exists,
+          - ``enabled`` is written UNCONDITIONALLY when the file exists — a
+            disable flips ``enabled = false`` (so the request router stops
+            resolving the slot) and an enable clears any stale
+            ``enabled = false``,
+          - the backend/device/provider/model/profile fields are reconciled
+            ONLY when the selection is enabled (a pure disable never rewrites
+            the model/device siblings),
           - one-level deep merge for the nested ``[model]`` table so
             sibling keys (``context_size`` etc.) survive,
           - both ``device`` (v0.2 canonical) and ``backend`` (one-release
@@ -269,30 +276,36 @@ class SlotConfigStore:
         this the slot would keep Kokoro's profile and never spawn Qwen3.
         """
         selection = slot_selection.selection
-        if raw_before is None or not selection.enabled:
+        if raw_before is None:
             return raw_before
 
-        updates: dict[str, Any] = {}
-        slot_backend = device_to_legacy_backend(selection.device)
-        slot_device = canonical_device(selection.device)
-        if slot_backend:
-            # Deprecated field, kept for one release — see ADR-0006 §7.
-            updates["backend"] = slot_backend
-        if slot_device:
-            updates["device"] = slot_device
-        if selection.provider:
-            updates["provider"] = selection.provider
-        if selection.model:
-            updates["model"] = {"default": selection.model}
+        # ``enabled`` is written UNCONDITIONALLY — this is the single owner of
+        # the slot's enablement (SC-1). A disable must flip ``enabled = false``
+        # so the request router (``_loaded_slot_from_config``) stops resolving
+        # the slot; an enable clears any stale ``enabled = false``.
+        updates: dict[str, Any] = {"enabled": selection.enabled}
+        if selection.enabled:
+            # The backend/device/provider/model/profile reconciliation only
+            # applies when the slot is going to run — a pure disable never
+            # rewrites the model/device siblings.
+            slot_backend = device_to_legacy_backend(selection.device)
+            slot_device = canonical_device(selection.device)
+            if slot_backend:
+                # Deprecated field, kept for one release — see ADR-0006 §7.
+                updates["backend"] = slot_backend
+            if slot_device:
+                updates["device"] = slot_device
+            if selection.provider:
+                updates["provider"] = selection.provider
+            if selection.model:
+                updates["model"] = {"default": selection.model}
 
-        # TTS engine switch: derive the slot profile from the picked device so
-        # the GPU/CPU choice actually swaps the provider inside the one tts slot.
-        tts_profile = self._tts_profile_for(slot_selection)
-        if tts_profile is not None:
-            updates["profile"] = tts_profile
-
-        if not updates:
-            return raw_before
+            # TTS engine switch: derive the slot profile from the picked device
+            # so the GPU/CPU choice actually swaps the provider inside the one
+            # tts slot.
+            tts_profile = self._tts_profile_for(slot_selection)
+            if tts_profile is not None:
+                updates["profile"] = tts_profile
 
         after = dict(raw_before)
         for key, value in updates.items():
