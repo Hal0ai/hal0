@@ -219,7 +219,7 @@ function TaskDrawer({ task, byId, onClose, onOpenTask }) {
           {/* description + block reason */}
           <div className="dr-sec">
             <div className="dr-sec-h"><h4>description</h4></div>
-            <div className="dr-desc">{t.desc}</div>
+            <div className="dr-desc">{t.body ?? t.desc}</div>
             {t.blockReason && (
               <div className="dr-block">
                 <div className="bl">block reason</div>

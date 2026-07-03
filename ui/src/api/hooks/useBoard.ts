@@ -204,27 +204,120 @@ export interface CreateBoardBody {
   icon?: string
 }
 
-// ── Wire-to-normalised task transform ─────────────────────────────────
+// ── Wire-shape helpers ────────────────────────────────────────────────
 //
-// The server may send either camelCase or snake_case for legacy compat;
-// normalise everything to camelCase for the UI.
+// The Hermes kanban plugin speaks snake_case and returns TWO shapes:
+//   • GET /board embeds a FLAT task row in each column.
+//   • GET /tasks/{id} WRAPS the row in an envelope:
+//        {task, comments, events, attachments, links, runs}
+// Timestamps are unix-epoch SECONDS; event/run/comment items use their own
+// field names (created_at, payload, outcome, summary…) that differ from what
+// the drawer renders (at, json, state, msg). These helpers bridge both wire
+// shapes — plus the already-normalised camelCase objects the optimistic-update
+// path feeds back through normaliseTask — into the UI's camelCase contract.
+
+const _isObj = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v)
+
+/** Unix-epoch (sec or ms) or pre-formatted string → short "20m ago" label. */
+function relTime(v: unknown): string | undefined {
+  if (v == null || v === '') return undefined
+  if (typeof v === 'string') return v // already a display string / ISO
+  if (typeof v !== 'number' || !Number.isFinite(v)) return undefined
+  const ms = v < 1e12 ? v * 1000 : v // < 1e12 ⇒ epoch seconds
+  const delta = Date.now() - ms
+  if (delta < 0) return 'just now'
+  const s = Math.floor(delta / 1000)
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
+}
+
+/** started/ended epoch seconds → "1m 57s" duration (open runs measure to now). */
+function durLabel(start: unknown, end: unknown): string | undefined {
+  if (typeof start !== 'number') return undefined
+  const endS = typeof end === 'number' ? end : Math.floor(Date.now() / 1000)
+  let s = Math.max(0, Math.floor(endS - start))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  s = s % 60
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  return `${h}h ${m % 60}m`
+}
+
+function normaliseComment(c: Record<string, unknown>): TaskComment {
+  return {
+    author: String(c.author ?? c.created_by ?? ''),
+    at: (c.at as string) ?? relTime(c.created_at) ?? '',
+    body: String(c.body ?? ''),
+  }
+}
+
+function normaliseEvent(e: Record<string, unknown>): TaskEvent {
+  const payload = e.payload
+  return {
+    kind: String(e.kind ?? ''),
+    at: (e.at as string) ?? relTime(e.created_at) ?? '',
+    json:
+      (e.json as string) ??
+      (payload != null ? JSON.stringify(payload) : undefined),
+  }
+}
+
+function normaliseRun(r: Record<string, unknown>): TaskRun {
+  // Upstream carries both status ("running"/"done") and outcome ("completed").
+  // The drawer keys its row colour off state ∈ {active, completed, review}.
+  const rawState = String(r.state ?? r.outcome ?? r.status ?? '')
+  return {
+    state: rawState === 'running' ? 'active' : rawState,
+    profile: String(r.profile ?? r.assignee ?? ''),
+    dur: (r.dur as string) ?? durLabel(r.started_at, r.ended_at) ?? '',
+    at: (r.at as string) ?? relTime(r.ended_at ?? r.started_at) ?? '',
+    msg: String(r.msg ?? r.summary ?? ''),
+  }
+}
+
+// ── Wire-to-normalised task transform ─────────────────────────────────
 
 function normaliseTask(raw: Record<string, unknown>): BoardTask {
-  const assignee =
-    (raw.assignee ?? raw.profile ?? null) as string | null
-  const createdBy =
-    (raw.created_by ?? raw.createdBy ?? null) as string | null
-  const blockReason =
-    (raw.block_reason ?? raw.blockReason ?? null) as string | null
-  const body = (raw.body ?? raw.desc ?? null) as string | null
-  const commentCount =
-    typeof (raw.comment_count ?? raw.commentCount) === 'number'
-      ? (raw.comment_count ?? raw.commentCount) as number
-      : 0
-  const depCount =
-    (raw.dep_count ?? raw.depCount ?? null) as string | null
+  // Unwrap the /tasks/{id} envelope: read scalars off the inner row, but pull
+  // collections (comments/events/runs) and links off the envelope top level.
+  // GET /board rows and optimistic-update objects are flat, so fall back to the
+  // row itself for every field.
+  const env = raw
+  const t = _isObj(raw.task) ? (raw.task as Record<string, unknown>) : raw
 
-  const rawDeps = (raw.deps ?? {}) as {
+  const assignee =
+    (t.assignee ?? t.profile ?? null) as string | null
+  const createdBy =
+    (t.created_by ?? t.createdBy ?? null) as string | null
+  const blockReason =
+    (t.block_reason ?? t.blockReason ?? null) as string | null
+  const body = (t.body ?? t.desc ?? null) as string | null
+
+  const pickArr = (k: string): Record<string, unknown>[] =>
+    Array.isArray(env[k])
+      ? (env[k] as Record<string, unknown>[])
+      : Array.isArray(t[k])
+        ? (t[k] as Record<string, unknown>[])
+        : []
+  const rawComments = pickArr('comments')
+  const rawEvents = pickArr('events')
+  const rawRuns = pickArr('runs')
+
+  const commentCount =
+    typeof (t.comment_count ?? t.commentCount) === 'number'
+      ? ((t.comment_count ?? t.commentCount) as number)
+      : rawComments.length
+  const depCount =
+    (t.dep_count ?? t.depCount ?? null) as string | null
+
+  // deps: normalised {parents,children}, or the upstream `links` (same shape).
+  const rawDeps = (env.deps ?? env.links ?? t.deps ?? t.links ?? {}) as {
     parents?: string[]
     children?: string[]
   }
@@ -234,25 +327,23 @@ function normaliseTask(raw: Record<string, unknown>): BoardTask {
   }
 
   return {
-    id: String(raw.id ?? ''),
-    title: String(raw.title ?? ''),
-    status: (raw.status ?? 'triage') as TaskStatus,
+    id: String(t.id ?? ''),
+    title: String(t.title ?? ''),
+    status: (t.status ?? 'triage') as TaskStatus,
     assignee,
-    tenant: raw.tenant as string | undefined,
-    priority: raw.priority as number | undefined,
-    workspace: raw.workspace as string | undefined,
+    tenant: (t.tenant ?? undefined) as string | undefined,
+    priority: t.priority as number | undefined,
+    workspace: (t.workspace ?? t.workspace_path) as string | undefined,
     createdBy,
-    created: raw.created as string | undefined,
+    created: (t.created as string | undefined) ?? relTime(t.created_at),
     body,
     blockReason,
-    schedule: raw.schedule as string | undefined,
-    summary: raw.summary as string | undefined,
+    schedule: t.schedule as string | undefined,
+    summary: (t.summary ?? t.latest_summary) as string | undefined,
     deps,
-    comments: Array.isArray(raw.comments)
-      ? (raw.comments as TaskComment[])
-      : [],
-    events: Array.isArray(raw.events) ? (raw.events as TaskEvent[]) : [],
-    runs: Array.isArray(raw.runs) ? (raw.runs as TaskRun[]) : [],
+    comments: rawComments.map(normaliseComment),
+    events: rawEvents.map(normaliseEvent),
+    runs: rawRuns.map(normaliseRun),
     commentCount,
     depCount,
   }
@@ -479,11 +570,19 @@ export function useBoardTaskLog(
     queryFn: async () => {
       const qs = tail != null ? `?tail=${tail}` : ''
       const raw = await apiGet<
-        TaskLogEntry[] | { entries: TaskLogEntry[] }
+        TaskLogEntry[] | { entries?: TaskLogEntry[]; content?: string }
       >(`${ENDPOINTS.boardTaskLog(id)}${qs}`)
       if (Array.isArray(raw)) return raw
       if (raw && Array.isArray((raw as { entries: TaskLogEntry[] }).entries))
         return (raw as { entries: TaskLogEntry[] }).entries
+      // Hermes kanban returns {task_id, path, exists, size_bytes, content}
+      // where `content` is the raw log text — split into per-line entries so
+      // the drawer (which joins e.line with "\n") renders it.
+      const content = (raw as { content?: unknown })?.content
+      if (typeof content === 'string')
+        return content.length
+          ? content.split('\n').map((line) => ({ line }))
+          : []
       return []
     },
     enabled: !!id,
