@@ -13,7 +13,6 @@ import contextlib
 import json
 import logging
 import os
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -24,7 +23,6 @@ from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
-from hal0.config import paths as _config_paths
 from hal0.config.loader import load_hal0_config
 from hal0.errors import Hal0Error
 from hal0.model_meta import classify
@@ -40,6 +38,8 @@ from hal0.registry.pull import (
     run_flm_pull,
     run_pull,
 )
+from hal0.registry.pull import persist_pull_job as _persist_pull_job
+from hal0.registry.pull import pull_job_file as _pull_job_file
 
 # See slots.py for the writer-gate rationale.
 
@@ -48,49 +48,13 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 
-# ── durable pull-job store (#626) ─────────────────────────────────────────────
+# ── durable pull-job store (#626 / #MR-1) ─────────────────────────────────────
 #
-# Model-pull jobs live only on app.state.model_pull_jobs, so a hal0-api
-# restart mid-pull 404s the status poll. Mirror each job snapshot to
-# /var/lib/hal0/model-pull-jobs/<model_id>.json (atomic write) and fall back
-# to disk on status lookup — mirroring the updater.py pattern (#509).
-
-
-def _pull_jobs_dir() -> Path:
-    """Return /var/lib/hal0/model-pull-jobs (HAL0_HOME-aware via paths)."""
-    return _config_paths.var_lib() / "model-pull-jobs"
-
-
-def _pull_job_file(model_id: str) -> Path:
-    from hal0.registry.pull import _sanitise_id
-
-    return _pull_jobs_dir() / f"{_sanitise_id(model_id)}.json"
-
-
-def _persist_pull_job(job: PullJob) -> None:
-    """Atomically write a pull-job snapshot to disk (best-effort, fail-soft).
-
-    A failure to persist must never break the pull flow — the in-memory
-    registry remains authoritative for the running process.
-    """
-    path = _pull_job_file(job.model_id)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        tmp_path = Path(tmp_str)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(job.as_dict(), f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-            tmp_path = None  # type: ignore[assignment]
-        finally:
-            if tmp_path is not None:
-                with contextlib.suppress(OSError):
-                    tmp_path.unlink(missing_ok=True)
-    except OSError as exc:
-        log.warning("model.pull_job_persist_failed model_id=%s error=%s", job.model_id, exc)
+# The snapshot writer now lives in registry.pull (imported above as
+# ``_persist_pull_job``/``_pull_job_file``) so ``run_pull`` persists terminal
+# state for EVERY caller — the dashboard route AND the installer/bundle-tier
+# pulls that call run_pull directly. The disk-fallback read path below still
+# consumes those snapshots.
 
 
 def _load_persisted_pull_job(
