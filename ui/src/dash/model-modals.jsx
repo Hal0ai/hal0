@@ -447,7 +447,7 @@ function DeleteModelDialog({ open, onClose, model }) {
   const slotsQuery = useSlots();
   if (!model) return null;
   const slots = slotsQuery.data ?? [];
-  const slotsUsing = slots.filter(s => (s.model_id || s.model?.default) === model.id);
+  const slotsUsing = slots.filter(s => s.model_id === model.id || s.model === model.id);
   const hasUsers = slotsUsing.length > 0;
 
   const onConfirm = async () => {
@@ -496,7 +496,7 @@ function UsedByPanel({ model }) {
   const slotsQuery = useSlots();
   if (!model) return null;
   const slots = slotsQuery.data ?? [];
-  const using = slots.filter(s => (s.model_id || s.model?.default) === model.id);
+  const using = slots.filter(s => s.model_id === model.id || s.model === model.id);
   return (
     <div className="mdl-detail-recipe">
       <div className="lbl">Used by</div>
@@ -579,7 +579,9 @@ function DownloadRow({ modelId, onRemove }) {
       setCancelling(false);
     }
   };
-  const onPause = doCancel;  // engine has no pause; degrade to cancel.
+  // UI-9: no "Pause" button — the pull engine has no pause (job.cancel() sets
+  // the terminal `cancelled` state and destroys the download). Only an honest
+  // Cancel is offered; a re-pull resumes from the .part file backend-side.
   const onCancel = doCancel;
   const onRetry = () => { job.start(modelId); };
 
@@ -625,10 +627,7 @@ function DownloadRow({ modelId, onRemove }) {
       )}
       <div style={{display: "flex", gap: 4, marginTop: 6}}>
         {state === "running" && (
-          <>
-            <button className="btn ghost sm" onClick={onPause} disabled={cancelling}>Pause</button>
-            <button className="btn ghost sm" onClick={onCancel} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel"}</button>
-          </>
+          <button className="btn ghost sm" onClick={onCancel} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel"}</button>
         )}
         {state === "queued" && (
           <button className="btn ghost sm" onClick={onCancel} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel"}</button>
