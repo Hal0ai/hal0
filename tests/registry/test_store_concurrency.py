@@ -21,6 +21,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
 
@@ -130,7 +132,7 @@ def _child_add(hal0_home: str, model_id: str, barrier: Any, delay: float) -> Non
     reg.add(_Model(id=model_id, path="/models/x.gguf"))
 
 
-def test_multiprocessing_no_lost_update(tmp_path: Path) -> None:
+def test_multiprocessing_no_lost_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Two child processes adding distinct rows: both must survive.
 
     This proves true cross-process safety — separate interpreters, separate
@@ -140,7 +142,9 @@ def test_multiprocessing_no_lost_update(tmp_path: Path) -> None:
     hal0_home.mkdir(parents=True, exist_ok=True)
 
     # Seed a base row using a parent-side registry rooted at the same HAL0_HOME.
-    os.environ["HAL0_HOME"] = str(hal0_home)
+    # monkeypatch.setenv auto-restores HAL0_HOME on teardown so this never
+    # leaks into later tests (test_models_config default-path assertions).
+    monkeypatch.setenv("HAL0_HOME", str(hal0_home))
     from hal0.config import paths
 
     seed = ModelRegistry()
