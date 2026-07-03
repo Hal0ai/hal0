@@ -21,10 +21,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import os
 import re
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -288,6 +290,51 @@ def get_job(jobs: dict[str, PullJob], model_id: str) -> PullJob | None:
     return jobs.get(model_id)
 
 
+# ── durable pull-job store (#626 / #MR-1) ─────────────────────────────────────
+#
+# The snapshot lives here (not in routes/models) so ``run_pull`` itself writes
+# the terminal state on EVERY path — the dashboard route AND the installer /
+# bundle-tier pulls, which call ``run_pull`` directly and previously bypassed the
+# routes/models wrappers, 404ing every status poll after an install-time restart.
+
+
+def _pull_jobs_dir() -> Path:
+    """Return ``<var_lib>/model-pull-jobs`` (HAL0_HOME-aware via config paths)."""
+    return paths.var_lib() / "model-pull-jobs"
+
+
+def pull_job_file(model_id: str) -> Path:
+    """Path of the durable snapshot for ``model_id``'s pull job."""
+    return _pull_jobs_dir() / f"{_sanitise_id(model_id)}.json"
+
+
+def persist_pull_job(job: PullJob) -> None:
+    """Atomically mirror a pull-job snapshot to disk (best-effort, fail-soft).
+
+    A failure to persist must never break the pull flow — the in-memory job
+    stays authoritative for the running process. Called from ``run_pull`` so a
+    restart-surviving status poll resolves for any caller (#MR-1).
+    """
+    path = pull_job_file(job.model_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        tmp_path: Path | None = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(job.as_dict(), f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("model.pull_job_persist_failed model_id=%s error=%s", job.model_id, exc)
+
+
 async def run_pull(
     job: PullJob,
     *,
@@ -463,6 +510,12 @@ async def run_pull(
         job._signal()
         log.exception("model.pull_unexpected_error", extra={"model_id": job.model_id})
     finally:
+        # Persist FIRST — a durable snapshot of the terminal (completed/failed/
+        # cancelled) state so a restart-surviving status poll resolves for ANY
+        # caller, including installer/bundle-tier pulls that call run_pull
+        # directly (#MR-1). Ordered before the client close so a theoretical
+        # aclose() raise can't skip the persist.
+        persist_pull_job(job)
         if owns_client:
             await client.aclose()
 
@@ -799,6 +852,8 @@ __all__ = [
     "get_job",
     "hf_download_url",
     "make_job",
+    "persist_pull_job",
+    "pull_job_file",
     "run_flm_pull",
     "run_pull",
 ]

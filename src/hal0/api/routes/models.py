@@ -13,7 +13,6 @@ import contextlib
 import json
 import logging
 import os
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -24,7 +23,6 @@ from fastapi.responses import StreamingResponse
 
 from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, NotFound
-from hal0.config import paths as _config_paths
 from hal0.config.loader import load_hal0_config
 from hal0.errors import Hal0Error
 from hal0.model_meta import classify
@@ -40,6 +38,8 @@ from hal0.registry.pull import (
     run_flm_pull,
     run_pull,
 )
+from hal0.registry.pull import persist_pull_job as _persist_pull_job
+from hal0.registry.pull import pull_job_file as _pull_job_file
 
 # See slots.py for the writer-gate rationale.
 
@@ -48,53 +48,22 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 
-# ── durable pull-job store (#626) ─────────────────────────────────────────────
+# ── durable pull-job store (#626 / #MR-1) ─────────────────────────────────────
 #
-# Model-pull jobs live only on app.state.model_pull_jobs, so a hal0-api
-# restart mid-pull 404s the status poll. Mirror each job snapshot to
-# /var/lib/hal0/model-pull-jobs/<model_id>.json (atomic write) and fall back
-# to disk on status lookup — mirroring the updater.py pattern (#509).
+# The snapshot writer now lives in registry.pull (imported above as
+# ``_persist_pull_job``/``_pull_job_file``) so ``run_pull`` persists terminal
+# state for EVERY caller — the dashboard route AND the installer/bundle-tier
+# pulls that call run_pull directly. The disk-fallback read path below still
+# consumes those snapshots.
 
 
-def _pull_jobs_dir() -> Path:
-    """Return /var/lib/hal0/model-pull-jobs (HAL0_HOME-aware via paths)."""
-    return _config_paths.var_lib() / "model-pull-jobs"
+def _load_persisted_pull_job(model_id: str, registry: Any | None = None) -> dict[str, Any] | None:
+    """Read a persisted pull-job snapshot from disk, or None if absent/unreadable.
 
-
-def _pull_job_file(model_id: str) -> Path:
-    from hal0.registry.pull import _sanitise_id
-
-    return _pull_jobs_dir() / f"{_sanitise_id(model_id)}.json"
-
-
-def _persist_pull_job(job: PullJob) -> None:
-    """Atomically write a pull-job snapshot to disk (best-effort, fail-soft).
-
-    A failure to persist must never break the pull flow — the in-memory
-    registry remains authoritative for the running process.
+    ``registry`` (when supplied) is forwarded to the reconcile step so a stale
+    non-terminal snapshot can be cross-checked against ground truth — an
+    install that actually landed is reported ``completed``, not ``failed``.
     """
-    path = _pull_job_file(job.model_id)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        tmp_path = Path(tmp_str)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(job.as_dict(), f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-            tmp_path = None  # type: ignore[assignment]
-        finally:
-            if tmp_path is not None:
-                with contextlib.suppress(OSError):
-                    tmp_path.unlink(missing_ok=True)
-    except OSError as exc:
-        log.warning("model.pull_job_persist_failed model_id=%s error=%s", job.model_id, exc)
-
-
-def _load_persisted_pull_job(model_id: str) -> dict[str, Any] | None:
-    """Read a persisted pull-job snapshot from disk, or None if absent/unreadable."""
     path = _pull_job_file(model_id)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -106,20 +75,50 @@ def _load_persisted_pull_job(model_id: str) -> dict[str, Any] | None:
         return None
     if not isinstance(loaded, dict):
         return None
-    return _reconcile_persisted_pull_job(loaded)
+    return _reconcile_persisted_pull_job(loaded, registry)
 
 
-def _reconcile_persisted_pull_job(persisted: dict[str, Any]) -> dict[str, Any]:
+def _reconcile_persisted_pull_job(
+    persisted: dict[str, Any], registry: Any | None = None
+) -> dict[str, Any]:
     """Repair a persisted snapshot that was left in a non-terminal state.
 
     A snapshot only reaches disk-fallback when its job is absent from the
     in-memory dict — which after a restart means the worker that owned it is
     gone. A ``queued``/``running`` snapshot can therefore never make further
-    progress, so we surface it as ``failed`` (rather than a state the client
-    would poll forever) with an explanatory error. Terminal snapshots
-    (completed/failed/cancelled) are returned unchanged.
+    progress.
+
+    Before declaring it failed, cross-check ground truth (#MR-2): the terminal
+    on-disk write is fail-soft, so a pull that actually completed can be left
+    with a stale ``running`` snapshot. When ``registry`` knows the id and its
+    model file exists on disk, the install landed — surface ``completed``
+    (backfilling ``path``/``size_bytes`` from the registry) rather than a
+    spurious ``failed``. Only a snapshot with no matching installed file falls
+    through to the failed-rewrite. Terminal snapshots (completed/failed/
+    cancelled) are returned unchanged.
     """
     if persisted.get("state") in ("queued", "running"):
+        model_id = persisted.get("model_id")
+        if registry is not None and model_id:
+            try:
+                if registry.has(model_id):
+                    model = registry.get(model_id)
+                    p = getattr(model, "path", None)
+                    if p and Path(p).exists():
+                        persisted = dict(persisted)
+                        persisted["state"] = "completed"
+                        persisted.setdefault("path", str(p))
+                        size = getattr(model, "size_bytes", None)
+                        if size:
+                            persisted.setdefault("size_bytes", size)
+                        sha = getattr(model, "sha256", None)
+                        if sha:
+                            persisted.setdefault("sha256", sha)
+                        return persisted
+            except Exception:
+                # A registry hiccup must never raise inside a status poll —
+                # degrade to the failed-rewrite below.
+                pass
         persisted = dict(persisted)
         persisted["state"] = "failed"
         persisted.setdefault("error", "pull interrupted by hal0-api restart; re-run the pull")
@@ -1548,7 +1547,7 @@ async def pull_status(model_id: str, request: Request) -> dict[str, object]:
     jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
     job = jobs.get(model_id)
     if job is None:
-        persisted = _load_persisted_pull_job(model_id)
+        persisted = _load_persisted_pull_job(model_id, request.app.state.model_registry)
         if persisted is not None:
             return persisted
         raise PullJobNotFound(
@@ -1574,7 +1573,7 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
     jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
     job = jobs.get(model_id)
     if job is None:
-        persisted = _load_persisted_pull_job(model_id)
+        persisted = _load_persisted_pull_job(model_id, request.app.state.model_registry)
         if persisted is not None:
             # Serve one terminal frame from the persisted snapshot so the
             # client's SSE consumer sees the final state and can close.

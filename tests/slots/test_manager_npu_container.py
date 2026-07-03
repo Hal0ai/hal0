@@ -194,3 +194,44 @@ async def test_registry_style_model_id_does_not_take_flm_path(
     assert model_info_arg["_model_key"] == "qwopus3.6-27b-v2"
     # flm_tag is also always stamped (from the base info dict).
     assert model_info_arg["flm_tag"] == "qwopus3.6-27b-v2"
+
+
+# ── DR-3: health-probe timeout must NOT advertise a lying READY ──────────────
+
+
+@pytest.mark.anyio
+async def test_await_ready_health_timeout_stays_non_dispatchable(
+    slot_root: Path,
+    tmp_hal0_home: str,
+) -> None:
+    """A /health wait timeout resolves to WARMING (non-dispatchable), not READY.
+
+    DR-3: when ``container_provider().wait_ready`` times out, the container's
+    inference server never answered /health, so the slot must NOT be advertised
+    as dispatchable. Resolving to WARMING keeps it retryable (the fail watcher /
+    next-request reload governs recovery) instead of forwarding live traffic to
+    a wedged server on a false READY.
+    """
+    from hal0.slots.manager import SlotState
+
+    _write_npu_container_slot(slot_root, "npu")
+
+    fake_provider = _make_container_provider_mock()
+    # Simulate the container port never becoming healthy within the window.
+    fake_provider.wait_ready = AsyncMock(side_effect=TimeoutError("port did not become healthy"))
+
+    with (
+        patch("hal0.providers.container.container_provider", return_value=fake_provider),
+        patch(
+            "hal0.providers.flm.flm_served_models",
+            return_value=[{"tag": "gemma3:4b", "installed": True}],
+        ),
+        patch("hal0.agents.hermes_refresh.spawn_context_refresh", lambda *a, **k: None),
+    ):
+        mgr = SlotManager()
+        await mgr.load("npu", "gemma3:4b")
+
+        assert mgr.state("npu") == SlotState.WARMING, (
+            "health-probe timeout must resolve to WARMING, not a lying READY"
+        )
+        assert mgr.is_ready_for_dispatch("npu") is False, "a WARMING slot must not be dispatchable"

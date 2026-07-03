@@ -334,6 +334,13 @@ class SlotManager:
         # when N concurrent requests arrive in the same tick.
         self._serving_count: dict[str, int] = {}
         self._serving_lock: asyncio.Lock = asyncio.Lock()
+        # DR-2 — per-slot committed-dispatch tickets.  ``Dispatcher.forward``
+        # takes a ticket synchronously right after the image-mode guard and
+        # BEFORE its first await, closing the window where a request has
+        # passed the guard but not yet entered ``serving()``.  ``in_flight_count``
+        # sums tickets + serving so the GpuArbiter drain never unloads a slot
+        # out from under a request that is already committed to dispatch.
+        self._dispatch_tickets: dict[str, int] = {}
         # IDLE — background sweeper task that demotes READY→IDLE after
         # ``idle_after_s`` seconds of inactivity.  Started explicitly via
         # ``start_idle_monitor()`` (the API lifespan owns the lifecycle so
@@ -2303,8 +2310,39 @@ class SlotManager:
                 )
 
     def in_flight_count(self, slot_name: str) -> int:
-        """Return the number of currently-active ``serving()`` contexts."""
-        return self._serving_count.get(slot_name, 0)
+        """Return the number of in-flight requests for ``slot_name``.
+
+        Sums active ``serving()`` contexts AND committed dispatch tickets
+        (DR-2): a request that has passed ``Dispatcher.forward``'s image-mode
+        guard but has not yet entered ``serving()`` still holds a ticket, so
+        the GpuArbiter drain sees it and never unloads the slot out from under
+        an in-flight request.  Temporary overlap while both counters hold the
+        same request is harmless — both reach 0 only when the request ends.
+        """
+        return self._serving_count.get(slot_name, 0) + self._dispatch_tickets.get(slot_name, 0)
+
+    def enter_dispatch(self, slot_name: str) -> None:
+        """Synchronously commit a dispatch ticket for ``slot_name`` (DR-2).
+
+        Called by ``Dispatcher.forward`` immediately after the image-mode
+        guard and BEFORE the first await.  Being sync (no lock, no await) is
+        the whole point: nothing — not even ``GpuArbiter.ensure_img`` — can
+        interleave between the guard read and the ticket take, so any request
+        that passed the guard registers before the drain's next poll.
+        """
+        self._dispatch_tickets[slot_name] = self._dispatch_tickets.get(slot_name, 0) + 1
+
+    def exit_dispatch(self, slot_name: str) -> None:
+        """Release the dispatch ticket taken by :meth:`enter_dispatch` (DR-2).
+
+        Balanced on EVERY exit path of ``Dispatcher.forward``'s slot branches
+        (success, typed raises, ``UpstreamUnavailable``, cancellation).
+        """
+        remaining = self._dispatch_tickets.get(slot_name, 1) - 1
+        if remaining > 0:
+            self._dispatch_tickets[slot_name] = remaining
+        else:
+            self._dispatch_tickets.pop(slot_name, None)
 
     # ── GpuArbiter (Phase D, spec §7) ────────────────────────────────────────
 
@@ -2745,9 +2783,11 @@ class SlotManager:
         Polls GET /health on the slot's container port until 200.
 
         Returns:
-            SlotState.READY when the container is serving (or the
-            health wait timed out — the fail watcher picks up ongoing
-            unhealthiness).
+            SlotState.READY when the container is serving. On a health-wait
+            timeout, resolves to SlotState.WARMING (non-dispatchable) rather
+            than a lying READY: WARMING keeps the slot retryable so the fail
+            watcher / next-request reload governs recovery, instead of live
+            traffic being forwarded to a wedged server on a false READY.
         """
         cfg = await self._maybe_load_config(slot_name)
         if not cfg:
@@ -2765,8 +2805,13 @@ class SlotManager:
                 "slot.container_await_ready_timeout",
                 extra={"slot": slot_name, "port": slot_port, "error": str(exc)},
             )
-            # Let the fail watcher detect ongoing unhealthiness.
-            return SlotState.READY
+            # DR-3: the inference server never answered /health, so do NOT
+            # advertise a dispatchable READY. WARMING is not in
+            # _DISPATCHABLE_STATES, so _check_slot_ready_for_dispatch raises
+            # the retryable SlotLoading (503 + Retry-After) and the next
+            # request re-drives load() — the fail watcher / reload governs
+            # recovery instead of live traffic hitting a wedged server.
+            return SlotState.WARMING
 
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
 

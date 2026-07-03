@@ -8,6 +8,7 @@ redirect handling, and partial downloads / cancellation.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from hal0.registry.pull import (
     _sanitise_id,
     hf_download_url,
     make_job,
+    pull_job_file,
     run_pull,
 )
 from hal0.registry.store import ModelRegistry
@@ -110,6 +112,66 @@ async def test_run_pull_happy_path_writes_file_and_registers(
     assert entry.size_bytes == len(body)
     assert entry.hf_repo == "Qwen/Qwen3-4B-Instruct-GGUF"
     assert entry.metadata.get("sha256") == digest
+
+
+# ── MR-1: run_pull persists a durable snapshot for ALL callers ────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_pull_persists_terminal_snapshot_for_direct_callers(
+    tmp_hal0_home: str,
+) -> None:
+    """MR-1: installer/bundle-tier pulls call ``run_pull`` directly (bypassing
+    the routes/models wrappers). ``run_pull`` must itself write the durable
+    pull-job snapshot so a status poll after an install-time api restart
+    resolves instead of 404ing."""
+    body = _payload(2048)
+    job = make_job("hal0-max")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/hal0-Max-GGUF",
+            hf_file="hal0-max.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed"
+    # The snapshot the /pull/status disk-fallback reads must exist and be terminal.
+    snapshot = pull_job_file("hal0-max")
+    assert snapshot.exists(), "run_pull must persist a durable snapshot itself (MR-1)"
+    persisted = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert persisted["state"] == "completed"
+    assert persisted["model_id"] == "hal0-max"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_persists_failed_snapshot_on_error(tmp_hal0_home: str) -> None:
+    """MR-1: a failed direct pull is also persisted terminally, so a restart
+    doesn't leave the poller with no snapshot at all."""
+    job = make_job("ghost")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_status_handler(404))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/ghost-GGUF",
+            hf_file="ghost.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "failed"
+    snapshot = pull_job_file("ghost")
+    assert snapshot.exists()
+    persisted = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert persisted["state"] == "failed"
 
 
 @pytest.mark.asyncio

@@ -807,28 +807,49 @@ class Dispatcher:
             # LLM model back onto the GPU while the arbiter holds it for
             # the img slot.
             self._guard_gpu_image_mode(call)
-        if call.slot_name and self._slot_manager is not None:
-            # B1 (ADR-0022): backend-aware lazy-load. On a cold miss we
-            # kick SlotManager.load(slot_name) FIRST so the slot's declared
-            # device/profile drives the load, then gate on readiness.
-            await self._ensure_slot_loaded_backend_aware(call)
-            # Swap-window gate: refuse to forward if the slot is loading.
-            # Without this, requests hit a dead port (502) or a still-
-            # loading llama-server (raw 503 with no Retry-After).
-            self._check_slot_ready_for_dispatch(call)
-            return await self._forward_with_serving(call)
-        if call.container_slot_name and self._slot_manager is not None:
-            # Container-slot readiness gate (#656): container slots register
-            # as kind="remote" upstreams so slot_name is empty above and the
-            # slot-kind gate never fires.  We probe the container directly
-            # (systemctl is-active + /health) before forwarding so the client
-            # gets a structured slot.loading 503 with Retry-After instead of
-            # a raw 502 ConnectError when the container is down or starting.
-            await self._check_container_slot_ready(call)
-            # Mirror the slot_name branch: wrap the forward in the serving
-            # context so the slot transitions READY → SERVING → READY and
-            # last_used_at is bumped around every request (#746).
-            return await self._forward_with_serving(call)
+            # DR-2: take a dispatch ticket SYNCHRONOUSLY here — right after the
+            # guard, BEFORE the first await below — so the arbiter's drain sees
+            # any request that has passed the image-mode guard even in the
+            # window before ``serving()`` increments its own counter. Because
+            # both guard_dispatch and enter_dispatch are sync, no other task
+            # (incl. ensure_img, which persists IMG mode before draining) can
+            # interleave between the guard read and the ticket take. The ticket
+            # is released on EVERY exit path via the try/finally. getattr keeps
+            # light test stand-ins that don't model the ticket surface working
+            # (mirrors the arbiter getattr opt-out above); the real SlotManager
+            # always exposes enter_dispatch/exit_dispatch.
+            effective_slot = call.slot_name or call.container_slot_name
+            enter_dispatch = getattr(self._slot_manager, "enter_dispatch", None)
+            exit_dispatch = getattr(self._slot_manager, "exit_dispatch", None)
+            if enter_dispatch is not None:
+                enter_dispatch(effective_slot)
+            try:
+                if call.slot_name:
+                    # B1 (ADR-0022): backend-aware lazy-load. On a cold miss we
+                    # kick SlotManager.load(slot_name) FIRST so the slot's
+                    # declared device/profile drives the load, then gate on
+                    # readiness.
+                    await self._ensure_slot_loaded_backend_aware(call)
+                    # Swap-window gate: refuse to forward if the slot is
+                    # loading. Without this, requests hit a dead port (502) or a
+                    # still-loading llama-server (raw 503 with no Retry-After).
+                    self._check_slot_ready_for_dispatch(call)
+                    return await self._forward_with_serving(call)
+                # Container-slot readiness gate (#656): container slots register
+                # as kind="remote" upstreams so slot_name is empty above and the
+                # slot-kind gate never fires.  We probe the container directly
+                # (systemctl is-active + /health) before forwarding so the
+                # client gets a structured slot.loading 503 with Retry-After
+                # instead of a raw 502 ConnectError when the container is down
+                # or starting.
+                await self._check_container_slot_ready(call)
+                # Mirror the slot_name branch: wrap the forward in the serving
+                # context so the slot transitions READY → SERVING → READY and
+                # last_used_at is bumped around every request (#746).
+                return await self._forward_with_serving(call)
+            finally:
+                if exit_dispatch is not None:
+                    exit_dispatch(effective_slot)
         return await self._forward_plain(call)
 
     def _guard_gpu_image_mode(self, call: UpstreamCall) -> None:
