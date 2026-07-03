@@ -20,7 +20,7 @@ import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
 import { ENDPOINTS } from '@/api/endpoints'
-import { stateChipClassForSlot } from './slot-status.js'
+import { stateChipClassForSlot, slotButtonPhase } from './slot-status.js'
 
 const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React;
 
@@ -118,7 +118,11 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   });
   const { name, type, profile, model, makeDefault } = f.values;
   const setName = (val) => f.set("name", val);
-  const setType = (val) => f.set("type", val);
+  // UI-21: changing Type must clear the selected model — a model compatible
+  // with the old type is almost always incompatible with the new one, and the
+  // stale id would otherwise ride into the create body. Use setValues so both
+  // fields flip in one update (mark type touched to match f.set semantics).
+  const setType = (val) => { f.setValues(v => ({ ...v, type: val, model: "" })); f.touch("type"); };
   const setProfile = (val) => f.set("profile", val);
   const setModel = (val) => f.set("model", val);
   const setMakeDefault = (val) => f.set("makeDefault", val);
@@ -280,9 +284,18 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
               </option>
             ))}
           </select>
-          {model && compatible.find(m => m.id === model) && (
-            <div className="ok">✓ fits in available memory ({hwQuery.data?.ram?.free ?? "?"} GB free)</div>
-          )}
+          {model && (() => {
+            // UI-6: real size-vs-RAM check, reusing the same parseSizeGB test
+            // the InlineSwapPopover uses (data.jsx global). The old branch
+            // rendered an unconditional "fits" claim regardless of model size.
+            const selM = compatible.find(m => m.id === model);
+            if (!selM) return null;
+            const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
+            const fits = ramFreeGb > parseSizeGB(selM.size);
+            return fits
+              ? <div className="ok">✓ fits in available memory ({ramFreeGb} GB free)</div>
+              : <div className="hint" style={{color: "var(--warn)"}}>⚠ may not fit — {selM.size} model vs {ramFreeGb} GB free</div>;
+          })()}
         </div>
       </div>
 
@@ -372,6 +385,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // pill toggle, which the redesigned cards dropped). `enableBusy` gates the
   // header toggle against a double-trigger while the mutation is in flight.
   const [enableBusy, setEnableBusy] = useStateSM(false);
+  // UI-16: destructive delete confirms through the shared ConfirmDialog
+  // (type-to-confirm the slot name), mirroring DeleteModelDialog — replaces
+  // the raw window.confirm that used to gate onDeleteClick.
+  const [delOpen, setDelOpen] = useStateSM(false);
   // Inline error for the instant-apply thinking toggle (task 3): surface the
   // failure next to the control instead of only reverting state silently.
   const [thinkingErr, setThinkingErr] = useStateSM(null);
@@ -536,14 +553,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
     );
   }
 
-  async function onDeleteClick() {
-    if (!window.confirm(`Delete slot "${slot.name}"?`)) return;
+  async function onDeleteConfirm() {
     setSubmitErr(null);
     try {
       await deleteMut.mutateAsync(slot.name);
       window.__hal0Toast && window.__hal0Toast(`Slot "${slot.name}" deleted`, "ok");
+      setDelOpen(false);
       onClose();
     } catch (err) {
+      setDelOpen(false);
       setSubmitErr(err?.message || "delete failed");
     }
   }
@@ -600,6 +618,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
   };
 
   return (
+    <>
     <Drawer
       open={open}
       onClose={onClose}
@@ -628,7 +647,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           <button
             className="btn danger sm"
             disabled={deleting}
-            onClick={onDeleteClick}
+            onClick={() => setDelOpen(true)}
           >{Icons.unload} {deleting ? "Deleting…" : "Delete slot"}</button>
           <span style={{display: "inline-flex", gap: 8, alignItems: "center"}}>
             {submitErr && <span style={{color: "var(--err)", fontSize: 11}}>{submitErr}</span>}
@@ -778,6 +797,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
                 onChange={(e) => {
                   const id = e.target.value;
                   if (!id || id === cur) return;
+                  // UI-5: swapping the model on a LIVE container slot cold-restarts
+                  // it (~model-load seconds). Confirm before firing — bailing here
+                  // re-renders the select back to `cur` (value={cur}), so no manual
+                  // revert is needed. Mirrors the delete/dirty-close confirm gates.
+                  const live = slotButtonPhase(slot) === "running";
+                  if (isContainer && live && !window.confirm(`Swap model on running slot "${slot.name}"? This cold-restarts the container (~model-load seconds).`)) return;
                   setSubmitErr(null);
                   const picked = compatible.find(m => m.id === id);
                   const label = picked?.longName || id;
@@ -1169,6 +1194,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
       </div>
       </details>
     </Drawer>
+    <ConfirmDialog
+      open={delOpen}
+      onCancel={() => setDelOpen(false)}
+      onConfirm={onDeleteConfirm}
+      title={`Delete slot ${slot.name}?`}
+      message={
+        <span>
+          This removes the slot <span className="mono" style={{color: "var(--fg)"}}>{slot.name}</span> and
+          its <span className="mono">capabilities.toml</span> config. The container is stopped and the
+          slot is gone from the host.
+        </span>
+      }
+      confirmLabel={deleting ? "Deleting…" : "Delete slot"}
+      destructive
+      typeToConfirm={slot.name}
+    />
+    </>
   );
 }
 
@@ -1205,6 +1247,10 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
     if (isContainer) {
       const name = slot.name;
       const label = m.longName || m.id;
+      // UI-5: confirm before cold-restarting a LIVE container slot. Bail out
+      // (leaving the popover open) when the operator declines.
+      const live = slotButtonPhase(slot) === "running";
+      if (live && !window.confirm(`Swap model on running slot "${name}"? This cold-restarts the container (~model-load seconds).`)) return;
       window.__hal0Toast && window.__hal0Toast(
         `Restarting ${name} to load ${label} — ~model-load seconds`,
         "info"

@@ -125,8 +125,13 @@ test.describe('Slots v3 wire-up (/slots)', () => {
     )
 
     await page.goto('/#slots/primary')
-    page.on('dialog', (d) => d.accept())
+    // UI-16: slot delete now confirms through the styled ConfirmDialog
+    // (type-to-confirm the slot name), replacing the raw window.confirm.
     await page.locator('.drawer button.btn.danger:has-text("Delete")').click()
+    await page.locator('input.input.mono').last().fill('primary')
+    // The ConfirmDialog overlay renders last, so its confirm button is the
+    // last "Delete slot" match (the drawer's own danger button is the first).
+    await page.locator('button:has-text("Delete slot")').last().click()
     await expect.poll(() => deletes.length).toBeGreaterThan(0)
   })
 })
