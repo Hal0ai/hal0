@@ -77,6 +77,56 @@ def write_slot_toml(path: Path | str, data: dict[str, Any]) -> None:
     write_toml_atomic(Path(path), data)
 
 
+# ── the shared slot-projection merge primitive (SC-11) ───────────────────────
+
+
+def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    """Project ``updates`` onto a slot-config ``base`` dict, copy-safe.
+
+    THE one shared "base dict + updates dict → merged dict" mechanic that
+    both the store (:meth:`SlotConfigStore._reconciled_slot`) and
+    :meth:`hal0.slots.manager.SlotManager.update_config` used to hand-roll
+    (SC-11). It does exactly three things and no field-specific reconciliation
+    (the store's selection→updates mapping and the manager's device/profile
+    coherence stay with their respective callers):
+
+      - shallow-copies ``base`` so the caller's dict is never mutated,
+      - runs a ONE-level-deep merge: for a key present as a dict on both
+        sides the sub-tables are merged key-by-key (``{**existing, **value}``,
+        so sibling ``[model]`` keys like ``default``/``context_size``
+        survive); every other key (scalars, lists, dict-vs-scalar) replaces
+        wholesale — value wins,
+      - folds the legacy ``[model].ctx_size`` alias into the canonical
+        ``context_size`` (#585): a fresh ``ctx_size`` wins over any stale
+        ``context_size``, then the alias is dropped so exactly one key
+        survives on disk.
+
+    Copy-safety is load-bearing: the store diffs ``before`` against ``after``
+    and rolls back to ``before`` on a failed commit, so the returned dict must
+    never share the ``[model]`` sub-dict with ``base``. Both the merge path
+    (which builds a fresh ``{**existing, **value}``) and the fold path (which
+    copies the sub-dict before ``pop``) honour that.
+    """
+    after = dict(base)
+    for key, value in updates.items():
+        existing = after.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            after[key] = {**existing, **value}
+        else:
+            after[key] = value
+
+    # #585: fold the legacy [model].ctx_size alias into the canonical
+    # context_size. Copy the sub-dict before mutating so ``base`` (the store's
+    # ``before`` snapshot) is never touched even when ``updates`` carried no
+    # [model] and ``after["model"]`` is still ``base``'s object.
+    model = after.get("model")
+    if isinstance(model, dict) and "ctx_size" in model:
+        model = dict(model)
+        model["context_size"] = model.pop("ctx_size")
+        after["model"] = model
+    return after
+
+
 # ── ChangeSet ────────────────────────────────────────────────────────────────
 
 
@@ -260,12 +310,18 @@ class SlotConfigStore:
           - the backend/device/provider/model/profile fields are reconciled
             ONLY when the selection is enabled (a pure disable never rewrites
             the model/device siblings),
-          - one-level deep merge for the nested ``[model]`` table so
-            sibling keys (``context_size`` etc.) survive,
           - both ``device`` (v0.2 canonical) and ``backend`` (one-release
-            legacy alias) written, translated via :mod:`hal0.model_meta`,
-          - the ``ctx_size`` → ``context_size`` alias folded (#585) so
-            the two keys can't diverge on disk.
+            legacy alias) written, translated via :mod:`hal0.model_meta`.
+
+        Once the store-specific ``updates`` dict is built, the actual
+        projection — the one-level-deep ``[model]`` merge (so sibling keys
+        like ``context_size`` survive) and the ``ctx_size`` → ``context_size``
+        fold (#585) — is delegated to the shared, copy-safe
+        :func:`merge_slot_config` (SC-11), the same primitive
+        :meth:`SlotManager.update_config` uses. Copy-safety matters here: the
+        returned ``after`` must not mutate ``raw_before`` (the ChangeSet's
+        ``before`` snapshot) or a disable-only reconcile could break the
+        commit diff / rollback.
 
         voice.tts engine switch (follow-up to #972): the two TTS engines
         (Kokoro CPU / Qwen3-TTS GPU) live in the SAME ``tts`` slot, selected
@@ -307,22 +363,10 @@ class SlotConfigStore:
             if tts_profile is not None:
                 updates["profile"] = tts_profile
 
-        after = dict(raw_before)
-        for key, value in updates.items():
-            existing = after.get(key)
-            if isinstance(existing, dict) and isinstance(value, dict):
-                after[key] = {**existing, **value}
-            else:
-                after[key] = value
-
-        # #585 parity with SlotManager.update_config: fold the legacy
-        # [model].ctx_size alias into the canonical context_size key.
-        model = after.get("model")
-        if isinstance(model, dict) and "ctx_size" in model:
-            model = dict(model)
-            model["context_size"] = model.pop("ctx_size")
-            after["model"] = model
-        return after
+        # The one-level [model] merge + #585 ctx_size fold is the shared,
+        # copy-safe primitive (SC-11) — ``raw_before`` (the ChangeSet's
+        # ``before`` snapshot) is never mutated.
+        return merge_slot_config(raw_before, updates)
 
     @staticmethod
     def _tts_profile_for(slot_selection: SlotSelection) -> str | None:
@@ -367,5 +411,6 @@ __all__ = [
     "FileState",
     "SlotConfigStore",
     "SlotSelection",
+    "merge_slot_config",
     "write_slot_toml",
 ]

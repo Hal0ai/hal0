@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
-from hal0.slot_config import write_slot_toml
+from hal0.slot_config import merge_slot_config, write_slot_toml
 from hal0.slots.state import (
     DISPATCHABLE_STATES,
     IllegalSlotTransition,
@@ -1823,27 +1823,24 @@ class SlotManager:
         self._ensure_known(slot_name)
         cfg = await self._load_slot_config(slot_name)
         cfg_dict = _cfg_to_dict(cfg)
-        # One-level deep merge for nested TOML tables ([model], [server]).
+        # One-level deep merge for nested TOML tables ([model], [server]) plus
+        # the #585 ctx_size→context_size fold, via the shared, copy-safe
+        # ``merge_slot_config`` primitive (SC-11) — the SAME projection the
+        # SlotConfigStore uses, so the two can't silently diverge.
+        #
         # A bare shallow ``dict.update`` replaced a sub-table wholesale, so a
         # partial ``PATCH /defaults`` body like ``{"model": {"ctx_size": N}}``
         # silently dropped sibling keys — most damagingly ``[model].default``
         # (the model name), which left the slot unable to resolve a model and
         # turned the dashboard Start button into a silent no-op after a
-        # restart. Merge sub-table dicts key-by-key so partial updates only
-        # touch the fields they carry; scalars and lists still replace
-        # wholesale (predictable, and no caller relies on list-merge).
-        for key, value in updates.items():
-            existing = cfg_dict.get(key)
-            if isinstance(existing, dict) and isinstance(value, dict):
-                merged = dict(existing)
-                merged.update(value)
-                cfg_dict[key] = merged
-            else:
-                cfg_dict[key] = value
-
-        # #585: the dashboard writes [model].ctx_size; canonicalize to
-        # context_size so the two keys can't diverge on disk.
-        _normalize_ctx_key(cfg_dict)
+        # restart. The helper merges sub-table dicts key-by-key so partial
+        # updates only touch the fields they carry; scalars and lists still
+        # replace wholesale (predictable, and no caller relies on list-merge).
+        # It also folds the dashboard's legacy ``[model].ctx_size`` alias into
+        # the canonical ``context_size`` (#585) so the two keys can't diverge
+        # on disk. ``merge_slot_config`` returns a fresh dict, so rebind
+        # ``cfg_dict`` before the downstream reconcile/guard calls below.
+        cfg_dict = merge_slot_config(cfg_dict, updates)
 
         # Keep device↔profile backend coherent: a profile switch re-derives
         # device (the drawer path that previously left a vulkan device under a
