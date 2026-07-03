@@ -112,6 +112,49 @@ def test_capability_guess_classifies_diffusion_media() -> None:
     assert _guess_capability("qwen3-4b-instruct-q4_k_m.gguf") == "chat"
 
 
+def test_capability_guess_classifies_rerankers() -> None:
+    """MR-3: a reranker filename must classify as 'rerank', not the old 'chat'
+    default. rerank is checked before embed so a "bge-reranker" name (which
+    also carries the embed token "bge") doesn't fall through to embed."""
+    from hal0.registry.discover import _guess_capability
+
+    # The bug: these auto-scanned as 'chat' before the shared-table fix.
+    assert _guess_capability("bge-reranker-v2-m3-Q8_0.gguf") == "rerank"
+    assert _guess_capability("bge-reranker-base-f16.gguf") == "rerank"
+    # bge non-reranker stays embed (rerank precedence didn't swallow it).
+    assert _guess_capability("bge-base-en-v1.5.gguf") == "embed"
+    # No vocabulary regression for the other families.
+    assert _guess_capability("ltx-2-19b-dev-fp8.gguf") == "video"
+    assert _guess_capability("nomic-embed-text-v1.gguf") == "embed"
+    assert _guess_capability("whisper-large-v3.gguf") == "asr"
+    assert _guess_capability("llama-3.1-8b-instruct.gguf") == "chat"
+
+
+def test_scan_and_register_reranker_capability(tmp_path: Path, registry: ModelRegistry) -> None:
+    """End-to-end: a NON-curated reranker gguf under a scan root registers with
+    capabilities == ['rerank'] (it registered as ['chat'] before MR-3), while
+    an EXACT curated reranker filename still registers 'rerank' via the curated
+    override branch."""
+    root = tmp_path / "models"
+    root.mkdir()
+    # Non-curated reranker (Q8_0 is not a curated hf_file) → capability_guess.
+    non_curated = root / "bge-reranker-v2-m3-Q8_0.gguf"
+    non_curated.write_bytes(b"r" * 64)
+    # Exact curated reranker filename → curated-override branch.
+    curated = root / "bge-reranker-v2-m3-Q4_K_M.gguf"
+    curated.write_bytes(b"c" * 64)
+
+    cfg = ModelsConfig(roots=[str(root)])
+    scan_and_register(registry, cfg)
+    models = {Path(m.path).name: m for m in registry.list()}
+
+    assert models["bge-reranker-v2-m3-Q8_0.gguf"].capabilities == ["rerank"]
+    # The curated entry masks discover and still yields 'rerank'.
+    curated_model = models["bge-reranker-v2-m3-Q4_K_M.gguf"]
+    assert curated_model.capabilities == ["rerank"]
+    assert curated_model.id == "bge-reranker-v2-m3-q4_k_m"
+
+
 def test_curated_match_by_filename(model_root: Path) -> None:
     """A discovered file whose name matches a curated entry's hf_file
     must surface that curated entry on the candidate."""

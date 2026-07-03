@@ -76,6 +76,74 @@ def classify(model_id: str = "", capabilities: Any = None) -> str:
     return "chat"
 
 
+# ── filename → capability token (MR-3) ───────────────────────────────────────
+#
+# ONE token table feeding both filename heuristics that used to drift:
+# ``registry/discover._guess_capability`` (auto-scan) and
+# ``registry/detect._filename_capability`` (single-file detect). Before this
+# the same "guess capability from a filename" logic lived in three places with
+# three different token sets, so a reranker gguf auto-scanned as ``chat`` in
+# discover while ``classify`` already knew it was ``rerank``.
+#
+# This returns a CAPABILITY token — not a coarse modality bucket like
+# :func:`classify` — or ``None`` when nothing matches. Each caller applies its
+# own default so their output vocabularies stay intact (discover defaults to
+# ``chat``; detect narrows to embed/asr/tts).
+#
+# Ordering is load-bearing: ``rerank`` is tested BEFORE ``embed`` so a
+# "bge-reranker" filename (which also contains the embed token "bge")
+# classifies as ``rerank`` rather than ``embed``.
+
+_RERANK_NAME_TOKENS: tuple[str, ...] = ("rerank",)
+_EMBED_NAME_TOKENS: tuple[str, ...] = ("embed", "bge", "e5", "nomic", "gte-", "jina-embed")
+_VISION_NAME_TOKENS: tuple[str, ...] = ("vl", "vision", "vit")
+_ASR_NAME_TOKENS: tuple[str, ...] = ("whisper", "moonshine", "-asr", "_asr", "asr", "stt")
+_TTS_NAME_TOKENS: tuple[str, ...] = ("tts", "kokoro", "vibevoice", "voice")
+# Clearly-diffusion media families (#940 hardening): classifying these as
+# video/image instead of defaulting to ``chat`` keeps a 25GB video-diffusion
+# gguf out of the chat fallback pool ``SlotManager._fallback_local_model``
+# draws from. Conservative: only well-known families, matched as substrings.
+_VIDEO_NAME_TOKENS: tuple[str, ...] = (
+    "ltx",
+    "wan",
+    "hunyuan-video",
+    "hunyuanvideo",
+    "cogvideo",
+    "svd",
+)
+_IMAGE_NAME_TOKENS: tuple[str, ...] = ("sdxl", "flux", "stable-diffusion", "stable_diffusion")
+
+
+def capability_from_filename(name: str) -> str | None:
+    """Best-effort capability token inferred from a model filename.
+
+    Returns one of ``rerank | embed | vision | asr | tts | video | image``,
+    or ``None`` when no token matches. Matching is a case-insensitive
+    substring test against a single shared token table; ``rerank`` is checked
+    before ``embed`` so cross-encoder rerankers (whose names carry an embed
+    token such as "bge") don't misclassify as embedders.
+
+    Callers apply their own default for the ``None`` case so their existing
+    output vocabularies are preserved (see the module note above).
+    """
+    lower = name.lower()
+    if any(tok in lower for tok in _RERANK_NAME_TOKENS):
+        return "rerank"
+    if any(tok in lower for tok in _EMBED_NAME_TOKENS):
+        return "embed"
+    if any(tok in lower for tok in _VISION_NAME_TOKENS):
+        return "vision"
+    if any(tok in lower for tok in _ASR_NAME_TOKENS):
+        return "asr"
+    if any(tok in lower for tok in _TTS_NAME_TOKENS):
+        return "tts"
+    if any(tok in lower for tok in _VIDEO_NAME_TOKENS):
+        return "video"
+    if any(tok in lower for tok in _IMAGE_NAME_TOKENS):
+        return "image"
+    return None
+
+
 # ── device → recipe/backend mapping ──────────────────────────────────────────
 #
 # Plan §4.1 + ADR-0008 §6 locked the four-way mapping; the result feeds
@@ -216,6 +284,7 @@ def labels_of(cfg: dict[str, Any]) -> set[str]:
 
 __all__ = [
     "canonical_device",
+    "capability_from_filename",
     "classify",
     "device_to_backend",
     "device_to_legacy_backend",

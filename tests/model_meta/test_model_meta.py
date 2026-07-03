@@ -24,12 +24,58 @@ import pytest
 
 from hal0.model_meta import (
     canonical_device,
+    capability_from_filename,
     classify,
     device_to_backend,
     device_to_legacy_backend,
     is_resolvable,
     labels_of,
 )
+
+# ── capability_from_filename ─────────────────────────────────────────────────
+#
+# (filename, expected capability token or None). MR-3: the ONE token table
+# that feeds registry/discover + registry/detect filename heuristics. Pins the
+# vocabulary so a future edit can't silently drop a token — and locks the
+# rerank-before-embed precedence that fixes the reranker→chat auto-scan bug.
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        # rerank is tested before embed, so a bge-reranker → rerank not embed.
+        ("bge-reranker-v2-m3.gguf", "rerank"),
+        ("jina-reranker-v2-base.gguf", "rerank"),
+        # embed family (the union of every prior site's embed tokens).
+        ("nomic-embed-text.gguf", "embed"),
+        ("bge-base-en-v1.5.gguf", "embed"),
+        ("e5-mistral-7b.safetensors", "embed"),
+        ("gte-large.gguf", "embed"),
+        ("jina-embeddings-v3.gguf", "embed"),
+        # vision.
+        ("qwen2-vl-7b-instruct.gguf", "vision"),
+        ("some-vision-model.gguf", "vision"),
+        # asr.
+        ("whisper-large-v3.gguf", "asr"),
+        ("moonshine-base.onnx", "asr"),
+        ("parakeet-asr.gguf", "asr"),
+        # tts.
+        ("kokoro-82m.pth", "tts"),
+        ("vibevoice-1.5b.safetensors", "tts"),
+        ("some-tts-model.gguf", "tts"),
+        # diffusion media (#940 hardening).
+        ("ltx-2-19b-dev-fp8.gguf", "video"),
+        ("wan2.1-t2v-14b.gguf", "video"),
+        ("flux1-dev.gguf", "image"),
+        ("sdxl-base-1.0.safetensors", "image"),
+        # No token → None (caller applies its own default; never "chat" here).
+        ("qwen2.5-7b.gguf", None),
+        ("llama-3.1-8b-instruct.gguf", None),
+    ],
+)
+def test_capability_from_filename(name: str, expected: str | None) -> None:
+    assert capability_from_filename(name) == expected
+
 
 # ── classify ─────────────────────────────────────────────────────────────────
 #
