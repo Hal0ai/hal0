@@ -38,6 +38,7 @@ from hal0.capabilities.config import (
     save_capabilities_config,
 )
 from hal0.capabilities.orchestrator import _CHILD_TO_CAPABILITY
+from hal0.config.locking import file_lock
 from hal0.registry.store import ModelRegistry
 
 app = typer.Typer(
@@ -104,94 +105,102 @@ def migrate(
 
     Idempotent — running it twice is a no-op once everything is legal.
     """
-    cfg = load_capabilities_config()
-    registry = ModelRegistry()
+    # SC-10: the load → diff → save is one read-modify-write. Hold the same
+    # capabilities.toml advisory lock the running API uses so a ``migrate``
+    # invoked while hal0-api is applying a selection cannot read a stale copy
+    # and clobber the API's concurrent write (or vice-versa). The lock spans
+    # the whole span — locking only the ``save`` would leave the stale read
+    # unguarded. Dry-run holds it too (cheap) so the preview reflects a
+    # consistent snapshot.
+    with file_lock(capabilities_toml_path()):
+        cfg = load_capabilities_config()
+        registry = ModelRegistry()
 
-    changes: list[dict[str, str]] = []
-    for slot, children in cfg.selections.items():
-        for child, sel in children.items():
-            capability = _CHILD_TO_CAPABILITY.get((slot, child))
-            if capability is None:
-                continue
-            verdict, legal = _classify_pair(capability, sel.model, sel.backend, registry)
-            if verdict in {"empty", "ok"}:
-                continue
-            if verdict == "illegal_backend":
-                new_backend = legal[0] if legal else ""
-                # Re-resolve provider against the matching row so the
-                # slot rewrite uses the right runtime tag.
-                rows = models_for_capability(capability, registry=registry)
-                row = next((r for r in rows if r["id"] == sel.model), None)
-                new_provider = ""
-                if row is not None:
-                    backend_meta = next(
-                        (b for b in row.get("backends", []) if b["id"] == new_backend),
-                        None,
+        changes: list[dict[str, str]] = []
+        for slot, children in cfg.selections.items():
+            for child, sel in children.items():
+                capability = _CHILD_TO_CAPABILITY.get((slot, child))
+                if capability is None:
+                    continue
+                verdict, legal = _classify_pair(capability, sel.model, sel.backend, registry)
+                if verdict in {"empty", "ok"}:
+                    continue
+                if verdict == "illegal_backend":
+                    new_backend = legal[0] if legal else ""
+                    # Re-resolve provider against the matching row so the
+                    # slot rewrite uses the right runtime tag.
+                    rows = models_for_capability(capability, registry=registry)
+                    row = next((r for r in rows if r["id"] == sel.model), None)
+                    new_provider = ""
+                    if row is not None:
+                        backend_meta = next(
+                            (b for b in row.get("backends", []) if b["id"] == new_backend),
+                            None,
+                        )
+                        if backend_meta is not None:
+                            new_provider = backend_meta.get("provider", "") or ""
+                    changes.append(
+                        {
+                            "slot": slot,
+                            "child": child,
+                            "model": sel.model,
+                            "before": f"{sel.backend or '—'} / {sel.provider or '—'}",
+                            "after": f"{new_backend or '—'} / {new_provider or '—'}",
+                            "reason": "backend cannot serve model",
+                        }
                     )
-                    if backend_meta is not None:
-                        new_provider = backend_meta.get("provider", "") or ""
-                changes.append(
-                    {
-                        "slot": slot,
-                        "child": child,
-                        "model": sel.model,
-                        "before": f"{sel.backend or '—'} / {sel.provider or '—'}",
-                        "after": f"{new_backend or '—'} / {new_provider or '—'}",
-                        "reason": "backend cannot serve model",
-                    }
-                )
-                if not dry_run:
-                    children[child] = CapabilitySelection(
-                        backend=new_backend,
-                        provider=new_provider,
-                        model=sel.model,
-                        enabled=sel.enabled,
+                    if not dry_run:
+                        children[child] = CapabilitySelection(
+                            backend=new_backend,
+                            provider=new_provider,
+                            model=sel.model,
+                            enabled=sel.enabled,
+                        )
+                elif verdict == "unknown_model":
+                    changes.append(
+                        {
+                            "slot": slot,
+                            "child": child,
+                            "model": sel.model,
+                            "before": f"{sel.backend or '—'} / {sel.provider or '—'}",
+                            "after": "(cleared)",
+                            "reason": "model not in catalog",
+                        }
                     )
-            elif verdict == "unknown_model":
-                changes.append(
-                    {
-                        "slot": slot,
-                        "child": child,
-                        "model": sel.model,
-                        "before": f"{sel.backend or '—'} / {sel.provider or '—'}",
-                        "after": "(cleared)",
-                        "reason": "model not in catalog",
-                    }
-                )
-                if not dry_run:
-                    children[child] = CapabilitySelection(
-                        backend=sel.backend,
-                        provider=sel.provider,
-                        model="",
-                        enabled=False,
-                    )
+                    if not dry_run:
+                        children[child] = CapabilitySelection(
+                            backend=sel.backend,
+                            provider=sel.provider,
+                            model="",
+                            enabled=False,
+                        )
 
-    if not changes:
+        if not changes:
+            console.print(
+                f"[green]nothing to migrate[/green] — every selection in "
+                f"{capabilities_toml_path()} is legal against the current catalog."
+            )
+            raise typer.Exit(0)
+
+        table = Table(title="capabilities migrate")
+        table.add_column("slot", style="bold")
+        table.add_column("child")
+        table.add_column("model")
+        table.add_column("before")
+        table.add_column("after")
+        table.add_column("reason")
+        for c in changes:
+            table.add_row(c["slot"], c["child"], c["model"], c["before"], c["after"], c["reason"])
+        console.print(table)
+
+        if dry_run:
+            console.print(
+                f"\n[yellow]--dry-run[/yellow] — {len(changes)} selection(s) "
+                f"would be rewritten in {capabilities_toml_path()}."
+            )
+            raise typer.Exit(0)
+
+        save_capabilities_config(cfg)
         console.print(
-            f"[green]nothing to migrate[/green] — every selection in "
-            f"{capabilities_toml_path()} is legal against the current catalog."
+            f"\n[green]migrated[/green] {len(changes)} selection(s) in {capabilities_toml_path()}."
         )
-        raise typer.Exit(0)
-
-    table = Table(title="capabilities migrate")
-    table.add_column("slot", style="bold")
-    table.add_column("child")
-    table.add_column("model")
-    table.add_column("before")
-    table.add_column("after")
-    table.add_column("reason")
-    for c in changes:
-        table.add_row(c["slot"], c["child"], c["model"], c["before"], c["after"], c["reason"])
-    console.print(table)
-
-    if dry_run:
-        console.print(
-            f"\n[yellow]--dry-run[/yellow] — {len(changes)} selection(s) "
-            f"would be rewritten in {capabilities_toml_path()}."
-        )
-        raise typer.Exit(0)
-
-    save_capabilities_config(cfg)
-    console.print(
-        f"\n[green]migrated[/green] {len(changes)} selection(s) in {capabilities_toml_path()}."
-    )

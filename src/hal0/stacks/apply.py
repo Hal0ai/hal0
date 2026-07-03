@@ -242,8 +242,14 @@ class StackApplyEngine:
         tmpfile+fsync+rename; a mid-set failure restores every already-written
         file to its ``before`` snapshot and re-raises — disk is never left
         half-reconciled. A no-op ChangeSet (nothing changed) writes nothing.
+
+        SC-10: the commit runs under the store's shared advisory lock so a
+        stack apply and a concurrent capability apply (which reconcile the same
+        ``slots/*.toml`` surface) serialize rather than interleaving their
+        writes.
         """
-        self._store.commit(plan.change_set)
+        with self._store.transaction():
+            self._store.commit(plan.change_set)
 
     # ── drift / active pointer ───────────────────────────────────────────────
 

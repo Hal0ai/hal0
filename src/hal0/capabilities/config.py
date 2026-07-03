@@ -277,34 +277,45 @@ def auto_migrate_capabilities_file(path: Path | None = None) -> bool:
     """
     import os
 
+    from hal0.config.locking import file_lock
+
     target = Path(path) if path is not None else capabilities_toml_path()
-    if not target.exists():
-        return False
 
-    with open(target, "rb") as f:
-        raw = tomllib.load(f)
+    # SC-10: the read → rename-backup → replace → write is one read-modify-write
+    # that must not race a concurrent capabilities.toml writer (this runs at
+    # hal0-api boot AND from the CLI ``migrate*`` commands). Hold the same
+    # advisory lock every other writer uses; the check is re-done inside the
+    # lock so a peer that migrated while we blocked short-circuits. The lock is
+    # re-entrant, so calling this from an already-locked ``initialize_if_missing``
+    # does not self-deadlock.
+    with file_lock(target):
+        if not target.exists():
+            return False
 
-    current_version = read_schema_version(raw)
-    if current_version >= CAPABILITIES_SCHEMA_VERSION_CURRENT:
-        return False
+        with open(target, "rb") as f:
+            raw = tomllib.load(f)
 
-    backup = capabilities_v1_backup_path(target)
-    # Atomic-rename live → .v1.bak. If a stale backup exists (a prior
-    # migration that crashed mid-write), refuse to clobber it — the
-    # operator will see the live file untouched on next boot.
-    if backup.exists():
-        log.warning(
-            "capabilities.migrate.backup_exists",
-            extra={"path": str(backup)},
-        )
-    else:
-        os.replace(target, backup)
+        current_version = read_schema_version(raw)
+        if current_version >= CAPABILITIES_SCHEMA_VERSION_CURRENT:
+            return False
 
-    migrated = migrate_capabilities_v1_to_v2(raw)
-    # Validate before write — a malformed migration output should never
-    # land on disk. ``model_validate`` raises with the offending path.
-    CapabilityConfig.model_validate(migrated)
-    write_toml_atomic(target, migrated)
+        backup = capabilities_v1_backup_path(target)
+        # Atomic-rename live → .v1.bak. If a stale backup exists (a prior
+        # migration that crashed mid-write), refuse to clobber it — the
+        # operator will see the live file untouched on next boot.
+        if backup.exists():
+            log.warning(
+                "capabilities.migrate.backup_exists",
+                extra={"path": str(backup)},
+            )
+        else:
+            os.replace(target, backup)
+
+        migrated = migrate_capabilities_v1_to_v2(raw)
+        # Validate before write — a malformed migration output should never
+        # land on disk. ``model_validate`` raises with the offending path.
+        CapabilityConfig.model_validate(migrated)
+        write_toml_atomic(target, migrated)
 
     log.info(
         "migrated capabilities.toml from schema_version=%d to %d",
