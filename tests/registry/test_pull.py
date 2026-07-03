@@ -402,6 +402,31 @@ def test_sweep_orphaned_partials_missing_tmp_dir_is_noop(tmp_hal0_home: str) -> 
     assert sweep_orphaned_partials() == 0
 
 
+def test_sweep_orphaned_partials_reaps_stale_resume_sidecars(tmp_hal0_home: str) -> None:
+    """A stale .part.json resume sidecar is reaped too, not left to linger."""
+    tmp = _tmp_dir()
+    tmp.mkdir(parents=True, exist_ok=True)
+    old = time.time() - 48 * 3600
+
+    stale_part = tmp / "modelA.part"
+    stale_part.write_bytes(b"partial")
+    stale_sidecar = tmp / "modelA.part.json"
+    stale_sidecar.write_text('{"bytes": 7}', encoding="utf-8")
+    for p in (stale_part, stale_sidecar):
+        os.utime(p, (old, old))
+
+    # A fresh sidecar from an in-flight pull must survive.
+    fresh_sidecar = tmp / "modelB.part.json"
+    fresh_sidecar.write_text('{"bytes": 3}', encoding="utf-8")
+
+    removed = sweep_orphaned_partials()
+
+    assert removed == 2  # stale .part + its stale sidecar
+    assert not stale_part.exists()
+    assert not stale_sidecar.exists()
+    assert fresh_sidecar.exists()
+
+
 # ── MR-7: resume / partial-download support ──────────────────────────────────
 
 

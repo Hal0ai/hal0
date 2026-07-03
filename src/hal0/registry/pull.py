@@ -274,14 +274,18 @@ _PARTIAL_MAX_AGE_S: float = 24 * 3600  # reap .part files idle > 24h
 def sweep_orphaned_partials(max_age_s: float = _PARTIAL_MAX_AGE_S) -> int:
     """Delete stale ``*.part`` staging files left by SIGKILL/OOM mid-pull.
 
-    Best-effort, fail-soft. Only removes ``*.part`` files whose mtime is
-    older than ``max_age_s`` so a concurrently-downloading partial (whose
-    mtime advances as it grows) is never reaped. Returns count removed.
+    Best-effort, fail-soft. Only removes ``*.part`` files (and their
+    ``*.part.json`` resume sidecars) whose mtime is older than ``max_age_s``
+    so a concurrently-downloading partial (whose mtime advances as it grows)
+    is never reaped. Sidecars are swept too so a reaped-but-not-resumed
+    partial doesn't leave its sidecar lingering. Returns count removed.
     """
     tmp_dir = _tmp_dir()
     removed = 0
     try:
-        entries = list(tmp_dir.glob("*.part"))
+        # Both the partial and its resume sidecar (MR-7); once a .part is stale
+        # enough to reap, its resume coordinates are worthless too.
+        entries = list(tmp_dir.glob("*.part")) + list(tmp_dir.glob("*.part.json"))
     except OSError:
         return 0
     now = time.time()
@@ -566,7 +570,12 @@ async def run_pull(
     tmp_dir.mkdir(parents=True, exist_ok=True)
     # Deterministic staging name (MR-7) so a prior interrupted pull can be
     # found and resumed. The JSON sidecar next to it records the resume
-    # coordinates (url, etag, bytes-on-disk, total).
+    # coordinates (url, etag, bytes-on-disk, total). TRADEOFF: unlike the old
+    # random-tag name, this is not isolated across two concurrent pulls of the
+    # SAME model_id. In-process pulls are deduped by model_pull_jobs
+    # (routes/models.pull_model), so the only unguarded case is two SEPARATE
+    # processes pulling the identical id at once (rare — not an expected flow);
+    # resumability is worth that edge.
     sanitised = _sanitise_id(job.model_id)
     part = tmp_dir / f"{sanitised}.part"
     sidecar = tmp_dir / f"{sanitised}.part.json"
