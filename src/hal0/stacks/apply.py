@@ -156,6 +156,30 @@ class StackApplyEngine:
             summary=summary,
         )
 
+    def validate(
+        self,
+        stack: StackConfig,
+        known_profiles: set[str],
+        known_models: set[str],
+    ) -> list[str]:
+        """Pre-apply sanity check: flag entries whose profile/model won't resolve.
+
+        Import-light on purpose — the caller passes the known profile-name and
+        model-id sets (already loaded at the route layer). Returns one
+        human-readable warning per unresolved reference so the dry-run preview
+        and a real apply can flag that runtime will silently diverge from the
+        stack (e.g. a slot pinned to a profile absent from the local catalog, or
+        a model id not in the registry). Advisory only: apply still proceeds and
+        converge records its own per-slot lifecycle errors separately.
+        """
+        warnings: list[str] = []
+        for entry in stack.slots:
+            if entry.profile and entry.profile not in known_profiles:
+                warnings.append(f"{entry.slot}: profile {entry.profile!r} not found")
+            if entry.model and entry.model not in known_models:
+                warnings.append(f"{entry.slot}: model {entry.model!r} not in registry")
+        return warnings
+
     def _reconciled_stack_slot(
         self, before: dict[str, Any] | None, entry: StackSlotEntry
     ) -> dict[str, Any] | None:

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -172,6 +173,81 @@ async def test_run_pull_persists_failed_snapshot_on_error(tmp_hal0_home: str) ->
     assert snapshot.exists()
     persisted = json.loads(snapshot.read_text(encoding="utf-8"))
     assert persisted["state"] == "failed"
+
+
+# ── MR-4: disk-space preflight before streaming ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_pull_fails_fast_when_content_length_exceeds_free_disk(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MR-4: a pull whose advertised size exceeds free disk fails fast with
+    model.insufficient_disk BEFORE streaming the body (no .part, no final)."""
+    body = _payload(4096)
+
+    # Advertise a large content-length, but report almost no free space.
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, headers={"Content-Length": str(40 * 1024**3)})
+
+    monkeypatch.setattr(
+        "hal0.registry.pull.shutil.disk_usage",
+        lambda _p: SimpleNamespace(total=100, used=99, free=1024),
+    )
+
+    job = make_job("too-big")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/too-big-GGUF",
+            hf_file="too-big.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "failed"
+    assert job.error_code == "model.insufficient_disk"
+    # Nothing was written: no bytes downloaded, no final path recorded.
+    assert job.bytes_downloaded == 0
+    assert job.path is None
+    # The failed snapshot is still persisted (Wave 2 MR-1 finally).
+    persisted = json.loads(pull_job_file("too-big").read_text(encoding="utf-8"))
+    assert persisted["state"] == "failed"
+    assert persisted["error_code"] == "model.insufficient_disk"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_proceeds_when_disk_probe_unavailable(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MR-4: if the free-space probe raises, the pull must NOT fail on that —
+    it falls through to the existing stream-until-ENOSPC behavior."""
+    body = _payload(2048)
+
+    def raise_oserror(_p: object) -> object:
+        raise OSError("statvfs unavailable")
+
+    monkeypatch.setattr("hal0.registry.pull.shutil.disk_usage", raise_oserror)
+
+    job = make_job("probe-fails")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=_ok_handler(body))
+    try:
+        await run_pull(
+            job,
+            hf_repo="Hal0ai/probe-GGUF",
+            hf_file="probe.gguf",
+            registry=registry,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert job.state == "completed", f"probe failure must not fail the pull: {job.error}"
 
 
 @pytest.mark.asyncio

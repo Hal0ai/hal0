@@ -37,6 +37,7 @@ from hal0.api._audit import record_action
 from hal0.config import paths
 from hal0.config.schema import StackConfig
 from hal0.errors import BadRequest
+from hal0.profiles import ProfileCatalog
 from hal0.stacks import ResolvedStack, StacksCatalog
 from hal0.stacks.apply import StackApplyEngine
 from hal0.stacks.portable import (
@@ -201,6 +202,31 @@ async def _create_missing_slots(
     return created, errors
 
 
+def _known_profile_names() -> set[str]:
+    """Profile names in the local catalog (seed-merged); empty on read failure.
+
+    Feeds ``StackApplyEngine.validate`` so apply can flag a slot pinned to a
+    profile this host doesn't have. Best-effort: a malformed profiles.toml must
+    not sink the apply preview.
+    """
+    try:
+        return {p.name for p in ProfileCatalog().list()}
+    except Exception:  # pragma: no cover — advisory validation, never fatal
+        return set()
+
+
+def _known_model_ids(request: Request) -> set[str]:
+    """Model ids in the live registry; empty when the registry is unavailable.
+
+    Feeds ``StackApplyEngine.validate`` so apply can flag a slot whose model id
+    isn't registered on this host.
+    """
+    try:
+        return {m.id for m in _registry(request).list()}
+    except Exception:  # pragma: no cover — advisory validation, never fatal
+        return set()
+
+
 def _diff_rows(plan: Any) -> list[dict[str, Any]]:
     """Per-slot before→after model summary for the dry-run preview UI."""
     rows: list[dict[str, Any]] = []
@@ -339,7 +365,8 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
     cfg = _config_of(resolved)
 
     if dry_run:
-        plan = StackApplyEngine().plan(slug, cfg)
+        engine = StackApplyEngine()
+        plan = engine.plan(slug, cfg)
         return {
             "stack": slug,
             "dry_run": True,
@@ -347,6 +374,8 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
             "changes": _diff_rows(plan),
             # Slots the stack names that don't exist yet — apply will create them.
             "creates": _missing_slot_names(cfg),
+            # Profile/model refs that won't resolve on this host (silent divergence).
+            "warnings": engine.validate(cfg, _known_profile_names(), _known_model_ids(request)),
         }
 
     slot_manager = getattr(request.app.state, "slot_manager", None)
@@ -390,6 +419,8 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
         "summary": plan.summary,
         "changes": _diff_rows(plan),
         "converged": converged,
+        # Same pre-apply divergence flags the dry-run preview surfaces.
+        "warnings": engine.validate(cfg, _known_profile_names(), _known_model_ids(request)),
     }
 
 

@@ -1735,7 +1735,25 @@ class SlotManager:
         # operator error and raises.
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
         await self._check_npu_exclusivity(slot_name, cfg_dict)
+        # SC-4: refuse a second default=true slot of the same type before
+        # the TOML lands on disk (belt to default_slot_for's routing-time
+        # suspenders). Fast fast path when this write isn't a new default.
+        await self._check_default_uniqueness(slot_name, cfg_dict)
         cfg_path = self._config_file(slot_name)
+        # SC-5: refuse to clobber an existing slot's config. Without this,
+        # a duplicate create() overwrote the on-disk TOML and force-reset
+        # state.json to OFFLINE, orphaning any running container. Most
+        # internal reconcile callers pre-check cfg_path.exists() before
+        # create() (orchestrator, backends, stacks._create_missing_slots),
+        # so they never reach this guard; install/orchestrate does NOT
+        # pre-check but wraps create() in a best-effort except, so a
+        # duplicate degrades to a per-slot error rather than a crash.
+        # add_slot and POST /api/slots surface the conflict to the caller.
+        if cfg_path.exists():
+            raise SlotConfigError(
+                f"slot {slot_name!r} already exists; use update to modify it",
+                details={"slot": slot_name, "config": str(cfg_path)},
+            )
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             write_slot_toml(cfg_path, cfg_dict)
@@ -1839,6 +1857,13 @@ class SlotManager:
         # §5.3). Cheap when no NPU LLM is involved — the helper short-
         # circuits on the merged cfg's own device/type.
         await self._check_npu_exclusivity(slot_name, cfg_dict)
+
+        # SC-4: a PATCH that flips default=true (even when ``type`` lives
+        # only on the pre-existing config) is checked against the merged
+        # cfg_dict — the authoritative post-merge state, same as the NPU
+        # guard. The peer walk excludes slot_name, so re-persisting the
+        # sole default never self-conflicts.
+        await self._check_default_uniqueness(slot_name, cfg_dict)
 
         cfg_path = self._config_file(slot_name)
         try:
@@ -2050,6 +2075,71 @@ class SlotManager:
                     "slot": slot_name,
                     "conflicting_slots": sorted(offenders),
                     "hint": "disable the existing NPU LLM slot before enabling another",
+                },
+            )
+
+    async def _check_default_uniqueness(
+        self,
+        slot_name: str,
+        cfg_dict: dict[str, Any],
+    ) -> None:
+        """Reject a write that would land a second ``default=true`` per type.
+
+        SC-4 (CONTEXT.md §defaults): exactly one ``default = true`` slot
+        is allowed per ``type``. :meth:`default_slot_for` already raises
+        at routing time when two defaults slip onto disk; this guard is
+        the belt to that suspenders — it refuses the offending write on
+        every ``create()`` and ``update_config()`` so the second default
+        never reaches disk.
+
+        Cheap fast path: the write only introduces a conflict when the
+        slot being written is itself ``default=true``. A write that
+        clears or leaves the default alone can't create a new collision,
+        so it returns immediately (mirrors the NPU guard's "not the
+        constrained kind → return"). We deliberately do NOT retroactively
+        reject writes to unrelated slots just because two stale defaults
+        already exist on disk — that's the routing check's job, and
+        firing here would brick legitimate edits.
+
+        On the slow path we walk the other configured slots, keying on
+        the merged ``cfg_dict``'s own ``type``, and collect any peer of
+        the same type that is already ``default=true``. Reading the
+        writer's own slot is skipped — the in-memory ``cfg_dict`` IS the
+        authoritative new state.
+        """
+        if cfg_dict.get("default") is not True:
+            return
+        type_ = cfg_dict.get("type")
+        if not type_:
+            return
+        # Walk peers. Use _all_configured_slot_names() so we see slots
+        # whose TOML exists but whose in-memory state hasn't been hit
+        # yet (e.g. installer-seeded slots before first poll).
+        peer_names = [n for n in self._all_configured_slot_names() if n != slot_name]
+        offenders: list[str] = []
+        for name in peer_names:
+            try:
+                peer = await self._load_slot_config(name)
+            except SlotConfigError:
+                # Malformed TOML doesn't block the user's legitimate
+                # write — surface the malformed-slot warning via the
+                # usual path instead of conflating it here.
+                continue
+            except SlotNotFound:
+                continue
+            if peer.get("type") != type_:
+                continue
+            if peer.get("default") is True:
+                offenders.append(name)
+        if offenders:
+            raise SlotConfigError(
+                f"slot type {type_!r} already has a default=true slot "
+                f"(slot {slot_name!r} would conflict with {offenders[0]!r})",
+                details={
+                    "slot": slot_name,
+                    "type": type_,
+                    "conflicting_slots": sorted(offenders),
+                    "hint": "clear the existing default before setting another",
                 },
             )
 
