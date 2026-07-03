@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hal0.config.schema import ModelsConfig
+from hal0.model_meta import capability_from_filename
 from hal0.registry.curated import CURATED_MODELS, CuratedModel
 from hal0.registry.model import Model
 from hal0.registry.store import ModelAlreadyExists, ModelRegistry
@@ -111,36 +112,17 @@ def _normalise_id(stem: str) -> str:
     return collapsed or "model"
 
 
-# Filename tokens that mark an image/video diffusion artifact. Classifying
-# these as ``image``/``video`` (instead of defaulting to ``chat``) keeps them
-# out of the chat candidate pool that ``SlotManager._fallback_local_model``
-# draws from — the live ltx-2 incident, where a 25GB video diffusion gguf was
-# default-guessed ``chat`` and selected as the chat slot's fallback. The
-# fallback's own diffusion guard is the must-have backstop; this is defence in
-# depth at the source. Conservative: only well-known families, matched as
-# substrings of the lower-cased filename.
-_VIDEO_NAME_TOKENS = ("ltx", "wan", "hunyuan-video", "hunyuanvideo", "cogvideo", "svd")
-_IMAGE_NAME_TOKENS = ("sdxl", "flux", "stable-diffusion", "stable_diffusion")
-
-
 def _guess_capability(filename: str) -> str:
-    """Best-effort capability inference from the filename."""
-    lower = filename.lower()
-    if any(tok in lower for tok in ("embed", "nomic")):
-        return "embed"
-    if any(tok in lower for tok in ("vl", "vision", "vit")):
-        return "vision"
-    if any(tok in lower for tok in ("tts", "voice", "kokoro", "vibevoice")):
-        return "tts"
-    if any(tok in lower for tok in ("whisper", "moonshine", "asr", "stt")):
-        return "asr"
-    # Clearly-diffusion media: classify as image/video rather than the chat
-    # default so they never pollute the chat fallback pool (#940 hardening).
-    if any(tok in lower for tok in _VIDEO_NAME_TOKENS):
-        return "video"
-    if any(tok in lower for tok in _IMAGE_NAME_TOKENS):
-        return "image"
-    return "chat"
+    """Best-effort capability inference from the filename.
+
+    Delegates to the single shared token table in
+    :func:`hal0.model_meta.capability_from_filename` (MR-3) so the auto-scan,
+    single-file detect, and ``classify`` heuristics can no longer drift.
+    Reranker filenames now yield ``rerank`` instead of the old ``chat``
+    default. ``chat`` remains the default for unrecognised filenames — the
+    #940 backstop contract ``SlotManager._fallback_local_model`` relies on.
+    """
+    return capability_from_filename(filename) or "chat"
 
 
 def _match_curated(filename: str) -> CuratedModel | None:

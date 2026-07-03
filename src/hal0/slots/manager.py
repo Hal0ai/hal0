@@ -39,8 +39,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
-from hal0.slot_config import write_slot_toml
+from hal0.slot_config import merge_slot_config, write_slot_toml
 from hal0.slots.state import (
+    DISPATCHABLE_STATES,
     IllegalSlotTransition,
     NpuExclusivityViolation,
     SlotConfigError,
@@ -120,9 +121,10 @@ _SLOT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 # inactive underneath us the watcher flips state and emits an SSE
 # frame within ~1s.
 _FAIL_WATCH_INTERVAL_S: float = 2.0
-_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
-    {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
-)
+#: The "live" states the fail-watcher polls are exactly the dispatchable
+#: ready-set (container up and usable) — alias the one canonical set (DR-8)
+#: rather than re-declaring the literal.
+_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES
 # #783/B4: an active unit is not necessarily healthy. The watcher also probes
 # the model server's /health; a crashed-but-active server (active unit, failing
 # /health) is demoted to ERROR — but only after this many CONSECUTIVE failures,
@@ -515,11 +517,10 @@ class SlotManager:
     # ── public readiness interface (issue #696) ─────────────────────────────
 
     #: States in which a slot is safe to dispatch inference requests to.
-    #: Single source of truth per #696 — never duplicate inline.
+    #: Single source of truth per #696 / DR-8 — aliases the one canonical set
+    #: in ``hal0.slots.state`` so this class never re-declares the literal.
     #: Sync read so call sites in the hot dispatch path pay zero await overhead.
-    _DISPATCHABLE_STATES: frozenset[SlotState] = frozenset(
-        {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
-    )
+    _DISPATCHABLE_STATES: frozenset[SlotState] = DISPATCHABLE_STATES
 
     def state(self, name: str) -> SlotState:
         """Return the current :class:`SlotState` for *name*.
@@ -1822,27 +1823,24 @@ class SlotManager:
         self._ensure_known(slot_name)
         cfg = await self._load_slot_config(slot_name)
         cfg_dict = _cfg_to_dict(cfg)
-        # One-level deep merge for nested TOML tables ([model], [server]).
+        # One-level deep merge for nested TOML tables ([model], [server]) plus
+        # the #585 ctx_size→context_size fold, via the shared, copy-safe
+        # ``merge_slot_config`` primitive (SC-11) — the SAME projection the
+        # SlotConfigStore uses, so the two can't silently diverge.
+        #
         # A bare shallow ``dict.update`` replaced a sub-table wholesale, so a
         # partial ``PATCH /defaults`` body like ``{"model": {"ctx_size": N}}``
         # silently dropped sibling keys — most damagingly ``[model].default``
         # (the model name), which left the slot unable to resolve a model and
         # turned the dashboard Start button into a silent no-op after a
-        # restart. Merge sub-table dicts key-by-key so partial updates only
-        # touch the fields they carry; scalars and lists still replace
-        # wholesale (predictable, and no caller relies on list-merge).
-        for key, value in updates.items():
-            existing = cfg_dict.get(key)
-            if isinstance(existing, dict) and isinstance(value, dict):
-                merged = dict(existing)
-                merged.update(value)
-                cfg_dict[key] = merged
-            else:
-                cfg_dict[key] = value
-
-        # #585: the dashboard writes [model].ctx_size; canonicalize to
-        # context_size so the two keys can't diverge on disk.
-        _normalize_ctx_key(cfg_dict)
+        # restart. The helper merges sub-table dicts key-by-key so partial
+        # updates only touch the fields they carry; scalars and lists still
+        # replace wholesale (predictable, and no caller relies on list-merge).
+        # It also folds the dashboard's legacy ``[model].ctx_size`` alias into
+        # the canonical ``context_size`` (#585) so the two keys can't diverge
+        # on disk. ``merge_slot_config`` returns a fresh dict, so rebind
+        # ``cfg_dict`` before the downstream reconcile/guard calls below.
+        cfg_dict = merge_slot_config(cfg_dict, updates)
 
         # Keep device↔profile backend coherent: a profile switch re-derives
         # device (the drawer path that previously left a vulkan device under a
@@ -3209,6 +3207,13 @@ def _base_profile_for_backend(catalog: Any, backend: str) -> str:
 
     Prefers the seed profile named after the backend (``rocm`` / ``vulkan``);
     falls back to any non-MTP then any profile that declares ``backend``.
+
+    This is the deliberate *non-MTP* counterpart of
+    :func:`hal0.install.profile_derive.derive_profile`'s ``rocm-dnse``
+    preference: it answers backend→base-profile from the live catalog so a
+    drawer device-flip re-derives a plain base image (``rocm``/``vulkan``) and
+    never silently switches a slot onto the MTP ``rocm-dnse`` image. Do NOT
+    fold it into the device→profile helper (finding PS-4).
     """
     named = catalog.profile.get(backend)
     if named is not None and getattr(named, "backend", None) == backend:

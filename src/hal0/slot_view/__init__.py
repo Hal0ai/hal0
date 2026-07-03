@@ -176,22 +176,23 @@ def serialize_slot(slot: Any, model_cache: dict[str, Any] | None = None) -> dict
 
 # ── loaded-model derivation ──────────────────────────────────────────────────
 
-#: Dispatchable ready-set (#696) — mirrors SlotManager.is_ready_for_dispatch.
-_READY_STATES = frozenset({"ready", "serving", "idle"})
-
 
 def loaded_model_names_from_slots(slots: list[Any]) -> set[str]:
     """Model ids currently served by dispatchable slots.
 
     Derives the loaded set from Slot snapshots: a model counts as
     loaded when its slot is in the dispatchable ready-set (READY /
-    SERVING / IDLE, per #696). Junk entries are skipped.
+    SERVING / IDLE, per #696 / DR-8). Junk entries are skipped.
     """
+    # Lazy import: top-level ``from hal0.slots...`` would cycle (hal0.slots
+    # __init__ pulls in the heavy manager, which imports this module). Mirror
+    # the pattern used in ``serialize_slot`` above. ``is_dispatchable_state``
+    # owns the shared str/StrEnum normalisation, so pass the raw snapshot state.
+    from hal0.slots.state import is_dispatchable_state
+
     names: set[str] = set()
     for slot in slots:
-        raw_state = getattr(slot, "state", "")
-        state = str(getattr(raw_state, "value", raw_state) or "").lower()
-        if state not in _READY_STATES:
+        if not is_dispatchable_state(getattr(slot, "state", "")):
             continue
         model_id = getattr(slot, "model_id", None)
         if isinstance(model_id, str) and model_id:
