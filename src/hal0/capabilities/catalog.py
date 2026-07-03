@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 from hal0.config.loader import load_hardware_info
-from hal0.config.schema import DEVICE_DEFAULT_PROFILES
 from hal0.errors import Hal0Error
 from hal0.model_fit import evaluate_model_fit
 from hal0.profiles import ProfileCatalog, ResolvedProfile
@@ -745,20 +744,14 @@ def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
 
     Mirrors CapabilityOrchestrator's conservative inference so picker and
     apply use the same model/profile/slot compatibility rules until the
-    selection schema carries an explicit profile.
+    selection schema carries an explicit profile. Both surfaces share the
+    single :func:`hal0.capabilities.profile_fit.profile_name_for_fit` rule.
     """
-    profile_name: str | None = None
-    if capability == "tts":
-        # Engine switch within the tts slot — GPU resolves Qwen3, CPU Kokoro.
-        # Must precede the generic gpu→llama branch (a TTS slot never runs the
-        # rocm/vulkan llama profile). See ``tts_profile_for_device``.
-        profile_name = tts_profile_for_device(device)
-    elif device == "npu":
-        profile_name = DEVICE_DEFAULT_PROFILES.get("npu")
-    elif device in {"gpu-rocm", "gpu-vulkan"}:
-        profile_name = DEVICE_DEFAULT_PROFILES.get(device)
-    elif capability == "image":
-        profile_name = "comfyui"
+    # Local import: profile_fit imports tts_profile_for_device from this
+    # module, so a top-level import here would be circular.
+    from hal0.capabilities.profile_fit import profile_name_for_fit
+
+    profile_name = profile_name_for_fit(capability, device)
     if not profile_name:
         return None
     try:

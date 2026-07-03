@@ -3209,6 +3209,13 @@ def _base_profile_for_backend(catalog: Any, backend: str) -> str:
 
     Prefers the seed profile named after the backend (``rocm`` / ``vulkan``);
     falls back to any non-MTP then any profile that declares ``backend``.
+
+    This is the deliberate *non-MTP* counterpart of
+    :func:`hal0.install.profile_derive.derive_profile`'s ``rocm-dnse``
+    preference: it answers backend→base-profile from the live catalog so a
+    drawer device-flip re-derives a plain base image (``rocm``/``vulkan``) and
+    never silently switches a slot onto the MTP ``rocm-dnse`` image. Do NOT
+    fold it into the device→profile helper (finding PS-4).
     """
     named = catalog.profile.get(backend)
     if named is not None and getattr(named, "backend", None) == backend:
