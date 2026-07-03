@@ -635,8 +635,14 @@ async def run_flm_pull(
             )
 
         # Refresh the catalog so subsequent /api/capabilities picks up
-        # the new installed=true flag without a process restart.
+        # the new installed=true flag without a process restart. Also drop
+        # the cached NPU image-present probe so a first FLM pull (which may
+        # have brought the toolbox image online) can flip the NPU backend on
+        # the next capabilities GET without a restart.
         reset_flm_catalog_cache()
+        from hal0.capabilities.catalog import reset_flm_image_present_cache
+
+        reset_flm_image_present_cache()
 
         # Best-effort path bookkeeping. FLM stores each tag's weights at
         # ``<host_models_dir>/<HF-repo-name>/`` — we resolve the dir from

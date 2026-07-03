@@ -838,7 +838,7 @@ PROFILE_BENCH: dict[str, dict[str, float]] = {
 DEVICE_DEFAULT_PROFILES: dict[str, str] = {
     "gpu-rocm": "rocm",
     "gpu-vulkan": "vulkan",
-    "cpu": "tts",
+    "cpu": "cpu-llm",
     "npu": "flm",
 }
 

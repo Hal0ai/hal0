@@ -165,35 +165,73 @@ _FLM_BROKEN_TAGS: dict[str, str] = {
 }
 
 
+# Cached result of the FLM-image-present probe (None = not yet probed).
+# The probe shells a container runtime, which the module contract
+# (``GET /api/capabilities`` must not spawn subprocesses on every load)
+# forbids doing per-GET — so we run it once and reuse it.
+# :func:`reset_flm_image_present_cache` drops it after an FLM pull.
+_flm_image_present_cache: bool | None = None
+
+
+def reset_flm_image_present_cache() -> None:
+    """Drop the cached FLM-image-present probe so the next call re-probes.
+
+    Invalidated alongside the FLM catalog cache after a successful FLM
+    pull (see :func:`hal0.registry.pull.run_flm_pull`) so a freshly-pulled
+    toolbox image flips the NPU backend on without a process restart.
+    Also exposed for tests.
+    """
+    global _flm_image_present_cache
+    _flm_image_present_cache = None
+
+
 def _flm_image_present() -> bool:
     """True iff the FLM toolbox image is already pulled locally.
 
-    Picking ``backend=npu`` rewrites the slot TOML and asks docker to
-    spawn the FLM container. The image is gated on ghcr.io credentials
-    that aren't part of the public install, so an unauthenticated host
-    spirals into a ``docker pull → unauthorized → systemd restart``
-    loop with no way for the user to recover from the dashboard.
-    Advertising NPU as a backend only after we know docker can spawn
+    Picking ``backend=npu`` rewrites the slot TOML and asks the container
+    runtime to spawn the FLM container. The image is gated on ghcr.io
+    credentials that aren't part of the public install, so an
+    unauthenticated host spirals into a ``pull → unauthorized → systemd
+    restart`` loop with no way for the user to recover from the dashboard.
+    Advertising NPU as a backend only after we know the runtime can spawn
     the container avoids that whole class of failure.
 
-    Checked via ``docker image inspect`` which returns 0 iff the image
-    id resolves locally. We cache nothing — the toolchain install
-    pulls the image once and the function is called only on the
-    /api/capabilities GET which is already cheap.
+    Checked via ``<runtime> image inspect`` which returns 0 iff the image
+    id resolves locally. The runtime binary is resolved through the shared
+    :func:`hal0.providers.container._container_runtime` path (podman →
+    docker → RuntimeError) so a podman-only host probes podman rather than
+    a missing ``docker``. The result is cached at module scope (see
+    :data:`_flm_image_present_cache`) so the /api/capabilities GET doesn't
+    re-spawn the probe on every load.
     """
+    global _flm_image_present_cache
+    if _flm_image_present_cache is not None:
+        return _flm_image_present_cache
+
     import subprocess
+
+    from hal0.providers.container import _container_runtime
+
+    try:
+        runtime = _container_runtime()
+    except RuntimeError:
+        # No container runtime installed — the NPU backend can't spawn.
+        _flm_image_present_cache = False
+        return False
 
     try:
         proc = subprocess.run(
-            ["docker", "image", "inspect", _FLM_TOOLBOX_IMAGE],
+            [runtime, "image", "inspect", _FLM_TOOLBOX_IMAGE],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2.0,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # Transient probe failure — don't cache, so a later GET can retry.
         return False
-    return proc.returncode == 0
+    _flm_image_present_cache = proc.returncode == 0
+    return _flm_image_present_cache
 
 
 def available_backends() -> list[dict[str, Any]]:

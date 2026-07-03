@@ -406,6 +406,19 @@ def test_device_default_profiles_map() -> None:
     assert DEVICE_DEFAULT_PROFILES == {
         "gpu-rocm": "rocm",
         "gpu-vulkan": "vulkan",
-        "cpu": "tts",
+        # PS-1: a GPU-less host must default to a chat-capable CPU profile,
+        # not the Kokoro TTS engine.
+        "cpu": "cpu-llm",
         "npu": "flm",
     }
+
+
+def test_cpu_default_profile_supports_llm(tmp_path: Path) -> None:
+    """PS-1: DEVICE_DEFAULT_PROFILES["cpu"] must name a chat-capable profile."""
+    from hal0.config.schema import DEVICE_DEFAULT_PROFILES
+    from hal0.profiles import ProfileCatalog
+
+    resolved = ProfileCatalog(path=tmp_path / "nonexistent.toml").resolve(
+        DEVICE_DEFAULT_PROFILES["cpu"]
+    )
+    assert "llm" in resolved.supported_slot_types

@@ -128,6 +128,42 @@ def test_cpu_host_gets_small_conservative_model() -> None:
     assert rec["backend"] == "cpu"
 
 
+# ── PS-1: GPU-less installs must seed a chat-capable profile, not TTS ─────────
+# Regression: DEVICE_DEFAULT_PROFILES["cpu"] used to be "tts", so a GPU-less
+# host got a chat slot pointing at the Kokoro TTS engine. That profile's
+# supported_slot_types is ("tts",), so evaluate_model_fit for the seeded chat
+# model was rejected with reason "profile.unsupported_slot_type" — the primary
+# slot was born broken on every CPU-only install.
+
+
+def test_cpu_only_host_seeds_chat_capable_profile(tmp_path) -> None:
+    from pathlib import Path
+
+    from hal0.model_fit import evaluate_model_fit
+    from hal0.profiles import ProfileCatalog
+
+    rec = recommend_primary_slot(_cpu_only_host(64))
+    # No GPU → device is plain "cpu"; its default profile must be chat-capable.
+    assert rec["device"] == "cpu"
+    assert rec["profile"] == "cpu-llm"
+
+    # Resolve the seeded profile (empty tmp path → seed defaults) and confirm
+    # it advertises "llm" support, i.e. it is a real chat runtime family.
+    catalog = ProfileCatalog(path=Path(tmp_path) / "nonexistent.toml")
+    resolved = catalog.resolve(rec["profile"])
+    assert "llm" in resolved.supported_slot_types
+
+    # Stronger: the seeded chat model must not be blocked on this profile with
+    # the old "profile.unsupported_slot_type" reason.
+    fit = evaluate_model_fit(
+        model_id=rec["model"]["default"],
+        slot_type="llm",
+        device=rec["device"],
+        profile=resolved,
+    )
+    assert "profile.unsupported_slot_type" not in fit.reasons
+
+
 # ── seeded chat slot must resolve a profile (container-runtime era) ──────────
 # Regression: recommend_primary_slot used to emit no ``profile``/``runtime``,
 # so the seeded chat.toml loaded with profile=None and the resolver rejected
