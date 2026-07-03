@@ -349,3 +349,47 @@ class TestPreexistingCorruption:
 
         reg = ModelRegistry(registry_dir=rdir)
         assert reg.list() == []
+
+
+# ── MR-13: atomic writes fsync the parent directory ──────────────────────────
+
+
+class TestParentDirFsync:
+    def test_add_fsyncs_registry_dir(
+        self, reg: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """add() fsyncs the parent dir after os.replace so the rename is durable."""
+        import hal0.registry.store as store_mod
+
+        calls: list[Path] = []
+        real = store_mod._fsync_dir
+
+        def _spy(dir_path: Path) -> None:
+            calls.append(dir_path)
+            real(dir_path)
+
+        monkeypatch.setattr(store_mod, "_fsync_dir", _spy)
+
+        reg.add(_model("a"))
+
+        assert calls == [reg.registry_file.parent]
+
+    def test_add_survives_dir_fsync_failure(
+        self, reg: ModelRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed directory fsync is best-effort — the write still lands."""
+        import hal0.registry.store as store_mod
+
+        real_open = store_mod.os.open
+
+        def _flaky_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if flags & getattr(store_mod.os, "O_DIRECTORY", 0):
+                raise OSError("no O_DIRECTORY here")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(store_mod.os, "open", _flaky_open)
+
+        reg.add(_model("a", name="Alpha"))
+
+        assert reg.registry_file.exists()
+        assert reg.get("a").name == "Alpha"

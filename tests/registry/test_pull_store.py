@@ -7,6 +7,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from hal0.config import paths
 from hal0.config.loader import save_hal0_config
 from hal0.config.schema import Hal0Config, ModelsConfig
@@ -95,3 +97,52 @@ def test_sweep_pull_jobs_missing_dir_returns_zero(tmp_hal0_home: str) -> None:
 
     assert not _pull_jobs_dir().exists()
     assert sweep_pull_jobs() == 0
+
+
+# ── MR-13: persist_pull_job fsyncs the parent directory ──────────────────────
+
+
+def test_persist_pull_job_fsyncs_parent_dir(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """persist_pull_job fsyncs the snapshot's parent dir after os.replace."""
+    import hal0.registry.pull as pull_mod
+    from hal0.registry.pull import make_job, persist_pull_job, pull_job_file
+
+    calls: list[Path] = []
+    real = pull_mod._fsync_dir
+
+    def _spy(dir_path: Path) -> None:
+        calls.append(dir_path)
+        real(dir_path)
+
+    monkeypatch.setattr(pull_mod, "_fsync_dir", _spy)
+
+    job = make_job("qwen3-4b")
+    persist_pull_job(job)
+
+    snapshot = pull_job_file(job.model_id)
+    assert snapshot.exists()
+    assert calls == [snapshot.parent]
+
+
+def test_persist_pull_job_survives_dir_fsync_failure(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed directory fsync stays fail-soft — the snapshot still lands."""
+    import hal0.registry.pull as pull_mod
+    from hal0.registry.pull import make_job, persist_pull_job, pull_job_file
+
+    real_open = pull_mod.os.open
+
+    def _flaky_open(path, flags, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if flags & getattr(pull_mod.os, "O_DIRECTORY", 0):
+            raise OSError("no O_DIRECTORY here")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(pull_mod.os, "open", _flaky_open)
+
+    job = make_job("qwen3-4b")
+    persist_pull_job(job)  # must not raise
+
+    assert pull_job_file(job.model_id).exists()

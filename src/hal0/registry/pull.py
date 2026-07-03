@@ -38,7 +38,7 @@ import httpx
 from hal0.config import paths
 from hal0.errors import Hal0Error
 from hal0.registry.model import Model
-from hal0.registry.store import ModelNotFound, ModelRegistry
+from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
 
 log = logging.getLogger(__name__)
 
@@ -366,6 +366,7 @@ def persist_pull_job(job: PullJob) -> None:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)
+            _fsync_dir(path.parent)
             tmp_path = None
         finally:
             if tmp_path is not None:

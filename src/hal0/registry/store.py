@@ -116,6 +116,26 @@ def registry_write_lock(registry_dir: str | Path) -> Iterator[None]:
         os.close(fd)
 
 
+# ── Durability helper (MR-13) ─────────────────────────────────────────────────
+
+
+def _fsync_dir(dir_path: Path) -> None:
+    """Best-effort fsync of a directory so a just-renamed entry is durable.
+
+    An atomic ``os.replace`` only guarantees the rename is visible to later
+    ``open`` calls; the directory entry itself is not on stable storage until
+    the parent directory is fsynced. This is best-effort — any OSError (e.g. a
+    platform without ``O_DIRECTORY``) is suppressed so it can never break the
+    write it is meant to harden.
+    """
+    with contextlib.suppress(OSError):
+        dfd = os.open(dir_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+
+
 # ── ModelRegistry ─────────────────────────────────────────────────────────────
 
 
@@ -295,6 +315,7 @@ class ModelRegistry:
                     os.close(fd)
                 raise
             os.replace(tmp_path, target)
+            _fsync_dir(target.parent)
             tmp_path = None
         finally:
             if tmp_path is not None:
