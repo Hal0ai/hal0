@@ -268,6 +268,38 @@ def _tmp_dir() -> Path:
     return _pull_root() / ".tmp"
 
 
+_PARTIAL_MAX_AGE_S: float = 24 * 3600  # reap .part files idle > 24h
+
+
+def sweep_orphaned_partials(max_age_s: float = _PARTIAL_MAX_AGE_S) -> int:
+    """Delete stale ``*.part`` staging files left by SIGKILL/OOM mid-pull.
+
+    Best-effort, fail-soft. Only removes ``*.part`` files whose mtime is
+    older than ``max_age_s`` so a concurrently-downloading partial (whose
+    mtime advances as it grows) is never reaped. Returns count removed.
+    """
+    tmp_dir = _tmp_dir()
+    removed = 0
+    try:
+        entries = list(tmp_dir.glob("*.part"))
+    except OSError:
+        return 0
+    now = time.time()
+    for p in entries:
+        try:
+            if not p.is_file():
+                continue
+            if (now - p.stat().st_mtime) < max_age_s:
+                continue
+            p.unlink(missing_ok=True)
+            removed += 1
+        except OSError as exc:
+            log.warning("model.partial_sweep_failed path=%s error=%s", p, exc)
+    if removed:
+        log.info("model.partial_sweep removed=%d dir=%s", removed, tmp_dir)
+    return removed
+
+
 def hf_download_url(repo: str, filename: str, revision: str = "main") -> str:
     """Build the canonical HuggingFace download URL.
 
@@ -887,4 +919,5 @@ __all__ = [
     "pull_job_file",
     "run_flm_pull",
     "run_pull",
+    "sweep_orphaned_partials",
 ]

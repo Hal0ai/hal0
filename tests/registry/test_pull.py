@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,11 +18,14 @@ import httpx
 import pytest
 
 from hal0.registry.pull import (
+    _pull_root,
     _sanitise_id,
+    _tmp_dir,
     hf_download_url,
     make_job,
     pull_job_file,
     run_pull,
+    sweep_orphaned_partials,
 )
 from hal0.registry.store import ModelRegistry
 
@@ -353,3 +357,42 @@ async def test_run_pull_cancellation_removes_partial(
     final_dir = Path(tmp_hal0_home) / "var-lib" / "hal0" / "models" / "cancel-me"
     if final_dir.exists():
         assert not any(final_dir.iterdir())
+
+
+# ── sweep_orphaned_partials: startup reaper (MR-9) ───────────────────────────
+
+
+def test_sweep_orphaned_partials_reaps_old_but_keeps_fresh_and_final(
+    tmp_hal0_home: str,
+) -> None:
+    """Aged *.part files are reaped; fresh partials and installed files survive."""
+    tmp = _tmp_dir()
+    tmp.mkdir(parents=True, exist_ok=True)
+
+    # Stale partial left by a SIGKILL/OOM mid-pull — backdate its mtime 48h.
+    old = tmp / "modelA.aaaa.part"
+    old.write_bytes(b"partial")
+    t = time.time() - 48 * 3600
+    os.utime(old, (t, t))
+
+    # An actively-growing partial from a concurrent pull — mtime is now.
+    fresh = tmp / "modelB.bbbb.part"
+    fresh.write_bytes(b"partial")
+
+    # A completed install, NOT under .tmp — must never be touched.
+    installed = _pull_root() / "modelC" / "model.gguf"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_bytes(b"GGUF")
+
+    removed = sweep_orphaned_partials()
+
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()
+    assert installed.exists()
+
+
+def test_sweep_orphaned_partials_missing_tmp_dir_is_noop(tmp_hal0_home: str) -> None:
+    """No .tmp directory present → returns 0 and never raises (fail-soft)."""
+    assert not _tmp_dir().exists()
+    assert sweep_orphaned_partials() == 0
