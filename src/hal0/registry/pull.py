@@ -375,6 +375,44 @@ def persist_pull_job(job: PullJob) -> None:
         log.warning("model.pull_job_persist_failed model_id=%s error=%s", job.model_id, exc)
 
 
+def sweep_pull_jobs(max_age_days: int = 14) -> int:
+    """Garbage-collect stale terminal pull-job snapshots (#MR-8).
+
+    Reap on-disk snapshots whose ``state`` is terminal (``completed`` /
+    ``failed`` / ``cancelled``) and whose file mtime is older than
+    ``max_age_days``. Non-terminal snapshots (``queued`` / ``running``) are
+    preserved regardless of age so an in-flight or restart-surviving pull is
+    never dropped. Called best-effort from the API lifespan on startup.
+
+    Every step is fail-soft: a single unreadable / malformed / undeletable
+    file is skipped so one bad snapshot never aborts the whole sweep. A
+    missing jobs directory is a no-op. Returns the number of files removed.
+    """
+    jobs_dir = _pull_jobs_dir()
+    if not jobs_dir.is_dir():
+        return 0
+
+    terminal = {"completed", "failed", "cancelled"}
+    cutoff = max_age_days * 86400
+    now = time.time()
+    removed = 0
+    for path in jobs_dir.glob("*.json"):
+        try:
+            if now - path.stat().st_mtime <= cutoff:
+                continue
+            with path.open(encoding="utf-8") as f:
+                state = json.load(f).get("state")
+            if state not in terminal:
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+        except (OSError, ValueError):
+            # ValueError covers json.JSONDecodeError; OSError covers stat /
+            # read / unlink failures. Skip this file, keep sweeping.
+            continue
+    return removed
+
+
 async def run_pull(
     job: PullJob,
     *,
@@ -920,4 +958,5 @@ __all__ = [
     "run_flm_pull",
     "run_pull",
     "sweep_orphaned_partials",
+    "sweep_pull_jobs",
 ]
