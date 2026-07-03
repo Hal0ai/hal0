@@ -38,7 +38,7 @@ import httpx
 from hal0.config import paths
 from hal0.errors import Hal0Error
 from hal0.registry.model import Model
-from hal0.registry.store import ModelNotFound, ModelRegistry
+from hal0.registry.store import ModelNotFound, ModelRegistry, _fsync_dir
 
 log = logging.getLogger(__name__)
 
@@ -268,6 +268,42 @@ def _tmp_dir() -> Path:
     return _pull_root() / ".tmp"
 
 
+_PARTIAL_MAX_AGE_S: float = 24 * 3600  # reap .part files idle > 24h
+
+
+def sweep_orphaned_partials(max_age_s: float = _PARTIAL_MAX_AGE_S) -> int:
+    """Delete stale ``*.part`` staging files left by SIGKILL/OOM mid-pull.
+
+    Best-effort, fail-soft. Only removes ``*.part`` files (and their
+    ``*.part.json`` resume sidecars) whose mtime is older than ``max_age_s``
+    so a concurrently-downloading partial (whose mtime advances as it grows)
+    is never reaped. Sidecars are swept too so a reaped-but-not-resumed
+    partial doesn't leave its sidecar lingering. Returns count removed.
+    """
+    tmp_dir = _tmp_dir()
+    removed = 0
+    try:
+        # Both the partial and its resume sidecar (MR-7); once a .part is stale
+        # enough to reap, its resume coordinates are worthless too.
+        entries = list(tmp_dir.glob("*.part")) + list(tmp_dir.glob("*.part.json"))
+    except OSError:
+        return 0
+    now = time.time()
+    for p in entries:
+        try:
+            if not p.is_file():
+                continue
+            if (now - p.stat().st_mtime) < max_age_s:
+                continue
+            p.unlink(missing_ok=True)
+            removed += 1
+        except OSError as exc:
+            log.warning("model.partial_sweep_failed path=%s error=%s", p, exc)
+    if removed:
+        log.info("model.partial_sweep removed=%d dir=%s", removed, tmp_dir)
+    return removed
+
+
 def hf_download_url(repo: str, filename: str, revision: str = "main") -> str:
     """Build the canonical HuggingFace download URL.
 
@@ -334,6 +370,7 @@ def persist_pull_job(job: PullJob) -> None:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)
+            _fsync_dir(path.parent)
             tmp_path = None
         finally:
             if tmp_path is not None:
@@ -341,6 +378,155 @@ def persist_pull_job(job: PullJob) -> None:
                     tmp_path.unlink(missing_ok=True)
     except OSError as exc:
         log.warning("model.pull_job_persist_failed model_id=%s error=%s", job.model_id, exc)
+
+
+def sweep_pull_jobs(max_age_days: int = 14) -> int:
+    """Garbage-collect stale terminal pull-job snapshots (#MR-8).
+
+    Reap on-disk snapshots whose ``state`` is terminal (``completed`` /
+    ``failed`` / ``cancelled``) and whose file mtime is older than
+    ``max_age_days``. Non-terminal snapshots (``queued`` / ``running``) are
+    preserved regardless of age so an in-flight or restart-surviving pull is
+    never dropped. Called best-effort from the API lifespan on startup.
+
+    Every step is fail-soft: a single unreadable / malformed / undeletable
+    file is skipped so one bad snapshot never aborts the whole sweep. A
+    missing jobs directory is a no-op. Returns the number of files removed.
+    """
+    jobs_dir = _pull_jobs_dir()
+    if not jobs_dir.is_dir():
+        return 0
+
+    terminal = {"completed", "failed", "cancelled"}
+    cutoff = max_age_days * 86400
+    now = time.time()
+    removed = 0
+    for path in jobs_dir.glob("*.json"):
+        try:
+            if now - path.stat().st_mtime <= cutoff:
+                continue
+            with path.open(encoding="utf-8") as f:
+                state = json.load(f).get("state")
+            if state not in terminal:
+                continue
+            path.unlink(missing_ok=True)
+            removed += 1
+        except (OSError, ValueError):
+            # ValueError covers json.JSONDecodeError; OSError covers stat /
+            # read / unlink failures. Skip this file, keep sweeping.
+            continue
+    return removed
+
+
+# ── resume / partial-download support (MR-7) ──────────────────────────────────
+#
+# A prior interrupted pull leaves a deterministic ``<id>.part`` in the staging
+# dir plus a ``<id>.part.json`` sidecar recording the resume coordinates. The
+# next ``run_pull`` re-reads the sidecar, re-hashes the on-disk prefix (stdlib
+# hashlib can't serialise/restore its state, so re-reading the local prefix is
+# the correctness-preserving way to keep the final SHA-256 exact), and issues a
+# ``Range`` request to fetch only the tail. Hash correctness is non-negotiable:
+# any doubt about the prefix (size mismatch, changed object, server ignoring the
+# Range) triggers a clean full restart, never a silent double-count.
+
+_CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+)", re.IGNORECASE)
+
+
+def _read_resume_sidecar(part: Path, sidecar: Path, url: str) -> dict[str, Any] | None:
+    """Return the resume metadata iff an on-disk partial is trustworthy.
+
+    Guards every assumption the resume relies on: both files present, valid
+    JSON, a positive recorded byte count, the same source url, and the recorded
+    byte count matching the actual ``.part`` size on disk. Any mismatch returns
+    ``None`` so the caller discards the stale partial and starts fresh.
+    """
+    if not (part.exists() and sidecar.exists()):
+        return None
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    have = meta.get("bytes")
+    if not isinstance(have, int) or have <= 0:
+        return None
+    if meta.get("url") != url:
+        return None
+    try:
+        if part.stat().st_size != have:
+            return None
+    except OSError:
+        return None
+    return meta
+
+
+def _discard_partial(part: Path, sidecar: Path) -> None:
+    """Remove the staging ``.part`` and its sidecar, ignoring absence/errors."""
+    with contextlib.suppress(OSError):
+        part.unlink(missing_ok=True)
+    with contextlib.suppress(OSError):
+        sidecar.unlink(missing_ok=True)
+
+
+def _write_resume_sidecar(
+    part: Path,
+    sidecar: Path,
+    *,
+    url: str,
+    etag: str | None,
+    total: int,
+) -> None:
+    """Persist resume coordinates next to a preserved ``.part`` (best-effort).
+
+    Records the *actual* on-disk byte count (not the in-memory counter) so the
+    next :func:`_read_resume_sidecar` probe — which compares against
+    ``part.stat().st_size`` — accepts it. A zero-length or missing partial is
+    not worth resuming, so it (and any stale sidecar) is discarded instead.
+    """
+    try:
+        have = part.stat().st_size
+    except OSError:
+        _discard_partial(part, sidecar)
+        return
+    if have <= 0:
+        _discard_partial(part, sidecar)
+        return
+    payload = {"url": url, "etag": etag, "bytes": have, "total": total}
+    with contextlib.suppress(OSError):
+        sidecar.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _parse_content_range_total(header: str | None, resume_from: int) -> int | None:
+    """Parse ``Content-Range: bytes <start>-<last>/<total>`` → total.
+
+    Returns ``None`` when the header is missing/unparseable or when the range
+    start disagrees with ``resume_from`` (a server sending from a different
+    offset than we requested would corrupt the hash — the caller must restart).
+    """
+    if not header:
+        return None
+    m = _CONTENT_RANGE_RE.match(header.strip())
+    if not m:
+        return None
+    start = int(m.group(1))
+    total = int(m.group(3))
+    if start != resume_from:
+        return None
+    return total
+
+
+def _rehash_prefix(part: Path, hasher: Any) -> int:
+    """Feed the on-disk prefix into ``hasher``; return the byte count read."""
+    total = 0
+    with open(part, "rb") as f:
+        while True:
+            block = f.read(_CHUNK_BYTES)
+            if not block:
+                break
+            hasher.update(block)
+            total += len(block)
+    return total
 
 
 async def run_pull(
@@ -382,8 +568,17 @@ async def run_pull(
 
     tmp_dir = _tmp_dir()
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    rand_tag = secrets.token_hex(4)
-    tmp_path = tmp_dir / f"{_sanitise_id(job.model_id)}.{rand_tag}.part"
+    # Deterministic staging name (MR-7) so a prior interrupted pull can be
+    # found and resumed. The JSON sidecar next to it records the resume
+    # coordinates (url, etag, bytes-on-disk, total). TRADEOFF: unlike the old
+    # random-tag name, this is not isolated across two concurrent pulls of the
+    # SAME model_id. In-process pulls are deduped by model_pull_jobs
+    # (routes/models.pull_model), so the only unguarded case is two SEPARATE
+    # processes pulling the identical id at once (rare — not an expected flow);
+    # resumability is worth that edge.
+    sanitised = _sanitise_id(job.model_id)
+    part = tmp_dir / f"{sanitised}.part"
+    sidecar = tmp_dir / f"{sanitised}.part.json"
 
     hasher = hashlib.sha256()
     last_emit = time.monotonic()
@@ -394,86 +589,159 @@ async def run_pull(
             follow_redirects=True,
         )
 
+    # ── Resume probe (MR-7) ───────────────────────────────────────────────
+    # Only reuse an on-disk partial the sidecar vouches for; anything else is
+    # discarded so a stale/mismatched prefix can never corrupt the final hash.
+    resume_from = 0
+    resume_meta = _read_resume_sidecar(part, sidecar, url)
+    if resume_meta is not None:
+        resume_from = int(resume_meta["bytes"])
+        headers["Range"] = f"bytes={resume_from}-"
+        etag = resume_meta.get("etag")
+        if etag:
+            # If-Range forces a full 200 body when the object has changed,
+            # so we never stitch a fresh tail onto a stale prefix.
+            headers["If-Range"] = etag
+    else:
+        _discard_partial(part, sidecar)
+
+    installed = False
+    captured_etag: str | None = None
     try:
-        async with client.stream("GET", url, headers=headers) as resp:
-            if resp.status_code == 401 or resp.status_code == 403:
-                raise PullError(
-                    f"hugging face returned {resp.status_code} for {hf_repo}/{hf_file}"
-                    " (gated repo? set HF_TOKEN)",
-                    details={
-                        "status": resp.status_code,
-                        "repo": hf_repo,
-                        "file": hf_file,
-                    },
-                )
-            if resp.status_code == 404:
-                raise PullError(
-                    f"hugging face has no file {hf_file!r} in {hf_repo!r} at main",
-                    details={"repo": hf_repo, "file": hf_file},
-                )
-            if resp.status_code >= 400:
-                raise PullError(
-                    f"hugging face returned HTTP {resp.status_code} for {url}",
-                    details={"status": resp.status_code, "url": url},
-                )
+        # Retry loop exists solely so a 416 (bad/complete range) can fall back
+        # to a clean full download in the same invocation. The happy path runs
+        # the body exactly once and breaks.
+        while True:
+            async with client.stream("GET", url, headers=headers) as resp:
+                if resp.status_code == 416 and resume_from > 0:
+                    # Range not satisfiable (already complete or bad range) —
+                    # discard the prefix and restart from zero.
+                    resume_from = 0
+                    headers.pop("Range", None)
+                    headers.pop("If-Range", None)
+                    _discard_partial(part, sidecar)
+                    hasher = hashlib.sha256()
+                    continue
 
-            content_length = resp.headers.get("content-length")
-            if content_length:
-                try:
-                    job.bytes_total = int(content_length)
-                except ValueError:
-                    job.bytes_total = 0
-            job._signal()
+                if resp.status_code == 401 or resp.status_code == 403:
+                    raise PullError(
+                        f"hugging face returned {resp.status_code} for {hf_repo}/{hf_file}"
+                        " (gated repo? set HF_TOKEN)",
+                        details={
+                            "status": resp.status_code,
+                            "repo": hf_repo,
+                            "file": hf_file,
+                        },
+                    )
+                if resp.status_code == 404:
+                    raise PullError(
+                        f"hugging face has no file {hf_file!r} in {hf_repo!r} at main",
+                        details={"repo": hf_repo, "file": hf_file},
+                    )
+                if resp.status_code >= 400:
+                    raise PullError(
+                        f"hugging face returned HTTP {resp.status_code} for {url}",
+                        details={"status": resp.status_code, "url": url},
+                    )
 
-            # Disk-space preflight (MR-4): bail before opening the .part file
-            # (and streaming multi-GB) if the staging FS clearly can't hold the
-            # advertised size. Measured against tmp_dir — that's where bytes
-            # land before the os.replace() into the final path. A probe failure
-            # must not itself fail the pull: if we can't measure, fall through
-            # to the existing stream-until-ENOSPC behavior (no regression).
-            # PullInsufficientDisk is not an OSError, so the raise inside the
-            # suppress still propagates to the except Hal0Error handler below.
-            if job.bytes_total > 0:
-                with contextlib.suppress(OSError):
-                    free = shutil.disk_usage(tmp_dir).free
-                    if free < job.bytes_total:
-                        raise PullInsufficientDisk(
-                            f"insufficient disk for {job.model_id}: need "
-                            f"{job.bytes_total} bytes, {free} free at {tmp_dir}",
+                captured_etag = resp.headers.get("etag")
+
+                if resp.status_code == 206 and resume_from > 0:
+                    # Server honoured the Range — continue the existing prefix.
+                    total = _parse_content_range_total(
+                        resp.headers.get("content-range"), resume_from
+                    )
+                    if total is None:
+                        # Offset the server sent disagrees with what we asked
+                        # for — refuse to stitch (would corrupt the hash).
+                        raise PullError(
+                            f"resume range mismatch for {job.model_id}: "
+                            f"unexpected Content-Range {resp.headers.get('content-range')!r}",
                             details={
-                                "required_bytes": job.bytes_total,
-                                "free_bytes": free,
-                                "path": str(tmp_dir),
+                                "resume_from": resume_from,
+                                "content_range": resp.headers.get("content-range"),
                             },
                         )
+                    job.bytes_total = total
+                    # Re-hash the on-disk prefix so the final SHA-256 is exact
+                    # (stdlib hashlib can't restore a checkpoint).
+                    hashed = _rehash_prefix(part, hasher)
+                    if hashed != resume_from:
+                        raise PullError(
+                            f"resume prefix changed for {job.model_id}: expected "
+                            f"{resume_from} bytes, re-read {hashed}",
+                            details={"expected": resume_from, "hashed": hashed},
+                        )
+                    job.bytes_downloaded = resume_from
+                    mode = "ab"
+                else:
+                    # 200 (fresh, or the server/CDN ignored our Range) — start
+                    # over from a clean hasher so we never double-count a prefix.
+                    if resume_from > 0:
+                        hasher = hashlib.sha256()
+                        resume_from = 0
+                    content_length = resp.headers.get("content-length")
+                    if content_length:
+                        try:
+                            job.bytes_total = int(content_length)
+                        except ValueError:
+                            job.bytes_total = 0
+                    job.bytes_downloaded = 0
+                    mode = "wb"
+                job._signal()
 
-            with open(tmp_path, "wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size=_CHUNK_BYTES):
-                    if job.cancel_requested:
-                        # Caller asked for cancellation — drop the partial
-                        # and exit cleanly.
-                        f.close()
-                        with contextlib.suppress(OSError):
-                            tmp_path.unlink(missing_ok=True)
-                        job.state = "cancelled"
-                        job.finished_at = time.time()
-                        job._signal()
-                        return
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    hasher.update(chunk)
-                    job.bytes_downloaded += len(chunk)
-                    now = time.monotonic()
-                    if (now - last_emit) >= _SSE_MIN_INTERVAL_S:
-                        last_emit = now
-                        job._signal()
+                # Disk-space preflight (MR-4): bail before streaming multi-GB
+                # if the staging FS clearly can't hold what's still to fetch.
+                # Measured against tmp_dir — that's where bytes land before the
+                # os.replace() into the final path. A probe failure must not
+                # itself fail the pull: if we can't measure, fall through to the
+                # existing stream-until-ENOSPC behavior (no regression). On a
+                # resume we only need room for the remaining (total-have) bytes.
+                # PullInsufficientDisk is not an OSError, so the raise inside the
+                # suppress still propagates to the except Hal0Error handler below.
+                if job.bytes_total > 0:
+                    with contextlib.suppress(OSError):
+                        free = shutil.disk_usage(tmp_dir).free
+                        needed = job.bytes_total - resume_from
+                        if free < needed:
+                            raise PullInsufficientDisk(
+                                f"insufficient disk for {job.model_id}: need "
+                                f"{needed} bytes, {free} free at {tmp_dir}",
+                                details={
+                                    "required_bytes": needed,
+                                    "free_bytes": free,
+                                    "path": str(tmp_dir),
+                                },
+                            )
+
+                with open(part, mode) as f:
+                    async for chunk in resp.aiter_bytes(chunk_size=_CHUNK_BYTES):
+                        if job.cancel_requested:
+                            # Explicit user cancel — drop the partial + sidecar
+                            # and exit cleanly.
+                            f.close()
+                            _discard_partial(part, sidecar)
+                            job.state = "cancelled"
+                            job.finished_at = time.time()
+                            job._signal()
+                            return
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        hasher.update(chunk)
+                        job.bytes_downloaded += len(chunk)
+                        now = time.monotonic()
+                        if (now - last_emit) >= _SSE_MIN_INTERVAL_S:
+                            last_emit = now
+                            job._signal()
+            break
 
         # Download complete — atomic install.
         final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
         final.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(tmp_path, final)
-        tmp_path = final  # so the cleanup `finally` doesn't unlink the installed file
+        os.replace(part, final)
+        installed = True  # so the cleanup handlers don't touch the installed file
+        _discard_partial(part, sidecar)  # part is renamed away; drop the sidecar
         size_bytes = final.stat().st_size
         digest = hasher.hexdigest()
 
@@ -511,18 +779,19 @@ async def run_pull(
         job.finished_at = time.time()
         job._signal()
     except asyncio.CancelledError:
-        # Task itself was cancelled by the event loop — treat as cancellation.
-        with contextlib.suppress(OSError):
-            if tmp_path and tmp_path.exists() and tmp_path.suffix == ".part":
-                tmp_path.unlink()
+        # Task itself was cancelled by the event loop — treat as an explicit
+        # cancel: discard the partial + sidecar (MR-7).
+        if not installed:
+            _discard_partial(part, sidecar)
         job.state = "cancelled"
         job.finished_at = time.time()
         job._signal()
         raise
     except Hal0Error as exc:
-        with contextlib.suppress(OSError):
-            if tmp_path and tmp_path.exists() and tmp_path.suffix == ".part":
-                tmp_path.unlink()
+        # Permanent failures (4xx PullError, insufficient disk) are not
+        # resumable — discard the partial + sidecar (MR-7).
+        if not installed:
+            _discard_partial(part, sidecar)
         job.state = "failed"
         job.error = exc.message
         job.error_code = exc.code
@@ -530,9 +799,17 @@ async def run_pull(
         job._signal()
         log.warning("model.pull_failed", extra={"model_id": job.model_id, "error": exc.message})
     except Exception as exc:
-        with contextlib.suppress(OSError):
-            if tmp_path and tmp_path.exists() and tmp_path.suffix == ".part":
-                tmp_path.unlink()
+        # A transient transport error (connection drop / read timeout) must
+        # PRESERVE the .part and record a resume sidecar so the NEXT run_pull
+        # continues where this one left off (MR-7). Truly unexpected errors
+        # poison state, so those still discard.
+        if not installed:
+            if isinstance(exc, httpx.HTTPError):
+                _write_resume_sidecar(
+                    part, sidecar, url=url, etag=captured_etag, total=job.bytes_total
+                )
+            else:
+                _discard_partial(part, sidecar)
         job.state = "failed"
         job.error = f"{type(exc).__name__}: {exc}"
         job.error_code = "model.pull_failed"
@@ -887,4 +1164,6 @@ __all__ = [
     "pull_job_file",
     "run_flm_pull",
     "run_pull",
+    "sweep_orphaned_partials",
+    "sweep_pull_jobs",
 ]

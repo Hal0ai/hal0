@@ -883,6 +883,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # and status routes snapshot ``as_dict()`` rather than hold the
     # dataclass across event-loop ticks.
     app.state.model_pull_jobs = {}
+    # Reap orphaned *.part staging files left by a SIGKILL/OOM mid-pull
+    # (MR-9). Age-gated so an in-flight pull from another worker is never
+    # touched; housekeeping must never block startup.
+    try:
+        from hal0.registry.pull import sweep_orphaned_partials
+
+        sweep_orphaned_partials()
+    except Exception as exc:  # housekeeping must never block startup
+        log.warning("model.partial_sweep_startup_failed", error=str(exc))
+    # Reap stale terminal pull-job snapshots left by deleted / failed /
+    # cancelled pulls or older builds (#MR-8). Best-effort — a broken sweep
+    # must never block startup.
+    try:
+        from hal0.registry.pull import sweep_pull_jobs
+
+        reaped = sweep_pull_jobs()
+        if reaped:
+            log.info("model.pull_jobs_swept", count=reaped)
+    except Exception as exc:
+        log.warning("model.pull_jobs_sweep_failed", error=str(exc))
     # Container image-pull job registry — keyed by slot name, value is a
     # dict with keys: state (pulling|completed|failed), layer, total_layers,
     # error, and a threading.Event for SSE fan-out.

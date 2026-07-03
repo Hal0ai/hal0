@@ -48,6 +48,7 @@ from hal0.capabilities.config import (
 from hal0.capabilities.profile_fit import profile_name_for_fit
 from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
+from hal0.config.locking import file_lock
 from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import BadRequest, Hal0Error, NotFound
 from hal0.model_fit import evaluate_model_fit
@@ -206,41 +207,48 @@ class CapabilityOrchestrator:
         """
         from hal0.capabilities.config import auto_migrate_capabilities_file
 
-        if self._config_path.exists():
-            # Migrate v1 → v2 in place if needed. Idempotent on v2 files.
-            try:
-                auto_migrate_capabilities_file(self._config_path)
-            except Exception as exc:
-                # Don't let a migration crash block API startup — the
-                # orchestrator already swallows initialise failures one
-                # level up.
-                log.warning(
-                    "capabilities.migrate.skipped",
-                    extra={"path": str(self._config_path), "error": str(exc)},
-                )
-            return
+        # SC-10: the exists-check + seed write (and the nested auto-migrate)
+        # are one read-modify-write that must not race a concurrent CLI/API
+        # writer. Hold the same capabilities.toml advisory lock every other
+        # writer uses; re-check existence INSIDE the lock so a writer that
+        # seeded the file while we blocked isn't overwritten. The lock is
+        # re-entrant, so the nested (also-locked) auto-migrate is safe.
+        with file_lock(self._config_path):
+            if self._config_path.exists():
+                # Migrate v1 → v2 in place if needed. Idempotent on v2 files.
+                try:
+                    auto_migrate_capabilities_file(self._config_path)
+                except Exception as exc:
+                    # Don't let a migration crash block API startup — the
+                    # orchestrator already swallows initialise failures one
+                    # level up.
+                    log.warning(
+                        "capabilities.migrate.skipped",
+                        extra={"path": str(self._config_path), "error": str(exc)},
+                    )
+                return
 
-        cfg = CapabilityConfig()
-        for (slot, child), slot_name in _CHILD_TO_SLOT.items():
-            cfg.selections.setdefault(slot, {})
-            selection = CapabilitySelection()
-            try:
-                slot_cfg = load_slot_config(slot_name)
-            except Exception:
-                # Slot TOML missing or invalid — leave the selection blank.
+            cfg = CapabilityConfig()
+            for (slot, child), slot_name in _CHILD_TO_SLOT.items():
+                cfg.selections.setdefault(slot, {})
+                selection = CapabilitySelection()
+                try:
+                    slot_cfg = load_slot_config(slot_name)
+                except Exception:
+                    # Slot TOML missing or invalid — leave the selection blank.
+                    cfg.selections[slot][child] = selection
+                    continue
+                # Lift the fields we care about. v0.2: write ``device``
+                # (not the deprecated ``backend``). SlotConfig auto-promotes
+                # legacy ``backend`` on load, so ``slot_cfg.device`` is the
+                # right v0.2 surface here.
+                selection.device = canonical_device(slot_cfg.device)
+                selection.provider = slot_cfg.provider
+                selection.model = slot_cfg.model.default or ""
+                selection.enabled = bool(slot_cfg.enabled) and bool(selection.model)
                 cfg.selections[slot][child] = selection
-                continue
-            # Lift the fields we care about. v0.2: write ``device``
-            # (not the deprecated ``backend``). SlotConfig auto-promotes
-            # legacy ``backend`` on load, so ``slot_cfg.device`` is the
-            # right v0.2 surface here.
-            selection.device = canonical_device(slot_cfg.device)
-            selection.provider = slot_cfg.provider
-            selection.model = slot_cfg.model.default or ""
-            selection.enabled = bool(slot_cfg.enabled) and bool(selection.model)
-            cfg.selections[slot][child] = selection
 
-        self._save(cfg)
+            self._save(cfg)
 
     # ── shape helpers ────────────────────────────────────────────────────────
     #
@@ -426,11 +434,14 @@ class CapabilityOrchestrator:
         #   - the reconciliation itself (enabled selections projected onto
         #     an existing slot TOML, model_meta-translated device/backend)
         #     lives in the store where it is independently tested.
-        change_set = self._store.apply(
-            SlotSelection(slot=slot, child=child, slot_name=slot_name, selection=merged)
-        )
+        # SC-10: apply_and_commit holds the capabilities.toml advisory lock
+        # across the authoritative before-read AND the write, so a concurrent
+        # CLI/API writer cannot interleave its RMW and drop this change (the
+        # committed ChangeSet is computed under the lock).
         try:
-            self._store.commit(change_set)
+            self._store.apply_and_commit(
+                SlotSelection(slot=slot, child=child, slot_name=slot_name, selection=merged)
+            )
         except Exception as exc:
             raise CapabilityApplyFailed(
                 f"failed to persist capability change: {exc}",

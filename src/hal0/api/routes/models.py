@@ -1049,6 +1049,11 @@ async def delete_model(
             _clear_slot_default(Path(entry["path"]), entry["config"])
 
         removed = registry.remove(model_id)
+        # Best-effort GC of the durable pull-job snapshot (#MR-8). A failed
+        # unlink must never break the delete or the model.deleted emit; the
+        # startup sweep reaps anything we miss here.
+        with contextlib.suppress(OSError):
+            _pull_job_file(model_id).unlink(missing_ok=True)
         rec.after = {
             "id": model_id,
             "deleted": bool(removed),

@@ -40,12 +40,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import tomllib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
 from hal0.config.loader import write_toml_atomic
+from hal0.config.locking import file_lock
 from hal0.model_meta import canonical_device, device_to_legacy_backend
 
 if TYPE_CHECKING:
@@ -247,6 +249,39 @@ class SlotConfigStore:
                 FileState(path=slot_path, data=slot_after),
             ),
         )
+
+    # ── cross-process serialized RMW (SC-10) ─────────────────────────────────
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Hold the capabilities.toml cross-process lock for the body.
+
+        Every capabilities.toml writer (this store, the orchestrator seed,
+        the CLI migrate, the schema auto-migration) serializes on the SAME
+        advisory lock — the sibling ``<capabilities.toml>.lock`` — so a
+        concurrent read-modify-write from the API and the CLI cannot
+        interleave and drop each other's change (SC-10). The lock is
+        re-entrant within a thread, so a caller already inside ``transaction``
+        may nest a locked leaf writer without self-deadlocking.
+        """
+        with file_lock(self._caps_path()):
+            yield
+
+    def apply_and_commit(self, selection: SlotSelection) -> ChangeSet:
+        """Atomically read, reconcile and write ``selection`` under the lock.
+
+        The authoritative ``before`` snapshot (``apply``) and the ``after``
+        write (``commit``) happen inside one held lock so the whole
+        read-modify-write is a single critical section. Locking ``commit``
+        alone would NOT fix the lost update — the stale ``before`` would
+        already have been read outside the lock. Callers that need an earlier
+        ChangeSet for a dry-run/telemetry display should recompute the
+        committed one here, under the lock.
+        """
+        with self.transaction():
+            cs = self.apply(selection)
+            self.commit(cs)
+            return cs
 
     # ── commit / revert ──────────────────────────────────────────────────────
 

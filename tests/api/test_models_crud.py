@@ -437,6 +437,48 @@ def test_delete_unknown_model_returns_404(
     assert r.json()["error"]["code"] == "model.not_found"
 
 
+def test_delete_reaps_pull_job_snapshot(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """Deleting a model garbage-collects its durable pull-job snapshot (#MR-8)."""
+    from hal0.registry.pull import pull_job_file
+
+    fpath = crud_models_root / "reaped.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post("/api/models", json={"id": "reaped", "path": str(fpath)})
+    assert r.status_code == 201, r.text
+
+    snap = pull_job_file("reaped")
+    snap.parent.mkdir(parents=True, exist_ok=True)
+    snap.write_text('{"model_id": "reaped", "state": "completed"}', encoding="utf-8")
+    assert snap.exists()
+
+    r = crud_client.delete("/api/models/reaped")
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is True
+    assert not snap.exists()
+
+
+def test_delete_succeeds_when_snapshot_absent(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """The snapshot-GC is fail-soft: an already-absent file never breaks delete."""
+    from hal0.registry.pull import pull_job_file
+
+    fpath = crud_models_root / "no-snap.gguf"
+    fpath.write_bytes(b"\x00" * 16)
+    r = crud_client.post("/api/models", json={"id": "no-snap", "path": str(fpath)})
+    assert r.status_code == 201, r.text
+
+    assert not pull_job_file("no-snap").exists()
+
+    r = crud_client.delete("/api/models/no-snap")
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is True
+
+
 # ── EventBus subscriber verification ───────────────────────────────────────
 
 
