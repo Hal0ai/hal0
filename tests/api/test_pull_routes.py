@@ -341,3 +341,76 @@ def test_pull_status_reconciles_stale_inflight_to_failed_after_restart(
     body = s.json()
     assert body["state"] == "failed"
     assert body["error_code"] == "pull.interrupted"
+
+
+def test_pull_status_reports_completed_when_registry_has_installed_model_despite_stale_snapshot(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+) -> None:
+    """MR-2: a pull that actually landed must not be reported ``failed``.
+
+    The terminal on-disk write can fail-soft (swallowed OSError), leaving a
+    stale ``running`` snapshot even though the model file is present. On a
+    restart the disk fallback + reconcile must cross-check the registry: when
+    the id is installed and its file exists on disk, surface ``completed`` —
+    not ``failed``/``pull.interrupted``.
+    """
+    from hal0.registry.model import Model
+
+    model_file = tmp_path / "curated-x.gguf"
+    model_file.write_bytes(b"gguf-bytes")
+    app_isolated.state.model_registry.add(
+        Model(
+            id="curated.x",
+            name="curated.x",
+            path=str(model_file),
+            size_bytes=model_file.stat().st_size,
+        )
+    )
+
+    job_dir = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "curated.x.json").write_text(
+        json.dumps(
+            {"id": "j1", "model_id": "curated.x", "state": "running", "bytes_downloaded": 512}
+        ),
+        encoding="utf-8",
+    )
+    # Fresh in-memory dict → forces the disk fallback + reconcile path.
+    app_isolated.state.model_pull_jobs = {}
+
+    s = client_isolated.get("/api/models/curated.x/pull/status")
+    assert s.status_code == 200, s.text
+    body = s.json()
+    assert body["state"] == "completed"
+    assert body.get("error_code") != "pull.interrupted"
+    assert body.get("path") == str(model_file)
+
+
+def test_pull_status_reports_failed_when_model_not_installed(
+    client_isolated: TestClient,
+    app_isolated: FastAPI,
+    tmp_hal0_home: str,
+) -> None:
+    """MR-2 negative twin: a genuinely-interrupted pull still fails.
+
+    Same stale ``running`` snapshot, but the registry does NOT have the id
+    (nothing landed) → the reconcile must fall through to the failed-rewrite,
+    proving the ground-truth guard doesn't mask real interruptions."""
+    job_dir = Path(tmp_hal0_home) / "var-lib" / "hal0" / "model-pull-jobs"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "curated.x.json").write_text(
+        json.dumps(
+            {"id": "j1", "model_id": "curated.x", "state": "running", "bytes_downloaded": 512}
+        ),
+        encoding="utf-8",
+    )
+    app_isolated.state.model_pull_jobs = {}
+
+    s = client_isolated.get("/api/models/curated.x/pull/status")
+    assert s.status_code == 200, s.text
+    body = s.json()
+    assert body["state"] == "failed"
+    assert body["error_code"] == "pull.interrupted"

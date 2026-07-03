@@ -27,6 +27,7 @@ test_serving_integration.py; app-level tests mirror tests/api/test_v1_images.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -60,6 +61,7 @@ class _ArbiterSlotManager:
         self._state = state
         self.events: list[tuple[str, str]] = []
         self._counts: dict[str, int] = {}
+        self._tickets: dict[str, int] = {}
         self.load_calls: list[tuple[str, Any]] = []
         self.unload_calls: list[str] = []
         self.cfgs: list[dict[str, Any]] = []
@@ -90,7 +92,19 @@ class _ArbiterSlotManager:
         return _Ctx()
 
     def in_flight_count(self, slot_name: str) -> int:
-        return self._counts.get(slot_name, 0)
+        # Mirrors the real SlotManager (DR-2): serving contexts + committed
+        # dispatch tickets, so the arbiter drain sees requests past the guard.
+        return self._counts.get(slot_name, 0) + self._tickets.get(slot_name, 0)
+
+    def enter_dispatch(self, slot_name: str) -> None:
+        self._tickets[slot_name] = self._tickets.get(slot_name, 0) + 1
+
+    def exit_dispatch(self, slot_name: str) -> None:
+        remaining = self._tickets.get(slot_name, 1) - 1
+        if remaining > 0:
+            self._tickets[slot_name] = remaining
+        else:
+            self._tickets.pop(slot_name, None)
 
     def state(self, _slot_name: str) -> SlotState:
         return self._state
@@ -576,3 +590,92 @@ def test_force_killed_inflight_gets_clean_5xx(
     body = r.json()
     assert body["error"]["code"] == "gpu.image_mode"
     assert int(r.headers["Retry-After"]) >= 15
+
+
+# ── DR-2: drain must wait for a request already past the image-mode guard ────
+
+
+def _dr2_cfgs() -> list[dict[str, Any]]:
+    """An llm-group slot (``primary``) plus an img-group slot for group derivation."""
+    return [
+        {
+            "name": "primary",
+            "device": "gpu-rocm",
+            "runtime": "container",
+            "provider": "llama-server",
+            "type": "llm",
+        },
+        {
+            "name": "img",
+            "device": "gpu-rocm",
+            "runtime": "container",
+            "provider": "comfyui",
+            "type": "image",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_drain_waits_for_request_past_guard_before_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DR-2: a request parked between the guard and serving() blocks the drain.
+
+    Regression for the racy GpuArbiter drain: ``in_flight_count`` used to count
+    only active ``serving()`` contexts, so a request that had passed
+    ``_guard_gpu_image_mode`` but not yet entered ``serving()`` was invisible —
+    ``ensure_img`` unloaded the llm slot out from under it. With the synchronous
+    dispatch ticket taken in ``Dispatcher.forward`` (before the first await),
+    ``in_flight_count`` reflects the committed request and the drain blocks
+    until it finishes.
+
+    Pre-fix this FAILS: the ticket is never taken, ``in_flight_count`` stays 0,
+    the drain immediately unloads ``primary`` while the request is still parked.
+    """
+    monkeypatch.setattr("hal0.slots.arbiter._DRAIN_POLL_S", 0.01)
+
+    sm = _ArbiterSlotManager(tmp_path)  # LLM mode (no state file), slot READY
+    sm.cfgs = _dr2_cfgs()
+
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def _blocked_ensure_loaded(_call: UpstreamCall) -> None:
+        # Park the forward AFTER the guard + dispatch ticket (router.py) and
+        # BEFORE serving() increments its own counter — exactly the DR-2 window.
+        entered.set()
+        await gate.wait()
+
+    dispatcher = _make_dispatcher(
+        httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True})), sm
+    )
+    monkeypatch.setattr(dispatcher, "_ensure_slot_loaded_backend_aware", _blocked_ensure_loaded)
+
+    try:
+        req_task = asyncio.create_task(dispatcher.forward(_slot_call("primary")))
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+
+        # The request is parked in the window: serving() has NOT entered, yet
+        # the committed dispatch ticket makes it visible to the drain.
+        assert not req_task.done()
+        assert sm.events == [], "serving() must not have entered yet"
+        assert sm.in_flight_count("primary") == 1, "committed dispatch ticket must be visible"
+
+        # Flip to image mode concurrently; its drain must block on the ticket.
+        img_task = asyncio.create_task(sm.arbiter.ensure_img())
+        await asyncio.sleep(0.1)
+        assert not img_task.done(), "drain must wait for the in-flight request"
+        assert sm.unload_calls == [], "slot must not be unloaded under an in-flight request"
+
+        # Release the request: it finishes 200 on the still-loaded slot; ONLY
+        # then does the drain observe in_flight_count==0 and unload the slot.
+        gate.set()
+        resp = await asyncio.wait_for(req_task, timeout=2.0)
+        assert resp.status_code == 200
+        assert sm.in_flight_count("primary") == 0, "ticket + serving balanced on exit"
+
+        await asyncio.wait_for(img_task, timeout=2.0)
+        assert sm.unload_calls == ["primary"], "unload only after the request finished"
+        assert sm.arbiter.mode == GpuMode.IMG
+    finally:
+        await dispatcher.aclose()

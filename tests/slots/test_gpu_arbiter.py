@@ -103,6 +103,9 @@ class FakeManager:
         self.configs = configs if configs is not None else _base_configs()
         self.ready: set[str] = set(ready or {"chat", "agent", "npu", "tts"})
         self.in_flight: dict[str, Any] = dict(in_flight or {})
+        # DR-2 — committed dispatch tickets, summed into in_flight_count so the
+        # drain sees requests that passed the guard but aren't yet serving().
+        self.tickets: dict[str, int] = {}
         self.calls: list[tuple[Any, ...]] = []
         self.poll_log: list[tuple[str, int]] = []
         self.on_unload = None  # optional hook(name) fired before recording
@@ -134,8 +137,19 @@ class FakeManager:
             count = int(val.pop(0)) if len(val) > 1 else int(val[0])
         else:
             count = int(val)
+        count += self.tickets.get(name, 0)
         self.poll_log.append((name, count))
         return count
+
+    def enter_dispatch(self, name: str) -> None:
+        self.tickets[name] = self.tickets.get(name, 0) + 1
+
+    def exit_dispatch(self, name: str) -> None:
+        remaining = self.tickets.get(name, 1) - 1
+        if remaining > 0:
+            self.tickets[name] = remaining
+        else:
+            self.tickets.pop(name, None)
 
     async def load(self, name: str, model_id: str | None = None) -> None:
         if name in self.fail_loads:
@@ -269,6 +283,32 @@ async def test_ensure_img_drains_then_stops_then_starts(
     final = _read_state(state_path)
     assert final["mode"] == "img"
     assert isinstance(final["last_img_activity"], float)
+
+
+async def test_ensure_img_drain_blocks_on_committed_dispatch_ticket(
+    fake_mgr: FakeManager, state_path: Path
+) -> None:
+    """DR-2: a committed dispatch ticket keeps the drain alive until released.
+
+    ``serving()`` reports 0 (the request passed the guard but hasn't entered
+    the serving context yet), yet ``in_flight_count`` must still be >= 1 so the
+    drain does not prematurely reach 0 and unload the slot under the request.
+    """
+    fake_mgr.in_flight = {"chat": 0}  # serving() count is 0…
+    fake_mgr.enter_dispatch("chat")  # …but a request is committed past the guard
+    assert fake_mgr.in_flight_count("chat") == 1
+
+    arb = GpuArbiter(fake_mgr, state_path=state_path)
+    task = asyncio.create_task(arb.ensure_img())
+    await asyncio.sleep(0.05)
+    assert not task.done(), "drain must block while a dispatch ticket is held"
+    assert ("unload", "chat") not in fake_mgr.calls
+
+    fake_mgr.exit_dispatch("chat")  # request finished → drain can proceed
+    assert fake_mgr.in_flight_count("chat") == 0
+    await asyncio.wait_for(task, timeout=2.0)
+    assert ("unload", "chat") in fake_mgr.calls
+    assert arb.mode is GpuMode.IMG
 
 
 async def test_ensure_img_noop_when_already_img(fake_mgr: FakeManager, state_path: Path) -> None:
