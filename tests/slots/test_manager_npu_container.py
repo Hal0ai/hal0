@@ -218,9 +218,7 @@ async def test_await_ready_health_timeout_stays_non_dispatchable(
 
     fake_provider = _make_container_provider_mock()
     # Simulate the container port never becoming healthy within the window.
-    fake_provider.wait_ready = AsyncMock(
-        side_effect=TimeoutError("port did not become healthy")
-    )
+    fake_provider.wait_ready = AsyncMock(side_effect=TimeoutError("port did not become healthy"))
 
     with (
         patch("hal0.providers.container.container_provider", return_value=fake_provider),
@@ -236,6 +234,4 @@ async def test_await_ready_health_timeout_stays_non_dispatchable(
         assert mgr.state("npu") == SlotState.WARMING, (
             "health-probe timeout must resolve to WARMING, not a lying READY"
         )
-        assert mgr.is_ready_for_dispatch("npu") is False, (
-            "a WARMING slot must not be dispatchable"
-        )
+        assert mgr.is_ready_for_dispatch("npu") is False, "a WARMING slot must not be dispatchable"

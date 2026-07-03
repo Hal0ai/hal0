@@ -57,9 +57,7 @@ log = logging.getLogger(__name__)
 # consumes those snapshots.
 
 
-def _load_persisted_pull_job(
-    model_id: str, registry: Any | None = None
-) -> dict[str, Any] | None:
+def _load_persisted_pull_job(model_id: str, registry: Any | None = None) -> dict[str, Any] | None:
     """Read a persisted pull-job snapshot from disk, or None if absent/unreadable.
 
     ``registry`` (when supplied) is forwarded to the reconcile step so a stale

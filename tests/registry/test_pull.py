@@ -8,13 +8,12 @@ redirect handling, and partial downloads / cancellation.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
 import httpx
 import pytest
-
-import json
 
 from hal0.registry.pull import (
     _sanitise_id,
