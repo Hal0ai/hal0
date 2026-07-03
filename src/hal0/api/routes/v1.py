@@ -508,13 +508,18 @@ async def _wake_capability_slot(request: Request) -> None:
     slot_manager = getattr(request.app.state, "slot_manager", None)
     if slot_manager is None:
         return
-    # Only wake a KNOWN managed slot; an unconfigured capability path must
-    # dispatch as-is (and 404 as before) rather than trip a spurious load.
+    # Only wake a KNOWN managed slot that is ENABLED; an unconfigured
+    # capability path must dispatch as-is (and 404 as before) rather than trip
+    # a spurious load. Critically, a DISABLED slot must stay dark: the routing
+    # layer drops ``enabled is False`` slots (``_loaded_slot_from_config``), so
+    # waking one here would revive a capability an operator explicitly disabled
+    # (and undo the SC-1 disable semantics). Mirror that rule.
     try:
         cfgs = await slot_manager.iter_configs()
     except Exception:
         return
-    if slot_name not in {c.get("name") for c in cfgs}:
+    eligible = {c.get("name") for c in cfgs if c.get("enabled") is not False}
+    if slot_name not in eligible:
         return
     # Nothing to do unless the slot was actually evicted to OFFLINE — a
     # READY/IDLE/SERVING slot is already routable, and a still-loading slot

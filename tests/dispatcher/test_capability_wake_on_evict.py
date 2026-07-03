@@ -34,7 +34,7 @@ from hal0.upstreams.registry import UpstreamRegistry
 from tests.slots.conftest import FakeContainerProvider
 
 
-def _write_min_slot(root: Path, name: str, *, port: int) -> None:
+def _write_min_slot(root: Path, name: str, *, port: int, enabled: bool = True) -> None:
     """Write a minimal llama-server slot TOML (mirrors the slots suite helper)."""
     root.mkdir(parents=True, exist_ok=True)
     (root / f"{name}.toml").write_text(
@@ -44,7 +44,7 @@ def _write_min_slot(root: Path, name: str, *, port: int) -> None:
                 f"port = {port}",
                 'backend = "vulkan"',
                 'provider = "llama-server"',
-                "enabled = true",
+                f"enabled = {'true' if enabled else 'false'}",
                 "[model]",
                 'default = "qwen3-4b-q4_k_m"',
                 "",
@@ -185,3 +185,51 @@ async def test_capability_slot_wakes_on_request_after_eviction(
     assert _rerank_load_count(fake) == 2, "wake must drive a second container load"
     assert resp.status_code == 200
     assert captured["call"].upstream_name == "rerank"
+
+
+async def test_disabled_capability_slot_is_not_woken(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DR-1 ↔ SC-1 interaction: the wake path must NOT revive a DISABLED slot.
+
+    When an operator disables a capability, SC-1 writes ``enabled = false`` and
+    the reconciler unloads it to OFFLINE / deregisters its upstream. A follow-up
+    capability request must still 404 — waking a disabled slot would start its
+    container and re-register the upstream, silently undoing the disable. The
+    wake gate mirrors the routing layer's ``enabled is False`` drop rule.
+    """
+    fake = FakeContainerProvider()
+    monkeypatch.setattr("hal0.providers.container.container_provider", lambda: fake)
+
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    _write_min_slot(root, "rerank", port=8090, enabled=False)
+
+    registry = UpstreamRegistry()
+    sm = SlotManager(
+        idle_after_s=0.0,
+        evict_after_s=0.01,
+        idle_monitor_interval_s=10.0,
+        upstreams_registry=registry,
+    )
+    dispatcher = Dispatcher(
+        upstream_registry=registry,
+        model_registry=None,
+        cached_models=lambda _name: [],
+        slot_manager=sm,
+    )
+
+    # Disabled slot starts OFFLINE with no upstream — the exact post-disable state.
+    assert (await sm.status("rerank")).state == SlotState.OFFLINE
+    assert registry.get("rerank") is None
+
+    req = _make_request("/v1/rerankings", sm)
+    with pytest.raises(NoRouteFound) as exc:
+        await _dispatch_and_forward(
+            req,
+            dispatcher,
+            body={"model": "bge-reranker-v2-m3", "query": "q", "documents": ["d"]},
+        )
+    assert exc.value.code == "dispatch.no_route"
+    # The wake gate skipped it: no container load, no re-registered upstream.
+    assert _rerank_load_count(fake) == 0, "a disabled slot must never be woken"
+    assert registry.get("rerank") is None
