@@ -459,6 +459,87 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
         )
 
 
+# DR-1: path → capability-slot pins, mirroring resolve_by_capability rules
+# 1-4 in dispatcher/router.py (_EMBED_PATHS / _RERANK_PATHS / _TTS_PATHS /
+# _IMAGE_PATHS). Kept in lock-step with those fragments.
+_CAPABILITY_PATH_PINS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("/embeddings",), "embed"),
+    (("/rerankings", "/rerank"), "rerank"),
+    (("/audio/speech",), "tts"),
+    (("/images/generations", "/images/edits", "/images/variations"), "img"),
+)
+
+
+def _capability_slot_for_path(path: str) -> str | None:
+    """Resolve a path-pinned capability slot name (embed/rerank/tts/img).
+
+    Mirrors the dispatcher's ``resolve_by_capability`` rules 1-4
+    (:mod:`hal0.dispatcher.router`): route purely by request path, first
+    fragment wins. Returns ``None`` for a non-capability path (e.g. chat).
+    """
+    for fragments, slot in _CAPABILITY_PATH_PINS:
+        if any(frag in path for frag in fragments):
+            return slot
+    return None
+
+
+async def _wake_capability_slot(request: Request) -> None:
+    """DR-1: wake an idle-EVICTED path-pinned capability slot before dispatch.
+
+    The idle sweeper unloads embed/rerank/tts/img slots to OFFLINE and
+    DEREGISTERS their container upstream
+    (``SlotManager._deregister_container_upstream``). A follow-up request
+    then 404s inside ``resolve_by_capability`` (surfaced as ``NoRouteFound``)
+    long before it can reach the dispatcher's container readiness gate — so
+    the gate can never reload it. This is the capability-layer twin of the
+    chat branch's :func:`_ensure_backend_for_model`: resolve the slot from
+    the request PATH (not the model id) and, when it is a known managed slot
+    sitting OFFLINE, drive ``SlotManager.load(slot)``, which re-registers the
+    upstream (``SlotManager._register_container_upstream``) so the subsequent
+    dispatch resolves it instead of 404ing.
+
+    Best-effort, same contract as the chat branch: the arbiter image-mode
+    guard fires FIRST (NOT swallowed — it is the outcome), then the load runs
+    in a try/except that logs + swallows so routing still proceeds.
+    """
+    slot_name = _capability_slot_for_path(request.url.path)
+    if slot_name is None:
+        return
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if slot_manager is None:
+        return
+    # Only wake a KNOWN managed slot; an unconfigured capability path must
+    # dispatch as-is (and 404 as before) rather than trip a spurious load.
+    try:
+        cfgs = await slot_manager.iter_configs()
+    except Exception:
+        return
+    if slot_name not in {c.get("name") for c in cfgs}:
+        return
+    # Nothing to do unless the slot was actually evicted to OFFLINE — a
+    # READY/IDLE/SERVING slot is already routable, and a still-loading slot
+    # is handled by the dispatcher's readiness gate.
+    from hal0.slots.state import SlotState
+
+    if slot_manager.state(slot_name) is not SlotState.OFFLINE:
+        return
+    # Mirror the chat branch: NEVER lazy-load onto the GPU against the
+    # arbiter's exclusive mode. The guard is the outcome — not swallowed.
+    arbiter = getattr(slot_manager, "arbiter", None)
+    if arbiter is not None:
+        arbiter.guard_dispatch(slot_name)
+    try:
+        await slot_manager.load(slot_name)
+    except Exception as exc:
+        log.warning(
+            "v1.capability_wake_failed",
+            slot=slot_name,
+            path=request.url.path,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+
 async def _dispatch_and_forward(
     request: Request,
     dispatcher: DispatcherDep,
@@ -474,6 +555,10 @@ async def _dispatch_and_forward(
     # then takes. A model no upstream serves surfaces as the dispatcher's
     # NoRouteFound envelope (404) — there is no catch-all fall-through.
     await _ensure_backend_for_model(request, body)
+    # DR-1: capability twin of the backend-aware load — wake an idle-EVICTED
+    # embed/rerank/tts/img slot (resolved from the request PATH) so its
+    # upstream is re-registered before dispatch, instead of 404ing.
+    await _wake_capability_slot(request)
     call = await dispatcher.dispatch(request, body=body)
     # Remember the most recent model we sent to this upstream so the
     # dashboard's synthetic slot reflects what's actually being used,

@@ -26,7 +26,7 @@ from hal0.capabilities import catalog
 
 
 def _npu_only_hw() -> Any:
-    \"\"\"A HardwareInfo-shaped stub: NPU present, no GPUs.\"\"\"
+    """A HardwareInfo-shaped stub: NPU present, no GPUs."""
     return types.SimpleNamespace(
         npu=types.SimpleNamespace(present=True),
         gpus=[],
@@ -35,14 +35,14 @@ def _npu_only_hw() -> Any:
 
 @pytest.fixture(autouse=True)
 def _reset_probe_cache() -> Any:
-    \"\"\"Ensure each test starts and ends with a clean image-present cache.\"\"\"
+    """Ensure each test starts and ends with a clean image-present cache."""
     catalog.reset_flm_image_present_cache()
     yield
     catalog.reset_flm_image_present_cache()
 
 
 def test_npu_advertised_under_podman_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    \"\"\"NPU is advertised when podman (not docker) reports the image present.\"\"\"
+    """NPU is advertised when podman (not docker) reports the image present."""
     monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "podman")
     monkeypatch.setattr(catalog, "load_hardware_info", _npu_only_hw)
 
@@ -63,7 +63,7 @@ def test_npu_advertised_under_podman_only(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_npu_hidden_when_image_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    \"\"\"Runtime resolves but the image inspect fails → no NPU backend.\"\"\"
+    """Runtime resolves but the image inspect fails → no NPU backend."""
     monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "podman")
     monkeypatch.setattr(catalog, "load_hardware_info", _npu_only_hw)
 
@@ -78,8 +78,8 @@ def test_npu_hidden_when_image_absent(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_flm_probe_not_hardcoded_docker(monkeypatch: pytest.MonkeyPatch) -> None:
-    \"\"\"The resolved argv never equals literal ``docker`` under podman, and the
-    probe is cached across repeated ``available_backends`` calls.\"\"\"
+    """The resolved argv never equals literal ``docker`` under podman, and the
+    probe is cached across repeated ``available_backends`` calls."""
     monkeypatch.setenv("HAL0_CONTAINER_RUNTIME", "podman")
     monkeypatch.setattr(catalog, "load_hardware_info", _npu_only_hw)
 
