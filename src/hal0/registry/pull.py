@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -83,6 +84,13 @@ class PullJobNotFound(PullError):
 
     code = "model.pull_job_not_found"
     status = 404
+
+
+class PullInsufficientDisk(PullError):
+    """The staging filesystem lacks room for the advertised download size."""
+
+    code = "model.insufficient_disk"
+    status = 507  # Insufficient Storage
 
 
 # ── Job record ───────────────────────────────────────────────────────────────
@@ -416,6 +424,28 @@ async def run_pull(
                 except ValueError:
                     job.bytes_total = 0
             job._signal()
+
+            # Disk-space preflight (MR-4): bail before opening the .part file
+            # (and streaming multi-GB) if the staging FS clearly can't hold the
+            # advertised size. Measured against tmp_dir — that's where bytes
+            # land before the os.replace() into the final path. A probe failure
+            # must not itself fail the pull: if we can't measure, fall through
+            # to the existing stream-until-ENOSPC behavior (no regression).
+            # PullInsufficientDisk is not an OSError, so the raise inside the
+            # suppress still propagates to the except Hal0Error handler below.
+            if job.bytes_total > 0:
+                with contextlib.suppress(OSError):
+                    free = shutil.disk_usage(tmp_dir).free
+                    if free < job.bytes_total:
+                        raise PullInsufficientDisk(
+                            f"insufficient disk for {job.model_id}: need "
+                            f"{job.bytes_total} bytes, {free} free at {tmp_dir}",
+                            details={
+                                "required_bytes": job.bytes_total,
+                                "free_bytes": free,
+                                "path": str(tmp_dir),
+                            },
+                        )
 
             with open(tmp_path, "wb") as f:
                 async for chunk in resp.aiter_bytes(chunk_size=_CHUNK_BYTES):
@@ -845,6 +875,7 @@ def _register_flm_pulled(
 
 __all__ = [
     "PullError",
+    "PullInsufficientDisk",
     "PullInvalidSource",
     "PullJob",
     "PullJobNotFound",
