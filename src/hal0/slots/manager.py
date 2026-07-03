@@ -2783,9 +2783,11 @@ class SlotManager:
         Polls GET /health on the slot's container port until 200.
 
         Returns:
-            SlotState.READY when the container is serving (or the
-            health wait timed out — the fail watcher picks up ongoing
-            unhealthiness).
+            SlotState.READY when the container is serving. On a health-wait
+            timeout, resolves to SlotState.WARMING (non-dispatchable) rather
+            than a lying READY: WARMING keeps the slot retryable so the fail
+            watcher / next-request reload governs recovery, instead of live
+            traffic being forwarded to a wedged server on a false READY.
         """
         cfg = await self._maybe_load_config(slot_name)
         if not cfg:
@@ -2803,8 +2805,13 @@ class SlotManager:
                 "slot.container_await_ready_timeout",
                 extra={"slot": slot_name, "port": slot_port, "error": str(exc)},
             )
-            # Let the fail watcher detect ongoing unhealthiness.
-            return SlotState.READY
+            # DR-3: the inference server never answered /health, so do NOT
+            # advertise a dispatchable READY. WARMING is not in
+            # _DISPATCHABLE_STATES, so _check_slot_ready_for_dispatch raises
+            # the retryable SlotLoading (503 + Retry-After) and the next
+            # request re-drives load() — the fail watcher / reload governs
+            # recovery instead of live traffic hitting a wedged server.
+            return SlotState.WARMING
 
     # ── adoption / drift reconcile (ISSUE #30) ───────────────────────────────
 
