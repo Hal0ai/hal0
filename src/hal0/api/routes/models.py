@@ -93,8 +93,15 @@ def _persist_pull_job(job: PullJob) -> None:
         log.warning("model.pull_job_persist_failed model_id=%s error=%s", job.model_id, exc)
 
 
-def _load_persisted_pull_job(model_id: str) -> dict[str, Any] | None:
-    """Read a persisted pull-job snapshot from disk, or None if absent/unreadable."""
+def _load_persisted_pull_job(
+    model_id: str, registry: Any | None = None
+) -> dict[str, Any] | None:
+    """Read a persisted pull-job snapshot from disk, or None if absent/unreadable.
+
+    ``registry`` (when supplied) is forwarded to the reconcile step so a stale
+    non-terminal snapshot can be cross-checked against ground truth — an
+    install that actually landed is reported ``completed``, not ``failed``.
+    """
     path = _pull_job_file(model_id)
     try:
         raw = path.read_text(encoding="utf-8")
@@ -106,20 +113,50 @@ def _load_persisted_pull_job(model_id: str) -> dict[str, Any] | None:
         return None
     if not isinstance(loaded, dict):
         return None
-    return _reconcile_persisted_pull_job(loaded)
+    return _reconcile_persisted_pull_job(loaded, registry)
 
 
-def _reconcile_persisted_pull_job(persisted: dict[str, Any]) -> dict[str, Any]:
+def _reconcile_persisted_pull_job(
+    persisted: dict[str, Any], registry: Any | None = None
+) -> dict[str, Any]:
     """Repair a persisted snapshot that was left in a non-terminal state.
 
     A snapshot only reaches disk-fallback when its job is absent from the
     in-memory dict — which after a restart means the worker that owned it is
     gone. A ``queued``/``running`` snapshot can therefore never make further
-    progress, so we surface it as ``failed`` (rather than a state the client
-    would poll forever) with an explanatory error. Terminal snapshots
-    (completed/failed/cancelled) are returned unchanged.
+    progress.
+
+    Before declaring it failed, cross-check ground truth (#MR-2): the terminal
+    on-disk write is fail-soft, so a pull that actually completed can be left
+    with a stale ``running`` snapshot. When ``registry`` knows the id and its
+    model file exists on disk, the install landed — surface ``completed``
+    (backfilling ``path``/``size_bytes`` from the registry) rather than a
+    spurious ``failed``. Only a snapshot with no matching installed file falls
+    through to the failed-rewrite. Terminal snapshots (completed/failed/
+    cancelled) are returned unchanged.
     """
     if persisted.get("state") in ("queued", "running"):
+        model_id = persisted.get("model_id")
+        if registry is not None and model_id:
+            try:
+                if registry.has(model_id):
+                    model = registry.get(model_id)
+                    p = getattr(model, "path", None)
+                    if p and Path(p).exists():
+                        persisted = dict(persisted)
+                        persisted["state"] = "completed"
+                        persisted.setdefault("path", str(p))
+                        size = getattr(model, "size_bytes", None)
+                        if size:
+                            persisted.setdefault("size_bytes", size)
+                        sha = getattr(model, "sha256", None)
+                        if sha:
+                            persisted.setdefault("sha256", sha)
+                        return persisted
+            except Exception:
+                # A registry hiccup must never raise inside a status poll —
+                # degrade to the failed-rewrite below.
+                pass
         persisted = dict(persisted)
         persisted["state"] = "failed"
         persisted.setdefault("error", "pull interrupted by hal0-api restart; re-run the pull")
@@ -1548,7 +1585,7 @@ async def pull_status(model_id: str, request: Request) -> dict[str, object]:
     jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
     job = jobs.get(model_id)
     if job is None:
-        persisted = _load_persisted_pull_job(model_id)
+        persisted = _load_persisted_pull_job(model_id, request.app.state.model_registry)
         if persisted is not None:
             return persisted
         raise PullJobNotFound(
@@ -1574,7 +1611,7 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
     jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
     job = jobs.get(model_id)
     if job is None:
-        persisted = _load_persisted_pull_job(model_id)
+        persisted = _load_persisted_pull_job(model_id, request.app.state.model_registry)
         if persisted is not None:
             # Serve one terminal frame from the persisted snapshot so the
             # client's SSE consumer sees the final state and can close.
