@@ -1740,6 +1740,16 @@ class SlotManager:
         # suspenders). Fast fast path when this write isn't a new default.
         await self._check_default_uniqueness(slot_name, cfg_dict)
         cfg_path = self._config_file(slot_name)
+        # SC-5: refuse to clobber an existing slot's config. Without this,
+        # a duplicate create() overwrote the on-disk TOML and force-reset
+        # state.json to OFFLINE, orphaning any running container. Internal
+        # reconcile callers pre-check cfg_path.exists() before create(), so
+        # they never reach this guard; add_slot and POST /api/slots do.
+        if cfg_path.exists():
+            raise SlotConfigError(
+                f"slot {slot_name!r} already exists; use update to modify it",
+                details={"slot": slot_name, "config": str(cfg_path)},
+            )
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             write_slot_toml(cfg_path, cfg_dict)
