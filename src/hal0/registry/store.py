@@ -31,7 +31,7 @@ import os
 import tempfile
 import threading
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +41,17 @@ from hal0.config import paths
 from hal0.errors import Hal0Error
 from hal0.registry.model import Model
 
+try:  # POSIX advisory file locking. Absent on Windows; repo targets Linux.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
+
 log = logging.getLogger(__name__)
+
+# MR-5: sidecar lockfile guarding cross-process registry writes. It has a
+# STABLE inode — unlike registry.toml, which _atomic_write swaps via
+# os.replace, so a flock on the .toml would guard a now-unlinked inode.
+_PROCESS_LOCK_FILENAME = "registry.toml.lock"
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
@@ -66,6 +76,44 @@ class ModelAlreadyExists(RegistryError):
 
     code = "model.already_exists"
     status = 409
+
+
+# ── cross-process write lock (MR-5) ───────────────────────────────────────────
+
+
+@contextlib.contextmanager
+def registry_write_lock(registry_dir: str | Path) -> Iterator[None]:
+    """Hold an exclusive POSIX advisory lock on the registry sidecar lockfile.
+
+    Serializes registry read-modify-write critical sections ACROSS processes
+    (each open file description gets its own ``fcntl.flock`` slot, so this is
+    mutually exclusive between separate processes and separate open fds).
+    Composes with the in-process ``threading.RLock``: the RLock serializes
+    threads inside one instance, this flock serializes across processes.
+
+    The lock is taken on a dedicated sidecar (``registry.toml.lock``) with a
+    stable inode, NOT on ``registry.toml`` itself — the atomic-write path
+    swaps ``registry.toml``'s inode via ``os.replace``, so a lock on the old
+    inode would not guard the freshly-written file.
+
+    Gracefully degrades to a no-op when ``fcntl`` is unavailable (non-POSIX);
+    the repo targets Linux, so the real path is always POSIX.
+    """
+    lock_dir = Path(registry_dir)
+    if fcntl is None:  # pragma: no cover - non-POSIX fallback
+        yield
+        return
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / _PROCESS_LOCK_FILENAME
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 # ── ModelRegistry ─────────────────────────────────────────────────────────────
@@ -257,6 +305,15 @@ class ModelRegistry:
         """Clear the mtime tag so the next read re-parses."""
         self._cache_mtime = -1.0
 
+    def _process_lock(self) -> contextlib.AbstractContextManager[None]:
+        """Cross-process exclusive lock guarding this registry's writes (MR-5).
+
+        Thin wrapper over :func:`registry_write_lock` bound to this instance's
+        ``registry_dir``. Held for the duration of a mutator's read-modify-write
+        so a second process cannot interleave its ``os.replace`` and drop rows.
+        """
+        return registry_write_lock(self.registry_dir)
+
     # ── public reads ─────────────────────────────────────────────────────
 
     def list(self) -> list[Model]:
@@ -308,7 +365,10 @@ class ModelRegistry:
         Raises:
             ModelAlreadyExists: If the model id is already present.
         """
-        with self._lock:
+        with self._lock, self._process_lock():
+            # Re-read UNDER the flock so we observe any writer that committed
+            # just before we acquired it (MR-5).
+            self._invalidate()
             models = dict(self._ensure_fresh())
             if model.id in models:
                 raise ModelAlreadyExists(
@@ -326,7 +386,8 @@ class ModelRegistry:
         Returns:
             ``True`` if the model was present and removed, ``False`` if absent.
         """
-        with self._lock:
+        with self._lock, self._process_lock():
+            self._invalidate()
             models = dict(self._ensure_fresh())
             if model_id not in models:
                 return False
@@ -353,7 +414,8 @@ class ModelRegistry:
                 "updates must be a dict",
                 details={"got": type(updates).__name__},
             )
-        with self._lock:
+        with self._lock, self._process_lock():
+            self._invalidate()
             models = dict(self._ensure_fresh())
             if model_id not in models:
                 raise ModelNotFound(
@@ -454,4 +516,5 @@ __all__ = [
     "ModelRegistry",
     "RegistryError",
     "model_to_toml_dict",
+    "registry_write_lock",
 ]

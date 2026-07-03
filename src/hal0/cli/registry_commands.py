@@ -46,6 +46,8 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from hal0.registry.store import registry_write_lock
+
 console = Console()
 
 app = typer.Typer(
@@ -138,33 +140,39 @@ def _atomic_copy(source: Path, dest: Path) -> None:
     mid-copy never leaves a partial ``registry.toml`` at the canonical
     path — which would brick every registry consumer until the
     operator manually rolls back.
+
+    MR-5: takes the same cross-process sidecar flock as the store's
+    mutators, so ``hal0 registry import`` cannot interleave its
+    ``os.replace`` with an in-flight API write and silently clobber a
+    just-added row.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(
-        prefix=f".{dest.name}.",
-        suffix=".tmp",
-        dir=dest.parent,
-    )
-    tmp_path = Path(tmp_str)
-    try:
+    with registry_write_lock(dest.parent):
+        fd, tmp_str = tempfile.mkstemp(
+            prefix=f".{dest.name}.",
+            suffix=".tmp",
+            dir=dest.parent,
+        )
+        tmp_path = Path(tmp_str)
         try:
-            with (
-                open(source, "rb") as src,
-                os.fdopen(fd, "wb") as dst,
-            ):
-                shutil.copyfileobj(src, dst)
-                dst.flush()
-                os.fsync(dst.fileno())
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-            raise
-        os.replace(tmp_path, dest)
-        tmp_path = None  # type: ignore[assignment]
-    finally:
-        if tmp_path is not None:
-            with contextlib.suppress(OSError):
-                tmp_path.unlink(missing_ok=True)
+            try:
+                with (
+                    open(source, "rb") as src,
+                    os.fdopen(fd, "wb") as dst,
+                ):
+                    shutil.copyfileobj(src, dst)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
+            os.replace(tmp_path, dest)
+            tmp_path = None  # type: ignore[assignment]
+        finally:
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
 
 
 @app.command("import")
