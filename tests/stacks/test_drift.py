@@ -10,6 +10,7 @@ from pathlib import Path
 
 from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
+from hal0.slots.state import SlotState
 from hal0.stacks import StacksCatalog
 from hal0.stacks.apply import StackApplyEngine
 from hal0.stacks.state import (
@@ -18,6 +19,7 @@ from hal0.stacks.state import (
     stack_content_hash,
     write_stack_state_atomic,
 )
+from tests.stacks.conftest import FakeSnap, RecordingOrchestrator, RecordingSlotManager
 
 
 def _slots_dir(home: str) -> Path:
@@ -101,3 +103,50 @@ class TestDriftStatus:
         # Hand-edit the slot after applying → drift.
         slot_path.write_text(slot_path.read_text() + '\nrole = "primary"\n', encoding="utf-8")
         assert engine.drift_status(catalog)["status"] == "modified"
+
+
+class TestConvergeDegraded:
+    """PS-5 part 2 — a converge whose per-slot loads failed must not read clean.
+
+    The slot TOMLs are committed cleanly (Phase A), so the drift hash still
+    matches live disk; without the converge_ok flag drift_status would wrongly
+    report ``clean`` even though the runtime never came up. It must report
+    ``degraded`` instead.
+    """
+
+    async def test_load_error_reports_degraded_not_clean(self, tmp_hal0_home: str) -> None:
+        _write_slot(tmp_hal0_home, "agent", "old")
+        catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc" / "hal0" / "stacks.toml")
+        catalog.create("saber", _saber())
+
+        class Boom(RecordingSlotManager):
+            async def load(self, slot_name, model_id=None):
+                raise RuntimeError("spawn failed")
+
+        sm = Boom([FakeSnap("agent", SlotState.OFFLINE, None)])
+        engine = StackApplyEngine(slot_manager=sm, orchestrator=RecordingOrchestrator())
+
+        plan = engine.plan("saber", _saber())
+        engine.apply_config(plan)
+        report = await engine.converge(_saber())
+        assert report.errors, "converge should have recorded a per-slot load error"
+        engine.record_active(plan, applied_at=1.0, converge_ok=not report.errors)
+
+        status = engine.drift_status(catalog)
+        assert status == {"active": "saber", "status": "degraded"}
+
+    async def test_clean_converge_still_reports_clean(self, tmp_hal0_home: str) -> None:
+        _write_slot(tmp_hal0_home, "agent", "old")
+        catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc" / "hal0" / "stacks.toml")
+        catalog.create("saber", _saber())
+
+        sm = RecordingSlotManager([FakeSnap("agent", SlotState.OFFLINE, None)])
+        engine = StackApplyEngine(slot_manager=sm, orchestrator=RecordingOrchestrator())
+
+        plan = engine.plan("saber", _saber())
+        engine.apply_config(plan)
+        report = await engine.converge(_saber())
+        assert not report.errors
+        engine.record_active(plan, applied_at=1.0, converge_ok=not report.errors)
+
+        assert engine.drift_status(catalog) == {"active": "saber", "status": "clean"}

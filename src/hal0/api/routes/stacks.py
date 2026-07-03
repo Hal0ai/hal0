@@ -256,7 +256,7 @@ def list_stacks() -> dict[str, Any]:
         {
           "stacks": [ {slug, name, ..., seed, active, drift}, ... ],
           "active": "coding" | null,
-          "drift":  "clean" | "modified" | "none"
+          "drift":  "clean" | "degraded" | "modified" | "none"
         }
 
     ``drift`` is meaningful for the active stack; the matching item also carries
@@ -394,10 +394,15 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
 
         plan = engine.plan(slug, cfg)
         engine.apply_config(plan)
-        engine.record_active(plan, applied_at=time.time())
+        # converge BEFORE recording active so the pointer carries the Phase-B
+        # outcome (PS-5 part 2). A slot-create or per-slot lifecycle failure
+        # means disk is honest but runtime never fully came up → converge_ok
+        # False so drift_status reports ``degraded`` rather than ``clean``.
         converged: dict[str, Any] = {}
+        converge_ok = not create_errors
         if slot_manager is not None and orchestrator is not None:
             report = await engine.converge(cfg)
+            converge_ok = converge_ok and not report.errors
             converged = {
                 "loaded": report.loaded,
                 "swapped": report.swapped,
@@ -406,6 +411,7 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
                 "capabilities_applied": report.capabilities_applied,
                 "errors": [{"target": t, "error": e} for t, e in report.errors] + create_errors,
             }
+        engine.record_active(plan, applied_at=time.time(), converge_ok=converge_ok)
         rec.after = {
             "slug": slug,
             "changed": sum(1 for r in _diff_rows(plan) if r["changed"]),
