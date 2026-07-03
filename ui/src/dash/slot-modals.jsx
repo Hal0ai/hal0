@@ -88,13 +88,40 @@ function normalizeApiModel(m) {
   };
 }
 
+// One shared compatible-models filter for all three slot surfaces (create
+// modal, edit drawer, swap popover). Takes the raw /api/models list, normalizes
+// it, and filters to the requested `type`, hiding ROCmFP4-quantized models
+// whenever the target backend isn't rocm (those weights only run on the rocm
+// fork binary). Previously the create modal filtered on type ALONE and could
+// offer rocmfp4 models that the backend then rejects — this closes that gap.
+function compatibleModels(models, { type, backend }) {
+  return (models ?? []).map(normalizeApiModel).filter(m =>
+    m.type === type &&
+    !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && backend !== "rocm")
+  );
+}
+
 // ─── Create-slot modal ──────────────────────────────────────────
 function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
-  const [name, setName] = useStateSM(defaults.name || "");
-  const [type, setType] = useStateSM(defaults.type || "llm");
-  const [profile, setProfile] = useStateSM(defaults.profile || "");
-  const [model, setModel] = useStateSM(defaults.model || "");
-  const [makeDefault, setMakeDefault] = useStateSM(false);
+  // Shared form-state hook (useForm): values + touched/submitted + isDirty (the
+  // unsaved-changes guard) + a reset that re-derives from `defaults` when the
+  // modal (re)opens. Field setters are thin wrappers so the JSX stays intact.
+  const f = useForm({
+    deriveInitial: () => ({
+      name: defaults.name || "",
+      type: defaults.type || "llm",
+      profile: defaults.profile || "",
+      model: "",
+      makeDefault: false,
+    }),
+    resetKey: `${open ? "o" : "c"}:${JSON.stringify(defaults)}`,
+  });
+  const { name, type, profile, model, makeDefault } = f.values;
+  const setName = (val) => f.set("name", val);
+  const setType = (val) => f.set("type", val);
+  const setProfile = (val) => f.set("profile", val);
+  const setModel = (val) => f.set("model", val);
+  const setMakeDefault = (val) => f.set("makeDefault", val);
   const [submitErr, setSubmitErr] = useStateSM(null);
 
   const createMut = useSlotCreate();
@@ -102,16 +129,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const modelsQuery = useModels();
   const profilesQuery = useProfiles();
 
-  useEffectSM(() => {
-    if (open) {
-      setName(defaults.name || "");
-      setType(defaults.type || "llm");
-      setProfile(defaults.profile || "");
-      setModel("");
-      setMakeDefault(false);
-      setSubmitErr(null);
-    }
-  }, [open, defaults]);
+  useEffectSM(() => { if (open) setSubmitErr(null); }, [open]);
 
   // validation — slot collision uses the live slot list passed in from
   // the SlotsView (useSlots data), not HAL0_DATA.
@@ -120,16 +138,13 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const nameInvalid = name && !/^[a-z][a-z0-9-]{0,30}$/.test(name);
   const nameError = nameCollision ? "name already in use" : nameInvalid ? "lowercase + dashes only" : null;
 
-  // Live catalogue from /api/models (normalized to the legacy HAL0_DATA
-  // shape so the existing filter + render code keeps working). Sending a
-  // mock id like `qwen3.6-27b-mtp` here would tunnel into POST
-  // /api/slots/{name}/swap and the slot orchestrator would reject it
-  // against the real registry (slot.not_found).
-  const allModels = (modelsQuery.data ?? []).map(normalizeApiModel);
   const allProfiles = profilesQuery.data ?? [];
-  // Any model of the right type works — the profile's image determines
-  // the backend, not a device selector.
-  const compatible = allModels.filter(m => m.type === type);
+  // Compatible models: filter by type AND the selected profile's backend so
+  // rocmfp4 models are hidden on non-rocm profiles (was type-only — the gap
+  // UI-3 closes). Before a profile is picked, backend is undefined → rocmfp4
+  // models stay hidden, the safe default.
+  const selBackend = allProfiles.find(p => p.name === profile)?.backend;
+  const compatible = compatibleModels(modelsQuery.data, { type, backend: selBackend });
 
   const canSave = !!name && !nameError && !createMut.isPending && !!profile;
 
@@ -175,6 +190,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       eyebrow="Slots · new"
       title="Create slot"
       width={640}
+      dirty={f.isDirty}
       foot={
         <>
           <span>
@@ -183,7 +199,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
               : "capabilities.toml will be written on save."}
           </span>
           <span style={{display: "inline-flex", gap: 8}}>
-            <button className="btn ghost sm" onClick={onClose}>Cancel</button>
+            <button className="btn ghost sm" onClick={() => { if (f.isDirty && !window.confirm("Discard unsaved changes?")) return; onClose(); }}>Cancel</button>
             <button
               className="btn sm"
               onClick={onCreateClick}
@@ -569,10 +585,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const extraArgsDirty = extraArgs !== extraArgsBaseline;
   const extraArgsErr = validateExtraArgs(extraArgs);
 
+  // UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields
+  // (extra_args, ctx, profile, chat_template override). The instant-apply
+  // toggles (thinking / MTP / enable) fire their own PUT/POST outside Save and
+  // are intentionally excluded — a flipped toggle is already persisted.
+  const dirty =
+    extraArgsDirty ||
+    String(ctx) !== String(slot.metrics?.ctx || 16384) ||
+    (!!selectedProfile && selectedProfile !== (slot.profile || "")) ||
+    (overrideOpen && chatTemplate !== (slot.chat_template || ""));
+  const requestClose = () => {
+    if (dirty && !window.confirm("Discard unsaved changes?")) return;
+    onClose();
+  };
+
   return (
     <Drawer
       open={open}
       onClose={onClose}
+      dirty={dirty}
       eyebrow={`Slots · /slots/${slot.name}`}
       title={`Edit ${slot.name}`}
       width={560}
@@ -601,7 +632,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           >{Icons.unload} {deleting ? "Deleting…" : "Delete slot"}</button>
           <span style={{display: "inline-flex", gap: 8, alignItems: "center"}}>
             {submitErr && <span style={{color: "var(--err)", fontSize: 11}}>{submitErr}</span>}
-            <button className="btn ghost sm" onClick={onClose}>Cancel</button>
+            <button className="btn ghost sm" onClick={requestClose}>Cancel</button>
             <button
               className="btn sm"
               disabled={saving || deleting}
@@ -724,14 +755,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         // the operator switches profiles — before Save is clicked.
         const selProfileMeta = (profilesQuery.data ?? []).find(p => p.name === selectedProfile);
         const selBackend = selProfileMeta?.backend ?? slot.backend;
-        const compatible = (modelsQuery.data ?? [])
-          .map(normalizeApiModel)
-          .filter(m =>
-            m.type === slot.type &&
-            // ROCmFP4-quantized models only run on the rocm fork binary — hide
-            // them when the selected profile isn't on the rocm backend.
-            !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && selBackend !== "rocm")
-          );
+        const compatible = compatibleModels(modelsQuery.data, { type: slot.type, backend: selBackend });
         const cur = slot.model_id || slot.model || "";
         const has = compatible.some(m => m.id === cur);
         // A background swap is in flight — the select stays usable, but show a
@@ -1168,14 +1192,9 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
 
   const isContainer = slot.runtime === "container";
   const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
-  const compatible = (modelsQuery.data ?? [])
-    .map(normalizeApiModel)
-    .filter(m =>
-      m.type === slot.type &&
-      // ROCmFP4-quantized models only run on the custom rocm fork binary —
-      // don't offer them when swapping a non-rocm slot.
-      !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && slot.backend !== "rocm")
-    );
+  // ROCmFP4-quantized models only run on the custom rocm fork binary — don't
+  // offer them when swapping a non-rocm slot (shared compatibleModels filter).
+  const compatible = compatibleModels(modelsQuery.data, { type: slot.type, backend: slot.backend });
 
   // N2: container swap = cold systemctl restart (not a hot in-place swap).
   // Intercept onPick for container slots: show a confirm toast and fire

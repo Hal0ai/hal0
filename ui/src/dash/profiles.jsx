@@ -35,8 +35,7 @@ const BACKEND_META = {
   cpu:    { label: 'CPU',       color: 'var(--dev-cpu)',    device_class: 'cpu', backendField: null },
 };
 
-// Mirrors the API name regex ^[a-z0-9][a-z0-9_-]{0,31}$.
-const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// `NAME_RE` (name regex) and `toast` are shared globals from primitives.jsx.
 
 const BLANK = { name: '', intent: '', image: '', backend: 'rocm', quant: '', flags: '', mtp: false };
 
@@ -58,10 +57,6 @@ function intentOf(p) {
   if (p.intent) return p.intent;
   const base = p.image ? p.image.split(':').pop() : prettyProfile(p.name);
   return p.mtp ? `${base} · MTP` : base;
-}
-
-function toast(msg, kind = 'info') {
-  if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind);
 }
 
 // ── slot binding pill ─────────────────────────────────────────────────────────
@@ -169,33 +164,8 @@ function Section({ title, count, hint, children }) {
 }
 
 // ── Form drawer (create / edit / clone) ─────────────────────────────────────────
-
-function FormRow({ label, sub, req, children, error, warn, ok, counter }) {
-  return (
-    <div className={'pf-row' + (error ? ' has-err' : '')}>
-      <div className="pf-row-lbl">
-        <span>{label}{req && <span className="pf-req" title="required">*</span>}</span>
-        {sub && <span className="pf-row-sub mono">{sub}</span>}
-      </div>
-      <div className="pf-row-ctl">
-        <div className={'pf-field' + (ok ? ' ok' : '') + (error ? ' err' : '')}>
-          {children}
-          {ok && <span className="pf-field-ok" aria-hidden="true">{Icons.check}</span>}
-        </div>
-        {(error || warn || counter) && (
-          <div className="pf-row-foot">
-            {error
-              ? <span className="pf-msg err mono hint err">{Icons.alert}{error}</span>
-              : warn
-              ? <span className="pf-msg warn mono">{Icons.alert}{warn}</span>
-              : <span />}
-            {counter && <span className={'pf-counter mono' + (counter.warn ? ' warn' : '')}>{counter.text}</span>}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+// FormRow is a shared primitive (primitives.jsx) — the superset variant this
+// view seeded (error/warn/ok/counter + real <label htmlFor>).
 
 function validateForm(form, existing) {
   const errs = {};
@@ -215,9 +185,14 @@ function warnForm(form) {
   return warns;
 }
 
-function Drawer({ mode, source, existing = [], onClose, onSaved }) {
+// The editor drawer. Consumes the shared FormDrawer shell + useForm hook +
+// shared FormRow. Named ProfileDrawer (not Drawer) to avoid shadowing the
+// primitives.jsx Drawer global. validateForm/warnForm are passed into useForm
+// verbatim so the validation rules stay in this view.
+function ProfileDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
-  const initial = (() => {
+
+  const deriveInitial = () => {
     if (mode === 'create') return { ...BLANK };
     const base = {
       name: source.name,
@@ -233,41 +208,38 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
       return { ...base, name: (source.name + suffix).slice(0, 32), cloned_from: source.name };
     }
     return base;
-  })();
-
-  const [form, setForm] = useState(initial);
-  const [touched, setTouched] = useState({});
-  const [submitted, setSubmitted] = useState(false);
-  const [closing, setClosing] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  };
 
   const create = useProfileCreate();
   const update = useProfileUpdate();
 
-  useEffect(() => { setForm(initial); setTouched({}); setSubmitted(false); /* eslint-disable-next-line */ }, [mode, source]);
-
-  const meta = bk(form.backend);
-
   const taken = existing.filter(n => !(isEdit && n === source.name));
-  const errs = validateForm(form, taken);
-  const warns = warnForm(form);
-  const blocking = Object.keys(errs).length > 0;
-  const show = (f) => submitted || touched[f];
+  const f = useForm({
+    deriveInitial,
+    resetKey: `${mode}:${source?.name ?? ''}`,
+    validate: (v) => validateForm(v, taken),
+    warn: (v) => warnForm(v),
+  });
+  const form = f.values;
+  const errs = f.errors;
+  const warns = f.warns;
+  const blocking = f.blocking;
+  const show = f.show;
+  const set = f.set;
+  const touch = f.touch;
+  const meta = bk(form.backend);
   const nameValid = !errs.name && (form.name || '').trim().length > 0;
-
-  const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setTouched(t => ({ ...t, [k]: true })); };
-  const touch = (k) => setTouched(t => ({ ...t, [k]: true }));
-  const close = () => { if (submitting) return; setClosing(true); setTimeout(onClose, 200); };
+  const nameLen = (form.name || '').length;
 
   async function submit(e) {
     e.preventDefault();
-    setSubmitted(true);
+    f.setSubmitted(true);
     if (blocking) {
       const first = document.querySelector('.pf-field.err input');
       if (first) first.focus();
       return;
     }
-    setSubmitting(true);
+    f.setSubmitting(true);
     const choice = bk(form.backend);
     const body = {
       name: form.name.trim(),
@@ -293,7 +265,7 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
     } catch (err) {
       const code = err?.code || '';
       if (code === 'profiles.exists') {
-        setTouched(t => ({ ...t, name: true }));
+        touch('name');
         toast(`A profile named ${body.name} already exists`, 'err');
       } else if (code === 'profiles.seed_immutable') {
         toast('Seed profiles cannot be modified', 'err');
@@ -301,7 +273,7 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
         toast(err?.message || 'Save failed', 'err');
       }
     } finally {
-      setSubmitting(false);
+      f.setSubmitting(false);
     }
   }
 
@@ -309,98 +281,88 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
     : mode === 'clone' ? (source.seed ? `Edit a copy · ${source.name}` : `Clone · ${source.name}`)
     : 'New profile';
   const eyebrow = mode === 'create' ? 'CREATE' : mode === 'clone' ? (source.seed ? 'EDIT A COPY' : 'CLONE') : 'EDIT';
-  const nameLen = (form.name || '').length;
 
   return (
-    <div className={'pf-scrim' + (closing ? ' out' : '')} onMouseDown={close}>
-      <div
-        className={'pf-drawer pf-form-panel' + (closing ? ' out' : '')}
-        onMouseDown={e => e.stopPropagation()}
-        role="dialog"
-        aria-label={title}
-        aria-busy={submitting}
-      >
-        <div className="pf-drawer-head">
-          <div>
-            <div className="pf-drawer-eye mono">{eyebrow}</div>
-            <div className="pf-drawer-title pf-form-title mono">{title}</div>
-          </div>
-          <button className="pf-x" onClick={close} aria-label="Close" disabled={submitting}>{Icons.close}</button>
-        </div>
-
-        <form className="pf-drawer-body" onSubmit={submit} noValidate>
-          <FormRow label="Name" req sub="lowercase · - _ · ≤32"
-            error={show('name') ? errs.name : null}
-            ok={!isEdit && nameValid}
-            counter={!isEdit ? { text: nameLen + '/32', warn: nameLen >= 28 } : null}>
-            <input className={'pf-input mono' + (show('name') && errs.name ? ' err' : '')} value={form.name}
-              onChange={e => set('name', e.target.value)} onBlur={() => touch('name')}
-              placeholder="my-profile" maxLength={32} disabled={isEdit}
-              aria-invalid={!!(show('name') && errs.name)} data-testid="pf-input-name" />
-          </FormRow>
-
-          <FormRow label="Intent" sub="what it's for">
-            <input className="pf-input" value={form.intent} onChange={e => set('intent', e.target.value)}
-              placeholder="MoE agents · long-ctx" data-testid="pf-input-intent" />
-          </FormRow>
-
-          <FormRow label="Image" req sub="container image URI"
-            error={show('image') ? errs.image : null}
-            warn={!errs.image ? warns.image : null}
-            ok={!!(form.image || '').trim() && !errs.image && !warns.image}>
-            <input className={'pf-input mono' + (show('image') && errs.image ? ' err' : '')} value={form.image}
-              onChange={e => set('image', e.target.value)} onBlur={() => touch('image')}
-              placeholder="ghcr.io/hal0ai/…:tag" aria-invalid={!!(show('image') && errs.image)}
-              data-testid="pf-input-image" />
-          </FormRow>
-
-          <FormRow label="Backend" sub="runtime path">
-            <div className="pf-seg" data-testid="pf-seg-backend">
-              {Object.keys(BACKEND_META).map(k => (
-                <button type="button" key={k} className={'pf-seg-btn' + (form.backend === k ? ' on' : '')}
-                  style={{ '--bk': BACKEND_META[k].color }} onClick={() => set('backend', k)}>
-                  <span className="pf-chip-dot" />{BACKEND_META[k].label}
-                </button>
-              ))}
-            </div>
-          </FormRow>
-
-          <FormRow label="Quant" sub="weight format">
-            <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}
-              placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
-          </FormRow>
-
-          <FormRow label="Flags" sub="appended to the run command">
-            <textarea className="pf-input mono pf-textarea" value={form.flags || ''}
-              onChange={e => set('flags', e.target.value)} rows={3} placeholder="--flash-attn on -ngl 999"
-              data-testid="pf-input-flags" />
-          </FormRow>
-
-          <FormRow label="MTP" sub="Multi-Token Prediction speculative decode">
-            <button type="button" className={'pf-switch' + (form.mtp ? ' on' : '')} onClick={() => set('mtp', !form.mtp)}
-              role="switch" aria-checked={form.mtp} data-testid="pf-check-mtp">
-              <span className="pf-switch-knob" />
-              <span className="pf-switch-lbl mono">{form.mtp ? 'enabled' : 'disabled'}</span>
-            </button>
-          </FormRow>
-        </form>
-
-        <div className="pf-drawer-foot">
+    <FormDrawer
+      eyebrow={eyebrow}
+      title={title}
+      submitting={f.submitting}
+      dirty={f.isDirty}
+      onClose={onClose}
+      foot={({ requestClose }) => (
+        <>
           <div className="pf-drawer-preview mono" style={{ '--bk': meta.color }}>
             <span className="pf-chip-dot" />{meta.label}{form.mtp ? ' · MTP' : ''}
           </div>
           <span className="pf-grow" />
-          {submitted && blocking && (
+          {f.submitted && blocking && (
             <span className="pf-foot-err mono">{Icons.alert}Fix {Object.keys(errs).length} field{Object.keys(errs).length > 1 ? 's' : ''}</span>
           )}
-          <button className="pf-btn" onClick={close} type="button" disabled={submitting}>Cancel</button>
-          <button className={'pf-btn primary' + (submitted && blocking ? ' is-blocked' : '')}
-            onClick={submit} disabled={submitting} data-testid="pf-btn-submit">
-            {submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Create profile'}
+          <button className="pf-btn" onClick={requestClose} type="button" disabled={f.submitting}>Cancel</button>
+          <button className={'pf-btn primary' + (f.submitted && blocking ? ' is-blocked' : '')}
+            onClick={submit} disabled={f.submitting} data-testid="pf-btn-submit">
+            {f.submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Create profile'}
           </button>
-        </div>
-      </div>
-    </div>
+        </>
+      )}
+    >
+      <form className="pf-drawer-body" onSubmit={submit} noValidate>
+        <FormRow label="Name" req sub="lowercase · - _ · ≤32"
+          error={show('name') ? errs.name : null}
+          ok={!isEdit && nameValid}
+          counter={!isEdit ? { text: nameLen + '/32', warn: nameLen >= 28 } : null}>
+          <input className={'pf-input mono' + (show('name') && errs.name ? ' err' : '')} value={form.name}
+            onChange={e => set('name', e.target.value)} onBlur={() => touch('name')}
+            placeholder="my-profile" maxLength={32} disabled={isEdit}
+            aria-invalid={!!(show('name') && errs.name)} data-testid="pf-input-name" />
+        </FormRow>
+
+        <FormRow label="Intent" sub="what it's for">
+          <input className="pf-input" value={form.intent} onChange={e => set('intent', e.target.value)}
+            placeholder="MoE agents · long-ctx" data-testid="pf-input-intent" />
+        </FormRow>
+
+        <FormRow label="Image" req sub="container image URI"
+          error={show('image') ? errs.image : null}
+          warn={!errs.image ? warns.image : null}
+          ok={!!(form.image || '').trim() && !errs.image && !warns.image}>
+          <input className={'pf-input mono' + (show('image') && errs.image ? ' err' : '')} value={form.image}
+            onChange={e => set('image', e.target.value)} onBlur={() => touch('image')}
+            placeholder="ghcr.io/hal0ai/…:tag" aria-invalid={!!(show('image') && errs.image)}
+            data-testid="pf-input-image" />
+        </FormRow>
+
+        <FormRow label="Backend" sub="runtime path">
+          <div className="pf-seg" data-testid="pf-seg-backend">
+            {Object.keys(BACKEND_META).map(k => (
+              <button type="button" key={k} className={'pf-seg-btn' + (form.backend === k ? ' on' : '')}
+                style={{ '--bk': BACKEND_META[k].color }} onClick={() => set('backend', k)}>
+                <span className="pf-chip-dot" />{BACKEND_META[k].label}
+              </button>
+            ))}
+          </div>
+        </FormRow>
+
+        <FormRow label="Quant" sub="weight format">
+          <input className="pf-input mono" value={form.quant || ''} onChange={e => set('quant', e.target.value)}
+            placeholder="FP4 · Q4_K_M …" data-testid="pf-input-quant" />
+        </FormRow>
+
+        <FormRow label="Flags" sub="appended to the run command">
+          <textarea className="pf-input mono pf-textarea" value={form.flags || ''}
+            onChange={e => set('flags', e.target.value)} rows={3} placeholder="--flash-attn on -ngl 999"
+            data-testid="pf-input-flags" />
+        </FormRow>
+
+        <FormRow label="MTP" sub="Multi-Token Prediction speculative decode">
+          <button type="button" className={'pf-switch' + (form.mtp ? ' on' : '')} onClick={() => set('mtp', !form.mtp)}
+            role="switch" aria-checked={form.mtp} data-testid="pf-check-mtp">
+            <span className="pf-switch-knob" />
+            <span className="pf-switch-lbl mono">{form.mtp ? 'enabled' : 'disabled'}</span>
+          </button>
+        </FormRow>
+      </form>
+    </FormDrawer>
   );
 }
 
@@ -467,98 +429,50 @@ function DeleteConfirm({ p, onCancel, onConfirmed }) {
 // profile references no models, so the preview is just identity + integrity +
 // collision — no model resolve/pull affordance.
 
+// Thin wrapper over the shared <ImportDialog>: owns the useProfileImport hook
+// and the profile-specific preview (identity + integrity + collision — no
+// model resolve/pull). The dialog shell + name input + commit live in
+// primitives.jsx.
 function ImportModal({ existing, onClose, onImported }) {
   const imp = useProfileImport();
-  const [envelope, setEnvelope] = useState(null);
-  const [report, setReport] = useState(null);
-  const [name, setName] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-
-  async function onFile(file) {
-    setErr('');
-    try {
-      const text = await file.text();
-      const env = JSON.parse(text);
-      setEnvelope(env);
-      const r = await imp.mutateAsync({ envelope: env, dry_run: true });
-      setReport(r);
-      setName(r.name || '');
-    } catch (e) {
-      setErr(e?.message || 'Not a valid .hal0profile.json envelope');
-      setEnvelope(null); setReport(null);
-    }
-  }
-
-  const taken = existing.includes(name);
-  const nameValid = NAME_RE.test(name);
-  const canCommit = !!report && nameValid && !busy;
-
-  async function commit() {
-    if (!report || !name.trim()) return;
-    setBusy(true);
-    try {
-      await imp.mutateAsync({ envelope, name, dry_run: false });
-      toast(`Imported ${name}`, 'ok');
-      onImported();
-    } catch (e) {
-      if (e?.code === 'profiles.exists' || e?.status === 409) {
-        setErr(`“${name}” already exists — pick another name`);
-      } else {
-        toast(e?.message || 'Import failed', 'err');
-      }
-    } finally { setBusy(false); }
-  }
-
-  return (
-    <div className="stk-scrim" onMouseDown={() => { if (!busy) onClose(); }}>
-      <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Import profile" aria-busy={busy}>
-        <div className="stk-dlg-h">
-          <span className="stk-dlg-eye">Import profile</span>
-          <button className="stk-dlg-x" onClick={onClose} aria-label="Close" disabled={busy}>{Icons.close}</button>
-        </div>
-        <div className="stk-dlg-b">
-          {!report ? (
-            <label className="stk-drop">
-              <input type="file" accept=".hal0profile.json,.json,application/json" style={{ display: 'none' }}
-                onChange={e => e.target.files?.[0] && onFile(e.target.files[0])} data-testid="pf-import-file" />
-              <span className="stk-drop-glyph">{Icons.attach}</span>
-              <span className="mono">Choose a .hal0profile.json file</span>
-              {err && <span className="stk-dlg-warn">{Icons.alert}{err}</span>}
-            </label>
-          ) : (
-            <>
-              <div className="stk-dlg-hint">
-                {report.name || 'profile'} · schema v{report.schema_version} · checksum {report.checksum_ok ? '✓ ok' : '✗ mismatch'}
-              </div>
-              {report.collides && (
-                <div className="stk-dlg-warn">{Icons.alert}A profile named “{report.name}” already exists — choose a different name to import.</div>
-              )}
-              <div className="stk-slot-list">
-                <div className="stk-slot-row">
-                  <span className="sname">Save as</span>
-                  <input className={'pf-input mono' + (name && !nameValid ? ' err' : '')} value={name}
-                    onChange={e => { setName(e.target.value); setErr(''); }} maxLength={32} placeholder="my-profile"
-                    style={{ flex: 1, background: 'transparent', border: 'none', color: 'var(--fg)', fontFamily: 'var(--jbm)' }}
-                    data-testid="pf-import-name" />
-                </div>
-              </div>
-              {name && !nameValid && <div className="stk-dlg-warn">{Icons.alert}lowercase · digits · - · _ · ≤32</div>}
-              {taken && nameValid && <div className="stk-dlg-warn">{Icons.alert}“{name}” already exists</div>}
-              {err && <div className="stk-dlg-warn">{Icons.alert}{err}</div>}
-            </>
-          )}
-        </div>
-        <div className="stk-dlg-f">
-          <button className="btn ghost sm" onClick={onClose} disabled={busy}>Cancel</button>
-          {report && (
-            <button className="btn sm" onClick={commit} disabled={!canCommit} data-testid="pf-import-confirm">
-              {busy ? 'Importing…' : 'Import'}
-            </button>
-          )}
-        </div>
+  const renderPreview = (report) => (
+    <>
+      <div className="stk-dlg-hint">
+        {report.name || 'profile'} · schema v{report.schema_version} · checksum {report.checksum_ok ? '✓ ok' : '✗ mismatch'}
       </div>
-    </div>
+      {report.collides && (
+        <div className="stk-dlg-warn">{Icons.alert}A profile named “{report.name}” already exists — choose a different name to import.</div>
+      )}
+    </>
+  );
+  return (
+    <ImportDialog
+      title="Import profile"
+      ariaLabel="Import profile"
+      fileAccept=".hal0profile.json,.json,application/json"
+      fileHint="Choose a .hal0profile.json file"
+      fileTestid="pf-import-file"
+      nameTestid="pf-import-name"
+      confirmTestid="pf-import-confirm"
+      namePlaceholder="my-profile"
+      invalidCopy="Not a valid .hal0profile.json envelope"
+      existing={existing}
+      renderPreview={renderPreview}
+      dryRun={(env) => imp.mutateAsync({ envelope: env, dry_run: true })}
+      commit={async ({ envelope, name }) => {
+        try {
+          await imp.mutateAsync({ envelope, name, dry_run: false });
+          toast(`Imported ${name}`, 'ok');
+        } catch (e) {
+          if (e?.code === 'profiles.exists' || e?.status === 409) {
+            throw { inline: `“${name}” already exists — pick another name` };
+          }
+          throw e;
+        }
+      }}
+      onClose={onClose}
+      onImported={onImported}
+    />
   );
 }
 
@@ -707,7 +621,7 @@ function ProfilesView() {
       )}
 
       {drawer && (
-        <Drawer
+        <ProfileDrawer
           mode={drawer.mode}
           source={drawer.source}
           existing={profiles.map(p => p.name)}
