@@ -87,18 +87,31 @@ def classify(model_id: str = "", capabilities: Any = None) -> str:
 #
 # This returns a CAPABILITY token — not a coarse modality bucket like
 # :func:`classify` — or ``None`` when nothing matches. Each caller applies its
-# own default so their output vocabularies stay intact (discover defaults to
-# ``chat``; detect narrows to embed/asr/tts).
+# own default for the ``None`` case (discover defaults to ``chat``; detect
+# narrows to embed/asr/tts). Note: unifying on this shared table intentionally
+# BROADENS discover's embed vocabulary — bge/gte-/e5-/jina-embed filenames that
+# discover previously mislabeled as ``chat`` now correctly resolve to ``embed``
+# (the MR-3 fix, of a piece with the reranker fix). See the token-table comment.
 #
 # Ordering is load-bearing: ``rerank`` is tested BEFORE ``embed`` so a
 # "bge-reranker" filename (which also contains the embed token "bge")
 # classifies as ``rerank`` rather than ``embed``.
 
 _RERANK_NAME_TOKENS: tuple[str, ...] = ("rerank",)
-_EMBED_NAME_TOKENS: tuple[str, ...] = ("embed", "bge", "e5", "nomic", "gte-", "jina-embed")
+# Embedder families. bge/gte-/jina-embed/nomic/e5- are INTENTIONALLY included
+# here as part of the MR-3 unification: discover previously only knew
+# ("embed","nomic") and mislabeled bge/gte/e5 embedders as ``chat`` (keeping
+# them out of the correct embed slot). Tokens are anchored to avoid loose
+# 2-char false positives — ``e5-`` (not bare "e5", which would match any chat
+# filename containing "e5") and ``gte-`` (not bare "gte"). ``rerank`` is tested
+# first (below) so "bge-reranker" resolves to rerank, not embed.
+_EMBED_NAME_TOKENS: tuple[str, ...] = ("embed", "bge", "e5-", "nomic", "gte-", "jina-embed")
 _VISION_NAME_TOKENS: tuple[str, ...] = ("vl", "vision", "vit")
 _ASR_NAME_TOKENS: tuple[str, ...] = ("whisper", "moonshine", "-asr", "_asr", "asr", "stt")
-_TTS_NAME_TOKENS: tuple[str, ...] = ("tts", "kokoro", "vibevoice", "voice")
+# ``vibevoice`` is explicit; bare "voice" is deliberately excluded (too loose —
+# would catch a chat model named "...voice..."). xtts-voice still resolves via
+# the bare "tts" token.
+_TTS_NAME_TOKENS: tuple[str, ...] = ("tts", "kokoro", "vibevoice")
 # Clearly-diffusion media families (#940 hardening): classifying these as
 # video/image instead of defaulting to ``chat`` keeps a 25GB video-diffusion
 # gguf out of the chat fallback pool ``SlotManager._fallback_local_model``

@@ -71,6 +71,12 @@ from hal0.model_meta import (
         # No token → None (caller applies its own default; never "chat" here).
         ("qwen2.5-7b.gguf", None),
         ("llama-3.1-8b-instruct.gguf", None),
+        # Anchored tokens: a bare "e5" / "voice" substring in a chat filename
+        # must NOT flip it to embed/tts (guards the loose-token false positive
+        # the MR-3 review flagged). Real embedders use "e5-"; xtts still tts.
+        ("tinyllama-1.1b-e5.gguf", None),
+        ("my-voice-chat.gguf", None),
+        ("xtts-voice-v2.gguf", "tts"),
     ],
 )
 def test_capability_from_filename(name: str, expected: str | None) -> None:
