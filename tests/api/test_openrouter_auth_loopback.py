@@ -208,3 +208,73 @@ def test_require_loopback_helper_handles_missing_client() -> None:
     with pytest.raises(HTTPException) as exc:
         require_loopback(req)
     assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+
+# ── Gating behaviour (HAL0_OPENROUTER_OAUTH_ENABLED) ──────────────────
+# The route is only mounted when the env var is set to "1" or "true".
+# When unset (default) the callback URL is not registered — it does
+# NOT appear in the API surface (#775).
+
+
+@pytest.fixture()
+def gated_app() -> FastAPI:
+    """FastAPI app that behaves like create_app() gating decision."""
+    import os
+    app = FastAPI()
+    if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "").lower() in ("1", "true"):
+        app.include_router(openrouter_router)
+    return app
+
+
+def test_callback_not_mounted_when_env_unset(gated_app: FastAPI) -> None:
+    """Without HAL0_OPENROUTER_OAUTH_ENABLED, the route is absent (404)."""
+    with TestClient(gated_app) as client:
+        r = client.get("/api/openrouter/auth/callback")
+    assert r.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_callback_mounted_when_env_is_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With HAL0_OPENROUTER_OAUTH_ENABLED=1, the route mounts (501)."""
+    monkeypatch.setenv("HAL0_OPENROUTER_OAUTH_ENABLED", "1")
+    import os
+    app = FastAPI()
+    if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "").lower() in ("1", "true"):
+        app.include_router(openrouter_router)
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_loopback] = lambda: None
+        try:
+            r = client.get("/api/openrouter/auth/callback")
+        finally:
+            client.app.dependency_overrides.pop(require_loopback, None)
+    assert r.status_code == status.HTTP_501_NOT_IMPLEMENTED
+
+
+def test_callback_mounted_when_env_is_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Case-insensitive — "true" also mounts."""
+    monkeypatch.setenv("HAL0_OPENROUTER_OAUTH_ENABLED", "true")
+    import os
+    app = FastAPI()
+    if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "").lower() in ("1", "true"):
+        app.include_router(openrouter_router)
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_loopback] = lambda: None
+        try:
+            r = client.get("/api/openrouter/auth/callback")
+        finally:
+            client.app.dependency_overrides.pop(require_loopback, None)
+    assert r.status_code == status.HTTP_501_NOT_IMPLEMENTED
+
+
+def test_callback_not_mounted_for_unknown_env_value() -> None:
+    """Garbage values like yes do NOT mount — fail-closed."""
+    import os
+    app = FastAPI()
+    # os.environ.get defaults to yes → NOT in (1,true) → no router
+    if os.environ.get("HAL0_OPENROUTER_OAUTH_ENABLED", "yes").lower() in ("1", "true"):
+        app.include_router(openrouter_router)
+    with TestClient(app) as client:
+        r = client.get("/api/openrouter/auth/callback")
+    assert r.status_code == status.HTTP_404_NOT_FOUND
