@@ -19,6 +19,7 @@ import { useHardware } from '@/api/hooks/useHardware'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
+import { useMetaEnums } from '@/api/hooks/useMeta'
 import { useSlotLogsStream } from '@/api/hooks/useLogs'
 import { ENDPOINTS } from '@/api/endpoints'
 import { normalizeApiModel } from '@/lib/normalizeApiModel'
@@ -99,6 +100,9 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const hwQuery = useHardware();
   const modelsQuery = useModels();
   const profilesQuery = useProfiles();
+  // Slot type vocabulary — meta-driven (GET /api/meta/enums, static fallback
+  // when absent) instead of the old hardcoded <option> list.
+  const enums = useMetaEnums();
 
   useEffectSM(() => { if (open) { setSubmitErr(null); setDiscardOpen(false); } }, [open]);
 
@@ -210,12 +214,9 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
         <div className="form-ctl">
           <select className="input mono" value={type} onChange={e => setType(e.target.value)}>
-            <option value="llm">llm</option>
-            <option value="embedding">embedding</option>
-            <option value="reranking">reranking</option>
-            <option value="transcription">transcription</option>
-            <option value="tts">tts</option>
-            <option value="image">image</option>
+            {/* keep an out-of-vocab persisted type selectable */}
+            {type && !enums.slot_types.includes(type) && <option value={type}>{type}</option>}
+            {enums.slot_types.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         </div>
       </div>
@@ -662,9 +663,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // instant-apply toggles (thinking / MTP / enable) fire their own PUT/POST
   // outside Save and are intentionally excluded — a flipped toggle is
   // already persisted.
+  // ctx dirty test matches the SAVE path's numeric comparison (ctxChanged in
+  // onSaveClick: Number(ctx) !== Number(ctxBaseline)) — the old string compare
+  // flagged "8192 " / "08192" as dirty even though Save would send nothing.
+  // Trim + parse before comparing; an unparseable edit still counts dirty
+  // (NaN !== N) so garbage input keeps the guard armed.
+  const ctxDirty = Number(String(ctx).trim()) !== Number(ctxBaseline);
   const dirty =
     extraArgsDirty ||
-    String(ctx) !== String(ctxBaseline) ||
+    ctxDirty ||
     nglDirty ||
     (!!selectedProfile && selectedProfile !== (slot.profile || "")) ||
     (overrideOpen && chatTemplate !== (slot.chat_template || ""));
@@ -694,8 +701,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
   return (
     <>
     {/* The Drawer's Esc/backdrop/✕ paths call onClose — routed through
-        requestClose so the dirty guard runs through the shared ConfirmDialog
-        (NOT the primitive's `dirty` prop, which uses window.confirm). */}
+        requestClose so the dirty guard runs through this drawer's own
+        ConfirmDialog copy below. (The primitive's `dirty` prop is now also
+        dialog-based — DiscardGuardDialog in primitives.jsx — but this drawer
+        keeps its slot-specific discard copy.) */}
     <Drawer
       open={open}
       onClose={requestClose}

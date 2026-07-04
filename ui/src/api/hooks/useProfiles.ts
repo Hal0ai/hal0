@@ -74,7 +74,10 @@ export function useProfiles() {
   return useQuery({
     queryKey: ['profiles'],
     queryFn: () => apiGet<Profile[]>(ENDPOINTS.profiles),
-    staleTime: 60_000,
+    staleTime: 25_000,
+    // Profiles can be edited externally (CLI, another browser, hal0 setup);
+    // a 30s background refetch converges the page without a manual reload.
+    refetchInterval: 30_000,
   })
 }
 

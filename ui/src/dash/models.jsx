@@ -9,6 +9,7 @@
 
 import { useModels, usePullJob, useHfSearch, fmtBytes } from '@/api/hooks/useModels'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
+import { useMetaEnums } from '@/api/hooks/useMeta'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
@@ -42,6 +43,25 @@ function ModelsView() {
 
   const modelsQuery = useModels();
   const modelList = modelsQuery.data ?? [];
+  const enums = useMetaEnums();
+
+  // Toolbar chip vocabularies — meta-driven (GET /api/meta/enums, with the
+  // static fallback when the endpoint is absent). Type chips are the slot
+  // types minus `image` (image models live on the Image/ComfyUI tab); device
+  // chips are the legacy backend tokens the model normalizer emits (rocm /
+  // vulkan from the GPU devices' legacy_backend, plus npu/cpu device ids).
+  const typeChips = useMemoM(
+    () => enums.slot_types.filter(t => t !== "image"),
+    [enums],
+  );
+  const deviceChips = useMemoM(
+    () => [...new Set(
+      enums.devices
+        .filter(d => d.device_class !== "img")
+        .map(d => d.legacy_backend || d.id),
+    )],
+    [enums],
+  );
 
   // Auto-pick the first installed model on first render so the detail
   // pane never opens empty.
@@ -156,13 +176,13 @@ function ModelsView() {
                   <span className="lbl">type</span>
                   {/* image models moved to the Image/ComfyUI tab — no "image"
                       chip here (it used to match nothing). */}
-                  {["llm", "embedding", "reranking", "transcription", "tts"].map(t => (
+                  {typeChips.map(t => (
                     <button key={t} className={"mdl-chip" + (filters.type === t ? " on" : "")} onClick={() => toggle("type", t)}>{t}</button>
                   ))}
                 </div>
                 <div className="mdl-toolbar-grp">
                   <span className="lbl">device</span>
-                  {["rocm", "vulkan", "cpu", "npu"].map(d => (
+                  {deviceChips.map(d => (
                     <button key={d} className={"mdl-chip" + (filters.device === d ? " on" : "")} onClick={() => toggle("device", d)}>{d}</button>
                   ))}
                 </div>

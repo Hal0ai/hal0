@@ -12,7 +12,7 @@
 // real model pull job; Export downloads the portable envelope; Import / New /
 // Snapshot reuse the existing flows. Styles: .stk-* in stacks.css.
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import {
   useStacks,
   useStackCreate,
@@ -26,36 +26,69 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlots } from '@/api/hooks/useSlots'
+import { useMetaEnums } from '@/api/hooks/useMeta'
+import { deviceClassForToken, profileDeviceClass } from '@/lib/deviceMeta'
 import { api } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
+import { slotIndicatorFromPhase } from './slot-status.js'
 
-// Device hue, for the editor selectors.
-const DEVICE_META = {
-  'gpu-rocm':   { label: 'ROCm',   color: 'var(--dev-rocm)' },
-  'gpu-vulkan': { label: 'Vulkan', color: 'var(--dev-vulkan)' },
-  npu:          { label: 'NPU',    color: 'var(--dev-npu)' },
-  cpu:          { label: 'CPU',    color: 'var(--dev-cpu)' },
-};
-const DEVICES = Object.keys(DEVICE_META);
+// Device hue + label map for the editor selectors — built from meta.devices
+// (GET /api/meta/enums via useMetaEnums, static fallback when the endpoint is
+// absent). Includes the img/ComfyUI device, previously missing here, so image
+// slots can be expressed in stacks. Hue token: the GPU devices' legacy backend
+// (rocm/vulkan), else the device_class (npu/cpu/img) — matches the shared
+// --dev-* palette.
+function buildDeviceMeta(enums) {
+  const out = {};
+  for (const d of enums.devices) {
+    const hue = d.legacy_backend || d.device_class || 'cpu';
+    out[d.id] = {
+      label: d.label || d.id,
+      color: `var(--dev-${hue})`,
+      device_class: d.device_class,
+      recommended: !!d.recommended,
+      description: d.description || '',
+      default_profile: d.default_profile || null,
+    };
+  }
+  return out;
+}
 
 // `NAME_RE` (slug regex) and `toast` are shared globals from primitives.jsx.
 
 const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', profile: '', mtp: false, capabilities: [] };
 const BLANK = { name: '', description: '', icon: '', tags: '', slots: [{ ...BLANK_SLOT }] };
 
-const DOT_STATES = new Set(['serving', 'ready', 'warming', 'idle', 'offline']);
-function dotCls(state) { return DOT_STATES.has(state) ? state : 'offline'; }
+// Live-slot → dot class, derived from the SHARED slot-status classifier
+// (slot-status.js) instead of the old local DOT_STATES re-derivation, so the
+// hero dots agree with every other slot surface (recency + health gates
+// included). `stale` renders as the `ready` dot, same mapping the Inference
+// pane uses; a missing live slot is offline.
+function liveDotCls(liveSlot) {
+  if (!liveSlot) return 'offline';
+  const cls = slotIndicatorFromPhase(liveSlot).cls;
+  if (cls === 'stale') return 'ready';
+  return cls; // serving | warming | error | offline
+}
 
 // ── status dot ────────────────────────────────────────────────────────────────
 
 function D({ state, sz = 6 }) {
-  return <span className={'dot ' + dotCls(state)} style={{ width: sz, height: sz, flexShrink: 0 }} />;
+  return <span className={'dot ' + (state || 'offline')} style={{ width: sz, height: sz, flexShrink: 0 }} />;
 }
 
 // ── view-model: project a stack into the Focus shape ──────────────────────────
-// slots: [{ name, model, profile, state, available }]. `state` is the live slot
-// status for the active stack, "offline" otherwise. `available` is false only
-// when a referenced model isn't in the local registry (→ pull affordance).
+// slots: [{ name, model, profile, device, state, available }]. `profile` and
+// `device` are kept as SEPARATE fields (the old VM conflated them into one
+// `profile: sl.profile || sl.device` string); displays that want a single
+// line join them via profileLine(). `state` is the live slot status for the
+// active stack (shared slot-status classifier), "offline" otherwise.
+// `available` is false only when a referenced model isn't in the local
+// registry (→ pull affordance).
+
+function profileLine(s) {
+  return [s.profile, s.device].filter(Boolean).join(' · ');
+}
 
 function buildVM(stack, modelSet, liveByName, activeSlug) {
   const active = stack.slug === activeSlug;
@@ -65,8 +98,9 @@ function buildVM(stack, modelSet, liveByName, activeSlug) {
       slots.push({
         name: sl.slot,
         model: sl.model,
-        profile: sl.profile || sl.device || '',
-        state: active ? dotCls(liveByName[sl.slot]?.status) : 'offline',
+        profile: sl.profile || '',
+        device: sl.device || '',
+        state: active ? liveDotCls(liveByName[sl.slot]) : 'offline',
         available: modelSet.has(sl.model),
       });
     }
@@ -75,7 +109,8 @@ function buildVM(stack, modelSet, liveByName, activeSlug) {
       slots.push({
         name: row.child,
         model: row.model,
-        profile: row.device || '',
+        profile: '',
+        device: row.device || '',
         state: 'offline',
         available: modelSet.has(row.model),
       });
@@ -213,7 +248,7 @@ function HeroPanel({ vm, isCustom, onPull, onExport, onReapply, onEdit }) {
               <span className="stk-hs-name">{s.name}</span>
               <span className={'stk-hs-state ' + s.state}>{s.available ? s.state : 'no model'}</span>
             </div>
-            <div className="stk-hs-profile">{s.profile}</div>
+            <div className="stk-hs-profile">{profileLine(s)}</div>
             <div className="stk-hs-model">{s.model}</div>
           </div>
         ))}
@@ -366,6 +401,9 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
   const models = useModels().data || [];
   const profiles = useProfiles().data || [];
   const liveSlots = (useSlots().data || []).filter(s => (s.kind ?? 'local') === 'local');
+  const enums = useMetaEnums();
+  const deviceMeta = useMemo(() => buildDeviceMeta(enums), [enums]);
+  const deviceIds = Object.keys(deviceMeta);
 
   const create = useStackCreate();
   const update = useStackUpdate();
@@ -487,6 +525,29 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
           </datalist>
           {v.slots.map((s, i) => {
             const isNew = !!s.slot && !liveSlots.some(ls => ls.name === s.slot);
+            const dm = deviceMeta[s.device];
+            // Profile compatibility for this row's device: match the
+            // profile's device_class (explicit, or gpu inferred from its
+            // rocm/vulkan backend — same rule as profiles.jsx backendOf)
+            // against the picked device's class. Unknown class on either
+            // side never filters. Incompatible profiles stay listed as a
+            // disabled escape hatch (and the current pick is never trapped).
+            const rowClass = dm?.device_class ?? deviceClassForToken(s.device, enums);
+            const compatProfiles = [];
+            const incompatProfiles = [];
+            for (const p of profiles) {
+              const pc = profileDeviceClass(p);
+              (!pc || !rowClass || pc === rowClass ? compatProfiles : incompatProfiles).push(p);
+            }
+            // MTP gate — same rule as the slot drawer (slot-modals.jsx):
+            // the picked model must carry the "mtp" tag AND the row must run
+            // the rocm backend. A pre-existing mtp=true row stays visible so
+            // it can be turned off.
+            const rowModel = models.find(m => m.id === s.model);
+            const mtpCapable = Array.isArray(rowModel?.tags) && rowModel.tags.includes('mtp');
+            const rowIsRocm = (enums.devices.find(d => d.id === s.device)?.legacy_backend === 'rocm')
+              || String(s.device || '').includes('rocm');
+            const showMtp = (mtpCapable && rowIsRocm) || !!s.mtp;
             return (
               <div className="st-slot-card" key={i}>
                 <div className="st-slot-head">
@@ -508,24 +569,57 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
                   </label>
                   <label className="st-fld">
                     <span className="st-fld-lbl">Device</span>
-                    <select className="pf-input mono" value={s.device} onChange={e => setSlot(i, 'device', e.target.value)}>
-                      {DEVICES.map(d => <option key={d} value={d}>{DEVICE_META[d].label}</option>)}
+                    <select className="pf-input mono" value={s.device}
+                      title={dm?.description || undefined}
+                      onChange={e => setSlot(i, 'device', e.target.value)} data-testid={`st-slot-device-${i}`}>
+                      {/* keep an out-of-vocab persisted device selectable */}
+                      {s.device && !deviceIds.includes(s.device) && (
+                        <option value={s.device}>{s.device}</option>
+                      )}
+                      {deviceIds.map(d => (
+                        <option key={d} value={d} title={deviceMeta[d].description}>
+                          {deviceMeta[d].label}{deviceMeta[d].recommended ? ' ★' : ''}
+                        </option>
+                      ))}
                     </select>
+                    {dm && (dm.recommended || dm.description) && (
+                      <span className="mono" style={{ fontSize: 9.5, lineHeight: 1.4, marginTop: 2, color: dm.recommended ? 'var(--ok)' : 'var(--fg-5)' }}>
+                        {dm.recommended ? '★ recommended' : dm.description}
+                      </span>
+                    )}
                   </label>
                   <label className="st-fld">
                     <span className="st-fld-lbl">Profile</span>
-                    <select className="pf-input mono" value={s.profile} onChange={e => setSlot(i, 'profile', e.target.value)}>
+                    <select className="pf-input mono" value={s.profile} onChange={e => setSlot(i, 'profile', e.target.value)} data-testid={`st-slot-profile-${i}`}>
                       <option value="">— profile —</option>
-                      {profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                      {compatProfiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                      {incompatProfiles.length > 0 && (
+                        <optgroup label={`— other device class${rowClass ? ` (not ${rowClass})` : ''} —`}>
+                          {incompatProfiles.map(p => (
+                            /* escape hatch: incompatible profiles are listed but
+                               disabled; the row's CURRENT pick stays enabled so a
+                               pre-existing binding is never trapped. */
+                            <option key={p.name} value={p.name} disabled={p.name !== s.profile}>
+                              {p.name}{profileDeviceClass(p) ? ` · ${profileDeviceClass(p)}` : ''}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
                   </label>
-                  <div className="st-fld st-fld-mtp">
-                    <span className="st-fld-lbl">Speculative decode</span>
-                    <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
-                      onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp} title="MTP speculative decode">
-                      <span className="pf-switch-knob" /><span className="mono">MTP</span>
-                    </button>
-                  </div>
+                  {showMtp && (
+                    <div className="st-fld st-fld-mtp">
+                      <span className="st-fld-lbl">Speculative decode</span>
+                      <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
+                        onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp}
+                        title={mtpCapable && rowIsRocm
+                          ? 'MTP speculative decode'
+                          : 'MTP persisted on this row — model tag/backend no longer qualify (mtp tag + rocm required)'}
+                        data-testid={`st-slot-mtp-${i}`}>
+                        <span className="pf-switch-knob" /><span className="mono">MTP</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             );

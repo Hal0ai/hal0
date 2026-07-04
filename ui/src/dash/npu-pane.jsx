@@ -20,6 +20,10 @@ import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useSlotRestart, useSlotUnload, useSlotLoad } from '@/api/hooks/useSlots'
 import { SlotControls, slotCtrlPhase } from './inference-pane.jsx'
 import { slotIndicatorFromPhase } from './slot-status.js'
+// devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
+// the local copy (which also mis-classified backend tokens like "flm" —
+// the shared helper folds them through backend_to_device → npu).
+import { devKind } from '@/lib/deviceMeta'
 
 // ─── icons (16×16, hal0 thin-line family — ported from the design) ─────────
 const NI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -53,13 +57,6 @@ const toast = (msg, kind = 'info') =>
   typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10
-const devKind = (device) => {
-  const d = String(device || '').toLowerCase()
-  if (d === 'npu') return 'npu'
-  if (d.includes('vulkan')) return 'vulkan'
-  if (d.includes('rocm') || d.startsWith('gpu')) return 'rocm'
-  return d || 'cpu'
-}
 const isNpuSlot = (s) => s.device_class === 'npu' || devKind(s.device) === 'npu'
 
 // owner hues — assigned by slot index so each resident FLM reads as its own

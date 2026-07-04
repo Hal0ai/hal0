@@ -277,6 +277,13 @@ export const ENDPOINTS = {
   // Fail-soft: 404 treated as "no layout saved" by useDashLayout hook.
   dashboardLayout: '/api/user/dashboard-layout',
 
+  // ── Meta enums (static per-release taxonomy) ─────────────────────
+  // GET /api/meta/enums → devices / backends / device_classes / slot_types /
+  // model_capabilities (+ aliases) / model_backends / runtime_families +
+  // backend_to_device / device_default_profiles maps. Consumed by useMeta;
+  // useMetaEnums() falls back to META_ENUMS_FALLBACK when absent.
+  metaEnums: '/api/meta/enums',
+
   // ── Chat templates (per-model default template catalogue) ────────
   // GET /api/chat-templates → [{id, label}] list of known template ids
   // that can be pinned as model.defaults.chat_template. The "auto"
