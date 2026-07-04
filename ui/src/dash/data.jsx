@@ -296,16 +296,6 @@ const HAL0_DATA = {
     { id: "user.bert-base", longName: "user.bert-base", repo: "google-bert/bert-base-uncased", params: "110M", size: "440 MB", labels: ["embeddings"], type: "embedding", device: "cpu", ns: "pulled", installed: true, runtime: "llamacpp" },
   ],
 
-  recipe: {
-    "qwen3.6-27b-mtp": {
-      ctx_size: 8192,
-      llamacpp_backend: "rocm",
-      llamacpp_args: "--flash-attn on --threads 8 --parallel 1",
-      n_gpu_layers: -1,
-      temperature: 0.7,
-    },
-  },
-
   // ── journal block removed (#322 phase 3) ─────────────────────────
   // The dashboard now streams /api/journal/stream for the footer pane
   // and the Logs page; both render an empty state when the SSE has no

@@ -14,6 +14,7 @@ import { useModels, useModelInspect, useModelUpdate, useModelDelete, usePullJob,
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
+import { useProfiles } from '@/api/hooks/useProfiles'
 import { MODEL_TYPE_TAGS, splitModelTags, mergeModelTags } from '@/dash/model-types.js'
 
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
@@ -272,12 +273,15 @@ function RecipeEditorModal({ open, onClose, model }) {
   // Gate on `open` — the modal is mounted while a model is merely selected,
   // so an ungated fetch would fire on the models list and detach row controls.
   const templates = useChatTemplates(open);
+  const profilesQuery = useProfiles();
   const init = model?.defaults || {};
   const [ctx, setCtx] = useStateMM("");
   const [ngl, setNgl] = useStateMM("");
   const [rope, setRope] = useStateMM("");
   const [extra, setExtra] = useStateMM("");
   const [chatTemplate, setChatTemplate] = useStateMM("auto");
+  // Preferred runtime profile that loads with this model (ModelDefaults.profile).
+  const [profile, setProfile] = useStateMM("");
   // Identity + types. `name` is the editable display name; `types` is the
   // selected subset of MODEL_TYPE_TAGS; `otherTags` snapshots the model's
   // non-curated tags so we can re-emit them verbatim on save (never clobber).
@@ -301,6 +305,7 @@ function RecipeEditorModal({ open, onClose, model }) {
       setRope(init.rope_freq_base != null ? String(init.rope_freq_base) : "");
       setExtra(init.extra_args || "");
       setChatTemplate(init.chat_template ?? "auto");
+      setProfile(init.profile || "");
       setName(model.name || "");
       const split = splitModelTags(model.tags);
       setTypes(split.selected);
@@ -348,6 +353,9 @@ function RecipeEditorModal({ open, onClose, model }) {
     // is the absence of an override, so don't pollute defaults with it.
     if (chatTemplate && chatTemplate !== "auto") defaults.chat_template = chatTemplate;
     else delete defaults.chat_template;
+    // Preferred profile: "" means no preference (slot keeps its device default).
+    if (profile.trim()) defaults.profile = profile.trim();
+    else delete defaults.profile;
     const body = { defaults };
     // Display name: only persist a real, changed value — never blank it out.
     const trimmedName = name.trim();
@@ -543,6 +551,45 @@ function RecipeEditorModal({ open, onClose, model }) {
             {(Array.isArray(templates.data) ? templates.data : []).filter(t => t.id !== "auto").map(t => (
               <option key={t.id} value={t.id}>{t.label}</option>
             ))}
+          </select>
+        </div>
+      </div>
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>preferred profile</span>
+          <span className="sub">runtime profile loaded with this model on create + every swap · empty = slot default</span>
+        </div>
+        <div className="form-ctl">
+          <select
+            className="input mono"
+            value={profile}
+            onChange={e => setProfile(e.target.value)}
+          >
+            <option value="">None (use slot default)</option>
+            {(() => {
+              // Filter to profiles that fit this model: same slot type, and same
+              // device class where the model's device is known (rocm/vulkan→gpu).
+              const dc =
+                model.device === "rocm" || model.device === "vulkan" ? "gpu"
+                : model.device === "npu" ? "npu"
+                : model.device === "cpu" ? "cpu"
+                : null;
+              const all = Array.isArray(profilesQuery.data) ? profilesQuery.data : [];
+              const fit = all.filter(p =>
+                (!dc || !p.device_class || p.device_class === dc) &&
+                (!model.type || !Array.isArray(p.supported_slot_types) || p.supported_slot_types.includes(model.type))
+              );
+              // Always include the current selection even if it doesn't pass the
+              // filter, so an existing preference never silently disappears.
+              const names = new Set(fit.map(p => p.name));
+              const rows = [...fit];
+              if (profile && !names.has(profile)) rows.unshift({ name: profile });
+              return rows.map(p => (
+                <option key={p.name} value={p.name}>
+                  {p.name}{p.intent ? ` · ${p.intent}` : ""}
+                </option>
+              ));
+            })()}
           </select>
         </div>
       </div>

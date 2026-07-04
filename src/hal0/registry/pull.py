@@ -754,6 +754,8 @@ async def run_pull(
             sha256=digest,
             hf_repo=hf_repo,
             hf_filename=hf_file,
+            capability=capability,
+            comfyui_subdir=comfyui_subdir,
         )
 
         # Capability-grouped pulls (FirstRun v2, design D2) get a meta.json
@@ -836,8 +838,19 @@ def _register_pulled(
     sha256: str,
     hf_repo: str,
     hf_filename: str,
+    capability: str | None = None,
+    comfyui_subdir: str | None = None,
 ) -> None:
-    """Upsert the registry entry after a successful pull."""
+    """Upsert the registry entry after a successful pull.
+
+    ``capability``/``comfyui_subdir`` are the pull layer's resolved routing
+    (see :func:`hal0.api.routes.models._resolve_pull_capability`). For a brand-
+    new entry (the curated wizard does NOT pre-seed a row) they decide the
+    initial tagging: an image-gen pull into the ComfyUI tree must land as
+    ``capabilities=["image"]`` / ``backends=["comfyui"]`` — NOT the old
+    hardcoded ``["chat"]``, which mis-filed every fresh image checkpoint under
+    the dashboard's llm bucket and drew it into the chat fallback pool.
+    """
     updates: dict[str, Any] = {
         "path": path,
         "size_bytes": size_bytes,
@@ -848,6 +861,10 @@ def _register_pulled(
     try:
         existing = registry.get(model_id)
     except ModelNotFound:
+        is_comfyui = bool(comfyui_subdir)
+        cap = (capability or "").strip()
+        caps = [cap] if cap else (["image"] if is_comfyui else ["chat"])
+        backends = ["comfyui"] if is_comfyui else []
         registry.add(
             Model(
                 id=model_id,
@@ -856,7 +873,8 @@ def _register_pulled(
                 size_bytes=size_bytes,
                 hf_repo=hf_repo,
                 hf_filename=hf_filename,
-                capabilities=["chat"],
+                capabilities=caps,
+                backends=backends,
                 metadata={"sha256": sha256},
             )
         )

@@ -214,6 +214,24 @@ def test_register_candidate_non_curated_uses_suggested_id(
     assert "embed" in model.capabilities
 
 
+def test_register_candidate_comfyui_checkpoint_tagged_image(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """A checkpoint under the ComfyUI models tree registers as image/comfyui,
+    not the chat fallback — so it lands on the dashboard's image surface and
+    stays out of the chat fallback pool."""
+    ckpt_dir = tmp_path / "comfyui" / "models" / "checkpoints"
+    ckpt_dir.mkdir(parents=True)
+    (ckpt_dir / "dreamshaper_8.safetensors").write_bytes(b"x" * 256)
+    candidates = find_candidates(
+        roots=[tmp_path], extensions=[".safetensors"], known_paths=set()
+    )
+    cand = next(c for c in candidates if c.path.name == "dreamshaper_8.safetensors")
+    model = register_candidate(registry, cand)
+    assert model.capabilities == ["image"]
+    assert model.backends == ["comfyui"]
+
+
 def test_scan_and_register_idempotent(model_root: Path, registry: ModelRegistry) -> None:
     cfg = ModelsConfig(roots=[str(model_root)])
     first = scan_and_register(registry, cfg)

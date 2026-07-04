@@ -49,6 +49,16 @@ class ModelDefaults(BaseModel):
         default=None,
         description="Chat template id from /api/chat-templates, or 'auto'/None for the GGUF-embedded template.",
     )
+    profile: str | None = Field(
+        default=None,
+        description=(
+            "Preferred runtime profile name (from the profiles catalog) this "
+            "model wants loaded with it. Applied to a slot on create and on "
+            "every model swap when it is compatible with the slot's device; the "
+            "device-default profile is used as the fallback. None = no "
+            "preference (slot keeps the device default)."
+        ),
+    )
 
 
 class Model(BaseModel):

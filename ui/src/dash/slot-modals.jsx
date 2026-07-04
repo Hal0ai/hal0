@@ -368,7 +368,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // owns them for container slots).
   const initialExtraArgs = slot?.llamacpp_args != null ? slot.llamacpp_args : "";
 
-  const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 16384);
+  // Seed from the PERSISTED context window (slot.ctx_max, from
+  // [model].context_size) first — NOT the live runtime metric, which is 0
+  // whenever the slot isn't actively serving and would otherwise snap the
+  // field to a fabricated 16k on every cold (re)load. Fall back to the live
+  // metric, then the backend's safe 8192 floor.
+  const [ctx, setCtx] = useStateSM(slot?.ctx_max ?? (slot?.metrics?.ctx || 8192));
   // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
   // button through PATCH /defaults. Both seed from the slot list payload.
   const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
@@ -429,7 +434,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
   useEffectSM(() => {
     if (slot) {
-      setCtx(slot.metrics?.ctx || 16384);
+      setCtx(slot.ctx_max ?? (slot.metrics?.ctx || 8192));
       setThinking(slot.enable_thinking === true);
       setThinkingPending(false);
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
@@ -499,15 +504,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
     // Per-slot extra_args override — ship only when changed, nested under
     // [server] so the backend one-level merge preserves sibling server keys.
     const extraArgsChanged = extraArgs !== extraArgsBaseline;
+    // Only write ctx_size when the operator actually changed it. The old code
+    // sent ctxNum unconditionally, so any unrelated save (profile, extra_args)
+    // on a not-currently-serving slot clobbered the persisted context window
+    // with the seeded fallback. Gate on the persisted baseline (ctxBaseline).
+    const ctxChanged = ctxNum !== Number(ctxBaseline);
     try {
       // Two-step: defaults (ctx_size lives under [model]) + slot config
       // for the top-level keys (default, profile). n_gpu_layers /
       // rope_freq_base / llamacpp_args are owned by the profile — never
       // include them in a save. These are fast on-disk writes, so we await
       // them and keep the drawer open to surface any write error.
-      const ctxBody = {
-        ctx_size: ctxNum,
-      };
       const slotBody = {};
       if (profileChanged) {
         slotBody.profile = selectedProfile;
@@ -518,10 +525,12 @@ function EditSlotDrawer({ open, slot, onClose }) {
       if (extraArgsChanged) {
         slotBody.server = { extra_args: extraArgs };
       }
-      await defaultsMut.mutateAsync({
-        name: slot.name,
-        body: ctxBody,
-      });
+      if (ctxChanged) {
+        await defaultsMut.mutateAsync({
+          name: slot.name,
+          body: { ctx_size: ctxNum },
+        });
+      }
       await editMut.mutateAsync({
         name: slot.name,
         body: slotBody,
@@ -630,6 +639,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const extraArgsBaseline = slot.llamacpp_args != null ? slot.llamacpp_args : "";
   const extraArgsDirty = extraArgs !== extraArgsBaseline;
   const extraArgsErr = validateExtraArgs(extraArgs);
+  // ctx dirty-tracking baseline: the PERSISTED context window (slot.ctx_max),
+  // mirroring how the seed value is derived. Falls back to the live metric then
+  // the 8192 floor only when nothing is persisted, so an untouched field on a
+  // cold slot is never counted dirty (and never written — see ctxChanged).
+  const ctxBaseline = slot.ctx_max ?? (slot.metrics?.ctx || 8192);
 
   // UI-1: unsaved-changes guard. Aggregate ONLY the Save-batched fields
   // (extra_args, ctx, profile, chat_template override). The instant-apply
@@ -637,7 +651,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // are intentionally excluded — a flipped toggle is already persisted.
   const dirty =
     extraArgsDirty ||
-    String(ctx) !== String(slot.metrics?.ctx || 16384) ||
+    String(ctx) !== String(ctxBaseline) ||
     (!!selectedProfile && selectedProfile !== (slot.profile || "")) ||
     (overrideOpen && chatTemplate !== (slot.chat_template || ""));
   const requestClose = () => {

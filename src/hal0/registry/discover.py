@@ -259,6 +259,13 @@ def find_candidates(
 def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Model:
     """Build a :class:`Model` from ``candidate`` and add it to ``registry``."""
     curated = candidate.curated_match
+    # A checkpoint discovered under the ComfyUI models tree is an image-gen
+    # model, not a chat model — tag it capability "image" / backend "comfyui"
+    # so it lands on the dashboard's image-gen surface instead of the llm
+    # bucket (and out of the chat fallback pool). ``checkpoints/`` is the one
+    # ComfyUI subdir the scan walks; the accessory dirs are skip-listed above.
+    is_comfyui = "/comfyui/models/" in str(candidate.path)
+    comfyui_backends = ["comfyui"] if is_comfyui else []
     if curated is not None:
         model = Model(
             id=curated.id,
@@ -266,7 +273,10 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             path=str(candidate.path),
             size_bytes=candidate.size_bytes,
             license=curated.license,
-            capabilities=[curated.capability] if curated.capability else ["chat"],
+            capabilities=[curated.capability]
+            if curated.capability
+            else (["image"] if is_comfyui else ["chat"]),
+            backends=comfyui_backends,
             hf_repo=curated.hf_repo,
             hf_filename=curated.hf_file,
             tags=list(curated.tags),
@@ -278,7 +288,8 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             name=candidate.path.stem,
             path=str(candidate.path),
             size_bytes=candidate.size_bytes,
-            capabilities=[candidate.capability_guess],
+            capabilities=["image"] if is_comfyui else [candidate.capability_guess],
+            backends=comfyui_backends,
             metadata={"discovered": True, "source": "auto-scan"},
         )
     # Carry a discovered mmproj sidecar onto the model so the llama-server

@@ -1149,6 +1149,17 @@ class SlotManager:
             raise SlotConfigError("swap requires a non-empty model id")
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
+        # Q1 (model profiles): adopt the new model's preferred profile — when it
+        # fits the slot — BEFORE the reload, so the container comes up on the
+        # right image. A no-op when the model has no preference or it doesn't
+        # fit; a write failure must not block the swap, so it soft-fails.
+        try:
+            await self._apply_preferred_profile(slot_name, new_model_id)
+        except SlotConfigError as exc:
+            log.warning(
+                "slot.preferred_profile_swap_failed",
+                extra={"slot": slot_name, "model_id": new_model_id, "error": str(exc)},
+            )
         await self.unload(slot_name)
         slot = await self.load(slot_name, model_id=new_model_id)
         # Refresh Hermes's live-context files so a model swap is visible to
@@ -1729,6 +1740,15 @@ class SlotManager:
 
             model_info = await self._resolve_model_info(model_tbl.get("default"))
             model_tbl["context_size"] = _resolve_context_size(None, model_info)
+        # Q1 (model profiles): a new slot bound to a model but with NO explicit
+        # profile adopts the model's preferred profile when it fits the slot's
+        # device/type. An operator's explicit create-time profile is left
+        # untouched (only an empty profile is filled) — the reconcile below then
+        # validates device/profile coherence as usual.
+        if isinstance(model_tbl, dict) and model_tbl.get("default") and not cfg_dict.get("profile"):
+            preferred = await self._preferred_profile_for(model_tbl.get("default"))
+            if preferred and self._profile_fits_slot(preferred, cfg_dict):
+                cfg_dict["profile"] = preferred
         # Reject (or normalize) an incoherent device/profile backend pairing
         # before it ever lands on disk — the door the dashboard left open for
         # the utility slot (vulkan device + rocm-dnse profile). Every field is
@@ -2009,6 +2029,97 @@ class SlotManager:
                 f"failed to persist model.default to {cfg_path}: {exc}",
                 details={"slot": slot_name, "model_id": model_id},
             ) from exc
+
+    # ── model preferred profile (Q1: profile loads with the model) ────────────
+
+    async def _preferred_profile_for(self, model_id: str | None) -> str | None:
+        """The model's preferred runtime profile name (``defaults.profile``).
+
+        A registry model may carry ``defaults.profile`` — the runtime profile
+        it wants loaded with it. Returns the name or ``None`` (no preference /
+        model not in registry).
+        """
+        if not model_id:
+            return None
+        info = await self._resolve_model_info(model_id)
+        defaults = info.get("defaults")
+        preferred = defaults.get("profile") if isinstance(defaults, dict) else None
+        return preferred if isinstance(preferred, str) and preferred else None
+
+    @staticmethod
+    def _profile_fits_slot(profile_name: str, cfg_dict: dict[str, Any]) -> bool:
+        """True when ``profile_name`` is safe to adopt for this slot.
+
+        A model's profile preference is honoured only when the profile exists in
+        the catalog AND matches the slot's device/type. We never flip a slot's
+        hardware (device/backend) to satisfy a preference — an image or
+        cross-backend profile on the wrong device is rejected so the caller
+        keeps the slot's current/device-default profile.
+        """
+        from hal0.errors import NotFound
+        from hal0.profiles import ProfileCatalog
+
+        try:
+            resolved = ProfileCatalog().resolve(profile_name)
+        except NotFound:
+            return False
+        slot_type = cfg_dict.get("type")
+        if slot_type and slot_type not in resolved.supported_slot_types:
+            return False
+        device = str(cfg_dict.get("device") or "")
+        if device:
+            slot_class = (
+                "gpu"
+                if device.startswith("gpu")
+                else device
+                if device in ("npu", "cpu", "img")
+                else "cpu"
+            )
+            if resolved.device_class != slot_class:
+                return False
+            if resolved.backend:
+                from hal0.model_meta import device_to_backend
+
+                slot_backend = device_to_backend(device)[1]
+                if slot_backend and slot_backend != resolved.backend:
+                    return False
+        return True
+
+    async def _apply_preferred_profile(self, slot_name: str, model_id: str) -> bool:
+        """Adopt ``model_id``'s preferred profile for this slot when compatible.
+
+        Q1 (model profiles): on every model swap the slot adopts the new
+        model's ``defaults.profile`` — but only when it fits the slot (see
+        :meth:`_profile_fits_slot`); an incompatible preference is logged and
+        ignored. Writes the slot TOML BEFORE the reload so the container comes
+        up on the new profile's image. Returns True when ``profile`` changed.
+        """
+        preferred = await self._preferred_profile_for(model_id)
+        if not preferred:
+            return False
+        cfg = await self._load_slot_config(slot_name)
+        cfg_dict = _cfg_to_dict(cfg)
+        if cfg_dict.get("profile") == preferred:
+            return False
+        if not self._profile_fits_slot(preferred, cfg_dict):
+            log.info(
+                "slot.preferred_profile_skipped",
+                extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
+            )
+            return False
+        cfg_dict = {**cfg_dict, "profile": preferred}
+        try:
+            write_slot_toml(self._config_file(slot_name), cfg_dict)
+        except OSError as exc:
+            raise SlotConfigError(
+                f"failed to persist preferred profile to slot {slot_name}: {exc}",
+                details={"slot": slot_name, "profile": preferred},
+            ) from exc
+        log.info(
+            "slot.preferred_profile_applied",
+            extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
+        )
+        return True
 
     async def _check_npu_exclusivity(
         self,

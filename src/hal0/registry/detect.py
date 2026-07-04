@@ -116,6 +116,22 @@ def _heuristic_only(path: Path) -> DetectionResult:
     name = path.name.lower()
     cap = _filename_capability(name)
 
+    # A file under the ComfyUI models tree is an image-gen asset — tag it
+    # image/comfyui so add-by-path / scan-preview file it on the dashboard's
+    # image surface instead of "unknown" with empty caps (``_filename_capability``
+    # deliberately collapses the image token to None, so this is the only place
+    # a manually-added checkpoint gets the image capability).
+    if "/comfyui/models/" in str(path).replace("\\", "/"):
+        return DetectionResult(
+            suggested_backends=["comfyui"],
+            suggested_capabilities=["image"],
+            context_length=None,
+            confidence="low",
+            suggested_name=_hf_repo_name_from_path(path),
+            kind="unknown",
+            raw_hints={"source": "comfyui-tree", "stem": path.stem, "suffix": path.suffix.lower()},
+        )
+
     backends: list[str] = []
     caps: list[str] = []
     kind: Kind = "unknown"
