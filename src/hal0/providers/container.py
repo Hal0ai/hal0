@@ -1023,6 +1023,42 @@ class ContainerProvider(Provider):
         )
         self._write_and_start_unit(slot_name, unit_text)
 
+    def rerender_unit_sync(self, slot_cfg: dict[str, Any], model_info: dict[str, Any]) -> bool:
+        """Re-render an EXISTING unit file through current code — without
+        touching the running service.
+
+        The unit bakes the launch argv at load time, so after a hal0 update the
+        on-disk ExecStart still carries pre-update flags: a bare ``systemctl
+        restart`` (or a reboot!) re-runs stale config. This rewrites the unit
+        via the same plan path as :meth:`load_sync` but deliberately does NOT
+        enable/restart — serving is never bounced by an update; the new argv
+        applies on the next start from any path. Callers batch one
+        ``daemon_reload`` after a sweep.
+
+        Returns True when the unit file changed. No-ops (False) when the slot
+        has no unit on disk (never rendered → nothing stale) or the fresh
+        render is byte-identical.
+        """
+        slot_name: str = str(slot_cfg.get("name", ""))
+        unit_path = self._unit_path(slot_name)
+        if not unit_path.exists():
+            return False
+        provider = _spec_provider_for(slot_cfg) or self
+        plan = provider.container_spec(slot_cfg, model_info)
+        unit_text = _render_unit_from_plan(slot_name, plan, runtime_bin=_container_runtime())
+        if unit_path.read_text() == unit_text:
+            return False
+        unit_path.write_text(unit_text)
+        log.info(
+            "container.unit_rerendered",
+            extra={"slot": slot_name, "unit_path": str(unit_path)},
+        )
+        return True
+
+    def daemon_reload(self) -> None:
+        """``systemctl daemon-reload`` — public for the unit-rerender sweep."""
+        self._run("systemctl", "daemon-reload")
+
     def expected_argv(
         self, slot_cfg: dict[str, Any], model_info: dict[str, Any]
     ) -> list[str] | None:
