@@ -1,12 +1,24 @@
 /**
- * memory-map-v3 — MemoryMap sidebar widget across the three host modes
- * (off / detected_unconfigured / configured) + the attribution edge case.
+ * memory-map-v3 — the dashboard's memory surface.
  *
- * The sidebar mounts on /dashboard and /slots. Specs target /dashboard.
+ * Dashboard-redesign: the compact MemoryMap sidebar widget on /#dashboard
+ * was superseded by the full-width UNIFIED MEMORY hero (dashboard-redesign
+ * .rd-mem-*): slot allocations render as colored blocks INSIDE the pool
+ * bar, with a striped system block and a free remainder. The attribution
+ * model is unchanged — useMemoryMapModel() (mem_mb contract, per-slot
+ * Okabe–Ito colors) feeds both the retired sidebar and the new hero — so
+ * the semantic guards carry over:
+ *   - per-slot mem_mb attribution renders non-zero blocks + legend rows
+ *   - co-resident slots keep DISTINCT stable colours (never one device hue)
+ *   - container slots with mem_mb attribute like any other slot (#660)
+ *   - no Proxmox nudge on the dashboard surface (expanded-variant only)
  *
- * NOTE: This spec is .skip until Tasks 9-11 wire the MemoryMap
- * component into the dashboard routes. The mocks below are correct;
- * unskip the `describe` blocks when the consumer wire-ups land.
+ * The old sidebar-only guards (GTT-pool header label, headroom-line
+ * removal) retired with the sidebar: the hero deliberately frames the FULL
+ * unified pool (RAM total; host DIMM total in Proxmox mode) per the
+ * redesign handoff, and never had a headroom line. isSlotLive/limitedBy
+ * logic remains covered by slot-live-equivalence-v3.spec.ts and the
+ * useMemoryMapModel consumers.
  */
 import { test, expect, json } from '../fixtures/apiMock'
 import type { Page } from '@playwright/test'
@@ -15,8 +27,8 @@ function mockStatsHardware(page: Page, host: object, overrides: object = {}) {
   return page.route('**/api/stats/hardware', (route) =>
     json(route, {
       ram_total_mb: 96000,
-      ram_used_mb: 1863,
-      ram_available_mb: 94577,
+      ram_used_mb: 40000,
+      ram_available_mb: 56000,
       gtt_used_mb: 6200,
       vram_used_mb: 0,
       npu_status: { ok: true, model_mb: 1100 },
@@ -26,177 +38,41 @@ function mockStatsHardware(page: Page, host: object, overrides: object = {}) {
   )
 }
 
-function mockProxmoxSettings(page: Page, status: object) {
-  return page.route('**/api/settings/proxmox', (route) =>
-    json(route, {
-      configured: true,
-      host: '10.0.1.110',
-      port: 8006,
-      user: 'hal0@pve',
-      token_name: 'dashboard',
-      verify_ssl: false,
-      token_value_set: true,
-      status,
-    }),
-  )
-}
-
-test.describe('Memory map — sidebar', () => {
-  test('off — single-tier bar, no PVE band', async ({ page }) => {
+test.describe('Unified memory hero (dashboard)', () => {
+  test('renders the pool bar with slot blocks, free remainder and legend', async ({ page }) => {
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const card = page.locator('.memmap-sidebar')
+    const card = page.locator('.rd-mem-card')
     await expect(card).toBeVisible()
-    await expect(card).not.toContainText('Hosted on Proxmox')
-    await expect(card).not.toContainText('host free')
-  })
-
-  test('detected_unconfigured — sidebar no longer shows the Proxmox nudge', async ({ page }) => {
-    // The "⚠ Hosted on Proxmox — host pressure unknown. Configure →" nudge was
-    // removed from the SIDEBAR variant (it now lives only in the expanded
-    // hardware-page variant). Even in the detected-but-unconfigured state the
-    // compact sidebar stays model-memory only.
-    await mockStatsHardware(page, {
-      configured: false,
-      detected: true,
-      detection: 'detected',
-      hint: 'Configure /etc/hal0/proxmox.json to see host pressure.',
-    })
-    await page.goto('/#dashboard')
-    const card = page.locator('.memmap-sidebar')
-    await expect(card).toBeVisible()
-    await expect(card).not.toContainText('Hosted on Proxmox')
-    await expect(card.locator('.memmap-pve-nudge')).toHaveCount(0)
-    // Model-memory framing is still the sidebar's content.
-    await expect(card).toContainText('model memory')
-  })
-
-  test('configured — sidebar shows MODEL memory only, no host section', async ({ page }) => {
-    // wave-1: host/Proxmox pressure moved OUT of the sidebar variant and
-    // into the EXPANDED variant's separate .memmap-host-section. The
-    // sidebar now renders model memory vs the unified pool only — no host
-    // teaser, no tenant bar, no "host free".
-    await mockStatsHardware(page, {
-      configured: true,
-      ok: true,
-      node: 'pve',
-      host_mem_total_mb: 131072,
-      host_mem_used_mb: 24576,
-      host_mem_free_mb: 106496,
-      tenants_running: 3,
-      tenants_total: 5,
-    })
-    await mockProxmoxSettings(page, {
-      configured: true,
-      ok: true,
-      node: 'pve',
-      host_mem_total_mb: 131072,
-      host_mem_used_mb: 24576,
-      host_mem_free_mb: 106496,
-      tenants_running: 3,
-      tenants_total: 5,
-      tenants: [
-        { vmid: 105, name: 'hal0', type: 'lxc', status: 'running', mem_mb: 9216, maxmem_mb: 98304 },
-        { vmid: 159, name: 'halodev', type: 'lxc', status: 'running', mem_mb: 3072, maxmem_mb: 8192 },
-        { vmid: 200, name: 'backup', type: 'qemu', status: 'running', mem_mb: 2150, maxmem_mb: 4096 },
-      ],
-    })
-    await page.goto('/#dashboard')
-    const card = page.locator('.memmap-sidebar')
-    await expect(card).toBeVisible()
-    // Primary model-memory framing is present.
-    await expect(card).toContainText('model memory')
-    // Configured-but-not-detected: the amber nudge must NOT appear.
-    await expect(card).not.toContainText('Hosted on Proxmox')
-    // Host pressure surface is EXPANDED-only — absent from the sidebar.
-    await expect(card.locator('.memmap-host-section')).toHaveCount(0)
-    await expect(card.locator('.memmap-bar-host')).toHaveCount(0)
-    await expect(card).not.toContainText('host pressure')
-    await expect(card).not.toContainText('free on host')
-  })
-
-  test('UMA pool labelled "GPU pool (GTT)", not "unified"', async ({ page }) => {
-    // The default mock host is a Strix Halo UMA box (memory_kind: 'unified').
-    // On UMA the pool ceiling is the GTT cap, so the header must read as the
-    // GPU/GTT pool — never the misleading raw "unified" kind. See issue #462.
-    await mockStatsHardware(page, { configured: false, detected: false })
-    await page.goto('/#dashboard')
-    const card = page.locator('.memmap-sidebar')
-    await expect(card.locator('.side-card-h .right')).toContainText('GPU pool (GTT)')
-    await expect(card.locator('.side-card-h .right')).not.toContainText('unified')
-  })
-
-  test('sidebar no longer renders the headroom line (pool scenario)', async ({ page }) => {
-    // The oversized "Headroom for new models … limited by pool/host" line was
-    // dropped from the SIDEBAR variant — the "<free> free" value above the bar
-    // is the kept signal. The headroom + limited-by string now lives ONLY in
-    // the expanded variant (see EXPANDED-variant coverage below).
-    await mockStatsHardware(page, { configured: false, detected: false })
-    await page.goto('/#dashboard')
-    const card = page.locator('.memmap-sidebar')
-    await expect(card).toBeVisible()
-    await expect(card.locator('.memmap-headroom')).toHaveCount(0)
-    // The retained free signal is still present in the sidebar header row.
-    await expect(card.locator('.memmap-h')).toContainText('free')
-  })
-
-  test('sidebar drops headroom even when host is the binding constraint', async ({ page }) => {
-    // Host-limited pool: previously the sidebar showed "limited by host". The
-    // limited-by distinction is now expanded-only; the sidebar must show no
-    // headroom line regardless of which constraint binds.
-    await mockStatsHardware(page, {
-      configured: true,
-      ok: true,
-      host_mem_total_mb: 131072,
-      host_mem_used_mb: 125000,
-      host_mem_free_mb: 6072,
-      tenants_running: 0,
-      tenants_total: 0,
-    })
-    await mockProxmoxSettings(page, {
-      configured: true,
-      ok: true,
-      host_mem_total_mb: 131072,
-      host_mem_used_mb: 125000,
-      host_mem_free_mb: 6072,
-      tenants_running: 0,
-      tenants_total: 0,
-      tenants: [],
-    })
-    await page.goto('/#dashboard')
-    const card = page.locator('.memmap-sidebar')
-    await expect(card).toBeVisible()
-    await expect(card.locator('.memmap-headroom')).toHaveCount(0)
+    // Pool bar with at least one attributed slot block (default mock slots
+    // carry mem_mb) plus the free remainder.
+    const bar = card.locator('.rd-mem-bar')
+    await expect(bar).toBeVisible()
+    await expect(bar.locator('.rd-mem-seg')).not.toHaveCount(0)
+    await expect(bar.locator('.rd-mem-free')).toContainText('free')
+    // Legend: one row per attributed slot + the click affordance hint.
+    await expect(card.locator('.rd-mem-leg').first()).toBeVisible()
+    await expect(card).toContainText('click a block → slot')
   })
 
   test('co-resident slots render distinct legend swatch colours', async ({ page }) => {
-    // Change 1: each loaded model slot gets its OWN stable colour so
-    // co-resident models are visually distinguishable. The default mock has
-    // several live slots with mem_mb > 0 (primary/agent/embed/…) — some
-    // share device=gpu-rocm, which used to collapse to one device hue.
-    // Their legend swatches must now differ.
+    // Each loaded model slot gets its OWN stable colour so co-resident
+    // models are visually distinguishable — several default-mock slots share
+    // device=gpu-rocm, which must NOT collapse to one device hue.
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const swatches = page.locator('.memmap-sidebar .memmap-legend .ln .sw')
-    // free row adds one swatch; expect ≥3 (>=2 live slots + free).
+    const swatches = page.locator('.rd-mem-card .rd-mem-leg i')
     await expect(swatches.first()).toBeVisible()
     const count = await swatches.count()
-    expect(count).toBeGreaterThanOrEqual(3)
-    // First two slot swatches (sorted by name) must be distinct colours.
+    expect(count).toBeGreaterThanOrEqual(2)
     const c0 = await swatches.nth(0).evaluate((el) => getComputedStyle(el).backgroundColor)
     const c1 = await swatches.nth(1).evaluate((el) => getComputedStyle(el).backgroundColor)
     expect(c0).not.toBe(c1)
   })
 
-  test('container slot legend shows image tag, not device token', async ({ page }) => {
-    // #660: container slots are uninformative with "device=rocm" in the
-    // legend sub — every GPU container slot shares the same device token.
-    // The backend emits image + profile for container slots; the legend
-    // must show the (truncated) image tag instead.
-    //
+  test('container slot mem_mb attributed as a block in the pool bar (#660)', async ({ page }) => {
     // With VITE_MOCK_HAL0=1 the mock shim reads HAL0_DATA directly;
-    // page.route() never fires. Inject the container slot via addInitScript
-    // before data.jsx sets window.HAL0_DATA, so the mock harness picks it up.
+    // inject the container slot via addInitScript before data.jsx runs.
     const containerSlot = {
       name: 'primary-container', type: 'llm', device: 'gpu-rocm',
       device_class: 'gpu', backend: 'rocm',
@@ -211,7 +87,6 @@ test.describe('Memory map — sidebar', () => {
       mem_mb: 22400,
     }
     await page.addInitScript((slot) => {
-      // Intercept the HAL0_DATA setter that data.jsx calls, prepend our slot.
       let stored: any = undefined
       Object.defineProperty(window, 'HAL0_DATA', {
         set(v: any) {
@@ -223,43 +98,44 @@ test.describe('Memory map — sidebar', () => {
     }, containerSlot)
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const legend = page.locator('.memmap-sidebar .memmap-legend')
-    await expect(legend).toBeVisible()
-    // The container slot's legend sub must contain part of the image tag.
-    // slotLegendSub truncates to the last 32 chars of the image string:
-    // "…rocm-7.2.4-rocmfp4-server"
-    await expect(legend).toContainText('rocm-7.2.4-rocmfp4-server')
+    const card = page.locator('.rd-mem-card')
+    await expect(card).toBeVisible()
+    // The 22.4 GB container slot must register in the legend with its name…
+    await expect(card.locator('.rd-mem-legend')).toContainText('primary-container')
+    // …and attribute as a non-zero block in the bar, alongside the free
+    // remainder. (With mem_mb present the model attributes ONLY measured
+    // slots — un-measured mock slots correctly drop to zero, not a guess.)
+    const segs = card.locator('.rd-mem-bar .rd-mem-seg:not(.rd-mem-seg-system)')
+    const count = await segs.count()
+    expect(count).toBeGreaterThanOrEqual(1)
+    await expect(card.locator('.rd-mem-free')).toContainText('free')
   })
 
-  test('container slot mem_mb attributed in pool bar', async ({ page }) => {
-    // #660: container slots with mem_mb > 0 must register as a non-zero
-    // segment in the pool bar — i.e. the bar has ≥2 <i> width segments
-    // (at least one slot + the free remainder).
+  test('no Proxmox nudge on the dashboard memory surface', async ({ page }) => {
+    // Detected-but-unconfigured PVE: the "⚠ Hosted on Proxmox" nudge lives
+    // only in the expanded hardware-page variant, never on the dashboard.
+    await mockStatsHardware(page, {
+      configured: false,
+      detected: true,
+      detection: 'detected',
+      hint: 'Configure /etc/hal0/proxmox.json to see host pressure.',
+    })
+    await page.goto('/#dashboard')
+    const card = page.locator('.rd-mem-card')
+    await expect(card).toBeVisible()
+    await expect(card).not.toContainText('Hosted on Proxmox')
+    await expect(page.locator('.memmap-pve-nudge')).toHaveCount(0)
+  })
+
+  test('health strip mirrors the unified-memory used/total reading', async ({ page }) => {
+    // The 5-cell health strip's "unified memory" cell reads the same
+    // ram_used/ram_total counters the hero frames — never a fabricated 0.
     await mockStatsHardware(page, { configured: false, detected: false })
     await page.goto('/#dashboard')
-    const bar = page.locator('.memmap-sidebar .memmap-bar')
-    await expect(bar).toBeVisible()
-    const segments = bar.locator('i[style*="width"]')
-    const count = await segments.count()
-    expect(count).toBeGreaterThanOrEqual(2)
+    const cell = page.locator('.rd-health-cell', { hasText: 'unified memory' })
+    await expect(cell).toBeVisible()
+    // 40000 MB used / 96000 MB total → "39.1/94 GB" (mb→GB, round1/round).
+    await expect(cell.locator('.rd-health-v')).toContainText('39.1')
+    await expect(cell.locator('.rd-health-v')).toContainText('/94 GB')
   })
 })
-
-// NOTE: the `Memory map — expanded` variant (with its Proxmox host-pressure
-// + tenant-breakdown section) was removed from the /#dashboard layout — the
-// dashboard now carries a single memory map (the sticky sidebar) plus the
-// live Memory hardware card. The MemoryMap component still supports
-// `variant="expanded"`, but nothing mounts it on the dashboard, so the
-// former dashboard-scoped expanded suite was retired.
-//
-// HEADROOM coverage: the "Headroom for new models … limited by pool/host"
-// line (and the pool-vs-host limited-by distinction) now renders ONLY in the
-// expanded variant — it was dropped from the sidebar (the "<free> free" value
-// above the bar is the kept signal). Because no live route mounts the
-// expanded variant, the limited-by string is not e2e-reachable today; the
-// `limitedBy` logic still lives in useMemoryMapModel() and the expanded
-// <HeadroomLabel> render. The former sidebar "limited by pool"/"limited by
-// host" assertions were converted above to assert the sidebar no longer shows
-// the headroom line (under both pool- and host-constrained mocks). When a
-// route mounts variant="expanded", re-add a `.memmap-expanded .memmap-headroom`
-// limited-by assertion here.
