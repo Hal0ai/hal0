@@ -23,6 +23,7 @@
 
 import { useMemo, useRef, useState } from 'react'
 import { useActivityStream, activityExportUrl } from '@/api/hooks/useActivity'
+import { useSlots } from '@/api/hooks/useSlots'
 
 // Normalize severity into one of the four CSS row classes.
 function sevOf(rec) {
@@ -80,41 +81,50 @@ const CATEGORY_OPTIONS = [
 export function ActivityLog() {
   const [severity, setSeverity] = useState('all')
   const [category, setCategory] = useState('all')
-  const [search, setSearch] = useState('')
+  // Slot filter — matches a record's `target` (slot.* actions carry the
+  // slot name in target; capability children use "<slot>/<child>").
+  const [slot, setSlot] = useState('all')
   // Auto-scroll-to-top pauses while hovering so a live frame can't yank
   // the row you're reading. (Newest-first → "scroll" is really the top.)
   const [paused, setPaused] = useState(false)
   const listRef = useRef(null)
 
+  const slotsQuery = useSlots()
+  const slotNames = useMemo(
+    () =>
+      Array.from(new Set((slotsQuery.data ?? []).map((s) => s.name).filter(Boolean))).sort(),
+    [slotsQuery.data],
+  )
+
   const stream = useActivityStream({
     follow: true,
     severity: severity === 'all' ? null : severity,
     category: category === 'all' ? null : category,
-    // search is forwarded server-side; the client filter below gives
-    // instant feedback for the residual ring while the SSE reconnects.
-    search: search || null,
+    // The slot name is forwarded server-side as a `search` term so the SSE
+    // payload is pre-narrowed (substring match ⊇ exact-target match, so no
+    // matching record is wrongly dropped); the residual client filter below
+    // tightens it to an exact target match.
+    search: slot === 'all' ? null : slot,
   })
 
   // Residual client filter so records already in the ring honour a tightened
   // filter immediately (server-side filtering only gates FUTURE frames).
   const rows = useMemo(() => {
-    const q = search.trim().toLowerCase()
     return stream.records.filter((r) => {
       if (severity !== 'all' && sevOf(r) !== severity) return false
       if (category !== 'all' && r.category !== category) return false
-      if (q) {
-        const hay =
-          `${r.message || ''} ${r.action || ''} ${r.target || ''} ${r.actor || ''}`.toLowerCase()
-        if (!hay.includes(q)) return false
+      if (slot !== 'all') {
+        const t = r.target || ''
+        if (t !== slot && !t.startsWith(slot + '/')) return false
       }
       return true
     })
-  }, [stream.records, severity, category, search])
+  }, [stream.records, severity, category, slot])
 
   const exportFilters = {
     severity: severity === 'all' ? null : severity,
     category: category === 'all' ? null : category,
-    search: search || null,
+    search: slot === 'all' ? null : slot,
   }
   const csvHref = activityExportUrl('csv', exportFilters)
   const jsonHref = activityExportUrl('json', exportFilters)
@@ -166,14 +176,20 @@ export function ActivityLog() {
               </option>
             ))}
           </select>
-          <input
-            className="act-search mono"
-            data-testid="act-search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="search…"
-            aria-label="Search activity"
-          />
+          <select
+            className="act-slot mono"
+            data-testid="act-slot"
+            aria-label="Filter by slot"
+            value={slot}
+            onChange={(e) => setSlot(e.target.value)}
+          >
+            <option value="all">All slots</option>
+            {slotNames.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -198,7 +214,7 @@ export function ActivityLog() {
                   onClick={() => {
                     setSeverity('all')
                     setCategory('all')
-                    setSearch('')
+                    setSlot('all')
                   }}
                 >
                   Clear filters
@@ -218,14 +234,18 @@ export function ActivityLog() {
                 data-severity={sev}
                 title={r.error || r.message || r.action}
               >
-                <span className="act-ts">{shortTime(r.ts)}</span>
+                <span className="act-meta">
+                  <span className="act-ts">{shortTime(r.ts)}</span>
+                  <span className="act-actor">{actorLabel(r.actor)}</span>
+                </span>
                 <span className={'act-glyph ' + g.cls} aria-hidden="true">
                   {g.glyph}
                 </span>
-                <span className="act-actor">{actorLabel(r.actor)}</span>
-                <span className="act-action mono">{r.action}</span>
-                {r.target ? <span className="act-target">{r.target}</span> : null}
-                <span className="act-msg">{r.message}</span>
+                <span className="act-content">
+                  <span className="act-action mono">{r.action}</span>
+                  {r.target ? <span className="act-target">{r.target}</span> : null}
+                  <span className="act-msg">{r.message}</span>
+                </span>
               </div>
             )
           })
