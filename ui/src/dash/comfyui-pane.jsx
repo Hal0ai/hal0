@@ -18,6 +18,7 @@ import {
   useComfyui,
   useComfyuiRenderCancel,
   useComfyuiRestart,
+  useComfyuiWorkflows,
   transformComfyuiStatus,
   COMFYUI_FALLBACK,
 } from '@/api/hooks/useComfyui'
@@ -268,10 +269,24 @@ function workflowHref(comfyBaseUrl, wf) {
   return wf ? `${comfyBaseUrl}/?workflow=${encodeURIComponent(wf)}` : comfyBaseUrl
 }
 
-// `max` caps the strip so it stays ~2 rows — a curated, varied set sorted by
-// type rather than an unbounded wall of tags.
-function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl, max = 6 }) {
+// `max` caps the curated strip so it stays ~2 rows — a curated, varied set
+// sorted by type rather than an unbounded wall of tags. Operator-added
+// workflows discovered on disk (GET /api/comfyui/workflows) are appended as
+// plain chips so files dropped into the bind-mounted workflows dir are
+// visible without a rebuild; they were previously invisible (hardcoded list).
+function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl, max = 6, maxCustom = 8 }) {
   const shown = sortFlowsByType(flows).slice(0, max)
+  const workflowsQuery = useComfyuiWorkflows()
+
+  // Curated entries already reference a ``<file>.json``; don't list an
+  // operator file twice if it matches one of those. Compare on the bare name.
+  const curatedFiles = new Set(
+    flows.map(f => (f.wf ? f.wf.replace(/\.json$/i, '') : null)).filter(Boolean),
+  )
+  const custom = (workflowsQuery.data || [])
+    .filter(w => w.name && !curatedFiles.has(w.name))
+    .slice(0, maxCustom)
+
   return (
     <div>
       <BlkH icon="bolt" acc note="opens in ComfyUI ↗">workflows</BlkH>
@@ -293,6 +308,25 @@ function WorkflowsBlock({ flows = FLOWS_DEFAULT, comfyBaseUrl, max = 6 }) {
               <span className="arr">→</span>
               <span>{f.b}</span>
               {f.tag && <span className="tag">{f.tag}</span>}
+            </a>
+          )
+        })}
+        {custom.map((w) => {
+          const href = workflowHref(comfyBaseUrl, `${w.name}.json`)
+          return (
+            <a
+              className="flow"
+              key={`custom:${w.name}`}
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-disabled={href ? undefined : 'true'}
+              data-workflow={w.name}
+              title={`${w.name}.json (${w.source})`}
+            >
+              <span className="ic"><Ci name="bolt" size={14} /></span>
+              <span>{w.name}</span>
+              <span className="tag">custom</span>
             </a>
           )
         })}
