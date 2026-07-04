@@ -856,24 +856,45 @@ function VoiceSection() {
 // Image-gen exposes enable/engine(provider)/model picks for the img.img slot.
 // Persisted via POST /api/capabilities/img/img {model, provider, enabled}.
 //
-// Deferred (#554 follow-up — no clean slot-config path):
-//   - Default size (width × height): read from /v1/images/generations body, not slot config.
-//   - Steps: from extra_body.steps per-request; template defaults in workflows JSON.
-//   - ComfyUI workflow selection: bound at inference time by model_class from the registry.
-//   These require either per-request defaults in slot TOML (not yet modelled) or a
-//   new /api/slots/{name}/defaults surface — tracked in the issue body.
+// Generation defaults (#599 ImageGenConfig — [image] table on the img slot
+// TOML): default_size / default_steps / idle_restore_minutes. These persist
+// via PUT /api/slots/{name}/config { image: {...} } through useSlotEdit,
+// mirroring how the Voice section wires TTS default_voice. The img slot name
+// is discovered from useSlots (type "image" / name "img"); when no img slot
+// exists the controls degrade to disabled with a hint.
 function ImageGenSection() {
   const capsQuery = useCapabilities();
   const applyCapability = useCapabilityApply();
+  const slotsQuery = useSlots();
+  const editSlot = useSlotEdit();
 
   const caps = capsQuery.data;
   const imgCatalogs = caps?.catalogs?.img || {};
   const imgSelections = caps?.selections?.img || {};
   const imgSelection = imgSelections.img || {};
 
+  // Discover the img slot name so the [image] config read/write targets a real
+  // slot. Prefer an explicit "img" name, else the first image-type slot.
+  const imgSlotName =
+    (slotsQuery.data || []).find(s => s.name === "img" || s.type === "image" || s.group === "img")?.name || null;
+  const imgCfgQuery = useSlotConfig(imgSlotName);
+  const imgCfgImage = (imgCfgQuery.data?.image) || {};
+
+  // Schema defaults (ImageGenConfig): an all-defaults [image] table is elided
+  // from the dumped config, so fall back to the same defaults the backend uses.
+  const DEF_SIZE = "1024x1024";
+  const DEF_STEPS = "0";
+  const DEF_IDLE = "60";
+  const origSize = imgCfgImage.default_size != null ? String(imgCfgImage.default_size) : DEF_SIZE;
+  const origSteps = imgCfgImage.default_steps != null ? String(imgCfgImage.default_steps) : DEF_STEPS;
+  const origIdle = imgCfgImage.idle_restore_minutes != null ? String(imgCfgImage.idle_restore_minutes) : DEF_IDLE;
+
   const [imgModel, setImgModel] = useStateSet("");
   const [imgEnabled, setImgEnabled] = useStateSet(false);
   const [imgProvider, setImgProvider] = useStateSet("");
+  const [defaultSize, setDefaultSize] = useStateSet(DEF_SIZE);
+  const [defaultSteps, setDefaultSteps] = useStateSet(DEF_STEPS);
+  const [idleRestore, setIdleRestore] = useStateSet(DEF_IDLE);
 
   useEffectSet(() => {
     if (imgSelection.model != null) setImgModel(imgSelection.model || "");
@@ -881,7 +902,15 @@ function ImageGenSection() {
     if (imgSelection.provider != null) setImgProvider(imgSelection.provider || "");
   }, [imgSelection.model, imgSelection.enabled, imgSelection.provider]);
 
+  useEffectSet(() => {
+    const img = imgCfgQuery.data?.image || {};
+    setDefaultSize(img.default_size != null ? String(img.default_size) : DEF_SIZE);
+    setDefaultSteps(img.default_steps != null ? String(img.default_steps) : DEF_STEPS);
+    setIdleRestore(img.idle_restore_minutes != null ? String(img.idle_restore_minutes) : DEF_IDLE);
+  }, [imgCfgQuery.data]);
+
   const imgDirty = imgModel !== (imgSelection.model || "") || imgEnabled !== !!imgSelection.enabled || imgProvider !== (imgSelection.provider || "");
+  const defaultsDirty = !!imgSlotName && (defaultSize !== origSize || defaultSteps !== origSteps || idleRestore !== origIdle);
   const imgCatalogItems = imgCatalogs.img?.items || imgCatalogs.img?.models || [];
   const imgStatus = imgSelection.status || "offline";
 
@@ -894,6 +923,29 @@ function ImageGenSection() {
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Image-gen save failed — ${e?.message || "see logs"}`, "err");
     }
+  };
+
+  const doSaveDefaults = async () => {
+    if (!imgSlotName) return;
+    // Coerce to the ImageGenConfig field types before writing. Steps / idle are
+    // non-negative ints (schema ge=0); size is a freeform "WxH" string.
+    const image = {
+      default_size: defaultSize.trim() || DEF_SIZE,
+      default_steps: Math.max(0, parseInt(defaultSteps, 10) || 0),
+      idle_restore_minutes: Math.max(0, parseInt(idleRestore, 10) || 0),
+    };
+    try {
+      await editSlot.mutateAsync({ name: imgSlotName, body: { image } });
+      window.__hal0Toast && window.__hal0Toast("Image-gen defaults saved", "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
+  const resetDefaults = () => {
+    setDefaultSize(origSize);
+    setDefaultSteps(origSteps);
+    setIdleRestore(origIdle);
   };
 
   const statusChip = (st) => {
@@ -938,8 +990,6 @@ function ImageGenSection() {
           )
         } sub={imgCatalogItems.length === 0 ? "no installed image models — install one in the Models view" : undefined} />
 
-        {/* Size / Steps / Workflow are per-request params (extra_body.*), not slot config — hidden until /api/slots/{name}/defaults lands */}
-
         <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
           {imgDirty && (
             <button className="btn ghost sm" onClick={() => {
@@ -949,6 +999,49 @@ function ImageGenSection() {
             }}>Reset</button>
           )}
           <button className="btn sm" disabled={!imgDirty || loading || applyCapability.isPending} onClick={doSave}>Save Image-gen</button>
+        </div>
+      </div>
+
+      {/* ── Generation defaults (#599 ImageGenConfig — [image] on the img slot) ── */}
+      <div className="s-panel" style={{marginTop: 12}}>
+        <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
+          <div className="k">
+            <span>Generation defaults</span>
+            <span className="sub">img slot config · applied when a /v1/images request omits the param</span>
+          </div>
+          <div className="v">
+            {imgSlotName
+              ? <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-3)"}}>{imgSlotName}</span>
+              : <span className="chip mono" style={{fontSize: 10, padding: "1px 6px", color: "var(--fg-4)"}}>no img slot</span>}
+          </div>
+        </div>
+        <SRow k="Default size" sub="Output resolution as WxH (e.g. 1024x1024)" v={
+          <input value={defaultSize} onChange={e => setDefaultSize(e.target.value)} placeholder={DEF_SIZE}
+            disabled={!imgSlotName}
+            className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 140}} />
+        } />
+        <SRow k="Default steps" sub="Sampler steps · 0 = use the model-class default" v={
+          <input type="number" min={0} value={defaultSteps} onChange={e => setDefaultSteps(e.target.value)} placeholder={DEF_STEPS}
+            disabled={!imgSlotName}
+            className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 100}} />
+        } />
+        <SRow k="Idle restore" sub="Minutes of img inactivity before the GPU arbiter restores LLM slots · 0 = manual only" v={
+          <input type="number" min={0} value={idleRestore} onChange={e => setIdleRestore(e.target.value)} placeholder={DEF_IDLE}
+            disabled={!imgSlotName}
+            className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 100}} />
+        } />
+        {!imgSlotName && (
+          <div className="s-row" style={{padding: "6px 12px"}}>
+            <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>No img slot configured — create one in the Slots view to edit generation defaults.</span>
+          </div>
+        )}
+        <div style={{display: "flex", justifyContent: "flex-end", gap: 8, padding: "8px 12px 4px"}}>
+          {defaultsDirty && (
+            <button className="btn ghost sm" onClick={resetDefaults}>Reset</button>
+          )}
+          <button className="btn sm" disabled={!defaultsDirty || editSlot.isPending} onClick={doSaveDefaults}>
+            {editSlot.isPending ? "Saving…" : "Save defaults"}
+          </button>
         </div>
       </div>
     </div>
@@ -1027,13 +1120,67 @@ function DefaultSlotsSection() {
 }
 
 function GeneralSection() {
+  // Wave 8: telemetry.enabled privacy toggle. hal0.toml [telemetry].enabled
+  // defaults to false (opt-in anonymous telemetry). Persisted via the generic
+  // PUT /api/settings {telemetry:{enabled}} — the backend deep-merges, so we
+  // only send the one bit. The apply-plan registry classes telemetry.enabled
+  // as "immediate" (re-read on each save, no restart), rendered by ApplyBadge.
+  const settings = useSettings();
+  const update = useSettingsUpdate();
+  const applyPlanQuery = useApplyPlan();
+  const registry = applyPlanQuery.data?.registry || {};
+  const liveTelemetry = settings.data?.telemetry;
+
+  const [telemetry, setTelemetry] = useStateSet(false);
+  useEffectSet(() => {
+    if (settings.data) setTelemetry(settings.data.telemetry?.enabled === true);
+  }, [settings.data]);
+
+  const telemetryDirty = !!settings.data && telemetry !== (liveTelemetry?.enabled === true);
+
+  const onSaveTelemetry = async () => {
+    try {
+      await update.mutateAsync({ telemetry: { enabled: telemetry } });
+      window.__hal0Toast && window.__hal0Toast(`Telemetry ${telemetry ? "enabled" : "disabled"}`, "ok");
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+
   return (
     <div className="s-section">
       <h2>General</h2>
       <p className="desc">
-        The dashboard is dark-only by design. Theme / density / accent customization is not available in this release.
+        Privacy and appearance. The dashboard is dark-only by design — theme / density / accent
+        customization is not available in this release.
       </p>
       <div className="s-panel">
+        <SRow
+          k="Anonymous telemetry"
+          sub="Opt-in · off by default. Sends anonymized, aggregate usage counts to help prioritize work — no prompts, model I/O, or file paths leave the machine."
+          v={
+            <label className="mono" style={{display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", color: "var(--fg-2)"}}>
+              <input
+                type="checkbox"
+                checked={telemetry}
+                disabled={!settings.data}
+                onChange={e => setTelemetry(e.target.checked)}
+                style={{accentColor: "var(--accent)"}}
+              />
+              <span>{telemetry ? "enabled" : "disabled"}</span>
+            </label>
+          }
+          actions={
+            <div style={{display: "inline-flex", alignItems: "center", gap: 6}}>
+              <ApplyBadge settingsKey="telemetry.enabled" registry={registry} />
+              {telemetryDirty && (
+                <button className="btn ghost sm" disabled={update.isPending} onClick={onSaveTelemetry}>
+                  {update.isPending ? "Saving…" : "Save"}
+                </button>
+              )}
+            </div>
+          }
+        />
         <SRow k="Theme" v={<span className="chip mono" style={{color: "var(--fg-4)"}}>dark · locked</span>} />
       </div>
     </div>
