@@ -287,7 +287,7 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     }, { slots, models })
   }
 
-  test('C7i — MTP pill shows for rocm slot + MTP-capable model and writes mtp:true + restart', async ({ page }) => {
+  test('C7i — MTP control shows for MTP-capable model; On writes mtp:true + restart, Auto writes mtp:null', async ({ page }) => {
     const puts: any[] = []
     let restarted = false
     await page.route('**/api/slots/chat/config', async (route) => {
@@ -300,10 +300,15 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     // Use the exact label span text to avoid false-matches on "qwen-mtp" / "rocm-mtp" substrings
     const row = page.locator('.drawer .form-row').filter({ has: page.locator('.form-lbl span', { hasText: /^MTP$/ }) })
     await expect(row).toBeVisible()
-    await row.locator('button[role="switch"]').click()
+    // Tri-state: forcing On writes mtp:true and restarts.
+    await row.getByTestId('mtp-seg-on').click()
     await expect.poll(() => puts.length).toBeGreaterThan(0)
     expect(puts[0].mtp).toBe(true)
     await expect.poll(() => restarted).toBe(true)
+    // Returning to Auto writes mtp:null (defer to model × profile).
+    await row.getByTestId('mtp-seg-auto').click()
+    await expect.poll(() => puts.length).toBeGreaterThan(1)
+    expect(puts[1].mtp).toBeNull()
   })
 
   test('C7j — MTP pill hidden when the model is not MTP-capable', async ({ page }) => {

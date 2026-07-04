@@ -400,10 +400,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // overrideOpen tracks whether the user has clicked [Override] to reveal the select.
   const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
   const [overrideOpen, setOverrideOpen] = useStateSM(!!(slot?.chat_template));
-  // UI-20: MTP local state — mirrors the reasoning toggle's optimistic
-  // set-before-mutate / revert-on-error pattern. Seeds from slot.mtp (default
-  // off; only `true` counts as on, matching the previous `slot.mtp === true`).
-  const [mtp, setMtp] = useStateSM(slot?.mtp === true);
+  // MTP local state — TRI-STATE after the profile↔model separation:
+  // null = Auto (defer to model-eligibility × profile opt-in), true = force on,
+  // false = force off. Seeds from slot.mtp (undefined/null → Auto). Optimistic
+  // set-before-mutate / revert-on-error, mirroring the reasoning toggle.
+  const [mtp, setMtp] = useStateSM(slot?.mtp ?? null);
   // #901: per-slot vision toggle (instant-apply + cold restart). Default-ON:
   // the mmproj sidecar loads unless explicitly disabled, so null/undefined →
   // on. Optimistic local state with revert-on-error (mirrors reasoning).
@@ -443,7 +444,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setOverrideOpen(!!(slot.chat_template));
       // Wave 8: re-seed the instant-apply toggles from the (possibly-updated)
       // slot prop.
-      setMtp(slot.mtp === true);
+      setMtp(slot.mtp ?? null);
       setVision(slot.vision !== false);
       setVisionPending(false);
       setVisionErr(null);
@@ -1030,48 +1031,54 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         </div>
       )}
-      {/* Task 2: MTP pill — capability-gated, rocm-only.
-          Renders ONLY when the slot's loaded model has the "mtp" tag AND
-          the slot's backend is "rocm". Toggle is instant-apply
-          via PUT /config (editMut) + non-blocking restart (mirrors the
-          profile-change pattern above). */}
+      {/* MTP — tri-state (Auto/On/Off) after the profile↔model separation.
+          Renders when the loaded model is MTP-ELIGIBLE (carries the "mtp" tag)
+          OR the slot already has an explicit override, so a forced state is
+          always adjustable. NOT gated on rocm any more — the draft device now
+          tracks the profile backend, so MTP works wherever an MTP profile runs.
+          Auto (null) defers to model-eligibility × profile opt-in; the control
+          shows whether Auto is currently effective. Instant-apply via PUT
+          /config + non-blocking restart. */}
       {(() => {
         const cur = slot.model_id || slot.model || "";
         const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
-        const mtpCapable = Array.isArray(m?.tags) && m.tags.includes("mtp");
-        // Gate on `backend` — the authoritative slot field the API emits.
-        // `device` ("gpu-rocm") is a client-side convenience synthesized by
-        // normalizeSlot from backend and is ABSENT on the raw slot shape, so
-        // keying off it alone is fragile; the device check stays only as a
-        // defensive fallback for any path that bypasses the normalizer.
-        const isRocm = slot.backend === "rocm" || String(slot.device || "").startsWith("gpu-rocm");
-        if (!mtpCapable || !isRocm) return null;
+        const modelEligible = Array.isArray(m?.tags) && m.tags.includes("mtp");
+        // Show for an eligible model, or when MTP is force-ON on a now-ineligible
+        // model so it stays adjustable. A force-OFF on an ineligible model needs
+        // no control (it's already off and would be off under Auto too).
+        const forcedOn = slot.mtp === true;
+        if (!modelEligible && !forcedOn) return null;
+        // Auto is effective only when the model is eligible AND the slot's
+        // profile opts into MTP — mirror the server's _effective_mtp rule so
+        // the hint never disagrees with what actually launches.
+        const prof = (profilesQuery.data ?? []).find(p => p.name === (selectedProfile || slot.profile));
+        const autoActive = modelEligible && !!prof?.mtp;
         return (
           <div className="form-row">
             <div className="form-lbl">
               <span>MTP</span>
-              <span className="sub">Multi-token speculative decoding — dense models only (MoE runs slower). Restarts the container.</span>
+              <span className="sub">Multi-token speculative decoding. Auto follows the model + profile; On/Off force it. Restarts the container.</span>
             </div>
             <div className="form-ctl">
-              <PillToggle
-                on={mtp}
+              <MtpControl
+                value={mtp}
+                autoActive={autoActive}
                 disabled={saving}
-                label="MTP"
-                stateText={mtp ? "On" : "Off"}
-                onToggle={async (next) => {
-                  // UI-20: optimistic — flip local state before the PUT, revert
-                  // on error (mirrors the reasoning toggle above).
+                onChange={async (next) => {
+                  // Optimistic — set local state before the PUT, revert on error.
+                  const prev = mtp;
                   setMtp(next);
                   setSubmitErr(null);
+                  const word = next == null ? "auto" : (next ? "on" : "off");
                   try {
                     await editMut.mutateAsync({ name: slot.name, body: { mtp: next } });
                     restartMut.mutate(slot.name, {
                       onError: (err) => window.__hal0Toast && window.__hal0Toast(`MTP restart failed — ${err?.message || "see logs"}`, "err"),
                     });
-                    window.__hal0Toast && window.__hal0Toast(`${slot.name} MTP ${next ? "on" : "off"} — restarting in the background`, "info");
+                    window.__hal0Toast && window.__hal0Toast(`${slot.name} MTP ${word} — restarting in the background`, "info");
                   } catch (err) {
-                    setMtp(!next);
-                    setSubmitErr(err?.message || "MTP toggle failed");
+                    setMtp(prev);
+                    setSubmitErr(err?.message || "MTP change failed");
                   }
                 }}
               />
