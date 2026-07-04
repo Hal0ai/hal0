@@ -1,10 +1,11 @@
 /**
- * memory-tools-v3 — Playwright coverage for the #memory/tools surface.
+ * memory-tools-v3 — Playwright coverage for the Memory tools surface.
  *
- * The Tools panel was re-skinned to mt-* classes but keeps every live action +
- * testid (recall, reflect, documents w/ delete-confirm, mental-models refresh,
- * directives create/toggle/delete). The bank selector lives in a .mt-bankbar
- * (data-testid="mem-tools-bank") and persists to localStorage 'hal0.mem.bank'.
+ * The Tools panel now renders EMBEDDED inside the selected bank's main card on
+ * #memory (the standalone #memory/tools route was retired); it keeps every live
+ * action + testid (recall, reflect, documents w/ delete-confirm, mental-models
+ * refresh/create, directives create/toggle/delete). In embedded mode the panel
+ * scopes to the bank selected on the Overview (its own .mt-bankbar is hidden).
  *
  * NOTE on data: the Playwright webServer runs with VITE_MOCK_HAL0=1 (forced
  * mock). The mock fetch harness (src/api/mock.ts) short-circuits the allowlisted
@@ -27,13 +28,18 @@
 import { test, expect, json } from '../fixtures/apiMock'
 
 async function gotoTools(page: any) {
-  await page.goto('/#memory/tools')
+  // Tools moved into the primary bank display on #memory (the standalone
+  // #memory/tools route + sub-tab were removed). Open Memory, select a bank,
+  // and the embedded tools surface (data-testid="mem-tools") renders for it.
+  await page.goto('/#memory')
   await page.waitForFunction(() => typeof (window as any).MemoryView === 'function')
+  await page.waitForSelector('[data-testid="mem-bank-primary"]', { timeout: 10_000 })
+  await page.click('[data-testid="mem-bank-primary"]')
   await page.waitForSelector('[data-testid="mem-tools"]', { timeout: 10_000 })
 }
 
 test.describe('Memory tools', () => {
-  test('recall console runs and renders ranked results', async ({ page }) => {
+  test('Recall runs and renders ranked results', async ({ page }) => {
     await gotoTools(page)
 
     await page.fill('[data-testid="mem-recall-q"]', 'what changed recently')
@@ -46,7 +52,7 @@ test.describe('Memory tools', () => {
     await expect.poll(async () => await results.locator('.mt-result').count()).toBeGreaterThan(0)
   })
 
-  test('reflect playground renders answer and based_on counts', async ({ page }) => {
+  test('Reflect renders answer and based_on counts', async ({ page }) => {
     await gotoTools(page)
 
     await page.fill('[data-testid="mem-reflect-q"]', 'summarize the platform state')
