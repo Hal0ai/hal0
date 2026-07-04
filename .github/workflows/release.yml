@@ -56,7 +56,7 @@ on:
 
 permissions:
   contents: write     # required to upload Release assets
-  id-token: write     # required for cosign keyless OIDC
+  id-token: write     # required for cosign keyless OIDC + PyPI OIDC
   packages: read      # in case we ever pull a private image at build time
 
 concurrency:
@@ -473,3 +473,36 @@ jobs:
             echo "  hal0 update --check"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 8. PyPI wheel — convenience install, not the production path ────────────
+  # Published as a complement to the tarball + bootstrap above.
+  # The wheel is NOT the supported prod path (no systemd units, no UI bundle,
+  # no FHS layout); it is purely for `pip install hal0` convenience.
+  # Uses PyPI Trusted Publishing (OIDC) — no API token stored in secrets.
+  # Requires the PyPI project to have a Trusted Publisher configured for:
+  #   owner: hal0ai, repo: hal0, workflow: release.yml, environment: pypi
+  pypi-publish:
+    name: PyPI wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: []  # parallel to the tarball job; no dependency
+    environment: pypi
+    permissions:
+      id-token: write  # required for PyPI OIDC
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel + sdist
+        run: |
+          pip install hatchling
+          python -m hatchling build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
