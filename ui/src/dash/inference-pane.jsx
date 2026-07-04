@@ -36,6 +36,7 @@ import {
   useSlotSwap,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
+import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
@@ -427,7 +428,11 @@ export function ModelPicker({ s, models, disabled, onSwap }) {
         {s.model || '—'}
       </div>
     )
-  const opts = (Array.isArray(models) ? models : []).filter((m) => m.type === 'llm')
+  // Upstream-advertised rows can't be bound to a slot (no local file) —
+  // same exclusion as slot-modals' compatibleModels().
+  const opts = (Array.isArray(models) ? models : []).filter(
+    (m) => m.type === 'llm' && !isUpstreamModel(m),
+  )
   const cur = s.model_id || s.model || ''
   const has = opts.some((m) => m.id === cur)
   return (
