@@ -109,7 +109,10 @@ instead of silently failing. The image container itself stays resident — what'
 exclusive is the GPU **memory**, not the container — so switching modes is fast.
 After the image slot has had no jobs for its configured idle window
 (`idle_restore_minutes`, 60 by default; `0` means manual-only), the arbiter
-frees the diffusion models and restores the LLM slots it had stopped.
+frees the diffusion models and restores the LLM slots it had stopped. If the
+image slot still has an in-flight generation job when the idle window elapses,
+the restore defers rather than unloading it mid-render — a long video render
+simply pushes the LLM restore back until it finishes.
 
 <Aside type="caution">
 The single NPU LLM anchor is exclusive too, but for a different reason: the AMD
@@ -122,22 +125,33 @@ enabling a second `device=npu` chat slot is rejected.
 Every install starts with a set of **seeded slots** so the common capabilities
 have a home before you create anything:
 
-`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`, and `agent`.
+`utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`, and `agent`.
 
 When the NPU runtime (FLM) is present, two more shadow slots are seeded:
-`stt-npu` and `embed-npu`. Seeded slots are reserved — you can't create a
-conflicting name or delete them.
+`stt-npu` and `embed-npu` (riding the NPU chat anchor's own `npu` slot).
+Seeded slots are reserved — you can't create a conflicting name or delete them.
+
+The two canonical LLM roles are **`agent`** (the capable default — the
+dispatch fallback anchor every routing chain ends in) and **`utility`** (the
+cheap helper, seeded on every install so tasks like memory extraction always
+have a cheap local model to target). `chat` and `primary` are retired as
+slot/role names — the `chat` *capability* itself is unaffected, since any
+`type: llm` slot can serve it.
 
 Each slot carries a **type** (`llm`, `embedding`, `reranking`, `transcription`,
 `tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`, `cpu`,
-or `npu`). hal0 also keeps a couple of back-compat **aliases** so older callers
-keep working: `primary` resolves to `chat`, and `agent-hermes` resolves to
-`agent`. Aliases are never written to disk and never appear in slot listings —
-they're a transparent translation at dispatch time.
+or `npu`). hal0 keeps one back-compat **alias** so older callers keep working:
+`agent-hermes` resolves to `agent`. Aliases are never written to disk and
+never appear in slot listings — they're a transparent translation at dispatch
+time.
 
-Addressing a slot by its name (e.g. `model: "chat"`) is the stable way to pin a
-co-resident model: the name doesn't change when you swap the underlying model
-file.
+Addressing a slot by its name (e.g. `model: "agent"`) is the stable way to pin
+a co-resident model: the name doesn't change when you swap the underlying
+model file. hal0 also advertises three virtual model names that resolve to
+whichever slot is actually loaded — `hal0/agent`, `hal0/utility`, and
+`hal0/npu` — and generalizes the pattern to any enabled `type: llm` slot: a
+custom slot named `research` is addressable as `hal0/research` even though
+it isn't one of the three advertised names.
 
 ## Where to go next
 

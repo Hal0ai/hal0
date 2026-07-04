@@ -81,6 +81,13 @@ research-only, SD 1.5 is RAIL-M. Read the license before using output
 commercially.
 </Aside>
 
+The dashboard's Models view keeps these off the dispatcher-facing
+**Models** tab entirely — they live on their own **Image / ComfyUI** tab,
+grouped by the ComfyUI models-tree subdirectory each one actually lands in
+(`checkpoints`, `loras`, `vae`, `upscale_models`, …). See
+[Generate images](/docs/guides/generate-images) for how that surface
+works.
+
 ## How model fit is evaluated
 
 Before a model is assigned to a slot, hal0 computes a **fit verdict** —
@@ -111,6 +118,20 @@ assignment. This is why the device you pick for a slot has to be
 consistent with its profile — see
 [Manage slots](/docs/guides/manage-slots) for the `--hardware` flag that
 sets it.
+
+<Aside type="tip">
+Fit-checking runs at *assignment* time. If a slot's already-configured
+default later stops resolving locally — its file was removed, or a seed
+pinned an id that was never actually pulled under that exact name —
+`hal0 slot load` doesn't crash-loop on the missing path. `load()` falls
+back to the best locally-registered model that matches the slot's
+capability, preferring whichever candidate shares the most leading
+name tokens with the configured id (then the largest one on disk), and
+always excluding diffusion/image/video artifacts so a text slot can
+never load one by accident. The substitution is logged
+(`slot.model_default_fallback`) so you can go fix the slot's configured
+default.
+</Aside>
 
 ## Off-catalogue models
 

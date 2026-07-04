@@ -378,6 +378,65 @@ class TestWorkflowLaunch:
         assert r.json()["prompt_id"] == "xyz"
 
 
+class TestWorkflowList:
+    def test_lists_json_files_from_primary_dir(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        wf_dir = tmp_path / "comfyui" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "alpha.json").write_text("{}")
+        (wf_dir / "beta.json").write_text("{}")
+        (wf_dir / "notes.txt").write_text("ignore me")  # non-json skipped
+        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
+
+        r = client.get("/api/comfyui/workflows")
+        assert r.status_code == 200
+        names = {w["name"]: w["source"] for w in r.json()["workflows"]}
+        assert names == {"alpha": "primary", "beta": "primary"}
+
+    def test_primary_wins_over_user_fallback(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        primary = tmp_path / "comfyui" / "workflows"
+        primary.mkdir(parents=True)
+        (primary / "shared.json").write_text("{}")
+        fallback = tmp_path / "comfyui" / "user" / "default" / "workflows"
+        fallback.mkdir(parents=True)
+        (fallback / "shared.json").write_text("{}")
+        (fallback / "extra.json").write_text("{}")
+        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(primary))
+        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "comfyui"))
+
+        r = client.get("/api/comfyui/workflows")
+        assert r.status_code == 200
+        by_name = {w["name"]: w["source"] for w in r.json()["workflows"]}
+        assert by_name["shared"] == "primary"  # primary shadows the fallback copy
+        assert by_name["extra"] == "user"
+
+    def test_missing_dir_returns_empty_list_not_error(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(tmp_path / "does-not-exist"))
+        monkeypatch.setenv("COMFYUI_DATA_DIR", str(tmp_path / "also-gone"))
+        r = client.get("/api/comfyui/workflows")
+        assert r.status_code == 200
+        assert r.json() == {"workflows": []}
+
+    def test_traversal_names_are_filtered(
+        self, client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        wf_dir = tmp_path / "comfyui" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "good.json").write_text("{}")
+        # A file whose stem carries a path-ish char must not surface.
+        (wf_dir / "a b.json").write_text("{}")  # space fails the name regex
+        monkeypatch.setenv("COMFYUI_WORKFLOWS_DIR", str(wf_dir))
+
+        r = client.get("/api/comfyui/workflows")
+        names = {w["name"] for w in r.json()["workflows"]}
+        assert names == {"good"}
+
+
 # ---------------------------------------------------------------------------
 # GET /api/comfyui/preview
 # ---------------------------------------------------------------------------

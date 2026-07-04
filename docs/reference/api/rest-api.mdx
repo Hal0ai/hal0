@@ -14,7 +14,7 @@ references.
 
 <Aside type="note">
 All endpoints are open on the local network — auth and TLS were removed in
-your reverse proxy's job. The OpenAPI spec is served live at
+ADR-0012 and are your reverse proxy's job. The OpenAPI spec is served live at
 `/api/openapi.json` (interactive docs at `/api/docs`).
 </Aside>
 
@@ -23,20 +23,21 @@ your reverse proxy's job. The OpenAPI spec is served live at
 | Prefix                  | Purpose                                                              |
 |-------------------------|---------------------------------------------------------------------|
 | `/api/install`          | First-run wizard endpoints.                                          |
-| `/api/slots`            | Slot lifecycle — list, create, delete, restart, model swap.         |
+| `/api/slots`            | Slot lifecycle — list, create, delete, restart, model swap, resolved-argv provenance. |
 | `/api/comfyui`          | ComfyUI generation-engine status + the gated image-gen switchover.  |
 | `/api/models`           | Model registry — list, pull, delete, inspect.                       |
 | `/api/hf`               | Hugging Face Hub discovery (search proxy).                          |
 | `/api/hardware`, `/api/stats/hardware` | Hardware probe + live hardware stats.                |
 | `/api/stats/throughput` | Bucketed throughput history.                                        |
 | `/api/power`            | Power / GPU stats.                                                  |
+| `/api/services`         | Companion-service registry — full detail, lifecycle actions, mDNS discovery/advertisement. See [Services](/docs/operate/services). |
 | `/api/services/health`  | Health of dependent services.                                       |
 | `/api/user/dashboard-layout` | Persisted dashboard layout (file-backed).                      |
 | `/api/logs`             | journald tail for hal0 units.                                       |
 | `/api/settings`         | Read/write `hal0.toml` top-level settings.                          |
 | `/api/secrets`          | Operator secrets store (write-only, persisted to `api.env`).        |
 | `/api/settings/proxmox` | Proxmox integration config.                                        |
-| `/api/memory`           | Memory provider gate/status + Hindsight engine admin (banks, graph, recall). Opt-in. |
+| `/api/memory`           | Memory provider gate/status + Hindsight engine admin (banks, graph, recall). Opt-in. Destructive ops are audit-logged; bank delete requires confirmation. |
 | `/api/providers`        | External LLM provider config.                                       |
 | `/api/updates`          | Update check, apply, rollback (channels + cosign).                  |
 | `/api/capabilities`     | Capability overlay — embed/voice/img children mapped onto slots.    |
@@ -45,7 +46,8 @@ your reverse proxy's job. The OpenAPI spec is served live at
 | `/api/board`            | Hermes agent board — chat proxy, WebSocket session, and board-level events. |
 | `/api/status`           | Server status (public).                                              |
 | `/api/config`           | Dashboard URLs discovery (`/api/config/urls`) + models list (public). |
-| `/api/profiles`         | Profile catalog (seeds + custom).                                   |
+| `/api/meta`             | Canonical device/backend/capability taxonomy (`/api/meta/enums`), cached. |
+| `/api/profiles`         | Profile catalog (seeds + custom) — CRUD plus portable export/import. |
 | `/api/chat-templates`   | Chat-template catalog — bundled + operator-added.                   |
 | `/api/events`           | Dashboard footer event stream (SSE).                               |
 | `/api/activity`         | Durable activity / audit surface (config changes + transitions).    |
@@ -54,6 +56,59 @@ your reverse proxy's job. The OpenAPI spec is served live at
 | `/api/agents`           | Bundled-agent lifecycle, personas, budget, restart, memory stats, chat proxy. |
 | `/api/agent/approvals`  | Approval inbox for gated agent/MCP actions.                         |
 | `/api/mcp`              | MCP introspection — hosted servers, clients, catalog, tool-event tail. |
+
+## Recently added endpoints
+
+A few router groups above got new routes worth calling out individually.
+
+### `/api/services`
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/services` | Full per-service detail — probe state, systemd unit state + uptime, browser URL, mDNS URL, permitted `actions`. Never 500s. |
+| `POST /api/services/{id}/action` | Run one allow-listed lifecycle verb (`start`/`stop`/`restart`/`enable`/`disable`) against a service's unit. Audit-logged. `400 services.action_not_allowed` / `404 services.unknown`. |
+| `GET /api/services/mdns` | avahi/mDNS discovery status + advertisable services. |
+| `POST /api/services/mdns` | Advertise (`{"advertise": true}`) or withdraw (`{"advertise": false}`) addon mDNS announcements. Audit-logged. |
+
+See [Services](/docs/operate/services) for the operator-facing guide (registry, dashboard page, mDNS behavior).
+
+### `/api/meta`
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/meta/enums` | The canonical device/backend/capability taxonomy in one document — devices, legacy/selectable backends, device classes, slot types, runtime families, model capabilities + aliases, model backends, curated model tags, and the backend↔device translation maps. Weak version-keyed `ETag` + `If-None-Match` → `304`; `Cache-Control: public, max-age=3600`. |
+
+### `/api/profiles` — portable export/import
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/profiles/{name}` | Resolve a single profile. `404 profiles.not_found`. |
+| `POST /api/profiles/{name}/export` | Serialize a profile into a portable `.hal0profile.json` envelope (template only — no secrets, no host paths), stamped with a content checksum and `exported_at`. |
+| `POST /api/profiles/import` | Import a profile envelope. Body: `{"envelope": {...}, "name": "...", "dry_run": bool}`. `dry_run` validates the envelope + checksum and reports name collision without writing; a commit creates the profile under `name` and returns the resolved item. `400 profiles.bad_envelope`, `400 profiles.import_no_name`, `409 profiles.exists` on a name collision. |
+
+### `/api/memory` — hardening
+
+- Every destructive `/api/memory/*` operation — bank delete, and the
+  memories/config/document/directive/operation/mental-model deletes, plus the
+  namespace `POST /api/memory/delete` — records a durable audit row (actor +
+  target + truthful outcome) via the shared action-recording facility, so a
+  memory wipe is attributable after the fact.
+- `DELETE /api/memory/banks/{bank_id}` requires confirmation that echoes the
+  bank id — `?confirm=<bank_id>` and/or JSON body `{"confirm": "<bank_id>"}` —
+  otherwise `400 memory.confirm_required`.
+- The namespace `POST /api/memory/delete` deletes by id (`{ids: [...], dataset?}`)
+  and is itself audited as a destructive op.
+- The cognition-console passthroughs (`POST /api/memory/banks/{bank_id}/recall`,
+  `POST .../reflect`, `GET .../directives`) validate the load-bearing envelope
+  key (`results` / `text` / `items` respectively). Upstream Hindsight shape
+  drift on a `2xx` response now surfaces as a loud `502 memory.engine_shape`
+  instead of a silently-blank console panel.
+
+### `/api/slots` — resolved argv provenance
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/slots/{name}/resolved` | The deduped, resolved llama-server argv plus per-flag provenance — which segment (`base` / `profile` / `model_defaults` / `chat_template` / `mmproj` / `slot_overrides` / `extra_args`) set each surviving flag's final value, and how many duplicate flags were collapsed (`removed`). Non-llama slots (no profile) return `{"argv": null, "provenance": [], "removed": 0}` rather than an error. |
 
 ## Mounted MCP servers
 
@@ -71,3 +126,4 @@ See [MCP tools](/docs/reference/mcp-tools) for the per-tool catalog and gating.
 - [Streaming (SSE)](/docs/reference/api/streaming) — the `/v1` streaming wire format.
 - [MCP tools](/docs/reference/mcp-tools) — what each MCP tool forwards to here.
 - [Environment variables](/docs/reference/env-vars) — `HAL0_PORT` and the rest.
+- [Services](/docs/operate/services) — the operator guide to the companion-service registry, dashboard page, and mDNS discovery behind `/api/services`.

@@ -164,6 +164,30 @@ export function useComfyuiLogs(tail = 60) {
   })
 }
 
+// List launchable workflows discovered on disk. Fail-soft: 404 / network
+// error (comfyui not installed, no dir yet) yields an empty list so the
+// curated strip renders unchanged. Polled lazily — the file set changes
+// rarely, so a long staleTime keeps this cheap.
+export interface ComfyuiWorkflow {
+  name: string
+  source: 'primary' | 'user'
+}
+
+export function useComfyuiWorkflows() {
+  return useQuery({
+    queryKey: ['comfyui', 'workflows'],
+    queryFn: async (): Promise<ComfyuiWorkflow[]> => {
+      try {
+        const res = await apiGet<{ workflows?: ComfyuiWorkflow[] }>(ENDPOINTS.comfyuiWorkflows)
+        return Array.isArray(res?.workflows) ? res.workflows : []
+      } catch {
+        return []
+      }
+    },
+    staleTime: 60_000,
+  })
+}
+
 // Quick-launch a named workflow (202).
 export function useComfyuiWorkflowLaunch() {
   return useMutation({

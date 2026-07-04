@@ -679,6 +679,54 @@ def _workflow_not_found_response() -> JSONResponse:
     )
 
 
+def _list_workflow_names() -> list[dict[str, Any]]:
+    """Enumerate launchable ``<name>.json`` workflows across both search dirs.
+
+    Scans the primary workflows dir and the ``user/default/workflows``
+    fallback (both bind-mounted into the container, so operator-dropped
+    files show up here). Names are deduped with primary winning; each entry
+    carries the resolved ``source`` dir so the UI can hint where a file
+    lives. Fail-soft: an unreadable/missing dir contributes nothing rather
+    than raising, so the list endpoint never 500s on a fresh install.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for source, directory in (
+        ("primary", _comfyui_workflows_dir()),
+        ("user", os.path.join(_comfyui_data_dir(), "user", "default", "workflows")),
+    ):
+        try:
+            entries = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for fn in entries:
+            if not fn.endswith(".json"):
+                continue
+            name = fn[: -len(".json")]
+            if not _WORKFLOW_NAME_RE.fullmatch(name) or ".." in name:
+                continue
+            # Primary wins — don't let the fallback shadow it.
+            seen.setdefault(name, {"name": name, "source": source})
+    return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
+# GET /workflows — list launchable workflows from the bind-mounted dirs
+# ---------------------------------------------------------------------------
+
+
+@router.get("/workflows")
+async def comfyui_workflows() -> dict[str, Any]:
+    """List launchable workflow templates discoverable on disk.
+
+    Returns ``{"workflows": [{"name", "source"}, ...]}`` — the names the
+    UI can hand to ``POST /workflows/{name}/launch``. Operators drop
+    ``<name>.json`` files into the bind-mounted workflows dir and they
+    appear here without a rebuild. Empty list on a fresh install (no dir
+    yet) rather than an error.
+    """
+    return {"workflows": _list_workflow_names()}
+
+
 # ---------------------------------------------------------------------------
 # POST /render/cancel — clear queue + interrupt current render
 # ---------------------------------------------------------------------------

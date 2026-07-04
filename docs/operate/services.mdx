@@ -1,0 +1,115 @@
+---
+title: Companion services
+description: The unified companion-service registry, the dashboard Services page, mDNS discovery, and the /api/services management surface for OpenWebUI, ComfyUI, Hermes, Hindsight, and n8n.
+sidebar:
+  order: 86
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+hal0 sits next to a handful of companion services — a chat UI, an image-gen
+engine, a bundled agent, a memory engine — each with its own systemd unit,
+port, and health story. The **companion-service management** layer gives
+these one declarative registry, one API surface, and one dashboard page,
+instead of the ad-hoc `systemctl` calls and per-feature status cards each
+service used to grow independently.
+
+## The registry
+
+Every companion service is one entry in a declarative catalog
+(`hal0.services.registry`). Each entry carries: the owning systemd unit (or
+`None` for an unmanaged/external service), the LAN port for a `host:port` URL
+fallback, an env var for an operator-declared public URL, a probe strategy,
+the lifecycle verbs the API is allowed to run, and whether the service is
+advertised over mDNS.
+
+The current catalog:
+
+| Service | Unit | Port | Actions | Notes |
+|---|---|---|---|---|
+| **OpenWebUI** | `hal0-openwebui.service` | `:3001` (LAN) | start/stop/restart/enable/disable | Podman container; HTTP-probed at `/health`. |
+| **ComfyUI** | `hal0-slot@img.service` | `:8188` (LAN) | restart only | Start/stop is GPU-arbiter managed — the img slot unit owns the switchover logic, so only `restart` is exposed (the same verb the FirstRun repair button uses). |
+| **Hermes** | `hal0-agent@hermes.service` | `:9119` (loopback only) | start/stop/restart/enable/disable | Bundled agent + dashboard. No LAN URL fallback — a link is shown only when `HAL0_HERMES_PUBLIC_URL` is set. |
+| **Hindsight** | `hindsight-api.service` | `:9177` (loopback only) | start/stop/restart/enable/disable | Native memory-engine daemon. Same no-fallback-URL rule as Hermes. |
+| **n8n** | *(none — external)* | — | read-only | Workflow automation the operator runs themselves; hal0 does not deploy it. Listed with URL/probe env hooks but carries no lifecycle actions until a unit exists. |
+
+<Aside type="note">
+This table mirrors `SERVICES` in `hal0.services.registry` at the time this
+page was written. Treat the registry itself as the source of truth — new
+companion services get added there first.
+</Aside>
+
+Every lifecycle verb (`start`, `stop`, `restart`, `enable`, `disable`) is
+enforced twice: once against the per-service allow-list in the registry, and
+again at the execution boundary in `hal0.services.systemd` — a crafted
+request can never reach an arbitrary `systemctl` verb, and a service like
+ComfyUI can never be stopped or started through this surface even if the
+route is called directly.
+
+## Dashboard: Services page
+
+The dashboard has a top-level **Services** nav item (hash route `#services`)
+showing:
+
+- A **discovery (mDNS) card** with an announce/withdraw toggle for addon
+  advertisement.
+- One card per registered service: status pill, systemd uptime, unit
+  metadata, an "open" button for the browser-facing URL, registry-driven
+  lifecycle buttons (a `stop` action asks for confirmation first), a journald
+  logs drawer (reusing `GET /api/logs?unit=`), and — for ComfyUI — the shared
+  live-queue drawer.
+
+Every probe is fail-soft: a probe or systemd failure degrades to an honest
+"unknown"/`down` state, never a fabricated "up" and never a 500. Older
+backends without this surface show "source pending" rather than breaking the
+page.
+
+## mDNS discovery
+
+hal0's installer already advertises the main dashboard as `hal0.service`
+under `/etc/avahi/services`. The companion-service layer extends that with
+one **addon** announcement per advertised service:
+`hal0-addon-<id>.service`, so LAN clients see distinct entries like
+"OpenWebUI on \<host\>" / "ComfyUI on \<host\>" and can reach each one at
+`http://<host>.local:<port>` without DNS.
+
+Key properties:
+
+- Only services with `mdns=True` in the registry **and** a LAN port are
+  advertisable — that's OpenWebUI and ComfyUI today. Loopback-only services
+  (Hermes, Hindsight) and the external n8n entry are never advertised.
+- Advertising writes an avahi service-group XML file per service;
+  withdrawing removes every `hal0-addon-*` file. avahi-daemon inotify-watches
+  the directory, so changes take effect immediately — no daemon reload, no
+  `systemctl` call.
+- The installer-owned `hal0.service` file is never touched by this layer.
+- `available` in the discovery status reflects whether `avahi-daemon.service`
+  is actually active — not a guess from binary presence.
+- `HAL0_HOSTNAME` (set by the install wizard) wins over the raw system
+  hostname when deriving the `.local` name shown to operators.
+
+## The `/api/services` surface
+
+| Method & path | Purpose |
+|---|---|
+| `GET /api/services` | Full per-service detail: probe state, systemd unit state + uptime, browser URL, mDNS URL, and the permitted `actions` list. Never 500s — every probe/systemd failure degrades to an honest unknown. |
+| `POST /api/services/{id}/action` | Run one lifecycle verb (`start`/`stop`/`restart`/`enable`/`disable`) against a service's unit. Body: `{"action": "..."}`. Rejected with `400 services.action_not_allowed` if the verb isn't in that service's allow-list, or `404 services.unknown` for an unrecognized id. Audit-logged via the shared action-recording facility. |
+| `GET /api/services/mdns` | avahi/mDNS discovery status (`available`, `hostname`, `advertised`) plus the list of `advertisable` services. |
+| `POST /api/services/mdns` | Advertise (`{"advertise": true}`) or withdraw (`{"advertise": false}`) the addon mDNS announcements. Audit-logged. |
+
+This is the richer sibling of the pre-existing `GET /api/services/health`
+aggregator, which keeps its own stable read-only contract for the dashboard
+Overview card — the two share probe implementations under the hood, so
+health numbers stay consistent between the Overview card and the dedicated
+Services page.
+
+Per-service logs reuse the existing generic journald surface
+(`GET /api/logs?unit=<unit>`) — each entry in `GET /api/services` carries its
+`unit` name so the UI can wire a logs drawer without a dedicated endpoint.
+
+## See also
+
+- [REST API index](/docs/reference/api/rest-api) — the full `/api/*` router
+  index, including `/api/services` and `/api/services/health`.
+- [Authentication & HTTPS](/docs/operate/auth) — mDNS/`.local` addressing for
+  the main dashboard, which this page's addon advertisements build on.

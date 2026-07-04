@@ -15,14 +15,6 @@ it, and hands off to the real installer.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-<Aside type="tip" title="Public-facing? Add --auth=basic">
-One extra flag: `curl -fsSL https://hal0.dev/install.sh | bash -s -- --auth=basic`.
-It provisions Caddy with basic_auth, bearer tokens for the API, and automatic
-HTTPS — internal CA for `.local`, Let's Encrypt for real domains. Safe to
-expose beyond a single trusted LAN. See
-[Authentication & HTTPS](/docs/operate/auth).
-</Aside>
-
 <Aside type="note">
 The installer needs root to write to `/etc`, `/usr/lib`, and the systemd
 unit directory. When piped through `bash` without `sudo`, it re-execs
