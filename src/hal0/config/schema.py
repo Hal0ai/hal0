@@ -406,6 +406,39 @@ class SlotConfig(BaseModel):
         ),
     )
 
+    # ── TTS request defaults (Settings → Voice) ─────────────────────────
+    # Read by /v1/audio/speech at request time: when the body omits the
+    # matching param, the serving tts slot's persisted default is injected
+    # before dispatch — so changes apply immediately, no container bounce.
+    # default_voice previously round-tripped via extra="allow" only (the
+    # dashboard wrote it, nothing read it); declaring the trio makes the
+    # values validated and schema-visible.
+    default_voice: str | None = Field(
+        default=None,
+        description=(
+            "TTS slots only — voice id injected into /v1/audio/speech when "
+            "the request omits `voice`. None → engine default (Kokoro: "
+            "af_bella)."
+        ),
+    )
+    default_speed: float | None = Field(
+        default=None,
+        ge=0.25,
+        le=4.0,
+        description=(
+            "TTS slots only — playback speed injected when the request omits "
+            "`speed`. Engines clamp to their supported range (Kokoro: "
+            "0.5-2.0). None → engine default (1.0)."
+        ),
+    )
+    default_response_format: Literal["mp3", "wav", "opus", "flac", "pcm"] | None = Field(
+        default=None,
+        description=(
+            "TTS slots only — audio container injected when the request "
+            "omits `response_format`. None → engine default (mp3)."
+        ),
+    )
+
     # [model] section (nested)
     model: ModelConfig = Field(default_factory=ModelConfig)
 

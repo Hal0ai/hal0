@@ -518,6 +518,25 @@ export function useSlotDelete() {
  * values (e.g. default_voice, default_steps) that live in the slot TOML
  * but are not surfaced by the capabilities/selections payload.
  */
+// Voice list for a TTS slot, proxied from the container. `source` is
+// "live" when the engine answered, "offline" when cold/unreachable — the
+// consumer falls back to its seed list in that case.
+export interface SlotVoices {
+  name: string
+  voices: string[]
+  source: 'live' | 'offline'
+}
+
+export function useSlotVoices(name: string | null | undefined) {
+  return useQuery<SlotVoices>({
+    queryKey: ['slot-voices', name],
+    queryFn: () => apiGet<SlotVoices>(ENDPOINTS.slotVoices(name as string)),
+    enabled: !!name,
+    staleTime: 60_000,
+    retry: false,
+  })
+}
+
 export function useSlotConfig(name: string | null | undefined) {
   return useQuery<Record<string, unknown>>({
     queryKey: ['slot-config', name],
