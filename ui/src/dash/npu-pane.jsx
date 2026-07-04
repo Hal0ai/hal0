@@ -384,7 +384,7 @@ export function NpuOccupancyCard({ slots }) {
   }
 
   const dutySub = colsAvailable
-    ? `${colsUsed}/${colsTotal} columns claimed`
+    ? `${colsUsed}/${colsTotal} columns`
     : 'column probe unavailable'
 
   // slots-live count = slots the occupancy probe reports as actually
