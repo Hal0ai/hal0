@@ -24,7 +24,10 @@ import { useStatsPower } from '@/api/hooks/useStatsPower'
 import { useThroughputHistory } from '@/api/hooks/useThroughputHistory'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useMemoryMapModel } from './memory-map'
+import { slotIndicatorFromPhase } from './slot-status.js'
 import { devKind } from '@/lib/deviceMeta'
+
+const { useState: useStateT, useRef: useRefT, useEffect: useEffectT, useMemo: useMemoT } = React
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10
 const fmt1 = (n) => (typeof n === 'number' ? n.toFixed(1) : '—')
@@ -91,15 +94,49 @@ function ThEyebrow({ dot, live, label, sub, right }) {
 // as ThroughputCard2: history pending/empty → "source pending" body, no
 // fabricated bars ever. The gpu/npu split in the sub-row is the measured
 // per-slot tok/s from the live slot poll.
+//
+// Persistence: the history endpoint only reports buckets inside its 100s
+// window, so on an idle box `samples` empties out and the cell would flap
+// back to "source pending". Two-part fix, both honest:
+//   1. "source pending" is reserved for a MISSING source (loading / 404 /
+//      error — `data` null). A 200 with an empty window is a measurement —
+//      "no throughput in the last 100s" — and renders as hero 0.0 with the
+//      live serving count, never as a pending gate.
+//   2. Real buckets are merged into a module-level cache (keyed by ts) so
+//      the spark keeps the last 20 MEASURED buckets on screen after the
+//      window slides past them. Every bar is a real reading — the cache
+//      only stops bars from vanishing; it never invents them.
+const TPS_BUCKET_CACHE = new Map() // ts → sample, module-level so it survives remounts
+function mergeTpsCache(samples) {
+  for (const s of samples) {
+    if (s && typeof s.ts === 'number' && typeof s.total_tps === 'number') {
+      TPS_BUCKET_CACHE.set(s.ts, s)
+    }
+  }
+  // keep the cache bounded: newest 20 buckets in ts order
+  const kept = [...TPS_BUCKET_CACHE.values()].sort((a, b) => a.ts - b.ts).slice(-20)
+  TPS_BUCKET_CACHE.clear()
+  for (const s of kept) TPS_BUCKET_CACHE.set(s.ts, s)
+  return kept
+}
+
 function ThCellThroughput({ slots }) {
-  const { data, isPending } = useThroughputHistory()
+  const { data } = useThroughputHistory()
+  // Pending ONLY when the source itself is absent (hook returns data=null on
+  // loading and on 404/error) — an alive endpoint with an empty window is a
+  // real "nothing served lately" reading, not a missing source.
+  const sourcePending = !data
   const samples = data?.samples ?? []
   const latest = samples.length > 0 ? samples[samples.length - 1] : null
-  const hasReading = latest != null && typeof latest.total_tps === 'number'
-  const heroTps = hasReading ? latest.total_tps : null
-  const serving = hasReading ? (latest.serving_slots ?? 0) : null
+  const hasLive = latest != null && typeof latest.total_tps === 'number'
+  // Empty-but-alive window → measured 0.0 (paired with the serving count
+  // below, per the #221 invariant).
+  const heroTps = hasLive ? latest.total_tps : sourcePending ? null : 0
+  const serving = hasLive
+    ? (latest.serving_slots ?? 0)
+    : (slots || []).filter((s) => s.state === 'serving').length
 
-  const bars = samples.slice(-20)
+  const bars = sourcePending ? [] : mergeTpsCache(samples)
   const maxTps = bars.length > 0 ? Math.max(...bars.map((s) => s.total_tps), 1) : 1
 
   const npuTps = sumToks((slots || []).filter(isNpuDev))
@@ -108,7 +145,7 @@ function ThCellThroughput({ slots }) {
   return (
     <div className="th-cell th-cell-tps">
       <ThEyebrow label="Throughput" right="tok/s" />
-      {isPending ? (
+      {sourcePending ? (
         <div className="mc-pending">
           <span className="mc-pending-label">source pending</span>
           <span className="mc-pending-sub">waiting for throughput history</span>
@@ -135,14 +172,12 @@ function ThCellThroughput({ slots }) {
               ))}
             </div>
           </div>
-          {/* Sub-row ALWAYS renders with a real reading so a measured 0.0
-              is disambiguated by the explicit serving count (#221). */}
-          {hasReading && (
-            <div className="th-sub">
-              gpu <span className="g">{fmt1(gpuTps)}</span> · npu <span className="n">{fmt1(npuTps)}</span> ·{' '}
-              <span className="s">{serving} slot{serving !== 1 ? 's' : ''} serving</span>
-            </div>
-          )}
+          {/* Sub-row ALWAYS renders with a reading (incl. the measured-empty
+              0.0) so it is disambiguated by the explicit serving count (#221). */}
+          <div className="th-sub">
+            gpu <span className="g">{fmt1(gpuTps)}</span> · npu <span className="n">{fmt1(npuTps)}</span> ·{' '}
+            <span className="s">{serving} slot{serving !== 1 ? 's' : ''} serving</span>
+          </div>
         </>
       )}
     </div>
@@ -373,21 +408,73 @@ function ThCellNpu({ slots }) {
   )
 }
 
+// Element width via ResizeObserver — drives "label only when the segment is
+// wide enough (~90px)" in the memory bar without clipping half a label
+// (same helper as the #1061 dashboard-redesign memory hero).
+function useMeasuredWidth() {
+  const ref = useRefT(null)
+  const [width, setWidth] = useStateT(0)
+  useEffectT(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) setWidth(e.contentRect.width)
+    })
+    ro.observe(el)
+    setWidth(el.offsetWidth)
+    return () => ro.disconnect()
+  }, [])
+  return [ref, width]
+}
+
+const SEG_LABEL_MIN_PX = 90
+
 // Memory rack ruler — full-width second row; replaces and absorbs the old
 // memory-map band. All attribution comes from useMemoryMapModel() verbatim
-// (pool cap, per-slot bytesGb + Okabe–Ito colors, headroom + limitedBy);
-// the legend list is replaced by in-segment labels. Segments are
-// border-box and drop their padding when too narrow for a label so widths
-// stay true to the GB scale.
-function ThRuler() {
+// (pool cap, per-slot bytesGb + Okabe–Ito colors, headroom + limitedBy).
+// Bar styling follows the #1061 memory hero: allocations live INSIDE the
+// bar as dim-tint segments with a solid top accent stripe, in-segment
+// labels only when ≥90 measured px (serving segments add the pulsing dot +
+// live tok/s), a 45° striped "system · KV + runtime" block for measured
+// GTT use beyond the named model weights, and click → slot. Widths stay
+// true to the GB scale (explicit % on border-box segments); the GB tick
+// row keeps the ruler's scale readable.
+function ThRuler({ slots }) {
   const model = useMemoryMapModel()
   const { pool, self, headroom } = model
   const total = pool.totalGb || 0
   const used = self.modelUsedGb
   const free = Math.max(0, round1(total - used))
-  const segs = self.slots.filter((s) => s.bytesGb > 0)
   const pct = (gb) => (total > 0 ? (gb / total) * 100 : 0)
   const ticks = total > 0 ? [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(total * f)) : null
+
+  const [barRef, barWidth] = useMeasuredWidth()
+  const slotByName = useMemoT(() => {
+    const m = {}
+    for (const s of slots || []) m[s.name] = s
+    return m
+  }, [slots])
+
+  const segs = self.slots
+    .filter((s) => s.bytesGb > 0)
+    .map((s) => {
+      const live = slotByName[s.name]
+      const ind = live ? slotIndicatorFromPhase(live) : null
+      const serving = ind?.cls === 'serving'
+      const toks = serving && typeof live?.metrics?.toks === 'number' && live.metrics.toks > 0
+        ? live.metrics.toks
+        : null
+      return { ...s, serving, toks, indLabel: ind ? ind.label : '—' }
+    })
+  // System block — measured GTT in use beyond the named model weights
+  // (KV + runtime + buffers). Honest: only renders when gtt_used reports
+  // more than the models hold; never a fabricated split.
+  const systemGb = Math.max(0, round1((self.gttUsedGb || 0) - used))
+  const barFree = Math.max(0, round1(total - used - systemGb))
+
+  const goSlot = (name) => {
+    window.location.hash = '#slots/' + name
+  }
 
   return (
     <div className="th-ruler">
@@ -399,26 +486,53 @@ function ThRuler() {
           <span className="lim">— limited by {headroom.limitedBy}</span>
         </span>
       </div>
-      <div className="th-ruler-wrap">
-        <div className="th-ruler-bar">
-          {segs.map((s) => {
-            const w = pct(s.bytesGb)
-            const labeled = w >= 4.5 // wide enough to carry a label + padding
-            return (
-              <div
-                key={s.name}
-                className={'th-ruler-seg' + (labeled ? ' pad' : '')}
-                style={{ width: w + '%', background: s.color }}
-                title={`${s.name} · ${fmt1(s.bytesGb)} GB`}
-              >
-                {labeled && <span className="nm">{s.name}</span>}
-                {w >= 9 && <span className="gb">{fmt1(s.bytesGb)} GB</span>}
-              </div>
-            )
-          })}
-          <div className="th-ruler-free">free</div>
-        </div>
-        <div className="th-ruler-marker" style={{ left: `${Math.min(100, pct(used))}%` }} />
+      <div className="th-ruler-bar" ref={barRef}>
+        {segs.map((s) => {
+          const w = pct(s.bytesGb)
+          const showLabel = (w / 100) * barWidth >= SEG_LABEL_MIN_PX
+          return (
+            <div
+              key={s.name}
+              className="th-ruler-seg"
+              style={{
+                width: w + '%',
+                background: `color-mix(in srgb, ${s.color} 18%, transparent)`,
+                boxShadow: `inset 0 2px 0 ${s.color}`,
+              }}
+              title={`${s.name} · ${fmt1(s.bytesGb)} GB · ${s.indLabel}`}
+              role="link"
+              tabIndex={0}
+              onClick={() => goSlot(s.name)}
+              onKeyDown={(e) => { if (e.key === 'Enter') goSlot(s.name) }}
+            >
+              {showLabel && (
+                <>
+                  <span className="nm" style={{ color: s.color }}>
+                    {s.name} · {s.bytesGb.toFixed(1)}G
+                  </span>
+                  {s.toks != null && (
+                    <span className="sub">
+                      <span className="dot serving th-ruler-dot" />
+                      {Math.round(s.toks)} tok/s
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        })}
+        {systemGb > 0 && (
+          <div
+            className="th-ruler-seg th-ruler-seg-system"
+            style={{ width: pct(systemGb) + '%' }}
+            title={`system · KV + runtime · ${fmt1(systemGb)} GB`}
+          >
+            {(pct(systemGb) / 100) * barWidth >= SEG_LABEL_MIN_PX && (
+              <span className="nm">system · {systemGb.toFixed(1)}G</span>
+            )}
+          </div>
+        )}
+        <div className="th-ruler-free">free · {fmt1(barFree)} GB</div>
       </div>
       {ticks && (
         <div className="th-ruler-ticks">
@@ -447,7 +561,7 @@ export function TelemetryHeader({ slots: slotsProp }) {
         <ThCellCpuMem />
         <ThCellNpu slots={slots} />
       </div>
-      <ThRuler />
+      <ThRuler slots={slots} />
     </div>
   )
 }
