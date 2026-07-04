@@ -281,6 +281,11 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "owned_by": u.name,
                     "upstream": u.name,
                     "installed": False,
+                    # Explicit origin (WS-13): advertised by a remote
+                    # provider's /v1/models, never on this host's disk.
+                    # Clients should prefer this over inferring from
+                    # installed+upstream.
+                    "origin": "upstream",
                     # Upstream-only rows have no local path → "pulled"
                     # by the path-shape rule (issue #220). The
                     # blessed bucket is reserved for files actually
@@ -328,6 +333,9 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "upstream": "npu",
                     "backend": "flm",
                     "installed": True,
+                    # FLM rows carry upstream="npu" for the slot pickers but
+                    # are installed host-side — explicitly local (WS-13).
+                    "origin": "local",
                     "ns": "pulled",
                     "type": _FLM_DISPATCH_TYPE.get(primary, "llm"),
                     "capability": primary,
@@ -615,6 +623,7 @@ async def _commit_scan_rows(
                 name=str(name),
                 path=str(resolved),
                 size_bytes=size_bytes,
+                quant=detection.quant,
                 capabilities=[str(c) for c in capabilities],
                 backends=[str(b) for b in backends],
                 defaults=defaults_obj,
@@ -781,6 +790,7 @@ async def add_model_from_path(request: Request) -> dict[str, Any]:
             name=display_name,
             path=str(resolved),
             size_bytes=size_bytes,
+            quant=detection.quant,
             capabilities=capabilities,
             backends=list(detection.suggested_backends),
             metadata=metadata,
@@ -870,6 +880,18 @@ def _model_to_dict(model: Any) -> dict[str, Any]:
     so the dashboard's Models view can group rows without re-deriving
     it client-side. The rule is path-shape only (see :func:`_derive_ns`
     + issue #220).
+
+    Also attaches (WS-13):
+
+    * ``origin`` — always ``"local"`` here: every row that flows through
+      this serialiser is registry-backed (bytes or a registration on this
+      host). The upstream-advertised rows assembled inline in
+      :func:`list_models` carry ``origin="upstream"`` so clients no longer
+      infer remoteness from ``installed`` + ``upstream``.
+    * ``quant`` — the stored ``Model.quant`` when present, else lazily
+      derived from the filename (path basename, then ``hf_filename``) so
+      registries written before the field existed surface quant without
+      re-registration. Filename-only on this hot path — no header read.
     """
     if hasattr(model, "model_dump"):
         dumped = model.model_dump(mode="json")
@@ -882,7 +904,31 @@ def _model_to_dict(model: Any) -> dict[str, Any]:
             dumped["ns"] = _derive_ns(model)
         except Exception:
             dumped["ns"] = "pulled"
+    dumped.setdefault("origin", "local")
+    if not dumped.get("quant"):
+        quant = _lazy_quant(dumped)
+        if quant:
+            dumped["quant"] = quant
     return dumped
+
+
+def _lazy_quant(dumped: dict[str, Any]) -> str | None:
+    """Best-effort quant label for a serialised row missing ``quant``.
+
+    Filename-token only (cheap enough for the list endpoint's 30s poll):
+    the on-disk basename first, then the HF variant filename. Rows whose
+    quant is only knowable from the GGUF header (hash-named blobs) get it
+    at registration via detect() instead.
+    """
+    from hal0.registry.detect import quant_from_filename
+
+    for key in ("path", "hf_filename"):
+        raw = dumped.get(key)
+        if isinstance(raw, str) and raw:
+            quant = quant_from_filename(Path(raw).name)
+            if quant:
+                return quant
+    return None
 
 
 @router.get("/{model_id}")
@@ -1254,28 +1300,42 @@ def _resolve_pull_source_with_body(
     request: Request,
     model_id: str,
     body: dict[str, Any] | None,
-) -> tuple[str, str, bool]:
-    """Resolve (hf_repo, hf_file) with an optional body override.
+) -> tuple[str, str, str | None, bool]:
+    """Resolve (hf_repo, hf_file, mmproj_file) with an optional body override.
 
-    Returns ``(repo, file, from_body)`` where ``from_body=True`` means
-    the caller supplied both fields in the request payload — the pull
-    route uses that flag to decide whether to seed a registry row.
+    Returns ``(repo, file, mmproj_file, from_body)`` where ``from_body=True``
+    means the caller supplied both coordinate fields in the request payload —
+    the pull route uses that flag to decide whether to seed a registry row.
 
-    A partial body (only one of the two fields) is ignored to avoid
-    silently mixing a body coord with a stale registry coord; the
+    ``mmproj_file`` (WS-11) resolves body-first (the Add-by-HF modal sends
+    ``mmproj_filename`` for vision models), then the curated entry's
+    ``mmproj_file``; ``None`` means single-file pull.
+
+    A partial body (only one of the two coordinate fields) is ignored to
+    avoid silently mixing a body coord with a stale registry coord; the
     fallback path raises 422 with the existing message so the caller
     gets the same hint they would on an empty body.
     """
+    mmproj: str | None = None
     if isinstance(body, dict):
+        mm_raw = body.get("mmproj_filename") or body.get("mmproj_file")
+        if isinstance(mm_raw, str) and mm_raw.strip():
+            mmproj = mm_raw.strip()
         repo_raw = body.get("hf_repo")
         file_raw = body.get("hf_filename") or body.get("hf_file")
         if isinstance(repo_raw, str) and isinstance(file_raw, str):
             repo = repo_raw.strip()
             file = file_raw.strip()
             if repo and file:
-                return repo, file, True
+                return repo, file, mmproj, True
     repo, file = _resolve_pull_source(request, model_id)
-    return repo, file, False
+    if mmproj is None:
+        # Curated vision picks carry their mmproj alongside the main GGUF.
+        curated = get_curated(model_id)
+        if curated is not None:
+            mm = (getattr(curated, "mmproj_file", "") or "").strip()
+            mmproj = mm or None
+    return repo, file, mmproj, False
 
 
 async def _run_pull_with_events(
@@ -1288,6 +1348,7 @@ async def _run_pull_with_events(
     event_bus: Any | None,
     capability: str | None = None,
     comfyui_subdir: str | None = None,
+    mmproj_file: str | None = None,
 ) -> None:
     """Wrap ``run_pull`` so footer-visible progress events fan out.
 
@@ -1310,6 +1371,7 @@ async def _run_pull_with_events(
                 hf_token=hf_token,
                 capability=capability,
                 comfyui_subdir=comfyui_subdir,
+                mmproj_file=mmproj_file,
             )
         finally:
             # Persist terminal state so a restart-surviving status poll resolves
@@ -1358,6 +1420,7 @@ async def _run_pull_with_events(
             hf_token=hf_token,
             capability=capability,
             comfyui_subdir=comfyui_subdir,
+            mmproj_file=mmproj_file,
         )
     finally:
         progress_task.cancel()
@@ -1444,9 +1507,10 @@ async def pull_model(
     Body (all fields optional)::
 
         {
-          "hf_repo": "org/repo",          # add-by-HF-coords override
-          "hf_filename": "model.gguf",    # required iff hf_repo is set
-          "labels": ["chat", "vision"],   # seeded onto the registry row
+          "hf_repo": "org/repo",              # add-by-HF-coords override
+          "hf_filename": "model.gguf",        # required iff hf_repo is set
+          "mmproj_filename": "mmproj.gguf",   # optional vision sidecar (WS-11)
+          "labels": ["chat", "vision"],       # seeded onto the registry row
         }
 
     Resolution order:
@@ -1495,7 +1559,9 @@ async def pull_model(
     except Exception:
         body = None
 
-    hf_repo, hf_file, from_body = _resolve_pull_source_with_body(request, model_id, body)
+    hf_repo, hf_file, mmproj_file, from_body = _resolve_pull_source_with_body(
+        request, model_id, body
+    )
     if from_body:
         labels = body.get("labels") if isinstance(body, dict) else None
         if not isinstance(labels, list):
@@ -1532,14 +1598,18 @@ async def pull_model(
         event_bus=event_bus,
         capability=capability,
         comfyui_subdir=comfyui_subdir,
+        mmproj_file=mmproj_file,
     )
-    return {
+    out: dict[str, object] = {
         "id": job.job_id,
         "model_id": model_id,
         "state": job.state,
         "hf_repo": hf_repo,
         "hf_file": hf_file,
     }
+    if mmproj_file:
+        out["mmproj_file"] = mmproj_file
+    return out
 
 
 async def _start_flm_pull(

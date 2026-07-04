@@ -69,7 +69,7 @@ _VALID_BACKENDS = frozenset(_LEGACY_BACKENDS)
 # ``hal0.model_meta.device_to_backend`` maps these to the recipe:backend
 # pair that feeds container profile/argv derivation. The Literal must match
 # ``hal0.model_meta.VALID_DEVICES`` (asserted by tests/model_meta).
-DeviceLiteral = Literal["gpu-rocm", "gpu-vulkan", "cpu", "npu"]
+DeviceLiteral = Literal["gpu-rocm", "gpu-vulkan", "gpu-cuda", "cpu", "npu"]
 
 # Valid provider names. ContainerProvider drives every slot lifecycle;
 # the pre-container names remain accepted so legacy slot TOMLs round-trip
@@ -311,9 +311,23 @@ class SlotConfig(BaseModel):
     device: str = Field(
         default=DEFAULT_DEVICE,
         description=(
-            "v0.2 hardware-preference enum: 'gpu-rocm' | 'gpu-vulkan' | 'cpu' "
-            "| 'npu'. Replaces the legacy ``backend`` field which mixed "
-            "providers and backends. See ADR-0006 §7."
+            "v0.2 hardware-preference enum: 'gpu-rocm' | 'gpu-vulkan' | "
+            "'gpu-cuda' | 'cpu' | 'npu'. Replaces the legacy ``backend`` "
+            "field which mixed providers and backends. See ADR-0006 §7."
+        ),
+    )
+    gpu_index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Pin this slot to one GPU by index on multi-GPU hosts. Emits the "
+            "backend-appropriate visibility env into the container "
+            "(gpu-rocm → HIP_VISIBLE_DEVICES + ROCR_VISIBLE_DEVICES, "
+            "gpu-vulkan → GGML_VK_VISIBLE_DEVICES) or maps only that GPU via "
+            "CDI (gpu-cuda → --device nvidia.com/gpu=<n> with "
+            "CUDA_VISIBLE_DEVICES=0 inside). Explicit [server].env keys win "
+            "over the derived visibility vars. None (default) = all GPUs, "
+            "unchanged behaviour."
         ),
     )
     provider: str = Field(
@@ -790,6 +804,21 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "intent": "Vulkan std · fallback",
         "quant": "Q4_K_M",
     },
+    "cuda": {
+        # NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. The image is
+        # UPSTREAM llama.cpp (ghcr.io/ggml-org/llama.cpp:server-cuda), not the
+        # AMD Strix-Halo toolbox family the other GPU profiles use. Flags
+        # mirror the vulkan profile's conservative structure (no AMD-specific
+        # tuning, no KV-quant assumptions); requires nvidia-container-toolkit
+        # (CDI) for GPU passthrough — see providers/_gpu.nvidia_cdi_devices.
+        "image": "ghcr.io/ggml-org/llama.cpp:server-cuda",
+        "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "cuda",
+        "intent": "CUDA · NVIDIA (upstream llama.cpp, experimental)",
+        "quant": "Q4_K_M",
+    },
     "flm": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
         "flags": "",
@@ -902,13 +931,13 @@ class ProfileConfig(BaseModel):
             "(ComfyUI image-generation slots) and is not yet used."
         ),
     )
-    backend: Literal["rocm", "vulkan"] | None = Field(
+    backend: Literal["rocm", "vulkan", "cuda"] | None = Field(
         default=None,
         description=(
             "GPU runtime this profile targets — the authoritative source for the "
-            "ROCm-vs-Vulkan choice (replaces sniffing the image tag).  ``None`` for "
-            "non-GPU profiles (npu/cpu/img), where ``device_class`` drives display "
-            "and slot-card colour."
+            "ROCm-vs-Vulkan-vs-CUDA choice (replaces sniffing the image tag).  "
+            "``None`` for non-GPU profiles (npu/cpu/img), where ``device_class`` "
+            "drives display and slot-card colour."
         ),
     )
     cloned_from: str | None = Field(
@@ -1417,6 +1446,16 @@ class GPUInfo(BaseModel):
     model_config = {"populate_by_name": True, "extra": "allow"}
 
     vendor: str = Field(default="", description="'amd' | 'nvidia' | 'intel' | 'unknown'.")
+    index: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Vendor enumeration index of this GPU (nvidia-smi / DRM card "
+            "order). Matches what *_VISIBLE_DEVICES and CDI per-index device "
+            "names (nvidia.com/gpu=<n>) expect for SlotConfig.gpu_index "
+            "pinning. 0 for single-GPU hosts (additive; older probes omit it)."
+        ),
+    )
     name: str = Field(default="", description="Marketing name, e.g. 'RTX 4080'.")
     vram_mb: int = Field(
         default=0, ge=0, description="VRAM (or GTT pool for UMA) in MiB; 0 = unknown."
@@ -1439,6 +1478,34 @@ class NPUInfo(BaseModel):
     vendor: str = Field(default="", description="NPU vendor, e.g. 'amd'.")
     name: str = Field(default="", description="NPU name, e.g. 'AMD XDNA (Strix Halo)'.")
     driver: str = Field(default="", description="Driver name, e.g. 'amdxdna'.")
+    # Additive probe facts (GPU/NPU generalization wave). Consumers keep
+    # module-constant fallbacks for snapshots written by older probes:
+    # FLMProvider falls back to /dev/accel/accel0 + /dev/dri/renderD128 and
+    # npu_columns falls back to the Strix Halo 8-column cap.
+    accel_path: str = Field(
+        default="",
+        description=(
+            "Actual accel device node detected at probe time (e.g. "
+            "'/dev/accel/accel0'). Empty = unknown; consumers fall back to "
+            "the Strix Halo default /dev/accel/accel0."
+        ),
+    )
+    render_path: str = Field(
+        default="",
+        description=(
+            "iGPU render companion node the NPU runtime needs (e.g. "
+            "'/dev/dri/renderD128'). Empty = unknown; consumers fall back to "
+            "the Strix Halo default /dev/dri/renderD128."
+        ),
+    )
+    aie_columns: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Total AIE column count discovered via xrt-smi at probe time. "
+            "0 = unknown; consumers fall back to the Strix Halo constant 8."
+        ),
+    )
 
 
 class HardwareInfo(BaseModel):
@@ -1487,6 +1554,17 @@ class HardwareInfo(BaseModel):
         ),
     )
     gpus: list[GPUInfo] = Field(default_factory=list, description="Detected GPUs.")
+    gpu_group_gids: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Numeric GIDs of the host's GPU-access groups resolved at probe "
+            "time, keyed by group name (e.g. {'render': 993, 'video': 44}). "
+            "providers/_gpu.resolve_gpu_group_ids uses these when the live "
+            "group lookup fails (fallback chain: live /etc/group → this "
+            "probe-time record → the Linux-convention constants 993/44). "
+            "Empty on hosts where neither group existed at probe time."
+        ),
+    )
     npu: NPUInfo = Field(
         default_factory=NPUInfo, description="Detected NPU (present=False if none)."
     )

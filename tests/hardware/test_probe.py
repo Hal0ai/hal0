@@ -153,16 +153,27 @@ def _mk_run(table: dict[str, tuple[int, str, str]]):
 
 
 def test_detect_nvidia(monkeypatch: pytest.MonkeyPatch) -> None:
+    # New 5-field query: index,name,memory.total,driver_version,pci.bus_id
     monkeypatch.setattr(
         probe_mod,
         "_run",
-        _mk_run({"nvidia-smi": (0, "GeForce RTX 4080, 16376, 535.171.04\n", "")}),
+        _mk_run(
+            {
+                "nvidia-smi": (
+                    0,
+                    "0, GeForce RTX 4080, 16376, 535.171.04, 00000000:01:00.0\n",
+                    "",
+                )
+            }
+        ),
     )
     info = probe_mod._detect_nvidia()
     assert info is not None
     assert info.vendor == "nvidia"
+    assert info.index == 0
     assert info.name == "GeForce RTX 4080"
     assert info.vram_mb == 16376.0
+    assert info.pci_id == "00000000:01:00.0"
     assert info.driver.startswith("nvidia 535")
     assert info.compute_capable is True
 
@@ -179,7 +190,8 @@ def test_detect_amd_via_drm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     (drm / "mem_info_gtt_total").write_text(str(96 * 1024 * 1024 * 1024))  # 96 GiB pool
     (drm / "uevent").write_text("PCI_SLOT_NAME=0000:c5:00.0\n")
 
-    monkeypatch.setattr(probe_mod, "_amd_drm_device", lambda: drm)
+    # _detect_amd now enumerates every card via _amd_drm_devices (plural).
+    monkeypatch.setattr(probe_mod, "_amd_drm_devices", lambda: [drm])
     monkeypatch.setattr(
         probe_mod,
         "_run",
@@ -194,16 +206,18 @@ def test_detect_amd_via_drm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     info = probe_mod._detect_amd()
     assert info is not None
     assert info.vendor == "amd"
+    assert info.index == 0
     assert "Radeon" in info.name or "AMD" in info.name
     # max(vram_total, gtt_total) wins — the UMA pool
     assert info.vram_mb == pytest.approx(96 * 1024, rel=0.01)
+    assert info.pci_id == "0000:c5:00.0"
     assert info.compute_capable is True
     assert info.vulkan_capable is True
     assert info.drm_path == str(drm)
 
 
 def test_detect_amd_no_drm(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(probe_mod, "_amd_drm_device", lambda: None)
+    monkeypatch.setattr(probe_mod, "_amd_drm_devices", lambda: [])
     assert probe_mod._detect_amd() is None
 
 
@@ -334,16 +348,33 @@ def test_disk_free_mb_nonexistent(tmp_path: Path) -> None:
 def test_probe_assembles_hardware_info(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("Test CPU", 8, 16))
     monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (32768, 24576))
+    # probe() assembles info.gpus from the multi-GPU enumerator _detect_gpus.
     monkeypatch.setattr(
         probe_mod,
-        "_detect_gpu",
-        lambda: GPUInfo(vendor="nvidia", name="RTX 4080", vram_mb=16000),
+        "_detect_gpus",
+        lambda: [
+            GPUInfo(
+                vendor="nvidia",
+                index=0,
+                name="RTX 4080",
+                vram_mb=16000,
+                pci_id="00000000:01:00.0",
+            ),
+            GPUInfo(
+                vendor="nvidia",
+                index=1,
+                name="RTX 4080",
+                vram_mb=16000,
+                pci_id="00000000:02:00.0",
+            ),
+        ],
     )
     monkeypatch.setattr(
         probe_mod,
         "_detect_npu",
         lambda: probe_mod.NPUInfo(present=False),
     )
+    monkeypatch.setattr(probe_mod, "_gpu_group_gids", lambda: {"render": 993, "video": 44})
     monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 512000)
 
     def fake_read_text(path: Path) -> str | None:
@@ -367,10 +398,18 @@ def test_probe_assembles_hardware_info(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert info.cpu_threads == 16
     assert info.ram_mb == 32768
     assert info.ram_available_mb == 24576
-    assert len(info.gpus) == 1
+    # Multi-GPU: every enumerated GPU lands on info.gpus, primary first.
+    assert len(info.gpus) == 2
     assert info.gpus[0].vendor == "nvidia"
     assert info.gpus[0].vram_mb == 16000
+    assert [g.index for g in info.gpus] == [0, 1]
+    assert info.gpus[1].pci_id == "00000000:02:00.0"
+    assert info.gpu_group_gids == {"render": 993, "video": 44}
     assert info.npu.present is False
+    # New additive NPU probe facts default to "unknown" when absent.
+    assert info.npu.accel_path == ""
+    assert info.npu.render_path == ""
+    assert info.npu.aie_columns == 0
     assert info.disk_free_mb == 512000
     assert info.probed_at  # ISO-8601 timestamp populated
     # Host identity (added for the dashboard hardware cards).
@@ -446,8 +485,8 @@ def test_probe_assembles_unified_memory_on_uma(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(probe_mod, "_dmidecode_host_ram_mb", lambda: 128 * 1024)
     monkeypatch.setattr(
         probe_mod,
-        "_detect_gpu",
-        lambda: GPUInfo(vendor="amd", name="Radeon 8060S", vram_mb=105 * 1024),
+        "_detect_gpus",
+        lambda: [GPUInfo(vendor="amd", index=0, name="Radeon 8060S", vram_mb=105 * 1024)],
     )
     monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
     monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 1024)
@@ -655,8 +694,8 @@ def test_probe_includes_named_gpu_even_when_vendor_unknown(
     monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (4096, 2048))
     monkeypatch.setattr(
         probe_mod,
-        "_detect_gpu",
-        lambda: GPUInfo(vendor="unknown", name="Red Hat, Inc. Virtio 1.0 GPU"),
+        "_detect_gpus",
+        lambda: [GPUInfo(vendor="unknown", name="Red Hat, Inc. Virtio 1.0 GPU")],
     )
     monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
     monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 1024)

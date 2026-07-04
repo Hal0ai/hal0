@@ -89,6 +89,9 @@ _INTERESTING_KEYS_STATIC: frozenset[str] = frozenset(
         "general.name",
         "general.basename",
         "general.size_label",
+        # llama.cpp LLAMA_FTYPE enum — the authoritative quantisation
+        # signal (WS-13); registry/detect maps it to a "Q4_K_M"-style label.
+        "general.file_type",
     }
 )
 
@@ -210,6 +213,7 @@ def read_gguf_header(path: str | Path) -> dict[str, Any] | None:
     Specifically extracts:
         * ``general.architecture``
         * ``general.embedding_length``
+        * ``general.file_type``
         * ``<arch>.context_length``
         * ``<arch>.pooling_type``
 

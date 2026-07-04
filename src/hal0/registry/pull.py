@@ -93,7 +93,60 @@ class PullInsufficientDisk(PullError):
     status = 507  # Insufficient Storage
 
 
+class PullChecksumMismatch(PullError):
+    """Streamed bytes don't hash to the SHA-256 HuggingFace advertised.
+
+    Raised only when HF exposed an expected hash (the LFS object sha256 in
+    ``X-Linked-ETag`` on the resolve response/redirect). Non-LFS files carry
+    no sha256 and keep the record-only behaviour. The completed ``.part``
+    is preserved for diagnosis; its resume sidecar is dropped so a retry
+    starts clean instead of "resuming" corrupt bytes.
+    """
+
+    code = "pull.checksum_mismatch"
+    status = 502  # upstream handed us bytes that don't match its own manifest
+
+
+class _PullCancelled(Exception):
+    """Internal control-flow: user cancel observed mid-stream.
+
+    Raised by :func:`_download_one` so :func:`run_pull` can transition the
+    job to ``cancelled`` after per-file staging cleanup already happened.
+    Never surfaces past ``run_pull``.
+    """
+
+
 # ── Job record ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class PullFile:
+    """One file of a (possibly multi-file) pull job.
+
+    A plain pull has exactly one entry (the main GGUF); a vision pull adds
+    an ``mmproj`` sidecar entry downloaded after the main model. Top-level
+    ``PullJob.bytes_downloaded`` / ``bytes_total`` stay the AGGREGATE across
+    entries so the SSE/status wire shape is unchanged for consumers.
+    """
+
+    hf_filename: str
+    kind: str = "model"  # "model" | "mmproj"
+    dest: str | None = None  # final installed path, once known
+    bytes_total: int = 0
+    bytes_done: int = 0
+    sha256: str | None = None  # computed while streaming
+    expected_sha256: str | None = None  # HF-advertised LFS hash, if any
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "hf_filename": self.hf_filename,
+            "kind": self.kind,
+            "dest": self.dest,
+            "bytes_total": self.bytes_total,
+            "bytes_done": self.bytes_done,
+            "sha256": self.sha256,
+            "expected_sha256": self.expected_sha256,
+        }
 
 
 @dataclass
@@ -117,12 +170,22 @@ class PullJob:
     sha256: str | None = None
     path: str | None = None
     cancel_requested: bool = False
+    # Per-file manifest (multi-file pulls, e.g. main GGUF + mmproj). Empty
+    # until ``run_pull`` seeds it; single-file jobs get one entry. The
+    # top-level bytes_* fields above remain the aggregate across files.
+    files: list[PullFile] = field(default_factory=list)
     # Async signalling — set every time the background task makes
     # progress. SSE waits on this rather than polling.
     progress_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def as_dict(self) -> dict[str, Any]:
-        """Serialisable snapshot for /pull/status and SSE frames."""
+        """Serialisable snapshot for /pull/status and SSE frames.
+
+        The top-level keys are the stable wire shape the UI reads
+        (``bytes_downloaded``/``bytes_total`` are aggregates across files).
+        ``files`` is additive detail — consumers that don't know it ignore it,
+        and old persisted snapshots without it load fine.
+        """
         return {
             "id": self.job_id,
             "model_id": self.model_id,
@@ -135,6 +198,7 @@ class PullJob:
             "error_code": self.error_code,
             "sha256": self.sha256,
             "path": self.path,
+            "files": [f.as_dict() for f in self.files],
         }
 
     def _signal(self) -> None:
@@ -529,65 +593,94 @@ def _rehash_prefix(part: Path, hasher: Any) -> int:
     return total
 
 
-async def run_pull(
-    job: PullJob,
-    *,
-    hf_repo: str,
-    hf_file: str,
-    registry: ModelRegistry,
-    hf_token: str | None = None,
-    client: httpx.AsyncClient | None = None,
-    comfyui_subdir: str | None = None,
-    capability: str | None = None,
-) -> None:
-    """Background-task body: stream the file, hash it, install it, register it.
+def _staging_paths(model_id: str, filename: str) -> tuple[Path, Path]:
+    """Deterministic per-(model, file) staging paths under ``.tmp``.
 
-    Mutates ``job`` in place and pulses ``job._signal()`` on every chunk
-    boundary or 500ms tick (whichever is rarer) so SSE consumers see
-    progress without polling.
-
-    Cancellation: callers set ``job.cancel_requested = True``. The next
-    chunk read checks the flag, deletes the partial, transitions to
-    ``cancelled``, and returns.
-
-    Args:
-        comfyui_subdir: When set (e.g. ``"checkpoints"``), the file lands
-            under ``/var/lib/hal0/comfyui/models/<subdir>/<filename>``
-            instead of the default ``/var/lib/hal0/models/<id>/<filename>``.
-            Curated image-gen entries set this so ComfyUI's own model
-            loaders find the file at the path their workflow nodes expect.
+    Keyed by BOTH the sanitised model id and the sanitised filename so each
+    file of a multi-file pull (main GGUF + mmproj sidecar) resumes
+    independently (MR-7). Pre-multi-file partials were named ``<id>.part``;
+    those simply never match the new key, so they are ignored (never
+    mis-stitched) and reaped by :func:`sweep_orphaned_partials`.
     """
-    job.state = "running"
-    job.started_at = time.time()
-    job._signal()
+    tmp_dir = _tmp_dir()
+    stem = f"{_sanitise_id(model_id)}--{_sanitise_id(filename)}"
+    return tmp_dir / f"{stem}.part", tmp_dir / f"{stem}.part.json"
 
-    url = hf_download_url(hf_repo, hf_file)
-    headers: dict[str, str] = {"User-Agent": "hal0/installer"}
-    if hf_token:
-        headers["Authorization"] = f"Bearer {hf_token}"
+
+# ── expected-hash capture (WS-12) ─────────────────────────────────────────────
+#
+# HF's ``resolve/<rev>`` endpoint advertises the LFS object's sha256 as
+# ``X-Linked-ETag`` on the redirect hop to the CDN (and on direct responses
+# for LFS-backed files). Non-LFS files carry only a git-blob etag (40-hex
+# sha1 / weak etag) — no sha256 exists for those, so they keep the historic
+# record-only behaviour.
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _expected_sha256_from_response(resp: httpx.Response) -> str | None:
+    """Extract HF's advertised LFS sha256 from ``X-Linked-ETag``, if present.
+
+    Checks the redirect chain (``resp.history``) first — that's where the
+    huggingface.co hop lives once httpx has followed the 302 to the CDN —
+    then the final response. Returns the lowercase 64-hex digest, or ``None``
+    when no response in the chain carries a sha256-shaped linked etag.
+    """
+    for r in [*resp.history, resp]:
+        raw = (r.headers.get("x-linked-etag") or "").strip()
+        if raw[:2] in ("W/", "w/"):
+            raw = raw[2:]
+        cleaned = raw.strip().strip('"').lower()
+        if _SHA256_HEX_RE.match(cleaned):
+            return cleaned
+    return None
+
+
+async def _download_one(
+    job: PullJob,
+    rec: PullFile,
+    *,
+    client: httpx.AsyncClient,
+    hf_repo: str,
+    base_headers: dict[str, str],
+    final: Path,
+    base_done: int,
+    base_total: int,
+) -> str:
+    """Stream ONE file of a pull to ``final``; return its hex SHA-256.
+
+    Owns the per-file staging lifecycle: the deterministic ``.part`` +
+    resume sidecar (keyed by model id AND filename — see
+    :func:`_staging_paths`), the Range-resume dance (MR-7), the integrity
+    check against HF's advertised LFS sha256 (WS-12), and the atomic
+    install. Aggregate job progress is maintained as ``base_done + <this
+    file's bytes>`` so ``job.bytes_downloaded`` is monotonic across the
+    file boundary of a multi-file pull.
+
+    Staging cleanup contract (mirrors the historic single-file behaviour):
+      * user cancel        → discard partial + sidecar, raise ``_PullCancelled``
+      * checksum mismatch  → KEEP the completed ``.part`` for diagnosis, drop
+                             the sidecar, raise :class:`PullChecksumMismatch`
+      * permanent Hal0Error→ discard partial + sidecar, re-raise
+      * transient httpx err→ preserve ``.part`` + write resume sidecar, re-raise
+      * anything else      → discard (unknown state must not poison a resume)
+    """
+    url = hf_download_url(hf_repo, rec.hf_filename)
+    headers = dict(base_headers)
 
     tmp_dir = _tmp_dir()
     tmp_dir.mkdir(parents=True, exist_ok=True)
     # Deterministic staging name (MR-7) so a prior interrupted pull can be
     # found and resumed. The JSON sidecar next to it records the resume
-    # coordinates (url, etag, bytes-on-disk, total). TRADEOFF: unlike the old
-    # random-tag name, this is not isolated across two concurrent pulls of the
-    # SAME model_id. In-process pulls are deduped by model_pull_jobs
-    # (routes/models.pull_model), so the only unguarded case is two SEPARATE
-    # processes pulling the identical id at once (rare — not an expected flow);
-    # resumability is worth that edge.
-    sanitised = _sanitise_id(job.model_id)
-    part = tmp_dir / f"{sanitised}.part"
-    sidecar = tmp_dir / f"{sanitised}.part.json"
+    # coordinates (url, etag, bytes-on-disk, total). TRADEOFF: this is not
+    # isolated across two concurrent pulls of the SAME (model_id, filename).
+    # In-process pulls are deduped by model_pull_jobs (routes/models.pull_model),
+    # so the only unguarded case is two SEPARATE processes pulling the identical
+    # id at once (rare — not an expected flow); resumability is worth that edge.
+    part, sidecar = _staging_paths(job.model_id, rec.hf_filename)
 
     hasher = hashlib.sha256()
     last_emit = time.monotonic()
-    owns_client = client is None
-    if client is None:
-        client = httpx.AsyncClient(
-            timeout=httpx.Timeout(_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S),
-            follow_redirects=True,
-        )
 
     # ── Resume probe (MR-7) ───────────────────────────────────────────────
     # Only reuse an on-disk partial the sidecar vouches for; anything else is
@@ -605,7 +698,6 @@ async def run_pull(
     else:
         _discard_partial(part, sidecar)
 
-    installed = False
     captured_etag: str | None = None
     try:
         # Retry loop exists solely so a 416 (bad/complete range) can fall back
@@ -625,18 +717,18 @@ async def run_pull(
 
                 if resp.status_code == 401 or resp.status_code == 403:
                     raise PullError(
-                        f"hugging face returned {resp.status_code} for {hf_repo}/{hf_file}"
-                        " (gated repo? set HF_TOKEN)",
+                        f"hugging face returned {resp.status_code} for "
+                        f"{hf_repo}/{rec.hf_filename} (gated repo? set HF_TOKEN)",
                         details={
                             "status": resp.status_code,
                             "repo": hf_repo,
-                            "file": hf_file,
+                            "file": rec.hf_filename,
                         },
                     )
                 if resp.status_code == 404:
                     raise PullError(
-                        f"hugging face has no file {hf_file!r} in {hf_repo!r} at main",
-                        details={"repo": hf_repo, "file": hf_file},
+                        f"hugging face has no file {rec.hf_filename!r} in {hf_repo!r} at main",
+                        details={"repo": hf_repo, "file": rec.hf_filename},
                     )
                 if resp.status_code >= 400:
                     raise PullError(
@@ -645,6 +737,11 @@ async def run_pull(
                     )
 
                 captured_etag = resp.headers.get("etag")
+                # WS-12: capture HF's advertised LFS sha256 (X-Linked-ETag on
+                # the resolve redirect / response). None for non-LFS files —
+                # those keep the record-only behaviour.
+                if rec.expected_sha256 is None:
+                    rec.expected_sha256 = _expected_sha256_from_response(resp)
 
                 if resp.status_code == 206 and resume_from > 0:
                     # Server honoured the Range — continue the existing prefix.
@@ -662,7 +759,8 @@ async def run_pull(
                                 "content_range": resp.headers.get("content-range"),
                             },
                         )
-                    job.bytes_total = total
+                    rec.bytes_total = total
+                    job.bytes_total = base_total + total
                     # Re-hash the on-disk prefix so the final SHA-256 is exact
                     # (stdlib hashlib can't restore a checkpoint).
                     hashed = _rehash_prefix(part, hasher)
@@ -672,7 +770,8 @@ async def run_pull(
                             f"{resume_from} bytes, re-read {hashed}",
                             details={"expected": resume_from, "hashed": hashed},
                         )
-                    job.bytes_downloaded = resume_from
+                    rec.bytes_done = resume_from
+                    job.bytes_downloaded = base_done + resume_from
                     mode = "ab"
                 else:
                     # 200 (fresh, or the server/CDN ignored our Range) — start
@@ -683,10 +782,12 @@ async def run_pull(
                     content_length = resp.headers.get("content-length")
                     if content_length:
                         try:
-                            job.bytes_total = int(content_length)
+                            rec.bytes_total = int(content_length)
                         except ValueError:
-                            job.bytes_total = 0
-                    job.bytes_downloaded = 0
+                            rec.bytes_total = 0
+                        job.bytes_total = base_total + rec.bytes_total
+                    rec.bytes_done = 0
+                    job.bytes_downloaded = base_done
                     mode = "wb"
                 job._signal()
 
@@ -698,11 +799,11 @@ async def run_pull(
                 # existing stream-until-ENOSPC behavior (no regression). On a
                 # resume we only need room for the remaining (total-have) bytes.
                 # PullInsufficientDisk is not an OSError, so the raise inside the
-                # suppress still propagates to the except Hal0Error handler below.
-                if job.bytes_total > 0:
+                # suppress still propagates to run_pull's Hal0Error handler.
+                if rec.bytes_total > 0:
                     with contextlib.suppress(OSError):
                         free = shutil.disk_usage(tmp_dir).free
-                        needed = job.bytes_total - resume_from
+                        needed = rec.bytes_total - resume_from
                         if free < needed:
                             raise PullInsufficientDisk(
                                 f"insufficient disk for {job.model_id}: need "
@@ -717,35 +818,177 @@ async def run_pull(
                 with open(part, mode) as f:
                     async for chunk in resp.aiter_bytes(chunk_size=_CHUNK_BYTES):
                         if job.cancel_requested:
-                            # Explicit user cancel — drop the partial + sidecar
-                            # and exit cleanly.
-                            f.close()
-                            _discard_partial(part, sidecar)
-                            job.state = "cancelled"
-                            job.finished_at = time.time()
-                            job._signal()
-                            return
+                            # Explicit user cancel — surfaced to run_pull via
+                            # _PullCancelled; the except below drops the
+                            # partial + sidecar.
+                            raise _PullCancelled()
                         if not chunk:
                             continue
                         f.write(chunk)
                         hasher.update(chunk)
-                        job.bytes_downloaded += len(chunk)
+                        rec.bytes_done += len(chunk)
+                        job.bytes_downloaded = base_done + rec.bytes_done
                         now = time.monotonic()
                         if (now - last_emit) >= _SSE_MIN_INTERVAL_S:
                             last_emit = now
                             job._signal()
             break
 
-        # Download complete — atomic install.
-        final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
+        # Stream complete — verify against the HF-advertised hash (WS-12)
+        # BEFORE the atomic install so a corrupt object never lands at the
+        # final path.
+        digest = hasher.hexdigest()
+        if rec.expected_sha256 and digest != rec.expected_sha256:
+            # Keep the .part for diagnosis; drop the sidecar so a retry
+            # starts clean rather than "resuming" a complete corrupt file.
+            with contextlib.suppress(OSError):
+                sidecar.unlink(missing_ok=True)
+            raise PullChecksumMismatch(
+                f"checksum mismatch for {hf_repo}/{rec.hf_filename}: expected "
+                f"{rec.expected_sha256}, got {digest} (partial kept at {part})",
+                details={
+                    "repo": hf_repo,
+                    "file": rec.hf_filename,
+                    "expected_sha256": rec.expected_sha256,
+                    "actual_sha256": digest,
+                    "part_path": str(part),
+                },
+            )
+
+        # Atomic install.
         final.parent.mkdir(parents=True, exist_ok=True)
         os.replace(part, final)
-        installed = True  # so the cleanup handlers don't touch the installed file
         _discard_partial(part, sidecar)  # part is renamed away; drop the sidecar
         size_bytes = final.stat().st_size
-        digest = hasher.hexdigest()
+        rec.sha256 = digest
+        rec.dest = str(final)
+        rec.bytes_done = size_bytes
+        if rec.bytes_total <= 0:
+            rec.bytes_total = size_bytes
+        job.bytes_downloaded = base_done + size_bytes
+        job.bytes_total = max(job.bytes_total, base_total + rec.bytes_total)
+        job._signal()
+        return digest
+    except _PullCancelled:
+        _discard_partial(part, sidecar)
+        raise
+    except PullChecksumMismatch:
+        raise  # .part intentionally preserved for diagnosis (sidecar dropped)
+    except asyncio.CancelledError:
+        # Task itself was cancelled by the event loop — treat as an explicit
+        # cancel: discard the partial + sidecar (MR-7).
+        _discard_partial(part, sidecar)
+        raise
+    except Hal0Error:
+        # Permanent failures (4xx PullError, insufficient disk) are not
+        # resumable — discard the partial + sidecar (MR-7).
+        _discard_partial(part, sidecar)
+        raise
+    except Exception as exc:
+        # A transient transport error (connection drop / read timeout) must
+        # PRESERVE the .part and record a resume sidecar so the NEXT run_pull
+        # continues where this one left off (MR-7). Truly unexpected errors
+        # poison state, so those still discard.
+        if isinstance(exc, httpx.HTTPError):
+            _write_resume_sidecar(part, sidecar, url=url, etag=captured_etag, total=rec.bytes_total)
+        else:
+            _discard_partial(part, sidecar)
+        raise
 
-        # Register / update the registry entry.
+
+async def run_pull(
+    job: PullJob,
+    *,
+    hf_repo: str,
+    hf_file: str,
+    registry: ModelRegistry,
+    hf_token: str | None = None,
+    client: httpx.AsyncClient | None = None,
+    comfyui_subdir: str | None = None,
+    capability: str | None = None,
+    mmproj_file: str | None = None,
+) -> None:
+    """Background-task body: stream the file(s), hash, install, register.
+
+    Mutates ``job`` in place and pulses ``job._signal()`` on every chunk
+    boundary or 500ms tick (whichever is rarer) so SSE consumers see
+    progress without polling.
+
+    Multi-file (WS-11): when ``mmproj_file`` is set, the mmproj sidecar is
+    downloaded AFTER the main model into the same directory and associated
+    on the registry row directly (``model.mmproj``) — no directory scan
+    needed. ``job.bytes_downloaded`` / ``bytes_total`` stay the aggregate
+    across files, so the SSE/status wire shape is unchanged.
+
+    Cancellation: callers set ``job.cancel_requested = True``. The next
+    chunk read checks the flag, deletes the current partial, transitions
+    to ``cancelled``, and returns.
+
+    Args:
+        comfyui_subdir: When set (e.g. ``"checkpoints"``), the file lands
+            under ``/var/lib/hal0/comfyui/models/<subdir>/<filename>``
+            instead of the default ``/var/lib/hal0/models/<id>/<filename>``.
+            Curated image-gen entries set this so ComfyUI's own model
+            loaders find the file at the path their workflow nodes expect.
+        mmproj_file: Optional multimodal-projector filename within the same
+            HF repo (the Add-by-HF modal's vision pick, or a curated
+            entry's ``mmproj_file``). Downloaded after the main file.
+    """
+    job.state = "running"
+    job.started_at = time.time()
+    # Per-file manifest — main model first, optional mmproj sidecar second.
+    job.files = [PullFile(hf_filename=hf_file, kind="model")]
+    if mmproj_file:
+        job.files.append(PullFile(hf_filename=mmproj_file, kind="mmproj"))
+    job._signal()
+
+    base_headers: dict[str, str] = {"User-Agent": "hal0/installer"}
+    if hf_token:
+        base_headers["Authorization"] = f"Bearer {hf_token}"
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S),
+            follow_redirects=True,
+        )
+
+    try:
+        # ── Main model file ────────────────────────────────────────────────
+        main_rec = job.files[0]
+        final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir, capability)
+        digest = await _download_one(
+            job,
+            main_rec,
+            client=client,
+            hf_repo=hf_repo,
+            base_headers=base_headers,
+            final=final,
+            base_done=0,
+            base_total=0,
+        )
+        size_bytes = main_rec.bytes_done
+
+        # ── Optional mmproj sidecar (WS-11) ────────────────────────────────
+        # Same directory as the main model, so the association survives the
+        # discover scan's same-directory heuristic AND is set directly below.
+        mmproj_final: Path | None = None
+        if len(job.files) > 1:
+            mm_rec = job.files[1]
+            mmproj_final = final.parent / Path(mm_rec.hf_filename).name
+            await _download_one(
+                job,
+                mm_rec,
+                client=client,
+                hf_repo=hf_repo,
+                base_headers=base_headers,
+                final=mmproj_final,
+                base_done=main_rec.bytes_done,
+                base_total=main_rec.bytes_total,
+            )
+
+        # Register / update the registry entry (mmproj set directly — the
+        # row is vision-ready without waiting for a directory scan).
         _register_pulled(
             registry,
             model_id=job.model_id,
@@ -756,6 +999,7 @@ async def run_pull(
             hf_filename=hf_file,
             capability=capability,
             comfyui_subdir=comfyui_subdir,
+            mmproj=str(mmproj_final) if mmproj_final is not None else None,
         )
 
         # Capability-grouped pulls (FirstRun v2, design D2) get a meta.json
@@ -774,26 +1018,25 @@ async def run_pull(
 
         job.path = str(final)
         job.sha256 = digest
-        job.bytes_downloaded = size_bytes
-        if job.bytes_total == 0:
-            job.bytes_total = size_bytes
+        job.bytes_downloaded = sum(f.bytes_done for f in job.files)
+        total = sum(f.bytes_total for f in job.files)
+        job.bytes_total = total if total > 0 else job.bytes_downloaded
         job.state = "completed"
         job.finished_at = time.time()
         job._signal()
+    except _PullCancelled:
+        # Explicit user cancel — staging already cleaned by _download_one.
+        job.state = "cancelled"
+        job.finished_at = time.time()
+        job._signal()
     except asyncio.CancelledError:
-        # Task itself was cancelled by the event loop — treat as an explicit
-        # cancel: discard the partial + sidecar (MR-7).
-        if not installed:
-            _discard_partial(part, sidecar)
+        # Task itself was cancelled by the event loop — staging cleanup
+        # happened in _download_one; just record the terminal state.
         job.state = "cancelled"
         job.finished_at = time.time()
         job._signal()
         raise
     except Hal0Error as exc:
-        # Permanent failures (4xx PullError, insufficient disk) are not
-        # resumable — discard the partial + sidecar (MR-7).
-        if not installed:
-            _discard_partial(part, sidecar)
         job.state = "failed"
         job.error = exc.message
         job.error_code = exc.code
@@ -801,17 +1044,6 @@ async def run_pull(
         job._signal()
         log.warning("model.pull_failed", extra={"model_id": job.model_id, "error": exc.message})
     except Exception as exc:
-        # A transient transport error (connection drop / read timeout) must
-        # PRESERVE the .part and record a resume sidecar so the NEXT run_pull
-        # continues where this one left off (MR-7). Truly unexpected errors
-        # poison state, so those still discard.
-        if not installed:
-            if isinstance(exc, httpx.HTTPError):
-                _write_resume_sidecar(
-                    part, sidecar, url=url, etag=captured_etag, total=job.bytes_total
-                )
-            else:
-                _discard_partial(part, sidecar)
         job.state = "failed"
         job.error = f"{type(exc).__name__}: {exc}"
         job.error_code = "model.pull_failed"
@@ -840,6 +1072,7 @@ def _register_pulled(
     hf_filename: str,
     capability: str | None = None,
     comfyui_subdir: str | None = None,
+    mmproj: str | None = None,
 ) -> None:
     """Upsert the registry entry after a successful pull.
 
@@ -850,6 +1083,11 @@ def _register_pulled(
     ``capabilities=["image"]`` / ``backends=["comfyui"]`` — NOT the old
     hardcoded ``["chat"]``, which mis-filed every fresh image checkpoint under
     the dashboard's llm bucket and drew it into the chat fallback pool.
+
+    ``mmproj`` (WS-11) is the absolute path of a co-downloaded multimodal
+    projector sidecar. Set directly so vision works right after the pull —
+    no directory scan needed. ``None`` leaves any existing association
+    (e.g. one a prior scan discovered) untouched.
     """
     updates: dict[str, Any] = {
         "path": path,
@@ -858,6 +1096,8 @@ def _register_pulled(
         "hf_filename": hf_filename,
         "metadata": {"sha256": sha256},
     }
+    if mmproj is not None:
+        updates["mmproj"] = mmproj
     try:
         existing = registry.get(model_id)
     except ModelNotFound:
@@ -875,6 +1115,7 @@ def _register_pulled(
                 hf_filename=hf_filename,
                 capabilities=caps,
                 backends=backends,
+                mmproj=mmproj,
                 metadata={"sha256": sha256},
             )
         )
@@ -1169,7 +1410,9 @@ def _register_flm_pulled(
 
 
 __all__ = [
+    "PullChecksumMismatch",
     "PullError",
+    "PullFile",
     "PullInsufficientDisk",
     "PullInvalidSource",
     "PullJob",

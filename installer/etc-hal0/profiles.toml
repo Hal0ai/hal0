@@ -60,6 +60,19 @@ backend      = "vulkan"
 intent       = "Vulkan std · fallback"
 quant        = "Q4_K_M"
 
+[profile.cuda]
+# NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. UPSTREAM llama.cpp
+# image (not the AMD Strix-Halo toolbox family); flags mirror the vulkan
+# profile's conservative structure. Requires nvidia-container-toolkit (CDI)
+# for GPU passthrough.
+image        = "ghcr.io/ggml-org/llama.cpp:server-cuda"
+flags        = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
+mtp          = false
+device_class = "gpu"
+backend      = "cuda"
+intent       = "CUDA · NVIDIA (upstream llama.cpp, experimental)"
+quant        = "Q4_K_M"
+
 [profile.flm]
 # NPU LLM/trio slot (FastFlowLM). Flags are built by FLMProvider.container_spec,
 # not by this profile — image pin only. No backend (device_class drives display).

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import logging
 import os
 import re
@@ -39,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hal0.config import paths
+from hal0.errors import Hal0Error
 from hal0.model_meta import SLOT_TYPES
 from hal0.slot_config import (
     fold_ctx_size_alias,
@@ -65,6 +67,21 @@ if TYPE_CHECKING:
     from hal0.slots.arbiter import GpuArbiter
 
 log = logging.getLogger(__name__)
+
+
+class RegistryUnavailableError(Hal0Error):
+    """The model registry could not be consulted (outage, not a miss).
+
+    Raised by the model-cache check when the registry lookup fails for a
+    reason other than "model not registered" — e.g. an unreadable registry
+    directory.  Distinct from ``model.not_found`` (404): the model may well
+    exist, we just cannot know right now, so 503 is the honest answer.
+    Surfaced instead of silently treating the model as cached (which
+    skipped PULLING and crash-looped the container on a missing file).
+    """
+
+    code = "model.registry_unavailable"
+    status = 503
 
 
 # ── Seeded slot catalogue (PR-10, plan §4.2 + §10.2) ────────────────────────
@@ -328,6 +345,18 @@ class SlotManager:
         self._upstreams_registry = upstreams_registry
         # Per-slot locks to prevent concurrent load/unload/restart races.
         self._locks: dict[str, asyncio.Lock] = {}
+        # Parsed slot-TOML cache: canonical slot name → (mtime_ns, size,
+        # parsed dict).  ``resolve_for_request`` calls ``iter_configs``
+        # twice per routed request, which used to re-read + re-parse every
+        # slot TOML from disk each time.  The cache is keyed on the file's
+        # (st_mtime_ns, st_size) so external edits are picked up on the
+        # next call (we still stat per read — the win is skipping the
+        # parse, not the stat).  Same-process writers additionally
+        # invalidate eagerly via :meth:`_invalidate_cfg_cache` so even a
+        # coarse-mtime filesystem can't serve a stale parse after our own
+        # write.  Callers receive deep copies — the cached dict is never
+        # handed out for mutation.
+        self._cfg_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
         # In-memory copy of the latest state per slot (mirrors state.json).
         self._states: dict[str, SlotStateRecord] = {}
         # SSE subscribers: list of queues; one per active state_stream().
@@ -1424,7 +1453,11 @@ class SlotManager:
         Lightweight — reads TOML only, no live probes. Intended
         for startup hooks (e.g. ``lifespan`` auto-registering slots as
         upstreams) that need slot metadata before any real lifecycle
-        interaction.
+        interaction.  Also the routing hot path
+        (:meth:`resolve_for_request` calls this twice per request):
+        parses are served from the per-file mtime cache in
+        :meth:`_load_slot_config`, and the directory glob per call keeps
+        added/removed slot TOMLs visible immediately.
 
         Returns:
             One dict per slot, in stable order. Each dict carries at
@@ -1858,6 +1891,7 @@ class SlotManager:
                         f"failed to write slot config {cfg_path}: {exc}",
                         details={"slot": slot_name},
                     ) from exc
+                self._invalidate_cfg_cache(slot_name)
 
             # Initialise state.
             await self._transition(
@@ -1903,6 +1937,7 @@ class SlotManager:
         self._states.pop(slot_name, None)
         self._locks.pop(slot_name, None)
         self._last_used.pop(slot_name, None)
+        self._invalidate_cfg_cache(slot_name)
 
     async def update_config(
         self,
@@ -1965,6 +2000,7 @@ class SlotManager:
                 raise SlotConfigError(
                     f"failed to rewrite {cfg_path}: {exc}",
                 ) from exc
+            self._invalidate_cfg_cache(slot_name)
 
         # Issue #359: invalidate stale top-level metadata in state.json
         # whenever the operator's update changes a field that's also
@@ -2107,6 +2143,7 @@ class SlotManager:
                     f"failed to persist model.default to {cfg_path}: {exc}",
                     details={"slot": slot_name, "model_id": model_id},
                 ) from exc
+            self._invalidate_cfg_cache(slot_name)
 
     # ── model preferred profile (Q1: profile loads with the model) ────────────
 
@@ -2196,6 +2233,7 @@ class SlotManager:
                     f"failed to persist preferred profile to slot {slot_name}: {exc}",
                     details={"slot": slot_name, "profile": preferred},
                 ) from exc
+            self._invalidate_cfg_cache(slot_name)
         log.info(
             "slot.preferred_profile_applied",
             extra={"slot": slot_name, "model_id": model_id, "profile": preferred},
@@ -2300,15 +2338,29 @@ class SlotManager:
         Returns ``False`` if no ``pull_runner`` was wired — the legacy
         offline→starting path is preserved for callers that handle their
         own model staging (installer, integration tests).
+
+        Raises:
+            RegistryUnavailableError: When the cache check could not
+                consult the registry at all (registry outage).  This is
+                NOT swallowed: silently treating an unreachable registry
+                as "cached" skips PULLING and launches a container
+                against a maybe-missing file, which then crash-loops with
+                an unrelated-looking error.  The structured
+                ``model.registry_unavailable`` code surfaces the real
+                cause to the API caller instead.
         """
         if self._pull_runner is None:
             return False
         try:
             return not bool(self._model_cache_check(model_id))
+        except RegistryUnavailableError:
+            raise
         except Exception as exc:
-            # Defensive: a buggy cache check must not break load().  Log
-            # and treat as "cached" so we fall through to STARTING and
-            # the slot's own probe surfaces the real failure.
+            # Defensive: a buggy *injected* cache check must not break
+            # load().  Log and treat as "cached" so we fall through to
+            # STARTING and the slot's own probe surfaces the real failure.
+            # (The default check never lands here: it maps registry
+            # outages to RegistryUnavailableError above.)
             log.warning(
                 "slot.cache_check_failed",
                 extra={"model_id": model_id, "error": str(exc)},
@@ -2444,6 +2496,16 @@ class SlotManager:
         ``HAL0_HOME`` still load the module.  Missing registry / model →
         not cached → caller flips through PULLING (where the pull hook
         either materialises the file or raises).
+
+        Raises:
+            RegistryUnavailableError: When the registry lookup fails for
+                any reason other than "model not registered" (unreadable
+                registry dir, permission error, …).  Previously this was
+                swallowed as "cached=True", which silently skipped
+                PULLING during a registry outage.  A missing
+                ``registry.toml`` is NOT an outage — the store reads that
+                as an empty registry, which lands in the ordinary
+                ``ModelNotFound`` → not-cached branch.
         """
         try:
             from hal0.registry.store import ModelNotFound, ModelRegistry
@@ -2453,8 +2515,11 @@ class SlotManager:
             model = ModelRegistry().get(model_id)
         except ModelNotFound:
             return False
-        except Exception:
-            return True
+        except Exception as exc:
+            raise RegistryUnavailableError(
+                f"model registry unavailable while checking {model_id!r}: {exc}",
+                details={"model_id": model_id, "reason": str(exc)},
+            ) from exc
         path = getattr(model, "path", "") or ""
         if not path:
             return False
@@ -2941,6 +3006,25 @@ class SlotManager:
             if rec_backend:
                 fallback["backend"] = rec_backend
             return fallback
+        # ── mtime-keyed parse cache ──────────────────────────────────────
+        # Stat BEFORE reading: if the file changes mid-read we may cache
+        # the newer content under the older key, and the next write bumps
+        # the mtime again so the entry self-corrects on the following call.
+        # (st_mtime_ns, st_size) as the key survives coarse-mtime
+        # filesystems better than mtime alone; same-process writers also
+        # invalidate eagerly (see _invalidate_cfg_cache).
+        try:
+            st = path.stat()
+            cache_key: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            cache_key = None
+        if cache_key is not None:
+            cached = self._cfg_cache.get(slot_name)
+            if cached is not None and (cached[0], cached[1]) == cache_key:
+                # Deep-copy: callers freely mutate the returned dict
+                # (merge pipelines, _paths injection) and must never
+                # write through into the cache.
+                return copy.deepcopy(cached[2])
         try:
             with open(path, "rb") as f:
                 data = tomllib.load(f)
@@ -2950,6 +3034,9 @@ class SlotManager:
                 details={"slot": slot_name, "path": str(path)},
             ) from exc
         except tomllib.TOMLDecodeError as exc:
+            # A malformed TOML must not be served from a stale cache entry
+            # on subsequent calls either — drop whatever we had.
+            self._cfg_cache.pop(slot_name, None)
             raise SlotConfigError(
                 f"slot config {path} is not valid TOML: {exc}",
                 details={"slot": slot_name, "path": str(path)},
@@ -2966,7 +3053,24 @@ class SlotManager:
                 data[_k] = _v
         if "name" not in data:
             data["name"] = slot_name
+        if cache_key is not None:
+            self._cfg_cache[slot_name] = (
+                cache_key[0],
+                cache_key[1],
+                copy.deepcopy(data),
+            )
         return data
+
+    def _invalidate_cfg_cache(self, slot_name: str) -> None:
+        """Drop the parsed-TOML cache entry for *slot_name* (post-write hook).
+
+        Called by every in-process slot-TOML writer (create / update_config /
+        _persist_model_default / _apply_preferred_profile / delete) right
+        after the write lands.  Belt to the (mtime_ns, size) suspenders in
+        :meth:`_load_slot_config` — guarantees our own writes are never
+        masked even on a filesystem with coarse mtime resolution.
+        """
+        self._cfg_cache.pop(self._resolve_alias(slot_name), None)
 
     async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]:
         """Look up model metadata from the registry.

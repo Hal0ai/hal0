@@ -252,6 +252,73 @@ def test_pull_body_capability_overrides(
     assert fake_run_pull[0]["capability"] == "embed"
 
 
+# ── WS-11: mmproj_filename threading ─────────────────────────────────────────
+
+
+def test_pull_body_mmproj_filename_threads_to_run_pull(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    """The Add-by-HF modal's ``mmproj_filename`` reaches run_pull as
+    ``mmproj_file`` so the vision sidecar downloads with the model."""
+    r = client_isolated.post(
+        "/api/models/user.VisionPick/pull",
+        json={
+            "hf_repo": "org/vision-GGUF",
+            "hf_filename": "vision-Q4_K_M.gguf",
+            "mmproj_filename": "mmproj-F16.gguf",
+            "labels": ["chat", "vision"],
+        },
+    )
+    assert r.status_code == 202, r.text
+    assert r.json()["mmproj_file"] == "mmproj-F16.gguf"
+    assert len(fake_run_pull) == 1
+    assert fake_run_pull[0]["mmproj_file"] == "mmproj-F16.gguf"
+
+
+def test_pull_without_mmproj_passes_none(
+    client_isolated: TestClient, fake_run_pull: list[dict[str, Any]]
+) -> None:
+    """Single-file pulls stay single-file: no body mmproj + no curated mmproj
+    → run_pull gets mmproj_file=None and the response omits the key."""
+    r = client_isolated.post("/api/models/qwen3-4b/pull")
+    assert r.status_code == 202, r.text
+    assert "mmproj_file" not in r.json()
+    assert fake_run_pull[0]["mmproj_file"] is None
+
+
+def test_pull_curated_mmproj_file_is_wired(
+    client_isolated: TestClient,
+    fake_run_pull: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A curated entry that carries ``mmproj_file`` gets a two-file pull
+    without the caller sending anything in the body."""
+    from hal0.api.routes import models as model_routes
+    from hal0.registry.curated import CuratedModel
+
+    curated = CuratedModel(
+        id="vision-pick",
+        display_name="Vision Pick",
+        description="test",
+        family="qwen",
+        size_gb=1.0,
+        vram_gb_min=1.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="org/vision-GGUF",
+        hf_file="vision-Q4_K_M.gguf",
+        mmproj_file="mmproj-F16.gguf",
+    )
+    monkeypatch.setattr(
+        model_routes, "get_curated", lambda mid: curated if mid == "vision-pick" else None
+    )
+
+    r = client_isolated.post("/api/models/vision-pick/pull")
+    assert r.status_code == 202, r.text
+    assert r.json()["mmproj_file"] == "mmproj-F16.gguf"
+    assert fake_run_pull[0]["mmproj_file"] == "mmproj-F16.gguf"
+
+
 # ── #626: durable pull-job store ────────────────────────────────────────────
 
 
