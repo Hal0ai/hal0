@@ -13,6 +13,96 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+Everything landed on `main` since the v0.8.4b1 cut. The headlines: hal0
+generalizes beyond the Strix Halo iGPU (experimental CUDA + multi-GPU
+pinning), companion services get one management surface (registry +
+`/api/services` + mDNS + dashboard page), the settings-completeness plan
+finishes (phases 3–5 + an Advanced section with full `hal0.toml` parity),
+and seed profiles go virtual with dedicated embed/rerank lanes and a
+proper model×profile×slot MTP decision (#1045).
+
+### Added
+- **GPU generalization — experimental CUDA + multi-GPU.** A dedicated
+  `cuda` seed profile (upstream `llama.cpp:server-cuda` image, preferred
+  by the installer when NVIDIA CDI is present, Vulkan fallback otherwise)
+  and per-slot `gpu_index` pinning for multi-GPU hosts. Ships alongside
+  dead-path retirement and **multi-file pulls** (a model's mmproj/vision
+  sidecars download with the main GGUF in one job).
+- **Unified companion-service management (#1037).** A code-level service
+  registry (Open WebUI, ComfyUI, Hermes, Hindsight, n8n), `GET
+  /api/services` + allow-listed lifecycle actions, **mDNS advertisement**
+  of addon services (`hal0-addon-<id>.service` files, avahi inotify
+  pickup, `HAL0_HOSTNAME` precedence), and a dashboard **Services** page
+  (cards, logs drawer, ComfyUI queue drawer, fail-soft probes).
+- **Settings completeness, phases 3–5.** TTS request defaults
+  (`default_voice` / `default_speed` / `default_response_format`) seeded
+  into `/v1/audio/speech` plus a live voice list proxied from the `tts`
+  slot (#1038); a Settings **NPU** section (#1040); ComfyUI
+  `idle_restore_minutes` hot-reload (no API restart) and a workflow
+  listing endpoint + dynamic strip (#1043).
+- **Advanced settings section.** Full `hal0.toml` parity in the dashboard
+  (every config key editable, grouped, with descriptions), a memory-graph
+  panel, and an API restart button; an AWS secret-pair preset and a
+  reload-config-from-disk button; previously-inert config keys wired
+  through, and the memory schema aligned to the Hindsight era.
+- **Dedicated `embed` / `rerank` GPU profiles (#1045).** Containerised
+  embed/rerank slots previously never received `--embedding` /
+  `--reranking` (only the native path injected them) and had to be
+  hand-wired via `extra_args`. New seed profiles bake the serving flags
+  plus `-ub 8192`; both `derive_profile` and the picker/apply resolver
+  route embed→`embed`, rerank→`rerank` on `gpu-rocm`.
+- **Catalog UX finish (#1042).** Sort / tag-filter / quant chip wiring in
+  the Models view, and a chat-template pick at pull time.
+- **Canonical device/backend taxonomy.** One enum source at `GET
+  /api/meta/enums` (ETag/cache-friendly), consumed by the dashboard —
+  plus stacks fixes and dialog guards that rode the same change.
+
+### Changed
+- **Seed profiles are virtual (#1045, PS-2).** Seeds live in code
+  (`SEED_PROFILES`) and are overlaid on every load — never materialized
+  to `/etc/hal0/profiles.toml` (which is now comment-only; operator
+  profiles persist as before). Previously the loader only injected
+  *missing* seeds, so a re-tuned seed never reached an existing install;
+  `ensure_seed_profiles()` now prunes stale on-disk seeds to self-heal
+  old installs. Seeds were already immutable via the API, so no operator
+  data is lost.
+- **MTP is now a model × profile × slot decision (#1045).** Model
+  eligibility (`mtp` registry tag or name marker) × profile opt-in
+  (`profile.mtp` now means "enable for eligible models", not "append the
+  bundle regardless") × a tri-state per-slot override (Auto/On/Off, Auto
+  = profile opts in AND model eligible). A non-MTP model on an MTP
+  profile no longer launches with dead `--spec-draft-*` flags, and the
+  draft device tracks the profile backend (ROCm/Vulkan/CUDA) instead of
+  hardcoded ROCm. The slot drawer swaps the binary MTP pill for the
+  tri-state control with a live "Auto · active/inactive" hint; stack
+  editor rows default to Auto.
+
+### Fixed
+- **Upstream-advertised models are clearly identified as remote (#1035)**,
+  not local, across the dashboard model surfaces.
+- **Operator Board (#1032).** Hermes-contract repairs, honest UI state,
+  and platform-assistant chat.
+- **Slot pipeline hardening.** API boundary validation, backend-switch
+  completion, manager guards, and guarded stack writes; a single argv
+  assembler with model-defaults wiring and provider fixes; normalizer
+  bug, dead-code removal, and a11y quick wins in the slot drawers.
+- **Settings polish.** Truthful apply plan, safe engine picker, secret
+  descriptions, rollback behaviour, and palette ghosts.
+
+### Docs
+- README re-baselined to v0.8.4b1 + full accuracy pass (#1044, #1046):
+  canonical `agent`/`utility` seeded slots, real backend-profile and
+  hardware-tier tables (experimental CUDA row), removed the
+  no-longer-shipped `HAL0_USER` unprivileged mode, added the **Discord**
+  invite (header + Contributing).
+- hal0.dev docs mirror refreshed (#1044): new `operate/services` page,
+  `operate/auth` rewritten to the real ADR-0012 reverse-proxy model (the
+  fictional `--auth=basic` / managed-Caddy docs from 3e056de removed
+  site-wide), plus the full v0.8.x feature-doc sweep.
+- Handoffs: platform reliability/config/UI review (#1010), ONNX / Strix
+  Halo NPU research and integration plan (#1034), llama.cpp seed-profile
+  evaluation + consolidation proposal (#1041).
+
 ## [v0.8.4b1] — 2026-07-04
 
 A **models, logs & memory** follow-up to v0.8.3b1. Models can now carry a
