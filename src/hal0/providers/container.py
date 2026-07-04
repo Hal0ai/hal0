@@ -14,7 +14,12 @@ Container lifecycle → systemd template unit ``hal0-slot@<name>.service``:
 
 The slot's port is loopback-published (``-p 127.0.0.1:<port>:<port>``) so
 the dispatcher can proxy it via a ``kind="remote"`` upstream entry without
-exposing it on the LAN.
+exposing it on the LAN.  The publish host is configurable via
+``[slots].publish_host`` (``SlotsConfig.publish_host``) — an operator can set
+it to ``0.0.0.0`` to reach raw slot ports directly over the LAN
+(``http://<host>.local:<port>``); the loopback default is retained for every
+install that doesn't opt in.  ``load_sync`` reads the live value and passes it
+to :func:`_render_unit_from_plan`; the scalar shims keep the loopback default.
 
 Mount design (IDENTICAL path, design doc §2 gotcha):
   /mnt/ai-models → /mnt/ai-models:ro
@@ -192,6 +197,24 @@ def _container_runtime() -> str:
     )
 
 
+def _slot_publish_host() -> str:
+    """Live ``[slots].publish_host`` — the address slot ports publish on.
+
+    Fail-soft to the loopback default: a malformed/unreadable hal0.toml must
+    never widen the bind (fail-open to 0.0.0.0) nor block a slot from
+    starting. Read fresh each render so a Settings change lands on the next
+    slot (re)start without an api process bounce.
+    """
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        host = (load_hal0_config().slots.publish_host or "").strip()
+        return host or "127.0.0.1"
+    except Exception:
+        log.warning("container.publish_host_load_failed", exc_info=True)
+        return "127.0.0.1"
+
+
 # Health-check tuning: poll GET /health on the slot port.
 _HEALTH_POLL_INTERVAL_S = 2.0
 _HEALTH_TIMEOUT_S = 180.0
@@ -256,6 +279,7 @@ def _render_unit_from_plan(
     plan: RuntimeLaunchPlan,
     *,
     runtime_bin: str | None = None,
+    publish_host: str = "127.0.0.1",
 ) -> str:
     """Render a complete self-contained systemd unit from a launch plan.
 
@@ -274,6 +298,11 @@ def _render_unit_from_plan(
         runtime_bin: Override the container runtime binary.  Defaults to
                      :func:`_container_runtime`.  Pass explicitly in tests to
                      avoid requiring podman/docker in the test environment.
+        publish_host: Host address the slot port is published on
+                     (``--publish=<host>:<port>:<port>``).  Defaults to
+                     ``127.0.0.1`` (loopback-only); ``load_sync`` overrides it
+                     with the live ``[slots].publish_host`` so an operator can
+                     opt into ``0.0.0.0`` (LAN-exposed) or a specific address.
     """
     runtime = runtime_bin or _container_runtime()
     container_name = f"hal0-slot-{slot_name}"
@@ -315,11 +344,13 @@ def _render_unit_from_plan(
         argv.append(f"--volume={Mount.coerce(mount).render()}")
     for k, v in plan.env.items():
         argv.append(f"--env={k}={v}")
-    # Loopback publish derived from plan.port (declarative — plans no longer
-    # hand-roll "-p ..." in extra_args).  Skipped under host networking where
+    # Publish derived from plan.port (declarative — plans no longer
+    # hand-roll "-p ..." in extra_args).  ``publish_host`` defaults to
+    # loopback (127.0.0.1); an operator can widen it to 0.0.0.0 / a specific
+    # address via [slots].publish_host.  Skipped under host networking where
     # port publishing is meaningless.
     if plan.port and plan.network_mode != "host":
-        argv.append(f"--publish=127.0.0.1:{plan.port}:{plan.port}")
+        argv.append(f"--publish={publish_host}:{plan.port}:{plan.port}")
     # Healthcheck override (#684): the toolbox image bakes a HEALTHCHECK that
     # probes a hardcoded port, but a slot runs its server on its own port — so
     # the image check fails forever and `podman ps` shows a permanent
@@ -1020,6 +1051,7 @@ class ContainerProvider(Provider):
             slot_name,
             plan,
             runtime_bin=_container_runtime(),
+            publish_host=_slot_publish_host(),
         )
         self._write_and_start_unit(slot_name, unit_text)
 

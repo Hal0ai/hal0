@@ -1534,7 +1534,7 @@ function GeneralSection() {
 const ADV_GROUPS = [
   { title: "Slots runtime", sub: "hal0.toml [slots]", keys: [
     "slots.max_slots", "slots.port_range_start", "slots.port_range_end",
-    "slots.idle_timeout_s", "slots.evict_pressure_mb",
+    "slots.idle_timeout_s", "slots.evict_pressure_mb", "slots.publish_host",
   ]},
   { title: "Dispatcher", sub: "hal0.toml [dispatcher]", keys: [
     "dispatcher.prefetch_timeout_s", "dispatcher.prefetch_parallel_cap",
@@ -1557,6 +1557,10 @@ const ADV_OPTIONS = {
 };
 // Overrides replace the schema description where it's stale or missing.
 const ADV_DESC_OVERRIDE = {
+  "slots.publish_host":
+    "Host address slot ports publish on. 127.0.0.1 = loopback-only (default, safe): slots are reachable only via hal0-api/Traefik. " +
+    "0.0.0.0 exposes every slot's raw port directly on your LAN (e.g. http://<host>.local:<port>), bypassing the reverse-proxy front door — " +
+    "only widen this on a trusted network. A specific interface IP binds just that address. Applies on the next slot restart.",
   "memory.engine":
     "Active memory engine, applied on the next hal0-api restart. hindsight is the durable default. " +
     "pgvector is an in-memory, NON-DURABLE fallback — existing memories are not migrated and won't be visible while selected.",

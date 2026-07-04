@@ -509,6 +509,21 @@ class TestContainerSpec:
         unit = _render_unit_from_plan("test-slot", spec, runtime_bin=_TEST_RUNTIME)
         assert "--publish=127.0.0.1:8095:8095" in unit
 
+    def test_publish_host_default_is_loopback(self) -> None:
+        """Absent a publish_host override the renderer keeps the safe default."""
+        spec = self._build_spec()
+        unit = _render_unit_from_plan("test-slot", spec, runtime_bin=_TEST_RUNTIME)
+        assert "--publish=127.0.0.1:8095:8095" in unit
+
+    def test_publish_host_override_widens_bind(self) -> None:
+        """[slots].publish_host=0.0.0.0 → the slot publishes on all interfaces."""
+        spec = self._build_spec()
+        unit = _render_unit_from_plan(
+            "test-slot", spec, runtime_bin=_TEST_RUNTIME, publish_host="0.0.0.0"
+        )
+        assert "--publish=0.0.0.0:8095:8095" in unit
+        assert "--publish=127.0.0.1:8095:8095" not in unit
+
     def test_network_mode_empty(self) -> None:
         """network_mode must be empty (not 'host') so loopback publish is used."""
         spec = self._build_spec()
