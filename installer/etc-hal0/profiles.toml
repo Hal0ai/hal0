@@ -1,131 +1,30 @@
-# hal0 profile catalog — bench-tuned backend templates.
-# A profile = (image, flags, mtp, device_class, backend).  Slots reference a
-# profile by name; the profile supplies the container image + flag bundle and
-# the GPU runtime (backend = rocm|vulkan).  Slugs are backend-agnostic workload
-# names — the `backend` field, not the slug, carries the ROCm/Vulkan choice.
-# See the container-runtime design doc (§1) for the layering rationale.
+# hal0 profile catalog — OPERATOR CUSTOM PROFILES ONLY.
 #
-# NOTE: this file is OPTIONAL.  hal0-api returns these seed profiles as built-in
-# defaults when the file is absent (SEED_PROFILES in schema.py).  When the file
-# IS present, load_profiles_config additively merges any SEED_PROFILES entries
-# missing from the file without clobbering operator-customised profiles (#838).
-# Keep this file in sync with SEED_PROFILES to avoid silent drift.
-
-[profile.rocm]
-# Standard ROCm GPU template (ace-saber A3B MoE etc). ~52.8 tok/s gen, 131k ctx.
-# Broad-compatibility "std" — must-have defaults (-fa, KV quant, --no-mmap).
-image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
-mtp          = false
-device_class = "gpu"
-backend      = "rocm"
-intent       = "MoE agents"
-quant        = "FP4"
-
-[profile.rocm-dnse]
-# ROCm + MTP draft-mtp, q8 KV (dense chat, qwopus 27B). Bench-tuned throughput
-# flags (-b 8192/-ub 2048, 16+32 threads, poll). KV is q8_0 (k+v): near-lossless
-# (<0.1% PPL vs f16) where q4 V-cache measurably hurts tool-use on high-GQA Qwen;
-# symmetric q8 keeps the fast fused flash-attn kernel on AMD HIP (asymmetric K!=V
-# silently falls back); ~+4 GB at 164k ctx is trivial on 128 GB unified.
-image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1"
-mtp          = true
-device_class = "gpu"
-backend      = "rocm"
-intent       = "Dense + MTP · q8 KV"
-quant        = "FP4"
-
-[profile.rocm-moe]
-# ROCm + MTP draft-mtp for MoE (crown-halo / ace-saber 35B-A3B). Bench-tuned:
-# q8 KV, -b 8192/-ub 2048, 16+32 threads, poll, jinja. q4-vs-f16 was within noise
-# on crown-halo (decode is MoE/MTP-bound, not KV-bound), so q8 buys quality for
-# ~free — symmetric q8 keeps the fused FA path on AMD and avoids q4's ~37% decode
-# slowdown at long ctx. Re-bench tok/s after switching.
-image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
-flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1 --jinja"
-mtp          = true
-device_class = "gpu"
-backend      = "rocm"
-intent       = "MoE + MTP · q8 KV"
-quant        = "FP4"
-
-[profile.vulkan]
-# Standard Vulkan GPU template (fallback / non-FP4 models). Vulkan-radv, no FP4/MTP.
-image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
-flags        = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
-mtp          = false
-device_class = "gpu"
-backend      = "vulkan"
-intent       = "Vulkan std · fallback"
-quant        = "Q4_K_M"
-
-[profile.cuda]
-# NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. UPSTREAM llama.cpp
-# image (not the AMD Strix-Halo toolbox family); flags mirror the vulkan
-# profile's conservative structure. Requires nvidia-container-toolkit (CDI)
-# for GPU passthrough.
-image        = "ghcr.io/ggml-org/llama.cpp:server-cuda"
-flags        = "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap"
-mtp          = false
-device_class = "gpu"
-backend      = "cuda"
-intent       = "CUDA · NVIDIA (upstream llama.cpp, experimental)"
-quant        = "Q4_K_M"
-
-[profile.flm]
-# NPU LLM/trio slot (FastFlowLM). Flags are built by FLMProvider.container_spec,
-# not by this profile — image pin only. No backend (device_class drives display).
-image        = "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43"
-flags        = ""
-mtp          = false
-device_class = "npu"
-intent       = "FLM NPU inference"
-quant        = "W4ABF16"
-
-[profile.tts]
-# CPU TTS slot (kokoro-onnx). No GPU devices. Flags feed kokoro_server.py;
-# --model_path points at the shared model store so no download on start.
-image        = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
-flags        = "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx"
-mtp          = false
-device_class = "cpu"
-intent       = "TTS · Kokoro"
-quant        = ""
-
-[profile.tts-qwen3]
-# GPU TTS slot (Qwen3-TTS CustomVoice, multilingual). ROCm on native gfx1151
-# (~2.1x realtime). The GPU sibling of the cpu `tts`/kokoro profile — runtime
-# family qwen3tts routes it to Qwen3TTSProvider (GPU passthrough + /cache).
-# Flags bake --model_path + default voice/language; the model store is mounted
-# read-only so there is no download on start. Do NOT add HSA_OVERRIDE here —
-# native gfx1151 is ~4.5x faster than the gfx1100 override.
-image        = "ghcr.io/hal0ai/hal0-toolbox-qwen3tts:v1"
-flags        = "--model_path /mnt/ai-models/local/qwen3-tts/Qwen3-TTS-12Hz-1.7B-CustomVoice --default_voice Ryan --default_language Auto"
-mtp          = false
-device_class = "gpu"
-backend      = "rocm"
-intent       = "TTS · Qwen3 (multilingual GPU)"
-quant        = "BF16"
-
-[profile.comfyui]
-# Image-gen slot (ComfyUI on ROCm, kyuz0 Strix Halo build). Exclusive-GPU:
-# the GpuArbiter stops LLM GPU slots while img runs (Phase D, #599).
-image        = "docker.io/kyuz0/amd-strix-halo-comfyui@sha256:0066678ae9043f69a1c8c7699e70626ceffd35c1a8ca03227a05640ad0241ed2"
-flags        = "--disable-mmap --bf16-vae --cache-none"
-mtp          = false
-device_class = "img"
-intent       = "Image generation"
-quant        = ""
-
-[profile.cpu-llm]
-# CPU-only LLM template (#834). The Vulkan toolbox image runs llama-server in
-# CPU mode when no GPU devices are passed to the container (GGML_CPU auto-
-# selected). No backend → passes the #807 device/profile coherence check on a
-# CPU-only host. Seeded so first-run on a GPU-less box gets a coherent Main slot.
-image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server"
-flags        = "--threads 4 --threads-batch 8 -b 256 -ub 256 --parallel 1 --no-mmap"
-mtp          = false
-device_class = "cpu"
-intent       = "CPU-only LLM · llama-server"
-quant        = "Q4_K_M"
+# Seed profiles are VIRTUAL: the built-in catalog (rocm / rocm-dnse / rocm-moe /
+# vulkan / cuda / embed / rerank / flm / tts / tts-qwen3 / cpu-llm / comfyui)
+# lives in code (SEED_PROFILES in hal0.config.schema) and is overlaid on every
+# load. It is intentionally NOT materialised here so that a re-tuned seed — new
+# flags, a bumped toolbox image — reaches every install on upgrade instead of
+# being frozen by a stale on-disk copy. hal0-api serves the seeds from code
+# whether or not this file exists.
+#
+# What this file is for: your OWN profiles. Add `[profile.<name>]` tables below
+# (or clone a seed from the dashboard, which writes here). Seed profiles are
+# immutable — to customise one, clone it under a new name. hal0 persists only
+# non-seed profiles to /etc/hal0/profiles.toml; any seed key written here is
+# ignored in favour of the code definition and pruned on the next save/upgrade.
+#
+# A profile = (image, flags, mtp, device_class, backend). Slots reference a
+# profile by name; the profile supplies the container image + flag bundle and
+# the GPU runtime (backend = rocm|vulkan|cuda). See the container-runtime design
+# doc (§1) for the layering rationale.
+#
+# Example — a custom ROCm profile cloned from `rocm-moe`:
+#
+#   [profile.my-moe]
+#   image        = "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server"
+#   flags        = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --no-mmap --jinja"
+#   mtp          = true
+#   device_class = "gpu"
+#   backend      = "rocm"
+#   cloned_from  = "rocm-moe"

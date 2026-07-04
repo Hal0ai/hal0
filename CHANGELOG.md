@@ -45,12 +45,14 @@ proper model×profile×slot MTP decision (#1045).
   panel, and an API restart button; an AWS secret-pair preset and a
   reload-config-from-disk button; previously-inert config keys wired
   through, and the memory schema aligned to the Hindsight era.
-- **Dedicated `embed` / `rerank` GPU profiles (#1045).** Containerised
-  embed/rerank slots previously never received `--embedding` /
-  `--reranking` (only the native path injected them) and had to be
-  hand-wired via `extra_args`. New seed profiles bake the serving flags
-  plus `-ub 8192`; both `derive_profile` and the picker/apply resolver
-  route embed→`embed`, rerank→`rerank` on `gpu-rocm`.
+- **Dedicated `embed` and `rerank` seed profiles (#1045).** GPU llama-server
+  templates that bake in the serving flags (`--embedding` / `--reranking`,
+  `-ub 8192` so a full input fits one physical batch) so an embedding or
+  reranking slot no longer hand-wires them in `extra_args`. On a `gpu-rocm`
+  box, embed/rerank capabilities derive onto these lanes automatically
+  (install path and picker/apply fit path both updated); Vulkan/CPU boxes
+  keep falling back to the `vulkan` / `cpu-llm` profile until
+  backend-specific variants ship.
 - **Catalog UX finish (#1042).** Sort / tag-filter / quant chip wiring in
   the Models view, and a chat-template pick at pull time.
 - **Canonical device/backend taxonomy.** One enum source at `GET
@@ -58,14 +60,17 @@ proper model×profile×slot MTP decision (#1045).
   plus stacks fixes and dialog guards that rode the same change.
 
 ### Changed
-- **Seed profiles are virtual (#1045, PS-2).** Seeds live in code
-  (`SEED_PROFILES`) and are overlaid on every load — never materialized
-  to `/etc/hal0/profiles.toml` (which is now comment-only; operator
-  profiles persist as before). Previously the loader only injected
-  *missing* seeds, so a re-tuned seed never reached an existing install;
-  `ensure_seed_profiles()` now prunes stale on-disk seeds to self-heal
-  old installs. Seeds were already immutable via the API, so no operator
-  data is lost.
+- **Seed profiles are now virtual (#1045).** The built-in profile catalog
+  (`SEED_PROFILES`) is overlaid from code on every load and never persisted to
+  `/etc/hal0/profiles.toml`. Previously the installer materialised every seed
+  inline and the loader only injected *missing* seeds, so a re-tuned seed (new
+  flags, a bumped toolbox image) never reached an existing install. Now the code
+  definition always wins: `load_profiles_config` overlays seeds over any on-disk
+  copy, `save_profiles_config` strips seeds before writing, and the updater's
+  `ensure_seed_profiles()` prunes any materialised seeds left by an older
+  install (self-heal on upgrade). Seed profiles remain immutable — clone to
+  customise. Operator (non-seed) profiles are untouched. **Safe upgrade** — no
+  operator data is lost (seeds were never operator-editable through the API).
 - **MTP is now a model × profile × slot decision (#1045).** Model
   eligibility (`mtp` registry tag or name marker) × profile opt-in
   (`profile.mtp` now means "enable for eligible models", not "append the

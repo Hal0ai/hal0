@@ -36,6 +36,38 @@ def test_merge_one_level_deep_keeps_model_siblings() -> None:
     assert after["model"] == {"default": "m", "context_size": 8192}
 
 
+def test_merge_none_deletes_key() -> None:
+    """An explicit ``None`` in updates DELETES the key (TOML has no null).
+
+    This is what lets ``PUT /config {"mtp": null}`` reset a slot to MTP AUTO:
+    the old behaviour merged ``mtp=None`` into the dict and the TOML writer
+    (tomli_w) raised ``TypeError: NoneType is not TOML serializable`` → 500,
+    leaving no API path back to Auto once an override existed.
+    """
+    base = {"mtp": True, "enabled": True}
+    after = merge_slot_config(base, {"mtp": None})
+    assert "mtp" not in after
+    assert after["enabled"] is True
+    # base untouched (copy-safety)
+    assert base["mtp"] is True
+
+
+def test_merge_none_deletes_missing_key_is_noop() -> None:
+    after = merge_slot_config({"enabled": True}, {"mtp": None})
+    assert "mtp" not in after
+    assert after == {"enabled": True}
+
+
+def test_merge_none_deletes_nested_key() -> None:
+    """Same None-deletes rule one level deep: {"server": {"extra_args": null}}
+    removes the sub-key instead of poisoning the TOML writer."""
+    base = {"server": {"extra_args": "-b 512", "env": {"X": "1"}}}
+    after = merge_slot_config(base, {"server": {"extra_args": None}})
+    assert after["server"] == {"env": {"X": "1"}}
+    # base sub-dict untouched (copy-safety)
+    assert base["server"]["extra_args"] == "-b 512"
+
+
 def test_merge_scalars_and_lists_replace_wholesale() -> None:
     base = {"workers": 1, "labels": ["a"]}
     after = merge_slot_config(base, {"workers": 4, "labels": ["b"]})

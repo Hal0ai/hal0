@@ -43,6 +43,7 @@ import os
 import shlex
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ import httpx
 
 from hal0.config.paths import DEFAULT_MODEL_STORE, model_store_root
 from hal0.config.schema import resolve_chat_template, resolve_profile_flags
+from hal0.model_meta import model_is_mtp_eligible
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import (
     gpu_visibility_env,
@@ -105,6 +107,42 @@ def _profile_image_and_flags(profile: Any, mtp_override: bool | None = None) -> 
         if flags is None:
             flags = resolve_profile_flags(profile)
     return str(profile.image), str(flags)
+
+
+def _effective_mtp(slot_mtp: bool | None, profile: Any, model_info: Mapping[str, Any]) -> bool:
+    """Resolve whether MTP speculative decoding is on for this slot launch.
+
+    The three concerns are separated (design: MTP is a model property, not a
+    flag-template one):
+
+    * **slot** decides first — an explicit :attr:`SlotConfig.mtp` (``True`` /
+      ``False``) always wins, so an operator can force MTP on for an untagged
+      model or off for a tagged one.
+    * **AUTO** (``slot_mtp is None``) enables MTP only when the **profile**
+      opts in (``profile.mtp``) AND the **model** actually ships MTP heads
+      (:func:`hal0.model_meta.model_is_mtp_eligible`).
+
+    This is what stops a non-MTP model on an MTP profile (e.g. a plain chat
+    GGUF pinned to ``rocm-moe``) from launching with dead ``--spec-draft-*``
+    flags, without any per-slot wiring for the common case.
+    """
+    if slot_mtp is not None:
+        return bool(slot_mtp)
+    profile_opts_in = bool(getattr(profile, "mtp", False))
+    eligible = model_is_mtp_eligible(model_info)
+    if profile_opts_in and not eligible:
+        # Visible breadcrumb for the silent-auto-off case: an MTP-capable model
+        # that carries neither the registry tag nor a name marker stops
+        # speculating under auto. The fix is tagging the model (or slot
+        # mtp=true); this log is how an operator finds that out.
+        log.info(
+            "mtp.auto_off_model_ineligible",
+            extra={
+                "model": str(model_info.get("_model_key") or model_info.get("path") or ""),
+                "hint": "tag the model 'mtp' or set slot mtp=true to speculate",
+            },
+        )
+    return profile_opts_in and eligible
 
 
 log = logging.getLogger(__name__)
@@ -605,7 +643,9 @@ def _resolve_llama_scalars(
     ``[model].n_gpu_layers`` override, and the ``[server]`` env / extra_args.
     Returning one dict means the two paths can never drift.
     """
-    image, flags_str = _profile_image_and_flags(profile, slot_cfg.get("mtp"))
+    image, flags_str = _profile_image_and_flags(
+        profile, _effective_mtp(slot_cfg.get("mtp"), profile, model_info)
+    )
 
     model_table = slot_cfg.get("model") or {}
     if not isinstance(model_table, dict):

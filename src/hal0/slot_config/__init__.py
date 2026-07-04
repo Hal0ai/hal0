@@ -156,6 +156,12 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
         so sibling ``[model]`` keys like ``default``/``context_size``
         survive); every other key (scalars, lists, dict-vs-scalar) replaces
         wholesale — value wins,
+      - treats an explicit ``None`` value in ``updates`` as **delete the key**
+        (top level and one level deep). TOML has no null — ``tomli_w`` raises
+        ``TypeError`` on a ``None`` value, so "set to null" could never be
+        persisted anyway; absent IS null on this surface. This is what lets
+        ``PUT /config {"mtp": null}`` return a slot to MTP AUTO (the tri-state
+        default) instead of 500ing in the TOML writer,
       - folds the legacy ``[model].ctx_size`` alias into the canonical
         ``context_size`` (#585): a fresh ``ctx_size`` wins over any stale
         ``context_size``, then the alias is dropped so exactly one key
@@ -170,8 +176,14 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
     after = dict(base)
     for key, value in updates.items():
         existing = after.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            after[key] = {**existing, **value}
+        if value is None:
+            # None = delete: remove the key so the TOML writer never sees a
+            # null (tomli_w TypeError). Deleting a missing key is a no-op.
+            after.pop(key, None)
+        elif isinstance(existing, dict) and isinstance(value, dict):
+            sub = {**existing, **value}
+            # Same None-deletes rule one level deep ({"server": {"extra_args": null}}).
+            after[key] = {k: v for k, v in sub.items() if v is not None}
         else:
             after[key] = value
 

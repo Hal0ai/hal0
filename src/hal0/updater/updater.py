@@ -866,26 +866,40 @@ def _cache_dir(version: str) -> Path:
 
 
 def ensure_seed_profiles(*, job_id: str | None = None) -> int:
-    """Additively merge missing SEED_PROFILES into /etc/hal0/profiles.toml.
+    """Prune materialised seed profiles from /etc/hal0/profiles.toml.
 
-    Loads the on-disk profile catalog (or the in-memory seeds when the
-    file is absent), injects any seed keys that are missing, and
-    atomically writes the result back to disk only when the file already
-    exists and new seeds were actually added.  If the file is absent,
-    nothing is written — :func:`load_profiles_config` returns the seeds
-    in-memory and the file is only created by explicit operator action or
-    :func:`save_profiles_config`.
+    Seeds are **virtual** — overlaid from code (:data:`SEED_PROFILES`) on every
+    :func:`load_profiles_config` and never persisted (:func:`save_profiles_config`
+    strips them).  Older installers wrote every seed inline, which froze stale
+    seed definitions on upgrade (a re-tuned seed never reached an existing
+    install).  This migration rewrites the on-disk catalog to operator
+    (non-seed) profiles only, so the shipped seed definition is authoritative
+    again on the next load.  If the file is absent nothing is written (the
+    overlay serves the seeds in-memory).
 
-    Operator-customised profiles are never overwritten: the merge is
-    strictly additive — only keys absent from the on-disk catalog are
-    touched (#838).
+    Data-safety (this rewrite is the one destructive step of the virtual-seed
+    design, so it hedges):
+
+    * The pre-prune file is copied to ``profiles.toml.pre-virtual-seeds.bak``
+      once (never overwritten on re-runs), so nothing is unrecoverable.
+    * A seed-named entry whose content DIFFERS from the code seed is **rescued
+      to ``<name>-custom``**, not deleted.  Two real cases: an operator
+      hand-edited a seed table in the TOML (previously honoured by the #838
+      additive merge), or an operator created a profile under a name that only
+      became a seed in a later release (e.g. ``embed``/``rerank``).  Slots
+      keep referencing ``<name>`` (now the code seed) — the rescue preserves
+      the operator's content under the new name and the log says so loudly.
+    * A seed-named entry byte-identical to the code seed is just a stale
+      materialisation — pruned without rescue.
 
     Args:
         job_id: Optional breadcrumb for structured-log tracing.
 
     Returns:
-        Number of seed profiles injected (0 means already up-to-date).
+        Number of materialised seed entries handled (pruned + rescued).
     """
+    import shutil
+
     from hal0.config.loader import _read_toml
     from hal0.config.schema import SEED_PROFILES, ProfileConfig, ProfilesConfig
 
@@ -897,7 +911,7 @@ def ensure_seed_profiles(*, job_id: str | None = None) -> int:
         return 0
 
     # Load the raw on-disk catalog directly so we can detect exactly which
-    # seed keys are missing before deciding whether to write anything.
+    # seed keys are materialised before deciding whether to write anything.
     raw = _read_toml(target)
     try:
         cfg = ProfilesConfig.model_validate(raw)
@@ -907,24 +921,60 @@ def ensure_seed_profiles(*, job_id: str | None = None) -> int:
             details={"path": str(target), "reason": str(exc)},
         ) from exc
 
-    added: list[str] = []
-    for key, seed_raw in SEED_PROFILES.items():
-        if key not in cfg.profile:
-            cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
-            added.append(key)
-
-    if not added:
-        log.info("updater.seed_profiles_noop", job_id=job_id, reason="all seeds present")
+    stale = [key for key in cfg.profile if key in SEED_PROFILES]
+    if not stale:
+        log.info("updater.seed_profiles_noop", job_id=job_id, reason="no materialised seeds")
         return 0
 
-    save_profiles_config(cfg, path=target)
+    # One-time backup before the only destructive rewrite of this migration.
+    backup = target.with_name(target.name + ".pre-virtual-seeds.bak")
+    if not backup.exists():
+        try:
+            shutil.copy2(target, backup)
+            log.info("updater.seed_profiles_backup", job_id=job_id, path=str(backup))
+        except OSError as exc:
+            log.warning("updater.seed_profiles_backup_failed", job_id=job_id, error=str(exc))
+
+    pruned: list[str] = []
+    rescued: dict[str, str] = {}
+    for key in stale:
+        entry = cfg.profile[key]
+        seed = ProfileConfig.model_validate(SEED_PROFILES[key])
+        if entry == seed:
+            # Byte-identical stale materialisation — safe to drop.
+            pruned.append(key)
+            continue
+        # Divergent content: operator-authored (hand-edit, or a name that only
+        # later became a seed). Rescue under <name>-custom (suffix until free).
+        rescue = f"{key}-custom"
+        n = 2
+        while rescue in cfg.profile or rescue in SEED_PROFILES:
+            rescue = f"{key}-custom{n}"
+            n += 1
+        cfg.profile[rescue] = entry
+        rescued[key] = rescue
+
+    save_profiles_config(cfg, path=target)  # strips all seed-named keys
     log.info(
-        "updater.seed_profiles_merged",
+        "updater.seed_profiles_pruned",
         job_id=job_id,
-        added=added,
-        count=len(added),
+        pruned=pruned,
+        rescued=rescued,
+        count=len(stale),
+        backup=str(backup),
     )
-    return len(added)
+    if rescued:
+        log.warning(
+            "updater.seed_profiles_rescued_customs",
+            job_id=job_id,
+            rescued=rescued,
+            note=(
+                "profiles with seed names but non-seed content were renamed; "
+                "slots referencing the original name now use the built-in seed — "
+                "repoint them at the -custom profile if the old behaviour is wanted"
+            ),
+        )
+    return len(stale)
 
 
 # ── Updater class ──────────────────────────────────────────────────────────────
@@ -1154,18 +1204,20 @@ class Updater:
                 details={**exc.details, "version": target_version},
             ) from exc
 
-        # Step 7b: additive seed-profile merge — inject any new SEED_PROFILES
-        # entries into /etc/hal0/profiles.toml without clobbering operator edits.
-        # Runs after migrations so the schema is stable before touching profiles.
+        # Step 7b: virtual-seed migration — prune any materialised seed profiles
+        # from /etc/hal0/profiles.toml (older installs wrote them inline, which
+        # froze stale definitions) so the code overlay wins. Operator edits are
+        # untouched. Runs after migrations so the schema is stable first.
         try:
             await asyncio.to_thread(ensure_seed_profiles, job_id=self.job_id)
         except Exception as exc:
             log.warning(
-                "updater.seed_profiles_merge_failed",
+                "updater.seed_profiles_prune_failed",
                 job_id=self.job_id,
                 error=str(exc),
             )
-            # Non-fatal: a missing seed profile is cosmetic; don't abort the update.
+            # Non-fatal: a lingering materialised seed is harmless (the overlay
+            # overwrites it on load); don't abort the update.
 
         # Step 8 + 9: atomic symlink swap + record previous.
         link = _current_symlink()

@@ -43,8 +43,14 @@ def test_chat_on_vulkan_only_box_picks_vulkan():
     assert derive_profile("chat", "gpu-vulkan") == "vulkan"
 
 
-def test_embed_on_rocm_box_is_rocm_not_mtp():
-    assert derive_profile("embed", "gpu-rocm") == "rocm"
+def test_embed_on_rocm_box_uses_embed_profile():
+    # Embeddings take the dedicated GPU embed profile (llama-server --embedding),
+    # never the chat-tuned plain `rocm` and never the MTP profile.
+    assert derive_profile("embed", "gpu-rocm") == "embed"
+
+
+def test_rerank_on_rocm_box_uses_rerank_profile():
+    assert derive_profile("rerank", "gpu-rocm") == "rerank"
 
 
 def test_npu_chat_lane_requires_present_and_optin():
@@ -72,7 +78,7 @@ def test_embed_on_npu_box_derives_to_gpu_not_npu():
     never to the NPU (design 2026-06-15)."""
     hw = _hw(npu=True, compute=True)
     assert derive_device("embed", hw, npu_opt_in=True) == "gpu-rocm"
-    assert derive_profile("embed", "gpu-rocm") == "rocm"
+    assert derive_profile("embed", "gpu-rocm") == "embed"
 
 
 def test_npu_takes_utility_when_present_and_optin():

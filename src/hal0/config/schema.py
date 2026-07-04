@@ -381,9 +381,11 @@ class SlotConfig(BaseModel):
         default=None,
         description=(
             "Per-slot MTP (multi-token-prediction speculative decoding) override. "
-            "true → force on; false → force off; None → inherit the profile's mtp. "
-            "Only effective on rocmfp4 profiles with an MTP-capable model. "
-            "See resolve_profile_flags and MTP_FLAG_BUNDLE."
+            "true → force on; false → force off; None → AUTO. Auto enables MTP only "
+            "when the profile opts in (profile.mtp) AND the model actually ships MTP "
+            "heads (registry `mtp` tag or an MTP name marker), so a non-MTP model on "
+            "an MTP profile no longer launches with dead --spec-draft-* flags. "
+            "See providers.container._effective_mtp and build_mtp_flag_bundle."
         ),
     )
     chat_template: str | None = Field(
@@ -773,24 +775,44 @@ class ProvidersConfig(BaseModel):
 
 # ── ProfileConfig + ProfilesConfig ────────────────────────────────────────────
 
-#: MTP draft-speculation flag bundle, bench-tuned.  Appended verbatim after
-#: profile.flags when ``mtp=true``.  Keep in sync with the profiles.toml seed
-#: and the bench doc (hal0-container-bench-2026-06-08.md).
-MTP_FLAG_BUNDLE = (
-    "--spec-type draft-mtp"
-    " --spec-draft-device ROCm0"
-    " --spec-draft-ngl all"
-    " --spec-draft-n-max 4"
-    " --spec-draft-n-min 0"
-    " --spec-draft-p-min 0.0"
-    " --spec-draft-p-split 0.10"
-    " --spec-draft-type-k q8_0"
-    " --spec-draft-type-v q8_0"
-    " --spec-draft-threads 16"
-    " --spec-draft-threads-batch 32"
-    " --spec-draft-poll 1"
-    " --spec-draft-poll-batch 1"
-)
+#: MTP draft-speculation draft device, per profile backend.  The old bundle
+#: hardcoded ``ROCm0``, so a Vulkan/CUDA profile with MTP on drafted on a ROCm
+#: device.  Unknown / non-GPU / ``None`` backends keep the historical ``ROCm0``
+#: default (byte-identical to the old constant).
+_MTP_DRAFT_DEVICE: dict[str, str] = {"rocm": "ROCm0", "vulkan": "Vulkan0", "cuda": "CUDA0"}
+
+
+def build_mtp_flag_bundle(backend: str | None) -> str:
+    """Bench-tuned MTP draft-speculation flag bundle, with the draft device
+    derived from *backend*.
+
+    Appended after ``profile.flags`` when MTP is effective (see
+    :func:`resolve_profile_flags`).  Every ``--spec-draft-*`` value here is a
+    DEFAULT — a model may override any of them via its registry
+    ``defaults.extra_args`` (``merge_flags`` precedence).  Keep the values in
+    sync with the bench doc (hal0-container-bench-2026-06-08.md).
+    """
+    device = _MTP_DRAFT_DEVICE.get((backend or "").lower(), "ROCm0")
+    return (
+        "--spec-type draft-mtp"
+        f" --spec-draft-device {device}"
+        " --spec-draft-ngl all"
+        " --spec-draft-n-max 4"
+        " --spec-draft-n-min 0"
+        " --spec-draft-p-min 0.0"
+        " --spec-draft-p-split 0.10"
+        " --spec-draft-type-k q8_0"
+        " --spec-draft-type-v q8_0"
+        " --spec-draft-threads 16"
+        " --spec-draft-threads-batch 32"
+        " --spec-draft-poll 1"
+        " --spec-draft-poll-batch 1"
+    )
+
+
+#: Back-compat: the ROCm-flavoured bundle (the seed MTP profiles are all ROCm).
+#: Prefer :func:`build_mtp_flag_bundle` so the draft device tracks the backend.
+MTP_FLAG_BUNDLE = build_mtp_flag_bundle("rocm")
 
 #: Seed profiles shipped with hal0.  Returned by ``load_profiles_config()``
 #: when ``/etc/hal0/profiles.toml`` is absent so ``GET /api/profiles`` is
@@ -851,6 +873,40 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "backend": "cuda",
         "intent": "CUDA · NVIDIA (upstream llama.cpp, experimental)",
         "quant": "Q4_K_M",
+    },
+    "embed": {
+        # GPU embedding template (llama-server --embedding). Serves
+        # /v1/embeddings for Qwen3-Embedding / nomic / bge GGUFs. -ub must
+        # cover the longest single input: pooled embeddings run the whole
+        # sequence in ONE physical ubatch, so -ub 8192 (== -b) matches the
+        # 8k-token models and larger inputs would truncate/fail on a smaller
+        # ubatch (llama.cpp #6263/#11105). Pooling is left to GGUF metadata
+        # (Qwen3-Embedding pins --pooling last via its model defaults); no KV
+        # quant — meaningless for a single-pass encoder. GPU because these
+        # tiny encoders are prefill-bound and cost ~nothing in the 128 GB pool.
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "flags": "--embedding -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "Embeddings · GPU",
+        "quant": "",
+    },
+    "rerank": {
+        # GPU reranker template (llama-server --reranking → /v1/rerank, implies
+        # embedding-mode + rank pooling). Sized for bge-reranker-v2-m3
+        # (8192-token query+doc pairs): -ub 8192 must cover the longest pair or
+        # the request truncates. MUST be a SEPARATE instance from `embed` —
+        # combining --embedding and --reranking on one server yields all-zero
+        # scores (llama.cpp #20085). For parallel scoring raise ctx via the
+        # slot (-c 65536 --parallel 8 = n_seq x 8192, ggerganov's PR #9510).
+        "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
+        "flags": "--reranking -ngl 999 -fa on -b 8192 -ub 8192 --no-mmap",
+        "mtp": False,
+        "device_class": "gpu",
+        "backend": "rocm",
+        "intent": "Reranking · GPU",
+        "quant": "",
     },
     "flm": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-flm:0.9.43",
@@ -1357,7 +1413,8 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
         # shares argv's tokenizer + short/long alias table.
         from hal0.slots.argv import merge_flags
 
-        return merge_flags(MTP_FLAG_BUNDLE, base)
+        bundle = build_mtp_flag_bundle(getattr(profile, "backend", None))
+        return merge_flags(bundle, base)
     return base
 
 

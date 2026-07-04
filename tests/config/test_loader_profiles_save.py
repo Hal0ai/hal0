@@ -23,10 +23,12 @@ class TestSaveProfilesConfig:
         save_profiles_config(catalog)
         reloaded = load_profiles_config()
         assert "my-custom" in reloaded.profile
-        # seeds survive — save must write full catalog
+        # seeds survive the round-trip — they are re-overlaid from code on load
+        # (they are NOT written to disk; see test_save_omits_virtual_seeds).
         assert set(SEED_PROFILES) <= set(reloaded.profile)
 
-    def test_save_writes_full_catalog_atomically(self, tmp_hal0_home: str) -> None:
+    def test_save_omits_virtual_seeds(self, tmp_hal0_home: str) -> None:
+        """Seeds are virtual: save persists only operator (non-seed) profiles."""
         catalog = load_profiles_config()
         catalog.profile["extra"] = ProfileConfig(image="ghcr.io/a/b:c")
         save_profiles_config(catalog)
@@ -40,8 +42,12 @@ class TestSaveProfilesConfig:
 
         # Validates as ProfilesConfig
         parsed = ProfilesConfig.model_validate(raw)
+        # The operator profile is persisted…
         assert "extra" in parsed.profile
-        assert set(SEED_PROFILES) <= set(parsed.profile)
+        # …but NOT a single seed profile is materialised on disk.
+        assert set(SEED_PROFILES).isdisjoint(parsed.profile), (
+            "seed profiles must never be written to disk (they overlay from code)"
+        )
 
     def test_save_uses_profiles_toml_path_by_default(self, tmp_hal0_home: str) -> None:
         catalog = load_profiles_config()
@@ -50,13 +56,16 @@ class TestSaveProfilesConfig:
 
     def test_save_accepts_explicit_path(self, tmp_path: Path) -> None:
         catalog = ProfilesConfig.model_validate({"profile": SEED_PROFILES})
+        catalog.profile["mine"] = ProfileConfig(image="ghcr.io/x/mine:1")
         target = tmp_path / "custom_profiles.toml"
         save_profiles_config(catalog, path=target)
         assert target.exists()
         with open(target, "rb") as f:
             raw = tomllib.load(f)
         parsed = ProfilesConfig.model_validate(raw)
-        assert set(parsed.profile.keys()) == set(SEED_PROFILES.keys())
+        # Explicit path honoured; only the operator profile lands on disk —
+        # seeds are virtual and stripped on write.
+        assert set(parsed.profile.keys()) == {"mine"}
 
     def test_save_overwrites_previous_file(self, tmp_hal0_home: str) -> None:
         catalog = load_profiles_config()

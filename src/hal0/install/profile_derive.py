@@ -108,8 +108,18 @@ def derive_profile(capability: str, device: str) -> str:
     GPU-less boxes (device=cpu + profile=vulkan incoherent, #834).
     """
     if device == "gpu-rocm" and capability in ("chat", "coder"):
-        # Dense chat/coder benefit from MTP; embed + others take plain rocm.
+        # Dense chat/coder benefit from MTP; embed/rerank take their own lanes.
         return "rocm-dnse"
+    if device == "gpu-rocm" and capability == "embed":
+        # Embeddings get the dedicated GPU embed profile (llama-server
+        # --embedding, -ub 8192) rather than the chat-tuned plain `rocm` — the
+        # chat KV-quant/batch flags are meaningless for a pooled encoder and it
+        # never emitted --embedding at all on the container path.
+        return "embed"
+    if device == "gpu-rocm" and capability == "rerank":
+        # Rerankers get the dedicated GPU rerank profile (llama-server
+        # --reranking → /v1/rerank); MUST stay a separate instance from embed.
+        return "rerank"
     if device == "cpu" and capability == "tts":
         # ``tts`` stays on the kokoro/CPU profile; everything else on CPU takes
         # the CPU-coherent llama-server profile from the base table below.

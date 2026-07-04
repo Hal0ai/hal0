@@ -765,8 +765,13 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         install -m 0644 "${BENCH_SRC}/config.sh"                "${LIB_DIR}/bench/config.sh"
         install -m 0755 "${BENCH_SRC}/run_benchmarks.sh"        "${LIB_DIR}/bench/run_benchmarks.sh"
         install -m 0755 "${BENCH_SRC}/generate_results_json.py" "${LIB_DIR}/bench/generate_results_json.py"
+        # Profile-matrix orchestrator (seam-driven Tier A) + server-level A/B
+        # harness (Tier B: MTP/spec, cache-reuse, embed/rerank — hits hal0-api
+        # + slot ports as the hal0 user, no sudo needed).
+        install -m 0755 "${BENCH_SRC}/profile-matrix.sh"        "${LIB_DIR}/bench/profile-matrix.sh"
+        install -m 0755 "${BENCH_SRC}/server_ab.py"             "${LIB_DIR}/bench/server_ab.py"
         install -m 0644 "${BENCH_SRC}/README.md"                "${LIB_DIR}/bench/README.md"
-        install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs"
+        install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" "${VAR_DIR}/benchmarks/server-ab"
         chown -R hal0:hal0 "${VAR_DIR}/benchmarks" 2>/dev/null || true
         chmod 2775 "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" 2>/dev/null || true
         info "wrote ${LIB_DIR}/bench + ${VAR_DIR}/benchmarks"
@@ -1084,25 +1089,26 @@ for seed_slot in npu tts rerank utility img; do
     fi
 done
 
-# ── profiles.toml additive seed merge (A10b, #838) ────────────────────────────
-# If /etc/hal0/profiles.toml already exists (created by a prior install or a
-# dashboard profile edit), inject any SEED_PROFILES entries that are MISSING
-# from it — without clobbering operator-customised profiles (additive only).
-# On a fresh install the file does not yet exist; load_profiles_config returns
-# the seeds in-memory on every call and no write is needed until the operator
-# saves a custom profile via the dashboard.
+# ── profiles.toml virtual-seed migration ──────────────────────────────────────
+# Seeds are virtual: the built-in profile catalog lives in code (SEED_PROFILES)
+# and is overlaid on every load, so a re-tuned seed reaches this install with no
+# on-disk change. Older installs materialised every seed into profiles.toml,
+# which froze stale definitions on upgrade; if such a file exists, prune those
+# materialised seeds so the code definition wins. Operator (non-seed) profiles
+# are left untouched. On a fresh install the file does not exist and the seeds
+# are served in-memory until the operator saves a custom profile.
 PROFILES_TOML="${ETC_DIR}/profiles.toml"
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    info "dev mode — skipping profiles.toml seed merge (no system writes)"
+    info "dev mode — skipping profiles.toml seed migration (no system writes)"
 elif [[ -f "${PROFILES_TOML}" ]]; then
-    info "profiles.toml exists — merging any missing seed profiles (additive, #838)"
+    info "profiles.toml exists — pruning any materialised seed profiles (seeds are virtual)"
     "${VENV_DIR}/bin/python" - <<'PYEOF'
 from hal0.updater.updater import ensure_seed_profiles
 n = ensure_seed_profiles()
 if n:
-    print(f"  seeded {n} new profile(s) into /etc/hal0/profiles.toml")
+    print(f"  pruned {n} materialised seed profile(s) from /etc/hal0/profiles.toml")
 else:
-    print("  profiles.toml already contains all seed profiles")
+    print("  profiles.toml holds no materialised seeds (nothing to prune)")
 PYEOF
 else
     info "profiles.toml absent — seeds served in-memory on first request"

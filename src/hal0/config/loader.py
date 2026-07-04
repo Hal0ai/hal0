@@ -393,10 +393,10 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
 
     Returns a :class:`ProfilesConfig` seeded with the built-in bench
     profiles when the file is absent so ``GET /api/profiles`` is always
-    populated on a fresh install.  When the file *is* present, any
-    SEED_PROFILES entries whose keys are **missing** from the on-disk
-    catalog are injected additively — existing operator-customised profiles
-    are never overwritten (additive-merge semantics, #838).
+    populated on a fresh install.  Seed profiles are **virtual**: when the
+    file *is* present, every seed key is overlaid from code (SEED_PROFILES),
+    overwriting any on-disk copy, so a re-tuned seed always reaches the
+    install; operator (non-seed) profiles on disk are returned unchanged.
 
     Args:
         path: Override path.  If None, uses
@@ -420,28 +420,32 @@ def load_profiles_config(path: Path | None = None) -> ProfilesConfig:
             f"failed to validate profiles.toml at {target}: {exc}",
             details={"path": str(target), "reason": str(exc)},
         ) from exc
-    # Additive merge: inject any seed profiles that are absent from the
-    # on-disk catalog so upgrades pick up newly-added seed profiles without
-    # clobbering operator edits.  Keys already present are left untouched.
+    # Seeds are VIRTUAL: seed profiles are always overlaid from code
+    # (``SEED_PROFILES``) and never trusted from disk.  Older installers
+    # materialised every seed into profiles.toml, so the previous "inject only
+    # missing keys" merge left stale seed definitions frozen on disk — a
+    # re-tuned seed (new flags / bumped image) in a release never reached an
+    # existing install.  Because seed profiles are immutable through the
+    # catalog API (operators clone to customise — see
+    # ``ProfileCatalog._guard_custom``), a seed key on disk is never a
+    # legitimate operator edit, so overwriting it with the code definition
+    # loses nothing.  Non-seed (operator) profiles are left exactly as written.
     for key, seed_raw in SEED_PROFILES.items():
-        if key not in cfg.profile:
-            cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
+        cfg.profile[key] = ProfileConfig.model_validate(seed_raw)
     return cfg
 
 
 def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
-    """Atomically write the full profile catalog to profiles.toml.
+    """Atomically write the operator (non-seed) profile catalog to profiles.toml.
 
-    Serializes *cfg* — which must contain the complete catalog including any
-    seed profiles that should survive — to ``paths.profiles_toml()`` (or
-    *path* if given) via :func:`write_toml_atomic`.
-
-    The written file is the single source of truth for operator-authored
-    profiles; on next load :func:`load_profiles_config` additively fills in
-    any seed profiles missing from the file, so callers do not need to
-    include seed profiles in *cfg* to keep them available.  That said,
-    starting from ``load_profiles_config()`` and modifying entries is still
-    the recommended pattern so the full catalog is explicit on disk.
+    Serializes the operator-authored profiles in *cfg* to
+    ``paths.profiles_toml()`` (or *path* if given) via
+    :func:`write_toml_atomic`.  **Seed profiles are stripped before writing** —
+    they are virtual (overlaid from :data:`SEED_PROFILES` on every
+    :func:`load_profiles_config`), so persisting them here would only re-freeze
+    a stale copy on disk, the exact bug the virtual-seed overlay fixes.  Callers
+    may pass a full catalog (the seeds are simply dropped) or just their custom
+    profiles; the on-load overlay restores every seed either way.
 
     Note: :func:`write_toml_atomic` emits pure TOML — no header comment is
     written (tomli_w has no comment support and the atomic writer takes no
@@ -449,12 +453,17 @@ def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
     keeps tomli_w from raising TypeError on optional None fields.
 
     Args:
-        cfg: Full validated :class:`ProfilesConfig` to persist.
+        cfg: Validated :class:`ProfilesConfig` to persist (seed entries ignored).
         path: Override destination.  If ``None``, uses
               :func:`hal0.config.paths.profiles_toml`.
     """
     target = Path(path) if path is not None else paths.profiles_toml()
-    write_toml_atomic(target, cfg.model_dump(mode="python", exclude_none=True))
+    data = cfg.model_dump(mode="python", exclude_none=True)
+    # Drop virtual seed profiles — they always overlay from code at load time,
+    # so writing them would freeze a stale copy on disk (the #PS-2 bug).
+    profiles = data.get("profile") or {}
+    data["profile"] = {name: entry for name, entry in profiles.items() if name not in SEED_PROFILES}
+    write_toml_atomic(target, data)
 
 
 # ── stacks.toml ───────────────────────────────────────────────────────────────
