@@ -436,6 +436,17 @@ export function useMentalModelRefresh() {
   })
 }
 
+export function useMentalModelCreate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, body }: { bank: string; body: { name: string; source_query: string } }) =>
+      apiPost(ENDPOINTS.memoryBankMentalModels(bank), body),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'mental-models'] })
+    },
+  })
+}
+
 // ── tools: directives ────────────────────────────────────────────────────────
 
 export interface Directive {
