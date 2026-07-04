@@ -21,7 +21,15 @@ from fastapi.testclient import TestClient
 from hal0.activity import AuditStore
 from hal0.api.middleware import error_codes
 from hal0.api.routes import board
-from hal0.api.routes.board_chat import _extract_tool_calls, _resolve_tool, _tool_schemas
+from hal0.api.routes.board_chat import (
+    _SYSTEM_PROMPT,
+    _compact_board,
+    _extract_tool_calls,
+    _resolve_platform_tool,
+    _resolve_read_tool,
+    _resolve_tool,
+    _tool_schemas,
+)
 from hal0.board import KANBAN_BASE_PATH, HermesKanbanClient
 
 P = KANBAN_BASE_PATH
@@ -55,6 +63,26 @@ class _Recorder:
     def recorded(self, method: str, path: str) -> list[dict[str, Any]]:
         full = f"{P}{path}"
         return [r for r in self.requests if r["method"] == method and r["path"] == full]
+
+
+class _PlatformRecorder:
+    """Like _Recorder but for hal0-api's OWN routes (no kanban prefix)."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.responses: dict[tuple[str, str], httpx.Response] = {}
+
+    def respond(self, method: str, path: str, body: Any, status: int = 200) -> None:
+        self.responses[(method, path)] = httpx.Response(status, json=body)
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append({"method": request.method, "path": request.url.path})
+        return self.responses.get(
+            (request.method, request.url.path), httpx.Response(200, json={"ok": True})
+        )
+
+    def recorded(self, method: str, path: str) -> list[dict[str, Any]]:
+        return [r for r in self.requests if r["method"] == method and r["path"] == path]
 
 
 class _StubLLM:
@@ -117,7 +145,14 @@ def _final_response(text: str) -> dict[str, Any]:
     return {"choices": [{"message": {"role": "assistant", "content": text}}]}
 
 
-def _make_app(recorder: _Recorder, stub: Any, tmp_path, *, no_client: bool = False) -> tuple:
+def _make_app(
+    recorder: _Recorder,
+    stub: Any,
+    tmp_path,
+    *,
+    no_client: bool = False,
+    platform: _PlatformRecorder | None = None,
+) -> tuple:
     app = FastAPI()
     error_codes.install(app)
     app.include_router(board.router, prefix="/api/board")
@@ -128,6 +163,11 @@ def _make_app(recorder: _Recorder, stub: Any, tmp_path, *, no_client: bool = Fal
         http = httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9119")
         app.state.hermes_kanban = HermesKanbanClient(
             http_client=http, session_token_resolver=lambda: "TOK"
+        )
+    if platform is not None:
+        app.state.platform_http = httpx.AsyncClient(
+            transport=httpx.MockTransport(platform.handler),
+            base_url="http://127.0.0.1:8080",
         )
     store = AuditStore(tmp_path / "audit.db")
     store.init_schema()
@@ -380,6 +420,181 @@ def test_multi_tool_one_response(tmp_path) -> None:
     assert len(rows) == 2
 
 
+# ── read tools (unaudited, board-scoped) ────────────────────────────────────
+
+
+def test_read_tool_get_board_forwards_and_is_not_audited(tmp_path) -> None:
+    rec = _Recorder()
+    rec.respond(
+        "GET",
+        "/board",
+        {
+            "columns": [
+                {
+                    "name": "todo",
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "title": "fix",
+                            "status": "todo",
+                            "assignee": "bob",
+                            "body": "a very long body that must be trimmed",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    stub = _StubLLM([_tool_call_response("get_board", {}, "c_gb"), _final_response("ok")])
+    app, client = _make_app(rec, stub, tmp_path)
+    resp = client.post(
+        "/api/board/chat",
+        json={"board": "alpha", "messages": [{"role": "user", "content": "what's up"}]},
+    )
+    assert resp.status_code == 200
+    hits = rec.recorded("GET", "/board")
+    assert len(hits) == 1
+    assert hits[0]["params"]["board"] == "alpha"  # board scope threads through
+    # tool_result carries the COMPACTED rows (no body field)
+    events = _sse_events(resp.text)
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert result["result"] == {
+        "tasks": [{"id": "t1", "title": "fix", "status": "todo", "assignee": "bob"}]
+    }
+    # reads write NO audit rows — matches the REST proxy's split
+    assert app.state.audit.query(action="board.chat.turn") == []
+
+
+def test_read_tool_get_task_forwards(tmp_path) -> None:
+    rec = _Recorder()
+    rec.respond("GET", "/tasks/t9", {"task": {"id": "t9"}, "comments": []})
+    stub = _StubLLM(
+        [_tool_call_response("get_task", {"task_id": "t9"}, "c_gt"), _final_response("ok")]
+    )
+    app, client = _make_app(rec, stub, tmp_path)
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert len(rec.recorded("GET", "/tasks/t9")) == 1
+    events = _sse_events(resp.text)
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert result["result"]["task"]["id"] == "t9"  # detail is NOT compacted
+    assert app.state.audit.query(action="board.chat.turn") == []
+
+
+def test_read_tool_get_assignees_forwards(tmp_path) -> None:
+    rec = _Recorder()
+    rec.respond("GET", "/assignees", [{"name": "scout", "on_disk": True}])
+    stub = _StubLLM([_tool_call_response("get_assignees", {}, "c_ga"), _final_response("ok")])
+    _app, client = _make_app(rec, stub, tmp_path)
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert len(rec.recorded("GET", "/assignees")) == 1
+
+
+# ── platform tools (slots/models/agents/stats via self-HTTP) ────────────────
+
+
+def test_platform_list_slots_forwards_and_is_not_audited(tmp_path) -> None:
+    rec = _Recorder()
+    plat = _PlatformRecorder()
+    plat.respond("GET", "/api/slots", [{"name": "agent", "state": "serving"}])
+    stub = _StubLLM([_tool_call_response("list_slots", {}, "c_ls"), _final_response("ok")])
+    app, client = _make_app(rec, stub, tmp_path, platform=plat)
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert len(plat.recorded("GET", "/api/slots")) == 1
+    events = _sse_events(resp.text)
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert result["result"] == [{"name": "agent", "state": "serving"}]
+    assert app.state.audit.query(action="platform.chat.turn") == []
+
+
+def test_platform_slot_restart_forwards_and_audits(tmp_path) -> None:
+    rec = _Recorder()
+    plat = _PlatformRecorder()
+    plat.respond("POST", "/api/slots/img/restart", {"ok": True})
+    stub = _StubLLM(
+        [_tool_call_response("slot_restart", {"name": "img"}, "c_sr"), _final_response("ok")]
+    )
+    app, client = _make_app(rec, stub, tmp_path, platform=plat)
+    client.post(
+        "/api/board/chat",
+        json={"messages": [{"role": "user", "content": "restart img"}]},
+        headers={"X-hal0-Agent": "op"},
+    )
+    assert len(plat.recorded("POST", "/api/slots/img/restart")) == 1
+    rows = app.state.audit.query(action="platform.chat.turn")
+    assert len(rows) == 1
+    assert rows[0]["target"] == "img"
+    # No Hermes traffic for a platform tool.
+    assert rec.requests == []
+
+
+def test_platform_error_becomes_tool_result(tmp_path) -> None:
+    rec = _Recorder()
+    plat = _PlatformRecorder()
+    plat.respond("GET", "/api/slots", {"error": "nope"}, status=500)
+    stub = _StubLLM([_tool_call_response("list_slots", {}, "c_e"), _final_response("ok")])
+    _app, client = _make_app(rec, stub, tmp_path, platform=plat)
+    resp = client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    events = _sse_events(resp.text)
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "HTTP 500" in result["result"]["error"]
+    # The loop keeps stepping — the turn still terminates cleanly.
+    assert events[-1]["type"] == "done"
+
+
+def test_orchestration_tools_route_via_kanban_client(tmp_path) -> None:
+    rec = _Recorder()
+    rec.respond("GET", "/orchestration", {"orchestrator_profile": "admin"})
+    rec.respond("PUT", "/orchestration", {"ok": True})
+    stub = _StubLLM(
+        [
+            _tool_call_response("get_orchestration", {}, "c_go"),
+            _tool_call_response("update_orchestration", {"auto_decompose": True}, "c_uo"),
+            _final_response("ok"),
+        ]
+    )
+    app, client = _make_app(rec, stub, tmp_path)
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "x"}]})
+    assert len(rec.recorded("GET", "/orchestration")) == 1
+    puts = rec.recorded("PUT", "/orchestration")
+    assert len(puts) == 1
+    assert json.loads(puts[0]["body"]) == {"auto_decompose": True}
+    # read unaudited, update audited as a board mutation
+    rows = app.state.audit.query(action="board.chat.turn")
+    assert len(rows) == 1
+
+
+# ── system prompt injection ─────────────────────────────────────────────────
+
+
+def test_system_prompt_injected_when_absent(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    _app, client = _make_app(rec, stub, tmp_path)
+    client.post("/api/board/chat", json={"messages": [{"role": "user", "content": "hello"}]})
+    sent = stub.calls[0]["messages"]
+    assert sent[0]["role"] == "system"
+    assert sent[0]["content"] == _SYSTEM_PROMPT
+    assert sent[1] == {"role": "user", "content": "hello"}
+
+
+def test_system_prompt_not_duplicated_when_client_sends_one(tmp_path) -> None:
+    rec = _Recorder()
+    stub = _StubLLM([_final_response("hi")])
+    _app, client = _make_app(rec, stub, tmp_path)
+    client.post(
+        "/api/board/chat",
+        json={
+            "messages": [
+                {"role": "system", "content": "custom"},
+                {"role": "user", "content": "hello"},
+            ]
+        },
+    )
+    sent = stub.calls[0]["messages"]
+    assert sent[0] == {"role": "system", "content": "custom"}
+    assert sum(1 for m in sent if m.get("role") == "system") == 1
+
+
 # ── loop termination + errors ───────────────────────────────────────────────
 
 
@@ -460,9 +675,67 @@ def test_resolve_tool_unknown() -> None:
     assert method is None
 
 
+def test_resolve_read_tool_paths() -> None:
+    assert _resolve_read_tool("get_board", {}) == ("GET", "/board")
+    assert _resolve_read_tool("get_task", {"task_id": "t1"}) == ("GET", "/tasks/t1")
+    assert _resolve_read_tool("get_assignees", {}) == ("GET", "/assignees")
+    assert _resolve_read_tool("get_orchestration", {}) == ("GET", "/orchestration")
+    assert _resolve_read_tool("move_task", {}) == (None, "")
+
+
+def test_resolve_platform_tool_paths() -> None:
+    assert _resolve_platform_tool("list_slots", {}) == ("GET", "/api/slots", False)
+    assert _resolve_platform_tool("get_slot", {"name": "img"}) == (
+        "GET",
+        "/api/slots/img",
+        False,
+    )
+    assert _resolve_platform_tool("slot_load", {"name": "img"}) == (
+        "POST",
+        "/api/slots/img/load",
+        True,
+    )
+    assert _resolve_platform_tool("slot_unload", {"name": "img"}) == (
+        "POST",
+        "/api/slots/img/unload",
+        True,
+    )
+    assert _resolve_platform_tool("slot_restart", {"name": "img"}) == (
+        "POST",
+        "/api/slots/img/restart",
+        True,
+    )
+    assert _resolve_platform_tool("list_models", {}) == ("GET", "/api/models", False)
+    assert _resolve_platform_tool("hardware_stats", {}) == (
+        "GET",
+        "/api/stats/hardware",
+        False,
+    )
+    assert _resolve_platform_tool("list_agents", {}) == ("GET", "/api/agents", False)
+    assert _resolve_platform_tool("move_task", {}) == (None, "", False)
+
+
+def test_compact_board_shapes() -> None:
+    row = {"id": "t1", "title": "x", "status": "todo", "body": "long", "priority": 2}
+    compacted = {"id": "t1", "title": "x", "status": "todo", "priority": 2}
+    assert _compact_board({"columns": [{"tasks": [row]}]}) == {"tasks": [compacted]}
+    assert _compact_board({"lanes": {"todo": [row]}}) == {"tasks": [compacted]}
+    assert _compact_board({"tasks": [row]}) == {"tasks": [compacted]}
+    assert _compact_board([row]) == {"tasks": [compacted]}
+    # unrecognised shapes pass through untouched
+    assert _compact_board({"weird": True}) == {"weird": True}
+    assert _compact_board("raw") == "raw"
+
+
 def test_tool_schemas_complete() -> None:
     names = {s["function"]["name"] for s in _tool_schemas()}
     assert names == {
+        # board reads (unaudited — the model's eyes on the board)
+        "get_board",
+        "get_task",
+        "get_assignees",
+        "get_orchestration",
+        # audited board mutations
         "move_task",
         "assign_task",
         "create_task",
@@ -473,6 +746,16 @@ def test_tool_schemas_complete() -> None:
         "specify_task",
         "decompose_task",
         "nudge_dispatcher",
+        "update_orchestration",
+        # platform surface (slots/models/agents/stats via self-HTTP)
+        "list_slots",
+        "get_slot",
+        "slot_load",
+        "slot_unload",
+        "slot_restart",
+        "list_models",
+        "hardware_stats",
+        "list_agents",
     }
 
 

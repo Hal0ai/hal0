@@ -108,33 +108,72 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # [telemetry]
     "telemetry.enabled": {"apply_class": "immediate", "services": []},
     "telemetry.channel": {"apply_class": "immediate", "services": []},
-    # [dispatcher]
-    "dispatcher.prefetch_timeout_s": {"apply_class": "immediate", "services": []},
-    "dispatcher.prefetch_parallel_cap": {"apply_class": "immediate", "services": []},
+    # [dispatcher] — prefetch_timeout_s is threaded into the Dispatcher at
+    # create_app time, so a change lands on the next hal0-api restart.
+    # prefetch_parallel_cap is reserved (not yet consumed by the fanout).
+    "dispatcher.prefetch_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "dispatcher.prefetch_parallel_cap": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [slots]
     "slots.max_slots": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "slots.port_range_start": {"apply_class": "manual-restart", "services": []},
     "slots.port_range_end": {"apply_class": "manual-restart", "services": []},
     "slots.idle_timeout_s": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "slots.evict_pressure_mb": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     # [models]
     "models.roots": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "models.auto_scan_on_start": {"apply_class": "immediate", "services": []},
     "models.file_extensions": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "models.store": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
     "models.pull_root": {"apply_class": "service-restart", "services": [SERVICE_SLOTS]},
-    # [memory.embedding]
+    # [memory]
+    # engine is consumed once at create_app when the memory provider is
+    # constructed (api/__init__.py) — a change only lands on restart.
+    "memory.engine": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    # [memory.embedding] — the rerank timeouts are threaded into
+    # Hal0Reranker at startup (memory/__init__.py), so they're
+    # service-restart, not immediate. The remaining rerank knobs are
+    # reserved (cognee-era; not consumed by the hindsight provider).
     "memory.embedding.model": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
-    "memory.embedding.rerank_enabled": {"apply_class": "immediate", "services": []},
-    "memory.embedding.rerank_url": {"apply_class": "immediate", "services": []},
-    "memory.embedding.rerank_over_fetch_factor": {"apply_class": "immediate", "services": []},
-    "memory.embedding.rerank_max_candidates": {"apply_class": "immediate", "services": []},
-    "memory.embedding.rerank_connect_timeout_s": {"apply_class": "immediate", "services": []},
-    "memory.embedding.rerank_read_timeout_s": {"apply_class": "immediate", "services": []},
+    "memory.embedding.rerank_enabled": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_url": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_over_fetch_factor": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_max_candidates": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_connect_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.embedding.rerank_read_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [memory.graph] — ADR-0023: extraction_slot propagates to hindsight-api via a
     # systemd drop-in + restart (handled in the /api/memory/graph PUT handler, which
     # is the sole writer; the apply pipeline only needs to know the key is valid).
     "memory.graph.enabled": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_slot": {"apply_class": "immediate", "services": []},
+    # [activity] — the AuditStore is constructed once at create_app
+    # (api/__init__.py); retention/max_rows/enabled land on restart.
+    "activity.enabled": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "activity.retention_days": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "activity.max_rows": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     # [meta]
     "meta.schema_version": {"apply_class": "manual-restart", "services": []},
 }

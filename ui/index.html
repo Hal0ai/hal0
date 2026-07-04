@@ -18,12 +18,9 @@
       content="hal0 v0.5.0-alpha.1 dashboard — container-runtime slots, NPU trio, OmniRouter, agent approvals. Operator surface for a local AI appliance."
     />
 
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Fonts are self-hosted via @fontsource imports in src/main.tsx — no
+         external font CDN: the dashboard must render identically on an
+         offline LAN box. -->
   </head>
   <body>
     <div id="root"></div>

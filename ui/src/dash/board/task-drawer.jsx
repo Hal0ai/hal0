@@ -21,7 +21,7 @@ const stName = (s) => {
 const liveDot = (s) => "kdot" + (s === "running" ? " live" : " glow");
 
 // ─── Task detail drawer ────────────────────────────────────────────────
-function TaskDrawer({ task, byId, onClose, onOpenTask }) {
+function TaskDrawer({ task, byId, onClose, onOpenTask, board }) {
   const toast = (msg) => { if (window.__hal0Toast) window.__hal0Toast(msg); };
 
   // prefer live hook; fall back to prop. useBoardTask returns a TanStack
@@ -33,13 +33,14 @@ function TaskDrawer({ task, byId, onClose, onOpenTask }) {
   const [parentSelect, setParentSelect] = useState("");
   const [childSelect, setChildSelect] = useState("");
 
-  // mutations (guarded)
-  const updateTask = window.__hal0UseUpdateTask ? window.__hal0UseUpdateTask() : null;
-  const addComment = window.__hal0UseAddComment ? window.__hal0UseAddComment() : null;
-  const addLink    = window.__hal0UseAddLink    ? window.__hal0UseAddLink()    : null;
-  const removeLink = window.__hal0UseRemoveLink ? window.__hal0UseRemoveLink() : null;
-  const specifyTask   = window.__hal0UseSpecifyTask   ? window.__hal0UseSpecifyTask()   : null;
-  const decomposeTask = window.__hal0UseDecomposeTask ? window.__hal0UseDecomposeTask() : null;
+  // mutations (guarded; board threads through so ?board= + the cache
+  // invalidation key match the view the operator is looking at)
+  const updateTask = window.__hal0UseUpdateTask ? window.__hal0UseUpdateTask(board) : null;
+  const addComment = window.__hal0UseAddComment ? window.__hal0UseAddComment(board) : null;
+  const addLink    = window.__hal0UseAddLink    ? window.__hal0UseAddLink(board)    : null;
+  const removeLink = window.__hal0UseRemoveLink ? window.__hal0UseRemoveLink(board) : null;
+  const specifyTask   = window.__hal0UseSpecifyTask   ? window.__hal0UseSpecifyTask(board)   : null;
+  const decomposeTask = window.__hal0UseDecomposeTask ? window.__hal0UseDecomposeTask(board) : null;
 
   // worker log (pull-only)
   const logHook = window.__hal0UseBoardTaskLog ? window.__hal0UseBoardTaskLog(t.id) : null;

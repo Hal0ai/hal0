@@ -265,8 +265,10 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
     await page.locator('.orch-pill').click()
     await expect(page.locator('[data-testid="board-orch-popover"]')).toBeVisible()
 
-    await expect(page.locator('[data-testid="board-orch-mode-auto"]')).toBeVisible()
-    await expect(page.locator('[data-testid="board-orch-mode-manual"]')).toBeVisible()
+    // Exactly the 4 contract knobs — no auto/manual "mode" segment (that was
+    // a phantom field the server never returned nor accepted).
+    await expect(page.locator('[data-testid="board-orch-mode-auto"]')).toHaveCount(0)
+    await expect(page.locator('[data-testid="board-orch-mode-manual"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="board-orch-profile"]')).toBeVisible()
     await expect(page.locator('[data-testid="board-orch-assignee"]')).toBeVisible()
     await expect(page.locator('[data-testid="board-orch-autodecompose"]')).toBeVisible()
@@ -298,20 +300,6 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
     await expect(page.locator('[data-testid="board-orch-ro-ttl"]')).toHaveText('600s')
   })
 
-  test('toggle orch mode to manual then auto', async ({ page }) => {
-    await gotoBoardAndWait(page)
-    await page.locator('.orch-pill').click()
-    await expect(page.locator('[data-testid="board-orch-popover"]')).toBeVisible()
-
-    // Click manual
-    await page.locator('[data-testid="board-orch-mode-manual"]').click()
-    await expect(page.locator('[data-testid="board-orch-mode-manual"]')).toHaveClass(/on/)
-
-    // Click auto
-    await page.locator('[data-testid="board-orch-mode-auto"]').click()
-    await expect(page.locator('[data-testid="board-orch-mode-auto"]')).toHaveClass(/on/)
-  })
-
   test('orch save fires PUT /api/board/orchestration', async ({ page }) => {
     let putBody: any = null
     await page.route('**/api/board/orchestration', async (route) => {
@@ -327,22 +315,21 @@ test.describe('BoardView — selector, new board, orchestration, tweaks', () => 
     await page.locator('.orch-pill').click()
     await expect(page.locator('[data-testid="board-orch-popover"]')).toBeVisible()
 
-    // Toggle mode to manual
-    await page.locator('[data-testid="board-orch-mode-manual"]').click()
     // Save
     await page.locator('[data-testid="board-action-orch-save"]').click()
     await page.waitForTimeout(300)
 
-    // PUT body carries the toggled mode plus the 4 editable knobs, seeded from the
-    // live /api/board/orchestration response (BOARD_ORCH_DEFAULT, unwrapped via .data).
+    // PUT body carries exactly the 4 contract knobs, seeded from the live
+    // /api/board/orchestration response (BOARD_ORCH_DEFAULT, unwrapped via
+    // .data). No `mode` — the server neither returns nor accepts one.
     expect(putBody).toBeTruthy()
     expect(putBody).toMatchObject({
-      mode: 'manual',
       orchestrator_profile: 'admin-agent',
       default_assignee: 'admin-agent',
       auto_decompose: true,
       auto_promote_children: true,
     })
+    expect(putBody.mode).toBeUndefined()
   })
 
   test('orch popover closes on Escape', async ({ page }) => {

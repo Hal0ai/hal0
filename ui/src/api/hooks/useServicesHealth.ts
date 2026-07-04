@@ -8,7 +8,8 @@
 // Poll 5s. Returns { services, pending, error } where `pending` is true
 // while the endpoint has not yet returned a success (404 included).
 
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { apiPost } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 export interface ServiceStat {
@@ -50,6 +51,17 @@ async function fetchServicesHealth(): Promise<ServicesHealthPayload | null> {
   } catch {
     return null
   }
+}
+
+// POST /api/install/services/{unit}/repair — systemctl restart of a
+// whitelisted unit. When the unit is hal0-api.service the connection is
+// expected to DROP mid-request (the API restarts under us), so callers
+// must treat a network error as "restart initiated" and poll /api/health.
+export function useServiceRepair() {
+  return useMutation<{ unit: string; active: boolean }, Error, string>({
+    mutationFn: (unit) =>
+      apiPost<{ unit: string; active: boolean }>(ENDPOINTS.installServiceRepair(unit), {}),
+  })
 }
 
 export function useServicesHealth(): {

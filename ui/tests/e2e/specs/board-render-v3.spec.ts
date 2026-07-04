@@ -197,9 +197,9 @@ test.describe('BoardView — render', () => {
 
   // ── Drop-to-delete zone ───────────────────────────────────────────────
 
-  test('drop-to-delete zone is visible', async ({ page }) => {
+  test('drop-to-archive zone is visible', async ({ page }) => {
     await gotoBoardAndWait(page)
-    await expect(page.locator('[data-testid="board-drop-delete"]')).toBeVisible()
+    await expect(page.locator('[data-testid="board-drop-archive"]')).toBeVisible()
   })
 
 })

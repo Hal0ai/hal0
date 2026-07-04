@@ -410,6 +410,10 @@ function normaliseBoardResponse(
       lanes[task.status].push(task)
     } else if (task.status === 'archived' && includeArchived) {
       lanes['archived'].push(task)
+    } else if (task.status !== 'archived') {
+      // Unknown status (upstream enum drift): surface the card in triage
+      // rather than letting it vanish while still counting toward "N tasks".
+      lanes['triage'].push(task)
     }
   }
 
@@ -697,16 +701,20 @@ export function useAddLink(board?: string) {
 export function useRemoveLink(board?: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (linkBody: LinkBody) =>
-      api<unknown>(
-        board
-          ? `${ENDPOINTS.boardLinks}?board=${encodeURIComponent(board)}`
-          : ENDPOINTS.boardLinks,
-        {
-          method: 'DELETE',
-          body: linkBody as unknown as Record<string, unknown>,
-        },
-      ),
+    // DELETE /links takes parent_id/child_id as QUERY params — the backend
+    // forwards the query string verbatim and sends NO body on this route
+    // (board.py remove_link), so ids in a JSON body are silently dropped
+    // upstream and the dependency is never removed.
+    mutationFn: (linkBody: LinkBody) => {
+      const params = new URLSearchParams({
+        parent_id: linkBody.parent_id,
+        child_id: linkBody.child_id,
+      })
+      if (board) params.set('board', board)
+      return api<unknown>(`${ENDPOINTS.boardLinks}?${params}`, {
+        method: 'DELETE',
+      })
+    },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: boardKey(board) })
     },
@@ -881,10 +889,15 @@ export function useNudgeDispatch() {
 
 // ── WS events stream ─────────────────────────────────────────────────
 
+/**
+ * One frame from the events WS. The upstream kanban WS polls task_events and
+ * pushes BATCH frames — `{"events": [...], "cursor": N}` — not single events.
+ * `cursor` is the resume point: threaded back as `?since=` on reconnect so
+ * the gap between a drop and the reconnect is replayed, not lost.
+ */
 export interface BoardEvent {
-  kind?: string
-  task_id?: string
-  at?: string
+  events?: unknown[]
+  cursor?: number
   [k: string]: unknown
 }
 
@@ -917,6 +930,9 @@ export function boardEventsWsUrl(opts: {
 }
 
 const WS_MAX_BACKOFF_MS = 16_000
+// Hermes polls task_events every 300ms and pushes a frame per batch; without
+// a debounce a busy run triggers a full GET /board refetch per frame.
+const WS_INVALIDATE_DEBOUNCE_MS = 300
 
 export function useBoardEventsStream(
   opts: UseBoardEventsStreamOptions = {},
@@ -926,6 +942,8 @@ export function useBoardEventsStream(
   const [lastEvent, setLastEvent] = useState<BoardEvent | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const errorCountRef = useRef(0)
+  // Last frame cursor — used as `since` on reconnect to replay the gap.
+  const cursorRef = useRef<number | null>(null)
   const qc = useQueryClient()
 
   useEffect(() => {
@@ -940,11 +958,37 @@ export function useBoardEventsStream(
 
     let cancelled = false
     let backoffTimer: ReturnType<typeof setTimeout> | null = null
+    let invalidateTimer: ReturnType<typeof setTimeout> | null = null
+
+    const scheduleInvalidate = () => {
+      if (invalidateTimer) return // trailing-edge: one refetch per window
+      invalidateTimer = setTimeout(() => {
+        invalidateTimer = null
+        qc.invalidateQueries({ queryKey: boardKey(board) })
+      }, WS_INVALIDATE_DEBOUNCE_MS)
+    }
+
+    const scheduleReconnect = () => {
+      if (cancelled || backoffTimer) return
+      errorCountRef.current += 1
+      const delay = Math.min(
+        1000 * 2 ** Math.min(errorCountRef.current - 1, 4),
+        WS_MAX_BACKOFF_MS,
+      )
+      backoffTimer = setTimeout(() => {
+        backoffTimer = null
+        connect()
+      }, delay)
+    }
 
     const connect = () => {
       if (cancelled) return
       try {
-        const url = boardEventsWsUrl({ board, tenant, since })
+        const url = boardEventsWsUrl({
+          board,
+          tenant,
+          since: cursorRef.current ?? since,
+        })
         wsRef.current = new WebSocket(url)
       } catch {
         setConnected(false)
@@ -961,30 +1005,28 @@ export function useBoardEventsStream(
       ws.onmessage = (evt) => {
         try {
           const data = JSON.parse(String(evt.data)) as BoardEvent
+          if (typeof data.cursor === 'number') cursorRef.current = data.cursor
           setLastEvent(data)
-          // Invalidate board query so cards refresh live
-          qc.invalidateQueries({ queryKey: boardKey(board) })
+          scheduleInvalidate()
         } catch {
           // ignore malformed
         }
       }
 
+      // Reconnect is driven from `close` ONLY. The proxy ends the browser WS
+      // with a close frame (1011 on upstream connect failure, normal close
+      // when the upstream drops, e.g. a Hermes restart) — that fires just
+      // `close` in browsers, never `error`. And every transport `error` is
+      // always followed by `close`, so scheduling from both would double-book
+      // the backoff timer.
       ws.onerror = () => {
         setConnected(false)
-        errorCountRef.current += 1
-        if (wsRef.current) {
-          wsRef.current.close()
-          wsRef.current = null
-        }
-        const delay = Math.min(
-          1000 * 2 ** Math.min(errorCountRef.current - 1, 4),
-          WS_MAX_BACKOFF_MS,
-        )
-        backoffTimer = setTimeout(connect, delay)
       }
 
       ws.onclose = () => {
         setConnected(false)
+        if (wsRef.current === ws) wsRef.current = null
+        scheduleReconnect()
       }
     }
 
@@ -993,7 +1035,9 @@ export function useBoardEventsStream(
     return () => {
       cancelled = true
       if (backoffTimer) clearTimeout(backoffTimer)
+      if (invalidateTimer) clearTimeout(invalidateTimer)
       if (wsRef.current) {
+        // `cancelled` is set, so the close event this fires won't reconnect.
         wsRef.current.close()
         wsRef.current = null
       }

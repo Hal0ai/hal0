@@ -134,8 +134,8 @@ export async function installDefaultMocks(page: Page, state: MockState) {
     json(route, BOARD_PROFILES),
   )
 
-  // GET /api/board/assignees?board=
-  await page.route('**/api/board/assignees', (route) =>
+  // GET /api/board/assignees?board=  (regex: the ?board= query must match)
+  await page.route(/\/api\/board\/assignees(\?|$)/, (route) =>
     json(route, BOARD_ASSIGNEES),
   )
 
@@ -165,13 +165,15 @@ export async function installDefaultMocks(page: Page, state: MockState) {
     json(route, { dispatched: 1 }),
   )
 
-  // POST /api/board/tasks/bulk (must be before /tasks/:id patterns)
-  await page.route('**/api/board/tasks/bulk', (route) =>
+  // POST /api/board/tasks/bulk?board= (must be before /tasks/:id patterns;
+  // regex so the optional ?board= query matches)
+  await page.route(/\/api\/board\/tasks\/bulk(\?|$)/, (route) =>
     json(route, { updated: 0 }),
   )
 
-  // POST /api/board/links  +  DELETE /api/board/links (body-DELETE)
-  await page.route('**/api/board/links', (route) => {
+  // POST /api/board/links  +  DELETE /api/board/links?parent_id=&child_id=
+  // (regex: DELETE carries its ids as QUERY params per the backend contract)
+  await page.route(/\/api\/board\/links(\?|$)/, (route) => {
     const method = route.request().method()
     if (method === 'POST')   return json(route, { ok: true }, 201)
     if (method === 'DELETE') return json(route, { ok: true })
@@ -213,8 +215,9 @@ export async function installDefaultMocks(page: Page, state: MockState) {
     return json(route, {})
   })
 
-  // POST /api/board/tasks (create)
-  await page.route('**/api/board/tasks', (route) => {
+  // POST /api/board/tasks (create; regex so an optional ?board= matches —
+  // trailing (\?|$) keeps /tasks/:id out of this route)
+  await page.route(/\/api\/board\/tasks(\?|$)/, (route) => {
     if (route.request().method() === 'POST') {
       const body = route.request().postDataJSON?.() ?? {}
       const newTask = {
@@ -244,8 +247,9 @@ export async function installDefaultMocks(page: Page, state: MockState) {
     json(route, { ok: true }),
   )
 
-  // GET /api/board/board (main board view — lanes format)
-  await page.route('**/api/board/board', (route) => {
+  // GET /api/board/board?board=&include_archived= (main board view — lanes
+  // format; regex so the query params the hook now threads actually match)
+  await page.route(/\/api\/board\/board(\?|$)/, (route) => {
     const url = route.request().url()
     const includeArchived = url.includes('include_archived=true')
     return json(route, makeBoardLanesResponse(includeArchived))

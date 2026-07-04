@@ -62,31 +62,40 @@ def test_registry_declares_three_apply_classes() -> None:
         # [telemetry]
         ("telemetry.enabled", "immediate", []),
         ("telemetry.channel", "immediate", []),
-        # [dispatcher]
-        ("dispatcher.prefetch_timeout_s", "immediate", []),
-        ("dispatcher.prefetch_parallel_cap", "immediate", []),
+        # [dispatcher] — prefetch_timeout_s is threaded into the Dispatcher
+        # at create_app time; a change lands on the next hal0-api restart.
+        ("dispatcher.prefetch_timeout_s", "service-restart", [SERVICE_HAL0_API]),
+        ("dispatcher.prefetch_parallel_cap", "service-restart", [SERVICE_HAL0_API]),
         # [slots]
         ("slots.max_slots", "service-restart", [SERVICE_HAL0_API]),
         ("slots.port_range_start", "manual-restart", []),
         ("slots.port_range_end", "manual-restart", []),
         ("slots.idle_timeout_s", "service-restart", [SERVICE_HAL0_API]),
+        ("slots.evict_pressure_mb", "service-restart", [SERVICE_HAL0_API]),
         # [models]
         ("models.roots", "service-restart", [SERVICE_HAL0_API]),
         ("models.auto_scan_on_start", "immediate", []),
         ("models.file_extensions", "service-restart", [SERVICE_HAL0_API]),
         ("models.store", "service-restart", [SERVICE_SLOTS]),
         ("models.pull_root", "service-restart", [SERVICE_SLOTS]),
+        # [memory] — engine is consumed once when the provider is built at
+        # create_app; the rerank timeouts feed Hal0Reranker at startup.
+        ("memory.engine", "service-restart", [SERVICE_HAL0_API]),
         # [memory.embedding]
         ("memory.embedding.model", "service-restart", [SERVICE_HAL0_API]),
-        ("memory.embedding.rerank_enabled", "immediate", []),
-        ("memory.embedding.rerank_url", "immediate", []),
-        ("memory.embedding.rerank_over_fetch_factor", "immediate", []),
-        ("memory.embedding.rerank_max_candidates", "immediate", []),
-        ("memory.embedding.rerank_connect_timeout_s", "immediate", []),
-        ("memory.embedding.rerank_read_timeout_s", "immediate", []),
+        ("memory.embedding.rerank_enabled", "service-restart", [SERVICE_HAL0_API]),
+        ("memory.embedding.rerank_url", "service-restart", [SERVICE_HAL0_API]),
+        ("memory.embedding.rerank_over_fetch_factor", "service-restart", [SERVICE_HAL0_API]),
+        ("memory.embedding.rerank_max_candidates", "service-restart", [SERVICE_HAL0_API]),
+        ("memory.embedding.rerank_connect_timeout_s", "service-restart", [SERVICE_HAL0_API]),
+        ("memory.embedding.rerank_read_timeout_s", "service-restart", [SERVICE_HAL0_API]),
         # [memory.graph] — ADR-0023: route/upstream replaced by extraction_slot
         ("memory.graph.enabled", "immediate", []),
         ("memory.graph.extraction_slot", "immediate", []),
+        # [activity] — AuditStore is constructed once at create_app.
+        ("activity.enabled", "service-restart", [SERVICE_HAL0_API]),
+        ("activity.retention_days", "service-restart", [SERVICE_HAL0_API]),
+        ("activity.max_rows", "service-restart", [SERVICE_HAL0_API]),
         # [meta]
         ("meta.schema_version", "manual-restart", []),
     ],
@@ -298,10 +307,10 @@ def test_put_settings_response_includes_apply_plan(isolated_client: TestClient) 
     toast can render the per-save effect split without a follow-up
     round-trip (#545).
 
-    The plan keys on the *top-level* fields the PATCH carried (e.g.
-    ``telemetry``), not on the dotted leaf paths the registry uses
-    (e.g. ``telemetry.enabled``). For a top-level-only touch the
-    buckets are empty, but the shape stays consistent."""
+    The nested PATCH body is flattened into the dotted leaf paths the
+    registry keys on (``telemetry.enabled``), so a normal nested PUT
+    yields a populated partition — previously only top-level body keys
+    were matched, which left every bucket empty for real-world saves."""
     r = isolated_client.put(
         "/api/settings",
         json={"telemetry": {"enabled": True}},
@@ -310,15 +319,32 @@ def test_put_settings_response_includes_apply_plan(isolated_client: TestClient) 
     body = r.json()
     # Existing top-level shape preserved.
     assert body["telemetry"]["enabled"] is True
-    # New: per-save apply plan rides along.
+    # New: per-save apply plan rides along, keyed on flattened leaf paths.
     assert "_hal0" in body
     plan = body["_hal0"]["apply_plan"]
     assert plan == {
-        "immediate": [],
+        "immediate": ["telemetry.enabled"],
         "service_restart": {},
         "manual_restart": [],
         "unknown": [],
     }
+
+
+def test_put_settings_apply_plan_flattens_nested_keys(
+    isolated_client: TestClient,
+) -> None:
+    """A nested body touching a service-restart key surfaces that key in
+    the plan's ``service_restart`` bucket keyed by service name."""
+    r = isolated_client.put(
+        "/api/settings",
+        json={"slots": {"idle_timeout_s": 120}},
+    )
+    assert r.status_code == 200, r.text
+    plan = r.json()["_hal0"]["apply_plan"]
+    assert plan["immediate"] == []
+    assert plan["service_restart"] == {"hal0-api": ["slots.idle_timeout_s"]}
+    assert plan["manual_restart"] == []
+    assert plan["unknown"] == []
 
 
 def test_put_settings_response_preserves_existing_top_level_shape(

@@ -238,7 +238,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "r-hardware",  route: "hardware",  label: "Hardware",   icon: Icons.hardware,  sub: "cpu, gpu, npu, memory" },
     { id: "r-logs",      route: "logs",      label: "Logs",       icon: Icons.logs,      sub: "hal0 stream", keywords: "tail console output" },
     { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "chat, personas, skills, memory, plugins" },
-    { id: "r-settings",  route: "settings",  label: "Settings",   icon: Icons.settings,  sub: "auth, secrets, updates" },
+    { id: "r-settings",  route: "settings",  label: "Settings",   icon: Icons.settings,  sub: "secrets, storage, updates" },
   ];
   routes.forEach(r => items.push({ ...r, section: "Routes", hint: "↵ jump" }));
 
@@ -273,18 +273,20 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     });
   });
 
-  // Settings sections — anchor jumps
-  // #544: OmniRouter/Agent-policy/Memory (Cognee) sections pruned;
-  // entries for them are gone. Surviving sections renamed for accuracy
-  // (Storage, Runtime, General).
+  // Settings sections — deep links into #settings/<section>. Mirrors
+  // VALID_IDS in settings.jsx; Auth/Runtime entries removed (auth was
+  // dropped in ADR-0012 and no Runtime section exists).
   [
-    { id: "set-auth",      label: "Auth · token",        sub: "rotate Bearer token, allowed origins" },
-    { id: "set-secrets",   label: "Secrets",              sub: "HF_TOKEN and provider keys" },
-    { id: "set-storage",   label: "Storage",              sub: "[models].store · auto_scan · file extensions" },
-    { id: "set-updates",   label: "Updates",              sub: "hal0 / flm versions" },
-    { id: "set-runtime",   label: "Runtime",              sub: "max_loaded_models, ctx_size, args" },
-    { id: "set-general",   label: "General",              sub: "theme, density, accent" },
-  ].forEach(s => items.push({ ...s, section: "Settings", icon: Icons.settings, route: "settings" }));
+    { id: "set-secrets",   label: "Secrets",       route: "settings/secrets",  sub: "HF_TOKEN, provider keys, custom env vars" },
+    { id: "set-storage",   label: "Storage",       route: "settings/storage",  sub: "[models].store · auto_scan · file extensions" },
+    { id: "set-updates",   label: "Updates",       route: "settings/updates",  sub: "check / install / roll back · channel" },
+    { id: "set-voice",     label: "Voice",         route: "settings/voice",    sub: "STT + TTS models, default voice" },
+    { id: "set-imagegen",  label: "Image-gen",     route: "settings/imagegen", sub: "engine, model, generation defaults" },
+    { id: "set-defaults",  label: "Default slots", route: "settings/defaults", sub: "per-modality default slot" },
+    { id: "set-general",   label: "General",       route: "settings/general",  sub: "telemetry, appearance" },
+    { id: "set-advanced",  label: "Advanced",      route: "settings/advanced", sub: "slots runtime, dispatcher, memory, activity · restart hal0-api" },
+    { id: "set-about",     label: "About",         route: "settings/about",    sub: "version, license, links" },
+  ].forEach(s => items.push({ ...s, section: "Settings", icon: Icons.settings }));
 
   // Global actions — every one is wired to a real effect.
   const action = (id, label, sub, fn, icon) => items.push({
@@ -295,8 +297,6 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     () => window.dispatchEvent(new CustomEvent("hal0:create-slot")));
   action("a-add-hf", "Add model from HF…", "open the catalog on /models",
     () => { window.location.hash = "#models"; });
-  action("a-rotate-token", "Rotate hal0 token", "invalidates the current Bearer immediately",
-    () => { window.location.hash = "#settings"; window.__hal0Toast && window.__hal0Toast("Routing to Auth → Rotate", "info"); });
   if (owuiUrl) {
     action("a-open-owui", "Open Chat Pro UI →", "external · OpenWebUI",
       () => window.open(owuiUrl, "_blank", "noopener"));
