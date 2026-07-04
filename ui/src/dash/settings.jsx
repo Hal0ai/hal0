@@ -730,15 +730,19 @@ function UpdatesSection() {
         onConfirm={() => {
           setRollbackConfirm(false);
           rollbackM.mutate(undefined, {
-            onSuccess: () => window.__hal0Toast && window.__hal0Toast("Rolled back to the previous version — services restarting", "warn"),
+            // The backend swaps the version symlink but does NOT restart
+            // services — the running hal0-api keeps serving the current
+            // build until the operator bounces it.
+            onSuccess: () => window.__hal0Toast && window.__hal0Toast("Rolled back — restart hal0-api (Settings → Advanced) to run the previous version", "warn"),
             onError: (err) => window.__hal0Toast && window.__hal0Toast(`Rollback failed: ${err?.message || "no previous version retained"}`, "err"),
           });
         }}
         title="Roll back hal0?"
         message={
           <span>
-            Reverts to the previous retained version{u.hal0?.current ? <> (currently on <b className="mono">{u.hal0.current}</b>)</> : null}.
-            Services restart during the swap — expect a brief outage. If no previous version is retained, nothing changes.
+            Reverts the installed tree to the previous retained version{u.hal0?.current ? <> (currently on <b className="mono">{u.hal0.current}</b>)</> : null}.
+            The running service keeps serving until you restart hal0-api (Settings → Advanced).
+            If no previous version is retained, nothing changes.
           </span>
         }
         confirmLabel="Roll back"
@@ -913,15 +917,16 @@ function VoiceSection() {
               className="mono" style={{background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px", fontSize: 11, width: 260}} />
           )
         } sub={ttsCatalogItems.length === 0 ? "no installed TTS models — install one in the Models view" : undefined} />
-        {/* The bundled voice list is Kokoro-specific — only offer it when the
-            selected model is a Kokoro variant; other TTS models take a free-form
-            model-specific voice id. */}
+        {/* The bundled voice list is Kokoro-specific. Kokoro is also the
+            bundled default TTS engine, so an unset model gets the list too;
+            only an explicitly-selected non-Kokoro model switches to a
+            free-form model-specific voice id. */}
         <SRow k="Default voice" sub={
-          (ttsModel || "").toLowerCase().includes("kokoro")
+          (!ttsModel || ttsModel.toLowerCase().includes("kokoro"))
             ? "applied when /v1/audio/speech omits the voice param · bundled voices (Kokoro v1)"
             : "applied when /v1/audio/speech omits the voice param · model-specific voice id"
         } v={
-          (ttsModel || "").toLowerCase().includes("kokoro") ? (
+          (!ttsModel || ttsModel.toLowerCase().includes("kokoro")) ? (
             <select value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}
               style={{fontFamily: "var(--jbm)", fontSize: 11, background: "var(--bg-2)", color: "var(--fg)", border: "1px solid var(--line)", borderRadius: 4, padding: "3px 6px"}}>
               <option value="">— use server default (af_bella) —</option>
@@ -1299,32 +1304,41 @@ function GeneralSection() {
 //
 // memory.engine is a plain string in the schema (validator-enforced), so
 // its options are pinned here to the backend's accepted set.
+// Keys deliberately NOT exposed even though they're in the schema, because
+// the backend doesn't consume them yet (verified against src/hal0):
+// slots.max_slots, slots.port_range_start/end (allocation is hardcoded
+// 8081-8099), dispatcher.prefetch_parallel_cap, memory.embedding.model,
+// and the cognee-era rerank knobs (rerank_enabled/url/over_fetch/
+// max_candidates). Add them back once the backend wires them.
 const ADV_GROUPS = [
   { title: "Slots runtime", sub: "hal0.toml [slots]", keys: [
-    "slots.max_slots", "slots.port_range_start", "slots.port_range_end",
     "slots.idle_timeout_s", "slots.evict_pressure_mb",
   ]},
   { title: "Dispatcher", sub: "hal0.toml [dispatcher]", keys: [
-    "dispatcher.prefetch_timeout_s", "dispatcher.prefetch_parallel_cap",
+    "dispatcher.prefetch_timeout_s",
   ]},
-  { title: "Memory", sub: "hal0.toml [memory] · engine + embedding/rerank; graph extraction below", keys: [
-    "memory.engine", "memory.embedding.model", "memory.embedding.rerank_enabled",
-    "memory.embedding.rerank_url", "memory.embedding.rerank_over_fetch_factor",
-    "memory.embedding.rerank_max_candidates", "memory.embedding.rerank_connect_timeout_s",
+  { title: "Memory", sub: "hal0.toml [memory] · engine + rerank timeouts; graph extraction below", keys: [
+    "memory.engine",
+    "memory.embedding.rerank_connect_timeout_s",
     "memory.embedding.rerank_read_timeout_s",
   ]},
   { title: "Activity log", sub: "hal0.toml [activity] · durable audit trail", keys: [
     "activity.enabled", "activity.retention_days", "activity.max_rows",
   ]},
 ];
+// memory.engine's validator also accepts "cognee" and "mem0", but the
+// factory silently maps both to hindsight — offering them would lie.
 const ADV_OPTIONS = {
-  "memory.engine": ["cognee", "hindsight", "mem0", "pgvector"],
+  "memory.engine": ["hindsight", "pgvector"],
 };
-// Fallbacks for the few fields whose pydantic schema carries no description.
-const ADV_FALLBACK_DESC = {
+// Overrides replace the schema description where it's stale or missing.
+const ADV_DESC_OVERRIDE = {
+  "memory.engine":
+    "Active memory engine, applied on the next hal0-api restart. hindsight is the durable default. " +
+    "pgvector is an in-memory, NON-DURABLE fallback — existing memories are not migrated and won't be visible while selected.",
   "activity.enabled": "Record config changes and state transitions to the durable activity log.",
-  "activity.retention_days": "Days of activity history to keep before pruning.",
-  "activity.max_rows": "Hard cap on stored activity rows. Empty = unlimited.",
+  "activity.retention_days": "Days of activity history to keep before pruning. The HAL0_ACTIVITY_RETENTION_DAYS env var, if set, overrides this value.",
+  "activity.max_rows": "Hard cap on stored activity rows (minimum 100).",
 };
 
 // Resolve $ref / single-allOf indirection in a pydantic JSON schema node.
@@ -1382,7 +1396,11 @@ function _advCoerce(f, raw) {
   if (f.type === "boolean") return { ok: true, value: !!raw };
   if (f.type === "integer" || f.type === "number") {
     const s = String(raw).trim();
-    if (s === "") return f.nullable ? { ok: true, value: null } : { ok: false };
+    // Empty → null only when null is the field's actual default: the TOML
+    // writer drops None values (exclude_none), so persisting null for a
+    // field with a non-null default silently reverts on the next reload.
+    if (s === "") return f.nullable && f.default == null ? { ok: true, value: null } : { ok: false };
+    if (f.type === "integer" && !/^-?\d+$/.test(s)) return { ok: false };
     const n = f.type === "integer" ? parseInt(s, 10) : parseFloat(s);
     if (isNaN(n)) return { ok: false };
     if (f.minimum != null && n < f.minimum) return { ok: false };
@@ -1400,7 +1418,7 @@ const _advInputStyle = {
 
 function AdvRow({ dotKey, field, live, buf, onChange, registry }) {
   const label = dotKey.split(".").slice(1).join(".");
-  const desc = field?.description || ADV_FALLBACK_DESC[dotKey] || "";
+  const desc = ADV_DESC_OVERRIDE[dotKey] || field?.description || "";
   const shortDesc = desc.length > 150 ? desc.slice(0, 147) + "…" : desc;
   const options = ADV_OPTIONS[dotKey] || field?.enum || null;
   const isBool = field?.type === "boolean";
@@ -1428,7 +1446,7 @@ function AdvRow({ dotKey, field, live, buf, onChange, registry }) {
         min={field.minimum} max={field.maximum}
         step={field.type === "number" ? "any" : 1}
         onChange={e => onChange(dotKey, e.target.value)}
-        placeholder={field.nullable ? "empty = unlimited" : (field.default != null ? String(field.default) : "")}
+        placeholder={field.default != null ? String(field.default) : ""}
         className="mono"
         style={{..._advInputStyle, width: 120, borderColor: bad ? "var(--err)" : "var(--line)"}}
       />
@@ -1486,16 +1504,16 @@ function AdvancedSection() {
       const { value } = _advCoerce(fields[k], buf[k]);
       patch = _deepMergePatch(patch, k.split(".").reverse().reduce((acc, part) => ({ [part]: acc }), value));
     }
+    // Restart hint comes from the client-side registry over the keys we're
+    // about to write — computed BEFORE the buffer clears. (The PUT response
+    // also carries _hal0.apply_plan, but deriving locally keeps the toast
+    // correct against older backends that only matched top-level body keys.)
+    const needsRestart = dirtyKeys.some(k => registry[k] && registry[k].apply_class !== "immediate");
     try {
-      const resp = await update.mutateAsync(patch);
+      await update.mutateAsync(patch);
       setBuf({});
-      // apply_plan shape: {immediate:[], service_restart:{svc:[keys]}, manual_restart:[], unknown:[]}
-      const plan = resp && resp._hal0 && resp._hal0.apply_plan;
-      const needsRestart = plan && (
-        Object.keys(plan.service_restart || {}).length > 0 || (plan.manual_restart || []).length > 0
-      );
       window.__hal0Toast && window.__hal0Toast(
-        needsRestart ? "Saved — some changes take effect after a restart" : "Advanced settings saved",
+        needsRestart ? "Saved — restart hal0-api (below) to apply the marked changes" : "Advanced settings saved",
         needsRestart ? "warn" : "ok",
       );
     } catch (e) {
@@ -1714,13 +1732,21 @@ function RestartApiPanel() {
   const [confirmOpen, setConfirmOpen] = useStateSet(false);
   const [waiting, setWaiting] = useStateSet(false);
   const pollRef = useRefSet(null);
+  // Unmount guard: the tick may be awaiting fetch() when the component
+  // unmounts — clearing the timer alone wouldn't stop it from rescheduling
+  // or firing toasts/invalidation after navigation.
+  const cancelledRef = useRefSet(false);
 
-  useEffectSet(() => () => { if (pollRef.current) clearTimeout(pollRef.current); }, []);
+  useEffectSet(() => () => {
+    cancelledRef.current = true;
+    if (pollRef.current) clearTimeout(pollRef.current);
+  }, []);
 
   const pollHealth = (deadline) => {
     pollRef.current = setTimeout(async () => {
       try {
         const res = await fetch("/api/health", { headers: { Accept: "application/json" } });
+        if (cancelledRef.current) return;
         if (res.ok) {
           setWaiting(false);
           window.__hal0Toast && window.__hal0Toast("hal0-api is back online", "ok");
@@ -1728,6 +1754,7 @@ function RestartApiPanel() {
           return;
         }
       } catch { /* still restarting */ }
+      if (cancelledRef.current) return;
       if (Date.now() < deadline) pollHealth(deadline);
       else {
         setWaiting(false);

@@ -41,16 +41,23 @@ function AddSecretModal({ open, onClose, initialName }) {
     }
   }, [open, initialName]);
 
-  // Auto-detect: if value matches a known prefix, snap the picker
+  // Auto-detect: if value matches a known prefix, snap the picker.
+  // Longest prefix wins — "sk-ant-…" must match ANTHROPIC_API_KEY, not
+  // OPENAI_API_KEY's "sk-". Skipped entirely when the modal was opened
+  // for a specific key (initialName): pasting a provider-shaped value
+  // into a deliberately-chosen row must not silently retarget the save.
   useEffectAS(() => {
-    if (!value) return;
-    for (const p of SECRET_PRESETS) {
-      if (p.prefix && value.startsWith(p.prefix)) {
+    if (!value || initialName) return;
+    const byLongestPrefix = [...SECRET_PRESETS]
+      .filter(p => p.prefix)
+      .sort((a, b) => b.prefix.length - a.prefix.length);
+    for (const p of byLongestPrefix) {
+      if (value.startsWith(p.prefix)) {
         if (picked !== p.id) setPicked(p.id);
         return;
       }
     }
-  }, [value]);
+  }, [value, initialName]);
 
   const preset = SECRET_PRESETS.find(p => p.id === picked);
   const isCustom = picked === "CUSTOM";

@@ -180,24 +180,25 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # The top-level config dict stays the same shape — this is purely
     # additive (#545).
     #
-    # The touched-keys list is built from the *top-level* keys the PATCH
-    # carried, not from the merged body's leaf paths: the apply-plan
-    # registry keys on dotted paths (``slots.max_slots``) which never
-    # appear at the top level of a PUT, so the partition mostly
-    # surfaces empty buckets when the operator edits via the generic
-    # endpoint. The shape stays consistent so the UI can render
-    # uniform badges regardless of which endpoint produced the
-    # response.
-    # Build the apply plan from request body keys that the registry
-    # directly knows about. Top-level section keys (e.g. "telemetry",
-    # "dispatcher") are NOT in the registry — only dotted leaf paths
-    # like "telemetry.enabled" are. Filtering them out before calling
-    # apply_plan() prevents them from landing in "unknown" (they're
-    # not unknown, just coarse-grained section names). The result is
-    # all-empty buckets for a generic section-level PUT, which the UI
-    # renders without any effect badge — correct, since the operator
-    # didn't target a specific leaf key.
-    touched_registry_keys = [k for k in body if k in REGISTRY]
+    # The touched-keys list flattens the nested PATCH body into dotted
+    # leaf paths ("slots.max_slots") — the form the registry keys on. A
+    # normal nested PUT ({"slots": {"max_slots": 4}}) previously produced
+    # an all-empty plan because only top-level body keys were matched
+    # against the registry, so the UI's restart hint never fired for
+    # generic-endpoint edits. Keys the registry doesn't know stay out of
+    # the list (they'd land in "unknown"; section names and forward-compat
+    # extras aren't actionable).
+    def _dotted_leaf_keys(node: dict[str, Any], prefix: str = "") -> list[str]:
+        out: list[str] = []
+        for k, v in node.items():
+            path = f"{prefix}{k}"
+            if isinstance(v, dict):
+                out.extend(_dotted_leaf_keys(v, f"{path}."))
+            else:
+                out.append(path)
+        return out
+
+    touched_registry_keys = [k for k in _dotted_leaf_keys(body) if k in REGISTRY]
     config_view = _config_to_dict(merged)
     config_view["_hal0"] = {"apply_plan": apply_plan(touched_registry_keys)}
     return config_view
