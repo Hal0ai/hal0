@@ -349,6 +349,40 @@ function validateExtraArgs(s) {
   return null;
 }
 
+// UI-2: apply-semantics marker. Mirrors the Settings ApplyBadge 'live' vs
+// restart language so operators can tell, at a glance, which drawer controls
+// take effect the instant they're touched (their own PUT/POST — enable, model
+// swap, reasoning, MTP, vision, NPU) from those that only persist when the
+// Save button is pressed (ctx, profile, chat_template, extra_args,
+// idle_timeout). `mode` is "live" | "save".
+function ApplyChip({ mode }) {
+  const live = mode === "live";
+  return (
+    <span
+      className="chip"
+      title={
+        live
+          ? "Applies immediately when toggled — no Save needed"
+          : "Staged — persisted when you press Save"
+      }
+      style={{
+        fontFamily: "var(--jbm)",
+        fontSize: 9,
+        padding: "1px 6px",
+        marginLeft: 6,
+        verticalAlign: "middle",
+        whiteSpace: "nowrap",
+        letterSpacing: "0.04em",
+        color: live ? "var(--ok)" : "var(--fg-4)",
+        borderColor: live ? "var(--ok)" : "var(--line-soft)",
+        background: live ? "rgba(46,204,113,0.08)" : "var(--bg)",
+      }}
+    >
+      {live ? "applies now" : "on Save"}
+    </span>
+  );
+}
+
 function EditSlotDrawer({ open, slot, onClose }) {
   // Hooks must execute every render — early `return null` would skip
   // them; render the drawer shell with a sentinel slot instead.
@@ -404,6 +438,29 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // overrideOpen tracks whether the user has clicked [Override] to reveal the select.
   const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
   const [overrideOpen, setOverrideOpen] = useStateSM(!!(slot?.chat_template));
+  // UI-20: MTP local state — mirrors the reasoning toggle's optimistic
+  // set-before-mutate / revert-on-error pattern. Seeds from slot.mtp (default
+  // off; only `true` counts as on, matching the previous `slot.mtp === true`).
+  const [mtp, setMtp] = useStateSM(slot?.mtp === true);
+  // #901: per-slot vision toggle (instant-apply + cold restart). Default-ON:
+  // the mmproj sidecar loads unless explicitly disabled, so null/undefined →
+  // on. Optimistic local state with revert-on-error (mirrors reasoning).
+  const [vision, setVision] = useStateSM(slot?.vision !== false);
+  const [visionPending, setVisionPending] = useStateSM(false);
+  const [visionErr, setVisionErr] = useStateSM(null);
+  // Task 2 (idle_timeout_s): Save-batched numeric field (ge=0; 0 disables
+  // eviction). Seeded from the slot list payload — empty string when unset so
+  // an untouched field never writes a fabricated default.
+  const [idleTimeout, setIdleTimeout] = useStateSM(
+    slot?.idle_timeout_s != null ? String(slot.idle_timeout_s) : ""
+  );
+  // Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
+  // device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
+  // revert-on-error.
+  const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
+  const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
+  const [npuPending, setNpuPending] = useStateSM(false);
+  const [npuErr, setNpuErr] = useStateSM(null);
 
   // Resolved command provenance — only fetched while the drawer is open.
   // Falls back gracefully when null (non-llama slots) or on error.
@@ -427,6 +484,17 @@ function EditSlotDrawer({ open, slot, onClose }) {
       // Task 5: re-seed chat_template override from the slot prop.
       setChatTemplate(slot.chat_template || "");
       setOverrideOpen(!!(slot.chat_template));
+      // Wave 8: re-seed the instant-apply toggles + idle_timeout field from
+      // the (possibly-updated) slot prop.
+      setMtp(slot.mtp === true);
+      setVision(slot.vision !== false);
+      setVisionPending(false);
+      setVisionErr(null);
+      setIdleTimeout(slot.idle_timeout_s != null ? String(slot.idle_timeout_s) : "");
+      setNpuAsr(slot.npu?.asr === true);
+      setNpuEmbed(slot.npu?.embed === true);
+      setNpuPending(false);
+      setNpuErr(null);
     }
   }, [slot?.name]);
 
@@ -440,6 +508,15 @@ function EditSlotDrawer({ open, slot, onClose }) {
     const errs = {};
     if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
       errs.ctx = "Must be an integer ≥ 128";
+    }
+    // Task 2 (idle_timeout_s): validate only when the field carries a value —
+    // an empty field means "leave the on-disk value alone". Backend contract
+    // is ge=0 (0 disables idle eviction).
+    if (idleTimeout !== "") {
+      const idleNum = Number(idleTimeout);
+      if (!Number.isFinite(idleNum) || !Number.isInteger(idleNum) || idleNum < 0) {
+        errs.idleTimeout = "Must be an integer ≥ 0 (0 disables eviction)";
+      }
     }
     // Task 5: GPU-class slots have an editable profile select; mirror the
     // create-slot modal's guard and block Save when it's been cleared. NPU/CPU
@@ -468,6 +545,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
     // Task 5: include chat_template only when the user has set/changed an override.
     // Dirty-track against slot.chat_template (mirrors profileChanged pattern).
     const chatTemplateChanged = overrideOpen && chatTemplate !== (slot.chat_template || "");
+    // Task 2 (idle_timeout_s): dirty-track against the on-disk value. An empty
+    // field is "no change" (can't clear the override from this UI — 0 is the
+    // explicit disable-eviction value, not empty).
+    const idleBaseline = slot.idle_timeout_s != null ? String(slot.idle_timeout_s) : "";
+    const idleTimeoutChanged = idleTimeout !== "" && idleTimeout !== idleBaseline;
     // Per-slot extra_args override — ship only when changed, nested under
     // [server] so the backend one-level merge preserves sibling server keys.
     const extraArgsChanged = extraArgs !== extraArgsBaseline;
@@ -486,6 +568,11 @@ function EditSlotDrawer({ open, slot, onClose }) {
       }
       if (chatTemplateChanged) {
         slotBody.chat_template = chatTemplate;
+      }
+      // Task 2: idle_timeout_s is a top-level SlotConfig field — PUT /config
+      // shallow-merges it. Only sent when changed (ge=0, 0 disables eviction).
+      if (idleTimeoutChanged) {
+        slotBody.idle_timeout_s = Number(idleTimeout);
       }
       if (extraArgsChanged) {
         slotBody.server = { extra_args: extraArgs };
@@ -611,7 +698,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
     extraArgsDirty ||
     String(ctx) !== String(slot.metrics?.ctx || 16384) ||
     (!!selectedProfile && selectedProfile !== (slot.profile || "")) ||
-    (overrideOpen && chatTemplate !== (slot.chat_template || ""));
+    (overrideOpen && chatTemplate !== (slot.chat_template || "")) ||
+    // Task 2: idle_timeout_s is Save-batched — a pending edit is unsaved.
+    (idleTimeout !== "" && idleTimeout !== (slot.idle_timeout_s != null ? String(slot.idle_timeout_s) : ""));
   const requestClose = () => {
     if (dirty && !window.confirm("Discard unsaved changes?")) return;
     onClose();
@@ -713,7 +802,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>Profile</span>
+              <span>Profile{isGpuProfile && <ApplyChip mode="save" />}</span>
               {isGpuProfile
                 ? <span className="sub warn">⟳ restart required on change</span>
                 : <span className="sub">image + bench-tuned flags for this slot — runtime-pinned</span>
@@ -783,7 +872,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>Model</span>
+              <span>Model<ApplyChip mode="live" /></span>
               <span className="sub">
                 {isContainer ? "swap restarts the container to load" : "applies immediately"}
               </span>
@@ -834,7 +923,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
       <div className="form-row">
         <div className="form-lbl">
-          <span>ctx_size</span>
+          <span>ctx_size<ApplyChip mode="save" /></span>
           <span className="warn">⟳ restarts the container (~model-load seconds)</span>
         </div>
         <div className="form-ctl">
@@ -861,7 +950,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>Template</span>
+              <span>Template<ApplyChip mode="save" /></span>
               <span className="sub warn">⟳ restart required on change</span>
             </div>
             <div className="form-ctl">
@@ -923,7 +1012,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       {slot.type === "llm" && (
         <div className="form-row">
           <div className="form-lbl">
-            <span>Reasoning</span>
+            <span>Reasoning<ApplyChip mode="live" /></span>
             <span className="sub">Stream reasoning before the answer. Off = faster, direct replies. Applies to the next message.</span>
           </div>
           <div className="form-ctl">
@@ -968,20 +1057,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
         // defensive fallback for any path that bypasses the normalizer.
         const isRocm = slot.backend === "rocm" || String(slot.device || "").startsWith("gpu-rocm");
         if (!mtpCapable || !isRocm) return null;
-        const mtpOn = slot.mtp === true;
         return (
           <div className="form-row">
             <div className="form-lbl">
-              <span>MTP</span>
+              <span>MTP<ApplyChip mode="live" /></span>
               <span className="sub">Multi-token speculative decoding — dense models only (MoE runs slower). Restarts the container.</span>
             </div>
             <div className="form-ctl">
               <PillToggle
-                on={mtpOn}
+                on={mtp}
                 disabled={saving}
                 label="MTP"
-                stateText={mtpOn ? "On" : "Off"}
+                stateText={mtp ? "On" : "Off"}
                 onToggle={async (next) => {
+                  // UI-20: optimistic — flip local state before the PUT, revert
+                  // on error (mirrors the reasoning toggle above).
+                  setMtp(next);
                   setSubmitErr(null);
                   try {
                     await editMut.mutateAsync({ name: slot.name, body: { mtp: next } });
@@ -990,12 +1081,122 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     });
                     window.__hal0Toast && window.__hal0Toast(`${slot.name} MTP ${next ? "on" : "off"} — restarting in the background`, "info");
                   } catch (err) {
+                    setMtp(!next);
                     setSubmitErr(err?.message || "MTP toggle failed");
                   }
                 }}
               />
             </div>
           </div>
+        );
+      })()}
+      {/* #901: Vision pill — gated to slots whose bound model carries an mmproj
+          sidecar (the registry Model.mmproj presence flag). Toggling drops or
+          adds the ~0.9 GB projector; instant-apply via PUT /config {vision}
+          plus a non-blocking cold restart (mirrors MTP). Default-ON, so a
+          null/absent on-disk value renders as on. */}
+      {(() => {
+        const cur = slot.model_id || slot.model || "";
+        const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
+        // mmproj is a presence flag on the registry row (path or marker string);
+        // any truthy value means the model ships a vision projector sidecar.
+        if (!m || !m.mmproj) return null;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Vision<ApplyChip mode="live" /></span>
+              <span className="sub">Load the multimodal projector so the slot accepts images. Off frees ~0.9 GB (text-only). Restarts the container.</span>
+            </div>
+            <div className="form-ctl">
+              <PillToggle
+                on={vision}
+                disabled={visionPending || saving}
+                label="Vision"
+                stateText={vision ? "On" : "Off"}
+                onToggle={async (next) => {
+                  // Optimistic set-before-mutate + revert-on-error (mirrors MTP).
+                  setVision(next);
+                  setVisionPending(true);
+                  setVisionErr(null);
+                  setSubmitErr(null);
+                  try {
+                    await editMut.mutateAsync({ name: slot.name, body: { vision: next } });
+                    restartMut.mutate(slot.name, {
+                      onError: (err) => window.__hal0Toast && window.__hal0Toast(`Vision restart failed — ${err?.message || "see logs"}`, "err"),
+                    });
+                    window.__hal0Toast && window.__hal0Toast(`${slot.name} vision ${next ? "on" : "off"} — restarting in the background`, "info");
+                  } catch (err) {
+                    setVision(!next);
+                    setVisionErr(err?.message || "vision toggle failed");
+                  } finally {
+                    setVisionPending(false);
+                  }
+                }}
+              />
+              {visionErr && <div className="hint" style={{ color: "var(--err)" }}>{visionErr}</div>}
+            </div>
+          </div>
+        );
+      })()}
+      {/* Task 3: NPU modality toggles (asr/embed) — device=npu slots only.
+          Seeded from slot.npu; each toggle sends the full {asr,embed} object via
+          PUT /config {npu:{...}} (the backend one-level merge replaces the [npu]
+          table wholesale) + a non-blocking cold restart. Optimistic with
+          revert-on-error. */}
+      {slot.device === "npu" && (() => {
+        const applyNpu = async (nextAsr, nextEmbed, prevAsr, prevEmbed, which) => {
+          setNpuPending(true);
+          setNpuErr(null);
+          setSubmitErr(null);
+          try {
+            await editMut.mutateAsync({ name: slot.name, body: { npu: { asr: nextAsr, embed: nextEmbed } } });
+            restartMut.mutate(slot.name, {
+              onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
+            });
+            window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${which} updated — restarting in the background`, "info");
+          } catch (err) {
+            // Revert both to their pre-toggle values.
+            setNpuAsr(prevAsr);
+            setNpuEmbed(prevEmbed);
+            setNpuErr(err?.message || "NPU toggle failed");
+          } finally {
+            setNpuPending(false);
+          }
+        };
+        return (
+          <>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · ASR<ApplyChip mode="live" /></span>
+                <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <PillToggle
+                  on={npuAsr}
+                  disabled={npuPending || saving}
+                  label="NPU ASR"
+                  stateText={npuAsr ? "On" : "Off"}
+                  onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
+                />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · Embed<ApplyChip mode="live" /></span>
+                <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <PillToggle
+                  on={npuEmbed}
+                  disabled={npuPending || saving}
+                  label="NPU Embed"
+                  stateText={npuEmbed ? "On" : "Off"}
+                  onToggle={(next) => { setNpuEmbed(next); applyNpu(npuAsr, next, npuAsr, npuEmbed, "Embed"); }}
+                />
+              </div>
+            </div>
+            {npuErr && <div className="hint" style={{ color: "var(--err)" }}>{npuErr}</div>}
+          </>
         );
       })()}
       </FieldGroup>
@@ -1005,6 +1206,27 @@ function EditSlotDrawer({ open, slot, onClose }) {
           disclosure primitive exists in primitives.jsx). */}
       <details className="adv-disclosure">
       <summary className="form-section" style={{cursor: "pointer", listStyle: "revert"}}>Advanced</summary>
+
+      {/* Task 2: idle_timeout_s — editable, Save-batched (PUT /config). Seconds
+          of inactivity before the slot is evicted; 0 disables eviction. Blank
+          leaves the on-disk value untouched. */}
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>idle_timeout_s<ApplyChip mode="save" /></span>
+          <span className="sub">evict after N idle seconds · 0 disables · blank = leave as-is</span>
+        </div>
+        <div className="form-ctl">
+          <input
+            className={"input mono" + (fieldErrs.idleTimeout ? " input-err" : "")}
+            value={idleTimeout}
+            inputMode="numeric"
+            onChange={e => { setIdleTimeout(e.target.value); setFieldErrs(p => ({...p, idleTimeout: undefined})); }}
+            placeholder={slot.idle_timeout_s != null ? String(slot.idle_timeout_s) : "unset (uses default)"}
+            data-testid="idle-timeout-input"
+          />
+          {fieldErrs.idleTimeout && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.idleTimeout}</div>}
+        </div>
+      </div>
 
       {/* C5: GPU offload tuning — read-only, defined by the profile. */}
       <div className="form-row">
@@ -1034,7 +1256,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
           operators can test one-off flags without minting a new profile. */}
       <div className="form-row">
         <div className="form-lbl">
-          <span>extra_args</span>
+          <span>extra_args<ApplyChip mode="save" /></span>
           <span className="sub">per-slot override · wins over profile flags</span>
         </div>
         <div className="form-ctl">

@@ -308,6 +308,14 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # the truth source the dashboard uses to dirty-track changes,
         # so an absent on-disk field surfaces as null/None, not the
         # schema default.
+        # #901: per-slot vision toggle (tri-valued: true/false/absent → null).
+        # Surfaced so the edit-drawer Vision pill seeds from disk. The
+        # SlotConfig default is ON (True) — the mmproj sidecar loads unless
+        # explicitly disabled — so the UI treats null as "on" and only writes
+        # back when the operator turns the ~0.9 GB projector off. Mirrors the
+        # idle_timeout_s lift below (absent surfaces as None, not the schema
+        # default, so the dashboard can dirty-track real on-disk state).
+        entry["vision"] = cfg.get("vision")
         entry["idle_timeout_s"] = cfg.get("idle_timeout_s")
         entry["workers"] = cfg.get("workers")
         server_cfg = cfg.get("server")
