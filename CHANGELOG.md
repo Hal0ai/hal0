@@ -27,6 +27,16 @@ v0.8.4b1** — the one on-disk migration (virtual-seed prune) backs up
 names; note the MTP auto behaviour below if you run untagged local MTP
 builds.
 
+> **Upgrade note — re-render slot units after updating.** A container
+> slot's systemd unit bakes the launch argv at load time, so after an
+> update the running slots (and their unit files) still carry the
+> PRE-update flags. A bare `systemctl restart hal0-slot@<name>` re-runs
+> the stale ExecStart — restart slots **through hal0** (dashboard restart,
+> or unload→load) so the unit re-renders through the new code. The
+> dashboard's resolved-command drift indicator shows which slots are
+> stale. Automatic unit re-rendering on update (without bouncing serving)
+> is planned as the follow-up.
+
 ### Added
 - **GPU generalization — experimental CUDA + multi-GPU.** A dedicated
   `cuda` seed profile (upstream `llama.cpp:server-cuda` image, preferred
