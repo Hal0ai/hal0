@@ -39,11 +39,51 @@ upserts the registry entry with the size and integrity digest. Because
 the temp staging dir lives on the same filesystem as the final path, the
 install is a true atomic rename even for multi-GB files.
 
+Before it streams a multi-GB file, hal0 runs a disk-space preflight
+against the staging filesystem — measured against what's still left to
+fetch, so a resumed pull only needs room for the remainder. If there
+isn't enough free space it fails fast with a structured
+`model.insufficient_disk` (`507`) error instead of streaming until the
+disk fills up.
+
+When HuggingFace's LFS metadata advertises an expected SHA-256 for the
+file, hal0 compares it against the hash it computed on completion; a
+mismatch fails the pull with `pull.checksum_mismatch` (`502`). The
+completed `.part` is kept on disk for diagnosis, but its resume sidecar
+is dropped so a retry starts a clean download rather than "resuming"
+corrupt bytes. Files HF exposes with no advertised hash keep the older
+record-only behaviour.
+
 <Aside type="note">
 Gated or private repos return `401`/`403`. Set `HF_TOKEN` (or
 `HUGGING_FACE_HUB_TOKEN`) in the API environment and the pull adds the
 `Authorization: Bearer …` header automatically.
 </Aside>
+
+### Resuming an interrupted pull
+
+If a pull is interrupted — network drop, `hal0-api` restart, an OOM kill
+— it leaves a deterministic `.part` file in the staging dir plus a small
+resume sidecar recording where it left off. The next pull for that model
+id picks the partial back up with an HTTP `Range` request instead of
+starting over from zero:
+
+- The sidecar's ETag is sent as `If-Range`, so if the upstream object
+  changed in the meantime the server hands back a full `200` body and
+  hal0 restarts the download clean rather than splicing mismatched bytes.
+- The on-disk prefix is re-hashed before the resume continues, so the
+  final SHA-256 still comes out byte-for-byte exact.
+- A `.part` (and its sidecar) left untouched for more than 24 hours is
+  swept on the next daemon start.
+
+### Vision models: the mmproj sidecar
+
+A vision-capable pick pulls its multimodal projector (`mmproj`) as a
+second file in the same job, right after the main GGUF — no separate
+directory scan needed to find it afterwards. The job's per-file manifest
+carries both entries, but the top-level `bytes_downloaded` / `bytes_total`
+on the status/SSE payload stay the aggregate across every file, so
+existing status/progress consumers don't need to change.
 
 ### Progress, status, and cancel
 
@@ -71,7 +111,9 @@ curl -X POST http://localhost:8080/api/models/qwen3-4b/pull/cancel
 <TabItem label="Status fields">
 
 The status payload carries `state`, `bytes_downloaded`, `bytes_total`,
-`sha256`, `path`, and (on failure) `error` / `error_code`. Cancellation
+`sha256`, `path`, and (on failure) `error` / `error_code`. A multi-file
+pull (mmproj sidecar) additionally carries `files`, a per-file manifest
+with each entry's own `bytes_done` / `bytes_total` / `sha256`. Cancellation
 sets a flag the background task observes on the next chunk boundary; the
 partial download is unlinked and the job transitions to `cancelled`.
 
@@ -142,6 +184,22 @@ hal0 model list --json
 
 Aggregates the local registry with everything advertised by configured
 upstreams. Local files win on id collision and are flagged `installed`.
+Every row also carries an explicit `origin` — `local` (bytes actually on
+this host) or `upstream` (only advertised by a remote provider's
+`/v1/models`, never pulled) — so the dashboard's Models list can badge
+upstream-only rows **Upstream · remote** instead of guessing from
+`installed`/`upstream` alone. A tag a composite upstream advertises
+before its weights are genuinely on disk (an FLM slot-default tag, for
+example) is dropped from the catalogue rather than shown as a
+pullable-but-fake row; the dedicated FLM probe re-adds it once it's
+actually installed.
+
+The dashboard's Models catalogue can also be sorted (name / size / params
+/ added-date, independently within each section — installed, catalogue,
+your pulls, upstream) and filtered by tag chips drawn from the curated
+tag vocabulary. Every registered GGUF also carries a `quant` field (e.g.
+`Q4_K_XL`) extracted from the GGUF header at registration time, surfaced
+as a filterable chip alongside the tags.
 
 </TabItem>
 <TabItem label="Show">
@@ -178,9 +236,32 @@ This sets the slot's default model but does **not** load it — follow with
 `hal0 slot load chat` (see
 [Manage slots](/docs/guides/manage-slots)).
 
+## Preferred profile
+
+A registry model can also declare a **preferred profile** — the runtime
+profile it wants loaded alongside it — under `defaults.profile`:
+
+```sh
+curl -X PUT http://localhost:8080/api/models/qwen3.6-27b \
+  -H 'content-type: application/json' \
+  -d '{"defaults": {"profile": "rocm-moe"}}'
+```
+
+A slot adopts this preference automatically: when it's created bound to
+the model with no explicit profile of its own, and again on **every**
+subsequent model swap. The preference is honoured only when it's
+compatible with the slot's existing device and type — an incompatible
+preference is ignored and the slot keeps its current/device-default
+profile; hal0 never flips a slot's hardware to satisfy a model's
+preference. The dashboard's model editor surfaces this as a
+**preferred profile** selector in the model's Recipe pane (filtered to
+profiles that fit the model's backends/device/type), with
+`None (use slot default)` when there's no preference set.
+
 ## The registry on disk
 
 Registry entries are metadata records — id, display name, path, size,
-SHA-256, capabilities, and the Hugging Face coordinates a pull came from.
-The registry is the source of truth the dispatcher resolves model ids
-against; the actual weights live in your configured model store.
+SHA-256, capabilities, launcher defaults (including an optional preferred
+profile), and the Hugging Face coordinates a pull came from. The registry
+is the source of truth the dispatcher resolves model ids against; the
+actual weights live in your configured model store.

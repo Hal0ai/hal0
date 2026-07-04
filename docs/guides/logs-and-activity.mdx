@@ -33,10 +33,10 @@ journalctl -u hal0-api.service -f
 </TabItem>
 </Tabs>
 
-For example, to follow the chat slot or the image-gen slot:
+For example, to follow the agent slot or the image-gen slot:
 
 ```sh
-journalctl -u hal0-slot@chat.service -f
+journalctl -u hal0-slot@agent.service -f
 journalctl -u hal0-slot@img.service -f
 ```
 
@@ -52,7 +52,7 @@ curl 'http://localhost:8080/api/logs?unit=hal0-api&n=200'
 
 | Query param | Default | Notes |
 |-------------|---------|-------|
-| `unit`      | —       | Required. The systemd unit, e.g. `hal0-api` or `hal0-slot@chat`. Validated against a conservative character set. |
+| `unit`      | —       | Required. The systemd unit, e.g. `hal0-api` or `hal0-slot@agent`. Validated against a conservative character set. |
 | `n`         | `200`   | Trailing lines, 1–5000. |
 | `since`     | —       | A `journalctl --since` value (ISO timestamp or `'5min ago'`). |
 | `level`     | —       | Filter to this priority **and higher severity**: `warning` returns warning and all higher-severity levels (error, critical, alert, emergency). |
@@ -66,7 +66,7 @@ On a host without `journalctl` (e.g. CI), the endpoint returns an empty
 Stream a live tail as Server-Sent Events:
 
 ```sh
-curl -N 'http://localhost:8080/api/logs/stream?unit=hal0-slot@chat&level=warning'
+curl -N 'http://localhost:8080/api/logs/stream?unit=hal0-slot@agent&level=warning'
 ```
 
 Each non-empty journal line arrives as a `data:` frame carrying the line
@@ -80,6 +80,32 @@ ENCRYPTION_KEY | SALT` is replaced with `{"value": "***REDACTED***",
 "set": <bool>}` — the UI learns whether a secret is configured without
 ever seeing it.
 </Aside>
+
+## The dashboard Logs page (unified logs/events)
+
+The dashboard's Logs page reads from two different backends behind one
+**channel** selector — `events` / `slot` / `merged`:
+
+- **`events`** — the structured `GET /api/journal` feed (hal0's internal
+  EventBus: slot state transitions, config changes, and the like). Every
+  entry now carries its real `source` (`slot:<name>`, `system`,
+  `model:<id>`, …) instead of everything collapsing to the literal
+  `"hal0"`, plus a parsed `slot` field so per-slot filtering doesn't
+  require re-parsing `source` client-side. `GET /api/journal` (and its
+  `/api/journal/stream` SSE counterpart) accepts `?source=` (exact match,
+  or pass `source=slot` to match every `slot:*` source) and `?slot=` for
+  the same filtering server-side.
+- **`slot`** — the raw per-slot journald tail, i.e. `GET
+  /api/slots/{name}/logs` and `/api/slots/{name}/logs/stream` (the same
+  data `hal0 slot logs` reads — see
+  [Manage slots](/docs/guides/manage-slots)), picked from a slot dropdown.
+  This channel now backfills on open instead of only showing output from
+  the moment you opened it, so the one-shot model-loading lines a slot
+  emits at container start are visible again. A `quiet` filter (on by
+  default; both endpoints accept `quiet=false`) drops `update_slots: all
+  slots are idle` heartbeat spam that would otherwise push real log lines
+  out of view.
+- **`merged`** — both channels together.
 
 ## The durable Activity and Audit log
 

@@ -85,6 +85,30 @@ down, the command exits non-zero — start hal0-api first.
 ![Settings page showing live reload status](/screenshots/settings-page.png)
 *Settings page with live daemon status and reload controls.*
 
+The dashboard's **Settings → Storage** section also has its own **Reload
+from disk** button next to the `hal0.toml` path, which hits this same
+`POST /api/settings/reload` — use it after an out-of-band edit with `hal0
+config edit`.
+
+## The dashboard Settings page
+
+Beyond the files and CLI above, the dashboard's Settings view covers most of
+the same ground with a few operator conveniences:
+
+- **Anonymous telemetry** — an opt-in toggle for `[telemetry] enabled`
+  (off by default; see [Configuration schema reference](/docs/reference/config-schema)).
+- **Image-gen defaults** — `default_size`, `default_steps`, and
+  `idle_restore_minutes` for the `img`/ComfyUI slot's `[image]` table.
+- **Secrets** — provider API key presets (Hugging Face, OpenAI, Anthropic,
+  Google, Groq) plus a paired **AWS Bedrock** preset
+  (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), or a custom key name.
+- **Advanced** — schema-driven controls for every `[slots]`, `[dispatcher]`,
+  `[memory]`, and `[activity]` key that previously required `hal0 config
+  edit` (including `slots.evict_pressure_mb`, the pressure-eviction floor),
+  plus a dedicated **memory graph** panel for `[memory.graph]`
+  (`extraction_slot`, `llm_timeout_s`) and a **Restart hal0-api** button for
+  settings marked "restart required".
+
 ## Migrate the schema forward
 
 When you update hal0 across a schema bump, bring `hal0.toml` to the latest

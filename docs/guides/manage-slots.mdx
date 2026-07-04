@@ -39,7 +39,7 @@ hal0 slot list --json
 ## Inspect one slot
 
 ```sh
-hal0 slot show chat
+hal0 slot show agent
 ```
 
 Prints the full status **and** the on-disk TOML config as JSON. Use
@@ -49,7 +49,10 @@ Prints the full status **and** the on-disk TOML config as JSON. Use
 *The slot detail panel combines live status with the persisted TOML config in a single view.*
 
 <Aside type="note">
-The legacy name `primary` is still accepted as an alias for `chat`.
+`primary` and `chat` are retired slot/role names (ADR-0023) — neither is
+accepted as an alias anymore. The canonical LLM roles are `agent` (the
+capable default/fallback anchor) and `utility` (the cheap helper seeded for
+memory extraction); a custom slot is reachable only by its own name.
 </Aside>
 
 ## Create a slot
@@ -168,8 +171,33 @@ The dashboard's slot edit drawer can also set per-slot `[server] extra_args`
 (raw launch flags) — there's no CLI flag for this; it writes via
 `PUT /api/slots/{name}/config`. After changing args that the container baked
 in, the drawer surfaces a **Regenerate** action to rebuild the unit. The
-drawer's context-size field defaults to 16k in the UI; the CLI `--ctx-size`
-default remains `4096`.
+drawer's context-size field seeds from the slot's *persisted*
+`[model].context_size` (not the live runtime metric, which reads `0` on a
+slot that isn't currently serving) and is only written back on Save if you
+actually changed it — so saving an unrelated field (profile, extra_args) no
+longer clobbers the stored context window on a cold reload or model swap.
+The CLI `--ctx-size` default remains `4096`.
+</Aside>
+
+## Dashboard edit drawers
+
+The dashboard's slot and model-recipe edit drawers expose fields the `hal0
+slot` / `hal0 model` CLIs don't have flags for:
+
+- **Per-slot vision toggle** — defaults on when the bound model ships an
+  `mmproj` sidecar (instant-apply; drops or reloads the ~0.9 GB vision
+  projector and cold-restarts the container).
+- **NPU modality toggles** — on `device = npu` slots, `asr` and `embed`
+  toggles write the slot's `[npu]` table (instant-apply, cold-restart).
+- **Model recipe editor** — `capabilities`, `backends`, the `mmproj` path,
+  and the `hf_repo`/`hf_filename` re-pull coordinates are all editable from
+  the Models view, not just the registry API.
+
+<Aside type="note">
+`rope_freq_base` is not editable from either drawer — it's deprecated and
+inert (the launch path never emits it, on both the per-model default and the
+slot `[model]` table). Override RoPE base via `[server] extra_args` instead,
+e.g. `--rope-freq-base 10000`.
 </Aside>
 
 ## Delete a slot
@@ -182,9 +210,44 @@ Stops the unit and removes the config. You'll be asked to confirm; pass
 `--force` / `-f` to skip the prompt.
 
 <Aside type="note">
-Built-in slots (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`, `agent`) are reserved
-and cannot be deleted — the API rejects the request.
+Seeded slots (`utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
+`agent`) are reserved and cannot be deleted — the API rejects the request.
+To stop one of these from serving, disable its capability in
+`capabilities.toml` (or `hal0 slot edit <name>` its `enabled` flag) instead
+of trying to remove it.
 </Aside>
+
+## Idle eviction and memory pressure
+
+Two independent timers can idle-evict a slot, freeing the host RAM
+llama-server statically allocated at `ctx_size` (unloading is the only way
+to reclaim it):
+
+- **Per-slot idle TTL** — `idle_timeout_s` (default `300`s, `0` disables).
+  A slot idle past this is unloaded.
+- **Host memory pressure** — `[slots].evict_pressure_mb` (default `8192`
+  MiB, `0` disables). When host `MemAvailable` drops below this floor,
+  idle LRU-eligible slots are evicted oldest-first until free RAM recovers.
+
+An idle-evicted slot isn't gone: the dispatcher reloads it transparently on
+its next request (wake-on-request), including `embed` / `rerank` / `tts`
+slots — these previously 404'd until a manual `hal0 slot load` after an
+idle eviction. The one exception is a slot **disabled** via a capability
+toggle: hal0 writes `enabled = false` to the slot's TOML, and a disabled
+slot is excluded from wake-on-request, so it stays off until you re-enable
+the capability — a disable now genuinely sticks instead of being silently
+woken by the next matching request.
+
+See [Configuration schema reference](/docs/reference/config-schema) for
+`idle_timeout_s` and `evict_pressure_mb`.
+
+## Dashboard telemetry
+
+On the main dashboard, the **Power & Thermal** card (GPU clock MHz,
+temperature, power draw) and the **Per-Slot Throughput** card are on by
+default, and the **Utilization** card's iGPU row carries a live clock/temp
+caption alongside its usage bar. All three render a "pending driver" note
+instead of a fake reading when a metric isn't available on your host.
 
 ## Stream logs
 

@@ -91,10 +91,9 @@ The chat-slot aliases accepted as the `model` id are the slot names
 works too.
 </Aside>
 
-No `Authorization` header is required by default — hal0 treats the local
-network as trusted. Pass `--auth=basic` at install for Caddy + bearer tokens
-+ HTTPS; or front it with your own reverse proxy if exposed.
-You can point any OpenAI SDK at the same base URL:
+No `Authorization` header is required — hal0 ships with no built-in auth
+and treats the local network as trusted (front it with a reverse proxy if
+it is exposed). You can point any OpenAI SDK at the same base URL:
 
 ```python
 from openai import OpenAI
