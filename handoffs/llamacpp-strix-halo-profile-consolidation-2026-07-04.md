@@ -355,5 +355,8 @@ profile but a per-slot override still beats the family. First entry
 `"gemma": "-ctk f16 -ctv f16 --cache-reuse 0"` auto-protects every gemma slot
 (catalog or scanned) on any profile, fixing the live rocm-dnse regression. GGUF
 `general.architecture` is the future family-detection hardening (not persisted on
-rows today). **Follow-up:** with gemma auto-guarded, adopting Vulkan q8 KV for
-the +45% qwen-at-depth win is now a safe one-line seed change.
+rows today). **Follow-up — DONE:** with gemma auto-guarded, the vulkan seed now
+ships `-ctk q8_0 -ctv q8_0` for the +45% qwen-at-depth pp win (and half KV mem);
+gemma-on-vulkan is pinned back to f16 by the family guard. The vulkan profile is
+therefore no longer intrinsically gemma-safe — do not drop `FAMILY_DEFAULTS`
+without reverting vulkan to f16 (a test pins this coupling).

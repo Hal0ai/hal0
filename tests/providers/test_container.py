@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 from hal0.config.schema import (
     FAMILY_DEFAULTS,
     MTP_FLAG_BUNDLE,
+    SEED_PROFILES,
     ProfileConfig,
     family_flags,
     model_family,
@@ -889,3 +890,23 @@ class TestFamilyDefaults:
             argv = resolved_command_for_slot(cfg, model_path="/mnt/ai-models/gemma-4-12b-it.gguf")
         assert argv is not None
         assert argv[argv.index("-ctk") + 1] == "q4_0"  # slot override wins over family
+
+    def test_vulkan_seed_ships_q8_but_gemma_is_guarded(self) -> None:
+        """The vulkan seed adopts q8 KV (qwen +45% pp win) and RELIES on the
+        gemma family guard for safety — qwen-on-vulkan gets q8, gemma gets f16."""
+        vseed = SEED_PROFILES["vulkan"]
+        assert "-ctk q8_0 -ctv q8_0" in vseed["flags"], "vulkan seed must ship q8 KV"
+        profile = ProfileConfig(image=vseed["image"], flags=vseed["flags"], mtp=False)
+
+        def _resolve(model_default: str, path: str) -> list[str]:
+            cfg = {"profile": "vulkan", "port": 8096, "model": {"default": model_default}}
+            with patch("hal0.providers.container._resolve_profile", return_value=profile):
+                argv = resolved_command_for_slot(cfg, model_path=path)
+            assert argv is not None
+            return argv
+
+        qwen = _resolve("qwen3-27b", "/mnt/ai-models/qwen3-27b.gguf")
+        assert qwen[qwen.index("-ctk") + 1] == "q8_0"  # adopted win, no guard
+        gemma = _resolve("gemma-4-12b-it", "/mnt/ai-models/gemma-4-12b-it.gguf")
+        assert "q8_0" not in gemma  # family guard pins f16, q8 deduped away
+        assert gemma[gemma.index("-ctk") + 1] == "f16"

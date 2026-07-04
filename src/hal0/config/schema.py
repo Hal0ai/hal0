@@ -864,16 +864,13 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         # Strix Halo matrix 2026-07-04 (RADV): -ub sweep monotonic — 256 is the
         # sweet spot (pp2048 274.7 vs 260.7 @512 = +5.4%; 1024 is WORSE at 244.7),
         # so -ub 512→256. +-ngl 999/--jinja. Symmetric q8 KV measured +45% pp at
-        # 32k depth on qwen here but deliberately NOT set: it is the MIRROR image
-        # on gemma — measured 2026-07-04 on gemma-4-12B @32k, q8 KV costs -28.5%
-        # pp on RADV (-10% tg on rocm). (The upstream "~10x pp trap" #12352/#23978
-        # did NOT reproduce on this ROCm-7.2.4/RADV fork — q8 stayed GPU-resident,
-        # no cliff — but gemma still clearly regresses.) No per-model f16 override
-        # exists to protect a gemma-on-vulkan slot (CuratedModel carries no
-        # launcher defaults; the live gemma `explore` slot already runs -ctk q8_0
-        # on rocm-dnse, paying ~10% tg). Keep f16 KV until a gemma-family guard lands.
+        # 32k depth on qwen (168 vs 116) and halves KV memory — now ADOPTED. It is
+        # the mirror image on gemma (gemma-4-12B @32k: q8 costs -28.5% pp RADV), so
+        # this profile is NO LONGER intrinsically gemma-safe — it relies on
+        # FAMILY_DEFAULTS["gemma"] pinning gemma slots back to f16 KV. Do NOT drop
+        # the gemma family guard without reverting this to f16.
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
-        "flags": "-ngl 999 -fa on -b 512 -ub 256 --parallel 1 --threads 8 --no-mmap --jinja",
+        "flags": "-ngl 999 -fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 256 --parallel 1 --threads 8 --no-mmap --jinja",
         "mtp": False,
         "device_class": "gpu",
         "backend": "vulkan",
