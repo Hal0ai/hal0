@@ -91,15 +91,49 @@ function ThEyebrow({ dot, live, label, sub, right }) {
 // as ThroughputCard2: history pending/empty → "source pending" body, no
 // fabricated bars ever. The gpu/npu split in the sub-row is the measured
 // per-slot tok/s from the live slot poll.
+//
+// Persistence: the history endpoint only reports buckets inside its 100s
+// window, so on an idle box `samples` empties out and the cell would flap
+// back to "source pending". Two-part fix, both honest:
+//   1. "source pending" is reserved for a MISSING source (loading / 404 /
+//      error — `data` null). A 200 with an empty window is a measurement —
+//      "no throughput in the last 100s" — and renders as hero 0.0 with the
+//      live serving count, never as a pending gate.
+//   2. Real buckets are merged into a module-level cache (keyed by ts) so
+//      the spark keeps the last 20 MEASURED buckets on screen after the
+//      window slides past them. Every bar is a real reading — the cache
+//      only stops bars from vanishing; it never invents them.
+const TPS_BUCKET_CACHE = new Map() // ts → sample, module-level so it survives remounts
+function mergeTpsCache(samples) {
+  for (const s of samples) {
+    if (s && typeof s.ts === 'number' && typeof s.total_tps === 'number') {
+      TPS_BUCKET_CACHE.set(s.ts, s)
+    }
+  }
+  // keep the cache bounded: newest 20 buckets in ts order
+  const kept = [...TPS_BUCKET_CACHE.values()].sort((a, b) => a.ts - b.ts).slice(-20)
+  TPS_BUCKET_CACHE.clear()
+  for (const s of kept) TPS_BUCKET_CACHE.set(s.ts, s)
+  return kept
+}
+
 function ThCellThroughput({ slots }) {
-  const { data, isPending } = useThroughputHistory()
+  const { data } = useThroughputHistory()
+  // Pending ONLY when the source itself is absent (hook returns data=null on
+  // loading and on 404/error) — an alive endpoint with an empty window is a
+  // real "nothing served lately" reading, not a missing source.
+  const sourcePending = !data
   const samples = data?.samples ?? []
   const latest = samples.length > 0 ? samples[samples.length - 1] : null
-  const hasReading = latest != null && typeof latest.total_tps === 'number'
-  const heroTps = hasReading ? latest.total_tps : null
-  const serving = hasReading ? (latest.serving_slots ?? 0) : null
+  const hasLive = latest != null && typeof latest.total_tps === 'number'
+  // Empty-but-alive window → measured 0.0 (paired with the serving count
+  // below, per the #221 invariant).
+  const heroTps = hasLive ? latest.total_tps : sourcePending ? null : 0
+  const serving = hasLive
+    ? (latest.serving_slots ?? 0)
+    : (slots || []).filter((s) => s.state === 'serving').length
 
-  const bars = samples.slice(-20)
+  const bars = sourcePending ? [] : mergeTpsCache(samples)
   const maxTps = bars.length > 0 ? Math.max(...bars.map((s) => s.total_tps), 1) : 1
 
   const npuTps = sumToks((slots || []).filter(isNpuDev))
@@ -108,7 +142,7 @@ function ThCellThroughput({ slots }) {
   return (
     <div className="th-cell th-cell-tps">
       <ThEyebrow label="Throughput" right="tok/s" />
-      {isPending ? (
+      {sourcePending ? (
         <div className="mc-pending">
           <span className="mc-pending-label">source pending</span>
           <span className="mc-pending-sub">waiting for throughput history</span>
@@ -135,14 +169,12 @@ function ThCellThroughput({ slots }) {
               ))}
             </div>
           </div>
-          {/* Sub-row ALWAYS renders with a real reading so a measured 0.0
-              is disambiguated by the explicit serving count (#221). */}
-          {hasReading && (
-            <div className="th-sub">
-              gpu <span className="g">{fmt1(gpuTps)}</span> · npu <span className="n">{fmt1(npuTps)}</span> ·{' '}
-              <span className="s">{serving} slot{serving !== 1 ? 's' : ''} serving</span>
-            </div>
-          )}
+          {/* Sub-row ALWAYS renders with a reading (incl. the measured-empty
+              0.0) so it is disambiguated by the explicit serving count (#221). */}
+          <div className="th-sub">
+            gpu <span className="g">{fmt1(gpuTps)}</span> · npu <span className="n">{fmt1(npuTps)}</span> ·{' '}
+            <span className="s">{serving} slot{serving !== 1 ? 's' : ''} serving</span>
+          </div>
         </>
       )}
     </div>
