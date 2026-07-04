@@ -8,23 +8,25 @@ is currently loaded so the container re-renders under the new backend.
 Phase E (#687) semantics under test:
   - "loaded" is the SlotManager's own truth (``is_ready_for_dispatch``) —
     no external daemon is consulted.
-  - ``actual_backend`` is always ``None``: per-process backend
-    introspection retired with the legacy runtime (#663 — the running
+  - ``effective_backend`` (and its wire back-compat alias
+    ``actual_backend``) is the EFFECTIVE backend derived from the slot's
+    config (device → backend via ``_cfg_effective_backend``); per-process
+    introspection was retired with the legacy runtime (#663 — the running
     image is the backend-of-record, surfaced as ``actual_image``).
-  - Backend builds ship inside the container images, so
-    ``_BACKEND_BUILD_BIN`` is empty and ``_backend_build_present`` always
-    returns True; it is kept as a monkeypatchable seam, and the 409
-    ``backend.build_missing`` path is exercised through that seam.
+  - Backend builds ship inside the container images, so there is NO
+    host-side build-presence check (the old always-True stub and its dead
+    409 ``backend.build_missing`` branch were removed).
 
 Validation:
-  - cpu / auto → always valid.
+  - rocm / vulkan / cpu / auto → always valid.
   - flm/npu → 400 ``backend.not_selectable``.
 
 Idempotent: same backend already declared → no-op, ``reloaded: false``.
 
 Response 200 carries the standard ``_slot_to_dict`` payload PLUS
-``requested_backend`` / ``declared_backend`` / ``actual_backend`` /
-``reloaded``.
+``requested_backend`` / ``declared_backend`` / ``effective_backend`` /
+``actual_backend`` (back-compat alias of effective) / ``device`` /
+``profile`` / ``reloaded``.
 """
 
 from __future__ import annotations
@@ -34,8 +36,6 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
-import hal0.api.routes.slots as slots_mod
 
 
 @pytest.fixture
@@ -100,11 +100,13 @@ def test_switch_to_rocm_writes_device_and_restarts_when_loaded(
     body = r.json()
     # device persisted to TOML.
     assert _read_device(slot_toml) == "gpu-rocm"
-    # response contract.
+    # response contract: coherent declared/effective/device snapshot.
     assert body["requested_backend"] == "rocm"
     assert body["declared_backend"] == "rocm"
-    # Phase E: per-process backend introspection retired — always None.
-    assert body["actual_backend"] is None
+    assert body["effective_backend"] == "rocm"
+    # Back-compat alias carries the effective value (was hardcoded None).
+    assert body["actual_backend"] == "rocm"
+    assert body["device"] == "gpu-rocm"
     assert body["reloaded"] is True
     # standard slot payload still present.
     assert body["name"] == "chat"
@@ -143,35 +145,22 @@ def test_accepts_device_alias_and_normalizes_gpu_form(
 # ── build presence: container images always carry the build ─────────────────
 
 
-def test_build_presence_defaults_to_true_no_409(
+def test_gpu_backend_switch_never_gated_on_host_builds(
     slot_toml: Path,
     client: TestClient,
 ) -> None:
     """Backend builds ship inside container images — no host-side check.
 
-    ``_BACKEND_BUILD_BIN`` is empty and ``_backend_build_present`` always
-    returns True, so an unpatched rocm switch succeeds.
+    The always-True ``_backend_build_present`` stub and its unreachable 409
+    ``backend.build_missing`` branch were removed; an unpatched rocm switch
+    must simply succeed.
     """
-    assert slots_mod._BACKEND_BUILD_BIN == {}
-    assert slots_mod._backend_build_present("rocm") is True
-    assert slots_mod._backend_build_present("vulkan") is True
+    import hal0.api.routes.slots as slots_mod
+
+    assert not hasattr(slots_mod, "_backend_build_present"), "dead stub must stay removed"
     r = client.post("/api/slots/chat/backend", json={"backend": "rocm"})
     assert r.status_code == 200, r.text
     assert _read_device(slot_toml) == "gpu-rocm"
-
-
-def test_rocm_build_missing_returns_409_via_seam(
-    slot_toml: Path,
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The monkeypatchable seam still gates the switch (future host builds)."""
-    monkeypatch.setattr(slots_mod, "_backend_build_present", lambda b: b != "rocm")
-    r = client.post("/api/slots/chat/backend", json={"backend": "rocm"})
-    assert r.status_code == 409, r.text
-    assert r.json()["error"]["code"] == "backend.build_missing"
-    # device must NOT have changed.
-    assert _read_device(slot_toml) == "gpu-vulkan"
 
 
 # ── 400 not_selectable for flm/npu ───────────────────────────────────────────
@@ -221,15 +210,17 @@ def test_idempotent_same_backend_no_reload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Requesting the already-declared backend is a no-op, even when loaded
-    (actual_backend is always None post-#663, so the declared device is
-    the only idempotency input)."""
+    (the effective backend is config-derived, so declared==effective when
+    the device already matches)."""
     restarts = _patch_loaded(client, monkeypatch, loaded=True)
     r = client.post("/api/slots/chat/backend", json={"backend": "vulkan"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["reloaded"] is False
     assert body["declared_backend"] == "vulkan"
-    assert body["actual_backend"] is None
+    assert body["effective_backend"] == "vulkan"
+    assert body["actual_backend"] == "vulkan"
+    assert body["device"] == "gpu-vulkan"
     # No restart cycle.
     assert not restarts, "idempotent no-op must not restart"
     # device unchanged.

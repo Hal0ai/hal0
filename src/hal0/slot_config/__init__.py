@@ -75,8 +75,66 @@ def write_slot_toml(path: Path | str, data: dict[str, Any]) -> None:
     writer inventory stays greppable (issue #697). Raises ``OSError`` on
     filesystem failure and ``TypeError`` on non-TOML-encodable values,
     same as the underlying writer.
+
+    Cross-process serialization is the CALLER's job: wrap the whole
+    read-modify-write (not just this write) in :func:`slot_write_lock`.
     """
     write_toml_atomic(Path(path), data)
+
+
+@contextlib.contextmanager
+def slot_write_lock(slots_dir: Path | str | None = None) -> Iterator[None]:
+    """Hold the coarse cross-process lock for ALL slots/*.toml writes.
+
+    Historically :meth:`SlotConfigStore.transaction` guarded only
+    ``capabilities.toml``, so slot-TOML read-modify-writes from the API
+    (``SlotManager.update_config`` / ``create`` / ``_persist_model_default``),
+    the CLI, and the stacks apply engine could interleave and drop each
+    other's change. Every slot-TOML RMW now opts into this ONE advisory
+    lock — a single lock file (``<slots_dir>.lock``, i.e. the sibling of
+    the slots config dir) covering every slot file. Deliberately coarse:
+    slot writes are rare, tiny, and a per-file lock would buy nothing but
+    ordering headaches.
+
+    Same re-entrancy contract as :func:`hal0.config.locking.file_lock`
+    (per-thread re-entrant; serializing across threads and processes).
+    IMPORTANT: do not ``await`` anything that can actually suspend while
+    holding it — a second coroutine on the same thread would observe the
+    thread-local re-entrancy depth and walk straight in.
+
+    ``slots_dir`` overrides the default ``paths.slots_config_dir()`` for
+    stores constructed against a custom directory (tests).
+    """
+    base = Path(slots_dir) if slots_dir is not None else paths.slots_config_dir()
+    with file_lock(base):
+        yield
+
+
+def fold_ctx_size_alias(cfg_dict: dict[str, Any]) -> None:
+    """Fold the legacy ``[model].ctx_size`` alias into the canonical
+    ``context_size`` (#585) — THE single normalization point.
+
+    The dashboard slot-edit panel writes ``ctx_size``; the load path reads
+    ``context_size``. Persisting both lets them silently diverge. A fresh
+    ``ctx_size`` (the operator's latest write) wins over any stale
+    ``context_size``, then the alias is dropped so exactly one key survives
+    on disk. No-op when ``ctx_size`` is absent.
+
+    Copy-safe on the nested table: the ``[model]`` sub-dict is copied
+    before mutation and rebound onto ``cfg_dict``, so callers that share
+    the sub-dict with a "before" snapshot (the store's ChangeSet) are
+    never corrupted. ``cfg_dict`` itself is mutated in place.
+
+    Used by :func:`merge_slot_config` (which covers
+    ``SlotManager.update_config`` and the store) and by
+    ``SlotManager.create`` — previously three separate copies of this fold
+    existed and could drift.
+    """
+    model = cfg_dict.get("model")
+    if isinstance(model, dict) and "ctx_size" in model:
+        model = dict(model)
+        model["context_size"] = model.pop("ctx_size")
+        cfg_dict["model"] = model
 
 
 # ── the shared slot-projection merge primitive (SC-11) ───────────────────────
@@ -118,15 +176,122 @@ def merge_slot_config(base: dict[str, Any], updates: dict[str, Any]) -> dict[str
             after[key] = value
 
     # #585: fold the legacy [model].ctx_size alias into the canonical
-    # context_size. Copy the sub-dict before mutating so ``base`` (the store's
+    # context_size via the ONE shared fold (:func:`fold_ctx_size_alias`).
+    # The fold copies the sub-dict before mutating so ``base`` (the store's
     # ``before`` snapshot) is never touched even when ``updates`` carried no
     # [model] and ``after["model"]`` is still ``base``'s object.
-    model = after.get("model")
-    if isinstance(model, dict) and "ctx_size" in model:
-        model = dict(model)
-        model["context_size"] = model.pop("ctx_size")
-        after["model"] = model
+    fold_ctx_size_alias(after)
     return after
+
+
+# ── boundary validation for slot-config writes ───────────────────────────────
+
+#: Top-level keys that are NOT declared on ``SlotConfig`` (they round-trip
+#: through its ``extra="allow"``) but are documented, actively-read parts of
+#: the slot-TOML surface. The unknown-key validator tolerates exactly these;
+#: anything else at the top level is treated as a typo.
+#:
+#:   - ``type``           — slot kind (llm/embedding/…), read all over manager/routing.
+#:   - ``default``        — SC-4 per-type default flag, read by default_slot_for.
+#:   - ``lru``            — pressure-eviction eligibility (#903).
+#:   - ``default_voice`` / ``default_language`` — TTS engine extras written by
+#:     the dashboard voice settings (PUT /api/slots/tts/config).
+#:   - ``slot``           — the nested on-disk [slot] table shape (hoisted on load).
+TOLERATED_SLOT_CONFIG_KEYS: frozenset[str] = frozenset(
+    {"type", "default", "lru", "default_voice", "default_language", "slot"}
+)
+
+#: Extra keys tolerated inside specific sub-tables, keyed by sub-table name.
+#: ``[model].ctx_size`` is the documented legacy alias of ``context_size``
+#: (#585) — accepted on write, folded by :func:`fold_ctx_size_alias`.
+_TOLERATED_SUBTABLE_KEYS: dict[str, frozenset[str]] = {
+    "model": frozenset({"ctx_size"}),
+}
+
+
+def _known_field_names(model_cls: Any) -> set[str]:
+    """Field names + aliases a pydantic model accepts — derived dynamically.
+
+    Reading ``model_fields`` (not a hardcoded list) means a field another
+    change adds to the schema (e.g. ``ServerConfig.env``) passes validation
+    automatically, with no second list to keep in sync.
+    """
+    names: set[str] = set()
+    for name, field in model_cls.model_fields.items():
+        names.add(name)
+        alias = getattr(field, "alias", None)
+        if alias:
+            names.add(alias)
+    return names
+
+
+def unknown_slot_config_keys(payload: dict[str, Any]) -> list[str]:
+    """Dotted paths of payload keys the slot-config schema does not know.
+
+    ``SlotConfig`` and its sub-models are ``extra="allow"`` so a typo'd key
+    (``ctx_sizee``, ``enabeld``) round-trips to disk silently and the
+    intended setting never takes effect. This walks ``payload`` (a partial
+    slot-config write body: PUT /config, PATCH /defaults wrapped under
+    ``model``, POST create) against the pydantic field sets of
+    ``SlotConfig`` / ``ModelConfig`` / ``ServerConfig`` / ``NpuConfig`` /
+    ``ImageGenConfig`` and returns the paths of unknown keys, sorted.
+
+    Tolerated beyond the declared fields:
+      - documented legacy aliases: ``[model].ctx_size``, top-level
+        ``backend`` / ``provider`` / ``runtime`` (declared deprecated
+        fields), a *string* ``image`` (per-slot container-image override),
+      - the actively-read extras in :data:`TOLERATED_SLOT_CONFIG_KEYS`,
+      - ``extra`` tables at any level (verbatim provider passthrough by
+        contract — never validated).
+
+    Known fields are derived from ``model_fields`` dynamically, so schema
+    additions (e.g. ``[server].env``) pass without touching this module.
+    """
+    from hal0.config.schema import (
+        ImageGenConfig,
+        ModelConfig,
+        NpuConfig,
+        ServerConfig,
+        SlotConfig,
+    )
+
+    sub_models: dict[str, Any] = {
+        "model": ModelConfig,
+        "server": ServerConfig,
+        "npu": NpuConfig,
+        "image": ImageGenConfig,
+        "image_gen": ImageGenConfig,
+    }
+    top_known = _known_field_names(SlotConfig) | TOLERATED_SLOT_CONFIG_KEYS
+    unknown: list[str] = []
+
+    def _check_subtable(prefix: str, table: dict[str, Any], model_cls: Any, name: str) -> None:
+        known = _known_field_names(model_cls) | _TOLERATED_SUBTABLE_KEYS.get(name, frozenset())
+        for key in table:
+            if key not in known:
+                unknown.append(f"{prefix}{key}")
+
+    def _check_top(prefix: str, mapping: dict[str, Any]) -> None:
+        for key, value in mapping.items():
+            if key not in top_known:
+                unknown.append(f"{prefix}{key}")
+                continue
+            if key == "extra":
+                continue  # verbatim passthrough by contract
+            if key == "slot" and isinstance(value, dict):
+                # Nested on-disk [slot] table — same vocabulary as top level.
+                for sub_key in value:
+                    if sub_key not in top_known or sub_key == "slot":
+                        unknown.append(f"{prefix}slot.{sub_key}")
+                continue
+            model_cls = sub_models.get(key)
+            if model_cls is not None and isinstance(value, dict):
+                _check_subtable(f"{prefix}{key}.", value, model_cls, key)
+            # A non-dict ``image`` is the legacy string container-image
+            # override — tolerated as-is (parked under extra on load).
+
+    _check_top("", payload)
+    return sorted(set(unknown))
 
 
 # ── ChangeSet ────────────────────────────────────────────────────────────────
@@ -263,8 +428,16 @@ class SlotConfigStore:
         interleave and drop each other's change (SC-10). The lock is
         re-entrant within a thread, so a caller already inside ``transaction``
         may nest a locked leaf writer without self-deadlocking.
+
+        The store's commit also writes ``slots/*.toml``, so the body
+        additionally holds the coarse slot-TOML write lock
+        (:func:`slot_write_lock`) — a stack apply / capability apply and a
+        concurrent ``SlotManager.update_config`` (which takes only the slot
+        lock) serialize instead of interleaving their slot-file writes.
+        Lock order is always capabilities → slots; no slot-lock holder ever
+        acquires the capabilities lock, so the ordering cannot invert.
         """
-        with file_lock(self._caps_path()):
+        with file_lock(self._caps_path()), slot_write_lock(self._slots_dir):
             yield
 
     def apply_and_commit(self, selection: SlotSelection) -> ChangeSet:
@@ -442,10 +615,14 @@ def _write_state(fs: FileState) -> None:
 
 
 __all__ = [
+    "TOLERATED_SLOT_CONFIG_KEYS",
     "ChangeSet",
     "FileState",
     "SlotConfigStore",
     "SlotSelection",
+    "fold_ctx_size_alias",
     "merge_slot_config",
+    "slot_write_lock",
+    "unknown_slot_config_keys",
     "write_slot_toml",
 ]
