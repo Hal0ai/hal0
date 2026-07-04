@@ -97,7 +97,7 @@ def test_profile_fits_slot_matrix(tmp_hal0_home: str) -> None:
     fits = SlotManager._profile_fits_slot
     gpu_vulkan = {"type": "llm", "device": "gpu-vulkan"}
     assert fits("vulkan", gpu_vulkan) is True
-    assert fits("rocm", gpu_vulkan) is False       # cross-backend
-    assert fits("cpu-llm", gpu_vulkan) is False     # wrong device class
-    assert fits("comfyui", gpu_vulkan) is False     # img profile, wrong type+class
+    assert fits("rocm", gpu_vulkan) is False  # cross-backend
+    assert fits("cpu-llm", gpu_vulkan) is False  # wrong device class
+    assert fits("comfyui", gpu_vulkan) is False  # img profile, wrong type+class
     assert fits("does-not-exist", gpu_vulkan) is False

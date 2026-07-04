@@ -223,9 +223,7 @@ def test_register_candidate_comfyui_checkpoint_tagged_image(
     ckpt_dir = tmp_path / "comfyui" / "models" / "checkpoints"
     ckpt_dir.mkdir(parents=True)
     (ckpt_dir / "dreamshaper_8.safetensors").write_bytes(b"x" * 256)
-    candidates = find_candidates(
-        roots=[tmp_path], extensions=[".safetensors"], known_paths=set()
-    )
+    candidates = find_candidates(roots=[tmp_path], extensions=[".safetensors"], known_paths=set())
     cand = next(c for c in candidates if c.path.name == "dreamshaper_8.safetensors")
     model = register_candidate(registry, cand)
     assert model.capabilities == ["image"]
