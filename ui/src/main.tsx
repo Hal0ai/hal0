@@ -24,6 +24,17 @@
 //    in this file would execute AFTER the dash imports.
 import './globals-install'
 
+// Self-hosted fonts (package.json shipped these but nothing imported them,
+// so the dashboard silently depended on the fonts.googleapis.com <link> in
+// index.html — a per-load external fetch on what is a local-first LAN
+// appliance, and offline it stalls then falls back). The CSS font stacks
+// already list "Geist Variable" / "JetBrains Mono" (dashboard.css --geist /
+// --jbm), so bundling the files makes them deterministic.
+import '@fontsource-variable/geist'
+import '@fontsource/jetbrains-mono/400.css'
+import '@fontsource/jetbrains-mono/500.css'
+import '@fontsource/jetbrains-mono/600.css'
+
 // 2) Side-effect imports — order matches the original script tags in
 //    `hal0 v2 dashboard.html`. Each module installs its components on
 //    `window` via `Object.assign(window, …)`.

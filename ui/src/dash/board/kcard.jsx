@@ -13,6 +13,10 @@ const { useState, useCallback } = React;
 function BoardCard({ task, selected, onToggle, onOpen, isOpen, onDragStart, onDragEnd }) {
   const BoardIcon = window.BoardIcon;
 
+  // depCount is "done/total" (e.g. "2/3", "10/12") — split on the slash;
+  // char-indexing broke for counts of 10+.
+  const dep = task.depCount ? String(task.depCount).split("/") : null;
+
   return (
     <div
       className={
@@ -43,8 +47,8 @@ function BoardCard({ task, selected, onToggle, onOpen, isOpen, onDragStart, onDr
               {BoardIcon && <BoardIcon name="flag" size={12} />}
             </span>
           )}
-          {task.depCount && (
-            <span className={"kc-dep" + (task.depCount[0] !== task.depCount[2] ? " warn" : "")}>
+          {dep && (
+            <span className={"kc-dep" + (dep[0] !== dep[1] ? " warn" : "")}>
               {BoardIcon && <BoardIcon name="dep" size={11} />}
               {task.depCount}
             </span>

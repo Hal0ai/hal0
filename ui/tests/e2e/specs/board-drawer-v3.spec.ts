@@ -292,14 +292,16 @@ test.describe('TaskDrawer — per-status contract', () => {
     await expect(childChip).toBeVisible()
   })
 
-  test('dep remove chip fires DELETE on /api/board/links', async ({ page }) => {
+  test('dep remove chip fires DELETE /api/board/links?parent_id=&child_id=', async ({ page }) => {
     const task = BOARD_TASKS.find(t => t.deps.children.length > 0)!
     const childId = task.deps.children[0]
-    let deleteBody: any = null
+    let deleteUrl: URL | null = null
 
-    await page.route('**/api/board/links', async (route) => {
+    // The ids ride as QUERY params (the backend forwards the query string
+    // verbatim and sends no body on DELETE) — a JSON body would be dropped.
+    await page.route(/\/api\/board\/links(\?|$)/, async (route) => {
       if (route.request().method() === 'DELETE') {
-        deleteBody = route.request().postDataJSON()
+        deleteUrl = new URL(route.request().url())
         await json(route, { ok: true })
       } else {
         await route.fallback()
@@ -313,7 +315,9 @@ test.describe('TaskDrawer — per-status contract', () => {
     await expect(removeBtn).toBeVisible()
     await removeBtn.click()
     await page.waitForTimeout(200)
-    expect(deleteBody).toBeTruthy()
+    expect(deleteUrl).toBeTruthy()
+    expect(deleteUrl!.searchParams.get('parent_id')).toBe(task.id)
+    expect(deleteUrl!.searchParams.get('child_id')).toBe(childId)
   })
 
   test('add parent dep fires POST /api/board/links', async ({ page }) => {

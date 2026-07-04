@@ -213,7 +213,7 @@ Move a task = `PATCH /api/board/tasks/{id} {status}`. `done` completes; `blocked
 | `/config` | GET | — (read-only knobs: tick-interval/failure-limit/claim-TTL/max-in-flight) |
 | `/orchestration` | GET / PUT | — / board.orchestration.update (4 knobs: orchestrator_profile, default_assignee, auto_decompose, auto_promote_children) |
 | `/events` | WS ?token=&since=&board=&tenant= | — |
-| `/chat` | POST(SSE) | board.chat.turn (per tool call) |
+| `/chat` | POST(SSE) | board.chat.turn per board mutation · platform.chat.turn per slot mutation (reads unaudited) |
 
 ## Wire shapes (board task — the canonical card/drawer shape)
 A `Task` from `/board` lanes + `/tasks/{id}`:
@@ -230,8 +230,14 @@ so view components consume one stable camelCase shape. `/board` returns lanes ke
 flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render with "— no tasks —".
 
 ## Gaps surfaced honestly in the UI (do not fake)
-- Orchestration popover: only the 4 PUT knobs are editable. tick-interval / failure-limit /
-  claim-TTL / max-in-flight are read from `/config` and rendered **read-only with a note**.
+- Orchestration popover: only the 4 PUT knobs are editable (no auto/manual "mode" — the
+  server has no such field). tick-interval / failure-limit / claim-TTL / max-in-flight are
+  read from `/config` and rendered **read-only with a note**.
+- The `/chat` agent is the PLATFORM assistant: board tools (reads + audited mutations,
+  incl. get/update_orchestration) plus hal0-api self-HTTP tools (slots list/get/
+  load/unload/restart, models, hardware stats, installed agents). Same SSE frame contract.
+- Drag-and-drop outside any lane ARCHIVES the card (`board-drop-archive` /
+  `board-archive-veil`); nothing on the board hard-deletes without an explicit action.
 - "Nudge dispatcher" = one-shot `POST /dispatch?max=N`. No continuous start/stop.
 - Worker log is pull-only (`/tasks/{id}/log?tail=`); poll on drawer open, no live stream.
 - `create_task` may return a `warning` (no dispatcher running) — show it as a toast/banner.
