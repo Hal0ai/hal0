@@ -26,7 +26,7 @@ import { useThroughputHistory } from '@/api/hooks/useThroughputHistory'
 import { useRequestsRollup } from '@/api/hooks/useRequestsRollup'
 import { useServices } from '@/api/hooks/useServices'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
-import { useActivityStream } from '@/api/hooks/useActivity'
+import { useActivityRecent } from '@/api/hooks/useActivity'
 import { useApprovalList } from '@/api/hooks/useAgents'
 import {
   useDashLayout,
@@ -831,8 +831,11 @@ function activityTs(ts) {
 const ACTIVITY_ROWS = 6
 
 function RDActivityCard({ swap }) {
-  const { records } = useActivityStream({ limit: 50 })
-  const rows = records.slice(0, ACTIVITY_ROWS)
+  // Polled recent records, NOT the SSE stream — see useActivityRecent: the
+  // card only needs the latest handful, and an EventSource against a mock /
+  // older backend pollutes the console on every dashboard mount.
+  const { data: records } = useActivityRecent(50)
+  const rows = (records ?? []).slice(0, ACTIVITY_ROWS)
 
   return (
     <RDCard title="Activity" note="journald · all slots" swap={swap} className="rd-fill" flush>
