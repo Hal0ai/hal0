@@ -28,21 +28,28 @@ shared inference daemon; no extra process to babysit.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.8.4b1** — container-runtime era, declarative
-> config. Each slot (`agent`, `utility`, `embed`, `rerank`, `stt`, `tts`,
-> `img`, `vision`, NPU trio) runs as a dedicated podman container
-> (`hal0-slot@<name>.service`).
-> Slot definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
-> in `/etc/hal0/profiles.toml`; the model catalog is `registry.toml` — the
+> **Status:** **v0.9.0 — first public beta.** Container-runtime era,
+> declarative config. Each slot (`agent`, `utility`, `embed`, `rerank`,
+> `stt`, `tts`, `img`, `vision`, NPU trio) runs as a dedicated podman
+> container (`hal0-slot@<name>.service`). Slot definitions live in
+> `/etc/hal0/slots/<name>.toml`; backend profiles in
+> `/etc/hal0/profiles.toml`; the model catalog is `registry.toml` — the
 > single source of truth for every HuggingFace coordinate and SHA-256
 > digest. The launch command for every slot is resolved from a single
 > source (deduped, with per-flag provenance), **Stacks** apply
 > declarative model/slot layouts atomically, and profiles share the same
-> portable export/import envelope. Models can carry a preferred runtime
-> profile, interrupted pulls resume, and voice runs end-to-end (NPU STT +
-> Kokoro or GPU Qwen3-TTS). The one-liner
-> seeds the recommended Main slot non-interactively; run `hal0 setup`
-> anytime to configure models, extensions, and NPU interactively. See
+> portable export/import envelope. hal0 is **Strix Halo native, not
+> Strix-Halo-only**: experimental CUDA + multi-GPU pinning ride alongside
+> the ROCm/Vulkan defaults. Companion services (Open WebUI, ComfyUI,
+> Hermes, Hindsight, n8n) are managed from one **Services** dashboard
+> page with mDNS discovery; the dashboard itself has a redesigned
+> fixed-band layout with a live telemetry header. Seed profiles are
+> virtual (code-defined, self-healing on upgrade) with dedicated
+> embed/rerank lanes and a model×profile×slot MTP decision; models carry
+> a preferred runtime profile, interrupted pulls resume, and voice runs
+> end-to-end (NPU STT + Kokoro or GPU Qwen3-TTS). The one-liner seeds the
+> recommended Main slot non-interactively; run `hal0 setup` anytime to
+> configure models, extensions, and NPU interactively. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
 
 ## Why hal0
