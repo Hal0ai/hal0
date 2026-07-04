@@ -977,6 +977,98 @@ def ensure_seed_profiles(*, job_id: str | None = None) -> int:
     return len(stale)
 
 
+def clear_stale_mtp_overrides(*, job_id: str | None = None, registry: Any = None) -> int:
+    """Clear crash-only ``mtp = true`` slot overrides (upgrade migration).
+
+    An explicit slot ``mtp = true`` is honored literally at launch — it is the
+    escape hatch for MTP-capable models the eligibility heuristics miss. But a
+    force-on pointing at a model with NO MTP layers makes llama-server exit at
+    load ("context type MTP requested but model doesn't contain MTP layers").
+    Such overrides are typically debris from the pre-separation binary MTP
+    pill or an old stack apply, left behind by a later model swap and masked
+    for months by stale baked units.
+
+    For every slot with ``mtp = true`` whose bound model is registry-resolvable
+    and NOT MTP-eligible, drop the override (→ AUTO) and log loudly. Slots are
+    left untouched when the model can't be resolved (can't judge, stay
+    conservative), when the override is ``false``/absent (harmless), or when
+    the model is eligible (deliberate force-on — the escape hatch stands).
+
+    Args:
+        job_id: Optional breadcrumb for structured-log tracing.
+        registry: Model-registry override for tests (anything with
+            ``get(model_id)`` returning an object with ``model_dump()``).
+            ``None`` uses the real :class:`~hal0.registry.store.ModelRegistry`.
+
+    Returns:
+        Number of slot overrides cleared.
+    """
+    import tomllib
+
+    from hal0.config.loader import write_toml_atomic
+    from hal0.config.paths import slots_config_dir
+    from hal0.model_meta import model_is_mtp_eligible
+
+    if registry is None:
+        from hal0.registry.store import ModelRegistry
+
+        registry = ModelRegistry()
+
+    # Raw-TOML surgery, deliberately schema-free: slot TOMLs exist in two
+    # shapes on real boxes (flat manager-written keys vs the nested ``[slot]``
+    # table of the installer seeds), and a migration must not depend on the
+    # current SlotConfig validating either. Only the ``mtp`` key is touched,
+    # and a file is rewritten only when it actually changes.
+    cleared = 0
+    slots_dir = slots_config_dir()
+    for toml_path in sorted(slots_dir.glob("*.toml")) if slots_dir.is_dir() else []:
+        slot_name = toml_path.stem
+        try:
+            raw = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("updater.mtp_migration_slot_unreadable", slot=slot_name, error=str(exc))
+            continue
+        # ``mtp`` lives top-level (flat shape) or under [slot] (nested shape).
+        holder = raw
+        if not isinstance(holder.get("mtp"), bool) and isinstance(raw.get("slot"), dict):
+            holder = raw["slot"]
+        if holder.get("mtp") is not True:
+            continue
+        model_table = raw.get("model")
+        model_id = model_table.get("default", "") if isinstance(model_table, dict) else ""
+        if not model_id:
+            continue
+        try:
+            model = registry.get(model_id)
+            info = model.model_dump() if hasattr(model, "model_dump") else dict(model)
+        except Exception:
+            # Unresolvable model — can't judge eligibility; leave the override.
+            continue
+        info.setdefault("_model_key", model_id)
+        if model_is_mtp_eligible(info):
+            continue
+        del holder["mtp"]  # absent = AUTO (TOML has no null)
+        try:
+            write_toml_atomic(toml_path, raw)
+        except Exception as exc:
+            log.warning("updater.mtp_migration_write_failed", slot=slot_name, error=str(exc))
+            continue
+        cleared += 1
+        log.warning(
+            "updater.mtp_force_on_cleared",
+            job_id=job_id,
+            slot=slot_name,
+            model=model_id,
+            note=(
+                "slot forced MTP on but the model has no MTP heads (would crash "
+                "llama-server at load); override cleared to AUTO. If the model "
+                "really ships MTP layers, tag it 'mtp' in the registry or re-force "
+                "MTP in the slot drawer."
+            ),
+        )
+    return cleared
+
+
 # ── Updater class ──────────────────────────────────────────────────────────────
 
 
@@ -1218,6 +1310,21 @@ class Updater:
             )
             # Non-fatal: a lingering materialised seed is harmless (the overlay
             # overwrites it on load); don't abort the update.
+
+        # Step 7c: clear crash-only mtp=true slot overrides (a force-on pointing
+        # at a model with no MTP heads makes llama-server exit at load once the
+        # unit re-renders under post-separation code). Loud per-slot log; the
+        # eligible / unresolvable cases are left untouched.
+        try:
+            await asyncio.to_thread(clear_stale_mtp_overrides, job_id=self.job_id)
+        except Exception as exc:
+            log.warning(
+                "updater.mtp_migration_failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+            # Non-fatal: the affected slot simply fails to load until the
+            # operator flips MTP to Auto/Off in the drawer.
 
         # Step 8 + 9: atomic symlink swap + record previous.
         link = _current_symlink()

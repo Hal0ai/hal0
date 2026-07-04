@@ -1114,6 +1114,24 @@ else
     info "profiles.toml absent — seeds served in-memory on first request"
 fi
 
+# ── stale mtp=true slot-override migration ────────────────────────────────────
+# A slot forcing MTP on for a model with no MTP heads crashes llama-server at
+# load once the unit re-renders under post-separation code (the old baked units
+# masked the contradiction). Clear exactly those overrides (→ AUTO), loudly;
+# eligible or unresolvable models are left untouched.
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    info "dev mode — skipping stale-MTP slot migration (no system writes)"
+else
+    "${VENV_DIR}/bin/python" - <<'PYEOF'
+from hal0.updater.updater import clear_stale_mtp_overrides
+n = clear_stale_mtp_overrides()
+if n:
+    print(f"  cleared {n} crash-only mtp=true slot override(s) — see log for slots")
+else:
+    print("  no stale mtp=true slot overrides found")
+PYEOF
+fi
+
 # ── ComfyUI model share ───────────────────────────────────────────────────────
 # The docker comfy-up/down/logs/postinstall.sh scripts have been retired; the
 # podman img slot (hal0-slot@img.service) is the sole lifecycle owner of :8188

@@ -13,6 +13,18 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+### Fixed
+- **Crash-only `mtp = true` overrides are defused automatically.** A forced
+  MTP override pointing at a model with no MTP heads crashes llama-server at
+  load once the slot's unit re-renders under the v0.8.5b1 MTP separation
+  (field-confirmed: pre-separation `mtp = true` debris on a headless MoE
+  model). Two mechanisms now clear exactly that combination: an updater
+  migration over the slot TOMLs (`updater.mtp_force_on_cleared` log; force-off,
+  eligible force-on, and unresolvable models untouched) and a swap-path guard
+  (swapping onto an ineligible model drops a forced `true` → AUTO, so the
+  staleness can't regenerate). The false-negative escape hatch — forcing MTP
+  on for an untagged-but-capable model — is preserved.
+
 ## [v0.8.5b1] — 2026-07-04
 
 Everything landed on `main` since the v0.8.4b1 cut. The headlines: hal0
@@ -36,6 +48,17 @@ builds.
 > dashboard's resolved-command drift indicator shows which slots are
 > stale. Automatic unit re-rendering on update (without bouncing serving)
 > is planned as the follow-up.
+>
+> **Upgrade note — stale `mtp = true` slot overrides crash on re-render.**
+> An explicit `mtp = true` in a slot TOML is honored literally (it is the
+> escape hatch for MTP-capable models the eligibility heuristics miss). If
+> a stale override — typically left behind by the old binary MTP pill or a
+> pre-#1045 stack apply, surviving a later model swap — points at a model
+> with NO MTP layers, llama-server exits at load ("context type MTP
+> requested but model doesn't contain MTP layers") once the unit
+> re-renders. Fix: set the slot's MTP to Auto (`{"mtp": null}`) or Off in
+> the drawer and restart. An updater migration that clears provably-stale
+> force-ons (with a loud log) ships in the follow-up.
 
 ### Added
 - **GPU generalization — experimental CUDA + multi-GPU.** A dedicated
