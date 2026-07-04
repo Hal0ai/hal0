@@ -228,7 +228,14 @@ function App() {
     // bridge command-palette actions into App state
     const onApprovals = () => setBellOpen(true);
     window.addEventListener("hal0:open-approvals", onApprovals);
-    return () => window.removeEventListener("hal0:open-approvals", onApprovals);
+    // dashboard-redesign: the Activity card's "Open journal →" expands the
+    // footer journal pane from anywhere.
+    const onJournal = () => setFooterOpen(true);
+    window.addEventListener("hal0:open-journal", onJournal);
+    return () => {
+      window.removeEventListener("hal0:open-approvals", onApprovals);
+      window.removeEventListener("hal0:open-journal", onJournal);
+    };
   }, []);
 
   // Agent-chat: broadcast open state (so triggers everywhere can light up) and
@@ -259,19 +266,15 @@ function App() {
   const renderView = () => {
     switch (route) {
       case "dashboard":
-        // Dashboard overhaul (feat/dashboard-overhaul): the customizable
-        // widget board (DashboardOverhaulView, dash-grid.jsx) replaces the
-        // old static DashboardView. It owns its own edit-mode state and a
-        // Customize/Done toggle in the hero, so it drops in without topbar
-        // threading. Falls back to the legacy view if the global hasn't
-        // registered (e.g. a stale bundle) so the route never blanks.
+        // Dashboard redesign (design_handoff_dashboard_redesign): the
+        // fixed-band, swap-in-place view (DashboardRedesignView) replaces
+        // the free-form customizable grid. It owns its own swap-mode state
+        // and customize toggle in the hero strip, so it drops in without
+        // topbar threading. Falls back to the legacy view if the global
+        // hasn't registered (stale bundle) so the route never blanks.
         return (
-          typeof DashboardOverhaulView === "function" ? (
-            <DashboardOverhaulView
-              onGo={go}
-              showHero={tweaks.showHero && !heroDismissed}
-              onDismissHero={() => setHeroDismissed(true)}
-            />
+          typeof DashboardRedesignView === "function" ? (
+            <DashboardRedesignView onGo={go} />
           ) : (
             <DashboardView
               slots={HAL0_DATA.slots}
