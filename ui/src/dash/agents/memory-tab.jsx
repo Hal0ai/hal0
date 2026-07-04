@@ -154,11 +154,10 @@ function MemoryGraphPanel() {
 
   return (
     <div className="card" style={{padding: 18, marginBottom: 14}}>
-      <div style={{display: "flex", alignItems: "center", gap: 12, marginBottom: 10}}>
-        <span className="mono" style={{fontSize: 10, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.1em"}}>Graph extraction · ADR-0023</span>
-        <span style={{marginLeft: "auto"}}>
-          {enabled ? <span className="chip ok">ON · {extractionSlot}</span> : <span className="chip">OFF</span>}
-        </span>
+      <div className="mo-card-h">
+        <span className="mo-eyebrow">Graph extraction</span>
+        <span className="grow" />
+        {enabled ? <span className="chip ok">ON · {extractionSlot}</span> : <span className="chip">OFF</span>}
       </div>
 
       {!enabled && !showSlotPicker && (

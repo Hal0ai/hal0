@@ -29,11 +29,13 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Request
 
+from hal0.api._audit import record_action
 from hal0.api.routes import _memory_subgraph as _sg
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.errors import BadRequest, Hal0Error, NotFound, UnprocessableEntity
@@ -69,6 +71,21 @@ class MemoryEngineError(Hal0Error):
     """Hindsight answered with an error; status mirrors upstream (4xx) or 502."""
 
     code = "memory.engine_error"
+    status = 502
+
+
+class MemoryEngineShape(Hal0Error):
+    """Hindsight answered 2xx but with an envelope the dashboard can't consume.
+
+    The recall/reflect/directives consoles are verbatim passthroughs whose UI
+    hooks assume a specific response shape (``{results}`` / ``{text}`` /
+    ``{items}``). If Hindsight drifts that shape (version bump, breaking change)
+    the console would break *silently* with a blank panel. This guard turns that
+    silent break into a loud, attributable 502 so the drift is diagnosable
+    (issue #1026).
+    """
+
+    code = "memory.engine_shape"
     status = 502
 
 
@@ -274,7 +291,13 @@ async def delete_bank(request: Request, bank_id: str) -> Any:
             details={"bank_id": bank_id},
         )
     log.warning("memory_admin: deleting bank %r (confirmed)", bank_id)
-    return await _forward(client, "DELETE", f"/v1/default/banks/{bank_id}")
+    # #1024 hardening: every confirmed destructive op lands in the audit store
+    # (actor + timestamp + outcome) so a bank wipe is attributable after the
+    # fact. Bank deletion is the highest-blast-radius op on this surface.
+    async with record_action(
+        request, category="memory", action="memory.bank.delete", target=bank_id
+    ):
+        return await _forward(client, "DELETE", f"/v1/default/banks/{bank_id}")
 
 
 # ── allowlisted passthrough table ──────────────────────────────────────────────
@@ -343,6 +366,13 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
     ),
     ("GET", "/banks/{bank_id}/tags", "/v1/default/banks/{bank_id}/tags"),
     # cognition consoles
+    #
+    # NB two distinct ``recall`` contracts exist under /api/memory (issue #1026):
+    #   * POST /api/memory/recall            (hal0.api.routes.memory) — NAMESPACE
+    #     recall: ACL-scoped, cross-bank fan-out, returns ``{items: MemoryItem[]}``.
+    #   * POST /api/memory/banks/{bank}/recall (this table)          — BANK recall:
+    #     a single-bank verbatim Hindsight passthrough, returns ``{results: [...]}``.
+    # Same verb, different scope + envelope — do not conflate them.
     ("POST", "/banks/{bank_id}/recall", "/v1/default/banks/{bank_id}/memories/recall"),
     ("POST", "/banks/{bank_id}/reflect", "/v1/default/banks/{bank_id}/reflect"),
     # mental models
@@ -417,14 +447,71 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
 _BODY_METHODS = {"POST", "PUT", "PATCH"}
 
 
+# ── #1026: response-shape guards for the cognition consoles ─────────────────────
+#
+# The recall/reflect/directives passthroughs feed UI hooks that assume a fixed
+# envelope. We validate the *presence + type* of the load-bearing key (not the
+# full schema) so upstream drift surfaces as a loud, attributable 502
+# (``memory.engine_shape``) instead of a silently-blank console panel.
+
+
+def _require(payload: Any, key: str, kind: type, upstream: str) -> None:
+    if not isinstance(payload, dict) or not isinstance(payload.get(key), kind):
+        raise MemoryEngineShape(
+            f"memory engine response missing expected {key!r} ({kind.__name__})",
+            details={
+                "upstream": upstream,
+                "expected_key": key,
+                "expected_type": kind.__name__,
+                "got_keys": sorted(payload.keys()) if isinstance(payload, dict) else None,
+            },
+        )
+
+
+#: (method, upstream template) → validator run against the 2xx response body.
+_SHAPE_GUARDS: dict[tuple[str, str], Callable[[Any], None]] = {
+    ("POST", "/v1/default/banks/{bank_id}/memories/recall"): lambda p: _require(
+        p, "results", list, "recall"
+    ),
+    ("POST", "/v1/default/banks/{bank_id}/reflect"): lambda p: _require(p, "text", str, "reflect"),
+    ("GET", "/v1/default/banks/{bank_id}/directives"): lambda p: _require(
+        p, "items", list, "directives"
+    ),
+}
+
+
+#: #1024: DELETE forwards audited via record_action. Template → audit action.
+_DELETE_ACTIONS: dict[str, str] = {
+    "/v1/default/banks/{bank_id}/config": "memory.bank_config.delete",
+    "/v1/default/banks/{bank_id}/memories": "memory.memories.delete",
+    "/v1/default/banks/{bank_id}/documents/{document_id}": "memory.document.delete",
+    "/v1/default/banks/{bank_id}/directives/{directive_id}": "memory.directive.delete",
+    "/v1/default/banks/{bank_id}/operations/{operation_id}": "memory.operation.delete",
+    "/v1/default/banks/{bank_id}/mental-models/{model_id}": "memory.mental_model.delete",
+}
+
+
 def _make_handler(method: str, template: str):
+    guard = _SHAPE_GUARDS.get((method, template))
+    audit_action = _DELETE_ACTIONS.get(template) if method == "DELETE" else None
+
     async def handler(request: Request) -> Any:
         client = _client(request)
         segments = _validate_segments(dict(request.path_params))
         upstream = template.format(**segments) if segments else template
         body = await _read_body(request) if method in _BODY_METHODS else None
         params = dict(request.query_params) or None
-        return await _forward(client, method, upstream, params=params, json_body=body)
+        if audit_action is not None:
+            # #1024: audit destructive ops with a truthful outcome — the block
+            # records outcome=error if the forward raises, outcome=ok otherwise.
+            async with record_action(
+                request, category="memory", action=audit_action, target=upstream
+            ):
+                return await _forward(client, method, upstream, params=params, json_body=body)
+        result = await _forward(client, method, upstream, params=params, json_body=body)
+        if guard is not None:
+            guard(result)
+        return result
 
     return handler
 

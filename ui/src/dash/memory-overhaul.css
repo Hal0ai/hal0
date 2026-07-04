@@ -165,7 +165,23 @@
 .mg-nbr-label { font-size: 11.5px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ─── Overview ───────────────────────────────────────────────────── */
-.mo-top { display: grid; grid-template-columns: 360px 1fr; gap: 16px; margin-bottom: 22px; align-items: start; }
+/* Three cards across the top: engine identity · (shrunk) memories-retained
+   spark · graph-extraction gate. The spark column is deliberately narrow so
+   the graph panel gets the room it needs beside it. */
+.mo-top { display: grid; grid-template-columns: 300px minmax(0, 0.8fr) minmax(0, 1.25fr); gap: 16px; margin-bottom: 22px; align-items: start; }
+.mo-graphcol { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+/* Panel is reused from the #agent tab where it carries a bottom margin; drop it
+   here so the three top cards bottom-align cleanly (!important beats the inline
+   style the shared component sets). */
+.mo-graphcol > .card { margin-bottom: 0 !important; }
+
+/* Unified card heading — an uppercase mono "eyebrow" label with right-aligned
+   controls, shared by the memories-retained + graph-extraction cards so the
+   Overview reads as one system instead of three bespoke headers. */
+.mo-card-h { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.mo-card-h .grow { flex: 1; }
+.mo-eyebrow { font-family: var(--jbm); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); white-space: nowrap; }
+
 .mo-engine { padding: 16px; }
 .mo-engine-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .mo-engine-name { display: inline-flex; align-items: center; gap: 8px; font-size: 15px; color: var(--fg); }
@@ -270,7 +286,16 @@
 .ag-ptr-h { font-size: 15px; color: var(--fg); margin-bottom: 6px; }
 .ag-ptr-body p { font-size: 12.5px; color: var(--fg-3); line-height: 1.55; margin: 0 0 14px; max-width: 560px; }
 
-@media (max-width: 900px) {
+@media (max-width: 1200px) {
+  /* Two columns: engine + spark on the first row, graph panel spanning below. */
+  .mo-top {
+    grid-template-columns: 300px 1fr;
+  }
+  .mo-graphcol {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 720px) {
   .mo-top {
     grid-template-columns: 1fr;
   }
