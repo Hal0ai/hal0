@@ -488,28 +488,45 @@ function StackDrawer({ mode, source, existing = [], onClose, onSaved }) {
           {v.slots.map((s, i) => {
             const isNew = !!s.slot && !liveSlots.some(ls => ls.name === s.slot);
             return (
-              <div className="st-slot-edit" key={i}>
-                <input className="pf-input mono st-slot-name" value={s.slot} list="st-existing-slots"
-                  onChange={e => setSlot(i, 'slot', e.target.value)} placeholder="pick or name…" maxLength={32}
-                  title={isNew ? 'New slot — created on apply' : 'Existing slot'} data-testid={`st-slot-name-${i}`} />
-                {isNew && <span className="st-slot-new mono" title="Created on apply">new</span>}
-                <select className="pf-input mono st-slot-model" value={s.model}
-                  onChange={e => setSlot(i, 'model', e.target.value)} data-testid={`st-slot-model-${i}`}>
-                  <option value="">— model —</option>
-                  {models.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
-                </select>
-                <select className="pf-input mono st-slot-dev" value={s.device} onChange={e => setSlot(i, 'device', e.target.value)}>
-                  {DEVICES.map(d => <option key={d} value={d}>{DEVICE_META[d].label}</option>)}
-                </select>
-                <select className="pf-input mono st-slot-prof" value={s.profile} onChange={e => setSlot(i, 'profile', e.target.value)}>
-                  <option value="">— profile —</option>
-                  {profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-                </select>
-                <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
-                  onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp} title="MTP speculative decode">
-                  <span className="pf-switch-knob" /><span className="mono">MTP</span>
-                </button>
-                <button type="button" className="pf-btn danger" onClick={() => rmSlot(i)} title="Remove slot" data-testid={`st-slot-rm-${i}`}>{Icons.trash}</button>
+              <div className="st-slot-card" key={i}>
+                <div className="st-slot-head">
+                  <input className="pf-input mono st-slot-name" value={s.slot} list="st-existing-slots"
+                    onChange={e => setSlot(i, 'slot', e.target.value)} placeholder="slot name — pick or type…" maxLength={32}
+                    title={isNew ? 'New slot — created on apply' : 'Existing slot'} data-testid={`st-slot-name-${i}`} />
+                  {isNew && <span className="st-slot-new mono" title="Created on apply">new</span>}
+                  <span className="pf-grow" />
+                  <button type="button" className="pf-btn danger st-slot-rm" onClick={() => rmSlot(i)} title="Remove slot" data-testid={`st-slot-rm-${i}`}>{Icons.trash}</button>
+                </div>
+                <div className="st-slot-fields">
+                  <label className="st-fld st-fld-model">
+                    <span className="st-fld-lbl">Model</span>
+                    <select className="pf-input mono" value={s.model}
+                      onChange={e => setSlot(i, 'model', e.target.value)} data-testid={`st-slot-model-${i}`}>
+                      <option value="">— model —</option>
+                      {models.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
+                    </select>
+                  </label>
+                  <label className="st-fld">
+                    <span className="st-fld-lbl">Device</span>
+                    <select className="pf-input mono" value={s.device} onChange={e => setSlot(i, 'device', e.target.value)}>
+                      {DEVICES.map(d => <option key={d} value={d}>{DEVICE_META[d].label}</option>)}
+                    </select>
+                  </label>
+                  <label className="st-fld">
+                    <span className="st-fld-lbl">Profile</span>
+                    <select className="pf-input mono" value={s.profile} onChange={e => setSlot(i, 'profile', e.target.value)}>
+                      <option value="">— profile —</option>
+                      {profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                    </select>
+                  </label>
+                  <div className="st-fld st-fld-mtp">
+                    <span className="st-fld-lbl">Speculative decode</span>
+                    <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
+                      onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp} title="MTP speculative decode">
+                      <span className="pf-switch-knob" /><span className="mono">MTP</span>
+                    </button>
+                  </div>
+                </div>
               </div>
             );
           })}
