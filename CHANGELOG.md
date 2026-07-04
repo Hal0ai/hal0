@@ -108,6 +108,12 @@ builds.
   `mtp.auto_off_model_ineligible` when this bites.
 
 ### Fixed
+- **MTP auto-off breadcrumb is launch-gated.** The
+  `mtp.auto_off_model_ineligible` hint lives inside the shared launch/preview
+  scalar resolver, so it fired on every dashboard `GET /api/slots` poll
+  (~0.4/s per client, forever) for any AUTO slot pairing an MTP profile with a
+  non-MTP model. It now logs only on a real container launch; preview/status
+  renders stay silent, and launch/preview argv parity is unchanged.
 - **Upstream-advertised models are clearly identified as remote (#1035)**,
   not local, across the dashboard model surfaces.
 - **Operator Board (#1032).** Hermes-contract repairs, honest UI state,

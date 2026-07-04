@@ -109,7 +109,13 @@ def _profile_image_and_flags(profile: Any, mtp_override: bool | None = None) -> 
     return str(profile.image), str(flags)
 
 
-def _effective_mtp(slot_mtp: bool | None, profile: Any, model_info: Mapping[str, Any]) -> bool:
+def _effective_mtp(
+    slot_mtp: bool | None,
+    profile: Any,
+    model_info: Mapping[str, Any],
+    *,
+    log_ineligible: bool = False,
+) -> bool:
     """Resolve whether MTP speculative decoding is on for this slot launch.
 
     The three concerns are separated (design: MTP is a model property, not a
@@ -125,12 +131,19 @@ def _effective_mtp(slot_mtp: bool | None, profile: Any, model_info: Mapping[str,
     This is what stops a non-MTP model on an MTP profile (e.g. a plain chat
     GGUF pinned to ``rocm-moe``) from launching with dead ``--spec-draft-*``
     flags, without any per-slot wiring for the common case.
+
+    ``log_ineligible`` gates the auto-off breadcrumb to the LAUNCH path only.
+    This function sits inside the shared launch/preview scalar resolver
+    (:func:`_resolve_llama_scalars`), and the preview path is hit by every
+    dashboard ``GET /api/slots`` poll — logging unconditionally here turned a
+    once-per-launch hint into a ~0.4/s stream per polling client for every
+    AUTO slot pairing an MTP profile with a non-MTP model.
     """
     if slot_mtp is not None:
         return bool(slot_mtp)
     profile_opts_in = bool(getattr(profile, "mtp", False))
     eligible = model_is_mtp_eligible(model_info)
-    if profile_opts_in and not eligible:
+    if log_ineligible and profile_opts_in and not eligible:
         # Visible breadcrumb for the silent-auto-off case: an MTP-capable model
         # that carries neither the registry tag nor a name marker stops
         # speculating under auto. The fix is tagging the model (or slot
@@ -632,6 +645,8 @@ def _resolve_llama_scalars(
     slot_cfg: dict[str, Any],
     model_info: dict[str, Any],
     profile: Any,
+    *,
+    for_launch: bool = False,
 ) -> dict[str, Any]:
     """Resolve every llama-server launch scalar for a slot+model+profile.
 
@@ -642,9 +657,14 @@ def _resolve_llama_scalars(
     mmproj sidecar, the per-model registry ``defaults`` bundle, the slot-level
     ``[model].n_gpu_layers`` override, and the ``[server]`` env / extra_args.
     Returning one dict means the two paths can never drift.
+
+    ``for_launch`` marks the real launch call (vs a status/preview render) —
+    it only gates side-effects like the MTP auto-off breadcrumb; the RESOLVED
+    VALUES are identical on both paths, preserving launch/preview parity.
     """
     image, flags_str = _profile_image_and_flags(
-        profile, _effective_mtp(slot_cfg.get("mtp"), profile, model_info)
+        profile,
+        _effective_mtp(slot_cfg.get("mtp"), profile, model_info, log_ineligible=for_launch),
     )
 
     model_table = slot_cfg.get("model") or {}
@@ -776,7 +796,9 @@ class ContainerProvider(Provider):
         """
         profile_name = slot_cfg.get("profile") or ""
         profile = _resolve_profile(profile_name)
-        scalars = _resolve_llama_scalars(slot_cfg, model_info, profile)
+        # for_launch: this is the real container-spec build — side-effect logs
+        # (MTP auto-off breadcrumb) fire here, never on preview/status renders.
+        scalars = _resolve_llama_scalars(slot_cfg, model_info, profile, for_launch=True)
 
         model_path = _resolve_model_path(model_info)
         port = int(slot_cfg.get("port", 0))

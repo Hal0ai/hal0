@@ -134,3 +134,19 @@ def test_slot_override_true_forces_on_even_for_plain_model():
 
 def test_slot_override_false_forces_off_even_for_eligible():
     assert _effective_mtp(False, _profile(True), _mtp_model()) is False
+
+
+def test_auto_off_breadcrumb_only_on_launch_path(caplog):
+    """The auto-off log is launch-gated: _effective_mtp sits inside the SHARED
+    launch/preview resolver, and the preview path runs on every dashboard
+    GET /api/slots poll — an ungated log turned a once-per-launch hint into a
+    ~0.4/s stream per polling client (measured 43 logs : 43 status GETs)."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="hal0.providers.container"):
+        # Preview/status path (default): silent.
+        assert _effective_mtp(None, _profile(True), _plain_model()) is False
+        assert not [r for r in caplog.records if "auto_off" in r.getMessage()]
+        # Launch path: exactly one breadcrumb.
+        assert _effective_mtp(None, _profile(True), _plain_model(), log_ineligible=True) is False
+        assert len([r for r in caplog.records if "auto_off" in r.getMessage()]) == 1
