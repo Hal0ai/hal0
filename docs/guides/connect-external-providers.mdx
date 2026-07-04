@@ -96,7 +96,7 @@ environment so the change takes effect immediately, and **never echoes
 the secret back** — the response carries `"value": "***REDACTED***"`.
 
 <Aside type="caution">
-There is no built-in authentication on the hal0 API (ADR-0012) — it binds
+Without `--auth=basic`, the hal0 API binds open
 to the LAN. `api.env` is a LAN-writable file; treat the host as you would
 any secret-bearing service and reverse-proxy it if it needs to be exposed.
 </Aside>

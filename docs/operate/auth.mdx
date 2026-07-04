@@ -1,0 +1,180 @@
+---
+title: Authentication & HTTPS
+description: hal0 ships Caddy + basic_auth + bearer tokens + automatic HTTPS behind one flag. Reference for --auth=basic, token management, and bringing your own proxy.
+sidebar:
+  order: 85
+---
+
+import { Aside, Steps, Tabs, TabItem, Code } from '@astrojs/starlight/components';
+
+hal0 ships a complete auth stack behind one flag: `--auth=basic`. Pass it at
+install time and hal0 provisions and manages a Caddy reverse proxy in front of
+the API, giving you:
+
+- **Browser basic_auth** for the dashboard and OpenWebUI.
+- **Bearer tokens** for the OpenAI-compatible `/v1/*` API (SDKs, CLI, MCP
+  clients).
+- **Automatic HTTPS** — internal CA for `.local` and mDNS addresses, Let's
+  Encrypt for real domains. Zero certbot.
+
+<Aside type="tip">
+This is the fastest way to make hal0 safe to expose beyond a single trusted
+machine. One flag, no manual proxy config, no cert plumbing.
+</Aside>
+
+## Quick start
+
+The flag goes on the install command:
+
+```sh
+curl -fsSL https://hal0.dev/install.sh | bash -s -- --auth=basic
+```
+
+Or on a re-install or setup re-run:
+
+```sh
+hal0 setup --auth=basic
+```
+
+hal0 provisions Caddy, generates a default admin user, provisions a bearer
+token for API access, and brings up automatic HTTPS. The dashboard and
+OpenWebUI prompt for the basic_auth credentials; API clients present the
+bearer token in the `Authorization` header.
+
+## Built-in Caddy (`--auth=basic`) vs. bring your own proxy
+
+| | `--auth=basic` | Bring your own proxy |
+|---|---|---|
+| **Who manages the proxy** | hal0 provisions and manages Caddy | You run Traefik / nginx / etc. |
+| **Browser auth** | Caddy basic_auth (default admin user + any you add) | Whatever your proxy supports |
+| **API auth** | hal0-managed bearer tokens | Your proxy's auth + hal0's agent headers |
+| **TLS** | Automatic: internal CA for `.local`, Let's Encrypt for real domains | Your certs, your renewal |
+| **Best for** | Public-facing homelab, quick setup, "it just works" | Existing infra, custom auth stacks, corp networks |
+
+## Bearer token management
+
+When `--auth=basic` is active, hal0 manages bearer tokens for programmatic
+access to the `/v1/*` endpoints.
+
+### Provision a token
+
+```sh
+hal0 auth token create --name "my-sdk-client" --scopes chat,embeddings
+```
+
+The command prints the token once. Store it — it is not recoverable.
+
+### List and revoke
+
+```sh
+hal0 auth token list
+hal0 auth token revoke <token-id>
+```
+
+### Use a token
+
+Set it as your `OPENAI_API_KEY` (or the equivalent for your SDK):
+
+```sh
+export OPENAI_API_KEY="hal0-..."
+curl -H "Authorization: Bearer hal0-..." https://hal0.local:8080/v1/models
+```
+
+Tokens carry scopes (a subset of `chat`, `embeddings`, `rerank`, `audio`,
+`images`, `admin`) so you can issue narrow credentials for different clients.
+
+### Token vs. agent identity
+
+Bearer tokens protect the `/v1/*` API surface. Agent identity (for MCP tools
+and the memory system) still flows on the `X-hal0-Agent` header and is
+orthogonal to bearer tokens. When Caddy auth is active, both layers apply:
+Caddy gates the connection, and hal0 resolves agent identity from the header
+inside the gated session.
+
+## Automatic HTTPS
+
+Caddy obtains certificates automatically based on the hostname:
+
+| Hostname pattern | Certificate source |
+|---|---|
+| `*.local` (mDNS) | Caddy's internal CA — trusted on the install host automatically |
+| Real domain (e.g. `hal0.example.com`) | Let's Encrypt (ACME) — requires port 80/443 reachability for the challenge |
+| IP address | Internal CA (self-signed) — browsers show a warning unless you install the CA |
+
+<Aside type="note">
+The internal CA cert is installed into the system trust store on the hal0
+host at provision time. Other machines on your LAN need the CA certificate
+imported manually (or access hal0 by IP and accept the warning, or use a
+real domain with Let's Encrypt).
+</Aside>
+
+## Managing users
+
+Caddy basic_auth users are managed through hal0 (not by editing Caddy configs
+directly):
+
+```sh
+hal0 auth user add --name "alice"     # prompts for password
+hal0 auth user list
+hal0 auth user remove --name "alice"
+hal0 auth user password --name "alice" # change password
+```
+
+The first admin user is created during `hal0 setup --auth=basic`. Add more
+for teammates or roommates who need dashboard access.
+
+## Public-route allowlist
+
+Some endpoints (landing page, health check) can be exposed without auth even
+when Caddy is active:
+
+```sh
+hal0 auth public-route add /health
+hal0 auth public-route add /api/status
+hal0 auth public-route list
+hal0 auth public-route remove /health
+```
+
+This is useful for monitoring (your uptime checker hits `/health` without
+credentials) without opening the whole API.
+
+## mDNS and `.local` addresses
+
+hal0 advertises itself on mDNS when `--auth=basic` is active, so other
+machines on the LAN can reach it at `hal0.local`:
+
+```sh
+# On another machine:
+curl -H "Authorization: Bearer hal0-..." https://hal0.local:8080/v1/models
+```
+
+The `.local` hostname gets an internal-CA certificate. Import the CA cert
+from the hal0 host to avoid browser warnings:
+
+```sh
+# On the hal0 host, print the CA cert:
+hal0 auth ca-cert
+# Copy it to the client machine and install into the system trust store.
+```
+
+## Rollback / disable
+
+To disable built-in auth and return to LAN-open mode:
+
+```sh
+hal0 auth disable
+```
+
+Caddy is stopped and removed from the service supervision tree. The API
+returns to binding `0.0.0.0:8080` with no auth gate. Any tokens you created
+are revoked. This is reversible — re-run `halo setup --auth=basic` to
+re-provision.
+
+## See also
+
+- [Security](/docs/concepts/security) — the full security posture, including
+  the bring-your-own-proxy path and MCP host/origin allowlists.
+- [Install](/docs/getting-started/install) — the `--auth=basic` flag in the
+  installer.
+- [Connect an MCP client](/docs/guides/connect-mcp) — MCP mounts behind
+  Caddy auth.
