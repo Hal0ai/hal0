@@ -1037,7 +1037,60 @@ async def audio_speech(request: Request, dispatcher: DispatcherDep) -> Response:
             details={"field": "model", "path": "/v1/audio/speech"},
             code="request.missing_model",
         )
+    # Seed the serving tts slot's persisted request defaults (default_voice /
+    # default_speed / default_response_format — Settings → Voice) into the
+    # body BEFORE dispatch, mirroring how /v1/images/generations seeds the
+    # img slot's [image] defaults. Explicit request params always win.
+    _seed_tts_defaults(await _tts_slot_config(request, model), body)
     return await _dispatch_and_forward(request, dispatcher, body=body)
+
+
+async def _tts_slot_config(request: Request, model: str) -> dict[str, Any]:
+    """Config of the tts slot that will serve ``model``, or ``{}``.
+
+    Selection mirrors dispatch closely enough for default-seeding: prefer
+    the tts slot bound to the requested model, then the per-type default
+    tts slot, then the seeded ``tts`` name, then a sole tts slot.
+    """
+    manager = getattr(request.app.state, "slot_manager", None)
+    if manager is None:
+        return {}
+    try:
+        cfgs = await manager.iter_configs()
+    except Exception:  # pragma: no cover — defensive; seeding is optional
+        return {}
+
+    def _model_id(cfg: dict[str, Any]) -> str:
+        model_section = cfg.get("model") or {}
+        mid = (
+            cfg.get("model_default")
+            or cfg.get("model_id")
+            or (model_section.get("default") if isinstance(model_section, dict) else None)
+            or ""
+        )
+        return mid if isinstance(mid, str) else ""
+
+    tts = [c for c in cfgs if (c.get("type") or "").lower() == "tts"]
+    return (
+        next((c for c in tts if _model_id(c) == model), None)
+        or next((c for c in tts if c.get("default")), None)
+        or next((c for c in tts if (c.get("name") or "") == "tts"), None)
+        or (tts[0] if len(tts) == 1 else None)
+        or {}
+    )
+
+
+def _seed_tts_defaults(tts_cfg: dict[str, Any], body: dict[str, Any]) -> None:
+    """Fill omitted /v1/audio/speech params from the slot's persisted defaults."""
+    voice = tts_cfg.get("default_voice")
+    if not body.get("voice") and isinstance(voice, str) and voice:
+        body["voice"] = voice
+    speed = tts_cfg.get("default_speed")
+    if body.get("speed") is None and isinstance(speed, int | float) and not isinstance(speed, bool):
+        body["speed"] = float(speed)
+    fmt = tts_cfg.get("default_response_format")
+    if not body.get("response_format") and isinstance(fmt, str) and fmt:
+        body["response_format"] = fmt
 
 
 # ── /v1/images/generations (ComfyUI provider, hal0-managed translation) ────

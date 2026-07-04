@@ -948,6 +948,41 @@ async def get_slot_config(name: str, request: Request) -> dict[str, object]:
     return cfg
 
 
+@router.get("/{name}/voices")
+async def get_slot_voices(name: str, request: Request) -> dict[str, object]:
+    """Proxy the slot's ``GET /v1/audio/voices`` (TTS engines expose it).
+
+    Kokoro and qwen3tts containers serve the list of loaded voices; the
+    dashboard's Voice settings populate the default-voice picker from it
+    instead of hardcoding the pack. Fail-soft: a cold/unreachable slot (or
+    an engine without the route) returns ``{"voices": [], "source":
+    "offline"}`` rather than an error — the UI falls back to a seed list.
+    Unknown slot names still 404 via ``SlotManager.get_config``.
+    """
+    import httpx
+
+    sm = _get_slot_manager(request)
+    cfg = await sm.get_config(name)
+    port = cfg.get("port")
+    if not isinstance(port, int) or port <= 0:
+        return {"name": name, "voices": [], "source": "offline"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
+            resp = await client.get(f"http://127.0.0.1:{port}/v1/audio/voices")
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception:
+        return {"name": name, "voices": [], "source": "offline"}
+    voices = payload.get("voices") if isinstance(payload, dict) else None
+    if not isinstance(voices, list):
+        voices = []
+    return {
+        "name": name,
+        "voices": [str(v) for v in voices if isinstance(v, str | int)],
+        "source": "live",
+    }
+
+
 @router.get("/{name}/resolved")
 async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
     """Return the resolved llama-server argv with per-flag provenance.
