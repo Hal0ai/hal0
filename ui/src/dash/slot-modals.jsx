@@ -404,6 +404,23 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // overrideOpen tracks whether the user has clicked [Override] to reveal the select.
   const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
   const [overrideOpen, setOverrideOpen] = useStateSM(!!(slot?.chat_template));
+  // UI-20: MTP local state — mirrors the reasoning toggle's optimistic
+  // set-before-mutate / revert-on-error pattern. Seeds from slot.mtp (default
+  // off; only `true` counts as on, matching the previous `slot.mtp === true`).
+  const [mtp, setMtp] = useStateSM(slot?.mtp === true);
+  // #901: per-slot vision toggle (instant-apply + cold restart). Default-ON:
+  // the mmproj sidecar loads unless explicitly disabled, so null/undefined →
+  // on. Optimistic local state with revert-on-error (mirrors reasoning).
+  const [vision, setVision] = useStateSM(slot?.vision !== false);
+  const [visionPending, setVisionPending] = useStateSM(false);
+  const [visionErr, setVisionErr] = useStateSM(null);
+  // Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
+  // device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
+  // revert-on-error.
+  const [npuAsr, setNpuAsr] = useStateSM(slot?.npu?.asr === true);
+  const [npuEmbed, setNpuEmbed] = useStateSM(slot?.npu?.embed === true);
+  const [npuPending, setNpuPending] = useStateSM(false);
+  const [npuErr, setNpuErr] = useStateSM(null);
 
   // Resolved command provenance — only fetched while the drawer is open.
   // Falls back gracefully when null (non-llama slots) or on error.
@@ -427,6 +444,16 @@ function EditSlotDrawer({ open, slot, onClose }) {
       // Task 5: re-seed chat_template override from the slot prop.
       setChatTemplate(slot.chat_template || "");
       setOverrideOpen(!!(slot.chat_template));
+      // Wave 8: re-seed the instant-apply toggles from the (possibly-updated)
+      // slot prop.
+      setMtp(slot.mtp === true);
+      setVision(slot.vision !== false);
+      setVisionPending(false);
+      setVisionErr(null);
+      setNpuAsr(slot.npu?.asr === true);
+      setNpuEmbed(slot.npu?.embed === true);
+      setNpuPending(false);
+      setNpuErr(null);
     }
   }, [slot?.name]);
 
@@ -968,7 +995,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
         // defensive fallback for any path that bypasses the normalizer.
         const isRocm = slot.backend === "rocm" || String(slot.device || "").startsWith("gpu-rocm");
         if (!mtpCapable || !isRocm) return null;
-        const mtpOn = slot.mtp === true;
         return (
           <div className="form-row">
             <div className="form-lbl">
@@ -977,11 +1003,14 @@ function EditSlotDrawer({ open, slot, onClose }) {
             </div>
             <div className="form-ctl">
               <PillToggle
-                on={mtpOn}
+                on={mtp}
                 disabled={saving}
                 label="MTP"
-                stateText={mtpOn ? "On" : "Off"}
+                stateText={mtp ? "On" : "Off"}
                 onToggle={async (next) => {
+                  // UI-20: optimistic — flip local state before the PUT, revert
+                  // on error (mirrors the reasoning toggle above).
+                  setMtp(next);
                   setSubmitErr(null);
                   try {
                     await editMut.mutateAsync({ name: slot.name, body: { mtp: next } });
@@ -990,12 +1019,122 @@ function EditSlotDrawer({ open, slot, onClose }) {
                     });
                     window.__hal0Toast && window.__hal0Toast(`${slot.name} MTP ${next ? "on" : "off"} — restarting in the background`, "info");
                   } catch (err) {
+                    setMtp(!next);
                     setSubmitErr(err?.message || "MTP toggle failed");
                   }
                 }}
               />
             </div>
           </div>
+        );
+      })()}
+      {/* #901: Vision pill — gated to slots whose bound model carries an mmproj
+          sidecar (the registry Model.mmproj presence flag). Toggling drops or
+          adds the ~0.9 GB projector; instant-apply via PUT /config {vision}
+          plus a non-blocking cold restart (mirrors MTP). Default-ON, so a
+          null/absent on-disk value renders as on. */}
+      {(() => {
+        const cur = slot.model_id || slot.model || "";
+        const m = (modelsQuery.data ?? []).map(normalizeApiModel).find(x => x.id === cur);
+        // mmproj is a presence flag on the registry row (path or marker string);
+        // any truthy value means the model ships a vision projector sidecar.
+        if (!m || !m.mmproj) return null;
+        return (
+          <div className="form-row">
+            <div className="form-lbl">
+              <span>Vision</span>
+              <span className="sub">Load the multimodal projector so the slot accepts images. Off frees ~0.9 GB (text-only). Restarts the container.</span>
+            </div>
+            <div className="form-ctl">
+              <PillToggle
+                on={vision}
+                disabled={visionPending || saving}
+                label="Vision"
+                stateText={vision ? "On" : "Off"}
+                onToggle={async (next) => {
+                  // Optimistic set-before-mutate + revert-on-error (mirrors MTP).
+                  setVision(next);
+                  setVisionPending(true);
+                  setVisionErr(null);
+                  setSubmitErr(null);
+                  try {
+                    await editMut.mutateAsync({ name: slot.name, body: { vision: next } });
+                    restartMut.mutate(slot.name, {
+                      onError: (err) => window.__hal0Toast && window.__hal0Toast(`Vision restart failed — ${err?.message || "see logs"}`, "err"),
+                    });
+                    window.__hal0Toast && window.__hal0Toast(`${slot.name} vision ${next ? "on" : "off"} — restarting in the background`, "info");
+                  } catch (err) {
+                    setVision(!next);
+                    setVisionErr(err?.message || "vision toggle failed");
+                  } finally {
+                    setVisionPending(false);
+                  }
+                }}
+              />
+              {visionErr && <div className="hint" style={{ color: "var(--err)" }}>{visionErr}</div>}
+            </div>
+          </div>
+        );
+      })()}
+      {/* Task 3: NPU modality toggles (asr/embed) — device=npu slots only.
+          Seeded from slot.npu; each toggle sends the full {asr,embed} object via
+          PUT /config {npu:{...}} (the backend one-level merge replaces the [npu]
+          table wholesale) + a non-blocking cold restart. Optimistic with
+          revert-on-error. */}
+      {slot.device === "npu" && (() => {
+        const applyNpu = async (nextAsr, nextEmbed, prevAsr, prevEmbed, which) => {
+          setNpuPending(true);
+          setNpuErr(null);
+          setSubmitErr(null);
+          try {
+            await editMut.mutateAsync({ name: slot.name, body: { npu: { asr: nextAsr, embed: nextEmbed } } });
+            restartMut.mutate(slot.name, {
+              onError: (err) => window.__hal0Toast && window.__hal0Toast(`NPU restart failed — ${err?.message || "see logs"}`, "err"),
+            });
+            window.__hal0Toast && window.__hal0Toast(`${slot.name} NPU ${which} updated — restarting in the background`, "info");
+          } catch (err) {
+            // Revert both to their pre-toggle values.
+            setNpuAsr(prevAsr);
+            setNpuEmbed(prevEmbed);
+            setNpuErr(err?.message || "NPU toggle failed");
+          } finally {
+            setNpuPending(false);
+          }
+        };
+        return (
+          <>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · ASR</span>
+                <span className="sub">Serve speech-to-text on the coresident NPU process. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <PillToggle
+                  on={npuAsr}
+                  disabled={npuPending || saving}
+                  label="NPU ASR"
+                  stateText={npuAsr ? "On" : "Off"}
+                  onToggle={(next) => { setNpuAsr(next); applyNpu(next, npuEmbed, npuAsr, npuEmbed, "ASR"); }}
+                />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-lbl">
+                <span>NPU · Embed</span>
+                <span className="sub">Serve embeddings on the coresident NPU process. Restarts the container.</span>
+              </div>
+              <div className="form-ctl">
+                <PillToggle
+                  on={npuEmbed}
+                  disabled={npuPending || saving}
+                  label="NPU Embed"
+                  stateText={npuEmbed ? "On" : "Off"}
+                  onToggle={(next) => { setNpuEmbed(next); applyNpu(npuAsr, next, npuAsr, npuEmbed, "Embed"); }}
+                />
+              </div>
+            </div>
+            {npuErr && <div className="hint" style={{ color: "var(--err)" }}>{npuErr}</div>}
+          </>
         );
       })()}
       </FieldGroup>

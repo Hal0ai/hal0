@@ -252,6 +252,20 @@ function AddByHfModal({ open, onClose, initialRepo = "" }) {
   );
 }
 
+// Model.capabilities vocabulary (registry/model.py) — drives dispatch/omni
+// eligibility. Historically only settable at register time.
+const MODEL_CAPABILITIES = ["chat", "embed", "rerank", "vision", "asr", "tts"];
+// Model.backends vocabulary — drives slot-compat filtering in the slot form.
+const MODEL_BACKENDS = ["rocm", "vulkan", "cpu", "cuda", "flm", "moonshine", "kokoro"];
+
+// Order-insensitive set equality for the array fields (capabilities/backends),
+// so a defaults-only save doesn't spuriously report those as changed.
+function sameStringSet(a, b) {
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.length === sb.length && sa.join(" ") === sb.join(" ");
+}
+
 // ─── Recipe editor (per-model defaults) ────────────────────────
 function RecipeEditorModal({ open, onClose, model }) {
   const update = useModelUpdate();
@@ -261,6 +275,7 @@ function RecipeEditorModal({ open, onClose, model }) {
   const init = model?.defaults || {};
   const [ctx, setCtx] = useStateMM("");
   const [ngl, setNgl] = useStateMM("");
+  const [rope, setRope] = useStateMM("");
   const [extra, setExtra] = useStateMM("");
   const [chatTemplate, setChatTemplate] = useStateMM("auto");
   // Identity + types. `name` is the editable display name; `types` is the
@@ -269,40 +284,70 @@ function RecipeEditorModal({ open, onClose, model }) {
   const [name, setName] = useStateMM("");
   const [types, setTypes] = useStateMM([]);
   const [otherTags, setOtherTags] = useStateMM([]);
+  // Routing-critical top-level fields (registry/model.py): capabilities gate
+  // dispatch/omni eligibility, backends gate slot-compat filtering, mmproj is
+  // the vision projector sidecar path, and hf_repo/hf_filename are the re-pull
+  // coords (POST /pull 422s without them).
+  const [caps, setCaps] = useStateMM([]);
+  const [backends, setBackends] = useStateMM([]);
+  const [mmproj, setMmproj] = useStateMM("");
+  const [hfRepo, setHfRepo] = useStateMM("");
+  const [hfFilename, setHfFilename] = useStateMM("");
 
   useEffectMM(() => {
     if (open && model) {
       setCtx(init.context_size != null ? String(init.context_size) : "");
       setNgl(init.n_gpu_layers != null ? String(init.n_gpu_layers) : "");
+      setRope(init.rope_freq_base != null ? String(init.rope_freq_base) : "");
       setExtra(init.extra_args || "");
       setChatTemplate(init.chat_template ?? "auto");
       setName(model.name || "");
       const split = splitModelTags(model.tags);
       setTypes(split.selected);
       setOtherTags(split.other);
+      setCaps(Array.isArray(model.capabilities) ? model.capabilities : []);
+      setBackends(Array.isArray(model.backends) ? model.backends : []);
+      setMmproj(model.mmproj || "");
+      setHfRepo(model.hf_repo || "");
+      setHfFilename(model.hf_filename || "");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, model?.id]);
 
   const toggleType = (tag) =>
     setTypes(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
+  const toggleCap = (cap) =>
+    setCaps(prev => prev.includes(cap) ? prev.filter(c => c !== cap) : [...prev, cap]);
+  const toggleBackend = (b) =>
+    setBackends(prev => prev.includes(b) ? prev.filter(x => x !== b) : [...prev, b]);
 
   if (!model) return null;
 
   const onSave = async () => {
-    const defaults = {};
+    // Preserve any ModelDefaults field the editor doesn't surface. The
+    // registry PUT flat-merges `defaults` WHOLESALE, so we must start from the
+    // stored defaults and only override the keys we render inputs for —
+    // otherwise siblings (e.g. a hand-set rope_freq_base) are silently cleared.
+    // Emptying a shown input clears just that one key (delete), keeping the
+    // "empty = launcher default" affordance intact.
+    const defaults = { ...init };
     if (ctx.trim()) {
       const n = parseInt(ctx, 10);
-      if (Number.isFinite(n)) defaults.context_size = n;
-    }
+      if (Number.isFinite(n)) defaults.context_size = n; else delete defaults.context_size;
+    } else delete defaults.context_size;
     if (ngl.trim()) {
       const n = parseInt(ngl, 10);
-      if (Number.isFinite(n)) defaults.n_gpu_layers = n;
-    }
-    if (extra.trim()) defaults.extra_args = extra;
+      if (Number.isFinite(n)) defaults.n_gpu_layers = n; else delete defaults.n_gpu_layers;
+    } else delete defaults.n_gpu_layers;
+    if (rope.trim()) {
+      const n = parseFloat(rope);
+      if (Number.isFinite(n)) defaults.rope_freq_base = n; else delete defaults.rope_freq_base;
+    } else delete defaults.rope_freq_base;
+    if (extra.trim()) defaults.extra_args = extra; else delete defaults.extra_args;
     // Only persist a real template choice — 'auto' means GGUF-embedded, which
     // is the absence of an override, so don't pollute defaults with it.
     if (chatTemplate && chatTemplate !== "auto") defaults.chat_template = chatTemplate;
+    else delete defaults.chat_template;
     const body = { defaults };
     // Display name: only persist a real, changed value — never blank it out.
     const trimmedName = name.trim();
@@ -316,6 +361,20 @@ function RecipeEditorModal({ open, onClose, model }) {
       nextTags.length === prevTags.length &&
       [...nextTags].sort().join(" ") === [...prevTags].sort().join(" ");
     if (!sameTags) body.tags = nextTags;
+    // Capabilities + backends: routing-critical top-level sets. Emit only when
+    // the set actually changed (order-insensitive).
+    const prevCaps = Array.isArray(model.capabilities) ? model.capabilities : [];
+    if (!sameStringSet(caps, prevCaps)) body.capabilities = caps;
+    const prevBackends = Array.isArray(model.backends) ? model.backends : [];
+    if (!sameStringSet(backends, prevBackends)) body.backends = backends;
+    // Vision projector sidecar path; "" clears it (null on the wire).
+    const trimmedMmproj = mmproj.trim();
+    if (trimmedMmproj !== (model.mmproj || "")) body.mmproj = trimmedMmproj || null;
+    // Re-pull source coords — without these a subsequent Pull 422s.
+    const trimmedRepo = hfRepo.trim();
+    if (trimmedRepo !== (model.hf_repo || "")) body.hf_repo = trimmedRepo;
+    const trimmedFile = hfFilename.trim();
+    if (trimmedFile !== (model.hf_filename || "")) body.hf_filename = trimmedFile;
     try {
       await update.mutateAsync({ id: model.id, body });
       window.__hal0Toast && window.__hal0Toast(`Updated ${model.longName || model.id}`, "ok");
@@ -387,11 +446,68 @@ function RecipeEditorModal({ open, onClose, model }) {
       </div>
       <div className="form-row">
         <div className="form-lbl">
+          <span>capabilities</span>
+          <span className="sub">dispatch / omni eligibility · chat · embed · rerank · vision · asr · tts</span>
+        </div>
+        <div className="form-ctl" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {MODEL_CAPABILITIES.map(cap => {
+            const on = caps.includes(cap);
+            return (
+              <button
+                key={cap}
+                type="button"
+                role="switch"
+                aria-checked={on}
+                data-testid={`cap-toggle-${cap}`}
+                className={"mdl-chip" + (on ? " on" : "")}
+                onClick={() => toggleCap(cap)}
+              >
+                {cap}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>backends</span>
+          <span className="sub">runners this model can bind · drives slot-compat filtering</span>
+        </div>
+        <div className="form-ctl" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {MODEL_BACKENDS.map(b => {
+            const on = backends.includes(b);
+            return (
+              <button
+                key={b}
+                type="button"
+                role="switch"
+                aria-checked={on}
+                data-testid={`backend-toggle-${b}`}
+                className={"mdl-chip" + (on ? " on" : "")}
+                onClick={() => toggleBackend(b)}
+              >
+                {b}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="form-row">
+        <div className="form-lbl">
           <span>context_size</span>
           <span className="sub">tokens · empty = launcher default</span>
         </div>
         <div className="form-ctl">
           <input className="input mono" inputMode="numeric" placeholder="e.g. 8192" value={ctx} onChange={e => setCtx(e.target.value)} />
+        </div>
+      </div>
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>rope_freq_base</span>
+          <span className="sub">float · empty = launcher / GGUF default</span>
+        </div>
+        <div className="form-ctl">
+          <input className="input mono" inputMode="decimal" placeholder="e.g. 10000" value={rope} onChange={e => setRope(e.target.value)} />
         </div>
       </div>
       <div className="form-row">
@@ -428,6 +544,42 @@ function RecipeEditorModal({ open, onClose, model }) {
               <option key={t.id} value={t.id}>{t.label}</option>
             ))}
           </select>
+        </div>
+      </div>
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>mmproj</span>
+          <span className="sub">vision projector sidecar path · required when a vision capability is set</span>
+        </div>
+        <div className="form-ctl">
+          <input
+            className="input mono"
+            placeholder="/var/lib/hal0/models/…/mmproj-Q8.gguf"
+            value={mmproj}
+            onChange={e => setMmproj(e.target.value)}
+          />
+          {caps.includes("vision") && !mmproj.trim() && (
+            <div className="err" style={{marginTop: 6}}>vision capability requires an mmproj sidecar path</div>
+          )}
+        </div>
+      </div>
+      <div className="form-section">Source · re-pull coords</div>
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>hf_repo</span>
+          <span className="sub">HuggingFace repo · needed to re-pull</span>
+        </div>
+        <div className="form-ctl">
+          <input className="input mono" placeholder="unsloth/Qwen3-8B-GGUF" value={hfRepo} onChange={e => setHfRepo(e.target.value)} />
+        </div>
+      </div>
+      <div className="form-row">
+        <div className="form-lbl">
+          <span>hf_filename</span>
+          <span className="sub">variant filename within the repo</span>
+        </div>
+        <div className="form-ctl">
+          <input className="input mono" placeholder="qwen3-8b-q4_k_m.gguf" value={hfFilename} onChange={e => setHfFilename(e.target.value)} />
         </div>
       </div>
       {update.isError && (

@@ -29,10 +29,16 @@ import { prettyProfile } from './profile-names'
 // value persisted to ProfileConfig.backend (null for non-GPU paths, where
 // device_class carries the hardware intent — see #751).
 const BACKEND_META = {
-  rocm:   { label: 'ROCm',      color: 'var(--dev-rocm)',   device_class: 'gpu', backendField: 'rocm' },
-  vulkan: { label: 'Vulkan',    color: 'var(--dev-vulkan)', device_class: 'gpu', backendField: 'vulkan' },
-  npu:    { label: 'FLM · NPU', color: 'var(--dev-npu)',    device_class: 'npu', backendField: null },
-  cpu:    { label: 'CPU',       color: 'var(--dev-cpu)',    device_class: 'cpu', backendField: null },
+  rocm:   { label: 'ROCm',          color: 'var(--dev-rocm)',   device_class: 'gpu', backendField: 'rocm' },
+  vulkan: { label: 'Vulkan',        color: 'var(--dev-vulkan)', device_class: 'gpu', backendField: 'vulkan' },
+  npu:    { label: 'FLM · NPU',     color: 'var(--dev-npu)',    device_class: 'npu', backendField: null },
+  cpu:    { label: 'CPU',           color: 'var(--dev-cpu)',    device_class: 'cpu', backendField: null },
+  // ComfyUI image-gen path: no llama.cpp backend, device_class carries the
+  // 'img' intent. Present so an existing device_class='img' profile survives an
+  // edit (backendOf → 'img' → device_class:'img') instead of being silently
+  // rewritten to 'gpu'/'cpu'. Backend PUT /api/profiles accepts device_class ∈
+  // {gpu,cpu,npu,img}.
+  img:    { label: 'ComfyUI · IMG', color: 'var(--dev-img)',    device_class: 'img', backendField: null },
 };
 
 // `NAME_RE` (name regex) and `toast` are shared globals from primitives.jsx.
@@ -45,6 +51,7 @@ function bk(name) { return BACKEND_META[name] || BACKEND_META.cpu; }
 // set, otherwise mapped from device_class so npu/cpu/img still get a hue.
 function backendOf(p) {
   if (p.backend && BACKEND_META[p.backend]) return p.backend;
+  if (p.device_class === 'img') return 'img';
   if (p.device_class === 'npu') return 'npu';
   if (p.device_class === 'cpu') return 'cpu';
   if ((p.image || '').toLowerCase().includes('vulkan')) return 'vulkan';
