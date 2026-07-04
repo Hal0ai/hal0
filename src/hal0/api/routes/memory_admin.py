@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from typing import Any
 
@@ -38,6 +39,8 @@ from hal0.api.routes.memory import MemoryUnavailable
 from hal0.errors import BadRequest, Hal0Error, NotFound, UnprocessableEntity
 
 router = APIRouter()
+
+log = logging.getLogger(__name__)
 
 #: Bank ids come from namespace_to_bank() (``private__<agent>``) or operator
 #: input — kebab/snake alphanumerics only, no dots (blocks path tricks).
@@ -247,6 +250,33 @@ async def bank_subgraph(request: Request, bank_id: str) -> dict[str, Any]:
     return out
 
 
+# ── DELETE /banks/{bank_id} — guarded (NOT a passthrough) ──────────────────────
+#
+# Bank deletion is irreversible upstream (drops every memory/document/entity in
+# the bank), so it is special-cased OUT of the _FORWARDS table and gated behind
+# an explicit confirmation that must echo the target bank id — via ?confirm=
+# and/or a JSON body ``{"confirm": ...}``. Registered before the _FORWARDS loop
+# so the guarded route owns the verb; only forwards once confirmation matches.
+
+
+@router.delete("/banks/{bank_id}")
+async def delete_bank(request: Request, bank_id: str) -> Any:
+    client = _client(request)
+    _validate_segments({"bank_id": bank_id})
+    body = await _read_body(request)
+    confirm = request.query_params.get("confirm")
+    if confirm is None and isinstance(body, dict):
+        confirm = body.get("confirm")
+    if confirm != bank_id:
+        raise BadRequest(
+            f"confirm={bank_id} required to delete bank {bank_id}",
+            code="memory.confirm_required",
+            details={"bank_id": bank_id},
+        )
+    log.warning("memory_admin: deleting bank %r (confirmed)", bank_id)
+    return await _forward(client, "DELETE", f"/v1/default/banks/{bank_id}")
+
+
 # ── allowlisted passthrough table ──────────────────────────────────────────────
 #
 # (hal0 method, hal0 path under /api/memory, upstream path template).
@@ -259,7 +289,8 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/banks", "/v1/default/banks"),
     ("PUT", "/banks/{bank_id}", "/v1/default/banks/{bank_id}"),
     ("PATCH", "/banks/{bank_id}", "/v1/default/banks/{bank_id}"),
-    ("DELETE", "/banks/{bank_id}", "/v1/default/banks/{bank_id}"),
+    # DELETE /banks/{bank_id} is NOT here — it is special-cased into the guarded
+    # ``delete_bank`` handler above (irreversible; requires ?confirm=<bank_id>).
     ("GET", "/banks/{bank_id}/stats", "/v1/default/banks/{bank_id}/stats"),
     (
         "GET",

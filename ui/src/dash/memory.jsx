@@ -40,7 +40,7 @@ function fmtWhen(iso) {
 
 // ── Engine card ───────────────────────────────────────────────────────────────
 
-function MemEngineCard({ engine, isLoading, onOpenGraph }) {
+function MemEngineCard({ engine, isLoading, graphEnabled, onOpenGraph }) {
   if (isLoading) {
     return (
       <div className="card mo-engine" data-testid="mem-engine-card">
@@ -56,7 +56,10 @@ function MemEngineCard({ engine, isLoading, onOpenGraph }) {
   const reachable = !!e.reachable;
   const features = e.features || {};
   const featureNames = Object.keys(features);
-  const graphOn = !!features.graph;
+  // Graph-extraction on/off comes from /api/memory/graph/status (the real
+  // state), NOT the Hindsight capability flags in /engine — those have no
+  // `graph` key, so keying off them always read "off".
+  const graphOn = !!graphEnabled;
   return (
     <div className="card mo-engine" data-testid="mem-engine-card">
       <div className="mo-engine-head">
@@ -299,10 +302,20 @@ function MemBankDetail({ bank, onClose, onDeleted }) {
 
   async function doConsolidate() {
     try {
+      // Any 2xx is success — Hindsight may 202 with an empty body (res === null)
+      // or return the queued op under operation_id / id / operation.
       const res = await consolidate.mutateAsync(bank.bank_id);
-      memToast(`Consolidation queued (${res?.operation_id || 'ok'})`, 'ok');
+      const opId = res?.operation_id ?? res?.id ?? res?.operation;
+      memToast(`Consolidation queued (${opId || 'ok'})`, 'ok');
     } catch (err) {
-      memToast(err?.message || 'Consolidate failed', 'err');
+      // "already in progress" (409) / "nothing to consolidate" aren't failures
+      // — the queue is simply busy or empty; report them informationally.
+      const msg = err?.message || '';
+      if (err?.status === 409 || /in progress|nothing to consolidate/i.test(msg)) {
+        memToast(msg || 'Consolidation already in progress', 'info');
+      } else {
+        memToast(msg || 'Consolidate failed', 'err');
+      }
     }
   }
 
@@ -435,8 +448,11 @@ function MemoryView({ param } = {}) {
   const section = param === 'graph' ? 'graph' : param === 'tools' ? 'tools' : 'overview';
   const useMemoryEngine = window.__hal0UseMemoryEngine;
   const useMemoryBanks = window.__hal0UseMemoryBanks;
+  const useMemoryGraphStatus = window.__hal0UseMemoryGraphStatus;
   const engineQuery = useMemoryEngine ? useMemoryEngine() : { data: null, isLoading: false };
   const banksQuery = useMemoryBanks ? useMemoryBanks() : { data: null, isLoading: false };
+  const graphQuery = useMemoryGraphStatus ? useMemoryGraphStatus() : { data: null };
+  const graphEnabled = !!graphQuery.data?.enabled;
 
   const banks = banksQuery.data?.banks || [];
   const [selectedId, setSelectedId] = useStateMem(() => {
@@ -498,10 +514,21 @@ function MemoryView({ param } = {}) {
         <MemEngineCard
           engine={engineQuery.data}
           isLoading={engineQuery.isLoading}
+          graphEnabled={graphEnabled}
           onOpenGraph={() => { window.location.hash = '#memory/graph'; }}
         />
         <MemTimeseries bank={chartBank} period={period} setPeriod={setPeriod} />
       </div>
+
+      {/* ADR-0023 graph-extraction gate + slot picker — reuses the canonical
+          MemoryGraphPanel (window global from agents/memory-tab.jsx) so the
+          enabled/slot/slot_resolves/builds_ok/errors/last_built_at/last_error
+          controls live here on the Memory Overview, not just the #agent tab. */}
+      <div className="sec">
+        <h2>Graph extraction</h2>
+        <div className="rule" />
+      </div>
+      {typeof MemoryGraphPanel === 'function' ? <MemoryGraphPanel /> : null}
 
       {/* .sec is a flex title-row (h2 + flex:1 rule); content must be a SIBLING,
           not a child, or it gets pinned into the heading row and shrink-wraps. */}

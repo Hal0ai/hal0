@@ -18,6 +18,7 @@ veneer that:
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -27,6 +28,7 @@ from pydantic import ValidationError
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import MemoryGraphConfig
+from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
     MemoryNamespaceError,
@@ -35,6 +37,8 @@ from hal0.memory.namespace import (
 )
 
 router = APIRouter()
+
+log = logging.getLogger(__name__)
 
 
 # ── ADR-0012 identity + ADR-0005 §3 namespace helpers ─────────────────────
@@ -485,6 +489,7 @@ async def memory_recall(request: Request) -> dict[str, Any]:
 async def memory_list(
     request: Request,
     dataset: str | None = None,
+    bank: str | None = None,
     cursor: str | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
@@ -494,7 +499,24 @@ async def memory_list(
     explicit ``?dataset=`` resolves to the caller's own private bucket
     so the ``hal0 agent memory list`` CLI subcommand can enumerate
     per-agent items without the operator passing the namespace by hand.
+
+    ``?bank=`` is a convenience alias for the dashboard's Hindsight bank
+    browser: a bank id (``private__hermes``) is translated to the matching
+    dataset namespace (``private:hermes``) when no explicit ``?dataset=`` is
+    given. If both are supplied and conflict, the explicit ``dataset`` wins.
     """
+    if bank is not None:
+        bank_dataset = bank_to_namespace(bank)
+        if dataset is None:
+            dataset = bank_dataset
+        elif dataset != bank_dataset:
+            log.info(
+                "memory_list: ?dataset=%r overrides conflicting ?bank=%r (->%r)",
+                dataset,
+                bank,
+                bank_dataset,
+            )
+
     agent_id = _agent_id(request)
     private = _is_private(request)
     try:

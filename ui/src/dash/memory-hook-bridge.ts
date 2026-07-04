@@ -41,9 +41,16 @@ import {
   useOperationCancel,
   useOperationRetry,
 } from '@/api/hooks/useHindsight'
+// ADR-0023 graph-extraction gate hooks — the Memory Overview drives its
+// graph on/off line + slot picker from these (same source as the #agent
+// Memory tab; bridged here too so #memory doesn't depend on that tab's
+// bridge load order).
+import { useMemoryGraphStatus, useUpdateMemoryGraph } from '@/api/hooks/useMemory'
 
 Object.assign(window as unknown as Record<string, unknown>, {
   __hal0UseMemoryEngine: useMemoryEngine,
+  __hal0UseMemoryGraphStatus: useMemoryGraphStatus,
+  __hal0UseUpdateMemoryGraph: useUpdateMemoryGraph,
   __hal0UseMemoryBanks: useMemoryBanks,
   __hal0UseBankStats: useBankStats,
   __hal0UseBankTimeseries: useBankTimeseries,

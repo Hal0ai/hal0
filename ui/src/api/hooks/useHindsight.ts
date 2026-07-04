@@ -130,7 +130,11 @@ export function useBankUpsert() {
 export function useBankDelete() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (bank: string) => apiDelete(ENDPOINTS.memoryBank(bank)),
+    // The backend guards bank deletion behind ?confirm=<bank_id> (the delete
+    // is irreversible). The UI already gates this behind a two-step confirm
+    // dialog, so echo the bank id to satisfy the guard.
+    mutationFn: (bank: string) =>
+      apiDelete(`${ENDPOINTS.memoryBank(bank)}?confirm=${encodeURIComponent(bank)}`),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['memory'] })
     },
@@ -179,6 +183,9 @@ export function useConsolidate() {
     mutationFn: (bank: string) => apiPost(ENDPOINTS.memoryBankConsolidate(bank), {}),
     onSuccess: (_data, bank) => {
       void qc.invalidateQueries({ queryKey: ['memory', 'banks', bank] })
+      // The queued consolidation shows up in the Operations list — refetch it
+      // explicitly so the new op appears without waiting for the poll tick.
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', bank, 'operations'] })
     },
   })
 }
