@@ -13,7 +13,30 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+## [v0.8.4b1] — 2026-07-04
+
+A **models, logs & memory** follow-up to v0.8.3b1. Models can now carry a
+preferred runtime profile that loads with them, image-gen/ComfyUI models get
+their own properly-tagged surface, the slot context window finally persists
+across reloads, the logs/events system is unified, and the memory subsystem
+gains a destructive-op audit trail plus console shape guards. **Safe upgrade
+from v0.8.3b1 — no breaking changes; all additions are additive.**
+
 ### Added
+- **Model preferred profile.** A registry model can declare `defaults.profile`
+  — the runtime profile it wants loaded with it. A slot adopts it on create
+  (when it has no explicit profile) and on **every model swap**, gated on
+  device/type compatibility (an incompatible preference is ignored and the slot
+  keeps its device-default profile; slot hardware is never flipped to satisfy a
+  model). Surfaced as a **Preferred profile** selector in the model recipe
+  editor.
+- **ComfyUI / image-gen model surface.** The Models view gains a **Models |
+  Image/ComfyUI** segmented toggle; image-gen models are grouped by their
+  models-tree category (checkpoints/loras/vae/upscale_models/…) and kept out of
+  the dispatcher list. ComfyUI models are correctly tagged `image`/`comfyui` at
+  every registration path, and `/api/models` self-heals rows an older pull
+  mis-tagged by deriving the ComfyUI category from the on-disk path (no
+  migration needed).
 - **Memory: audit trail for destructive ops (#1024).** Every destructive
   `/api/memory/*` op — bank delete, and memories/config/document/directive/
   operation/mental-model deletes, plus the namespace `POST /api/memory/delete`
@@ -28,9 +51,32 @@ tree is gitignored, #638) and referenced by number throughout the code.
   now documented at both call sites.
 
 ### Changed
+- **Unified logs/events.** Restores per-slot model-load logs, real source/slot
+  attribution, and a channel selector across the logs/events surface.
 - **Memory Overview UI.** The graph-extraction gate now sits beside a shrunk
   "memories retained" spark in the top row; card headings share one unified
   "eyebrow" style; dropped the stray `ADR-0023` label from the extraction title.
+
+### Fixed
+- **Persistent slot context.** The slot edit drawer seeds the context field
+  from the persisted `[model].context_size` (not the live runtime metric or a
+  hardcoded 16384) and only writes `ctx_size` when it actually changed, so an
+  unrelated save no longer clobbers the stored context window with 16k on a cold
+  reload or swap.
+- **Don't surface invisible models.** FLM tags advertised by the composite
+  upstream before their weights are pulled are dropped from the catalog (the
+  dedicated probe still surfaces the genuinely installed ones); freshly-pulled
+  ComfyUI checkpoints are no longer mis-filed as chat models.
+- **Memory tab functional; bank delete guarded (#1028).** The Memory tab renders
+  its graph status/slot UI and consolidate/list actions correctly, and a bank
+  `DELETE` now requires an explicit `?confirm=` guard.
+- **Stack edit drawer (#1023).** Slot cards render as labeled multi-line
+  entries and the escaped toggle-knob glyph is fixed.
+- **Board: Hermes kanban task-detail drawer (#1014).** The task-detail envelope
+  from Hermes is unwrapped so the board drawer renders instead of showing empty.
+- **Installer: cosign optional for the one-line install.** The bootstrap no
+  longer hard-requires `cosign`, so the one-line installer runs on hosts without
+  it (signature verification still applies where `cosign` is present).
 
 ## [v0.8.3b1] — 2026-07-04
 
