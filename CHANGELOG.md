@@ -13,21 +13,101 @@ tree is gitignored, #638) and referenced by number throughout the code.
 
 ## [Unreleased]
 
+## [v0.8.3b1] — 2026-07-04
+
+A large **reliability and UI-completeness** release. The headline is a
+72-finding platform-review remediation delivered as eight verified waves
+(each finding regression-tested and gated by CI + Playwright), landing
+alongside earlier staged fixes. It retires several silent-failure bugs,
+adds cross-process safety and pull resumability, makes every
+backend-supported value editable in the slot/model/profile drawers, and
+surfaces live telemetry on the dashboard. **Safe upgrade from v0.8.2b4 —
+no breaking changes; all config/UI additions are additive.**
+
+The most user-visible behaviour changes: the dashboard now shows Power &
+Thermal (live GPU clock/temp/power) and Per-Slot Throughput cards **by
+default**; disabling a capability now genuinely stops it serving; and the
+`bge` reranker is now classified and routed as a reranker.
+
+### Added
+- **Dashboard live telemetry, on by default.** The Power & Thermal card
+  (GPU clock MHz, temp, power) and the Per-Slot Throughput card are now
+  default-on, and the Utilization card shows a live clock/temp caption.
+  (#1019)
+- **Edit-drawer completeness.** The model editor now exposes
+  `capabilities`, `backends`, `rope_freq_base`, `mmproj`, and
+  `hf_repo`/`hf_filename`; slots gain a per-slot `vision` toggle and NPU
+  `asr`/`embed` modality toggles — all fields the API already accepted but
+  no drawer surfaced. (#1020)
+- **Settings.** An opt-in anonymous telemetry toggle and the image-gen
+  defaults (`default_size`, `default_steps`, `idle_restore_minutes`). (#1021)
+- **Interrupted pulls resume** via HTTP `Range` (with `If-Range`) instead
+  of re-downloading from zero; the on-disk prefix is re-hashed so the final
+  SHA-256 stays exact. (#1017)
+- **Disk-space preflight** before multi-GB pulls fails fast with a
+  structured `model.insufficient_disk` error instead of filling the disk.
+  (#1013)
+- **Host-memory-pressure LRU eviction** of idle slots. (#1003)
+
+### Changed
+- **Retired duplicated logic** that had silently drifted: one
+  device→profile derivation, one filename→capability classifier, one
+  dispatchable-state predicate, and one slot-projection reconcile. (#1015)
+- **Rebuilt the dash editing drawers** on a shared `FormDrawer` + `useForm`
+  with an unsaved-changes dirty guard, one `compatibleModels` filter, a
+  focus trap and real `<label>` wiring (a11y), plus honest, confirmed
+  destructive actions (styled type-to-confirm deletes; no more "Pause"
+  that silently cancels; real "fits in memory" check). (#1016, #1018)
+- **Cross-process safety:** advisory file locks around registry and
+  capabilities writes; parent-directory `fsync` after atomic writes. (#1017)
+- **Housekeeping:** startup GC of stale pull-job snapshots and orphaned
+  `.part` partials. (#1017)
+- Extracted the capability-resolution heuristics out of `dispatcher/router.py`.
+  (#1017)
+
 ### Fixed
+- **Disabling a capability now sticks.** The disable is written through to
+  the slot config, so a later request can no longer wake a "disabled" slot
+  and serve from it. (#1011)
+- **The NPU trio is advertised on podman-only hosts** — the picker probed
+  `docker` and never offered it on the reference platform. (#1011)
+- **GPU-less installs get a chat-capable primary slot** instead of one
+  bound to the Kokoro TTS engine (`cpu` now defaults to `cpu-llm`). (#1011)
+- **Idle-evicted embed/rerank/tts slots wake on request** instead of
+  404'ing until a manual load. (#1011)
+- **The `bge` reranker is classified as a reranker** (was mislabeled
+  `chat`) and is routable as one. (#1015)
+- **Installer/bundle pulls survive an api restart** — status/stream polls
+  no longer 404 mid-install. (#1012)
+- **A completed pull is no longer reported "failed"** after a restart. (#1012)
+- **The GpuArbiter drain no longer unloads a slot under an in-flight
+  request** (image-mode switch race). (#1012)
+- **Slots are no longer advertised READY on a health-probe timeout.** (#1012)
+- **Write-time validation:** a second `default=true` slot of a type is
+  refused at save; `create()` no longer clobbers an existing custom slot;
+  stack apply flags unresolved profile/model refs and reports **degraded**
+  (not "clean") when slots fail to load. (#1013, #1018)
+- **The model editor no longer silently wipes unshown launcher defaults on
+  Save**, and the ComfyUI image-profile control no longer corrupts
+  `device_class` on edit. (#1020)
 - **Chat requests with mis-positioned or stacked `role='system'` messages
-  no longer 500 the Qwen3.6-35B-A3B upstream.** The Hermes dashboard SPA,
-  Open WebUI and LibreChat build the messages array by append, so a stale
-  session system message can land mid-array; third-party clients can also
-  stack two system blocks deliberately. The Qwen3 Jinja chat template
-  hard-raises `System message must be at the beginning` from line ~85 in
-  both cases, surfacing as HTTP 500 with `Jinja Exception: ...`. The
-  OpenAI-compat normaliser now calls
-  `hal0.normalize.messages.normalize_system_messages` inside
-  `_normalize_chat_body`, which **collapses** every system entry into one
-  and **hoists** the result to position 0 (joined with blank lines,
-  matching the OpenAI/Anthropic convention for stacked-system payloads).
-  No-system payloads are returned without a copy so the SPA's hot path
-  pays nothing.
+  no longer 500 the Qwen3.6-35B-A3B upstream.** The OpenAI-compat
+  normaliser now collapses every system entry into one and hoists it to
+  position 0 (matching the OpenAI/Anthropic convention), so a stale
+  mid-array system message from the SPA/Open WebUI/LibreChat — or two
+  deliberately-stacked system blocks — no longer trips the Qwen3 Jinja
+  template's `System message must be at the beginning`. No-system payloads
+  skip the copy. (#992)
+- Additional staged fixes from the assessment sweep: dead-port guard for
+  container slots (#1001), `events.gap` on subscriber-queue overflow
+  (#1000), non-retryable `SlotLoadFailed` for ERROR slots (#999), bounded
+  httpx pool + tighter read timeout (#998), cold-slot 404 ordering (#996),
+  container slots entering SERVING and bumping `last_used_at` (#995),
+  installer port reachability when Docker is co-installed (#990), updater
+  rollback re-pip (#994), an in-memory PgVector write warning (#1008),
+  additive seed-profile merge (#1007), durable pull-job persistence (#1006),
+  canonical slot fields on npu/load + install model-update (#1009), and the
+  yellow-halo favicon restore (#991).
 
 ## [v0.8.2b4] — 2026-06-30
 
