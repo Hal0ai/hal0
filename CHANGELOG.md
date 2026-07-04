@@ -27,6 +27,12 @@ tree is gitignored, #638) and referenced by number throughout the code.
   window.
 
 ### Fixed
+- **Gateway now serves `POST /v1/rerank`.** The dispatcher's capability path
+  map already resolved `/rerank` to the rerank slot, but the gateway only
+  registered `/v1/rerankings` — so clients using llama-server's / Jina-style
+  `/v1/rerank` got 405 and had to hit the slot port directly (field finding).
+  `/v1/rerank` is now an alias of `/v1/rerankings` through the same dispatch
+  path.
 - **Crash-only `mtp = true` overrides are defused automatically.** A forced
   MTP override pointing at a model with no MTP heads crashes llama-server at
   load once the slot's unit re-renders under the v0.8.5b1 MTP separation

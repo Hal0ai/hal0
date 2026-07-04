@@ -113,3 +113,17 @@ def test_v1_rerankings_no_route_returns_typed_404(client: TestClient) -> None:
     )
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "dispatch.no_route"
+
+
+def test_v1_rerank_alias_is_routed_not_405(client: TestClient) -> None:
+    """/v1/rerank (llama-server's / Jina-style clients' path) must reach the
+    dispatcher like /v1/rerankings — it previously had NO gateway route, so
+    clients got 405 and had to hit the slot port directly (CT105 finding)."""
+    r = client.post(
+        "/v1/rerank",
+        json={"model": "model-nobody-serves", "query": "q", "documents": ["d"]},
+    )
+    # A typed dispatch 404 proves the route exists and resolves through the
+    # dispatcher; the pre-fix failure mode was a bare 405 Method Not Allowed.
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "dispatch.no_route"
