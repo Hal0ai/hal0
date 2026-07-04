@@ -24,7 +24,13 @@ from typing import Any
 import httpx
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
-DEFAULT_AGENT_ID = "hermes-agent"
+# hal0's registry calls this agent ``hermes`` (BUNDLED_AGENTS; the systemd
+# unit exports ``HAL0_AGENT_ID=hermes``). The server derives the private bank
+# name straight from the id (``private:<id>``), so this default IS the bank
+# name whenever ``HAL0_AGENT_ID`` isn't exported into the process. It MUST
+# match the registry id — the old ``hermes-agent`` default spawned a stray
+# duplicate ``private:hermes-agent`` bank on every env-less code path.
+DEFAULT_AGENT_ID = "hermes"
 DEFAULT_CONNECT_TIMEOUT = 3.0
 DEFAULT_READ_TIMEOUT = 10.0
 
